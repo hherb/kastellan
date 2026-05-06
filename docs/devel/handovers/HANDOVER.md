@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-06
-**Last commit:** `3051294` (`docs: add CLAUDE.md as agent operating manual`)
+**Last commit:** `3210f70` (`Phase 0 hardening stage 1: worker-side Landlock + seccomp + bwrap probe fix`)
 **Branch:** `main`
 
 ---
@@ -21,22 +21,35 @@
 ## Working state (what's green right now)
 
 ```
-hhagent (Rust workspace, 5 crates, AGPL-3.0)
-├── core              hhagent-core: lib + bin (skeleton main); has tool_host
-├── sandbox           hhagent-sandbox: SandboxPolicy + LinuxBwrap working
-├── supervisor        hhagent-supervisor: stub (NotYetImplemented)
-├── protocol          hhagent-protocol: JSON-RPC 2.0 over stdio (working)
-└── workers/shell-exec  hhagent-worker-shell-exec: argv allowlist (working)
+hhagent (Rust workspace, 6 crates, AGPL-3.0)
+├── core               hhagent-core: lib + bin (skeleton main); tool_host derives lockdown env
+├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (probe fixed)
+├── supervisor         hhagent-supervisor: stub (NotYetImplemented)
+├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
+├── workers/prelude      hhagent-worker-prelude: Landlock + seccomp lock_down (NEW, Phase 0 hardening)
+└── workers/shell-exec   hhagent-worker-shell-exec: now uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` is green: 18 tests, 0 skipped.**
+**`cargo test --workspace` is green: 36 tests, 0 skipped.**
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
 | `protocol` unit | 3 | dispatch, parse-error fallback, method-not-found |
 | `sandbox` unit | 6 | bwrap argv builder shape |
-| `sandbox` integration (`linux_smoke`) | 6 | real bwrap: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected |
-| `core` integration (`shell_exec_e2e`) | 3 | core → bwrap → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND |
+| `sandbox` integration (`linux_smoke`) | 6 | **real** bwrap: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected |
+| `core` unit | 4 | `derive_lockdown_env` adds correct env entries, doesn't overwrite caller-supplied env |
+| `core` integration (`shell_exec_e2e`) | 3 | **real** core → bwrap+landlock+seccomp → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND |
+| `prelude` unit | 8 | env-var parsing, profile parsing, BPF program builds, kill-list contains `unshare` |
+| `prelude` integration (`landlock_smoke`) | 3 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work |
+| `prelude` integration (`seccomp_smoke`) | 3 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS; `getpid()` survives |
+
+**Critical bug fix this session:** `LinuxBwrap::probe()` was missing the
+`/lib*` symlinks the dynamic linker needs, so `execvp /usr/bin/true: No such
+file or directory` made every bwrap-dependent test silently `[SKIP]`. The
+"18 tests, 0 skipped" claim from the previous handover was a false green —
+in reality only 12 host-only tests were running. The probe now mirrors the
+full `build_argv` mount layout, and `cargo test --workspace -- --nocapture`
+shows zero `[SKIP]` lines.
 
 **Build & test:**
 ```sh
@@ -54,11 +67,27 @@ yet (Phase 0b).
 
 ## Recently completed (this session, 2026-05-06)
 
+**Phase 0 hardening — stage 1 (Landlock + seccomp + bwrap probe fix):**
+
+- New crate `workers/prelude` (`hhagent-worker-prelude`):
+  - `landlock_lock` module — applies a Landlock LSM filter from inside the worker. Targets ABI v1; RO+exec on `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc/ld.so.cache`, `/dev`, `/proc`; RW from `HHAGENT_LANDLOCK_RW` env (JSON array of absolute paths). Graceful `KernelTooOld` fallback.
+  - `seccomp_lock` module — installs a seccomp-bpf deny-list killing `unshare`, `setns`, `mount`, `umount2`, `pivot_root`, `init_module`, `finit_module`, `delete_module`, `ptrace`, `bpf`, `perf_event_open`, `kexec_load`, `kexec_file_load`, `reboot`, `swapon`, `swapoff`, `settimeofday`, `clock_settime`, `clock_adjtime`, `adjtimex`, `keyctl`, `add_key`, `request_key`, `personality` with `KillProcess`. Sets `PR_SET_NO_NEW_PRIVS` first.
+  - `serve_stdio()` — drop-in wrapper around `hhagent_protocol::server::serve_stdio` that calls `lock_down()` first.
+  - `lockdown_probe` test binary — subprocess fixture that integration tests fork off so the one-way filters don't poison sibling tests.
+  - 8 unit tests (parsers, BPF builder), 3 landlock integration tests, 3 seccomp integration tests — all green, zero skips.
+- `core/src/tool_host.rs`: `derive_lockdown_env()` injects `HHAGENT_LANDLOCK_RW` (from `policy.fs_write`) and `HHAGENT_SECCOMP_PROFILE` (from `policy.profile`) so callers cannot accidentally skip the worker-side layer. Caller-supplied env wins (useful for tests that want `seccomp=none`). 4 new unit tests.
+- `workers/shell-exec/src/main.rs`: 1-line swap from `hhagent_protocol::server::serve_stdio` to `hhagent_worker_prelude::serve_stdio`. Existing 3 e2e tests still pass — this time **for real** (see bug fix below).
+- **Bug fix in `sandbox/src/linux_bwrap.rs`**: `LinuxBwrap::probe()` was launching `bwrap` without the `/lib*` symlinks the dynamic linker needs, so `execvp /usr/bin/true` returned `ENOENT` (interpreter unreachable) and the probe failed-closed. The skip-on-probe-failure pattern in the integration tests then turned that into `[SKIP]` lines that masqueraded as green. Probe now mirrors `build_argv`'s mount layout. **The previous handover's "18 tests, 0 skipped" was wrong** — only the 12 host-only tests were actually running.
+- New deps (workspace): `landlock = "0.4"` (MIT OR Apache-2.0), `seccompiler = "0.5"` (Apache-2.0 OR BSD-3-Clause), both AGPL-compatible.
+- Docs: `threat-model.md` defence-in-depth table now lists the worker-side Landlock+seccomp row with the parent-side bwrap/Seatbelt row; "negative tests already shipped" section added.
+
+**Earlier sessions (kept here as build-sequence memory):**
+
 - Initial scaffold (`140eec5`): workspace, three crate stubs, docs skeletons, AGPL-3.0
 - Linux bwrap backend (`eae3df4`): real containment + AppArmor probe + install script
 - Protocol crate, shell-exec worker, tool_host, end-to-end test (`f2411ec`)
 - Created `docs/devel/ROADMAP.md` and this handover convention
-- Studied two adjacent OpenClaw-derived projects (IronClaw, ZeroClaw); resolved parked Q2 (channel pairing flow) and Q3 (egress proxy as separate worker + leak scanner); added five concrete roadmap items (`Workspace` type, AES-256-GCM secrets, dispatcher chokepoint invariant + test, pairing flow, leak scanner, skill trust enum); codified five architectural invariants in `docs/architecture.md`
+- Studied two adjacent OpenClaw-derived projects (IronClaw, ZeroClaw); resolved parked Q2 (channel pairing flow) and Q3 (egress proxy as separate worker + leak scanner); added five concrete roadmap items; codified five architectural invariants in `docs/architecture.md`
 
 ## Key design decisions locked in
 
@@ -72,48 +101,46 @@ yet (Phase 0b).
 
 ## Next TODO (pick one)
 
-The user's last guidance: *suggested stopping point after Phase 0 milestone*. Three reasonable next moves, listed in the order they're least painful to do later if you defer:
+The user is in parallel attempting **Option A (Phase 0b — macOS port)** on a Mac, so prefer Options B' or C below for the Linux-side work. Listed in increasing scope; pick whichever the user wants.
 
-### Option A — Phase 0b: macOS port  ⭐ recommended
+### Option A — Phase 0b: macOS port  *(parallel work — coordinate with user)*
 
-**Why now:** The plan flagged this explicitly. Every additional Linux-only line of code makes the macOS port harder. Right now there's only one Linux-specific module (`sandbox/src/linux_bwrap.rs`); a clean port keeps the cross-platform contract honest.
+The user has stated they will start this on a Mac in parallel. Implementation outline kept here for cross-checking:
 
-**What to build:**
 - `sandbox/src/macos_seatbelt.rs` — `SandboxPolicy` → `.sb` (TinyScheme) profile, then `sandbox-exec -f <profile> <program> ...`
-- `setrlimit` for CPU/mem/wallclock (bwrap had bwrap-specific CPU/mem TODOs anyway; do the rlimit path that both backends will share)
+- `setrlimit` for CPU/mem/wallclock (shared with future bwrap CPU/mem path)
 - Wire `default_backend()` to pick `MacosSeatbelt::new()` under `cfg(target_os = "macos")`
-- Mirror `sandbox/tests/linux_smoke.rs` as `sandbox/tests/macos_smoke.rs` (cfg-gated). Same six containment assertions translated to Seatbelt semantics.
-- Mirror `core/tests/shell_exec_e2e.rs` as `core/tests/shell_exec_e2e_macos.rs` (or, better, factor the e2e test to be platform-agnostic if `default_backend()` already picks the right one).
+- Mirror `sandbox/tests/linux_smoke.rs` as `sandbox/tests/macos_smoke.rs` (cfg-gated)
+- Worker-side: on macOS the `hhagent-worker-prelude::lock_down()` is already a no-op (Seatbelt enforces equivalent containment from the parent). Verify on first run.
 
 **Gotchas:**
-- `sandbox-exec` is technically a private API but stable; document this in `docs/threat-model.md`.
-- Seatbelt has no equivalent to `--clearenv`; pass empty environment via `Command::env_clear()` then `Command::envs(policy.env)` *before* exec. Update `core::tool_host` only if the abstraction needs it (probably it doesn't — bwrap handles env via `--setenv` argv flags; Seatbelt handles env via the parent's exec).
-- Seatbelt network deny via `(deny network*)` works at syscall level; the test using `getent hosts` would fail closed. Verify on a real macOS box.
-- macOS doesn't have `/usr/bin/getent`; use `nslookup` or write a tiny Rust helper that does `TcpStream::connect`.
+- `sandbox-exec` is private API but stable; document in `docs/threat-model.md`.
+- Seatbelt has no `--clearenv`; pass empty environment via `Command::env_clear()` + `Command::envs(policy.env)` before exec.
+- macOS doesn't have `/usr/bin/getent`; for the net-deny test use a tiny Rust helper that calls `TcpStream::connect`.
+- For the e2e test, factor the worker binary path resolver into a helper that handles the `target/debug/<name>` (Linux) vs `target/debug/<name>` (macOS) cases — they're the same path on both today, but documentation will keep the next reader sane.
 
-**Verification:** `cargo test --workspace` should be 18 + N tests green on both Linux and macOS, with 0 skips.
+**Verification:** `cargo test --workspace` should be 36 + N tests green on macOS, 0 skips.
 
-### Option B — Phase 0 hardening: Landlock + seccomp on top of bwrap (Linux)
+### Option B' — Phase 0 hardening: stage 2 (Linux)
 
-**Why:** Defence in depth. bwrap gets you most of the way; Landlock + seccomp close known bwrap gaps (e.g. `/proc/self/...` tricks) and align with what production agents do (Codex CLI uses Landlock+seccomp).
+**Why:** Stage 1 used a deny-list and ABI v1 to ship quickly. Stage 2 tightens both:
 
 **What to build:**
-- Add the `landlock` crate (BSD-3-Clause, AGPL-compatible) and apply `LandlockRuleset` from inside the worker process **before** it does any I/O
-- Add `seccompiler` or `libseccomp` crate; ship a `Profile::WorkerStrict` syscall list and apply via `prctl(PR_SET_SECCOMP, ...)` after worker startup
-- The application of these is in the *worker*, not bwrap argv; introduce a tiny `hhagent-worker-prelude` crate that workers `prelude::lock_down(profile)` at the top of `main()`. The shell-exec worker becomes the test bed.
+1. **Allow-list seccomp profile** — replace `KILL_LIST` with an explicit `ALLOW_LIST` of ~150–200 syscalls per profile. `Profile::WorkerStrict` and `Profile::WorkerNetClient` diverge here (NetClient adds `socket`, `connect`, `bind`, `listen`, `accept4`, `setsockopt`, `getsockopt`, `getpeername`, `getsockname`, `recvfrom`, `sendto`, `recvmsg`, `sendmsg`, `shutdown` and the inotify/io_uring family if needed).
+2. **Bump Landlock TARGET_ABI** from V1 to V6 (or current). Audit each new access right and decide whether to handle it: `Refer` (V2), `TruncateFile` (V3), `IoctlDev` (V5), per-file scope rights (V6). Lifts `PartiallyEnforced` → `FullyEnforced` in the report.
+3. **Negative tests for stage 2**: `prelude/tests/seccomp_smoke.rs` should also assert that an in-list syscall like `socket(AF_INET, SOCK_STREAM, 0)` survives under `WorkerNetClient` and is killed under `WorkerStrict`.
 
 **Gotchas:**
-- Workers must apply these *after* loading shared libs and *before* any user-controlled input, otherwise the dynamic linker can't open libc.
-- seccomp filters are easy to write too tight; start permissive and tighten incrementally with negative tests.
+- Allow-list seccomp will absolutely break things on first try. Iterate with `strace -fc` to find the missing syscalls. tokio + serde_json + std use ~80 syscalls; the rest are libc malloc / dynamic linker.
+- Landlock V2's `Refer` right is "rename across rule boundaries"; V3's `TruncateFile` is "truncate even with O_RDONLY"; they're both fine to handle (deny by default).
 
-### Option C — Phase 0 cont.: supervisor + Postgres bring-up
+### Option C — Phase 0 cont.: supervisor + Postgres bring-up (Linux)
 
-**Why:** Closes out the Phase 0 deployment story so the agent can actually be left running.
+(Unchanged from previous handover — closes the Phase 0 deployment story.)
 
-**What to build:**
 - `hhagent-supervisor::systemd::SystemdUser` writing unit files to `~/.config/systemd/user/` and shelling out to `systemctl --user`
 - A first concrete unit: `hhagent.service` for the core, `hhagent-postgres.service` for the DB (or rely on system PG and just create a role+DB)
-- `db/migrations/0001_init.sql` — `audit_log`, `tasks`, `memories`, `entities`, `relations`. Use `sqlx-cli` for migrations. Don't load `pgvector`/`pg_search`/`AGE` until they're actually queried (Phase 1).
+- `db/migrations/0001_init.sql` — `audit_log`, `tasks`, `memories`, `entities`, `relations`. Use `sqlx-cli` for migrations.
 
 **Gotchas:**
 - pg_search is AGPL-3.0 — perfect license-fit but verify build is fine on aarch64.

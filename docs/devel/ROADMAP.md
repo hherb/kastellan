@@ -28,8 +28,13 @@ items unlock later ones.
 
 ## Phase 0 hardening — Defence in depth (Linux)
 
-- [ ] Landlock LSM as second FS-allowlist layer inside the worker before exec (defence-in-depth on top of bwrap)
-- [ ] seccomp-bpf syscall filter (deny-by-default profile per worker class)
+- [x] Landlock LSM as second FS-allowlist layer inside the worker before exec (defence-in-depth on top of bwrap) — `3210f70` *stage 1*: targets ABI v1, RO+exec on `/usr`, `/lib*`, `/bin`, `/sbin`, `/etc/ld.so.cache`, `/dev`, `/proc`; RW from `HHAGENT_LANDLOCK_RW` env
+- [x] seccomp-bpf syscall filter — `3210f70` *stage 1*: deny-list of catastrophic syscalls (`unshare`, `setns`, `mount`, `umount2`, `pivot_root`, `init_module`, `finit_module`, `delete_module`, `ptrace`, `bpf`, `perf_event_open`, `kexec_load`, `kexec_file_load`, `reboot`, `swapon`, `swapoff`, `settimeofday`, `clock_settime`, `clock_adjtime`, `adjtimex`, `keyctl`, `add_key`, `request_key`, `personality`); SIGSYS-kill action; same set for both Strict and NetClient profiles
+- [x] **Bug fix**: `LinuxBwrap::probe()` was missing `/lib*` symlinks, causing all bwrap-dependent tests to silently skip with "false green"; probe now mirrors `build_argv` so a green probe means real containment — `3210f70`
+- [x] **Worker prelude crate** (`workers/prelude`, `hhagent-worker-prelude`) — `serve_stdio` wrapper that calls `lock_down()` before serving; tested via subprocess `lockdown_probe` binary — `3210f70`
+- [x] **`tool_host` derives lockdown env** — `derive_lockdown_env` injects `HHAGENT_LANDLOCK_RW` (from `policy.fs_write`) and `HHAGENT_SECCOMP_PROFILE` (from `policy.profile`) so callers cannot accidentally skip the worker-side layer — `3210f70`
+- [ ] *Stage 2*: migrate seccomp to per-profile **allow-list** (~200 syscalls) replacing the current deny-list
+- [ ] *Stage 2*: bump Landlock TARGET_ABI from v1 to current (v6/v7 on 6.17 kernel) and audit each new access right (`Refer`, `TruncateFile`, `IoctlDev`, scope rights, etc.) — this will lift the `PartiallyEnforced` report to `FullyEnforced`
 - [ ] cgroup v2 CPU/memory caps via `systemd-run --user --scope`
 - [ ] Per-worker scratch dir lifecycle (create on spawn, wipe on exit)
 - [ ] Promote per-worker scratch to a first-class `Workspace` type — canonical layout `~/.hhagent/workspace/<task_id>/{in,out,tmp}`, single owner, single cleanup path; `SandboxPolicy.fs_write` derives from it rather than being authored ad-hoc per worker (cf. ZeroClaw `workspace_boundary.rs`)
