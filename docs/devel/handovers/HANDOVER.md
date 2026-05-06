@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-06
-**Last commit:** `f2411ec` (`core+protocol+worker: end-to-end JSON-RPC over sandboxed stdio`)
+**Last commit:** `3051294` (`docs: add CLAUDE.md as agent operating manual`)
 **Branch:** `main`
 
 ---
@@ -58,6 +58,7 @@ yet (Phase 0b).
 - Linux bwrap backend (`eae3df4`): real containment + AppArmor probe + install script
 - Protocol crate, shell-exec worker, tool_host, end-to-end test (`f2411ec`)
 - Created `docs/devel/ROADMAP.md` and this handover convention
+- Studied two adjacent OpenClaw-derived projects (IronClaw, ZeroClaw); resolved parked Q2 (channel pairing flow) and Q3 (egress proxy as separate worker + leak scanner); added five concrete roadmap items (`Workspace` type, AES-256-GCM secrets, dispatcher chokepoint invariant + test, pairing flow, leak scanner, skill trust enum); codified five architectural invariants in `docs/architecture.md`
 
 ## Key design decisions locked in
 
@@ -125,11 +126,20 @@ The user's last guidance: *suggested stopping point after Phase 0 milestone*. Th
 (From the design plan, restated here so they're surfaced when relevant.)
 
 1. Embedding model on-device — bge-m3 vs nomic-embed-text vs ColBERT (Phase 1)
-2. Channel approval — passcode pairing vs static contact allowlist (Phase 2)
-3. Egress proxy as separate worker vs in-process in `tool_host` (lean separate; revisit Phase 3)
-4. Skill review workflow for *named* agent-authored Python (Phase 4)
+2. ~~Channel approval — passcode pairing vs static contact allowlist (Phase 2)~~ **Resolved 2026-05-06:** pairing flow with WebAuthn-or-OTP fallback, modeled on ZeroClaw's `security/{pairing,webauthn,otp}.rs`. Static contact allowlists rejected as user-hostile and forgeable. Implemented in Phase 2.
+3. ~~Egress proxy as separate worker vs in-process in `tool_host`~~ **Resolved 2026-05-06:** separate worker, with the credential-leak scanner co-located so every byte that crosses the trust boundary is inspected once. Cross-references with both reference projects (IronClaw `safety::leak_detector`, ZeroClaw `security/leak_detector.rs`) — convergent design.
+4. Skill review workflow for *named* agent-authored Python (Phase 4) — see new Phase 4 line items: trust enum + per-level capability ceiling.
 5. Worker keep-alive vs spawn-per-call (currently spawn-per-call; revisit when latency matters)
 6. Worker binary discovery in production (currently `target/debug/...` for tests; need a stable install location convention)
+
+## Inspirations / things to read before each milestone
+
+Two adjacent OpenClaw-derived projects ship code we can read (Apache-2.0/MIT, AGPL-compatible) before each new milestone — convergent prior art saves design time:
+
+- **ZeroClaw** ([`zeroclaw-labs/zeroclaw`](https://github.com/zeroclaw-labs/zeroclaw), 100% Rust): read [`crates/zeroclaw-runtime/src/security/`](https://github.com/zeroclaw-labs/zeroclaw/tree/main/crates/zeroclaw-runtime/src/security) — has working `bubblewrap.rs`, `landlock.rs`, `seatbelt.rs`, `firejail.rs`, `pairing.rs`, `webauthn.rs`, `leak_detector.rs`, `workspace_boundary.rs`. Architectural drawback vs us: tools run as in-process Rust traits, OS sandbox wraps the runtime — weaker boundary than our process-per-worker. Don't copy the in-process tool model.
+- **IronClaw** ([`nearai/ironclaw`](https://github.com/nearai/ironclaw)): read its dispatcher chokepoint pattern (`ToolDispatcher::dispatch()` is the single audit/safety-validation funnel for *every* action, regardless of caller). Drawbacks: WASM-as-boundary is software-only containment; Postgres+libSQL dual backend is overkill at our stage.
+
+The *defining* architectural difference: hhagent enforces **one OS process + one bwrap/Seatbelt jail per worker**. Both reference projects retreated from that. Don't.
 
 ## How to update this document at session end
 

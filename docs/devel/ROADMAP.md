@@ -32,6 +32,7 @@ items unlock later ones.
 - [ ] seccomp-bpf syscall filter (deny-by-default profile per worker class)
 - [ ] cgroup v2 CPU/memory caps via `systemd-run --user --scope`
 - [ ] Per-worker scratch dir lifecycle (create on spawn, wipe on exit)
+- [ ] Promote per-worker scratch to a first-class `Workspace` type — canonical layout `~/.hhagent/workspace/<task_id>/{in,out,tmp}`, single owner, single cleanup path; `SandboxPolicy.fs_write` derives from it rather than being authored ad-hoc per worker (cf. ZeroClaw `workspace_boundary.rs`)
 - [ ] Spawn timeout / wall-clock kill
 
 ## Phase 0b — macOS Port (Seatbelt)
@@ -56,8 +57,9 @@ items unlock later ones.
 - [ ] Local Postgres install via systemd unit (Linux) / `pg_ctl` (macOS)
 - [ ] Localhost-only via UDS, peer auth, dedicated DB role
 - [ ] Extensions: `pgvector`, `pg_search` (ParadeDB BM25), `Apache AGE` graph
-- [ ] `db/migrations/` skeleton: `memories`, `tasks`, `entities`, `relations`, `audit_log`
+- [ ] `db/migrations/` skeleton: `memories`, `tasks`, `entities`, `relations`, `audit_log`, `secrets`
 - [ ] `sqlx-cli` migration runner integration in core startup
+- [ ] Secrets at rest: AES-256-GCM in the `secrets` table; key from OS keyring (libsecret / Keychain); decrypted only at the host boundary when injecting into a worker call, never logged, never sent to the LLM (cf. IronClaw `secrets/`, ZeroClaw `security/secrets.rs`)
 
 ## Phase 0 cont. — Audit log
 
@@ -73,6 +75,7 @@ items unlock later ones.
 
 ## Phase 1 — Memory & Loop
 
+- [ ] **Dispatcher chokepoint invariant** documented in `docs/architecture.md`: every tool/channel/routine action enters core through `ToolHost::dispatch()` (or successor) — one audit-log write site, one policy-check site, no side doors. Add a compile-time test that `core::tool_host` is the only module that constructs `WorkerCommand`. (Pattern lifted from IronClaw `ToolDispatcher`; cheap now, painful to retrofit once channels and routines exist.)
 - [ ] `memory::recall(query, modes, k)` — pgvector + BM25 + AGE traversal via Reciprocal Rank Fusion
 - [ ] Embedding worker (small local embedding model behind OpenAI HTTP)
 - [ ] `scheduler` agent loop: tick → drain channel bus → next task → LLM call → tool calls → repeat
@@ -84,11 +87,12 @@ items unlock later ones.
 - [ ] IMAP inbound worker (sandbox: net allowlist = configured IMAP server only)
 - [ ] Telegram inbound adapter (`grammers`, Rust)
 - [ ] Channel-bus fan-in into core conversation queue
-- [ ] DM-pairing approval policy (passcode or contact allowlist)
+- [ ] DM pairing flow: short-lived pairing code (TOTP/HOTP) issued via a separate trusted channel; WebAuthn for browser/CLI pairings where available; pairings recorded in `audit_log` with revocation. Static contact allowlists rejected (forgeable). (Pattern: ZeroClaw `security/{pairing,webauthn,otp}.rs`.)
 
 ## Phase 3 — Channels outbound + browser + web
 
 - [ ] Egress proxy (per-worker host allowlist, TLS pinning, audit logging)
+- [ ] **Credential-leak scanner co-located in the egress proxy** — every outbound request body and inbound response body scanned for the SHA-256 prefix of every secret currently materialized for the calling worker; hits are blocked and audited. Scanning happens at the trust boundary, not inside the worker (which may itself be compromised). (Pattern: IronClaw `safety::leak_detector`, ZeroClaw `security/leak_detector.rs`.)
 - [ ] Telegram outbound; Signal in/out (presage)
 - [ ] SMTP outbound in mail worker
 - [ ] `web-fetch` worker: HTTPS-only, host allowlist, body cap, redirect cap
@@ -99,6 +103,7 @@ items unlock later ones.
 
 - [ ] `python-exec` worker: scratch FS only, no net, hard CPU/mem/wallclock; curated stdlib bind
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
+- [ ] **Skill trust enum** — `Untrusted | UserApproved | Pinned`, each level mapping to an explicit capability ceiling (which workers it may invoke, which net allowlists, which fs paths). Authorship and approval recorded in `audit_log`; promotion requires re-approval. (Pattern: IronClaw skill trust model — user-placed vs registry-installed.)
 - [ ] Optional micro-VM backend for `python-exec` (Firecracker on Linux, Apple `container` on macOS)
 
 ## Phase 5 — Frontier escalation, hardening, audit UI
