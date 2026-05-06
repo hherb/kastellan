@@ -1,0 +1,15 @@
+[package]
+name        = "hhagent-protocol"
+description = "JSON-RPC 2.0 over stdio: tool-worker IPC. MCP-compatible stdio transport."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }

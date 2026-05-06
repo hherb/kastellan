@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 hhagent-sandbox    = { path = "../sandbox" }
 hhagent-supervisor = { path = "../supervisor" }
+hhagent-protocol   = { path = "../protocol" }
 
 tokio              = { workspace = true }
 serde              = { workspace = true }

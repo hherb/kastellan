@@ -1,0 +1,20 @@
+[package]
+name        = "hhagent-worker-shell-exec"
+description = "Tool worker: run an argv from a strict allowlist. No shell interpretation."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+[[bin]]
+name = "hhagent-worker-shell-exec"
+path = "src/main.rs"
+
+[dependencies]
+hhagent-protocol = { path = "../../protocol" }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+anyhow           = { workspace = true }

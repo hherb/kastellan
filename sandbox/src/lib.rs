@@ -47,6 +47,11 @@ pub struct SandboxPolicy {
     pub mem_mb: u64,
     /// Profile preset.
     pub profile: Profile,
+    /// Environment variables to set inside the jail. Empty by default — the
+    /// host environment is **always** cleared before this is applied, so the
+    /// jail sees only what's listed here.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Error)]

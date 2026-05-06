@@ -98,7 +98,10 @@ impl SandboxBackend for LinuxBwrap {
         let argv = build_argv(policy, program, args);
         let mut cmd = Command::new("bwrap");
         cmd.args(&argv[1..]);
-        cmd.stdin(Stdio::null());
+        // stdin is piped so workers speaking JSON-RPC over stdio can be driven
+        // by the core. Workers that don't read stdin (one-shot commands like
+        // /usr/bin/echo in tests) simply ignore the open pipe.
+        cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.spawn()
@@ -124,6 +127,12 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
     argv.push("--new-session".into());
     argv.push("--as-pid-1".into());
     argv.push("--clearenv".into());
+
+    for (k, v) in &policy.env {
+        argv.push("--setenv".into());
+        argv.push(k.clone());
+        argv.push(v.clone());
+    }
 
     argv.extend(["--proc".into(), "/proc".into()]);
     argv.extend(["--dev".into(), "/dev".into()]);
@@ -175,6 +184,7 @@ mod tests {
             cpu_ms: 1_000,
             mem_mb: 64,
             profile: Profile::WorkerStrict,
+            env: vec![],
         }
     }
 

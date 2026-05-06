@@ -29,6 +29,7 @@ fn strict_policy() -> SandboxPolicy {
         cpu_ms: 5_000,
         mem_mb: 64,
         profile: Profile::WorkerStrict,
+        env: vec![],
     }
 }
 

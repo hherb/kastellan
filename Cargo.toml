@@ -4,6 +4,8 @@ members = [
     "core",
     "sandbox",
     "supervisor",
+    "protocol",
+    "workers/shell-exec",
 ]
 
 [workspace.package]

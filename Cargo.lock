@@ -60,6 +60,7 @@ name = "hhagent-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "hhagent-protocol",
  "hhagent-sandbox",
  "hhagent-supervisor",
  "serde",
@@ -69,6 +70,15 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "hhagent-protocol"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -88,6 +98,16 @@ dependencies = [
  "serde",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "hhagent-worker-shell-exec"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hhagent-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
