@@ -5,6 +5,7 @@ members = [
     "sandbox",
     "supervisor",
     "protocol",
+    "workers/prelude",
     "workers/shell-exec",
 ]
 
@@ -34,6 +35,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Time
 time        = { version = "0.3", features = ["serde", "macros"] }
+
+# Linux defence-in-depth (worker-side, applied from inside the worker process,
+# layered on top of bwrap from the parent side). Both AGPL-compatible:
+#   landlock     — MIT OR Apache-2.0
+#   seccompiler  — Apache-2.0 OR BSD-3-Clause
+landlock    = "0.4"
+seccompiler = "0.5"
 
 # Profile tweaks
 [profile.release]

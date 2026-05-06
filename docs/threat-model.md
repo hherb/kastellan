@@ -37,10 +37,13 @@ The macOS sandbox (`sandbox-exec` / Seatbelt) is partially private API and less 
 | Layer | Purpose |
 | ----- | ------- |
 | Policy gate (core) | Static allow/deny per `(tool, args, data class)` before any tool spawn |
-| Sandbox            | OS-enforced FS / net / syscall limits per worker |
+| Parent-side sandbox (bwrap / Seatbelt) | Namespace isolation, FS bind-mount, network unshare. Applied by `core::tool_host`. |
+| Worker-side sandbox (Landlock + seccomp-bpf) | Second, finer kernel filter installed by the worker on itself via [`hhagent-worker-prelude`](../workers/prelude/). One-way: cannot be relaxed once `restrict_self`/`apply_filter` returns. |
 | Egress proxy       | Per-worker host allowlist, TLS pinning, audit-log every request |
 | Postgres role isolation | Workers cannot reach Postgres at all; only the core has the DB connection |
 | Append-only audit log   | Every tool call, LLM call, channel message, memory write |
+
+The two sandbox rows together implement the "parent denies + child denies again" double containment: a kernel bug in either layer alone does not breach the worker's threat boundary. The worker-side layer is enforced from inside the worker process *after* dynamic-linker resolution but *before* serving any JSON-RPC request, via `hhagent_worker_prelude::serve_stdio`.
 
 ## Negative tests (CI-enforced as backends land)
 
@@ -49,6 +52,13 @@ The macOS sandbox (`sandbox-exec` / Seatbelt) is partially private API and less 
 - `shell-exec` attempts a non-allowlisted argv → rejected before spawn.
 - `browser-driver` attempts to read `~/.ssh/` → blocked by sandbox.
 - Adversarial web page in agent context tries to exfiltrate via `web-fetch` → request blocked, audit log shows attempt.
+
+Already shipped (Phase 0 + Phase 0 hardening stage 1):
+
+- `sandbox/tests/linux_smoke.rs` — bwrap denies `/etc/passwd`, `/home`, network under `Net::Deny`.
+- `core/tests/shell_exec_e2e.rs` — non-allowlisted argv rejected by worker policy with `POLICY_DENIED`; full round-trip through bwrap + Landlock + seccomp.
+- `workers/prelude/tests/landlock_smoke.rs` — write to non-allowlisted path is denied with EACCES; allowlisted scratch writes succeed; reads under `/usr` continue to work.
+- `workers/prelude/tests/seccomp_smoke.rs` — `unshare(CLONE_NEWUSER)` and `mount(...)` are killed with `SIGSYS`; `getpid()` survives.
 
 ## Open items
 

@@ -14,7 +14,8 @@
 use std::collections::HashSet;
 use std::process::Command;
 
-use hhagent_protocol::{codes, server::Handler, server::serve_stdio, RpcError};
+use hhagent_protocol::{codes, server::Handler, RpcError};
+use hhagent_worker_prelude::serve_stdio;
 use serde::Deserialize;
 
 #[derive(Deserialize)]

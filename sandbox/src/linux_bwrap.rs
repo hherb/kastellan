@@ -36,6 +36,14 @@ impl LinuxBwrap {
     /// (`kernel.apparmor_restrict_unprivileged_userns=1`) before we try to
     /// spawn real workers.
     pub fn probe() -> Result<(), SandboxError> {
+        // The probe runs `/usr/bin/true` inside a minimal jail, so it must
+        // also stand up enough of the FS for the dynamic linker to resolve
+        // (`ld-linux-*.so` lives under `/lib*` on most distros, and `/lib`
+        // is itself a symlink to `usr/lib` on merged-/usr systems). Without
+        // these symlinks, `execvp` returns ENOENT *not* because the binary
+        // is missing but because its loader is — which is what we hit on
+        // Ubuntu 24.04+ before this fix and which masked broken probes as
+        // "kernel restricts userns" false positives.
         let output = Command::new("bwrap")
             .args([
                 "--unshare-user",
@@ -45,6 +53,18 @@ impl LinuxBwrap {
                 "--symlink",
                 "usr/bin",
                 "/bin",
+                "--symlink",
+                "usr/sbin",
+                "/sbin",
+                "--symlink",
+                "usr/lib",
+                "/lib",
+                "--symlink",
+                "usr/lib64",
+                "/lib64",
+                "--ro-bind-try",
+                "/etc/ld.so.cache",
+                "/etc/ld.so.cache",
                 "--proc",
                 "/proc",
                 "--dev",
