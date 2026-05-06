@@ -8,6 +8,9 @@
 //!   - macos_seatbelt — sandbox-exec (Seatbelt) + setrlimit
 //!   - microvm       — Firecracker (Linux) / Apple `container` CLI (macOS Tahoe+)
 
+#[cfg(target_os = "linux")]
+pub mod linux_bwrap;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -67,13 +70,22 @@ pub trait SandboxBackend {
     ) -> Result<std::process::Child, SandboxError>;
 }
 
-/// Pick the default backend for the current OS. Currently a stub.
+/// Pick the default backend for the current OS.
 pub fn default_backend() -> Box<dyn SandboxBackend> {
-    Box::new(NotYetImplemented)
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(linux_bwrap::LinuxBwrap::new())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Box::new(NotYetImplemented)
+    }
 }
 
+#[cfg(not(target_os = "linux"))]
 struct NotYetImplemented;
 
+#[cfg(not(target_os = "linux"))]
 impl SandboxBackend for NotYetImplemented {
     fn spawn_under_policy(
         &self,
@@ -82,7 +94,7 @@ impl SandboxBackend for NotYetImplemented {
         _args: &[&str],
     ) -> Result<std::process::Child, SandboxError> {
         Err(SandboxError::NotImplemented(
-            "sandbox backend not wired up yet — Phase 0 work item",
+            "macOS Seatbelt backend not yet wired — Phase 0b work item",
         ))
     }
 }

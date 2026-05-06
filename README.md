@@ -36,6 +36,29 @@ config/        Runtime policy and per-worker sandbox profiles
 docs/          Architecture & threat-model docs
 ```
 
+## Setup
+
+### Linux (Ubuntu 24.04+)
+
+The kernel restricts unprivileged user namespaces by default
+(`kernel.apparmor_restrict_unprivileged_userns=1`), so `bwrap` cannot create
+its own jail without a per-binary AppArmor profile. Install one once:
+
+```sh
+sudo scripts/linux/install-bwrap-apparmor-profile.sh
+```
+
+This is the same pattern Flatpak uses (`/etc/apparmor.d/flatpak`). After
+installing, sandbox tests should pass:
+
+```sh
+cargo test -p hhagent-sandbox
+```
+
+If you skip this step, the agent will refuse to spawn workers and emit a
+clear error pointing back here. Other Linux distros without AppArmor user-ns
+restrictions don't need this script.
+
 ## License
 
 AGPL-3.0-only. See [LICENSE](LICENSE).
