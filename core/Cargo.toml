@@ -1,0 +1,30 @@
+[package]
+name        = "hhagent-core"
+description = "Agent core: scheduler, memory orchestration, policy gate, LLM router, IPC, audit log."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hhagent"
+path = "src/main.rs"
+
+[dependencies]
+hhagent-sandbox    = { path = "../sandbox" }
+hhagent-supervisor = { path = "../supervisor" }
+
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+anyhow             = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+time               = { workspace = true }

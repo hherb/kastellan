@@ -1,0 +1,38 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Direnv / env
+.envrc
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / runtime artefacts
+*.log
+*.pid
+/run/
+/state/
+/data/
+/scratch/
+
+# Python (only ever inside workers/python-exec/)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local agent artefacts
+audit-*.jsonl
