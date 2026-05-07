@@ -51,7 +51,24 @@ impl MacosSeatbelt {
     /// reads, metadata, and `sysctl-read`, even `/usr/bin/true` fails to
     /// launch and the probe spuriously reports "broken Seatbelt" on a
     /// healthy host.
+    ///
+    /// Note: the probe profile intentionally uses `(subpath "/usr")` and
+    /// `(subpath "/System")` — broader than `build_profile`'s narrower
+    /// `/usr/lib` + `/usr/libexec` + `/System/Library` rules. See the
+    /// comment inside the implementation for the full rationale.
     pub fn probe() -> Result<(), SandboxError> {
+        // INTENTIONAL DIVERGENCE from build_profile: this probe profile
+        // uses (subpath "/usr") and (subpath "/System") whereas build_profile
+        // uses (subpath "/usr/lib") + (subpath "/usr/libexec") +
+        // (subpath "/System/Library"). The probe is the *binary* canary
+        // ("can sandbox-exec spawn anything?") and should not false-fail on
+        // a healthy host because of legitimate /usr/share or /System/Volumes
+        // reads. build_profile is intentionally narrower because real
+        // workers have a tighter contract. If a future macOS release tightens
+        // /usr/bin/true's read set in a way that build_profile doesn't cover,
+        // the relevant integration smoke tests (echo_runs_inside_sandbox)
+        // will catch the regression — not the probe.
+        //
         // The probe profile is a minimal allowlist — not a no-op — so dyld +
         // libsystem can resolve and exec succeeds on a healthy host. Key rules:
         //   (literal "/")        — the root inode itself must be readable for
@@ -190,11 +207,21 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
     // surface beyond what the profile's other rules permit.
     out.push_str("(allow mach-lookup)\n");
 
+    // /dev allowlist: only the safe pseudo-device nodes workers legitimately
+    // need. /dev as a whole is NOT allowed (that would expose disk*, bpf*,
+    // auditpipe, etc.).
+    //
+    // tty is intentionally NOT exposed: Linux's bwrap --new-session detaches
+    // the controlling terminal so /dev/tty is unusable (ENXIO) by Linux
+    // workers anyway, and our process_group(0) uses setpgid(0,0) which does
+    // NOT create a new session — granting write access here would create a
+    // covert channel to the user's terminal that Linux workers don't have.
+    // JSON-RPC workers communicate via stdin/stdout (piped) and have no
+    // legitimate use for /dev/tty.
     out.push_str("(allow file-read* file-write* (literal \"/dev/null\"))\n");
     out.push_str("(allow file-read* file-write* (literal \"/dev/zero\"))\n");
     out.push_str("(allow file-read* (literal \"/dev/random\"))\n");
     out.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
-    out.push_str("(allow file-read* file-write* (literal \"/dev/tty\"))\n");
     out.push_str("(allow file-read* file-write* (subpath \"/dev/fd\"))\n");
     out.push_str("(allow file-read* file-write* (literal \"/dev/dtracehelper\"))\n");
 
@@ -277,18 +304,23 @@ mod tests {
     #[test]
     fn dev_allowlist_is_minimal() {
         let p = build_profile(&strict_policy());
-        // The seven safe /dev nodes must be present.
+        // The six safe /dev nodes must be present (/dev/tty is intentionally absent).
         for needle in [
             "(literal \"/dev/null\")",
             "(literal \"/dev/zero\")",
             "(literal \"/dev/random\")",
             "(literal \"/dev/urandom\")",
-            "(literal \"/dev/tty\")",
             "(subpath \"/dev/fd\")",
             "(literal \"/dev/dtracehelper\")",
         ] {
             assert!(p.contains(needle), "profile missing {needle:?}; got:\n{p}");
         }
+        // /dev/tty must NOT be present — it would create a covert channel to
+        // the user's terminal that Linux workers (bwrap --new-session) can't use.
+        assert!(
+            !p.contains("(literal \"/dev/tty\")"),
+            "profile must not expose /dev/tty; got:\n{p}"
+        );
         // /dev as a whole must NOT be subpath-allowed — that would expose disk*,
         // auditpipe, bpf*, etc.
         assert!(

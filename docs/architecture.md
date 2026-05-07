@@ -46,7 +46,7 @@ JSON-RPC ([Model Context Protocol](https://modelcontextprotocol.io)-compatible) 
 
 | Concern              | Linux                               | macOS                                          |
 | -------------------- | ----------------------------------- | ---------------------------------------------- |
-| Sandbox              | bubblewrap + Landlock + seccomp-bpf | `sandbox-exec` (Seatbelt) + `setrlimit`        |
+| Sandbox              | bubblewrap + Landlock + seccomp-bpf | `sandbox-exec` (Seatbelt)                      |
 | Service supervisor   | `systemd --user`                    | `launchd` (LaunchAgents)                        |
 | Local LLM serving    | vLLM / SGLang on GPU                | llama.cpp / Ollama (Metal/MLX)                 |
 | Keyring              | libsecret (`secret-tool`)           | Keychain (`security`)                          |
