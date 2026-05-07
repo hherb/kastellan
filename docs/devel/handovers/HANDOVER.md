@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-08
-**Last commit:** `fb726d0` + this session's pending commit on the workspace+worker e2e test
+**Last commit:** `50a06ec` (`test(core): workspace+worker e2e + BASE_ALLOW for GNU file copy`)
 **Branch:** `main`
 
 ---
