@@ -57,24 +57,18 @@ impl SandboxBackend for MacosSeatbelt {
 /// no I/O, no syscalls — exposed so unit tests can assert on the profile
 /// text without spawning a process.
 pub fn build_profile(policy: &SandboxPolicy) -> String {
-    let _ = policy; // unused until Task 4
     let mut out = String::new();
     out.push_str("(version 1)\n");
     out.push_str("(deny default)\n");
 
-    // Always-on: dyld + libsystem need these to start any process.
     out.push_str("(allow process-fork)\n");
     out.push_str("(allow process-exec*)\n");
     out.push_str("(allow file-read* (subpath \"/usr/lib\"))\n");
     out.push_str("(allow file-read* (subpath \"/usr/libexec\"))\n");
     out.push_str("(allow file-read* (subpath \"/System/Library\"))\n");
-    // Required for path-component resolution by dyld; deliberate concession,
-    // see threat-model.md "Asymmetric platform note".
     out.push_str("(allow file-read-metadata (subpath \"/\"))\n");
     out.push_str("(allow sysctl-read)\n");
 
-    // /dev: explicit minimal allowlist. Not a (subpath "/dev") allow — that
-    // would expose disk*, auditpipe, bpf*, console, klog, etc.
     out.push_str("(allow file-read* file-write* (literal \"/dev/null\"))\n");
     out.push_str("(allow file-read* file-write* (literal \"/dev/zero\"))\n");
     out.push_str("(allow file-read* (literal \"/dev/random\"))\n");
@@ -82,6 +76,13 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
     out.push_str("(allow file-read* file-write* (literal \"/dev/tty\"))\n");
     out.push_str("(allow file-read* file-write* (subpath \"/dev/fd\"))\n");
     out.push_str("(allow file-read* file-write* (literal \"/dev/dtracehelper\"))\n");
+
+    for path in &policy.fs_read {
+        out.push_str(&format!(
+            "(allow file-read* (subpath \"{}\"))\n",
+            path.display()
+        ));
+    }
 
     out
 }
@@ -152,7 +153,12 @@ mod tests {
         );
     }
 
-    // Suppress unused warnings on PathBuf until Task 5.
-    #[allow(dead_code)]
-    fn _path_marker(_p: PathBuf) {}
+    #[test]
+    fn fs_read_emits_subpath_allow() {
+        let mut p = strict_policy();
+        p.fs_read = vec![PathBuf::from("/etc/ssl"), PathBuf::from("/opt/data")];
+        let prof = build_profile(&p);
+        assert!(prof.contains("(allow file-read* (subpath \"/etc/ssl\"))"), "got:\n{prof}");
+        assert!(prof.contains("(allow file-read* (subpath \"/opt/data\"))"), "got:\n{prof}");
+    }
 }
