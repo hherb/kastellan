@@ -140,11 +140,28 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
 
     out.push_str("(allow process-fork)\n");
     out.push_str("(allow process-exec*)\n");
+    // Root-inode read is required for the kernel path-walk to ANY /usr/...
+    // or /bin/... binary, even when the per-subpath read rules below are
+    // present. Without this rule, /bin/echo and /usr/bin/true abort with
+    // SIGABRT before dyld even runs (empirically confirmed on macOS 26.4
+    // ARM64). This is broader than bwrap's --ro-bind /usr — it's a
+    // documented consequence of Seatbelt being a MAC layer with no
+    // mount-remap counterpart, and the threat-model already flags this
+    // asymmetry.
+    out.push_str("(allow file-read* (literal \"/\"))\n");
     out.push_str("(allow file-read* (subpath \"/usr/lib\"))\n");
     out.push_str("(allow file-read* (subpath \"/usr/libexec\"))\n");
     out.push_str("(allow file-read* (subpath \"/System/Library\"))\n");
     out.push_str("(allow file-read-metadata (subpath \"/\"))\n");
     out.push_str("(allow sysctl-read)\n");
+    // launchd bootstrap lookups required by dyld and libdispatch on newer
+    // macOS. Empirically needed for Python, libdispatch users, and any
+    // binary calling getpwuid/getgrgid. The unrestricted form (no
+    // `global-name` qualifier) is intentional: enumerating every Mach
+    // service dyld might query is brittle across macOS versions, and the
+    // Mach bootstrap namespace is not itself a privilege-escalation
+    // surface beyond what the profile's other rules permit.
+    out.push_str("(allow mach-lookup)\n");
 
     out.push_str("(allow file-read* file-write* (literal \"/dev/null\"))\n");
     out.push_str("(allow file-read* file-write* (literal \"/dev/zero\"))\n");
@@ -218,11 +235,13 @@ mod tests {
         for needle in [
             "(allow process-fork)",
             "(allow process-exec*)",
+            "(allow file-read* (literal \"/\"))",
             "(allow file-read* (subpath \"/usr/lib\"))",
             "(allow file-read* (subpath \"/usr/libexec\"))",
             "(allow file-read* (subpath \"/System/Library\"))",
             "(allow file-read-metadata (subpath \"/\"))",
             "(allow sysctl-read)",
+            "(allow mach-lookup)",
         ] {
             assert!(p.contains(needle), "profile missing {needle:?}; got:\n{p}");
         }
