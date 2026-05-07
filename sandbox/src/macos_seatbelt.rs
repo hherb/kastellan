@@ -13,8 +13,8 @@
 //!     nodes, and per-policy fs_read / fs_write paths.
 //!   - Environment cleared via `Command::env_clear()` before exec (analogue of
 //!     bwrap's `--clearenv`); `policy.env` re-applied on top.
-//!   - `Command::process_group(0)` so the worker is in its own session
-//!     (analogue of `--new-session`).
+//!   - `Command::process_group(0)` so the worker is in its own process group
+//!     (analogue of bwrap's `--new-session`; uses setpgid, not setsid).
 //!
 //! Not yet (deferred to supervisor work):
 //!   - `setrlimit` for `policy.cpu_ms` / `policy.mem_mb`.
@@ -67,7 +67,10 @@ impl SandboxBackend for MacosSeatbelt {
             cmd.env(k, v);
         }
 
-        // bwrap's --new-session equivalent: own session via setsid.
+        // bwrap's --new-session analogue: own process group via setpgid(0, 0)
+        // so signals to the parent's process group don't reach the worker.
+        // Strictly weaker than `setsid` (new session) but sufficient for our
+        // signal-isolation needs; can tighten via a posix_spawn shim later.
         cmd.process_group(0);
 
         cmd.stdin(Stdio::piped());
@@ -103,6 +106,13 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
     out.push_str("(allow file-read* file-write* (subpath \"/dev/fd\"))\n");
     out.push_str("(allow file-read* file-write* (literal \"/dev/dtracehelper\"))\n");
 
+    // Per-policy paths are interpolated as TinyScheme string literals.
+    // We do NOT escape `"` or `\` here — `SandboxPolicy` is constructed by
+    // trusted core code (`tool_host`), and absolute-path validation in
+    // `spawn_under_policy` rules out the most obvious malformed paths.
+    // If a future caller starts to pass *untrusted* path inputs through this
+    // crate, add an escape-and-validate helper and route both loops through
+    // it.
     for path in &policy.fs_read {
         out.push_str(&format!(
             "(allow file-read* (subpath \"{}\"))\n",
