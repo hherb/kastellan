@@ -93,3 +93,24 @@ fn host_etc_master_passwd_is_invisible_when_not_in_policy() {
         read_to_string(&mut child.stderr)
     );
 }
+
+#[test]
+fn host_users_dir_is_invisible_when_not_in_policy() {
+    if skip_if_no_seatbelt() {
+        return;
+    }
+    let backend = MacosSeatbelt::new();
+    let mut child = backend
+        .spawn_under_policy(&strict_policy(), "/bin/ls", &["/Users"])
+        .expect("sandbox-exec should spawn ls");
+    let status = child.wait().expect("wait");
+    let stdout = read_to_string(&mut child.stdout);
+    let stderr = read_to_string(&mut child.stderr);
+    // Either ls fails (denied), or it succeeds but lists nothing real.
+    // What's NOT acceptable is seeing the actual user's home dir name.
+    assert!(
+        !stdout.contains("hherb"),
+        "sandbox leaked the host's /Users dir! stdout={stdout:?} stderr={stderr:?}"
+    );
+    let _ = status;
+}
