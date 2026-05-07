@@ -91,6 +91,13 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
         ));
     }
 
+    if matches!(policy.net, crate::Net::Allowlist(_)) {
+        // The host allowlist itself is enforced by the future egress proxy
+        // (see docs/architecture.md invariant 5), not by Seatbelt — same
+        // split as bwrap's --share-net.
+        out.push_str("(allow network*)\n");
+    }
+
     out
 }
 
@@ -183,5 +190,19 @@ mod tests {
             !prof.contains("(allow file-read* (subpath \"/var/lib/hhagent/scratch\"))"),
             "fs_write path must not also be emitted as a separate read-only rule; got:\n{prof}"
         );
+    }
+
+    #[test]
+    fn deny_does_not_allow_network() {
+        let p = build_profile(&strict_policy());
+        assert!(!p.contains("(allow network*)"), "Net::Deny must not emit (allow network*); got:\n{p}");
+    }
+
+    #[test]
+    fn allowlist_does_allow_network() {
+        let mut p = strict_policy();
+        p.net = Net::Allowlist(vec!["api.example.com:443".into()]);
+        let prof = build_profile(&p);
+        assert!(prof.contains("(allow network*)"), "Net::Allowlist must emit (allow network*); got:\n{prof}");
     }
 }
