@@ -53,3 +53,22 @@ fn scaffold_compiles_and_skip_helper_runs() {
     let _ = strict_policy();
     let _: fn(&mut Option<std::process::ChildStdout>) -> String = read_to_string;
 }
+
+#[test]
+fn echo_runs_inside_sandbox() {
+    if skip_if_no_seatbelt() {
+        return;
+    }
+    let backend = MacosSeatbelt::new();
+    let mut child = backend
+        .spawn_under_policy(&strict_policy(), "/bin/echo", &["hello-from-jail"])
+        .expect("sandbox-exec should spawn echo");
+    let status = child.wait().expect("wait");
+    assert!(
+        status.success(),
+        "echo exited non-zero: {status:?}, stderr={}",
+        read_to_string(&mut child.stderr)
+    );
+    let stdout = read_to_string(&mut child.stdout);
+    assert_eq!(stdout.trim_end(), "hello-from-jail");
+}
