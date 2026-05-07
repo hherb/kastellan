@@ -72,3 +72,24 @@ fn echo_runs_inside_sandbox() {
     let stdout = read_to_string(&mut child.stdout);
     assert_eq!(stdout.trim_end(), "hello-from-jail");
 }
+
+#[test]
+fn host_etc_master_passwd_is_invisible_when_not_in_policy() {
+    if skip_if_no_seatbelt() {
+        return;
+    }
+    let backend = MacosSeatbelt::new();
+    // /etc/master.passwd is the shadow file on macOS. /etc/passwd itself
+    // is world-readable on macOS by design; master.passwd is the sensitive
+    // analogue of Linux's /etc/passwd in this test's intent.
+    let mut child = backend
+        .spawn_under_policy(&strict_policy(), "/bin/cat", &["/etc/master.passwd"])
+        .expect("sandbox-exec should spawn cat");
+    let status = child.wait().expect("wait");
+    assert!(
+        !status.success(),
+        "cat /etc/master.passwd should fail inside sandbox; stdout={} stderr={}",
+        read_to_string(&mut child.stdout),
+        read_to_string(&mut child.stderr)
+    );
+}
