@@ -144,3 +144,22 @@ fn relative_policy_paths_are_rejected() {
     let res = backend.spawn_under_policy(&policy, "/usr/bin/true", &[]);
     assert!(matches!(res, Err(hhagent_sandbox::SandboxError::Backend(_))));
 }
+
+#[test]
+fn reading_dev_disk0_is_denied() {
+    if skip_if_no_seatbelt() {
+        return;
+    }
+    let backend = MacosSeatbelt::new();
+    // /dev/disk0 is not in the explicit /dev allowlist, so the read must fail.
+    let mut child = backend
+        .spawn_under_policy(&strict_policy(), "/bin/cat", &["/dev/disk0"])
+        .expect("sandbox-exec should spawn cat");
+    let status = child.wait().expect("wait");
+    assert!(
+        !status.success(),
+        "cat /dev/disk0 should be denied; stdout={} stderr={}",
+        read_to_string(&mut child.stdout),
+        read_to_string(&mut child.stderr)
+    );
+}
