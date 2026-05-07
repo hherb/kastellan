@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-08
-**Last commit:** *pending* (`Phase 0 hardening stage 2 — seccomp allow-list + Landlock v6`)
+**Last commit:** `97d4465` (`Phase 0 hardening stage 2 — seccomp allow-list + Landlock v6`)
 **Branch:** `main`
 
 ---
