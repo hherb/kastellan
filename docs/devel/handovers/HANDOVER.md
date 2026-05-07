@@ -30,13 +30,13 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` is green: 36 tests on Linux + 29 tests on macOS, 0 skipped on either.**
+**`cargo test --workspace` is green: 36 tests on Linux + 31 tests on macOS, 0 skipped on either.**
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
 | `protocol` unit | 3 | dispatch, parse-error fallback, method-not-found |
 | `sandbox` unit (linux) | 6 | bwrap argv builder shape |
-| `sandbox` unit (macos) | 11 | sandbox-exec profile builder shape + path canonicalization + on-host probe |
+| `sandbox` unit (macos) | 13 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation |
 | `sandbox` integration (`linux_smoke`) | 6 | **real** bwrap: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected |
 | `sandbox` integration (`macos_smoke`) | 8 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny` |
 | `core` unit | 4 | (unchanged — `derive_lockdown_env` adds correct env entries, doesn't overwrite caller-supplied env) |
@@ -81,9 +81,42 @@ on the user's DGX Spark. Other Linux hosts may need
   - `build_profile` needed `(allow file-read* (literal "/"))` and `(allow mach-lookup)` to launch real binaries on macOS 26.4 ARM64. Without the literal `/` rule, `/bin/echo` aborts with SIGABRT before dyld even runs (SIP-related path-walk requirement).
   - `spawn_under_policy` canonicalizes `policy.fs_read` / `policy.fs_write` so `/etc/...` paths resolve to `/private/etc/...` before being emitted in the Seatbelt profile.
 
-Total tests after this session on macOS: 29 passed, 0 skipped, 0 failed.
+Total tests after Phase 0b on macOS: 29 passed, 0 skipped, 0 failed.
 
 Linux side is unchanged (the macOS module is cfg-gated out). The Linux user should run `cargo test --workspace` on their Linux box to confirm the prior 36 tests still pass.
+
+**Code-review hardening pass (same session):** addressed feedback from a
+post-Phase-0b review of the macOS backend.
+
+- `spawn_under_policy` now rejects policy paths containing TinyScheme-special
+  characters (`"`, `\`, `(`, `)`, newline, NUL) before the profile is built —
+  forecloses an injection class even though every caller is trusted core code
+  today. New unit test `policy_paths_with_tinyscheme_specials_are_rejected_by_spawn`.
+- `canonicalize_policy_paths` now returns `Result<SandboxPolicy, SandboxError>`
+  and only falls back for `NotFound`. `PermissionDenied` (and any other
+  `io::Error`) propagates so we don't silently emit a non-functional Seatbelt
+  rule. New unit test `canonicalize_policy_paths_propagates_non_notfound_errors`
+  uses `chmod 0o000` on a temp dir with an RAII guard for cleanup.
+- `host_users_dir_is_invisible_when_not_in_policy` now asserts `!status.success()`
+  primarily and only secondarily checks that `$USER` doesn't leak into stdout —
+  no more host-specific hard-coded "hherb" string and no more vacuous-pass risk.
+- `probe_succeeds_on_this_host` unit test now `[SKIP]`s on probe failure
+  instead of panicking, matching the integration-test pattern (so an
+  MDM-clipped Seatbelt host doesn't false-fail the suite).
+- Dropped the unused `SandboxError::NotImplemented` variant — no constructor,
+  no callers, can be re-added when a micro-VM backend lands.
+
+**Filed as follow-up GitHub issues** (won't fit this session but flagged so they
+don't get forgotten):
+
+- [#1 — narrow `(allow mach-lookup)` to a `global-name` allowlist](https://github.com/hherb/hhagent/issues/1).
+  The unrestricted Mach lookup is the largest concrete weakness in the macOS
+  profile; capture the actual service set per worker and switch to an explicit
+  allowlist.
+- [#2 — evaluate `setpgid(0,0)` → `setsid()` for stronger session isolation](https://github.com/hherb/hhagent/issues/2).
+  Today the worker is in its own process group but inherits the controlling
+  terminal; `/dev/tty` is excluded from the profile but the asymmetry vs Linux
+  `--new-session` is real.
 
 ## Recently completed (this session, 2026-05-06)
 
