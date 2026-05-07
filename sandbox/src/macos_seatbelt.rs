@@ -147,8 +147,8 @@ mod tests {
         // /dev as a whole must NOT be subpath-allowed — that would expose disk*,
         // auditpipe, bpf*, etc.
         assert!(
-            !p.contains("(subpath \"/dev\")") || p.contains("(subpath \"/dev/fd\")"),
-            "profile must not allow subpath \"/dev\" (only /dev/fd is OK)"
+            !p.contains("(subpath \"/dev\")"),
+            "profile must not allow broad (subpath \"/dev\") rule; got:\n{p}"
         );
     }
 
