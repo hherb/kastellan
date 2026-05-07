@@ -1,19 +1,58 @@
 //! End-to-end test: agent core spawns the `shell-exec` worker under the
-//! Linux bwrap backend and round-trips a JSON-RPC `shell.exec` call. This is
-//! the Phase 0 verification that everything wires up: sandbox + protocol +
-//! tool_host + worker.
+//! platform's sandbox backend and round-trips a JSON-RPC `shell.exec` call.
+//! Phase 0 / 0b verification that everything wires up: sandbox + protocol +
+//! tool_host + worker. Runs on both Linux (bwrap) and macOS (Seatbelt).
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::path::PathBuf;
 
 use hhagent_core::tool_host::{spawn_worker, WorkerSpec};
 use hhagent_protocol::codes;
-use hhagent_sandbox::{linux_bwrap::LinuxBwrap, Net, Profile, SandboxPolicy};
+use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
-/// Locate the worker binary. Cargo builds it into the same target dir as
-/// this test when `cargo test --workspace` is run; resolve via
-/// `CARGO_MANIFEST_DIR` so we don't depend on the working directory.
+// On Linux /usr/bin/echo exists; on macOS the standalone echo binary lives at
+// /bin/echo (there is no /usr/bin/echo on macOS).
+#[cfg(target_os = "linux")]
+const ECHO_PATH: &str = "/usr/bin/echo";
+
+#[cfg(target_os = "macos")]
+const ECHO_PATH: &str = "/bin/echo";
+
+#[cfg(target_os = "linux")]
+fn skip_if_sandbox_unavailable() -> bool {
+    use hhagent_sandbox::linux_bwrap::LinuxBwrap;
+    if let Err(e) = LinuxBwrap::probe() {
+        eprintln!("\n[SKIP] bwrap probe failed: {e}\n");
+        return true;
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn skip_if_sandbox_unavailable() -> bool {
+    use hhagent_sandbox::macos_seatbelt::MacosSeatbelt;
+    if let Err(e) = MacosSeatbelt::probe() {
+        eprintln!("\n[SKIP] sandbox-exec probe failed: {e}\n");
+        return true;
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn backend() -> Box<dyn SandboxBackend> {
+    Box::new(hhagent_sandbox::linux_bwrap::LinuxBwrap::new())
+}
+
+#[cfg(target_os = "macos")]
+fn backend() -> Box<dyn SandboxBackend> {
+    Box::new(hhagent_sandbox::macos_seatbelt::MacosSeatbelt::new())
+}
+
+/// Locate the worker binary. Same path layout on Linux and macOS today —
+/// `target/debug/<name>`. This helper exists primarily so the next reader
+/// has a single place to edit when production deployment establishes a
+/// stable install location for workers.
 fn worker_binary() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let target = std::env::var_os("CARGO_TARGET_DIR")
@@ -22,17 +61,6 @@ fn worker_binary() -> PathBuf {
     target.join("debug").join("hhagent-worker-shell-exec")
 }
 
-fn skip_if_no_userns() -> bool {
-    if let Err(e) = LinuxBwrap::probe() {
-        eprintln!("\n[SKIP] bwrap probe failed: {e}\n");
-        return true;
-    }
-    false
-}
-
-/// Build a sandbox policy that lets the shell-exec worker run and exec
-/// `/usr/bin/echo`. We expose the worker binary read-only and pass the
-/// allowlist via env.
 fn policy_for_shell_exec(worker: &PathBuf, allowlist: &[&str]) -> SandboxPolicy {
     let allow_json = serde_json::to_string(allowlist).unwrap();
     SandboxPolicy {
@@ -48,7 +76,7 @@ fn policy_for_shell_exec(worker: &PathBuf, allowlist: &[&str]) -> SandboxPolicy 
 
 #[test]
 fn echo_round_trip_through_sandboxed_worker() {
-    if skip_if_no_userns() {
+    if skip_if_sandbox_unavailable() {
         return;
     }
     let worker = worker_binary();
@@ -57,20 +85,20 @@ fn echo_round_trip_through_sandboxed_worker() {
         "worker binary not found at {worker:?} — run `cargo build --workspace` first"
     );
 
-    let policy = policy_for_shell_exec(&worker, &["/usr/bin/echo"]);
-    let backend = LinuxBwrap::new();
+    let policy = policy_for_shell_exec(&worker, &[ECHO_PATH]);
+    let backend = backend();
     let worker_str = worker.to_string_lossy().into_owned();
     let spec = WorkerSpec {
         policy: &policy,
         program: &worker_str,
         args: &[],
     };
-    let mut client = spawn_worker(&backend, &spec).expect("spawn shell-exec under bwrap");
+    let mut client = spawn_worker(&*backend, &spec).expect("spawn shell-exec under sandbox");
 
     let result = client
         .call(
             "shell.exec",
-            serde_json::json!({"argv": ["/usr/bin/echo", "round-trip-ok"]}),
+            serde_json::json!({"argv": [ECHO_PATH, "round-trip-ok"]}),
         )
         .expect("shell.exec round trip");
 
@@ -81,7 +109,7 @@ fn echo_round_trip_through_sandboxed_worker() {
 
 #[test]
 fn argv_outside_allowlist_is_rejected_by_worker_policy() {
-    if skip_if_no_userns() {
+    if skip_if_sandbox_unavailable() {
         return;
     }
     let worker = worker_binary();
@@ -89,21 +117,19 @@ fn argv_outside_allowlist_is_rejected_by_worker_policy() {
         eprintln!("[SKIP] worker binary not built");
         return;
     }
-    // Allowlist contains echo but the call asks for cat — worker must reject
-    // before it even tries to exec.
-    let policy = policy_for_shell_exec(&worker, &["/usr/bin/echo"]);
-    let backend = LinuxBwrap::new();
+    let policy = policy_for_shell_exec(&worker, &[ECHO_PATH]);
+    let backend = backend();
     let worker_str = worker.to_string_lossy().into_owned();
     let spec = WorkerSpec {
         policy: &policy,
         program: &worker_str,
         args: &[],
     };
-    let mut client = spawn_worker(&backend, &spec).expect("spawn shell-exec under bwrap");
+    let mut client = spawn_worker(&*backend, &spec).expect("spawn shell-exec under sandbox");
     let err = client
         .call(
             "shell.exec",
-            serde_json::json!({"argv": ["/usr/bin/cat", "/etc/passwd"]}),
+            serde_json::json!({"argv": ["/bin/cat", "/etc/master.passwd"]}),
         )
         .expect_err("non-allowlisted argv must be denied");
     let msg = format!("{err}");
@@ -117,7 +143,7 @@ fn argv_outside_allowlist_is_rejected_by_worker_policy() {
 
 #[test]
 fn unknown_method_yields_method_not_found() {
-    if skip_if_no_userns() {
+    if skip_if_sandbox_unavailable() {
         return;
     }
     let worker = worker_binary();
@@ -125,15 +151,15 @@ fn unknown_method_yields_method_not_found() {
         eprintln!("[SKIP] worker binary not built");
         return;
     }
-    let policy = policy_for_shell_exec(&worker, &["/usr/bin/echo"]);
-    let backend = LinuxBwrap::new();
+    let policy = policy_for_shell_exec(&worker, &[ECHO_PATH]);
+    let backend = backend();
     let worker_str = worker.to_string_lossy().into_owned();
     let spec = WorkerSpec {
         policy: &policy,
         program: &worker_str,
         args: &[],
     };
-    let mut client = spawn_worker(&backend, &spec).expect("spawn shell-exec under bwrap");
+    let mut client = spawn_worker(&*backend, &spec).expect("spawn shell-exec under sandbox");
     let err = client
         .call("does.not.exist", serde_json::json!({}))
         .expect_err("unknown method must error");
