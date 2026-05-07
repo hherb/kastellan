@@ -10,6 +10,8 @@
 
 #[cfg(target_os = "linux")]
 pub mod linux_bwrap;
+#[cfg(target_os = "macos")]
+pub mod macos_seatbelt;
 
 use std::path::PathBuf;
 
@@ -81,16 +83,20 @@ pub fn default_backend() -> Box<dyn SandboxBackend> {
     {
         Box::new(linux_bwrap::LinuxBwrap::new())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(macos_seatbelt::MacosSeatbelt::new())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Box::new(NotYetImplemented)
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 struct NotYetImplemented;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl SandboxBackend for NotYetImplemented {
     fn spawn_under_policy(
         &self,
@@ -98,8 +104,8 @@ impl SandboxBackend for NotYetImplemented {
         _program: &str,
         _args: &[&str],
     ) -> Result<std::process::Child, SandboxError> {
-        Err(SandboxError::NotImplemented(
-            "macOS Seatbelt backend not yet wired — Phase 0b work item",
+        Err(SandboxError::Backend(
+            "no sandbox backend for this OS — only Linux and macOS are supported".into(),
         ))
     }
 }
