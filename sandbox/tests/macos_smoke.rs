@@ -135,3 +135,12 @@ fn fs_read_path_is_visible_when_listed() {
     let stdout = read_to_string(&mut child.stdout);
     assert!(!stdout.is_empty(), "expected non-empty /etc/hosts content");
 }
+
+#[test]
+fn relative_policy_paths_are_rejected() {
+    let backend = MacosSeatbelt::new();
+    let mut policy = strict_policy();
+    policy.fs_read.push(PathBuf::from("relative/path"));
+    let res = backend.spawn_under_policy(&policy, "/usr/bin/true", &[]);
+    assert!(matches!(res, Err(hhagent_sandbox::SandboxError::Backend(_))));
+}
