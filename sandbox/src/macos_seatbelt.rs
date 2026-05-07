@@ -25,7 +25,7 @@
 //!
 //! See [`docs/superpowers/specs/2026-05-07-macos-seatbelt-backend-design.md`].
 
-#[allow(unused_imports)]
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
 use crate::{SandboxBackend, SandboxError, SandboxPolicy};
@@ -43,13 +43,39 @@ impl MacosSeatbelt {
 impl SandboxBackend for MacosSeatbelt {
     fn spawn_under_policy(
         &self,
-        _policy: &SandboxPolicy,
-        _program: &str,
-        _args: &[&str],
+        policy: &SandboxPolicy,
+        program: &str,
+        args: &[&str],
     ) -> Result<Child, SandboxError> {
-        Err(SandboxError::Backend(
-            "MacosSeatbelt::spawn_under_policy not yet implemented".into(),
-        ))
+        for p in policy.fs_read.iter().chain(policy.fs_write.iter()) {
+            if !p.is_absolute() {
+                return Err(SandboxError::Backend(format!(
+                    "policy paths must be absolute, got {p:?}"
+                )));
+            }
+        }
+
+        let profile = build_profile(policy);
+        let mut cmd = Command::new("sandbox-exec");
+        cmd.arg("-p").arg(&profile);
+        cmd.arg(program);
+        cmd.args(args);
+
+        // bwrap's --clearenv equivalent: clear, then re-apply per-policy env.
+        cmd.env_clear();
+        for (k, v) in &policy.env {
+            cmd.env(k, v);
+        }
+
+        // bwrap's --new-session equivalent: own session via setsid.
+        cmd.process_group(0);
+
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        cmd.spawn()
+            .map_err(|e| SandboxError::Backend(format!("sandbox-exec spawn failed: {e}")))
     }
 }
 
@@ -204,5 +230,20 @@ mod tests {
         p.net = Net::Allowlist(vec!["api.example.com:443".into()]);
         let prof = build_profile(&p);
         assert!(prof.contains("(allow network*)"), "Net::Allowlist must emit (allow network*); got:\n{prof}");
+    }
+
+    #[test]
+    fn relative_policy_paths_are_rejected_by_spawn() {
+        let backend = MacosSeatbelt::new();
+        let mut p = strict_policy();
+        p.fs_read.push(PathBuf::from("relative/path"));
+        let err = backend
+            .spawn_under_policy(&p, "/usr/bin/true", &[])
+            .expect_err("must reject relative paths");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must be absolute"),
+            "expected 'must be absolute' error, got: {msg}"
+        );
     }
 }
