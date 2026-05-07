@@ -22,25 +22,58 @@
 //!
 //! ## Kernel compatibility
 //!
-//! We request Landlock ABI v1 (5.13+) which gives us the basic FS access
-//! rights needed for read/write/exec gating. On older kernels,
-//! `restrict_self` returns [`landlock::RulesetStatus::NotEnforced`]; we
-//! report this via [`LandlockReport::KernelTooOld`] and continue (bwrap is
-//! still in effect from the parent side).
+//! We request Landlock ABI v6 (Linux 6.12+). The user's primary host is on
+//! Linux 6.17, so this lifts the report from `PartiallyEnforced` to
+//! `FullyEnforced`. On older kernels, the `landlock` crate's compatibility
+//! layer transparently falls back to the highest ABI the kernel does
+//! support — we still get whatever subset is enforceable. If the kernel is
+//! too old to support Landlock at all (< 5.13), `restrict_self` returns
+//! [`landlock::RulesetStatus::NotEnforced`]; we report this via
+//! [`LandlockReport::KernelTooOld`] and continue (bwrap is still in
+//! effect from the parent side).
+//!
+//! ## ABI v6 access rights audit
+//!
+//! Bumping from v1 → v6 introduces four new restricted accesses that we
+//! must explicitly handle (otherwise they fall outside the ruleset and
+//! the kernel never enforces them):
+//!
+//!   * **`Refer` (v2)** — rename/link across rule boundaries. We allow
+//!     it *within* the worker's RW scratch dir (renames within scratch
+//!     are needed by anything that does atomic-write-then-rename). We
+//!     do not add it to RO+exec roots — they have no write rights so
+//!     the question is moot.
+//!   * **`Truncate` (v3)** — truncating a file via `O_TRUNC`,
+//!     `truncate()`, or `ftruncate()`. Allowed on RW scratch (every
+//!     write-then-overwrite path needs it). Denied on RO+exec roots.
+//!   * **`IoctlDev` (v5)** — `ioctl()` on character/block devices.
+//!     Allowed on `/dev` because libc and the dynamic linker probe
+//!     terminal-ness on stdio with `TCGETS`-style ioctls. The risk
+//!     surface is minimal because bwrap already restricts `/dev` to a
+//!     tmpfs with only `null`/`zero`/`random`/`urandom`/`tty`/`console`
+//!     — there are no dangerous device nodes left to ioctl.
+//!   * **Scope: `AbstractUnixSocket` (v6)** — connecting to abstract
+//!     UDS created outside the sandbox. We deny: no Phase 0 worker has
+//!     a legitimate need for an external abstract UDS, and DBus or
+//!     similar would be a Phase-3 concern with its own profile.
+//!   * **Scope: `Signal` (v6)** — sending signals to processes outside
+//!     the sandbox. Denied: a worker should never need to signal
+//!     anything but its own children.
 
 use std::path::{Path, PathBuf};
 
 use landlock::{
     ABI, Access, AccessFs, BitFlags, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetError, RulesetStatus,
+    RulesetCreatedAttr, RulesetError, RulesetStatus, Scope,
 };
 
 use crate::{LandlockReport, LockdownError};
 
-/// The Landlock ABI version we target. v1 = Linux 5.13+. v2 (5.19+) adds
-/// `Refer` (rename across boundaries) which we do not need. Stick to v1
-/// for maximum compatibility — we only need read/write/exec gating.
-const TARGET_ABI: ABI = ABI::V1;
+/// The Landlock ABI version we target. v6 = Linux 6.12+ (host on 6.17).
+/// The crate's compatibility layer downgrades on older kernels — we
+/// still benefit from whatever subset is enforceable. See the module
+/// doc-comment for the per-version access-rights audit.
+const TARGET_ABI: ABI = ABI::V6;
 
 /// Coarse-grained read-and-execute roots that every worker needs in order
 /// to load shared libraries and exec helper binaries that the parent has
@@ -109,17 +142,31 @@ pub fn parse_rw_string(raw: &str) -> Result<Vec<PathBuf>, LockdownError> {
 /// Install the Landlock ruleset. `rw_paths` is the worker's writable
 /// scratch list (typically just one entry).
 pub fn apply(rw_paths: &[PathBuf]) -> Result<LandlockReport, LockdownError> {
+    // Full read+write+rename+truncate+ioctl access — granted only to the
+    // worker's RW scratch dirs.
     let access_all = AccessFs::from_all(TARGET_ABI);
-    // RO roots get read **and** execute, otherwise the worker can read
-    // /usr/bin/echo but cannot exec it — `from_read` is read-only and
-    // omits `Execute`. Without this, every shell-exec call would die
-    // with EACCES at `execve` time. The dynamic linker also needs
-    // Execute when it mmap's libc.so.6 with PROT_EXEC (PROT_EXEC mmap
-    // is a Landlock-`Execute` access).
-    let access_read_exec = AccessFs::from_read(TARGET_ABI) | AccessFs::Execute;
+
+    // Read+exec only — granted to the dynamic-linker / shared-library
+    // roots. `from_read(V6)` already includes `Execute` (see
+    // landlock::AccessFs::from_read), so the bitflag union is just
+    // explicit-readability; the kernel sees the same set either way.
+    let access_read_exec = AccessFs::from_read(TARGET_ABI);
+
+    // Same as `access_read_exec` plus `IoctlDev` — granted only to
+    // `/dev`. libc/glibc and the dynamic linker probe terminal-ness on
+    // stdio with `TCGETS`-style ioctls; without `IoctlDev` allowed
+    // somewhere, those return EACCES instead of ENOTTY and break.
+    let access_read_exec_dev = access_read_exec | AccessFs::IoctlDev;
+
+    // Scope rights are v6-only. Handling them flips the kernel into
+    // "deny by default for this scope" mode for this process tree.
+    // There are no per-path rules for scopes — once handled, the
+    // restriction is global.
+    let scope_all = Scope::from_all(TARGET_ABI);
 
     let ruleset = match Ruleset::default()
         .handle_access(access_all)
+        .and_then(|r| r.scope(scope_all))
         .and_then(|r| r.create())
     {
         Ok(r) => r,
@@ -134,7 +181,13 @@ pub fn apply(rw_paths: &[PathBuf]) -> Result<LandlockReport, LockdownError> {
 
     let mut ruleset = ruleset;
     for root in DEFAULT_RO_EXEC_ROOTS {
-        ruleset = add_path_rule(ruleset, Path::new(root), access_read_exec)?;
+        // /dev gets IoctlDev too; everything else is plain read+exec.
+        let access = if *root == "/dev" {
+            access_read_exec_dev
+        } else {
+            access_read_exec
+        };
+        ruleset = add_path_rule(ruleset, Path::new(root), access)?;
     }
     for p in rw_paths {
         ruleset = add_path_rule(ruleset, p, access_all)?;
@@ -155,6 +208,14 @@ pub fn apply(rw_paths: &[PathBuf]) -> Result<LandlockReport, LockdownError> {
 /// silently skip. We use `add_rule` rather than `add_rules` so each path is
 /// tried independently — a missing `/lib64` on a multilib-only host should
 /// not break the worker.
+///
+/// The kernel rejects `EINVAL` if a `PathBeneath` rule on a *file* lists
+/// directory-only rights like `ReadDir` / `MakeDir` / `Refer`. The
+/// `landlock` crate copes by stripping those silently, but it also flips
+/// the ruleset's compat state to `Partial`, downgrading the eventual
+/// status report from `FullyEnforced` to `PartiallyEnforced`. We avoid
+/// that by stat-ing the path here and passing only the file-applicable
+/// subset for files. The on-disk enforcement is identical either way.
 fn add_path_rule(
     ruleset: landlock::RulesetCreated,
     path: &Path,
@@ -163,6 +224,10 @@ fn add_path_rule(
     let fd = match PathFd::new(path) {
         Ok(fd) => fd,
         Err(_) => return Ok(ruleset), // ENOENT: skip silently
+    };
+    let access = match path.metadata() {
+        Ok(md) if md.is_file() => access & AccessFs::from_file(TARGET_ABI),
+        _ => access,
     };
     ruleset
         .add_rule(PathBeneath::new(fd, access))

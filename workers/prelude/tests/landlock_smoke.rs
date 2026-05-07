@@ -113,6 +113,47 @@ fn write_to_allowlisted_scratch_succeeds() {
     let _ = std::fs::remove_file(&target);
 }
 
+/// Stage-2 invariant: bumping `TARGET_ABI` from v1 to v6 was meant to
+/// lift the report from `PartiallyEnforced` (we'd been requesting fewer
+/// rights than the kernel could enforce) to `FullyEnforced` (we now
+/// request and obtain the full v6 set, including `Refer`, `Truncate`,
+/// `IoctlDev`, and the v6 `Scope` rights). On any kernel ≥ 6.12 — the
+/// user's host is on 6.17 — this test must report `FullyEnforced`. On
+/// older kernels we `[SKIP]` rather than fail; the regression we want
+/// to guard against is a *downgrade* on a host that previously achieved
+/// full enforcement.
+#[test]
+fn v6_abi_yields_fully_enforced_on_modern_kernel() {
+    let out = run_probe(
+        &[
+            ("HHAGENT_LANDLOCK_RW", "[]"),
+            ("HHAGENT_SECCOMP_PROFILE", "none"),
+        ],
+        &["seccomp-getpid"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("KernelTooOld") {
+        eprintln!("\n[SKIP] Landlock not enforced on this kernel: {stderr}");
+        return;
+    }
+    if stderr.contains("PartiallyEnforced") {
+        // Either a kernel < 6.12 (where some v6 rights aren't supported)
+        // or a regression where one of our rules dropped a right
+        // silently. The former is fine to skip; the latter we want to
+        // see — but distinguishing them from userspace is awkward, so
+        // we let the test fail and document the two possibilities.
+        panic!(
+            "Landlock reported PartiallyEnforced; either the host kernel is < 6.12 \
+             (in which case adjust this test) or a rule silently downgraded a \
+             right (e.g. file-vs-dir mismatch — see add_path_rule). stderr: {stderr}"
+        );
+    }
+    assert!(
+        stderr.contains("FullyEnforced"),
+        "expected FullyEnforced report after v6 bump, got: {stderr}"
+    );
+}
+
 #[test]
 fn reading_from_usr_still_works_after_lockdown() {
     if !landlock_enforced() {

@@ -23,6 +23,15 @@
 //! lockdown-probe seccomp-getpid
 //!     Call lock_down(), then call getpid(). Exit 0 on success — verifies
 //!     the filter doesn't kill innocent syscalls.
+//!
+//! lockdown-probe seccomp-socket
+//!     Call lock_down(), then attempt socket(AF_INET, SOCK_STREAM, 0).
+//!     Under Profile::Strict the BSD-socket family is not allow-listed —
+//!     expect SIGSYS. Under Profile::NetClient socket() is allow-listed —
+//!     expect the call to succeed (or fail gracefully with EAFNOSUPPORT
+//!     etc., which still proves seccomp didn't kill us). Exit 0 on socket
+//!     success, 3 on socket failure with errno (still alive — useful when
+//!     the test host has no IPv4 stack).
 //! ```
 //!
 //! All subcommands print `LOCKDOWN_REPORT: {report}` to stderr first, so
@@ -56,6 +65,8 @@ fn main() -> ExitCode {
         "seccomp-unshare" => probe_unshare(),
         #[cfg(target_os = "linux")]
         "seccomp-mount" => probe_mount(),
+        #[cfg(target_os = "linux")]
+        "seccomp-socket" => probe_socket(),
         "seccomp-getpid" => probe_getpid(),
         other => {
             eprintln!("unknown subcommand: {other}");
@@ -139,6 +150,31 @@ fn probe_mount() -> ExitCode {
     };
     eprintln!("UNEXPECTED: mount returned rc={rc} errno={}", errno());
     ExitCode::from(0)
+}
+
+/// Try to create an IPv4 TCP socket. Outcomes the test layer cares about:
+///
+///   * Process killed by SIGSYS → seccomp blocked socket() (expected
+///     under `Profile::Strict`).
+///   * Process exits 0 → socket() returned a valid fd (expected under
+///     `Profile::NetClient` on a host with an IPv4 stack).
+///   * Process exits 3 → socket() returned -1 with some errno but we
+///     survived seccomp (also acceptable under `NetClient` — the
+///     point of the test is that the *syscall entry* wasn't blocked).
+#[cfg(target_os = "linux")]
+fn probe_socket() -> ExitCode {
+    // SAFETY: socket() with these constants takes no pointer args; on a
+    // kernel without an IPv4 stack it simply returns -1/EAFNOSUPPORT
+    // rather than misbehaving.
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+    if fd >= 0 {
+        // Close the fd to be polite; close() is in BASE_ALLOW so we
+        // expect this to succeed regardless of profile.
+        unsafe { libc::close(fd) };
+        return ExitCode::from(0);
+    }
+    eprintln!("socket() returned {fd}, errno={}", errno());
+    ExitCode::from(3)
 }
 
 fn probe_getpid() -> ExitCode {

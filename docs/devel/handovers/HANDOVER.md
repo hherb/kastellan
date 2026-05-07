@@ -4,8 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-07
-**Last commit:** `2fa46a2` (`Phase 0b — macOS Seatbelt backend shipped`)
+**Last updated:** 2026-05-08
+**Last commit:** *pending* (`Phase 0 hardening stage 2 — seccomp allow-list + Landlock v6`)
 **Branch:** `main`
 
 ---
@@ -30,7 +30,7 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` is green: 36 tests on Linux + 31 tests on macOS, 0 skipped on either.**
+**`cargo test --workspace` is green: 43 tests on Linux + 31 tests on macOS, 0 skipped on either.**
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -41,17 +41,16 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 | `sandbox` integration (`macos_smoke`) | 8 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny` |
 | `core` unit | 4 | (unchanged — `derive_lockdown_env` adds correct env entries, doesn't overwrite caller-supplied env) |
 | `core` integration (`shell_exec_e2e`) | 3 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND |
-| `prelude` unit | 8 | env-var parsing, profile parsing, BPF program builds, kill-list contains `unshare` |
-| `prelude` integration (`landlock_smoke`) | 3 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work |
-| `prelude` integration (`seccomp_smoke`) | 3 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS; `getpid()` survives |
+| `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
+| `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
+| `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
 
-**Critical bug fix this session:** `LinuxBwrap::probe()` was missing the
-`/lib*` symlinks the dynamic linker needs, so `execvp /usr/bin/true: No such
-file or directory` made every bwrap-dependent test silently `[SKIP]`. The
-"18 tests, 0 skipped" claim from the previous handover was a false green —
-in reality only 12 host-only tests were running. The probe now mirrors the
-full `build_argv` mount layout, and `cargo test --workspace -- --nocapture`
-shows zero `[SKIP]` lines.
+Earlier-session note (kept for context): `LinuxBwrap::probe()` was once
+missing the `/lib*` symlinks the dynamic linker needs, so
+`execvp /usr/bin/true: No such file or directory` made every
+bwrap-dependent test silently `[SKIP]`. Fixed in `3210f70` by mirroring
+the full `build_argv` mount layout in the probe. Today's run shows zero
+`[SKIP]` lines.
 
 **Build & test:**
 ```sh
@@ -67,7 +66,71 @@ on the user's DGX Spark. Other Linux hosts may need
 `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses
 `sandbox-exec` (no setup needed; ships with the OS).
 
-## Recently completed (this session, 2026-05-07)
+## Recently completed (this session, 2026-05-08)
+
+**Phase 0 hardening — stage 2 (Linux): seccomp allow-list + Landlock v6.**
+
+The handover's "Option B'" shipped end-to-end. Both layers are now
+fail-closed and per-profile; both have negative tests proving the
+distinguishing behavior.
+
+- **seccomp: deny-list → per-profile allow-list.** `workers/prelude/src/seccomp_lock.rs`:
+  - Replaced `KILL_LIST` with `BASE_ALLOW` (~110 syscalls common to x86_64
+    + aarch64) plus `BASE_ALLOW_X86_64_LEGACY` (~19 syscalls for the
+    open/stat/pipe/dup2/poll/select/fork legacy entry points that don't
+    exist on aarch64) plus `NET_CLIENT_ADDITIONS` (~18 syscalls in the
+    BSD-socket family).
+  - `Profile::Strict` = `BASE_ALLOW` (+ legacy on x86_64). `Profile::NetClient` =
+    same plus `NET_CLIENT_ADDITIONS`. Default action flipped to
+    `KillProcess`; listed syscalls get `Allow`.
+  - The catastrophic syscall set (`unshare`, `setns`, `mount`,
+    `umount2`, `pivot_root`, `move_mount`, `open_tree`, `bpf`,
+    `ptrace`, `kexec_*`, `init_module`, …) is killed automatically by
+    *not* being in either allow-list — verified by the unit test
+    `unshare_is_not_in_allow_list`.
+  - Base set was derived empirically from `strace -fc` of a real
+    `shell_exec_e2e` round-trip plus the standard tokio/std runtime
+    requirements (`futex`, `rseq`, `clone3`, `epoll_*`, `rt_sigreturn`).
+    The shell-exec e2e passed first try under the new allow-list — no
+    `strace` iteration needed.
+
+- **Landlock: ABI v1 → v6.** `workers/prelude/src/landlock_lock.rs`:
+  - `TARGET_ABI` bumped to `ABI::V6` (Linux 6.12+). The user's host on
+    6.17 reports kernel ABI 7; the crate caps to V6 and proceeds.
+  - All four new restricted accesses are now handled: `Refer` (v2),
+    `Truncate` (v3), `IoctlDev` (v5), and the v6 `Scope` rights
+    (`AbstractUnixSocket`, `Signal`). Refer + Truncate are granted on
+    RW scratch dirs; IoctlDev is granted on `/dev` only (libc/dyld
+    probe terminal-ness with `TCGETS`-style ioctls); Scope rights are
+    handled but no rules — the kernel restricts both globally for the
+    worker.
+  - **Bug fix discovered by the new `FullyEnforced` test:** the kernel
+    rejects directory-only rights like `ReadDir` on file-typed
+    `PathBeneath` rules; the `landlock` crate silently strips them but
+    flips the ruleset's compat state to `Partial`, downgrading the
+    eventual report to `PartiallyEnforced`. `add_path_rule` now
+    `stat`s the path and intersects with `AccessFs::from_file(V6)` for
+    files, leaving `from_all(V6)` for directories. With this in
+    place, `LandlockReport::FullyEnforced` is now reported on every
+    run — verified by `v6_abi_yields_fully_enforced_on_modern_kernel`.
+
+- **New tests (+7 over the previous 36):**
+  - `prelude` unit (+3): `build_bpf_net_client_succeeds`,
+    `socket_is_only_in_net_client_profile`, `essentials_are_in_base_allow_list`
+    (replaces the now-stale `kill_list_contains_unshare`).
+  - `seccomp_smoke` (+3): `socket_is_killed_under_strict`,
+    `socket_survives_under_net_client`, `unshare_is_killed_under_net_client`.
+  - `landlock_smoke` (+1): `v6_abi_yields_fully_enforced_on_modern_kernel`.
+
+- **New probe subcommand:** `lockdown-probe seccomp-socket` attempts
+  `socket(AF_INET, SOCK_STREAM, 0)` and reports survival vs SIGSYS.
+  Used by both the kill-under-Strict and survives-under-NetClient
+  integration tests.
+
+Total tests after stage 2 on Linux: 43 passed, 0 skipped, 0 failed.
+macOS side untouched (the prelude crate is `cfg(target_os = "linux")`-gated).
+
+## Recently completed (previous session, 2026-05-07)
 
 **Phase 0b — macOS Seatbelt sandbox backend:**
 
@@ -154,22 +217,14 @@ don't get forgotten):
 
 ## Next TODO (pick one)
 
-Phase 0b (macOS port) shipped this session. The remaining options are Linux-side work. Listed in increasing scope; pick whichever the user wants.
+Phase 0 hardening (stages 1 and 2) is done on Linux. Phase 0b (macOS) is
+done. The next session can pick from any of: closing Phase 0's
+deployment story (Option C), starting Phase 1 (memory + agent loop), or
+some smaller polish items.
 
-### Option A — Phase 0b: macOS port  *(SHIPPED this session — see "Recently completed")*
+### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
-### Option B' — Phase 0 hardening: stage 2 (Linux)
-
-**Why:** Stage 1 used a deny-list and ABI v1 to ship quickly. Stage 2 tightens both:
-
-**What to build:**
-1. **Allow-list seccomp profile** — replace `KILL_LIST` with an explicit `ALLOW_LIST` of ~150–200 syscalls per profile. `Profile::WorkerStrict` and `Profile::WorkerNetClient` diverge here (NetClient adds `socket`, `connect`, `bind`, `listen`, `accept4`, `setsockopt`, `getsockopt`, `getpeername`, `getsockname`, `recvfrom`, `sendto`, `recvmsg`, `sendmsg`, `shutdown` and the inotify/io_uring family if needed).
-2. **Bump Landlock TARGET_ABI** from V1 to V6 (or current). Audit each new access right and decide whether to handle it: `Refer` (V2), `TruncateFile` (V3), `IoctlDev` (V5), per-file scope rights (V6). Lifts `PartiallyEnforced` → `FullyEnforced` in the report.
-3. **Negative tests for stage 2**: `prelude/tests/seccomp_smoke.rs` should also assert that an in-list syscall like `socket(AF_INET, SOCK_STREAM, 0)` survives under `WorkerNetClient` and is killed under `WorkerStrict`.
-
-**Gotchas:**
-- Allow-list seccomp will absolutely break things on first try. Iterate with `strace -fc` to find the missing syscalls. tokio + serde_json + std use ~80 syscalls; the rest are libc malloc / dynamic linker.
-- Landlock V2's `Refer` right is "rename across rule boundaries"; V3's `TruncateFile` is "truncate even with O_RDONLY"; they're both fine to handle (deny by default).
+### Option B' — Phase 0 hardening: stage 2  *(SHIPPED 2026-05-08 — see "Recently completed")*
 
 ### Option C — Phase 0 cont.: supervisor + Postgres bring-up (Linux)
 

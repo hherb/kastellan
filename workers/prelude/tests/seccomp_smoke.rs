@@ -96,8 +96,8 @@ fn getpid_survives_lockdown() {
     if !seccomp_enforced() {
         return;
     }
-    // Innocent syscall — must NOT be in the deny-list. If this test
-    // starts failing, the deny-list grew too eager.
+    // Innocent syscall — must be in the allow-list. If this test starts
+    // failing, the allow-list dropped a runtime-essential syscall.
     let out = run_probe(
         &[("HHAGENT_SECCOMP_PROFILE", "strict")],
         &["seccomp-getpid"],
@@ -106,6 +106,78 @@ fn getpid_survives_lockdown() {
         out.status.code(),
         Some(0),
         "getpid should survive lockdown, got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Stage-2 invariant: under `Profile::Strict` the BSD-socket family is
+/// **not** in the allow-list, so `socket(AF_INET, SOCK_STREAM, 0)` must
+/// trigger `SECCOMP_RET_KILL_PROCESS` (SIGSYS). Without this, a future
+/// regression that re-merged Strict and NetClient would silently allow
+/// outbound networking from a worker that's supposed to be air-gapped.
+#[test]
+fn socket_is_killed_under_strict() {
+    if !seccomp_enforced() {
+        return;
+    }
+    let out = run_probe(
+        &[("HHAGENT_SECCOMP_PROFILE", "strict")],
+        &["seccomp-socket"],
+    );
+    assert_eq!(
+        out.status.signal(),
+        Some(SIGSYS),
+        "expected SIGSYS kill under Strict, got status {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Stage-2 invariant: under `Profile::NetClient` the BSD-socket family
+/// **is** in the allow-list. The probe must survive — either with exit 0
+/// (socket() succeeded) or exit 3 (socket() returned an errno but
+/// seccomp didn't kill us). What we must *not* see is SIGSYS.
+#[test]
+fn socket_survives_under_net_client() {
+    if !seccomp_enforced() {
+        return;
+    }
+    let out = run_probe(
+        &[("HHAGENT_SECCOMP_PROFILE", "net_client")],
+        &["seccomp-socket"],
+    );
+    assert!(
+        out.status.signal().is_none(),
+        "socket() must not be killed under NetClient, got signal {:?}\nstderr: {}",
+        out.status.signal(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let code = out.status.code();
+    assert!(
+        code == Some(0) || code == Some(3),
+        "socket probe under NetClient should exit 0 or 3, got {code:?}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Symmetric coverage: the catastrophic syscall set must remain killed
+/// under `Profile::NetClient` too. `unshare(CLONE_NEWUSER)` is the
+/// canary — it's the one syscall that, if reachable, would let a
+/// compromised worker escape into a fresh user namespace.
+#[test]
+fn unshare_is_killed_under_net_client() {
+    if !seccomp_enforced() {
+        return;
+    }
+    let out = run_probe(
+        &[("HHAGENT_SECCOMP_PROFILE", "net_client")],
+        &["seccomp-unshare"],
+    );
+    assert_eq!(
+        out.status.signal(),
+        Some(SIGSYS),
+        "expected SIGSYS kill under NetClient, got status {:?}\nstderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
