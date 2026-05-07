@@ -114,3 +114,24 @@ fn host_users_dir_is_invisible_when_not_in_policy() {
     );
     let _ = status;
 }
+
+#[test]
+fn fs_read_path_is_visible_when_listed() {
+    if skip_if_no_seatbelt() {
+        return;
+    }
+    let backend = MacosSeatbelt::new();
+    let mut policy = strict_policy();
+    policy.fs_read.push(PathBuf::from("/etc/hosts"));
+    let mut child = backend
+        .spawn_under_policy(&policy, "/bin/cat", &["/etc/hosts"])
+        .expect("sandbox-exec should spawn cat");
+    let status = child.wait().expect("wait");
+    assert!(
+        status.success(),
+        "cat /etc/hosts should succeed when listed; stderr={}",
+        read_to_string(&mut child.stderr)
+    );
+    let stdout = read_to_string(&mut child.stdout);
+    assert!(!stdout.is_empty(), "expected non-empty /etc/hosts content");
+}
