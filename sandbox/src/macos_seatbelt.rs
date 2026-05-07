@@ -38,6 +38,54 @@ impl MacosSeatbelt {
     pub fn new() -> Self {
         Self
     }
+
+    /// Run a minimal `sandbox-exec /usr/bin/true` to verify Seatbelt is
+    /// healthy on this host. Catches: missing `/usr/bin/sandbox-exec`,
+    /// SIP-related Seatbelt scope clipping, profile-syntax regressions in
+    /// a future macOS release. Mirrors [`LinuxBwrap::probe`]'s posture so
+    /// integration tests can `[SKIP]` rather than false-green when the
+    /// platform sandbox is unavailable.
+    ///
+    /// The probe profile is itself a minimal working allowlist (not a
+    /// no-op): without `process-fork`, `process-exec*`, dyld + System
+    /// reads, metadata, and `sysctl-read`, even `/usr/bin/true` fails to
+    /// launch and the probe spuriously reports "broken Seatbelt" on a
+    /// healthy host.
+    pub fn probe() -> Result<(), SandboxError> {
+        // The probe profile is a minimal allowlist — not a no-op — so dyld +
+        // libsystem can resolve and exec succeeds on a healthy host. Key rules:
+        //   (literal "/")        — the root inode itself must be readable for
+        //                         the kernel to walk the path to /usr/bin/true;
+        //                         without it, exec fails even when every other
+        //                         subpath is allowed.
+        //   (subpath "/usr")     — binary + dyld shared cache
+        //   (subpath "/System")  — System frameworks and dyld closures
+        //   mach-lookup          — launchd bootstrap lookups required by dyld
+        let profile = "(version 1)\n\
+                       (deny default)\n\
+                       (allow process-fork)\n\
+                       (allow process-exec*)\n\
+                       (allow file-read* (literal \"/\"))\n\
+                       (allow file-read* (subpath \"/usr\"))\n\
+                       (allow file-read* (subpath \"/System\"))\n\
+                       (allow file-read-metadata (subpath \"/\"))\n\
+                       (allow mach-lookup)\n\
+                       (allow sysctl-read)\n";
+        let output = Command::new("sandbox-exec")
+            .args(["-p", profile, "/usr/bin/true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| SandboxError::Backend(format!("could not spawn sandbox-exec: {e}")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(SandboxError::Backend(format!(
+            "sandbox-exec probe failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
 }
 
 impl SandboxBackend for MacosSeatbelt {
@@ -255,5 +303,13 @@ mod tests {
             msg.contains("must be absolute"),
             "expected 'must be absolute' error, got: {msg}"
         );
+    }
+
+    // This test runs a real sandbox-exec invocation. It only meaningfully runs
+    // on macOS hosts; the parent module is cfg(target_os = "macos") so this
+    // file isn't compiled elsewhere.
+    #[test]
+    fn probe_succeeds_on_this_host() {
+        MacosSeatbelt::probe().expect("sandbox-exec probe must succeed on a healthy macOS host");
     }
 }
