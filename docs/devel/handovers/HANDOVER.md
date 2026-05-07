@@ -298,6 +298,18 @@ don't get forgotten):
   Today the worker is in its own process group but inherits the controlling
   terminal; `/dev/tty` is excluded from the profile but the asymmetry vs Linux
   `--new-session` is real.
+- [#3 — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64](https://github.com/hherb/hhagent/issues/3).
+  Hygiene only; the shim in `workers/prelude/src/seccomp_lock.rs` carries the
+  kernel ABI numbers explicitly so `BASE_ALLOW` compiles on `aarch64`.
+- [#4 — bump Last-commit + test-count fields whenever a Recently-completed entry is added](https://github.com/hherb/hhagent/issues/4).
+  This session started with HANDOVER 4 commits behind HEAD; the prose was
+  updated but the header fields weren't. Promote the bump-the-header step
+  to the top of the end-of-session checklist.
+- [#5 — audit `BASE_ALLOW` against a fixture of common worker binaries](https://github.com/hherb/hhagent/issues/5).
+  `BASE_ALLOW` was empirically derived from `echo`; the workspace e2e test
+  surfaced a silent gap that broke `cp` (fixed in `50a06ec`). Build a
+  coreutils fixture and audit before Phase 4 (`python-exec`) starts adding
+  workers that exercise more of the syscall surface.
 
 ## Recently completed (this session, 2026-05-06)
 
