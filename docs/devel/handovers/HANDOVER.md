@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-08
-**Last commit:** `97d4465` (`Phase 0 hardening stage 2 — seccomp allow-list + Landlock v6`)
+**Last commit:** `9333311` (`feat(core): per-task scratch workspace with RAII cleanup`)
 **Branch:** `main`
 
 ---
@@ -22,7 +22,7 @@
 
 ```
 hhagent (Rust workspace, 6 crates, AGPL-3.0)
-├── core               hhagent-core: lib + bin (skeleton main); tool_host derives lockdown env
+├── core               hhagent-core: lib + bin (skeleton main); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap + MacosSeatbelt
 ├── supervisor         hhagent-supervisor: stub (NotYetImplemented)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
@@ -30,7 +30,7 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` is green: 43 tests on Linux + 31 tests on macOS, 0 skipped on either.**
+**`cargo test --workspace` is green: 55 tests on Linux, 0 skipped, 0 failed.**
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -39,7 +39,7 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 | `sandbox` unit (macos) | 13 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation |
 | `sandbox` integration (`linux_smoke`) | 6 | **real** bwrap: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected |
 | `sandbox` integration (`macos_smoke`) | 8 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny` |
-| `core` unit | 4 | (unchanged — `derive_lockdown_env` adds correct env entries, doesn't overwrite caller-supplied env) |
+| `core` unit | 16 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests) |
 | `core` integration (`shell_exec_e2e`) | 3 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
@@ -67,6 +67,43 @@ on the user's DGX Spark. Other Linux hosts may need
 `sandbox-exec` (no setup needed; ships with the OS).
 
 ## Recently completed (this session, 2026-05-08)
+
+**Phase 0 polish — per-task scratch workspace with RAII cleanup (`9333311`).**
+
+`core::workspace::Workspace` is the canonical type for per-task scratch
+space. Construction lays down `<root>/<task_id>/{in,out,tmp}`; drop
+wipes `<root>/<task_id>` recursively. Single owner, single cleanup
+path. Replaces the previous "caller authors `policy.fs_write` paths
+ad-hoc per worker" pattern, which had no cleanup contract at all.
+
+- `Workspace::new(task_id)` uses default root from
+  `$HHAGENT_WORKSPACE_ROOT` or `~/.hhagent/workspace`. Tests use
+  `Workspace::with_root(&temp_dir, task_id)` so they don't pollute
+  global state and don't depend on env vars.
+- `extend_policy(&mut policy)` is the canonical wiring point: it
+  appends `[in, out, tmp]` to `policy.fs_write`, which then flows
+  unchanged into the worker-side Landlock allow-list via
+  `tool_host::derive_lockdown_env`. Host and worker layers can never
+  disagree because both read the same paths.
+- Task ids are validated against `[A-Za-z0-9_-]+` up front. Rejected
+  ids never touch the filesystem (path-traversal class refused with
+  `WorkspaceError::InvalidTaskId`).
+- Pre-existing task dir is refused (`ErrorKind::AlreadyExists`) — we
+  never inherit another task's state silently.
+- 7 unit tests under `core/src/workspace.rs::tests` cover layout,
+  drop, fs_write order, extend_policy, validation, root auto-create,
+  and pre-existing-dir refusal.
+
+---
+
+**Phase 0 polish — wall-clock watchdog + kill(-1) fanout defense (`57edfb2`).**
+
+Workers now have an optional wall-clock budget. `WorkerSpec` gains
+`wall_clock_ms: Option<u64>`; `spawn_worker` returns a
+`SupervisedWorker` that owns a watchdog thread which SIGKILLs the
+worker once the deadline elapses. Cancellation is fast: dropping the
+handle flips an `AtomicBool` the watchdog picks up on its 50 ms poll,
+so a normal close never produces a kill on a reused PID.
 
 **Bug fix — watchdog SIGKILL fanout (a.k.a. the "DGX display blackout").**
 
@@ -262,14 +299,46 @@ don't get forgotten):
 
 ## Next TODO (pick one)
 
-Phase 0 hardening (stages 1 and 2) is done on Linux. Phase 0b (macOS) is
-done. The next session can pick from any of: closing Phase 0's
-deployment story (Option C), starting Phase 1 (memory + agent loop), or
-some smaller polish items.
+Phase 0 hardening (stages 1 + 2) is done on Linux. Phase 0b (macOS) is
+done. Workspace + wall-clock watchdog shipped this session. What remains:
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
-### Option B' — Phase 0 hardening: stage 2  *(SHIPPED 2026-05-08 — see "Recently completed")*
+### Option B' — Phase 0 hardening: stage 2  *(SHIPPED 2026-05-08)*
+
+### Option D — Phase 0 polish: per-task scratch + wall-clock kill  *(SHIPPED 2026-05-08 — `9333311`, `57edfb2`)*
+
+### Option E — cgroup v2 CPU/memory caps via `systemd-run --user --scope` (Linux)
+
+(Last remaining Phase 0 hardening item.) Today the only resource
+ceiling on a worker is the wall-clock watchdog plus `policy.cpu_ms` /
+`policy.mem_mb` (which are not yet enforced — the values are carried
+in `SandboxPolicy` but no backend reads them). Linux can enforce both
+ceilings via cgroup v2 by wrapping `bwrap` in `systemd-run --user
+--scope --uid=$UID --slice=hhagent.slice -p MemoryMax=Nm
+-p CPUQuota=N% -p TasksMax=N`.
+
+- New file: `sandbox/src/linux_cgroup.rs` — pure helper that builds the
+  `systemd-run` argv from `SandboxPolicy.cpu_ms` + `mem_mb` + a
+  derived task name. Keep it separate from `linux_bwrap.rs` so the
+  argv builder stays unit-testable.
+- `LinuxBwrap::spawn_under_policy` invokes `systemd-run --scope` as
+  the *outer* process and `bwrap` as the inner — order matters: the
+  cgroup must be in place before the namespace is created so the
+  worker is born inside the cap.
+- Probe (`LinuxBwrap::probe`) gains a check that `systemctl --user
+  status` works (i.e. the user's session bus is up and the
+  `systemd-run` path is available).
+- Negative test: a worker that allocates more than `mem_mb` is killed
+  with OOM signal; a worker that burns CPU above quota is throttled.
+  These need a small fixture binary; the `lockdown_probe` pattern
+  works.
+- macOS parity: there's no equivalent first-class API. macOS Tahoe's
+  Apple `container` framework can do this via a micro-VM, but that's
+  a separate roadmap item. Alternative: `setrlimit(RLIMIT_AS,
+  RLIMIT_CPU)` from the worker prelude before exec — much weaker but
+  cross-platform. Pick one for this session, leave the other as a
+  follow-up.
 
 ### Option C — Phase 0 cont.: supervisor + Postgres bring-up (Linux)
 
@@ -282,6 +351,22 @@ some smaller polish items.
 **Gotchas:**
 - pg_search is AGPL-3.0 — perfect license-fit but verify build is fine on aarch64.
 - Apache AGE on Postgres 17 may need a recent build; check supported PG version.
+
+### Option F — wire `Workspace` into `shell_exec_e2e` so the cleanup contract is integration-tested
+
+Today `Workspace` is unit-tested in isolation. Nothing yet exercises
+"spawn a worker, write a file via the worker, drop the workspace,
+assert the file is gone". A natural extension to `shell_exec_e2e`:
+
+- Allowlist `/usr/bin/tee` (Linux) / `/usr/bin/tee` (macOS too — same
+  path) and have `shell.exec` write into `<workspace>/out/`.
+- After `client.close()`, drop the `Workspace`. Re-stat the path
+  asserts the dir is gone.
+- This validates the host↔worker fs_write wiring end-to-end and
+  catches any future drift between `extend_policy` and the
+  bwrap/Landlock paths.
+
+Smaller than Option E; good warm-up if the next session is short.
 
 ---
 

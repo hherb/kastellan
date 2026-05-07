@@ -36,9 +36,9 @@ items unlock later ones.
 - [x] *Stage 2*: migrate seccomp to per-profile **allow-list** replacing the current deny-list — `97d4465` (~110 syscalls in `BASE_ALLOW` + 19 x86_64-only legacy + 18 in `NET_CLIENT_ADDITIONS`; `Profile::Strict` kills `socket()` while `Profile::NetClient` permits it; verified by `socket_is_killed_under_strict` and `socket_survives_under_net_client`)
 - [x] *Stage 2*: bump Landlock TARGET_ABI from v1 to v6 and audit each new access right (`Refer`, `Truncate`, `IoctlDev`, `Scope::AbstractUnixSocket`, `Scope::Signal`) — `97d4465` (lifts `PartiallyEnforced` → `FullyEnforced` on this kernel; verified by `v6_abi_yields_fully_enforced_on_modern_kernel`; required a fix in `add_path_rule` to use `AccessFs::from_file` for file-typed paths so directory-only rights aren't silently stripped)
 - [ ] cgroup v2 CPU/memory caps via `systemd-run --user --scope`
-- [ ] Per-worker scratch dir lifecycle (create on spawn, wipe on exit)
-- [ ] Promote per-worker scratch to a first-class `Workspace` type — canonical layout `~/.hhagent/workspace/<task_id>/{in,out,tmp}`, single owner, single cleanup path; `SandboxPolicy.fs_write` derives from it rather than being authored ad-hoc per worker (cf. ZeroClaw `workspace_boundary.rs`)
-- [ ] Spawn timeout / wall-clock kill
+- [x] Per-worker scratch dir lifecycle (create on spawn, wipe on exit) — `9333311` (subsumed by the `Workspace` type below; `Workspace::Drop` recursively wipes `<root>/<task_id>`)
+- [x] Promote per-worker scratch to a first-class `Workspace` type — canonical layout `<root>/<task_id>/{in,out,tmp}`, single owner, single cleanup path; `Workspace::extend_policy(&mut SandboxPolicy)` is the canonical wiring point so host (`policy.fs_write`) and worker-side Landlock (via `tool_host::derive_lockdown_env`) cannot disagree (cf. ZeroClaw `workspace_boundary.rs`) — `9333311`
+- [x] Spawn timeout / wall-clock kill — `57edfb2` (`WorkerSpec.wall_clock_ms: Option<u64>`; `spawn_worker` returns `SupervisedWorker` with a 50 ms-poll watchdog thread; cancellation on Drop closes the reused-PID race; `is_valid_target_pid` defends against `kill(-1)` fanout)
 
 ## Phase 0b — macOS Port (Seatbelt)
 
