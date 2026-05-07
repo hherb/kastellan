@@ -163,3 +163,41 @@ fn reading_dev_disk0_is_denied() {
         read_to_string(&mut child.stderr)
     );
 }
+
+fn net_probe_binary() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest.parent().unwrap().join("target"));
+    target.join("debug").join("net_probe")
+}
+
+#[test]
+fn net_is_unreachable_under_deny() {
+    if skip_if_no_seatbelt() {
+        return;
+    }
+    let probe = net_probe_binary();
+    if !probe.exists() {
+        eprintln!(
+            "[SKIP] net_probe binary not built at {probe:?} — run `cargo build --workspace` first"
+        );
+        return;
+    }
+    // The probe binary needs to be readable inside the sandbox.
+    let mut policy = strict_policy();
+    policy.fs_read.push(probe.clone());
+
+    let backend = MacosSeatbelt::new();
+    let probe_str = probe.to_string_lossy().into_owned();
+    let mut child = backend
+        .spawn_under_policy(&policy, &probe_str, &[])
+        .expect("sandbox-exec should spawn net_probe");
+    let status = child.wait().expect("wait");
+    assert!(
+        !status.success(),
+        "net_probe should fail under Net::Deny (TCP connect blocked); stdout={} stderr={}",
+        read_to_string(&mut child.stdout),
+        read_to_string(&mut child.stderr)
+    );
+}
