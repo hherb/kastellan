@@ -57,10 +57,22 @@ impl SandboxBackend for MacosSeatbelt {
 /// no I/O, no syscalls — exposed so unit tests can assert on the profile
 /// text without spawning a process.
 pub fn build_profile(policy: &SandboxPolicy) -> String {
-    let _ = policy; // unused until Task 3
+    let _ = policy; // unused until Task 4
     let mut out = String::new();
     out.push_str("(version 1)\n");
     out.push_str("(deny default)\n");
+
+    // Always-on: dyld + libsystem need these to start any process.
+    out.push_str("(allow process-fork)\n");
+    out.push_str("(allow process-exec*)\n");
+    out.push_str("(allow file-read* (subpath \"/usr/lib\"))\n");
+    out.push_str("(allow file-read* (subpath \"/usr/libexec\"))\n");
+    out.push_str("(allow file-read* (subpath \"/System/Library\"))\n");
+    // Required for path-component resolution by dyld; deliberate concession,
+    // see threat-model.md "Asymmetric platform note".
+    out.push_str("(allow file-read-metadata (subpath \"/\"))\n");
+    out.push_str("(allow sysctl-read)\n");
+
     out
 }
 
@@ -89,6 +101,22 @@ mod tests {
         let version_idx = p.find("(version 1)").expect("missing (version 1)");
         let deny_default_idx = p.find("(deny default)").expect("missing (deny default)");
         assert!(version_idx < deny_default_idx);
+    }
+
+    #[test]
+    fn profile_emits_always_on_allows() {
+        let p = build_profile(&strict_policy());
+        for needle in [
+            "(allow process-fork)",
+            "(allow process-exec*)",
+            "(allow file-read* (subpath \"/usr/lib\"))",
+            "(allow file-read* (subpath \"/usr/libexec\"))",
+            "(allow file-read* (subpath \"/System/Library\"))",
+            "(allow file-read-metadata (subpath \"/\"))",
+            "(allow sysctl-read)",
+        ] {
+            assert!(p.contains(needle), "profile missing {needle:?}; got:\n{p}");
+        }
     }
 
     // Suppress unused warnings on PathBuf until Task 5.
