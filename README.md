@@ -19,6 +19,68 @@ A long-running personal AI agent that:
 3. **License hygiene.** Project is AGPL-3.0; every dependency is AGPL-compatible.
 4. **Small core.** The agent core is Rust (no eval, no metaprogramming, no dynamic import). Python lives only inside sandboxed workers.
 
+## Why another one?
+
+Several Rust personal-agent projects exist in the OpenClaw-derived
+family — notably [IronClaw](https://github.com/nearai/ironclaw) and
+[ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw). They share a lot
+with hhagent: Rust core, local-first, OS sandboxing, MCP-compatible IPC.
+The reason for *another* one is posture, not feature count: **security
+is the foundational property here, not a layer added later.** Each rule
+below is a load-bearing invariant, not a default we relax under deadline
+pressure.
+
+- **One OS process + one kernel sandbox per tool invocation.** IronClaw
+  runs tools as WASM modules inside the runtime; ZeroClaw runs them as
+  in-process Rust traits with the OS sandbox wrapping the *whole*
+  runtime. Both are software-only or coarse-grained boundaries.
+  hhagent's boundary is the OS process boundary — `bubblewrap` on
+  Linux, `sandbox-exec` on macOS — so a compromised tool reaches at
+  most the endpoints in *that tool's* allowlist, never the next
+  tool's, and never the core.
+
+- **Double containment.** The parent installs the OS sandbox at spawn;
+  the worker then installs a *second* layer on itself
+  (Landlock + seccomp-bpf on Linux) before serving any JSON-RPC
+  request. A kernel bug in either layer alone does not breach the
+  worker. See [`workers/prelude/`](workers/prelude/).
+
+- **seccomp is an allow-list, not a deny-list.** Default action is
+  `KillProcess`; ~110 base syscalls plus per-profile additions
+  (e.g. the BSD-socket family for `WorkerNetClient`) are explicitly
+  permitted. The kill-list-of-obviously-bad-calls posture common
+  elsewhere lets new attack syscalls walk in unchallenged every time
+  the kernel grows.
+
+- **Dispatcher chokepoint.** A single function authors every
+  `WorkerCommand`, consults policy, and writes the audit-log entry.
+  New channels (Telegram, Signal, IMAP) and scheduled routines call
+  into it — they never spawn workers themselves. Borrowed from
+  IronClaw's `ToolDispatcher::dispatch()` and made non-negotiable.
+
+- **AGPL with AGPL-compatible deps only.** No CDDL, BUSL, SSPL,
+  Elastic License, or "source-available" components. License hygiene
+  is part of the security boundary: a permissive dep can re-enter the
+  process under a corporate fork the user cannot audit.
+
+- **Cross-platform parity by construction.** The same `SandboxPolicy`
+  struct drives both backends. Linux's stronger stack
+  (bwrap + Landlock + seccomp) and macOS's weaker stack (Seatbelt) are
+  both first-class with negative tests asserting that denials actually
+  deny. The asymmetry between them is documented openly in
+  [`docs/threat-model.md`](docs/threat-model.md) rather than papered
+  over.
+
+- **No vendor lock-in.** Primary host is the NVIDIA DGX Spark, but
+  nothing in the core requires NVIDIA, CUDA, or a specific cloud.
+  Local LLMs run via vLLM/SGLang on Linux or llama.cpp/Ollama on macOS
+  behind an OpenAI-compatible HTTP API.
+
+The full set of invariants — including secret handling, single-point
+egress inspection, and the "no in-process untrusted code" rule — lives
+in [`docs/architecture.md`](docs/architecture.md). Reviewers are
+expected to refuse PRs that violate them.
+
 ## Status
 
 Early scaffold. See [`docs/architecture.md`](docs/architecture.md) and [`docs/threat-model.md`](docs/threat-model.md). Phased build plan is tracked in the design plan file outside this repo.
