@@ -11,5 +11,6 @@
 //!   - channel_bus      — fan-in/out for messaging-channel adapters
 
 pub mod tool_host;
+pub mod workspace;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
