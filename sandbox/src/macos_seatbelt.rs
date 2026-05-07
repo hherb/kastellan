@@ -73,6 +73,16 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
     out.push_str("(allow file-read-metadata (subpath \"/\"))\n");
     out.push_str("(allow sysctl-read)\n");
 
+    // /dev: explicit minimal allowlist. Not a (subpath "/dev") allow — that
+    // would expose disk*, auditpipe, bpf*, console, klog, etc.
+    out.push_str("(allow file-read* file-write* (literal \"/dev/null\"))\n");
+    out.push_str("(allow file-read* file-write* (literal \"/dev/zero\"))\n");
+    out.push_str("(allow file-read* (literal \"/dev/random\"))\n");
+    out.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
+    out.push_str("(allow file-read* file-write* (literal \"/dev/tty\"))\n");
+    out.push_str("(allow file-read* file-write* (subpath \"/dev/fd\"))\n");
+    out.push_str("(allow file-read* file-write* (literal \"/dev/dtracehelper\"))\n");
+
     out
 }
 
@@ -117,6 +127,29 @@ mod tests {
         ] {
             assert!(p.contains(needle), "profile missing {needle:?}; got:\n{p}");
         }
+    }
+
+    #[test]
+    fn dev_allowlist_is_minimal() {
+        let p = build_profile(&strict_policy());
+        // The seven safe /dev nodes must be present.
+        for needle in [
+            "(literal \"/dev/null\")",
+            "(literal \"/dev/zero\")",
+            "(literal \"/dev/random\")",
+            "(literal \"/dev/urandom\")",
+            "(literal \"/dev/tty\")",
+            "(subpath \"/dev/fd\")",
+            "(literal \"/dev/dtracehelper\")",
+        ] {
+            assert!(p.contains(needle), "profile missing {needle:?}; got:\n{p}");
+        }
+        // /dev as a whole must NOT be subpath-allowed — that would expose disk*,
+        // auditpipe, bpf*, etc.
+        assert!(
+            !p.contains("(subpath \"/dev\")") || p.contains("(subpath \"/dev/fd\")"),
+            "profile must not allow subpath \"/dev\" (only /dev/fd is OK)"
+        );
     }
 
     // Suppress unused warnings on PathBuf until Task 5.
