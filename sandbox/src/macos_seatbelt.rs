@@ -25,6 +25,7 @@
 //!
 //! See [`docs/superpowers/specs/2026-05-07-macos-seatbelt-backend-design.md`].
 
+#[allow(unused_imports)]
 use std::process::{Child, Command, Stdio};
 
 use crate::{SandboxBackend, SandboxError, SandboxPolicy};
@@ -52,6 +53,45 @@ impl SandboxBackend for MacosSeatbelt {
     }
 }
 
-// Avoid unused-import warnings until later tasks fill these in.
-#[allow(dead_code)]
-fn _unused_imports_marker(_c: Command, _s: Stdio) {}
+/// Build the TinyScheme `.sb` profile string for `policy`. Pure function:
+/// no I/O, no syscalls — exposed so unit tests can assert on the profile
+/// text without spawning a process.
+pub fn build_profile(policy: &SandboxPolicy) -> String {
+    let _ = policy; // unused until Task 3
+    let mut out = String::new();
+    out.push_str("(version 1)\n");
+    out.push_str("(deny default)\n");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Net, Profile};
+    use std::path::PathBuf;
+
+    fn strict_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            fs_read: vec![],
+            fs_write: vec![],
+            net: Net::Deny,
+            cpu_ms: 1_000,
+            mem_mb: 64,
+            profile: Profile::WorkerStrict,
+            env: vec![],
+        }
+    }
+
+    #[test]
+    fn profile_starts_with_version_and_deny_default() {
+        let p = build_profile(&strict_policy());
+        // (version 1) must appear before any allow/deny rule.
+        let version_idx = p.find("(version 1)").expect("missing (version 1)");
+        let deny_default_idx = p.find("(deny default)").expect("missing (deny default)");
+        assert!(version_idx < deny_default_idx);
+    }
+
+    // Suppress unused warnings on PathBuf until Task 5.
+    #[allow(dead_code)]
+    fn _path_marker(_p: PathBuf) {}
+}
