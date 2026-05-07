@@ -32,6 +32,16 @@ Nothing else.
 
 The macOS sandbox (`sandbox-exec` / Seatbelt) is partially private API and less audited than the Linux stack (bubblewrap + Landlock + seccomp-bpf, battle-tested via Flatpak). The *weaker* of the two platform backends sets the real bar. We accept this asymmetry openly here rather than implying the two are identical. Where higher assurance is required on macOS, opt the relevant worker into the micro-VM backend (Apple `container` CLI on Tahoe+).
 
+The macOS implementation shells out to `/usr/bin/sandbox-exec`, which Apple
+has marked as private API and emits a deprecation warning for, while
+continuing to ship and maintain it (it remains the foundation of the
+system's own sandboxing of daemons under `/usr/share/sandbox/`). We accept
+this risk explicitly: should Apple ever remove `sandbox-exec`, the
+migration path is the entitlement-based App Sandbox combined with Endpoint
+Security framework filters, both of which require code-signing and
+entitlements that we do not have today. Until that day, `sandbox-exec` is
+the best containment available without entitlements.
+
 ## Defence-in-depth layers
 
 | Layer | Purpose |
@@ -59,6 +69,7 @@ Already shipped (Phase 0 + Phase 0 hardening stage 1):
 - `core/tests/shell_exec_e2e.rs` — non-allowlisted argv rejected by worker policy with `POLICY_DENIED`; full round-trip through bwrap + Landlock + seccomp.
 - `workers/prelude/tests/landlock_smoke.rs` — write to non-allowlisted path is denied with EACCES; allowlisted scratch writes succeed; reads under `/usr` continue to work.
 - `workers/prelude/tests/seccomp_smoke.rs` — `unshare(CLONE_NEWUSER)` and `mount(...)` are killed with `SIGSYS`; `getpid()` survives.
+- `sandbox/tests/macos_smoke.rs` — Seatbelt denies `/etc/master.passwd`, `/Users/...`, raw `/dev/disk0`, and network under `Net::Deny`.
 
 ## Open items
 
