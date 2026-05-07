@@ -4,8 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-06
-**Last commit:** `3210f70` (`Phase 0 hardening stage 1: worker-side Landlock + seccomp + bwrap probe fix`)
+**Last updated:** 2026-05-07
+**Last commit:** `2fa46a2` (`Phase 0b — macOS Seatbelt backend shipped`)
 **Branch:** `main`
 
 ---
@@ -23,22 +23,24 @@
 ```
 hhagent (Rust workspace, 6 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + bin (skeleton main); tool_host derives lockdown env
-├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (probe fixed)
+├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap + MacosSeatbelt
 ├── supervisor         hhagent-supervisor: stub (NotYetImplemented)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
-├── workers/prelude      hhagent-worker-prelude: Landlock + seccomp lock_down (NEW, Phase 0 hardening)
-└── workers/shell-exec   hhagent-worker-shell-exec: now uses prelude::serve_stdio
+├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS)
+└── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` is green: 36 tests, 0 skipped.**
+**`cargo test --workspace` is green: 36 tests on Linux + 29 tests on macOS, 0 skipped on either.**
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
 | `protocol` unit | 3 | dispatch, parse-error fallback, method-not-found |
-| `sandbox` unit | 6 | bwrap argv builder shape |
+| `sandbox` unit (linux) | 6 | bwrap argv builder shape |
+| `sandbox` unit (macos) | 11 | sandbox-exec profile builder shape + path canonicalization + on-host probe |
 | `sandbox` integration (`linux_smoke`) | 6 | **real** bwrap: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected |
-| `core` unit | 4 | `derive_lockdown_env` adds correct env entries, doesn't overwrite caller-supplied env |
-| `core` integration (`shell_exec_e2e`) | 3 | **real** core → bwrap+landlock+seccomp → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND |
+| `sandbox` integration (`macos_smoke`) | 8 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny` |
+| `core` unit | 4 | (unchanged — `derive_lockdown_env` adds correct env entries, doesn't overwrite caller-supplied env) |
+| `core` integration (`shell_exec_e2e`) | 3 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND |
 | `prelude` unit | 8 | env-var parsing, profile parsing, BPF program builds, kill-list contains `unshare` |
 | `prelude` integration (`landlock_smoke`) | 3 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work |
 | `prelude` integration (`seccomp_smoke`) | 3 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS; `getpid()` survives |
@@ -62,8 +64,26 @@ cargo test --workspace           # all green
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile
 that lets `bwrap` create unprivileged user namespaces is already installed
 on the user's DGX Spark. Other Linux hosts may need
-`sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS isn't ported
-yet (Phase 0b).
+`sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses
+`sandbox-exec` (no setup needed; ships with the OS).
+
+## Recently completed (this session, 2026-05-07)
+
+**Phase 0b — macOS Seatbelt sandbox backend:**
+
+- New module `sandbox/src/macos_seatbelt.rs`: pure `build_profile(policy)` returning a TinyScheme `.sb` profile, `MacosSeatbelt::probe()` mirroring the Linux probe pattern, `spawn_under_policy()` with up-front absolute-path validation, path canonicalization (so `/etc`-style platform symlinks resolve to `/private/etc/...`), `env_clear()` + per-policy env, and `process_group(0)` for `--new-session` parity. 11 unit tests cover the version+deny-default header, always-on dyld/libsystem allows, the explicit `/dev` allowlist, fs_read/fs_write rules, Net::Allowlist lifting the network deny, the canonicalize-with-fallback helper, the relative-path rejection, and the on-host probe.
+- New `sandbox/tests/macos_smoke.rs` (8 tests): scaffold marker, echo-runs-jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read becomes readable (exercising the canonicalize fix for /etc symlinks), relative-path rejection, /dev/disk0 denied, network unreachable under Net::Deny.
+- New `sandbox/tests/fixtures/net_probe.rs` (12 LoC standalone bin): replaces the missing `/usr/bin/getent` on macOS for the network-deny test. Built into `target/debug/net_probe` via a `[[bin]]` stanza in `sandbox/Cargo.toml`.
+- `sandbox/src/lib.rs`: `default_backend()` now returns `MacosSeatbelt` on `cfg(target_os = "macos")`. The `NotYetImplemented` fallback survives behind `cfg(not(any(target_os = "linux", target_os = "macos")))`. The orphan `SandboxError::NotImplemented` variant got a `#[allow(dead_code)]` and a one-line doc comment so future readers know it's reserved.
+- `core/tests/shell_exec_e2e.rs` is now cross-platform: per-OS `skip_if_sandbox_unavailable()` and `backend()` helpers, and a `cfg`-gated `ECHO_PATH` (Linux: `/usr/bin/echo`, macOS: `/bin/echo` — verified empirically since `/usr/bin/echo` doesn't exist on this macOS 26.4 host). The same three round-trip tests run on both Linux and macOS.
+- `docs/threat-model.md`: explicit paragraph on `sandbox-exec` being Apple-marked private API + the macos_smoke row in "negative tests already shipped".
+- Two empirical broadenings vs the design doc — both committed transparently:
+  - `build_profile` needed `(allow file-read* (literal "/"))` and `(allow mach-lookup)` to launch real binaries on macOS 26.4 ARM64. Without the literal `/` rule, `/bin/echo` aborts with SIGABRT before dyld even runs (SIP-related path-walk requirement).
+  - `spawn_under_policy` canonicalizes `policy.fs_read` / `policy.fs_write` so `/etc/...` paths resolve to `/private/etc/...` before being emitted in the Seatbelt profile.
+
+Total tests after this session on macOS: 29 passed, 0 skipped, 0 failed.
+
+Linux side is unchanged (the macOS module is cfg-gated out). The Linux user should run `cargo test --workspace` on their Linux box to confirm the prior 36 tests still pass.
 
 ## Recently completed (this session, 2026-05-06)
 
@@ -101,25 +121,9 @@ yet (Phase 0b).
 
 ## Next TODO (pick one)
 
-The user is in parallel attempting **Option A (Phase 0b — macOS port)** on a Mac, so prefer Options B' or C below for the Linux-side work. Listed in increasing scope; pick whichever the user wants.
+Phase 0b (macOS port) shipped this session. The remaining options are Linux-side work. Listed in increasing scope; pick whichever the user wants.
 
-### Option A — Phase 0b: macOS port  *(parallel work — coordinate with user)*
-
-The user has stated they will start this on a Mac in parallel. Implementation outline kept here for cross-checking:
-
-- `sandbox/src/macos_seatbelt.rs` — `SandboxPolicy` → `.sb` (TinyScheme) profile, then `sandbox-exec -f <profile> <program> ...`
-- `setrlimit` for CPU/mem/wallclock (shared with future bwrap CPU/mem path)
-- Wire `default_backend()` to pick `MacosSeatbelt::new()` under `cfg(target_os = "macos")`
-- Mirror `sandbox/tests/linux_smoke.rs` as `sandbox/tests/macos_smoke.rs` (cfg-gated)
-- Worker-side: on macOS the `hhagent-worker-prelude::lock_down()` is already a no-op (Seatbelt enforces equivalent containment from the parent). Verify on first run.
-
-**Gotchas:**
-- `sandbox-exec` is private API but stable; document in `docs/threat-model.md`.
-- Seatbelt has no `--clearenv`; pass empty environment via `Command::env_clear()` + `Command::envs(policy.env)` before exec.
-- macOS doesn't have `/usr/bin/getent`; for the net-deny test use a tiny Rust helper that calls `TcpStream::connect`.
-- For the e2e test, factor the worker binary path resolver into a helper that handles the `target/debug/<name>` (Linux) vs `target/debug/<name>` (macOS) cases — they're the same path on both today, but documentation will keep the next reader sane.
-
-**Verification:** `cargo test --workspace` should be 36 + N tests green on macOS, 0 skips.
+### Option A — Phase 0b: macOS port  *(SHIPPED this session — see "Recently completed")*
 
 ### Option B' — Phase 0 hardening: stage 2 (Linux)
 

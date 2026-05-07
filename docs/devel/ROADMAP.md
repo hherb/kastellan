@@ -44,11 +44,12 @@ items unlock later ones.
 
 > Done before adding more workers, to stop Linux-isms leaking through the codebase.
 
-- [ ] `macos_seatbelt.rs`: `SandboxPolicy` → `.sb` (TinyScheme) generator
-- [ ] `sandbox-exec` invocation + `setrlimit` for CPU/mem/wallclock
-- [ ] Network containment via `(deny network*)` + allowlist rules
-- [ ] Mirror of all 6 sandbox containment integration tests, passing on macOS
-- [ ] Mirror of all 3 e2e tests on macOS
+- [x] `macos_seatbelt.rs`: `SandboxPolicy` → `.sb` (TinyScheme) generator — `2fa46a2`
+- [x] `sandbox-exec` invocation (env_clear + per-policy env + setsid via process_group) — `2fa46a2`
+- [ ] setrlimit for CPU/mem/wallclock — DEFERRED to supervisor work (parity with Linux's current state)
+- [x] Network containment via `(deny network*)` + allowlist rules — `2fa46a2`
+- [x] Mirror of all sandbox containment integration tests, passing on macOS — 8 tests, 0 skipped (`macos_smoke.rs`: scaffold marker, echo-runs-jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read readable, /dev/disk0 denied, relative-path rejection, network unreachable) — `2fa46a2`
+- [x] Mirror of all 3 e2e tests on macOS — 3 tests passing under cross-platform `shell_exec_e2e.rs` — `2fa46a2`
 
 ## Phase 0 cont. — Service supervisor
 
