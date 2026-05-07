@@ -43,6 +43,10 @@ time        = { version = "0.3", features = ["serde", "macros"] }
 landlock    = "0.4"
 seccompiler = "0.5"
 
+# POSIX bindings for the wall-clock watchdog: we send SIGKILL by PID from a
+# helper thread when a worker outlives its budget. MIT OR Apache-2.0.
+libc        = "0.2"
+
 # Profile tweaks
 [profile.release]
 lto         = "thin"

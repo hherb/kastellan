@@ -92,6 +92,7 @@ fn echo_round_trip_through_sandboxed_worker() {
         policy: &policy,
         program: &worker_str,
         args: &[],
+        wall_clock_ms: None,
     };
     let mut client = spawn_worker(&*backend, &spec).expect("spawn shell-exec under sandbox");
 
@@ -124,6 +125,7 @@ fn argv_outside_allowlist_is_rejected_by_worker_policy() {
         policy: &policy,
         program: &worker_str,
         args: &[],
+        wall_clock_ms: None,
     };
     let mut client = spawn_worker(&*backend, &spec).expect("spawn shell-exec under sandbox");
     let err = client
@@ -158,6 +160,7 @@ fn unknown_method_yields_method_not_found() {
         policy: &policy,
         program: &worker_str,
         args: &[],
+        wall_clock_ms: None,
     };
     let mut client = spawn_worker(&*backend, &spec).expect("spawn shell-exec under sandbox");
     let err = client

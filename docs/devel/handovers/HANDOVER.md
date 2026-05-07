@@ -68,6 +68,51 @@ on the user's DGX Spark. Other Linux hosts may need
 
 ## Recently completed (this session, 2026-05-08)
 
+**Bug fix — watchdog SIGKILL fanout (a.k.a. the "DGX display blackout").**
+
+This had been logged in user memory as a driver issue
+(`host_display_blackout.md` — "driver 580.142 + X11 + dual-display;
+reproducible from cargo *in VS Code*, NOT idle/DPMS"). It was actually
+*us*. Smoking-gun trace: an SSH session died mid-test on
+`watchdog_loop_runs_until_deadline_when_not_cancelled` — the only
+watchdog test that allows the deadline to elapse and therefore the only
+one that fires the kill path.
+
+Root cause in `core/src/tool_host.rs`:
+
+```rust
+const SAFE_FAKE_PID: u32 = u32::MAX;            // ← misnamed
+fn send_sigkill(pid: u32) {
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+}
+```
+
+`pid_t` is `i32`; `u32::MAX as i32 == -1`; `kill(-1, SIGKILL)` signals
+*every* process the calling user can signal. Running that one test
+SIGKILLed the user's X session, gnome-shell, and per-session sshd
+children. Looked like a GPU driver crash; was a self-inflicted process
+massacre.
+
+**Fix is two-layered (both shipped, do not remove either):**
+
+1. `is_valid_target_pid(pid: u32) -> bool` rejects `0`, `1`, and any
+   value `> i32::MAX` *before* `kill(2)` — defensive guard with
+   incident write-up in the `send_sigkill` doc comment so future
+   readers can't miss the history.
+2. `watchdog_loop` now takes an injected `kill: fn(u32)`. Production
+   passes `send_sigkill`; tests pass a `noop_kill` that discards the
+   PID. The dangerous test never reaches `kill(2)` at all.
+
+New regression test `is_valid_target_pid_rejects_broadcast_values`
+asserts the validator behaviour against the four worst PID values
+(`0`, `1`, `u32::MAX`, `i32::MAX as u32 + 1`). The dangerous watchdog
+test now runs cleanly on the DGX without disturbing the GUI session.
+
+**`cargo test --workspace` after the fix: 55 passed, 0 failed, 1 ignored**
+(doc-test).
+
+---
+
 **Phase 0 hardening — stage 2 (Linux): seccomp allow-list + Landlock v6.**
 
 The handover's "Option B'" shipped end-to-end. Both layers are now
