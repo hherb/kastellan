@@ -103,7 +103,16 @@ impl SandboxBackend for MacosSeatbelt {
             }
         }
 
-        let profile = build_profile(policy);
+        // macOS Seatbelt resolves symlinks when matching FS rules. /etc, /tmp,
+        // and /var are platform symlinks (-> /private/etc, etc.), so a caller
+        // passing /etc/hosts would have their (subpath "/etc/hosts") rule
+        // ignored by the kernel, which sees /private/etc/hosts. Canonicalize
+        // before building the profile. canonicalize() requires the path to
+        // exist on disk; for paths that don't (e.g. a fresh scratch dir),
+        // fall back to the literal path — the rule still works because
+        // those paths typically aren't symlinks themselves.
+        let policy = canonicalize_policy_paths(policy);
+        let profile = build_profile(&policy);
         let mut cmd = Command::new("sandbox-exec");
         cmd.arg("-p").arg(&profile);
         cmd.arg(program);
@@ -128,6 +137,24 @@ impl SandboxBackend for MacosSeatbelt {
         cmd.spawn()
             .map_err(|e| SandboxError::Backend(format!("sandbox-exec spawn failed: {e}")))
     }
+}
+
+/// Return a clone of `policy` with each fs_read / fs_write path canonicalized
+/// (symlinks resolved). Paths that don't exist yet keep their original form;
+/// they typically aren't symlinks anyway, and if they are the caller's
+/// problem, the resulting rule will silently fail to grant access — surfaced
+/// when the worker hits an EACCES.
+fn canonicalize_policy_paths(policy: &SandboxPolicy) -> SandboxPolicy {
+    let canon = |paths: &[std::path::PathBuf]| -> Vec<std::path::PathBuf> {
+        paths
+            .iter()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .collect()
+    };
+    let mut out = policy.clone();
+    out.fs_read = canon(&policy.fs_read);
+    out.fs_write = canon(&policy.fs_write);
+    out
 }
 
 /// Build the TinyScheme `.sb` profile string for `policy`. Pure function:
@@ -330,5 +357,30 @@ mod tests {
     #[test]
     fn probe_succeeds_on_this_host() {
         MacosSeatbelt::probe().expect("sandbox-exec probe must succeed on a healthy macOS host");
+    }
+
+    #[test]
+    fn canonicalize_policy_paths_resolves_etc_symlink() {
+        // /etc is a symlink to /private/etc on macOS — verify the helper
+        // resolves it. /etc/hosts is guaranteed to exist on any macOS host.
+        let mut p = strict_policy();
+        p.fs_read = vec![PathBuf::from("/etc/hosts")];
+        let canon = canonicalize_policy_paths(&p);
+        let resolved = &canon.fs_read[0];
+        assert_eq!(
+            resolved,
+            &PathBuf::from("/private/etc/hosts"),
+            "canonicalize did not resolve /etc -> /private/etc symlink; got {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn canonicalize_policy_paths_falls_back_for_nonexistent() {
+        // /var/lib/hhagent/scratch_xyz_does_not_exist — should keep its literal form.
+        let mut p = strict_policy();
+        let nonexistent = PathBuf::from("/var/lib/hhagent/scratch_xyz_does_not_exist");
+        p.fs_write = vec![nonexistent.clone()];
+        let canon = canonicalize_policy_paths(&p);
+        assert_eq!(canon.fs_write[0], nonexistent);
     }
 }
