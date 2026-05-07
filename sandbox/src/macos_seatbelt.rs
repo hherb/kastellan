@@ -84,6 +84,13 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
         ));
     }
 
+    for path in &policy.fs_write {
+        out.push_str(&format!(
+            "(allow file-read* file-write* (subpath \"{}\"))\n",
+            path.display()
+        ));
+    }
+
     out
 }
 
@@ -160,5 +167,21 @@ mod tests {
         let prof = build_profile(&p);
         assert!(prof.contains("(allow file-read* (subpath \"/etc/ssl\"))"), "got:\n{prof}");
         assert!(prof.contains("(allow file-read* (subpath \"/opt/data\"))"), "got:\n{prof}");
+    }
+
+    #[test]
+    fn fs_write_emits_read_and_write_subpath_allow() {
+        let mut p = strict_policy();
+        p.fs_write = vec![PathBuf::from("/var/lib/hhagent/scratch")];
+        let prof = build_profile(&p);
+        assert!(
+            prof.contains("(allow file-read* file-write* (subpath \"/var/lib/hhagent/scratch\"))"),
+            "expected combined read+write allow; got:\n{prof}"
+        );
+        // The fs_write path must NOT appear as a separate read-only allow.
+        assert!(
+            !prof.contains("(allow file-read* (subpath \"/var/lib/hhagent/scratch\"))"),
+            "fs_write path must not also be emitted as a separate read-only rule; got:\n{prof}"
+        );
     }
 }
