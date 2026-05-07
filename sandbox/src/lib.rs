@@ -58,12 +58,6 @@ pub struct SandboxPolicy {
 
 #[derive(Debug, Error)]
 pub enum SandboxError {
-    /// Reserved for future backends (e.g. micro-VM) that want to signal a
-    /// recognised-but-unimplemented case with a more specific message than
-    /// the catch-all `Backend(...)`. Currently no constructor.
-    #[allow(dead_code)]
-    #[error("backend not yet implemented: {0}")]
-    NotImplemented(&'static str),
     #[error("backend error: {0}")]
     Backend(String),
 }

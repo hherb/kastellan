@@ -99,6 +99,12 @@ fn host_users_dir_is_invisible_when_not_in_policy() {
     if skip_if_no_seatbelt() {
         return;
     }
+    // Capture the host's username up front so the assertion isn't hard-coded
+    // to one developer machine. On a CI host without a $USER env var the
+    // test still runs — we just lose the username-leak check and rely on the
+    // exit-status assertion below.
+    let host_user = std::env::var("USER").ok();
+
     let backend = MacosSeatbelt::new();
     let mut child = backend
         .spawn_under_policy(&strict_policy(), "/bin/ls", &["/Users"])
@@ -106,13 +112,26 @@ fn host_users_dir_is_invisible_when_not_in_policy() {
     let status = child.wait().expect("wait");
     let stdout = read_to_string(&mut child.stdout);
     let stderr = read_to_string(&mut child.stderr);
-    // Either ls fails (denied), or it succeeds but lists nothing real.
-    // What's NOT acceptable is seeing the actual user's home dir name.
+
+    // Primary assertion: ls /Users must fail under the strict profile, since
+    // /Users is not in the allowlist. A successful listing here would mean
+    // the deny-default posture has been broken.
     assert!(
-        !stdout.contains("hherb"),
-        "sandbox leaked the host's /Users dir! stdout={stdout:?} stderr={stderr:?}"
+        !status.success(),
+        "ls /Users should be denied under strict profile; \
+         status={status:?} stdout={stdout:?} stderr={stderr:?}"
     );
-    let _ = status;
+
+    // Secondary defence: even if a future broadening accidentally lets ls
+    // succeed (e.g. by exposing /Users as a metadata-readable subpath), the
+    // host user's name must not leak into stdout.
+    if let Some(user) = host_user {
+        assert!(
+            !stdout.contains(&user),
+            "sandbox leaked the host's username {user:?} via /Users! \
+             stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
 }
 
 #[test]

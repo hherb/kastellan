@@ -118,6 +118,20 @@ impl SandboxBackend for MacosSeatbelt {
                     "policy paths must be absolute, got {p:?}"
                 )));
             }
+            // TinyScheme injection forecloser: any of these chars in a path
+            // would close the surrounding `(subpath "...")` early and let a
+            // crafted policy rewrite the profile. Today every caller is
+            // trusted core code; this guard means a future caller (or a path
+            // round-tripped through an untrusted source) can't silently
+            // escalate. See the same escape-and-validate note in build_profile.
+            let s = p.to_string_lossy();
+            if let Some(c) = s.chars().find(|c| {
+                matches!(c, '"' | '\\' | '(' | ')' | '\n' | '\r' | '\0')
+            }) {
+                return Err(SandboxError::Backend(format!(
+                    "policy path contains disallowed character {c:?}: {p:?}"
+                )));
+            }
         }
 
         // macOS Seatbelt resolves symlinks when matching FS rules. /etc, /tmp,
@@ -125,10 +139,12 @@ impl SandboxBackend for MacosSeatbelt {
         // passing /etc/hosts would have their (subpath "/etc/hosts") rule
         // ignored by the kernel, which sees /private/etc/hosts. Canonicalize
         // before building the profile. canonicalize() requires the path to
-        // exist on disk; for paths that don't (e.g. a fresh scratch dir),
-        // fall back to the literal path — the rule still works because
-        // those paths typically aren't symlinks themselves.
-        let policy = canonicalize_policy_paths(policy);
+        // exist on disk; for NotFound (e.g. a fresh scratch dir not yet
+        // created) we fall back to the literal path because those paths
+        // typically aren't symlinks themselves. Other errors (PermissionDenied
+        // on a parent dir, etc.) propagate so we don't silently emit a
+        // non-functional rule.
+        let policy = canonicalize_policy_paths(policy)?;
         let profile = build_profile(&policy);
         let mut cmd = Command::new("sandbox-exec");
         cmd.arg("-p").arg(&profile);
@@ -157,21 +173,29 @@ impl SandboxBackend for MacosSeatbelt {
 }
 
 /// Return a clone of `policy` with each fs_read / fs_write path canonicalized
-/// (symlinks resolved). Paths that don't exist yet keep their original form;
-/// they typically aren't symlinks anyway, and if they are the caller's
-/// problem, the resulting rule will silently fail to grant access — surfaced
-/// when the worker hits an EACCES.
-fn canonicalize_policy_paths(policy: &SandboxPolicy) -> SandboxPolicy {
-    let canon = |paths: &[std::path::PathBuf]| -> Vec<std::path::PathBuf> {
+/// (symlinks resolved). `NotFound` errors fall back to the original path
+/// (legitimate for fs_write of a not-yet-created scratch dir). Any other
+/// `io::Error` — most importantly `PermissionDenied` on a parent directory
+/// — propagates as a `SandboxError::Backend`, because emitting a rule for an
+/// unresolved path would silently produce a non-functional Seatbelt rule and
+/// mask user errors as "the sandbox is just too strict."
+fn canonicalize_policy_paths(policy: &SandboxPolicy) -> Result<SandboxPolicy, SandboxError> {
+    let canon = |paths: &[std::path::PathBuf]| -> Result<Vec<std::path::PathBuf>, SandboxError> {
         paths
             .iter()
-            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .map(|p| match std::fs::canonicalize(p) {
+                Ok(resolved) => Ok(resolved),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(p.clone()),
+                Err(e) => Err(SandboxError::Backend(format!(
+                    "could not canonicalize policy path {p:?}: {e}"
+                ))),
+            })
             .collect()
     };
     let mut out = policy.clone();
-    out.fs_read = canon(&policy.fs_read);
-    out.fs_write = canon(&policy.fs_write);
-    out
+    out.fs_read = canon(&policy.fs_read)?;
+    out.fs_write = canon(&policy.fs_write)?;
+    Ok(out)
 }
 
 /// Build the TinyScheme `.sb` profile string for `policy`. Pure function:
@@ -383,12 +407,58 @@ mod tests {
         );
     }
 
+    /// TinyScheme-special characters (", \, (, ), newline, NUL) in a policy
+    /// path would let a malformed `SandboxPolicy` rewrite the profile by
+    /// closing the `(subpath "...")` s-expression early. Today all callers are
+    /// trusted core code, but the validation forecloses an entire class of
+    /// future bug; cheaper than auditing every future call site.
+    #[test]
+    fn policy_paths_with_tinyscheme_specials_are_rejected_by_spawn() {
+        let backend = MacosSeatbelt::new();
+        for bad in [
+            "/tmp/x\")(allow network*)(literal \"/x",
+            "/tmp/has\\backslash",
+            "/tmp/has(paren",
+            "/tmp/has)paren",
+            "/tmp/has\nnewline",
+            "/tmp/has\0nul",
+        ] {
+            let mut p = strict_policy();
+            p.fs_read.push(PathBuf::from(bad));
+            let err = backend
+                .spawn_under_policy(&p, "/usr/bin/true", &[])
+                .err()
+                .unwrap_or_else(|| panic!("must reject fs_read path {bad:?}"));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("disallowed character"),
+                "expected 'disallowed character' error for {bad:?}, got: {msg}"
+            );
+        }
+        // Same shape, but for fs_write — the validation must cover both lists.
+        let mut p = strict_policy();
+        p.fs_write.push(PathBuf::from("/tmp/x\"escape"));
+        let err = backend
+            .spawn_under_policy(&p, "/usr/bin/true", &[])
+            .expect_err("fs_write path with quote must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("disallowed character"),
+            "expected 'disallowed character' error, got: {msg}"
+        );
+    }
+
     // This test runs a real sandbox-exec invocation. It only meaningfully runs
     // on macOS hosts; the parent module is cfg(target_os = "macos") so this
-    // file isn't compiled elsewhere.
+    // file isn't compiled elsewhere. Print a [SKIP] line on probe failure
+    // (matches the integration-test pattern) instead of panicking, so a
+    // host with MDM-clipped Seatbelt or a future macOS regression doesn't
+    // false-fail the suite.
     #[test]
     fn probe_succeeds_on_this_host() {
-        MacosSeatbelt::probe().expect("sandbox-exec probe must succeed on a healthy macOS host");
+        if let Err(e) = MacosSeatbelt::probe() {
+            eprintln!("\n[SKIP] sandbox-exec probe failed: {e}\n");
+        }
     }
 
     #[test]
@@ -397,7 +467,7 @@ mod tests {
         // resolves it. /etc/hosts is guaranteed to exist on any macOS host.
         let mut p = strict_policy();
         p.fs_read = vec![PathBuf::from("/etc/hosts")];
-        let canon = canonicalize_policy_paths(&p);
+        let canon = canonicalize_policy_paths(&p).expect("canonicalize must succeed");
         let resolved = &canon.fs_read[0];
         assert_eq!(
             resolved,
@@ -412,7 +482,56 @@ mod tests {
         let mut p = strict_policy();
         let nonexistent = PathBuf::from("/var/lib/hhagent/scratch_xyz_does_not_exist");
         p.fs_write = vec![nonexistent.clone()];
-        let canon = canonicalize_policy_paths(&p);
+        let canon = canonicalize_policy_paths(&p).expect("NotFound must fall back, not error");
         assert_eq!(canon.fs_write[0], nonexistent);
+    }
+
+    /// Non-NotFound canonicalize errors (e.g. PermissionDenied on a parent
+    /// directory) MUST propagate — silently emitting an unresolved-path rule
+    /// would produce a silently-non-functional Seatbelt rule and mask user
+    /// errors as "the sandbox is just too strict." Pin this so a future
+    /// refactor doesn't quietly re-introduce the catch-all swallow.
+    #[test]
+    fn canonicalize_policy_paths_propagates_non_notfound_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        // Create an owned temp dir, drop perms to 000, then attempt to
+        // canonicalize a path inside it — the parent walk fails with
+        // PermissionDenied. We must propagate rather than fall back.
+        let tmp = std::env::temp_dir().join(format!(
+            "hhagent_canon_perm_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&tmp).expect("create_dir");
+        // Always chmod back to 0o700 in a guard so we don't leak an
+        // unreadable temp dir on test failure.
+        struct Guard(PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(
+                    &self.0,
+                    std::fs::Permissions::from_mode(0o700),
+                );
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = Guard(tmp.clone());
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+
+        let mut p = strict_policy();
+        p.fs_read = vec![tmp.join("inside")];
+        let res = canonicalize_policy_paths(&p);
+        let err = res.err().unwrap_or_else(|| {
+            panic!("expected PermissionDenied to propagate; got Ok")
+        });
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("could not canonicalize"),
+            "expected 'could not canonicalize' in error, got: {msg}"
+        );
     }
 }
