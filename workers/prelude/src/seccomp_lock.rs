@@ -148,6 +148,26 @@ pub fn allow_list_for(profile: Profile) -> Vec<i64> {
     out
 }
 
+// libc 0.2 doesn't expose `SYS_sendfile` and `SYS_fadvise64` on aarch64
+// even though the kernel implements both at stable ABI numbers. Define
+// them locally so [`BASE_ALLOW`] compiles unchanged on both arches.
+//
+// Numbers come from `arch/arm64/include/uapi/asm-generic/unistd.h`
+// (sendfile = 71, fadvise64 = 223) and `arch/x86/entry/syscalls/syscall_64.tbl`
+// (sendfile = 40, fadvise64 = 221). On x86_64 we forward to libc to
+// guarantee the constant matches whatever the toolchain compiled with;
+// on aarch64 we hardcode (the kernel ABI is stable). Any other arch
+// will fail to compile here, which is the correct behaviour — adding
+// support means making a deliberate choice.
+#[cfg(target_arch = "aarch64")]
+const SYS_SENDFILE: i64 = 71;
+#[cfg(target_arch = "aarch64")]
+const SYS_FADVISE64: i64 = 223;
+#[cfg(target_arch = "x86_64")]
+const SYS_SENDFILE: i64 = libc::SYS_sendfile;
+#[cfg(target_arch = "x86_64")]
+const SYS_FADVISE64: i64 = libc::SYS_fadvise64;
+
 /// Base allow-list. Every syscall here exists on both `x86_64` and
 /// `aarch64` (the two arches we currently target). Newer/legacy variants
 /// that only exist on one arch live in [`BASE_ALLOW_X86_64_LEGACY`].
@@ -212,6 +232,18 @@ pub const BASE_ALLOW: &[i64] = &[
     libc::SYS_lseek,
     libc::SYS_fsync,
     libc::SYS_fdatasync,
+    // Bulk file-copy primitives. GNU coreutils (`cp`, `cat`) call
+    // `copy_file_range` first and fall back to `sendfile`; both also
+    // pre-hint the kernel via `fadvise64`. Without these, `cp src dst`
+    // dies with SIGSYS on its first read. They copy *between two
+    // already-open file descriptors* and grant no capability beyond
+    // what `openat` already does; `fadvise64` is a pure readahead hint
+    // with no cross-process surface. (`SYS_sendfile` and `SYS_fadvise64`
+    // are unexposed by libc 0.2 on aarch64, so the numeric ABI is
+    // pulled in via [`SYS_SENDFILE`] / [`SYS_FADVISE64`] above.)
+    libc::SYS_copy_file_range,
+    SYS_SENDFILE,
+    SYS_FADVISE64,
 
     // ---- Filesystem metadata ----
     // newfstatat is the universal stat on aarch64; statx is the modern

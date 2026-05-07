@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-08
-**Last commit:** `9333311` (`feat(core): per-task scratch workspace with RAII cleanup`)
+**Last commit:** `fb726d0` + this session's pending commit on the workspace+worker e2e test
 **Branch:** `main`
 
 ---
@@ -30,7 +30,7 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` is green: 55 tests on Linux, 0 skipped, 0 failed.**
+**`cargo test --workspace` is green: 56 tests on Linux, 0 skipped, 0 failed.**
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -40,7 +40,7 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 | `sandbox` integration (`linux_smoke`) | 6 | **real** bwrap: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected |
 | `sandbox` integration (`macos_smoke`) | 8 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny` |
 | `core` unit | 16 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests) |
-| `core` integration (`shell_exec_e2e`) | 3 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND |
+| `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
@@ -67,6 +67,42 @@ on the user's DGX Spark. Other Linux hosts may need
 `sandbox-exec` (no setup needed; ships with the OS).
 
 ## Recently completed (this session, 2026-05-08)
+
+**Phase 0 polish — workspace+worker integration test + seccomp BASE_ALLOW broadening.**
+
+`core/tests/shell_exec_e2e.rs::workspace_dir_is_writable_during_call_and_wiped_on_drop`
+exercises the full `Workspace` contract end-to-end against a real
+sandboxed worker: stage a known string in `<ws>/in/source.txt`, build
+a `SandboxPolicy`, call `Workspace::extend_policy(&mut policy)` (the
+canonical wiring point), spawn shell-exec with `cp` allowlisted, copy
+`in/ → out/` *inside* the jail, read the artifact back from the host,
+drop the workspace, assert the whole task tree is gone. This is the
+first test that proves the host (`policy.fs_write` → bwrap bind-mount)
+and worker (`HHAGENT_LANDLOCK_RW` → Landlock allow-list) layers agree
+on what the worker may write — they share `Workspace::fs_write_paths`
+through `derive_lockdown_env`, but the e2e is what catches drift.
+
+To make `cp` actually run inside the jail, three syscalls had to be
+added to `BASE_ALLOW`:
+
+- `copy_file_range`: GNU coreutils' bulk-copy fastpath; without it,
+  `cp` dies with SIGSYS on its first byte.
+- `sendfile`: copy_file_range's fallback for cross-fs / pre-5.3 copies.
+- `fadvise64`: a kernel readahead hint coreutils calls before its
+  first `read(2)`. No security surface (cannot affect anything outside
+  the calling process).
+
+All three copy *between two already-open file descriptors* and grant
+no capability beyond what `openat` already does — net-zero on the
+threat model. `libc 0.2` doesn't expose `SYS_sendfile` or
+`SYS_fadvise64` on `aarch64`, so a small `cfg`-gated shim
+(`SYS_SENDFILE` / `SYS_FADVISE64`) carries the kernel ABI numbers
+explicitly. x86_64 still forwards to `libc::SYS_*`. Other arches
+fail-closed at compile time, which is the right behaviour.
+
+Test count: 55 → 56. No existing test changed.
+
+---
 
 **Phase 0 polish — per-task scratch workspace with RAII cleanup (`9333311`).**
 
@@ -352,21 +388,7 @@ ceilings via cgroup v2 by wrapping `bwrap` in `systemd-run --user
 - pg_search is AGPL-3.0 — perfect license-fit but verify build is fine on aarch64.
 - Apache AGE on Postgres 17 may need a recent build; check supported PG version.
 
-### Option F — wire `Workspace` into `shell_exec_e2e` so the cleanup contract is integration-tested
-
-Today `Workspace` is unit-tested in isolation. Nothing yet exercises
-"spawn a worker, write a file via the worker, drop the workspace,
-assert the file is gone". A natural extension to `shell_exec_e2e`:
-
-- Allowlist `/usr/bin/tee` (Linux) / `/usr/bin/tee` (macOS too — same
-  path) and have `shell.exec` write into `<workspace>/out/`.
-- After `client.close()`, drop the `Workspace`. Re-stat the path
-  asserts the dir is gone.
-- This validates the host↔worker fs_write wiring end-to-end and
-  catches any future drift between `extend_policy` and the
-  bwrap/Landlock paths.
-
-Smaller than Option E; good warm-up if the next session is short.
+### Option F — workspace+worker e2e test  *(SHIPPED 2026-05-08 — see "Recently completed")*
 
 ---
 
