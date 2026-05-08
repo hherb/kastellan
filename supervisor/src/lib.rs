@@ -4,10 +4,10 @@
 //! macOS  -> launchd LaunchAgents plists in   `~/Library/LaunchAgents/`
 //!
 //! Both backends share one trait ([`Supervisor`]) and one declarative spec
-//! ([`ServiceSpec`]). The Linux backend ([`systemd_user::SystemdUser`]) is
-//! implemented in this crate; the macOS backend (LaunchAgents) is a follow-up
-//! work item — until then [`default_supervisor`] returns a placeholder on
-//! macOS that errors with `NotImplemented`.
+//! ([`ServiceSpec`]). The Linux backend ([`systemd_user::SystemdUser`]) and
+//! the macOS backend ([`launchd_agents::LaunchAgents`]) are both real;
+//! [`default_supervisor`] picks the right one for the current OS, and falls
+//! back to a `NotYetImplemented` placeholder only on other Unixes.
 //!
 //! Why user-level only:
 //!   - hhagent runs entirely in one OS user's account; system-level units
@@ -17,6 +17,9 @@
 
 #[cfg(target_os = "linux")]
 pub mod systemd_user;
+
+#[cfg(target_os = "macos")]
+pub mod launchd_agents;
 
 use std::path::PathBuf;
 
@@ -30,8 +33,12 @@ use thiserror::Error;
 /// implements [`Supervisor::install`]).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceSpec {
-    /// Unit/agent name. Used as the file stem (`<name>.service` /
-    /// `org.hhagent.<name>.plist`). Validated by the backend on install.
+    /// Unit/agent name. Used as the file stem (`<name>.service` on
+    /// Linux, `<name>.plist` on macOS) and as the launchd `Label`.
+    /// The caller chooses any naming scheme they want (e.g.
+    /// `hhagent-core` or reverse-DNS `org.hhagent.core`) — the
+    /// backends only enforce character-class validation, not a forced
+    /// prefix. Validated by the backend on install.
     pub name: String,
     /// Absolute path to the executable.
     pub program: PathBuf,
@@ -101,24 +108,29 @@ pub trait Supervisor {
 /// Pick the default supervisor for the current OS.
 ///
 /// On Linux this is [`systemd_user::SystemdUser`] writing into
-/// `~/.config/systemd/user/`. On macOS (and other OSes) this is a
-/// placeholder that returns [`SupervisorError::NotImplemented`] until the
-/// LaunchAgents backend lands.
+/// `~/.config/systemd/user/`. On macOS this is
+/// [`launchd_agents::LaunchAgents`] writing into
+/// `~/Library/LaunchAgents/`. On any other Unix this is a
+/// placeholder that returns [`SupervisorError::NotImplemented`].
 pub fn default_supervisor() -> Box<dyn Supervisor> {
     #[cfg(target_os = "linux")]
     {
         Box::new(systemd_user::SystemdUser::new())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(launchd_agents::LaunchAgents::new())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Box::new(NotYetImplemented)
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 struct NotYetImplemented;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl Supervisor for NotYetImplemented {
     fn install(&self, _: &ServiceSpec) -> Result<(), SupervisorError> {
         Err(SupervisorError::NotImplemented("install — Phase 0 work item"))

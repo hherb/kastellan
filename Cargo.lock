@@ -116,6 +116,7 @@ dependencies = [
 name = "hhagent-supervisor"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "serde",
  "thiserror",
  "tracing",

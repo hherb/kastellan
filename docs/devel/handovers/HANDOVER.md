@@ -4,8 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-10
-**Last commit:** `5ac4e90` (`feat(supervisor): SystemdUser Linux backend with real systemctl --user driver`)
+**Last updated:** 2026-05-08
+**Last commit:** `e5d20e6` (`gitignore modified to sync skills, nextsession skill added`) — macOS LaunchAgents supervisor session pending commit
 **Branch:** `main`
 
 ---
@@ -24,13 +24,14 @@
 hhagent (Rust workspace, 6 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + bin (skeleton main); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (now wraps in systemd-run --scope cgroup) + MacosSeatbelt
-├── supervisor         hhagent-supervisor: SystemdUser (Linux: real install/start/stop/status/uninstall via systemctl --user); macOS LaunchAgent backend still NotYetImplemented
+├── supervisor         hhagent-supervisor: SystemdUser (Linux: real install/start/stop/status/uninstall via systemctl --user) + LaunchAgents (macOS: real lifecycle via launchctl bootstrap/bootout/print in gui/<uid> domain)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` is green: 96 tests on Linux, 0 skipped, 0 failed.**
+**`cargo test --workspace` on macOS: 83 tests, 0 skipped, 0 failed.**
+*Linux is unchanged this session (the macOS code is `cfg(target_os = "macos")`-gated); Linux test count was 96 last session and the supervisor unit/smoke tests there still gate via `cfg(target_os = "linux")`.*
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -44,8 +45,10 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
-| `supervisor` unit | 27 | `build_unit_file` shape (14 tests: section order, Description, ExecStart program+args, arg quoting + escape of `"`/`\`, Environment ordering, Environment value quoting, WorkingDirectory present/absent, log redirects, keep_alive Restart=on-failure, no-Restart when keep_alive=false, TimeoutStopSec always, [Install] WantedBy=default.target); `validate_service_name` (6 tests: typical names, empty, traversal, dot/dash prefix, overlong, whitespace+specials); driver against custom units_dir (7 tests: install writes file, rejects relative program, rejects invalid name, creates units_dir, uninstall removes file, uninstall idempotent, status NotInstalled when absent) |
-| `supervisor` integration (`systemd_user_smoke`) | 2 | **real** `systemctl --user` round-trip: install → daemon-reload → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled, with RAII cleanup guard so a panic does not leave residue in `~/.config/systemd/user/`; invalid name rejected before any systemctl call |
+| `supervisor` unit (linux) | 27 | `build_unit_file` shape (14 tests: section order, Description, ExecStart program+args, arg quoting + escape of `"`/`\`, Environment ordering, Environment value quoting, WorkingDirectory present/absent, log redirects, keep_alive Restart=on-failure, no-Restart when keep_alive=false, TimeoutStopSec always, [Install] WantedBy=default.target); `validate_service_name` (6 tests: typical names, empty, traversal, dot/dash prefix, overlong, whitespace+specials); driver against custom units_dir (7 tests: install writes file, rejects relative program, rejects invalid name, creates units_dir, uninstall removes file, uninstall idempotent, status NotInstalled when absent) |
+| `supervisor` unit (macos) | 35 | `build_plist` shape (14 tests: XML preamble + DOCTYPE, Label, ProgramArguments order, XML-escaping of `<`, `>`, `&`, `"`, `'` in args, EnvironmentVariables presence/order/omission-when-empty, WorkingDirectory present/absent, log redirects, RunAtLoad=true unconditional, KeepAlive=true/false mirror of spec, ExitTimeOut always, Label XML-escaped); `validate_service_name` (6 tests: typical names incl. reverse-DNS like `org.hhagent.core`, empty, traversal, dot/dash prefix, overlong, whitespace+specials); helpers (7 tests: `xml_escape` predefined entities + Unicode passthrough, `parse_print_state` indented/multi-word/absent, `is_no_such_service_error` phrases, `user_domain_target` `gui/<digits>` shape); driver against custom agents_dir (8 tests: install writes plist, rejects relative program, rejects invalid name, rejects relative working_dir, creates agents_dir, uninstall removes plist, uninstall idempotent, status NotInstalled when absent) |
+| `supervisor` integration (`systemd_user_smoke`, linux) | 2 | **real** `systemctl --user` round-trip: install → daemon-reload → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled, with RAII cleanup guard so a panic does not leave residue in `~/.config/systemd/user/`; invalid name rejected before any systemctl call |
+| `supervisor` integration (`launchd_agents_smoke`, macos) | 4 | **real** `launchctl bootstrap gui/<uid>` round-trip against `~/Library/LaunchAgents/`: install → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled; idempotent `start` after start (status-first check via `launchctl print`, no version-specific error-string parsing); idempotent `stop` against not-bootstrapped agent; invalid name rejected before any launchctl call. RAII guard cleans up plist file + `bootout` on panic; tests serialised with a static `Mutex` because the GUI launchd domain is a shared global resource. `[SKIP]` line on hosts where the GUI domain is unreachable (SSH-only sessions). |
 
 Earlier-session note (kept for context): `LinuxBwrap::probe()` was once
 missing the `/lib*` symlinks the dynamic linker needs, so
@@ -68,7 +71,138 @@ on the user's DGX Spark. Other Linux hosts may need
 `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses
 `sandbox-exec` (no setup needed; ships with the OS).
 
-## Recently completed (this session, 2026-05-10)
+## Recently completed (this session, 2026-05-08)
+
+**Phase 0 cont. — macOS service supervisor (`hhagent-supervisor::launchd_agents`).**
+
+Cross-platform parity with the Linux `SystemdUser` backend. The supervisor
+crate now ships real install/start/stop/status/uninstall on both
+operating systems. `default_supervisor()` returns `LaunchAgents::new()`
+on macOS and `SystemdUser::new()` on Linux; only "other Unix" still
+falls through to the `NotYetImplemented` placeholder.
+
+- **API touch-ups in `supervisor/src/lib.rs`:** module gate
+  `#[cfg(target_os = "macos")] pub mod launchd_agents`; `default_supervisor`
+  branches on three cases (Linux / macOS / other) instead of two; the
+  `NotYetImplemented` placeholder is now correctly cfg-gated to
+  *non*-Linux-*non*-macOS Unixes. The `ServiceSpec.name` doc-comment
+  is updated to reflect that file basename = `<name>.plist` on macOS
+  (not the previously-suggested `org.hhagent.<name>.plist` auto-prefix
+  scheme). Trait + spec are otherwise unchanged.
+- **New module `supervisor/src/launchd_agents.rs` (~700 lines, ~280
+  of those in the test block):**
+  - **Pure `build_plist(spec) -> String`** — emits a deterministic
+    XML LaunchAgent in fixed key order: `Label`, `ProgramArguments`,
+    `EnvironmentVariables` (only when non-empty, mirroring systemd's
+    `--clean-env` shape), `WorkingDirectory` / `StandardOutPath` /
+    `StandardErrorPath` (only when set), `RunAtLoad=true`
+    (unconditional — see "Why RunAtLoad is always true" below),
+    `KeepAlive` (mirrors `spec.keep_alive`), `ExitTimeOut=10`
+    (matches systemd's `TimeoutStopSec=10` so behaviour is uniform
+    across OSes). All free-form strings (`name`, args, env keys/values,
+    paths) flow through `xml_escape` for the five predefined XML
+    entities (`&`, `<`, `>`, `"`, `'`).
+  - **Pure `validate_service_name(&str)` helper** — same character
+    class as the Linux side (`[A-Za-z0-9._-]`, no leading `.` or `-`,
+    max 200 chars, no `.`/`..`). Identical rule set on both backends
+    so a single user-facing service name is portable to either OS
+    without a "rename for macOS" step. Includes tests for typical
+    reverse-DNS labels like `org.hhagent.core`.
+  - **`LaunchAgents` driver** — `new()` resolves `~/Library/LaunchAgents/`
+    from `$HOME`; `with_agents_dir(path)` is the test seam that lets
+    unit tests exercise the file-writing half against a temp dir
+    without touching the live GUI launchd domain. `install` validates
+    the spec (program/working_dir/log paths must be absolute), creates
+    the agents dir if missing, atomically writes `<name>.plist`
+    (write-to-tmp + `fsync` + `rename`). Unlike the Linux side,
+    `install` never calls `launchctl` — there is no separate
+    "daemon-reload" step on macOS; `bootstrap` *is* the load step
+    and it's invoked from `start`. `start` checks `is_loaded_in_domain`
+    via `launchctl print <target>` exit code, returns Ok if already
+    bootstrapped (idempotent), otherwise `launchctl bootstrap gui/<uid>
+    <plist-path>`. `stop` runs `launchctl bootout gui/<uid>/<label>`
+    and swallows the "no such service" error so re-stops are
+    idempotent. `uninstall` is best-effort about `bootout` (skipped
+    entirely for custom agents_dir to prevent name collisions with
+    real installed agents) then removes the plist file. `status`
+    short-circuits to `NotInstalled` when the file is missing,
+    otherwise parses the `state = <word>` line out of `launchctl
+    print` stdout (`running` → `Active`, anything else → `Inactive`,
+    matching the Linux backend's liberal mapping).
+  - **`probe()`** — `launchctl print-disabled gui/<uid>`; succeeds
+    silently or returns `SupervisorError::Probe` with a hint
+    explaining that the GUI domain needs an active console login
+    (SSH-only sessions can't reach it).
+  - **35 unit tests** — see suite table for the breakdown.
+- **New `supervisor/tests/launchd_agents_smoke.rs` (~200 lines, 4 tests):**
+  - `install_start_status_stop_uninstall_round_trip` — full
+    real-launchctl path against `~/Library/LaunchAgents/` with a
+    `TestAgentGuard` whose Drop calls `uninstall`. Service body is
+    `/bin/sleep 30`; polls `status()` for the Active/Inactive
+    transitions (no flaky sleeps).
+  - `start_after_install_is_idempotent` — calls `start` twice,
+    proving the status-first idempotency check works (avoids the
+    parsing-version-specific-bootstrap-error trap discussed below).
+  - `stop_when_not_started_is_idempotent` — calls `stop` against
+    an agent that was installed but never started; `bootout`'s
+    "no such service" error is swallowed, `stop` returns Ok.
+  - `invalid_name_is_rejected_before_any_launchctl_call` — pure
+    path, runs even on hosts where the GUI domain is unreachable.
+  - **All four smoke tests share `~/Library/LaunchAgents/` and the
+    GUI launchd domain — both global resources — so they're
+    serialised with a `static OnceLock<Mutex<()>>` acquired at the
+    top of each test.** Without this, parallel runs produced
+    flakes where one test's mid-flight `bootstrap` interfered with
+    another test's atomic plist write (the tmp file would vanish
+    before rename). Cargo's default workspace-wide parallelism
+    is otherwise preserved.
+
+**Test count:** 96 → 96 on Linux (no Linux files touched), 44 → 83 on
+macOS (+35 unit, +4 smoke). No existing test changed.
+
+**Why RunAtLoad is always true.** `launchctl bootstrap` only runs the
+program when `RunAtLoad=true`; with `RunAtLoad=false` the agent loads
+into the domain but sits dormant waiting for a demand-driven trigger
+that hhagent doesn't use. Our public API contract is "install + start
+runs the program," so the builder pins `RunAtLoad=true` regardless of
+what the caller might set on the spec. There's a unit test
+(`build_plist_run_at_load_is_always_true`) that pins this invariant.
+
+**Idempotent `start` via status-first, not error-parse.** First TDD
+pass tried `match run_launchctl(&["bootstrap", ...]) { Err(Backend(msg))
+if is_already_loaded_error(&msg) => Ok(()), ... }` with substring
+matching for `"already loaded"` etc. macOS 26.4's actual response to a
+double-bootstrap on this host is `"Bootstrap failed: 5: Input/output
+error"` (exit 5 / EIO) — no "already loaded" anywhere in the message.
+Apple's launchctl error strings vary across macOS versions and even
+across error paths within a single version, so substring matching is
+brittle. Replaced with `is_loaded_in_domain(target)` — runs `launchctl
+print <target>` and checks the exit code (0 = bootstrapped, non-zero
+= not in domain). Stable across versions because we don't parse the
+verbose `print` output, just the exit code. Verified by the
+`start_after_install_is_idempotent` smoke test.
+
+**Why uninstall skips bootout for custom agents_dir.** When tests
+construct `LaunchAgents::with_agents_dir(temp_dir)`, the unit-tested
+`uninstall` path runs `bootout gui/<uid>/<name>` against the *live*
+GUI domain even though the plist itself is in a temp dir. If a test
+name happened to collide with a real installed agent, that would
+silently bootout someone else's service. Fixed by checking
+`is_default_agents_dir()` before any launchctl call — for custom
+dirs, uninstall is purely a file removal. Mirrors the Linux backend's
+"only daemon-reload when writing into the canonical dir" pattern.
+
+**`hhagent-supervisor-test-` prefix discipline.** The smoke tests name
+their plist `hhagent-supervisor-test-{pid}-{nanos}.plist` — uniquely
+greppable so leftovers from a hard crash can be cleaned up with
+`find ~/Library/LaunchAgents -name 'hhagent-supervisor-test-*'`.
+Verified post-test: zero residue (`ls ~/Library/LaunchAgents/ | grep
+hhagent` returns nothing; `launchctl print-disabled gui/$(id -u) |
+grep hhagent` agrees).
+
+---
+
+## Recently completed (previous session, 2026-05-10)
 
 **Phase 0 cont. — Linux service supervisor scaffold (`hhagent-supervisor::systemd_user`).**
 
@@ -152,7 +286,7 @@ returns nothing; `systemctl --user list-units` agrees).
 
 ---
 
-## Recently completed (previous session, 2026-05-09)
+## Recently completed (2026-05-09)
 
 **Phase 0 hardening — final item: cgroup v2 CPU/memory/tasks caps via `systemd-run --user --scope`.**
 
@@ -507,9 +641,13 @@ don't get forgotten):
 **Phase 0 hardening is now complete on Linux.** All items in the
 "Phase 0 hardening — Defence in depth (Linux)" ROADMAP section are
 ticked. Phase 0b (macOS Seatbelt) is done. The Linux supervisor
-scaffold landed this session. Remaining work to close out Phase 0:
-Postgres bring-up, the macOS LaunchAgent supervisor backend, and the
-first concrete `hhagent.service` unit wiring core into the supervisor.
+scaffold (2026-05-10) and the macOS LaunchAgents supervisor (this
+session) are both real. **The supervisor crate now has cross-platform
+parity.** Remaining work to close out Phase 0: Postgres bring-up,
+the first concrete `hhagent.service` unit wiring core into the
+supervisor, and the supervisor "auto-restart with backoff on worker
+crash" item (currently partial — `keep_alive=true` ⇒ unconditional
+restart on either OS, no exponential backoff yet).
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -522,6 +660,8 @@ first concrete `hhagent.service` unit wiring core into the supervisor.
 ### Option F — workspace+worker e2e test  *(SHIPPED 2026-05-08 — see "Recently completed")*
 
 ### Option C1 — Linux supervisor scaffold  *(SHIPPED 2026-05-10 — see "Recently completed")*
+
+### Option C3 — macOS LaunchAgent supervisor backend  *(SHIPPED 2026-05-08 — see "Recently completed")*
 
 ### Option C2 — Phase 0 cont.: Postgres bring-up (private user-instance)
 
@@ -557,23 +697,17 @@ auth over UDS. Cleaner containment than coupling to a system PG.)
   PG version. If not ready, defer graph traversal to Phase 1 too —
   Phase 0 only needs the schema + audit log.
 
-### Option C3 — macOS LaunchAgent supervisor backend
+### Option C4 — wire core into the supervisor (`hhagent.service` / `org.hhagent.core.plist`)
 
-Cross-platform parity with C1. Mirror the pattern: pure
-`build_plist(spec) -> String` + `LaunchAgents` driver wrapping
-`launchctl bootstrap gui/<uid>` and `launchctl bootout`. Plist is
-in `~/Library/LaunchAgents/com.hhagent.<name>.plist`. Map `keep_alive`
-→ `KeepAlive=true`, env → `EnvironmentVariables` dict, etc.
-Integration test mirrors `systemd_user_smoke.rs` with strong cleanup
-discipline (LaunchAgents are persistent across reboots).
-
-### Option C4 — wire core into the supervisor (`hhagent.service`)
-
-Now that the supervisor abstraction is real, ship a typed helper
+Now that both supervisor backends are real, ship a typed helper
 `hhagent_supervisor::specs::core_service_spec(binary, log_dir) ->
 ServiceSpec`. Smallest possible glue; one integration test in `core`
 that builds the spec, installs it, starts it, observes the daemon's
-single log line, stops + uninstalls. Independent of the PG work.
+single log line, stops + uninstalls. **Cross-platform out of the box** —
+the test runs against `default_supervisor()` so the same code exercises
+SystemdUser on Linux and LaunchAgents on macOS. Independent of the PG work
+(Option C2 below). Probably the smallest next-pickup; closes the
+"hhagent.target / first concrete service" item on the ROADMAP.
 
 ### Option G — make `cpu_quota_pct`/`tasks_max` policy-driven + setrlimit-based `cpu_ms` enforcement  ([#6](https://github.com/hherb/hhagent/issues/6))
 

@@ -13,3 +13,8 @@ readme.workspace       = true
 serde     = { workspace = true }
 thiserror = { workspace = true }
 tracing   = { workspace = true }
+
+# macOS-only: the LaunchAgents backend needs `getuid()` to build the
+# `gui/<uid>` domain target for `launchctl bootstrap` / `bootout`.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
