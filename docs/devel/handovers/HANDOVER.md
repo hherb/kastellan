@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-09
-**Last commit:** *bumped at end of session — see checklist*
+**Last commit:** `3cea642` (`feat(sandbox): cgroup v2 caps via systemd-run --user --scope wrapper`)
 **Branch:** `main`
 
 ---
