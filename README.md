@@ -1,5 +1,9 @@
 # hhagent
 
+<p align="center">
+  <img src="assets/hhagent_logo_transparent.png" alt="hhagent logo" width="280">
+</p>
+
 A personal, always-on agentic system designed from the ground up for security and vendor neutrality.
 
 ## What it is
