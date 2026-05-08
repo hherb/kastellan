@@ -4,8 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-08
-**Last commit:** `50a06ec` (`test(core): workspace+worker e2e + BASE_ALLOW for GNU file copy`)
+**Last updated:** 2026-05-09
+**Last commit:** *bumped at end of session — see checklist*
 **Branch:** `main`
 
 ---
@@ -23,21 +23,21 @@
 ```
 hhagent (Rust workspace, 6 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + bin (skeleton main); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
-├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap + MacosSeatbelt
+├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (now wraps in systemd-run --scope cgroup) + MacosSeatbelt
 ├── supervisor         hhagent-supervisor: stub (NotYetImplemented)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` is green: 56 tests on Linux, 0 skipped, 0 failed.**
+**`cargo test --workspace` is green: 67 tests on Linux, 0 skipped, 0 failed.**
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
 | `protocol` unit | 3 | dispatch, parse-error fallback, method-not-found |
-| `sandbox` unit (linux) | 6 | bwrap argv builder shape |
+| `sandbox` unit (linux) | 16 | bwrap argv builder shape (6) + cgroup `systemd-run` argv builder shape: starts with `systemd-run`, uses `--user --scope --quiet --collect`, sets `MemoryMax`+`MemorySwapMax=0` from policy, omits both when `mem_mb=0`, defense-in-depth `CPUQuota=200%` + `TasksMax=64` defaults, ends with `--` separator, no inner-program leakage, 4 `-p` flags total (10) |
 | `sandbox` unit (macos) | 13 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation |
-| `sandbox` integration (`linux_smoke`) | 6 | **real** bwrap: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected |
+| `sandbox` integration (`linux_smoke`) | 7 | **real** bwrap+cgroup: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected, **mem_burner allocating 256 MiB under `MemoryMax=32M` is OOM-killed by the kernel** |
 | `sandbox` integration (`macos_smoke`) | 8 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny` |
 | `core` unit | 16 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
@@ -66,7 +66,78 @@ on the user's DGX Spark. Other Linux hosts may need
 `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses
 `sandbox-exec` (no setup needed; ships with the OS).
 
-## Recently completed (this session, 2026-05-08)
+## Recently completed (this session, 2026-05-09)
+
+**Phase 0 hardening — final item: cgroup v2 CPU/memory/tasks caps via `systemd-run --user --scope`.**
+
+The Linux backend now wraps every `bwrap` invocation in `systemd-run
+--user --scope --quiet --collect -p MemoryMax=Nm -p MemorySwapMax=0 -p
+CPUQuota=200% -p TasksMax=64 -- bwrap ...`. systemd-run is the
+**outer** process so the cgroup is in place *before* `bwrap` creates
+the unshare-all namespace — the worker is born inside the cap, never
+outside it. With `--scope` the wrapped command runs in the foreground
+with stdio inherited (mandatory for JSON-RPC over stdio); `--service`
+would have detached and broken the protocol layer.
+
+- New module `sandbox/src/linux_cgroup.rs` (~300 lines, well under the
+  500-line guideline). Pure `build_systemd_run_argv(&policy) ->
+  Vec<String>` returning the argv up to and including the trailing
+  `--` separator. Caller (`linux_bwrap::spawn_under_policy`) appends
+  the bwrap argv directly after. 10 unit tests cover each property and
+  the omit-when-`mem_mb=0` path.
+- New `cgroup_probe()` runs `systemd-run --user --scope --quiet
+  --collect /usr/bin/true`. `LinuxBwrap::probe()` now calls both the
+  bwrap probe and the cgroup probe and only returns Ok when **all**
+  containment layers are available — fail-closed defense-in-depth: a
+  host without a live user systemd manager doesn't run sandbox tests
+  in degraded mode, it skips them entirely (so green CI without
+  containment is impossible).
+- `LinuxBwrap::spawn_under_policy` composes the two argv builders:
+  `Command::new("systemd-run")`, args from `build_systemd_run_argv`,
+  then `bwrap` + the existing bwrap argv.
+- New fixture `sandbox/tests/fixtures/mem_burner.rs` (~60 lines, no
+  deps): allocates `--mb N` MiB of `Vec<u8>` and **writes one byte per
+  4 KiB page** so the kernel actually faults the pages in (without
+  the touch they'd stay copy-on-write zero pages and never count
+  against `memory.max`). Built via a `[[bin]]` stanza in
+  `sandbox/Cargo.toml` mirroring the existing `net_probe` pattern.
+- New regression test
+  `sandbox/tests/linux_smoke.rs::worker_with_low_mem_max_is_oom_killed`:
+  spawns mem_burner under a `mem_mb=32` policy with
+  `--mb 256` (an 8× overrun). The cgroup OOM killer SIGKILLs the
+  inner process; the parent observes a non-success exit. This test is
+  what would have caught the `MemorySwapMax=0` gap that caused the
+  first iteration to fail.
+
+**`MemorySwapMax=0` discovery (and why it must be paired with
+`MemoryMax`).** First TDD pass set only `MemoryMax=32M`; mem_burner
+allocated 256 MiB and exited cleanly. Diagnosis: this host has 15 GiB
+of swap, and without `MemorySwapMax=0` the kernel pages overruns to
+swap rather than killing the cgroup. That's not just a test
+inconvenience — it means a runaway worker would burn host I/O for
+many seconds, degrading the system, before any cap fired. Pairing
+`MemorySwapMax=0` with `MemoryMax` makes the cap honest: the kernel
+counts swap against the cgroup, so OOM fires the moment RSS hits the
+limit. Documented in the linux_cgroup.rs module-level doc and tested
+by `argv_pairs_memory_max_with_memory_swap_max_zero`.
+
+**Defense-in-depth defaults (not yet policy-driven).** `CPUQuota=200%`
+(at most 2 CPUs) and `TasksMax=64` (fork-bomb resistance) are
+hardcoded. Tunable `cpu_quota_pct` / `tasks_max` / `setrlimit`-based
+`cpu_ms` enforcement is filed as a follow-up GitHub issue rather than
+shipped this session (would require a `SandboxPolicy` schema change
+that would touch every test fixture).
+
+`docs/threat-model.md` defense-in-depth table grows a "Resource caps"
+row pointing at `linux_cgroup.rs`; the negative-tests-shipped list
+gains the OOM-kill row.
+
+Test count: 56 → 67 (+10 unit, +1 integration). No existing test
+changed.
+
+---
+
+## Recently completed (previous session, 2026-05-08)
 
 **Phase 0 polish — workspace+worker integration test + seccomp BASE_ALLOW broadening.**
 
@@ -347,8 +418,10 @@ don't get forgotten):
 
 ## Next TODO (pick one)
 
-Phase 0 hardening (stages 1 + 2) is done on Linux. Phase 0b (macOS) is
-done. Workspace + wall-clock watchdog shipped this session. What remains:
+**Phase 0 hardening is now complete on Linux.** All items in the
+"Phase 0 hardening — Defence in depth (Linux)" ROADMAP section are
+ticked. Phase 0b (macOS Seatbelt) is done. The next layer of work
+shifts toward making the system *deployable*.
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -356,41 +429,14 @@ done. Workspace + wall-clock watchdog shipped this session. What remains:
 
 ### Option D — Phase 0 polish: per-task scratch + wall-clock kill  *(SHIPPED 2026-05-08 — `9333311`, `57edfb2`)*
 
-### Option E — cgroup v2 CPU/memory caps via `systemd-run --user --scope` (Linux)
+### Option E — cgroup v2 CPU/memory caps  *(SHIPPED 2026-05-09 — see "Recently completed")*
 
-(Last remaining Phase 0 hardening item.) Today the only resource
-ceiling on a worker is the wall-clock watchdog plus `policy.cpu_ms` /
-`policy.mem_mb` (which are not yet enforced — the values are carried
-in `SandboxPolicy` but no backend reads them). Linux can enforce both
-ceilings via cgroup v2 by wrapping `bwrap` in `systemd-run --user
---scope --uid=$UID --slice=hhagent.slice -p MemoryMax=Nm
--p CPUQuota=N% -p TasksMax=N`.
-
-- New file: `sandbox/src/linux_cgroup.rs` — pure helper that builds the
-  `systemd-run` argv from `SandboxPolicy.cpu_ms` + `mem_mb` + a
-  derived task name. Keep it separate from `linux_bwrap.rs` so the
-  argv builder stays unit-testable.
-- `LinuxBwrap::spawn_under_policy` invokes `systemd-run --scope` as
-  the *outer* process and `bwrap` as the inner — order matters: the
-  cgroup must be in place before the namespace is created so the
-  worker is born inside the cap.
-- Probe (`LinuxBwrap::probe`) gains a check that `systemctl --user
-  status` works (i.e. the user's session bus is up and the
-  `systemd-run` path is available).
-- Negative test: a worker that allocates more than `mem_mb` is killed
-  with OOM signal; a worker that burns CPU above quota is throttled.
-  These need a small fixture binary; the `lockdown_probe` pattern
-  works.
-- macOS parity: there's no equivalent first-class API. macOS Tahoe's
-  Apple `container` framework can do this via a micro-VM, but that's
-  a separate roadmap item. Alternative: `setrlimit(RLIMIT_AS,
-  RLIMIT_CPU)` from the worker prelude before exec — much weaker but
-  cross-platform. Pick one for this session, leave the other as a
-  follow-up.
+### Option F — workspace+worker e2e test  *(SHIPPED 2026-05-08 — see "Recently completed")*
 
 ### Option C — Phase 0 cont.: supervisor + Postgres bring-up (Linux)
 
-(Unchanged from previous handover — closes the Phase 0 deployment story.)
+(Closes the Phase 0 deployment story. Now the headline next-pickup
+since cgroup containment is done.)
 
 - `hhagent-supervisor::systemd::SystemdUser` writing unit files to `~/.config/systemd/user/` and shelling out to `systemctl --user`
 - A first concrete unit: `hhagent.service` for the core, `hhagent-postgres.service` for the DB (or rely on system PG and just create a role+DB)
@@ -400,7 +446,41 @@ ceilings via cgroup v2 by wrapping `bwrap` in `systemd-run --user
 - pg_search is AGPL-3.0 — perfect license-fit but verify build is fine on aarch64.
 - Apache AGE on Postgres 17 may need a recent build; check supported PG version.
 
-### Option F — workspace+worker e2e test  *(SHIPPED 2026-05-08 — see "Recently completed")*
+### Option G — make `cpu_quota_pct`/`tasks_max` policy-driven + setrlimit-based `cpu_ms` enforcement  ([#6](https://github.com/hherb/hhagent/issues/6))
+
+Smaller follow-up to Option E. Today the cgroup layer hardcodes
+`CPUQuota=200%` and `TasksMax=64`; `policy.cpu_ms` is documented but
+unenforced. To wire them up:
+
+- Extend `SandboxPolicy` with `cpu_quota_pct: Option<u32>` and
+  `tasks_max: Option<u64>` (both `#[serde(default)]` so existing
+  serialized policies still parse). This will require updating every
+  test fixture that constructs `SandboxPolicy` literally — consider
+  adding a `Default` impl for `SandboxPolicy` first to avoid that
+  churn.
+- Plumb the new fields through `linux_cgroup::build_systemd_run_argv`
+  (use the policy value when `Some`, the current hardcoded default
+  otherwise).
+- For `cpu_ms`, the natural enforcement is `setrlimit(RLIMIT_CPU)`
+  from the worker prelude before `exec(2)` — cgroup v2 has no direct
+  CPU-budget primitive. Add a new prelude function
+  `apply_rlimits(policy)` and call it from `serve_stdio` before
+  Landlock/seccomp lock_down (rlimit applies process-wide; ordering
+  is harmless but document it).
+- macOS parity: same `setrlimit` approach in the prelude; will work
+  unchanged because rlimits are POSIX. The cgroup-shaped `mem_mb` cap
+  on macOS still requires the future micro-VM backend or
+  `RLIMIT_AS` (which has known false-positive risks for malloc-heavy
+  workers — flag in the issue).
+
+### Open follow-up issues (filed but not picked)
+
+- [#1](https://github.com/hherb/hhagent/issues/1) — narrow macOS `(allow mach-lookup)` to a `global-name` allowlist
+- [#2](https://github.com/hherb/hhagent/issues/2) — evaluate `setpgid` → `setsid` for stronger session isolation on macOS
+- [#3](https://github.com/hherb/hhagent/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64
+- [#4](https://github.com/hherb/hhagent/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added
+- [#5](https://github.com/hherb/hhagent/issues/5) — audit `BASE_ALLOW` against a fixture of common worker binaries
+- [#6](https://github.com/hherb/hhagent/issues/6) — tunable `cpu_quota_pct`/`tasks_max` policy fields + `setrlimit`-based `cpu_ms` enforcement (Option G above)
 
 ---
 

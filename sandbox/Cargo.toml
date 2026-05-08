@@ -22,3 +22,11 @@ name = "net_probe"
 path = "tests/fixtures/net_probe.rs"
 test = false
 doc = false
+
+# Test fixture: memory-allocator probe used by linux_smoke's cgroup
+# OOM-kill test. Built into target/debug/mem_burner by `cargo build`.
+[[bin]]
+name = "mem_burner"
+path = "tests/fixtures/mem_burner.rs"
+test = false
+doc = false

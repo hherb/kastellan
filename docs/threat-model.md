@@ -49,6 +49,7 @@ the best containment available without entitlements.
 | Policy gate (core) | Static allow/deny per `(tool, args, data class)` before any tool spawn |
 | Parent-side sandbox (bwrap / Seatbelt) | Namespace isolation, FS bind-mount, network unshare. Applied by `core::tool_host`. |
 | Worker-side sandbox (Landlock + seccomp-bpf) | Second, finer kernel filter installed by the worker on itself via [`hhagent-worker-prelude`](../workers/prelude/). One-way: cannot be relaxed once `restrict_self`/`apply_filter` returns. |
+| Resource caps (Linux: cgroup v2 via `systemd-run --user --scope`) | Hard `MemoryMax` + `MemorySwapMax=0` from `policy.mem_mb`; defense-in-depth `CPUQuota=200%` and `TasksMax=64` defaults. Wraps `bwrap` so the cgroup is in place before the worker namespace is created. Applied by [`sandbox::linux_cgroup`](../sandbox/src/linux_cgroup.rs). |
 | Egress proxy       | Per-worker host allowlist, TLS pinning, audit-log every request |
 | Postgres role isolation | Workers cannot reach Postgres at all; only the core has the DB connection |
 | Append-only audit log   | Every tool call, LLM call, channel message, memory write |
@@ -70,6 +71,7 @@ Already shipped (Phase 0 + Phase 0 hardening stage 1):
 - `workers/prelude/tests/landlock_smoke.rs` — write to non-allowlisted path is denied with EACCES; allowlisted scratch writes succeed; reads under `/usr` continue to work.
 - `workers/prelude/tests/seccomp_smoke.rs` — `unshare(CLONE_NEWUSER)` and `mount(...)` are killed with `SIGSYS`; `getpid()` survives.
 - `sandbox/tests/macos_smoke.rs` — Seatbelt denies `/etc/master.passwd`, `/Users/...`, raw `/dev/disk0`, and network under `Net::Deny`.
+- `sandbox/tests/linux_smoke.rs::worker_with_low_mem_max_is_oom_killed` — a worker that allocates 256 MiB under `MemoryMax=32M` is OOM-killed by the kernel. Closes the cgroup-resource layer.
 
 ## Open items
 

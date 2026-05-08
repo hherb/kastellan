@@ -10,6 +10,8 @@
 
 #[cfg(target_os = "linux")]
 pub mod linux_bwrap;
+#[cfg(target_os = "linux")]
+pub mod linux_cgroup;
 #[cfg(target_os = "macos")]
 pub mod macos_seatbelt;
 

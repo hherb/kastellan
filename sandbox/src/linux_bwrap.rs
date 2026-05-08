@@ -11,10 +11,14 @@
 //!   - `--clearenv` so host env vars don't leak in
 //!
 //! Not yet (deferred to Phase 0 hardening, tracked in `docs/threat-model.md`):
-//!   - Landlock LSM as a second FS-allowlist layer
-//!   - seccomp-bpf syscall filter
-//!   - cgroup CPU/memory caps (will use `systemd-run --user` from the supervisor)
 //!   - Per-host network allowlist (handled by the egress proxy, not bwrap)
+//!
+//! Wired in from sibling modules:
+//!   - Landlock LSM as a second FS-allowlist layer — `workers/prelude::landlock_lock`
+//!   - seccomp-bpf syscall filter — `workers/prelude::seccomp_lock`
+//!   - cgroup v2 CPU/memory/tasks caps — [`crate::linux_cgroup`], wrapped
+//!     **outside** `bwrap` here so the cgroup is in place before the
+//!     unshare-all namespace is created.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -79,24 +83,31 @@ impl LinuxBwrap {
             .output()
             .map_err(|e| SandboxError::Backend(format!("could not spawn bwrap: {e}")))?;
 
-        if output.status.success() {
-            return Ok(());
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let hint = if stderr.contains("setting up uid map")
+                || stderr.contains("Operation not permitted")
+                || stderr.contains("RTM_NEWADDR")
+            {
+                "\n\nThis kernel is restricting unprivileged user namespaces (Ubuntu 24.04+ default).\n\
+                 Install the AppArmor profile: scripts/linux/install-bwrap-apparmor-profile.sh \
+                 (one-time, sudo required)."
+            } else {
+                ""
+            };
+            return Err(SandboxError::Backend(format!(
+                "bwrap probe failed: {}{hint}",
+                stderr.trim()
+            )));
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let hint = if stderr.contains("setting up uid map")
-            || stderr.contains("Operation not permitted")
-            || stderr.contains("RTM_NEWADDR")
-        {
-            "\n\nThis kernel is restricting unprivileged user namespaces (Ubuntu 24.04+ default).\n\
-             Install the AppArmor profile: scripts/linux/install-bwrap-apparmor-profile.sh \
-             (one-time, sudo required)."
-        } else {
-            ""
-        };
-        Err(SandboxError::Backend(format!(
-            "bwrap probe failed: {}{hint}",
-            stderr.trim()
-        )))
+
+        // Defense-in-depth requires the cgroup ceiling layer too: a
+        // failed probe here means we can't enforce MemoryMax / CPUQuota
+        // / TasksMax, so the sandbox contract is degraded. Fail closed
+        // — `LinuxBwrap::probe` is `Ok` only when *all* layers are
+        // available.
+        crate::linux_cgroup::cgroup_probe()?;
+        Ok(())
     }
 }
 
@@ -115,9 +126,16 @@ impl SandboxBackend for LinuxBwrap {
             }
         }
 
-        let argv = build_argv(policy, program, args);
-        let mut cmd = Command::new("bwrap");
-        cmd.args(&argv[1..]);
+        let bwrap_argv = build_argv(policy, program, args);
+        // systemd-run is the **outer** process; it sets up the cgroup
+        // before bwrap creates the unshare-all namespace. Final shape:
+        //   systemd-run --user --scope ... -- bwrap --unshare-all ... -- <program> <args>
+        let cgroup_argv = crate::linux_cgroup::build_systemd_run_argv(policy);
+
+        let mut cmd = Command::new(&cgroup_argv[0]);
+        cmd.args(&cgroup_argv[1..]);
+        cmd.args(&bwrap_argv);
+
         // stdin is piped so workers speaking JSON-RPC over stdio can be driven
         // by the core. Workers that don't read stdin (one-shot commands like
         // /usr/bin/echo in tests) simply ignore the open pipe.
@@ -125,7 +143,7 @@ impl SandboxBackend for LinuxBwrap {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.spawn()
-            .map_err(|e| SandboxError::Backend(format!("bwrap spawn failed: {e}")))
+            .map_err(|e| SandboxError::Backend(format!("systemd-run+bwrap spawn failed: {e}")))
     }
 }
 

@@ -147,6 +147,73 @@ fn net_is_unreachable_under_deny() {
     );
 }
 
+/// Locate the `mem_burner` test fixture built by the sandbox crate's
+/// `[[bin]]` stanza into `target/debug/mem_burner`. Mirrors the locator
+/// pattern in `core/tests/shell_exec_e2e.rs::worker_binary` so future
+/// readers find one consistent layout.
+fn mem_burner_binary() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest.parent().unwrap().join("target"));
+    target.join("debug").join("mem_burner")
+}
+
+#[test]
+fn worker_with_low_mem_max_is_oom_killed() {
+    // Negative test for the cgroup v2 enforcement layer added on top of
+    // bwrap (see `linux_cgroup.rs`). Strategy:
+    //   1. Build the `mem_burner` fixture into `target/debug/mem_burner`.
+    //   2. Spawn it under a policy whose `mem_mb = 32` so
+    //      `MemoryMax=32M` is set on the transient cgroup scope.
+    //   3. Tell the fixture to allocate **256 MiB** — eight times the
+    //      cap — and touch every page so the kernel actually accounts
+    //      the memory. The cgroup OOM killer fires and the inner
+    //      process is SIGKILL'd.
+    //   4. Assert the parent (`Child` for `systemd-run`) reflects the
+    //      kill: non-success exit. On glibc/Linux the propagated
+    //      signal is SIGKILL (9); we accept any non-success exit so
+    //      the test isn't over-specified to one libc / one systemd
+    //      version.
+    if skip_if_no_userns() {
+        return;
+    }
+    let backend = LinuxBwrap::new();
+    let mem_burner = mem_burner_binary();
+    if !mem_burner.exists() {
+        eprintln!(
+            "\n[SKIP] mem_burner fixture not built at {}; run `cargo build -p hhagent-sandbox`",
+            mem_burner.display()
+        );
+        return;
+    }
+
+    let mut policy = strict_policy();
+    policy.mem_mb = 32; // tight cap; mem_burner will try to use 256 MiB
+    // Bind the fixture binary into the jail so /usr/bin/... isn't the
+    // only thing visible. The fs_read entry resolves to a read-only
+    // single-file bind mount inside bwrap.
+    policy.fs_read.push(mem_burner.clone());
+
+    let mut child = backend
+        .spawn_under_policy(
+            &policy,
+            mem_burner.to_str().expect("path is utf-8"),
+            &["--mb", "256"],
+        )
+        .expect("systemd-run + bwrap should spawn");
+    let status = child.wait().expect("wait");
+
+    assert!(
+        !status.success(),
+        "mem_burner should have been OOM-killed by the cgroup but exited cleanly. \
+         stderr={} \
+         (cgroup MemoryMax=32M was set; if the worker survived allocating 256 MiB \
+         then either the cgroup wrapping is missing or the limit isn't being applied)",
+        read_to_string(&mut child.stderr)
+    );
+}
+
 #[test]
 fn relative_policy_paths_are_rejected() {
     let backend = LinuxBwrap::new();
