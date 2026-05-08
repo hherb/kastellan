@@ -53,10 +53,10 @@ items unlock later ones.
 
 ## Phase 0 cont. — Service supervisor
 
-- [ ] `hhagent-supervisor` Linux backend: `systemd --user` unit generator + `systemctl --user` driver
+- [x] `hhagent-supervisor` Linux backend: `systemd --user` unit generator + `systemctl --user` driver — supervisor scaffold landed 2026-05-10. `supervisor/src/systemd_user.rs`: pure `build_unit_file(spec) -> String` + `validate_service_name` + `SystemdUser` driver (`install`/`start`/`stop`/`uninstall`/`status`) + `probe()` against the live `--user` manager. Unit-file write is atomic (write-to-tmp + fsync + rename). 27 unit tests + 2 smoke tests (real `systemctl --user` round-trip with RAII cleanup guard). `default_supervisor()` now returns `SystemdUser::new()` on Linux.
 - [ ] `hhagent-supervisor` macOS backend: LaunchAgent plist generator + `launchctl bootstrap`
 - [ ] `hhagent.target` that brings up Postgres, inference, core, workers
-- [ ] Auto-restart with backoff on worker crash
+- [ ] Auto-restart with backoff on worker crash (partial: `keep_alive=true` in ServiceSpec → `Restart=on-failure RestartSec=5` in the systemd unit, no exponential backoff yet)
 
 ## Phase 0 cont. — Postgres bring-up
 

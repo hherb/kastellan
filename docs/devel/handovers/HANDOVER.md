@@ -4,8 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-09
-**Last commit:** `3cea642` (`feat(sandbox): cgroup v2 caps via systemd-run --user --scope wrapper`)
+**Last updated:** 2026-05-10
+**Last commit:** `5ac4e90` (`feat(supervisor): SystemdUser Linux backend with real systemctl --user driver`)
 **Branch:** `main`
 
 ---
@@ -24,13 +24,13 @@
 hhagent (Rust workspace, 6 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + bin (skeleton main); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (now wraps in systemd-run --scope cgroup) + MacosSeatbelt
-├── supervisor         hhagent-supervisor: stub (NotYetImplemented)
+├── supervisor         hhagent-supervisor: SystemdUser (Linux: real install/start/stop/status/uninstall via systemctl --user); macOS LaunchAgent backend still NotYetImplemented
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` is green: 67 tests on Linux, 0 skipped, 0 failed.**
+**`cargo test --workspace` is green: 96 tests on Linux, 0 skipped, 0 failed.**
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -44,6 +44,8 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
+| `supervisor` unit | 27 | `build_unit_file` shape (14 tests: section order, Description, ExecStart program+args, arg quoting + escape of `"`/`\`, Environment ordering, Environment value quoting, WorkingDirectory present/absent, log redirects, keep_alive Restart=on-failure, no-Restart when keep_alive=false, TimeoutStopSec always, [Install] WantedBy=default.target); `validate_service_name` (6 tests: typical names, empty, traversal, dot/dash prefix, overlong, whitespace+specials); driver against custom units_dir (7 tests: install writes file, rejects relative program, rejects invalid name, creates units_dir, uninstall removes file, uninstall idempotent, status NotInstalled when absent) |
+| `supervisor` integration (`systemd_user_smoke`) | 2 | **real** `systemctl --user` round-trip: install → daemon-reload → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled, with RAII cleanup guard so a panic does not leave residue in `~/.config/systemd/user/`; invalid name rejected before any systemctl call |
 
 Earlier-session note (kept for context): `LinuxBwrap::probe()` was once
 missing the `/lib*` symlinks the dynamic linker needs, so
@@ -66,7 +68,91 @@ on the user's DGX Spark. Other Linux hosts may need
 `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses
 `sandbox-exec` (no setup needed; ships with the OS).
 
-## Recently completed (this session, 2026-05-09)
+## Recently completed (this session, 2026-05-10)
+
+**Phase 0 cont. — Linux service supervisor scaffold (`hhagent-supervisor::systemd_user`).**
+
+The supervisor crate previously held a `Supervisor` trait + `ServiceSpec`
+struct + a `NotYetImplemented` placeholder; this session grew the trait
+slightly and shipped a real Linux backend.
+
+- **API additions in `supervisor/src/lib.rs`:** new `ServiceStatus` enum
+  (`Active | Inactive | Failed | NotInstalled`), new `Supervisor::status`
+  method, new structured `SupervisorError` variants
+  (`InvalidName`, `Probe`, `Io`; existing `Backend`, `NotImplemented`).
+  `default_supervisor()` now returns `SystemdUser::new()` on Linux and
+  `NotYetImplemented` only on non-Linux. The trait remains `dyn`-safe.
+- **New module `supervisor/src/systemd_user.rs` (~600 lines, well under
+  the 500-line guideline because the test block accounts for ~280 of
+  those):**
+  - **Pure `build_unit_file(spec) -> String`** — emits a deterministic
+    `[Unit] / [Service] / [Install]` unit file. Quotes ExecStart args
+    and Environment values only when the token contains whitespace,
+    `"`, `\`, or is empty; backslash-escapes `"` and `\`. Emits
+    `Restart=on-failure` + `RestartSec=5` only when `keep_alive=true`,
+    always emits `TimeoutStopSec=10` so test teardown can never hang.
+    Mirrors the `linux_bwrap::build_argv` / `linux_cgroup::build_systemd_run_argv`
+    pattern (pure, separately testable from the spawn path).
+  - **Pure `validate_service_name(&str)` helper** — rejects empty,
+    overlong (>200), `.`, `..`, names starting with `.` or `-`, and
+    any character outside `[A-Za-z0-9._-]`. This is the path-traversal
+    + systemd-grammar gate; called by `install`/`start`/`stop`/`uninstall`/`status`.
+  - **`SystemdUser` driver** — `new()` resolves `~/.config/systemd/user/`
+    from `$HOME`; `with_units_dir(path)` is the test seam that lets unit
+    tests exercise the file-writing half against a temp dir without
+    touching the live `--user` manager. `install` validates the spec
+    (program/working_dir/log paths must be absolute), creates the units
+    dir if missing, atomically writes `<name>.service` (write-to-tmp +
+    `fsync` + `rename`), and runs `daemon-reload` *only* when writing
+    into the canonical dir. `uninstall` is best-effort about
+    `stop`/`disable` (so it's idempotent for never-started or
+    never-installed units), removes the file, and reloads. `status`
+    short-circuits to `NotInstalled` when the file is missing, otherwise
+    parses `systemctl --user is-active` stdout (trusting stdout, not the
+    exit code, because `is-active` exits non-zero for inactive units).
+  - **`probe()`** — `systemctl --user show-environment`; succeed silently
+    or return `SupervisorError::Probe` with a hint pointing at
+    `loginctl enable-linger $USER` for headless hosts. Mirrors
+    `sandbox::linux_cgroup::cgroup_probe`.
+  - **27 unit tests** — see the suite table for the full breakdown.
+- **New `supervisor/tests/systemd_user_smoke.rs` (~150 lines, 2 tests):**
+  - `install_start_status_stop_uninstall_round_trip` exercises the full
+    real-systemctl path against `~/.config/systemd/user/` with a
+    `TestUnitGuard` whose `Drop` calls `uninstall` so a panic mid-test
+    does not leave a stale unit file behind. Uses `/usr/bin/sleep 30`
+    as the service body and polls `status()` for the Active/Inactive
+    transitions (no flaky sleeps). Skips with a `[SKIP]` line on hosts
+    where `probe()` fails.
+  - `invalid_name_is_rejected_before_any_systemctl_call` — pure path,
+    runs even on hosts without a user manager. Defensive proof that
+    name validation runs before any side effect.
+
+**Test count:** 67 → 96 (+27 unit, +2 smoke). No existing test changed.
+
+**Atomic-write idiom — write_atomic:** the unit file is written via
+write-to-tmp (`<path>.tmp`) → `fsync` → `rename`. Without this, a
+concurrent `systemctl --user` invocation could (in theory) read a
+half-written unit file during a race. The cost is one extra rename
+syscall per install — negligible — and the observable state is now
+binary: either the old contents or the new ones, never a torn read.
+
+**Why no auto-`enable`:** `install` emits `[Install] WantedBy=default.target`
+so a caller *can* `systemctl --user enable <name>.service` to make the
+service start at session login, but `install` does not call `enable`
+itself. Whether to enable is a policy decision per service (the core
+daemon probably wants it; one-shot test units don't). When we ship the
+first concrete `hhagent.service` we'll make that explicit.
+
+**`hhagent-supervisor-test-` prefix discipline:** the smoke test names
+its unit `hhagent-supervisor-test-{pid}-{nanos}.service` — uniquely
+greppable so leftovers from a hard crash can be cleaned up with
+`find ~/.config/systemd/user/ -name 'hhagent-supervisor-test-*'`. Verified
+post-test: zero residue (`ls ~/.config/systemd/user/ | grep hhagent`
+returns nothing; `systemctl --user list-units` agrees).
+
+---
+
+## Recently completed (previous session, 2026-05-09)
 
 **Phase 0 hardening — final item: cgroup v2 CPU/memory/tasks caps via `systemd-run --user --scope`.**
 
@@ -137,7 +223,7 @@ changed.
 
 ---
 
-## Recently completed (previous session, 2026-05-08)
+## Recently completed (2026-05-08)
 
 **Phase 0 polish — workspace+worker integration test + seccomp BASE_ALLOW broadening.**
 
@@ -319,7 +405,7 @@ distinguishing behavior.
 Total tests after stage 2 on Linux: 43 passed, 0 skipped, 0 failed.
 macOS side untouched (the prelude crate is `cfg(target_os = "linux")`-gated).
 
-## Recently completed (previous session, 2026-05-07)
+## Recently completed (2026-05-07)
 
 **Phase 0b — macOS Seatbelt sandbox backend:**
 
@@ -382,7 +468,7 @@ don't get forgotten):
   coreutils fixture and audit before Phase 4 (`python-exec`) starts adding
   workers that exercise more of the syscall surface.
 
-## Recently completed (this session, 2026-05-06)
+## Recently completed (2026-05-06)
 
 **Phase 0 hardening — stage 1 (Landlock + seccomp + bwrap probe fix):**
 
@@ -420,8 +506,10 @@ don't get forgotten):
 
 **Phase 0 hardening is now complete on Linux.** All items in the
 "Phase 0 hardening — Defence in depth (Linux)" ROADMAP section are
-ticked. Phase 0b (macOS Seatbelt) is done. The next layer of work
-shifts toward making the system *deployable*.
+ticked. Phase 0b (macOS Seatbelt) is done. The Linux supervisor
+scaffold landed this session. Remaining work to close out Phase 0:
+Postgres bring-up, the macOS LaunchAgent supervisor backend, and the
+first concrete `hhagent.service` unit wiring core into the supervisor.
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -433,18 +521,59 @@ shifts toward making the system *deployable*.
 
 ### Option F — workspace+worker e2e test  *(SHIPPED 2026-05-08 — see "Recently completed")*
 
-### Option C — Phase 0 cont.: supervisor + Postgres bring-up (Linux)
+### Option C1 — Linux supervisor scaffold  *(SHIPPED 2026-05-10 — see "Recently completed")*
 
-(Closes the Phase 0 deployment story. Now the headline next-pickup
-since cgroup containment is done.)
+### Option C2 — Phase 0 cont.: Postgres bring-up (private user-instance)
 
-- `hhagent-supervisor::systemd::SystemdUser` writing unit files to `~/.config/systemd/user/` and shelling out to `systemctl --user`
-- A first concrete unit: `hhagent.service` for the core, `hhagent-postgres.service` for the DB (or rely on system PG and just create a role+DB)
-- `db/migrations/0001_init.sql` — `audit_log`, `tasks`, `memories`, `entities`, `relations`. Use `sqlx-cli` for migrations.
+(Now the headline next-pickup. Decided in 2026-05-10 session: a
+**private per-user PG cluster** under `~/.local/share/hhagent/pg/`
+managed by `hhagent-postgres.service`, never network-listen, peer
+auth over UDS. Cleaner containment than coupling to a system PG.)
+
+- `db/initdb.sh` (or a small Rust tool) that runs `initdb -D
+  ~/.local/share/hhagent/pg/data --auth-host=reject --auth-local=peer`
+  on first boot. Idempotent: skip if data dir already initialised.
+- `hhagent-postgres.service` ServiceSpec → install via the new
+  `SystemdUser` supervisor. ExecStart: `/usr/lib/postgresql/<ver>/bin/postgres
+  -D ~/.local/share/hhagent/pg/data -k /run/user/<uid>/hhagent-pg`
+  (UDS dir under XDG_RUNTIME_DIR so socket path is per-session).
+  `Restart=on-failure` makes sense here — the DB is the system's spine.
+- `db/migrations/0001_init.sql` — `audit_log`, `tasks`, `memories`,
+  `entities`, `relations`, `secrets`. Use `sqlx-cli` for the migration
+  runner; integrate into core startup.
+- A small probe in `core` that connects over the UDS, runs migrations,
+  emits an audit-log entry on bring-up.
 
 **Gotchas:**
-- pg_search is AGPL-3.0 — perfect license-fit but verify build is fine on aarch64.
-- Apache AGE on Postgres 17 may need a recent build; check supported PG version.
+- The host has **no Postgres installed at all** today. Decide
+  apt-install (system package, system binaries, user-instance data)
+  vs Docker vs build-from-source. Most pragmatic: install
+  `postgresql-17` (system package), but use only the *binaries* and
+  initdb our own data dir.
+- pg_search is AGPL-3.0 (good license fit) but verify the apt build is
+  available for arm64 noble; if not, defer the BM25 work to Phase 1
+  and start with plain text columns + pgvector.
+- Apache AGE on Postgres 17 may need a recent build; check supported
+  PG version. If not ready, defer graph traversal to Phase 1 too —
+  Phase 0 only needs the schema + audit log.
+
+### Option C3 — macOS LaunchAgent supervisor backend
+
+Cross-platform parity with C1. Mirror the pattern: pure
+`build_plist(spec) -> String` + `LaunchAgents` driver wrapping
+`launchctl bootstrap gui/<uid>` and `launchctl bootout`. Plist is
+in `~/Library/LaunchAgents/com.hhagent.<name>.plist`. Map `keep_alive`
+→ `KeepAlive=true`, env → `EnvironmentVariables` dict, etc.
+Integration test mirrors `systemd_user_smoke.rs` with strong cleanup
+discipline (LaunchAgents are persistent across reboots).
+
+### Option C4 — wire core into the supervisor (`hhagent.service`)
+
+Now that the supervisor abstraction is real, ship a typed helper
+`hhagent_supervisor::specs::core_service_spec(binary, log_dir) ->
+ServiceSpec`. Smallest possible glue; one integration test in `core`
+that builds the spec, installs it, starts it, observes the daemon's
+single log line, stops + uninstalls. Independent of the PG work.
 
 ### Option G — make `cpu_quota_pct`/`tasks_max` policy-driven + setrlimit-based `cpu_ms` enforcement  ([#6](https://github.com/hherb/hhagent/issues/6))
 
