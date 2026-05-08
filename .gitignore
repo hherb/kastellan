@@ -6,7 +6,7 @@ Cargo.lock.bak
 # Editors / IDEs
 .idea/
 .vscode/
-.claude/
+.claude/setting.local.json
 *.swp
 *.swo
 
@@ -37,3 +37,4 @@ venv/
 
 # Local agent artefacts
 audit-*.jsonl
+2026-05-09-000520-since-a-system-reboot-after-update-to-newest-apt.txt
