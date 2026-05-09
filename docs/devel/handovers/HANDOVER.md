@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** `0d3055d` (`refactor(db): post-C2.2 review polish + four parking issues filed`) — bump to the Option-L commit at session-end
+**Last commit:** `78a9ab1` (`feat(db): Option L — hhagent_runtime role split + audit_log REVOKE`)
 **Branch:** `main`
 
 ---
