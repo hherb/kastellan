@@ -212,6 +212,60 @@ fn wait_for_log_match<F: Fn(&str) -> bool>(
     }
 }
 
+/// Read every `audit-*.jsonl` file under `state_dir` (concatenated)
+/// and return the body once `predicate(&body)` is true, or fail with
+/// a verbose error if `timeout` elapses first.
+///
+/// Used to assert that the audit-mirror task has picked up a freshly
+/// written row. The audit-mirror writes to a date-named file inside
+/// `state_dir`, so we don't know the exact filename a priori — but
+/// every existing audit file under the dir is fair game.
+fn wait_for_state_dir_match<F: Fn(&str) -> bool>(
+    state_dir: &Path,
+    predicate: F,
+    timeout: Duration,
+) -> Result<String, String> {
+    let start = Instant::now();
+    loop {
+        let body = read_state_dir_jsonl(state_dir);
+        if predicate(&body) {
+            return Ok(body);
+        }
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "timed out after {:?}; concatenated JSONL body:\n---\n{}\n---",
+                timeout, body
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn read_state_dir_jsonl(state_dir: &Path) -> String {
+    let mut out = String::new();
+    let entries = match std::fs::read_dir(state_dir) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("audit-") && n.ends_with(".jsonl"))
+                .unwrap_or(false)
+        })
+        .collect();
+    paths.sort();
+    for p in paths {
+        if let Ok(body) = std::fs::read_to_string(&p) {
+            out.push_str(&body);
+        }
+    }
+    out
+}
+
 /// Bring up a Postgres cluster under the test supervisor and return
 /// `(data_dir, socket_dir, supervisor, service_name, guards)`.
 ///
@@ -375,6 +429,18 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
     // the same role that ran `initdb --username=$USER` above.
     spec.env.push(("USER".to_string(), current_username()));
 
+    // Per-test state dir for the audit-mirror's JSONL output. Without
+    // this override the daemon would write under `$HOME/.local/state/`
+    // which (a) would clobber the operator's real audit logs and (b)
+    // would race other concurrent test runs. Mirrors the
+    // HHAGENT_DATA_DIR seam.
+    let state_dir = unique_temp_root(&format!("e2e-core-state-{suffix}"));
+    let _state_guard = PathGuard { path: state_dir.clone() };
+    spec.env.push((
+        "HHAGENT_STATE_DIR".to_string(),
+        state_dir.to_string_lossy().into_owned(),
+    ));
+
     let sup_core = default_supervisor();
     let _core_service_guard = ServiceGuard {
         sup: default_supervisor(),
@@ -460,6 +526,33 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
         count >= 1,
         "audit_log should have at least one core/startup row, got {count}",
     );
+
+    // ---------- step 5b: assert audit-mirror picked up the row ----------
+    // The daemon spawns `audit_mirror::spawn_mirror` after the probe
+    // (see `core/src/main.rs::start_audit_mirror`); the mirror task
+    // does an initial drain and writes today's row to
+    // `<state_dir>/audit-YYYY-MM-DD.jsonl` with fsync. ≤ 5 s is the
+    // budget HANDOVER's Option I sketch called out (1 s under
+    // healthy-host conditions; 5 s for slow CI under load).
+    let mirror_body = wait_for_state_dir_match(
+        &state_dir,
+        |body| {
+            body.contains("\"actor\":\"core\"")
+                && body.contains("\"action\":\"startup\"")
+        },
+        Duration::from_secs(5),
+    )
+    .expect("audit_mirror JSONL should contain the bring-up row within 5 s");
+    // Sanity: every line in the JSONL file must be valid JSON. A
+    // formatting drift in `audit_mirror::format_jsonl_line` would
+    // surface here even if the content matched the substring grep.
+    for (i, line) in mirror_body.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let _: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("JSONL mirror line {i} not valid JSON: {e}\n{line}"));
+    }
 
     // ---------- step 6: stop + uninstall core ----------
     sup_core.stop(&spec.name).expect("stop core");

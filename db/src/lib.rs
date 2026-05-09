@@ -27,8 +27,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+pub mod audit;
 pub mod conn;
 pub mod graph;
+pub mod pool;
 pub mod probe;
 
 /// Serialise unit tests that mutate process-wide environment variables.

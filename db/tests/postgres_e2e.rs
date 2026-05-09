@@ -930,3 +930,261 @@ fn runtime_role_audit_log_revoke_is_enforced() {
     let _ = sup.uninstall(&spec.name);
     let _ = (data_root, log_dir, socket_dir);
 }
+
+/// Verify the runtime pool, the `audit::insert` helper, and the
+/// `audit_log_inserted` NOTIFY trigger from migration `0003`.
+///
+/// What this proves end-to-end:
+///   * `pool::connect_runtime_pool` opens a pool whose `after_connect`
+///     hook runs `SET ROLE hhagent_runtime`. UPDATE/DELETE on
+///     `audit_log` via the pool fail with `permission denied` —
+///     proof that role drop actually happened (would succeed under
+///     superuser).
+///   * The 0003 trigger fires AFTER INSERT and emits a NOTIFY on
+///     channel `audit_log_inserted` carrying the new row's `id`.
+///   * `PgListener` on a separate dedicated connection receives the
+///     NOTIFY within ≤ 2 s of the INSERT.
+///   * `audit::fetch_by_id` round-trips the inserted row.
+///   * `audit::truncate_payload` is wired into `audit::insert`: an
+///     8 KiB payload is replaced with the `_truncated` envelope before
+///     storage, and `fetch_by_id` returns the envelope (not the
+///     original).
+///
+/// Skips silently with `[SKIP]` lines on hosts without Postgres or a
+/// reachable supervisor.
+#[test]
+fn audit_helpers_pool_and_notify_round_trip() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let postgres = bin_dir.join("postgres");
+    let initdb = bin_dir.join("initdb");
+
+    // ---------- temp dirs ----------
+    let data_root = unique_temp_root("audit-pool-data");
+    let _data_guard = PathGuard { path: data_root.clone() };
+    let data_dir = data_root.join("data");
+    let socket_dir = default_socket_dir(&data_dir);
+    let log_dir = unique_temp_root("audit-pool-logs");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+    let _log_guard = PathGuard { path: log_dir.clone() };
+
+    // ---------- initdb + auto.conf ----------
+    let user = current_username();
+    let argv = build_initdb_argv(
+        &initdb,
+        &InitDbOptions {
+            data_dir: data_dir.clone(),
+            username: user.clone(),
+            ..InitDbOptions::default()
+        },
+    );
+    let out = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("spawn initdb");
+    assert!(
+        out.status.success(),
+        "initdb failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    std::fs::create_dir(&socket_dir).expect("create socket dir");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&socket_dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&socket_dir, perms).unwrap();
+    }
+    std::fs::write(
+        data_dir.join("postgresql.auto.conf"),
+        build_postgresql_auto_conf(&PgConfigOptions {
+            socket_dir: socket_dir.clone(),
+            ..PgConfigOptions::default()
+        }),
+    )
+    .expect("write postgresql.auto.conf");
+
+    // ---------- supervisor spec ----------
+    let mut spec = postgres_service_spec(&postgres, &data_dir, &log_dir);
+    spec.name = format!(
+        "hhagent-supervisor-test-pg-audit-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    assert!(spec.name.len() <= 200);
+    spec.stdout_log = Some(log_dir.join(format!("{}.out", spec.name)));
+    spec.stderr_log = Some(log_dir.join(format!("{}.err", spec.name)));
+
+    let sup = default_supervisor();
+    let _service_guard = ServiceGuard {
+        sup: default_supervisor(),
+        name: spec.name.clone(),
+    };
+    sup.install(&spec).expect("install postgres");
+    sup.start(&spec.name).expect("start postgres");
+    wait_for_status(
+        sup.as_ref(),
+        &spec.name,
+        |s| s == ServiceStatus::Active,
+        Duration::from_secs(15),
+    )
+    .expect("postgres reaches Active");
+    wait_for_socket(&socket_dir, Duration::from_secs(15))
+        .expect("postgres socket appears");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        sup.status(&spec.name).unwrap(),
+        ServiceStatus::Active,
+        "postgres flapping during stable-active window"
+    );
+
+    // ---------- exercise the new modules ----------
+    let conn_spec = hhagent_db::conn::ConnectSpec {
+        socket_dir: socket_dir.clone(),
+        user: user.clone(),
+        database: hhagent_db::conn::DEFAULT_APPLICATION_DB.to_string(),
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
+        // Probe runs migrations 0001, 0002, 0003 and writes the
+        // bring-up audit row. The bring-up NOTIFY happens before the
+        // listener attaches — covered separately by the catch-up
+        // `fetch_since` path; we don't require it to surface here.
+        hhagent_db::probe::run(
+            &conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"version": "test", "purpose": "audit-helpers"}),
+        )
+        .await
+        .expect("probe run");
+
+        // Pool with after_connect SET ROLE.
+        let pool = hhagent_db::pool::connect_runtime_pool(&conn_spec)
+            .await
+            .expect("connect runtime pool");
+
+        // Negative-path proof that pool connections run as the runtime
+        // role: UPDATE on `audit_log` must fail. Under the bootstrap
+        // superuser this would succeed; the failure is what tells us
+        // SET ROLE actually ran in `after_connect`.
+        let upd_err = sqlx::query(
+            "UPDATE audit_log SET payload = $1 \
+             WHERE id = (SELECT min(id) FROM audit_log)",
+        )
+        .bind(serde_json::json!({"tampered": true}))
+        .execute(&pool)
+        .await
+        .expect_err("UPDATE under runtime-role pool must be rejected");
+        assert!(
+            upd_err.to_string().contains("permission denied"),
+            "expected 'permission denied' from runtime-role pool: {upd_err}"
+        );
+
+        // ---------- attach listener BEFORE the watched insert ----------
+        // PgListener holds its own dedicated connection (LISTEN binds
+        // the channel to the physical connection — it cannot use pool
+        // connections that get returned to the pool). The listener's
+        // connection comes from the same options as the pool but does
+        // NOT go through after_connect, so it stays as the OS user.
+        // LISTEN works for any role, so this is fine.
+        let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+            .await
+            .expect("PgListener connect");
+        listener
+            .listen("audit_log_inserted")
+            .await
+            .expect("LISTEN audit_log_inserted");
+
+        // ---------- write a row via audit::insert ----------
+        let inserted_id = hhagent_db::audit::insert(
+            &pool,
+            "tool:test",
+            "call",
+            serde_json::json!({"req": {"argv": ["echo", "hi"]}, "ms": 7}),
+        )
+        .await
+        .expect("audit::insert under runtime-role pool");
+        assert!(inserted_id > 0);
+
+        // ---------- listener receives the NOTIFY ----------
+        // The trigger fires synchronously inside the INSERT
+        // transaction; NOTIFY queue drain is microseconds on a
+        // healthy host. 2 s is robust against a paused container or a
+        // busy CI without masking a real bug.
+        let notif = tokio::time::timeout(Duration::from_secs(2), listener.recv())
+            .await
+            .expect("NOTIFY must arrive within 2 s of audit_log INSERT")
+            .expect("recv() returned a notification, not an error");
+        assert_eq!(notif.channel(), "audit_log_inserted");
+        let payload_id: i64 = notif
+            .payload()
+            .parse()
+            .expect("NOTIFY payload must be a parseable i64 row id");
+        assert_eq!(
+            payload_id, inserted_id,
+            "NOTIFY payload must equal the inserted row's id"
+        );
+
+        // ---------- fetch_by_id round-trip ----------
+        let row = hhagent_db::audit::fetch_by_id(&pool, inserted_id)
+            .await
+            .expect("fetch_by_id");
+        assert_eq!(row.id, inserted_id);
+        assert_eq!(row.actor, "tool:test");
+        assert_eq!(row.action, "call");
+        assert_eq!(
+            row.payload,
+            serde_json::json!({"req": {"argv": ["echo", "hi"]}, "ms": 7})
+        );
+
+        // ---------- truncation: an 8 KiB payload is replaced ----------
+        // 8 KiB of `x` serialises to 8 KiB + 2 (the surrounding `"`s),
+        // comfortably above the 4 KiB threshold. The stored row must
+        // carry the `_truncated` envelope, not the original string.
+        let big = "x".repeat(8192);
+        let truncated_id = hhagent_db::audit::insert(
+            &pool,
+            "tool:test",
+            "call",
+            serde_json::Value::String(big),
+        )
+        .await
+        .expect("audit::insert with big payload");
+        let truncated = hhagent_db::audit::fetch_by_id(&pool, truncated_id)
+            .await
+            .expect("fetch_by_id for truncated row");
+        let env = truncated
+            .payload
+            .as_object()
+            .expect("truncated payload must be an object");
+        assert_eq!(env.get("_truncated"), Some(&serde_json::Value::Bool(true)));
+        assert!(env.contains_key("sha256"));
+        assert!(env.contains_key("len"));
+
+        pool.close().await;
+    });
+
+    // ---------- teardown ----------
+    sup.stop(&spec.name).expect("stop postgres");
+    let _ = sup.uninstall(&spec.name);
+    let _ = (data_root, log_dir, socket_dir);
+}
+

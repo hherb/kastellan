@@ -16,6 +16,14 @@ path = "src/lib.rs"
 name = "hhagent"
 path = "src/main.rs"
 
+# Operator CLI: today only `hhagent-cli audit tail` for streaming the
+# JSONL mirror under ~/.local/state/hhagent/. Needs no Postgres
+# connection so it works against a daemon that has crashed (the JSONL
+# files are the durable replica written by the mirror task).
+[[bin]]
+name = "hhagent-cli"
+path = "src/bin/hhagent-cli.rs"
+
 [dependencies]
 hhagent-sandbox    = { path = "../sandbox" }
 hhagent-supervisor = { path = "../supervisor" }
@@ -31,3 +39,4 @@ tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 time               = { workspace = true }
 libc               = { workspace = true }
+sqlx               = { workspace = true }

@@ -26,6 +26,112 @@ pub enum ToolHostError {
     Protocol(#[from] ClientError),
 }
 
+/// Single chokepoint for tool invocations: make one JSON-RPC call
+/// against `worker` and write a row into `audit_log` describing what
+/// happened.
+///
+/// Every Phase-0+ tool call SHOULD go through `dispatch` — see the
+/// "dispatcher chokepoint" invariant in `docs/architecture.md` and
+/// HANDOVER's Option I notes. The shape mirrors IronClaw's
+/// `ToolDispatcher::dispatch()` and is the place where Phase-1 policy
+/// checks, rate limits, and per-tool budgets will hook in.
+///
+/// ## Audit-log shape
+///
+/// One row per call, regardless of success or failure:
+/// * `actor`  = `"tool:<tool>"` — caller-supplied logical name (e.g.
+///   `"shell-exec"`, `"web-fetch"`). The worker binary path may be
+///   long and host-specific; the logical name is what operators
+///   filter on.
+/// * `action` = `<method>` — the JSON-RPC method name (`"echo"`,
+///   `"call"`, etc.).
+/// * `payload` = `{"req": <params>, "result": <ok value>, "ms": <duration>}`
+///   on success, or
+///   `{"req": <params>, "err": "<error string>", "ms": <duration>}`
+///   on failure. Payloads larger than 4 KiB are replaced inside
+///   [`hhagent_db::audit::insert`] with a SHA-256 envelope.
+///
+/// ## Why the audit insert is *best-effort*
+///
+/// If the worker call succeeded but the audit insert fails (cluster
+/// down, pool exhausted, transient error), the caller MUST still
+/// receive the worker's result — silently swapping a successful
+/// tool call for an error because we couldn't log it would be a much
+/// worse failure mode than missing one audit row. The audit error is
+/// logged via [`tracing::error`] so an operator notices the gap, but
+/// it does not propagate. Conversely, if the worker call failed,
+/// the worker's error is what the caller gets — the audit insert is
+/// best-effort there too.
+///
+/// In Phase 1, when the audit log gains stronger durability
+/// guarantees (e.g. every dispatcher call is required to land an
+/// audit row before its result is returned to the scheduler), this
+/// behaviour will tighten — but the right tightening depends on what
+/// failure modes the scheduler can actually tolerate, which we don't
+/// know yet.
+///
+/// ## Why `block_in_place` around the sync `worker.call`
+///
+/// `Client::call` from `hhagent-protocol` is synchronous (it uses
+/// `std::io::Read`/`Write` over the worker's piped stdio).
+/// [`tokio::task::block_in_place`] runs that on the current
+/// async-runtime worker thread without handing off — which means we
+/// can keep the existing `&mut SupervisedWorker` handle and don't
+/// need an Arc<Mutex<>> dance.
+///
+/// Requirement: the calling tokio runtime must be multi-threaded
+/// (`Builder::new_multi_thread()` or `#[tokio::main]`'s default).
+/// `current_thread` runtimes panic from `block_in_place`. Tests that
+/// exercise `dispatch` are responsible for choosing the right
+/// runtime; the daemon's `#[tokio::main]` already does.
+pub async fn dispatch(
+    pool: &sqlx::PgPool,
+    worker: &mut SupervisedWorker,
+    tool: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, ToolHostError> {
+    // Snapshot the request before the worker takes it — `worker.call`
+    // moves the `params` value into the JSON-RPC envelope, so we
+    // wouldn't be able to log it after the call.
+    let req_for_audit = params.clone();
+    let started = Instant::now();
+
+    let call_result = tokio::task::block_in_place(|| worker.call(method, params));
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    let actor = format!("tool:{tool}");
+    let audit_payload = match &call_result {
+        Ok(v) => serde_json::json!({
+            "req":    req_for_audit,
+            "result": v,
+            "ms":     elapsed_ms,
+        }),
+        Err(e) => serde_json::json!({
+            "req": req_for_audit,
+            "err": e.to_string(),
+            "ms":  elapsed_ms,
+        }),
+    };
+
+    if let Err(audit_err) =
+        hhagent_db::audit::insert(pool, &actor, method, audit_payload).await
+    {
+        // Operator-visible: every dropped audit row is a gap in the
+        // append-only record. We don't escalate to an error return
+        // because that would mask the worker's actual result; see the
+        // function-level doc for the rationale.
+        tracing::error!(
+            tool = %tool,
+            method = %method,
+            error = %audit_err,
+            "audit_log INSERT failed; tool result still propagated"
+        );
+    }
+
+    Ok(call_result?)
+}
+
 /// What to launch and how to jail it.
 pub struct WorkerSpec<'a> {
     pub policy: &'a SandboxPolicy,

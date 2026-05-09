@@ -23,6 +23,7 @@ tracing    = { workspace = true }
 tokio = { workspace = true }
 sqlx  = { workspace = true }
 time  = { workspace = true }
+sha2  = { workspace = true }
 
 # Driver entry point — small CLI that creates the user-instance data dir,
 # runs `initdb` once, and writes our `postgresql.auto.conf` overrides on

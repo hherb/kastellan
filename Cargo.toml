@@ -80,6 +80,11 @@ sqlx = { version = "0.8", default-features = false, features = [
     "time",
 ] }
 
+# SHA-256 fingerprint of audit-log payloads that exceed the
+# in-row size budget (see `db::audit::truncate_payload`). MIT OR
+# Apache-2.0 — AGPL-compatible. Pure-Rust, no system deps.
+sha2 = "0.10"
+
 # Profile tweaks
 [profile.release]
 lto         = "thin"

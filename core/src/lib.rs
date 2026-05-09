@@ -10,6 +10,8 @@
 //!   - audit            — append-only audit log
 //!   - channel_bus      — fan-in/out for messaging-channel adapters
 
+pub mod audit_mirror;
+pub mod audit_tail;
 pub mod tool_host;
 pub mod workspace;
 
