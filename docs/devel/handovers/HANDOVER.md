@@ -166,16 +166,21 @@ follow-up session.
   `1` → stop → poll until Inactive → uninstall → status=NotInstalled.
   RAII `ServiceGuard` and two `PathGuard`s (data dir, log dir) clean
   up even on panic. Runtime ~1.8 s on the DGX Spark.
-- **AGE + pg_search filed but deferred ([#9](https://github.com/hherb/hhagent/issues/9), [#10](https://github.com/hherb/hhagent/issues/10)).**
+- **AGE deferred ([#9](https://github.com/hherb/hhagent/issues/9)); pg_search dropped as won't-fix ([#10](https://github.com/hherb/hhagent/issues/10) closed).**
   Both extensions were originally on the wishlist for this session.
   PGDG ships `postgresql-NN-age` only up to PG 16 (upstream Apache
-  AGE lags new PG releases); ParadeDB primarily distributes
-  `pg_search` via Docker and `apt.paradedb.com` does not currently
-  resolve for noble-arm64. HANDOVER's pre-existing gotcha said
-  exactly this: *"if not ready, defer the BM25/AGE work to Phase 1."*
-  The Phase 1 memory-recall design is open to FTS = `tsvector`+GIN
-  and graph = plain join tables in the meantime, so this defers
-  cleanly. Both issues capture the trigger conditions to revisit.
+  AGE lags new PG releases) — defer cleanly to plain join tables on
+  `entities`/`relations` until the PG 18 build appears. **pg_search
+  was reviewed and dropped:** for our corpus size (≤ ~1M memories)
+  and write rate (a few hundred/day), native `tsvector`+GIN with
+  `ts_rank` is comparable to BM25 in recall quality, and the
+  embedding (pgvector) dominates the lexical re-ranker anyway.
+  Hybrid lex+vector via Reciprocal Rank Fusion is ~5 lines of SQL,
+  not a dependency. The marginal quality delta from BM25 isn't worth
+  carrying ParadeDB as a transitive dep + tracking their PG 18
+  build availability + auditing the extra Rust deps. If recall
+  measurement ever shows ts_rank is the bottleneck (extremely
+  unlikely at our scale), revisit then.
 
 **Test count:** 105 → **138** on Linux (+23 db unit, +1 db integration,
 +9 supervisor specs, no skips, no warnings). macOS projects to ~115 with
@@ -1093,7 +1098,8 @@ unenforced. To wire them up:
 - [#6](https://github.com/hherb/hhagent/issues/6) — tunable `cpu_quota_pct`/`tasks_max` policy fields + `setrlimit`-based `cpu_ms` enforcement (Option G above)
 - [#8](https://github.com/hherb/hhagent/issues/8) — collapse `default_probe` / `default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears
 - [#9](https://github.com/hherb/hhagent/issues/9) — add Apache AGE graph extension when `postgresql-18-age` ships in PGDG (filed 2026-05-09)
-- [#10](https://github.com/hherb/hhagent/issues/10) — add ParadeDB `pg_search` BM25 extension when PG 18 build is available (filed 2026-05-09)
+
+(Closed in this session: [#10](https://github.com/hherb/hhagent/issues/10) — ParadeDB `pg_search` won't-fix after review. Native PG `tsvector`+GIN+`ts_rank` is sufficient for our corpus size and write rate; the embedding dominates the lexical re-ranker; RRF is ~5 lines of SQL.)
 
 (Closed in earlier 2026-05-09 session: [#7](https://github.com/hherb/hhagent/issues/7) — daemon log-line substring is now precise after `(skeleton)` was dropped from the startup line.)
 
