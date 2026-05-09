@@ -50,7 +50,7 @@ use sqlx::PgPool;
 use time::format_description::well_known::Rfc3339;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Environment variable used by tests (and operators who want a
 /// non-XDG path) to override the default state directory.
@@ -390,20 +390,6 @@ enum CatchUpError {
     Write(PathBuf, std::io::Error),
     #[error("fsync {0}: {1}")]
     Fsync(PathBuf, std::io::Error),
-}
-
-impl From<CatchUpError> for std::io::Error {
-    fn from(e: CatchUpError) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-    }
-}
-
-// `error!` is used inside the loop for unrecoverable failures; expose
-// it for IDE-jump-to-symbol sanity even though it's only conditionally
-// hit. Stops "unused import" lint complaints.
-#[allow(dead_code)]
-fn _ensure_error_macro_resolves() {
-    error!("noop");
 }
 
 #[cfg(test)]

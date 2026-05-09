@@ -121,10 +121,12 @@ fn run_audit_tail(args: &[String]) -> ExitCode {
         },
     };
 
-    // Build a small multi-thread runtime explicitly so the CLI works
-    // identically regardless of which `tokio` feature flags happen to
-    // be enabled in the workspace deps. The viewer does file I/O +
-    // a 250 ms sleep loop; one worker thread is plenty.
+    // The viewer does file I/O + a 250 ms sleep loop, no
+    // `block_in_place` — a current-thread runtime is the right shape
+    // (smallest footprint, no extra worker thread). Calling
+    // `Builder::new_current_thread()` explicitly so the binary's
+    // runtime choice is independent of which `tokio` feature flags
+    // happen to be active in the workspace deps.
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

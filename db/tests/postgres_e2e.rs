@@ -1101,10 +1101,12 @@ fn audit_helpers_pool_and_notify_round_trip() {
         // ---------- attach listener BEFORE the watched insert ----------
         // PgListener holds its own dedicated connection (LISTEN binds
         // the channel to the physical connection — it cannot use pool
-        // connections that get returned to the pool). The listener's
-        // connection comes from the same options as the pool but does
-        // NOT go through after_connect, so it stays as the OS user.
-        // LISTEN works for any role, so this is fine.
+        // connections that get returned to the pool). `connect_with`
+        // calls `pool.acquire()` and then detaches, so the connection
+        // *did* run our `after_connect` hook on first dial — meaning
+        // the listener is already running as `hhagent_runtime`. That's
+        // fine: LISTEN/NOTIFY are unprivileged operations available to
+        // any role.
         let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
             .await
             .expect("PgListener connect");

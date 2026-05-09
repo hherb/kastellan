@@ -111,24 +111,35 @@ pub async fn tail_loop<W>(cfg: TailConfig, mut out: W) -> std::io::Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
-    let mut current: Option<(time::Date, PathBuf, u64)> = None; // (date, path, byte offset)
+    // (date, path, byte offset). The offset is always derived from the
+    // bytes `stream_file_from` actually read — never from an external
+    // `metadata().len()` call. A stat-based anchor would race the
+    // mirror's writer: bytes appended between read and stat would be
+    // skipped (in `from_start` after-the-read), or already-printed
+    // bytes would be re-printed (in the follow loop, if the file grew
+    // during a read).
+    let mut current: Option<(time::Date, PathBuf, u64)> = None;
 
     if cfg.from_start {
         let files = find_audit_files(&cfg.state_dir).await;
-        for (_date, path) in &files {
-            stream_file_from(&path, 0, &mut out).await?;
+        for (date, path) in &files {
+            let bytes = stream_file_from(path, 0, &mut out).await?;
+            // Last assignment wins — only the latest-dated file is
+            // the live-follow anchor; earlier files are only replayed.
+            current = Some((*date, path.clone(), bytes));
         }
-        if let Some((date, path)) = files.last().cloned() {
-            let len = tokio::fs::metadata(&path).await?.len();
-            current = Some((date, path, len));
-        }
-    } else {
+    } else if let Some((date, path)) =
+        find_audit_files(&cfg.state_dir).await.last().cloned()
+    {
         // Live mode: skip existing content, anchor at the end of the
-        // latest file (or wait for the first file to appear).
-        if let Some((date, path)) = find_audit_files(&cfg.state_dir).await.last().cloned() {
-            let len = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
-            current = Some((date, path, len));
-        }
+        // latest file. A stat is fine here because we are
+        // *intentionally* discarding any bytes between stat and the
+        // next loop tick — that's the canonical `tail -f` behaviour
+        // (don't replay history). The follow loop still uses
+        // bytes-actually-read for its incremental advance, so the
+        // skip is bounded to existing-at-attach-time content only.
+        let len = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+        current = Some((date, path, len));
     }
 
     if !cfg.follow {
@@ -156,13 +167,16 @@ where
         }
 
         if let Some((_, path, off)) = current.as_mut() {
+            // Stat is only used as a "is there anything new?" gate.
+            // The offset itself advances by bytes actually read so
+            // a file growing mid-read can't double-print or skip.
             let new_len = match tokio::fs::metadata(&*path).await {
                 Ok(m) => m.len(),
                 Err(_) => *off, // file vanished briefly; try again next tick
             };
             if new_len > *off {
-                stream_file_from(path, *off, &mut out).await?;
-                *off = new_len;
+                let bytes = stream_file_from(path, *off, &mut out).await?;
+                *off += bytes;
             }
         }
 
@@ -171,14 +185,16 @@ where
 }
 
 /// Stream `path` from byte offset `from` to EOF, one line per newline,
-/// to `out`. Used by both the initial replay and the post-rotation
-/// flush.
+/// to `out`. Returns the **number of bytes actually streamed** so the
+/// caller can advance its offset by exactly that amount — a separate
+/// `metadata().len()` would race a writer that's appending to the
+/// file during the read.
 ///
 /// We open + seek per call rather than holding an open handle because
 /// the mirror writer may have done a `sync_all` + drop-on-rotate; a
 /// stale fd would point at a possibly-unlinked inode (matters when an
 /// operator runs `logrotate` style cleanup later).
-async fn stream_file_from<W>(path: &Path, from: u64, out: &mut W) -> std::io::Result<()>
+async fn stream_file_from<W>(path: &Path, from: u64, out: &mut W) -> std::io::Result<u64>
 where
     W: AsyncWriteExt + Unpin,
 {
@@ -189,6 +205,7 @@ where
     }
     let mut reader = BufReader::new(f);
     let mut line = Vec::new();
+    let mut total: u64 = 0;
     loop {
         line.clear();
         let n = reader.read_until(b'\n', &mut line).await?;
@@ -196,9 +213,10 @@ where
             break;
         }
         out.write_all(&line).await?;
+        total += n as u64;
     }
     out.flush().await?;
-    Ok(())
+    Ok(total)
 }
 
 #[cfg(test)]
