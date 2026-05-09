@@ -25,6 +25,35 @@ sqlx  = { workspace = true }
 time  = { workspace = true }
 sha2  = { workspace = true }
 
+# AES-256-GCM authenticated encryption for the `secrets` table runtime.
+# `getrandom` (default) gives us `aead::OsRng` for fresh nonce
+# generation; `zeroize` wires key+cipher state to wipe on drop.
+aes-gcm = { workspace = true }
+
+# Wipe sensitive buffers on drop. Public secret-getter return type is
+# `Zeroizing<Vec<u8>>` so a downstream `format!("{:?}", plaintext)` or
+# panic-unwind cannot leave material behind.
+zeroize = { workspace = true }
+
+# Per-OS keyring backends for `OsKeyringProvider` (the production
+# wrapping-key store). See workspace `Cargo.toml` for the rationale
+# behind the per-target split. Tests use `MapKeyProvider`; CI never
+# exercises the real keyring (no daemon in headless containers).
+[target.'cfg(target_os = "linux")'.dependencies]
+# `async-secret-service` uses `zbus` (pure-Rust D-Bus) instead of
+# `dbus-secret-service` / `libdbus-sys`, avoiding a `libdbus-1-dev`
+# system-package dependency at compile time. `crypto-rust` keeps
+# the encryption side pure-Rust too (no `openssl-sys`). The
+# `tokio` feature lets keyring's internals integrate with our
+# runtime so a blocking `Entry::get_secret()` from inside an
+# async task does not deadlock the executor. License chain:
+# keyring (MIT/Apache-2.0) → secret-service (MIT/Apache-2.0) →
+# zbus (MIT) — all AGPL-compatible.
+keyring = { version = "3", default-features = false, features = ["async-secret-service", "tokio", "crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
 # Driver entry point — small CLI that creates the user-instance data dir,
 # runs `initdb` once, and writes our `postgresql.auto.conf` overrides on
 # top. Pure helpers in `lib.rs` are exercised independently via unit tests

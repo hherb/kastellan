@@ -32,6 +32,7 @@ pub mod conn;
 pub mod graph;
 pub mod pool;
 pub mod probe;
+pub mod secrets;
 
 /// Serialise unit tests that mutate process-wide environment variables.
 ///

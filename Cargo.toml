@@ -85,6 +85,27 @@ sqlx = { version = "0.8", default-features = false, features = [
 # Apache-2.0 — AGPL-compatible. Pure-Rust, no system deps.
 sha2 = "0.10"
 
+# AES-256-GCM authenticated encryption for the `secrets` table
+# (see `db::secrets`). Pure-Rust RustCrypto implementation; the
+# default features pull in `getrandom` (which re-exports `OsRng`
+# via the `aead` crate) and the `aes` instruction-set backend.
+# The `zeroize` feature wires the key+cipher's internal state to
+# wipe on drop so a panic-unwind cannot leave material in stack
+# frames. Apache-2.0 OR MIT — AGPL-compatible.
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+
+# Wipe sensitive buffers on drop. Used directly for plaintext
+# (`Zeroizing<Vec<u8>>` is the public secret-getter return type) and
+# transitively by `aes-gcm` for key/cipher state. Apache-2.0 OR MIT.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+# `keyring` (cross-platform OS keyring shim) is NOT declared as a
+# workspace dep because feature selection is per-target. See the
+# per-target stanzas at the bottom of `db/Cargo.toml` for the
+# Linux (`sync-secret-service` + `crypto-rust`) vs. macOS
+# (`apple-native`) split. License: MIT OR Apache-2.0 across the
+# crate and all backend deps.
+
 # Profile tweaks
 [profile.release]
 lto         = "thin"

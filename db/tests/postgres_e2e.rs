@@ -1190,3 +1190,364 @@ fn audit_helpers_pool_and_notify_round_trip() {
     let _ = (data_root, log_dir, socket_dir);
 }
 
+// ─── secrets ──────────────────────────────────────────────────────
+
+/// End-to-end happy path for `db::secrets`.
+///
+/// Brings up a per-test Postgres cluster (the canonical recipe:
+/// initdb → write auto.conf → install + start under
+/// `default_supervisor()` → wait Active + 500 ms stable + socket),
+/// runs the probe so all four migrations apply (0001 init + 0002
+/// runtime role + 0003 audit NOTIFY + 0004 secrets aad nonempty),
+/// then exercises the full secrets lifecycle against a
+/// runtime-role pool with a [`MapKeyProvider`].
+///
+/// Asserts:
+///
+/// 1. **put + get round-trip** — plaintext written and recovered
+///    byte-for-byte; AAD column was populated by the application
+///    (so the new 0004 `CHECK (octet_length(aad) > 0)` is satisfied).
+/// 2. **list returns metadata only** — name + key_id + timestamps,
+///    no ciphertext, no nonce, no aad in the returned struct.
+/// 3. **put with same name overwrites** — second put updates
+///    ciphertext + nonce; subsequent get returns the new plaintext.
+/// 4. **delete removes the row** — second get fails with `NotFound`;
+///    delete-of-absent returns `Ok(false)` (idempotent).
+/// 5. **AAD-mismatch detection** — `UPDATE secrets SET name = …`
+///    via the runtime-role pool (which holds UPDATE on `secrets`,
+///    just not on `audit_log`); subsequent get under the new name
+///    fails with `AadMismatch` because the stored AAD still binds
+///    to the old name. Models a worst-case attacker who has the
+///    application connection.
+/// 6. **Ciphertext-tamper detection** — flipping a byte of
+///    `secrets.ciphertext` makes the next get fail with
+///    `DecryptFailed` (GCM auth tag mismatch).
+/// 7. **0004 CHECK constraint enforcement** — a direct INSERT with
+///    `aad = ''::bytea` is rejected with the constraint-violation
+///    error string.
+///
+/// Skips silently with `[SKIP]` lines on hosts without Postgres or a
+/// reachable supervisor.
+#[test]
+fn secrets_put_get_list_delete_round_trip() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let postgres = bin_dir.join("postgres");
+    let initdb = bin_dir.join("initdb");
+
+    // ---------- temp dirs ----------
+    let data_root = unique_temp_root("secrets-d");
+    let _data_guard = PathGuard { path: data_root.clone() };
+    let data_dir = data_root.join("data");
+    let socket_dir = default_socket_dir(&data_dir);
+    let log_dir = unique_temp_root("secrets-l");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+    let _log_guard = PathGuard { path: log_dir.clone() };
+
+    // ---------- initdb + auto.conf ----------
+    let user = current_username();
+    let argv = build_initdb_argv(
+        &initdb,
+        &InitDbOptions {
+            data_dir: data_dir.clone(),
+            username: user.clone(),
+            ..InitDbOptions::default()
+        },
+    );
+    let out = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("spawn initdb");
+    assert!(
+        out.status.success(),
+        "initdb failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    std::fs::create_dir(&socket_dir).expect("create socket dir");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&socket_dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&socket_dir, perms).unwrap();
+    }
+    std::fs::write(
+        data_dir.join("postgresql.auto.conf"),
+        build_postgresql_auto_conf(&PgConfigOptions {
+            socket_dir: socket_dir.clone(),
+            ..PgConfigOptions::default()
+        }),
+    )
+    .expect("write postgresql.auto.conf");
+
+    // ---------- supervisor spec ----------
+    let mut spec = postgres_service_spec(&postgres, &data_dir, &log_dir);
+    spec.name = format!(
+        "hhagent-supervisor-test-pg-secrets-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    assert!(spec.name.len() <= 200);
+    spec.stdout_log = Some(log_dir.join(format!("{}.out", spec.name)));
+    spec.stderr_log = Some(log_dir.join(format!("{}.err", spec.name)));
+
+    let sup = default_supervisor();
+    let _service_guard = ServiceGuard {
+        sup: default_supervisor(),
+        name: spec.name.clone(),
+    };
+    sup.install(&spec).expect("install postgres");
+    sup.start(&spec.name).expect("start postgres");
+    wait_for_status(
+        sup.as_ref(),
+        &spec.name,
+        |s| s == ServiceStatus::Active,
+        Duration::from_secs(15),
+    )
+    .expect("postgres reaches Active");
+    wait_for_socket(&socket_dir, Duration::from_secs(15))
+        .expect("postgres socket appears");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        sup.status(&spec.name).unwrap(),
+        ServiceStatus::Active,
+        "postgres flapping during stable-active window"
+    );
+
+    // ---------- exercise the secrets module ----------
+    let conn_spec = hhagent_db::conn::ConnectSpec {
+        socket_dir: socket_dir.clone(),
+        user: user.clone(),
+        database: hhagent_db::conn::DEFAULT_APPLICATION_DB.to_string(),
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
+        // Run probe to apply all four migrations.
+        hhagent_db::probe::run(
+            &conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"version": "test", "purpose": "secrets-e2e"}),
+        )
+        .await
+        .expect("probe run");
+
+        // Pool whose `after_connect` SET ROLE hhagent_runtime hook
+        // means every secrets call below runs as the application
+        // role (which holds full CRUD on `secrets` per 0002).
+        let pool = hhagent_db::pool::connect_runtime_pool(&conn_spec)
+            .await
+            .expect("connect runtime pool");
+
+        // Hard-coded test key. In production, `OsKeyringProvider`
+        // returns one fetched once at startup from libsecret /
+        // Keychain.
+        let key_provider = hhagent_db::secrets::MapKeyProvider::new(
+            "test-key-id-v1",
+            [0x42u8; hhagent_db::secrets::KEY_LEN],
+        );
+
+        // ---------- 1. put + get round-trip ----------
+        let pt_a: &[u8] = b"super-secret-token-A";
+        hhagent_db::secrets::put(&pool, &key_provider, "imap_password", pt_a, None)
+            .await
+            .expect("put initial secret");
+
+        let recovered = hhagent_db::secrets::get(
+            &pool,
+            &key_provider,
+            "imap_password",
+            None,
+        )
+        .await
+        .expect("get round-trip");
+        assert_eq!(&*recovered, pt_a, "round-trip plaintext mismatch");
+
+        // ---------- 2. list returns metadata only ----------
+        // Insert a second row so we can also pin the ordering shape.
+        hhagent_db::secrets::put(
+            &pool,
+            &key_provider,
+            "anthropic_api_key",
+            b"ak-zzz",
+            None,
+        )
+        .await
+        .expect("put second secret");
+        let listing = hhagent_db::secrets::list(&pool)
+            .await
+            .expect("list");
+        assert_eq!(listing.len(), 2);
+        // ORDER BY name ASC: "anthropic_api_key" < "imap_password"
+        assert_eq!(listing[0].name, "anthropic_api_key");
+        assert_eq!(listing[1].name, "imap_password");
+        assert_eq!(listing[0].key_id, "test-key-id-v1");
+        assert_eq!(listing[1].key_id, "test-key-id-v1");
+
+        // ---------- 3. UPSERT semantics ----------
+        let pt_a2: &[u8] = b"super-secret-token-A-rotated";
+        hhagent_db::secrets::put(
+            &pool,
+            &key_provider,
+            "imap_password",
+            pt_a2,
+            None,
+        )
+        .await
+        .expect("upsert second time");
+        let recovered2 = hhagent_db::secrets::get(
+            &pool,
+            &key_provider,
+            "imap_password",
+            None,
+        )
+        .await
+        .expect("get after upsert");
+        assert_eq!(&*recovered2, pt_a2, "upsert did not replace plaintext");
+        let listing_after = hhagent_db::secrets::list(&pool).await.unwrap();
+        assert_eq!(listing_after.len(), 2, "upsert must not duplicate");
+
+        // ---------- 4. delete ----------
+        let removed = hhagent_db::secrets::delete(&pool, "imap_password")
+            .await
+            .expect("delete");
+        assert!(removed, "delete reported no row removed");
+        let removed_again = hhagent_db::secrets::delete(&pool, "imap_password")
+            .await
+            .expect("delete idempotent");
+        assert!(
+            !removed_again,
+            "delete of absent row must return false (idempotent)"
+        );
+        let err = hhagent_db::secrets::get(
+            &pool,
+            &key_provider,
+            "imap_password",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, hhagent_db::secrets::SecretsError::NotFound(_)),
+            "expected NotFound after delete: {err:?}"
+        );
+
+        // ---------- 5. AAD-mismatch detection ----------
+        // Models the worst case where an attacker has the runtime
+        // role's connection. The role's GRANTs allow UPDATE on
+        // `secrets` (only `audit_log` is REVOKE'd in 0002), so a
+        // direct UPDATE through the same pool is the realistic
+        // tamper scenario.
+        hhagent_db::secrets::put(
+            &pool,
+            &key_provider,
+            "swap_target",
+            b"original-plaintext",
+            None,
+        )
+        .await
+        .expect("put swap_target");
+        sqlx::query("UPDATE secrets SET name = $1 WHERE name = $2")
+            .bind("swap_target_renamed")
+            .bind("swap_target")
+            .execute(&pool)
+            .await
+            .expect("simulate row rename");
+        let mismatch_err = hhagent_db::secrets::get(
+            &pool,
+            &key_provider,
+            "swap_target_renamed",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                mismatch_err,
+                hhagent_db::secrets::SecretsError::AadMismatch
+            ),
+            "renamed row must surface AadMismatch, got: {mismatch_err:?}"
+        );
+
+        // ---------- 6. ciphertext-tamper detection ----------
+        hhagent_db::secrets::put(
+            &pool,
+            &key_provider,
+            "tamper_target",
+            b"original-plaintext",
+            None,
+        )
+        .await
+        .expect("put tamper_target");
+        // Flip the first byte of ciphertext via raw SQL.
+        sqlx::query(
+            "UPDATE secrets \
+             SET ciphertext = set_byte(ciphertext, 0, get_byte(ciphertext, 0) # 1) \
+             WHERE name = $1",
+        )
+        .bind("tamper_target")
+        .execute(&pool)
+        .await
+        .expect("flip ciphertext byte");
+        let tamper_err = hhagent_db::secrets::get(
+            &pool,
+            &key_provider,
+            "tamper_target",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                tamper_err,
+                hhagent_db::secrets::SecretsError::DecryptFailed
+            ),
+            "tampered ciphertext must surface DecryptFailed, got: {tamper_err:?}"
+        );
+
+        // ---------- 7. 0004 CHECK enforces non-empty AAD ----------
+        let check_err = sqlx::query(
+            "INSERT INTO secrets (name, ciphertext, nonce, aad, key_id) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind("empty_aad_should_fail")
+        .bind(&[0u8; 16][..])
+        .bind(&[0u8; 12][..])
+        .bind(&[0u8; 0][..])
+        .bind("k")
+        .execute(&pool)
+        .await
+        .expect_err("INSERT with empty aad must be rejected by 0004 CHECK");
+        let msg = check_err.to_string();
+        assert!(
+            msg.contains("secrets_aad_nonempty") || msg.contains("check constraint"),
+            "expected 0004 CHECK constraint violation, got: {msg}"
+        );
+
+        pool.close().await;
+    });
+
+    // ---------- teardown ----------
+    sup.stop(&spec.name).expect("stop postgres");
+    let _ = sup.uninstall(&spec.name);
+    let _ = (data_root, log_dir, socket_dir);
+}
+
+
