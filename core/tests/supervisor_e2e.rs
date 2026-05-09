@@ -105,6 +105,19 @@ impl Drop for ServiceGuard {
     }
 }
 
+/// RAII guard: removes the per-test log directory even if the body
+/// panics midway. Paired with [`ServiceGuard`] so a failure leaves
+/// neither a stale unit/agent nor an orphaned `temp_dir/hhagent-…/`
+/// behind. Best-effort like the service guard.
+struct LogDirGuard {
+    path: PathBuf,
+}
+impl Drop for LogDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// Poll `path` until it exists and `predicate(contents)` returns
 /// true, or `timeout` elapses. Returns the matching contents on
 /// success, or a diagnostic string with whatever was actually
@@ -170,6 +183,7 @@ fn core_service_install_start_observe_log_uninstall() {
             .unwrap_or(0),
     ));
     std::fs::create_dir_all(&log_dir).expect("create per-test log dir");
+    let _log_dir_guard = LogDirGuard { path: log_dir.clone() };
 
     // Build the canonical spec, then rename so concurrent test runs
     // don't collide on the single shared `hhagent-core` name and so a
@@ -178,6 +192,14 @@ fn core_service_install_start_observe_log_uninstall() {
     // so we read back the right file below.
     let mut spec = core_service_spec(&binary, &log_dir);
     spec.name = unique_test_name();
+    // Cheap insurance against a future change to the name template that
+    // could push past either backend's 200-char limit. Today's worst
+    // case is ~54 chars; this trips well before `install` would.
+    assert!(
+        spec.name.len() <= 200,
+        "constructed test name {} chars exceeds backend MAX_NAME_LEN=200; rework unique_test_name()",
+        spec.name.len()
+    );
     let stdout_path = log_dir.join(format!("{}.out", spec.name));
     let stderr_path = log_dir.join(format!("{}.err", spec.name));
     spec.stdout_log = Some(stdout_path.clone());
@@ -233,7 +255,7 @@ fn core_service_install_start_observe_log_uninstall() {
         "post-uninstall status must be NotInstalled"
     );
 
-    // Tidy: remove the per-test log dir. Best-effort — the guard
-    // above already covers the supervisor side.
-    let _ = std::fs::remove_dir_all(&log_dir);
+    // `LogDirGuard` (declared at the top of the test) removes the
+    // per-test log dir on drop — both on the success path here and on
+    // any panic midway.
 }
