@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** `a83991a` (`feat(db): secrets at rest — AES-256-GCM + OS keyring + db::secrets runtime + 0004 migration`)
+**Last commit:** `7c9a5c8` (`fix(db): code-review polish for a83991a (secrets at rest)`)
 **Branch:** `main`
 
 ---
@@ -31,8 +31,8 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 191 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (172 → 191, +19 from this session's secrets-at-rest slice: 18 db unit (AES-GCM round-trip / wrong-key / wrong-AAD / wrong-nonce / tampered-ciphertext / oversize-plaintext / fresh-nonce-per-call / AAD-shape pin / name-validation / MapKeyProvider behaviour / constants) + 1 db integration (`secrets_put_get_list_delete_round_trip` — full put/get/list/upsert/delete + AAD-mismatch + ciphertext-tamper + 0004 CHECK against real PG)). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
-**macOS projection:** ~138 (was ~119; +19 from the same set, except the new PG-touching integration test `[SKIP]`s cleanly when `brew install postgresql@18` hasn't run; the 18 unit tests are platform-neutral). Re-run on macOS to confirm.
+**`cargo test --workspace` on Linux: 192 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (172 → 192, +19 from the secrets-at-rest slice in a83991a + 1 from review polish in 7c9a5c8: a `max_size_plaintext_fits_within_ciphertext_cap` unit test that pins the new `MAX_CIPHERTEXT_LEN` length-guard arithmetic on the decrypt path. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**macOS projection:** ~139 (was ~119; +20 from the same set, except the PG-touching integration test from a83991a `[SKIP]`s cleanly when `brew install postgresql@18` hasn't run; the 19 added unit tests are platform-neutral). Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
