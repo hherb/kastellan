@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** `ce7aade` (`feat(core,db): Option I — dispatcher chokepoint + audit_log NOTIFY mirror + hhagent-cli audit tail`)
+**Last commit:** `a83991a` (`feat(db): secrets at rest — AES-256-GCM + OS keyring + db::secrets runtime + 0004 migration`)
 **Branch:** `main`
 
 ---
@@ -31,8 +31,8 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 172 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (154 → 172, +18 from Option I: 6 db unit (audit truncation) + 1 db integration (pool/audit/NOTIFY round-trip) + 5 core unit (audit_mirror date paths + JSONL formatting) + 5 core unit (audit_tail filename parsing + tail loop) + 1 core integration (audit_dispatch_e2e). The supervisor_e2e test grew a JSONL-mirror assertion but the test count is unchanged). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
-**macOS projection:** ~119 (was ~101; +18 from the same set, except the two PG-touching integration tests `[SKIP]` cleanly when `brew install postgresql@18` hasn't run). Re-run on macOS to confirm.
+**`cargo test --workspace` on Linux: 191 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (172 → 191, +19 from this session's secrets-at-rest slice: 18 db unit (AES-GCM round-trip / wrong-key / wrong-AAD / wrong-nonce / tampered-ciphertext / oversize-plaintext / fresh-nonce-per-call / AAD-shape pin / name-validation / MapKeyProvider behaviour / constants) + 1 db integration (`secrets_put_get_list_delete_round_trip` — full put/get/list/upsert/delete + AAD-mismatch + ciphertext-tamper + 0004 CHECK against real PG)). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**macOS projection:** ~138 (was ~119; +19 from the same set, except the new PG-touching integration test `[SKIP]`s cleanly when `brew install postgresql@18` hasn't run; the 18 unit tests are platform-neutral). Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -45,8 +45,8 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
 | `core` integration (`audit_dispatch_e2e`) | 1 | **NEW Option I — cross-platform real** dispatcher chokepoint. Brings up a per-test PG cluster (initdb + `postgres_service_spec` + start + wait Active + wait socket), runs `db::probe::run` to apply 0001/0002/0003, opens a `pool::connect_runtime_pool` (which auto-`SET ROLE hhagent_runtime` on every dialed conn), spawns shell-exec under the platform sandbox, and exercises `tool_host::dispatch` twice: once with an allowlisted argv (`echo dispatch-ok`) → success path returns the worker's result and writes a row with `actor=tool:shell-exec`, `action=shell.exec`, payload `{req, result, ms}` (no `err`); once with `/bin/cat /etc/passwd` → POLICY_DENIED, dispatch propagates the error AND writes a row with payload `{req, err, ms}` (no `result`). Final assertion: exactly 3 rows in `audit_log` (bring-up + 2 dispatches) with the per-row payload-shape pins. Multi-thread tokio runtime is mandatory — `dispatch` uses `block_in_place` around the synchronous `Client::call`. Short temp-dir labels (`disp-d`, `disp-l`) keep the cluster socket path under the 108-byte sockaddr_un limit |
 | `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `hhagent` binary with `HHAGENT_DATA_DIR` + `HHAGENT_STATE_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user; `HHAGENT_STATE_DIR` keeps the audit-mirror's JSONL out of the operator's `~/.local/state/`). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d hhagent` and assert `audit_log` has at least one `(actor='core', action='startup')` row → **NEW Option I**: poll the per-test state dir for an `audit-YYYY-MM-DD.jsonl` file containing the bring-up row within ≤ 5 s (proves the audit-mirror task spawned, listened, drained, and fsynced) and assert every line is valid JSON → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + four `PathGuard`s clean up PG service, core service, two data/log dirs, the core log dir, and the per-test state dir on panic. Unique `hhagent-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
-| `db` unit | 43 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted). **Plus Option I additions (6):** `audit::truncate_payload` — small payloads pass through (1), empty object passes through (1), boundary-inclusive non-truncation at exactly `PAYLOAD_MAX_BYTES = 4096` (1), oversize replaced with `{_truncated, sha256, len}` envelope with 64-char lowercase-hex digest (1), deterministic for same input (1), distinct fingerprints for distinct inputs at same length (1) |
-| `db` integration (`postgres_e2e`) | 4 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (existing C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Runtime ~2.1 s on the DGX Spark. **`runtime_role_audit_log_revoke_is_enforced`** (Option L): brings up a per-test PG cluster, runs the probe (which now applies `0001` + `0002` and switches to `SET ROLE hhagent_runtime` for its own audit insert), then connects on a fresh pool connection, asserts `pg_roles` rolsuper/rolcanlogin/rolinherit/rolcreaterole/rolcreatedb are all false, asserts the OS user is recorded in `pg_auth_members` for `hhagent_runtime`, holds an acquired connection out of the pool and runs `SET ROLE hhagent_runtime` on it, then proves: INSERT into `audit_log` succeeds; UPDATE on `audit_log` fails with `"permission denied"`; DELETE on `audit_log` fails with `"permission denied"`; full SELECT/INSERT/UPDATE/DELETE on `memories` succeeds (so the bulk CRUD GRANT block is wired); final `audit_log` count is exactly 2 (probe row + test INSERT, no UPDATE rewrite, no DELETE leak). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~3.0 s on the DGX Spark. **`audit_helpers_pool_and_notify_round_trip`** (NEW Option I): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003), opens `pool::connect_runtime_pool` and proves UPDATE on `audit_log` via the pool fails with `"permission denied"` (negative-path proof that `after_connect` SET ROLE actually ran). Then attaches a `PgListener` on `audit_log_inserted` BEFORE the watched insert, calls `audit::insert(&pool, "tool:test", "call", json)`, asserts `tokio::time::timeout(2 s, listener.recv())` returns a notification on the right channel whose payload parses as the inserted row id, calls `audit::fetch_by_id` and confirms the row round-trips byte-for-byte. Finally, `audit::insert` with an 8 KiB payload + `fetch_by_id` returns the `_truncated` envelope (proves `truncate_payload` is wired into the insert path, not just an unused pure helper). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark |
+| `db` unit | 61 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted). **Plus Option I additions (6):** `audit::truncate_payload` — small payloads pass through (1), empty object passes through (1), boundary-inclusive non-truncation at exactly `PAYLOAD_MAX_BYTES = 4096` (1), oversize replaced with `{_truncated, sha256, len}` envelope with 64-char lowercase-hex digest (1), deterministic for same input (1), distinct fingerprints for distinct inputs at same length (1). **Plus secrets-at-rest additions (18):** AES-GCM round-trip recovers plaintext (1); decrypt fails under wrong key (1), wrong AAD (1), tampered ciphertext (1), tampered nonce (1); each `encrypt` call uses a fresh nonce — no determinism leak (1); `encrypt` rejects > `MAX_PLAINTEXT_LEN = 64 KiB` (1); AAD shape pin — starts with `AAD_DOMAIN = b"hhagent-secrets-v1"`, NUL-delimited, name embedded (1); AAD with `extra` appends after the second NUL (1); AAD is always non-empty by construction (closes #12 at the application layer) (1); `validate_name` rejects empty (1), oversize > `MAX_NAME_LEN = 256` (1), embedded NUL (1), other control bytes (1); accepts typical operator-friendly names (1); `MapKeyProvider` returns the registered key (1); unknown id is `KeyNotFound` (1); constants `KEY_LEN = 32` / `NONCE_LEN = 12` / `AAD_DOMAIN` / `KEY_SERVICE = "hhagent"` / `KEY_ACCOUNT = "secrets-v1"` are all pinned (1) |
+| `db` integration (`postgres_e2e`) | 5 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (existing C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Runtime ~2.1 s on the DGX Spark. **`runtime_role_audit_log_revoke_is_enforced`** (Option L): brings up a per-test PG cluster, runs the probe (which now applies `0001` + `0002` and switches to `SET ROLE hhagent_runtime` for its own audit insert), then connects on a fresh pool connection, asserts `pg_roles` rolsuper/rolcanlogin/rolinherit/rolcreaterole/rolcreatedb are all false, asserts the OS user is recorded in `pg_auth_members` for `hhagent_runtime`, holds an acquired connection out of the pool and runs `SET ROLE hhagent_runtime` on it, then proves: INSERT into `audit_log` succeeds; UPDATE on `audit_log` fails with `"permission denied"`; DELETE on `audit_log` fails with `"permission denied"`; full SELECT/INSERT/UPDATE/DELETE on `memories` succeeds (so the bulk CRUD GRANT block is wired); final `audit_log` count is exactly 2 (probe row + test INSERT, no UPDATE rewrite, no DELETE leak). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~3.0 s on the DGX Spark. **`audit_helpers_pool_and_notify_round_trip`** (NEW Option I): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003), opens `pool::connect_runtime_pool` and proves UPDATE on `audit_log` via the pool fails with `"permission denied"` (negative-path proof that `after_connect` SET ROLE actually ran). Then attaches a `PgListener` on `audit_log_inserted` BEFORE the watched insert, calls `audit::insert(&pool, "tool:test", "call", json)`, asserts `tokio::time::timeout(2 s, listener.recv())` returns a notification on the right channel whose payload parses as the inserted row id, calls `audit::fetch_by_id` and confirms the row round-trips byte-for-byte. Finally, `audit::insert` with an 8 KiB payload + `fetch_by_id` returns the `_truncated` envelope (proves `truncate_payload` is wired into the insert path, not just an unused pure helper). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark. **`secrets_put_get_list_delete_round_trip`** (NEW secrets-at-rest): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003 + the new 0004 `secrets_aad_nonempty` migration), opens a runtime-role pool, then exercises every leaf of the `db::secrets` API end-to-end with a `MapKeyProvider`. Asserts: (1) `put` then `get` round-trips plaintext byte-for-byte, with the AAD column populated by the application so 0004's `CHECK (octet_length(aad) > 0)` passes; (2) `list` returns metadata only (name + key_id + timestamps, ORDER BY name ASC) — no ciphertext, no nonce, no AAD in the returned struct; (3) re-`put` of the same name UPSERTs (single row, new ciphertext + new nonce); (4) `delete` removes the row and is idempotent (`Ok(false)` on absent), and a subsequent `get` is `NotFound`; (5) `UPDATE secrets SET name = …` via the runtime-role pool (which holds UPDATE on `secrets`, just not on `audit_log` — the worst-case attacker surface from the threat model) is detected by `get` as `AadMismatch` because the stored AAD still binds to the *old* name; (6) flipping a byte of `secrets.ciphertext` via `set_byte(...) # 1` is detected by `get` as `DecryptFailed` (GCM auth tag mismatch); (7) a direct `INSERT INTO secrets … aad = ''::bytea` is rejected by 0004's CHECK constraint with `"secrets_aad_nonempty"` in the error message. Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
@@ -77,6 +77,172 @@ on the user's DGX Spark. Other Linux hosts may need
 `sandbox-exec` (no setup needed; ships with the OS).
 
 ## Recently completed (this session, 2026-05-10)
+
+### Phase 0 cont. (secrets at rest — AES-256-GCM + OS-keyring wrapping key + `db::secrets` runtime + 0004 migration)
+
+**Closed the last Phase 0 cont. line item under "Secrets at rest" in
+ROADMAP.** The `secrets` table column shape was already pinned by
+C2.2; the runtime that turns those columns into encrypt/decrypt
+operations now exists. Plaintext for an API token, IMAP password, or
+signing key lives only in agent-process memory and inside the OS
+keyring; the Postgres row carries AES-256-GCM ciphertext + a fresh
+random 12-byte nonce + AAD that binds the row to its name + a
+`key_id` pointer back to the keyring entry that holds the wrapping
+key.
+
+- **`db/src/secrets.rs` (~520 lines, 18 unit tests):** the canonical
+  shape for every secret read/write. Pure crypto helpers
+  (`encrypt`, `decrypt`, `compute_aad`, `validate_name`) decoupled
+  from any I/O so the AES-GCM contract is pinned by unit tests
+  without a DB or a keyring. AAD layout:
+  `b"hhagent-secrets-v1" || 0x00 || name.as_bytes() || 0x00 ||
+  optional_extra` — domain-separated, NUL-delimited, name-bound.
+  This is what gives us row-rename detection: `UPDATE secrets SET
+  name = …` leaves the stored AAD pointing at the old name, so
+  `get` either fails the prefix-match check (`AadMismatch`) or, if
+  an attacker also UPDATEs the AAD column, fails the GCM auth tag
+  (`DecryptFailed`) because the tag was computed under the original
+  AAD. Public secret-getter returns `Zeroizing<Vec<u8>>` so a
+  panic-unwind cannot leave plaintext on the stack; `SecretKey`
+  (32-byte AES-256 key) is `Zeroizing<[u8; 32]>` for the same
+  reason. Soft caps: `MAX_NAME_LEN = 256`, `MAX_PLAINTEXT_LEN =
+  64 KiB`. `validate_name` rejects empty / oversize / NUL / other
+  control bytes (NUL is the AAD separator; allowing it would let a
+  crafted name push bytes into the "extra" half of AAD).
+
+- **`KeyProvider` trait + two impls (in the same file):**
+  `MapKeyProvider` is the test seam — production code never sees
+  it. `OsKeyringProvider::ensure_initialized()` opens the
+  `(hhagent, secrets-v1)` entry on first use; if no entry exists,
+  it generates a fresh 32-byte key via `aead::OsRng` and writes it.
+  The cached `key_bytes` field means the keyring lookup (and any
+  unlock prompt) happens once at startup, not on every `get`. The
+  trait is `Send + Sync` because `put`/`get` cross await points
+  while holding a `&dyn KeyProvider`.
+
+- **Async DB I/O (same file, ~150 lines):** `put`, `get`, `list`,
+  `delete` all generic over `sqlx::Executor<'_, Database = Postgres>`,
+  same shape as `db::audit::insert`/`fetch_by_id`. `put` UPSERTs by
+  name (`ON CONFLICT (name) DO UPDATE SET ciphertext, nonce, aad,
+  key_id, updated_at = now()`). `get` does a
+  recompute-then-compare on AAD before passing to GCM, catching
+  the swap case explicitly via `AadMismatch` instead of folding it
+  into the generic `DecryptFailed` (operators want to know the
+  difference: AAD mismatch means "row was renamed", `DecryptFailed`
+  means "wrapping key is wrong or ciphertext was edited"). `list`
+  selects only metadata columns (`name`, `key_id`, `created_at`,
+  `updated_at`) so a debug-dump of the listing leaks nothing
+  cryptographic. `delete` is idempotent (`Ok(false)` on absent
+  name).
+
+- **`db/migrations/0004_secrets_aad_nonempty.sql` (~30 lines):**
+  drops the provisional `aad BYTEA NOT NULL DEFAULT ''::bytea` and
+  adds `CHECK (octet_length(aad) > 0)`. Closes [#12](https://github.com/hherb/hhagent/issues/12).
+  Belt-and-braces: the application layer is structurally
+  incapable of producing an empty AAD (`compute_aad` always emits
+  at least `AAD_DOMAIN.len() + 2` bytes), but the DB-layer CHECK
+  catches a rogue `INSERT INTO secrets …` that bypassed
+  `db::secrets::put`. Safe to apply on a populated cluster: at
+  this point in the project's history nobody has written `secrets`
+  rows yet, so no backfill is needed; a future migration on a
+  populated table would have to ensure non-empty AAD first.
+
+- **New deps (workspace):** `aes-gcm = { version = "0.10", features
+  = ["zeroize"] }` (pure-Rust RustCrypto AEAD; the `getrandom`
+  default brings in `aead::OsRng` for our nonce path; `zeroize`
+  feature wires key+cipher state to wipe on drop), `zeroize = {
+  version = "1", features = ["zeroize_derive"] }` (direct dep for
+  `Zeroizing<Vec<u8>>` on the public boundary). All Apache-2.0 OR
+  MIT — AGPL-compatible. **Per-target keyring deps in
+  `db/Cargo.toml`:** Linux uses `keyring 3` with the
+  `async-secret-service` + `tokio` + `crypto-rust` features —
+  pure-Rust D-Bus via `zbus`, no `libdbus-1-dev` system-package
+  requirement (we avoided the `sync-secret-service` /
+  `dbus-secret-service` / `libdbus-sys` chain on purpose to keep
+  the build hermetic across distros). macOS uses `apple-native`
+  (Security.framework). The whole transitive set is MIT/Apache.
+
+- **`db/tests/postgres_e2e.rs::secrets_put_get_list_delete_round_trip`
+  (~280 lines, NEW):** the only new integration test. Brings up a
+  per-test PG cluster (the canonical recipe shared with the
+  audit-pool test), runs the probe so all four migrations apply,
+  opens a runtime-role pool, then walks the seven assertions
+  documented in the test table row above. Uses a `MapKeyProvider`
+  with a hard-coded `[0x42u8; 32]` key so the test is hermetic
+  (CI never touches libsecret / Keychain). The AAD-mismatch and
+  ciphertext-tamper paths use the runtime-role pool's own UPDATE
+  privilege — the threat model says a worst-case attacker has
+  exactly that connection, so reproducing the tamper through the
+  same connection that any compromised application code would
+  hold is the right adversarial model. The 0004-CHECK assertion
+  uses a direct `INSERT … aad = ''::bytea` (which `db::secrets::put`
+  would never construct) to prove the database-layer guard is
+  active. Skips cleanly with `[SKIP]` lines when PG / supervisor
+  isn't available.
+
+**Why pure-Rust D-Bus on Linux (`async-secret-service` + `zbus`)
+instead of `sync-secret-service` + `libdbus-sys`.** The sync
+backend pulls in `dbus-secret-service`, which depends on
+`libdbus-sys`, which is a `pkg-config`-driven C-library binding
+requiring `libdbus-1-dev` headers at build time. That breaks
+`cargo build` on minimal containers, raises the bar for "clone +
+cargo build works on a fresh DGX Spark", and gives us no security
+benefit (it's the same D-Bus protocol either way). `zbus` is pure
+Rust, MIT-licensed, AGPL-compatible. The keyring crate's `tokio`
+feature integrates with our existing runtime so a blocking
+`Entry::get_secret()` from inside an async task does not deadlock
+the executor; we hit that exactly once per startup, in
+`OsKeyringProvider::ensure_initialized`.
+
+**Why not split the secrets module into multiple files.** It is
+one file at ~520 lines (with tests) and naturally cohesive: pure
+crypto helpers, the trait, both providers, async DB I/O, all
+operate on the same small set of types (`SecretKey`, `Nonce`, the
+AAD bytes). The 500-line target is a soft guideline; CLAUDE.md
+calls for "consider refactoring where possible". A future
+`secrets/{crypto.rs, key_provider.rs, keyring_provider.rs, db.rs,
+mod.rs}` split is straightforward when a real second consumer
+appears, but premature today.
+
+**Why best-effort logging on `OsKeyringProvider` errors instead of
+panicking.** A locked GNOME keyring or a missing D-Bus daemon
+should surface as `SecretsError::Keyring(...)` so the caller can
+choose to fall back (e.g. defer secret-using tools until the next
+unlock) or fail closed. Panicking in the provider would prevent
+the daemon from booting at all, which is the wrong default for a
+single-user tool that may have non-secret-using subsystems.
+
+**Why we did NOT integrate `secrets::get` into `tool_host::dispatch`
+in this slice.** The HANDOVER's "decrypted only at host boundary
+when injecting into a worker call" line stays as a Phase 1+ task.
+This slice is the *boundary layer* — the typed surface that future
+worker-secret injection will call into. Wiring the dispatcher to
+fetch secrets requires a per-worker policy ("which secrets is this
+tool allowed to ask for?") which doesn't exist yet, and adding
+that lookup mechanism at the same time as the encrypt/decrypt path
+would have bundled two distinct decisions into one slice. Filed as
+implicit prep for the first tool that needs an outbound credential
+(likely `web-fetch` in Phase 3 or the LLM router in Option J for
+the Anthropic API key).
+
+**Why issue #12 is closed at the application layer + DB layer
+simultaneously.** The original ticket said "reject empty
+`secrets.aad` in the runtime encrypt path; drop the schema's
+`DEFAULT ''::bytea` once all call sites populate explicitly". The
+runtime path is `db::secrets::put`, which always uses
+`compute_aad(name, _)` — structurally non-empty. So the call-site
+guarantee is in place. The schema DEFAULT had to go too, and a
+DB-layer `CHECK` is the cheapest belt-and-braces against future
+non-`db::secrets` insert paths (a debug query, a hand migration).
+0004 does both in one step.
+
+**Test count:** 172 → **191** on Linux (+18 unit secrets-crypto, +1
+integration secrets full-lifecycle; 0 skipped, 0 failed, 0
+warnings). macOS projects to ~138 once `brew install postgresql@18`
+is done; the unit tests are platform-neutral, the integration test
+`[SKIP]`s cleanly without PG.
+
+---
 
 ### Phase 0 cont. (Option I — dispatcher chokepoint + audit_log NOTIFY trigger + JSONL mirror + `hhagent-cli audit tail`)
 
@@ -1713,31 +1879,35 @@ fail-closed against a per-user, UDS-only Postgres cluster managed by
 the same `default_supervisor()` that supervises the daemon itself.
 Every application write runs under the non-superuser
 `hhagent_runtime` role with a database-layer prohibition on tampering
-with prior audit rows (Option L, earlier on 2026-05-10). And as of
-Option I (this session) every Phase 0+ tool call is funneled through
-`tool_host::dispatch`, which writes one `audit_log` row per call;
-those rows are replicated to a daily-rotated JSONL stream under
-`~/.local/state/hhagent/` by a long-lived listener that wakes on
-`pg_notify`. Operators can `tail -f` the JSONL files via the new
-`hhagent-cli audit tail` binary without touching Postgres — including
-against a daemon that has crashed mid-startup.
+with prior audit rows (Option L, earlier on 2026-05-10). Every Phase
+0+ tool call is funneled through `tool_host::dispatch`, which writes
+one `audit_log` row per call (Option I); those rows are replicated to
+a daily-rotated JSONL stream under `~/.local/state/hhagent/` by a
+long-lived listener that wakes on `pg_notify`, and operators can
+`tail -f` the JSONL files via `hhagent-cli audit tail` without
+touching Postgres. **As of this session,** every secret at rest in
+the database is encrypted with AES-256-GCM under a wrapping key that
+lives in the OS keyring (libsecret on Linux, Keychain on macOS);
+plaintext is returned in `Zeroizing<Vec<u8>>` so a panic-unwind
+cannot leave material behind, and the AAD layer binds each row to
+its name so a `UPDATE secrets SET name = …` swap is detected on the
+next read.
 
 What remains in Phase 0:
 
 - **LLM router HTTP-client stub** (Option J below) — sole egress for
   model calls; Phase 5's policy gate slots in here. **Headline next
   pickup** — Phase 1's memory recall and scheduler loop both depend
-  on it.
+  on it. With secrets-at-rest landed, this is the last
+  application-layer plumbing before Phase 1 can begin.
 - **Cross-platform exponential restart backoff** (Option K below) —
   systemd 252+ has `RestartSteps`/`RestartMaxDelaySec`; macOS launchd's
   `KeepAlive=true` has no operator-controllable throttle, so this
   needs a per-OS shape. Filed but parked — no immediate need.
-- **Secrets at rest: AES-256-GCM encrypt/decrypt path** — the
-  `secrets` table column shape was pinned in C2.2 (`0001_init.sql`)
-  but the runtime encrypt/decrypt path is still TODO. The wrapping
-  key lives in the OS keyring (libsecret on Linux, Keychain on
-  macOS); this is the last Phase 0 cont. line item under "Secrets
-  at rest" in ROADMAP.
+
+(The "Secrets at rest" line item that was the third bullet here in
+the previous handover shipped this session — see "Recently
+completed" above.)
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -1869,11 +2039,12 @@ unenforced. To wire them up:
 - [#6](https://github.com/hherb/hhagent/issues/6) — tunable `cpu_quota_pct`/`tasks_max` policy fields + `setrlimit`-based `cpu_ms` enforcement (Option G above)
 - [#8](https://github.com/hherb/hhagent/issues/8) — collapse `default_probe` / `default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears
 - [#11](https://github.com/hherb/hhagent/issues/11) — switch `core` to a daemon-scoped `PgPool` when Phase 1's concurrent workload lands (filed during C2.2 review)
-- [#12](https://github.com/hherb/hhagent/issues/12) — reject empty `secrets.aad` in the runtime encrypt path; drop the schema's `DEFAULT ''::bytea` once all call sites populate explicitly (filed during C2.2 review)
+- ~~[#12](https://github.com/hherb/hhagent/issues/12) — reject empty `secrets.aad` in the runtime encrypt path; drop the schema's `DEFAULT ''::bytea` once all call sites populate explicitly~~ **closed this session** — `db::secrets::put` always populates AAD via `compute_aad(name, _)` (structurally non-empty), migration `0004_secrets_aad_nonempty.sql` drops the DEFAULT and adds `CHECK (octet_length(aad) > 0)`
 - [#13](https://github.com/hherb/hhagent/issues/13) — write a migration numbering / rename hygiene checklist; sqlx fingerprints version+slug, so a rename or edit on a shipped migration silently breaks startup on existing clusters (filed during C2.2 review)
 - [#14](https://github.com/hherb/hhagent/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `core/tests/supervisor_e2e.rs` with a constant in `hhagent-core`'s public API or a real readiness signal (filed during C2.2 review)
+- [#15](https://github.com/hherb/hhagent/issues/15) — hoist the duplicated PG bring-up boilerplate (`unique_temp_root` + `initdb` + `postgresql.auto.conf` + supervisor install/start/wait) into a shared `tests-common` dev-dep crate; today it lives copy-pasted across `db/tests/postgres_e2e.rs`'s several integration tests and `core/tests/audit_dispatch_e2e.rs` (filed during the post-Option-I review in `553dcf8`)
 
-(All Phase 0 follow-up issues filed in earlier sessions are still open: [#1](https://github.com/hherb/hhagent/issues/1)–[#6](https://github.com/hherb/hhagent/issues/6), [#8](https://github.com/hherb/hhagent/issues/8), and the four C2.2-review issues [#11](https://github.com/hherb/hhagent/issues/11)–[#14](https://github.com/hherb/hhagent/issues/14). Both extension-deferral issues filed at the start of this session are now closed won't-fix — see below.)
+(All Phase 0 follow-up issues filed in earlier sessions are still open: [#1](https://github.com/hherb/hhagent/issues/1)–[#6](https://github.com/hherb/hhagent/issues/6), [#8](https://github.com/hherb/hhagent/issues/8), and the C2.2-review issues [#11](https://github.com/hherb/hhagent/issues/11), [#13](https://github.com/hherb/hhagent/issues/13), [#14](https://github.com/hherb/hhagent/issues/14), plus [#15](https://github.com/hherb/hhagent/issues/15). [#12](https://github.com/hherb/hhagent/issues/12) is now closed by the secrets-at-rest slice. Both extension-deferral issues filed earlier are closed won't-fix — see below.)
 
 (Closed in this session, both as won't-fix after review: [#9](https://github.com/hherb/hhagent/issues/9) Apache AGE — relational `entities`/`relations` behind a `Graph` trait + recursive CTEs are sufficient for a personal-agent graph; AGE upstream lags PG releases and stores attributes in JSONB which fights pgvector/tsvector indexing. [#10](https://github.com/hherb/hhagent/issues/10) ParadeDB `pg_search` — native `tsvector`+GIN+`ts_rank` is comparable to BM25 at our corpus size; the embedding dominates the lexical re-ranker; RRF is ~5 lines of SQL.)
 
