@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** `<NEW>` (`feat(llm-router): OpenAI-compatible HTTP client + Backend/PolicyGate seam (Option J)`)
+**Last commit:** `cfff583` (`feat(llm-router): OpenAI-compatible HTTP client + Backend/PolicyGate seam (Option J)`)
 **Branch:** `main`
 
 ---
@@ -32,7 +32,7 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 224 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (192 → 224, +32 from the LLM router stub in `<NEW>`: 28 unit + 4 integration. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**`cargo test --workspace` on Linux: 224 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (192 → 224, +32 from the LLM router stub in `cfff583`: 28 unit + 4 integration. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
 **macOS projection:** ~171 (was ~139; +32 from the same set — the LLM router slice is platform-neutral, no PG/keyring dep, the integration test binds to 127.0.0.1:0 which works identically on both OSes). Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
