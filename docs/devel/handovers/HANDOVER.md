@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** *to be set in the commit that lands this session* (`feat(tool_host): Option M — sealed WorkerCommand + dispatch chokepoint compile-time pin`)
+**Last commit:** `3279c6d` (`feat(tool_host): Option M — sealed WorkerCommand + dispatch chokepoint compile-time pin`)
 **Branch:** `main`
 
 ---
