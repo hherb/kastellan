@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-09
-**Last commit:** *(this session — pending)*
+**Last commit:** `f3fdb14` (`feat(db,supervisor): Postgres bring-up foundation (Option C2 slice 1)`)
 **Branch:** `main`
 
 ---
