@@ -48,6 +48,38 @@ seccompiler = "0.5"
 # helper thread when a worker outlives its budget. MIT OR Apache-2.0.
 libc        = "0.2"
 
+# Postgres driver + migration runner. License: MIT OR Apache-2.0.
+#
+# Feature notes:
+#   - default-features=false drops the runtime-tokio-rustls bundle. We
+#     speak Postgres over a Unix-domain socket only (peer auth, see
+#     hhagent-db's module doc), so a TLS implementation would be dead
+#     weight and a license-audit hazard.
+#   - "runtime-tokio" wires sqlx to the same Tokio reactor the rest of
+#     the workspace uses.
+#   - "postgres" enables the PG driver.
+#   - "migrate" enables the `sqlx::migrate` *module* (the `Migrator`
+#     type used to hold the embedded migration set).
+#   - "macros" re-exports the `sqlx::migrate!()` proc-macro itself —
+#     the one that scans `./migrations/*.sql` at compile time and
+#     bakes them into a `Migrator` constant. Without this the
+#     `migrate!` invocation in hhagent-db won't resolve. We do NOT
+#     opt in to the `query!()` / `query_as!()` compile-time-checked
+#     query macros (they require DATABASE_URL at build time, which
+#     would tie CI to a running cluster).
+#   - "json" pulls in `JsonValue` <-> `serde_json::Value` codec for the
+#     JSONB columns on `audit_log`, `tasks`, `entities`, `relations`.
+#   - "time" wires sqlx's `TIMESTAMPTZ` codec to the same `time` crate
+#     types used elsewhere in the workspace (`time::OffsetDateTime`).
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "migrate",
+    "macros",
+    "json",
+    "time",
+] }
+
 # Profile tweaks
 [profile.release]
 lto         = "thin"

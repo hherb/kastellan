@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-09
-**Last commit:** `326104b` (`feat(sandbox/macos): close issues #1 (mach-lookup) and #2 (setsid)`) — rebased on top of `f3fdb14` (Postgres bring-up foundation, Option C2 slice 1)
+**Last commit:** `<TBD — bumped in the docs-only follow-up commit after the C2.2 work commit>`
 **Branch:** `main`
 
 ---
@@ -22,17 +22,17 @@
 
 ```
 hhagent (Rust workspace, 7 crates, AGPL-3.0)
-├── core               hhagent-core: lib + bin (long-running daemon blocking on SIGTERM/SIGINT via tokio::signal::unix; placeholder body until the Phase 1 scheduler lands); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
-├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + hhagent-db-init bin (idempotent initdb against ~/.local/share/hhagent/pg/data, UDS-only listen, peer auth)
-├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (now wraps in systemd-run --scope cgroup) + MacosSeatbelt
+├── core               hhagent-core: lib + bin (long-running daemon blocking on SIGTERM/SIGINT via tokio::signal::unix; main.rs now runs db::probe::run before wait_for_shutdown — fail-closed startup); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
+├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + probe::run (ensure DB → migrate → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql) + hhagent-db-init bin
+├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt
 ├── supervisor         hhagent-supervisor: SystemdUser (Linux) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec} + default_probe (per-OS supervisor probe)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 138 tests, 0 skipped, 0 failed, 0 warnings.**
-**`cargo test --workspace` on macOS: 86 tests, 0 skipped, 0 failed** *(after this session's macOS hardening; earlier-in-day Linux/db/supervisor work hasn't been re-run on macOS yet — projection ~126 there once `postgres_service_spec`'s +17 unit tests + the +23 db unit tests run, with `postgres_e2e` `[SKIP]`ping until `brew install postgresql@18`).*
+**`cargo test --workspace` on Linux: 151 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (138 → 151, +13 from C2.2: schema + sqlx migrations + Graph trait + core probe + e2e). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**macOS projection:** ~99 (was 86; +12 from the +12 db unit tests; the +1 db integration test (`probe_runs_migrations_and_graph_happy_path`) and the rewritten core integration test (`core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly`) `[SKIP]` until `brew install postgresql@18`). Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -43,9 +43,9 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 | `sandbox` integration (`macos_smoke`) | 10 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny`, **worker is the leader of a fresh session — sid == pid via setsid (issue #2)**, **worker cannot `bootstrap_look_up` `com.apple.coreservices.appleevents` (issue #1)** |
 | `core` unit | 16 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
-| `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** `default_supervisor()` round-trip against the actual `hhagent` binary: build spec via `core_service_spec`, install into `~/.config/systemd/user/` (Linux) or `~/Library/LaunchAgents/` (macOS), pre-start status=Inactive, start, **poll status until Active** then **hold 500 ms and re-check** (rules out flapping/restart loops under the `keep_alive=true` ServiceSpec), sanity-check that the redirected stdout contains the daemon's startup JSON line (`"hhagent core starting"` + `version` field), stop, **poll status until Inactive** within 5 s (proves the daemon's tokio SIGTERM handler exited cleanly *before* `TimeoutStopSec=10` would have SIGKILLed it), uninstall, post-uninstall status=NotInstalled. RAII `ServiceGuard` + `LogDirGuard` clean up on panic. Unique `hhagent-supervisor-test-{pid}-{nanos}` name avoids clobbering a real installed `hhagent-core`. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
-| `db` unit | 23 | `build_initdb_argv` (8 tests: argv[0]=binary path, `--pgdata <data_dir>` always present, `--auth-local=peer` + `--auth-host=reject` always present, `--data-checksums` toggles cleanly, blank username falls back to `hhagent`, supplied username flows through verbatim); `build_postgresql_auto_conf` (7 tests: `listen_addresses=''` always emitted, `unix_socket_directories` flows through, `unix_socket_permissions = 0700` baked in, `log_destination=stderr` + `logging_collector=off` for supervisor capture, `max_connections`/`shared_buffers` clamp to ≥ 1, file starts with the don't-edit warning); `find_pg_bin_dir` + candidate ordering (3 tests: PG 18 first, empty list errors, picks first candidate with both `postgres`+`initdb` executable); `is_data_dir_initialized` (2 tests: false for empty, true when `PG_VERSION` regular file present); `require_absolute` + `default_data_dir` + `default_socket_dir` (5 tests: rejects relative, accepts absolute, default data dir under `$HOME/.local/share/hhagent/pg/data`, socket dir is `<data>/sockets`) |
-| `db` integration (`postgres_e2e`) | 1 | **real** `find_pg_bin_dir` → `initdb` (PGDG `/usr/lib/postgresql/18/bin/initdb` on Linux, Homebrew on macOS) → write `postgresql.auto.conf` → `default_supervisor()` install → start → wait for `Active` (≤ 15 s) → wait for `<sockets>/.s.PGSQL.5432` to appear → hold 500 ms and re-check Active (no flapping under `Restart=on-failure`) → spawn `psql -h <socket_dir> -U <whoami> -At -c 'SELECT 1'` over the UDS (peer auth) → assert stdout trim equals `1` → stop → wait for `Inactive` → uninstall → status=NotInstalled. Per-test temp data dir + log dir under `std::env::temp_dir()`; both wiped by `PathGuard` Drop on success or panic. Unique `hhagent-supervisor-test-pg-{pid}-{nanos}` service name. Skips with `[SKIP]` when no Postgres binaries on host or supervisor probe fails. Runtime ~1.8 s on the DGX Spark |
+| `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `hhagent` binary with `HHAGENT_DATA_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d hhagent` and assert `audit_log` has at least one `(actor='core', action='startup')` row → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + three `PathGuard`s clean up PG service, core service, two data/log dirs, and the core log dir on panic. Unique `hhagent-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs`. Test name flipped to `core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly` to reflect the new contract |
+| `db` unit | 35 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. Plus **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`) |
+| `db` integration (`postgres_e2e`) | 2 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (NEW C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
@@ -77,7 +77,205 @@ on the user's DGX Spark. Other Linux hosts may need
 
 ## Recently completed (this session, 2026-05-09)
 
-> **Two parallel work streams shipped on 2026-05-09 from different machines.**
+### Phase 0 cont. (Option C2.2 — schema + sqlx migrations + Graph trait + core probe + e2e)
+
+**Closed the headline next-pickup item from the previous handover.** The
+foundation that landed in C2 (a per-user PG cluster on a UDS, supervised
+end-to-end) now has a schema, a migration runner integrated into the
+agent-core daemon's startup, a typed graph abstraction, and a single
+fail-closed probe path that connects → ensures the application DB →
+runs migrations → emits a bring-up `audit_log` row.
+
+- **`db/migrations/0001_init.sql` (~150 lines):** six tables + one
+  extension. Tables:
+  - **`audit_log`** — append-only landing zone for the dispatcher
+    chokepoint (`core::tool_host::dispatch()`). Strictly monotonic
+    `id BIGSERIAL`, `(actor, ts)` index. Append-only is application
+    discipline today; a future migration adds
+    `REVOKE UPDATE, DELETE ON audit_log FROM <runtime_role>` once
+    that role is split out (see "Open follow-up issues" below).
+  - **`tasks`** — scheduler queue. State machine pinned via a
+    `CHECK (state IN ('pending', 'running', 'completed', 'failed',
+    'cancelled'))` constraint rather than a Postgres ENUM (ENUMs
+    require `ALTER TYPE … ADD VALUE` in its own transaction;
+    CHECK is cheap to widen).
+  - **`memories`** — recall corpus with three independent retrieval
+    shapes (semantic via pgvector, lexical via generated `tsvector`
+    + GIN, structured via JSONB metadata). Embedding column is
+    `vector(1024)` (bge-m3 dim — locked in this session). HNSW
+    index is *deferred* to Phase 1's first batch ingest because
+    HNSW build cost scales with row count and building against an
+    empty table just to grow it row-by-row is strictly worse.
+  - **`entities`**, **`relations`** — graph nodes and edges.
+    `UNIQUE (kind, name)` is the natural key on entities;
+    `relations` allows multi-edges so two observations about the
+    same triple coexist with timestamps. `ON DELETE CASCADE` keeps
+    the graph internally consistent for recursive-CTE traversal.
+  - **`secrets`** — column shape for AES-256-GCM ciphertext +
+    12-byte nonce + AAD + key_id. The wrapping key lives in the OS
+    keyring (libsecret on Linux, Keychain on macOS); only the
+    column shape is pinned in this slice — the encrypt/decrypt
+    runtime is a later Phase 0 slice.
+  - **`vector` extension** loaded via `CREATE EXTENSION IF NOT
+    EXISTS vector` (idempotent re-runs).
+- **`db/src/conn.rs` (~240 lines, 9 unit tests):** `ConnectSpec` is the
+  pure description of how to reach the per-user cluster.
+  `default_for(&data_dir)` reads `$USER` for peer-auth identity,
+  resolves `<data_dir>/sockets` for the UDS host, and pins the
+  application database name to `"hhagent"`. Fails closed with
+  `DbError::EnvVarMissing("USER")` when `$USER` is unset or empty —
+  peer auth has no fallback identity so guessing would lead to a
+  confusing connection failure or (worse) authenticating as the
+  wrong role. `to_pg_connect_options()` materialises into the sqlx
+  options struct. `for_maintenance_db()` swaps only the database
+  field for the brief CREATE-DATABASE roundtrip in the probe.
+  `quote_ident` is the canonical defense for any future DDL that
+  pipes a less-trusted name into a CREATE statement (today's
+  callers are constants only — belt-and-braces).
+- **`db/src/probe.rs` (~150 lines, 1 unit test + 1 integration
+  test):** `probe::run` is the single entry point the daemon calls
+  on startup. Steps: connect to maintenance DB → check
+  `pg_database` for `hhagent` → CREATE DATABASE if absent → reconnect
+  to `hhagent` → `MIGRATOR.run(&mut conn)` → INSERT into `audit_log`.
+  Fail-closed: any error short-circuits the daemon startup with `?`
+  propagation, exits non-zero, the supervisor sees the failure, and
+  the next restart attempt re-runs the probe. `ensure_database_exists`
+  is split out as a pub helper so the create-branch can be exercised
+  in isolation. Two short-lived connections (admin + app), no pool
+  yet — the pool comes in Phase 1 when memory recall queries arrive.
+- **`db/src/graph.rs` (~340 lines, 2 unit tests + happy-path
+  integration test):** `Graph` trait + `PgGraph` impl. Uses
+  async-fn-in-trait (Rust 1.75+) directly rather than `async-trait`
+  to avoid the `Box<Pin<…>>` allocation per call. Operations:
+  `upsert_entity` (`ON CONFLICT (kind, name) DO UPDATE` so re-upsert
+  is id-stable, attrs replace whole-row), `upsert_relation` (multi-
+  edges allowed; "upsert" here means "INSERT, returning id"),
+  `get_entity`, `neighbors` (filtered + unfiltered SQL paths so the
+  planner gets the predicate at parse time), `path` (recursive CTE
+  with visited-set in the row to refuse re-entry on cycles, ORDER BY
+  depth ASC LIMIT 1 picks the shortest path, then a second query
+  expands ids into entities preserving walk order). Embeddings are
+  *not* read or written in this slice — `entities.embedding` stays
+  NULL for now; Phase 1 picks the encoding (pgvector crate vs
+  text-cast) when the embedding worker lands.
+- **`MIGRATOR` static (`db/src/lib.rs`):** `sqlx::migrate!("./migrations")`
+  embeds the migration set at compile time, so a binary install
+  doesn't need the source tree on disk. `MIGRATOR.run(&pool)` is
+  what `probe::run` calls; sqlx tracks applied migrations in
+  `_sqlx_migrations` so re-running on an up-to-date DB is a no-op.
+- **`core::main::bring_up_database` (~30 lines, wired into `main.rs`
+  before `wait_for_shutdown`):** the daemon's contract. Reads
+  `HHAGENT_DATA_DIR` env (test-only override; production uses
+  `default_data_dir()`), constructs the `ConnectSpec` from `$USER`,
+  emits a structured tracing line with the resolved values, calls
+  `probe::run` with `actor="core" action="startup" payload={"version": …}`,
+  emits a `"database probe succeeded"` follow-up line. Any error
+  bubbles up via `?` and exits non-zero.
+- **sqlx feature picks (`Cargo.toml` workspace dep):** `runtime-tokio`
+  (no TLS — UDS only), `postgres`, `migrate` (the `Migrator` type
+  + `migrations/` runtime), `macros` (re-exports the `sqlx::migrate!()`
+  proc-macro), `json` (JSONB ↔ `serde_json::Value` codec), `time`
+  (TIMESTAMPTZ ↔ `time::OffsetDateTime`). Specifically *not* enabled:
+  `query!` / `query_as!` (compile-time SQL validation requires
+  `DATABASE_URL` at build time, which would tie CI to a running
+  cluster). All non-macro forms (`sqlx::query`, `sqlx::query_as`)
+  work fine.
+- **`core/tests/supervisor_e2e.rs` rewrite:** test renamed to
+  `core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly`
+  to reflect the new contract. Brings up a per-test PG cluster
+  (initdb + `postgres_service_spec` + start + wait socket + 500 ms
+  stable-Active recheck) before installing the `hhagent` core
+  service. Forwards `HHAGENT_DATA_DIR` and `USER` via `spec.env`
+  so the daemon's probe targets the temp cluster (`USER` is needed
+  because systemd `--user` units only inherit env vars listed in
+  the unit file's `Environment=` lines). Asserts the
+  `"database probe succeeded"` log line + the `audit_log` row count
+  via psql. Two `ServiceGuard`s + three `PathGuard`s clean up on panic.
+- **`db/tests/postgres_e2e.rs` extension:** new test
+  `probe_runs_migrations_and_graph_happy_path` exercises probe
+  idempotency + the `Graph` trait happy path against a real
+  cluster (see "test table" entry above for the sequence).
+- **`HHAGENT_DATA_DIR` env var override:** new optional env knob in
+  `core::main::bring_up_database`. Production deployments leave it
+  unset and use `default_data_dir()` → `~/.local/share/hhagent/pg/data`;
+  tests inject a per-test temp dir so the operator's installed
+  cluster is never touched. The doc-comment on `bring_up_database`
+  makes the precedence explicit.
+
+**Pre-existing Linux build break, fixed inline (`sandbox/tests/fixtures/mach_probe.rs`):**
+the macOS-only Mach probe added in `326104b` (issue #1) used
+`extern { static bootstrap_port; fn bootstrap_look_up; }` —
+both libSystem-only symbols. `cargo build --workspace` failed on
+Linux at the linker stage. The fix gates the body with
+`#[cfg(target_os = "macos")]` and provides a stub `fn main()` for
+non-macOS targets that prints a self-explanatory error and exits 1.
+Cargo's `[[bin]]` table doesn't support per-target conditional
+inclusion, so source-level cfg is the canonical pattern.
+
+**Test count:** 138 → **151** on Linux (+12 db unit tests + 1 db integration
+test + supervisor_e2e rewrite (still 1 test, contract upgraded);
+0 skipped, 0 failed, 0 warnings). macOS projection: 99 once
+`brew install postgresql@18`'s done; the new integration tests
+`[SKIP]` cleanly without it.
+
+**Why the probe lives in `hhagent-db` rather than `hhagent-core`.**
+The probe's logic (connect → ensure DB → migrate → audit row) is
+pure database orchestration with zero `core`-specific shape. Putting
+it in `db` means the future memory worker (Phase 1) can call the
+same function for its own bring-up without dragging the core crate
+in. `core/src/main.rs` is a thin adapter: it resolves env-derived
+defaults and supplies the `actor`/`action`/`payload` strings that
+identify *who* is starting up.
+
+**Why peer auth, role = OS user, application DB = `hhagent`.** These
+three pin the smallest containment story. Peer auth on a UDS means
+remote auth is structurally impossible (no listener); role = OS user
+means a different OS user on the same host literally cannot
+connect (peer rejects + 0700 socket dir); application DB =
+`hhagent` keeps `postgres`/`template0`/`template1` for maintenance.
+The cluster is born locked-down at `initdb` and stays that way
+because every connection assumes this triple — there is no
+"connect with password" code path to leak through.
+
+**Why we did not split out a non-superuser runtime role yet.** The
+HANDOVER's audit_log description called for `REVOKE UPDATE, DELETE
+ON audit_log FROM <runtime_role>` once a non-superuser role is
+split out. Today the daemon connects as the cluster superuser
+(role == OS user, set up at `initdb` time). Adding a
+`hhagent_runtime` role + `GRANT INSERT, SELECT ON audit_log` and
+having the daemon connect as that role is a clean follow-up but
+needs a careful audit of what each subsystem (memory worker,
+graph writes, secret reads) actually requires before we GRANT.
+Filed in "Open follow-up issues" below.
+
+**Why no e2e test for the daemon's restart-loop on probe failure.**
+The fail-closed contract is exercised by the existing supervisor
+lifecycle pin (`Restart=on-failure RestartSec=5`) plus the new
+e2e's "500 ms stable-Active recheck" — a probe that fails would
+flip the daemon to Inactive within those 500 ms and the assertion
+would trip with the stderr log dumped. A dedicated "probe fails →
+daemon respawns → eventually succeeds" test would need to
+*induce* a probe failure mid-test (e.g. tear PG down between the
+daemon's connection attempts), which is an unbounded flake hazard
+on a busy host. Filed for the future "exponential backoff"
+hardening if and when that arrives.
+
+**Why we opted for `sqlx` over `refinery` and over a hand-rolled
+runner.** `refinery` is lighter on deps but has no async story for
+sqlx-style query execution downstream — Phase 1 will need
+`sqlx::query` for memory recall regardless, so adding sqlx now and
+piggybacking the migration runner on the same crate is one tool
+instead of two. A hand-rolled runner against `psql` would have
+worked but trades binary cleanliness for source-tree-on-disk
+deployment (we'd have to ship `migrations/*.sql` alongside the
+daemon). `sqlx::migrate!()` macro embeds at compile time — same
+shape as the workspace's existing fixture binaries.
+
+---
+
+## Recently completed (earlier sessions on 2026-05-09)
+
+> **Two parallel work streams shipped earlier on 2026-05-09 from different machines.**
 > The Linux work below (Postgres bring-up + supervisor wiring + native PG FTS
 > + relational graph commitment) was implemented and committed first
 > (`f3fdb14` and friends). The macOS hardening below (issues #1 + #2) was
@@ -1109,17 +1307,27 @@ don't get forgotten):
 
 ## Next TODO (pick one)
 
-**Phase 0 hardening is complete on Linux; macOS Seatbelt and both
-supervisor backends are real.** Two concrete services are now
-wired and proven end-to-end against `default_supervisor()`:
-`hhagent-core` (the agent-core daemon, blocks on SIGTERM/SIGINT) and
-`hhagent-postgres` (the per-user PG cluster on a UDS). Remaining
-Phase 0 work: schema + migrations + core probe (the rest of Option
-C2 — see C2.2 below), the audit log writer + JSONL mirror, the
-LLM-router HTTP client stub, and the supervisor "auto-restart with
-backoff on worker crash" finishing-touch (`Restart=on-failure
-RestartSec=5` is constant; cross-platform exponential backoff still
-parked).
+**Phase 0 is mostly complete now.** The agent-core daemon comes up
+fail-closed against a per-user, UDS-only Postgres cluster managed by
+the same `default_supervisor()` that supervises the daemon itself,
+and the schema + Graph trait are in place for Phase 1's memory
+recall. What remains in Phase 0:
+
+- **Audit-log JSONL mirror + tail viewer** (Option I below) —
+  `audit_log` is now a real table with rows, but the dispatcher
+  doesn't write to it yet *and* there's no operator-visible mirror
+  on disk for `tail -f` style debugging.
+- **LLM router HTTP-client stub** (Option J below) — sole egress for
+  model calls; Phase 5's policy gate slots in here.
+- **Cross-platform exponential restart backoff** (Option K below) —
+  systemd 252+ has `RestartSteps`/`RestartMaxDelaySec`; macOS launchd's
+  `KeepAlive=true` has no operator-controllable throttle, so this
+  needs a per-OS shape.
+- **Non-superuser runtime role + audit-log GRANT split** (Option L
+  below) — today the daemon connects as the cluster superuser; the
+  HANDOVER pin for `audit_log` (no UPDATE/DELETE GRANT to runtime
+  roles) lands once a `hhagent_runtime` role is split out and the
+  daemon switches to it.
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -1137,78 +1345,102 @@ parked).
 
 ### Option C4 — wire core into the supervisor  *(SHIPPED 2026-05-09 — see "Recently completed")*
 
-### Option C2 — Phase 0 cont.: Postgres bring-up (foundation slice)  *(SHIPPED 2026-05-09 — see "Recently completed (this session)")*
+### Option C2 — Phase 0 cont.: Postgres bring-up (foundation slice)  *(SHIPPED 2026-05-09 — see "Recently completed (earlier sessions)")*
 
-### Option C2.2 — Phase 0 cont.: schema + migrations + core probe (the rest of C2)
+### Option C2.2 — Phase 0 cont.: schema + migrations + Graph trait + core probe + e2e  *(SHIPPED 2026-05-09 — see "Recently completed (this session)")*
 
-(Now the headline next-pickup. Foundation is in place: the cluster
-runs under `default_supervisor()`, listens on a UDS only, accepts
-peer auth — proven by `db/tests/postgres_e2e.rs::postgres_install_start_select_one_uninstall`.
-What's missing is the *schema* and the migration runner that
-`hhagent-core` will use on bring-up.)
+### Option I — audit-log JSONL mirror + dispatcher write-site
 
-- **`db/migrations/0001_init.sql`** — `audit_log`, `tasks`, `memories`,
-  `entities`, `relations`, `secrets`. Schema notes:
-  - `audit_log`: append-only (no UPDATE/DELETE GRANT), strictly
-    monotonic `id BIGSERIAL`, `ts TIMESTAMPTZ DEFAULT now()`, `actor`,
-    `action`, `payload JSONB`, indexes on `ts` and on `actor, ts`.
-  - `memories`: text + `pgvector::vector` column for embeddings + a
-    `tsvector` GENERATED column over the body with a GIN index for
-    `ts_rank`-based lexical retrieval; choose embedding dimension up
-    front (1024 for bge-m3 is the leading Phase 1 candidate but defer
-    to Open Question #1).
-  - `entities`: `(id, kind, name, attrs JSONB, embedding vector(N))`,
-    `UNIQUE(kind, name)`, `kind+name` and `attrs` GIN indexes.
-  - `relations`: `(id, src_id, dst_id, kind, attrs JSONB)` with
-    cascading delete from `entities`, `(src_id, kind)` and
-    `(dst_id, kind)` indexes. No graph extension; recursive CTEs
-    handle variable-length traversal behind a `Graph` trait in
-    `db/src/graph.rs` (see "Graph abstraction" below).
-  - `secrets`: AES-256-GCM ciphertext columns; key from OS keyring
-    (libsecret on Linux / Keychain on macOS) — *outside* this
-    migration's scope, but pin the column shape now.
-- **Graph abstraction in `db/src/graph.rs`** — `pub trait Graph` with
-  `upsert_entity`, `upsert_relation`, `neighbors`, `path`, etc. All
-  call sites in `core` go through this trait; no module outside `db`
-  ever writes raw SQL against `entities`/`relations`. Same chokepoint
-  discipline as `tool_host::dispatch()`. The trait makes a future
-  swap to AGE/Neo4j/Memgraph mechanical (one impl, no call-site
-  churn) if a real bottleneck ever appears.
-- **Choose the migration runner.** Three viable options:
-  - `sqlx-cli` + `sqlx::migrate!()` macro at startup (compile-time
-    embedded migrations; what HANDOVER previously suggested).
-  - `refinery` (similar shape, lighter dep tree).
-  - Hand-rolled: just run the `.sql` file with `psql` on first
-    bring-up and track applied migrations in a `_schema_migrations`
-    table ourselves.
-  Lean toward `sqlx-cli` for the MIT-OR-Apache-2.0 license, the
-  `query!()` macro's compile-time SQL validation downstream, and the
-  established `embedded::migrate!()` shape that doesn't require
-  shipping the migrations alongside the binary.
-- **Core probe in `core`** that, on startup:
-  1. Resolves the cluster's socket dir (`<data_dir>/sockets`).
-  2. Connects with the configured role (default `hhagent`).
-  3. Runs `sqlx::migrate!()`.
-  4. Emits an `audit_log` row on bring-up: actor=`core`,
-     action=`startup`, payload=`{"version": …, "git": …}`.
-  5. Fails closed if any of the above errors — the daemon should not
-     reach the (future) scheduler loop without a working DB.
+(Headline next-pickup candidate.) The `audit_log` table now exists
+and the daemon writes one bring-up row to it; nothing else writes
+yet, and there's no on-disk mirror an operator can `tail -f`.
+
+- **Wire `core::tool_host::dispatch()`** to insert into `audit_log` on
+  every tool call: `actor` = the tool name, `action` = the JSON-RPC
+  method, `payload` = `{"req": …, "result": …, "err": …, "ms": …}`
+  with anything > 4 KiB truncated and replaced with a hash. Single
+  insert per call, no batching at this stage — Phase 0 throughput
+  doesn't justify it.
+- **JSONL mirror writer:** small task spawned at daemon startup that
+  watches `audit_log` (LISTEN/NOTIFY on a `audit_log_inserted`
+  channel, with a `LASTVAL`-style fallback poll every 5 s) and
+  appends each row as a JSON line to
+  `~/.local/state/hhagent/audit-YYYY-MM-DD.jsonl`. Rotate on UTC
+  date. `fsync` after each write — operator visibility beats
+  throughput at this scale.
+- **`hhagent-cli audit tail`** (new bin in core or a new tiny crate):
+  reads the JSONL files in date order, follows the latest one. No
+  DB connection needed for the viewer — operator can debug a daemon
+  that crashed mid-startup without bringing the cluster up.
+- **Test:** extend `core/tests/supervisor_e2e.rs` with one call to a
+  fixture worker that should produce an `audit_log` insert, then
+  assert the JSONL mirror picks it up within ≤ 1 s.
 
 **Gotchas:**
-- `core` does not currently depend on `hhagent-db`. Adding the dep is
-  fine but the migration runner choice will pull in either `sqlx`
-  (heavy: tokio + connection pool + macros) or `refinery` (lighter).
-  Pick before wiring.
-- Production install layout. `db/migrations/*.sql` lives in the
-  source tree today; `sqlx::migrate!()` embeds them at compile time
-  so a binary install doesn't need them on disk. Pin this shape now
-  so we don't have to retrofit a "find migrations on disk" code path.
-- The current `keep_alive=true` postgres ServiceSpec relies on
-  Postgres exiting non-zero on crash, which it does. Smart shutdown
-  (default SIGTERM behavior) waits for clients to disconnect; if the
-  scheduler ever holds long-lived connections, `stop` could exceed
-  `TimeoutStopSec=10`. Track this and consider `KillSignal=SIGINT`
-  (fast shutdown) at the supervisor layer for postgres specifically.
+- The dispatcher chokepoint invariant (every tool/channel/routine
+  action enters core through `ToolHost::dispatch()`) is documented
+  in HANDOVER but not enforced by a compile-time test. Phase 1
+  ROADMAP's first item adds a "core::tool_host is the only
+  constructor of WorkerCommand" pin; consider sneaking it in here.
+- LISTEN/NOTIFY in sqlx requires a dedicated long-lived connection
+  (the pool can't multiplex async notifications). One extra
+  `PgConnection` is fine; document so a future "shrink the
+  connection count" pass doesn't kill it.
+- `~/.local/state/` is XDG-compliant on Linux; macOS doesn't follow
+  XDG by default but does support the path. Use the same path on
+  both OSes to keep operator docs simple (we already do this for
+  the data dir).
+
+### Option J — LLM router HTTP-client stub
+
+Same shape as the audit-log mirror item: one new module in `core`
+(or a new `hhagent-llm-router` crate, depending on where it grows
+to), an OpenAI-compatible HTTP client over `reqwest` (or `hyper`),
+a config knob pointing at a local backend
+(vLLM/SGLang on Linux, llama.cpp/Ollama on macOS), and a
+*placeholder* for the Phase-5 policy gate that decides when to
+escalate to a frontier backend. The escalation path is *unwired*
+in this slice — only the local-backend call path needs to work
+end-to-end. Once Phase 1 wants real model calls (memory recall +
+the scheduler loop), this is the unblock.
+
+### Option K — cross-platform exponential restart backoff
+
+Currently `Restart=on-failure RestartSec=5` is a constant 5 s. systemd
+252+ supports `RestartSteps` / `RestartMaxDelaySec` for true
+exponential backoff. macOS launchd's `KeepAlive=true` has no
+operator-controllable throttle (launchd uses an internal throttle
+that's not configurable). The cross-platform shape: extend
+`ServiceSpec` with `restart_backoff: Option<RestartBackoff>` (max
+delay + step count); the systemd backend wires it into the unit
+file, the macOS backend logs a warning at install time and falls
+back to launchd's default. Filed but parked — no immediate need
+since today's daemon doesn't crash routinely.
+
+### Option L — non-superuser runtime role + audit-log GRANT split
+
+Today the daemon connects as the cluster superuser (peer auth, role
+== OS user from `initdb --username=$(whoami)`). The HANDOVER's
+audit_log pin calls for `REVOKE UPDATE, DELETE ON audit_log FROM
+<runtime_role>` once a non-superuser role is split out. Steps:
+
+- Migration `0002_runtime_role.sql`: CREATE ROLE `hhagent_runtime`
+  NOINHERIT NOLOGIN (peer auth doesn't need LOGIN since the OS user
+  authenticates as themselves, then `SET ROLE hhagent_runtime`). Or:
+  CREATE USER `hhagent_runtime` WITH NOSUPERUSER NOCREATEROLE NOCREATEDB
+  and pair with a `pg_ident.conf` map so the OS user authenticates
+  *as* the runtime role. The `pg_ident` route is cleaner.
+- GRANT INSERT, SELECT ON audit_log to runtime; GRANT all needed
+  CRUD on the other tables; REVOKE UPDATE, DELETE ON audit_log FROM
+  PUBLIC + runtime. Audit each subsystem's needs first.
+- Switch `core::main::bring_up_database` to connect as the runtime
+  role (still peer auth via the ident map).
+
+**Gotcha:** CREATE EXTENSION still needs superuser. Either run the
+0001-style "extension" migrations as the OS user (current shape) and
+the data migrations as the runtime role, or have hhagent-db-init
+also run a one-shot superuser CREATE EXTENSION step at install time.
+Pick before writing the migration.
 
 ### Option H — long-running daemon + `keep_alive=true`  *(SHIPPED 2026-05-09 — see "Recently completed (previous session)")*
 

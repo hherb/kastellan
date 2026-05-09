@@ -364,3 +364,260 @@ fn postgres_install_start_select_one_uninstall() {
 
     // PathGuard drops handle the temp dirs.
 }
+
+/// End-to-end smoke for the runtime probe and the `Graph` trait.
+///
+/// Pipeline (mirrors what `core/src/main.rs::bring_up_database` does
+/// every time the daemon starts, plus a Graph round-trip):
+///
+///   1. Bring up a per-test PG cluster (same shape as
+///      `postgres_install_start_select_one_uninstall` above — kept
+///      separate so a regression in the runtime probe never masks a
+///      regression in the supervisor lifecycle, and vice versa).
+///   2. Run `db::probe::run` once. This exercises:
+///        * The maintenance-DB connect.
+///        * `CREATE DATABASE hhagent` (first-boot branch).
+///        * Reconnect to `hhagent`.
+///        * `MIGRATOR.run` — pulls in `0001_init.sql`.
+///        * The `audit_log` insert.
+///   3. Run `db::probe::run` a *second* time. The CREATE DATABASE
+///      branch must short-circuit (the lookup already finds the row),
+///      and migrations must be a no-op (sqlx's `_sqlx_migrations`
+///      checksum check). A fresh `audit_log` row appears, proving
+///      idempotency without rewriting state.
+///   4. Connect with sqlx and exercise `PgGraph`:
+///        * `upsert_entity` two nodes (kind=`person`).
+///        * Re-`upsert_entity` the first node — id stays stable
+///          (ON CONFLICT (kind,name) DO UPDATE).
+///        * `upsert_relation` one edge.
+///        * `get_entity` round-trip.
+///        * `neighbors` returns the second node.
+///        * `path` finds the 1-hop path.
+///   5. Sanity-check the `audit_log` row count is exactly 2 (the
+///      two probe runs above), so no spurious writes are happening
+///      in either probe path or the graph round-trip.
+///   6. Tear down: stop / uninstall the PG service, RAII guards wipe
+///      data + log dirs.
+///
+/// Skips silently with `[SKIP]` lines on the same hosts as the
+/// supervisor-lifecycle test above (no PG, no supervisor probe).
+#[test]
+fn probe_runs_migrations_and_graph_happy_path() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let postgres = bin_dir.join("postgres");
+    let initdb = bin_dir.join("initdb");
+
+    // ---------- temp dirs ----------
+    let data_root = unique_temp_root("probe-data");
+    let _data_guard = PathGuard { path: data_root.clone() };
+    let data_dir = data_root.join("data");
+    let socket_dir = default_socket_dir(&data_dir);
+    let log_dir = unique_temp_root("probe-logs");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+    let _log_guard = PathGuard { path: log_dir.clone() };
+
+    // ---------- initdb ----------
+    let user = current_username();
+    let argv = build_initdb_argv(
+        &initdb,
+        &InitDbOptions {
+            data_dir: data_dir.clone(),
+            username: user.clone(),
+            ..InitDbOptions::default()
+        },
+    );
+    let out = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("spawn initdb");
+    assert!(
+        out.status.success(),
+        "initdb failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    std::fs::create_dir(&socket_dir).expect("create socket dir");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&socket_dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&socket_dir, perms).unwrap();
+    }
+    std::fs::write(
+        data_dir.join("postgresql.auto.conf"),
+        build_postgresql_auto_conf(&PgConfigOptions {
+            socket_dir: socket_dir.clone(),
+            ..PgConfigOptions::default()
+        }),
+    )
+    .expect("write postgresql.auto.conf");
+
+    // ---------- supervisor spec ----------
+    let mut spec = postgres_service_spec(&postgres, &data_dir, &log_dir);
+    spec.name = format!(
+        "hhagent-supervisor-test-pg-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    assert!(spec.name.len() <= 200);
+    spec.stdout_log = Some(log_dir.join(format!("{}.out", spec.name)));
+    spec.stderr_log = Some(log_dir.join(format!("{}.err", spec.name)));
+
+    let sup = default_supervisor();
+    let _service_guard = ServiceGuard {
+        sup: default_supervisor(),
+        name: spec.name.clone(),
+    };
+    sup.install(&spec).expect("install postgres");
+    sup.start(&spec.name).expect("start postgres");
+    wait_for_status(
+        sup.as_ref(),
+        &spec.name,
+        |s| s == ServiceStatus::Active,
+        Duration::from_secs(15),
+    )
+    .expect("postgres reaches Active");
+    wait_for_socket(&socket_dir, Duration::from_secs(15))
+        .expect("postgres socket appears");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        sup.status(&spec.name).unwrap(),
+        ServiceStatus::Active,
+        "postgres flapping during stable-active window"
+    );
+
+    // ---------- run the probe twice (idempotency) ----------
+    // New binding (`conn`) so we don't shadow the supervisor `spec`
+    // we still need for stop/uninstall below.
+    let conn = hhagent_db::conn::ConnectSpec {
+        socket_dir: socket_dir.clone(),
+        user: user.clone(),
+        database: hhagent_db::conn::DEFAULT_APPLICATION_DB.to_string(),
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
+        // First run — exercises the CREATE DATABASE + migrations branches.
+        hhagent_db::probe::run(
+            &conn,
+            "core",
+            "startup",
+            serde_json::json!({"version": "test", "run": 1}),
+        )
+        .await
+        .expect("first probe run");
+
+        // Second run — must be a no-op except for the audit row.
+        hhagent_db::probe::run(
+            &conn,
+            "core",
+            "startup",
+            serde_json::json!({"version": "test", "run": 2}),
+        )
+        .await
+        .expect("second probe run (idempotency)");
+
+        // ---------- Graph trait round-trip ----------
+        use hhagent_db::graph::{Graph, PgGraph};
+        let pool = sqlx::postgres::PgPool::connect_with(conn.to_pg_connect_options())
+            .await
+            .expect("pool connect");
+        let g = PgGraph::new(&pool);
+
+        // Upsert two entities.
+        let alice = g
+            .upsert_entity("person", "alice", &serde_json::json!({"role": "engineer"}))
+            .await
+            .expect("upsert alice");
+        let bob = g
+            .upsert_entity("person", "bob", &serde_json::json!({}))
+            .await
+            .expect("upsert bob");
+        assert!(alice > 0 && bob > 0 && alice != bob);
+
+        // Re-upsert alice — id must stay stable (ON CONFLICT key is
+        // (kind,name); a regression that flipped to INSERT-only or
+        // changed the key would change the id).
+        let alice_again = g
+            .upsert_entity("person", "alice", &serde_json::json!({"role": "tlm"}))
+            .await
+            .expect("upsert alice again");
+        assert_eq!(alice, alice_again);
+
+        // Edge alice --knows--> bob.
+        let edge_id = g
+            .upsert_relation(alice, bob, "knows", &serde_json::json!({}))
+            .await
+            .expect("upsert relation");
+        assert!(edge_id > 0);
+
+        // get_entity round-trip — attrs must reflect the second upsert.
+        let fetched = g.get_entity("person", "alice").await.expect("get alice");
+        let fetched = fetched.expect("alice should exist");
+        assert_eq!(fetched.id, alice);
+        assert_eq!(fetched.kind, "person");
+        assert_eq!(fetched.name, "alice");
+        assert_eq!(fetched.attrs["role"], "tlm");
+
+        // neighbors(alice, knows) returns bob.
+        let neighbors = g
+            .neighbors(alice, Some("knows"), 100)
+            .await
+            .expect("neighbors");
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].id, bob);
+
+        // neighbors(alice, None) — same result with the unfiltered
+        // query path (different SQL, same answer).
+        let neighbors_unfiltered = g
+            .neighbors(alice, None, 100)
+            .await
+            .expect("neighbors unfiltered");
+        assert_eq!(neighbors_unfiltered.len(), 1);
+        assert_eq!(neighbors_unfiltered[0].id, bob);
+
+        // path(alice, bob, 5) returns [alice, bob].
+        let path = g.path(alice, bob, 5).await.expect("path");
+        let path = path.expect("path should exist");
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].id, alice);
+        assert_eq!(path[1].id, bob);
+
+        // path(bob, alice) returns None — relations are directed,
+        // and we wrote only alice->bob, not the reverse.
+        let no_path = g.path(bob, alice, 5).await.expect("path bob->alice");
+        assert!(no_path.is_none(), "path should not exist in reverse direction");
+
+        // ---------- audit_log row count ----------
+        let row: (i64,) = sqlx::query_as("SELECT count(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .expect("count audit_log");
+        assert_eq!(row.0, 2, "expected exactly 2 audit_log rows (one per probe run)");
+
+        pool.close().await;
+    });
+
+    // ---------- teardown ----------
+    sup.stop(&spec.name).expect("stop postgres");
+    let _ = sup.uninstall(&spec.name);
+    // Guards wipe data + log dirs on drop.
+    let _ = (data_root, log_dir, socket_dir);
+}

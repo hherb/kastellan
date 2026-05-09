@@ -17,20 +17,32 @@
 //!
 //! No std::env, no logging beyond stderr — the test reads only the exit
 //! code. The mach symbols are part of libSystem and link with no extra flags.
+//!
+//! On non-macOS targets the fixture compiles to a stub that prints a
+//! marker line and exits 1 — `cargo build --workspace` then succeeds
+//! everywhere even though the fixture is only meaningful on macOS.
+//! `[[bin]]` tables in `sandbox/Cargo.toml` do not support per-target
+//! conditional inclusion, so source-level cfg is the canonical pattern.
 
+#[cfg(target_os = "macos")]
 use std::ffi::CString;
+#[cfg(target_os = "macos")]
 use std::os::raw::c_char;
+#[cfg(target_os = "macos")]
 use std::process;
 
 // Apple's `<servers/bootstrap.h>` types. `mach_port_t` is `u32` on every
 // modern Darwin ABI (32-bit port name); `kern_return_t` is `i32`. We declare
 // only what we need to avoid pulling in a heavy bindings crate just for the
 // fixture.
+#[cfg(target_os = "macos")]
 #[allow(non_camel_case_types)]
 type mach_port_t = u32;
+#[cfg(target_os = "macos")]
 #[allow(non_camel_case_types)]
 type kern_return_t = i32;
 
+#[cfg(target_os = "macos")]
 extern "C" {
     /// Per-process bootstrap port handed to us by launchd at exec(2). This
     /// is a real symbol exported from libSystem.B.dylib — the linker resolves
@@ -50,6 +62,7 @@ extern "C" {
     ) -> kern_return_t;
 }
 
+#[cfg(target_os = "macos")]
 fn main() {
     let service = CString::new("com.apple.coreservices.appleevents")
         .expect("hardcoded ASCII name has no NUL");
@@ -64,4 +77,14 @@ fn main() {
     }
     eprintln!("bootstrap_look_up failed: kr={kr}");
     process::exit(1);
+}
+
+/// Non-macOS stub. Prints a marker line so anything that mistakenly
+/// invokes the fixture on Linux gets a self-explanatory failure
+/// instead of a confusing "the binary did the wrong thing" symptom.
+/// Exit 1 mirrors the real fixture's "lookup denied" path.
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("mach_probe: stub on non-macOS target — fixture is meaningful only on macOS");
+    std::process::exit(1);
 }

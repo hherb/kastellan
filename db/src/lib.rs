@@ -27,7 +27,24 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-/// Errors surfaced by the db helpers and CLI.
+pub mod conn;
+pub mod graph;
+pub mod probe;
+
+/// Compile-time-embedded migration set.
+///
+/// `sqlx::migrate!()` expands at build time into a sorted list of every
+/// `<version>_<slug>.sql` file under [`db/migrations/`]. Embedding (vs
+/// reading from disk at runtime) means a binary install does not need
+/// the source tree on disk — same shape as the Linux/macOS sandbox
+/// fixture binaries that are baked into `target/`.
+///
+/// Run via `MIGRATOR.run(&pool).await?` from [`probe::run`]; sqlx
+/// handles the `_sqlx_migrations` bookkeeping table itself, so calling
+/// this on an already-up-to-date database is a cheap no-op.
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Errors surfaced by the db helpers, CLI, and runtime probe.
 #[derive(Debug, Error)]
 pub enum DbError {
     /// A path argument that must be absolute was relative.
@@ -49,6 +66,32 @@ pub enum DbError {
     /// or pass `--bin-dir` explicitly.
     #[error("postgres binaries not found; tried: {0}")]
     PgBinariesMissing(String),
+
+    /// Could not connect to Postgres. Wraps `sqlx::Error::Display` so
+    /// the underlying cause (UDS socket missing, role not allowed by
+    /// pg_hba, server still booting) is visible in the log line.
+    #[error("postgres connection failed: {0}")]
+    Connect(String),
+
+    /// `sqlx::migrate!().run(&pool)` failed. Wrapped string is the
+    /// `MigrateError::Display` — typically a SQL error in one of the
+    /// embedded migrations or a checksum mismatch on a previously
+    /// applied file.
+    #[error("postgres migration failed: {0}")]
+    Migrate(String),
+
+    /// A specific SQL query (one-off DDL like `CREATE DATABASE`,
+    /// the `audit_log` insert in [`probe::run`], or anything in
+    /// [`graph::PgGraph`]) returned an error.
+    #[error("postgres query failed: {0}")]
+    Query(String),
+
+    /// A required environment variable was unset. Today this is just
+    /// `$USER`, used as the peer-auth identity in
+    /// [`conn::ConnectSpec::default_for`]. Any others added later
+    /// (e.g. `$XDG_DATA_HOME`) reuse this variant.
+    #[error("required environment variable unset: {0}")]
+    EnvVarMissing(&'static str),
 }
 
 impl From<std::io::Error> for DbError {

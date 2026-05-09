@@ -10,9 +10,19 @@ repository.workspace   = true
 readme.workspace       = true
 
 [dependencies]
-serde     = { workspace = true }
-thiserror = { workspace = true }
-tracing   = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+# Async runtime + Postgres driver. The pure helpers in `lib.rs` (the
+# `build_*` functions, `find_pg_bin_dir`, etc.) do NOT depend on these,
+# but the runtime probe (`probe::run`) does — it talks Postgres over a
+# UDS, runs `sqlx::migrate!()` against the embedded `migrations/` dir,
+# and writes the bring-up `audit_log` row.
+tokio = { workspace = true }
+sqlx  = { workspace = true }
+time  = { workspace = true }
 
 # Driver entry point — small CLI that creates the user-instance data dir,
 # runs `initdb` once, and writes our `postgresql.auto.conf` overrides on
