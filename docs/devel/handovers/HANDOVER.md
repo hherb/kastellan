@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-09
-**Last commit:** `a6580a5` (`test(supervisor): harden supervisor_e2e cleanup + name-length assert`)
+**Last commit:** `f94ad49` (`feat(core,supervisor): long-running daemon + keep_alive=true (Option H)`)
 **Branch:** `main`
 
 ---
