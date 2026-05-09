@@ -47,14 +47,20 @@
 //! ## Test seam
 //!
 //! Tests construct a [`MapKeyProvider`] with a deterministic key.
-//! Production uses [`OsKeyringProvider`] which is `#[ignore]`-tested
-//! manually because libsecret in headless CI either fails or prompts.
+//! Production uses [`OsKeyringProvider`], which is **not exercised by
+//! the automated suite**: libsecret in headless CI either fails (no
+//! D-Bus daemon) or prompts (locked keyring), and either outcome is
+//! incompatible with `cargo test`. Manual smoke is "run the daemon
+//! once, observe the keyring entry appears, restart, observe the
+//! same entry is reused without prompt." If we ever add an opt-in
+//! `#[ignore]`-gated test for the real keyring path it should live
+//! next to this comment.
 
 use std::collections::HashMap;
 
+use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Key as AesKey, Nonce as AesNonce};
-use rand_core_for_aes_gcm::RngCore;
 use sqlx::types::time::OffsetDateTime;
 use sqlx::Row;
 use thiserror::Error;
@@ -84,15 +90,41 @@ pub const MAX_NAME_LEN: usize = 256;
 /// accidental `tracing::debug!("{:?}", ciphertext)` stays bounded.
 pub const MAX_PLAINTEXT_LEN: usize = 64 * 1024;
 
+/// AES-GCM authentication-tag length appended to ciphertext. Pinned
+/// at the protocol level by GCM (always 16 bytes for the standard
+/// tag); kept as a named constant so the [`MAX_CIPHERTEXT_LEN`]
+/// arithmetic below reads as "plaintext budget + tag overhead"
+/// instead of an opaque `+ 16`.
+pub const GCM_TAG_LEN: usize = 16;
+
+/// Hard cap on ciphertext length accepted by [`get`]. A row with a
+/// ciphertext column larger than this is treated as DB corruption /
+/// an attacker who has write access; we refuse rather than feed it
+/// into `aes-gcm::decrypt` (which would happily allocate to whatever
+/// size we hand it). PG `bytea` could in principle hold up to 1 GB,
+/// so the cap is load-bearing on the decrypt side.
+pub const MAX_CIPHERTEXT_LEN: usize = MAX_PLAINTEXT_LEN + GCM_TAG_LEN;
+
 /// Default keyring service name (= the entry's "service" field on
 /// libsecret / Keychain). Combined with [`KEY_ACCOUNT`] it forms the
 /// stable lookup key for [`OsKeyringProvider`].
+///
+/// **Do not rename this without a rotation migration.**
+/// `OsKeyringProvider::current_id()` returns
+/// `format!("{KEY_SERVICE}.{KEY_ACCOUNT}")`, which is persisted into
+/// every `secrets.key_id` row at write time. Renaming the constant
+/// detaches all stored rows from their wrapping key (subsequent `get`
+/// returns `KeyNotFound`). The pinning unit test `constants_are_pinned`
+/// catches the literal change but cannot enforce a rotation.
 pub const KEY_SERVICE: &str = "hhagent";
 
 /// Default keyring account name. Bumping the `vN` suffix is the only
 /// rotation knob for now: the new id slots into [`KeyProvider::current_id`]
 /// while the old id stays valid for ciphertexts that haven't been
 /// re-encrypted yet.
+///
+/// **Do not rename this without a rotation migration** — see the
+/// [`KEY_SERVICE`] doc comment for why; the same coupling applies.
 pub const KEY_ACCOUNT: &str = "secrets-v1";
 
 /// 32-byte AES-256 wrapping key, wiped on drop.
@@ -111,6 +143,13 @@ pub enum SecretsError {
     /// Plaintext exceeds [`MAX_PLAINTEXT_LEN`].
     #[error("plaintext is too large: {len} bytes (max {max})")]
     PlaintextTooLarge { len: usize, max: usize },
+
+    /// Stored ciphertext exceeds [`MAX_CIPHERTEXT_LEN`]. Either the
+    /// DB row is corrupt or an attacker has write access and is
+    /// trying to push us into a large allocation in `aes-gcm::decrypt`.
+    /// We refuse before allocating.
+    #[error("stored ciphertext is too large: {len} bytes (max {max})")]
+    CiphertextTooLarge { len: usize, max: usize },
 
     /// AES-GCM encrypt failed. Should be unreachable in practice
     /// (the `aead` crate only fails encrypt on impossibly-small
@@ -367,6 +406,16 @@ impl OsKeyringProvider {
     /// First call generates and stores a fresh key; subsequent calls
     /// retrieve it. Returns [`SecretsError::Keyring`] when the
     /// keyring is locked, missing, or otherwise unreachable.
+    ///
+    /// **Concurrency contract.** This is `get-then-set` and is **not**
+    /// safe to call concurrently when no entry yet exists: two callers
+    /// can both observe `NoEntry`, both generate distinct keys, and
+    /// the second `set_secret` overwrites the first — leaving any data
+    /// the first caller already encrypted unrecoverable. Callers must
+    /// ensure exactly one process performs the first-ever
+    /// initialisation. The agent's single-daemon / single-user model
+    /// makes this trivially true in practice; callers spawning
+    /// multiple instances must serialise the first call externally.
     pub fn ensure_initialized() -> Result<Self, SecretsError> {
         Self::ensure_initialized_for(KEY_SERVICE, KEY_ACCOUNT)
     }
@@ -517,6 +566,12 @@ where
     let stored_aad: Vec<u8> = row.try_get("aad")?;
     let key_id: String = row.try_get("key_id")?;
 
+    if ciphertext.len() > MAX_CIPHERTEXT_LEN {
+        return Err(SecretsError::CiphertextTooLarge {
+            len: ciphertext.len(),
+            max: MAX_CIPHERTEXT_LEN,
+        });
+    }
     if stored_nonce.len() != NONCE_LEN {
         return Err(SecretsError::NonceLengthInvalid {
             expected: NONCE_LEN,
@@ -526,18 +581,20 @@ where
     let mut nonce = [0u8; NONCE_LEN];
     nonce.copy_from_slice(&stored_nonce);
 
-    // AAD-prefix check: catches a row swap that did not also update
-    // the AAD column. GCM auth catches the case where AAD was also
-    // updated but without re-encryption (the auth tag was bound to
-    // the old AAD). Both paths land in DecryptFailed via different
-    // routes.
-    let expected_prefix = compute_aad(name, extra_aad);
-    if stored_aad != expected_prefix {
+    // AAD strict-equality check: the canonical AAD for (name, extra)
+    // is deterministic, so the stored AAD must equal the recomputed
+    // one. This catches a row swap that did not also update the AAD
+    // column (`UPDATE secrets SET name = …` alone). GCM auth catches
+    // the case where AAD was also updated but without re-encryption
+    // (the auth tag was bound to the old AAD). Both attacker variants
+    // are detected, via different routes.
+    let expected_aad = compute_aad(name, extra_aad);
+    if stored_aad != expected_aad {
         return Err(SecretsError::AadMismatch);
     }
 
     let key = key_provider.get(&key_id)?;
-    decrypt(&key, &ciphertext, &nonce, &stored_aad)
+    decrypt(&key, &ciphertext, &nonce, &expected_aad)
 }
 
 /// Return metadata-only listings for every secret.
@@ -584,15 +641,6 @@ where
         .execute(executor)
         .await?;
     Ok(result.rows_affected() > 0)
-}
-
-// `aes_gcm`'s `OsRng` re-export covers our nonce path. For the keyring
-// provider we additionally need `RngCore::fill_bytes` to fill an
-// arbitrary `&mut [u8]`. The trait re-export below pulls in
-// `rand_core` (already a transitive dep of aes-gcm) without adding a
-// direct workspace dependency.
-mod rand_core_for_aes_gcm {
-    pub use aes_gcm::aead::rand_core::RngCore;
 }
 
 #[cfg(test)]
@@ -770,8 +818,31 @@ mod tests {
     fn constants_are_pinned() {
         assert_eq!(KEY_LEN, 32);
         assert_eq!(NONCE_LEN, 12);
+        assert_eq!(GCM_TAG_LEN, 16);
         assert_eq!(AAD_DOMAIN, b"hhagent-secrets-v1");
         assert_eq!(KEY_SERVICE, "hhagent");
         assert_eq!(KEY_ACCOUNT, "secrets-v1");
+        // Derived: ciphertext budget = plaintext budget + tag overhead.
+        // The `get` length-guard math depends on this identity.
+        assert_eq!(MAX_CIPHERTEXT_LEN, MAX_PLAINTEXT_LEN + GCM_TAG_LEN);
+    }
+
+    /// A real encrypt of a max-size plaintext fits inside
+    /// [`MAX_CIPHERTEXT_LEN`]. If GCM ever changed its tag size or we
+    /// fat-fingered the math, this fails — and the `get`-path guard
+    /// would start rejecting legitimately-stored rows.
+    #[test]
+    fn max_size_plaintext_fits_within_ciphertext_cap() {
+        let key: SecretKey = Zeroizing::new([0xA5u8; KEY_LEN]);
+        let aad = compute_aad("k", None);
+        let pt = vec![0u8; MAX_PLAINTEXT_LEN];
+        let (ct, _nonce) = encrypt(&key, &pt, &aad).unwrap();
+        assert!(
+            ct.len() <= MAX_CIPHERTEXT_LEN,
+            "encrypted output {} exceeded MAX_CIPHERTEXT_LEN {}",
+            ct.len(),
+            MAX_CIPHERTEXT_LEN
+        );
+        assert_eq!(ct.len(), MAX_PLAINTEXT_LEN + GCM_TAG_LEN);
     }
 }

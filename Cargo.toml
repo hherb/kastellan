@@ -102,7 +102,7 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # `keyring` (cross-platform OS keyring shim) is NOT declared as a
 # workspace dep because feature selection is per-target. See the
 # per-target stanzas at the bottom of `db/Cargo.toml` for the
-# Linux (`sync-secret-service` + `crypto-rust`) vs. macOS
+# Linux (`async-secret-service` + `tokio` + `crypto-rust`) vs. macOS
 # (`apple-native`) split. License: MIT OR Apache-2.0 across the
 # crate and all backend deps.
 
