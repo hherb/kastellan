@@ -1,0 +1,31 @@
+[package]
+name        = "hhagent-db"
+description = "Postgres bring-up: idempotent initdb + UDS-only config + per-user data dir."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+[dependencies]
+serde     = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+
+# Driver entry point — small CLI that creates the user-instance data dir,
+# runs `initdb` once, and writes our `postgresql.auto.conf` overrides on
+# top. Pure helpers in `lib.rs` are exercised independently via unit tests
+# (no Postgres binaries required).
+[[bin]]
+name = "hhagent-db-init"
+path = "src/bin/hhagent-db-init.rs"
+
+[dev-dependencies]
+# Integration test in `tests/postgres_e2e.rs` drives the real `postgres`
+# binary through the user-level supervisor (systemd --user on Linux,
+# launchd LaunchAgent on macOS) and then connects over the UDS to issue
+# a `SELECT 1`. Skips with a `[SKIP]` line when Postgres is not on the
+# host (mirrors the sandbox/supervisor smoke-test pattern).
+hhagent-supervisor = { path = "../supervisor" }

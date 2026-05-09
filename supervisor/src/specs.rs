@@ -27,6 +27,10 @@ use crate::ServiceSpec;
 /// acceptable).
 pub const CORE_SERVICE_NAME: &str = "hhagent-core";
 
+/// Canonical name used for the per-user Postgres daemon's unit/agent
+/// file. Same shape rationale as [`CORE_SERVICE_NAME`].
+pub const POSTGRES_SERVICE_NAME: &str = "hhagent-postgres";
+
 /// Build a [`ServiceSpec`] for the agent-core daemon (`hhagent`
 /// binary, see `core/src/main.rs`).
 ///
@@ -69,6 +73,63 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
         keep_alive: true,
         stdout_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.out"))),
         stderr_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.err"))),
+    }
+}
+
+/// Build a [`ServiceSpec`] for the per-user Postgres daemon (`postgres`
+/// binary, see PGDG `postgresql-18` package on Linux / Homebrew
+/// `postgresql@18` on macOS).
+///
+/// Arguments:
+/// - `postgres_binary` — absolute path to the `postgres` executable.
+///   Linux PGDG default: `/usr/lib/postgresql/18/bin/postgres`.
+///   macOS Homebrew default:
+///   `/opt/homebrew/opt/postgresql@18/bin/postgres` (Apple Silicon)
+///   or `/usr/local/opt/postgresql@18/bin/postgres` (Intel).
+///   Caller resolves which one — see [`hhagent_db::find_pg_bin_dir`]
+///   in the `db` crate.
+/// - `data_dir` — absolute path to the cluster data dir (the one that
+///   `hhagent-db-init` populated; postgres is invoked with `-D <path>`).
+/// - `log_dir` — directory where the supervisor appends stdout/stderr.
+///   Caller must create the dir before [`crate::Supervisor::install`].
+///   Files: `<POSTGRES_SERVICE_NAME>.out` and `.err`.
+///
+/// Choices baked in:
+/// - **`args = ["-D", <data_dir>]`** — the only argument postgres needs.
+///   The unix socket directory and `listen_addresses=''` come from
+///   `postgresql.auto.conf` inside the data dir, so no `-k` flag is
+///   needed at the supervisor layer (and we keep the spec minimal so
+///   the same shape works whether the caller sets the socket inside
+///   or outside the data dir).
+/// - **`env` is empty** — postgres does not require any environment
+///   variables to start cleanly when given `-D`. Locale defaults are
+///   already baked into the cluster by `initdb`'s `--encoding=UTF8`.
+///   When workers later need to override `LC_ALL` or set
+///   `PGTZ`, populate this; today we deliberately pass nothing so the
+///   process inherits a clean env from the supervisor.
+/// - **`working_dir = None`** — postgres reads `data_dir` exclusively
+///   from `-D` and writes its own pidfile/logs there. Cwd is irrelevant.
+/// - **`keep_alive = true`** — postgres is a long-running daemon. On
+///   systemd this is `Restart=on-failure RestartSec=5` (a crash means
+///   we restart, a clean stop via SIGTERM does not). On launchd this
+///   is `KeepAlive=true` (same intent; `bootout` removes the agent
+///   from the domain entirely so `stop` still ends the process).
+///
+/// Pure: no I/O, no env probing. Same call → same spec every time.
+pub fn postgres_service_spec(
+    postgres_binary: &Path,
+    data_dir: &Path,
+    log_dir: &Path,
+) -> ServiceSpec {
+    ServiceSpec {
+        name: POSTGRES_SERVICE_NAME.into(),
+        program: postgres_binary.to_path_buf(),
+        args: vec!["-D".into(), data_dir.to_string_lossy().into_owned()],
+        env: vec![],
+        working_dir: None,
+        keep_alive: true,
+        stdout_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.out"))),
+        stderr_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.err"))),
     }
 }
 
@@ -172,5 +233,119 @@ mod tests {
             Path::new("/tmp"),
         );
         assert_ne!(spec.stdout_log, spec.stderr_log);
+    }
+
+    // ----- postgres_service_spec -----
+
+    /// Pin the canonical Postgres service name.
+    #[test]
+    fn postgres_service_spec_uses_canonical_name() {
+        let spec = postgres_service_spec(
+            Path::new("/usr/lib/postgresql/18/bin/postgres"),
+            Path::new("/var/lib/hhagent/pg/data"),
+            Path::new("/var/log/hhagent"),
+        );
+        assert_eq!(spec.name, "hhagent-postgres");
+        assert_eq!(spec.name, POSTGRES_SERVICE_NAME);
+    }
+
+    /// Caller-supplied program path flows through verbatim.
+    #[test]
+    fn postgres_service_spec_program_is_caller_supplied() {
+        let bin = PathBuf::from("/opt/homebrew/opt/postgresql@18/bin/postgres");
+        let spec = postgres_service_spec(
+            &bin,
+            Path::new("/srv/data"),
+            Path::new("/tmp/logs"),
+        );
+        assert_eq!(spec.program, bin);
+    }
+
+    /// Postgres needs `-D <data_dir>` to know where the cluster lives.
+    /// Both the flag and the path must be present and in order.
+    #[test]
+    fn postgres_service_spec_passes_dash_d_data_dir_in_args() {
+        let spec = postgres_service_spec(
+            Path::new("/usr/lib/postgresql/18/bin/postgres"),
+            Path::new("/srv/hhagent/pg/data"),
+            Path::new("/tmp/logs"),
+        );
+        assert_eq!(spec.args.len(), 2, "args: {:?}", spec.args);
+        assert_eq!(spec.args[0], "-D");
+        assert_eq!(spec.args[1], "/srv/hhagent/pg/data");
+    }
+
+    /// We deliberately pass no env so the daemon inherits the clean
+    /// environment the supervisor sets up. Defends against accidentally
+    /// shipping a `PGDATA` or `PGPORT` that would override postgresql.conf.
+    #[test]
+    fn postgres_service_spec_env_is_empty() {
+        let spec = postgres_service_spec(
+            Path::new("/usr/lib/postgresql/18/bin/postgres"),
+            Path::new("/d"),
+            Path::new("/tmp"),
+        );
+        assert!(spec.env.is_empty());
+    }
+
+    /// Postgres reads everything it needs from `-D <data_dir>` and
+    /// writes its pidfile/logs there. Cwd is irrelevant.
+    #[test]
+    fn postgres_service_spec_does_not_set_working_dir() {
+        let spec = postgres_service_spec(
+            Path::new("/usr/lib/postgresql/18/bin/postgres"),
+            Path::new("/d"),
+            Path::new("/tmp"),
+        );
+        assert!(spec.working_dir.is_none());
+    }
+
+    /// Postgres is the system's spine; if it crashes we want it back.
+    /// `keep_alive=true` gives `Restart=on-failure` (systemd) /
+    /// `KeepAlive=true` (launchd). Pin so a regression flipping this
+    /// to `false` (which would leave a crashed PG offline indefinitely)
+    /// trips the test.
+    #[test]
+    fn postgres_service_spec_keep_alive_is_true() {
+        let spec = postgres_service_spec(
+            Path::new("/usr/lib/postgresql/18/bin/postgres"),
+            Path::new("/d"),
+            Path::new("/tmp"),
+        );
+        assert!(spec.keep_alive);
+    }
+
+    #[test]
+    fn postgres_service_spec_emits_log_paths_under_log_dir() {
+        let spec = postgres_service_spec(
+            Path::new("/usr/lib/postgresql/18/bin/postgres"),
+            Path::new("/d"),
+            Path::new("/var/log/hhagent"),
+        );
+        assert_eq!(
+            spec.stdout_log,
+            Some(PathBuf::from("/var/log/hhagent/hhagent-postgres.out"))
+        );
+        assert_eq!(
+            spec.stderr_log,
+            Some(PathBuf::from("/var/log/hhagent/hhagent-postgres.err"))
+        );
+    }
+
+    #[test]
+    fn postgres_service_spec_log_paths_are_distinct() {
+        let spec = postgres_service_spec(
+            Path::new("/usr/lib/postgresql/18/bin/postgres"),
+            Path::new("/d"),
+            Path::new("/tmp"),
+        );
+        assert_ne!(spec.stdout_log, spec.stderr_log);
+    }
+
+    /// The two canonical service names are distinct so they map to
+    /// distinct unit/agent files and never collide on disk.
+    #[test]
+    fn canonical_service_names_are_distinct() {
+        assert_ne!(CORE_SERVICE_NAME, POSTGRES_SERVICE_NAME);
     }
 }

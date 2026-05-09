@@ -94,6 +94,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hhagent-db"
+version = "0.0.0"
+dependencies = [
+ "hhagent-supervisor",
+ "serde",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "hhagent-protocol"
 version = "0.0.0"
 dependencies = [

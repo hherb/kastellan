@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-09
-**Last commit:** `f94ad49` (`feat(core,supervisor): long-running daemon + keep_alive=true (Option H)`)
+**Last commit:** *(this session — pending)*
 **Branch:** `main`
 
 ---
@@ -21,17 +21,18 @@
 ## Working state (what's green right now)
 
 ```
-hhagent (Rust workspace, 6 crates, AGPL-3.0)
+hhagent (Rust workspace, 7 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + bin (long-running daemon blocking on SIGTERM/SIGINT via tokio::signal::unix; placeholder body until the Phase 1 scheduler lands); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
+├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + hhagent-db-init bin (idempotent initdb against ~/.local/share/hhagent/pg/data, UDS-only listen, peer auth)
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (now wraps in systemd-run --scope cgroup) + MacosSeatbelt
-├── supervisor         hhagent-supervisor: SystemdUser (Linux: real install/start/stop/status/uninstall via systemctl --user) + LaunchAgents (macOS: real lifecycle via launchctl bootstrap/bootout/print in gui/<uid> domain) + specs::core_service_spec (typed ServiceSpec for the agent core daemon) + default_probe (per-OS supervisor probe)
+├── supervisor         hhagent-supervisor: SystemdUser (Linux) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec} + default_probe (per-OS supervisor probe)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 105 tests, 0 skipped, 0 failed, 0 warnings.**
-*macOS test count was 83 last session (2026-05-08); the macOS suite gains the same +8 supervisor unit tests (`specs::*`) and +1 cross-platform e2e (`core_service_install_start_observe_log_uninstall`) when next run there, projecting macOS to 92.*
+**`cargo test --workspace` on Linux: 138 tests, 0 skipped, 0 failed, 0 warnings.**
+*macOS test count was 83 last session (2026-05-08); the macOS suite gains the +9 supervisor unit tests (`specs::postgres_*` + `canonical_service_names_are_distinct`) and +23 db unit tests when next run there. The `postgres_e2e` integration test gates on `find_pg_bin_dir(default_pg_bin_dir_candidates())` so it skips with `[SKIP]` on a macOS host without Homebrew Postgres until the operator runs `brew install postgresql@18`. Projection: macOS to ~115 with PG, 114 without (skip).*
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -43,11 +44,13 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 | `core` unit | 16 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
 | `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** `default_supervisor()` round-trip against the actual `hhagent` binary: build spec via `core_service_spec`, install into `~/.config/systemd/user/` (Linux) or `~/Library/LaunchAgents/` (macOS), pre-start status=Inactive, start, **poll status until Active** then **hold 500 ms and re-check** (rules out flapping/restart loops under the `keep_alive=true` ServiceSpec), sanity-check that the redirected stdout contains the daemon's startup JSON line (`"hhagent core starting"` + `version` field), stop, **poll status until Inactive** within 5 s (proves the daemon's tokio SIGTERM handler exited cleanly *before* `TimeoutStopSec=10` would have SIGKILLed it), uninstall, post-uninstall status=NotInstalled. RAII `ServiceGuard` + `LogDirGuard` clean up on panic. Unique `hhagent-supervisor-test-{pid}-{nanos}` name avoids clobbering a real installed `hhagent-core`. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
+| `db` unit | 23 | `build_initdb_argv` (8 tests: argv[0]=binary path, `--pgdata <data_dir>` always present, `--auth-local=peer` + `--auth-host=reject` always present, `--data-checksums` toggles cleanly, blank username falls back to `hhagent`, supplied username flows through verbatim); `build_postgresql_auto_conf` (7 tests: `listen_addresses=''` always emitted, `unix_socket_directories` flows through, `unix_socket_permissions = 0700` baked in, `log_destination=stderr` + `logging_collector=off` for supervisor capture, `max_connections`/`shared_buffers` clamp to ≥ 1, file starts with the don't-edit warning); `find_pg_bin_dir` + candidate ordering (3 tests: PG 18 first, empty list errors, picks first candidate with both `postgres`+`initdb` executable); `is_data_dir_initialized` (2 tests: false for empty, true when `PG_VERSION` regular file present); `require_absolute` + `default_data_dir` + `default_socket_dir` (5 tests: rejects relative, accepts absolute, default data dir under `$HOME/.local/share/hhagent/pg/data`, socket dir is `<data>/sockets`) |
+| `db` integration (`postgres_e2e`) | 1 | **real** `find_pg_bin_dir` → `initdb` (PGDG `/usr/lib/postgresql/18/bin/initdb` on Linux, Homebrew on macOS) → write `postgresql.auto.conf` → `default_supervisor()` install → start → wait for `Active` (≤ 15 s) → wait for `<sockets>/.s.PGSQL.5432` to appear → hold 500 ms and re-check Active (no flapping under `Restart=on-failure`) → spawn `psql -h <socket_dir> -U <whoami> -At -c 'SELECT 1'` over the UDS (peer auth) → assert stdout trim equals `1` → stop → wait for `Inactive` → uninstall → status=NotInstalled. Per-test temp data dir + log dir under `std::env::temp_dir()`; both wiped by `PathGuard` Drop on success or panic. Unique `hhagent-supervisor-test-pg-{pid}-{nanos}` service name. Skips with `[SKIP]` when no Postgres binaries on host or supervisor probe fails. Runtime ~1.8 s on the DGX Spark |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
-| `supervisor` unit (linux) | 35 | `build_unit_file` shape (14 tests: section order, Description, ExecStart program+args, arg quoting + escape of `"`/`\`, Environment ordering, Environment value quoting, WorkingDirectory present/absent, log redirects, keep_alive Restart=on-failure, no-Restart when keep_alive=false, TimeoutStopSec always, [Install] WantedBy=default.target); `validate_service_name` (6 tests: typical names, empty, traversal, dot/dash prefix, overlong, whitespace+specials); driver against custom units_dir (7 tests: install writes file, rejects relative program, rejects invalid name, creates units_dir, uninstall removes file, uninstall idempotent, status NotInstalled when absent); `specs::core_service_spec` (8 tests: canonical name `hhagent-core`, caller-supplied program path flows through, args+env empty by default, no working_dir, keep_alive=true regression pin (flipped from false 2026-05-09 when the daemon became long-running), log paths under log_dir with predictable filenames, stdout/stderr distinct) |
-| `supervisor` unit (macos) | 43 | `build_plist` shape (14 tests: XML preamble + DOCTYPE, Label, ProgramArguments order, XML-escaping of `<`, `>`, `&`, `"`, `'` in args, EnvironmentVariables presence/order/omission-when-empty, WorkingDirectory present/absent, log redirects, RunAtLoad=true unconditional, KeepAlive=true/false mirror of spec, ExitTimeOut always, Label XML-escaped); `validate_service_name` (6 tests: typical names incl. reverse-DNS like `org.hhagent.core`, empty, traversal, dot/dash prefix, overlong, whitespace+specials); helpers (7 tests: `xml_escape` predefined entities + Unicode passthrough, `parse_print_state` indented/multi-word/absent, `is_no_such_service_error` phrases, `user_domain_target` `gui/<digits>` shape); driver against custom agents_dir (8 tests: install writes plist, rejects relative program, rejects invalid name, rejects relative working_dir, creates agents_dir, uninstall removes plist, uninstall idempotent, status NotInstalled when absent); `specs::core_service_spec` (8 tests: canonical name `hhagent-core`, caller-supplied program path flows through, args+env empty by default, no working_dir, keep_alive=true regression pin (flipped from false 2026-05-09 when the daemon became long-running), log paths under log_dir with predictable filenames, stdout/stderr distinct — same suite runs on both OSes) |
+| `supervisor` unit (linux) | 44 | `build_unit_file` shape (14 tests: section order, Description, ExecStart program+args, arg quoting + escape of `"`/`\`, Environment ordering, Environment value quoting, WorkingDirectory present/absent, log redirects, keep_alive Restart=on-failure, no-Restart when keep_alive=false, TimeoutStopSec always, [Install] WantedBy=default.target); `validate_service_name` (6 tests: typical names, empty, traversal, dot/dash prefix, overlong, whitespace+specials); driver against custom units_dir (7 tests: install writes file, rejects relative program, rejects invalid name, creates units_dir, uninstall removes file, uninstall idempotent, status NotInstalled when absent); `specs::core_service_spec` (8 tests: canonical name `hhagent-core`, caller-supplied program path flows through, args+env empty by default, no working_dir, keep_alive=true regression pin (flipped from false 2026-05-09 when the daemon became long-running), log paths under log_dir with predictable filenames, stdout/stderr distinct); `specs::postgres_service_spec` (8 tests: canonical name `hhagent-postgres`, caller-supplied program path flows through, args=`["-D", <data_dir>]` in order, env empty by default, no working_dir, keep_alive=true so a postgres crash respawns under `Restart=on-failure`, log paths under log_dir with predictable filenames, stdout/stderr distinct); `canonical_service_names_are_distinct` (1 test: `hhagent-core` ≠ `hhagent-postgres` so unit/agent files never collide) |
+| `supervisor` unit (macos) | 52 | `build_plist` shape (14 tests: XML preamble + DOCTYPE, Label, ProgramArguments order, XML-escaping of `<`, `>`, `&`, `"`, `'` in args, EnvironmentVariables presence/order/omission-when-empty, WorkingDirectory present/absent, log redirects, RunAtLoad=true unconditional, KeepAlive=true/false mirror of spec, ExitTimeOut always, Label XML-escaped); `validate_service_name` (6 tests: typical names incl. reverse-DNS like `org.hhagent.core`, empty, traversal, dot/dash prefix, overlong, whitespace+specials); helpers (7 tests: `xml_escape` predefined entities + Unicode passthrough, `parse_print_state` indented/multi-word/absent, `is_no_such_service_error` phrases, `user_domain_target` `gui/<digits>` shape); driver against custom agents_dir (8 tests: install writes plist, rejects relative program, rejects invalid name, rejects relative working_dir, creates agents_dir, uninstall removes plist, uninstall idempotent, status NotInstalled when absent); `specs::*` (17 tests: 8 `core_service_spec` + 8 `postgres_service_spec` + 1 `canonical_service_names_are_distinct` — same suite runs on both OSes since `specs.rs` has no platform deps) |
 | `supervisor` integration (`systemd_user_smoke`, linux) | 2 | **real** `systemctl --user` round-trip: install → daemon-reload → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled, with RAII cleanup guard so a panic does not leave residue in `~/.config/systemd/user/`; invalid name rejected before any systemctl call |
 | `supervisor` integration (`launchd_agents_smoke`, macos) | 4 | **real** `launchctl bootstrap gui/<uid>` round-trip against `~/Library/LaunchAgents/`: install → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled; idempotent `start` after start (status-first check via `launchctl print`, no version-specific error-string parsing); idempotent `stop` against not-bootstrapped agent; invalid name rejected before any launchctl call. RAII guard cleans up plist file + `bootout` on panic; tests serialised with a static `Mutex` because the GUI launchd domain is a shared global resource. `[SKIP]` line on hosts where the GUI domain is unreachable (SSH-only sessions). |
 
@@ -73,6 +76,145 @@ on the user's DGX Spark. Other Linux hosts may need
 `sandbox-exec` (no setup needed; ships with the OS).
 
 ## Recently completed (this session, 2026-05-09)
+
+**Phase 0 cont. (Option C2 — Postgres bring-up, foundation slice) — install PG 18 binaries, idempotent `hhagent-db-init`, `postgres_service_spec`, full e2e against `default_supervisor()`.**
+
+This is the first slice of HANDOVER's "headline next-pickup": a private
+per-user PG cluster under `~/.local/share/hhagent/pg/data` managed by a
+user-level supervisor unit, never network-listen, peer auth over UDS.
+Foundation only — migrations, sqlx-cli, and the core probe land in a
+follow-up session.
+
+- **`scripts/linux/install-postgres.sh` (~140 lines):** idempotent PGDG
+  setup. Installs `postgresql-common`, runs the upstream
+  `apt.postgresql.org.sh` helper to add the signed repo (with manual
+  `curl + sources.list.d` fallback for older `postgresql-common`),
+  then `apt install postgresql-18 postgresql-client-18
+  postgresql-18-pgvector`. Crucially also `systemctl stop` +
+  `systemctl disable` the auto-created system-wide
+  `postgresql@18-main.service` so it can never collide with our
+  user-instance — Debian's postgresql package launches a system
+  cluster on port 5432 by default; we want only the *binaries* on the
+  system, with our cluster running under
+  `~/.local/share/hhagent/pg/data` and listening on a UDS only.
+- **New crate `hhagent-db` (~620 lines split across `lib.rs`, `bin/hhagent-db-init.rs`, `tests/postgres_e2e.rs`):**
+  - **Pure functions in `lib.rs`** (23 unit tests):
+    `build_initdb_argv(initdb_bin, &InitDbOptions) -> Vec<String>`
+    pins `--auth-local=peer` + `--auth-host=reject` (so a future
+    operator who re-enables TCP still gets refused at the auth
+    layer — defense-in-depth) and `--data-checksums` by default.
+    `build_postgresql_auto_conf(&PgConfigOptions) -> String` emits
+    the file we drop into `<data_dir>/postgresql.auto.conf` after
+    `initdb` (Postgres applies this file *after* `postgresql.conf`,
+    so values here always win). The most important line is
+    `listen_addresses = ''` (no TCP listener at all); also pins
+    `unix_socket_directories = '<dir>'`,
+    `unix_socket_permissions = 0700` (only the owning OS user can
+    `connect()`), `password_encryption = 'scram-sha-256'`,
+    `log_destination = 'stderr'` + `logging_collector = off` so the
+    supervisor captures the stream.
+    `find_pg_bin_dir(candidates)` probes a priority-ordered candidate
+    list (PG 18 → 14, PGDG layout on Linux,
+    `/opt/homebrew/opt/postgresql@<ver>/bin` and
+    `/usr/local/opt/postgresql@<ver>/bin` on macOS) for a directory
+    containing both executable `postgres` + `initdb`.
+    `is_data_dir_initialized(data_dir)` checks for
+    `<data_dir>/PG_VERSION` regular file — Postgres's canonical "this
+    is a populated cluster" marker, the same one `pg_ctl` reads.
+    Pure functions follow the same pattern as
+    `sandbox::linux_bwrap::build_argv` and
+    `supervisor::systemd_user::build_unit_file` (separately testable
+    from any I/O).
+  - **`bin/hhagent-db-init`** drives the helpers: parse argv (`--data-dir`,
+    `--bin-dir`, `--username`, `--help`), resolve defaults
+    (`$HOME/.local/share/hhagent/pg/data`, auto-detect bin dir,
+    `hhagent` superuser), short-circuit if `PG_VERSION` already
+    present (re-running is safe — it still re-writes
+    `postgresql.auto.conf` so config drift is corrected), spawn
+    `initdb` with the argv, create `<data_dir>/sockets` mode 0700,
+    atomically write `postgresql.auto.conf` (write-to-tmp + fsync +
+    rename — same idiom as `supervisor::systemd_user::install`).
+    Verified end-to-end against a real PG 18.3 cluster in a temp dir;
+    layout, PG_VERSION=18, postgresql.auto.conf, sockets/0700, and
+    second-run idempotency all confirmed before the e2e was written.
+- **New `supervisor::specs::postgres_service_spec` (+ `POSTGRES_SERVICE_NAME` const, +9 unit tests):**
+  Pure ServiceSpec builder mirroring `core_service_spec`. Caller
+  passes `postgres_binary`, `data_dir`, `log_dir`; helper returns
+  `name = "hhagent-postgres"`, `args = ["-D", <data_dir>]` (the
+  socket path comes from `postgresql.auto.conf` inside the data dir,
+  so no `-k` flag at the supervisor layer), empty env, no
+  working_dir, `keep_alive = true` (postgres is a long-running
+  daemon; a crash should respawn under `Restart=on-failure`), and
+  predictable log filenames `<name>.out`/`.err`. Same shape and
+  reasoning as `core_service_spec`, paired regression-test pin.
+- **New `db/tests/postgres_e2e.rs::postgres_install_start_select_one_uninstall` (~280 lines, 1 test):**
+  Full real-world round-trip on Linux & macOS via
+  `default_supervisor()`. Skips with `[SKIP]` when no Postgres
+  binaries on host (so `cargo test --workspace` stays green on hosts
+  without PG installed) or supervisor probe fails. Test flow:
+  `find_pg_bin_dir` → `initdb` against a temp data dir using the
+  pure helpers (peer auth, --data-checksums) → write
+  `postgresql.auto.conf` (UDS-only) → build spec via
+  `postgres_service_spec`, override name to
+  `hhagent-supervisor-test-pg-{pid}-{nanos}` for collision-free
+  parallel test runs → install → start → poll status until Active
+  (≤ 15 s) → poll for `<sockets>/.s.PGSQL.5432` to appear → hold
+  500 ms and re-check Active (rules out flapping under
+  `Restart=on-failure`) → spawn `psql -h <socket_dir> -U <whoami> -At
+  -c 'SELECT 1'` over the UDS (peer auth lines up because the test
+  ran initdb with `--username=$(whoami)`) → assert stdout trim equals
+  `1` → stop → poll until Inactive → uninstall → status=NotInstalled.
+  RAII `ServiceGuard` and two `PathGuard`s (data dir, log dir) clean
+  up even on panic. Runtime ~1.8 s on the DGX Spark.
+- **AGE + pg_search filed but deferred ([#9](https://github.com/hherb/hhagent/issues/9), [#10](https://github.com/hherb/hhagent/issues/10)).**
+  Both extensions were originally on the wishlist for this session.
+  PGDG ships `postgresql-NN-age` only up to PG 16 (upstream Apache
+  AGE lags new PG releases); ParadeDB primarily distributes
+  `pg_search` via Docker and `apt.paradedb.com` does not currently
+  resolve for noble-arm64. HANDOVER's pre-existing gotcha said
+  exactly this: *"if not ready, defer the BM25/AGE work to Phase 1."*
+  The Phase 1 memory-recall design is open to FTS = `tsvector`+GIN
+  and graph = plain join tables in the meantime, so this defers
+  cleanly. Both issues capture the trigger conditions to revisit.
+
+**Test count:** 105 → **138** on Linux (+23 db unit, +1 db integration,
++9 supervisor specs, no skips, no warnings). macOS projects to ~115 with
+PG installed via Homebrew, ~114 without (the e2e skips cleanly).
+
+**Why postgres_service_spec carries no `-k` flag.** First TDD pass had
+`args = ["-D", <data_dir>, "-k", <socket_dir>]` so the spec controlled
+both. But that means the supervisor's view of the socket path can drift
+from what's in `postgresql.auto.conf`, and clients (the future memory
+worker, tests) read the UDS path from a *third* place. The single source
+of truth has to be `postgresql.auto.conf` because that's what postgres
+actually obeys — so the spec passes only `-D` and trusts the conf file.
+Tests read the same `default_socket_dir(<data_dir>)` constant the conf
+writer uses; production reads `<data_dir>/sockets` by the same convention.
+
+**Why we picked `<data_dir>/sockets/` over `/run/user/<uid>/hhagent-pg/`
+or `/tmp`.** Three reasons: (1) the data dir already has mode 0700
+ownership by the cluster's OS user, so a sub-directory inherits the
+right access shape; (2) it dodges the
+`/run/user/<uid>` (Linux-only, depends on systemd) vs `/tmp` (macOS,
+shared with anyone) split — same path on both OSes; (3) the cluster's
+lifecycle owns it, so when the data dir is torn down the socket dir
+goes with it. The `unix_socket_directories` config setting accepts a
+list, so a future operator who wants an additional socket location
+(e.g. a `/run/user/<uid>` symlink for a backwards-compat client) can
+add it without removing ours.
+
+**Why we disable the system `postgresql@18-main.service`.** Debian's
+postgresql package post-install hooks call `pg_createcluster 18 main`,
+which spins up a system-wide cluster on port 5432. We never want that
+running — our auth, our data, our supervised lifecycle. Even though we
+listen UDS-only and would not collide on the network port, the system
+cluster competing for `pg_lsclusters` output, eating disk under
+`/var/lib/postgresql/`, and showing up in `systemd` is operator
+confusion we don't need. The install script stops + disables it.
+
+---
+
+## Recently completed (previous session, 2026-05-09)
 
 **Phase 0 cont. (Option H) — turn `core/src/main.rs` into a real long-running daemon and flip `core_service_spec` to `keep_alive=true`.**
 
@@ -825,15 +967,16 @@ don't get forgotten):
 ## Next TODO (pick one)
 
 **Phase 0 hardening is complete on Linux; macOS Seatbelt and both
-supervisor backends are real.** The first concrete service is now
-wired (`core_service_spec` + e2e against the real `hhagent` binary)
-and the daemon is actually long-running (blocks on SIGTERM/SIGINT,
-`keep_alive=true` is meaningful — both shipped 2026-05-09).
-Remaining Phase 0 work: Postgres bring-up, the audit log writer +
-JSONL mirror, the LLM-router HTTP client stub, and the supervisor
-"auto-restart with backoff on worker crash" finishing-touch
-(`Restart=on-failure RestartSec=5` is constant; cross-platform
-exponential backoff still parked).
+supervisor backends are real.** Two concrete services are now
+wired and proven end-to-end against `default_supervisor()`:
+`hhagent-core` (the agent-core daemon, blocks on SIGTERM/SIGINT) and
+`hhagent-postgres` (the per-user PG cluster on a UDS). Remaining
+Phase 0 work: schema + migrations + core probe (the rest of Option
+C2 — see C2.2 below), the audit log writer + JSONL mirror, the
+LLM-router HTTP client stub, and the supervisor "auto-restart with
+backoff on worker crash" finishing-touch (`Restart=on-failure
+RestartSec=5` is constant; cross-platform exponential backoff still
+parked).
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -851,41 +994,67 @@ exponential backoff still parked).
 
 ### Option C4 — wire core into the supervisor  *(SHIPPED 2026-05-09 — see "Recently completed")*
 
-### Option C2 — Phase 0 cont.: Postgres bring-up (private user-instance)
+### Option C2 — Phase 0 cont.: Postgres bring-up (foundation slice)  *(SHIPPED 2026-05-09 — see "Recently completed (this session)")*
 
-(Now the headline next-pickup. Decided in 2026-05-10 session: a
-**private per-user PG cluster** under `~/.local/share/hhagent/pg/`
-managed by `hhagent-postgres.service`, never network-listen, peer
-auth over UDS. Cleaner containment than coupling to a system PG.)
+### Option C2.2 — Phase 0 cont.: schema + migrations + core probe (the rest of C2)
 
-- `db/initdb.sh` (or a small Rust tool) that runs `initdb -D
-  ~/.local/share/hhagent/pg/data --auth-host=reject --auth-local=peer`
-  on first boot. Idempotent: skip if data dir already initialised.
-- `hhagent-postgres.service` ServiceSpec → install via the new
-  `SystemdUser` supervisor. ExecStart: `/usr/lib/postgresql/<ver>/bin/postgres
-  -D ~/.local/share/hhagent/pg/data -k /run/user/<uid>/hhagent-pg`
-  (UDS dir under XDG_RUNTIME_DIR so socket path is per-session).
-  `Restart=on-failure` makes sense here — the DB is the system's spine.
-- `db/migrations/0001_init.sql` — `audit_log`, `tasks`, `memories`,
-  `entities`, `relations`, `secrets`. Use `sqlx-cli` for the migration
-  runner; integrate into core startup.
-- A small probe in `core` that connects over the UDS, runs migrations,
-  emits an audit-log entry on bring-up.
+(Now the headline next-pickup. Foundation is in place: the cluster
+runs under `default_supervisor()`, listens on a UDS only, accepts
+peer auth — proven by `db/tests/postgres_e2e.rs::postgres_install_start_select_one_uninstall`.
+What's missing is the *schema* and the migration runner that
+`hhagent-core` will use on bring-up.)
+
+- **`db/migrations/0001_init.sql`** — `audit_log`, `tasks`, `memories`,
+  `entities`, `relations`, `secrets`. Schema notes:
+  - `audit_log`: append-only (no UPDATE/DELETE GRANT), strictly
+    monotonic `id BIGSERIAL`, `ts TIMESTAMPTZ DEFAULT now()`, `actor`,
+    `action`, `payload JSONB`, indexes on `ts` and on `actor, ts`.
+  - `memories`: text + `pgvector::vector` column for embeddings; choose
+    embedding dimension up front (1024 for bge-m3 is the leading Phase 1
+    candidate but defer to the Open Question #1 decision).
+  - `entities` / `relations`: typed columns + JSONB sidecar so we can
+    later migrate the relations to AGE without touching the rest of the
+    schema (see [#9](https://github.com/hherb/hhagent/issues/9)).
+  - `secrets`: AES-256-GCM ciphertext columns; key from OS keyring
+    (libsecret on Linux / Keychain on macOS) — *outside* this
+    migration's scope, but pin the column shape now.
+- **Choose the migration runner.** Three viable options:
+  - `sqlx-cli` + `sqlx::migrate!()` macro at startup (compile-time
+    embedded migrations; what HANDOVER previously suggested).
+  - `refinery` (similar shape, lighter dep tree).
+  - Hand-rolled: just run the `.sql` file with `psql` on first
+    bring-up and track applied migrations in a `_schema_migrations`
+    table ourselves.
+  Lean toward `sqlx-cli` for the MIT-OR-Apache-2.0 license, the
+  `query!()` macro's compile-time SQL validation downstream, and the
+  established `embedded::migrate!()` shape that doesn't require
+  shipping the migrations alongside the binary.
+- **Core probe in `core`** that, on startup:
+  1. Resolves the cluster's socket dir (`<data_dir>/sockets`).
+  2. Connects with the configured role (default `hhagent`).
+  3. Runs `sqlx::migrate!()`.
+  4. Emits an `audit_log` row on bring-up: actor=`core`,
+     action=`startup`, payload=`{"version": …, "git": …}`.
+  5. Fails closed if any of the above errors — the daemon should not
+     reach the (future) scheduler loop without a working DB.
 
 **Gotchas:**
-- The host has **no Postgres installed at all** today. Decide
-  apt-install (system package, system binaries, user-instance data)
-  vs Docker vs build-from-source. Most pragmatic: install
-  `postgresql-17` (system package), but use only the *binaries* and
-  initdb our own data dir.
-- pg_search is AGPL-3.0 (good license fit) but verify the apt build is
-  available for arm64 noble; if not, defer the BM25 work to Phase 1
-  and start with plain text columns + pgvector.
-- Apache AGE on Postgres 17 may need a recent build; check supported
-  PG version. If not ready, defer graph traversal to Phase 1 too —
-  Phase 0 only needs the schema + audit log.
+- `core` does not currently depend on `hhagent-db`. Adding the dep is
+  fine but the migration runner choice will pull in either `sqlx`
+  (heavy: tokio + connection pool + macros) or `refinery` (lighter).
+  Pick before wiring.
+- Production install layout. `db/migrations/*.sql` lives in the
+  source tree today; `sqlx::migrate!()` embeds them at compile time
+  so a binary install doesn't need them on disk. Pin this shape now
+  so we don't have to retrofit a "find migrations on disk" code path.
+- The current `keep_alive=true` postgres ServiceSpec relies on
+  Postgres exiting non-zero on crash, which it does. Smart shutdown
+  (default SIGTERM behavior) waits for clients to disconnect; if the
+  scheduler ever holds long-lived connections, `stop` could exceed
+  `TimeoutStopSec=10`. Track this and consider `KillSignal=SIGINT`
+  (fast shutdown) at the supervisor layer for postgres specifically.
 
-### Option H — long-running daemon + `keep_alive=true`  *(SHIPPED 2026-05-09 — see "Recently completed (this session)")*
+### Option H — long-running daemon + `keep_alive=true`  *(SHIPPED 2026-05-09 — see "Recently completed (previous session)")*
 
 ### Option G — make `cpu_quota_pct`/`tasks_max` policy-driven + setrlimit-based `cpu_ms` enforcement  ([#6](https://github.com/hherb/hhagent/issues/6))
 
@@ -923,8 +1092,10 @@ unenforced. To wire them up:
 - [#5](https://github.com/hherb/hhagent/issues/5) — audit `BASE_ALLOW` against a fixture of common worker binaries
 - [#6](https://github.com/hherb/hhagent/issues/6) — tunable `cpu_quota_pct`/`tasks_max` policy fields + `setrlimit`-based `cpu_ms` enforcement (Option G above)
 - [#8](https://github.com/hherb/hhagent/issues/8) — collapse `default_probe` / `default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears
+- [#9](https://github.com/hherb/hhagent/issues/9) — add Apache AGE graph extension when `postgresql-18-age` ships in PGDG (filed 2026-05-09)
+- [#10](https://github.com/hherb/hhagent/issues/10) — add ParadeDB `pg_search` BM25 extension when PG 18 build is available (filed 2026-05-09)
 
-(Closed in this session: [#7](https://github.com/hherb/hhagent/issues/7) — daemon log-line substring is now precise after `(skeleton)` was dropped from the startup line.)
+(Closed in earlier 2026-05-09 session: [#7](https://github.com/hherb/hhagent/issues/7) — daemon log-line substring is now precise after `(skeleton)` was dropped from the startup line.)
 
 ---
 
