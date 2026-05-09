@@ -166,21 +166,32 @@ follow-up session.
   `1` → stop → poll until Inactive → uninstall → status=NotInstalled.
   RAII `ServiceGuard` and two `PathGuard`s (data dir, log dir) clean
   up even on panic. Runtime ~1.8 s on the DGX Spark.
-- **AGE deferred ([#9](https://github.com/hherb/hhagent/issues/9)); pg_search dropped as won't-fix ([#10](https://github.com/hherb/hhagent/issues/10) closed).**
-  Both extensions were originally on the wishlist for this session.
-  PGDG ships `postgresql-NN-age` only up to PG 16 (upstream Apache
-  AGE lags new PG releases) — defer cleanly to plain join tables on
-  `entities`/`relations` until the PG 18 build appears. **pg_search
-  was reviewed and dropped:** for our corpus size (≤ ~1M memories)
-  and write rate (a few hundred/day), native `tsvector`+GIN with
-  `ts_rank` is comparable to BM25 in recall quality, and the
-  embedding (pgvector) dominates the lexical re-ranker anyway.
-  Hybrid lex+vector via Reciprocal Rank Fusion is ~5 lines of SQL,
-  not a dependency. The marginal quality delta from BM25 isn't worth
-  carrying ParadeDB as a transitive dep + tracking their PG 18
-  build availability + auditing the extra Rust deps. If recall
-  measurement ever shows ts_rank is the bottleneck (extremely
-  unlikely at our scale), revisit then.
+- **Both extension-deferral issues dropped as won't-fix ([#9](https://github.com/hherb/hhagent/issues/9) Apache AGE, [#10](https://github.com/hherb/hhagent/issues/10) ParadeDB pg_search).**
+  Both extensions were originally on the wishlist for this session
+  ("install if available, defer if not"). After looking at what each
+  actually buys for *our* use case versus the cost of tracking their
+  PG 18 build availability, neither earns its keep:
+  - **pg_search:** for ≤ ~1M memories at a few hundred writes/day,
+    native `tsvector`+GIN with `ts_rank` is comparable to BM25 in
+    recall quality, and the embedding (pgvector) dominates the
+    lexical re-ranker anyway. Hybrid lex+vector via Reciprocal
+    Rank Fusion is ~5 lines of SQL, not a dependency.
+  - **Apache AGE:** for a personal-agent graph (low thousands of
+    nodes, occasional 2-hop, almost never 5-hop), recursive CTEs
+    handle variable-length paths fine. AGE's upstream lags new PG
+    releases (PGDG only ships up to PG 16 today, RC-tagged), and its
+    JSONB-backed storage fights natural Postgres indexing on the
+    same columns as pgvector/tsvector. The Cypher language doesn't
+    earn anything when our queries are agent-generated rather than
+    human-written.
+  - **What ships instead:** plain `entities` + `relations` tables
+    in `0001_init.sql` (next session), plus a `Graph` trait in
+    `db/src/graph.rs` so the rest of the codebase never writes
+    graph SQL directly. All traversal lives behind
+    `Graph::{neighbors, path, …}` — same chokepoint discipline as
+    `tool_host::dispatch()` for tools. If we ever measure a real
+    bottleneck (perf or expressiveness), we swap the impl, not the
+    call sites — we're not painted into a corner.
 
 **Test count:** 105 → **138** on Linux (+23 db unit, +1 db integration,
 +9 supervisor specs, no skips, no warnings). macOS projects to ~115 with
@@ -1014,15 +1025,28 @@ What's missing is the *schema* and the migration runner that
   - `audit_log`: append-only (no UPDATE/DELETE GRANT), strictly
     monotonic `id BIGSERIAL`, `ts TIMESTAMPTZ DEFAULT now()`, `actor`,
     `action`, `payload JSONB`, indexes on `ts` and on `actor, ts`.
-  - `memories`: text + `pgvector::vector` column for embeddings; choose
-    embedding dimension up front (1024 for bge-m3 is the leading Phase 1
-    candidate but defer to the Open Question #1 decision).
-  - `entities` / `relations`: typed columns + JSONB sidecar so we can
-    later migrate the relations to AGE without touching the rest of the
-    schema (see [#9](https://github.com/hherb/hhagent/issues/9)).
+  - `memories`: text + `pgvector::vector` column for embeddings + a
+    `tsvector` GENERATED column over the body with a GIN index for
+    `ts_rank`-based lexical retrieval; choose embedding dimension up
+    front (1024 for bge-m3 is the leading Phase 1 candidate but defer
+    to Open Question #1).
+  - `entities`: `(id, kind, name, attrs JSONB, embedding vector(N))`,
+    `UNIQUE(kind, name)`, `kind+name` and `attrs` GIN indexes.
+  - `relations`: `(id, src_id, dst_id, kind, attrs JSONB)` with
+    cascading delete from `entities`, `(src_id, kind)` and
+    `(dst_id, kind)` indexes. No graph extension; recursive CTEs
+    handle variable-length traversal behind a `Graph` trait in
+    `db/src/graph.rs` (see "Graph abstraction" below).
   - `secrets`: AES-256-GCM ciphertext columns; key from OS keyring
     (libsecret on Linux / Keychain on macOS) — *outside* this
     migration's scope, but pin the column shape now.
+- **Graph abstraction in `db/src/graph.rs`** — `pub trait Graph` with
+  `upsert_entity`, `upsert_relation`, `neighbors`, `path`, etc. All
+  call sites in `core` go through this trait; no module outside `db`
+  ever writes raw SQL against `entities`/`relations`. Same chokepoint
+  discipline as `tool_host::dispatch()`. The trait makes a future
+  swap to AGE/Neo4j/Memgraph mechanical (one impl, no call-site
+  churn) if a real bottleneck ever appears.
 - **Choose the migration runner.** Three viable options:
   - `sqlx-cli` + `sqlx::migrate!()` macro at startup (compile-time
     embedded migrations; what HANDOVER previously suggested).
@@ -1097,9 +1121,9 @@ unenforced. To wire them up:
 - [#5](https://github.com/hherb/hhagent/issues/5) — audit `BASE_ALLOW` against a fixture of common worker binaries
 - [#6](https://github.com/hherb/hhagent/issues/6) — tunable `cpu_quota_pct`/`tasks_max` policy fields + `setrlimit`-based `cpu_ms` enforcement (Option G above)
 - [#8](https://github.com/hherb/hhagent/issues/8) — collapse `default_probe` / `default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears
-- [#9](https://github.com/hherb/hhagent/issues/9) — add Apache AGE graph extension when `postgresql-18-age` ships in PGDG (filed 2026-05-09)
+(All Phase 0 follow-up issues filed in earlier sessions are still open: [#1](https://github.com/hherb/hhagent/issues/1)–[#6](https://github.com/hherb/hhagent/issues/6), [#8](https://github.com/hherb/hhagent/issues/8). Both extension-deferral issues filed at the start of this session are now closed won't-fix — see below.)
 
-(Closed in this session: [#10](https://github.com/hherb/hhagent/issues/10) — ParadeDB `pg_search` won't-fix after review. Native PG `tsvector`+GIN+`ts_rank` is sufficient for our corpus size and write rate; the embedding dominates the lexical re-ranker; RRF is ~5 lines of SQL.)
+(Closed in this session, both as won't-fix after review: [#9](https://github.com/hherb/hhagent/issues/9) Apache AGE — relational `entities`/`relations` behind a `Graph` trait + recursive CTEs are sufficient for a personal-agent graph; AGE upstream lags PG releases and stores attributes in JSONB which fights pgvector/tsvector indexing. [#10](https://github.com/hherb/hhagent/issues/10) ParadeDB `pg_search` — native `tsvector`+GIN+`ts_rank` is comparable to BM25 at our corpus size; the embedding dominates the lexical re-ranker; RRF is ~5 lines of SQL.)
 
 (Closed in earlier 2026-05-09 session: [#7](https://github.com/hherb/hhagent/issues/7) — daemon log-line substring is now precise after `(skeleton)` was dropped from the startup line.)
 
