@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-09
-**Last commit:** `f3fdb14` (`feat(db,supervisor): Postgres bring-up foundation (Option C2 slice 1)`) — macOS hardening session (issues #1 + #2) pending commit on top
+**Last commit:** `326104b` (`feat(sandbox/macos): close issues #1 (mach-lookup) and #2 (setsid)`) — rebased on top of `f3fdb14` (Postgres bring-up foundation, Option C2 slice 1)
 **Branch:** `main`
 
 ---
