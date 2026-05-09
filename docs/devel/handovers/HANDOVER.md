@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-09
-**Last commit:** `<TBD — bumped in the docs-only follow-up commit after the C2.2 work commit>`
+**Last commit:** `23d8ca6` (`feat(db,core): C2.2 — schema + sqlx migrations + Graph trait + core probe + e2e`)
 **Branch:** `main`
 
 ---
