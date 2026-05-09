@@ -6,15 +6,16 @@
 //! exercises [`hhagent_supervisor::systemd_user::SystemdUser`] on
 //! Linux and [`hhagent_supervisor::launchd_agents::LaunchAgents`] on
 //! macOS without per-OS branching). Verifies install → start →
-//! observe-the-daemon's-startup-log-line → stop → uninstall.
+//! observe-stable-Active → stop → observe-Inactive → uninstall.
 //!
 //! This is the "first concrete service" item in the ROADMAP — it
 //! proves both supervisor backends can host the real `hhagent` binary
-//! and pins the observable startup contract: today's daemon
-//! (`core/src/main.rs`) is a placeholder that emits one JSON-formatted
-//! tracing line ("hhagent core starting (skeleton)" with a `version`
-//! field) and exits 0. We observe via the supervisor's stdout
-//! redirect, not by trying to catch the brief `Active` window.
+//! and pins the observable lifecycle contract: today's daemon
+//! (`core/src/main.rs`) blocks on SIGTERM/SIGINT, so `start` puts it
+//! in `Active` and it stays there until `stop` sends SIGTERM. We
+//! observe via the supervisor's `status()` (the durable signal) and
+//! still sanity-check the redirected stdout for the daemon's startup
+//! JSON line ("hhagent core starting" with a `version` field).
 //!
 //! Skips silently on hosts where the supervisor probe fails:
 //!   - Linux: headless session without `loginctl enable-linger`
@@ -123,9 +124,10 @@ impl Drop for LogDirGuard {
 /// success, or a diagnostic string with whatever was actually
 /// observed on timeout.
 ///
-/// Used to wait for the daemon's startup log line. Polling rather
-/// than sleeping keeps the test fast on a healthy host (typically
-/// well under 200 ms) without making it flaky on a slow one.
+/// Used as a sanity check that the daemon got far enough to log its
+/// startup line. Polling rather than sleeping keeps the test fast on
+/// a healthy host (typically well under 200 ms) without making it
+/// flaky on a slow one.
 fn wait_for_log_match<F: Fn(&str) -> bool>(
     path: &Path,
     predicate: F,
@@ -148,6 +150,41 @@ fn wait_for_log_match<F: Fn(&str) -> bool>(
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Poll `sup.status(name)` until `predicate(status)` returns true, or
+/// `timeout` elapses. Returns the matching status on success, or a
+/// diagnostic with the last observation on timeout.
+///
+/// Used to wait for the daemon to reach Active after `start` and
+/// Inactive after `stop`. Both transitions are typically sub-100 ms
+/// on a healthy host; the timeout exists to bound flake on a slow
+/// one rather than to mask a real hang.
+fn wait_for_status<F: Fn(ServiceStatus) -> bool>(
+    sup: &dyn Supervisor,
+    name: &str,
+    predicate: F,
+    timeout: Duration,
+) -> Result<ServiceStatus, String> {
+    let start = Instant::now();
+    let mut last = sup
+        .status(name)
+        .map_err(|e| format!("status error: {e}"))?;
+    loop {
+        if predicate(last) {
+            return Ok(last);
+        }
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "timed out after {:?} waiting for status predicate; last observed: {:?}",
+                timeout, last
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        last = sup
+            .status(name)
+            .map_err(|e| format!("status error: {e}"))?;
     }
 }
 
@@ -220,33 +257,58 @@ fn core_service_install_start_observe_log_uninstall() {
 
     sup.start(&spec.name).expect("start");
 
-    // The daemon as currently shaped logs one JSON line and exits 0
-    // (`core/src/main.rs`). Both supervisors will see clean exit and
-    // mark the service Inactive almost immediately. We don't try to
-    // catch the brief Active window — we observe the durable side
-    // effect (the log line appearing in the redirected stdout file).
+    // The daemon now blocks on SIGTERM/SIGINT (`core/src/main.rs`),
+    // so `start` should put it in `Active` and it should *stay*
+    // there until we `stop` it. Wait up to 5 s for the transition,
+    // then re-check after 500 ms to rule out a flapping/restarting
+    // process (which would oscillate Active ↔ Inactive under
+    // `Restart=on-failure` / `KeepAlive=true`).
+    wait_for_status(
+        sup.as_ref(),
+        &spec.name,
+        |s| s == ServiceStatus::Active,
+        Duration::from_secs(5),
+    )
+    .expect("daemon should reach Active within 5s");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        sup.status(&spec.name).expect("status during stable-active window"),
+        ServiceStatus::Active,
+        "daemon should still be Active 500ms after start (no flapping)"
+    );
+
+    // Sanity-check the redirected stdout: the daemon should have
+    // logged its startup JSON line by now. This catches a regression
+    // where the daemon reaches Active but tracing isn't initialized
+    // (or `info!` was removed). Also pins the JSON shape — a future
+    // change that drops the `version` field or swaps tracing away
+    // from JSON would trip here. We don't parse the JSON; substring
+    // match keeps `serde_json` out of core's dev-deps.
     let body = wait_for_log_match(
         &stdout_path,
         |s| s.contains("hhagent core starting"),
         Duration::from_secs(5),
     )
     .expect("daemon should write its startup log line within 5s");
-
-    // Pin the JSON shape: a future change to main.rs that drops the
-    // version field or swaps tracing-subscriber away from JSON would
-    // trip here. (We don't parse the JSON — substring match is enough
-    // for a contract test, and avoids pulling serde_json into core's
-    // dev-deps just for this.)
     assert!(
         body.contains("\"version\":"),
         "log line should be JSON with a version field, got:\n{body}"
     );
 
-    // `stop` is a no-op when the process has already exited — both
-    // `systemctl --user stop` and `launchctl bootout` succeed (or
-    // map their idempotent error to Ok) in that case. Asserting Ok
-    // here pins the "stop is always safe" contract.
-    sup.stop(&spec.name).expect("stop must be safe even after natural exit");
+    sup.stop(&spec.name).expect("stop");
+
+    // After SIGTERM the daemon should exit cleanly via its
+    // `wait_for_shutdown` future and the supervisor should mark it
+    // `Inactive`. Without the daemon's signal handler, `systemctl
+    // stop` would eventually SIGKILL it after `TimeoutStopSec=10` —
+    // which would surface here as a timeout, not a silent pass.
+    wait_for_status(
+        sup.as_ref(),
+        &spec.name,
+        |s| s == ServiceStatus::Inactive,
+        Duration::from_secs(5),
+    )
+    .expect("daemon should reach Inactive within 5s of stop");
 
     sup.uninstall(&spec.name).expect("uninstall");
     assert_eq!(

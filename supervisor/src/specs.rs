@@ -50,13 +50,15 @@ pub const CORE_SERVICE_NAME: &str = "hhagent-core";
 ///   `unwrap_or_else` in `main`), so we don't need to inject it.
 ///   When the daemon grows real config-via-env, populate this.
 /// - `working_dir` is `None`: nothing in the daemon depends on cwd.
-/// - `keep_alive` is `false`: the daemon is currently a placeholder
-///   that emits one log line and exits 0. `Restart=on-failure`
-///   (systemd's translation of `keep_alive=true`) wouldn't restart
-///   on a clean exit anyway, so flipping this becomes meaningful
-///   only when the daemon is rewritten as a long-running event
-///   loop. There is a regression test ([`tests::core_service_spec_keep_alive_is_false_for_now`])
-///   pinning today's value so the change can't sneak in unnoticed.
+/// - `keep_alive` is `true`: the daemon now blocks on SIGTERM/SIGINT
+///   and is meant to stay running until the supervisor stops it. On
+///   systemd this becomes `Restart=on-failure` so a *crash* (non-zero
+///   exit) triggers a respawn while a clean SIGTERM-induced exit does
+///   not. On launchd this becomes `KeepAlive=true` with the same
+///   intent (bootout removes the agent from the domain entirely, so
+///   `stop` still ends the process for good). The regression test
+///   ([`tests::core_service_spec_keep_alive_is_true`]) pins today's
+///   value so a regression can't sneak in unnoticed.
 pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
     ServiceSpec {
         name: CORE_SERVICE_NAME.into(),
@@ -64,7 +66,7 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
         args: vec![],
         env: vec![],
         working_dir: None,
-        keep_alive: false,
+        keep_alive: true,
         stdout_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.out"))),
         stderr_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.err"))),
     }
@@ -129,16 +131,18 @@ mod tests {
         assert!(spec.working_dir.is_none());
     }
 
-    /// Pinning today's value: when the daemon becomes a real
-    /// long-running event loop, flip this to `true` here AND in the
-    /// helper at the same time.
+    /// The core daemon now blocks on SIGTERM/SIGINT and is intended
+    /// to stay running until the supervisor stops it. Pin
+    /// `keep_alive=true` so a regression that flips it back to
+    /// `false` (which would mean a daemon crash silently goes
+    /// unrestarted) trips this test.
     #[test]
-    fn core_service_spec_keep_alive_is_false_for_now() {
+    fn core_service_spec_keep_alive_is_true() {
         let spec = core_service_spec(
             Path::new("/usr/local/bin/hhagent"),
             Path::new("/tmp"),
         );
-        assert!(!spec.keep_alive);
+        assert!(spec.keep_alive);
     }
 
     /// stdout / stderr are appended to predictable filenames under
