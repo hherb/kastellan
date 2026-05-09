@@ -191,6 +191,141 @@ fn net_probe_binary() -> PathBuf {
     target.join("debug").join("net_probe")
 }
 
+fn sid_probe_binary() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest.parent().unwrap().join("target"));
+    target.join("debug").join("sid_probe")
+}
+
+fn mach_probe_binary() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest.parent().unwrap().join("target"));
+    target.join("debug").join("mach_probe")
+}
+
+/// Issue #1: the strict profile must NOT grant `mach-lookup`. Apple Events
+/// broker (`com.apple.coreservices.appleevents`) is a non-essential Mach
+/// service — none of our shipping workers (Rust binaries that don't link
+/// libdispatch heavily) need it, and it's the canonical privilege-escalation
+/// surface our threat model wants closed off (it's the back-end for
+/// AppleScript-driven cross-app automation).
+///
+/// Verification: spawn `mach_probe` under the strict profile and assert it
+/// exits non-zero. Outside the sandbox, mach_probe always exits 0 (verified
+/// in the fixture's own doc comment); inside the strict profile, the
+/// `bootstrap_look_up` call must be killed before it ever reaches launchd.
+#[test]
+fn worker_cannot_look_up_arbitrary_mach_services() {
+    if skip_if_no_seatbelt() {
+        return;
+    }
+    let probe = mach_probe_binary();
+    if !probe.exists() {
+        eprintln!(
+            "[SKIP] mach_probe binary not built at {probe:?} — run `cargo build --workspace` first"
+        );
+        return;
+    }
+    let mut policy = strict_policy();
+    policy.fs_read.push(probe.clone());
+
+    let backend = MacosSeatbelt::new();
+    let probe_str = probe.to_string_lossy().into_owned();
+    let mut child = backend
+        .spawn_under_policy(&policy, &probe_str, &[])
+        .expect("sandbox-exec should spawn mach_probe");
+    let status = child.wait().expect("wait");
+    let stdout = read_to_string(&mut child.stdout);
+    let stderr = read_to_string(&mut child.stderr);
+    assert!(
+        !status.success(),
+        "mach_probe must NOT successfully look up com.apple.coreservices.appleevents \
+         under the strict profile. status={status:?} stdout={stdout:?} stderr={stderr:?}; \
+         this means the strict profile is granting `mach-lookup` and a worker can talk \
+         to arbitrary registered launchd services. See issue #1."
+    );
+    // Ensure the failure was the expected kind (lookup denied, not exec failure).
+    assert!(
+        stderr.contains("bootstrap_look_up failed"),
+        "mach_probe failed for an unexpected reason — expected `bootstrap_look_up failed: kr=...` \
+         on stderr, got stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+/// Issue #2: every Seatbelt-launched worker must run in its own session,
+/// not just its own process group. The Linux backend gets this for free
+/// via `bwrap --new-session` (which calls `setsid`); on macOS we previously
+/// used `Command::process_group(0)` (which calls `setpgid`), leaving the
+/// worker attached to the parent's controlling terminal.
+///
+/// Verification: spawn `sid_probe` under the strict profile, parse
+/// `<pid> <sid>` from stdout, and assert `sid == pid` (the worker is the
+/// session leader of a fresh session). A simpler "sid != parent_sid"
+/// check would also work, but the `sid == pid` invariant is stronger:
+/// the only way to satisfy it is to have actually called `setsid()` in
+/// the child, *not* to have inherited a different session because the
+/// test binary itself was started detached.
+#[test]
+fn worker_runs_in_its_own_session() {
+    if skip_if_no_seatbelt() {
+        return;
+    }
+    let probe = sid_probe_binary();
+    if !probe.exists() {
+        eprintln!(
+            "[SKIP] sid_probe binary not built at {probe:?} — run `cargo build --workspace` first"
+        );
+        return;
+    }
+    // The probe binary needs to be readable inside the sandbox.
+    let mut policy = strict_policy();
+    policy.fs_read.push(probe.clone());
+
+    let backend = MacosSeatbelt::new();
+    let probe_str = probe.to_string_lossy().into_owned();
+    let mut child = backend
+        .spawn_under_policy(&policy, &probe_str, &[])
+        .expect("sandbox-exec should spawn sid_probe");
+    let status = child.wait().expect("wait");
+    let stdout = read_to_string(&mut child.stdout);
+    let stderr = read_to_string(&mut child.stderr);
+    assert!(
+        status.success(),
+        "sid_probe exited non-zero: {status:?}; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let mut parts = stdout.split_whitespace();
+    let pid: i32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("expected `<pid> <sid>` on stdout, got {stdout:?}"));
+    let sid: i32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("expected `<pid> <sid>` on stdout, got {stdout:?}"));
+
+    assert_eq!(
+        sid, pid,
+        "worker must be a session leader (sid == pid). Got pid={pid} sid={sid}; \
+         this means setsid() was not called before exec — the worker is still \
+         attached to the parent's session/controlling terminal. See issue #2."
+    );
+
+    // Belt-and-braces: the worker's session must also differ from the test
+    // process's own session. Hard to fail given `sid == pid` already passed,
+    // but documents the original threat-model concern explicitly.
+    let parent_sid = unsafe { libc::getsid(0) };
+    assert_ne!(
+        sid, parent_sid,
+        "worker session ({sid}) collided with parent session ({parent_sid}); \
+         setsid() was probably not called"
+    );
+}
+
 #[test]
 fn net_is_unreachable_under_deny() {
     if skip_if_no_seatbelt() {

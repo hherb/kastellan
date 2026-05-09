@@ -15,6 +15,12 @@ serde_json = { workspace = true }
 thiserror  = { workspace = true }
 tracing    = { workspace = true }
 
+# Used on macOS for the `setsid()` pre-exec hook that gives every
+# Seatbelt-launched worker its own session (parity with bwrap --new-session).
+# Pulled in unconditionally so the fixture binary `sid_probe` can call
+# getpid/getsid on every supported platform.
+libc       = { workspace = true }
+
 # Test fixture: standalone TcpStream::connect probe used by macos_smoke's
 # network-deny test. Built into target/debug/net_probe by `cargo build`.
 [[bin]]
@@ -28,5 +34,23 @@ doc = false
 [[bin]]
 name = "mem_burner"
 path = "tests/fixtures/mem_burner.rs"
+test = false
+doc = false
+
+# Test fixture: session-id probe used by macos_smoke's session-isolation
+# test. Prints `<pid> <sid>` on stdout. Built into target/debug/sid_probe
+# by `cargo build`.
+[[bin]]
+name = "sid_probe"
+path = "tests/fixtures/sid_probe.rs"
+test = false
+doc = false
+
+# Test fixture: mach-lookup probe used by macos_smoke's mach-deny test
+# (issue #1). Attempts bootstrap_look_up for a non-essential Mach service.
+# Built into target/debug/mach_probe by `cargo build`.
+[[bin]]
+name = "mach_probe"
+path = "tests/fixtures/mach_probe.rs"
 test = false
 doc = false

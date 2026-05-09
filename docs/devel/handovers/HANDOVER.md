@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-09
-**Last commit:** `f3fdb14` (`feat(db,supervisor): Postgres bring-up foundation (Option C2 slice 1)`)
+**Last commit:** `f3fdb14` (`feat(db,supervisor): Postgres bring-up foundation (Option C2 slice 1)`) — macOS hardening session (issues #1 + #2) pending commit on top
 **Branch:** `main`
 
 ---
@@ -32,15 +32,15 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 ```
 
 **`cargo test --workspace` on Linux: 138 tests, 0 skipped, 0 failed, 0 warnings.**
-*macOS test count was 83 last session (2026-05-08); the macOS suite gains the +9 supervisor unit tests (`specs::postgres_*` + `canonical_service_names_are_distinct`) and +23 db unit tests when next run there. The `postgres_e2e` integration test gates on `find_pg_bin_dir(default_pg_bin_dir_candidates())` so it skips with `[SKIP]` on a macOS host without Homebrew Postgres until the operator runs `brew install postgresql@18`. Projection: macOS to ~115 with PG, 114 without (skip).*
+**`cargo test --workspace` on macOS: 86 tests, 0 skipped, 0 failed** *(after this session's macOS hardening; earlier-in-day Linux/db/supervisor work hasn't been re-run on macOS yet — projection ~126 there once `postgres_service_spec`'s +17 unit tests + the +23 db unit tests run, with `postgres_e2e` `[SKIP]`ping until `brew install postgresql@18`).*
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
 | `protocol` unit | 3 | dispatch, parse-error fallback, method-not-found |
 | `sandbox` unit (linux) | 16 | bwrap argv builder shape (6) + cgroup `systemd-run` argv builder shape: starts with `systemd-run`, uses `--user --scope --quiet --collect`, sets `MemoryMax`+`MemorySwapMax=0` from policy, omits both when `mem_mb=0`, defense-in-depth `CPUQuota=200%` + `TasksMax=64` defaults, ends with `--` separator, no inner-program leakage, 4 `-p` flags total (10) |
-| `sandbox` unit (macos) | 13 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation |
+| `sandbox` unit (macos) | 14 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation + **strict profile does NOT contain unrestricted `(allow mach-lookup)`** (issue #1) |
 | `sandbox` integration (`linux_smoke`) | 7 | **real** bwrap+cgroup: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected, **mem_burner allocating 256 MiB under `MemoryMax=32M` is OOM-killed by the kernel** |
-| `sandbox` integration (`macos_smoke`) | 8 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny` |
+| `sandbox` integration (`macos_smoke`) | 10 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny`, **worker is the leader of a fresh session — sid == pid via setsid (issue #2)**, **worker cannot `bootstrap_look_up` `com.apple.coreservices.appleevents` (issue #1)** |
 | `core` unit | 16 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
 | `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** `default_supervisor()` round-trip against the actual `hhagent` binary: build spec via `core_service_spec`, install into `~/.config/systemd/user/` (Linux) or `~/Library/LaunchAgents/` (macOS), pre-start status=Inactive, start, **poll status until Active** then **hold 500 ms and re-check** (rules out flapping/restart loops under the `keep_alive=true` ServiceSpec), sanity-check that the redirected stdout contains the daemon's startup JSON line (`"hhagent core starting"` + `version` field), stop, **poll status until Inactive** within 5 s (proves the daemon's tokio SIGTERM handler exited cleanly *before* `TimeoutStopSec=10` would have SIGKILLed it), uninstall, post-uninstall status=NotInstalled. RAII `ServiceGuard` + `LogDirGuard` clean up on panic. Unique `hhagent-supervisor-test-{pid}-{nanos}` name avoids clobbering a real installed `hhagent-core`. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
@@ -77,7 +77,15 @@ on the user's DGX Spark. Other Linux hosts may need
 
 ## Recently completed (this session, 2026-05-09)
 
-**Phase 0 cont. (Option C2 — Postgres bring-up, foundation slice) — install PG 18 binaries, idempotent `hhagent-db-init`, `postgres_service_spec`, full e2e against `default_supervisor()`.**
+> **Two parallel work streams shipped on 2026-05-09 from different machines.**
+> The Linux work below (Postgres bring-up + supervisor wiring + native PG FTS
+> + relational graph commitment) was implemented and committed first
+> (`f3fdb14` and friends). The macOS hardening below (issues #1 + #2) was
+> implemented in a parallel macOS session and rebased on top.
+
+### Linux: Phase 0 cont. (Option C2 — Postgres bring-up, foundation slice)
+
+**Install PG 18 binaries, idempotent `hhagent-db-init`, `postgres_service_spec`, full e2e against `default_supervisor()`.**
 
 This is the first slice of HANDOVER's "headline next-pickup": a private
 per-user PG cluster under `~/.local/share/hhagent/pg/data` managed by a
@@ -412,6 +420,125 @@ Two follow-ups from the same review filed but deferred:
 - [#8](https://github.com/hherb/hhagent/issues/8) — collapse the
   `default_probe`/`default_supervisor` cfg-ladder duplication once a
   third entry point or backend OS appears.
+### macOS: Seatbelt hardening — closed two open GitHub issues (#1 + #2)
+
+Both issues had been filed during the post-Phase-0b code review on 2026-05-07
+(see HANDOVER entry below). They are now closed in code, with negative tests
+that pin the new behaviour against future regressions.
+
+### Issue #2 — `setpgid(0,0)` → `setsid()`
+
+`MacosSeatbelt::spawn_under_policy` previously called
+`Command::process_group(0)` (which delegates to `setpgid(0, 0)`), giving
+the worker its own process group but leaving it attached to the parent's
+session and controlling terminal. Now switched to a `pre_exec` hook that
+calls `libc::setsid()` directly between `fork(2)` and `execve(2)`. The
+worker is the leader of a brand-new session (`sid == pid`) and has no
+controlling terminal — any future open of `/dev/tty` fails with `ENXIO`
+regardless of profile broadening.
+
+- **`sandbox/src/macos_seatbelt.rs`**: removed `cmd.process_group(0)`,
+  added an `unsafe { cmd.pre_exec(...) }` block that calls
+  `libc::setsid()` and propagates `errno` via `io::Error::last_os_error()`.
+  `setsid` is on the POSIX async-signal-safe list (signal-safety(7) on
+  Linux, sigaction(2) on macOS), so it is a legal pre_exec operation.
+  `setsid` implies `setpgid(0, 0)` in the new session, so dropping the
+  old `process_group(0)` call is a strict subsumption — no behavioural
+  loss.
+- **`sandbox/tests/fixtures/sid_probe.rs`** (new, ~25 lines): a tiny
+  Rust binary that prints `<pid> <sid>` and exits 0 (or 1 on syscall
+  failure). Built into `target/debug/sid_probe` via a `[[bin]]` stanza
+  in `sandbox/Cargo.toml`, mirroring the existing `net_probe` /
+  `mem_burner` pattern.
+- **`sandbox/tests/macos_smoke.rs::worker_runs_in_its_own_session`**
+  (new, integration test): spawns `sid_probe` under the strict policy
+  and parses `<pid> <sid>` from stdout. Asserts `sid == pid` (worker is
+  a session leader) and `sid != parent_sid` (defence in depth). The
+  `sid == pid` invariant is strictly stronger than a "different from
+  parent" check — the only way to satisfy it is to have actually
+  called `setsid()` in the child.
+- **`sandbox/Cargo.toml`**: added `libc = { workspace = true }` as a
+  direct dependency (the integration test's defence-in-depth check
+  calls `libc::getsid(0)` to compare against the worker's reported sid).
+- **Test count delta**: 83 → 84 (+1 smoke). All other tests unchanged.
+
+### Issue #1 — narrow `(allow mach-lookup)` to a `global-name` allowlist
+
+The original Phase 0b profile emitted an unrestricted `(allow mach-lookup)`
+rule on the rationale "Python and libdispatch might need it." Empirical
+finding this session: **none of our shipping workers need it on macOS
+26.4 ARM64.** Verified by spawning each binary under a probe profile
+with the rule replaced by `(deny mach-lookup)`:
+
+- `hhagent-worker-shell-exec` → starts cleanly, prelude reports
+  `lockdown SkippedNonLinux`.
+- `sid_probe`, `net_probe`, `mach_probe` (all Rust) → exit 0.
+- `/bin/echo`, `/bin/sh`, `/bin/cat`, `/bin/ls`, `/usr/bin/true` →
+  exit 0.
+
+The unrestricted rule was speculative, not load-bearing. Removed it from
+`build_profile` entirely; kept the broader form in `probe()` where the
+deliberately-permissive canary lives. When Phase 4 introduces
+`python-exec`, the actual Mach service set CPython needs at startup
+should be captured at that time and emitted as a *narrow*
+`(allow mach-lookup (global-name "..."))` form — never as the broad
+rule again.
+
+- **`sandbox/src/macos_seatbelt.rs::build_profile`**: dropped the
+  `(allow mach-lookup)` line. Replaced its inline rationale with a long
+  comment describing the empirical methodology used to set the new
+  baseline, the threat-model reason for denying (Mach bootstrap
+  namespace is the back-end for every registered launchd service —
+  pasteboard, Apple Events broker, distributed notifications, etc.,
+  many of which bypass file/network rules entirely), and the contract
+  for Phase 4 (`python-exec` may add a narrow allowlist; never re-add
+  the unrestricted form).
+- **`sandbox/src/macos_seatbelt.rs::tests`**:
+  - `profile_emits_always_on_allows` — removed the
+    `(allow mach-lookup)` needle from the assertion list; nothing else
+    changed.
+  - **new** `profile_does_not_grant_unrestricted_mach_lookup` —
+    asserts the strict profile contains no `(allow mach-lookup)`
+    substring and no whitespace-only-trailing variants. Pins the
+    invariant against future refactors.
+- **`sandbox/tests/fixtures/mach_probe.rs`** (new, ~50 lines): a tiny
+  Rust fixture that calls `bootstrap_look_up(bootstrap_port,
+  "com.apple.coreservices.appleevents", &mut port)` via `extern "C"`
+  declarations against `libSystem`. Apple Events broker is a
+  deliberately benign-but-non-essential service: present on every
+  macOS host, but no shipping hhagent worker has any legitimate reason
+  to talk to it (it's the back-end for AppleScript-driven cross-app
+  automation — the canonical privilege-escalation surface). Built into
+  `target/debug/mach_probe` via a `[[bin]]` stanza.
+- **`sandbox/tests/macos_smoke.rs::worker_cannot_look_up_arbitrary_mach_services`**
+  (new, integration test): spawns `mach_probe` under the strict policy
+  and asserts non-zero exit + stderr containing `bootstrap_look_up
+  failed`. With the old unrestricted rule, `mach_probe` outside the
+  sandbox returns `port=2819`-ish; with the new profile it returns
+  `kr=1100` (sandbox-imposed denial) — verified end-to-end.
+- **Test count delta**: 84 → 86 (+1 unit, +1 smoke).
+
+### Inline-comment update in build_profile's /dev block
+
+The `/dev/tty` exclusion block previously cited `process_group(0)` as
+the reason `/dev/tty` had to be denied at the profile level. After
+issue #2 the worker is in a fresh session with no controlling terminal,
+so `/dev/tty` is unusable (`ENXIO`) regardless of the profile rule. The
+comment was rewritten to reflect this and to flag that the profile-level
+deny remains valuable as defence in depth: any future broadening of
+`/dev` would need to remember to re-deny `tty` explicitly.
+
+### Threat-model + roadmap updates
+
+- `docs/threat-model.md` "negative tests already shipped" gained two
+  rows for the issue #1 + #2 smoke tests.
+- `docs/devel/ROADMAP.md` Phase 0b section now annotates the two
+  hardenings on the original sandbox-exec line items rather than adding
+  new bullets — reflects that the issues were *closed* this session,
+  not new scope.
+
+**Total tests after this macOS session:** 86 on macOS (was 83). No existing
+test changed; three new tests were added.
 
 ---
 

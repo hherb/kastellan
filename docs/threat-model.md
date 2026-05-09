@@ -70,7 +70,7 @@ Already shipped (Phase 0 + Phase 0 hardening stage 1):
 - `core/tests/shell_exec_e2e.rs` — non-allowlisted argv rejected by worker policy with `POLICY_DENIED`; full round-trip through bwrap + Landlock + seccomp.
 - `workers/prelude/tests/landlock_smoke.rs` — write to non-allowlisted path is denied with EACCES; allowlisted scratch writes succeed; reads under `/usr` continue to work.
 - `workers/prelude/tests/seccomp_smoke.rs` — `unshare(CLONE_NEWUSER)` and `mount(...)` are killed with `SIGSYS`; `getpid()` survives.
-- `sandbox/tests/macos_smoke.rs` — Seatbelt denies `/etc/master.passwd`, `/Users/...`, raw `/dev/disk0`, and network under `Net::Deny`.
+- `sandbox/tests/macos_smoke.rs` — Seatbelt denies `/etc/master.passwd`, `/Users/...`, raw `/dev/disk0`, and network under `Net::Deny`. Also: a worker calling `bootstrap_look_up("com.apple.coreservices.appleevents")` is denied (`worker_cannot_look_up_arbitrary_mach_services`, issue #1) — closes the largest pre-existing asymmetry vs the threat-model invariant; and the worker process is the leader of a fresh session, so any future attempt to open `/dev/tty` fails with ENXIO regardless of profile broadening (`worker_runs_in_its_own_session`, issue #2).
 - `sandbox/tests/linux_smoke.rs::worker_with_low_mem_max_is_oom_killed` — a worker that allocates 256 MiB under `MemoryMax=32M` is OOM-killed by the kernel. Closes the cgroup-resource layer.
 
 ## Open items

@@ -13,8 +13,10 @@
 //!     nodes, and per-policy fs_read / fs_write paths.
 //!   - Environment cleared via `Command::env_clear()` before exec (analogue of
 //!     bwrap's `--clearenv`); `policy.env` re-applied on top.
-//!   - `Command::process_group(0)` so the worker is in its own process group
-//!     (analogue of bwrap's `--new-session`; uses setpgid, not setsid).
+//!   - `setsid()` in a `pre_exec` hook so the worker is the leader of a fresh
+//!     session — full parity with bwrap's `--new-session`. Closes issue #2;
+//!     forecloses any covert channel via the parent's controlling terminal,
+//!     even if a future profile broadening accidentally re-exposes /dev/tty.
 //!
 //! Not yet (deferred to supervisor work):
 //!   - `setrlimit` for `policy.cpu_ms` / `policy.mem_mb`.
@@ -157,15 +159,37 @@ impl SandboxBackend for MacosSeatbelt {
             cmd.env(k, v);
         }
 
-        // bwrap's --new-session analogue: own process group via setpgid(0, 0)
-        // so signals to the parent's process group don't reach the worker.
-        // Strictly weaker than `setsid` (new session) but sufficient for our
-        // signal-isolation needs; can tighten via a posix_spawn shim later.
-        cmd.process_group(0);
-
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+
+        // bwrap's --new-session analogue: full session isolation via setsid()
+        // in a pre_exec hook (issue #2). pre_exec runs after fork() but before
+        // execve() in the child; only async-signal-safe operations are allowed,
+        // and setsid() is async-signal-safe by POSIX. Effects:
+        //   1. The child becomes the leader of a brand-new session (sid == pid).
+        //   2. The child has no controlling terminal — any subsequent open of
+        //      /dev/tty fails with ENXIO, regardless of profile broadening.
+        //   3. The child is also in a brand-new process group (setsid()
+        //      implies setpgid in the new session), so we drop the previous
+        //      `cmd.process_group(0)` call — setsid subsumes it.
+        // setsid() returns -1 only when the caller is already a process group
+        // leader; we're in a freshly-forked child so that's not possible here,
+        // but we propagate the errno via io::Error so a future regression
+        // (e.g. a refactor that calls setpgid before pre_exec) becomes a
+        // visible spawn failure rather than a silent regression.
+        //
+        // SAFETY: pre_exec closures must be async-signal-safe. setsid() is on
+        // the POSIX async-signal-safe list (signal-safety(7) on Linux,
+        // sigaction(2) on macOS).
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
 
         cmd.spawn()
             .map_err(|e| SandboxError::Backend(format!("sandbox-exec spawn failed: {e}")))
@@ -222,24 +246,48 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
     out.push_str("(allow file-read* (subpath \"/System/Library\"))\n");
     out.push_str("(allow file-read-metadata (subpath \"/\"))\n");
     out.push_str("(allow sysctl-read)\n");
-    // launchd bootstrap lookups required by dyld and libdispatch on newer
-    // macOS. Empirically needed for Python, libdispatch users, and any
-    // binary calling getpwuid/getgrgid. The unrestricted form (no
-    // `global-name` qualifier) is intentional: enumerating every Mach
-    // service dyld might query is brittle across macOS versions, and the
-    // Mach bootstrap namespace is not itself a privilege-escalation
-    // surface beyond what the profile's other rules permit.
-    out.push_str("(allow mach-lookup)\n");
+    // mach-lookup is *intentionally not granted* (issue #1, fixed in this
+    // profile). Empirical methodology used to set this baseline: every
+    // shipping hhagent worker today (`hhagent-worker-shell-exec`,
+    // `sid_probe`, `net_probe`, `mach_probe`, `/bin/echo`, `/bin/sh`,
+    // `/bin/cat`, `/bin/ls`, `/usr/bin/true`) was test-spawned under a
+    // probe profile with `(deny mach-lookup)` on macOS 26.4 ARM64; all
+    // succeeded. The unrestricted `(allow mach-lookup)` rule that lived
+    // here through 2026-05-08 was speculative ("Python and libdispatch
+    // might need it"), not load-bearing.
+    //
+    // Why deny: the Mach bootstrap namespace is the back-end for every
+    // registered launchd service in the worker's bootstrap context —
+    // pasteboard (com.apple.pboard), Apple Events broker
+    // (com.apple.coreservices.appleevents), distributed notifications,
+    // location services, etc. — many of which bypass the profile's file
+    // and network rules entirely. Granting unrestricted `mach-lookup` is
+    // the largest known asymmetry vs the threat-model invariant in
+    // docs/threat-model.md ("compromise reaches at most … the explicitly
+    // allowlisted endpoints for the *one* tool"). With the rule absent,
+    // dyld + libsystem still resolve every binary we ship.
+    //
+    // When Phase 4 lands `python-exec`, capture the actual service set
+    // CPython needs at startup (likely a small set: notification
+    // delivery, distributed notifications, possibly a few coreservices
+    // helpers) and emit a *narrow* `(allow mach-lookup (global-name "..."))`
+    // form. Do NOT re-introduce the unrestricted rule.
+    //
+    // The negative test `worker_cannot_look_up_arbitrary_mach_services`
+    // in tests/macos_smoke.rs pins this invariant: a worker calling
+    // `bootstrap_look_up("com.apple.coreservices.appleevents")` must
+    // exit non-zero under the strict profile.
 
     // /dev allowlist: only the safe pseudo-device nodes workers legitimately
     // need. /dev as a whole is NOT allowed (that would expose disk*, bpf*,
     // auditpipe, etc.).
     //
-    // tty is intentionally NOT exposed: Linux's bwrap --new-session detaches
-    // the controlling terminal so /dev/tty is unusable (ENXIO) by Linux
-    // workers anyway, and our process_group(0) uses setpgid(0,0) which does
-    // NOT create a new session — granting write access here would create a
-    // covert channel to the user's terminal that Linux workers don't have.
+    // tty is intentionally NOT exposed: both backends now detach the
+    // controlling terminal (Linux via bwrap --new-session, macOS via the
+    // pre_exec setsid() in spawn_under_policy — issue #2), so /dev/tty is
+    // unusable (ENXIO) under either backend regardless of this rule. We keep
+    // the explicit non-allowance as defense in depth: any future broadening
+    // of /dev (e.g. (subpath "/dev")) would need to remember to re-deny tty.
     // JSON-RPC workers communicate via stdin/stdout (piped) and have no
     // legitimate use for /dev/tty.
     out.push_str("(allow file-read* file-write* (literal \"/dev/null\"))\n");
@@ -319,9 +367,36 @@ mod tests {
             "(allow file-read* (subpath \"/System/Library\"))",
             "(allow file-read-metadata (subpath \"/\"))",
             "(allow sysctl-read)",
-            "(allow mach-lookup)",
         ] {
             assert!(p.contains(needle), "profile missing {needle:?}; got:\n{p}");
+        }
+    }
+
+    /// Issue #1: the strict profile must NOT contain an unrestricted
+    /// `(allow mach-lookup)` rule. None of our shipping workers need it,
+    /// and granting it would expose every registered launchd service
+    /// (Apple Events broker, pasteboard, etc.) — the largest asymmetry
+    /// vs the threat-model invariant. When `python-exec` (Phase 4) needs
+    /// specific Mach services, the rule must be re-introduced as
+    /// `(allow mach-lookup (global-name "..."))` — narrow, never broad.
+    /// Pin this so a future refactor cannot silently regress.
+    #[test]
+    fn profile_does_not_grant_unrestricted_mach_lookup() {
+        let p = build_profile(&strict_policy());
+        assert!(
+            !p.contains("(allow mach-lookup)"),
+            "strict profile must not contain unrestricted (allow mach-lookup); \
+             got:\n{p}"
+        );
+        // Defence in depth: also reject any allow rule that *starts* with
+        // `(allow mach-lookup)` followed only by whitespace + `)` —
+        // catches `(allow mach-lookup )` and the line-continuation forms.
+        for line in p.lines() {
+            let trimmed = line.trim();
+            assert!(
+                trimmed != "(allow mach-lookup)" && trimmed != "(allow mach-lookup )",
+                "strict profile contains an effectively-unrestricted mach-lookup line: {line:?}"
+            );
         }
     }
 

@@ -116,6 +116,7 @@ dependencies = [
 name = "hhagent-sandbox"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "thiserror",

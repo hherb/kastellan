@@ -44,8 +44,8 @@ items unlock later ones.
 
 > Done before adding more workers, to stop Linux-isms leaking through the codebase.
 
-- [x] `macos_seatbelt.rs`: `SandboxPolicy` → `.sb` (TinyScheme) generator — `2fa46a2`
-- [x] `sandbox-exec` invocation (env_clear + per-policy env + setsid via process_group) — `2fa46a2`
+- [x] `macos_seatbelt.rs`: `SandboxPolicy` → `.sb` (TinyScheme) generator — `2fa46a2`. *Hardened*: removed unrestricted `(allow mach-lookup)` from the strict profile (issue #1) — every shipping worker (`hhagent-worker-shell-exec` + the four fixture binaries + every coreutils binary on macOS 26.4 ARM64) was empirically confirmed to start without it, and granting it would have exposed every registered launchd service (Apple Events broker, pasteboard, etc.) — the largest known asymmetry vs the threat-model invariant. Pinned by the new unit test `profile_does_not_grant_unrestricted_mach_lookup` and the smoke test `worker_cannot_look_up_arbitrary_mach_services` (the worker calls `bootstrap_look_up("com.apple.coreservices.appleevents")` and must exit non-zero).
+- [x] `sandbox-exec` invocation (env_clear + per-policy env + **setsid** for true session isolation — issue #2) — `2fa46a2` originally with `setpgid(0,0)` via `process_group(0)`, *upgraded* to `setsid()` via a `pre_exec` hook so the worker is the leader of a fresh session (sid == pid), strictly stronger than the old setpgid form. Closes the parity gap with bwrap's `--new-session` and forecloses any `/dev/tty` covert channel even under future profile broadening. Pinned by the smoke test `worker_runs_in_its_own_session`.
 - [ ] setrlimit for CPU/mem/wallclock — DEFERRED to supervisor work (parity with Linux's current state)
 - [x] Network containment via `(deny network*)` + allowlist rules — `2fa46a2`
 - [x] Mirror of all sandbox containment integration tests, passing on macOS — 8 tests, 0 skipped (`macos_smoke.rs`: scaffold marker, echo-runs-jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read readable, /dev/disk0 denied, relative-path rejection, network unreachable) — `2fa46a2`
