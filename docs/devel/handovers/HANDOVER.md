@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** `78a9ab1` (`feat(db): Option L — hhagent_runtime role split + audit_log REVOKE`)
+**Last commit:** `ce7aade` (`feat(core,db): Option I — dispatcher chokepoint + audit_log NOTIFY mirror + hhagent-cli audit tail`)
 **Branch:** `main`
 
 ---
@@ -22,8 +22,8 @@
 
 ```
 hhagent (Rust workspace, 7 crates, AGPL-3.0)
-├── core               hhagent-core: lib + bin (long-running daemon blocking on SIGTERM/SIGINT via tokio::signal::unix; main.rs now runs db::probe::run before wait_for_shutdown — fail-closed startup); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
-├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement (drop-privilege helper) + probe::run (ensure DB → migrate as superuser → SET ROLE hhagent_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql + 0002_runtime_role.sql) + hhagent-db-init bin
+├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs now runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup for probe + pool; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`)
+├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement (drop-privilege helper) + probe::run (ensure DB → migrate as superuser → SET ROLE hhagent_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + audit::{insert, fetch_by_id, fetch_since, truncate_payload} (pure 4 KiB SHA-256 envelope + async CRUD) + pool::connect_runtime_pool (PgPool with `after_connect` SET ROLE hhagent_runtime hook) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql + 0002_runtime_role.sql + 0003_audit_log_notify.sql) + hhagent-db-init bin
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt
 ├── supervisor         hhagent-supervisor: SystemdUser (Linux) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec} + default_probe (per-OS supervisor probe)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
@@ -31,8 +31,8 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 154 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (151 → 154, +3 from Option L: 2 db unit + 1 db integration). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
-**macOS projection:** ~101 (was 99; +2 from the new db unit tests; the new `runtime_role_audit_log_revoke_is_enforced` integration test `[SKIP]`s until `brew install postgresql@18`). Re-run on macOS to confirm.
+**`cargo test --workspace` on Linux: 172 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (154 → 172, +18 from Option I: 6 db unit (audit truncation) + 1 db integration (pool/audit/NOTIFY round-trip) + 5 core unit (audit_mirror date paths + JSONL formatting) + 5 core unit (audit_tail filename parsing + tail loop) + 1 core integration (audit_dispatch_e2e). The supervisor_e2e test grew a JSONL-mirror assertion but the test count is unchanged). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**macOS projection:** ~119 (was ~101; +18 from the same set, except the two PG-touching integration tests `[SKIP]` cleanly when `brew install postgresql@18` hasn't run). Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -41,11 +41,12 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 | `sandbox` unit (macos) | 14 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation + **strict profile does NOT contain unrestricted `(allow mach-lookup)`** (issue #1) |
 | `sandbox` integration (`linux_smoke`) | 7 | **real** bwrap+cgroup: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected, **mem_burner allocating 256 MiB under `MemoryMax=32M` is OOM-killed by the kernel** |
 | `sandbox` integration (`macos_smoke`) | 10 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny`, **worker is the leader of a fresh session — sid == pid via setsid (issue #2)**, **worker cannot `bootstrap_look_up` `com.apple.coreservices.appleevents` (issue #1)** |
-| `core` unit | 16 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests) |
+| `core` unit | 26 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests). **Option I additions (10):** `audit_mirror::audit_log_path_for` zero-pads month/day + handles 4-digit year (2 tests), `format_jsonl_line` ends with single \n + serialises every AuditRow field (2 tests), `default_state_dir` resolves under `$HOME/.local/state/hhagent` (1 test). `audit_tail::parse_audit_filename` accepts canonical shape + rejects every off-shape (no prefix/suffix/wrong digit count/non-numeric/invalid date) (2 tests), `find_audit_files` returns dates ascending + ignores non-matching files + handles missing dirs (2 tests), `tail_loop` from-start mode replays then exits (1 test) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
-| `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `hhagent` binary with `HHAGENT_DATA_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d hhagent` and assert `audit_log` has at least one `(actor='core', action='startup')` row → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + three `PathGuard`s clean up PG service, core service, two data/log dirs, and the core log dir on panic. Unique `hhagent-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs`. Test name flipped to `core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly` to reflect the new contract |
-| `db` unit | 37 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted) |
-| `db` integration (`postgres_e2e`) | 3 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (existing C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Runtime ~2.1 s on the DGX Spark. **`runtime_role_audit_log_revoke_is_enforced`** (NEW Option L): brings up a per-test PG cluster, runs the probe (which now applies `0001` + `0002` and switches to `SET ROLE hhagent_runtime` for its own audit insert), then connects on a fresh pool connection, asserts `pg_roles` rolsuper/rolcanlogin/rolinherit/rolcreaterole/rolcreatedb are all false, asserts the OS user is recorded in `pg_auth_members` for `hhagent_runtime`, holds an acquired connection out of the pool and runs `SET ROLE hhagent_runtime` on it, then proves: INSERT into `audit_log` succeeds; UPDATE on `audit_log` fails with `"permission denied"`; DELETE on `audit_log` fails with `"permission denied"`; full SELECT/INSERT/UPDATE/DELETE on `memories` succeeds (so the bulk CRUD GRANT block is wired); final `audit_log` count is exactly 2 (probe row + test INSERT, no UPDATE rewrite, no DELETE leak). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~3.0 s on the DGX Spark |
+| `core` integration (`audit_dispatch_e2e`) | 1 | **NEW Option I — cross-platform real** dispatcher chokepoint. Brings up a per-test PG cluster (initdb + `postgres_service_spec` + start + wait Active + wait socket), runs `db::probe::run` to apply 0001/0002/0003, opens a `pool::connect_runtime_pool` (which auto-`SET ROLE hhagent_runtime` on every dialed conn), spawns shell-exec under the platform sandbox, and exercises `tool_host::dispatch` twice: once with an allowlisted argv (`echo dispatch-ok`) → success path returns the worker's result and writes a row with `actor=tool:shell-exec`, `action=shell.exec`, payload `{req, result, ms}` (no `err`); once with `/bin/cat /etc/passwd` → POLICY_DENIED, dispatch propagates the error AND writes a row with payload `{req, err, ms}` (no `result`). Final assertion: exactly 3 rows in `audit_log` (bring-up + 2 dispatches) with the per-row payload-shape pins. Multi-thread tokio runtime is mandatory — `dispatch` uses `block_in_place` around the synchronous `Client::call`. Short temp-dir labels (`disp-d`, `disp-l`) keep the cluster socket path under the 108-byte sockaddr_un limit |
+| `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `hhagent` binary with `HHAGENT_DATA_DIR` + `HHAGENT_STATE_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user; `HHAGENT_STATE_DIR` keeps the audit-mirror's JSONL out of the operator's `~/.local/state/`). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d hhagent` and assert `audit_log` has at least one `(actor='core', action='startup')` row → **NEW Option I**: poll the per-test state dir for an `audit-YYYY-MM-DD.jsonl` file containing the bring-up row within ≤ 5 s (proves the audit-mirror task spawned, listened, drained, and fsynced) and assert every line is valid JSON → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + four `PathGuard`s clean up PG service, core service, two data/log dirs, the core log dir, and the per-test state dir on panic. Unique `hhagent-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
+| `db` unit | 43 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted). **Plus Option I additions (6):** `audit::truncate_payload` — small payloads pass through (1), empty object passes through (1), boundary-inclusive non-truncation at exactly `PAYLOAD_MAX_BYTES = 4096` (1), oversize replaced with `{_truncated, sha256, len}` envelope with 64-char lowercase-hex digest (1), deterministic for same input (1), distinct fingerprints for distinct inputs at same length (1) |
+| `db` integration (`postgres_e2e`) | 4 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (existing C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Runtime ~2.1 s on the DGX Spark. **`runtime_role_audit_log_revoke_is_enforced`** (Option L): brings up a per-test PG cluster, runs the probe (which now applies `0001` + `0002` and switches to `SET ROLE hhagent_runtime` for its own audit insert), then connects on a fresh pool connection, asserts `pg_roles` rolsuper/rolcanlogin/rolinherit/rolcreaterole/rolcreatedb are all false, asserts the OS user is recorded in `pg_auth_members` for `hhagent_runtime`, holds an acquired connection out of the pool and runs `SET ROLE hhagent_runtime` on it, then proves: INSERT into `audit_log` succeeds; UPDATE on `audit_log` fails with `"permission denied"`; DELETE on `audit_log` fails with `"permission denied"`; full SELECT/INSERT/UPDATE/DELETE on `memories` succeeds (so the bulk CRUD GRANT block is wired); final `audit_log` count is exactly 2 (probe row + test INSERT, no UPDATE rewrite, no DELETE leak). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~3.0 s on the DGX Spark. **`audit_helpers_pool_and_notify_round_trip`** (NEW Option I): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003), opens `pool::connect_runtime_pool` and proves UPDATE on `audit_log` via the pool fails with `"permission denied"` (negative-path proof that `after_connect` SET ROLE actually ran). Then attaches a `PgListener` on `audit_log_inserted` BEFORE the watched insert, calls `audit::insert(&pool, "tool:test", "call", json)`, asserts `tokio::time::timeout(2 s, listener.recv())` returns a notification on the right channel whose payload parses as the inserted row id, calls `audit::fetch_by_id` and confirms the row round-trips byte-for-byte. Finally, `audit::insert` with an 8 KiB payload + `fetch_by_id` returns the `_truncated` envelope (proves `truncate_payload` is wired into the insert path, not just an unused pure helper). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
@@ -77,7 +78,221 @@ on the user's DGX Spark. Other Linux hosts may need
 
 ## Recently completed (this session, 2026-05-10)
 
-### Phase 0 cont. (Option L — non-superuser runtime role + audit-log GRANT split)
+### Phase 0 cont. (Option I — dispatcher chokepoint + audit_log NOTIFY trigger + JSONL mirror + `hhagent-cli audit tail`)
+
+**Closed Option I from the previous handover's Next-TODO menu.** Every
+Phase 0+ tool call now goes through a single `tool_host::dispatch`
+chokepoint that writes one `audit_log` row per call. A long-lived
+`audit_mirror` task (spawned by the daemon at startup) replicates
+committed rows to `~/.local/state/hhagent/audit-YYYY-MM-DD.jsonl` with
+fsync per write and daily UTC rotation; `hhagent-cli audit tail` reads
+those files with no DB connection, so an operator can debug a daemon
+that crashed mid-startup. The DB is the source of truth (the Phase 0
+runtime-role `REVOKE UPDATE, DELETE` makes that durable); the JSONL
+stream is the operator-visibility replica.
+
+- **`db/migrations/0003_audit_log_notify.sql` (~70 lines):** AFTER
+  INSERT trigger on `audit_log` that calls
+  `pg_notify('audit_log_inserted', NEW.id::text)`. PL/pgSQL with
+  `SET search_path = pg_catalog, public` so a future schema-name
+  collision can't redirect `pg_notify`. Per-row trigger because
+  Phase 0 throughput is one INSERT per tool call (NOTIFY granularity
+  matches insertion granularity); per-statement would have lost the
+  wake-up specificity. Payload = `id::text` rather than the full row
+  for two reasons: (1) Postgres caps NOTIFY payloads at 8000 bytes
+  by default, well below our worst-case truncated `audit_log.payload`
+  + envelope; (2) the listener is in-process with the writer, so the
+  extra SELECT is a sub-ms UDS round-trip — cheaper than encoding the
+  row into the NOTIFY payload. Decoupling wake-up from data also
+  lets the listener catch up on missed rows by ignoring the payload
+  and querying `id > last_seen_id`.
+
+- **`db/src/audit.rs` (~280 lines, 6 unit tests):** the canonical
+  shape for every `audit_log` write/read. `truncate_payload(value)`
+  is the pure 4 KiB cap: oversize JSON payloads are replaced with
+  `{"_truncated": true, "sha256": "<64 hex>", "len": <bytes>}` so the
+  table, WAL, and JSONL mirror stay bounded regardless of caller.
+  Threshold is inclusive (`<= PAYLOAD_MAX_BYTES = 4096`), regression-
+  pinned by a boundary test that constructs a string serialising to
+  exactly 4096 bytes and asserts pass-through. SHA-256 via the new
+  workspace dep `sha2 = "0.10"` (MIT OR Apache-2.0, AGPL-compatible);
+  hex-formatted manually with `{:02x}` so a refactor that swaps the
+  hash crate doesn't accidentally change the wire shape. Async I/O:
+  `insert(executor, actor, action, payload) -> i64` returns the new
+  row's id via `INSERT … RETURNING`; `fetch_by_id(executor, id)` and
+  `fetch_since(executor, since, limit)` for the mirror's read paths.
+  `executor` is generic (`E: sqlx::Executor<'_, Database = Postgres>`)
+  so the same insert helper works against `&PgPool` (production
+  dispatcher) and `&mut PgConnection` (deterministic test setup).
+  `AuditRow` decodes all five columns (`id, ts, actor, action,
+  payload`) into a single struct shared by the dispatcher's e2e
+  assertions and the mirror's JSONL writer.
+
+- **`db/src/pool.rs` (~110 lines, no unit tests — proven by the
+  integration test instead):** `connect_runtime_pool(spec)` opens a
+  `PgPool` with `PgPoolOptions::after_connect` running
+  `set_role_runtime_statement()` on every dialed connection. So
+  every pool checkout is *already* in the runtime role —
+  application-level writes can never accidentally run as the
+  bootstrap superuser, and the audit_log REVOKE shape from Option L
+  applies to every dispatcher write by construction. Defaults:
+  `max_connections = 4`, `acquire_timeout = 10 s`,
+  `idle_timeout = 5 min`. `connect_runtime_pool_with_max` lets tests
+  override the cap if they share a cluster across many pool
+  instances. **Closes issue #11** ahead of the originally-planned
+  Phase 1 timeline; the daemon's "today only one short-lived conn
+  per probe" pattern is replaced with a real pool now that the
+  dispatcher write site materialised.
+
+- **`core/src/tool_host.rs::dispatch` (~80 lines):** the new chokepoint.
+  Signature `dispatch(&PgPool, &mut SupervisedWorker, tool, method,
+  params) -> Result<Value, ToolHostError>`. Snapshots `params` for
+  the audit row, wraps the synchronous `Client::call` in
+  `tokio::task::block_in_place`, measures elapsed ms, then
+  best-effort writes one row to `audit_log` (`actor = "tool:<tool>"`,
+  `action = <method>`, `payload = {"req", "result", "ms"}` on success
+  or `{"req", "err", "ms"}` on failure). Audit failures are logged
+  via `tracing::error!` but do **not** mask the worker's actual
+  result — silently turning a successful tool call into an error
+  because we couldn't log it would be a strictly worse failure mode
+  than missing an audit row. Phase 1 will tighten this when the
+  scheduler grows real durability requirements; for Phase 0 the DB
+  is the source of truth via the trigger + REVOKE shape, and the
+  audit-row best-effort behaviour is documented.
+
+- **`core/src/audit_mirror.rs` (~370 lines, 5 unit tests):** the
+  long-lived JSONL writer. `spawn_mirror(pool, state_dir)` spawns a
+  tokio task that opens a `PgListener` on `audit_log_inserted` (its
+  own dedicated connection, doesn't compete with pool slots), does
+  an initial `fetch_since(0)` drain so the bring-up audit row lands
+  in the JSONL file on cold starts, then enters a `tokio::select!`
+  loop racing NOTIFY arrivals, a 5 s catch-up timer, and a
+  cancellation watch. Each catch-up pulls in batches of 256 with
+  `audit::fetch_since(last_seen_id, 256)` until it returns fewer
+  rows than asked, so a multi-day backlog is bounded in memory. JSONL
+  format: `{"id", "ts", "actor", "action", "payload"}` with `ts` as
+  RFC 3339; daily UTC rotation keyed on `row.ts.date()` so a row
+  inserted at exactly midnight UTC files itself in the right day
+  regardless of host wallclock. Every line is followed by
+  `File::sync_all` — operator visibility beats throughput at Phase 0
+  scale (10s of audit rows/min, not 10k). NOTIFY drops are tolerated
+  because the catch-up SELECT is the canonical fetch path; the
+  listener's payload is treated as a wake-up signal only.
+  `MirrorHandle::shutdown` flips the cancellation watch and awaits
+  the task — the daemon's `main` calls it before closing the pool so
+  the final `sync_all` always runs.
+
+- **`core/src/audit_tail.rs` (~190 lines, 5 unit tests):**
+  `tail -f`-style follower used by `hhagent-cli audit tail`. Pure
+  helpers: `parse_audit_filename` (strict shape: `audit-YYYY-MM-DD.jsonl`,
+  rejects every off-form including invalid dates like `Feb 30`),
+  `find_audit_files` (returns `Vec<(Date, PathBuf)>` sorted ascending,
+  silently skipping non-matching names so editor backups don't appear
+  in the tail). The async `tail_loop(cfg, writer)` supports two
+  modes: `from_start` (replay every line of every existing file in
+  date order) and live (anchor at end of latest file). Polls every
+  250 ms — fast enough for sub-second operator visibility, slow
+  enough that an idle viewer doesn't busy-spin. Date roll-over is
+  detected by polling `find_audit_files` for a newer-dated entry and
+  flushing the previous file's tail before switching, so a midnight
+  rotation doesn't drop the last few lines.
+
+- **`core/src/bin/hhagent-cli.rs` (~140 lines):** new operator CLI
+  binary. Today only one subcommand: `hhagent-cli audit tail
+  [--from-start] [--no-follow] [--state-dir PATH]`. Hand-rolled argv
+  parsing (no `clap` dep — the surface is too small to justify one).
+  Resolves the state dir from `--state-dir` → `$HHAGENT_STATE_DIR` →
+  `$HOME/.local/state/hhagent`, in that order. Maps SIGPIPE-style
+  `BrokenPipe` to exit 0 (matches BSD `tail`'s "downstream `head`
+  closed early is not an error" behaviour). Built into
+  `target/debug/hhagent-cli` via a second `[[bin]]` stanza in
+  `core/Cargo.toml`.
+
+- **`core/src/main.rs` rewrite (~30 lines net):** after `probe::run`,
+  the daemon now calls `connect_runtime_pool` (fail-closed — the
+  dispatcher write site needs it) and `spawn_mirror`
+  (best-effort — failure logs and continues, since the DB row is
+  source of truth). On SIGTERM/SIGINT, it shuts down the mirror
+  *before* closing the pool so the mirror's final `sync_all`
+  observes an alive pool. Adds a third env-var seam:
+  `HHAGENT_STATE_DIR` (parallel to `HHAGENT_DATA_DIR`) so the
+  supervisor_e2e test can point the audit-mirror at a per-test
+  tempdir without touching the operator's `~/.local/state/`.
+
+- **Tests + e2e (+18 total):** 6 db unit (audit truncation), 1 db
+  integration (`audit_helpers_pool_and_notify_round_trip` — full
+  pool + NOTIFY + fetch_by_id + truncation round-trip in ~2.1 s on
+  the DGX Spark), 5 core unit (audit_mirror date paths + JSONL
+  formatting + state-dir resolution), 5 core unit (audit_tail
+  filename parsing + dir listing + tail-loop replay), 1 core
+  integration (`audit_dispatch_e2e::dispatch_writes_audit_row_for_success_and_failure`
+  — both shapes of dispatch end-to-end with per-row payload-shape
+  pins). The supervisor_e2e test gained a new ≤ 5 s assertion that
+  the JSONL mirror picks up the bring-up audit row + every line in
+  the JSONL file is valid JSON. Total: 154 → 172 on Linux, 0 skipped,
+  0 warnings.
+
+**Why we landed the PgPool now (vs. parking until Phase 1).** Issue
+#11 originally filed the daemon-scoped pool for "Phase 1's concurrent
+workload." Option I forced the question: the dispatcher write site
+fires once per tool call and concurrent tool calls are inevitable as
+soon as the scheduler lands, so opening connections per-dispatch
+would be both slow (UDS dials are cheap but not free) and harder to
+attach the SET ROLE hook to consistently. Building the pool with
+`after_connect` SET ROLE means the runtime-role contract from Option L
+is enforced by construction at every application write site —
+no caller has to remember to drop privilege.
+
+**Why best-effort audit writes vs. fail-closed.** The HANDOVER's
+Option I sketch didn't commit either way. We chose best-effort: a
+worker call that succeeded but couldn't log its audit row still
+returns the worker's result. The reasoning: silently swapping a
+successful tool call for an error because the audit insert hit a
+transient cluster issue is a strictly worse failure mode than
+missing a row in the operator-visibility log. The DB-layer durability
+(append-only via REVOKE, NOTIFY → JSONL mirror) is the strong
+guarantee; the dispatcher's audit write is the weak best-effort
+mirror of "I tried to log this." Phase 1 may flip this once the
+scheduler has a concrete contract for what audit-row durability
+means to it (e.g. "no tool result enters the recall corpus until its
+audit row is committed").
+
+**Why the JSONL state dir is `$HOME/.local/state/hhagent` on both
+OSes.** XDG-compliant on Linux; macOS doesn't follow XDG by default
+but does support the path. We use the same on both OSes for the same
+reason `default_data_dir` does — operator docs and scripts don't
+need per-OS branches. The `HHAGENT_STATE_DIR` env override (parallel
+to `HHAGENT_DATA_DIR`) is the test seam.
+
+**Why `block_in_place` instead of converting `Client::call` async.**
+The protocol crate's `Client` is synchronous (BufReader / Write over
+piped stdio). Converting it to async would touch both client and
+server (the worker prelude's `serve_stdio` is also sync) and is a
+larger refactor than this slice should bundle. `block_in_place` runs
+the sync call on the current async-runtime worker thread without
+handing off — works with `&mut SupervisedWorker` and adds zero
+allocations. Requirement: the caller's runtime must be multi-thread
+(the daemon's `#[tokio::main]` already is; the dispatch e2e test
+explicitly builds `Builder::new_multi_thread`). Phase 1 may revisit
+when a real concurrent scheduler arrives — then the sync→async
+conversion of the protocol crate becomes worth its weight.
+
+**Why we did NOT add the "core::tool_host is the only constructor of
+WorkerCommand" compile-time test.** HANDOVER's gotcha said "consider
+sneaking it in here." The pre-existing `spawn_worker` is `pub` and
+called directly by `core/tests/shell_exec_e2e.rs`; restricting
+visibility breaks that test, and the supporting trait/marker scaffolding
+to add a deny-on-construction guard is non-trivial. Filed for Phase 1
+when the chokepoint contract becomes load-bearing on the scheduler
+and there's a forcing function to do it cleanly.
+
+**Test count:** 154 → **172** on Linux (+18). macOS projects to ~119 once
+`brew install postgresql@18`'s done; both new PG-touching integration
+tests `[SKIP]` cleanly without it.
+
+---
+
+### Phase 0 cont. (Option L — non-superuser runtime role + audit-log GRANT split, earlier on 2026-05-10)
 
 **Closed Option L from the previous handover's Next-TODO menu.** The
 audit_log table picked up its long-promised `REVOKE UPDATE, DELETE`
@@ -1493,35 +1708,36 @@ don't get forgotten):
 
 ## Next TODO (pick one)
 
-**Phase 0 is mostly complete now.** The agent-core daemon comes up
+**Phase 0 is nearly complete now.** The agent-core daemon comes up
 fail-closed against a per-user, UDS-only Postgres cluster managed by
-the same `default_supervisor()` that supervises the daemon itself,
-the schema + Graph trait are in place for Phase 1's memory recall,
-and as of Option L (this session, 2026-05-10) every application
-write — starting with the daemon's own bring-up `audit_log` row —
-runs under the non-superuser `hhagent_runtime` role with a
-database-layer prohibition on tampering with prior audit rows. What
-remains in Phase 0:
+the same `default_supervisor()` that supervises the daemon itself.
+Every application write runs under the non-superuser
+`hhagent_runtime` role with a database-layer prohibition on tampering
+with prior audit rows (Option L, earlier on 2026-05-10). And as of
+Option I (this session) every Phase 0+ tool call is funneled through
+`tool_host::dispatch`, which writes one `audit_log` row per call;
+those rows are replicated to a daily-rotated JSONL stream under
+`~/.local/state/hhagent/` by a long-lived listener that wakes on
+`pg_notify`. Operators can `tail -f` the JSONL files via the new
+`hhagent-cli audit tail` binary without touching Postgres — including
+against a daemon that has crashed mid-startup.
 
-- **Audit-log JSONL mirror + dispatcher write-site** (Option I below) —
-  `audit_log` is a real table with the runtime-role tampering
-  prohibition now wired (Option L), but the dispatcher
-  (`tool_host::dispatch()`) doesn't write to it yet *and* there's no
-  operator-visible mirror on disk for `tail -f` style debugging.
+What remains in Phase 0:
+
 - **LLM router HTTP-client stub** (Option J below) — sole egress for
-  model calls; Phase 5's policy gate slots in here.
+  model calls; Phase 5's policy gate slots in here. **Headline next
+  pickup** — Phase 1's memory recall and scheduler loop both depend
+  on it.
 - **Cross-platform exponential restart backoff** (Option K below) —
   systemd 252+ has `RestartSteps`/`RestartMaxDelaySec`; macOS launchd's
   `KeepAlive=true` has no operator-controllable throttle, so this
-  needs a per-OS shape.
-- **Pool-level `SET ROLE` via `after_connect`** (smaller follow-up to
-  Option L) — once Phase 1 introduces a daemon-scoped `PgPool`
-  (issue [#11](https://github.com/hherb/hhagent/issues/11)), wire
-  `set_role_runtime_statement()` into the pool's `after_connect`
-  hook so every acquired connection comes pre-SET-ROLE'd. Today
-  the only application write happens inside `probe::run` and
-  applies SET ROLE inline; once dispatcher write-sites land, the
-  pool hook becomes the canonical seam.
+  needs a per-OS shape. Filed but parked — no immediate need.
+- **Secrets at rest: AES-256-GCM encrypt/decrypt path** — the
+  `secrets` table column shape was pinned in C2.2 (`0001_init.sql`)
+  but the runtime encrypt/decrypt path is still TODO. The wrapping
+  key lives in the OS keyring (libsecret on Linux, Keychain on
+  macOS); this is the last Phase 0 cont. line item under "Secrets
+  at rest" in ROADMAP.
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -1543,11 +1759,12 @@ remains in Phase 0:
 
 ### Option C2.2 — Phase 0 cont.: schema + migrations + Graph trait + core probe + e2e  *(SHIPPED 2026-05-09 — see "Recently completed (previous session)")*
 
-### Option I — audit-log JSONL mirror + dispatcher write-site
+### Option I — audit-log JSONL mirror + dispatcher write-site  *(SHIPPED 2026-05-10 — see "Recently completed (this session)")*
 
-(Headline next-pickup candidate.) The `audit_log` table now exists
-and the daemon writes one bring-up row to it; nothing else writes
-yet, and there's no on-disk mirror an operator can `tail -f`.
+(Original pickup notes preserved below for context.) The `audit_log`
+table now exists and the daemon writes one bring-up row to it; nothing
+else writes yet, and there's no on-disk mirror an operator can
+`tail -f`.
 
 - **Wire `core::tool_host::dispatch()`** to insert into `audit_log` on
   every tool call: `actor` = the tool name, `action` = the JSON-RPC
