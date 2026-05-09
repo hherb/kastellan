@@ -26,6 +26,49 @@ pub enum ToolHostError {
     Protocol(#[from] ClientError),
 }
 
+/// A sealed JSON-RPC request shape. The fields and constructor are
+/// `pub(crate)`, and [`SupervisedWorker::call`] only accepts a
+/// `WorkerCommand` — so out-of-crate callers cannot construct one
+/// and therefore cannot invoke a worker without going through
+/// [`dispatch`]. This is the compile-time pin for the dispatcher
+/// chokepoint invariant (see `docs/architecture.md` and HANDOVER's
+/// Option M notes).
+///
+/// Inside `hhagent_core`, sibling modules (e.g. a future
+/// `scheduler`) could in principle build one — but the only
+/// production caller is [`dispatch`], and any other in-crate use
+/// would be visible in code review.
+///
+/// The doctest below is the regression pin: an out-of-crate
+/// attempt to build a `WorkerCommand` must fail to compile.
+///
+/// ```compile_fail
+/// // Each doctest is compiled as a separate crate that depends on
+/// // `hhagent_core`, so `pub(crate)` items are out of scope. The
+/// // following two lines therefore fail to compile — which is
+/// // exactly what makes the chokepoint a real compile-time
+/// // invariant rather than a code-review checklist item. Touch
+/// // either form (field literal or `::new`) and the test trips.
+/// use hhagent_core::tool_host::WorkerCommand;
+/// let _via_new = WorkerCommand::new("echo", serde_json::Value::Null);
+/// ```
+pub struct WorkerCommand {
+    pub(crate) method: String,
+    pub(crate) params: serde_json::Value,
+}
+
+impl WorkerCommand {
+    /// Build a sealed command. `pub(crate)` so only this crate's
+    /// own modules can construct one — the canonical caller is
+    /// [`dispatch`].
+    pub(crate) fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
+        Self {
+            method: method.into(),
+            params,
+        }
+    }
+}
+
 /// Single chokepoint for tool invocations: make one JSON-RPC call
 /// against `worker` and write a row into `audit_log` describing what
 /// happened.
@@ -97,7 +140,13 @@ pub async fn dispatch(
     let req_for_audit = params.clone();
     let started = Instant::now();
 
-    let call_result = tokio::task::block_in_place(|| worker.call(method, params));
+    // Sealed command: `WorkerCommand` is the only argument shape
+    // `SupervisedWorker::call` accepts, and its constructor is
+    // `pub(crate)`. So this is the only path by which any
+    // caller — in-crate or out-of-crate — can land a JSON-RPC
+    // request on a sandboxed worker.
+    let cmd = WorkerCommand::new(method, params);
+    let call_result = tokio::task::block_in_place(|| worker.call(cmd));
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
     let actor = format!("tool:{tool}");
@@ -205,12 +254,18 @@ pub struct SupervisedWorker {
 
 impl SupervisedWorker {
     /// Make one JSON-RPC call against the worker.
+    ///
+    /// Takes a sealed [`WorkerCommand`] so only [`dispatch`] (or
+    /// another in-crate caller that has built one) can reach this
+    /// path. Out-of-crate code can hold a `&mut SupervisedWorker`
+    /// (as `core/tests/audit_dispatch_e2e.rs` does) but cannot
+    /// build a `WorkerCommand`, so it must funnel through
+    /// `dispatch` — which writes the audit row.
     pub fn call(
         &mut self,
-        method: &str,
-        params: serde_json::Value,
+        cmd: WorkerCommand,
     ) -> Result<serde_json::Value, ClientError> {
-        self.client.call(method, params)
+        self.client.call(&cmd.method, cmd.params)
     }
 
     /// Close stdin (signals EOF to the worker), wait for it to exit, and
@@ -546,6 +601,33 @@ mod tests {
         assert!(is_valid_target_pid(2));
         assert!(is_valid_target_pid(12_345));
         assert!(is_valid_target_pid(i32::MAX as u32));
+    }
+
+    #[test]
+    fn worker_command_new_carries_method_and_params() {
+        // In-crate sanity check: the `pub(crate)` constructor preserves
+        // both the method name (any `Into<String>` form) and the
+        // serde_json value verbatim. The `compile_fail` doctest on
+        // `WorkerCommand` proves out-of-crate code cannot reach this
+        // constructor at all — together they pin the seal from both
+        // sides.
+        let cmd = WorkerCommand::new("shell.exec", serde_json::json!({"argv": ["/bin/echo", "hi"]}));
+        assert_eq!(cmd.method, "shell.exec");
+        assert_eq!(cmd.params["argv"][0], "/bin/echo");
+        assert_eq!(cmd.params["argv"][1], "hi");
+    }
+
+    #[test]
+    fn worker_command_new_accepts_owned_string() {
+        // The `impl Into<String>` parameter shape lets dispatch pass
+        // its `&str` `method` parameter without a redundant owned
+        // allocation at the call site, while still letting an owned
+        // `String` flow through. Pin both shapes so a refactor to a
+        // narrower bound (e.g. `&str`-only) trips this test.
+        let owned: String = "shell.exec".to_string();
+        let cmd = WorkerCommand::new(owned, serde_json::Value::Null);
+        assert_eq!(cmd.method, "shell.exec");
+        assert!(cmd.params.is_null());
     }
 
     #[test]

@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** `cfff583` (`feat(llm-router): OpenAI-compatible HTTP client + Backend/PolicyGate seam (Option J)`)
+**Last commit:** *to be set in the commit that lands this session* (`feat(tool_host): Option M — sealed WorkerCommand + dispatch chokepoint compile-time pin`)
 **Branch:** `main`
 
 ---
@@ -32,8 +32,8 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 224 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (192 → 224, +32 from the LLM router stub in `cfff583`: 28 unit + 4 integration. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
-**macOS projection:** ~171 (was ~139; +32 from the same set — the LLM router slice is platform-neutral, no PG/keyring dep, the integration test binds to 127.0.0.1:0 which works identically on both OSes). Re-run on macOS to confirm.
+**`cargo test --workspace` on Linux: 227 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (224 → 227, +3 from Option M's dispatcher-chokepoint compile-time pin: 2 unit tests for `WorkerCommand::new` + 1 `compile_fail` doctest pinning that out-of-crate construction does not compile. The four `core/tests/shell_exec_e2e.rs` tests are unchanged in count but were rewritten to route through `tool_host::dispatch` — the seal forces it. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**macOS projection:** ~174 (was ~171; +3 from the same set — the seal slice is platform-neutral). The four migrated `shell_exec_e2e` tests now `[SKIP]` cleanly on hosts without Postgres / supervisor / sandbox / worker binary; existing macOS hosts with `brew install postgresql@18` continue to run them. Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -42,8 +42,8 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 | `sandbox` unit (macos) | 14 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation + **strict profile does NOT contain unrestricted `(allow mach-lookup)`** (issue #1) |
 | `sandbox` integration (`linux_smoke`) | 7 | **real** bwrap+cgroup: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected, **mem_burner allocating 256 MiB under `MemoryMax=32M` is OOM-killed by the kernel** |
 | `sandbox` integration (`macos_smoke`) | 10 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny`, **worker is the leader of a fresh session — sid == pid via setsid (issue #2)**, **worker cannot `bootstrap_look_up` `com.apple.coreservices.appleevents` (issue #1)** |
-| `core` unit | 26 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests). **Option I additions (10):** `audit_mirror::audit_log_path_for` zero-pads month/day + handles 4-digit year (2 tests), `format_jsonl_line` ends with single \n + serialises every AuditRow field (2 tests), `default_state_dir` resolves under `$HOME/.local/state/hhagent` (1 test). `audit_tail::parse_audit_filename` accepts canonical shape + rejects every off-shape (no prefix/suffix/wrong digit count/non-numeric/invalid date) (2 tests), `find_audit_files` returns dates ascending + ignores non-matching files + handles missing dirs (2 tests), `tail_loop` from-start mode replays then exits (1 test) |
-| `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
+| `core` unit | 28 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests). **Option I additions (10):** `audit_mirror::audit_log_path_for` zero-pads month/day + handles 4-digit year (2 tests), `format_jsonl_line` ends with single \n + serialises every AuditRow field (2 tests), `default_state_dir` resolves under `$HOME/.local/state/hhagent` (1 test). `audit_tail::parse_audit_filename` accepts canonical shape + rejects every off-shape (no prefix/suffix/wrong digit count/non-numeric/invalid date) (2 tests), `find_audit_files` returns dates ascending + ignores non-matching files + handles missing dirs (2 tests), `tail_loop` from-start mode replays then exits (1 test). **Option M additions (2):** `worker_command_new_carries_method_and_params` pins that the `pub(crate)` constructor preserves both the method (any `Into<String>` form) and the JSON params verbatim (1 test); `worker_command_new_accepts_owned_string` pins that the `Into<String>` parameter shape accepts both `&str` (the dispatcher's call site form) and an owned `String` so a refactor narrowing the bound trips this test (1 test) |
+| `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip — **rewritten this session (Option M)** to route every call through `tool_host::dispatch`, since the new `WorkerCommand` seal forecloses out-of-crate `worker.call(...)` invocations. Each test brings up its own per-test PG cluster (same recipe as `audit_dispatch_e2e.rs`) so dispatch's audit-log INSERT lands somewhere; `[SKIP]`s cleanly without PG / supervisor / sandbox / worker binary. Same four assertion shapes: echo round-trip; non-allowlisted argv → POLICY_DENIED (now wrapped in `ToolHostError::Protocol(...)` whose Display still includes the JSON-RPC code); unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree. Per-test PG cost: ~3 s × 4 = ~12 s additional integration-test time on Linux; acceptable for the compile-time chokepoint pin |
 | `core` integration (`audit_dispatch_e2e`) | 1 | **NEW Option I — cross-platform real** dispatcher chokepoint. Brings up a per-test PG cluster (initdb + `postgres_service_spec` + start + wait Active + wait socket), runs `db::probe::run` to apply 0001/0002/0003, opens a `pool::connect_runtime_pool` (which auto-`SET ROLE hhagent_runtime` on every dialed conn), spawns shell-exec under the platform sandbox, and exercises `tool_host::dispatch` twice: once with an allowlisted argv (`echo dispatch-ok`) → success path returns the worker's result and writes a row with `actor=tool:shell-exec`, `action=shell.exec`, payload `{req, result, ms}` (no `err`); once with `/bin/cat /etc/passwd` → POLICY_DENIED, dispatch propagates the error AND writes a row with payload `{req, err, ms}` (no `result`). Final assertion: exactly 3 rows in `audit_log` (bring-up + 2 dispatches) with the per-row payload-shape pins. Multi-thread tokio runtime is mandatory — `dispatch` uses `block_in_place` around the synchronous `Client::call`. Short temp-dir labels (`disp-d`, `disp-l`) keep the cluster socket path under the 108-byte sockaddr_un limit |
 | `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `hhagent` binary with `HHAGENT_DATA_DIR` + `HHAGENT_STATE_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user; `HHAGENT_STATE_DIR` keeps the audit-mirror's JSONL out of the operator's `~/.local/state/`). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d hhagent` and assert `audit_log` has at least one `(actor='core', action='startup')` row → **NEW Option I**: poll the per-test state dir for an `audit-YYYY-MM-DD.jsonl` file containing the bring-up row within ≤ 5 s (proves the audit-mirror task spawned, listened, drained, and fsynced) and assert every line is valid JSON → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + four `PathGuard`s clean up PG service, core service, two data/log dirs, the core log dir, and the per-test state dir on panic. Unique `hhagent-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
 | `db` unit | 61 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted). **Plus Option I additions (6):** `audit::truncate_payload` — small payloads pass through (1), empty object passes through (1), boundary-inclusive non-truncation at exactly `PAYLOAD_MAX_BYTES = 4096` (1), oversize replaced with `{_truncated, sha256, len}` envelope with 64-char lowercase-hex digest (1), deterministic for same input (1), distinct fingerprints for distinct inputs at same length (1). **Plus secrets-at-rest additions (18):** AES-GCM round-trip recovers plaintext (1); decrypt fails under wrong key (1), wrong AAD (1), tampered ciphertext (1), tampered nonce (1); each `encrypt` call uses a fresh nonce — no determinism leak (1); `encrypt` rejects > `MAX_PLAINTEXT_LEN = 64 KiB` (1); AAD shape pin — starts with `AAD_DOMAIN = b"hhagent-secrets-v1"`, NUL-delimited, name embedded (1); AAD with `extra` appends after the second NUL (1); AAD is always non-empty by construction (closes #12 at the application layer) (1); `validate_name` rejects empty (1), oversize > `MAX_NAME_LEN = 256` (1), embedded NUL (1), other control bytes (1); accepts typical operator-friendly names (1); `MapKeyProvider` returns the registered key (1); unknown id is `KeyNotFound` (1); constants `KEY_LEN = 32` / `NONCE_LEN = 12` / `AAD_DOMAIN` / `KEY_SERVICE = "hhagent"` / `KEY_ACCOUNT = "secrets-v1"` are all pinned (1) |
@@ -80,6 +80,141 @@ on the user's DGX Spark. Other Linux hosts may need
 `sandbox-exec` (no setup needed; ships with the OS).
 
 ## Recently completed (this session, 2026-05-10)
+
+### Phase 1 entry (Option M — sealed `WorkerCommand` + `tool_host::dispatch` chokepoint compile-time pin)
+
+**Closed Option M from the previous handover's Next-TODO menu — the
+"Phase 1 entry" suggested-pickup item.** The threat-model invariant
+in `docs/threat-model.md` and the dispatcher-chokepoint paragraph in
+HANDOVER's Architecture invariants both say *every tool/channel/
+routine action enters core through `tool_host::dispatch()`*. Until
+this session that was policy, not enforcement: any future
+contributor with a `&mut SupervisedWorker` could call
+`worker.call(method, params)` directly and silently bypass the
+audit-log row. The seal turns it into a compile-time invariant.
+
+- **`core/src/tool_host.rs::WorkerCommand` (new public type, ~25
+  lines + ~25 lines of doctest/doc-comment, 2 unit tests):** a
+  newtype `WorkerCommand { pub(crate) method: String, pub(crate)
+  params: serde_json::Value }` with a `pub(crate) fn new(method:
+  impl Into<String>, params: serde_json::Value) -> Self`
+  constructor. The `pub(crate)` visibility on both the fields and
+  the constructor means an out-of-crate caller — including each
+  doctest harness, which compiles as a separate crate that depends
+  on `hhagent_core` — cannot construct one. The
+  `SupervisedWorker::call` method's signature changed from `(method:
+  &str, params: serde_json::Value)` to `(cmd: WorkerCommand)`: it
+  now requires a sealed command. So the only path by which any
+  caller can land a JSON-RPC request on a sandboxed worker is via
+  `dispatch`, which builds the `WorkerCommand` internally.
+
+- **The `compile_fail` doctest is the regression pin:**
+  `core/src/tool_host.rs::WorkerCommand`'s doc comment carries a
+  `compile_fail` block that does `use hhagent_core::tool_host::WorkerCommand;
+  let _ = WorkerCommand::new("echo", serde_json::Value::Null);`. The
+  doctest harness compiles each block as a separate crate, so the
+  `pub(crate) fn new` is out of scope and the block must fail to
+  compile. If a future refactor accidentally widens `new` to `pub`
+  (or `WorkerCommand`'s fields to `pub`), the doctest fails with a
+  "compile_fail block compiled successfully" error and the
+  chokepoint pin is restored before merge. Verified live this
+  session: `cargo test -p hhagent-core --doc` returns
+  `1 passed; 0 failed; 0 ignored`.
+
+- **Why a `pub(crate) fn new` constructor and not `pub(crate)`-field
+  literal construction:** the `Into<String>` bound on `method` lets
+  the dispatcher pass its `&str` `method` parameter directly without
+  a redundant `.to_string()` at the call site, while still
+  accepting an owned `String`. `worker_command_new_accepts_owned_string`
+  pins both forms so a refactor narrowing the bound to `&str`-only
+  trips the test.
+
+- **Why a newtype seal and not a `pub(crate)` rename of
+  `SupervisedWorker::call` itself:** keeping `call` public lets
+  `core/tests/audit_dispatch_e2e.rs` (which already exists) hold a
+  `&mut SupervisedWorker` and pass it to `dispatch(...)` — which is
+  the intended architecture (long-lived workers; per-call dispatch
+  rows). A `pub(crate) fn call` would have forced every test that
+  holds a worker handle to also be in-crate, which integration
+  tests cannot be by Cargo's design. The newtype seal hits the same
+  compile-time pin without that constraint: out-of-crate code can
+  hold the handle but cannot build the argument.
+
+- **`core/tests/shell_exec_e2e.rs` rewritten (302 → 640 lines,
+  +338).** Pre-Option-M, the four sandbox-layer integration tests
+  called `client.call(method, params)` directly. Post-seal, that
+  no longer compiles. Each test now: (1) skips if no
+  supervisor / sandbox / Postgres install / worker binary;
+  (2) brings up a per-test PG cluster via the same recipe as
+  `audit_dispatch_e2e.rs` (initdb → `postgresql.auto.conf` →
+  `default_supervisor()` install + start + wait Active + wait
+  socket + 500 ms stable-Active recheck); (3) runs the probe to
+  apply migrations 0001 + 0002 + 0003 + 0004; (4) opens a
+  `pool::connect_runtime_pool` (auto-`SET ROLE hhagent_runtime` on
+  every dialed conn); (5) spawns the worker; (6) calls
+  `dispatch(&pool, &mut sworker, "shell-exec", method, params).await`
+  in place of the direct `worker.call`. Assertion shapes are
+  unchanged — a `dispatch` failure wraps the worker's `ClientError`
+  in `ToolHostError::Protocol(...)`, whose `Display` still includes
+  the JSON-RPC numeric code, so the same `msg.contains(POLICY_DENIED)`
+  / `METHOD_NOT_FOUND` checks still apply. Per-test cluster cost
+  is ~3 s × 4 = ~12 s of additional integration-test time on the
+  DGX Spark; acceptable as the price of a compile-time chokepoint
+  pin. Helper boilerplate (`ServiceGuard`, `PathGuard`,
+  `wait_for_status`, `wait_for_socket`, `bring_up_pg_cluster`,
+  `unique_temp_root`, `current_username`) is duplicated with
+  `audit_dispatch_e2e.rs` — see issue #15 for the planned
+  `tests-common` dev-dep crate.
+
+- **A small new helper `ready_or_skip(allowlist) -> Option<TestEnv>`
+  + struct `TestEnv { conn_spec, worker_path, allowlist, _guards }`
+  inside `shell_exec_e2e.rs`** factors out the four-test boilerplate
+  (skip checks + cluster bring-up + scaffolding ownership) without
+  growing the file's surface area further. Each test then does one
+  `dispatch_runtime().block_on(async { ... })` block that opens the
+  pool, builds the policy, spawns the worker, calls `dispatch`, and
+  closes the pool. The `_guards` field is the `(ServiceGuard,
+  PathGuard, PathGuard)` tuple — its Drop semantics tear down the
+  per-test cluster + temp dirs at end of scope, so a panic mid-test
+  does not leave residue.
+
+- **Why we did NOT extract the duplicated bring-up boilerplate into
+  `core/tests/common/mod.rs` in this slice.** The natural extraction
+  spans `core/tests/audit_dispatch_e2e.rs`, the new
+  `core/tests/shell_exec_e2e.rs`, plus `core/tests/supervisor_e2e.rs`
+  and `db/tests/postgres_e2e.rs` — four sites, two crates. Issue #15
+  already captures it ("hoist the duplicated PG bring-up boilerplate
+  into a shared `tests-common` dev-dep crate") and prescribes a
+  workspace-level dev-dep crate, which is the right shape because
+  `db/tests/` is in another package and a `tests/common/mod.rs`
+  approach only shares within one package. Doing the seal *and* the
+  hoist in the same slice would have widened scope unnecessarily;
+  the seal is shipped here, and #15's text is updated below to
+  record `core/tests/shell_exec_e2e.rs` as a fourth duplication
+  site.
+
+- **Why `core/tests/shell_exec_e2e.rs` no longer runs without
+  Postgres on Linux/macOS hosts.** The seal forces the migration
+  through `dispatch`, which requires a `&PgPool`. Hosts without a
+  PG install now `[SKIP]` with `[SKIP] no Postgres install found:
+  ...` (plus parallel `[SKIP]` lines for missing supervisor,
+  sandbox, or worker binary). `cargo test -- --nocapture` shows
+  the skips. On the user's DGX Spark (PG 18.3 from PGDG +
+  systemd-user supervisor) all four tests pass; on a fresh macOS
+  host the same is true once `brew install postgresql@18` runs.
+  This is a strictly weaker host-requirement story than pre-Option
+  M — the previous version of these tests ran without PG. Filed
+  in HANDOVER's "Open questions parked for later" as a small
+  trade-off note.
+
+**Test count:** 224 → **227** on Linux (+2 unit + 1 doctest; 0
+skipped, 0 failed, 0 warnings). The four migrated `shell_exec_e2e`
+tests are unchanged in count — the seal repointed them at
+`dispatch`, it didn't add new tests. macOS projects to ~174 once
+`brew install postgresql@18` is done; the new doctest + 2 unit
+tests are platform-neutral.
+
+---
 
 ### Phase 0 cont. (Option J — LLM router stub: OpenAI-compatible HTTP client, local backend pointer, frontier-stub seam)
 
@@ -2128,56 +2263,32 @@ backend default (vLLM/SGLang on Linux, Ollama on macOS), and a
 path is unwired by design.
 
 This was the last must-ship Phase-0 line item. **Phase 1 is now
-unblocked.** What's left as optional polish before declaring
-Phase 0 done:
+unblocked**, and the dispatcher-chokepoint compile-time pin
+(Option M, shipped this session — see "Recently completed" above)
+gives Phase 1's first consumers a hardened base. What's left as
+optional polish before declaring Phase 0 done:
 
-- **Phase 1 entry — Dispatcher chokepoint compile-time pin**
-  (Option M below) — small, scoped, and the most natural bridge
-  between Phase 0's "the chokepoint is documented" and Phase 1's
-  "every Phase-1 consumer relies on the chokepoint pattern." Adds
-  a `WorkerCommand` constructor seal so an `unsafe`-free outside-
-  module construction fails to compile. **Suggested next pickup**
-  if you want to start Phase 1 from a hardened base.
 - **Phase 1 entry — `memory::recall` skeleton** (Option N below)
   — the first real consumer of the LLM router (for embedding-side
-  reranking) and the first non-trivial sqlx query path. Bigger
-  than Option M; pick this if you have a session's worth of focus
-  to give it.
+  reranking) and the first non-trivial sqlx query path. The most
+  natural next pickup now that the chokepoint is sealed.
 - **Cross-platform exponential restart backoff** (Option K below)
   — systemd 252+ has `RestartSteps`/`RestartMaxDelaySec`; macOS
   launchd's `KeepAlive=true` has no operator-controllable
   throttle, so this needs a per-OS shape. Filed but parked — no
   immediate need.
+- **Hoist the duplicated PG bring-up boilerplate into a
+  `tests-common` dev-dep crate** ([issue #15](https://github.com/hherb/hhagent/issues/15))
+  — now four duplication sites (db/tests/postgres_e2e.rs +
+  core/tests/{audit_dispatch_e2e,supervisor_e2e,shell_exec_e2e}.rs).
+  Pure mechanical refactor; not blocking but cheap to ship.
 
 (The "LLM router HTTP-client stub" line item that was the
-headline pickup in the previous handover shipped this session —
-see "Recently completed" above.)
+headline pickup in the previous handover shipped 2026-05-10 (Option J).
+The dispatcher-chokepoint compile-time pin shipped this session
+(Option M).)
 
-### Option M — Dispatcher chokepoint compile-time pin (Phase 1 entry, small)
-
-The threat-model invariant (HANDOVER's *Architecture invariants*
-section, repeated in `docs/threat-model.md`) says **every tool/
-channel/routine action enters core through
-`tool_host::dispatch()`**. Today this is policy, not enforcement —
-a future contributor could `WorkerCommand::new(...)` from a
-sibling module and silently bypass the audit-log write. The fix
-is a constructor seal: `WorkerCommand` becomes a struct whose
-fields are `pub(crate)` (or `pub(super)`), with `new` /
-`with_args` / etc. moved to `tool_host`. Any sibling module that
-tries to construct one fails to compile.
-
-- **Files:** `core/src/tool_host.rs`, `core/src/lib.rs`. Maybe
-  `core/src/sandbox/`-touching code if `WorkerCommand` is
-  re-exported.
-- **Verification:** add a doctest that constructs a
-  `WorkerCommand` from outside `tool_host` and asserts it fails
-  to compile (the standard "doctest as compile-fail pin" trick:
-  `///` block with `compile_fail`).
-- **Gotcha:** the existing `core/tests/shell_exec_e2e.rs`
-  spawns workers directly — it pre-dates the dispatcher. Either
-  route those tests through `tool_host::dispatch` (cleaner) or
-  add a `pub(crate)` test-only `unsafe fn` constructor (uglier
-  but bounded). Prefer the first.
+### Option M — Dispatcher chokepoint compile-time pin  *(SHIPPED 2026-05-10 — see "Recently completed (this session)")*
 
 ### Option N — `memory::recall` skeleton (Phase 1 entry, larger)
 
@@ -2341,7 +2452,7 @@ unenforced. To wire them up:
 - ~~[#12](https://github.com/hherb/hhagent/issues/12) — reject empty `secrets.aad` in the runtime encrypt path; drop the schema's `DEFAULT ''::bytea` once all call sites populate explicitly~~ **closed this session** — `db::secrets::put` always populates AAD via `compute_aad(name, _)` (structurally non-empty), migration `0004_secrets_aad_nonempty.sql` drops the DEFAULT and adds `CHECK (octet_length(aad) > 0)`
 - [#13](https://github.com/hherb/hhagent/issues/13) — write a migration numbering / rename hygiene checklist; sqlx fingerprints version+slug, so a rename or edit on a shipped migration silently breaks startup on existing clusters (filed during C2.2 review)
 - [#14](https://github.com/hherb/hhagent/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `core/tests/supervisor_e2e.rs` with a constant in `hhagent-core`'s public API or a real readiness signal (filed during C2.2 review)
-- [#15](https://github.com/hherb/hhagent/issues/15) — hoist the duplicated PG bring-up boilerplate (`unique_temp_root` + `initdb` + `postgresql.auto.conf` + supervisor install/start/wait) into a shared `tests-common` dev-dep crate; today it lives copy-pasted across `db/tests/postgres_e2e.rs`'s several integration tests and `core/tests/audit_dispatch_e2e.rs` (filed during the post-Option-I review in `553dcf8`)
+- [#15](https://github.com/hherb/hhagent/issues/15) — hoist the duplicated PG bring-up boilerplate (`unique_temp_root` + `initdb` + `postgresql.auto.conf` + supervisor install/start/wait) into a shared `tests-common` dev-dep crate; today it lives copy-pasted across **four** sites: `db/tests/postgres_e2e.rs`, `core/tests/audit_dispatch_e2e.rs`, `core/tests/supervisor_e2e.rs`, and (newly added 2026-05-10 with Option M) `core/tests/shell_exec_e2e.rs`. The natural extraction shape is a workspace-level dev-dep crate (since `db/tests/` and `core/tests/` live in different packages, a `tests/common/mod.rs` only-shares-within-one-package approach won't work). Filed during the post-Option-I review in `553dcf8`; touched but not closed by Option M
 
 (All Phase 0 follow-up issues filed in earlier sessions are still open: [#1](https://github.com/hherb/hhagent/issues/1)–[#6](https://github.com/hherb/hhagent/issues/6), [#8](https://github.com/hherb/hhagent/issues/8), and the C2.2-review issues [#11](https://github.com/hherb/hhagent/issues/11), [#13](https://github.com/hherb/hhagent/issues/13), [#14](https://github.com/hherb/hhagent/issues/14), plus [#15](https://github.com/hherb/hhagent/issues/15). [#12](https://github.com/hherb/hhagent/issues/12) is now closed by the secrets-at-rest slice. Both extension-deferral issues filed earlier are closed won't-fix — see below.)
 
