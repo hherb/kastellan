@@ -15,8 +15,16 @@
 //!   2. Check `pg_database` for the application DB. CREATE if absent.
 //!   3. Disconnect from `postgres`; connect to the application DB.
 //!   4. Run [`crate::MIGRATOR`] (the embedded `migrations/0001_init.sql`
-//!      and any future siblings).
-//!   5. INSERT a row into `audit_log` so the boot is recorded.
+//!      + `0002_runtime_role.sql` + any future siblings) as the OS user
+//!      / cluster superuser — required for `CREATE EXTENSION`,
+//!      `CREATE ROLE`, and any future migration that touches a
+//!      superuser-only catalog.
+//!   5. `SET ROLE hhagent_runtime` to drop privileges before any
+//!      application write. From this point on the connection cannot
+//!      UPDATE or DELETE `audit_log` rows even if compromised; see
+//!      `db/migrations/0002_runtime_role.sql` for the GRANT shape.
+//!   6. INSERT a row into `audit_log` so the boot is recorded — this
+//!      is the first write under the runtime role.
 //!
 //! The CREATE DATABASE branch is idempotent — re-running the probe
 //! after the DB exists is a single `pg_database` lookup and zero DDL.
@@ -25,7 +33,7 @@
 
 use sqlx::{Connection, Executor, Row};
 
-use crate::conn::{quote_ident, ConnectSpec};
+use crate::conn::{quote_ident, set_role_runtime_statement, ConnectSpec};
 use crate::DbError;
 
 /// Run the full bring-up sequence and write the marker `audit_log`
@@ -57,6 +65,18 @@ pub async fn run(
         .run(&mut conn)
         .await
         .map_err(|e| DbError::Migrate(e.to_string()))?;
+
+    // Drop privileges before the first application-level write. The
+    // bootstrap superuser identity is needed for migrations (CREATE
+    // EXTENSION, CREATE ROLE) but not for anything below — and the
+    // runtime role's `REVOKE UPDATE, DELETE ON audit_log` is what makes
+    // the table effectively append-only at the database layer rather
+    // than only by application discipline. Migration 0002 GRANTs the
+    // runtime role to the OS user, so this SET ROLE always succeeds on
+    // a freshly-migrated cluster.
+    conn.execute(set_role_runtime_statement().as_str())
+        .await
+        .map_err(|e| DbError::Query(format!("SET ROLE hhagent_runtime: {e}")))?;
 
     sqlx::query("INSERT INTO audit_log (actor, action, payload) VALUES ($1, $2, $3)")
         .bind(actor)

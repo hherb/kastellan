@@ -37,6 +37,39 @@ pub const DEFAULT_APPLICATION_DB: &str = "hhagent";
 /// application DB.
 pub const MAINTENANCE_DB: &str = "postgres";
 
+/// Non-superuser runtime role created by migration `0002_runtime_role.sql`.
+///
+/// The agent-core daemon connects to the cluster as the OS user (=
+/// cluster bootstrap superuser under peer auth) so the migration runner
+/// has the privilege it needs for `CREATE EXTENSION` / future DDL, and
+/// then drops to this role via [`set_role_runtime_statement`] before
+/// any application-level write — so e.g. `audit_log` rows are inserted
+/// under a role that explicitly cannot UPDATE/DELETE them.
+///
+/// See `db/migrations/0002_runtime_role.sql` for the full GRANT/REVOKE
+/// shape. Pinned as a constant so the role name lives in one place; a
+/// rename here must be paired with a new migration that creates the new
+/// role and migrates membership.
+pub const RUNTIME_ROLE: &str = "hhagent_runtime";
+
+/// SQL statement that switches the current connection's session role
+/// to [`RUNTIME_ROLE`].
+///
+/// Wraps the role name with [`quote_ident`] so the statement is safe
+/// even if a future caller parameterises the role (today's only caller
+/// uses the constant). `SET ROLE` is per-session in Postgres — running
+/// it once per connection acquisition (e.g. via sqlx's
+/// `PoolOptions::after_connect` hook) is enough; subsequent statements
+/// on the same connection inherit the new role until `RESET ROLE` or
+/// the connection closes.
+///
+/// Pure: no I/O, deterministic. The matching async helper that opens a
+/// `PgConnection` and runs this statement lives in
+/// [`crate::probe`].
+pub fn set_role_runtime_statement() -> String {
+    format!("SET ROLE {}", quote_ident(RUNTIME_ROLE))
+}
+
 /// Pure description of how to reach the cluster.
 ///
 /// Materialise into the sqlx options struct via
@@ -232,6 +265,28 @@ mod tests {
     #[test]
     fn maintenance_db_name_is_postgres() {
         assert_eq!(MAINTENANCE_DB, "postgres");
+    }
+
+    /// Pin the runtime role name. Migration `0002_runtime_role.sql`
+    /// hardcodes the same string in its CREATE ROLE / GRANT statements;
+    /// renaming here without a new migration would mean the daemon
+    /// runs `SET ROLE` against a role that doesn't exist and every
+    /// post-bring-up application write fails at the auth layer.
+    #[test]
+    fn runtime_role_name_is_hhagent_runtime() {
+        assert_eq!(RUNTIME_ROLE, "hhagent_runtime");
+    }
+
+    /// Pin the SET ROLE statement shape. The role name MUST be wrapped
+    /// in double quotes (Postgres identifier quoting) so a future role
+    /// rename containing a reserved word or unusual character does not
+    /// silently parse as a different statement.
+    #[test]
+    fn set_role_runtime_statement_quotes_role_name() {
+        assert_eq!(
+            set_role_runtime_statement(),
+            "SET ROLE \"hhagent_runtime\"",
+        );
     }
 
     /// Identifier quoting wraps in double quotes and doubles any

@@ -621,3 +621,312 @@ fn probe_runs_migrations_and_graph_happy_path() {
     // Guards wipe data + log dirs on drop.
     let _ = (data_root, log_dir, socket_dir);
 }
+
+/// Verify the runtime-role split from migration `0002_runtime_role.sql`.
+///
+/// The migration creates `hhagent_runtime` (NOSUPERUSER, NOCREATEROLE,
+/// NOCREATEDB, NOLOGIN, NOINHERIT), grants membership to the OS user,
+/// grants `SELECT, INSERT` on `audit_log`, and explicitly REVOKEs
+/// `UPDATE, DELETE, TRUNCATE` from it. After `db::probe::run` applies
+/// the migration and switches into the runtime role for its own
+/// `audit_log` insert, this test connects on a fresh connection,
+/// `SET ROLE`s, and proves the contract:
+///
+///   * `audit_log` INSERT succeeds under the runtime role.
+///   * `audit_log` UPDATE fails with `permission denied` (SQLSTATE 42501).
+///   * `audit_log` DELETE fails with `permission denied`.
+///   * `memories` full CRUD succeeds (sanity that the GRANT block's
+///     CRUD line is in fact wired).
+///   * The role exists with the expected `pg_roles` flags and the OS
+///     user is recorded in `pg_auth_members` as a member.
+///   * Final `audit_log` row count is exactly 2 (probe row + our test
+///     INSERT) — no UPDATE silently rewrote the probe row, no DELETE
+///     vanished it.
+///
+/// Skips silently with `[SKIP]` lines on hosts without Postgres or a
+/// reachable supervisor (same as the other tests in this file).
+#[test]
+fn runtime_role_audit_log_revoke_is_enforced() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let postgres = bin_dir.join("postgres");
+    let initdb = bin_dir.join("initdb");
+
+    // ---------- temp dirs ----------
+    let data_root = unique_temp_root("runtime-role-data");
+    let _data_guard = PathGuard { path: data_root.clone() };
+    let data_dir = data_root.join("data");
+    let socket_dir = default_socket_dir(&data_dir);
+    let log_dir = unique_temp_root("runtime-role-logs");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+    let _log_guard = PathGuard { path: log_dir.clone() };
+
+    // ---------- initdb + auto.conf ----------
+    let user = current_username();
+    let argv = build_initdb_argv(
+        &initdb,
+        &InitDbOptions {
+            data_dir: data_dir.clone(),
+            username: user.clone(),
+            ..InitDbOptions::default()
+        },
+    );
+    let out = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("spawn initdb");
+    assert!(
+        out.status.success(),
+        "initdb failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    std::fs::create_dir(&socket_dir).expect("create socket dir");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&socket_dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&socket_dir, perms).unwrap();
+    }
+    std::fs::write(
+        data_dir.join("postgresql.auto.conf"),
+        build_postgresql_auto_conf(&PgConfigOptions {
+            socket_dir: socket_dir.clone(),
+            ..PgConfigOptions::default()
+        }),
+    )
+    .expect("write postgresql.auto.conf");
+
+    // ---------- supervisor spec ----------
+    let mut spec = postgres_service_spec(&postgres, &data_dir, &log_dir);
+    spec.name = format!(
+        "hhagent-supervisor-test-pg-runtime-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    assert!(spec.name.len() <= 200);
+    spec.stdout_log = Some(log_dir.join(format!("{}.out", spec.name)));
+    spec.stderr_log = Some(log_dir.join(format!("{}.err", spec.name)));
+
+    let sup = default_supervisor();
+    let _service_guard = ServiceGuard {
+        sup: default_supervisor(),
+        name: spec.name.clone(),
+    };
+    sup.install(&spec).expect("install postgres");
+    sup.start(&spec.name).expect("start postgres");
+    wait_for_status(
+        sup.as_ref(),
+        &spec.name,
+        |s| s == ServiceStatus::Active,
+        Duration::from_secs(15),
+    )
+    .expect("postgres reaches Active");
+    wait_for_socket(&socket_dir, Duration::from_secs(15))
+        .expect("postgres socket appears");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        sup.status(&spec.name).unwrap(),
+        ServiceStatus::Active,
+        "postgres flapping during stable-active window"
+    );
+
+    // ---------- probe + revoke checks ----------
+    let conn_spec = hhagent_db::conn::ConnectSpec {
+        socket_dir: socket_dir.clone(),
+        user: user.clone(),
+        database: hhagent_db::conn::DEFAULT_APPLICATION_DB.to_string(),
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
+        // Probe applies migrations 0001 + 0002 and writes one audit row
+        // already under SET ROLE. The role + grants now exist.
+        hhagent_db::probe::run(
+            &conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"version": "test", "purpose": "runtime-role-revoke"}),
+        )
+        .await
+        .expect("probe run");
+
+        // Pool connects as the OS user (= cluster superuser). We then
+        // SET ROLE on a single acquired connection so all subsequent
+        // statements run as the runtime role for that connection only.
+        let pool = sqlx::postgres::PgPool::connect_with(conn_spec.to_pg_connect_options())
+            .await
+            .expect("pool connect");
+
+        // ---------- role shape pin ----------
+        // The four boolean flags here pin the contract from
+        // `0002_runtime_role.sql`'s CREATE ROLE statement. A regression
+        // that flipped any of these (e.g. accidentally adding LOGIN)
+        // would silently weaken the boundary; the test is louder than
+        // a code-review catch.
+        let row: (String, bool, bool, bool, bool, bool) = sqlx::query_as(
+            "SELECT rolname, rolcanlogin, rolsuper, rolinherit, rolcreaterole, rolcreatedb \
+             FROM pg_roles WHERE rolname = 'hhagent_runtime'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("hhagent_runtime row in pg_roles");
+        assert_eq!(row.0, "hhagent_runtime");
+        assert!(!row.1, "hhagent_runtime must be NOLOGIN (rolcanlogin=false)");
+        assert!(!row.2, "hhagent_runtime must be NOSUPERUSER (rolsuper=false)");
+        assert!(!row.3, "hhagent_runtime must be NOINHERIT (rolinherit=false)");
+        assert!(!row.4, "hhagent_runtime must be NOCREATEROLE (rolcreaterole=false)");
+        assert!(!row.5, "hhagent_runtime must be NOCREATEDB (rolcreatedb=false)");
+
+        // The OS user (cluster superuser) MUST be a member of the
+        // runtime role — otherwise SET ROLE fails for the daemon. The
+        // join walks the role-membership graph: r1 = role being granted
+        // (hhagent_runtime), r2 = role receiving the grant (= current_user
+        // in our setup, which is the OS user under peer auth).
+        let (member_count,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM pg_auth_members am \
+             JOIN pg_roles r1 ON am.roleid = r1.oid \
+             JOIN pg_roles r2 ON am.member = r2.oid \
+             WHERE r1.rolname = 'hhagent_runtime' \
+               AND r2.rolname = current_user",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("pg_auth_members lookup");
+        assert_eq!(
+            member_count, 1,
+            "OS user must be a member of hhagent_runtime so SET ROLE works"
+        );
+
+        // ---------- SET ROLE on a held connection ----------
+        // Pool acquire returns a connection from the pool (or opens a
+        // fresh one). SET ROLE is a session setting, so it persists for
+        // the lifetime of *this* connection only. Holding the
+        // connection out across all the subsequent queries ensures every
+        // statement runs under hhagent_runtime.
+        let mut held = pool.acquire().await.expect("acquire connection");
+        sqlx::query(&hhagent_db::conn::set_role_runtime_statement())
+            .execute(&mut *held)
+            .await
+            .expect("SET ROLE hhagent_runtime");
+
+        // ---------- positive path: INSERT into audit_log ----------
+        let inserted: (i64,) = sqlx::query_as(
+            "INSERT INTO audit_log (actor, action, payload) \
+             VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("test")
+        .bind("revoke-check")
+        .bind(serde_json::json!({"phase": "positive"}))
+        .fetch_one(&mut *held)
+        .await
+        .expect("INSERT audit_log under runtime role");
+        let row_id = inserted.0;
+
+        // ---------- negative path 1: UPDATE rejected ----------
+        // Postgres rejects with SQLSTATE 42501 ("permission denied for
+        // table audit_log"). Matching on the substring "permission
+        // denied" is portable across PG major versions and across the
+        // sqlx error wrapper (which formats the underlying message).
+        let upd_err = sqlx::query("UPDATE audit_log SET payload = $1 WHERE id = $2")
+            .bind(serde_json::json!({"tampered": true}))
+            .bind(row_id)
+            .execute(&mut *held)
+            .await
+            .expect_err("UPDATE audit_log must be rejected under runtime role");
+        let upd_msg = upd_err.to_string();
+        assert!(
+            upd_msg.contains("permission denied"),
+            "expected 'permission denied' in error, got: {upd_msg}"
+        );
+
+        // ---------- negative path 2: DELETE rejected ----------
+        let del_err = sqlx::query("DELETE FROM audit_log WHERE id = $1")
+            .bind(row_id)
+            .execute(&mut *held)
+            .await
+            .expect_err("DELETE audit_log must be rejected under runtime role");
+        let del_msg = del_err.to_string();
+        assert!(
+            del_msg.contains("permission denied"),
+            "expected 'permission denied' in error, got: {del_msg}"
+        );
+
+        // ---------- positive path: full CRUD on memories ----------
+        // Sanity-pin that the bulk GRANT in 0002 actually wires
+        // SELECT/INSERT/UPDATE/DELETE for the application tables; a
+        // typo there (e.g. accidental `INSERT, UPDATE` only) would not
+        // be caught by the audit_log assertions above. `body` is the
+        // only NOT NULL column without a default; the rest are
+        // generated/defaulted, so this minimal INSERT exercises the
+        // sequence USAGE grant on memories_id_seq too.
+        let mem: (i64,) = sqlx::query_as(
+            "INSERT INTO memories (body) VALUES ($1) RETURNING id",
+        )
+        .bind("hello")
+        .fetch_one(&mut *held)
+        .await
+        .expect("INSERT memories under runtime role");
+        let mem_id = mem.0;
+
+        sqlx::query("UPDATE memories SET body = $1 WHERE id = $2")
+            .bind("world")
+            .bind(mem_id)
+            .execute(&mut *held)
+            .await
+            .expect("UPDATE memories under runtime role");
+
+        let body: (String,) = sqlx::query_as("SELECT body FROM memories WHERE id = $1")
+            .bind(mem_id)
+            .fetch_one(&mut *held)
+            .await
+            .expect("SELECT memories under runtime role");
+        assert_eq!(body.0, "world");
+
+        sqlx::query("DELETE FROM memories WHERE id = $1")
+            .bind(mem_id)
+            .execute(&mut *held)
+            .await
+            .expect("DELETE memories under runtime role");
+
+        // ---------- final audit row count ----------
+        // Probe inserted 1 row, our positive INSERT inserted 1 more.
+        // UPDATE and DELETE both failed at the auth layer so neither
+        // mutated the table. Anything other than 2 means either a
+        // bookkeeping bug or — much worse — an UPDATE/DELETE that was
+        // *not* rejected.
+        drop(held);
+        let (audit_count,): (i64,) = sqlx::query_as("SELECT count(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .expect("count audit_log");
+        assert_eq!(
+            audit_count, 2,
+            "expected exactly 2 audit_log rows (probe row + test INSERT); \
+             a different number means UPDATE/DELETE may have leaked through"
+        );
+
+        pool.close().await;
+    });
+
+    // ---------- teardown ----------
+    sup.stop(&spec.name).expect("stop postgres");
+    let _ = sup.uninstall(&spec.name);
+    let _ = (data_root, log_dir, socket_dir);
+}

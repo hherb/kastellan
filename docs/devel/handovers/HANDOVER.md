@@ -4,8 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-09
-**Last commit:** `23d8ca6` (`feat(db,core): C2.2 — schema + sqlx migrations + Graph trait + core probe + e2e`)
+**Last updated:** 2026-05-10
+**Last commit:** `0d3055d` (`refactor(db): post-C2.2 review polish + four parking issues filed`) — bump to the Option-L commit at session-end
 **Branch:** `main`
 
 ---
@@ -23,7 +23,7 @@
 ```
 hhagent (Rust workspace, 7 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + bin (long-running daemon blocking on SIGTERM/SIGINT via tokio::signal::unix; main.rs now runs db::probe::run before wait_for_shutdown — fail-closed startup); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
-├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + probe::run (ensure DB → migrate → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql) + hhagent-db-init bin
+├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement (drop-privilege helper) + probe::run (ensure DB → migrate as superuser → SET ROLE hhagent_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql + 0002_runtime_role.sql) + hhagent-db-init bin
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt
 ├── supervisor         hhagent-supervisor: SystemdUser (Linux) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec} + default_probe (per-OS supervisor probe)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
@@ -31,8 +31,8 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 151 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (138 → 151, +13 from C2.2: schema + sqlx migrations + Graph trait + core probe + e2e). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
-**macOS projection:** ~99 (was 86; +12 from the +12 db unit tests; the +1 db integration test (`probe_runs_migrations_and_graph_happy_path`) and the rewritten core integration test (`core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly`) `[SKIP]` until `brew install postgresql@18`). Re-run on macOS to confirm.
+**`cargo test --workspace` on Linux: 154 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (151 → 154, +3 from Option L: 2 db unit + 1 db integration). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**macOS projection:** ~101 (was 99; +2 from the new db unit tests; the new `runtime_role_audit_log_revoke_is_enforced` integration test `[SKIP]`s until `brew install postgresql@18`). Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -44,8 +44,8 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 | `core` unit | 16 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
 | `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `hhagent` binary with `HHAGENT_DATA_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d hhagent` and assert `audit_log` has at least one `(actor='core', action='startup')` row → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + three `PathGuard`s clean up PG service, core service, two data/log dirs, and the core log dir on panic. Unique `hhagent-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs`. Test name flipped to `core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly` to reflect the new contract |
-| `db` unit | 35 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. Plus **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`) |
-| `db` integration (`postgres_e2e`) | 2 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (NEW C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark |
+| `db` unit | 37 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted) |
+| `db` integration (`postgres_e2e`) | 3 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (existing C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Runtime ~2.1 s on the DGX Spark. **`runtime_role_audit_log_revoke_is_enforced`** (NEW Option L): brings up a per-test PG cluster, runs the probe (which now applies `0001` + `0002` and switches to `SET ROLE hhagent_runtime` for its own audit insert), then connects on a fresh pool connection, asserts `pg_roles` rolsuper/rolcanlogin/rolinherit/rolcreaterole/rolcreatedb are all false, asserts the OS user is recorded in `pg_auth_members` for `hhagent_runtime`, holds an acquired connection out of the pool and runs `SET ROLE hhagent_runtime` on it, then proves: INSERT into `audit_log` succeeds; UPDATE on `audit_log` fails with `"permission denied"`; DELETE on `audit_log` fails with `"permission denied"`; full SELECT/INSERT/UPDATE/DELETE on `memories` succeeds (so the bulk CRUD GRANT block is wired); final `audit_log` count is exactly 2 (probe row + test INSERT, no UPDATE rewrite, no DELETE leak). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~3.0 s on the DGX Spark |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
@@ -75,7 +75,148 @@ on the user's DGX Spark. Other Linux hosts may need
 `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses
 `sandbox-exec` (no setup needed; ships with the OS).
 
-## Recently completed (this session, 2026-05-09)
+## Recently completed (this session, 2026-05-10)
+
+### Phase 0 cont. (Option L — non-superuser runtime role + audit-log GRANT split)
+
+**Closed Option L from the previous handover's Next-TODO menu.** The
+audit_log table picked up its long-promised `REVOKE UPDATE, DELETE`
+guarantee, and the daemon now drops privileges before every
+application-level write. The contract is enforced at the database
+layer, not by application discipline alone — a compromised
+dispatcher (or LLM-issued SQL, or a future bug) running under
+`hhagent_runtime` cannot tamper with prior audit rows even if the
+caller wanted to. Phase 0 Option I (the dispatcher write-site) and
+all later application paths inherit the same connection pattern.
+
+- **`db/migrations/0002_runtime_role.sql` (~140 lines):** creates
+  `hhagent_runtime` with `NOSUPERUSER NOCREATEROLE NOCREATEDB
+  NOLOGIN NOINHERIT`, grants the OS user (= cluster bootstrap
+  superuser) membership via `EXECUTE format('GRANT hhagent_runtime
+  TO %I', current_user)` so `SET ROLE` works on every host
+  regardless of the OS username, then carves the GRANT/REVOKE shape:
+  `GRANT SELECT, INSERT ON audit_log` paired with
+  `REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM hhagent_runtime`
+  (the contract pin from `0001_init.sql`'s comment block) and
+  `REVOKE ALL ON audit_log FROM PUBLIC`. The other five tables
+  (`tasks`, `memories`, `entities`, `relations`, `secrets`) get
+  bulk `GRANT SELECT, INSERT, UPDATE, DELETE`. Sequences for all
+  six tables get explicit `GRANT USAGE` because BIGSERIAL needs
+  `nextval()`. `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT …
+  TO hhagent_runtime` covers future migrations' tables/sequences
+  automatically (caveat noted inline: future insert-only tables
+  still need their own explicit `REVOKE UPDATE, DELETE`). The
+  `CREATE ROLE` is wrapped in a `DO $$ IF NOT EXISTS … END $$`
+  block because Postgres has no `CREATE ROLE IF NOT EXISTS` syntax
+  — keeps the migration safe to re-apply by hand in pathological
+  recovery scenarios.
+
+- **`db/src/conn.rs` additions (~40 lines, +2 unit tests):**
+  `pub const RUNTIME_ROLE: &str = "hhagent_runtime"` (paired
+  regression-test pin) and `pub fn set_role_runtime_statement() ->
+  String` returning `SET ROLE "hhagent_runtime"` (identifier-quoted
+  via the existing `quote_ident` helper, so a future role-rename to
+  a name containing a reserved word or unusual character can't
+  silently parse as a different statement). Pure functions — no
+  I/O — same shape as the rest of `conn.rs`'s pin-set.
+
+- **`db/src/probe.rs` change (~10 lines, doc-updated):** between
+  `MIGRATOR.run` and the `audit_log` INSERT, the probe now executes
+  `set_role_runtime_statement()` on the same connection. Because
+  `0002_runtime_role.sql` is part of the embedded migration set, the
+  role + grant are guaranteed to exist by the time SET ROLE runs.
+  Module docstring updated to spell out the new pipeline (5 steps
+  → 6 steps; SET ROLE is step 5). `audit_log` rows from this point
+  on are inserted under `hhagent_runtime`, so the runtime-layer
+  prohibition on UPDATE/DELETE applies to the probe's own writes
+  too — defense-in-depth even on the bootstrap path.
+
+- **`db/tests/postgres_e2e.rs::runtime_role_audit_log_revoke_is_enforced` (~150 lines, NEW):**
+  full bring-up of a per-test PG cluster (mirrors the existing
+  `probe_runs_migrations_and_graph_happy_path` setup), then runs the
+  probe, then opens a sqlx pool and exercises both shapes of the
+  contract:
+  - **Role shape pin**: `SELECT rolname, rolcanlogin, rolsuper,
+    rolinherit, rolcreaterole, rolcreatedb FROM pg_roles WHERE
+    rolname = 'hhagent_runtime'` — all five booleans must be `false`.
+  - **Membership pin**: `pg_auth_members` join asserts the OS user
+    has been granted `hhagent_runtime` (so `SET ROLE` will succeed).
+  - **Negative path**: hold a pool-acquired connection out, `SET
+    ROLE hhagent_runtime`, then INSERT a row (succeeds), UPDATE
+    (must fail, error message contains `"permission denied"`),
+    DELETE (must fail, same message check). Substring match on
+    `"permission denied"` is portable across PG major versions and
+    survives the sqlx error-wrapper formatting.
+  - **Positive path**: full CRUD on `memories` (proves the bulk
+    GRANT block is in fact wired and `memories_id_seq` USAGE works).
+  - **Final invariant**: `audit_log` row count is exactly 2 (probe
+    row + test INSERT). Anything other than 2 means either a
+    bookkeeping bug or — much worse — an UPDATE/DELETE that
+    leaked through.
+
+- **No change to `core/src/main.rs::bring_up_database`.** The
+  daemon's bring-up path was already calling `probe::run`; adding
+  SET ROLE *inside* the probe is the seam, so the daemon side
+  needs no edits. The cross-OS supervisor e2e
+  (`core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly`)
+  continues to pass — it asserts the bring-up audit row is present,
+  which is exactly what the SET-ROLE'd INSERT writes.
+
+**Why `SET ROLE` instead of `pg_ident.conf` mapping.** HANDOVER's
+Option-L sketch listed both routes and called pg_ident "cleaner"
+conceptually. We went with SET ROLE for two reasons specific to
+our codebase shape: (1) it's pure SQL and lives entirely in a
+sqlx migration — no need to mutate `pg_hba.conf`/`pg_ident.conf`
+inside the data dir post-`initdb`, which would require either
+modifying `hhagent-db-init` (with awkward upgrade semantics) or
+adding a non-SQL config-file step to the probe; (2) the runtime
+role's privileges are bounded by the GRANTs regardless of how the
+role was entered, so the threat-model story is identical. The
+operational cost (one extra `SET ROLE` round-trip per connection)
+is invisible against a UDS round-trip we'd be paying anyway.
+
+**Why probe migrations as superuser, application writes as runtime.**
+`MIGRATOR.run` executes whatever the migration files contain —
+including `CREATE EXTENSION` (superuser-only), `CREATE ROLE`
+(superuser-only), and any future migration that touches a
+superuser-restricted catalog. Connecting as the runtime role for
+*migrations* would deadlock the schema. The clean split: bootstrap
+identity (= OS user under peer auth) for migrations, runtime role
+for everything afterwards. The single shared connection makes the
+role transition a one-statement event with no extra round-trips.
+
+**Why the SET ROLE happens *inside* `probe::run` rather than at the
+caller.** The probe IS the one place every daemon startup goes
+through, and the audit_log INSERT IS the canonical first
+application-level write. Keeping the privilege-drop adjacent to
+the write that motivates it (vs. asking every caller of
+`probe::run` to remember the SET ROLE step) means the runtime-role
+guarantee is enforced by construction. Future call sites of the
+graph helpers / audit_log writes will still need to drop privilege
+themselves on their own connections — or, when Phase 1 introduces
+a daemon-scoped `PgPool`, via sqlx's `PoolOptions::after_connect`
+hook so every pool connection comes pre-SET-ROLE.
+
+**Why we did not split per-worker roles yet** (e.g.
+`hhagent_memory`, `hhagent_dispatcher`). The HANDOVER's Option-L
+note said "GRANT all needed CRUD on the other tables; … audit each
+subsystem's needs first". The audit revealed that today there's
+exactly one application path — the daemon's audit_log INSERT —
+which makes a per-worker split premature: every other write is a
+Phase-1 future. The per-worker carving belongs in the migration
+that introduces the first worker that needs *less* than full CRUD
+(likely the embedding worker, which only needs SELECT + UPDATE on
+`memories.embedding`). Today's bulk grant gives Phase 1 a clean
+starting point; carving down is easier than carving up.
+
+**Test count:** 151 → **154** on Linux (+2 db unit + 1 db
+integration; 0 skipped, 0 failed, 0 warnings). macOS projection:
+~101 — the new integration test `[SKIP]`s cleanly without
+`brew install postgresql@18`, the unit tests are platform-neutral.
+
+---
+
+## Recently completed (previous session, 2026-05-09)
 
 ### Phase 0 cont. (Option C2.2 — schema + sqlx migrations + Graph trait + core probe + e2e)
 
@@ -1355,24 +1496,32 @@ don't get forgotten):
 **Phase 0 is mostly complete now.** The agent-core daemon comes up
 fail-closed against a per-user, UDS-only Postgres cluster managed by
 the same `default_supervisor()` that supervises the daemon itself,
-and the schema + Graph trait are in place for Phase 1's memory
-recall. What remains in Phase 0:
+the schema + Graph trait are in place for Phase 1's memory recall,
+and as of Option L (this session, 2026-05-10) every application
+write — starting with the daemon's own bring-up `audit_log` row —
+runs under the non-superuser `hhagent_runtime` role with a
+database-layer prohibition on tampering with prior audit rows. What
+remains in Phase 0:
 
-- **Audit-log JSONL mirror + tail viewer** (Option I below) —
-  `audit_log` is now a real table with rows, but the dispatcher
-  doesn't write to it yet *and* there's no operator-visible mirror
-  on disk for `tail -f` style debugging.
+- **Audit-log JSONL mirror + dispatcher write-site** (Option I below) —
+  `audit_log` is a real table with the runtime-role tampering
+  prohibition now wired (Option L), but the dispatcher
+  (`tool_host::dispatch()`) doesn't write to it yet *and* there's no
+  operator-visible mirror on disk for `tail -f` style debugging.
 - **LLM router HTTP-client stub** (Option J below) — sole egress for
   model calls; Phase 5's policy gate slots in here.
 - **Cross-platform exponential restart backoff** (Option K below) —
   systemd 252+ has `RestartSteps`/`RestartMaxDelaySec`; macOS launchd's
   `KeepAlive=true` has no operator-controllable throttle, so this
   needs a per-OS shape.
-- **Non-superuser runtime role + audit-log GRANT split** (Option L
-  below) — today the daemon connects as the cluster superuser; the
-  HANDOVER pin for `audit_log` (no UPDATE/DELETE GRANT to runtime
-  roles) lands once a `hhagent_runtime` role is split out and the
-  daemon switches to it.
+- **Pool-level `SET ROLE` via `after_connect`** (smaller follow-up to
+  Option L) — once Phase 1 introduces a daemon-scoped `PgPool`
+  (issue [#11](https://github.com/hherb/hhagent/issues/11)), wire
+  `set_role_runtime_statement()` into the pool's `after_connect`
+  hook so every acquired connection comes pre-SET-ROLE'd. Today
+  the only application write happens inside `probe::run` and
+  applies SET ROLE inline; once dispatcher write-sites land, the
+  pool hook becomes the canonical seam.
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -1392,7 +1541,7 @@ recall. What remains in Phase 0:
 
 ### Option C2 — Phase 0 cont.: Postgres bring-up (foundation slice)  *(SHIPPED 2026-05-09 — see "Recently completed (earlier sessions)")*
 
-### Option C2.2 — Phase 0 cont.: schema + migrations + Graph trait + core probe + e2e  *(SHIPPED 2026-05-09 — see "Recently completed (this session)")*
+### Option C2.2 — Phase 0 cont.: schema + migrations + Graph trait + core probe + e2e  *(SHIPPED 2026-05-09 — see "Recently completed (previous session)")*
 
 ### Option I — audit-log JSONL mirror + dispatcher write-site
 
@@ -1462,30 +1611,7 @@ file, the macOS backend logs a warning at install time and falls
 back to launchd's default. Filed but parked — no immediate need
 since today's daemon doesn't crash routinely.
 
-### Option L — non-superuser runtime role + audit-log GRANT split
-
-Today the daemon connects as the cluster superuser (peer auth, role
-== OS user from `initdb --username=$(whoami)`). The HANDOVER's
-audit_log pin calls for `REVOKE UPDATE, DELETE ON audit_log FROM
-<runtime_role>` once a non-superuser role is split out. Steps:
-
-- Migration `0002_runtime_role.sql`: CREATE ROLE `hhagent_runtime`
-  NOINHERIT NOLOGIN (peer auth doesn't need LOGIN since the OS user
-  authenticates as themselves, then `SET ROLE hhagent_runtime`). Or:
-  CREATE USER `hhagent_runtime` WITH NOSUPERUSER NOCREATEROLE NOCREATEDB
-  and pair with a `pg_ident.conf` map so the OS user authenticates
-  *as* the runtime role. The `pg_ident` route is cleaner.
-- GRANT INSERT, SELECT ON audit_log to runtime; GRANT all needed
-  CRUD on the other tables; REVOKE UPDATE, DELETE ON audit_log FROM
-  PUBLIC + runtime. Audit each subsystem's needs first.
-- Switch `core::main::bring_up_database` to connect as the runtime
-  role (still peer auth via the ident map).
-
-**Gotcha:** CREATE EXTENSION still needs superuser. Either run the
-0001-style "extension" migrations as the OS user (current shape) and
-the data migrations as the runtime role, or have hhagent-db-init
-also run a one-shot superuser CREATE EXTENSION step at install time.
-Pick before writing the migration.
+### Option L — non-superuser runtime role + audit-log GRANT split  *(SHIPPED 2026-05-10 — see "Recently completed (this session)")*
 
 ### Option H — long-running daemon + `keep_alive=true`  *(SHIPPED 2026-05-09 — see "Recently completed (previous session)")*
 
