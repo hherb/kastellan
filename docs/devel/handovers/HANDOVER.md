@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-09
-**Last commit:** _set on commit_ — `feat(supervisor): wire core into default_supervisor with typed core_service_spec helper + cross-platform e2e`
+**Last commit:** `5d02a2f` (`feat(supervisor): wire core into default_supervisor with typed core_service_spec helper + cross-platform e2e`)
 **Branch:** `main`
 
 ---
