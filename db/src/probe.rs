@@ -66,10 +66,13 @@ pub async fn run(
         .await
         .map_err(|e| DbError::Query(e.to_string()))?;
 
-    // `close()` flushes the terminate message; ignoring the error is
-    // safe (the connection is being dropped either way) but we
-    // explicitly await for graceful shutdown.
-    let _ = conn.close().await;
+    // `close()` flushes the terminate message; the connection is
+    // being dropped either way so we don't propagate the error, but
+    // a half-closed-socket symptom shows up nowhere else — log it at
+    // debug so packet captures aren't the only way to see it.
+    if let Err(e) = conn.close().await {
+        tracing::debug!(error = %e, "graceful close of probe app-DB connection failed");
+    }
     Ok(())
 }
 
@@ -112,7 +115,9 @@ pub async fn ensure_database_exists(spec: &ConnectSpec) -> Result<(), DbError> {
             .map_err(|e| DbError::Query(e.to_string()))?;
     }
 
-    let _ = conn.close().await;
+    if let Err(e) = conn.close().await {
+        tracing::debug!(error = %e, "graceful close of probe maintenance-DB connection failed");
+    }
     Ok(())
 }
 

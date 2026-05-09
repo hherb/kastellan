@@ -271,6 +271,51 @@ deployment (we'd have to ship `migrations/*.sql` alongside the
 daemon). `sqlx::migrate!()` macro embeds at compile time — same
 shape as the workspace's existing fixture binaries.
 
+### Post-review follow-ups (same session, after C2.2 review)
+
+A round of self-review immediately after C2.2 turned up a handful of
+small fixes (folded into a single follow-up commit) plus four parking
+issues. None changed the test count (151 → 151, all green). Net diff:
+~80 lines of polish.
+
+- **`graph::path` collapsed to a single SQL statement.** The two-query
+  variant ("get path ids" then "expand to entities") had a tiny race
+  window against a concurrent `DELETE FROM entities` between the two
+  queries — a half-deleted path could surface as
+  `DbError::Query("path id N not found in entities")`. Replaced with
+  one statement: a `hits` CTE picks the shortest path, then `unnest …
+  WITH ORDINALITY JOIN entities` expands in path order. Snapshot
+  consistency means FK CASCADE drops can't slip through.
+- **`graph::decode_entity` helper.** Three near-identical column-decode
+  blocks (`get_entity`, `neighbors`, `path`) collapsed into one
+  `fn decode_entity(&PgRow) -> Result<Entity, DbError>`.
+- **`db::env_lock` for unit tests that mutate `$USER` / `$HOME`.**
+  `cargo test` runs unit tests in one binary across multiple threads;
+  the three `default_for_*` tests (`conn.rs`) and the existing
+  `default_data_dir_is_under_xdg_data_home` (`lib.rs`) now hold a
+  shared `OnceLock<Mutex<()>>` for the duration of their env mutation.
+  Pre-existing flake risk is now closed.
+- **`probe::run` close-error logging.** Two `let _ = conn.close().await`
+  sites swallowed the close result silently; now wrapped with
+  `tracing::debug!` so a half-closed-socket symptom shows up in logs
+  rather than only in packet captures.
+- **Misleading "BFS-like via the planner" comment in `graph::path`
+  rewritten** — execution order in the recursive term is irrelevant;
+  the `ORDER BY depth ASC LIMIT 1` is what picks min-depth.
+- **Parking issues filed for items deferred to later phases:**
+  [#11](https://github.com/hherb/hhagent/issues/11) `PgPool` lifecycle
+  (one daemon-scoped pool when concurrent workload lands in Phase 1);
+  [#12](https://github.com/hherb/hhagent/issues/12) reject empty
+  `secrets.aad` in the runtime encrypt path when it lands;
+  [#13](https://github.com/hherb/hhagent/issues/13) migration numbering
+  / rename-hygiene checklist (sqlx fingerprints version+slug, so a
+  rename on a shipped migration silently breaks startup on existing
+  clusters); [#14](https://github.com/hherb/hhagent/issues/14) brittle
+  `wait_for_log_match("database probe succeeded")` in
+  `core/tests/supervisor_e2e.rs` — promote to either a tracing constant
+  in the daemon's public API or a dedicated readiness signal once
+  Phase 1's scheduler grows real heartbeats.
+
 ---
 
 ## Recently completed (earlier sessions on 2026-05-09)
@@ -1480,7 +1525,12 @@ unenforced. To wire them up:
 - [#5](https://github.com/hherb/hhagent/issues/5) — audit `BASE_ALLOW` against a fixture of common worker binaries
 - [#6](https://github.com/hherb/hhagent/issues/6) — tunable `cpu_quota_pct`/`tasks_max` policy fields + `setrlimit`-based `cpu_ms` enforcement (Option G above)
 - [#8](https://github.com/hherb/hhagent/issues/8) — collapse `default_probe` / `default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears
-(All Phase 0 follow-up issues filed in earlier sessions are still open: [#1](https://github.com/hherb/hhagent/issues/1)–[#6](https://github.com/hherb/hhagent/issues/6), [#8](https://github.com/hherb/hhagent/issues/8). Both extension-deferral issues filed at the start of this session are now closed won't-fix — see below.)
+- [#11](https://github.com/hherb/hhagent/issues/11) — switch `core` to a daemon-scoped `PgPool` when Phase 1's concurrent workload lands (filed during C2.2 review)
+- [#12](https://github.com/hherb/hhagent/issues/12) — reject empty `secrets.aad` in the runtime encrypt path; drop the schema's `DEFAULT ''::bytea` once all call sites populate explicitly (filed during C2.2 review)
+- [#13](https://github.com/hherb/hhagent/issues/13) — write a migration numbering / rename hygiene checklist; sqlx fingerprints version+slug, so a rename or edit on a shipped migration silently breaks startup on existing clusters (filed during C2.2 review)
+- [#14](https://github.com/hherb/hhagent/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `core/tests/supervisor_e2e.rs` with a constant in `hhagent-core`'s public API or a real readiness signal (filed during C2.2 review)
+
+(All Phase 0 follow-up issues filed in earlier sessions are still open: [#1](https://github.com/hherb/hhagent/issues/1)–[#6](https://github.com/hherb/hhagent/issues/6), [#8](https://github.com/hherb/hhagent/issues/8), and the four C2.2-review issues [#11](https://github.com/hherb/hhagent/issues/11)–[#14](https://github.com/hherb/hhagent/issues/14). Both extension-deferral issues filed at the start of this session are now closed won't-fix — see below.)
 
 (Closed in this session, both as won't-fix after review: [#9](https://github.com/hherb/hhagent/issues/9) Apache AGE — relational `entities`/`relations` behind a `Graph` trait + recursive CTEs are sufficient for a personal-agent graph; AGE upstream lags PG releases and stores attributes in JSONB which fights pgvector/tsvector indexing. [#10](https://github.com/hherb/hhagent/issues/10) ParadeDB `pg_search` — native `tsvector`+GIN+`ts_rank` is comparable to BM25 at our corpus size; the embedding dominates the lexical re-ranker; RRF is ~5 lines of SQL.)
 

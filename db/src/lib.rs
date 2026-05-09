@@ -31,6 +31,26 @@ pub mod conn;
 pub mod graph;
 pub mod probe;
 
+/// Serialise unit tests that mutate process-wide environment variables.
+///
+/// `cargo test` runs all unit tests in a single binary across multiple
+/// threads by default. Tests that `std::env::set_var` / `remove_var` race
+/// against any *other* test in this crate that reads the same variable —
+/// today that's `$USER` (read by `conn::current_os_user`) and `$HOME`
+/// (read by `default_data_dir`). Hold this guard for the entire scope of
+/// the env mutation; the guard's `Drop` releases the lock.
+///
+/// Mutex is poisoned-on-panic-resistant via `unwrap_or_else(into_inner)`
+/// so a panicking test cannot wedge the rest of the suite.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
+
 /// Compile-time-embedded migration set.
 ///
 /// `sqlx::migrate!()` expands at build time into a sorted list of every
@@ -654,7 +674,10 @@ mod tests {
     /// move existing users' data.
     #[test]
     fn default_data_dir_is_under_xdg_data_home() {
-        // Override HOME locally so the test is hermetic.
+        // Override HOME locally so the test is hermetic. Holds
+        // `env_lock` to serialise against any other test mutating
+        // process-wide env (currently the `$USER` tests in `conn`).
+        let _guard = env_lock();
         let prev = std::env::var_os("HOME");
         std::env::set_var("HOME", "/tmp/fakehome-hhagent-db-test");
         let dd = default_data_dir().unwrap();

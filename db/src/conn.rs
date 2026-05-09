@@ -152,8 +152,13 @@ mod tests {
     /// dir using the same `<data_dir>/sockets` convention `lib.rs`
     /// pins. The username comes from `$USER` (set by the test harness;
     /// always present on Linux+macOS).
+    ///
+    /// Holds `crate::env_lock` for the entire test body so concurrent
+    /// tests in this crate that read or mutate `$USER`/`$HOME` cannot
+    /// race with the `set_var` below.
     #[test]
     fn default_for_uses_data_dir_sockets_subdir() {
+        let _guard = crate::env_lock();
         let prev = std::env::var("USER").ok();
         std::env::set_var("USER", "testuser");
         let spec = ConnectSpec::default_for(Path::new("/srv/hhagent")).unwrap();
@@ -172,6 +177,7 @@ mod tests {
     /// some other role than the operator intended.
     #[test]
     fn default_for_errors_when_user_env_unset() {
+        let _guard = crate::env_lock();
         let prev = std::env::var("USER").ok();
         std::env::remove_var("USER");
         let err = ConnectSpec::default_for(Path::new("/srv/x")).unwrap_err();
@@ -186,6 +192,7 @@ mod tests {
     /// makes this work.
     #[test]
     fn default_for_errors_when_user_env_empty() {
+        let _guard = crate::env_lock();
         let prev = std::env::var("USER").ok();
         std::env::set_var("USER", "");
         let err = ConnectSpec::default_for(Path::new("/srv/x")).unwrap_err();

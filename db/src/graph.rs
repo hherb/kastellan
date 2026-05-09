@@ -35,6 +35,30 @@ use sqlx::Row;
 
 use crate::DbError;
 
+/// Decode an `entities`-shaped row into an [`Entity`].
+///
+/// All four `try_get` sites had near-identical wording before; centralising
+/// keeps the error strings consistent (so a `grep` on operator logs lands
+/// in one place) and means a future column rename only needs to touch one
+/// site. Caller is responsible for selecting columns in the order
+/// `(id, kind, name, attrs)`.
+fn decode_entity(row: &sqlx::postgres::PgRow) -> Result<Entity, DbError> {
+    Ok(Entity {
+        id: row
+            .try_get(0)
+            .map_err(|e| DbError::Query(format!("decode entity.id: {e}")))?,
+        kind: row
+            .try_get(1)
+            .map_err(|e| DbError::Query(format!("decode entity.kind: {e}")))?,
+        name: row
+            .try_get(2)
+            .map_err(|e| DbError::Query(format!("decode entity.name: {e}")))?,
+        attrs: row
+            .try_get(3)
+            .map_err(|e| DbError::Query(format!("decode entity.attrs: {e}")))?,
+    })
+}
+
 /// A node in the knowledge graph. The `id` is the BIGSERIAL primary
 /// key from `entities`; the `(kind, name)` pair is the natural key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,20 +231,7 @@ impl<'a> Graph for PgGraph<'a> {
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
         match opt {
-            Some(row) => Ok(Some(Entity {
-                id: row
-                    .try_get(0)
-                    .map_err(|e| DbError::Query(format!("decode entity.id: {e}")))?,
-                kind: row
-                    .try_get(1)
-                    .map_err(|e| DbError::Query(format!("decode entity.kind: {e}")))?,
-                name: row
-                    .try_get(2)
-                    .map_err(|e| DbError::Query(format!("decode entity.name: {e}")))?,
-                attrs: row
-                    .try_get(3)
-                    .map_err(|e| DbError::Query(format!("decode entity.attrs: {e}")))?,
-            })),
+            Some(row) => Ok(Some(decode_entity(&row)?)),
             None => Ok(None),
         }
     }
@@ -270,24 +281,7 @@ impl<'a> Graph for PgGraph<'a> {
         }
         .map_err(|e| DbError::Query(e.to_string()))?;
 
-        rows.into_iter()
-            .map(|row| {
-                Ok(Entity {
-                    id: row
-                        .try_get(0)
-                        .map_err(|e| DbError::Query(format!("decode entity.id: {e}")))?,
-                    kind: row
-                        .try_get(1)
-                        .map_err(|e| DbError::Query(format!("decode entity.kind: {e}")))?,
-                    name: row
-                        .try_get(2)
-                        .map_err(|e| DbError::Query(format!("decode entity.name: {e}")))?,
-                    attrs: row
-                        .try_get(3)
-                        .map_err(|e| DbError::Query(format!("decode entity.attrs: {e}")))?,
-                })
-            })
-            .collect()
+        rows.iter().map(decode_entity).collect()
     }
 
     async fn path(
@@ -297,18 +291,26 @@ impl<'a> Graph for PgGraph<'a> {
         max_hops: u8,
     ) -> Result<Option<Vec<Entity>>, DbError> {
         // Recursive CTE walks outbound edges, tracking the visited set
-        // in the row to refuse re-entry on cycles. `depth <= $3` caps
-        // the search; we ORDER BY depth ASC LIMIT 1 so the *shortest*
-        // satisfying path wins (BFS-like via the planner — Postgres
-        // does not actually do BFS but the LIMIT picks min-depth
-        // because shorter rows always exist before longer ones in the
-        // recursion's natural execution order for a single-source
-        // walk).
+        // in the row to refuse re-entry on cycles. `depth < $3` caps
+        // the recursion budget; the final `ORDER BY depth ASC LIMIT 1`
+        // on the materialised CTE result picks the shortest satisfying
+        // path. Execution order in the recursive term doesn't matter —
+        // the sort happens after the full reachable set (within
+        // max_hops) is built.
         //
         // `max_hops` is widened to i32 because Postgres has no native
         // u8; the cap is small enough that overflow is impossible.
+        //
+        // The single statement uses a follow-up CTE (`hits`) to pick the
+        // shortest path and `unnest WITH ORDINALITY` to expand it to
+        // entities in path order. Doing it server-side closes the race
+        // window between "select ids" and "expand to entities" that a
+        // two-statement variant has against a concurrent
+        // `DELETE FROM entities` — under FK CASCADE, the relations row
+        // would also have vanished, so a half-deleted path can't slip
+        // through the same snapshot here.
         let max_hops_i32: i32 = i32::from(max_hops);
-        let row = sqlx::query(
+        let rows = sqlx::query(
             r#"
             WITH RECURSIVE walk(node_id, depth, path) AS (
                 SELECT $1::bigint, 0, ARRAY[$1::bigint]
@@ -320,67 +322,35 @@ impl<'a> Graph for PgGraph<'a> {
                 JOIN relations r ON r.src_id = w.node_id
                 WHERE w.depth < $3
                   AND NOT (r.dst_id = ANY(w.path))
+            ),
+            hits AS (
+                SELECT path
+                FROM walk
+                WHERE node_id = $2
+                ORDER BY depth ASC
+                LIMIT 1
             )
-            SELECT path
-            FROM walk
-            WHERE node_id = $2
-            ORDER BY depth ASC
-            LIMIT 1
+            SELECT e.id, e.kind, e.name, e.attrs, ord
+            FROM hits,
+                 unnest(hits.path) WITH ORDINALITY AS p(id, ord)
+                 JOIN entities e ON e.id = p.id
+            ORDER BY ord
             "#,
         )
         .bind(src_id)
         .bind(dst_id)
         .bind(max_hops_i32)
-        .fetch_optional(self.pool)
-        .await
-        .map_err(|e| DbError::Query(e.to_string()))?;
-
-        let Some(row) = row else { return Ok(None) };
-        let ids: Vec<i64> = row
-            .try_get(0)
-            .map_err(|e| DbError::Query(format!("decode walk.path: {e}")))?;
-
-        // Expand the id list into entities. `ANY($1)` against an
-        // index lookup is a single round-trip; we then sort client-
-        // side by the path order to preserve the walk sequence.
-        let entities = sqlx::query(
-            "SELECT id, kind, name, attrs FROM entities WHERE id = ANY($1)",
-        )
-        .bind(&ids)
         .fetch_all(self.pool)
         .await
         .map_err(|e| DbError::Query(e.to_string()))?;
 
-        let mut by_id: std::collections::HashMap<i64, Entity> = std::collections::HashMap::new();
-        for r in entities {
-            let e = Entity {
-                id: r
-                    .try_get(0)
-                    .map_err(|e| DbError::Query(format!("decode entity.id: {e}")))?,
-                kind: r
-                    .try_get(1)
-                    .map_err(|e| DbError::Query(format!("decode entity.kind: {e}")))?,
-                name: r
-                    .try_get(2)
-                    .map_err(|e| DbError::Query(format!("decode entity.name: {e}")))?,
-                attrs: r
-                    .try_get(3)
-                    .map_err(|e| DbError::Query(format!("decode entity.attrs: {e}")))?,
-            };
-            by_id.insert(e.id, e);
+        if rows.is_empty() {
+            return Ok(None);
         }
-        let mut out = Vec::with_capacity(ids.len());
-        for id in ids {
-            // A foreign-key-cascading delete cannot leave orphans, so
-            // any id missing here is a programming error — surface it
-            // as a Query error so the daemon fails closed rather than
-            // returning a truncated path.
-            let e = by_id
-                .remove(&id)
-                .ok_or_else(|| DbError::Query(format!("path id {id} not found in entities")))?;
-            out.push(e);
-        }
-        Ok(Some(out))
+        rows.into_iter()
+            .map(|r| decode_entity(&r))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
     }
 }
 
