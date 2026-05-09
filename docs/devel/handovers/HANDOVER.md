@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** `7c9a5c8` (`fix(db): code-review polish for a83991a (secrets at rest)`)
+**Last commit:** `<NEW>` (`feat(llm-router): OpenAI-compatible HTTP client + Backend/PolicyGate seam (Option J)`)
 **Branch:** `main`
 
 ---
@@ -21,9 +21,10 @@
 ## Working state (what's green right now)
 
 ```
-hhagent (Rust workspace, 7 crates, AGPL-3.0)
+hhagent (Rust workspace, 8 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs now runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup for probe + pool; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`)
-├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement (drop-privilege helper) + probe::run (ensure DB → migrate as superuser → SET ROLE hhagent_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + audit::{insert, fetch_by_id, fetch_since, truncate_payload} (pure 4 KiB SHA-256 envelope + async CRUD) + pool::connect_runtime_pool (PgPool with `after_connect` SET ROLE hhagent_runtime hook) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql + 0002_runtime_role.sql + 0003_audit_log_notify.sql) + hhagent-db-init bin
+├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement (drop-privilege helper) + probe::run (ensure DB → migrate as superuser → SET ROLE hhagent_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + audit::{insert, fetch_by_id, fetch_since, truncate_payload} (pure 4 KiB SHA-256 envelope + async CRUD) + pool::connect_runtime_pool (PgPool with `after_connect` SET ROLE hhagent_runtime hook) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql + 0002_runtime_role.sql + 0003_audit_log_notify.sql + 0004_secrets_aad_nonempty.sql) + secrets::{Router-shaped AES-256-GCM at-rest with OS keyring KeyProvider} + hhagent-db-init bin
+├── llm-router         hhagent-llm-router: sole egress for LLM calls. `Router::send(&ChatRequest) -> Result<ChatResponse, RouterError>` over reqwest+rustls; `Backend::{Local, Frontier}` closed enum; `PolicyGate` trait with `DefaultLocalPolicy` always picking `Local` (Phase-5 seam). `RouterConfig::from_env` reads `HHAGENT_LLM_LOCAL_URL` / `HHAGENT_LLM_LOCAL_MODEL` / `HHAGENT_LLM_FRONTIER_URL` / `HHAGENT_LLM_FRONTIER_MODEL` / `HHAGENT_LLM_TIMEOUT_MS`. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns `RouterError::PolicyDeniedFrontier` until Phase 5
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt
 ├── supervisor         hhagent-supervisor: SystemdUser (Linux) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec} + default_probe (per-OS supervisor probe)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
@@ -31,8 +32,8 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 192 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (172 → 192, +19 from the secrets-at-rest slice in a83991a + 1 from review polish in 7c9a5c8: a `max_size_plaintext_fits_within_ciphertext_cap` unit test that pins the new `MAX_CIPHERTEXT_LEN` length-guard arithmetic on the decrypt path. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
-**macOS projection:** ~139 (was ~119; +20 from the same set, except the PG-touching integration test from a83991a `[SKIP]`s cleanly when `brew install postgresql@18` hasn't run; the 19 added unit tests are platform-neutral). Re-run on macOS to confirm.
+**`cargo test --workspace` on Linux: 224 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (192 → 224, +32 from the LLM router stub in `<NEW>`: 28 unit + 4 integration. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**macOS projection:** ~171 (was ~139; +32 from the same set — the LLM router slice is platform-neutral, no PG/keyring dep, the integration test binds to 127.0.0.1:0 which works identically on both OSes). Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -47,6 +48,8 @@ hhagent (Rust workspace, 7 crates, AGPL-3.0)
 | `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `hhagent` binary with `HHAGENT_DATA_DIR` + `HHAGENT_STATE_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user; `HHAGENT_STATE_DIR` keeps the audit-mirror's JSONL out of the operator's `~/.local/state/`). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d hhagent` and assert `audit_log` has at least one `(actor='core', action='startup')` row → **NEW Option I**: poll the per-test state dir for an `audit-YYYY-MM-DD.jsonl` file containing the bring-up row within ≤ 5 s (proves the audit-mirror task spawned, listened, drained, and fsynced) and assert every line is valid JSON → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + four `PathGuard`s clean up PG service, core service, two data/log dirs, the core log dir, and the per-test state dir on panic. Unique `hhagent-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
 | `db` unit | 61 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted). **Plus Option I additions (6):** `audit::truncate_payload` — small payloads pass through (1), empty object passes through (1), boundary-inclusive non-truncation at exactly `PAYLOAD_MAX_BYTES = 4096` (1), oversize replaced with `{_truncated, sha256, len}` envelope with 64-char lowercase-hex digest (1), deterministic for same input (1), distinct fingerprints for distinct inputs at same length (1). **Plus secrets-at-rest additions (18):** AES-GCM round-trip recovers plaintext (1); decrypt fails under wrong key (1), wrong AAD (1), tampered ciphertext (1), tampered nonce (1); each `encrypt` call uses a fresh nonce — no determinism leak (1); `encrypt` rejects > `MAX_PLAINTEXT_LEN = 64 KiB` (1); AAD shape pin — starts with `AAD_DOMAIN = b"hhagent-secrets-v1"`, NUL-delimited, name embedded (1); AAD with `extra` appends after the second NUL (1); AAD is always non-empty by construction (closes #12 at the application layer) (1); `validate_name` rejects empty (1), oversize > `MAX_NAME_LEN = 256` (1), embedded NUL (1), other control bytes (1); accepts typical operator-friendly names (1); `MapKeyProvider` returns the registered key (1); unknown id is `KeyNotFound` (1); constants `KEY_LEN = 32` / `NONCE_LEN = 12` / `AAD_DOMAIN` / `KEY_SERVICE = "hhagent"` / `KEY_ACCOUNT = "secrets-v1"` are all pinned (1) |
 | `db` integration (`postgres_e2e`) | 5 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (existing C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Runtime ~2.1 s on the DGX Spark. **`runtime_role_audit_log_revoke_is_enforced`** (Option L): brings up a per-test PG cluster, runs the probe (which now applies `0001` + `0002` and switches to `SET ROLE hhagent_runtime` for its own audit insert), then connects on a fresh pool connection, asserts `pg_roles` rolsuper/rolcanlogin/rolinherit/rolcreaterole/rolcreatedb are all false, asserts the OS user is recorded in `pg_auth_members` for `hhagent_runtime`, holds an acquired connection out of the pool and runs `SET ROLE hhagent_runtime` on it, then proves: INSERT into `audit_log` succeeds; UPDATE on `audit_log` fails with `"permission denied"`; DELETE on `audit_log` fails with `"permission denied"`; full SELECT/INSERT/UPDATE/DELETE on `memories` succeeds (so the bulk CRUD GRANT block is wired); final `audit_log` count is exactly 2 (probe row + test INSERT, no UPDATE rewrite, no DELETE leak). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~3.0 s on the DGX Spark. **`audit_helpers_pool_and_notify_round_trip`** (NEW Option I): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003), opens `pool::connect_runtime_pool` and proves UPDATE on `audit_log` via the pool fails with `"permission denied"` (negative-path proof that `after_connect` SET ROLE actually ran). Then attaches a `PgListener` on `audit_log_inserted` BEFORE the watched insert, calls `audit::insert(&pool, "tool:test", "call", json)`, asserts `tokio::time::timeout(2 s, listener.recv())` returns a notification on the right channel whose payload parses as the inserted row id, calls `audit::fetch_by_id` and confirms the row round-trips byte-for-byte. Finally, `audit::insert` with an 8 KiB payload + `fetch_by_id` returns the `_truncated` envelope (proves `truncate_payload` is wired into the insert path, not just an unused pure helper). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark. **`secrets_put_get_list_delete_round_trip`** (NEW secrets-at-rest): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003 + the new 0004 `secrets_aad_nonempty` migration), opens a runtime-role pool, then exercises every leaf of the `db::secrets` API end-to-end with a `MapKeyProvider`. Asserts: (1) `put` then `get` round-trips plaintext byte-for-byte, with the AAD column populated by the application so 0004's `CHECK (octet_length(aad) > 0)` passes; (2) `list` returns metadata only (name + key_id + timestamps, ORDER BY name ASC) — no ciphertext, no nonce, no AAD in the returned struct; (3) re-`put` of the same name UPSERTs (single row, new ciphertext + new nonce); (4) `delete` removes the row and is idempotent (`Ok(false)` on absent), and a subsequent `get` is `NotFound`; (5) `UPDATE secrets SET name = …` via the runtime-role pool (which holds UPDATE on `secrets`, just not on `audit_log` — the worst-case attacker surface from the threat model) is detected by `get` as `AadMismatch` because the stored AAD still binds to the *old* name; (6) flipping a byte of `secrets.ciphertext` via `set_byte(...) # 1` is detected by `get` as `DecryptFailed` (GCM auth tag mismatch); (7) a direct `INSERT INTO secrets … aad = ''::bytea` is rejected by 0004's CHECK constraint with `"secrets_aad_nonempty"` in the error message. Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark |
+| `llm-router` unit | 28 | **NEW Option J.** `error::truncate_for_error` passes short strings through, appends `…[truncated]` marker when oversized (2); `ERROR_BODY_CAP` pinned at `1024` bytes (1). `messages::ChatRole` serialises `system`/`user`/`assistant`/`tool` lowercase + rejects unknown variants like `"developer"` — closed enum (2); `ChatMessage::{system,user,assistant}` constructors set the right role (1); `ChatRequest` serialises with `skip_serializing_if = Option::is_none` so `max_tokens`/`temperature` never leak as `null` on the wire — older llama.cpp builds reject null-valued optional fields (1); `ChatRequest` includes optional fields when set (1); `ChatResponse` decodes the canonical OpenAI-style envelope from vLLM 0.5+ with full `usage` block (1); decodes the minimal Ollama envelope without `id`/`usage`/`finish_reason` — `serde(default)` + `Option` survives missing fields (1). `backend::Backend` serialises lowercase tag (1), `as_tag()` matches the serde rename (1), round-trips (1). `config::default_local_url_for_os()` returns `http://127.0.0.1:8000/v1` on Linux + `http://127.0.0.1:11434/v1` on macOS (1); `DEFAULT_LOCAL_MODEL = "local-default"` + `DEFAULT_TIMEOUT_MS = 30_000` pinned (1); `RouterConfig::default()` shape (1); `RouterConfig::from_env` with no vars set equals `default()` (1); each env var override flows through individually + parses timeout as ms (1); empty-string env var treated as absent (1); non-numeric `HHAGENT_LLM_TIMEOUT_MS` rejected with operator-readable error (1). `policy::DefaultLocalPolicy` always picks `Backend::Local` regardless of model name / message count / sensitivity hints (1); compile-time `Send + Sync` pin so a future implementor capturing `Rc<_>` won't compile (1). `lib::compose_url` trims a single trailing slash from the base, inserts a slash when the path lacks one (2); `CHAT_COMPLETIONS_PATH = "/chat/completions"` pinned (1); `Router::new` succeeds with `RouterConfig::default()` (1); `Router::pick_backend` delegates to the policy (1); `Router::send` returns `RouterError::PolicyDeniedFrontier` synchronously when a test policy picks `Backend::Frontier` (1, async test) |
+| `llm-router` integration (`local_backend_e2e`) | 4 | **NEW Option J.** `happy_path_round_trips_request_and_response` brings up a hand-rolled `tokio::net::TcpListener` mock on `127.0.0.1:0` that speaks just enough HTTP/1.1 to canned-respond a vLLM-shaped chat-completion (no `wiremock`/`httpmock` dev-dep — matches the `db/tests/postgres_e2e.rs` style of bringing fixtures up by hand). Asserts the router POSTs to `/chat/completions`, the request body decodes back as the original `ChatRequest` byte-for-byte (proves the `skip_serializing_if = Option::is_none` pin from `messages.rs` survives the round-trip), the response decodes as `ChatResponse` with full `usage` block. **`http_error_status_is_surfaced_with_truncated_body`**: backend returns 500 → `RouterError::HttpStatus { status: 500, body: <≤1 KiB capture> }`, body preserves operator-readable error text. **`decode_error_is_surfaced_when_response_is_not_chat_response`**: backend returns 200 + JSON that lacks `choices` → `RouterError::DecodeResponse { source, body }`, body captured for triage. **`router_send_routes_to_pick_backend_choice`**: a test-only `AlwaysFrontier` policy is wired into the router pointed at the mock; `Router::send` returns `RouterError::PolicyDeniedFrontier` AND no HTTP request reaches the mock (asserted via `oneshot::TryRecvError::Empty`). Defends the chokepoint: a future refactor that bypassed `policy.pick(&request)` would dial the local URL anyway and silently succeed — this test catches it |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
@@ -77,6 +80,238 @@ on the user's DGX Spark. Other Linux hosts may need
 `sandbox-exec` (no setup needed; ships with the OS).
 
 ## Recently completed (this session, 2026-05-10)
+
+### Phase 0 cont. (Option J — LLM router stub: OpenAI-compatible HTTP client, local backend pointer, frontier-stub seam)
+
+**Closed Option J from the previous handover's Next-TODO menu.** The
+last application-layer plumbing required before Phase 1 is in place:
+every future model call (memory recall ranking in Phase 1, the
+scheduler's reasoning step, channel auto-reply drafting in Phase 2,
+…) goes through `hhagent_llm_router::Router::send(&ChatRequest) ->
+Result<ChatResponse, RouterError>`. Phase 0's `DefaultLocalPolicy`
+always picks `Backend::Local`; the `Backend::Frontier` arm of
+`Router::send` returns `RouterError::PolicyDeniedFrontier` by design
+until the Phase-5 policy gate lands.
+
+- **New top-level workspace crate `llm-router` (`hhagent-llm-router`,
+  member #3 alongside `core` and `db`):** ~960 lines of Rust + ~340
+  lines of integration test, 32 tests total (28 unit + 4 integration).
+  License: AGPL-3.0-only (workspace inherit). Not a sub-folder of
+  `core` — the user explicitly chose the new-crate boundary in the
+  `/nextsession` design check at the start of the session, on the
+  reasoning that the router is a self-contained subsystem (HTTP egress
+  + backend selection + Phase-5 policy gate) with a stable typed
+  surface, and the small Cargo.toml + `lib.rs` overhead is justified
+  by the expectation of a Phase-5 grow-out (real policy gate + secret
+  fetching + escalation telemetry).
+
+- **`llm-router/src/messages.rs` (~190 lines, 7 unit tests):** the
+  OpenAI-compatible wire shapes. `ChatRole` is a closed enum
+  (`System | User | Assistant | Tool`) with `serde(rename_all =
+  "lowercase")` so `"developer"` or any other unknown role fails to
+  decode at compile-time review rather than silently round-tripping
+  through a stringly-typed escape hatch. `ChatMessage` carries
+  `{role, content: String}` — multimodal content parts deferred until
+  a concrete consumer needs them (Phase 1+). `ChatRequest` carries
+  `{model, messages, max_tokens?, temperature?}` with
+  `skip_serializing_if = Option::is_none` on the optionals so the
+  wire payload stays minimal — older `llama.cpp` builds with the
+  `--api` server reject `null`-valued optional fields, and Ollama's
+  OpenAI-compat front door is similarly strict. `ChatResponse`
+  carries `{id?, model?, choices, usage?}` where every optional
+  field is `serde(default)` so a minimal Ollama envelope (no `id`,
+  no `usage`, no `finish_reason`) decodes without contortions.
+
+- **`llm-router/src/backend.rs` (~80 lines, 3 unit tests):** the
+  `Backend::{Local, Frontier}` closed enum. Wire-encoded as
+  `"local"`/`"frontier"` for audit-log payloads (the future
+  `actor='llm:router'` rows can be operator-queried via
+  `payload->>'backend' = 'frontier'`). `as_tag(&self) -> &'static
+  str` is the canonical accessor used in tracing spans and
+  audit-log payloads; a paired test asserts it agrees with the
+  serde rename so the two never drift. **Why an enum and not a
+  `Box<dyn Backend>` trait:** Phase 0 has exactly two backends and
+  the Phase-5 sketch keeps it that way; pattern-matching on the
+  variant is what the audit-log payload writer wants to do.
+
+- **`llm-router/src/config.rs` (~280 lines, 7 unit tests):**
+  `RouterConfig::default()` resolves the local URL via
+  `default_local_url_for_os()` (Linux: `http://127.0.0.1:8000/v1`,
+  the canonical vLLM/SGLang OpenAI-compat port; macOS:
+  `http://127.0.0.1:11434/v1`, the default Ollama port). Other
+  Unixes fall back to the Linux default — better to have *something*
+  than to require an env var. `from_env()` reads
+  `HHAGENT_LLM_LOCAL_URL` / `HHAGENT_LLM_LOCAL_MODEL` /
+  `HHAGENT_LLM_FRONTIER_URL` / `HHAGENT_LLM_FRONTIER_MODEL` /
+  `HHAGENT_LLM_TIMEOUT_MS` with two operator-friendly behaviours: an
+  *unset* var or an *empty-string* var (e.g. a stray `export
+  HHAGENT_LLM_FRONTIER_URL=` in a shell profile) is treated as
+  absent (the latter is the most common operator footgun); a
+  non-numeric `HHAGENT_LLM_TIMEOUT_MS` is rejected with a typed
+  `RouterError::Config` carrying both the env-var name and the
+  invalid value. The frontier URL/model are deliberately *not*
+  defaulted; setting them is purely a forward-compatible seam for
+  Phase 5. **API keys are NOT read from env** by design — they
+  belong in `db::secrets` (the AES-256-GCM-at-rest store shipped
+  earlier this session) and will be fetched at dispatch time when
+  the Phase-5 policy gate lands. Reading them from env at
+  config-load time would defeat the whole keyring-wrapped at-rest
+  encryption story.
+
+- **`llm-router/src/policy.rs` (~80 lines, 2 unit tests):** the
+  `PolicyGate` trait — `Send + Sync + Debug` so the trait object
+  can cross tokio task boundaries inside the cloneable `Router` —
+  with a single sync method `pick(&self, &ChatRequest) -> Backend`.
+  `DefaultLocalPolicy` is the Phase-0 implementation; it
+  unconditionally returns `Backend::Local` for every request. The
+  trait is the explicit Phase-5 seam: the slice that introduces a
+  real policy gate is a pure-Rust addition (drop-in
+  `impl PolicyGate`, hand it to `Router::with_policy`), not a
+  refactor that retro-threads a decision into already-wired call
+  sites. **Why a trait and not a closure:** Phase 5's gate will
+  read state (recent escalation count, secrets-keyring availability,
+  the agent's current task) and emit traces / audit-log payloads;
+  trait objects compose with that future state better than a
+  single function pointer, and the cost today is one tiny `impl`
+  block.
+
+- **`llm-router/src/error.rs` (~80 lines, 3 unit tests):**
+  `RouterError::{Config, Transport, HttpStatus, DecodeResponse,
+  PolicyDeniedFrontier}`. `Transport` is `#[from] reqwest::Error`
+  for ergonomic `?`. `HttpStatus` and `DecodeResponse` capture a
+  truncated copy of the response body (cap 1 KiB via the pure
+  helper `truncate_for_error`) so a hostile or oversized backend
+  reply can't blow up our log lines / panic messages — operators
+  still get the readable text of a typical
+  `{"error": {"message": "..."}}` envelope but a multi-MiB HTML
+  error page is bounded.
+
+- **`llm-router/src/lib.rs` (~250 lines, 6 unit tests):** the
+  `Router` type. Constructors: `Router::new(config)` (uses
+  `DefaultLocalPolicy`), `Router::with_policy(config, policy)`
+  (caller-supplied trait object, `Arc`-wrapped so the same gate
+  can be reused across cloned routers without forcing it `Clone`).
+  The `reqwest::Client` is built with `timeout = config.timeout`
+  and `connect_timeout = min(config.timeout, 5 s)` so a dead
+  local-backend port surfaces fast (connection refused on the
+  OpenAI-compat URL is the most common operator-error signal in
+  this neighbourhood). `Router::send(&request).await` calls
+  `policy.pick(&request)` and either dispatches to
+  `dispatch_local` (HTTP POST `<base>/chat/completions`, JSON
+  body, decode `ChatResponse` from a 2xx body, surface
+  `HttpStatus` on non-2xx, surface `DecodeResponse` on schema
+  drift) or returns `PolicyDeniedFrontier` for `Backend::Frontier`.
+  The pure helper `compose_url(base, path)` trims a single
+  trailing `/` from the base before joining — pinned by unit
+  tests so a future refactor that double-slashes the URL does so
+  deliberately. `pick_backend(&request) -> Backend` is exposed as
+  a public method for the future `actor='llm:router'` audit-log
+  payload writer that wants to record the decision alongside the
+  request, *not* a substitute for actually calling `send`.
+
+- **`llm-router/tests/local_backend_e2e.rs` (~340 lines, 4
+  integration tests):** the round-trip proof. Brings up a
+  hand-rolled `tokio::net::TcpListener` on `127.0.0.1:0` (the
+  kernel hands out an unused port; no port-collision race against
+  other tests), spawns a one-shot accept task that parses the
+  request as `<headers>\r\n\r\n<body>` with `Content-Length`, and
+  responds with a hand-formatted HTTP/1.1 reply. **No
+  `wiremock`/`httpmock`/`axum` dev-dep** — the workspace style
+  (cf. `core/tests/audit_dispatch_e2e.rs` for PG, the sandbox
+  smoke tests for bwrap) is to bring fixtures up by hand so the
+  dependency footprint stays inspectable. Four tests:
+  `happy_path_round_trips_request_and_response` (path =
+  `/chat/completions`, body decodes back as `ChatRequest` byte-for-
+  byte including the `skip_serializing_if = Option::is_none` pin
+  on `max_tokens`/`temperature`, response decodes as
+  `ChatResponse` with `usage`),
+  `http_error_status_is_surfaced_with_truncated_body` (mock
+  returns 500 → `RouterError::HttpStatus { 500, body }` with the
+  operator-readable error text preserved),
+  `decode_error_is_surfaced_when_response_is_not_chat_response`
+  (200 OK + JSON that lacks `choices` → `RouterError::DecodeResponse`),
+  `router_send_routes_to_pick_backend_choice` (an `AlwaysFrontier`
+  test policy is wired in, asserting that **no HTTP request
+  reaches the mock** when the policy denies — defends the
+  chokepoint against a future refactor that accidentally bypasses
+  `policy.pick`).
+
+- **New deps (workspace):** `reqwest = { version = "0.12",
+  default-features = false, features = ["rustls-tls", "json"] }`.
+  License: MIT OR Apache-2.0 — AGPL-compatible. **Why
+  `default-features = false`:** strips the `native-tls` /
+  `openssl-sys` default and the blocking-client surface; we don't
+  link against system OpenSSL anywhere in this workspace
+  (matches `sqlx`'s `runtime-tokio` UDS-only choice). **Why
+  `rustls-tls`:** pure-Rust TLS so a Phase-5 frontier HTTPS call
+  works without dragging in `libssl-dev` at build time.
+  **Why not `stream`:** Phase-0 stub returns a single completion;
+  SSE streaming is a Phase-1+ concern. The transitive set
+  (`hyper-util`, `rustls`, `webpki-roots`, etc.) is all
+  MIT/Apache.
+
+**Subtle bug found and fixed in the test scaffolding (kept as a
+note for the next contributor who reaches for the same pattern).**
+The hand-rolled HTTP/1.1 mock's `header_content_length` parser
+originally used `?` on the second `splitn(2, ':')` token —
+which means the *whole function* short-circuited to `None` on
+the first colon-less line of the header block. The HTTP request
+line (`POST /chat/completions HTTP/1.1`) has no colon, so the
+parser never reached the actual `Content-Length: 109` line three
+rows below. Symptom: the body came through as 0 bytes, and
+`serde_json::from_str` panicked on EOF. Fix: replace `?` with
+`else { continue }` so colon-less lines are skipped without
+exiting the loop. Pinned by the diagnostic eprintln being
+removed once the round-trip-pinning test passed.
+
+**Why the new crate is a *crate* and not a `core::llm_router`
+module.** The user picked the crate boundary at the
+`/nextsession` design check. The reasoning we collected at the
+time: (a) the router is a self-contained subsystem with a stable
+typed surface (Phase 0's `Router::send` is the same shape Phase 5
+will keep); (b) the Phase-5 grow-out adds a real policy gate that
+will read state from `db::secrets`, emit telemetry, and gain its
+own integration test surface — natural fit for a separate crate;
+(c) `core` already holds the dispatcher chokepoint and the audit
+infrastructure, so keeping the LLM-egress concern out of `core`
+makes the dependency direction explicit (eventually `core`
+imports `llm-router`, never the other way around).
+
+**Why `Router::send` is async even though the policy gate is sync.**
+The HTTP call is unavoidably async (reqwest's API surface is
+async-native; the blocking surface is a Tokio thread-pool wrapper
+under the hood and we'd be paying the thread-handoff cost for
+nothing). The policy gate stays sync because today's decision is
+local computation — a future async policy gate (one that consults
+the keyring for a frontier API key, say) can do its async work
+upfront in `Router::with_policy`'s constructor and cache the
+result, or wrap the trait in an `async-trait`-style shim then.
+Forcing every consumer to `.await` the policy lookup today would
+buy nothing.
+
+**Why we did NOT integrate `Router::send` into
+`core::tool_host::dispatch` in this slice.** The HANDOVER said
+"sole egress for model calls; Phase 5's policy gate slots in here
+… Phase 1's memory recall and scheduler loop both depend on it."
+This slice ships the *typed surface* (the contract every Phase-1+
+consumer will dial). The dispatcher integration that fires an
+`actor='llm:router'` audit row is a Phase-1 step — it requires a
+concrete first consumer (memory recall is the most likely
+candidate) to validate the integration shape, and bundling that
+exploration into this slice would have widened scope unnecessarily.
+The chokepoint pattern is already documented: when the first
+LLM-using tool materialises, its dispatcher path will go through
+`tool_host::dispatch(pool, llm_router_handle, "llm:router",
+"chat", request)` (or a small variant) and the audit-log writer
+will record the `Backend::as_tag()` selection alongside.
+
+**Test count:** 192 → **224** on Linux (+28 unit + 4 integration;
+0 skipped, 0 failed, 0 warnings). macOS projection: ~171 — every
+new test is platform-neutral (no PG, no keyring, no sandbox; the
+integration test binds to `127.0.0.1:0` which works identically
+on both OSes). Re-run on macOS to confirm.
+
+---
 
 ### Phase 0 cont. (secrets at rest — AES-256-GCM + OS-keyring wrapping key + `db::secrets` runtime + 0004 migration)
 
@@ -1874,40 +2109,103 @@ don't get forgotten):
 
 ## Next TODO (pick one)
 
-**Phase 0 is nearly complete now.** The agent-core daemon comes up
-fail-closed against a per-user, UDS-only Postgres cluster managed by
-the same `default_supervisor()` that supervises the daemon itself.
-Every application write runs under the non-superuser
-`hhagent_runtime` role with a database-layer prohibition on tampering
-with prior audit rows (Option L, earlier on 2026-05-10). Every Phase
-0+ tool call is funneled through `tool_host::dispatch`, which writes
-one `audit_log` row per call (Option I); those rows are replicated to
+**Phase 0 is functionally complete.** The agent-core daemon comes
+up fail-closed against a per-user, UDS-only Postgres cluster
+managed by the same `default_supervisor()` that supervises the
+daemon itself. Every application write runs under the non-
+superuser `hhagent_runtime` role with a database-layer prohibition
+on tampering with prior audit rows (Option L). Every Phase 0+ tool
+call is funneled through `tool_host::dispatch`, which writes one
+`audit_log` row per call (Option I); those rows are replicated to
 a daily-rotated JSONL stream under `~/.local/state/hhagent/` by a
-long-lived listener that wakes on `pg_notify`, and operators can
-`tail -f` the JSONL files via `hhagent-cli audit tail` without
-touching Postgres. **As of this session,** every secret at rest in
-the database is encrypted with AES-256-GCM under a wrapping key that
-lives in the OS keyring (libsecret on Linux, Keychain on macOS);
-plaintext is returned in `Zeroizing<Vec<u8>>` so a panic-unwind
-cannot leave material behind, and the AAD layer binds each row to
-its name so a `UPDATE secrets SET name = …` swap is detected on the
-next read.
+long-lived listener that wakes on `pg_notify`. Every secret at
+rest is AES-256-GCM-encrypted under a keyring-wrapped key with
+AAD-bound row identity. **As of this session,** there is also a
+sole-egress LLM router (`hhagent-llm-router`) with an OpenAI-
+compatible `Router::send` over reqwest+rustls, a per-OS local-
+backend default (vLLM/SGLang on Linux, Ollama on macOS), and a
+`PolicyGate` seam that Phase 5 plugs into; the frontier-dispatch
+path is unwired by design.
 
-What remains in Phase 0:
+This was the last must-ship Phase-0 line item. **Phase 1 is now
+unblocked.** What's left as optional polish before declaring
+Phase 0 done:
 
-- **LLM router HTTP-client stub** (Option J below) — sole egress for
-  model calls; Phase 5's policy gate slots in here. **Headline next
-  pickup** — Phase 1's memory recall and scheduler loop both depend
-  on it. With secrets-at-rest landed, this is the last
-  application-layer plumbing before Phase 1 can begin.
-- **Cross-platform exponential restart backoff** (Option K below) —
-  systemd 252+ has `RestartSteps`/`RestartMaxDelaySec`; macOS launchd's
-  `KeepAlive=true` has no operator-controllable throttle, so this
-  needs a per-OS shape. Filed but parked — no immediate need.
+- **Phase 1 entry — Dispatcher chokepoint compile-time pin**
+  (Option M below) — small, scoped, and the most natural bridge
+  between Phase 0's "the chokepoint is documented" and Phase 1's
+  "every Phase-1 consumer relies on the chokepoint pattern." Adds
+  a `WorkerCommand` constructor seal so an `unsafe`-free outside-
+  module construction fails to compile. **Suggested next pickup**
+  if you want to start Phase 1 from a hardened base.
+- **Phase 1 entry — `memory::recall` skeleton** (Option N below)
+  — the first real consumer of the LLM router (for embedding-side
+  reranking) and the first non-trivial sqlx query path. Bigger
+  than Option M; pick this if you have a session's worth of focus
+  to give it.
+- **Cross-platform exponential restart backoff** (Option K below)
+  — systemd 252+ has `RestartSteps`/`RestartMaxDelaySec`; macOS
+  launchd's `KeepAlive=true` has no operator-controllable
+  throttle, so this needs a per-OS shape. Filed but parked — no
+  immediate need.
 
-(The "Secrets at rest" line item that was the third bullet here in
-the previous handover shipped this session — see "Recently
-completed" above.)
+(The "LLM router HTTP-client stub" line item that was the
+headline pickup in the previous handover shipped this session —
+see "Recently completed" above.)
+
+### Option M — Dispatcher chokepoint compile-time pin (Phase 1 entry, small)
+
+The threat-model invariant (HANDOVER's *Architecture invariants*
+section, repeated in `docs/threat-model.md`) says **every tool/
+channel/routine action enters core through
+`tool_host::dispatch()`**. Today this is policy, not enforcement —
+a future contributor could `WorkerCommand::new(...)` from a
+sibling module and silently bypass the audit-log write. The fix
+is a constructor seal: `WorkerCommand` becomes a struct whose
+fields are `pub(crate)` (or `pub(super)`), with `new` /
+`with_args` / etc. moved to `tool_host`. Any sibling module that
+tries to construct one fails to compile.
+
+- **Files:** `core/src/tool_host.rs`, `core/src/lib.rs`. Maybe
+  `core/src/sandbox/`-touching code if `WorkerCommand` is
+  re-exported.
+- **Verification:** add a doctest that constructs a
+  `WorkerCommand` from outside `tool_host` and asserts it fails
+  to compile (the standard "doctest as compile-fail pin" trick:
+  `///` block with `compile_fail`).
+- **Gotcha:** the existing `core/tests/shell_exec_e2e.rs`
+  spawns workers directly — it pre-dates the dispatcher. Either
+  route those tests through `tool_host::dispatch` (cleaner) or
+  add a `pub(crate)` test-only `unsafe fn` constructor (uglier
+  but bounded). Prefer the first.
+
+### Option N — `memory::recall` skeleton (Phase 1 entry, larger)
+
+The first real consumer of every Phase-0 piece: pgvector for
+semantic, GIN-indexed `tsvector` for lexical, recursive-CTE
+graph for relational neighbours, all fused via Reciprocal Rank
+Fusion in SQL. The LLM router gets its first
+`actor='llm:router'` audit-log row from this slice — likely the
+embedding-call path, which routes through the local backend by
+default.
+
+- **Shape:** new `core::memory::recall(query: &str, modes:
+  RecallModes, k: usize) -> Result<Vec<Memory>, _>`. Three
+  independent score lists, fused per-call.
+- **Files:** new `core/src/memory.rs` (or `core/src/memory/`),
+  `db/src/memories.rs` (the typed sqlx query helpers).
+- **Verification:** integration test against a per-test PG
+  cluster (the canonical recipe is shared across
+  `db/tests/postgres_e2e.rs` and `core/tests/audit_dispatch_e2e.rs`
+  — issue #15 will eventually hoist it to a `tests-common` dev-
+  dep crate). Seed three documents, query for one, assert it
+  ranks first under each mode and under the fused score.
+- **Gotcha:** the embedding worker doesn't exist yet. Phase 1's
+  first instinct is "spin up a tiny model behind OpenAI HTTP";
+  the cheap shortcut is to compute a deterministic test-only
+  embedding (e.g. SHA-256-then-fold-to-1024-floats) so the
+  integration test doesn't depend on a running model. Mark
+  the helper `#[cfg(test)]` so it never ships.
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -1972,18 +2270,19 @@ else writes yet, and there's no on-disk mirror an operator can
   both OSes to keep operator docs simple (we already do this for
   the data dir).
 
-### Option J — LLM router HTTP-client stub
+### Option J — LLM router HTTP-client stub  *(SHIPPED 2026-05-10 — see "Recently completed (this session)")*
 
-Same shape as the audit-log mirror item: one new module in `core`
-(or a new `hhagent-llm-router` crate, depending on where it grows
-to), an OpenAI-compatible HTTP client over `reqwest` (or `hyper`),
-a config knob pointing at a local backend
-(vLLM/SGLang on Linux, llama.cpp/Ollama on macOS), and a
-*placeholder* for the Phase-5 policy gate that decides when to
-escalate to a frontier backend. The escalation path is *unwired*
-in this slice — only the local-backend call path needs to work
-end-to-end. Once Phase 1 wants real model calls (memory recall +
-the scheduler loop), this is the unblock.
+(Original pickup notes preserved below for context.) Same shape
+as the audit-log mirror item: one new module in `core` (or a new
+`hhagent-llm-router` crate, depending on where it grows to), an
+OpenAI-compatible HTTP client over `reqwest` (or `hyper`), a
+config knob pointing at a local backend (vLLM/SGLang on Linux,
+llama.cpp/Ollama on macOS), and a *placeholder* for the Phase-5
+policy gate that decides when to escalate to a frontier backend.
+The escalation path is *unwired* in this slice — only the local-
+backend call path needs to work end-to-end. Once Phase 1 wants
+real model calls (memory recall + the scheduler loop), this is
+the unblock.
 
 ### Option K — cross-platform exponential restart backoff
 

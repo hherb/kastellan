@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "core",
     "db",
+    "llm-router",
     "sandbox",
     "supervisor",
     "protocol",
@@ -105,6 +106,23 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # Linux (`async-secret-service` + `tokio` + `crypto-rust`) vs. macOS
 # (`apple-native`) split. License: MIT OR Apache-2.0 across the
 # crate and all backend deps.
+
+# HTTP client for the `hhagent-llm-router` crate (sole egress for
+# model calls). License: MIT OR Apache-2.0 — AGPL-compatible.
+#
+# Feature notes:
+#   - default-features=false drops the openssl-sys default and the
+#     blocking client. We do not link against system OpenSSL; rustls
+#     keeps the build hermetic and is in line with the rest of the
+#     workspace (sqlx UDS-only, no native-tls).
+#   - "rustls-tls" turns on the pure-Rust TLS stack so HTTPS calls
+#     work (Phase-5 frontier backend) without dragging in
+#     `openssl-sys` and a `libssl-dev` build-time dependency.
+#   - "json" enables `RequestBuilder::json` / `Response::json` —
+#     the OpenAI-compatible request/response shape is JSON.
+#   - "stream" is *not* enabled — Phase-0 stub returns a single
+#     completion; SSE streaming is a Phase-1+ concern.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # Profile tweaks
 [profile.release]

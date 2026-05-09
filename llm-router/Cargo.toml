@@ -1,0 +1,32 @@
+[package]
+name        = "hhagent-llm-router"
+description = "Sole egress for LLM calls. OpenAI-compatible HTTP client with backend selection (local/frontier) and a Phase-5 policy-gate seam."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+# Async runtime: needed for `Router::send`, which is async on top of
+# reqwest's async client. The pure helpers in `config.rs`,
+# `messages.rs`, `backend.rs`, `policy.rs` do *not* depend on tokio
+# and are exercised by sync unit tests.
+tokio   = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+# `local_backend_e2e.rs` brings up a hand-rolled tokio TcpListener
+# that speaks just enough HTTP/1.1 to canned-respond a single
+# OpenAI-style chat-completion. No `wiremock` / `httpmock` dev-dep —
+# the workspace style (cf. `core/tests/audit_dispatch_e2e.rs`,
+# `db/tests/postgres_e2e.rs`) is to bring fixtures up by hand so the
+# dependency footprint stays inspectable.
+tokio = { workspace = true }
