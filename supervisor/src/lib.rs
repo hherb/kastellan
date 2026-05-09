@@ -21,6 +21,8 @@ pub mod systemd_user;
 #[cfg(target_os = "macos")]
 pub mod launchd_agents;
 
+pub mod specs;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -124,6 +126,37 @@ pub fn default_supervisor() -> Box<dyn Supervisor> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Box::new(NotYetImplemented)
+    }
+}
+
+/// Probe the default supervisor backend on this OS.
+///
+/// On Linux this delegates to [`systemd_user::probe`] (talks to the
+/// per-user systemd manager). On macOS this delegates to
+/// [`launchd_agents::probe`] (talks to the GUI launchd domain). On
+/// any other Unix this returns [`SupervisorError::NotImplemented`].
+///
+/// The point: callers (notably integration tests) can do a single
+/// "is the supervisor usable on this host?" check without per-OS
+/// branching. A failed probe is the canonical signal to skip
+/// supervisor-touching work — headless Linux without
+/// `loginctl enable-linger` and SSH-only macOS sessions both fail
+/// here, and both are environments where a `start` would otherwise
+/// produce a confusing backend error.
+pub fn default_probe() -> Result<(), SupervisorError> {
+    #[cfg(target_os = "linux")]
+    {
+        systemd_user::probe()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        launchd_agents::probe()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(SupervisorError::NotImplemented(
+            "default_probe — Phase 0 work item",
+        ))
     }
 }
 

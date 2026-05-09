@@ -4,8 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-08
-**Last commit:** `e5d20e6` (`gitignore modified to sync skills, nextsession skill added`) — macOS LaunchAgents supervisor session pending commit
+**Last updated:** 2026-05-09
+**Last commit:** _set on commit_ — `feat(supervisor): wire core into default_supervisor with typed core_service_spec helper + cross-platform e2e`
 **Branch:** `main`
 
 ---
@@ -24,14 +24,14 @@
 hhagent (Rust workspace, 6 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + bin (skeleton main); tool_host derives lockdown env + spawns watchdog; workspace = per-task scratch with RAII cleanup
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (now wraps in systemd-run --scope cgroup) + MacosSeatbelt
-├── supervisor         hhagent-supervisor: SystemdUser (Linux: real install/start/stop/status/uninstall via systemctl --user) + LaunchAgents (macOS: real lifecycle via launchctl bootstrap/bootout/print in gui/<uid> domain)
+├── supervisor         hhagent-supervisor: SystemdUser (Linux: real install/start/stop/status/uninstall via systemctl --user) + LaunchAgents (macOS: real lifecycle via launchctl bootstrap/bootout/print in gui/<uid> domain) + specs::core_service_spec (typed ServiceSpec for the agent core daemon) + default_probe (per-OS supervisor probe)
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on macOS: 83 tests, 0 skipped, 0 failed.**
-*Linux is unchanged this session (the macOS code is `cfg(target_os = "macos")`-gated); Linux test count was 96 last session and the supervisor unit/smoke tests there still gate via `cfg(target_os = "linux")`.*
+**`cargo test --workspace` on Linux: 105 tests, 0 skipped, 0 failed, 0 warnings.**
+*macOS test count was 83 last session (2026-05-08); the macOS suite gains the same +8 supervisor unit tests (`specs::*`) and +1 cross-platform e2e (`core_service_install_start_observe_log_uninstall`) when next run there, projecting macOS to 92.*
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -42,11 +42,12 @@ hhagent (Rust workspace, 6 crates, AGPL-3.0)
 | `sandbox` integration (`macos_smoke`) | 8 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny` |
 | `core` unit | 16 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree |
+| `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** `default_supervisor()` round-trip against the actual `hhagent` binary: build spec via `core_service_spec`, install into `~/.config/systemd/user/` (Linux) or `~/Library/LaunchAgents/` (macOS), pre-start status=Inactive, start, poll the redirected stdout file for the daemon's startup JSON line ("hhagent core starting" + `version` field), stop, uninstall, post-uninstall status=NotInstalled. RAII guard cleans up on panic. Unique `hhagent-supervisor-test-{pid}-{nanos}` name avoids clobbering a real installed `hhagent-core`. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
-| `supervisor` unit (linux) | 27 | `build_unit_file` shape (14 tests: section order, Description, ExecStart program+args, arg quoting + escape of `"`/`\`, Environment ordering, Environment value quoting, WorkingDirectory present/absent, log redirects, keep_alive Restart=on-failure, no-Restart when keep_alive=false, TimeoutStopSec always, [Install] WantedBy=default.target); `validate_service_name` (6 tests: typical names, empty, traversal, dot/dash prefix, overlong, whitespace+specials); driver against custom units_dir (7 tests: install writes file, rejects relative program, rejects invalid name, creates units_dir, uninstall removes file, uninstall idempotent, status NotInstalled when absent) |
-| `supervisor` unit (macos) | 35 | `build_plist` shape (14 tests: XML preamble + DOCTYPE, Label, ProgramArguments order, XML-escaping of `<`, `>`, `&`, `"`, `'` in args, EnvironmentVariables presence/order/omission-when-empty, WorkingDirectory present/absent, log redirects, RunAtLoad=true unconditional, KeepAlive=true/false mirror of spec, ExitTimeOut always, Label XML-escaped); `validate_service_name` (6 tests: typical names incl. reverse-DNS like `org.hhagent.core`, empty, traversal, dot/dash prefix, overlong, whitespace+specials); helpers (7 tests: `xml_escape` predefined entities + Unicode passthrough, `parse_print_state` indented/multi-word/absent, `is_no_such_service_error` phrases, `user_domain_target` `gui/<digits>` shape); driver against custom agents_dir (8 tests: install writes plist, rejects relative program, rejects invalid name, rejects relative working_dir, creates agents_dir, uninstall removes plist, uninstall idempotent, status NotInstalled when absent) |
+| `supervisor` unit (linux) | 35 | `build_unit_file` shape (14 tests: section order, Description, ExecStart program+args, arg quoting + escape of `"`/`\`, Environment ordering, Environment value quoting, WorkingDirectory present/absent, log redirects, keep_alive Restart=on-failure, no-Restart when keep_alive=false, TimeoutStopSec always, [Install] WantedBy=default.target); `validate_service_name` (6 tests: typical names, empty, traversal, dot/dash prefix, overlong, whitespace+specials); driver against custom units_dir (7 tests: install writes file, rejects relative program, rejects invalid name, creates units_dir, uninstall removes file, uninstall idempotent, status NotInstalled when absent); `specs::core_service_spec` (8 tests: canonical name `hhagent-core`, caller-supplied program path flows through, args+env empty by default, no working_dir, keep_alive=false-for-now regression pin, log paths under log_dir with predictable filenames, stdout/stderr distinct) |
+| `supervisor` unit (macos) | 43 | `build_plist` shape (14 tests: XML preamble + DOCTYPE, Label, ProgramArguments order, XML-escaping of `<`, `>`, `&`, `"`, `'` in args, EnvironmentVariables presence/order/omission-when-empty, WorkingDirectory present/absent, log redirects, RunAtLoad=true unconditional, KeepAlive=true/false mirror of spec, ExitTimeOut always, Label XML-escaped); `validate_service_name` (6 tests: typical names incl. reverse-DNS like `org.hhagent.core`, empty, traversal, dot/dash prefix, overlong, whitespace+specials); helpers (7 tests: `xml_escape` predefined entities + Unicode passthrough, `parse_print_state` indented/multi-word/absent, `is_no_such_service_error` phrases, `user_domain_target` `gui/<digits>` shape); driver against custom agents_dir (8 tests: install writes plist, rejects relative program, rejects invalid name, rejects relative working_dir, creates agents_dir, uninstall removes plist, uninstall idempotent, status NotInstalled when absent); `specs::core_service_spec` (8 tests: canonical name `hhagent-core`, caller-supplied program path flows through, args+env empty by default, no working_dir, keep_alive=false-for-now regression pin, log paths under log_dir with predictable filenames, stdout/stderr distinct — same suite runs on both OSes) |
 | `supervisor` integration (`systemd_user_smoke`, linux) | 2 | **real** `systemctl --user` round-trip: install → daemon-reload → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled, with RAII cleanup guard so a panic does not leave residue in `~/.config/systemd/user/`; invalid name rejected before any systemctl call |
 | `supervisor` integration (`launchd_agents_smoke`, macos) | 4 | **real** `launchctl bootstrap gui/<uid>` round-trip against `~/Library/LaunchAgents/`: install → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled; idempotent `start` after start (status-first check via `launchctl print`, no version-specific error-string parsing); idempotent `stop` against not-bootstrapped agent; invalid name rejected before any launchctl call. RAII guard cleans up plist file + `bootout` on panic; tests serialised with a static `Mutex` because the GUI launchd domain is a shared global resource. `[SKIP]` line on hosts where the GUI domain is unreachable (SSH-only sessions). |
 
@@ -71,7 +72,94 @@ on the user's DGX Spark. Other Linux hosts may need
 `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses
 `sandbox-exec` (no setup needed; ships with the OS).
 
-## Recently completed (this session, 2026-05-08)
+## Recently completed (this session, 2026-05-09)
+
+**Phase 0 cont. — wire core into the supervisor (typed `core_service_spec` + cross-OS `default_probe` + e2e against the real `hhagent` binary).**
+
+Closed Option C4 from the previous handover. The supervisor crate now
+ships a typed [`ServiceSpec`] builder for the agent core daemon and a
+cross-OS supervisor probe; the core crate proves both supervisor
+backends can host the real `hhagent` binary end-to-end without per-OS
+branching in the test code.
+
+- **New module `supervisor/src/specs.rs` (~150 lines, 8 unit tests):**
+  pure `core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec`
+  + `pub const CORE_SERVICE_NAME: &str = "hhagent-core"`. Returned spec:
+  `name = "hhagent-core"` (same string on both OSes — no reverse-DNS,
+  the lib.rs `ServiceSpec.name` doc-comment explicitly allows this);
+  `program = caller-supplied`; `args` empty (daemon takes no flags
+  yet); `env` empty (daemon's `RUST_LOG` defaults to `"info"` via
+  `unwrap_or_else` in `core/src/main.rs::main`); `working_dir = None`;
+  `keep_alive = false` (today's daemon is a placeholder that emits one
+  log line and exits 0 — `Restart=on-failure` would be a no-op on
+  clean exit anyway; flip when the daemon becomes a long-running
+  event loop, regression pin in
+  `core_service_spec_keep_alive_is_false_for_now`); `stdout_log =
+  log_dir/hhagent-core.out`, `stderr_log = log_dir/hhagent-core.err`.
+  Pure: no I/O, no env probing — caller resolves both inputs.
+- **New `supervisor::default_probe()` in `supervisor/src/lib.rs`:**
+  cross-OS supervisor probe mirroring `default_supervisor()`. Linux →
+  `systemd_user::probe()`, macOS → `launchd_agents::probe()`, other
+  Unix → `SupervisorError::NotImplemented`. Lets cross-platform tests
+  do a single skip-if-no-supervisor check without per-OS branching.
+- **New `supervisor::specs` module export in `supervisor/src/lib.rs`:**
+  `pub mod specs;` (not `cfg`-gated — pure spec builders compile on
+  every OS, only the backends are platform-specific).
+- **New `core/tests/supervisor_e2e.rs` (~190 lines, 1 test):**
+  - `core_service_install_start_observe_log_uninstall` — full e2e
+    against `default_supervisor()`: build spec via
+    `core_service_spec`, override the name to a unique
+    `hhagent-supervisor-test-{pid}-{nanos}` (avoids clobbering a real
+    installed `hhagent-core` and lets concurrent test runs coexist),
+    redirect stdout to a per-test log file under `temp_dir`, install,
+    assert pre-start status=Inactive, start, **poll the redirected
+    stdout file** (50 ms tick, 5 s budget) for the daemon's startup
+    JSON line containing `"hhagent core starting"` and the
+    `"version":` field, stop (must be safe even after the daemon's
+    natural exit — pins the "stop is always idempotent" contract),
+    uninstall, assert post-uninstall status=NotInstalled. RAII
+    `ServiceGuard` runs `uninstall` on Drop so a panic mid-test
+    doesn't leave residue. macOS path holds the same intra-binary
+    `static OnceLock<Mutex<()>>` the launchd smoke test uses, so the
+    GUI domain is never touched concurrently. `[SKIP]` line on hosts
+    where `default_probe()` fails (headless Linux without
+    `loginctl enable-linger` / SSH-only macOS).
+  - **Why observe via the log file, not via the `Active` window?**
+    Today's daemon is "log one line and exit 0", so the `Active`
+    window is well under 50 ms — too short to catch reliably with a
+    polling status check. The redirected stdout is the durable side
+    effect that proves the daemon actually ran. When the daemon
+    becomes a long-running event loop (and `core_service_spec`
+    flips to `keep_alive=true`), this test should grow an assertion
+    that `status` reaches `Active` *and* stays there for a few
+    polls — currently filed as part of the "core daemon goes
+    long-running" follow-up.
+
+**Test count:** 96 → 105 on Linux (+8 unit `specs::*`, +1 integration).
+0 skipped, 0 warnings. macOS projects to 92 by the same delta.
+
+**Why `keep_alive=false` for now (and the regression test that pins it).**
+Flipping `keep_alive=true` would translate to `Restart=on-failure`
+(systemd) / `KeepAlive=true` (launchd). For today's "log line and
+exit 0" daemon, neither restart trigger fires (exit 0 is success on
+both platforms). Setting `true` would just be cargo-culted noise; the
+right time to flip it is when the daemon body becomes a real
+event loop where unexpected exit *should* trigger restart. The
+`core_service_spec_keep_alive_is_false_for_now` unit test makes this a
+deliberate, paired change — flipping the helper trips the test, so the
+implementer is forced to update both at once.
+
+**Why the same `specs::*` suite shows up under both OS rows in the
+test table.** `specs.rs` is not `cfg`-gated (pure builders, no
+platform deps), so the 8 tests compile and run in whichever supervisor
+suite executes — Linux row goes 27 → 35, macOS row goes 35 → 43, but
+the *underlying* tests are the same 8 functions. This is intentional:
+the spec contract is platform-independent and any per-OS divergence
+would be a bug.
+
+---
+
+## Recently completed (previous session, 2026-05-08)
 
 **Phase 0 cont. — macOS service supervisor (`hhagent-supervisor::launchd_agents`).**
 
@@ -202,7 +290,7 @@ grep hhagent` agrees).
 
 ---
 
-## Recently completed (previous session, 2026-05-10)
+## Recently completed (2026-05-10)
 
 **Phase 0 cont. — Linux service supervisor scaffold (`hhagent-supervisor::systemd_user`).**
 
@@ -638,16 +726,15 @@ don't get forgotten):
 
 ## Next TODO (pick one)
 
-**Phase 0 hardening is now complete on Linux.** All items in the
-"Phase 0 hardening — Defence in depth (Linux)" ROADMAP section are
-ticked. Phase 0b (macOS Seatbelt) is done. The Linux supervisor
-scaffold (2026-05-10) and the macOS LaunchAgents supervisor (this
-session) are both real. **The supervisor crate now has cross-platform
-parity.** Remaining work to close out Phase 0: Postgres bring-up,
-the first concrete `hhagent.service` unit wiring core into the
-supervisor, and the supervisor "auto-restart with backoff on worker
-crash" item (currently partial — `keep_alive=true` ⇒ unconditional
-restart on either OS, no exponential backoff yet).
+**Phase 0 hardening is complete on Linux; macOS Seatbelt and both
+supervisor backends are real.** The first concrete service is now
+wired (`core_service_spec` + e2e against the real `hhagent` binary,
+shipped this session). Remaining Phase 0 work: Postgres bring-up,
+turning the daemon into a real long-running event loop (so
+`keep_alive=true` becomes meaningful), and the supervisor
+"auto-restart with backoff on worker crash" item (currently partial
+— `keep_alive=true` ⇒ unconditional `Restart=on-failure` on systemd,
+no exponential backoff yet).
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 
@@ -662,6 +749,8 @@ restart on either OS, no exponential backoff yet).
 ### Option C1 — Linux supervisor scaffold  *(SHIPPED 2026-05-10 — see "Recently completed")*
 
 ### Option C3 — macOS LaunchAgent supervisor backend  *(SHIPPED 2026-05-08 — see "Recently completed")*
+
+### Option C4 — wire core into the supervisor  *(SHIPPED 2026-05-09 — see "Recently completed")*
 
 ### Option C2 — Phase 0 cont.: Postgres bring-up (private user-instance)
 
@@ -697,17 +786,35 @@ auth over UDS. Cleaner containment than coupling to a system PG.)
   PG version. If not ready, defer graph traversal to Phase 1 too —
   Phase 0 only needs the schema + audit log.
 
-### Option C4 — wire core into the supervisor (`hhagent.service` / `org.hhagent.core.plist`)
+### Option H — turn `core/src/main.rs` into a real long-running daemon (and flip `core_service_spec` to `keep_alive=true`)
 
-Now that both supervisor backends are real, ship a typed helper
-`hhagent_supervisor::specs::core_service_spec(binary, log_dir) ->
-ServiceSpec`. Smallest possible glue; one integration test in `core`
-that builds the spec, installs it, starts it, observes the daemon's
-single log line, stops + uninstalls. **Cross-platform out of the box** —
-the test runs against `default_supervisor()` so the same code exercises
-SystemdUser on Linux and LaunchAgents on macOS. Independent of the PG work
-(Option C2 below). Probably the smallest next-pickup; closes the
-"hhagent.target / first concrete service" item on the ROADMAP.
+Smallest natural follow-up to C4. The `core_service_install_start_observe_log_uninstall`
+e2e proves the supervisor wiring works for the *current* placeholder
+daemon (log one line, exit 0), but a real agent core needs to block
+on a stop signal and respond to lifecycle events. Sketch:
+
+- Add a tokio signal handler for SIGTERM/SIGINT in `core/src/main.rs`;
+  block on `tokio::signal::ctrl_c()` (or the unix-specific
+  `signal(SignalKind::terminate())`) before returning from `main`.
+- Plumb a graceful-shutdown channel through to the (currently
+  non-existent) scheduler loop so the future loop has a clean exit
+  path. For now, the daemon does nothing useful between log line and
+  signal — the body is a placeholder for the Phase 1 scheduler.
+- Flip `supervisor::specs::core_service_spec` to set
+  `keep_alive = true`. Update the `core_service_spec_keep_alive_is_false_for_now`
+  unit test to assert `true` (rename appropriately).
+- Update the e2e: poll for `status() == ServiceStatus::Active` after
+  `start`, hold for ~500 ms to prove it's stable (not transient
+  `activating`), then `stop` and poll for `Inactive`. Drop the
+  log-file poll (no longer the durable signal — though it's still a
+  fine sanity check that the daemon got far enough to log its
+  startup line).
+- Verify the systemd `Type=simple` shape still works (it does — a
+  real long-running daemon is exactly what `Type=simple` expects).
+
+This unlocks the Phase 0 supervisor "auto-restart with backoff"
+follow-up: once the daemon can crash for real reasons,
+`Restart=on-failure` becomes meaningfully testable.
 
 ### Option G — make `cpu_quota_pct`/`tasks_max` policy-driven + setrlimit-based `cpu_ms` enforcement  ([#6](https://github.com/hherb/hhagent/issues/6))
 
