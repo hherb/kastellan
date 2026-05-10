@@ -26,7 +26,7 @@ pub fn hash_content(content: &str) -> String {
     let mut s = String::with_capacity(64);
     for b in digest {
         use std::fmt::Write;
-        let _ = write!(s, "{:02x}", b);
+        write!(s, "{:02x}", b).expect("write to String cannot fail");
     }
     s
 }
