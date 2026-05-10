@@ -1190,6 +1190,292 @@ fn audit_helpers_pool_and_notify_round_trip() {
     let _ = (data_root, log_dir, socket_dir);
 }
 
+// ─── tasks lifecycle ──────────────────────────────────────────────
+
+/// End-to-end lifecycle test for `db::tasks`.
+///
+/// Exercises the full `tasks` API against a per-test PG cluster with
+/// all six migrations applied (0001–0006). The test runs under the
+/// runtime role via `connect_runtime_pool` (same as production).
+///
+/// Scenarios covered:
+///
+///   1. `insert_pending` + `claim_one` round-trip with `tasks_inserted`
+///      NOTIFY confirmation — proves the trigger fires and the lane
+///      filter is respected.
+///   2. `observe_state` + `finalize` with `tasks_completed` NOTIFY —
+///      proves the completion trigger fires and `result` + `finished_at`
+///      are persisted.
+///   3. `mark_cancelled` + idempotency — a pending row is cancelled
+///      (returns true), and a second call on the already-cancelled row
+///      returns false.
+///   4. `sweep_crashed` + idempotency — a running task whose lease is
+///      forcibly back-dated is picked up by the sweep; a second sweep
+///      returns 0.
+///
+/// Skips silently with `[SKIP]` lines on hosts without Postgres or a
+/// reachable supervisor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tasks_lifecycle_e2e() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let postgres = bin_dir.join("postgres");
+    let initdb = bin_dir.join("initdb");
+
+    // ---------- temp dirs (short labels to stay under 108-byte sockaddr_un) ----------
+    let data_root = unique_temp_root("lc-d");
+    let _data_guard = PathGuard { path: data_root.clone() };
+    let data_dir = data_root.join("data");
+    let socket_dir = default_socket_dir(&data_dir);
+    let log_dir = unique_temp_root("lc-l");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+    let _log_guard = PathGuard { path: log_dir.clone() };
+
+    // ---------- initdb + auto.conf ----------
+    let user = current_username();
+    let argv = build_initdb_argv(
+        &initdb,
+        &InitDbOptions {
+            data_dir: data_dir.clone(),
+            username: user.clone(),
+            ..InitDbOptions::default()
+        },
+    );
+    let out = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("spawn initdb");
+    assert!(
+        out.status.success(),
+        "initdb failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    std::fs::create_dir(&socket_dir).expect("create socket dir");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&socket_dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&socket_dir, perms).unwrap();
+    }
+    std::fs::write(
+        data_dir.join("postgresql.auto.conf"),
+        build_postgresql_auto_conf(&PgConfigOptions {
+            socket_dir: socket_dir.clone(),
+            ..PgConfigOptions::default()
+        }),
+    )
+    .expect("write postgresql.auto.conf");
+
+    // ---------- supervisor spec ----------
+    let mut spec = postgres_service_spec(&postgres, &data_dir, &log_dir);
+    spec.name = format!(
+        "hhagent-supervisor-test-pg-lc-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    assert!(spec.name.len() <= 200);
+    spec.stdout_log = Some(log_dir.join(format!("{}.out", spec.name)));
+    spec.stderr_log = Some(log_dir.join(format!("{}.err", spec.name)));
+
+    let sup = default_supervisor();
+    let _service_guard = ServiceGuard {
+        sup: default_supervisor(),
+        name: spec.name.clone(),
+    };
+    sup.install(&spec).expect("install postgres");
+    sup.start(&spec.name).expect("start postgres");
+    wait_for_status(
+        sup.as_ref(),
+        &spec.name,
+        |s| s == ServiceStatus::Active,
+        Duration::from_secs(15),
+    )
+    .expect("postgres reaches Active");
+    wait_for_socket(&socket_dir, Duration::from_secs(15))
+        .expect("postgres socket appears");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        sup.status(&spec.name).unwrap(),
+        ServiceStatus::Active,
+        "postgres flapping during stable-active window"
+    );
+
+    // ---------- exercise the tasks module ----------
+    let conn_spec = hhagent_db::conn::ConnectSpec {
+        socket_dir: socket_dir.clone(),
+        user: user.clone(),
+        database: hhagent_db::conn::DEFAULT_APPLICATION_DB.to_string(),
+    };
+
+    // Probe applies migrations 0001–0006 (tasks table + triggers).
+    hhagent_db::probe::run(
+        &conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "tasks-lifecycle"}),
+    )
+    .await
+    .expect("probe run");
+
+    // Pool whose after_connect hook runs SET ROLE hhagent_runtime.
+    let pool = hhagent_db::pool::connect_runtime_pool(&conn_spec)
+        .await
+        .expect("connect runtime pool");
+
+    use hhagent_db::tasks::{
+        claim_one, finalize, get, insert_pending, mark_cancelled,
+        observe_state, sweep_crashed, Lane,
+    };
+
+    // ── 1. Subscribe to listeners BEFORE inserting (race-safe) ──────
+    let mut inserted_listener = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .expect("PgListener connect for tasks_inserted");
+    inserted_listener
+        .listen("tasks_inserted")
+        .await
+        .expect("LISTEN tasks_inserted");
+
+    let mut completed_listener = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .expect("PgListener connect for tasks_completed");
+    completed_listener
+        .listen("tasks_completed")
+        .await
+        .expect("LISTEN tasks_completed");
+
+    // ── 2. insert_pending → claim_one round trip ─────────────────────
+    let id = insert_pending(&pool, Lane::Fast, serde_json::json!({"instruction": "ping"}))
+        .await
+        .expect("insert_pending");
+
+    // tasks_inserted NOTIFY fires
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        inserted_listener.recv(),
+    )
+    .await
+    .expect("tasks_inserted notify timeout")
+    .expect("tasks_inserted recv error");
+    assert_eq!(n.payload(), id.to_string(), "tasks_inserted payload must equal the new task id");
+
+    let claimed = claim_one(&pool, Lane::Fast, 60)
+        .await
+        .expect("claim_one")
+        .expect("claim_one returned None");
+    assert_eq!(claimed.id, id);
+    assert_eq!(claimed.state, "running");
+    assert!(claimed.started_at.is_some(), "started_at must be set after claim");
+    assert!(claimed.lease_expires_at.is_some(), "lease_expires_at must be set after claim");
+
+    // ── 3. observe and finalize ──────────────────────────────────────
+    assert_eq!(
+        observe_state(&pool, id).await.expect("observe_state"),
+        "running",
+        "observe_state must see running after claim"
+    );
+
+    finalize(
+        &pool,
+        id,
+        "completed",
+        Some(serde_json::json!({"kind": "text", "body": "pong"})),
+    )
+    .await
+    .expect("finalize");
+
+    // tasks_completed NOTIFY fires
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        completed_listener.recv(),
+    )
+    .await
+    .expect("tasks_completed notify timeout")
+    .expect("tasks_completed recv error");
+    assert_eq!(n.payload(), id.to_string(), "tasks_completed payload must equal the finalized task id");
+
+    let task = get(&pool, id)
+        .await
+        .expect("get")
+        .expect("task not found after finalize");
+    assert_eq!(task.state, "completed");
+    assert_eq!(
+        task.result,
+        Some(serde_json::json!({"kind": "text", "body": "pong"})),
+        "result must match what was passed to finalize"
+    );
+    assert!(task.finished_at.is_some(), "finished_at must be set after finalize");
+
+    // ── 4. mark_cancelled on a separate row ──────────────────────────
+    let id2 = insert_pending(&pool, Lane::Long, serde_json::json!({"instruction": "x"}))
+        .await
+        .expect("insert_pending id2");
+    let was_cancelled = mark_cancelled(&pool, id2)
+        .await
+        .expect("mark_cancelled");
+    assert!(was_cancelled, "mark_cancelled must return true for a pending row");
+    assert_eq!(
+        observe_state(&pool, id2).await.expect("observe_state id2"),
+        "cancelled"
+    );
+
+    // Idempotent on a non-running/non-pending row → returns false
+    assert!(
+        !mark_cancelled(&pool, id2).await.expect("mark_cancelled idempotent"),
+        "mark_cancelled on an already-cancelled row must return false"
+    );
+
+    // ── 5. sweep_crashed ─────────────────────────────────────────────
+    let id3 = insert_pending(&pool, Lane::Fast, serde_json::json!({"instruction": "y"}))
+        .await
+        .expect("insert_pending id3");
+    let _ = claim_one(&pool, Lane::Fast, 60)
+        .await
+        .expect("claim_one id3")
+        .expect("claim_one returned None for id3");
+
+    // Forcibly back-date the lease so sweep_crashed picks it up.
+    sqlx::query("UPDATE tasks SET lease_expires_at = now() - interval '1 second' WHERE id = $1")
+        .bind(id3)
+        .execute(&pool)
+        .await
+        .expect("back-date lease_expires_at");
+
+    let swept = sweep_crashed(&pool).await.expect("sweep_crashed");
+    assert_eq!(swept, 1, "sweep_crashed must find exactly one expired lease");
+    assert_eq!(
+        observe_state(&pool, id3).await.expect("observe_state id3"),
+        "crashed"
+    );
+
+    // Idempotent: no running rows left with an expired lease.
+    assert_eq!(
+        sweep_crashed(&pool).await.expect("sweep_crashed idempotent"),
+        0,
+        "second sweep_crashed must find nothing"
+    );
+
+    pool.close().await;
+
+    // ---------- teardown ----------
+    sup.stop(&spec.name).expect("stop postgres");
+    let _ = sup.uninstall(&spec.name);
+    let _ = (data_root, log_dir, socket_dir);
+}
+
 // ─── secrets ──────────────────────────────────────────────────────
 
 /// End-to-end happy path for `db::secrets`.
