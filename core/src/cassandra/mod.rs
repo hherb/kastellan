@@ -12,6 +12,11 @@
 //! `docs/superpowers/specs/2026-05-10-scheduler-design.md` §6.1 for
 //! the scheduler-side contract.
 
+pub mod review;
 pub mod types;
 
+pub use review::{
+    ChainReviewStage, ConstitutionalGuard, DeterministicPolicy, NoopReviewStage,
+    ReviewStage, ReviewStageContext,
+};
 pub use types::{DataClass, Plan, PlannedStep, Severity, Verdict, DECISION_TERMINAL};
