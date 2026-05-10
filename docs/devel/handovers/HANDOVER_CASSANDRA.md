@@ -4,11 +4,10 @@
 > first, then the spec, then the plan, then continue task-by-task
 > under `superpowers:subagent-driven-development`.
 
-**Last updated:** 2026-05-10 (end of session — Phase 1 complete)
+**Last updated:** 2026-05-11 (end of session — Phases 2–5 complete, all green)
 **Branch:** `worktree-scheduler-phase1` (worktree at
 `.claude/worktrees/scheduler-phase1`)
-**Last commit on branch:** `b125e46` `test(db): tasks_lifecycle_e2e —
-claim, finalize, mark_cancelled, sweep_crashed, NOTIFY round-trips`
+**Last commit on branch:** `40d7719` `docs(roadmap): mark scheduler complete; add real-stages + tool_host wiring follow-up entries`
 
 ---
 
@@ -19,7 +18,7 @@ claim, finalize, mark_cancelled, sweep_crashed, NOTIFY round-trips`
    The implementation contract.
 2. **Plan** —
    [`docs/superpowers/plans/2026-05-10-scheduler.md`](../../superpowers/plans/2026-05-10-scheduler.md).
-   Step-by-step tasks. **Phase 1 (Tasks 1.1–1.10) is done. Resume at Task 2.1.**
+   Step-by-step tasks. **All phases 1–5 are complete. See deferrals below.**
 3. **Project memory** —
    [`HANDOVER.md`](HANDOVER.md) for general project state;
    [`docs/devel/ROADMAP.md`](../ROADMAP.md) for the phase view.
@@ -29,18 +28,29 @@ claim, finalize, mark_cancelled, sweep_crashed, NOTIFY round-trips`
 1. Enter the worktree (use the native `EnterWorktree` tool, pass
    `path: "/Users/hherb/src/hhagent/.claude/worktrees/scheduler-phase1"`).
    The branch is `worktree-scheduler-phase1`.
-2. Re-read the spec + plan above.
-3. Invoke `superpowers:subagent-driven-development` to continue the
-   subagent-per-task + two-stage-review flow (this is what shipped
-   Phase 1).
-4. The next task is **Task 2.1 — `prompts/agent_planner.md`**.
-5. Phase 1 ended on a green build with the integration test
-   passing-by-skip on macOS. On the DGX (Linux + PG installed) the
-   integration test must actually pass — verify with
-   `cargo test -p hhagent-db --test postgres_e2e tasks_lifecycle_e2e -- --nocapture`
-   before continuing.
+2. The scheduler implementation is **complete** — all tests pass (267 workspace,
+   all skip-as-pass on macOS without PG).
+3. **Next step: merge this branch into `main`**, then proceed to:
+   - Observation phase (spec §9) — collect real failure modes before designing
+     real `ConstitutionalGuard` + `DeterministicPolicy` rules.
+   - Task 3.2.bis — wire `ToolHostStepDispatcher` to `tool_host::dispatch`.
+   - Task 4.4 — `cli_ask_e2e` (depends on 3.2.bis).
 
-## Phase 1 — what shipped (15 commits)
+## Phases 1–5 — what shipped (commits `b125e46`–`40d7719`, branch `worktree-scheduler-phase1`)
+
+### Phases 2–5 (this session — commit range `71e144f`–`40d7719`)
+
+- **`prompts/agent_planner.md`** — planning protocol with constitutional principles; CASSANDRA terminal data_ceiling; `DECISION_TERMINAL` ("task_complete") shape.
+- **`core::scheduler::prompts`** — `PromptCache`, `load_prompts_from_dir` (reads `.md`, SHA-256-hashes, upserts into `agent_prompts` ledger, returns `Arc<PromptCache>`).
+- **`core::scheduler::agent`** — `PlanFormulator` trait (async, `async-trait`), `TaskContext` (task row + pool), `FormulationMeta` (prompt name/sha, model, backend, latency, retry count), `AgentError`.
+- **`core::scheduler::inner_loop`** — `run_to_terminal` (claim → LLM plan → CASSANDRA review chain → dispatch steps → repeat), `Outcome` (Completed/Failed/Cancelled), `StepDispatcher` trait, `StepOutcome`. Plan-iteration cap = 10.
+- **`core::scheduler::runner`** — `LaneRunner` (per-lane `PgListener` wake-up + `claim_one` loop + spawn inner_loop), `ToolHostStepDispatcher` (NOT_IMPLEMENTED placeholder — see deferrals), `spawn_scheduler` (starts both lanes).
+- **`core/src/main.rs` wiring** — `spawn_scheduler` at daemon startup; `sweep_crashed` on boot; prompt load; `ChainReviewStage` with stub stages.
+- **`hhagent-cli` subcommands** — `ask` (LISTEN-before-INSERT completion signal, ctrl-C cancel), `tasks list`, `tasks status`, `tasks cancel`, `tasks fail`, `tasks tail`.
+- **Integration tests (skip-as-pass without PG):** `scheduler_inner_loop_e2e` (4 scenarios: happy path, tool-fail-recover, cap-exhausted, cancel); `scheduler_lanes_e2e` (concurrent fast+long claim timing); `scheduler_crash_recovery_e2e` (back-dated lease → sweep_crashed); `agent_prompts_e2e` (hash lands + both versions persist).
+- **ROADMAP** — scheduler entry marked `[x]` with commit range; 3.2.bis, 4.4, and real-stages follow-up entries added as unchecked items.
+
+### Phase 1 — what shipped (15 commits)
 
 - Migrations `0005_tasks_scheduler.sql` (lanes, lease, expanded state
   CHECK, three NOTIFY triggers, GRANT shape with REVOKE DELETE on
@@ -131,15 +141,17 @@ claim, finalize, mark_cancelled, sweep_crashed, NOTIFY round-trips`
   `#[serde(skip_serializing_if = "Option::is_none")]` so `None` is
   fully absent from the wire — pinned by an updated test.
 
-## What's still ahead (15 tasks)
+## What's still ahead (2 deferred tasks + observation phase)
 
-| Phase | Tasks | What lands |
+| Priority | Task | What lands |
 |---|---|---|
-| 2 | 2.1 – 2.5 | `prompts/agent_planner.md`, `PromptCache`, `PlanFormulator`, inner loop, integration test |
-| 3 | 3.1 – 3.4 | Lane runners + crash recovery, `main.rs` wiring, `ToolHostStepDispatcher`, two integration tests |
-| 4 | 4.1 – 4.4 | `hhagent-cli` subcommands (ask, tasks list/status/cancel/fail/tail), CLI integration test |
-| 5 | 5.1 – 5.3 | Prompt-ledger e2e, ROADMAP + main HANDOVER updates |
-| – | Final review | One-shot review of the full scheduler implementation |
+| 1 | **Merge branch into `main`** | Close worktree, clean up, update HANDOVER.md Branch field |
+| 2 | **Observation phase** (spec §9) | Collect real agent failure modes before designing stage rules |
+| 3 | **Task 3.2.bis** — wire `ToolHostStepDispatcher` to `tool_host::dispatch` | Daemon can actually execute shell-exec steps from the scheduler loop; currently `NOT_IMPLEMENTED` placeholder |
+| 4 | **Task 4.4** — `cli_ask_e2e` integration test | Subprocess + mock LLM + daemon supervisor bring-up; depends on 3.2.bis |
+| 5 | **Real `ConstitutionalGuard` + `DeterministicPolicy`** | Design rule-sets after observing baseline failure modes; stub stages intentionally always-Approve until then |
+
+**Task 3.2.bis detail:** `ToolHostStepDispatcher` lives in `core/src/scheduler/runner.rs` as a `StepDispatcher` impl. Its `dispatch_step` currently returns `StepOutcome::Err { code: "NOT_IMPLEMENTED", ... }` for every step. The real impl needs to: (1) map `step.tool` to a worker binary path, (2) call `tool_host::dispatch(&pool, worker, &step.tool, &step.method, params)`, (3) translate the JSON-RPC result into a `StepOutcome`. The `audit_log` write happens inside `tool_host::dispatch` automatically.
 
 When the implementation is green and merged: hold for the
 **observation phase** (spec §9) before swapping the stub stages for
