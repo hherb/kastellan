@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+pub mod agent_prompts;
 pub mod audit;
 pub mod conn;
 pub mod graph;
