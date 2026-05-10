@@ -129,6 +129,12 @@ impl From<std::io::Error> for DbError {
     }
 }
 
+impl From<sqlx::Error> for DbError {
+    fn from(value: sqlx::Error) -> Self {
+        DbError::Query(value.to_string())
+    }
+}
+
 /// Inputs to [`build_initdb_argv`]. Caller resolves all paths.
 ///
 /// The struct exists so we can grow new options (e.g. `--locale`,

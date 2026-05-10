@@ -61,3 +61,40 @@ mod tests {
         assert!(Lane::from_sql("medium").is_err());
     }
 }
+
+/// One decoded `tasks` row.
+#[derive(Clone, Debug)]
+pub struct Task {
+    pub id: i64,
+    pub state: String,
+    pub lane: Lane,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub started_at: Option<OffsetDateTime>,
+    pub finished_at: Option<OffsetDateTime>,
+    pub lease_expires_at: Option<OffsetDateTime>,
+    pub plan_count: i32,
+    pub payload: serde_json::Value,
+    pub result: Option<serde_json::Value>,
+}
+
+/// Insert a fresh `pending` task row. The `tasks_inserted` trigger
+/// will fire `pg_notify('tasks_inserted', NEW.id::text)` for any
+/// listeners (the lane runner of the matching lane).
+pub async fn insert_pending(
+    pool: &PgPool,
+    lane: Lane,
+    payload: serde_json::Value,
+) -> Result<i64, DbError> {
+    let row = sqlx::query(
+        "INSERT INTO tasks (state, lane, payload) \
+         VALUES ('pending', $1, $2) \
+         RETURNING id",
+    )
+    .bind(lane.as_sql())
+    .bind(&payload)
+    .fetch_one(pool)
+    .await
+    .map_err(DbError::from)?;
+    Ok(row.try_get::<i64, _>("id").map_err(DbError::from)?)
+}
