@@ -240,7 +240,7 @@ async fn write_audit_plan_formulate(
         "latency_ms":       meta.latency_ms,
         "retry_count":      meta.retry_count,
         "plan_step_count":  plan.steps.len(),
-        "decision_kind":    if plan.is_terminal() { "task_complete" } else { "act" },
+        "decision_kind":    if plan.is_terminal() { crate::cassandra::types::DECISION_TERMINAL } else { "act" },
     });
     hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
