@@ -18,10 +18,14 @@ user just says "read the handover" and the next session has full context.
   - Update the "Working state" snapshot (what's green, what's stubbed)
   - Update [`../ROADMAP.md`](../ROADMAP.md) — tick `[ ]` → `[x]` for any
     items that shipped this session, with the commit hash
-- **Archive** older handovers under `archive/<YYYY-MM-DD-slug>.md` only if
-  the new session-end content is markedly different and the previous
-  context is worth preserving as history. Most updates should overwrite
-  in place.
+- **Pruning**: keep HANDOVER.md focused on what the next session needs to
+  act on (current state + last 2–3 sessions in detail + next TODO). Older
+  session entries get compressed into an "Earlier history" summary or
+  dropped once they're no longer load-bearing. Before pruning, snapshot
+  the current HANDOVER.md to [`archive/handover_<YYYYMMDD>[_<slug>].md`](archive/)
+  — the archive is the audit trail and is never edited after the fact.
+  See the "How to update this document at session end" section in HANDOVER.md
+  for the full pruning checklist.
 
 ## Why this exists
 
