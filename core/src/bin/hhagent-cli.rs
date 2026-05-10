@@ -443,17 +443,109 @@ async fn tasks_status(args: &[String]) -> ExitCode {
     }
 }
 
-async fn tasks_cancel(_args: &[String]) -> ExitCode {
-    eprintln!("tasks cancel: not yet implemented");
-    ExitCode::from(2)
+async fn tasks_cancel(args: &[String]) -> ExitCode {
+    use hhagent_db::pool::connect_runtime_pool;
+    use hhagent_db::tasks::mark_cancelled;
+
+    let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
+        Some(i) => i,
+        None => { eprintln!("usage: tasks cancel <id>"); return ExitCode::from(2); }
+    };
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    match mark_cancelled(&pool, id).await {
+        Ok(true)  => { println!("cancelled task {id}"); ExitCode::from(0) }
+        Ok(false) => { eprintln!("task {id} not in cancellable state"); ExitCode::from(1) }
+        Err(e)    => { eprintln!("{e}"); ExitCode::from(1) }
+    }
 }
 
-async fn tasks_fail(_args: &[String]) -> ExitCode {
-    eprintln!("tasks fail: not yet implemented");
-    ExitCode::from(2)
+async fn tasks_fail(args: &[String]) -> ExitCode {
+    use hhagent_db::pool::connect_runtime_pool;
+    use hhagent_db::tasks::mark_failed_running;
+
+    let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
+        Some(i) => i,
+        None => { eprintln!("usage: tasks fail <id>"); return ExitCode::from(2); }
+    };
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    match mark_failed_running(&pool, id).await {
+        Ok(true)  => { println!("marked task {id} as crashed"); ExitCode::from(0) }
+        Ok(false) => { eprintln!("task {id} not in 'running' or lease already elapsed"); ExitCode::from(1) }
+        Err(e)    => { eprintln!("{e}"); ExitCode::from(1) }
+    }
 }
 
-fn tasks_tail(_args: &[String]) -> ExitCode {
-    eprintln!("tasks tail: not yet implemented");
-    ExitCode::from(2)
+/// One-shot scan of the audit JSONL files for rows whose payload
+/// contains `"task_id":<id>`. Prints matching lines to stdout.
+///
+/// Follow mode (live tailing) is a follow-up; use `audit tail` for
+/// live tailing of the full stream. This function exits after scanning
+/// all existing files so it is suitable for post-mortem inspection of a
+/// completed task.
+fn tasks_tail(args: &[String]) -> ExitCode {
+    let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
+        Some(i) => i,
+        None => { eprintln!("usage: tasks tail <id>"); return ExitCode::from(2); }
+    };
+
+    let state_dir = match std::env::var_os(audit_mirror::ENV_STATE_DIR) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match audit_mirror::default_state_dir() {
+            Some(p) => p,
+            None => {
+                eprintln!("$HOME unset; cannot resolve state dir");
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    let needle = format!("\"task_id\":{id}");
+
+    let entries = match std::fs::read_dir(&state_dir) {
+        Ok(it) => it,
+        Err(e) => { eprintln!("read_dir({state_dir:?}): {e}"); return ExitCode::from(1); }
+    };
+
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("audit-") && n.ends_with(".jsonl"))
+                .unwrap_or(false)
+        })
+        .collect();
+    // Walk files in chronological (lexicographic) order so the oldest
+    // events for this task appear before newer ones.
+    files.sort();
+
+    use std::io::{BufRead, BufReader};
+    for path in files {
+        let f = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        for line in BufReader::new(f).lines().map_while(Result::ok) {
+            if line.contains(&needle) {
+                println!("{line}");
+            }
+        }
+    }
+
+    ExitCode::from(0)
 }
