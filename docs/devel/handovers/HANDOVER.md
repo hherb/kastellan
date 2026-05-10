@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** `3279c6d` (`feat(tool_host): Option M — sealed WorkerCommand + dispatch chokepoint compile-time pin`) — bump pending after Option N commit lands
+**Last commit:** `48dfeee` (`feat(memory): Option N — memory::recall skeleton (semantic + lexical lanes fused via RRF)`)
 **Branch:** `main`
 
 ---
