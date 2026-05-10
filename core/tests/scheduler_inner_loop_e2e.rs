@@ -245,7 +245,7 @@ fn bring_up_pg_cluster(
 
 /// Async helper: bring up a PG cluster, run migrations, return pool +
 /// guards. Returns `None` when PG or supervisor is unavailable (skip).
-async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, ServiceGuard, PathGuard, PathGuard)> {
+async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, (ServiceGuard, PathGuard, PathGuard))> {
     if skip_if_no_supervisor() {
         return None;
     }
@@ -258,7 +258,6 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, ServiceGuard, PathGua
     // without requiring the return value to be Send.
     let (conn_spec, guards) =
         tokio::task::block_in_place(|| bring_up_pg_cluster(&bin_dir, &suffix));
-    let (svc, data, log) = guards;
 
     hhagent_db::probe::run(
         &conn_spec,
@@ -273,7 +272,12 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, ServiceGuard, PathGua
         .await
         .ok()?;
 
-    Some((pool, svc, data, log))
+    // Single guard tuple so all three Drop impls run in declaration order
+    // (ServiceGuard first to stop PG, then PathGuards to remove dirs).
+    // A flat 4-tuple destructure would invert the order via reverse-LIFO
+    // local drops and PG would still be writing to the data dir while it
+    // gets remove_dir_all'd.
+    Some((pool, guards))
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +399,7 @@ fn make_ctx(task_id: i64, max_plans: u32) -> TaskContext {
 ///     Completed("pong").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn happy_path_one_plan_returns_completed() {
-    let Some((pool, _g1, _g2, _g3)) = bring_up_pg("ihp").await else {
+    let Some((pool, _guards)) = bring_up_pg("ihp").await else {
         return; // [SKIP]
     };
 
@@ -423,7 +427,7 @@ async fn happy_path_one_plan_returns_completed() {
 ///     Completed("recovered").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_fail_then_recover_returns_completed() {
-    let Some((pool, _g1, _g2, _g3)) = bring_up_pg("itf").await else {
+    let Some((pool, _guards)) = bring_up_pg("itf").await else {
         return; // [SKIP]
     };
 
@@ -454,7 +458,7 @@ async fn tool_fail_then_recover_returns_completed() {
 ///     iteration's cap-check fires → Failed("plan_iteration_cap_exceeded …").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plan_iteration_cap_exhausted_returns_failed() {
-    let Some((pool, _g1, _g2, _g3)) = bring_up_pg("icap").await else {
+    let Some((pool, _guards)) = bring_up_pg("icap").await else {
         return; // [SKIP]
     };
 
@@ -491,7 +495,7 @@ async fn plan_iteration_cap_exhausted_returns_failed() {
 ///     at the top of the next iteration and returns Cancelled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_mid_execution_returns_cancelled() {
-    let Some((pool, _g1, _g2, _g3)) = bring_up_pg("ican").await else {
+    let Some((pool, _guards)) = bring_up_pg("ican").await else {
         return; // [SKIP]
     };
 
