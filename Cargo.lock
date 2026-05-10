@@ -839,7 +839,9 @@ name = "hhagent-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "hhagent-db",
+ "hhagent-llm-router",
  "hhagent-protocol",
  "hhagent-sandbox",
  "hhagent-supervisor",

@@ -29,8 +29,10 @@ hhagent-sandbox    = { path = "../sandbox" }
 hhagent-supervisor = { path = "../supervisor" }
 hhagent-protocol   = { path = "../protocol" }
 hhagent-db         = { path = "../db" }
+hhagent-llm-router = { path = "../llm-router" }
 
 tokio              = { workspace = true }
+async-trait        = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 anyhow             = { workspace = true }
@@ -47,4 +49,5 @@ sqlx               = { workspace = true }
 # keeping this confined to dev-dependencies makes the limited scope
 # explicit.
 [dev-dependencies]
-sha2 = { workspace = true }
+sha2      = { workspace = true }
+tempfile  = "3"

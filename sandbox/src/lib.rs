@@ -66,7 +66,12 @@ pub enum SandboxError {
 
 /// Common backend interface. To be implemented by [`linux_bwrap`], [`macos_seatbelt`],
 /// and [`microvm`] in subsequent phases.
-pub trait SandboxBackend {
+///
+/// `Send + Sync` are required because backends are shared via `Arc<dyn SandboxBackend>`
+/// across async tasks in the scheduler (one `Arc` per lane runner). Both concrete
+/// implementations (`LinuxBwrap`, `MacosSeatbelt`) hold no mutable state and
+/// satisfy these bounds automatically.
+pub trait SandboxBackend: Send + Sync {
     /// Build the argv (or equivalent invocation) that runs `program` with `args`
     /// under `policy`. Implementation detail of the backend; not stable yet.
     fn spawn_under_policy(

@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+pub mod agent_prompts;
 pub mod audit;
 pub mod conn;
 pub mod graph;
@@ -34,6 +35,7 @@ pub mod memories;
 pub mod pool;
 pub mod probe;
 pub mod secrets;
+pub mod tasks;
 
 /// Serialise unit tests that mutate process-wide environment variables.
 ///
@@ -116,11 +118,21 @@ pub enum DbError {
     /// (e.g. `$XDG_DATA_HOME`) reuse this variant.
     #[error("required environment variable unset: {0}")]
     EnvVarMissing(&'static str),
+
+    /// Catchall for other errors not fitting other variants.
+    #[error("{0}")]
+    Other(String),
 }
 
 impl From<std::io::Error> for DbError {
     fn from(value: std::io::Error) -> Self {
         DbError::Io(value.to_string())
+    }
+}
+
+impl From<sqlx::Error> for DbError {
+    fn from(value: sqlx::Error) -> Self {
+        DbError::Query(value.to_string())
     }
 }
 

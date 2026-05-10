@@ -1,0 +1,356 @@
+//! Per-task iterative replanning loop.
+//!
+//! Called by the lane runner once a task is claimed. Owns the
+//! per-task `Workspace` and the `TaskContext` that accumulates state
+//! across plan iterations.
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use thiserror::Error;
+
+use crate::cassandra::review::{ChainReviewStage, ReviewStage, ReviewStageContext};
+use crate::cassandra::types::{DataClass, Plan, PlannedStep, Verdict};
+
+use super::agent::{AgentError, FormulationMeta, PlanFormulator};
+
+/// Per-task accumulator state passed to the agent each iteration.
+#[derive(Debug)]
+pub struct TaskContext {
+    pub task_id: i64,
+    pub lane: hhagent_db::tasks::Lane,
+    pub instruction: String,
+    pub classification_floor: DataClass,
+    pub plans: Vec<(Plan, Vec<StepOutcome>)>,
+    pub advisories: Vec<String>,
+    pub blocks: Vec<String>,
+    pub plan_count: u32,
+    pub max_plans: u32,
+}
+
+impl TaskContext {
+    /// Compact summary of completed plans, for inclusion in the
+    /// agent's input. Avoids dumping unbounded `serde_json::Value`
+    /// blobs into the prompt; gives just enough for the agent to
+    /// reflect.
+    pub fn plans_so_far_summary(&self) -> Vec<serde_json::Value> {
+        self.plans.iter().map(|(p, outcomes)| {
+            serde_json::json!({
+                "decision":      p.decision,
+                "step_outcomes": outcomes.iter().map(|o| match o {
+                    StepOutcome::Ok(_) => "ok",
+                    StepOutcome::Err { .. } => "err",
+                }).collect::<Vec<_>>(),
+            })
+        }).collect()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum StepOutcome {
+    Ok(serde_json::Value),
+    Err { code: String, detail: String },
+}
+
+impl StepOutcome {
+    pub fn is_err(&self) -> bool { matches!(self, StepOutcome::Err { .. }) }
+}
+
+/// Terminal result of the inner loop. The lane runner translates
+/// these into `tasks.state` + `tasks.result` via `db::tasks::finalize`.
+#[derive(Clone, Debug)]
+pub enum Outcome {
+    Completed(serde_json::Value),
+    Failed(String),
+    Cancelled,
+    TimedOut,
+    Blocked { principle: u8, reason: String },
+}
+
+impl Outcome {
+    pub fn final_state(&self) -> &'static str {
+        match self {
+            Outcome::Completed(_) => "completed",
+            Outcome::Failed(_)    => "failed",
+            Outcome::Cancelled    => "cancelled",
+            Outcome::TimedOut     => "timed_out",
+            Outcome::Blocked { .. } => "blocked",
+        }
+    }
+
+    pub fn result_payload(&self) -> Option<serde_json::Value> {
+        match self {
+            Outcome::Completed(v) => Some(v.clone()),
+            Outcome::Failed(s)    => Some(serde_json::json!({"kind": "error", "detail": s})),
+            Outcome::Blocked { principle, reason } =>
+                Some(serde_json::json!({"kind": "blocked", "principle": principle, "reason": reason})),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum InnerLoopError {
+    #[error("agent: {0}")]
+    Agent(#[from] AgentError),
+    #[error("db: {0}")]
+    Db(#[from] hhagent_db::DbError),
+}
+
+/// Trait for executing a single `PlannedStep`. The production impl
+/// is a thin wrapper around `tool_host::dispatch`; the test impl
+/// returns scripted `StepOutcome`s.
+#[async_trait::async_trait]
+pub trait StepDispatcher: Send + Sync {
+    async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome;
+}
+
+/// Run the inner loop until terminal. Returns an `Outcome` that the
+/// lane runner finalises into a `tasks` row UPDATE.
+pub async fn run_to_terminal(
+    pool: &PgPool,
+    formulator: Arc<dyn PlanFormulator>,
+    review: Arc<ChainReviewStage>,
+    dispatcher: Arc<dyn StepDispatcher>,
+    mut ctx: TaskContext,
+) -> Result<Outcome, InnerLoopError> {
+    use hhagent_db::tasks;
+
+    loop {
+        // Cancellation poll — top of loop.
+        if tasks::observe_state(pool, ctx.task_id).await? == "cancelled" {
+            return Ok(Outcome::Cancelled);
+        }
+
+        if ctx.plan_count >= ctx.max_plans {
+            return Ok(Outcome::Failed(format!(
+                "plan_iteration_cap_exceeded ({}>={})", ctx.plan_count, ctx.max_plans
+            )));
+        }
+
+        // 1. Formulate plan
+        let (plan, meta) = match formulator.formulate_plan(&ctx).await {
+            Ok(x) => x,
+            Err(AgentError::Router(e)) if is_transient(&e) => {
+                // Backoff retry up to 3 attempts, handled inside the
+                // formulator if it implements its own retry; here we
+                // surface as Failed if it bubbles. For this scope we
+                // do not retry at the loop level (replanning is the
+                // retry shape), but transient errors that escape the
+                // formulator are loud failures.
+                return Ok(Outcome::Failed(format!("llm_transient: {e}")));
+            }
+            Err(e) => return Ok(Outcome::Failed(format!("llm: {e}"))),
+        };
+
+        ctx.plan_count += 1;
+        let _ = tasks::increment_plan_count(pool, ctx.task_id, ctx.plan_count as i32).await;
+
+        write_audit_plan_formulate(pool, &ctx, &plan, &meta).await?;
+
+        // 2. CASSANDRA review
+        let rctx = ReviewStageContext {
+            task_id: ctx.task_id,
+            instruction: &ctx.instruction,
+            classification_floor: ctx.classification_floor,
+            plan_count: ctx.plan_count,
+        };
+        let verdict_start = std::time::Instant::now();
+        let verdict = review.review(&plan, &rctx).await;
+        write_audit_verdict(pool, &ctx, &verdict, verdict_start.elapsed().as_millis() as u64).await?;
+
+        match &verdict {
+            Verdict::ConstitutionalBlock { principle, reason } =>
+                return Ok(Outcome::Blocked { principle: *principle, reason: reason.clone() }),
+            Verdict::Block(reason) => {
+                ctx.blocks.push(reason.clone());
+                continue;  // bounded by plan_count cap on next iter
+            }
+            Verdict::Escalate(reason, _sev) => {
+                // No channel bus in this scope — treat as Block so
+                // the agent gets a chance to revise.
+                ctx.blocks.push(format!("escalate(no-channel): {reason}"));
+                continue;
+            }
+            Verdict::Advisory(c) => {
+                ctx.advisories.push(c.clone());
+                // proceed
+            }
+            Verdict::Approve => { /* proceed */ }
+        }
+
+        // 3. Terminal check
+        if plan.is_terminal() {
+            let result = plan.result.clone()
+                .unwrap_or_else(|| serde_json::json!({"kind": "text", "body": ""}));
+            return Ok(Outcome::Completed(result));
+        }
+
+        // 4. Execute steps
+        let mut outcomes: Vec<StepOutcome> = Vec::with_capacity(plan.steps.len());
+        for step in &plan.steps {
+            if tasks::observe_state(pool, ctx.task_id).await? == "cancelled" {
+                return Ok(Outcome::Cancelled);
+            }
+            let outcome = dispatcher.dispatch_step(step).await;
+            let is_err = outcome.is_err();
+            outcomes.push(outcome);
+            if is_err { break; }
+        }
+
+        let steps_total = plan.steps.len();
+        let steps_executed = outcomes.len();
+        let any_err = outcomes.iter().any(|o| o.is_err());
+        write_audit_plan_outcome(
+            pool, &ctx, steps_executed, steps_total, any_err,
+        ).await?;
+
+        ctx.plans.push((plan, outcomes));
+        // loop back: agent reflects on the outcomes for the next plan
+    }
+}
+
+/// Returns `true` for errors that are worth retrying (network-level
+/// failures and 5xx HTTP responses from the backend). The corrected
+/// explicit `match` form avoids the `matches!` OR-arm guard ambiguity
+/// in the plan's original draft.
+fn is_transient(e: &hhagent_llm_router::RouterError) -> bool {
+    use hhagent_llm_router::RouterError::*;
+    match e {
+        Transport(_) => true,
+        HttpStatus { status, .. } => (500u16..600).contains(status),
+        _ => false,
+    }
+}
+
+async fn write_audit_plan_formulate(
+    pool: &PgPool,
+    ctx: &TaskContext,
+    plan: &Plan,
+    meta: &FormulationMeta,
+) -> Result<(), InnerLoopError> {
+    let payload = serde_json::json!({
+        "task_id":          ctx.task_id,
+        "plan_count":       ctx.plan_count,
+        "prompt_name":      meta.prompt_name,
+        "prompt_sha256":    meta.prompt_sha256,
+        "llm_model":        meta.llm_model,
+        "llm_backend":      meta.llm_backend,
+        "latency_ms":       meta.latency_ms,
+        "retry_count":      meta.retry_count,
+        "plan_step_count":  plan.steps.len(),
+        "decision_kind":    if plan.is_terminal() { crate::cassandra::types::DECISION_TERMINAL } else { "act" },
+    });
+    hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
+    Ok(())
+}
+
+async fn write_audit_verdict(
+    pool: &PgPool,
+    ctx: &TaskContext,
+    verdict: &Verdict,
+    latency_ms: u64,
+) -> Result<(), InnerLoopError> {
+    let (kind, detail) = match verdict {
+        Verdict::Approve => ("approve", serde_json::Value::Null),
+        Verdict::Advisory(c) => ("advisory", serde_json::json!(c)),
+        Verdict::Escalate(c, s) => ("escalate", serde_json::json!({"concern": c, "severity": s})),
+        Verdict::Block(r) => ("block", serde_json::json!(r)),
+        Verdict::ConstitutionalBlock { principle, reason } =>
+            ("constitutional_block", serde_json::json!({"principle": principle, "reason": reason})),
+    };
+    let payload = serde_json::json!({
+        "task_id":      ctx.task_id,
+        "plan_count":   ctx.plan_count,
+        "verdict_kind": kind,
+        "detail":       detail,
+        "latency_ms":   latency_ms,
+    });
+    hhagent_db::audit::insert(pool, "cassandra:chain", "verdict", payload).await?;
+    Ok(())
+}
+
+async fn write_audit_plan_outcome(
+    pool: &PgPool,
+    ctx: &TaskContext,
+    steps_executed: usize,
+    steps_total: usize,
+    any_err: bool,
+) -> Result<(), InnerLoopError> {
+    let payload = serde_json::json!({
+        "task_id":         ctx.task_id,
+        "plan_count":      ctx.plan_count,
+        "terminal_kind":   if any_err { "err" } else { "ok" },
+        "steps_executed":  steps_executed,
+        "steps_total":     steps_total,
+    });
+    hhagent_db::audit::insert(pool, "scheduler", "plan.outcome", payload).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cassandra::types::DataClass;
+
+    fn ctx() -> TaskContext {
+        TaskContext {
+            task_id: 1,
+            lane: hhagent_db::tasks::Lane::Fast,
+            instruction: "ping".into(),
+            classification_floor: DataClass::Public,
+            plans: vec![],
+            advisories: vec![],
+            blocks: vec![],
+            plan_count: 0,
+            max_plans: 3,
+        }
+    }
+
+    #[test]
+    fn outcome_final_state_mapping() {
+        assert_eq!(Outcome::Completed(serde_json::json!("x")).final_state(), "completed");
+        assert_eq!(Outcome::Failed("e".into()).final_state(), "failed");
+        assert_eq!(Outcome::Cancelled.final_state(), "cancelled");
+        assert_eq!(Outcome::TimedOut.final_state(), "timed_out");
+        assert_eq!(Outcome::Blocked { principle: 1, reason: "r".into() }.final_state(), "blocked");
+    }
+
+    #[test]
+    fn outcome_result_payload_for_failed_includes_detail() {
+        let p = Outcome::Failed("oops".into()).result_payload().unwrap();
+        assert_eq!(p["kind"], "error");
+        assert_eq!(p["detail"], "oops");
+    }
+
+    #[test]
+    fn step_outcome_is_err_classifier() {
+        let ok = StepOutcome::Ok(serde_json::json!("x"));
+        let err = StepOutcome::Err { code: "POLICY_DENIED".into(), detail: "no".into() };
+        assert!(!ok.is_err());
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn task_context_plans_so_far_summary_is_compact() {
+        let mut c = ctx();
+        c.plans.push((
+            crate::cassandra::types::Plan {
+                context: "c".into(),
+                decision: "act".into(),
+                rationale: "r".into(),
+                steps: vec![],
+                result: None,
+                data_ceiling: DataClass::Public,
+            },
+            vec![StepOutcome::Ok(serde_json::json!("x")), StepOutcome::Err {
+                code: "POLICY_DENIED".into(), detail: "no".into(),
+            }],
+        ));
+        let s = c.plans_so_far_summary();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0]["decision"], "act");
+        assert_eq!(s[0]["step_outcomes"], serde_json::json!(["ok", "err"]));
+    }
+}

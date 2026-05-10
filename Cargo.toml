@@ -24,6 +24,7 @@ readme = "README.md"
 # Async runtime + utils
 tokio       = { version = "1", features = ["full"] }
 futures     = "0.3"
+async-trait = "0.1"
 
 # Serialization
 serde       = { version = "1", features = ["derive"] }

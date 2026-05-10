@@ -129,6 +129,12 @@ impl Router {
         self.config.timeout
     }
 
+    /// Borrow the router's configuration. Used by the agent adapter to
+    /// learn the active local model name without holding a separate copy.
+    pub fn config(&self) -> &RouterConfig {
+        &self.config
+    }
+
     /// Which backend would the router pick for `request`?
     ///
     /// Pure delegation to the configured [`PolicyGate`]; exposed for

@@ -12,7 +12,9 @@
 
 pub mod audit_mirror;
 pub mod audit_tail;
+pub mod cassandra;
 pub mod memory;
+pub mod scheduler;
 pub mod tool_host;
 pub mod workspace;
 

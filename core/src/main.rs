@@ -5,6 +5,7 @@ use hhagent_db::default_data_dir;
 use sqlx::PgPool;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::info;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,7 +46,83 @@ async fn main() -> Result<()> {
         .context("opening daemon-scoped Postgres pool")?;
     let mirror = start_audit_mirror(pool.clone()).await;
 
+    // Crash sweep: any task left in 'running' from a previous daemon
+    // instance whose lease has elapsed gets marked 'crashed'. Idempotent.
+    if let Err(e) = hhagent_db::tasks::sweep_crashed(&pool).await {
+        tracing::warn!(error = %e, "tasks::sweep_crashed failed (non-fatal)");
+    }
+
+    // Load every prompts/*.md, hash, upsert into agent_prompts.
+    let prompts_dir = std::env::var("HHAGENT_PROMPTS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("prompts"));
+    let prompts = hhagent_core::scheduler::prompts::load_prompts_from_dir(&pool, &prompts_dir)
+        .await
+        .with_context(|| format!("loading prompts from {:?}", prompts_dir))?;
+
+    // LLM router (existing skeleton).
+    let router_cfg = hhagent_llm_router::RouterConfig::from_env()
+        .map_err(|e| anyhow!("RouterConfig::from_env: {e}"))?;
+    let router = Arc::new(
+        hhagent_llm_router::Router::new(router_cfg)
+            .map_err(|e| anyhow!("Router::new: {e}"))?,
+    );
+
+    // Production review pipeline: stub stages in this scope (see spec
+    // §6.1). Real implementations replace these structs in place.
+    let review = Arc::new(
+        hhagent_core::cassandra::review::ChainReviewStage::new(vec![
+            Arc::new(hhagent_core::cassandra::review::ConstitutionalGuard),
+            Arc::new(hhagent_core::cassandra::review::DeterministicPolicy),
+        ]),
+    );
+
+    let formulator: Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
+        Arc::new(hhagent_core::scheduler::agent::RouterAgent::new(
+            router.clone(),
+            prompts.clone(),
+        ));
+
+    // Workspace root: env override → default under HOME state dir.
+    let workspace_root = std::env::var(hhagent_core::workspace::ENV_WORKSPACE_ROOT)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h)
+                    .join(".local/state/hhagent/workspace"))
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/hhagent-workspace"))
+        });
+
+    // Sandbox backend (cross-platform). The dispatcher in this commit is
+    // a NOT_IMPLEMENTED placeholder; wiring to tool_host::dispatch lands
+    // in Task 3.2.bis. The placeholder still owns these handles so the
+    // follow-up does not have to change call sites.
+    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = sandbox_backend();
+
+    let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
+        Arc::new(
+            hhagent_core::scheduler::runner::ToolHostStepDispatcher::new(
+                pool.clone(),
+                sandbox.clone(),
+                workspace_root.clone(),
+            ),
+        );
+
+    let scheduler = hhagent_core::scheduler::spawn_scheduler(
+        pool.clone(),
+        formulator,
+        review,
+        dispatcher,
+        workspace_root.clone(),
+    );
+    info!("scheduler spawned (lane_fast + lane_long)");
+
     wait_for_shutdown().await?;
+
+    // Stop the scheduler before the audit-mirror so any final audit
+    // rows it writes during graceful drain land in the mirror's
+    // catch-up SELECT.
+    scheduler.shutdown().await;
 
     // Graceful shutdown: stop the mirror task first so any in-flight
     // catch-up SELECT completes its fsync, then close the pool.
@@ -158,10 +235,6 @@ async fn start_audit_mirror(pool: PgPool) -> Option<MirrorHandle> {
 /// `Restart=on-failure` (systemd's translation of `keep_alive=true`)
 /// treats as success, so a stop-induced exit doesn't trip the restart
 /// policy and trigger an unwanted respawn.
-///
-/// The Phase 1 scheduler will plug in here. Today the daemon has no
-/// periodic work, so the signal future is the *only* thing that
-/// should ever wake us — anything else would be a bug.
 async fn wait_for_shutdown() -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -170,4 +243,25 @@ async fn wait_for_shutdown() -> Result<()> {
         _ = sigint.recv() => {}
     }
     Ok(())
+}
+
+/// Return the default sandbox backend for the current OS.
+///
+/// Linux uses bubblewrap (`LinuxBwrap`); macOS uses Seatbelt
+/// (`MacosSeatbelt`). The `ToolHostStepDispatcher` owns the resulting
+/// `Arc` so the real `tool_host::dispatch` wiring in Task 3.2.bis
+/// does not have to change call sites.
+#[cfg(target_os = "linux")]
+fn sandbox_backend() -> Arc<dyn hhagent_sandbox::SandboxBackend> {
+    Arc::new(hhagent_sandbox::linux_bwrap::LinuxBwrap::new())
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_backend() -> Arc<dyn hhagent_sandbox::SandboxBackend> {
+    Arc::new(hhagent_sandbox::macos_seatbelt::MacosSeatbelt::new())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn sandbox_backend() -> Arc<dyn hhagent_sandbox::SandboxBackend> {
+    panic!("no sandbox backend for this OS — only Linux and macOS are supported")
 }
