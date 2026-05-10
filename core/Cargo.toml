@@ -49,4 +49,5 @@ sqlx               = { workspace = true }
 # keeping this confined to dev-dependencies makes the limited scope
 # explicit.
 [dev-dependencies]
-sha2 = { workspace = true }
+sha2      = { workspace = true }
+tempfile  = "3"
