@@ -14,4 +14,4 @@
 
 pub mod types;
 
-pub use types::{DataClass, Plan, PlannedStep, Severity, Verdict};
+pub use types::{DataClass, Plan, PlannedStep, Severity, Verdict, DECISION_TERMINAL};

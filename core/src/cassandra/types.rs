@@ -2,11 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Decision sentinel emitted by the planner to signal task completion.
+/// The inner loop matches on this exact string in `Plan::is_terminal`;
+/// future sites (planner prompt, audit-log schema) reference the same
+/// constant.
+pub const DECISION_TERMINAL: &str = "task_complete";
+
 /// Classification of data flowing through a plan step.
 ///
 /// Outbound policy attaches to each level (see
 /// `docs/cassandra_design_plan.md` §7).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum DataClass {
     Public,
@@ -27,7 +33,7 @@ impl DataClass {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Low,
@@ -59,7 +65,7 @@ pub struct Plan {
     pub decision: String,
     pub rationale: String,
     pub steps: Vec<PlannedStep>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
     pub data_ceiling: DataClass,
 }
@@ -73,7 +79,7 @@ pub struct Plan {
 
 impl Plan {
     pub fn is_terminal(&self) -> bool {
-        self.decision == "task_complete"
+        self.decision == DECISION_TERMINAL
             && self.steps.is_empty()
             && self.result.is_some()
     }
@@ -144,6 +150,16 @@ mod tests {
             data_ceiling: DataClass::Public,
         };
         let s = serde_json::to_string(&p).unwrap();
+
+        // skip_serializing_if must omit the key entirely when result is None.
+        let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert!(
+            parsed.get("result").is_none(),
+            "expected `result` key absent in JSON, got: {s}"
+        );
+
+        // Round-trip is still lossless: Plan { result: None } deserialises
+        // back to Plan { result: None } via the #[serde(default)] hint.
         let p2: Plan = serde_json::from_str(&s).unwrap();
         assert_eq!(p, p2);
     }
