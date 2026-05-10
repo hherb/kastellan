@@ -95,6 +95,8 @@ pub async fn insert_pending(
     .bind(&payload)
     .fetch_one(pool)
     .await
-    .map_err(DbError::from)?;
-    Ok(row.try_get::<i64, _>("id").map_err(DbError::from)?)
+    .map_err(|e| DbError::Query(format!("tasks insert: {e}")))?;
+
+    row.try_get::<i64, _>("id")
+        .map_err(|e| DbError::Query(format!("decode tasks.id: {e}")))
 }
