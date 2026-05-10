@@ -1,29 +1,31 @@
 //! `hhagent-cli` — operator-facing CLI tool.
 //!
-//! Today the only subcommand is `audit tail`, which streams the
-//! daemon's `audit-YYYY-MM-DD.jsonl` files from
-//! `~/.local/state/hhagent/`. The viewer needs no Postgres connection
-//! and works against a daemon that has crashed (the JSONL files are
-//! the durable replica of the `audit_log` DB table written by the
-//! mirror task — see [`hhagent_core::audit_mirror`]).
+//! Subcommands:
 //!
-//! Future subcommands (status, memory dump, manual dispatch, …) will
-//! plug in here as the daemon grows side-channels.
+//! * `audit tail`  — stream the daemon's `audit-YYYY-MM-DD.jsonl`
+//!   files from `~/.local/state/hhagent/`. Works without Postgres
+//!   and survives a crashed daemon (the JSONL is the durable replica
+//!   of `audit_log` written by the mirror task —
+//!   see [`hhagent_core::audit_mirror`]).
+//!
+//! * `ask "<instruction>" [--fast|--long]` — submit a task to the
+//!   scheduler, LISTEN for the completion NOTIFY, then print the
+//!   result. Ctrl-C cancels the pending/running task.
+//!
+//! * `tasks list|status|cancel|fail|tail` — inspect and manage
+//!   tasks in the scheduler DB.
 //!
 //! Usage:
 //!
 //! ```text
-//! hhagent-cli audit tail [--from-start] [--no-follow] [--state-dir PATH]
+//! hhagent-cli ask "<instruction>" [--fast|--long]
+//! hhagent-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
+//! hhagent-cli tasks status <id>
+//! hhagent-cli tasks cancel <id>
+//! hhagent-cli tasks fail   <id>
+//! hhagent-cli tasks tail   <id>
+//! hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 //! ```
-//!
-//! Options:
-//!   --from-start   Replay every existing line before switching to
-//!                  follow mode (default: anchor at end of latest
-//!                  file, like `tail -f`).
-//!   --no-follow    Exit after replaying existing content (like
-//!                  `cat`); only meaningful with --from-start.
-//!   --state-dir P  Override the state directory (default:
-//!                  $HHAGENT_STATE_DIR or $HOME/.local/state/hhagent).
 //!
 //! The CLI parser is hand-rolled (no `clap` dep) because the surface
 //! is tiny and a parser dep would dominate the binary footprint. If
@@ -50,6 +52,8 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        "ask"   => run_ask(&args[2..]),
+        "tasks" => run_tasks(&args[2..]),
         "--help" | "-h" | "help" => {
             println!("{}", help_text());
             ExitCode::from(0)
@@ -65,9 +69,15 @@ fn help_text() -> &'static str {
     "hhagent-cli — operator CLI for hhagent
 
 usage:
-    hhagent-cli audit tail [--from-start] [--no-follow] [--state-dir PATH]
+    hhagent-cli ask \"<instruction>\" [--fast|--long]
+    hhagent-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
+    hhagent-cli tasks status <id>
+    hhagent-cli tasks cancel <id>
+    hhagent-cli tasks fail   <id>
+    hhagent-cli tasks tail   <id>
+    hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 
-flags:
+flags (audit tail):
     --from-start    Replay every line in every existing audit file
                     before switching to follow mode.
     --no-follow     Exit after replaying existing content (use with
@@ -162,4 +172,207 @@ fn run_audit_tail(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Connection helper — shared by every subcommand that needs Postgres.
+// ---------------------------------------------------------------------------
+
+/// Build a [`hhagent_db::conn::ConnectSpec`] from `$HHAGENT_DATA_DIR`
+/// (if set) or the XDG default. Fails with a human-readable error string
+/// when `$HOME` is unset (needed by `ConnectSpec::default_for`).
+fn resolve_connect_spec() -> Result<hhagent_db::conn::ConnectSpec, String> {
+    let data_dir = match std::env::var_os("HHAGENT_DATA_DIR") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => hhagent_db::default_data_dir()
+            .ok_or_else(|| "$HOME unset; cannot resolve cluster data dir".to_string())?,
+    };
+    hhagent_db::conn::ConnectSpec::default_for(&data_dir)
+        .map_err(|e| format!("resolving Postgres connection: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// `ask` subcommand
+// ---------------------------------------------------------------------------
+
+fn run_ask(args: &[String]) -> ExitCode {
+    let mut lane = hhagent_db::tasks::Lane::Fast;
+    let mut instruction: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--long" => { lane = hhagent_db::tasks::Lane::Long; }
+            "--fast" => { lane = hhagent_db::tasks::Lane::Fast; }
+            other if other.starts_with("--") => {
+                eprintln!("ask: unknown flag {other}");
+                return ExitCode::from(2);
+            }
+            other => {
+                if instruction.is_some() {
+                    eprintln!("ask: only one positional instruction allowed");
+                    return ExitCode::from(2);
+                }
+                instruction = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    let Some(instruction) = instruction else {
+        eprintln!("usage: hhagent-cli ask \"<instruction>\" [--fast|--long]");
+        return ExitCode::from(2);
+    };
+
+    // Use a multi-thread runtime so `block_in_place` is available if
+    // any sqlx internals need it; PgListener::recv does not require it
+    // today but the shape is consistent with the rest of the DB code.
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("ask: failed to build tokio runtime: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    rt.block_on(ask_async(lane, instruction))
+}
+
+async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCode {
+    use hhagent_db::pool::connect_runtime_pool;
+    use hhagent_db::tasks::{get, insert_pending, mark_cancelled};
+    use sqlx::postgres::PgListener;
+
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("ask: {e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("ask: db connect failed: {e}"); return ExitCode::from(1); }
+    };
+
+    // LISTEN BEFORE INSERT to avoid the race where the NOTIFY arrives
+    // before we start listening.
+    let mut listener = match PgListener::connect_with(&pool).await {
+        Ok(l) => l,
+        Err(e) => { eprintln!("ask: listener connect failed: {e}"); return ExitCode::from(1); }
+    };
+    if let Err(e) = listener.listen("tasks_completed").await {
+        eprintln!("ask: listen failed: {e}");
+        return ExitCode::from(1);
+    }
+
+    let id = match insert_pending(
+        &pool,
+        lane,
+        serde_json::json!({"instruction": instruction, "kind": "ask"}),
+    )
+    .await
+    {
+        Ok(i) => i,
+        Err(e) => { eprintln!("ask: insert failed: {e}"); return ExitCode::from(1); }
+    };
+
+    eprintln!("ask: submitted task {id} (lane={}); waiting for completion…", lane.as_sql());
+
+    // Wait for a terminal-state NOTIFY for our id, OR ctrl-C.
+    tokio::pin! {
+        let sigint = tokio::signal::ctrl_c();
+    }
+    loop {
+        tokio::select! {
+            n = listener.recv() => match n {
+                Ok(notif) => {
+                    if notif.payload() == id.to_string() { break; }
+                }
+                Err(e) => { eprintln!("ask: listener.recv: {e}"); return ExitCode::from(1); }
+            },
+            result = &mut sigint => {
+                if result.is_ok() {
+                    let _ = mark_cancelled(&pool, id).await;
+                    eprintln!("ask: cancelled (task id {id})");
+                    return ExitCode::from(130);  // standard SIGINT exit code
+                }
+            }
+        }
+    }
+
+    let task = match get(&pool, id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => { eprintln!("ask: task {id} disappeared"); return ExitCode::from(1); }
+        Err(e) => { eprintln!("ask: get failed: {e}"); return ExitCode::from(1); }
+    };
+
+    match (task.state.as_str(), task.result) {
+        ("completed", Some(r)) => {
+            if r.get("kind").and_then(|v| v.as_str()) == Some("text") {
+                if let Some(b) = r.get("body").and_then(|v| v.as_str()) {
+                    println!("{b}");
+                    return ExitCode::from(0);
+                }
+            }
+            // Unknown kind: dump JSON.
+            println!("{}", serde_json::to_string_pretty(&r).unwrap());
+            ExitCode::from(0)
+        }
+        (state, _) => {
+            eprintln!("ask: task ended in state '{state}'");
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `tasks` subcommand dispatcher — body added in Tasks 4.2 + 4.3.
+// ---------------------------------------------------------------------------
+
+fn run_tasks(args: &[String]) -> ExitCode {
+    if args.is_empty() {
+        eprintln!("usage: hhagent-cli tasks <list|status|cancel|fail|tail> ...");
+        return ExitCode::from(2);
+    }
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("tasks: failed to build tokio runtime: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match args[0].as_str() {
+        "list"   => rt.block_on(tasks_list(&args[1..])),
+        "status" => rt.block_on(tasks_status(&args[1..])),
+        "cancel" => rt.block_on(tasks_cancel(&args[1..])),
+        "fail"   => rt.block_on(tasks_fail(&args[1..])),
+        "tail"   => tasks_tail(&args[1..]),
+        other    => { eprintln!("tasks: unknown subcommand {other}"); ExitCode::from(2) }
+    }
+}
+
+async fn tasks_list(_args: &[String]) -> ExitCode {
+    eprintln!("tasks list: not yet implemented");
+    ExitCode::from(2)
+}
+
+async fn tasks_status(_args: &[String]) -> ExitCode {
+    eprintln!("tasks status: not yet implemented");
+    ExitCode::from(2)
+}
+
+async fn tasks_cancel(_args: &[String]) -> ExitCode {
+    eprintln!("tasks cancel: not yet implemented");
+    ExitCode::from(2)
+}
+
+async fn tasks_fail(_args: &[String]) -> ExitCode {
+    eprintln!("tasks fail: not yet implemented");
+    ExitCode::from(2)
+}
+
+fn tasks_tail(_args: &[String]) -> ExitCode {
+    eprintln!("tasks tail: not yet implemented");
+    ExitCode::from(2)
 }
