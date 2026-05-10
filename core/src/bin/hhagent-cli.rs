@@ -352,14 +352,95 @@ fn run_tasks(args: &[String]) -> ExitCode {
     }
 }
 
-async fn tasks_list(_args: &[String]) -> ExitCode {
-    eprintln!("tasks list: not yet implemented");
-    ExitCode::from(2)
+async fn tasks_list(args: &[String]) -> ExitCode {
+    use hhagent_db::pool::connect_runtime_pool;
+    use hhagent_db::tasks::{list, Lane};
+
+    let mut lane: Option<Lane> = None;
+    let mut state: Option<String> = None;
+    let mut limit: i64 = 20;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--lane" => {
+                let v = match args.get(i + 1) {
+                    Some(v) => v,
+                    None => { eprintln!("--lane needs value"); return ExitCode::from(2); }
+                };
+                lane = Some(Lane::from_sql(v).unwrap_or_else(|_| {
+                    eprintln!("--lane must be 'fast' or 'long'");
+                    std::process::exit(2)
+                }));
+                i += 2;
+            }
+            "--state" => {
+                state = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "-n" => {
+                limit = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(20);
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let rows = match list(&pool, lane, state.as_deref(), limit).await {
+        Ok(r) => r,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    for t in rows {
+        let instr = t.payload.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
+        let summary = if instr.len() > 60 { &instr[..60] } else { instr };
+        println!("{:>6}  {:<10}  {:<5}  {}  {}",
+            t.id, t.state, t.lane.as_sql(), t.created_at, summary);
+    }
+    ExitCode::from(0)
 }
 
-async fn tasks_status(_args: &[String]) -> ExitCode {
-    eprintln!("tasks status: not yet implemented");
-    ExitCode::from(2)
+async fn tasks_status(args: &[String]) -> ExitCode {
+    use hhagent_db::pool::connect_runtime_pool;
+    use hhagent_db::tasks::get;
+
+    let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
+        Some(i) => i,
+        None => { eprintln!("usage: tasks status <id>"); return ExitCode::from(2); }
+    };
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    match get(&pool, id).await {
+        Ok(Some(t)) => {
+            println!("id:               {}", t.id);
+            println!("state:            {}", t.state);
+            println!("lane:             {}", t.lane.as_sql());
+            println!("plan_count:       {}", t.plan_count);
+            println!("created_at:       {}", t.created_at);
+            println!("started_at:       {:?}", t.started_at);
+            println!("finished_at:      {:?}", t.finished_at);
+            println!("lease_expires_at: {:?}", t.lease_expires_at);
+            println!("payload:          {}", t.payload);
+            if let Some(r) = t.result {
+                println!("result:           {}", serde_json::to_string_pretty(&r).unwrap());
+            }
+            ExitCode::from(0)
+        }
+        Ok(None) => { eprintln!("task {id} not found"); ExitCode::from(1) }
+        Err(e)   => { eprintln!("{e}"); ExitCode::from(1) }
+    }
 }
 
 async fn tasks_cancel(_args: &[String]) -> ExitCode {
