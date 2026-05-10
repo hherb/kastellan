@@ -23,6 +23,12 @@ A long-running personal AI agent that:
 3. **License hygiene.** Project is AGPL-3.0; every dependency is AGPL-compatible.
 4. **Small core.** The agent core is Rust (no eval, no metaprogramming, no dynamic import). Python lives only inside sandboxed workers.
 
+## Security architecture
+
+<p align="center">
+  <img src="assets/security-architecture.png" alt="hhagent security architecture" width="800">
+</p>
+
 ## Why another one?
 
 Several Rust personal-agent projects exist in the OpenClaw-derived
