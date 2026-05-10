@@ -5,7 +5,7 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-10
-**Last commit:** `3279c6d` (`feat(tool_host): Option M — sealed WorkerCommand + dispatch chokepoint compile-time pin`)
+**Last commit:** `3279c6d` (`feat(tool_host): Option M — sealed WorkerCommand + dispatch chokepoint compile-time pin`) — bump pending after Option N commit lands
 **Branch:** `main`
 
 ---
@@ -22,8 +22,8 @@
 
 ```
 hhagent (Rust workspace, 8 crates, AGPL-3.0)
-├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs now runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup for probe + pool; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`)
-├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement (drop-privilege helper) + probe::run (ensure DB → migrate as superuser → SET ROLE hhagent_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + audit::{insert, fetch_by_id, fetch_since, truncate_payload} (pure 4 KiB SHA-256 envelope + async CRUD) + pool::connect_runtime_pool (PgPool with `after_connect` SET ROLE hhagent_runtime hook) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql + 0002_runtime_role.sql + 0003_audit_log_notify.sql + 0004_secrets_aad_nonempty.sql) + secrets::{Router-shaped AES-256-GCM at-rest with OS keyring KeyProvider} + hhagent-db-init bin
+├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs now runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup for probe + pool; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), memory (Phase-1 `recall(pool, params)` — fans out to `db::memories` semantic + lexical lanes, fuses via Reciprocal Rank Fusion, hydrates top-k bodies in one round-trip; pure `reciprocal_rank_fusion(lists, k)` helper exposed for testing and future re-rankers; `RecallModes::{ALL, SEMANTIC_ONLY, LEXICAL_ONLY}` selector; graph lane deferred — needs entity↔memory linkage that the schema doesn't carry yet)
+├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement (drop-privilege helper) + probe::run (ensure DB → migrate as superuser → SET ROLE hhagent_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + audit::{insert, fetch_by_id, fetch_since, truncate_payload} (pure 4 KiB SHA-256 envelope + async CRUD) + memories::{insert_memory, semantic_search, lexical_search, fetch_by_ids, vector_literal} (pgvector text-cast bind for `vector(1024)` — no `pgvector` Rust crate dep yet; `<=>` cosine distance via sequential scan since HNSW is deferred to first batch ingest; `to_tsvector('simple')` + `ts_rank` paired with the schema's GENERATED `tsv` column) + pool::connect_runtime_pool (PgPool with `after_connect` SET ROLE hhagent_runtime hook) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql + 0002_runtime_role.sql + 0003_audit_log_notify.sql + 0004_secrets_aad_nonempty.sql) + secrets::{Router-shaped AES-256-GCM at-rest with OS keyring KeyProvider} + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. `Router::send(&ChatRequest) -> Result<ChatResponse, RouterError>` over reqwest+rustls; `Backend::{Local, Frontier}` closed enum; `PolicyGate` trait with `DefaultLocalPolicy` always picking `Local` (Phase-5 seam). `RouterConfig::from_env` reads `HHAGENT_LLM_LOCAL_URL` / `HHAGENT_LLM_LOCAL_MODEL` / `HHAGENT_LLM_FRONTIER_URL` / `HHAGENT_LLM_FRONTIER_MODEL` / `HHAGENT_LLM_TIMEOUT_MS`. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns `RouterError::PolicyDeniedFrontier` until Phase 5
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt
 ├── supervisor         hhagent-supervisor: SystemdUser (Linux) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec} + default_probe (per-OS supervisor probe)
@@ -32,8 +32,8 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 227 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (224 → 227, +3 from Option M's dispatcher-chokepoint compile-time pin: 2 unit tests for `WorkerCommand::new` + 1 `compile_fail` doctest pinning that out-of-crate construction does not compile. The four `core/tests/shell_exec_e2e.rs` tests are unchanged in count but were rewritten to route through `tool_host::dispatch` — the seal forces it. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
-**macOS projection:** ~174 (was ~171; +3 from the same set — the seal slice is platform-neutral). The four migrated `shell_exec_e2e` tests now `[SKIP]` cleanly on hosts without Postgres / supervisor / sandbox / worker binary; existing macOS hosts with `brew install postgresql@18` continue to run them. Re-run on macOS to confirm.
+**`cargo test --workspace` on Linux: 247 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (227 → 247, +20 from Option N's `memory::recall` skeleton: 7 db unit tests on `memories::{vector_literal, EMBEDDING_DIM, DEFAULT_RECALL_K, insert_memory dim check}` + 12 core unit tests on `memory::{RecallModes shape, reciprocal_rank_fusion algorithm}` + 1 cross-platform integration test (`core/tests/memory_recall_e2e.rs`) that brings up a per-test PG cluster, seeds three memories with deterministic SHA-256-seeded embeddings + bodies, and asserts the matched memory is rank-1 under semantic-only, lexical-only, and the fused RRF result). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**macOS projection:** ~194 (was ~174; +20 from the same set — every new test is platform-neutral: pure unit tests + a PG-touching integration test that `[SKIP]`s cleanly without `brew install postgresql@18`). Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -42,11 +42,12 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 | `sandbox` unit (macos) | 14 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation + **strict profile does NOT contain unrestricted `(allow mach-lookup)`** (issue #1) |
 | `sandbox` integration (`linux_smoke`) | 7 | **real** bwrap+cgroup: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected, **mem_burner allocating 256 MiB under `MemoryMax=32M` is OOM-killed by the kernel** |
 | `sandbox` integration (`macos_smoke`) | 10 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny`, **worker is the leader of a fresh session — sid == pid via setsid (issue #2)**, **worker cannot `bootstrap_look_up` `com.apple.coreservices.appleevents` (issue #1)** |
-| `core` unit | 28 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests). **Option I additions (10):** `audit_mirror::audit_log_path_for` zero-pads month/day + handles 4-digit year (2 tests), `format_jsonl_line` ends with single \n + serialises every AuditRow field (2 tests), `default_state_dir` resolves under `$HOME/.local/state/hhagent` (1 test). `audit_tail::parse_audit_filename` accepts canonical shape + rejects every off-shape (no prefix/suffix/wrong digit count/non-numeric/invalid date) (2 tests), `find_audit_files` returns dates ascending + ignores non-matching files + handles missing dirs (2 tests), `tail_loop` from-start mode replays then exits (1 test). **Option M additions (2):** `worker_command_new_carries_method_and_params` pins that the `pub(crate)` constructor preserves both the method (any `Into<String>` form) and the JSON params verbatim (1 test); `worker_command_new_accepts_owned_string` pins that the `Into<String>` parameter shape accepts both `&str` (the dispatcher's call site form) and an owned `String` so a refactor narrowing the bound trips this test (1 test) |
+| `core` unit | 40 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests). **Option I additions (10):** `audit_mirror::audit_log_path_for` zero-pads month/day + handles 4-digit year (2 tests), `format_jsonl_line` ends with single \n + serialises every AuditRow field (2 tests), `default_state_dir` resolves under `$HOME/.local/state/hhagent` (1 test). `audit_tail::parse_audit_filename` accepts canonical shape + rejects every off-shape (no prefix/suffix/wrong digit count/non-numeric/invalid date) (2 tests), `find_audit_files` returns dates ascending + ignores non-matching files + handles missing dirs (2 tests), `tail_loop` from-start mode replays then exits (1 test). **Option M additions (2):** `worker_command_new_carries_method_and_params` pins that the `pub(crate)` constructor preserves both the method (any `Into<String>` form) and the JSON params verbatim (1 test); `worker_command_new_accepts_owned_string` pins that the `Into<String>` parameter shape accepts both `&str` (the dispatcher's call site form) and an owned `String` so a refactor narrowing the bound trips this test (1 test). **Option N additions (12):** `memory::reciprocal_rank_fusion` algorithm pins (7 tests: empty input → empty output, single lane preserves order with strictly decreasing scores, two agreeing lanes sum to `2/(k+1)`, two disagreeing lanes tiebreak on smaller id, items absent from a lane contribute 0 not a penalty, two-lane appearer beats single-lane top-1, smaller `k` widens the rank-1-vs-rank-2 ratio); `RecallModes` shape pins (4 tests: `default()` enables every lane, `ALL` constant agrees with `Default`, `SEMANTIC_ONLY` disables lexical, `LEXICAL_ONLY` disables semantic); `RRF_K_CONSTANT` pinned at exactly `60.0` to match the Cormack/Clarke/Buettcher 2009 paper (1 test) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip — **rewritten this session (Option M)** to route every call through `tool_host::dispatch`, since the new `WorkerCommand` seal forecloses out-of-crate `worker.call(...)` invocations. Each test brings up its own per-test PG cluster (same recipe as `audit_dispatch_e2e.rs`) so dispatch's audit-log INSERT lands somewhere; `[SKIP]`s cleanly without PG / supervisor / sandbox / worker binary. Same four assertion shapes: echo round-trip; non-allowlisted argv → POLICY_DENIED (now wrapped in `ToolHostError::Protocol(...)` whose Display still includes the JSON-RPC code); unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree. Per-test PG cost: ~3 s × 4 = ~12 s additional integration-test time on Linux; acceptable for the compile-time chokepoint pin |
+| `core` integration (`memory_recall_e2e`) | 1 | **NEW Option N — cross-platform real** Phase-1 entry. Brings up a per-test PG cluster (same recipe as `audit_dispatch_e2e.rs` and `supervisor_e2e.rs` — issue #15 will eventually hoist this), runs `db::probe::run` to apply 0001+0002+0003+0004, opens `pool::connect_runtime_pool`, then seeds 3 memories with bodies that share no surface words (`"alpha bravo charlie ..."`, `"delta echo foxtrot ..."`, `"golf hotel india ..."`) and 1024-dim L2-normalised embeddings produced by a hermetic `text_to_embedding(text)` helper (SHA-256 of the body → 8-byte xorshift64 seed → 1024 floats in `[-1, 1]` → normalise; same text → same vector → cosine similarity 1.0 → distance 0; different texts → near-orthogonal vectors → distance ≈ 1). Asserts: (1) `db::memories::semantic_search(emb_a, 10).first() == Some(id_a)` — pgvector cosine ranks the exact-match memory first; (2) `db::memories::lexical_search("alpha", 10) == [id_a]` — `tsvector @@ plainto_tsquery('simple', 'alpha')` matches only A; (3) `core::memory::recall(SEMANTIC_ONLY)` returns `id_a` as top-1 with the body byte-for-byte; (4) `core::memory::recall(LEXICAL_ONLY)` returns exactly `[A]`; (5) `core::memory::recall(ALL)` with both lanes voting for A still ranks A first AND includes B + C below it (proves RRF *fuses* rather than intersects). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~1.9 s on the DGX Spark. No HNSW index needed at 3 rows (sequential scan is fast); the index lands with Phase 1's first batch ingest |
 | `core` integration (`audit_dispatch_e2e`) | 1 | **NEW Option I — cross-platform real** dispatcher chokepoint. Brings up a per-test PG cluster (initdb + `postgres_service_spec` + start + wait Active + wait socket), runs `db::probe::run` to apply 0001/0002/0003, opens a `pool::connect_runtime_pool` (which auto-`SET ROLE hhagent_runtime` on every dialed conn), spawns shell-exec under the platform sandbox, and exercises `tool_host::dispatch` twice: once with an allowlisted argv (`echo dispatch-ok`) → success path returns the worker's result and writes a row with `actor=tool:shell-exec`, `action=shell.exec`, payload `{req, result, ms}` (no `err`); once with `/bin/cat /etc/passwd` → POLICY_DENIED, dispatch propagates the error AND writes a row with payload `{req, err, ms}` (no `result`). Final assertion: exactly 3 rows in `audit_log` (bring-up + 2 dispatches) with the per-row payload-shape pins. Multi-thread tokio runtime is mandatory — `dispatch` uses `block_in_place` around the synchronous `Client::call`. Short temp-dir labels (`disp-d`, `disp-l`) keep the cluster socket path under the 108-byte sockaddr_un limit |
 | `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `hhagent` binary with `HHAGENT_DATA_DIR` + `HHAGENT_STATE_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user; `HHAGENT_STATE_DIR` keeps the audit-mirror's JSONL out of the operator's `~/.local/state/`). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d hhagent` and assert `audit_log` has at least one `(actor='core', action='startup')` row → **NEW Option I**: poll the per-test state dir for an `audit-YYYY-MM-DD.jsonl` file containing the bring-up row within ≤ 5 s (proves the audit-mirror task spawned, listened, drained, and fsynced) and assert every line is valid JSON → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + four `PathGuard`s clean up PG service, core service, two data/log dirs, the core log dir, and the per-test state dir on panic. Unique `hhagent-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
-| `db` unit | 61 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted). **Plus Option I additions (6):** `audit::truncate_payload` — small payloads pass through (1), empty object passes through (1), boundary-inclusive non-truncation at exactly `PAYLOAD_MAX_BYTES = 4096` (1), oversize replaced with `{_truncated, sha256, len}` envelope with 64-char lowercase-hex digest (1), deterministic for same input (1), distinct fingerprints for distinct inputs at same length (1). **Plus secrets-at-rest additions (18):** AES-GCM round-trip recovers plaintext (1); decrypt fails under wrong key (1), wrong AAD (1), tampered ciphertext (1), tampered nonce (1); each `encrypt` call uses a fresh nonce — no determinism leak (1); `encrypt` rejects > `MAX_PLAINTEXT_LEN = 64 KiB` (1); AAD shape pin — starts with `AAD_DOMAIN = b"hhagent-secrets-v1"`, NUL-delimited, name embedded (1); AAD with `extra` appends after the second NUL (1); AAD is always non-empty by construction (closes #12 at the application layer) (1); `validate_name` rejects empty (1), oversize > `MAX_NAME_LEN = 256` (1), embedded NUL (1), other control bytes (1); accepts typical operator-friendly names (1); `MapKeyProvider` returns the registered key (1); unknown id is `KeyNotFound` (1); constants `KEY_LEN = 32` / `NONCE_LEN = 12` / `AAD_DOMAIN` / `KEY_SERVICE = "hhagent"` / `KEY_ACCOUNT = "secrets-v1"` are all pinned (1) |
+| `db` unit | 69 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted). **Plus Option I additions (6):** `audit::truncate_payload` — small payloads pass through (1), empty object passes through (1), boundary-inclusive non-truncation at exactly `PAYLOAD_MAX_BYTES = 4096` (1), oversize replaced with `{_truncated, sha256, len}` envelope with 64-char lowercase-hex digest (1), deterministic for same input (1), distinct fingerprints for distinct inputs at same length (1). **Plus secrets-at-rest additions (18):** AES-GCM round-trip recovers plaintext (1); decrypt fails under wrong key (1), wrong AAD (1), tampered ciphertext (1), tampered nonce (1); each `encrypt` call uses a fresh nonce — no determinism leak (1); `encrypt` rejects > `MAX_PLAINTEXT_LEN = 64 KiB` (1); AAD shape pin — starts with `AAD_DOMAIN = b"hhagent-secrets-v1"`, NUL-delimited, name embedded (1); AAD with `extra` appends after the second NUL (1); AAD is always non-empty by construction (closes #12 at the application layer) (1); `validate_name` rejects empty (1), oversize > `MAX_NAME_LEN = 256` (1), embedded NUL (1), other control bytes (1); accepts typical operator-friendly names (1); `MapKeyProvider` returns the registered key (1); unknown id is `KeyNotFound` (1); constants `KEY_LEN = 32` / `NONCE_LEN = 12` / `AAD_DOMAIN` / `KEY_SERVICE = "hhagent"` / `KEY_ACCOUNT = "secrets-v1"` are all pinned (1). **Plus Option N additions (7):** `memories::EMBEDDING_DIM` pinned at `1024` (1); `DEFAULT_RECALL_K` is at least 1 (1); `vector_literal` formatter shape — empty slice → `[]` (1), single-element no trailing comma → `[0.5]` (1), multi-element preserves order → `[1,2,3]` not `[3,2,1]` (1), negatives flow through → `[-0.5,0.5]` (1); `insert_memory` rejects too-short embedding with `DbError::Query` whose message names both got and expected dim (1) |
 | `db` integration (`postgres_e2e`) | 5 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (existing C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Runtime ~2.1 s on the DGX Spark. **`runtime_role_audit_log_revoke_is_enforced`** (Option L): brings up a per-test PG cluster, runs the probe (which now applies `0001` + `0002` and switches to `SET ROLE hhagent_runtime` for its own audit insert), then connects on a fresh pool connection, asserts `pg_roles` rolsuper/rolcanlogin/rolinherit/rolcreaterole/rolcreatedb are all false, asserts the OS user is recorded in `pg_auth_members` for `hhagent_runtime`, holds an acquired connection out of the pool and runs `SET ROLE hhagent_runtime` on it, then proves: INSERT into `audit_log` succeeds; UPDATE on `audit_log` fails with `"permission denied"`; DELETE on `audit_log` fails with `"permission denied"`; full SELECT/INSERT/UPDATE/DELETE on `memories` succeeds (so the bulk CRUD GRANT block is wired); final `audit_log` count is exactly 2 (probe row + test INSERT, no UPDATE rewrite, no DELETE leak). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~3.0 s on the DGX Spark. **`audit_helpers_pool_and_notify_round_trip`** (NEW Option I): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003), opens `pool::connect_runtime_pool` and proves UPDATE on `audit_log` via the pool fails with `"permission denied"` (negative-path proof that `after_connect` SET ROLE actually ran). Then attaches a `PgListener` on `audit_log_inserted` BEFORE the watched insert, calls `audit::insert(&pool, "tool:test", "call", json)`, asserts `tokio::time::timeout(2 s, listener.recv())` returns a notification on the right channel whose payload parses as the inserted row id, calls `audit::fetch_by_id` and confirms the row round-trips byte-for-byte. Finally, `audit::insert` with an 8 KiB payload + `fetch_by_id` returns the `_truncated` envelope (proves `truncate_payload` is wired into the insert path, not just an unused pure helper). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark. **`secrets_put_get_list_delete_round_trip`** (NEW secrets-at-rest): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003 + the new 0004 `secrets_aad_nonempty` migration), opens a runtime-role pool, then exercises every leaf of the `db::secrets` API end-to-end with a `MapKeyProvider`. Asserts: (1) `put` then `get` round-trips plaintext byte-for-byte, with the AAD column populated by the application so 0004's `CHECK (octet_length(aad) > 0)` passes; (2) `list` returns metadata only (name + key_id + timestamps, ORDER BY name ASC) — no ciphertext, no nonce, no AAD in the returned struct; (3) re-`put` of the same name UPSERTs (single row, new ciphertext + new nonce); (4) `delete` removes the row and is idempotent (`Ok(false)` on absent), and a subsequent `get` is `NotFound`; (5) `UPDATE secrets SET name = …` via the runtime-role pool (which holds UPDATE on `secrets`, just not on `audit_log` — the worst-case attacker surface from the threat model) is detected by `get` as `AadMismatch` because the stored AAD still binds to the *old* name; (6) flipping a byte of `secrets.ciphertext` via `set_byte(...) # 1` is detected by `get` as `DecryptFailed` (GCM auth tag mismatch); (7) a direct `INSERT INTO secrets … aad = ''::bytea` is rejected by 0004's CHECK constraint with `"secrets_aad_nonempty"` in the error message. Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark |
 | `llm-router` unit | 28 | **NEW Option J.** `error::truncate_for_error` passes short strings through, appends `…[truncated]` marker when oversized (2); `ERROR_BODY_CAP` pinned at `1024` bytes (1). `messages::ChatRole` serialises `system`/`user`/`assistant`/`tool` lowercase + rejects unknown variants like `"developer"` — closed enum (2); `ChatMessage::{system,user,assistant}` constructors set the right role (1); `ChatRequest` serialises with `skip_serializing_if = Option::is_none` so `max_tokens`/`temperature` never leak as `null` on the wire — older llama.cpp builds reject null-valued optional fields (1); `ChatRequest` includes optional fields when set (1); `ChatResponse` decodes the canonical OpenAI-style envelope from vLLM 0.5+ with full `usage` block (1); decodes the minimal Ollama envelope without `id`/`usage`/`finish_reason` — `serde(default)` + `Option` survives missing fields (1). `backend::Backend` serialises lowercase tag (1), `as_tag()` matches the serde rename (1), round-trips (1). `config::default_local_url_for_os()` returns `http://127.0.0.1:8000/v1` on Linux + `http://127.0.0.1:11434/v1` on macOS (1); `DEFAULT_LOCAL_MODEL = "local-default"` + `DEFAULT_TIMEOUT_MS = 30_000` pinned (1); `RouterConfig::default()` shape (1); `RouterConfig::from_env` with no vars set equals `default()` (1); each env var override flows through individually + parses timeout as ms (1); empty-string env var treated as absent (1); non-numeric `HHAGENT_LLM_TIMEOUT_MS` rejected with operator-readable error (1). `policy::DefaultLocalPolicy` always picks `Backend::Local` regardless of model name / message count / sensitivity hints (1); compile-time `Send + Sync` pin so a future implementor capturing `Rc<_>` won't compile (1). `lib::compose_url` trims a single trailing slash from the base, inserts a slash when the path lacks one (2); `CHAT_COMPLETIONS_PATH = "/chat/completions"` pinned (1); `Router::new` succeeds with `RouterConfig::default()` (1); `Router::pick_backend` delegates to the policy (1); `Router::send` returns `RouterError::PolicyDeniedFrontier` synchronously when a test policy picks `Backend::Frontier` (1, async test) |
 | `llm-router` integration (`local_backend_e2e`) | 4 | **NEW Option J.** `happy_path_round_trips_request_and_response` brings up a hand-rolled `tokio::net::TcpListener` mock on `127.0.0.1:0` that speaks just enough HTTP/1.1 to canned-respond a vLLM-shaped chat-completion (no `wiremock`/`httpmock` dev-dep — matches the `db/tests/postgres_e2e.rs` style of bringing fixtures up by hand). Asserts the router POSTs to `/chat/completions`, the request body decodes back as the original `ChatRequest` byte-for-byte (proves the `skip_serializing_if = Option::is_none` pin from `messages.rs` survives the round-trip), the response decodes as `ChatResponse` with full `usage` block. **`http_error_status_is_surfaced_with_truncated_body`**: backend returns 500 → `RouterError::HttpStatus { status: 500, body: <≤1 KiB capture> }`, body preserves operator-readable error text. **`decode_error_is_surfaced_when_response_is_not_chat_response`**: backend returns 200 + JSON that lacks `choices` → `RouterError::DecodeResponse { source, body }`, body captured for triage. **`router_send_routes_to_pick_backend_choice`**: a test-only `AlwaysFrontier` policy is wired into the router pointed at the mock; `Router::send` returns `RouterError::PolicyDeniedFrontier` AND no HTTP request reaches the mock (asserted via `oneshot::TryRecvError::Empty`). Defends the chokepoint: a future refactor that bypassed `policy.pick(&request)` would dial the local URL anyway and silently succeed — this test catches it |
@@ -80,6 +81,163 @@ on the user's DGX Spark. Other Linux hosts may need
 `sandbox-exec` (no setup needed; ships with the OS).
 
 ## Recently completed (this session, 2026-05-10)
+
+### Phase 1 entry (Option N — `memory::recall` skeleton: pgvector + tsvector lanes fused via RRF)
+
+**Closed Option N from the previous handover's Next-TODO menu — the
+"Phase 1 entry" suggested-pickup item.** Phase 1's scheduler asks
+"what does the agent already know that's relevant to this query?"
+and the answer goes through `core::memory::recall(pool, params)`.
+This slice ships the typed surface, both retrieval lanes the
+existing schema already supports, and the pure RRF fusion that
+combines them.
+
+- **`db/src/memories.rs` (new, ~470 lines incl. ~80 lines of unit
+  tests, 7 unit tests):** the canonical shape for every read/write
+  of the `memories` table — same chokepoint discipline `db::audit`
+  and `db::secrets` follow; outside callers (today: `core::memory`)
+  never write raw SQL. Surface: `insert_memory(executor, body,
+  metadata, embedding) -> i64`, `semantic_search(executor, emb, k)
+  -> Vec<i64>`, `lexical_search(executor, query, k) -> Vec<i64>`,
+  `fetch_by_ids(executor, ids) -> Vec<Memory>` (caller-order
+  preserving). Each `*_search` returns a *ranked id-list* (best
+  first) — exactly what RRF needs. Constants: `EMBEDDING_DIM =
+  1024` (bge-m3 dim, locked in C2.2; mismatch surfaces as a typed
+  `DbError::Query` *before* sqlx round-trips), `DEFAULT_RECALL_K =
+  10`. Pure helper `vector_literal(&[f32]) -> String` formats the
+  canonical pgvector text representation `[v0,v1,...]`; that is
+  bound and cast in SQL via `$1::vector` so we avoid the
+  `pgvector` Rust crate's dep weight at the cost of a small
+  formatter on the hot path (Phase-0 throughput dwarfs the
+  formatter cost; documented swap-when-needed).
+
+- **`core/src/memory.rs` (new, ~420 lines incl. ~125 lines of unit
+  tests, 12 unit tests):** the public recall surface.
+  `RecallParams { query_text, query_embedding, k, modes }` is the
+  inputs struct (designed to grow: filters, recency boost,
+  workspace scope are non-breaking additions). `RecallModes
+  { semantic, lexical }` selects which lanes to run (both default
+  on; `ALL` / `SEMANTIC_ONLY` / `LEXICAL_ONLY` constants for
+  ergonomics). `recall(pool, params)` runs each enabled lane (with
+  per-lane fanout `k * 4` so the fusion has overlap to surface
+  near-misses — standard RRF practice in production hybrid-search,
+  same multiplier as the BEIR benchmark suite), fuses via RRF,
+  and hydrates the top-k bodies in a single round-trip. Pure
+  `reciprocal_rank_fusion(lists: &[&[i64]], k: f64) -> Vec<(i64,
+  f64)>` does the fusion: `score(d) = Σ_lanes 1 / (k + rank)` over
+  1-based positions, sorted by descending score with ties broken
+  on smaller id (so output order is stable across runs).
+  `RRF_K_CONSTANT = 60.0` matches the Cormack/Clarke/Buettcher
+  2009 paper. The fusion is unit-testable without a DB — 7 of
+  the 12 core unit tests exercise its shape (empty input, single
+  lane preserves order, two-lane agreement sums scores, two-lane
+  disagreement tiebreaks on smaller id, absent items contribute 0,
+  two-lane appearer beats single-lane top, smaller `k` widens the
+  rank-1-vs-rank-2 ratio).
+
+- **`core/tests/memory_recall_e2e.rs` (new, ~490 lines, 1
+  integration test):** the cross-platform end-to-end proof. Brings
+  up a per-test PG cluster (the canonical recipe shared with
+  `audit_dispatch_e2e.rs` and `supervisor_e2e.rs` — issue #15 now
+  has a 5th duplication site to hoist eventually), runs the probe
+  to apply 0001+0002+0003+0004, opens a runtime-role pool, then
+  seeds 3 memories with bodies that share no surface words
+  (`"alpha bravo charlie ..."`, `"delta echo foxtrot ..."`,
+  `"golf hotel india ..."`). The hermetic embedding helper
+  `text_to_embedding(text) -> Vec<f32>` is the gotcha mitigation
+  the original Option N brief flagged: **the embedding worker
+  doesn't exist yet**, but the integration test cannot depend on
+  a running model. Solution: SHA-256 the body, seed an xorshift64
+  PRNG from the first 8 bytes, generate 1024 floats in `[-1, 1]`,
+  L2-normalise. Same text → same vector → cosine similarity 1.0;
+  different texts → near-orthogonal random vectors → cosine ≈ 0.
+  So when the test queries with one body's embedding, that body's
+  row is at distance 0 (rank 1) and the other two are at distance
+  ~1 — a strict pin, not a calibration check. Five assertions:
+  (1) `semantic_search(emb_a, 10).first() == Some(id_a)`,
+  (2) `lexical_search("alpha", 10) == [id_a]` (only A's tsv
+  matches), (3) `recall(SEMANTIC_ONLY)` returns A as top-1 with
+  body byte-for-byte, (4) `recall(LEXICAL_ONLY)` returns exactly
+  `[A]`, (5) `recall(ALL)` ranks A first AND includes B + C below
+  it — the latter proves the fusion is *fusing* (RRF) rather than
+  intersecting. Runtime ~1.9 s on the DGX Spark.
+
+- **No new schema migration.** The `memories` columns + indexes
+  were already pinned by C2.2's `0001_init.sql`: `embedding
+  vector(1024)`, `tsv tsvector GENERATED ALWAYS AS
+  (to_tsvector('simple', body)) STORED`, GIN on `tsv` and
+  `metadata`. The HNSW ANN index on `embedding` is still
+  deliberately omitted — building HNSW against an empty/3-row
+  table is strictly worse than building it once at Phase 1's
+  first batch ingest. Sequential scan with `<=>` is fast enough
+  at this corpus size.
+
+- **No new workspace dep.** `pgvector` Rust crate (MIT, AGPL-
+  compatible) was the obvious candidate but adds `byteorder` and
+  a sqlx-feature shim across every workspace target. We chose
+  the text-cast route in `vector_literal`; the swap is local to
+  `db/src/memories.rs` when a future caller (e.g. the embedding
+  worker streaming vectors at higher rates) makes the dep
+  worthwhile. `sha2` was already a workspace dep (used by
+  `db::audit::truncate_payload`); the integration test pulls it
+  via a new `[dev-dependencies]` stanza in `core/Cargo.toml` so
+  the deterministic SHA-256-seeded embedding helper compiles
+  without polluting `core`'s production deps.
+
+- **What this slice deliberately does NOT do (and why):**
+
+  * **No graph lane in `recall`.** The HANDOVER's Option N
+    description named three lanes ("semantic, lexical, graph")
+    fused per-call. The schema has no entity↔memory linkage today
+    — adding one (likely a `memory_entities` join table or a
+    GIN-indexed `memories.metadata->'entities'` JSONB array) is a
+    separate design decision that needs to land *before* the
+    graph lane has a sensible shape over `memories`. The existing
+    `db::graph::PgGraph::neighbors`/`path` over `entities`/
+    `relations` is unchanged and ready to be plumbed in by the
+    follow-up slice. Filed in "Next TODO" below.
+
+  * **No LLM-router `actor='llm:router'` audit row.** The
+    HANDOVER said "the LLM router gets its first
+    `actor='llm:router'` audit-log row from this slice — likely
+    the embedding-call path." The embedding-call path is the
+    embedding worker, which doesn't exist yet. Today's
+    `RecallParams` accepts a pre-computed `query_embedding`
+    directly; the integration test feeds it from
+    `text_to_embedding`. The first `actor='llm:router'` row will
+    materialise when the embedding worker lands and dispatches
+    its first call through the router (the chokepoint pattern
+    is already in place: `tool_host::dispatch(pool,
+    embedding_worker, "llm:router", "embed", request)`).
+
+  * **`recall` does not write to `audit_log`.** Reads from the
+    memory store are not "actions" in the same sense as tool
+    calls — every recall during a single scheduler tick produces
+    one audit-row at most, recorded by the *consumer* (the
+    scheduler decision that incorporated the recall). Wiring an
+    audit row at `recall`'s level would inflate the JSONL
+    mirror with retrieval-noise rows that the operator doesn't
+    want. The decision is reversible — Phase 2+ can flip it if
+    the threat-model story for memory-leak detection demands a
+    per-recall record.
+
+- **CLAUDE.md compliance check:** all three new files are under
+  500 lines (memories.rs: 467, memory.rs: 417, memory_recall_e2e.rs:
+  490). Pure functions in reusable modules (vector_literal,
+  reciprocal_rank_fusion). TDD — wrote unit tests for
+  `reciprocal_rank_fusion` *before* the integration test depended
+  on the fusion being correct (the algorithm's behaviour is the
+  same regardless of corpus, so the unit tests pin it harder than
+  the e2e ever could). Inline doc explains *why* (text-cast vs.
+  pgvector crate, RRF k-constant choice, lane-fanout multiplier,
+  why the graph lane is deferred) for junior contributors.
+
+**Test count:** 227 → **247** on Linux (+7 db unit + 12 core unit
++ 1 integration; 0 skipped, 0 failed, 0 warnings). macOS projects
+to ~194; every new test is platform-neutral (the integration test
+`[SKIP]`s cleanly without `brew install postgresql@18`).
+
+---
 
 ### Phase 1 entry (Option M — sealed `WorkerCommand` + `tool_host::dispatch` chokepoint compile-time pin)
 
@@ -2244,79 +2402,148 @@ don't get forgotten):
 
 ## Next TODO (pick one)
 
-**Phase 0 is functionally complete.** The agent-core daemon comes
-up fail-closed against a per-user, UDS-only Postgres cluster
-managed by the same `default_supervisor()` that supervises the
-daemon itself. Every application write runs under the non-
-superuser `hhagent_runtime` role with a database-layer prohibition
-on tampering with prior audit rows (Option L). Every Phase 0+ tool
-call is funneled through `tool_host::dispatch`, which writes one
-`audit_log` row per call (Option I); those rows are replicated to
-a daily-rotated JSONL stream under `~/.local/state/hhagent/` by a
-long-lived listener that wakes on `pg_notify`. Every secret at
-rest is AES-256-GCM-encrypted under a keyring-wrapped key with
-AAD-bound row identity. **As of this session,** there is also a
-sole-egress LLM router (`hhagent-llm-router`) with an OpenAI-
-compatible `Router::send` over reqwest+rustls, a per-OS local-
-backend default (vLLM/SGLang on Linux, Ollama on macOS), and a
-`PolicyGate` seam that Phase 5 plugs into; the frontier-dispatch
-path is unwired by design.
+**Phase 0 is functionally complete and Phase 1 has begun.** The
+agent-core daemon comes up fail-closed against a per-user,
+UDS-only Postgres cluster managed by the same
+`default_supervisor()` that supervises the daemon itself. Every
+application write runs under the non-superuser `hhagent_runtime`
+role with a database-layer prohibition on tampering with prior
+audit rows (Option L). Every Phase 0+ tool call is funneled
+through `tool_host::dispatch`, which writes one `audit_log` row
+per call (Option I); those rows are replicated to a daily-rotated
+JSONL stream under `~/.local/state/hhagent/` by a long-lived
+listener that wakes on `pg_notify`. Every secret at rest is
+AES-256-GCM-encrypted under a keyring-wrapped key with AAD-bound
+row identity. The sole-egress LLM router
+(`hhagent-llm-router`) with an OpenAI-compatible `Router::send`,
+per-OS local-backend default, and `PolicyGate` seam is in place;
+frontier-dispatch is unwired by design until Phase 5.
+**As of this session,** Phase 1's first slice has shipped:
+`core::memory::recall` (Option N) over `db::memories` runs
+semantic + lexical lanes against `memories.embedding` (pgvector
+`<=>`) and `memories.tsv` (`ts_rank`), fuses via RRF, and
+hydrates the top-k bodies in one round-trip — the first
+non-trivial sqlx query path in `core` and the first *consumer*
+of the schema beyond audit-log writes.
 
-This was the last must-ship Phase-0 line item. **Phase 1 is now
-unblocked**, and the dispatcher-chokepoint compile-time pin
-(Option M, shipped this session — see "Recently completed" above)
-gives Phase 1's first consumers a hardened base. What's left as
-optional polish before declaring Phase 0 done:
+The next pickups, in roughly suggested order:
 
-- **Phase 1 entry — `memory::recall` skeleton** (Option N below)
-  — the first real consumer of the LLM router (for embedding-side
-  reranking) and the first non-trivial sqlx query path. The most
-  natural next pickup now that the chokepoint is sealed.
-- **Cross-platform exponential restart backoff** (Option K below)
-  — systemd 252+ has `RestartSteps`/`RestartMaxDelaySec`; macOS
-  launchd's `KeepAlive=true` has no operator-controllable
-  throttle, so this needs a per-OS shape. Filed but parked — no
-  immediate need.
+- **Phase 1 cont. — embedding worker (Option O below)** — the
+  first concrete consumer of `Router::send`, the first
+  `actor='llm:router'` audit-log row, the first time `recall`'s
+  `query_embedding: Option<&[f32]>` is filled from a live model
+  call rather than a test stub. Natural follow-up to Option N —
+  recall is half-wired (semantic lane works against
+  pre-computed embeddings; production callers need a path from
+  free-text query → embedding vector → semantic search).
+- **Phase 1 cont. — entity↔memory linkage + graph lane in
+  `recall`** (Option P below) — the third lane mentioned in
+  Option N's original brief. Adds either a `memory_entities`
+  join table or a GIN-indexed `metadata->'entities'` JSONB
+  array, then plumbs `Graph::neighbors` into `recall` as a
+  third lane fused alongside semantic + lexical.
 - **Hoist the duplicated PG bring-up boilerplate into a
   `tests-common` dev-dep crate** ([issue #15](https://github.com/hherb/hhagent/issues/15))
-  — now four duplication sites (db/tests/postgres_e2e.rs +
-  core/tests/{audit_dispatch_e2e,supervisor_e2e,shell_exec_e2e}.rs).
-  Pure mechanical refactor; not blocking but cheap to ship.
+  — now five duplication sites with the new
+  `core/tests/memory_recall_e2e.rs`. Pure mechanical refactor;
+  not blocking but cheap to ship and would clean up the test
+  surface meaningfully before more integration tests pile on.
+- **Cross-platform exponential restart backoff** (Option K
+  below) — filed but still parked; no immediate need.
 
-(The "LLM router HTTP-client stub" line item that was the
-headline pickup in the previous handover shipped 2026-05-10 (Option J).
-The dispatcher-chokepoint compile-time pin shipped this session
-(Option M).)
+(The headline Phase-1 pickup that was the previous handover's
+"larger slice" recommendation shipped this session as Option N.)
+
+### Option N — `memory::recall` skeleton  *(SHIPPED 2026-05-10 — see "Recently completed (this session)")*
+
+### Option O — embedding worker (Phase 1 cont.)
+
+The first concrete consumer of `Router::send` and the first
+`actor='llm:router'` audit-log row. Today `recall` accepts a
+pre-computed `query_embedding`; production needs free-text
+query → embedding vector → semantic recall.
+
+- **Shape:** new `workers/embedding-worker/` crate + binary,
+  same prelude (`hhagent-worker-prelude::serve_stdio`) as
+  shell-exec. JSON-RPC method `embed` takes `{texts: [string]}`,
+  returns `{embeddings: [[f32; 1024]]}`. Inside the worker:
+  HTTP POST to `<HHAGENT_LLM_LOCAL_URL>/embeddings` with the
+  OpenAI-compat embedding-request shape (`{"model": "...",
+  "input": [...]}`); decode the response. Worker side is a
+  thin shim — the `Router::send` path lives in `core` because
+  the policy gate is `core`'s concern.
+- **`hhagent-llm-router::messages` extension:** add
+  `EmbeddingRequest` / `EmbeddingResponse` types parallel to
+  `ChatRequest` / `ChatResponse`. New `Router::embed(&request)`
+  method that (a) calls `policy.pick_embed(&request)` (Phase 5
+  seam — `PolicyGate` may grow a separate method or reuse
+  `pick`), (b) dispatches to `<base>/embeddings` against the
+  local backend, (c) returns `EmbeddingResponse`. Phase-0
+  `DefaultLocalPolicy` keeps the same "always local" behaviour.
+- **`core::memory::recall` enhancement:** when
+  `query_embedding` is `None` but `query_text` is `Some` and
+  the semantic lane is enabled, the function calls the
+  embedding worker via `tool_host::dispatch(pool, &mut
+  embed_worker, "llm:router", "embed", req)` to populate the
+  vector. The dispatch writes the first
+  `actor='llm:router'` audit row; the recall surface stays
+  unchanged from the caller's perspective.
+- **Verification:** integration test that adds a hand-rolled
+  TCP mock for the `/embeddings` endpoint (cf. the
+  `local_backend_e2e.rs` shape), spawns the embedding worker
+  pointed at the mock, calls `recall` with `query_text` only,
+  asserts the matched memory is rank-1 AND the audit log has
+  a fresh `actor='llm:router'` row with `action='embed'` and
+  the request payload.
+- **Gotcha:** the embedding model dim must match
+  `EMBEDDING_DIM = 1024`. Mismatched output (e.g. a 768-dim
+  model deployed by accident) should surface as a typed
+  router-level error before the worker tries to insert
+  shorter vectors. Validate dim in `Router::embed` against
+  the constant.
+- **Files:** `workers/embedding-worker/Cargo.toml` + `src/`
+  (~150 LOC), `llm-router/src/embeddings.rs` (~150 LOC),
+  `core/src/memory.rs` (~30-LOC additions for the lazy-embed
+  path), integration test (~300 LOC).
+
+### Option P — entity↔memory linkage + graph lane (Phase 1 cont.)
+
+The original Option N brief named three lanes; this slice
+ships the third (graph). Requires picking the linkage shape:
+
+- **Option P1: `memory_entities` join table.** New migration
+  adds `(memory_id BIGINT REFERENCES memories(id) ON DELETE
+  CASCADE, entity_id BIGINT REFERENCES entities(id) ON DELETE
+  CASCADE, PRIMARY KEY (memory_id, entity_id))`. Cleaner
+  separation; richer query semantics; requires explicit
+  `INSERT INTO memory_entities` at memory-write time.
+- **Option P2: `metadata->'entities'` JSONB array on
+  `memories`.** No new table; uses the existing `metadata`
+  GIN index. `metadata->'entities' ?| array['<id>']` is the
+  query. Less code; tighter coupling between memory shape
+  and graph linkage.
+
+Recommendation: **P1**. The memory store will accumulate
+linkage data over time; a dedicated table makes the query
+shape (and any future "find memories that mention any
+descendant of entity X" recursive walk) cleaner. P2 looks
+expedient but the JSONB filter sets up future "what shape is
+this?" archeology.
+
+- **Graph lane shape:** for a query carrying `seed_entity_ids:
+  &[i64]`, traverse outbound 1-hop (or via `Graph::path` with
+  `max_hops = 2`) to get a candidate entity set, then
+  `SELECT memory_id FROM memory_entities WHERE entity_id =
+  ANY($1)` returns the ranked id-list. Rank = # of seed-entity
+  neighbours that connect to the memory (a memory mentioning
+  3 of the 5 seed-related entities outranks one mentioning 1).
+- **Verification:** integration test seeds entities + memories
+  + linkage rows, queries with one entity as seed, asserts
+  the connected memories rank above unconnected ones, and
+  asserts the fused `recall(ALL)` over all three lanes
+  surfaces the most-relevant memory at top-1.
 
 ### Option M — Dispatcher chokepoint compile-time pin  *(SHIPPED 2026-05-10 — see "Recently completed (this session)")*
-
-### Option N — `memory::recall` skeleton (Phase 1 entry, larger)
-
-The first real consumer of every Phase-0 piece: pgvector for
-semantic, GIN-indexed `tsvector` for lexical, recursive-CTE
-graph for relational neighbours, all fused via Reciprocal Rank
-Fusion in SQL. The LLM router gets its first
-`actor='llm:router'` audit-log row from this slice — likely the
-embedding-call path, which routes through the local backend by
-default.
-
-- **Shape:** new `core::memory::recall(query: &str, modes:
-  RecallModes, k: usize) -> Result<Vec<Memory>, _>`. Three
-  independent score lists, fused per-call.
-- **Files:** new `core/src/memory.rs` (or `core/src/memory/`),
-  `db/src/memories.rs` (the typed sqlx query helpers).
-- **Verification:** integration test against a per-test PG
-  cluster (the canonical recipe is shared across
-  `db/tests/postgres_e2e.rs` and `core/tests/audit_dispatch_e2e.rs`
-  — issue #15 will eventually hoist it to a `tests-common` dev-
-  dep crate). Seed three documents, query for one, assert it
-  ranks first under each mode and under the fused score.
-- **Gotcha:** the embedding worker doesn't exist yet. Phase 1's
-  first instinct is "spin up a tiny model behind OpenAI HTTP";
-  the cheap shortcut is to compute a deterministic test-only
-  embedding (e.g. SHA-256-then-fold-to-1024-floats) so the
-  integration test doesn't depend on a running model. Mark
-  the helper `#[cfg(test)]` so it never ships.
 
 ### Option A — Phase 0b: macOS port  *(SHIPPED 2026-05-07)*
 

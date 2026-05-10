@@ -40,3 +40,11 @@ tracing-subscriber = { workspace = true }
 time               = { workspace = true }
 libc               = { workspace = true }
 sqlx               = { workspace = true }
+
+# Deterministic SHA-256-seeded embedding helper used by the
+# memory_recall_e2e integration test. Pure-Rust, AGPL-compatible.
+# Production embeddings come from the (future) embedding worker;
+# keeping this confined to dev-dependencies makes the limited scope
+# explicit.
+[dev-dependencies]
+sha2 = { workspace = true }

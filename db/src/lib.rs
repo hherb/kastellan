@@ -30,6 +30,7 @@ use thiserror::Error;
 pub mod audit;
 pub mod conn;
 pub mod graph;
+pub mod memories;
 pub mod pool;
 pub mod probe;
 pub mod secrets;

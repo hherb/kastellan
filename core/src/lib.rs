@@ -12,6 +12,7 @@
 
 pub mod audit_mirror;
 pub mod audit_tail;
+pub mod memory;
 pub mod tool_host;
 pub mod workspace;
 
