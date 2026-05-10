@@ -44,6 +44,10 @@ use tokio::sync::oneshot;
 // the broader fixture refactor lands (Issue #15).
 // ---------------------------------------------------------------------------
 
+// Intentionally slimmer than `local_backend_e2e.rs`'s `ServedRequest`
+// (no `path` field) — this test only needs to introspect the body to
+// pin the cached prompt was sent. If #15 hoists the helpers into a
+// shared fixture, this struct should adopt the richer shape.
 #[derive(Debug, Clone)]
 struct ServedRequest {
     body: String,
@@ -165,7 +169,10 @@ fn router_pointing_at(base_url: &str) -> Arc<Router> {
 }
 
 const PLANNER_PROMPT_CONTENT: &str = "you are a planner; emit a Plan JSON";
-const PLANNER_PROMPT_SHA: &str = "sha-pinned-for-test";
+// 64 hex chars — shape-realistic so a future audit-writer that validates
+// the sha256 column format (length / hex-only) doesn't reject this stub.
+const PLANNER_PROMPT_SHA: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn prompts_with_agent_planner() -> Arc<PromptCache> {
     Arc::new(PromptCache::new_for_test(vec![(
@@ -256,10 +263,14 @@ async fn happy_path_decodes_plan_and_populates_meta() {
     assert_eq!(meta.llm_model, "test-local-model");
     assert_eq!(meta.llm_backend, "local");
     assert_eq!(meta.retry_count, 0);
-    // latency is non-deterministic but must be a real measurement, not zero.
-    // Allow zero in case the timer resolution doesn't tick on a fast host;
-    // the field's presence + correct type is what we pin.
-    let _ = meta.latency_ms;
+    // latency is non-deterministic; allow zero (sub-millisecond on fast
+    // hosts), but a value above the router timeout would mean the agent
+    // measured something unrelated to this call.
+    assert!(
+        meta.latency_ms < 60_000,
+        "latency_ms wildly out of range: {}",
+        meta.latency_ms
+    );
 
     // The system prompt sent on the wire was the cached prompt content
     // verbatim — pin via the served body. (We don't pin the full
@@ -280,7 +291,7 @@ async fn decode_error_when_assistant_content_is_not_a_plan() {
     // plan — the inner loop's failure-handling depends on the typed
     // error.
     let envelope = envelope_for("not a plan, just chatter");
-    let (base_url, _served_rx) =
+    let (base_url, served_rx) =
         spawn_one_shot_mock(CannedResponse::ok_json(envelope)).await;
 
     let router = router_pointing_at(&base_url);
@@ -304,6 +315,16 @@ async fn decode_error_when_assistant_content_is_not_a_plan() {
         }
         other => panic!("expected AgentError::Decode, got {other:?}"),
     }
+
+    // Sanity: the agent reached the network before decoding failed —
+    // otherwise the Decode error would be masking a different bug
+    // (e.g. an early short-circuit that swallows the typed error).
+    let served = served_rx.await.expect("mock served the request");
+    assert!(
+        served.body.contains(PLANNER_PROMPT_CONTENT),
+        "system prompt missing from wire: {}",
+        served.body
+    );
 }
 
 #[tokio::test]
@@ -329,6 +350,12 @@ async fn prompt_missing_short_circuits_before_dialing_backend() {
 
     // `try_recv` returns Empty iff the mock's accept loop never
     // received a connection — i.e. the agent never dialed.
+    //
+    // Invariant this relies on: `formulate_plan` is synchronous-to-
+    // completion w.r.t. the network — `router.send().await` is awaited
+    // inline, not spawned. If a future refactor moves dialing into a
+    // `tokio::spawn`, this assertion will silently false-pass; switch
+    // to a short timeout-bounded `recv` then.
     let mut served_rx = served_rx;
     assert!(
         matches!(
