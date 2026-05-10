@@ -188,6 +188,11 @@ fn decode_task_row(row: &PgRow) -> Result<Task, DbError> {
 /// Caller is the lane runner's `finalize` step. The `state` argument
 /// must be one of the terminal states (everything except 'pending'
 /// and 'running'); the CHECK constraint will reject other values.
+///
+/// Silent no-op if the task has already transitioned out of `running`
+/// (e.g. cancelled out from under the lane runner, or finalised twice).
+/// Returns `Ok(())` either way; the caller does not need to distinguish
+/// "I won the race" from "someone else terminalised this row first."
 pub async fn finalize(
     pool: &PgPool,
     task_id: i64,
@@ -228,9 +233,10 @@ pub async fn observe_state(pool: &PgPool, task_id: i64) -> Result<String, DbErro
 /// `tasks_cancelled` NOTIFY. Returns true iff a row was updated.
 pub async fn mark_cancelled(pool: &PgPool, task_id: i64) -> Result<bool, DbError> {
     let r = sqlx::query(
-        "UPDATE tasks SET state = 'cancelled', \
-                          finished_at = now(), \
-                          updated_at = now() \
+        "UPDATE tasks \
+         SET state = 'cancelled', \
+             finished_at = now(), \
+             updated_at = now() \
          WHERE id = $1 AND state IN ('pending', 'running')",
     )
     .bind(task_id)
@@ -246,9 +252,10 @@ pub async fn mark_cancelled(pool: &PgPool, task_id: i64) -> Result<bool, DbError
 /// true iff a row was updated.
 pub async fn mark_failed_running(pool: &PgPool, task_id: i64) -> Result<bool, DbError> {
     let r = sqlx::query(
-        "UPDATE tasks SET state = 'crashed', \
-                          finished_at = now(), \
-                          updated_at = now() \
+        "UPDATE tasks \
+         SET state = 'crashed', \
+             finished_at = now(), \
+             updated_at = now() \
          WHERE id = $1 AND state = 'running' \
            AND lease_expires_at > now()",
     )
@@ -264,9 +271,10 @@ pub async fn mark_failed_running(pool: &PgPool, task_id: i64) -> Result<bool, Db
 /// Returns the number of rows updated.
 pub async fn sweep_crashed(pool: &PgPool) -> Result<u64, DbError> {
     let r = sqlx::query(
-        "UPDATE tasks SET state = 'crashed', \
-                          finished_at = now(), \
-                          updated_at = now() \
+        "UPDATE tasks \
+         SET state = 'crashed', \
+             finished_at = now(), \
+             updated_at = now() \
          WHERE state = 'running' AND lease_expires_at < now()",
     )
     .execute(pool)
@@ -321,6 +329,7 @@ pub async fn list(
     state: Option<&str>,
     limit: i64,
 ) -> Result<Vec<Task>, DbError> {
+    let limit = limit.max(0);  // clamp; LIMIT -1 would be a PG error
     let rows = sqlx::query(
         "SELECT id, state, lane, created_at, updated_at, started_at, \
                 finished_at, lease_expires_at, plan_count, payload, result \
