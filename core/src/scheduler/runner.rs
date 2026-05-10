@@ -178,3 +178,44 @@ async fn run_one(
         Err(e) => Outcome::Failed(format!("inner_loop: {e}")),
     }
 }
+
+/// Production `StepDispatcher`: maps each `PlannedStep` onto a
+/// `tool_host::dispatch` call against a freshly spawned worker.
+/// Each step gets its own per-task `Workspace`.
+///
+/// This is currently a NOT_IMPLEMENTED placeholder — the actual
+/// `tool_host::dispatch` wiring lands in Task 3.2.bis (deferred).
+/// Real tool calls from the daemon will fail with `NOT_IMPLEMENTED`
+/// until that follow-up commit. Integration tests (3.3, 3.4) use
+/// scripted dispatchers via `spawn_scheduler` and are unaffected.
+pub struct ToolHostStepDispatcher {
+    _pool: PgPool,
+    _sandbox: Arc<dyn hhagent_sandbox::SandboxBackend>,
+    _workspace_root: PathBuf,
+}
+
+impl ToolHostStepDispatcher {
+    pub fn new(pool: PgPool, sandbox: Arc<dyn hhagent_sandbox::SandboxBackend>, workspace_root: PathBuf) -> Self {
+        Self { _pool: pool, _sandbox: sandbox, _workspace_root: workspace_root }
+    }
+}
+
+#[async_trait::async_trait]
+impl StepDispatcher for ToolHostStepDispatcher {
+    async fn dispatch_step(
+        &self,
+        step: &crate::cassandra::types::PlannedStep,
+    ) -> super::inner_loop::StepOutcome {
+        use super::inner_loop::StepOutcome;
+        if step.tool != "shell-exec" {
+            return StepOutcome::Err {
+                code: "UNKNOWN_TOOL".into(),
+                detail: format!("tool '{}' not registered", step.tool),
+            };
+        }
+        StepOutcome::Err {
+            code: "NOT_IMPLEMENTED".into(),
+            detail: "ToolHostStepDispatcher needs wiring to tool_host::dispatch (Task 3.2.bis)".into(),
+        }
+    }
+}
