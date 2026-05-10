@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1240" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <title>hhagent — Security Architecture (with CASSANDRA)</title>
+  <desc>Defence-in-depth layers: channel ingress, agent core, CASSANDRA plan review pipeline, dispatcher chokepoint, sandboxed tool workers, egress proxy, Postgres with isolated roles, four-tier response model, and five constitutional principles.</desc>
+
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333"/>
+    </marker>
+    <marker id="arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b22222"/>
+    </marker>
+    <marker id="arrAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b8860b"/>
+    </marker>
+    <linearGradient id="cassGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff7d6"/>
+      <stop offset="100%" stop-color="#ffe9a8"/>
+    </linearGradient>
+    <linearGradient id="coreGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#eaf3fb"/>
+      <stop offset="100%" stop-color="#d3e6f5"/>
+    </linearGradient>
+    <linearGradient id="sandGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fde6e6"/>
+      <stop offset="100%" stop-color="#f5c2c2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Title -->
+  <text x="800" y="32" text-anchor="middle" font-size="22" font-weight="bold">hhagent — Security Architecture</text>
+  <text x="800" y="56" text-anchor="middle" font-size="14" fill="#555">Defence in depth: mechanical sandbox layers + CASSANDRA semantic oversight</text>
+
+  <!-- Host trust boundary -->
+  <rect x="20" y="80" width="1560" height="980" rx="14" fill="#fafcfd" stroke="#234" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="40" y="103" font-weight="bold" fill="#234">HOST  ·  single Linux/macOS user account  ·  all process boundaries below run as this user</text>
+
+  <!-- Inbound channels -->
+  <rect x="40" y="125" width="220" height="180" rx="8" fill="#eef2ee" stroke="#557755"/>
+  <text x="150" y="148" text-anchor="middle" font-weight="bold">Inbound channels</text>
+  <text x="60" y="172">• Telegram adapter</text>
+  <text x="60" y="192">• Signal adapter</text>
+  <text x="60" y="212">• IMAP / SMTP</text>
+  <text x="60" y="232">• Webhooks</text>
+  <text x="60" y="262" font-style="italic" fill="#557755">one process per channel,</text>
+  <text x="60" y="278" font-style="italic" fill="#557755">message-bus to core only</text>
+
+  <!-- Agent Core box -->
+  <rect x="290" y="125" width="970" height="660" rx="10" fill="url(#coreGrad)" stroke="#234e7e" stroke-width="2"/>
+  <text x="775" y="150" text-anchor="middle" font-weight="bold" font-size="16" fill="#234e7e">AGENT CORE  (Rust, in-process · the security boundary)</text>
+
+  <!-- Core sub-components -->
+  <rect x="310" y="170" width="180" height="58" rx="6" fill="#fff" stroke="#234e7e"/>
+  <text x="400" y="195" text-anchor="middle" font-weight="bold">Scheduler</text>
+  <text x="400" y="215" text-anchor="middle" font-size="11" fill="#555">agent loop · plan emit</text>
+
+  <rect x="500" y="170" width="180" height="58" rx="6" fill="#fff" stroke="#234e7e"/>
+  <text x="590" y="195" text-anchor="middle" font-weight="bold">Context Manager</text>
+  <text x="590" y="215" text-anchor="middle" font-size="11" fill="#555">handoff write/read</text>
+
+  <rect x="690" y="170" width="180" height="58" rx="6" fill="#fff" stroke="#234e7e"/>
+  <text x="780" y="195" text-anchor="middle" font-weight="bold">Memory orch.</text>
+  <text x="780" y="215" text-anchor="middle" font-size="11" fill="#555">recall + classification</text>
+
+  <rect x="880" y="170" width="180" height="58" rx="6" fill="#fff" stroke="#234e7e"/>
+  <text x="970" y="195" text-anchor="middle" font-weight="bold">LLM Router</text>
+  <text x="970" y="215" text-anchor="middle" font-size="11" fill="#555">local · frontier policy gate</text>
+
+  <rect x="1070" y="170" width="170" height="58" rx="6" fill="#fff" stroke="#234e7e"/>
+  <text x="1155" y="195" text-anchor="middle" font-weight="bold">Audit log</text>
+  <text x="1155" y="215" text-anchor="middle" font-size="11" fill="#555">append-only · NOTIFY</text>
+
+  <!-- Plan emission arrow -->
+  <line x1="400" y1="228" x2="400" y2="262" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="412" y="248" font-size="11" fill="#234e7e">Plan {context, decision, rationale, steps[]}</text>
+
+  <!-- CASSANDRA banner -->
+  <rect x="310" y="262" width="930" height="370" rx="10" fill="url(#cassGrad)" stroke="#b8860b" stroke-width="2"/>
+  <text x="775" y="288" text-anchor="middle" font-weight="bold" font-size="16" fill="#7a5a00">CASSANDRA  —  semantic oversight pipeline</text>
+  <text x="775" y="306" text-anchor="middle" font-size="11" fill="#7a5a00" font-style="italic">independent reviewer · plan-level review · runtime verification · own Postgres role unreachable by the agent</text>
+
+  <!-- Stages -->
+  <g font-size="11">
+    <!-- Stage -1 -->
+    <rect x="324" y="324" width="138" height="120" rx="6" fill="#fff" stroke="#b8860b"/>
+    <text x="393" y="346" text-anchor="middle" font-weight="bold">Stage −1</text>
+    <text x="393" y="362" text-anchor="middle" font-weight="bold">Constitutional</text>
+    <text x="393" y="376" text-anchor="middle" font-weight="bold">Guard (Rust)</text>
+    <text x="393" y="396" text-anchor="middle" fill="#555">deterministic</text>
+    <text x="393" y="411" text-anchor="middle" fill="#555">pattern match</text>
+    <text x="393" y="430" text-anchor="middle" fill="#b22222" font-weight="bold">PASS / Tier 0</text>
+
+    <!-- Stage 0 -->
+    <rect x="476" y="324" width="138" height="120" rx="6" fill="#fff" stroke="#b8860b"/>
+    <text x="545" y="346" text-anchor="middle" font-weight="bold">Stage 0</text>
+    <text x="545" y="362" text-anchor="middle" font-weight="bold">Deterministic</text>
+    <text x="545" y="376" text-anchor="middle" font-weight="bold">Policy (Rust)</text>
+    <text x="545" y="396" text-anchor="middle" fill="#555">deny-list ·</text>
+    <text x="545" y="411" text-anchor="middle" fill="#555">classification prop</text>
+    <text x="545" y="430" text-anchor="middle" fill="#555">destination allowlist</text>
+
+    <!-- Stage 1 -->
+    <rect x="628" y="324" width="138" height="120" rx="6" fill="#fff" stroke="#b8860b" stroke-dasharray="4,3"/>
+    <text x="697" y="346" text-anchor="middle" font-weight="bold">Stage 1</text>
+    <text x="697" y="362" text-anchor="middle" font-weight="bold">Fast Classifier</text>
+    <text x="697" y="376" text-anchor="middle" font-style="italic" fill="#555">(future)</text>
+    <text x="697" y="402" text-anchor="middle" fill="#555">BERT risk /</text>
+    <text x="697" y="417" text-anchor="middle" fill="#555">sentiment hook</text>
+
+    <!-- Stage 2 -->
+    <rect x="780" y="324" width="138" height="120" rx="6" fill="#fff" stroke="#b8860b"/>
+    <text x="849" y="346" text-anchor="middle" font-weight="bold">Stage 2</text>
+    <text x="849" y="362" text-anchor="middle" font-weight="bold">Privacy Gate</text>
+    <text x="849" y="382" text-anchor="middle" fill="#555">anonymiser worker</text>
+    <text x="849" y="397" text-anchor="middle" fill="#555">(BERT, sandboxed)</text>
+    <text x="849" y="412" text-anchor="middle" fill="#555">restrict frontier if</text>
+    <text x="849" y="427" text-anchor="middle" fill="#555">PII is the point</text>
+
+    <!-- Stage 3 -->
+    <rect x="932" y="324" width="138" height="120" rx="6" fill="#fff" stroke="#b8860b"/>
+    <text x="1001" y="346" text-anchor="middle" font-weight="bold">Stage 3</text>
+    <text x="1001" y="362" text-anchor="middle" font-weight="bold">LLM Semantic</text>
+    <text x="1001" y="376" text-anchor="middle" font-weight="bold">Review</text>
+    <text x="1001" y="396" text-anchor="middle" fill="#555">frontier OR local</text>
+    <text x="1001" y="411" text-anchor="middle" fill="#555">fallback model</text>
+    <text x="1001" y="427" text-anchor="middle" fill="#555">no raw clinical data</text>
+
+    <!-- Stage 4 -->
+    <rect x="1084" y="324" width="138" height="120" rx="6" fill="#fff" stroke="#b8860b"/>
+    <text x="1153" y="346" text-anchor="middle" font-weight="bold">Stage 4</text>
+    <text x="1153" y="362" text-anchor="middle" font-weight="bold">Longitudinal</text>
+    <text x="1153" y="376" text-anchor="middle" font-weight="bold">Pattern Check</text>
+    <text x="1153" y="396" text-anchor="middle" fill="#555">drift · escalation ·</text>
+    <text x="1153" y="411" text-anchor="middle" fill="#555">user anomaly /</text>
+    <text x="1153" y="427" text-anchor="middle" fill="#555">fit-state assess</text>
+  </g>
+
+  <!-- Stage chain arrows -->
+  <line x1="462" y1="384" x2="476" y2="384" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <line x1="614" y1="384" x2="628" y2="384" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <line x1="766" y1="384" x2="780" y2="384" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <line x1="918" y1="384" x2="932" y2="384" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <line x1="1070" y1="384" x2="1084" y2="384" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+
+  <!-- Verdicts row -->
+  <rect x="324" y="464" width="898" height="66" rx="6" fill="#fffbe6" stroke="#b8860b"/>
+  <text x="775" y="486" text-anchor="middle" font-weight="bold" fill="#7a5a00">Verdict  →  four-tier response model</text>
+  <g font-size="11.5">
+    <rect x="338" y="498" width="200" height="22" rx="3" fill="#222" stroke="#000"/>
+    <text x="438" y="514" text-anchor="middle" fill="#fff" font-weight="bold">Tier 0  Constitutional Block</text>
+
+    <rect x="548" y="498" width="200" height="22" rx="3" fill="#f5d76e" stroke="#a07a00"/>
+    <text x="648" y="514" text-anchor="middle" font-weight="bold">Tier 1  Advisory (yellow)</text>
+
+    <rect x="758" y="498" width="220" height="22" rx="3" fill="#f3a536" stroke="#7a4a00"/>
+    <text x="868" y="514" text-anchor="middle" font-weight="bold" fill="#3a2300">Tier 2  Escalate to user (orange)</text>
+
+    <rect x="988" y="498" width="220" height="22" rx="3" fill="#c9302c" stroke="#5a0000"/>
+    <text x="1098" y="514" text-anchor="middle" font-weight="bold" fill="#fff">Tier 3  Block (red)</text>
+  </g>
+
+  <!-- CASSANDRA's memory -->
+  <rect x="324" y="546" width="430" height="74" rx="6" fill="#fff" stroke="#b8860b"/>
+  <text x="539" y="568" text-anchor="middle" font-weight="bold">CASSANDRA memory  (Postgres, dedicated role)</text>
+  <text x="539" y="586" text-anchor="middle" font-size="11" fill="#555">verdict history · pattern watches · data lineage · agent behaviour</text>
+  <text x="539" y="603" text-anchor="middle" font-size="11" fill="#b22222" font-weight="bold">agent has no read or write access</text>
+
+  <!-- Plan/runtime verification box -->
+  <rect x="780" y="546" width="442" height="74" rx="6" fill="#fff" stroke="#b8860b"/>
+  <text x="1001" y="568" text-anchor="middle" font-weight="bold">Runtime verification  (post-approval)</text>
+  <text x="1001" y="586" text-anchor="middle" font-size="11" fill="#555">each tool call must match an approved plan step</text>
+  <text x="1001" y="603" text-anchor="middle" font-size="11" fill="#555">deviation → re-review or Tier 3 block</text>
+
+  <!-- Dispatcher chokepoint -->
+  <rect x="310" y="650" width="930" height="68" rx="8" fill="#234e7e"/>
+  <text x="775" y="676" text-anchor="middle" font-weight="bold" fill="#fff" font-size="15">DISPATCHER CHOKEPOINT  ·  tool_host::dispatch()</text>
+  <text x="775" y="700" text-anchor="middle" font-size="11" fill="#dde7f4">sole site that authors WorkerCommand · sole policy/audit point · runtime verification hook</text>
+
+  <line x1="775" y1="630" x2="775" y2="650" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <text x="788" y="645" font-size="11" fill="#7a5a00">APPROVE</text>
+
+  <line x1="775" y1="718" x2="775" y2="752" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="788" y="740" font-size="11" fill="#234e7e">spawn worker (sealed cmd)</text>
+
+  <!-- Tier 2 escalation arrow back to channel bus -->
+  <path d="M 1222 514 Q 1320 514 1320 240 Q 1320 200 1300 200" fill="none" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)" stroke-dasharray="6,3"/>
+  <text x="1330" y="380" font-size="11" fill="#7a5a00">Tier 2 →</text>
+  <text x="1330" y="395" font-size="11" fill="#7a5a00">channel bus</text>
+  <text x="1330" y="410" font-size="11" fill="#7a5a00">(Telegram /</text>
+  <text x="1330" y="425" font-size="11" fill="#7a5a00">Signal / email)</text>
+  <text x="1330" y="445" font-size="11" fill="#7a5a00" font-style="italic">timeout → DENY</text>
+
+  <!-- Tool worker zone -->
+  <rect x="290" y="752" width="970" height="290" rx="10" fill="#fff" stroke="#234e7e" stroke-width="2"/>
+  <text x="775" y="775" text-anchor="middle" font-weight="bold" font-size="14">TOOL WORKERS  ·  one OS process per worker  ·  one sandbox per worker</text>
+
+  <!-- Worker boxes -->
+  <g>
+    <!-- shell-exec -->
+    <rect x="310" y="790" width="220" height="240" rx="8" fill="url(#sandGrad)" stroke="#b22222" stroke-width="1.5"/>
+    <text x="420" y="812" text-anchor="middle" font-weight="bold">shell-exec</text>
+    <text x="420" y="831" text-anchor="middle" font-size="11" fill="#553">argv allowlist</text>
+    <line x1="320" y1="843" x2="520" y2="843" stroke="#b22222" stroke-dasharray="3,3"/>
+    <text x="420" y="860" text-anchor="middle" font-size="11" font-weight="bold">parent-side jail</text>
+    <text x="420" y="876" text-anchor="middle" font-size="11">bwrap (Linux) /</text>
+    <text x="420" y="891" text-anchor="middle" font-size="11">sandbox-exec (macOS)</text>
+    <text x="420" y="912" text-anchor="middle" font-size="11" font-weight="bold">worker-side jail</text>
+    <text x="420" y="928" text-anchor="middle" font-size="11">Landlock (FS)</text>
+    <text x="420" y="943" text-anchor="middle" font-size="11">seccomp-bpf (syscalls)</text>
+    <text x="420" y="964" text-anchor="middle" font-size="11" font-weight="bold">resource cap</text>
+    <text x="420" y="980" text-anchor="middle" font-size="11">cgroup v2 (mem/cpu)</text>
+    <text x="420" y="1001" text-anchor="middle" font-size="11" fill="#555" font-style="italic">no Postgres reach</text>
+    <text x="420" y="1016" text-anchor="middle" font-size="11" fill="#555" font-style="italic">no LLM reach</text>
+  </g>
+
+  <g>
+    <!-- python-exec -->
+    <rect x="540" y="790" width="220" height="240" rx="8" fill="url(#sandGrad)" stroke="#b22222" stroke-width="1.5"/>
+    <text x="650" y="812" text-anchor="middle" font-weight="bold">python-exec  (Phase)</text>
+    <text x="650" y="831" text-anchor="middle" font-size="11" fill="#553">scratch FS only</text>
+    <line x1="550" y1="843" x2="750" y2="843" stroke="#b22222" stroke-dasharray="3,3"/>
+    <text x="650" y="860" text-anchor="middle" font-size="11" font-weight="bold">parent-side jail</text>
+    <text x="650" y="876" text-anchor="middle" font-size="11">bwrap / sandbox-exec</text>
+    <text x="650" y="897" text-anchor="middle" font-size="11" font-weight="bold">worker-side jail</text>
+    <text x="650" y="913" text-anchor="middle" font-size="11">Landlock + seccomp</text>
+    <text x="650" y="934" text-anchor="middle" font-size="11" font-weight="bold">optional</text>
+    <text x="650" y="950" text-anchor="middle" font-size="11">micro-VM (Firecracker /</text>
+    <text x="650" y="965" text-anchor="middle" font-size="11">Apple container)</text>
+    <text x="650" y="990" text-anchor="middle" font-size="11" fill="#555" font-style="italic">net unshared by default</text>
+  </g>
+
+  <g>
+    <!-- web-fetch / browser -->
+    <rect x="770" y="790" width="220" height="240" rx="8" fill="url(#sandGrad)" stroke="#b22222" stroke-width="1.5"/>
+    <text x="880" y="812" text-anchor="middle" font-weight="bold">web-fetch / browser</text>
+    <text x="880" y="831" text-anchor="middle" font-size="11" fill="#553">net via egress proxy</text>
+    <line x1="780" y1="843" x2="980" y2="843" stroke="#b22222" stroke-dasharray="3,3"/>
+    <text x="880" y="860" text-anchor="middle" font-size="11" font-weight="bold">parent-side jail</text>
+    <text x="880" y="876" text-anchor="middle" font-size="11">bwrap / sandbox-exec</text>
+    <text x="880" y="897" text-anchor="middle" font-size="11" font-weight="bold">worker-side jail</text>
+    <text x="880" y="913" text-anchor="middle" font-size="11">Landlock + seccomp</text>
+    <text x="880" y="928" text-anchor="middle" font-size="11">(NetClient profile)</text>
+    <text x="880" y="952" text-anchor="middle" font-size="11" font-weight="bold">network</text>
+    <text x="880" y="968" text-anchor="middle" font-size="11">per-worker host allowlist</text>
+    <text x="880" y="983" text-anchor="middle" font-size="11">all bytes scanned at egress</text>
+  </g>
+
+  <g>
+    <!-- anonymiser (CASSANDRA-owned) -->
+    <rect x="1000" y="790" width="240" height="240" rx="8" fill="url(#cassGrad)" stroke="#b8860b" stroke-width="1.5"/>
+    <text x="1120" y="812" text-anchor="middle" font-weight="bold" fill="#7a5a00">anonymiser  (CASSANDRA)</text>
+    <text x="1120" y="831" text-anchor="middle" font-size="11" fill="#7a5a00">BERT · read-only weights</text>
+    <line x1="1010" y1="843" x2="1230" y2="843" stroke="#b8860b" stroke-dasharray="3,3"/>
+    <text x="1120" y="860" text-anchor="middle" font-size="11" font-weight="bold">parent-side jail</text>
+    <text x="1120" y="876" text-anchor="middle" font-size="11">bwrap / sandbox-exec</text>
+    <text x="1120" y="897" text-anchor="middle" font-size="11" font-weight="bold">worker-side jail</text>
+    <text x="1120" y="913" text-anchor="middle" font-size="11">Landlock + seccomp</text>
+    <text x="1120" y="934" text-anchor="middle" font-size="11" font-weight="bold">role</text>
+    <text x="1120" y="950" text-anchor="middle" font-size="11">Stage 2 PII scrub +</text>
+    <text x="1120" y="965" text-anchor="middle" font-size="11">declassifier safety net</text>
+    <text x="1120" y="990" text-anchor="middle" font-size="11" fill="#555" font-style="italic">agent cannot alter weights</text>
+  </g>
+
+  <!-- Egress proxy -->
+  <rect x="1290" y="500" width="270" height="200" rx="10" fill="#eaf6ee" stroke="#246b3a" stroke-width="2"/>
+  <text x="1425" y="524" text-anchor="middle" font-weight="bold" fill="#246b3a">Egress proxy</text>
+  <text x="1425" y="544" text-anchor="middle" font-size="11" fill="#246b3a">(separate process)</text>
+  <text x="1310" y="568" font-size="11">• per-worker host allowlist</text>
+  <text x="1310" y="586" font-size="11">• TLS pinning</text>
+  <text x="1310" y="604" font-size="11">• credential-leak scanner</text>
+  <text x="1310" y="622" font-size="11">• [future] BERT risk scorer</text>
+  <text x="1310" y="640" font-size="11">• [future] declassifier net</text>
+  <text x="1310" y="664" font-size="11" font-weight="bold">every byte scanned ONCE</text>
+  <text x="1310" y="682" font-size="11" font-style="italic" fill="#555">workers cannot bypass</text>
+
+  <!-- Postgres + LLM -->
+  <rect x="40" y="800" width="220" height="240" rx="8" fill="#eef2f7" stroke="#234e7e"/>
+  <text x="150" y="822" text-anchor="middle" font-weight="bold">Postgres  (UDS · peer auth)</text>
+  <line x1="50" y1="833" x2="250" y2="833" stroke="#234e7e" stroke-dasharray="3,3"/>
+  <text x="60" y="854" font-size="11" font-weight="bold">role: hhagent_runtime</text>
+  <text x="60" y="870" font-size="11">memory · audit_log (append-only)</text>
+  <text x="60" y="886" font-size="11">UPDATE/DELETE on audit denied</text>
+  <text x="60" y="912" font-size="11" font-weight="bold" fill="#7a5a00">role: cassandra (separate)</text>
+  <text x="60" y="928" font-size="11" fill="#7a5a00">verdicts · pattern watches</text>
+  <text x="60" y="944" font-size="11" fill="#7a5a00">lineage · user baseline</text>
+  <text x="60" y="970" font-size="11" font-weight="bold" fill="#b22222">tool workers: NO Postgres</text>
+  <text x="60" y="986" font-size="11" fill="#b22222">access at all (core-only)</text>
+  <text x="60" y="1010" font-size="11" font-style="italic" fill="#555">CASSANDRA DB may be hosted</text>
+  <text x="60" y="1024" font-size="11" font-style="italic" fill="#555">on a separate machine</text>
+
+  <!-- LLM endpoints -->
+  <rect x="40" y="320" width="220" height="180" rx="8" fill="#eef2f7" stroke="#234e7e"/>
+  <text x="150" y="342" text-anchor="middle" font-weight="bold">LLM endpoints</text>
+  <text x="60" y="368" font-size="11">• Local (vLLM/SGLang/Ollama)</text>
+  <text x="60" y="386" font-size="11">  reachable from core only</text>
+  <text x="60" y="408" font-size="11">• Frontier API (HTTPS via</text>
+  <text x="60" y="424" font-size="11">  egress proxy, allowlisted)</text>
+  <text x="60" y="448" font-size="11" font-weight="bold" fill="#7a5a00">CASSANDRA dual call</text>
+  <text x="60" y="464" font-size="11" fill="#7a5a00">frontier reviewer +</text>
+  <text x="60" y="480" font-size="11" fill="#7a5a00">local fallback (prompts §16)</text>
+
+  <!-- Constitutional principles legend -->
+  <rect x="40" y="520" width="220" height="270" rx="8" fill="#fff7d6" stroke="#b8860b"/>
+  <text x="150" y="542" text-anchor="middle" font-weight="bold" fill="#7a5a00">Constitutional principles</text>
+  <text x="150" y="558" text-anchor="middle" font-size="11" fill="#7a5a00" font-style="italic">absolute · no override path</text>
+  <text x="55" y="580" font-size="11" font-weight="bold">1.</text><text x="75" y="580" font-size="11">Do not cause physical harm</text>
+  <text x="55" y="608" font-size="11" font-weight="bold">2.</text><text x="75" y="608" font-size="11">Do not facilitate fraud or</text>
+  <text x="75" y="622" font-size="11">impersonation</text>
+  <text x="55" y="650" font-size="11" font-weight="bold">3.</text><text x="75" y="650" font-size="11">No irreversible harm without</text>
+  <text x="75" y="664" font-size="11">verified human-in-the-loop</text>
+  <text x="55" y="692" font-size="11" font-weight="bold">4.</text><text x="75" y="692" font-size="11">Do not concentrate the</text>
+  <text x="75" y="706" font-size="11">system's power</text>
+  <text x="55" y="734" font-size="11" font-weight="bold">5.</text><text x="75" y="734" font-size="11">Do not suppress oversight</text>
+  <text x="75" y="748" font-size="11">(audit, escalation, shutdown)</text>
+  <text x="55" y="772" font-size="11" font-style="italic" fill="#555">Tier 0 enforces these even</text>
+  <text x="55" y="786" font-size="11" font-style="italic" fill="#555">against the user.</text>
+
+  <!-- Egress connection lines from workers -->
+  <path d="M 880 1030 Q 880 1080 1290 600" fill="none" stroke="#246b3a" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <text x="1180" y="900" font-size="11" fill="#246b3a">all outbound network →</text>
+
+  <!-- Egress to LLM frontier -->
+  <line x1="1290" y1="540" x2="260" y2="410" stroke="#246b3a" stroke-width="1.5" stroke-dasharray="2,3"/>
+
+  <!-- Postgres connections from core -->
+  <line x1="290" y1="930" x2="260" y2="900" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Channel bus to core -->
+  <line x1="260" y1="200" x2="290" y2="200" stroke="#557755" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Footer / legend -->
+  <rect x="290" y="1062" width="970" height="40" rx="6" fill="#fafafa" stroke="#999"/>
+  <text x="775" y="1080" text-anchor="middle" font-size="11" font-weight="bold">Defence-in-depth chain (left → right):</text>
+  <text x="775" y="1095" text-anchor="middle" font-size="11">channel adapter  →  agent core  →  CASSANDRA pipeline  →  dispatcher chokepoint  →  parent-side sandbox  →  worker-side sandbox  →  cgroup cap  →  egress proxy</text>
+
+  <!-- Threat-model invariant -->
+  <rect x="1290" y="720" width="270" height="200" rx="8" fill="#fafafa" stroke="#666"/>
+  <text x="1425" y="742" text-anchor="middle" font-weight="bold">Worst-case compromise reaches:</text>
+  <text x="1305" y="766" font-size="11">1. agent's own OS user</text>
+  <text x="1305" y="784" font-size="11">2. its own Postgres role (UDS)</text>
+  <text x="1305" y="802" font-size="11">3. its own scratch FS</text>
+  <text x="1305" y="820" font-size="11">4. allowlisted endpoints for the</text>
+  <text x="1325" y="836" font-size="11">ONE compromised tool</text>
+  <text x="1305" y="862" font-size="11" font-weight="bold">Nothing else.</text>
+  <text x="1305" y="884" font-size="11" font-style="italic" fill="#7a5a00">CASSANDRA additionally catches</text>
+  <text x="1305" y="900" font-size="11" font-style="italic" fill="#7a5a00">semantically wrong actions that</text>
+  <text x="1305" y="914" font-size="11" font-style="italic" fill="#7a5a00">mechanical layers cannot.</text>
+
+  <!-- Color key -->
+  <g transform="translate(1290,940)">
+    <rect x="0" y="0" width="270" height="110" rx="8" fill="#fff" stroke="#999"/>
+    <text x="135" y="20" text-anchor="middle" font-weight="bold" font-size="12">Legend</text>
+    <rect x="12" y="32" width="18" height="12" fill="url(#coreGrad)" stroke="#234e7e"/>
+    <text x="38" y="42" font-size="11">agent core (Rust, in-process)</text>
+    <rect x="12" y="52" width="18" height="12" fill="url(#cassGrad)" stroke="#b8860b"/>
+    <text x="38" y="62" font-size="11">CASSANDRA / constitutional</text>
+    <rect x="12" y="72" width="18" height="12" fill="url(#sandGrad)" stroke="#b22222"/>
+    <text x="38" y="82" font-size="11">sandboxed worker (untrusted)</text>
+    <rect x="12" y="92" width="18" height="12" fill="#eaf6ee" stroke="#246b3a"/>
+    <text x="38" y="102" font-size="11">trust-boundary scanner</text>
+  </g>
+
+</svg>
