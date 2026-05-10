@@ -86,6 +86,19 @@ async fn lane_loop(
         return;
     }
 
+    // Initial drain: a task inserted *before* the LISTEN above does
+    // not produce a NOTIFY visible to this listener (PG does not queue
+    // notifications for late subscribers). Without this, a daemon
+    // restart with pending tasks would wait one full HEARTBEAT before
+    // picking them up — and tests that race the scheduler against
+    // pre-inserted rows would time out. Doing the drain *after* LISTEN
+    // is what keeps the drain race-free with newly-arriving tasks.
+    drain_lane(
+        &pool, formulator.clone(), review.clone(), dispatcher.clone(),
+        lane, deadline_seconds, max_plans, &shutdown,
+    ).await;
+    if *shutdown.borrow() { return; }
+
     loop {
         // Wait for a wake-up: shutdown, NOTIFY, or heartbeat.
         tokio::select! {
@@ -96,29 +109,48 @@ async fn lane_loop(
             _ = sleep(HEARTBEAT) => { /* fall through */ }
         }
 
-        // Drain pending tasks on this lane.
-        loop {
-            if *shutdown.borrow() { return; }
-            let claimed = match tasks::claim_one(&pool, lane, deadline_seconds).await {
-                Ok(Some(t)) => t,
-                Ok(None) => break,  // nothing pending; back to listener
-                Err(e) => {
-                    eprintln!("scheduler[{}]: claim_one error: {e}", lane.as_sql());
-                    break;
-                }
-            };
+        drain_lane(
+            &pool, formulator.clone(), review.clone(), dispatcher.clone(),
+            lane, deadline_seconds, max_plans, &shutdown,
+        ).await;
+    }
+}
 
-            let outcome = run_one(
-                &pool, formulator.clone(), review.clone(), dispatcher.clone(),
-                &claimed, max_plans,
-            ).await;
-
-            let final_state = outcome.final_state();
-            let result = outcome.result_payload();
-            if let Err(e) = tasks::finalize(&pool, claimed.id, final_state, result).await {
-                eprintln!("scheduler[{}]: finalize task {} failed: {e}",
-                          lane.as_sql(), claimed.id);
+/// Drain every pending task on `lane` until `claim_one` returns `None`.
+/// Pulled out of `lane_loop` so the same body runs both in the initial
+/// startup pass and on each NOTIFY/heartbeat wake. Honours `shutdown`
+/// between every claim.
+async fn drain_lane(
+    pool: &PgPool,
+    formulator: Arc<dyn PlanFormulator>,
+    review: Arc<ChainReviewStage>,
+    dispatcher: Arc<dyn StepDispatcher>,
+    lane: Lane,
+    deadline_seconds: i64,
+    max_plans: u32,
+    shutdown: &watch::Receiver<bool>,
+) {
+    loop {
+        if *shutdown.borrow() { return; }
+        let claimed = match tasks::claim_one(pool, lane, deadline_seconds).await {
+            Ok(Some(t)) => t,
+            Ok(None) => return,  // nothing pending; caller goes back to listener
+            Err(e) => {
+                eprintln!("scheduler[{}]: claim_one error: {e}", lane.as_sql());
+                return;
             }
+        };
+
+        let outcome = run_one(
+            pool, formulator.clone(), review.clone(), dispatcher.clone(),
+            &claimed, max_plans,
+        ).await;
+
+        let final_state = outcome.final_state();
+        let result = outcome.result_payload();
+        if let Err(e) = tasks::finalize(pool, claimed.id, final_state, result).await {
+            eprintln!("scheduler[{}]: finalize task {} failed: {e}",
+                      lane.as_sql(), claimed.id);
         }
     }
 }
@@ -158,8 +190,14 @@ async fn run_one(
             }
         }
     };
+    // Bound the override by u32::MAX explicitly: an `as u32` cast would
+    // silently roll over a producer-supplied 2^33 to a small number,
+    // which then *under*shoots the lane default. Falling back to the
+    // lane default on any out-of-range value keeps behaviour predictable.
     let max_plans_override = task.payload.get("max_plans")
-        .and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(max_plans);
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(max_plans);
 
     let ctx = TaskContext {
         task_id: task.id,
@@ -213,6 +251,16 @@ impl StepDispatcher for ToolHostStepDispatcher {
                 detail: format!("tool '{}' not registered", step.tool),
             };
         }
+        // Loud at the daemon log: an operator running `hhagent-cli ask ...`
+        // today will burn an LLM call and then see this; the error log
+        // points them straight at the deferred follow-up. Audit row from
+        // `plan.outcome` records the failure too, but that requires
+        // `audit tail` to spot.
+        tracing::error!(
+            tool = %step.tool, method = %step.method,
+            "ToolHostStepDispatcher hit NOT_IMPLEMENTED placeholder — \
+             real tool_host::dispatch wiring is Task 3.2.bis"
+        );
         StepOutcome::Err {
             code: "NOT_IMPLEMENTED".into(),
             detail: "ToolHostStepDispatcher needs wiring to tool_host::dispatch (Task 3.2.bis)".into(),

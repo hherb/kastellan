@@ -441,6 +441,21 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
         state_dir.to_string_lossy().into_owned(),
     ));
 
+    // The daemon's prompt loader (`scheduler::prompts::load_prompts_from_dir`)
+    // resolves its directory from `HHAGENT_PROMPTS_DIR` and falls back to
+    // a cwd-relative `prompts/`. systemd's working directory is not the
+    // workspace root, so without this override the daemon exits before
+    // the audit-mirror would have written its bring-up row. Point it at
+    // the in-tree prompts dir; the loader is read-only here.
+    let workspace_prompts = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("prompts");
+    spec.env.push((
+        "HHAGENT_PROMPTS_DIR".to_string(),
+        workspace_prompts.to_string_lossy().into_owned(),
+    ));
+
     let sup_core = default_supervisor();
     let _core_service_guard = ServiceGuard {
         sup: default_supervisor(),

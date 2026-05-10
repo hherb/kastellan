@@ -490,11 +490,21 @@ async fn plan_iteration_cap_exhausted_returns_failed() {
     }
 }
 
-/// (d) The inner loop is running in a spawned task. After 150 ms the
-///     test marks the task cancelled in the DB; the loop detects it
-///     at the top of the next iteration and returns Cancelled.
+/// (d) The inner loop is running in a spawned task. While iteration 1
+///     is mid-step, the test marks the task cancelled in the DB; the
+///     loop detects it at the top of the next iteration and returns
+///     Cancelled.
+///
+/// Synchronisation: the test uses a `BarrierDispatcher` that signals
+/// when the first step is being processed and waits for an explicit
+/// release. This avoids the timing-race a sleep-based test would have:
+/// on fast hardware (DGX-class), 150 ms is enough time for the loop to
+/// run iter 1 + iter 2 and complete plan 2 before the cancellation
+/// lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_mid_execution_returns_cancelled() {
+    use tokio::sync::Notify;
+
     let Some((pool, _guards)) = bring_up_pg("ican").await else {
         return; // [SKIP]
     };
@@ -504,29 +514,33 @@ async fn cancel_mid_execution_returns_cancelled() {
         .unwrap();
     let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
 
-    // Plan 1 succeeds its step; plan 2 would complete — but we cancel
-    // between iter 1 and iter 2 by planting state='cancelled'.
+    // Plan 1 dispatches a step that pauses on the barrier; while it
+    // pauses, the test plants state='cancelled'. Plan 2 must NOT run.
     let formulator = Arc::new(ScriptedFormulator::new(vec![
         one_step_plan("ok-tool", "ok-method"),
         task_complete_plan("never seen"),
     ]));
-    let mut table = std::collections::HashMap::new();
-    table.insert(
-        ("ok-tool".to_string(), "ok-method".to_string()),
-        StepOutcome::Ok(serde_json::json!("step-ok")),
-    );
-    let dispatcher = Arc::new(ScriptedDispatcher { table });
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let dispatcher = Arc::new(BarrierDispatcher {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
 
-    // Kick off the loop in a separate task.
     let pool2 = pool.clone();
     let h = tokio::spawn(async move {
         run_to_terminal(&pool2, formulator, review, dispatcher, make_ctx(id, 3)).await
     });
 
-    // Give the loop time to enter and complete iteration 1, then cancel.
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // Wait for the dispatcher to signal that iter 1's step is in flight.
+    entered.notified().await;
+    // Plant the cancellation while the step is paused on the barrier.
     tasks::mark_cancelled(&pool, id).await.unwrap();
+    // Release the step. The for-step `observe_state` poll fires on the
+    // next iteration of the step loop (none in this 1-step plan), then
+    // the top-of-loop `observe_state` for iter 2 catches the cancellation.
+    release.notify_one();
 
     let outcome = h.await.unwrap().unwrap();
     assert!(
@@ -534,4 +548,21 @@ async fn cancel_mid_execution_returns_cancelled() {
         "expected Cancelled, got: {:?}",
         outcome
     );
+}
+
+/// Dispatcher that signals on first call, waits for a release, then
+/// returns Ok. Used by the cancel-mid-execution test to make the race
+/// deterministic.
+struct BarrierDispatcher {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl StepDispatcher for BarrierDispatcher {
+    async fn dispatch_step(&self, _step: &PlannedStep) -> StepOutcome {
+        self.entered.notify_one();
+        self.release.notified().await;
+        StepOutcome::Ok(serde_json::json!("step-ok"))
+    }
 }

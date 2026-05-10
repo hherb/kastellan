@@ -25,14 +25,19 @@ pub enum PromptError {
     Io { path: std::path::PathBuf, source: std::io::Error },
     #[error("db error: {0}")]
     Db(#[from] hhagent_db::DbError),
-    #[error("prompt name has invalid characters: {0:?}")]
-    InvalidName(String),
 }
 
 /// Load all `.md` files under `dir` into a `PromptCache`. Each file's
 /// stem (without the `.md`) becomes its `name`; its content is read,
 /// hashed, and upserted into `agent_prompts`. Non-`.md` files are
 /// ignored.
+///
+/// Files with non-UTF8 paths or names containing characters outside
+/// `[A-Za-z0-9_-]` (e.g. dotfile-style `.foo.md` from an editor's
+/// autosave) are *skipped with a warning* rather than aborting the
+/// load. Refusing to start the daemon over a stray editor temp file
+/// would be hostile to the operator; the warning keeps the situation
+/// observable.
 pub async fn load_prompts_from_dir(
     pool: &PgPool,
     dir: &Path,
@@ -47,11 +52,16 @@ pub async fn load_prompts_from_dir(
         if path.extension().and_then(|x| x.to_str()) != Some("md") {
             continue;
         }
-        let name = path.file_stem().and_then(|s| s.to_str())
-            .ok_or_else(|| PromptError::InvalidName(format!("{:?}", path)))?
-            .to_string();
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            tracing::warn!(path = ?path, "prompt file has non-UTF8 name; skipping");
+            continue;
+        };
         if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err(PromptError::InvalidName(name));
+            tracing::warn!(
+                path = ?path, name = %name,
+                "prompt file name has chars outside [A-Za-z0-9_-]; skipping"
+            );
+            continue;
         }
         let content = fs::read_to_string(&path).await
             .map_err(|e| PromptError::Io { path: path.clone(), source: e })?;
