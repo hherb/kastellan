@@ -130,22 +130,27 @@ pub async fn run_to_terminal(
         }
 
         // 1. Formulate plan
+        //
+        // No loop-level retry: replanning IS the retry shape (the agent
+        // sees the prior failure on the next iteration, bounded by
+        // `max_plans`). A transient HTTP/transport error that escapes
+        // the formulator's own retry is therefore terminal here.
         let (plan, meta) = match formulator.formulate_plan(&ctx).await {
             Ok(x) => x,
-            Err(AgentError::Router(e)) if is_transient(&e) => {
-                // Backoff retry up to 3 attempts, handled inside the
-                // formulator if it implements its own retry; here we
-                // surface as Failed if it bubbles. For this scope we
-                // do not retry at the loop level (replanning is the
-                // retry shape), but transient errors that escape the
-                // formulator are loud failures.
-                return Ok(Outcome::Failed(format!("llm_transient: {e}")));
-            }
             Err(e) => return Ok(Outcome::Failed(format!("llm: {e}"))),
         };
 
         ctx.plan_count += 1;
-        let _ = tasks::increment_plan_count(pool, ctx.task_id, ctx.plan_count as i32).await;
+        // Best-effort mirror — the in-memory `ctx.plan_count` is the
+        // source of truth, the DB column is for operator visibility
+        // (`tasks status`). A real DB error here doesn't change loop
+        // behaviour but is worth surfacing in the daemon log.
+        if let Err(e) = tasks::increment_plan_count(pool, ctx.task_id, ctx.plan_count as i32).await {
+            tracing::warn!(
+                task_id = ctx.task_id, plan_count = ctx.plan_count, error = %e,
+                "tasks::increment_plan_count failed (mirror only; loop continues)"
+            );
+        }
 
         write_audit_plan_formulate(pool, &ctx, &plan, &meta).await?;
 
@@ -167,9 +172,25 @@ pub async fn run_to_terminal(
                 ctx.blocks.push(reason.clone());
                 continue;  // bounded by plan_count cap on next iter
             }
-            Verdict::Escalate(reason, _sev) => {
-                // No channel bus in this scope — treat as Block so
-                // the agent gets a chance to revise.
+            Verdict::Escalate(reason, sev) => {
+                // No channel bus in this scope — treat as Block so the
+                // agent gets a chance to revise. The audit row above
+                // already records `verdict_kind=escalate`, but the
+                // runtime degradation (escalate → block) is invisible
+                // to anyone not reading the audit log; a warn keeps it
+                // grep-able in the daemon journal.
+                //
+                // TODO(channel-bus): when the channel-bus lands, route
+                //   the Escalate verdict to the operator channel and
+                //   await a verdict from there. The site to update is
+                //   this match arm. See HANDOVER §"channel bus".
+                tracing::warn!(
+                    task_id = ctx.task_id,
+                    plan_count = ctx.plan_count,
+                    severity = ?sev,
+                    reason = %reason,
+                    "Verdict::Escalate degraded to Block (channel-bus not wired)"
+                );
                 ctx.blocks.push(format!("escalate(no-channel): {reason}"));
                 continue;
             }
@@ -208,19 +229,6 @@ pub async fn run_to_terminal(
 
         ctx.plans.push((plan, outcomes));
         // loop back: agent reflects on the outcomes for the next plan
-    }
-}
-
-/// Returns `true` for errors that are worth retrying (network-level
-/// failures and 5xx HTTP responses from the backend). The corrected
-/// explicit `match` form avoids the `matches!` OR-arm guard ambiguity
-/// in the plan's original draft.
-fn is_transient(e: &hhagent_llm_router::RouterError) -> bool {
-    use hhagent_llm_router::RouterError::*;
-    match e {
-        Transport(_) => true,
-        HttpStatus { status, .. } => (500u16..600).contains(status),
-        _ => false,
     }
 }
 

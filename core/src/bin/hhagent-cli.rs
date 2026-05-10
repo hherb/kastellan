@@ -367,10 +367,13 @@ async fn tasks_list(args: &[String]) -> ExitCode {
                     Some(v) => v,
                     None => { eprintln!("--lane needs value"); return ExitCode::from(2); }
                 };
-                lane = Some(Lane::from_sql(v).unwrap_or_else(|_| {
-                    eprintln!("--lane must be 'fast' or 'long'");
-                    std::process::exit(2)
-                }));
+                lane = match Lane::from_sql(v) {
+                    Ok(l) => Some(l),
+                    Err(_) => {
+                        eprintln!("--lane must be 'fast' or 'long'");
+                        return ExitCode::from(2);
+                    }
+                };
                 i += 2;
             }
             "--state" => {
@@ -381,7 +384,10 @@ async fn tasks_list(args: &[String]) -> ExitCode {
                 limit = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(20);
                 i += 2;
             }
-            _ => i += 1,
+            other => {
+                eprintln!("tasks list: unknown flag {other}");
+                return ExitCode::from(2);
+            }
         }
     }
 
@@ -399,7 +405,9 @@ async fn tasks_list(args: &[String]) -> ExitCode {
     };
     for t in rows {
         let instr = t.payload.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
-        let summary = if instr.len() > 60 { &instr[..60] } else { instr };
+        // Char-based truncation: byte slicing splits multi-byte UTF-8 codepoints
+        // (medical jargon with accented characters or CJK) and panics at runtime.
+        let summary: String = instr.chars().take(60).collect();
         println!("{:>6}  {:<10}  {:<5}  {}  {}",
             t.id, t.state, t.lane.as_sql(), t.created_at, summary);
     }
@@ -489,8 +497,14 @@ async fn tasks_fail(args: &[String]) -> ExitCode {
     }
 }
 
-/// One-shot scan of the audit JSONL files for rows whose payload
-/// contains `"task_id":<id>`. Prints matching lines to stdout.
+/// One-shot scan of the audit JSONL files for rows whose `payload.task_id`
+/// equals `<id>`. Prints matching lines verbatim to stdout, in chronological
+/// order across files.
+///
+/// Each line is parsed as JSON so the filter does not false-positive on
+/// substring matches like `parent_task_id` or whitespace-padded JSON. Lines
+/// that fail to parse are skipped silently — the file might be mid-write
+/// from the mirror task.
 ///
 /// Follow mode (live tailing) is a follow-up; use `audit tail` for
 /// live tailing of the full stream. This function exits after scanning
@@ -512,8 +526,6 @@ fn tasks_tail(args: &[String]) -> ExitCode {
             }
         },
     };
-
-    let needle = format!("\"task_id\":{id}");
 
     let entries = match std::fs::read_dir(&state_dir) {
         Ok(it) => it,
@@ -541,11 +553,56 @@ fn tasks_tail(args: &[String]) -> ExitCode {
             Err(_) => continue,
         };
         for line in BufReader::new(f).lines().map_while(Result::ok) {
-            if line.contains(&needle) {
+            if line_matches_task(&line, id) {
                 println!("{line}");
             }
         }
     }
 
     ExitCode::from(0)
+}
+
+/// Returns `true` iff `line` parses as JSON and `payload.task_id == id`.
+/// Pure helper so the unit tests below can pin behaviour without disk I/O.
+fn line_matches_task(line: &str, id: i64) -> bool {
+    let v: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    v.get("payload")
+        .and_then(|p| p.get("task_id"))
+        .and_then(|t| t.as_i64())
+        == Some(id)
+}
+
+#[cfg(test)]
+mod tasks_tail_tests {
+    use super::line_matches_task;
+
+    #[test]
+    fn matches_payload_task_id() {
+        let line = r#"{"id":1,"ts":"x","actor":"a","action":"b","payload":{"task_id":42,"x":1}}"#;
+        assert!(line_matches_task(line, 42));
+        assert!(!line_matches_task(line, 43));
+    }
+
+    #[test]
+    fn does_not_match_substring_lookalikes() {
+        // parent_task_id contains the substring "task_id" — the old
+        // string-search filter would false-positive here.
+        let line = r#"{"id":1,"ts":"x","actor":"a","action":"b","payload":{"parent_task_id":42}}"#;
+        assert!(!line_matches_task(line, 42));
+    }
+
+    #[test]
+    fn handles_whitespace_padded_json() {
+        let line = r#"{ "id" : 1, "payload" : { "task_id" : 42 } }"#;
+        assert!(line_matches_task(line, 42));
+    }
+
+    #[test]
+    fn skips_non_json_lines() {
+        assert!(!line_matches_task("not json at all", 42));
+        assert!(!line_matches_task("", 42));
+    }
 }
