@@ -12,9 +12,9 @@
 pub mod prompts;
 
 // Added by Task 2.3:
-// pub mod agent;
+pub mod agent;
 // Added by Task 2.4:
-// pub mod inner_loop;
+pub mod inner_loop;
 // Added by Task 3.1:
 // pub mod runner;
 // pub use runner::{spawn_scheduler, SchedulerHandle};

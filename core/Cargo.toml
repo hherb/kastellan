@@ -29,6 +29,7 @@ hhagent-sandbox    = { path = "../sandbox" }
 hhagent-supervisor = { path = "../supervisor" }
 hhagent-protocol   = { path = "../protocol" }
 hhagent-db         = { path = "../db" }
+hhagent-llm-router = { path = "../llm-router" }
 
 tokio              = { workspace = true }
 async-trait        = { workspace = true }
