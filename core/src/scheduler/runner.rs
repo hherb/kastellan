@@ -135,10 +135,29 @@ async fn run_one(
 
     let instruction = task.payload.get("instruction")
         .and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let classification_floor = task.payload.get("classification_floor")
-        .and_then(|v| v.as_str())
-        .and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok())
-        .unwrap_or(DataClass::Public);
+
+    // SECURITY: an unrecognised classification_floor is a hard error —
+    // silently defaulting to Public would downgrade clinically-classified
+    // data into the lowest review band. Field absence is the producer
+    // opting out (treated as no floor / Public); a present-but-bad value
+    // is a producer bug that must surface.
+    let classification_floor = match task.payload.get("classification_floor") {
+        None => DataClass::Public,
+        Some(v) => {
+            let Some(s) = v.as_str() else {
+                return Outcome::Failed(format!(
+                    "classification_floor in payload is not a string: {v:?}"
+                ));
+            };
+            match serde_json::from_str::<DataClass>(&format!("\"{}\"", s)) {
+                Ok(dc) => dc,
+                Err(_) => return Outcome::Failed(format!(
+                    "unknown classification_floor: {s:?} (expected one of \
+                     Public, Personal, ClinicalConfidential, Secret)"
+                )),
+            }
+        }
+    };
     let max_plans_override = task.payload.get("max_plans")
         .and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(max_plans);
 
