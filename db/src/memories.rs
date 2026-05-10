@@ -69,6 +69,30 @@ pub const EMBEDDING_DIM: usize = 1024;
 /// large enough that RRF has multiple candidates per lane to fuse.
 pub const DEFAULT_RECALL_K: usize = 10;
 
+/// Reject embeddings whose length doesn't match [`EMBEDDING_DIM`].
+///
+/// Shared by [`insert_memory`] (write path) and [`semantic_search`]
+/// (read path) so the operator-readable error message is identical at
+/// both ends. The check fires before any sqlx call, so unit tests can
+/// exercise it without a live executor.
+fn check_embedding_dim(label: &str, v: &[f32]) -> Result<(), DbError> {
+    if v.len() != EMBEDDING_DIM {
+        return Err(DbError::Query(format!(
+            "{label} embedding dim mismatch: got {}, expected {}",
+            v.len(),
+            EMBEDDING_DIM
+        )));
+    }
+    Ok(())
+}
+
+/// `usize` → `i64` for SQL `LIMIT` binds. Saturates at `i64::MAX`
+/// rather than wrapping to a negative value (which Postgres would
+/// reject with a runtime error far from the call site).
+fn limit_as_i64(k: usize) -> i64 {
+    i64::try_from(k).unwrap_or(i64::MAX)
+}
+
 /// One row from `memories` returned from a fully hydrated query.
 ///
 /// `embedding` is intentionally NOT decoded back into a `Vec<f32>` —
@@ -113,13 +137,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     if let Some(v) = embedding {
-        if v.len() != EMBEDDING_DIM {
-            return Err(DbError::Query(format!(
-                "embedding dim mismatch: got {}, expected {}",
-                v.len(),
-                EMBEDDING_DIM
-            )));
-        }
+        check_embedding_dim("insert", v)?;
     }
 
     // Bind the embedding as text and let Postgres cast it.
@@ -179,13 +197,7 @@ where
     if k == 0 {
         return Ok(Vec::new());
     }
-    if query_embedding.len() != EMBEDDING_DIM {
-        return Err(DbError::Query(format!(
-            "query embedding dim mismatch: got {}, expected {}",
-            query_embedding.len(),
-            EMBEDDING_DIM
-        )));
-    }
+    check_embedding_dim("query", query_embedding)?;
 
     let lit = vector_literal(query_embedding);
     let rows = sqlx::query(
@@ -196,7 +208,7 @@ where
          LIMIT $2",
     )
     .bind(lit)
-    .bind(k as i64)
+    .bind(limit_as_i64(k))
     .fetch_all(executor)
     .await
     .map_err(|e| DbError::Query(format!("semantic_search: {e}")))?;
@@ -247,7 +259,7 @@ where
          LIMIT $2",
     )
     .bind(query_text)
-    .bind(k as i64)
+    .bind(limit_as_i64(k))
     .fetch_all(executor)
     .await
     .map_err(|e| DbError::Query(format!("lexical_search: {e}")))?;
@@ -274,6 +286,13 @@ where
 /// query and hydration) are silently skipped — the caller observes a
 /// shorter list rather than an error, matching the
 /// "ranked id-list" + "best-effort hydration" contract.
+///
+/// Duplicate ids in `ids` are deduped to the first occurrence: the
+/// internal `HashMap::remove` strips the row on first lookup, so a
+/// later occurrence finds nothing and is dropped. RRF (the only
+/// production caller today) cannot produce duplicates because its
+/// score map is keyed by id, but a future caller passing arbitrary
+/// id lists should not rely on `fetch_by_ids` to expand them.
 pub async fn fetch_by_ids<'e, E>(executor: E, ids: &[i64]) -> Result<Vec<Memory>, DbError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -323,10 +342,14 @@ where
 ///
 /// pgvector's text input format is `[v0,v1,...,vN-1]` with a trailing
 /// `]`, no whitespace, and standard floating-point literals. The
-/// extension's parser accepts both `0.5` and `5e-1` style literals; we
-/// emit the former because Rust's `f32::Display` is the canonical
-/// Decimal formatter and that is what every downstream operator
-/// expects to see when they EXPLAIN the query.
+/// extension's parser accepts both decimal (`0.5`) and scientific
+/// (`5e-1`) forms; we delegate to Rust's `f32::Display`, which emits
+/// the shortest round-trippable representation — usually decimal for
+/// human-scale magnitudes (`0.5`, `-1.25`) but scientific for very
+/// small or very large values (`1e-10`, `3.4e38`). Both forms are
+/// accepted by pgvector and round-trip losslessly, so the choice is
+/// invisible to correctness; the only operator-visible effect is the
+/// shape of values they read in EXPLAIN.
 ///
 /// **Why text-cast and not the `pgvector` Rust crate.** The crate
 /// wraps the same string round-trip with stronger types and a sqlx
@@ -357,12 +380,14 @@ pub fn vector_literal(v: &[f32]) -> String {
             s.push(',');
         }
         // `f32` Display gives the shortest round-trippable
-        // representation in standard decimal form. NaN/Inf would
-        // produce strings pgvector rejects, but we never expect
-        // those — embeddings come from a normalised model output
-        // and are pre-validated by the embedding worker. Defense
-        // in depth: a future caller that introduces unsanitised
-        // floats will get a clear pgvector error at INSERT time.
+        // representation (decimal for human-scale values, scientific
+        // for very small/large) — both are valid pgvector input.
+        // NaN/Inf produce strings pgvector rejects, but we never
+        // expect those: embeddings come from a normalised model
+        // output and are pre-validated by the embedding worker.
+        // Defense in depth: a future caller that introduces
+        // unsanitised floats will get a clear pgvector error at
+        // INSERT time, not silent corruption.
         write!(&mut s, "{}", x).expect("write to String cannot fail");
     }
     s.push(']');
@@ -424,44 +449,42 @@ mod tests {
         assert_eq!(vector_literal(&[-0.5_f32, 0.5]), "[-0.5,0.5]");
     }
 
-    /// Insertion shape pin: the helper rejects a too-short vector with
-    /// a `Query` error whose message names both expected and actual
-    /// dim. Pure check — runs without a DB.
-    #[tokio::test]
-    async fn insert_memory_rejects_wrong_dim() {
-        // We cannot actually execute the INSERT without a DB, but the
-        // dim-check fires before any sqlx call. Use a dummy executor
-        // that would panic if reached; the function returns Err
-        // before touching it.
-        //
-        // sqlx's executors don't have an easy "panic-on-touch" stub,
-        // so we exercise the check by calling a tiny inline helper
-        // that mirrors the body's first branch. The real call site
-        // is exercised by the integration test.
+    /// Dim-check shape pin: the shared helper rejects a too-short
+    /// vector with a `Query` error whose message names both expected
+    /// and actual dim, plus the call-site label so an operator can
+    /// tell INSERT-side from query-side errors apart. Pure — runs
+    /// without a DB. Both `insert_memory` and `semantic_search` route
+    /// through this same helper, so this is the real production path.
+    #[test]
+    fn check_embedding_dim_rejects_too_short() {
         let too_short: Vec<f32> = vec![0.0; 10];
-        let err = check_dim(&too_short).unwrap_err();
+        let err = check_embedding_dim("insert", &too_short).unwrap_err();
         match err {
             DbError::Query(msg) => {
                 assert!(msg.contains("dim mismatch"), "msg: {msg}");
-                assert!(msg.contains("10"), "msg: {msg}");
-                assert!(msg.contains("1024"), "msg: {msg}");
+                assert!(msg.contains("insert"), "label missing in: {msg}");
+                assert!(msg.contains("10"), "got-dim missing in: {msg}");
+                assert!(msg.contains("1024"), "expected-dim missing in: {msg}");
             }
             other => panic!("expected DbError::Query, got {other:?}"),
         }
     }
 
-    /// Helper mirroring the dim check in `insert_memory` and
-    /// `semantic_search` so the unit test can exercise the path
-    /// without a live executor. If the helpers' check changes shape,
-    /// update both sites.
-    fn check_dim(v: &[f32]) -> Result<(), DbError> {
-        if v.len() != EMBEDDING_DIM {
-            return Err(DbError::Query(format!(
-                "embedding dim mismatch: got {}, expected {}",
-                v.len(),
-                EMBEDDING_DIM
-            )));
-        }
-        Ok(())
+    /// Same helper accepts an exact-length input.
+    #[test]
+    fn check_embedding_dim_accepts_correct_length() {
+        let ok: Vec<f32> = vec![0.0; EMBEDDING_DIM];
+        check_embedding_dim("query", &ok).expect("exact-length input must pass");
+    }
+
+    /// `limit_as_i64` saturates at `i64::MAX` rather than wrapping.
+    /// Realistic `k` values (≤ a few hundred) flow through unchanged;
+    /// the saturation is defense-in-depth against a future caller
+    /// passing an unreasonably large `k` from a config file.
+    #[test]
+    fn limit_as_i64_saturates_at_i64_max() {
+        assert_eq!(limit_as_i64(0), 0);
+        assert_eq!(limit_as_i64(40), 40);
+        assert_eq!(limit_as_i64(usize::MAX), i64::MAX);
     }
 }
