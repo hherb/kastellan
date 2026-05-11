@@ -1181,6 +1181,11 @@ fn audit_helpers_pool_and_notify_round_trip() {
         assert!(env.contains_key("sha256"));
         assert!(env.contains_key("len"));
 
+        // Drop the listener before pool.close() — same structural issue
+        // as `tasks_lifecycle_e2e` (see comment there). Current-thread
+        // runtime has so far passed by luck; do it the safe way.
+        drop(listener);
+
         pool.close().await;
     });
 
@@ -1468,14 +1473,9 @@ async fn tasks_lifecycle_e2e() {
         "second sweep_crashed must find nothing"
     );
 
-    // PgListener holds a checked-out PoolConnection for its lifetime
-    // (sqlx's `PgListener::connect_with` stores it as `Some(connection)`
-    // and only releases on Drop or when an explicit recv() is cancelled
-    // via Pool::close_event). `pool.close().await` waits for every
-    // connection to be returned — so without dropping the listeners
-    // first, close().await deadlocks waiting on the two listener
-    // connections that will only be released at end-of-scope. Drop
-    // them explicitly here.
+    // PgListener holds a checked-out PoolConnection for its lifetime.
+    // pool.close() blocks until every permit is released, so listeners
+    // still in scope at close-time deadlock the test. Drop them first.
     drop(inserted_listener);
     drop(completed_listener);
 
