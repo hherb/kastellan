@@ -21,6 +21,10 @@
 //!   [`crate::policy::DefaultLocalPolicy`] never escalates, so this
 //!   variant is reserved for Phase-5 policy implementations and the
 //!   "frontier-disabled" stub path.
+//! * [`RouterError::EmbeddingCountMismatch`] — the backend's
+//!   `/embeddings` response carried a different number of vectors
+//!   than the request asked for. The caller cannot safely zip
+//!   results back to inputs; treat as a backend protocol bug.
 
 use thiserror::Error;
 
@@ -64,6 +68,14 @@ pub enum RouterError {
 
     #[error("policy denied escalation to frontier backend: {0}")]
     PolicyDeniedFrontier(String),
+
+    /// Backend returned a different number of embedding vectors
+    /// than the request asked for. Fires inside `Router::embed`
+    /// when `response.data.len() != request.input.len()`. The
+    /// caller cannot safely zip the returned vectors back to their
+    /// input texts; treat this as a backend protocol violation.
+    #[error("embedding count mismatch: requested {requested}, got {returned}")]
+    EmbeddingCountMismatch { requested: usize, returned: usize },
 }
 
 #[cfg(test)]
@@ -94,5 +106,28 @@ mod tests {
         // messages). 1 KiB matches the "typical OpenAI error envelope
         // fits comfortably" reasoning in the module docstring.
         assert_eq!(ERROR_BODY_CAP, 1024);
+    }
+
+    #[test]
+    fn embedding_count_mismatch_display_and_fields() {
+        let err = RouterError::EmbeddingCountMismatch {
+            requested: 3,
+            returned: 2,
+        };
+        // Pin the exact operator-facing message. Once this lands in
+        // production logs the wording is hard to change without
+        // breaking downstream log-search queries.
+        assert_eq!(
+            err.to_string(),
+            "embedding count mismatch: requested 3, got 2"
+        );
+        // Field-shape pin: matching by name proves the variant carries
+        // the expected fields, not just positional placeholders.
+        if let RouterError::EmbeddingCountMismatch { requested, returned } = err {
+            assert_eq!(requested, 3);
+            assert_eq!(returned, 2);
+        } else {
+            panic!("wrong variant");
+        }
     }
 }
