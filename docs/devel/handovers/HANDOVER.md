@@ -5,8 +5,8 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-11
-**Last commit:** `40d7719` (`docs(roadmap): mark scheduler complete; add real-stages + tool_host wiring follow-up entries`)
-**Branch:** `worktree-scheduler-phase1` (worktree at `.claude/worktrees/scheduler-phase1`)
+**Last commit:** `5d7a6ee` (`fix(test): tasks_lifecycle_e2e — drop listeners before pool.close()`)
+**Branch:** `fix/tasks-lifecycle-pool-close-deadlock` (off `main`; the scheduler-phase1 worktree merged into `main` at `93da413` earlier today, and the post-merge follow-ups landed via PR #25 `ec007d7`)
 
 ---
 
@@ -33,8 +33,10 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 267 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings.** Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
-**macOS (this branch):** 267 all pass on macOS (skip-as-pass for PG-dependent tests).
+**`cargo test --workspace` on Linux: 281 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on this branch (`fix/tasks-lifecycle-pool-close-deadlock`). With the open PR #26 (`fix/router-agent-mock-http-tests`) applied, the total becomes 284. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
+**macOS (this branch):** 281 all pass on macOS (skip-as-pass for PG-dependent tests).
+
+**Known flake fixed this session:** `tasks_lifecycle_e2e` (in `db/tests/postgres_e2e.rs`) had a structural deadlock — `pool.close().await` blocks until all `max_connections` permits are released, but two `PgListener`s were still in scope when close() was called. The multi-thread tokio runtime exposed it reliably (90 s+ hang) while the single-thread runtime variant in `audit_helpers_pool_and_notify_round_trip` (same pattern, one listener) had been passing on timing. Fix: explicitly `drop(listener)` before `pool.close().await`. Applied preemptively to `audit_helpers_pool_and_notify_round_trip` too so the latent flake there is closed out as well.
 
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
@@ -76,9 +78,69 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-11 — scheduler / CASSANDRA Phases 2–5)
+## Recently completed (this session, 2026-05-11 — post-merge follow-ups, mock HTTP tests, deadlock fix)
 
-All work on branch `worktree-scheduler-phase1` (worktree at `.claude/worktrees/scheduler-phase1`). Commit range `71e144f`–`40d7719` (15 commits + 3 doc commits). Detailed resume state in [`HANDOVER_CASSANDRA.md`](HANDOVER_CASSANDRA.md).
+The Phase 1 scheduler work that was on `worktree-scheduler-phase1` has now landed on `main`. This session bundled three follow-up slices on top of that merge.
+
+### Merge `worktree-scheduler-phase1` → `main` (commit `93da413`)
+
+The scheduler-phase1 branch (commit range `71e144f`–`40d7719`, 15 commits + 3 doc commits) was merged via fast-forward equivalent (actually a merge commit). Everything described in the older "Recently completed (this session, 2026-05-11 — scheduler / CASSANDRA Phases 2–5)" section below is now in `main`. Detailed resume state is still in [`HANDOVER_CASSANDRA.md`](HANDOVER_CASSANDRA.md).
+
+### Post-merge code review follow-ups (PR #25, merged at `ec007d7`)
+
+Branch `fix/scheduler-phase1-followups`, commit `aff0621`. Two **real bugs** fixed and several reviewable nits cleaned up.
+
+**Real bugs:**
+
+- **Lane runner startup race** in `core::scheduler::runner::lane_loop`. The loop subscribed to `tasks_inserted` and then waited on the PgListener — but PG does *not* queue NOTIFY for late subscribers. A task inserted before LISTEN sat for one full HEARTBEAT (30 s) before being claimed. Fix: an initial drain after LISTEN, factored into `drain_lane`. Unblocks `two_lanes_run_concurrently` on fast hardware where insert-then-spawn-then-wait was hitting the gap.
+- **`cancel_mid_execution_returns_cancelled` was timing-racy** on DGX-class hardware where iter 1 + iter 2 finish before the 150 ms sleep. Replaced with a `BarrierDispatcher` so the cancellation is planted while the step is provably mid-flight.
+
+**Reviewable nits** (each in its own audit-grep-able comment):
+
+- `hhagent-cli tasks list`: char-based truncation (was `&instr[..60]` — UTF-8 panic on multi-byte input); rejects unknown flags consistently with `run_ask`; replaced `std::process::exit(2)` with `ExitCode::from(2)` to keep the pool-drop path correct.
+- `hhagent-cli tasks tail`: JSON-aware filter (was substring-matching `"task_id":N` which false-positives on `parent_task_id`). Pure `line_matches_task` helper with unit tests.
+- `core::scheduler::runner`: `max_plans` payload override uses `try_into::<u32>()` so a producer-supplied 2^33 doesn't roll over.
+- `core::scheduler::runner`: `ToolHostStepDispatcher` placeholder logs at `tracing::error!` before returning `NOT_IMPLEMENTED` — operators running `hhagent-cli ask` today get pointed at Task 3.2.bis from the journal.
+- `core::scheduler::inner_loop`: dead `is_transient` helper removed (both arms returned `Outcome::Failed`); `tasks::increment_plan_count` errors now `tracing::warn!`; `Verdict::Escalate → Block` degradation emits a `tracing::warn!` and pinned `TODO(channel-bus)` for the Phase-2 follow-up.
+- `core::scheduler::prompts::load_prompts_from_dir`: skips non-conforming filenames (vim swap files, dotfiles) with a warn rather than aborting daemon startup.
+- `supervisor_e2e`: sets `HHAGENT_PROMPTS_DIR` pointing at the workspace `prompts/` so the daemon under systemd doesn't fail prompt-load on a `prompts/` cwd-relative miss.
+- `prompts/agent_planner.md`: documents the JSON input shape the inner loop sends each iteration.
+
+Five follow-up issues filed: [#20](https://github.com/hherb/hhagent/issues/20), [#21](https://github.com/hherb/hhagent/issues/21), [#22](https://github.com/hherb/hhagent/issues/22), [#23](https://github.com/hherb/hhagent/issues/23), [#24](https://github.com/hherb/hhagent/issues/24).
+
+### Mock-HTTP coverage for `RouterAgent::formulate_plan` (PR #26, **OPEN — not yet merged**)
+
+Branch `fix/router-agent-mock-http-tests`. Commits `2e2657c` (initial) + `44d42c3` (review nits). Closes [#22](https://github.com/hherb/hhagent/issues/22).
+
+Before this PR, `core::scheduler::agent::RouterAgent::formulate_plan` — the only production path that turns a `TaskContext` into a `Plan` — was exercised only by the type system. Every scheduler test (`scheduler_inner_loop_e2e`, `scheduler_lanes_e2e`, `scheduler_crash_recovery_e2e`) swaps in a scripted `PlanFormulator`, so regressions in the JSON-decode path or the `FormulationMeta` field wiring would not have surfaced.
+
+`core/tests/router_agent_mock_e2e.rs` (~367 lines) pins three cases against a hand-rolled tokio `TcpListener` mock (matching `llm-router/tests/local_backend_e2e.rs`'s style — no `wiremock`/`httpmock` dev-dep):
+
+1. **`happy_path_decodes_plan_and_populates_meta`** — backend returns a valid Plan JSON envelope; `formulate_plan` returns `Ok((plan, meta))` with `plan.is_terminal() == true` and `FormulationMeta` carrying `prompt_name=agent_planner`, `prompt_sha256`, `llm_model`, `llm_backend="local"`. Also pins that the cached system prompt is sent verbatim on the wire.
+2. **`decode_error_when_assistant_content_is_not_a_plan`** — backend returns a chat envelope whose content is plain text; the agent must surface `AgentError::Decode { detail, raw }` with the raw body preserved for triage. A silent default or panic here would corrupt the audit trail.
+3. **`prompt_missing_short_circuits_before_dialing_backend`** — empty `PromptCache` → `AgentError::PromptMissing` without dialing the backend (witness: the mock's `served_rx` oneshot never fires).
+
+Mock helpers (`spawn_one_shot_mock`, `find_double_crlf`, `header_content_length`) are duplicated from `local_backend_e2e.rs` rather than hoisted; issue #15 tracks the broader test-fixture refactor. No production-code changes, no new dependencies.
+
+### `tasks_lifecycle_e2e` deadlock fix (this branch, commit `5d7a6ee`)
+
+A `cargo test --workspace` run early this session hung for 33 minutes on `db::tests::postgres_e2e::tasks_lifecycle_e2e` — no output, all threads in `futex_do_wait`. The test had been added in `b125e46` (part of the scheduler-phase1 merge) and PR #25's pre-merge verification was `cargo test -p hhagent-core`, so this `hhagent-db`-integration test had never been observed running cleanly on this DGX.
+
+**Root cause:** `PgListener::connect_with(&pool)` checks out a `PoolConnection` and *holds* it for the listener's lifetime (sqlx 0.8.6 source: stores it as `Some(connection)`, only releases on `Drop` or when an active `recv()` observes `Pool::close_event`). `pool.close().await` loops in `sqlx-core/src/pool/inner.rs::close()` acquiring all `max_connections` permits — which blocks until the listener-held connections are released. The two listeners in `tasks_lifecycle_e2e` were `let mut`-bindings in the test function, so they did not drop until end-of-scope — *after* the explicit `pool.close().await`. Deadlock.
+
+**Why it's intermittent in practice:** the workspace run on `main` happened to pass `tasks_lifecycle_e2e` in 4.97 s, but three isolated focused runs reliably hung past 60–90 s before the fix. The multi-thread tokio runtime (`#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`) exposes it more reliably than the single-thread runtime used in the sibling `audit_helpers_pool_and_notify_round_trip` (which has the same structural pattern with one listener and has not been observed to hang).
+
+**Fix:** explicit `drop(inserted_listener); drop(completed_listener);` before `pool.close().await`. PgListener's `Drop` impl spawns an async task that runs `UNLISTEN *` and `return_to_pool` (sqlx 0.8.6 line 357–373) — once both permits release, `pool.close()` proceeds. Verified by 3 consecutive focused runs (2 s each) and a full workspace run.
+
+### Test-count delta (this session)
+
+281 on this branch (was 267 in the previous handover snapshot). `+14` from the scheduler-phase1 merge and PR #25 / agent_prompts changes; PR #26 would add `+3` (the three `router_agent_mock_e2e` cases) when merged.
+
+---
+
+## Recently completed (previous session, 2026-05-11 — scheduler / CASSANDRA Phases 2–5)
+
+All work on branch `worktree-scheduler-phase1` (worktree at `.claude/worktrees/scheduler-phase1`). Commit range `71e144f`–`40d7719` (15 commits + 3 doc commits). **Merged to `main` at `93da413` earlier today.** Detailed resume state in [`HANDOVER_CASSANDRA.md`](HANDOVER_CASSANDRA.md).
 
 ### What shipped
 
@@ -262,11 +324,15 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 
 ## Next TODO (pick one)
 
-**Phase 0 is complete. Phase 1 — memory recall + the scheduler loop — is now also complete on `worktree-scheduler-phase1`.** The agent-core daemon comes up fail-closed, runs crash recovery, loads prompts, starts two lane runners, and can accept and schedule tasks via `hhagent-cli ask`. Step dispatch is the only non-implemented piece (Task 3.2.bis deferred — see above). Two follow-up ROADMAP items are open: Task 3.2.bis (ToolHostStepDispatcher wiring) and Task 4.4 (cli_ask_e2e). Both are gating on the first concrete tool-using task.
+**Phase 0 is complete. Phase 1 — memory recall + the scheduler loop — is on `main`.** The agent-core daemon comes up fail-closed, runs crash recovery, loads prompts, starts two lane runners, and can accept and schedule tasks via `hhagent-cli ask`. Step dispatch is the only non-implemented piece (Task 3.2.bis deferred — see above). Two follow-up ROADMAP items are open: Task 3.2.bis (ToolHostStepDispatcher wiring) and Task 4.4 (cli_ask_e2e). Both are gating on the first concrete tool-using task.
 
-**Immediate next pickups, in priority order:**
+**Two open PRs to settle first:**
 
-- **Merge `worktree-scheduler-phase1` into `main`** — the branch is clean, all tests pass. After merge, delete the worktree and update the CASSANDRA HANDOVER to reflect the merge.
+- **PR #26** (`fix/router-agent-mock-http-tests`) — closes #22, adds the 3-test mock HTTP suite described above. Mergeable, no CI configured, clean diff (+367 LOC, test file only). Merge before picking the next slice so the test surface for `RouterAgent::formulate_plan` exists on `main`.
+- **This branch** (`fix/tasks-lifecycle-pool-close-deadlock`) — single-commit `5d7a6ee` that unjams `tasks_lifecycle_e2e`. Push and either merge directly into `main` (no PR overhead — the fix is mechanical and the deadlock is real) or open a PR alongside #26 for review hygiene.
+
+**Immediate next pickups (post-merge of #26 and this branch), in priority order:**
+
 - **Observation phase** (spec §9) — run the scheduler with real tasks, collect failure modes, then design the real `ConstitutionalGuard` + `DeterministicPolicy` rules. Do not skip this phase or the real stage rules will be guesses.
 - **Task 3.2.bis — wire `ToolHostStepDispatcher`** — the daemon can schedule tasks but cannot execute steps. This is the highest-priority blocker for real agent operation.
 - **Task 4.4 — `cli_ask_e2e`** — after 3.2.bis lands, the e2e test is straightforward.
@@ -333,9 +399,14 @@ Smaller follow-up to Option E. Today the cgroup layer hardcodes `CPUQuota=200%` 
 - ~~[#12](https://github.com/hherb/hhagent/issues/12) — reject empty `secrets.aad`~~ **closed 2026-05-10** — `db::secrets::put` always populates AAD via `compute_aad(name, _)`; migration `0004_secrets_aad_nonempty.sql` adds `CHECK (octet_length(aad) > 0)`
 - [#13](https://github.com/hherb/hhagent/issues/13) — write a migration numbering / rename hygiene checklist; sqlx fingerprints version+slug, so a rename or edit on a shipped migration silently breaks startup on existing clusters
 - [#14](https://github.com/hherb/hhagent/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `core/tests/supervisor_e2e.rs` with a constant in `hhagent-core`'s public API or a real readiness signal
-- [#15](https://github.com/hherb/hhagent/issues/15) — hoist the duplicated PG bring-up boilerplate into a workspace-level `tests-common` dev-dep crate; **five duplication sites today** (`db/tests/postgres_e2e.rs`, `core/tests/audit_dispatch_e2e.rs`, `core/tests/supervisor_e2e.rs`, `core/tests/shell_exec_e2e.rs`, `core/tests/memory_recall_e2e.rs`)
+- [#15](https://github.com/hherb/hhagent/issues/15) — hoist the duplicated PG bring-up boilerplate into a workspace-level `tests-common` dev-dep crate; **six duplication sites today** (`db/tests/postgres_e2e.rs`, `core/tests/audit_dispatch_e2e.rs`, `core/tests/supervisor_e2e.rs`, `core/tests/shell_exec_e2e.rs`, `core/tests/memory_recall_e2e.rs`, plus the in-PR `core/tests/router_agent_mock_e2e.rs` which has the duplicated mock-server helpers)
 - [#16](https://github.com/hherb/hhagent/issues/16) — close the in-crate hole in the `WorkerCommand` seal (filed 2026-05-10)
 - [#17](https://github.com/hherb/hhagent/issues/17) — tighten `memory::recall` behaviour when input is missing (filed 2026-05-10)
+- [#20](https://github.com/hherb/hhagent/issues/20) — `agent_prompts` schema: PK on sha256 means renamed prompt files lose their original name (filed 2026-05-10 from PR #25 review)
+- [#21](https://github.com/hherb/hhagent/issues/21) — `core::scheduler::runner` per-iteration cancellation poll could be a `watch::Receiver` instead of a DB round-trip (filed 2026-05-10 from PR #25 review)
+- ~~[#22](https://github.com/hherb/hhagent/issues/22) — `RouterAgent::formulate_plan` has no mock-HTTP test coverage~~ **addressed by PR #26 (open)**
+- [#23](https://github.com/hherb/hhagent/issues/23) — scheduler: constitutional refusals are recorded as `state='completed'`, not `'blocked'` — design discussion before CASSANDRA real impls (filed 2026-05-10 from PR #25 review)
+- [#24](https://github.com/hherb/hhagent/issues/24) — deployment: `HHAGENT_PROMPTS_DIR` has a cwd-relative fallback; production unit files must set it explicitly (filed 2026-05-10 from PR #25 review)
 - **Deferred — Task 3.2.bis:** wire `ToolHostStepDispatcher` to `tool_host::dispatch` so the scheduler loop can actually execute shell-exec steps. Currently `NOT_IMPLEMENTED` placeholder in `core/src/scheduler/runner.rs`. All integration tests use scripted dispatchers.
 - **Deferred — Task 4.4:** `cli_ask_e2e` integration test — subprocess + mock LLM + daemon supervisor bring-up; depends on Task 3.2.bis.
 
