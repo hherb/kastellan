@@ -376,7 +376,10 @@ pub async fn embed_query(
 
     let start = Instant::now();
     let resp = router.embed(&req).await?;
-    let latency_ms = start.elapsed().as_millis() as u64;
+    // `as_millis()` is u128; saturate into u64 rather than silently
+    // truncating. The saturation arm is unreachable in practice
+    // (~584 million years) but the idiom keeps the cast honest.
+    let latency_ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
 
     if resp.data.len() != 1 {
         // Router's own count check should fire first; this is
@@ -400,11 +403,14 @@ pub async fn embed_query(
         });
     }
 
-    // Best-effort audit. We hardcode "local" here matching
-    // RouterAgent::formulate_plan (core/src/scheduler/agent.rs:111).
-    // When Phase 5's PolicyGate may select Frontier for embed, swap
-    // this for `router.pick_embed_backend(&req).as_tag()`.
-    let payload = build_embed_audit_payload(&req.model, 1, EMBEDDING_DIM, "local", latency_ms);
+    // Source the backend tag from the same policy decision the router
+    // made on dispatch. Phase 0/1 always resolves to "local" under
+    // `DefaultLocalPolicy`; threading it through `pick_embed_backend`
+    // means a Phase-5 gate that picks `Backend::Frontier` for embed
+    // records the right tag in the audit row without a follow-up edit.
+    let backend_tag = router.pick_embed_backend(&req).as_tag();
+    let payload =
+        build_embed_audit_payload(&req.model, 1, EMBEDDING_DIM, backend_tag, latency_ms);
     if let Err(e) = audit::insert(pool, "llm:router", "embed", payload).await {
         tracing::error!(
             target: "hhagent::memory",

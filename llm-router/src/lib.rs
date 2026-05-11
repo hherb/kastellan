@@ -311,8 +311,11 @@ impl Router {
 /// base is sufficient and pinned by unit tests.
 fn compose_url(base: &str, path: &str) -> String {
     let trimmed = base.trim_end_matches('/');
-    let suffix = if path.starts_with('/') { path } else { return format!("{trimmed}/{path}"); };
-    format!("{trimmed}{suffix}")
+    if path.starts_with('/') {
+        format!("{trimmed}{path}")
+    } else {
+        format!("{trimmed}/{path}")
+    }
 }
 
 #[cfg(test)]
