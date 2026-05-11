@@ -186,6 +186,8 @@ fn router_pointing_at(base_url: &str) -> Router {
     let cfg = RouterConfig {
         local_url: base_url.to_string(),
         local_model: "local-default".into(),
+        embedding_url: base_url.to_string(),
+        embedding_model: "embedding-default".into(),
         frontier_url: None,
         frontier_model: None,
         // Tight timeout so a hung mock fails the test fast rather than
@@ -321,8 +323,10 @@ async fn router_send_routes_to_pick_backend_choice() {
     let (base_url, served_rx) =
         spawn_one_shot_mock(CannedResponse::ok_json("{}".to_string())).await;
     let cfg = RouterConfig {
-        local_url: base_url,
+        local_url: base_url.clone(),
         local_model: "m".into(),
+        embedding_url: base_url,
+        embedding_model: "embedding-default".into(),
         frontier_url: Some("https://example.invalid/v1".into()),
         frontier_model: Some("frontier-model".into()),
         timeout: Duration::from_secs(2),

@@ -183,6 +183,8 @@ fn router_pointing_at(base_url: &str) -> Arc<Router> {
     let cfg = RouterConfig {
         local_url: base_url.to_string(),
         local_model: "test-local-model".into(),
+        embedding_url: base_url.to_string(),
+        embedding_model: "embedding-default".into(),
         frontier_url: None,
         frontier_model: None,
         timeout: Duration::from_secs(2),

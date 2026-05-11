@@ -18,13 +18,19 @@
 //! than a single function pointer; the cost today is one extra
 //! `impl PolicyGate for DefaultLocalPolicy` block.
 //!
-//! ## Why `pick` is sync
+//! ## Why `pick` and `pick_embed` are sync
 //! Today's decision is local computation. A future async policy gate
 //! (e.g. one that consults the keyring for a frontier API key) can
 //! do its async work upfront in `Router::with_policy`'s constructor
 //! and cache the result, or wrap the trait in an `async-trait`-style
 //! shim then. Forcing every consumer to `.await` the policy lookup
-//! today would buy nothing.
+//! today would buy nothing. Both `pick` and `pick_embed` share this
+//! sync contract — Phase 5 implementors can switch them together if
+//! the async route becomes necessary.
+//!
+//! For embeddings the parallel method [`PolicyGate::pick_embed`]
+//! exists with a default that returns [`Backend::Local`] — chat
+//! and embed policies can diverge under Phase 5's gate.
 
 use crate::backend::Backend;
 use crate::messages::ChatRequest;
@@ -35,6 +41,21 @@ use crate::messages::ChatRequest;
 /// the router calls `pick` synchronously on the dispatch path.
 pub trait PolicyGate: Send + Sync + std::fmt::Debug {
     fn pick(&self, request: &ChatRequest) -> Backend;
+
+    /// Decide which backend serves an embedding request.
+    ///
+    /// Default: always [`Backend::Local`]. Phase 5's gate may
+    /// override this independently of [`PolicyGate::pick`] so
+    /// chat-policy and embed-policy can diverge (e.g. "chat sometimes
+    /// goes frontier, embed always stays local"). Phase 0/1 inherit
+    /// the default.
+    ///
+    /// Implementations should be cheap-to-evaluate and **must not**
+    /// block: the router calls `pick_embed` synchronously on the
+    /// dispatch path (same contract as [`PolicyGate::pick`]).
+    fn pick_embed(&self, _request: &crate::embeddings::EmbeddingRequest) -> Backend {
+        Backend::Local
+    }
 }
 
 /// Phase 0 default: always pick [`Backend::Local`].
@@ -87,5 +108,34 @@ mod tests {
         // assertion will refuse to compile.
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<DefaultLocalPolicy>();
+    }
+
+    #[test]
+    fn default_local_policy_pick_embed_returns_local() {
+        use crate::embeddings::EmbeddingRequest;
+        let p = DefaultLocalPolicy;
+        let req = EmbeddingRequest::single("m", "hi");
+        assert_eq!(p.pick_embed(&req), Backend::Local);
+    }
+
+    #[test]
+    fn custom_policy_inherits_pick_embed_default_when_only_pick_is_overridden() {
+        use crate::embeddings::EmbeddingRequest;
+        // A test-only impl that only defines `pick`; `pick_embed` must
+        // come from the trait default and return Local.
+        #[derive(Debug)]
+        struct AlwaysFrontierChat;
+        impl PolicyGate for AlwaysFrontierChat {
+            fn pick(&self, _request: &ChatRequest) -> Backend {
+                Backend::Frontier
+            }
+        }
+        let p = AlwaysFrontierChat;
+        let req = EmbeddingRequest::single("m", "hi");
+        assert_eq!(
+            p.pick_embed(&req),
+            Backend::Local,
+            "default impl on the trait must return Local for embed"
+        );
     }
 }

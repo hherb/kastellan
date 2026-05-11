@@ -51,6 +51,7 @@
 
 pub mod backend;
 pub mod config;
+pub mod embeddings;
 pub mod error;
 pub mod messages;
 pub mod policy;
@@ -59,6 +60,7 @@ use std::sync::Arc;
 
 pub use backend::Backend;
 pub use config::RouterConfig;
+pub use embeddings::{EmbeddingData, EmbeddingRequest, EmbeddingResponse};
 pub use error::RouterError;
 pub use messages::{ChatChoice, ChatMessage, ChatRequest, ChatResponse, ChatRole, Usage};
 pub use policy::{DefaultLocalPolicy, PolicyGate};
@@ -70,6 +72,11 @@ use error::{truncate_for_error, ERROR_BODY_CAP};
 /// changes it does so deliberately at one site — every conforming
 /// backend uses this exact path.
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+
+/// The OpenAI-compatible embeddings sub-path appended to every
+/// backend's base URL. Same pinning rationale as
+/// [`CHAT_COMPLETIONS_PATH`].
+const EMBEDDINGS_PATH: &str = "/embeddings";
 
 /// Sole-egress LLM client.
 ///
@@ -166,6 +173,92 @@ impl Router {
         }
     }
 
+    /// Which backend would the router pick for an embedding request?
+    /// Pure delegation to the configured [`PolicyGate::pick_embed`].
+    pub fn pick_embed_backend(&self, request: &EmbeddingRequest) -> Backend {
+        self.policy.pick_embed(request)
+    }
+
+    /// Send an embedding request and return the decoded response.
+    ///
+    /// The policy gate picks the backend via `pick_embed`; for Phase
+    /// 0/1 that is always [`Backend::Local`] under the default impl
+    /// of `PolicyGate::pick_embed`. A Phase-5 policy that selects
+    /// `Backend::Frontier` for embed will fall through to the
+    /// `PolicyDeniedFrontier` arm (frontier dispatch unwired).
+    ///
+    /// Validates `response.data.len() == request.input.len()` and
+    /// surfaces a mismatch as
+    /// [`RouterError::EmbeddingCountMismatch`]. Does NOT validate the
+    /// per-vector dimension — that is the caller's concern (e.g.
+    /// `core::memory::embed_query` checks against `EMBEDDING_DIM`).
+    pub async fn embed(
+        &self,
+        request: &EmbeddingRequest,
+    ) -> Result<EmbeddingResponse, RouterError> {
+        let backend = self.policy.pick_embed(request);
+        match backend {
+            Backend::Local => self.dispatch_embed_local(request).await,
+            Backend::Frontier => Err(RouterError::PolicyDeniedFrontier(
+                "frontier embed dispatch is unwired in Phase 0; only DefaultLocalPolicy is supported"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Dispatch an embedding request to the local backend.
+    ///
+    /// Pure HTTP: POST to `<embedding_url>/embeddings` with the
+    /// JSON-encoded [`EmbeddingRequest`]. Same status / decode error
+    /// handling as `dispatch_local`; additional invariant check on
+    /// `data.len() == input.len()` after decode.
+    async fn dispatch_embed_local(
+        &self,
+        request: &EmbeddingRequest,
+    ) -> Result<EmbeddingResponse, RouterError> {
+        let url = compose_url(&self.config.embedding_url, EMBEDDINGS_PATH);
+        tracing::debug!(
+            target: "hhagent::llm_router",
+            backend = "local",
+            url = %url,
+            model = %request.model,
+            n_inputs = request.input.len(),
+            "dispatching embedding"
+        );
+
+        let resp = self.http.post(&url).json(request).send().await?;
+        let status = resp.status();
+
+        if !status.is_success() {
+            // Best effort: read the body for operator triage. If the
+            // body itself fails to read we still want a useful error.
+            let body = resp.text().await.unwrap_or_else(|_| {
+                "<error body could not be read as UTF-8 text>".to_string()
+            });
+            return Err(RouterError::HttpStatus {
+                status: status.as_u16(),
+                body: truncate_for_error(&body, ERROR_BODY_CAP),
+            });
+        }
+
+        let body = resp.text().await?;
+        let decoded: EmbeddingResponse = serde_json::from_str(&body).map_err(|source| {
+            RouterError::DecodeResponse {
+                source,
+                body: truncate_for_error(&body, ERROR_BODY_CAP),
+            }
+        })?;
+
+        if decoded.data.len() != request.input.len() {
+            return Err(RouterError::EmbeddingCountMismatch {
+                requested: request.input.len(),
+                returned: decoded.data.len(),
+            });
+        }
+
+        Ok(decoded)
+    }
+
     /// Dispatch a request to the local backend.
     ///
     /// Pure HTTP: POST to `<local_url>/chat/completions` with the
@@ -218,8 +311,11 @@ impl Router {
 /// base is sufficient and pinned by unit tests.
 fn compose_url(base: &str, path: &str) -> String {
     let trimmed = base.trim_end_matches('/');
-    let suffix = if path.starts_with('/') { path } else { return format!("{trimmed}/{path}"); };
-    format!("{trimmed}{suffix}")
+    if path.starts_with('/') {
+        format!("{trimmed}{path}")
+    } else {
+        format!("{trimmed}/{path}")
+    }
 }
 
 #[cfg(test)]
@@ -296,5 +392,44 @@ mod tests {
             }
             other => panic!("expected PolicyDeniedFrontier, got {other:?}"),
         }
+    }
+
+    /// A test-only [`PolicyGate`] that overrides only `pick_embed` to
+    /// return [`Backend::Frontier`], leaving `pick` at the chat default
+    /// (`Backend::Local`). Used to prove `Router::embed`'s frontier
+    /// rejection path fires independently of the chat path.
+    #[derive(Debug)]
+    struct AlwaysFrontierEmbed;
+    impl PolicyGate for AlwaysFrontierEmbed {
+        fn pick(&self, _request: &ChatRequest) -> Backend {
+            Backend::Local
+        }
+        fn pick_embed(&self, _request: &EmbeddingRequest) -> Backend {
+            Backend::Frontier
+        }
+    }
+
+    #[tokio::test]
+    async fn router_embed_rejects_frontier_choice_in_phase_0() {
+        let r = Router::with_policy(RouterConfig::default(), Arc::new(AlwaysFrontierEmbed)).unwrap();
+        let req = EmbeddingRequest::single("m", "hi");
+        let err = r.embed(&req).await.expect_err("frontier embed dispatch must be refused");
+        match err {
+            RouterError::PolicyDeniedFrontier(msg) => {
+                assert!(msg.contains("frontier"), "msg={msg}");
+                assert!(msg.contains("Phase 0"), "msg must mention Phase 0: {msg}");
+            }
+            other => panic!("expected PolicyDeniedFrontier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn router_pick_embed_backend_delegates_to_policy() {
+        // Confirms the public `pick_embed_backend` proxy and pins
+        // `DefaultLocalPolicy`'s Phase-0/1 behaviour for embed at the
+        // router level (in addition to the policy module's own test).
+        let r = Router::new(RouterConfig::default()).unwrap();
+        let req = EmbeddingRequest::single("m", "hi");
+        assert_eq!(r.pick_embed_backend(&req), Backend::Local);
     }
 }
