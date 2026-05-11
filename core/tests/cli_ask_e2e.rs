@@ -126,6 +126,26 @@ fn core_binary() -> PathBuf { workspace_target_binary("hhagent") }
 fn cli_binary() -> PathBuf { workspace_target_binary("hhagent-cli") }
 fn worker_binary() -> PathBuf { workspace_target_binary("hhagent-worker-shell-exec") }
 
+/// Returns `true` (caller should `return` from its `#[test]`) when any
+/// of the three workspace binaries this e2e exercises is missing —
+/// almost always a clean dev-env build went stale. Logs a `[SKIP]`
+/// line per missing binary so the operator running `cargo test --
+/// --nocapture` sees which one to rebuild.
+fn skip_if_any_binary_missing() -> bool {
+    for (label, p) in &[("hhagent", core_binary()),
+                        ("hhagent-cli", cli_binary()),
+                        ("hhagent-worker-shell-exec", worker_binary())] {
+        if !p.exists() {
+            eprintln!(
+                "\n[SKIP] {} binary missing at {}; run `cargo build --workspace`\n",
+                label, p.display()
+            );
+            return true;
+        }
+    }
+    false
+}
+
 fn unique_suffix() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -721,19 +741,16 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
     if skip_if_no_supervisor() { return; }
     if skip_if_sandbox_unavailable() { return; }
     let bin_dir = match pg_bin_dir_or_skip() { Some(d) => d, None => return };
+    if skip_if_any_binary_missing() { return; }
 
-    for (label, p) in &[("hhagent", core_binary()),
-                        ("hhagent-cli", cli_binary()),
-                        ("hhagent-worker-shell-exec", worker_binary())] {
-        if !p.exists() {
-            eprintln!(
-                "\n[SKIP] {} binary missing at {}; run `cargo build --workspace`\n",
-                label, p.display()
-            );
-            return;
-        }
-    }
-
+    // Scope-end drop order is reverse declaration order, so the
+    // bindings below resolve to:
+    //   1. `_daemon_guards`  → stops + uninstalls the daemon service
+    //   2. `mock`            → aborts the listener accept-task
+    //   3. `_pg_guards`      → stops PG, wipes data + log dirs
+    // The daemon stops dialing before the mock dies; the mock
+    // releases its ephemeral port before PG goes down. No explicit
+    // `drop(...)` calls needed.
     let suffix = unique_suffix();
     let marker = format!("marker-{suffix}");
     let user = current_username();
@@ -741,8 +758,11 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
     let (conn_spec, data_dir, _socket_dir, _pg_guards) =
         bring_up_pg_cluster(&bin_dir, &suffix);
 
+    // worker_threads(1): `tool_host::dispatch` uses `block_in_place`,
+    // which needs at least one spare worker. One is enough — there is
+    // no concurrent in-test work the runtime needs to schedule.
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(1)
         .enable_all()
         .build()
         .expect("build multi-threaded tokio runtime");
@@ -809,7 +829,7 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         .await
         .expect("select tasks");
         assert_eq!(rows.len(), 1, "expected exactly one task row, got {rows:?}");
-        let (_id, state, plan_count, result) = &rows[0];
+        let (_, state, plan_count, result) = &rows[0];
         assert_eq!(state, "completed", "task state must be 'completed'; got {state}");
         assert_eq!(*plan_count, 2, "expected plan_count == 2 (two LLM rounds); got {plan_count}");
         let result_body = result.as_ref()
@@ -832,19 +852,48 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         assert_eq!(m.get(&("scheduler".into(), "plan.outcome".into())), Some(&1),
                    "expected 1× scheduler/plan.outcome (only plan A executed steps); multiset = {m:?}");
 
+        // Total row count. The multiset above pins individual (actor,
+        // action) presence and count, but does NOT catch *unexpected*
+        // additional rows from a future audit-emitting refactor (e.g.
+        // a `scheduler/task.<state>` lifecycle row, spec §7). When
+        // such a row lands, the developer will see this exact
+        // assertion fail and update both the multiset and the total.
+        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .expect("count audit_log");
+        let expected_total: i64 = 1 + 2 + 2 + 1 + 1; // = 7
+        assert_eq!(
+            total.0, expected_total,
+            "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
+            total.0
+        );
+
         pool.close().await;
     });
 
     // Mock dial count: 2 — happy path is exactly 2 LLM calls.
-    let dialed = mock.requests.lock().unwrap().len();
-    assert_eq!(dialed, 2, "expected daemon to dial mock exactly 2× in happy path; got {dialed}");
-
-    // Drop order: mock first (test-local), then daemon (Drop), then PG
-    // (Drop). The mock's `Drop` aborts its accept task so the
-    // ephemeral port is released cleanly. The tuple guards from
-    // bring_up_daemon and bring_up_pg_cluster take care of the rest
-    // on the way out of scope.
-    drop(mock);
+    let captured = mock.requests.lock().unwrap();
+    assert_eq!(
+        captured.len(), 2,
+        "expected daemon to dial mock exactly 2× in happy path; got {}",
+        captured.len()
+    );
+    // The first request's body should carry the cached
+    // `agent_planner` system prompt verbatim. We pin the distinctive
+    // heading `Constitutional Principles` from `prompts/agent_planner.md`
+    // — distinctive enough that a regression accidentally swapping
+    // which prompt the daemon caches and sends would surface here.
+    // `router_agent_mock_e2e.rs` does the analogous check at the
+    // dispatcher layer; this lifts the same regression-pin to the
+    // full subprocess path.
+    let first_body = &captured[0];
+    assert!(
+        first_body.contains("Constitutional Principles"),
+        "first request must carry the cached planner prompt; got first {} chars:\n{}",
+        first_body.len().min(800),
+        &first_body[..first_body.len().min(800)],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -859,27 +908,20 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
     if skip_if_no_supervisor() { return; }
     if skip_if_sandbox_unavailable() { return; }
     let bin_dir = match pg_bin_dir_or_skip() { Some(d) => d, None => return };
+    if skip_if_any_binary_missing() { return; }
 
-    for (label, p) in &[("hhagent", core_binary()),
-                        ("hhagent-cli", cli_binary()),
-                        ("hhagent-worker-shell-exec", worker_binary())] {
-        if !p.exists() {
-            eprintln!(
-                "\n[SKIP] {} binary missing at {}; run `cargo build --workspace`\n",
-                label, p.display()
-            );
-            return;
-        }
-    }
-
+    // Scope-end drop order: `_daemon_guards` → `mock` → `_pg_guards`.
+    // See the matching comment in the happy-path test for why no
+    // explicit `drop` calls are needed.
     let suffix = unique_suffix();
     let user = current_username();
 
     let (conn_spec, data_dir, _socket_dir, _pg_guards) =
         bring_up_pg_cluster(&bin_dir, &suffix);
 
+    // worker_threads(1): see happy-path test for the rationale.
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(1)
         .enable_all()
         .build()
         .expect("build multi-threaded tokio runtime");
@@ -941,7 +983,7 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         .await
         .expect("select tasks");
         assert_eq!(rows.len(), 1, "expected exactly one task row, got {rows:?}");
-        let (_id, state, plan_count, _result) = &rows[0];
+        let (_, state, plan_count, _) = &rows[0];
         assert_eq!(state, "failed", "task state must be 'failed'; got {state}");
         assert_eq!(*plan_count, 3, "plan_count must equal cap (3); got {plan_count}");
 
@@ -981,16 +1023,33 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         }
 
         let m = audit_multiset(&pool).await;
+        assert_eq!(m.get(&("core".into(), "startup".into())), Some(&1),
+                   "expected 1× core/startup; multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&3),
                    "expected 3× agent/plan.formulate (one per LLM call before cap); multiset = {m:?}");
+        assert_eq!(m.get(&("cassandra:chain".into(), "verdict".into())), Some(&3),
+                   "expected 3× cassandra:chain/verdict (one per plan); multiset = {m:?}");
+        assert_eq!(m.get(&("tool:shell-exec".into(), "shell.exec".into())), Some(&3),
+                   "expected 3× tool:shell-exec/shell.exec (one per denied dispatch); multiset = {m:?}");
         assert_eq!(m.get(&("scheduler".into(), "plan.outcome".into())), Some(&3),
                    "expected 3× scheduler/plan.outcome (one per non-terminal plan); multiset = {m:?}");
+
+        // Total row count — catches unexpected additional audit rows.
+        // See the matching comment in the happy-path test.
+        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .expect("count audit_log");
+        let expected_total: i64 = 1 + 3 + 3 + 3 + 3; // = 13
+        assert_eq!(
+            total.0, expected_total,
+            "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
+            total.0
+        );
 
         pool.close().await;
     });
 
     let dialed = mock.requests.lock().unwrap().len();
     assert_eq!(dialed, 3, "expected daemon to dial mock exactly 3× before cap; got {dialed}");
-
-    drop(mock);
 }
