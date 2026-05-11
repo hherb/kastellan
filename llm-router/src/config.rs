@@ -20,6 +20,8 @@
 //! | --- | --- | --- |
 //! | `HHAGENT_LLM_LOCAL_URL` | Base URL of the local backend (no trailing `/`) | per-OS, see above |
 //! | `HHAGENT_LLM_LOCAL_MODEL` | Default model name passed to the local backend | `local-default` |
+//! | `HHAGENT_LLM_EMBEDDING_URL` | Base URL of the embedding backend | falls back to local URL |
+//! | `HHAGENT_LLM_EMBEDDING_MODEL` | Default model name passed to the embedding backend | `embedding-default` |
 //! | `HHAGENT_LLM_FRONTIER_URL` | Base URL of the frontier backend | unset (frontier disabled) |
 //! | `HHAGENT_LLM_FRONTIER_MODEL` | Default model on the frontier backend | unset |
 //! | `HHAGENT_LLM_TIMEOUT_MS` | Request timeout, milliseconds | 30_000 |
@@ -41,6 +43,7 @@ use std::time::Duration;
 use crate::error::RouterError;
 
 pub const DEFAULT_LOCAL_MODEL: &str = "local-default";
+pub const DEFAULT_EMBEDDING_MODEL: &str = "embedding-default";
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// Per-OS default base URL for the local backend.
@@ -66,6 +69,16 @@ pub fn default_local_url_for_os() -> &'static str {
 pub struct RouterConfig {
     pub local_url: String,
     pub local_model: String,
+    /// Base URL for the embedding backend. Defaults to `local_url`
+    /// so a single OpenAI-compat server (Ollama, vLLM with both chat
+    /// and embed loaded) works without setting two env vars.
+    pub embedding_url: String,
+    /// Default model name passed in the `model` field of
+    /// `POST /embeddings`. Defaults to `"embedding-default"` — a
+    /// placeholder that vLLM will reject with 4xx in production,
+    /// forcing the operator to set `HHAGENT_LLM_EMBEDDING_MODEL`
+    /// explicitly (loud failure preferred to silent fallback).
+    pub embedding_model: String,
     /// Set if and only if the operator has expressed intent to use a
     /// frontier backend. Phase 0 still refuses to dispatch even when
     /// set — the policy gate lands in Phase 5.
@@ -76,9 +89,12 @@ pub struct RouterConfig {
 
 impl Default for RouterConfig {
     fn default() -> Self {
+        let default_url = default_local_url_for_os().to_string();
         Self {
-            local_url: default_local_url_for_os().to_string(),
+            local_url: default_url.clone(),
             local_model: DEFAULT_LOCAL_MODEL.to_string(),
+            embedding_url: default_url,
+            embedding_model: DEFAULT_EMBEDDING_MODEL.to_string(),
             frontier_url: None,
             frontier_model: None,
             timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
@@ -97,10 +113,20 @@ impl RouterConfig {
         let mut cfg = Self::default();
 
         if let Some(v) = read_env("HHAGENT_LLM_LOCAL_URL")? {
-            cfg.local_url = v;
+            cfg.local_url = v.clone();
+            // local_url change also drives the embedding fallback —
+            // re-sync embedding_url unless the operator has already
+            // overridden it explicitly below.
+            cfg.embedding_url = v;
         }
         if let Some(v) = read_env("HHAGENT_LLM_LOCAL_MODEL")? {
             cfg.local_model = v;
+        }
+        if let Some(v) = read_env("HHAGENT_LLM_EMBEDDING_URL")? {
+            cfg.embedding_url = v;
+        }
+        if let Some(v) = read_env("HHAGENT_LLM_EMBEDDING_MODEL")? {
+            cfg.embedding_model = v;
         }
         cfg.frontier_url = read_env("HHAGENT_LLM_FRONTIER_URL")?;
         cfg.frontier_model = read_env("HHAGENT_LLM_FRONTIER_MODEL")?;
@@ -185,6 +211,8 @@ mod tests {
         EnvScope::new(&[
             ("HHAGENT_LLM_LOCAL_URL", None),
             ("HHAGENT_LLM_LOCAL_MODEL", None),
+            ("HHAGENT_LLM_EMBEDDING_URL", None),
+            ("HHAGENT_LLM_EMBEDDING_MODEL", None),
             ("HHAGENT_LLM_FRONTIER_URL", None),
             ("HHAGENT_LLM_FRONTIER_MODEL", None),
             ("HHAGENT_LLM_TIMEOUT_MS", None),
@@ -285,5 +313,81 @@ mod tests {
             }
             other => panic!("expected RouterError::Config, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn router_config_default_embedding_model_is_embedding_default() {
+        let cfg = RouterConfig::default();
+        assert_eq!(cfg.embedding_model, "embedding-default");
+    }
+
+    #[test]
+    fn router_config_default_embedding_url_falls_back_to_local_url() {
+        // No env vars touched here; the constructor default uses the
+        // per-OS default for *both* local_url and embedding_url so a
+        // Ollama-on-macOS deployment works with one URL set.
+        let cfg = RouterConfig::default();
+        assert_eq!(cfg.embedding_url, cfg.local_url);
+    }
+
+    #[test]
+    fn router_config_from_env_reads_embedding_url_when_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _scope = EnvScope::new(&[
+            ("HHAGENT_LLM_LOCAL_URL", None),
+            ("HHAGENT_LLM_EMBEDDING_URL", Some("http://127.0.0.1:9999/v1")),
+            ("HHAGENT_LLM_LOCAL_MODEL", None),
+            ("HHAGENT_LLM_EMBEDDING_MODEL", None),
+        ]);
+        let cfg = RouterConfig::from_env().expect("env parse");
+        assert_eq!(cfg.embedding_url, "http://127.0.0.1:9999/v1");
+    }
+
+    #[test]
+    fn router_config_from_env_reads_embedding_model_when_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _scope = EnvScope::new(&[
+            ("HHAGENT_LLM_LOCAL_URL", None),
+            ("HHAGENT_LLM_EMBEDDING_URL", None),
+            ("HHAGENT_LLM_LOCAL_MODEL", None),
+            ("HHAGENT_LLM_EMBEDDING_MODEL", Some("BAAI/bge-m3")),
+        ]);
+        let cfg = RouterConfig::from_env().expect("env parse");
+        assert_eq!(cfg.embedding_model, "BAAI/bge-m3");
+    }
+
+    #[test]
+    fn router_config_from_env_embedding_url_overrides_local_url() {
+        // Pin the load-bearing override contract: when both env vars are
+        // set, EMBEDDING_URL wins for embedding_url; local_url is
+        // unaffected. A refactor that swaps the two from_env blocks
+        // would break this contract silently otherwise.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _scope = EnvScope::new(&[
+            ("HHAGENT_LLM_LOCAL_URL", Some("http://local:8080/v1")),
+            ("HHAGENT_LLM_EMBEDDING_URL", Some("http://embed:9999/v1")),
+            ("HHAGENT_LLM_LOCAL_MODEL", None),
+            ("HHAGENT_LLM_EMBEDDING_MODEL", None),
+        ]);
+        let cfg = RouterConfig::from_env().expect("env parse");
+        assert_eq!(cfg.local_url, "http://local:8080/v1");
+        assert_eq!(cfg.embedding_url, "http://embed:9999/v1");
+    }
+
+    #[test]
+    fn router_config_from_env_local_url_drives_embedding_url_when_embedding_unset() {
+        // The fallback path: with only LOCAL_URL set, embedding_url
+        // resolves to the same value (the load-bearing semantic that
+        // makes Ollama-on-macOS work with one env var set).
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _scope = EnvScope::new(&[
+            ("HHAGENT_LLM_LOCAL_URL", Some("http://local:8080/v1")),
+            ("HHAGENT_LLM_EMBEDDING_URL", None),
+            ("HHAGENT_LLM_LOCAL_MODEL", None),
+            ("HHAGENT_LLM_EMBEDDING_MODEL", None),
+        ]);
+        let cfg = RouterConfig::from_env().expect("env parse");
+        assert_eq!(cfg.local_url, "http://local:8080/v1");
+        assert_eq!(cfg.embedding_url, "http://local:8080/v1");
     }
 }
