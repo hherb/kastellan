@@ -5,8 +5,8 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-11
-**Last commit:** `db0197c` (`Merge pull request #28 from hherb/feat/tool-host-step-dispatcher`); a post-merge follow-up commit `e524959` (`fix(scheduler): code-review follow-ups on tool_dispatch`) applies four small `/review` nits on Task 3.2.bis — see the Task 3.2.bis section below.
-**Branch:** `main`. Picking up **Task 4.4 — `cli_ask_e2e` end-to-end integration test** this session (HANDOVER's deferred-list item, unblocked by Task 3.2.bis). Design spec: [`docs/superpowers/specs/2026-05-11-cli-ask-e2e-design.md`](../../superpowers/specs/2026-05-11-cli-ask-e2e-design.md).
+**Last commit:** `e6e282f` (`docs(spec): cli_ask_e2e design + refresh HANDOVER header`); this session adds Task 4.4 (`cli_ask_e2e` integration test, +2 tests) on top of `e6e282f`.
+**Branch:** `main`. **Task 4.4 — `cli_ask_e2e` end-to-end integration test shipped this session.** Design spec: [`docs/superpowers/specs/2026-05-11-cli-ask-e2e-design.md`](../../superpowers/specs/2026-05-11-cli-ask-e2e-design.md).
 
 ---
 
@@ -33,8 +33,8 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 297 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on `main` (`db0197c` + the `e524959` follow-up). Baseline on `main` after PR #26 + PR #27 was 284; Task 3.2.bis added **+13** (12 unit tests in `scheduler::tool_dispatch` + 1 integration test `scheduler_step_dispatch_e2e`; one originally-13th unit test was a tautology and was deleted in `e524959`). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
-**macOS (main):** 297 all pass on macOS (skip-as-pass for PG-dependent tests).
+**`cargo test --workspace` on Linux: 299 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on `main` (`e6e282f` + the cli_ask_e2e slice in this session's pending commit). Baseline on `main` after PR #26 + PR #27 was 284; Task 3.2.bis added **+13** (12 unit + 1 integration; tautology removed in `e524959`); Task 4.4 (this session) added **+2** (`cli_ask_e2e` happy path + plan-iteration-cap failure path). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
+**macOS (main):** 299 all pass on macOS (skip-as-pass for PG-dependent tests).
 
 **Known flake fixed this session:** `tasks_lifecycle_e2e` (in `db/tests/postgres_e2e.rs`) had a structural deadlock — `pool.close().await` blocks until all `max_connections` permits are released, but two `PgListener`s were still in scope when close() was called. The multi-thread tokio runtime exposed it reliably (90 s+ hang) while the single-thread runtime variant in `audit_helpers_pool_and_notify_round_trip` (same pattern, one listener) had been passing on timing. Fix: explicitly `drop(listener)` before `pool.close().await`. Applied preemptively to `audit_helpers_pool_and_notify_round_trip` too so the latent flake there is closed out as well.
 
@@ -66,6 +66,7 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 | `core` integration (`scheduler_crash_recovery_e2e`) | 1 | **cross-platform skip-as-pass.** Back-dated lease → `sweep_crashed` marks task as crashed; daemon restart safety invariant |
 | `core` integration (`agent_prompts_e2e`) | 1 | **cross-platform skip-as-pass.** `load_prompts_from_dir` writes SHA-256 into `agent_prompts` ledger; cache entry round-trip; both v1 and v2 of an edited prompt persist (append-only by GRANT, migration 0006) |
 | `core` integration (`scheduler_step_dispatch_e2e`) | 1 | **cross-platform real** (skips on hosts without PG/supervisor/sandbox/worker). Task 3.2.bis regression pin. Per-test PG cluster + probe + runtime-role pool + `ToolRegistry` with shell-exec entry (ECHO_PATH allowlisted). Exercises `ToolHostStepDispatcher::dispatch_step` three ways: (1) happy path → `StepOutcome::Ok` with `exit_code=0` and `stdout="step-ok"`, (2) non-allowlisted argv → `StepOutcome::Err { code: "POLICY_DENIED" }`, (3) unknown tool (`web-fetch`) → `StepOutcome::Err { code: "UNKNOWN_TOOL" }` *without* writing an audit row. Final assertion: audit_log has exactly 3 rows (bring-up + ok + denied) — confirms UNKNOWN_TOOL short-circuits before the chokepoint, as designed |
+| `core` integration (`cli_ask_e2e`) | 2 | **cross-platform real** (skips on hosts without PG/supervisor/sandbox/worker). Task 4.4 regression pin: the *full* prod chain (CLI subprocess → PG insert → scheduler claim → LLM call → CASSANDRA review → step dispatch → finalize → CLI exit) end-to-end against a queued multi-shot mock LLM. (1) Happy path: mock serves `[non-terminal echo-step plan, terminal text plan]`; CLI exits 0; stdout `= marker`; `tasks.state="completed"`, `plan_count=2`; audit multiset `{core/startup ×1, agent/plan.formulate ×2, cassandra:chain/verdict ×2, tool:shell-exec/shell.exec ×1, scheduler/plan.outcome ×1}`. (2) Plan-cap failure: mock serves 3× same non-terminal plan with `/bin/cat /etc/passwd` (not allowlisted); CLI exits 1, stderr contains `"failed"`; `tasks.state="failed"`, `plan_count=3`; 3× tool:shell-exec rows whose payload carries the JSON-RPC `-32001` POLICY_DENIED code in `err`. Per-test PG cluster + per-test mock LLM (FIFO Vec<String> queue, 503 once exhausted so overruns surface loudly). 5/5 deterministic runs on the DGX in ~5.4 s each |
 
 **Build & test:**
 ```sh
@@ -79,9 +80,48 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-11 — Task 3.2.bis: wire `ToolHostStepDispatcher` to `tool_host::dispatch`)
+## Recently completed (this session, 2026-05-11 — Task 4.4: `cli_ask_e2e` end-to-end integration test)
 
-Branch: `feat/tool-host-step-dispatcher`, off `main` at `ea7556a`.
+Branch: `main`, off `e6e282f`.
+
+**Why this slice now.** Every existing integration test stubbed at least one moving part: `router_agent_mock_e2e` stubs the scheduler+dispatcher, `scheduler_step_dispatch_e2e` calls the dispatcher in-process without the LLM, `scheduler_inner_loop_e2e` scripts both the formulator and the dispatcher, and `supervisor_e2e` doesn't exercise `ask` at all. Nothing pinned the production chain end-to-end. Task 4.4 (HANDOVER's deferred-list item) closed that gap, unblocked yesterday by Task 3.2.bis wiring the real `ToolHostStepDispatcher`.
+
+**Shape.** Single new file `core/tests/cli_ask_e2e.rs` (~840 LOC). Two `#[test]` functions, each owning its per-test PG cluster + per-test mock LLM. Design spec (committed earlier in `e6e282f`): [`docs/superpowers/specs/2026-05-11-cli-ask-e2e-design.md`](../../superpowers/specs/2026-05-11-cli-ask-e2e-design.md).
+
+- **`ask_subprocess_completes_planned_task_end_to_end` (happy path):**
+  * Per-test PG cluster + per-test mock LLM bound to ephemeral 127.0.0.1 port. Mock queue: `[plan A (non-terminal, one echo step), plan B (terminal, kind=text body=marker)]` wrapped in OpenAI-compatible chat-completion envelopes.
+  * Bring up the real `hhagent` daemon under `systemd --user` (Linux) / `launchctl` (macOS) with env wiring: `HHAGENT_DATA_DIR`, `HHAGENT_STATE_DIR`, `HHAGENT_PROMPTS_DIR` → workspace `prompts/`, `HHAGENT_LLM_LOCAL_URL` → mock `/v1`, `HHAGENT_LLM_LOCAL_MODEL` → `test-local-model`, `HHAGENT_LLM_TIMEOUT_MS=5000`, `HHAGENT_SHELL_EXEC_BIN` → workspace `hhagent-worker-shell-exec`, `HHAGENT_SHELL_EXEC_ALLOWLIST` → `ECHO_PATH` (per-OS).
+  * Wait for the daemon's `"scheduler spawned"` log line (signals scheduler ready to claim).
+  * Spawn the real `hhagent-cli ask "say <marker>"` subprocess via `std::process::Command::output()`.
+  * Assertions: CLI exits 0; stdout `.trim_end() == marker`; `tasks` row ends `state="completed"`, `plan_count=2`, `result.body=marker`; audit multiset matches the expected 6-event shape (1× core/startup, 2× agent/plan.formulate, 2× cassandra:chain/verdict, 1× tool:shell-exec/shell.exec, 1× scheduler/plan.outcome — `plan.outcome` fires only on non-terminal plans whose steps ran, so plan B doesn't add one); mock was dialed exactly 2×.
+
+- **`ask_subprocess_fails_after_plan_iteration_cap` (failure path):**
+  * Same bring-up, except the mock queue is 3× the same non-terminal plan with `/bin/cat /etc/passwd` as the argv (deliberately not in the allowlist).
+  * The worker returns POLICY_DENIED on every step (`-32001` from the `argv[0] not in allowlist` check). Inner loop replans, hits `DEFAULT_MAX_PLANS_FAST = 3` from `db/src/tasks.rs:50` on what would have been iter 4, returns `Outcome::Failed("plan_iteration_cap_exceeded (3>=3)")`.
+  * CLI's `ask_async` (`hhagent-cli.rs:319-322`) sees `state != "completed"`, prints `"ask: task ended in state 'failed'"` to stderr, and exits 1.
+  * Assertions: CLI exits non-zero; stderr contains `"failed"`; `tasks.state="failed"`, `plan_count=3`; 3× `tool:shell-exec/shell.exec` rows whose payload carries `"-32001"` in the `err` string (the dispatcher chokepoint writes errors as a string, not a structured object — the rpc_code → mnemonic mapping happens one layer up in `ToolHostStepDispatcher`); audit multiset has `agent/plan.formulate ×3` + `scheduler/plan.outcome ×3`; mock was dialed exactly 3×.
+
+**Queued multi-shot mock LLM (~110 LOC).** New helper inside the test file. Hand-rolled `tokio::net::TcpListener` mock matching `router_agent_mock_e2e.rs`'s style; no `wiremock`/`httpmock` dev-dep. Background tokio task loops `accept().await`, reads each request body (cap 1 MiB), captures it for later assertions, FIFO-pops from a `Vec<String>` queue under `std::sync::Mutex`, writes the canned 200-OK response, and shuts the socket. Once exhausted, every subsequent request gets a `503 Service Unavailable` — so an unexpected extra dial surfaces as `RouterError::HttpStatus` in the daemon log AND as a `tasks.state="failed"` row in the test's assertion. Loud, not silent. Mock's `Drop` aborts the accept task so the ephemeral port releases cleanly.
+
+**What this slice deliberately does NOT do:**
+- No constitutional-block coverage. CASSANDRA stages still stub-Approve in this phase (`ConstitutionalGuard` + `DeterministicPolicy` both return `Verdict::Approve`); real-stage paths get coverage in the observation-phase follow-up.
+- No cancellation-mid-step test. Reliably planting a SIGINT during inner-loop step execution from a subprocess is timing-sensitive and would benefit from a `BarrierDispatcher`-style hook in the daemon (separate slice).
+- No long-lane test. Both cases use `Lane::Fast`. `scheduler_lanes_e2e` already pins the lane abstraction.
+- No `tests-common` refactor. Issue #15 already tracks the workspace-level hoist; this file is now the **seventh** duplication site for the per-test PG cluster bring-up. Each new e2e test that needs PG makes the issue more compelling.
+
+**Five-runs determinism check.** `for i in 1 2 3 4 5; do cargo test -p hhagent-core --test cli_ask_e2e; done` passed clean: ~5.4 s per run, both tests green every time, zero `[SKIP]` lines.
+
+**Test count delta:** 297 (post-`e524959` main) → **299** (+2 integration). 0 failed, 0 warnings.
+
+**Files added/modified this session:**
+- New: `core/tests/cli_ask_e2e.rs` (~840 LOC, 2 #[test]).
+- No production-code changes. The CLI, daemon, scheduler, dispatcher, worker, sandbox, and mock LLM all worked end-to-end on the first build — the only test-iteration was a wrong audit-payload shape assertion (`err` is a JSON string with the JSON-RPC error text, not a structured object). Fixed inline before committing.
+
+---
+
+## Recently completed (previous session, 2026-05-11 — Task 3.2.bis: wire `ToolHostStepDispatcher` to `tool_host::dispatch`)
+
+Branch: `feat/tool-host-step-dispatcher`, off `main` at `ea7556a`. **Merged to `main` via PR #28 at `db0197c`; follow-up `/review` nits in `e524959`** (see header summary).
 
 **Why this slice now.** Phase 1 scheduler shipped without step execution (Task 3.2.bis was the last deferred item). The daemon would accept tasks via `hhagent-cli ask`, formulate plans via the LLM, run them through CASSANDRA review — and then every `PlannedStep` hit a `NOT_IMPLEMENTED` placeholder in `core::scheduler::runner::ToolHostStepDispatcher`. Operators got an audit-log `plan.outcome` row with `terminal_kind: "err"` and no information about *why*. This slice replaces the placeholder with a real spawn-per-step path through `tool_host::dispatch`.
 
@@ -210,10 +250,10 @@ All work on branch `worktree-scheduler-phase1` (worktree at `.claude/worktrees/s
 
 ### Deferrals (explicit — not forgotten)
 
-Two items from the original plan were deliberately deferred and are tracked as unchecked items in ROADMAP.md:
+Two items from the original plan were deliberately deferred when Phase-1 scheduler shipped. **Both have since landed:**
 
-1. **Task 3.2.bis — `ToolHostStepDispatcher` wiring to `tool_host::dispatch`:** The daemon can accept and schedule tasks, but step execution calls `NOT_IMPLEMENTED`. Real tool calls from the scheduler loop never reach workers until this lands. Blocked on: first concrete tool-using task that defines the right dispatch shape. All integration tests use scripted `StepDispatcher` stubs that don't need the real dispatcher.
-2. **Task 4.4 — `cli_ask_e2e` integration test:** Subprocess + mock LLM + daemon supervisor bring-up. Deferred because it depends on 3.2.bis (the ask path returns a completion token before any step dispatch, but a real e2e would want to observe steps). Not blocking CLI usability — the subcommands compile and run; the test coverage gap is documented.
+1. ~~**Task 3.2.bis — `ToolHostStepDispatcher` wiring to `tool_host::dispatch`:**~~ **Shipped 2026-05-11** on branch `feat/tool-host-step-dispatcher`, merged via PR #28 at `db0197c` (post-merge `/review` follow-ups in `e524959`). See the Task 3.2.bis section earlier in this handover.
+2. ~~**Task 4.4 — `cli_ask_e2e` integration test:**~~ **Shipped 2026-05-11 (this session)** on `main` — see the "Recently completed (this session)" section near the top of this handover.
 
 ### Test-count delta
 
@@ -375,26 +415,19 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 
 ## Next TODO (pick one)
 
-**Phase 0 is complete. Phase 1 — memory recall + the scheduler loop, including end-to-end step dispatch — is on `main` (modulo this branch, `feat/tool-host-step-dispatcher`, which needs merging).** The agent-core daemon now comes up fail-closed, runs crash recovery, loads prompts, builds a tool registry from env vars, starts two lane runners, accepts tasks via `hhagent-cli ask`, and **actually executes shell-exec steps under sandbox**. Task 4.4 (`cli_ask_e2e`) is now unblocked — its dependency on 3.2.bis is satisfied.
-
-**This session's branch to merge:**
-
-- **`feat/tool-host-step-dispatcher`** — single-session work: replaces the `NOT_IMPLEMENTED` placeholder in the scheduler's step dispatcher with real `tool_host::dispatch` wiring + a `ToolRegistry` shape. 13 unit tests + 1 integration test + 0 warnings. Drops the unused `workspace_root` parameter from `spawn_scheduler` (the placeholder was the only caller). See the "Recently completed" section above for the full write-up.
+**Phase 0 is complete. Phase 1 — memory recall + the scheduler loop, including end-to-end step dispatch — is on `main`, and the production chain is now pinned end-to-end by `cli_ask_e2e` (shipped this session, Task 4.4).** The agent-core daemon comes up fail-closed, runs crash recovery, loads prompts, builds a tool registry from env vars, starts two lane runners, accepts tasks via `hhagent-cli ask`, executes shell-exec steps under sandbox, finalises the task, and the CLI prints the result — every layer verified by either `scheduler_step_dispatch_e2e` (dispatcher-only), `supervisor_e2e` (daemon bring-up), or `cli_ask_e2e` (the whole chain).
 
 **Immediate next pickups, in priority order:**
 
-- **Task 4.4 — `cli_ask_e2e`** — unblocked by this session. Subprocess + mock LLM + daemon supervisor bring-up. The ask path now exercises a real step dispatch end-to-end; the e2e can assert the full chain from CLI insert → scheduler claim → LLM plan → CASSANDRA review → step dispatch → finalize.
-- **Observation phase** (spec §9) — now that real steps execute, the scheduler can be driven with real tasks to collect failure modes before designing the real `ConstitutionalGuard` + `DeterministicPolicy` rules. Do not skip this phase or the real stage rules will be guesses.
+- **Observation phase** (spec §9) — now that real CLI-driven plans execute, the scheduler can be driven with real tasks to collect failure modes before designing the real `ConstitutionalGuard` + `DeterministicPolicy` rules. Do not skip this phase or the real stage rules will be guesses. Practical step: build a small fixture set of "real-ish" instructions (5–10 prompts spanning safe + edge-case + clearly-blockable), run them through the CLI, dump the audit log, look at which plans CASSANDRA *would* have wanted to block under each candidate rule, iterate the rule set against the dump rather than against speculation.
+- **Audit rows for spawn-side failures + UNKNOWN_TOOL** — today these surface only in the daemon log. `cli_ask_e2e`'s failure-path test confirmed the existing audit shape works for POLICY_DENIED (chokepoint write fires), but spawn-side failures (`SPAWN_FAILED`) and `UNKNOWN_TOOL` don't reach the chokepoint, so they leave no row at all. If the channel-bus operator wants to react to "the agent tried web-fetch but it's not registered," the row needs to exist. Possible shape: `actor='scheduler', action='step.unknown_tool' | 'step.spawn_failed'`, payload `{tool, method, error_or_none}` — written by `ToolHostStepDispatcher::dispatch_step` before it returns the Err variant.
 - **Per-tool argv allowlist hygiene** — the deny-by-default `HHAGENT_SHELL_EXEC_ALLOWLIST` env is acceptable for now, but production deployment needs a versioned per-host config (or `db::secrets`-stored allowlist) so a host restart can't accidentally widen it. Filed as a follow-up issue when the first non-test deployment lands.
-- **Audit rows for spawn-side failures + UNKNOWN_TOOL** — today these surface only in the daemon log. If the channel-bus operator wants to react to "the agent tried web-fetch but it's not registered," the row needs to exist. Possible shape: `actor='scheduler', action='step.unknown_tool' | 'step.spawn_failed'`, payload `{tool, method, error_or_none}`.
+- **Issue #15 — hoist tests-common dev-dep:** now **seven** duplication sites for the per-test PG cluster bring-up (the new `cli_ask_e2e` is #7). Pure mechanical refactor; not blocking but increasingly cheap to do.
 
 **Existing Phase 1 cont. pickups (unchanged in priority):**
 
-The next pickups, in roughly suggested order:
-
 - **Option O — embedding worker (Phase 1 cont.):** the first concrete consumer of `Router::send`, the first `actor='llm:router'` audit-log row, the first time `recall`'s `query_embedding: Option<&[f32]>` is filled from a live model call rather than a test stub. Recall is half-wired today (semantic lane works against pre-computed embeddings; production callers need free-text → embedding → semantic search).
 - **Option P — entity↔memory linkage + graph lane in `recall`:** the third lane mentioned in Option N's brief.
-- **Issue #15 — hoist the duplicated PG bring-up boilerplate into a `tests-common` dev-dep crate:** now five duplication sites with `core/tests/memory_recall_e2e.rs`. Pure mechanical refactor; not blocking but cheap.
 - **Issue #16 — close the in-crate hole in the `WorkerCommand` seal:** sibling modules inside `hhagent_core` can construct one and reach `SupervisedWorker::call` directly. Three candidate fixes filed.
 - **Issue #17 — `memory::recall` warn-and-degrade on missing input may mask caller bugs:** tighten before Phase 1's scheduler is the production caller.
 - **Option K — cross-platform exponential restart backoff:** filed but parked; no immediate need.
@@ -459,7 +492,7 @@ Smaller follow-up to Option E. Today the cgroup layer hardcodes `CPUQuota=200%` 
 - [#23](https://github.com/hherb/hhagent/issues/23) — scheduler: constitutional refusals are recorded as `state='completed'`, not `'blocked'` — design discussion before CASSANDRA real impls (filed 2026-05-10 from PR #25 review)
 - [#24](https://github.com/hherb/hhagent/issues/24) — deployment: `HHAGENT_PROMPTS_DIR` has a cwd-relative fallback; production unit files must set it explicitly (filed 2026-05-10 from PR #25 review)
 - ~~**Deferred — Task 3.2.bis:** wire `ToolHostStepDispatcher` to `tool_host::dispatch`~~ **shipped this session 2026-05-11** on branch `feat/tool-host-step-dispatcher`. See "Recently completed" above.
-- **Deferred — Task 4.4:** `cli_ask_e2e` integration test — subprocess + mock LLM + daemon supervisor bring-up. **Unblocked by Task 3.2.bis above; ready to pick next session.**
+- ~~**Deferred — Task 4.4:** `cli_ask_e2e` integration test~~ **shipped this session 2026-05-11** on `main` (see "Recently completed" above).
 
 (Closed won't-fix: [#9](https://github.com/hherb/hhagent/issues/9) Apache AGE, [#10](https://github.com/hherb/hhagent/issues/10) ParadeDB pg_search — both 2026-05-09 after review. Closed in earlier 2026-05-09: [#7](https://github.com/hherb/hhagent/issues/7) — daemon log-line substring is now precise after `(skeleton)` was dropped from the startup line.)
 
