@@ -5,8 +5,10 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-12
-**Last commit:** `a1256cd` (`feat(core/memory): embed_query + actor='llm:router' audit row (Option O step 7)`). The Option O slice (embedding router + first `actor='llm:router'` audit row) shipped this session across 7 implementation commits on branch `feat/embedding-router` (range `9fe45d6..a1256cd`); Task 8 (this commit) records the slice in HANDOVER and ROADMAP. The branch is ready to merge.
-**Branch:** `feat/embedding-router` (off `main`). Working tree clean.
+**Last commit:** *(this commit)* — `refactor(core/memory): split into recall.rs + embed.rs submodules (issue #30)`. Pure structural refactor: `core/src/memory.rs` (602 LOC, 102 over the 500-LOC soft cap in CLAUDE.md) split into `core/src/memory/{mod.rs, recall.rs, embed.rs}` (55 + 384 + 219 LOC respectively, each under the cap). Public API preserved exactly via re-exports in `mod.rs`: `memory::{recall, reciprocal_rank_fusion, RecallModes, RecallParams, RRF_K_CONSTANT, embed_query, MemoryError}`. `build_embed_audit_payload` tightened from `pub(crate)` to module-private (only called inside `embed.rs` and its tests). All 327 tests still pass; 0 failures; one dead-code warning in `core/tests/embedding_recall_e2e.rs::ServedRequest` is pre-existing (introduced in PR #29, unrelated to this slice).
+
+Branch lineage: PR #29 (Option O — embedding router + first `actor='llm:router'` audit row) merged 2026-05-11 at `d39023b`; follow-up code-review fixups in `7538132` on `feat/embedding-router` were carried in via the merge (audit `backend` tag now sourced from `pick_embed_backend(&req).as_tag()` instead of hardcoded `"local"` — Phase-5-correct under `DefaultLocalPolicy` which always returns `Local`; `compose_url` straightened to `if/else`; `latency_ms` cast as `try_into().unwrap_or(u64::MAX)`).
+**Branch:** `refactor/split-core-memory` (off `main` at `d39023b`). Working tree clean.
 
 ---
 
@@ -23,7 +25,7 @@
 
 ```
 hhagent (Rust workspace, 8 crates, AGPL-3.0)
-├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), memory (Phase-1 `recall(pool, params)` — fans out to `db::memories` semantic + lexical lanes, fuses via Reciprocal Rank Fusion, hydrates top-k bodies in one round-trip; pure `reciprocal_rank_fusion(lists, k)` helper; `RecallModes::{ALL, SEMANTIC_ONLY, LEXICAL_ONLY}`; graph lane deferred — needs entity↔memory linkage that the schema doesn't carry yet; `embed_query(pool, router, text) -> Result<Vec<f32>, MemoryError>` (Option O) — validates dim against `EMBEDDING_DIM`, writes first `actor='llm:router' action='embed'` audit row; `MemoryError` covers dim mismatch + DB + router error paths)
+├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), memory/ (split 2026-05-12 into `mod.rs` facade + `recall.rs` + `embed.rs` to stay under the 500-LOC soft cap; flat public surface preserved): `recall.rs` carries Phase-1 `recall(pool, params)` (fans out to `db::memories` semantic + lexical lanes, fuses via Reciprocal Rank Fusion, hydrates top-k bodies in one round-trip), pure `reciprocal_rank_fusion(lists, k)` helper, `RecallModes::{ALL, SEMANTIC_ONLY, LEXICAL_ONLY}`, `RRF_K_CONSTANT = 60.0`; graph lane deferred — needs entity↔memory linkage that the schema doesn't carry yet (Option P). `embed.rs` carries `embed_query(pool, router, text) -> Result<Vec<f32>, MemoryError>` (Option O — validates dim against `EMBEDDING_DIM`, writes first `actor='llm:router' action='embed'` audit row with payload `{model, n_texts, dim, backend, latency_ms}`), `MemoryError` (covers dim mismatch + DB + router error paths), and module-private `build_embed_audit_payload`
 ├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE hhagent_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + audit::{insert, fetch_by_id, fetch_since, truncate_payload} (4 KiB SHA-256 envelope) + memories::{insert_memory, semantic_search, lexical_search, fetch_by_ids, vector_literal} (pgvector text-cast bind for `vector(1024)`; `<=>` cosine via sequential scan; `to_tsvector('simple')` + `ts_rank` paired with the schema's GENERATED `tsv` column) + pool::connect_runtime_pool (PgPool with `after_connect` SET ROLE hhagent_runtime hook) + MIGRATOR (sqlx::migrate!() over 0001_init.sql + 0002_runtime_role.sql + 0003_audit_log_notify.sql + 0004_secrets_aad_nonempty.sql) + secrets::{Router-shaped AES-256-GCM at-rest with OS keyring KeyProvider} + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. `Router::send(&ChatRequest) -> Result<ChatResponse, RouterError>` and `Router::embed(&EmbeddingRequest) -> Result<EmbeddingResponse, RouterError>` over reqwest+rustls; `Backend::{Local, Frontier}` closed enum; `PolicyGate` trait with `DefaultLocalPolicy` always picking `Local` (Phase-5 seam) and `pick_embed` default method (Phase-5 seam for embedding routing). `RouterConfig::from_env` reads `HHAGENT_LLM_LOCAL_URL` / `HHAGENT_LLM_LOCAL_MODEL` / `HHAGENT_LLM_FRONTIER_URL` / `HHAGENT_LLM_FRONTIER_MODEL` / `HHAGENT_LLM_TIMEOUT_MS` / `HHAGENT_LLM_EMBEDDING_URL` (falls back to `HHAGENT_LLM_LOCAL_URL`) / `HHAGENT_LLM_EMBEDDING_MODEL` (defaults to `"embedding-default"` which vLLM rejects to surface misconfig loudly). Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). `EmbeddingRequest`/`EmbeddingData`/`EmbeddingResponse` wire shapes in `embeddings.rs`. `RouterError::EmbeddingCountMismatch` validates that the response contains the expected number of embedding vectors. Frontier dispatch returns `RouterError::PolicyDeniedFrontier` until Phase 5
 ├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt
@@ -33,7 +35,7 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 327 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on branch `feat/embedding-router` (commit `a1256cd`). Baseline on `main` after Task 4.4 (`cli_ask_e2e`) was 299; Option O (this session) added **+28** (unit + integration across `llm-router` and `core`; plan projected +24, +4 extras came from review-driven fallback-semantic and frontier-rejection pins). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
+**`cargo test --workspace` on Linux: 327 tests passed, 0 failed, 0 `[SKIP]` lines** on branch `refactor/split-core-memory` (this commit, off `main` at `d39023b`). Baseline on `main` after Task 4.4 (`cli_ask_e2e`) was 299; Option O added **+28**; this split is pure structural (test count unchanged). One pre-existing dead-code warning in `core/tests/embedding_recall_e2e.rs::ServedRequest` (introduced in PR #29) is unrelated to this slice — could be cleaned up in any future touch of that file (`#[allow(dead_code)]` on the struct, or read the fields in an assertion). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
 **macOS (main):** 299 all pass on macOS (skip-as-pass for PG-dependent tests); Option O additions not yet verified on macOS (embedding TCP mock tests are cross-platform clean; the `embedding_recall_e2e` skip-as-pass path is expected).
 
 **Known flake fixed this session:** `tasks_lifecycle_e2e` (in `db/tests/postgres_e2e.rs`) had a structural deadlock — `pool.close().await` blocks until all `max_connections` permits are released, but two `PgListener`s were still in scope when close() was called. The multi-thread tokio runtime exposed it reliably (90 s+ hang) while the single-thread runtime variant in `audit_helpers_pool_and_notify_round_trip` (same pattern, one listener) had been passing on timing. Fix: explicitly `drop(listener)` before `pool.close().await`. Applied preemptively to `audit_helpers_pool_and_notify_round_trip` too so the latent flake there is closed out as well.
@@ -82,7 +84,34 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-12 — Option O: embedding router + first actor='llm:router' audit row)
+## Recently completed (this session, 2026-05-12 — split `core/src/memory.rs` into submodules)
+
+Branch: `refactor/split-core-memory` (off `main` at `d39023b`). Closes [issue #30](https://github.com/hherb/hhagent/issues/30).
+
+**Why this slice now.** The Option O slice (shipped earlier today, merged via PR #29) grew `core/src/memory.rs` from 489 LOC to 602 LOC — 102 over the 500-LOC soft cap in CLAUDE.md. The file had two natural halves: pure retrieval (`recall` + `reciprocal_rank_fusion` + `RecallModes` + `RecallParams` + `RRF_K_CONSTANT` + `LANE_FANOUT`) which has zero dependencies beyond `hhagent-db`, and the LLM-router-touching helper (`embed_query` + `MemoryError` + `build_embed_audit_payload`) which depends on `hhagent-llm-router` + the audit module. Splitting them tightens the dependency surface of each file and keeps both well under the cap, with no behaviour change and no public-API change.
+
+**Shape.** One module became three:
+
+- `core/src/memory/mod.rs` (55 LOC) — facade. Module-level docstring describes the role; submodule decls (`mod recall; mod embed;`); flat re-exports preserve the external API: `pub use recall::{recall, reciprocal_rank_fusion, RecallModes, RecallParams, RRF_K_CONSTANT}; pub use embed::{embed_query, MemoryError};`.
+- `core/src/memory/recall.rs` (384 LOC) — retrieval surface + RRF. Carries `recall` (async, runs configured lanes + fuses + hydrates), `reciprocal_rank_fusion` (pure), `RecallModes`/`RecallParams`/`RRF_K_CONSTANT`/`LANE_FANOUT`. Imports only from `hhagent_db::memories` + `hhagent_db::DbError` + `sqlx::PgPool` — no LLM-router dependency. All RRF + RecallModes unit tests (11 tests) live in `recall.rs::tests`.
+- `core/src/memory/embed.rs` (219 LOC) — embedding query helper + audit row. Carries `embed_query` (async, validates dim, writes the `actor='llm:router' action='embed'` audit row), `MemoryError` enum, and the module-private `build_embed_audit_payload` (tightened from `pub(crate)` since no out-of-module caller exists). Three audit-payload-shape unit tests live in `embed.rs::tests`.
+
+**API surface preserved.** The two integration tests that import the module (`core/tests/memory_recall_e2e.rs` and `core/tests/embedding_recall_e2e.rs`) needed zero changes — they use the flat `hhagent_core::memory::{recall, RecallModes, RecallParams, embed_query, MemoryError}` paths, which the `mod.rs` re-exports satisfy.
+
+**Visibility tightening.** `build_embed_audit_payload` went from `pub(crate)` to module-private (no `pub` keyword at all). Pre-split, the rest of the `hhagent_core` crate *could* have called it; post-split, only `embed.rs` and its tests can. The audit + dispatcher chokepoint pattern in HANDOVER and CLAUDE.md says payload builders are internal helpers — the new visibility makes that contract structural rather than conventional.
+
+**Test count delta:** 327 → 327 (no change). Workspace builds clean; `cargo test --workspace` is 0 failed, 0 `[SKIP]` lines.
+
+**What this slice deliberately does NOT do.**
+- No new functionality. Strict structural split.
+- No public-surface change. `embed_query`, `recall`, `MemoryError`, `RecallModes`, `RecallParams`, `reciprocal_rank_fusion`, `RRF_K_CONSTANT` all reachable at the same `hhagent_core::memory::{...}` paths.
+- No fix to the pre-existing dead-code warning in `core/tests/embedding_recall_e2e.rs` (introduced in PR #29, not this slice).
+
+**Verification.** Per CLAUDE.md rule #6, all tests pass before commit: full `cargo test --workspace` is green at 327. Per rule #4, each new file is well under the 500-LOC soft cap (the largest is `recall.rs` at 384). Per rule #3, every new symbol carries a docstring explaining its role and the why-not-X (the module-level docs in `mod.rs`, `recall.rs`, and `embed.rs` each justify the split shape).
+
+---
+
+## Recently completed (previous session, 2026-05-12 — Option O: embedding router + first actor='llm:router' audit row)
 
 Branch: `feat/embedding-router` (off `main` at `9fe45d6`, the plan commit; spec at `docs/superpowers/specs/2026-05-11-embedding-router-design.md`, plan at `docs/superpowers/plans/2026-05-11-embedding-router.md`). 7 implementation commits + 1 docs commit.
 
@@ -470,9 +499,9 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 
 **Existing Phase 1 cont. pickups (updated priority):**
 
-- **Option P — entity↔memory linkage + graph lane in `recall`:** the third lane mentioned in Option N's brief. Now that `embed_query` exists (Option O shipped), Option P is the next natural recall extension.
-- **Refactor `core/src/memory.rs` into `memory/recall.rs` + `memory/embed.rs`:** file is now 585 LOC, 85 over the 500-LOC soft limit in CLAUDE.md. Natural split: `recall` / `reciprocal_rank_fusion` / `RecallParams` / `RecallModes` / `RRF_K_CONSTANT` / `LANE_FANOUT` → `memory/recall.rs` (pure retrieval); `embed_query` / `MemoryError` / `build_embed_audit_payload` → `memory/embed.rs` (LLM-router + audit). No behaviour change, purely structural cleanup.
-- ~~**Option O — embedding worker (Phase 1 cont.):**~~ **Shipped 2026-05-12** as `Router::embed` in core (worker-process design rejected during brainstorming; see "Recently completed" section above and the spec). Branch: `feat/embedding-router` (range `9fe45d6..a1256cd`).
+- **Option P — entity↔memory linkage + graph lane in `recall`:** the third lane mentioned in Option N's brief. Now that `embed_query` exists (Option O shipped) and the module is split (issue #30), Option P is the next natural recall extension.
+- ~~**Refactor `core/src/memory.rs` into `memory/recall.rs` + `memory/embed.rs`:**~~ **Shipped 2026-05-12 (this session)** — see "Recently completed" entry at the top. Closes issue #30.
+- ~~**Option O — embedding worker (Phase 1 cont.):**~~ **Shipped 2026-05-12** as `Router::embed` in core (worker-process design rejected during brainstorming; see the older "Recently completed" section and the spec). Branch: `feat/embedding-router` (merged via PR #29 at `d39023b`).
 - **Issue #16 — close the in-crate hole in the `WorkerCommand` seal:** sibling modules inside `hhagent_core` can construct one and reach `SupervisedWorker::call` directly. Three candidate fixes filed.
 - **Issue #17 — `memory::recall` warn-and-degrade on missing input may mask caller bugs:** tighten before Phase 1's scheduler is the production caller.
 - **Option K — cross-platform exponential restart backoff:** filed but parked; no immediate need.
@@ -531,8 +560,9 @@ Smaller follow-up to Option E. Today the cgroup layer hardcodes `CPUQuota=200%` 
 - ~~[#22](https://github.com/hherb/hhagent/issues/22) — `RouterAgent::formulate_plan` has no mock-HTTP test coverage~~ **addressed by PR #26 (open)**
 - [#23](https://github.com/hherb/hhagent/issues/23) — scheduler: constitutional refusals are recorded as `state='completed'`, not `'blocked'` — design discussion before CASSANDRA real impls (filed 2026-05-10 from PR #25 review)
 - [#24](https://github.com/hherb/hhagent/issues/24) — deployment: `HHAGENT_PROMPTS_DIR` has a cwd-relative fallback; production unit files must set it explicitly (filed 2026-05-10 from PR #25 review)
-- ~~**Deferred — Task 3.2.bis:** wire `ToolHostStepDispatcher` to `tool_host::dispatch`~~ **shipped this session 2026-05-11** on branch `feat/tool-host-step-dispatcher`. See "Recently completed" above.
-- ~~**Deferred — Task 4.4:** `cli_ask_e2e` integration test~~ **shipped this session 2026-05-11** on `main` (see "Recently completed" above).
+- ~~[#30](https://github.com/hherb/hhagent/issues/30) — split `core/src/memory.rs` into `recall.rs` + `embed.rs` submodules~~ **closed 2026-05-12 by this slice** (`core/src/memory/{mod.rs, recall.rs, embed.rs}`, all under the 500-LOC soft cap)
+- ~~**Deferred — Task 3.2.bis:** wire `ToolHostStepDispatcher` to `tool_host::dispatch`~~ **shipped 2026-05-11** on branch `feat/tool-host-step-dispatcher`. See older "Recently completed" entry.
+- ~~**Deferred — Task 4.4:** `cli_ask_e2e` integration test~~ **shipped 2026-05-11** on `main` (see older "Recently completed" entry).
 
 (Closed won't-fix: [#9](https://github.com/hherb/hhagent/issues/9) Apache AGE, [#10](https://github.com/hherb/hhagent/issues/10) ParadeDB pg_search — both 2026-05-09 after review. Closed in earlier 2026-05-09: [#7](https://github.com/hherb/hhagent/issues/7) — daemon log-line substring is now precise after `(skeleton)` was dropped from the startup line.)
 
