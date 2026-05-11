@@ -5,8 +5,8 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-11
-**Last commit:** `5d7a6ee` (`fix(test): tasks_lifecycle_e2e — drop listeners before pool.close()`)
-**Branch:** `fix/tasks-lifecycle-pool-close-deadlock` (off `main`; the scheduler-phase1 worktree merged into `main` at `93da413` earlier today, and the post-merge follow-ups landed via PR #25 `ec007d7`)
+**Last commit:** `ea7556a` (`Merge pull request #27 from hherb/fix/tasks-lifecycle-pool-close-deadlock`)
+**Branch:** `feat/tool-host-step-dispatcher` (off `main` at `ea7556a`; PR #26 + PR #27 both merged earlier today). Picking up **Task 3.2.bis — wire `ToolHostStepDispatcher` to `tool_host::dispatch`** this session.
 
 ---
 
@@ -33,8 +33,8 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 281 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on this branch (`fix/tasks-lifecycle-pool-close-deadlock`). With the open PR #26 (`fix/router-agent-mock-http-tests`) applied, the total becomes 284. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
-**macOS (this branch):** 281 all pass on macOS (skip-as-pass for PG-dependent tests).
+**`cargo test --workspace` on Linux: 298 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on this branch (`feat/tool-host-step-dispatcher`). Baseline on `main` after PR #26 + PR #27 was 284; this session adds **+14** (13 unit tests in `scheduler::tool_dispatch` + 1 integration test `scheduler_step_dispatch_e2e`). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
+**macOS (this branch):** 298 all pass on macOS (skip-as-pass for PG-dependent tests).
 
 **Known flake fixed this session:** `tasks_lifecycle_e2e` (in `db/tests/postgres_e2e.rs`) had a structural deadlock — `pool.close().await` blocks until all `max_connections` permits are released, but two `PgListener`s were still in scope when close() was called. The multi-thread tokio runtime exposed it reliably (90 s+ hang) while the single-thread runtime variant in `audit_helpers_pool_and_notify_round_trip` (same pattern, one listener) had been passing on timing. Fix: explicitly `drop(listener)` before `pool.close().await`. Applied preemptively to `audit_helpers_pool_and_notify_round_trip` too so the latent flake there is closed out as well.
 
@@ -45,7 +45,7 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 | `sandbox` unit (macos) | 14 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation + strict profile does NOT contain unrestricted `(allow mach-lookup)` (issue #1) |
 | `sandbox` integration (`linux_smoke`) | 7 | **real** bwrap+cgroup: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected, mem_burner allocating 256 MiB under `MemoryMax=32M` is OOM-killed |
 | `sandbox` integration (`macos_smoke`) | 10 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable, /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny`, worker is the leader of a fresh session — sid == pid via setsid (issue #2), worker cannot `bootstrap_look_up` `com.apple.coreservices.appleevents` (issue #1) |
-| `core` unit | 40 | `derive_lockdown_env` (4); watchdog loop honours cancel/deadline/early-exit (4); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7). `audit_mirror::audit_log_path_for` zero-pads month/day + handles 4-digit year (2), `format_jsonl_line` ends with single \n + serialises every AuditRow field (2), `default_state_dir` resolves under `$HOME/.local/state/hhagent` (1). `audit_tail::parse_audit_filename` accepts canonical shape + rejects every off-shape (2), `find_audit_files` ascending + ignores non-matching + handles missing dirs (2), `tail_loop` from-start mode (1). **Option M (2):** `WorkerCommand::new` carries method+params verbatim; accepts `&str` and owned `String`. **Option N (12):** `reciprocal_rank_fusion` algorithm pins (7); `RecallModes` shape pins (4); `RRF_K_CONSTANT` pinned at exactly `60.0` (1) |
+| `core` unit | 53 | `derive_lockdown_env` (4); watchdog loop honours cancel/deadline/early-exit (4); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7). `audit_mirror::audit_log_path_for` zero-pads month/day + handles 4-digit year (2), `format_jsonl_line` ends with single \n + serialises every AuditRow field (2), `default_state_dir` resolves under `$HOME/.local/state/hhagent` (1). `audit_tail::parse_audit_filename` accepts canonical shape + rejects every off-shape (2), `find_audit_files` ascending + ignores non-matching + handles missing dirs (2), `tail_loop` from-start mode (1). **Option M (2):** `WorkerCommand::new` carries method+params verbatim; accepts `&str` and owned `String`. **Option N (12):** `reciprocal_rank_fusion` algorithm pins (7); `RecallModes` shape pins (4); `RRF_K_CONSTANT` pinned at exactly `60.0` (1). **Task 3.2.bis (13):** `rpc_code_name` mapping (2 — every known JSON-RPC code + unknown fallback to `RPC_ERROR`); `map_dispatch_result` Ok/POLICY_DENIED/unknown-RPC-code/non-Rpc Protocol/Io buckets (5); `ToolRegistry` empty/insert/lookup/replace (3); `shell_exec_entry` carries allowlist + invariants (Net::Deny, WorkerStrict, fs_read binary, empty fs_write) + empty-list = deny-all (2); `dispatch_step` unknown-tool branch (1) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip — rewritten 2026-05-10 (Option M) to route every call through `tool_host::dispatch` since the `WorkerCommand` seal forecloses out-of-crate `worker.call(...)`. Each test brings up its own per-test PG cluster; `[SKIP]`s cleanly without PG / supervisor / sandbox / worker binary. Echo round-trip; non-allowlisted argv → POLICY_DENIED; unknown method → METHOD_NOT_FOUND; workspace e2e (cp from in/ to out/, host reads back, Drop wipes tree). Per-test PG cost: ~3 s × 4 = ~12 s |
 | `core` integration (`memory_recall_e2e`) | 1 | **cross-platform real** Phase-1 entry. Per-test PG cluster, probe applies 0001+0002+0003+0004, runtime-role pool, seeds 3 memories with hermetic SHA-256-seeded 1024-dim L2-normalised embeddings (same text → distance 0; different texts → ~orthogonal). Asserts `semantic_search(emb_a)` ranks A first, `lexical_search("alpha")` returns only A, `recall(SEMANTIC_ONLY)`/`recall(LEXICAL_ONLY)`/`recall(ALL)` all return A as top-1, ALL also includes B+C below A (proves RRF fuses). ~1.9 s |
 | `core` integration (`audit_dispatch_e2e`) | 1 | **cross-platform real** dispatcher chokepoint. Per-test PG cluster, probe, `pool::connect_runtime_pool` (auto SET ROLE), spawn shell-exec, exercise `tool_host::dispatch` twice: success (`echo dispatch-ok` → audit row payload `{req, result, ms}`); POLICY_DENIED (`/bin/cat /etc/passwd` → audit row payload `{req, err, ms}`). Final assertion: exactly 3 rows in `audit_log` (bring-up + 2 dispatches). Multi-thread tokio runtime mandatory (dispatch uses `block_in_place`) |
@@ -65,6 +65,7 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 | `core` integration (`scheduler_lanes_e2e`) | 1 | **cross-platform skip-as-pass.** Concurrent fast+long lane claim with timing assertion; verifies lane-default lease constants |
 | `core` integration (`scheduler_crash_recovery_e2e`) | 1 | **cross-platform skip-as-pass.** Back-dated lease → `sweep_crashed` marks task as crashed; daemon restart safety invariant |
 | `core` integration (`agent_prompts_e2e`) | 1 | **cross-platform skip-as-pass.** `load_prompts_from_dir` writes SHA-256 into `agent_prompts` ledger; cache entry round-trip; both v1 and v2 of an edited prompt persist (append-only by GRANT, migration 0006) |
+| `core` integration (`scheduler_step_dispatch_e2e`) | 1 | **cross-platform real** (skips on hosts without PG/supervisor/sandbox/worker). Task 3.2.bis regression pin. Per-test PG cluster + probe + runtime-role pool + `ToolRegistry` with shell-exec entry (ECHO_PATH allowlisted). Exercises `ToolHostStepDispatcher::dispatch_step` three ways: (1) happy path → `StepOutcome::Ok` with `exit_code=0` and `stdout="step-ok"`, (2) non-allowlisted argv → `StepOutcome::Err { code: "POLICY_DENIED" }`, (3) unknown tool (`web-fetch`) → `StepOutcome::Err { code: "UNKNOWN_TOOL" }` *without* writing an audit row. Final assertion: audit_log has exactly 3 rows (bring-up + ok + denied) — confirms UNKNOWN_TOOL short-circuits before the chokepoint, as designed |
 
 **Build & test:**
 ```sh
@@ -78,7 +79,49 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-11 — post-merge follow-ups, mock HTTP tests, deadlock fix)
+## Recently completed (this session, 2026-05-11 — Task 3.2.bis: wire `ToolHostStepDispatcher` to `tool_host::dispatch`)
+
+Branch: `feat/tool-host-step-dispatcher`, off `main` at `ea7556a`.
+
+**Why this slice now.** Phase 1 scheduler shipped without step execution (Task 3.2.bis was the last deferred item). The daemon would accept tasks via `hhagent-cli ask`, formulate plans via the LLM, run them through CASSANDRA review — and then every `PlannedStep` hit a `NOT_IMPLEMENTED` placeholder in `core::scheduler::runner::ToolHostStepDispatcher`. Operators got an audit-log `plan.outcome` row with `terminal_kind: "err"` and no information about *why*. This slice replaces the placeholder with a real spawn-per-step path through `tool_host::dispatch`.
+
+**Shape:**
+
+- **New module `core/src/scheduler/tool_dispatch.rs` (~330 lines + 13 unit tests):** ownership of the production dispatcher moved out of `runner.rs` into its own file. Contains:
+  * `pub struct ToolEntry { binary, policy, wall_clock_ms }` — one row in the tool registry.
+  * `pub struct ToolRegistry` — `HashMap<String, ToolEntry>` with `new`/`insert`/`lookup`/`is_empty`/`len`. The dispatcher takes an `Arc<ToolRegistry>` so the daemon owns the canonical instance and the inner loop sees a cheap clone.
+  * `pub fn shell_exec_entry(binary, allowlist) -> ToolEntry` — canonical recipe for the shell-exec worker: `Net::Deny`, `Profile::WorkerStrict`, `cpu_ms = 5_000`, `mem_mb = 256`, `wall_clock_ms = Some(30_000)`, `HHAGENT_SHELL_ALLOWLIST` env carrying the argv allowlist.
+  * `pub fn rpc_code_name(code: i32) -> &'static str` — pure mapping from JSON-RPC numeric codes (`-32001`, `-32601`, …) to the mnemonic strings the inner loop and audit consumers see (`"POLICY_DENIED"`, `"METHOD_NOT_FOUND"`, …). Unknown code → `"RPC_ERROR"`.
+  * `pub fn map_dispatch_result(Result<Value, ToolHostError>) -> StepOutcome` — pure translation from the chokepoint's typed error surface to the inner loop's `StepOutcome::{Ok, Err{code, detail}}`. Five buckets: `Ok`, `Sandbox` → `SPAWN_FAILED`, `Io` → `IO_ERROR`, `Protocol(Rpc)` → named via `rpc_code_name`, `Protocol(non-Rpc)` → `PROTOCOL_ERROR`.
+  * `pub struct ToolHostStepDispatcher { pool, sandbox, registry }` — `#[async_trait] impl StepDispatcher`. `dispatch_step`: lookup → spawn → call `tool_host::dispatch` → drop worker → `map_dispatch_result`. Unknown tools short-circuit before spawn (no audit row), surfaced loudly via `tracing::warn!`. Spawn failures surface as `SPAWN_FAILED` *without* an audit row — also a gap, flagged in the module doc comment.
+
+- **`core/src/scheduler/runner.rs` slimmed down:** the placeholder `ToolHostStepDispatcher` removed. The unused `_workspace_root: PathBuf` parameter dropped from `spawn_scheduler` (it was only kept so the placeholder didn't break `main.rs` call sites — now obsolete). The `PathBuf` import also dropped. Net: ~50 lines deleted.
+
+- **`core/src/main.rs` rewiring:**
+  * New helper `build_tool_registry()` reads `HHAGENT_SHELL_EXEC_BIN` and `HHAGENT_SHELL_EXEC_ALLOWLIST` (colon-separated) from env. If `HHAGENT_SHELL_EXEC_BIN` is unset or the binary doesn't exist, shell-exec is simply *not registered* — plans that name it will fall through to `UNKNOWN_TOOL`. **Deny-by-default**: empty/unset `HHAGENT_SHELL_EXEC_ALLOWLIST` means no programs are allowlisted, every shell-exec step returns `POLICY_DENIED`. The daemon admin opts programs in explicitly. This is the same posture used in the Phase 3 egress proxy plan.
+  * Workspace-root computation removed entirely. `Workspace::new` reads `HHAGENT_WORKSPACE_ROOT` directly, so the env seam still exists; nothing in the scheduler currently uses per-step workspaces. When a tool that needs writable scratch lands, the `Workspace` integration will go *inside* `dispatch_step` (or its trait sig will grow `task_id`).
+
+- **`core/tests/scheduler_step_dispatch_e2e.rs` (~420 lines):** the regression pin for the wiring. Per-test PG cluster (sixth duplication site, issue #15 still open). Multi-thread tokio runtime mandatory (the chokepoint uses `block_in_place`). Three assertions:
+  1. **Happy path** — `PlannedStep { tool: "shell-exec", method: "shell.exec", parameters: { argv: [ECHO_PATH, "step-ok"] } }` → `StepOutcome::Ok(value)` where `value["exit_code"] == 0` and `value["stdout"].trim_end() == "step-ok"`.
+  2. **Worker policy denial** — `argv = ["/bin/cat", "/etc/passwd"]` (not allowlisted) → `StepOutcome::Err { code: "POLICY_DENIED", detail: non-empty }`.
+  3. **Unknown tool** — `step.tool = "web-fetch"` → `StepOutcome::Err { code: "UNKNOWN_TOOL", detail: contains "web-fetch" }`.
+  Final audit_log assertion: exactly 3 rows (bring-up + ok + denied — UNKNOWN_TOOL is *deliberately* not audited because the spawn never happened and the chokepoint was never reached). Cleanly skips on hosts without PG/supervisor/sandbox/worker binary.
+
+- **`core/tests/scheduler_lanes_e2e.rs`:** updated to drop the `workspace_root` arg from the `spawn_scheduler` call (now redundant after the param removal).
+
+**Why deny-by-default for shell-exec allowlist.** The planner LLM supplies `step.parameters` (the argv); if the host-side allowlist came from the LLM-supplied params, a prompt-injected channel would directly control which programs ran inside the jail — defeating the whole point of the allowlist. The allowlist must come from a source the LLM cannot influence: daemon-admin env vars. Empty allowlist + worker-side `POLICY_DENIED` is the safest starting position; operators opt programs in by setting `HHAGENT_SHELL_EXEC_ALLOWLIST=/usr/bin/echo:/bin/cat:...` at daemon start.
+
+**What this slice deliberately does NOT do:**
+- No per-step `Workspace` integration. Shell-exec doesn't need writable scratch for the canonical `echo` test case. When `python-exec` or any tool needing scratch lands, the trait sig grows a `task_id: i64` parameter (the inner loop already has it in `TaskContext.task_id`).
+- No long-lived worker pooling. Spawn-per-step matches the existing "spawn-per-call" mode in `tool_host`; revisit when scheduler-latency profiling shows it's a bottleneck (HANDOVER §"Open questions" #5).
+- No `actor='scheduler', action='task.<state>'` lifecycle audit rows from the scheduler. Spec §7 expected them; still deferred (see existing ROADMAP Phase 1 follow-up). The `tool:shell-exec` row from `tool_host::dispatch` is one row per *step*, not per *task*.
+- No new audit row for `UNKNOWN_TOOL` or `SPAWN_FAILED`. Spawn-side failures never reach the chokepoint, so today they appear only in the daemon log. Flagged in the module doc — could be tightened in Phase 1 once the failure-shape contract is decided.
+
+**Test count delta:** 284 (post-PR-#26-and-#27 main) → **298** (+14: 13 unit + 1 integration). 0 failed, 0 warnings.
+
+---
+
+## Recently completed (previous session, 2026-05-11 — post-merge follow-ups, mock HTTP tests, deadlock fix)
 
 The Phase 1 scheduler work that was on `worktree-scheduler-phase1` has now landed on `main`. This session bundled three follow-up slices on top of that merge.
 
@@ -324,18 +367,18 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 
 ## Next TODO (pick one)
 
-**Phase 0 is complete. Phase 1 — memory recall + the scheduler loop — is on `main`.** The agent-core daemon comes up fail-closed, runs crash recovery, loads prompts, starts two lane runners, and can accept and schedule tasks via `hhagent-cli ask`. Step dispatch is the only non-implemented piece (Task 3.2.bis deferred — see above). Two follow-up ROADMAP items are open: Task 3.2.bis (ToolHostStepDispatcher wiring) and Task 4.4 (cli_ask_e2e). Both are gating on the first concrete tool-using task.
+**Phase 0 is complete. Phase 1 — memory recall + the scheduler loop, including end-to-end step dispatch — is on `main` (modulo this branch, `feat/tool-host-step-dispatcher`, which needs merging).** The agent-core daemon now comes up fail-closed, runs crash recovery, loads prompts, builds a tool registry from env vars, starts two lane runners, accepts tasks via `hhagent-cli ask`, and **actually executes shell-exec steps under sandbox**. Task 4.4 (`cli_ask_e2e`) is now unblocked — its dependency on 3.2.bis is satisfied.
 
-**Two open PRs to settle first:**
+**This session's branch to merge:**
 
-- **PR #26** (`fix/router-agent-mock-http-tests`) — closes #22, adds the 3-test mock HTTP suite described above. Mergeable, no CI configured, clean diff (+367 LOC, test file only). Merge before picking the next slice so the test surface for `RouterAgent::formulate_plan` exists on `main`.
-- **This branch** (`fix/tasks-lifecycle-pool-close-deadlock`) — single-commit `5d7a6ee` that unjams `tasks_lifecycle_e2e`. Push and either merge directly into `main` (no PR overhead — the fix is mechanical and the deadlock is real) or open a PR alongside #26 for review hygiene.
+- **`feat/tool-host-step-dispatcher`** — single-session work: replaces the `NOT_IMPLEMENTED` placeholder in the scheduler's step dispatcher with real `tool_host::dispatch` wiring + a `ToolRegistry` shape. 13 unit tests + 1 integration test + 0 warnings. Drops the unused `workspace_root` parameter from `spawn_scheduler` (the placeholder was the only caller). See the "Recently completed" section above for the full write-up.
 
-**Immediate next pickups (post-merge of #26 and this branch), in priority order:**
+**Immediate next pickups, in priority order:**
 
-- **Observation phase** (spec §9) — run the scheduler with real tasks, collect failure modes, then design the real `ConstitutionalGuard` + `DeterministicPolicy` rules. Do not skip this phase or the real stage rules will be guesses.
-- **Task 3.2.bis — wire `ToolHostStepDispatcher`** — the daemon can schedule tasks but cannot execute steps. This is the highest-priority blocker for real agent operation.
-- **Task 4.4 — `cli_ask_e2e`** — after 3.2.bis lands, the e2e test is straightforward.
+- **Task 4.4 — `cli_ask_e2e`** — unblocked by this session. Subprocess + mock LLM + daemon supervisor bring-up. The ask path now exercises a real step dispatch end-to-end; the e2e can assert the full chain from CLI insert → scheduler claim → LLM plan → CASSANDRA review → step dispatch → finalize.
+- **Observation phase** (spec §9) — now that real steps execute, the scheduler can be driven with real tasks to collect failure modes before designing the real `ConstitutionalGuard` + `DeterministicPolicy` rules. Do not skip this phase or the real stage rules will be guesses.
+- **Per-tool argv allowlist hygiene** — the deny-by-default `HHAGENT_SHELL_EXEC_ALLOWLIST` env is acceptable for now, but production deployment needs a versioned per-host config (or `db::secrets`-stored allowlist) so a host restart can't accidentally widen it. Filed as a follow-up issue when the first non-test deployment lands.
+- **Audit rows for spawn-side failures + UNKNOWN_TOOL** — today these surface only in the daemon log. If the channel-bus operator wants to react to "the agent tried web-fetch but it's not registered," the row needs to exist. Possible shape: `actor='scheduler', action='step.unknown_tool' | 'step.spawn_failed'`, payload `{tool, method, error_or_none}`.
 
 **Existing Phase 1 cont. pickups (unchanged in priority):**
 
@@ -407,8 +450,8 @@ Smaller follow-up to Option E. Today the cgroup layer hardcodes `CPUQuota=200%` 
 - ~~[#22](https://github.com/hherb/hhagent/issues/22) — `RouterAgent::formulate_plan` has no mock-HTTP test coverage~~ **addressed by PR #26 (open)**
 - [#23](https://github.com/hherb/hhagent/issues/23) — scheduler: constitutional refusals are recorded as `state='completed'`, not `'blocked'` — design discussion before CASSANDRA real impls (filed 2026-05-10 from PR #25 review)
 - [#24](https://github.com/hherb/hhagent/issues/24) — deployment: `HHAGENT_PROMPTS_DIR` has a cwd-relative fallback; production unit files must set it explicitly (filed 2026-05-10 from PR #25 review)
-- **Deferred — Task 3.2.bis:** wire `ToolHostStepDispatcher` to `tool_host::dispatch` so the scheduler loop can actually execute shell-exec steps. Currently `NOT_IMPLEMENTED` placeholder in `core/src/scheduler/runner.rs`. All integration tests use scripted dispatchers.
-- **Deferred — Task 4.4:** `cli_ask_e2e` integration test — subprocess + mock LLM + daemon supervisor bring-up; depends on Task 3.2.bis.
+- ~~**Deferred — Task 3.2.bis:** wire `ToolHostStepDispatcher` to `tool_host::dispatch`~~ **shipped this session 2026-05-11** on branch `feat/tool-host-step-dispatcher`. See "Recently completed" above.
+- **Deferred — Task 4.4:** `cli_ask_e2e` integration test — subprocess + mock LLM + daemon supervisor bring-up. **Unblocked by Task 3.2.bis above; ready to pick next session.**
 
 (Closed won't-fix: [#9](https://github.com/hherb/hhagent/issues/9) Apache AGE, [#10](https://github.com/hherb/hhagent/issues/10) ParadeDB pg_search — both 2026-05-09 after review. Closed in earlier 2026-05-09: [#7](https://github.com/hherb/hhagent/issues/7) — daemon log-line substring is now precise after `(skeleton)` was dropped from the startup line.)
 
