@@ -1468,6 +1468,17 @@ async fn tasks_lifecycle_e2e() {
         "second sweep_crashed must find nothing"
     );
 
+    // PgListener holds a checked-out PoolConnection for its lifetime
+    // (sqlx's `PgListener::connect_with` stores it as `Some(connection)`
+    // and only releases on Drop or when an explicit recv() is cancelled
+    // via Pool::close_event). `pool.close().await` waits for every
+    // connection to be returned — so without dropping the listeners
+    // first, close().await deadlocks waiting on the two listener
+    // connections that will only be released at end-of-scope. Drop
+    // them explicitly here.
+    drop(inserted_listener);
+    drop(completed_listener);
+
     pool.close().await;
 
     // ---------- teardown ----------
