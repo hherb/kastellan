@@ -276,6 +276,43 @@ pub fn reciprocal_rank_fusion(lists: &[&[i64]], k: f64) -> Vec<(i64, f64)> {
     out
 }
 
+/// Build the audit-log payload for an `actor='llm:router' action='embed'`
+/// row.
+///
+/// Pure function — no I/O, no clock reads, no global state. The
+/// future caller (`embed_query`, landing in Task 7 of the Option O
+/// slice) measures latency, picks the backend string, knows the
+/// request's model and the agreed dim, then calls this helper to
+/// compose the JSON object that the row's `payload` column carries.
+///
+/// **What the payload deliberately omits:**
+/// * The input texts (privacy — query may carry user PII).
+/// * The output embeddings (size + uselessness as audit signal).
+/// * HTTP status / body (failures don't write an audit row at all;
+///   matches `Router::send` and `tool_host::dispatch` precedent).
+///
+/// **What it includes** is the minimal operator-facing summary: which
+/// model, how many texts, what dimension, which backend, how long.
+// `embed_query` (the production caller) lands in Task 7. Until then
+// `cargo build` warns this is unused; suppress with a narrow allow
+// rather than carrying a yellow warning on main.
+#[allow(dead_code)]
+pub(crate) fn build_embed_audit_payload(
+    model: &str,
+    n_texts: usize,
+    dim: usize,
+    backend: &str,
+    latency_ms: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "model":      model,
+        "n_texts":    n_texts,
+        "dim":        dim,
+        "backend":    backend,
+        "latency_ms": latency_ms,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +450,44 @@ mod tests {
         let ratio_60 = out_60[0].1 / out_60[1].1;
         let ratio_1 = out_1[0].1 / out_1[1].1;
         assert!(ratio_1 > ratio_60);
+    }
+
+    /// The audit payload must NOT carry user text or embeddings —
+    /// privacy + size. Pinned so a future refactor that "adds context"
+    /// to the row gets caught at the right moment.
+    ///
+    /// Note: `"n_texts"` is an intentional key (count of inputs, not the
+    /// inputs themselves). The checks below guard against leaking the
+    /// *content* fields by their canonical key names.
+    #[test]
+    fn embed_audit_payload_excludes_input_text_and_embeddings() {
+        let v = build_embed_audit_payload("bge-m3", 1, 1024, "local", 42);
+        let s = serde_json::to_string(&v).unwrap();
+        assert!(!s.contains("\"input\""), "input leaked: {s}");
+        assert!(!s.contains("\"input_text\""), "input_text leaked: {s}");
+        assert!(!s.contains("\"query_text\""), "query_text leaked: {s}");
+        assert!(!s.contains("\"query\""), "query leaked: {s}");
+        assert!(!s.contains("\"embedding\""), "embedding leaked: {s}");
+        assert!(!s.contains("\"data\""), "data leaked: {s}");
+    }
+
+    /// The audit payload must carry the operator-facing summary fields.
+    #[test]
+    fn embed_audit_payload_includes_load_bearing_fields() {
+        let v = build_embed_audit_payload("bge-m3", 1, 1024, "local", 87);
+        assert_eq!(v["model"], "bge-m3");
+        assert_eq!(v["n_texts"], 1);
+        assert_eq!(v["dim"], 1024);
+        assert_eq!(v["backend"], "local");
+        assert_eq!(v["latency_ms"], 87);
+    }
+
+    /// `latency_ms` is `u64` upstream; pin that it serialises as a
+    /// JSON number (not stringly).
+    #[test]
+    fn embed_audit_payload_latency_is_numeric() {
+        let v = build_embed_audit_payload("m", 1, 4, "local", 12345);
+        assert!(v["latency_ms"].is_number(), "latency must be a JSON number");
+        assert_eq!(v["latency_ms"].as_u64(), Some(12345));
     }
 }
