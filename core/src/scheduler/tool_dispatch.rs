@@ -36,18 +36,43 @@
 //! responsible for *which* tools are available. Tests build a
 //! registry from scratch with whatever fixtures they need.
 //!
-//! ## Audit-log row from this slice
+//! ## Audit-log rows from this slice
 //!
-//! Every successful or failed step lands a `tool:<name>` row via
-//! `tool_host::dispatch` (see the chokepoint doc in
-//! `core::tool_host::dispatch`). The inner loop's separate
-//! `scheduler/plan.outcome` audit row aggregates step counts;
-//! `agent/plan.formulate` and `cassandra:chain/verdict` rows are
-//! emitted elsewhere in the loop.
+//! Three actor/action shapes can come out of one [`dispatch_step`]
+//! call, and an operator triaging the audit log relies on the
+//! distinction:
+//!
+//!   * **`tool:<name>` / `<method>`** — the worker was reached and
+//!     `tool_host::dispatch` wrote the row (one per call, success
+//!     or failure). The shape is `{req, result|err, ms}`.
+//!   * **`scheduler` / `step.unknown_tool`** — the planner asked for
+//!     a tool not in the registry. No spawn happened, the chokepoint
+//!     was not reached, and this dispatcher writes the row itself.
+//!     Payload: `{tool, method, req, ms}` (no `err` field — the
+//!     failure is a registration gap, not an error).
+//!   * **`scheduler` / `step.spawn_failed`** — the registry hit but
+//!     [`spawn_worker`] returned [`ToolHostError`] (sandbox rejection,
+//!     stdio setup failure, etc.). The chokepoint was not reached, so
+//!     this dispatcher writes the row itself. Payload:
+//!     `{tool, method, req, err, ms}` — `err` carries the
+//!     `ToolHostError::Display` string so operators can triage from
+//!     the audit log alone.
+//!
+//! The audit insert is **best-effort**: if Postgres is unavailable or
+//! the pool is exhausted, the dispatcher logs via [`tracing::error`]
+//! and still returns the original `StepOutcome::Err` to the caller.
+//! Masking the spawn/lookup failure because we couldn't log it would
+//! be a strictly worse failure mode. This matches the chokepoint's
+//! own best-effort posture; see [`crate::tool_host::dispatch`].
+//!
+//! The inner loop's separate `scheduler/plan.outcome` audit row
+//! aggregates step counts; `agent/plan.formulate` and
+//! `cassandra:chain/verdict` rows are emitted elsewhere in the loop.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use hhagent_protocol::{client::ClientError, codes};
 use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
@@ -218,6 +243,53 @@ pub fn map_dispatch_result(
     }
 }
 
+/// Logical actor string used in `audit_log` rows that the dispatcher
+/// itself writes (i.e. rows for short-circuit paths that never reach
+/// the `tool_host::dispatch` chokepoint). Lifted to a constant so a
+/// future rename can't drift between the writer and any reader.
+const SCHEDULER_AUDIT_ACTOR: &str = "scheduler";
+
+/// `action` value for an `audit_log` row written when
+/// [`ToolRegistry::lookup`] missed: the planner named a tool that
+/// isn't in the daemon's registry.
+const ACTION_STEP_UNKNOWN_TOOL: &str = "step.unknown_tool";
+
+/// `action` value for an `audit_log` row written when [`spawn_worker`]
+/// returned an error: a registered tool whose sandbox spawn was
+/// rejected (bad policy, OS error, etc.).
+const ACTION_STEP_SPAWN_FAILED: &str = "step.spawn_failed";
+
+/// Build the JSON payload for a `scheduler/step.<kind>` audit row.
+///
+/// Pure helper — no I/O, no clock, no global state — so the wire shape
+/// is unit-testable without spinning up a real database. The chokepoint
+/// in [`crate::tool_host::dispatch`] uses `{req, result|err, ms}`; this
+/// payload adds `tool` and `method` so audit consumers can filter
+/// without a join: when `actor = "scheduler"`, the worker name doesn't
+/// appear in the action.
+///
+/// * `err = None`  → suitable for `step.unknown_tool` (no underlying
+///   error string; the failure is a missing registration).
+/// * `err = Some`  → suitable for `step.spawn_failed` (`Display`
+///   string of the sandbox/IO error).
+fn build_scheduler_step_failure_payload(
+    tool: &str,
+    method: &str,
+    req: serde_json::Value,
+    err: Option<&str>,
+    ms: u64,
+) -> serde_json::Value {
+    let mut payload = serde_json::Map::with_capacity(5);
+    payload.insert("tool".into(), serde_json::Value::String(tool.into()));
+    payload.insert("method".into(), serde_json::Value::String(method.into()));
+    payload.insert("req".into(), req);
+    if let Some(e) = err {
+        payload.insert("err".into(), serde_json::Value::String(e.into()));
+    }
+    payload.insert("ms".into(), serde_json::Value::Number(ms.into()));
+    serde_json::Value::Object(payload)
+}
+
 /// Production [`StepDispatcher`]: looks up `step.tool` in a
 /// [`ToolRegistry`], spawns a fresh sandboxed worker, calls
 /// [`tool_host::dispatch`], and maps the result into a
@@ -245,6 +317,12 @@ impl ToolHostStepDispatcher {
 #[async_trait::async_trait]
 impl StepDispatcher for ToolHostStepDispatcher {
     async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome {
+        // Measured from dispatcher entry, not from worker spawn — so
+        // `ms` on a `step.unknown_tool` row is essentially zero (just
+        // the registry lookup) and `ms` on `step.spawn_failed`
+        // captures the time the failed spawn cost.
+        let started = Instant::now();
+
         let Some(entry) = self.registry.lookup(&step.tool) else {
             // Tool not in registry — surfaced loudly so the operator
             // sees which tool name the planner asked for. The inner
@@ -254,6 +332,33 @@ impl StepDispatcher for ToolHostStepDispatcher {
                 tool = %step.tool, method = %step.method,
                 "ToolHostStepDispatcher: unknown tool — not in registry"
             );
+
+            // Audit row is best-effort: a transient DB error is logged
+            // but the lookup-miss is still surfaced to the caller. See
+            // the module-level "Audit-log rows from this slice" doc for
+            // why this matches the chokepoint's own best-effort posture.
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let payload = build_scheduler_step_failure_payload(
+                &step.tool,
+                &step.method,
+                step.parameters.clone(),
+                None,
+                elapsed_ms,
+            );
+            if let Err(audit_err) = hhagent_db::audit::insert(
+                &self.pool,
+                SCHEDULER_AUDIT_ACTOR,
+                ACTION_STEP_UNKNOWN_TOOL,
+                payload,
+            )
+            .await
+            {
+                tracing::error!(
+                    tool = %step.tool, method = %step.method, error = %audit_err,
+                    "step.unknown_tool audit_log INSERT failed; outcome still propagated"
+                );
+            }
+
             return StepOutcome::Err {
                 code: "UNKNOWN_TOOL".into(),
                 detail: format!("tool '{}' not registered", step.tool),
@@ -275,18 +380,43 @@ impl StepDispatcher for ToolHostStepDispatcher {
         let mut worker = match spawn_worker(self.sandbox.as_ref(), &spec) {
             Ok(w) => w,
             Err(e) => {
-                // Spawn errors never reach `tool_host::dispatch`, so
-                // no audit row is written for them today. That's a
-                // gap — the operator only sees the daemon log. Could
-                // be tightened in Phase 1 once the audit shape for
-                // pre-RPC failures is decided.
+                // Spawn failure short-circuits before
+                // `tool_host::dispatch`, so the chokepoint never sees
+                // it. Closing that audit-trail gap is the contract of
+                // this branch: write a `scheduler/step.spawn_failed`
+                // row carrying the sandbox/IO error string, then
+                // surface `SPAWN_FAILED` upstream.
+                let err_string = e.to_string();
                 tracing::error!(
-                    tool = %step.tool, method = %step.method, error = %e,
+                    tool = %step.tool, method = %step.method, error = %err_string,
                     "ToolHostStepDispatcher: spawn_worker failed"
                 );
+
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let payload = build_scheduler_step_failure_payload(
+                    &step.tool,
+                    &step.method,
+                    step.parameters.clone(),
+                    Some(&err_string),
+                    elapsed_ms,
+                );
+                if let Err(audit_err) = hhagent_db::audit::insert(
+                    &self.pool,
+                    SCHEDULER_AUDIT_ACTOR,
+                    ACTION_STEP_SPAWN_FAILED,
+                    payload,
+                )
+                .await
+                {
+                    tracing::error!(
+                        tool = %step.tool, method = %step.method, error = %audit_err,
+                        "step.spawn_failed audit_log INSERT failed; outcome still propagated"
+                    );
+                }
+
                 return StepOutcome::Err {
                     code: "SPAWN_FAILED".into(),
-                    detail: e.to_string(),
+                    detail: err_string,
                 };
             }
         };
@@ -531,4 +661,63 @@ mod tests {
     // (the dispatcher needs a real `PgPool` to construct, so a pure unit
     // test would be tautological). `tool_registry_starts_empty` above
     // pins the underlying registry-miss contract.
+
+    // ----- build_scheduler_step_failure_payload -----
+
+    #[test]
+    fn build_payload_unknown_tool_shape_has_no_err_field() {
+        // UNKNOWN_TOOL is a registry-miss; there is no underlying error
+        // string to attach. The audit consumer's filter on
+        // `payload ? 'err'` distinguishes this row from `step.spawn_failed`
+        // by structure alone.
+        let req = serde_json::json!({"url": "https://example.com"});
+        let payload = build_scheduler_step_failure_payload(
+            "web-fetch", "fetch", req.clone(), None, 0,
+        );
+        let obj = payload.as_object().expect("payload must be a JSON object");
+        assert_eq!(obj.get("tool").and_then(|v| v.as_str()), Some("web-fetch"));
+        assert_eq!(obj.get("method").and_then(|v| v.as_str()), Some("fetch"));
+        assert_eq!(obj.get("req"), Some(&req));
+        assert_eq!(obj.get("ms").and_then(|v| v.as_u64()), Some(0));
+        assert!(
+            !obj.contains_key("err"),
+            "UNKNOWN_TOOL payload must omit `err`; got {payload:#}",
+        );
+        // Exactly the keys we expect — no accidental extras (which would
+        // shift the audit-shape contract in a future refactor).
+        let keys: std::collections::BTreeSet<&str> =
+            obj.keys().map(|s| s.as_str()).collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["tool", "method", "req", "ms"].iter().copied().collect();
+        assert_eq!(keys, expected, "unexpected keys in payload");
+    }
+
+    #[test]
+    fn build_payload_spawn_failed_shape_includes_err_string() {
+        // SPAWN_FAILED carries the sandbox/IO error's `to_string()` so
+        // operators can triage from the audit log alone.
+        let req = serde_json::json!({"argv": ["/bin/echo", "hi"]});
+        let payload = build_scheduler_step_failure_payload(
+            "shell-exec",
+            "shell.exec",
+            req.clone(),
+            Some("sandbox: policy paths must be absolute"),
+            7,
+        );
+        let obj = payload.as_object().expect("payload must be a JSON object");
+        assert_eq!(obj.get("tool").and_then(|v| v.as_str()), Some("shell-exec"));
+        assert_eq!(obj.get("method").and_then(|v| v.as_str()), Some("shell.exec"));
+        assert_eq!(obj.get("req"), Some(&req));
+        assert_eq!(
+            obj.get("err").and_then(|v| v.as_str()),
+            Some("sandbox: policy paths must be absolute"),
+        );
+        assert_eq!(obj.get("ms").and_then(|v| v.as_u64()), Some(7));
+        // No accidental extras here either.
+        let keys: std::collections::BTreeSet<&str> =
+            obj.keys().map(|s| s.as_str()).collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["tool", "method", "req", "err", "ms"].iter().copied().collect();
+        assert_eq!(keys, expected, "unexpected keys in payload");
+    }
 }
