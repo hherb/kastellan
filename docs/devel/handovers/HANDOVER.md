@@ -5,8 +5,8 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-11
-**Last commit:** `ea7556a` (`Merge pull request #27 from hherb/fix/tasks-lifecycle-pool-close-deadlock`)
-**Branch:** `feat/tool-host-step-dispatcher` (off `main` at `ea7556a`; PR #26 + PR #27 both merged earlier today). Picking up **Task 3.2.bis — wire `ToolHostStepDispatcher` to `tool_host::dispatch`** this session.
+**Last commit:** `db0197c` (`Merge pull request #28 from hherb/feat/tool-host-step-dispatcher`); a post-merge follow-up commit `e524959` (`fix(scheduler): code-review follow-ups on tool_dispatch`) applies four small `/review` nits on Task 3.2.bis — see the Task 3.2.bis section below.
+**Branch:** `main`. Picking up **Task 4.4 — `cli_ask_e2e` end-to-end integration test** this session (HANDOVER's deferred-list item, unblocked by Task 3.2.bis). Design spec: [`docs/superpowers/specs/2026-05-11-cli-ask-e2e-design.md`](../../superpowers/specs/2026-05-11-cli-ask-e2e-design.md).
 
 ---
 
@@ -33,8 +33,8 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 298 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on this branch (`feat/tool-host-step-dispatcher`). Baseline on `main` after PR #26 + PR #27 was 284; this session adds **+14** (13 unit tests in `scheduler::tool_dispatch` + 1 integration test `scheduler_step_dispatch_e2e`). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
-**macOS (this branch):** 298 all pass on macOS (skip-as-pass for PG-dependent tests).
+**`cargo test --workspace` on Linux: 297 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on `main` (`db0197c` + the `e524959` follow-up). Baseline on `main` after PR #26 + PR #27 was 284; Task 3.2.bis added **+13** (12 unit tests in `scheduler::tool_dispatch` + 1 integration test `scheduler_step_dispatch_e2e`; one originally-13th unit test was a tautology and was deleted in `e524959`). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
+**macOS (main):** 297 all pass on macOS (skip-as-pass for PG-dependent tests).
 
 **Known flake fixed this session:** `tasks_lifecycle_e2e` (in `db/tests/postgres_e2e.rs`) had a structural deadlock — `pool.close().await` blocks until all `max_connections` permits are released, but two `PgListener`s were still in scope when close() was called. The multi-thread tokio runtime exposed it reliably (90 s+ hang) while the single-thread runtime variant in `audit_helpers_pool_and_notify_round_trip` (same pattern, one listener) had been passing on timing. Fix: explicitly `drop(listener)` before `pool.close().await`. Applied preemptively to `audit_helpers_pool_and_notify_round_trip` too so the latent flake there is closed out as well.
 
@@ -117,7 +117,15 @@ Branch: `feat/tool-host-step-dispatcher`, off `main` at `ea7556a`.
 - No `actor='scheduler', action='task.<state>'` lifecycle audit rows from the scheduler. Spec §7 expected them; still deferred (see existing ROADMAP Phase 1 follow-up). The `tool:shell-exec` row from `tool_host::dispatch` is one row per *step*, not per *task*.
 - No new audit row for `UNKNOWN_TOOL` or `SPAWN_FAILED`. Spawn-side failures never reach the chokepoint, so today they appear only in the daemon log. Flagged in the module doc — could be tightened in Phase 1 once the failure-shape contract is decided.
 
-**Test count delta:** 284 (post-PR-#26-and-#27 main) → **298** (+14: 13 unit + 1 integration). 0 failed, 0 warnings.
+**Test count delta:** 284 (post-PR-#26-and-#27 main) → **297** (+13: 12 unit + 1 integration). 0 failed, 0 warnings.
+
+**Post-merge follow-up (`e524959`).** A `/review` pass on the merged slice surfaced four small nits, all applied in one commit:
+- The tautological `dispatch_step_unknown_tool_returns_unknown_tool_err` unit test constructed a `PlannedStep`, discarded it (`let _ = step;`), and asserted on a hand-rolled `expected` value — never invoked the dispatcher. Deleted; the unknown-tool branch is covered end-to-end by `scheduler_step_dispatch_e2e.rs`, and `tool_registry_starts_empty` pins the underlying registry-miss contract.
+- `build_tool_registry` now filters empty entries out of the colon-split `HHAGENT_SHELL_EXEC_ALLOWLIST`. An operator typo like `:` or `/usr/bin/echo::/bin/echo` was silently shipping an empty argv[0] to the worker, surfacing as a less-obvious `POLICY_DENIED` at a different layer than the misconfiguration.
+- Dropped the redundant `info!("tool registry built")` summary in `main.rs`. `build_tool_registry` already emits a per-tool `info!` line on registration.
+- Narrowed the `scheduler::mod` re-exports to drop `map_dispatch_result` and `rpc_code_name` — internal helpers used only by `dispatch_step`. Public surface stays at `{shell_exec_entry, ToolEntry, ToolHostStepDispatcher, ToolRegistry}`.
+
+Net change: 298 → 297 tests passing (the tautology); zero behavioural change.
 
 ---
 
