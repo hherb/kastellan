@@ -51,6 +51,11 @@
 
 pub mod backend;
 pub mod config;
+// Re-exports for `embeddings::{EmbeddingRequest, EmbeddingData,
+// EmbeddingResponse}` land in Task 5 alongside `Router::embed` so
+// callers can `use hhagent_llm_router::EmbeddingRequest` at the crate
+// root. Until then, callers reach them via the module path.
+pub mod embeddings;
 pub mod error;
 pub mod messages;
 pub mod policy;
