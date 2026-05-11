@@ -45,20 +45,51 @@
 //! document doesn't appear. Items absent from *every* lane do not
 //! appear in the output.
 //!
-//! ## What's deferred
+//! ## What's now wired (post-Option O, 2026-05-12)
 //!
-//! * **LLM-router `actor='llm:router'` audit row** for the embedding
-//!   call. The HANDOVER calls this out as the slice's first such
-//!   audit row — but the embedding call site (turning `query_text`
-//!   into `query_embedding`) will live with the *embedding worker*,
-//!   which doesn't exist yet. Today's caller passes the embedding in
-//!   directly (the integration test uses a deterministic SHA-256-seeded
-//!   helper). The audit-log row will materialise when the embedding
-//!   worker lands and dispatches its first call through the router.
+//! * [`embed_query`] turns a free-text query into a 1024-float
+//!   embedding via [`hhagent_llm_router::Router::embed`] and writes
+//!   the first `actor='llm:router' action='embed'` audit row in the
+//!   system. Callers compose `embed_query` then [`recall`] (the
+//!   recall surface itself stays pure-data and unchanged).
+//!
+//! ## What's still deferred
+//!
+//! * **Graph lane in `recall`** — the schema has no entity↔memory
+//!   linkage today; adding one (likely a join table or
+//!   `memories.metadata->>'entities'` GIN index) is a separate
+//!   design decision (Option P in HANDOVER).
+//! * **Per-task `embed_query` caching** — every call goes to the
+//!   embedding backend today; intra-task caching becomes useful when
+//!   the scheduler replays the same query across plan iterations.
 
+use hhagent_db::audit;
 use hhagent_db::memories::{fetch_by_ids, lexical_search, semantic_search, Memory, EMBEDDING_DIM};
 use hhagent_db::DbError;
+use hhagent_llm_router::embeddings::EmbeddingRequest;
+use hhagent_llm_router::{Router, RouterError};
 use sqlx::PgPool;
+use std::time::Instant;
+
+/// Errors returned by `core::memory` helpers that touch the LLM
+/// router and/or write audit rows.
+///
+/// `recall` itself is `Result<_, DbError>`-typed and is unchanged by
+/// this slice; `MemoryError` is the wider surface used by
+/// [`embed_query`].
+#[derive(Debug, thiserror::Error)]
+pub enum MemoryError {
+    #[error("router: {0}")]
+    Router(#[from] RouterError),
+    #[error("db: {0}")]
+    Db(#[from] DbError),
+    #[error("embedding dim mismatch: expected {expected}, got {actual} from model {model}")]
+    EmbeddingDimMismatch {
+        expected: usize,
+        actual: usize,
+        model: String,
+    },
+}
 
 /// Reciprocal Rank Fusion's `k` constant.
 ///
@@ -280,10 +311,10 @@ pub fn reciprocal_rank_fusion(lists: &[&[i64]], k: f64) -> Vec<(i64, f64)> {
 /// row.
 ///
 /// Pure function — no I/O, no clock reads, no global state. The
-/// future caller (`embed_query`, landing in Task 7 of the Option O
-/// slice) measures latency, picks the backend string, knows the
-/// request's model and the agreed dim, then calls this helper to
-/// compose the JSON object that the row's `payload` column carries.
+/// caller [`embed_query`] measures latency, picks the backend
+/// string, knows the request's model and the agreed dim, then calls
+/// this helper to compose the JSON object that the row's `payload`
+/// column carries.
 ///
 /// **What the payload deliberately omits:**
 /// * The input texts (privacy — query may carry user PII).
@@ -293,10 +324,6 @@ pub fn reciprocal_rank_fusion(lists: &[&[i64]], k: f64) -> Vec<(i64, f64)> {
 ///
 /// **What it includes** is the minimal operator-facing summary: which
 /// model, how many texts, what dimension, which backend, how long.
-// `embed_query` (the production caller) lands in Task 7. Until then
-// `cargo build` warns this is unused; suppress with a narrow allow
-// rather than carrying a yellow warning on main.
-#[allow(dead_code)]
 pub(crate) fn build_embed_audit_payload(
     model: &str,
     n_texts: usize,
@@ -311,6 +338,82 @@ pub(crate) fn build_embed_audit_payload(
         "backend":    backend,
         "latency_ms": latency_ms,
     })
+}
+
+/// Turn a free-text query into a [`EMBEDDING_DIM`]-length embedding
+/// vector via the LLM router's embedding backend, writing the first
+/// `actor='llm:router' action='embed'` audit row in the process.
+///
+/// ## Flow
+/// 1. Build `EmbeddingRequest::single(router.config().embedding_model, text)`.
+/// 2. Time the call to `router.embed(&req).await`.
+/// 3. Validate `data.len() == 1` (router already validated against
+///    request input length; this is a defensive check for the
+///    single-text shape).
+/// 4. Validate the returned embedding's length equals
+///    [`EMBEDDING_DIM`]; otherwise [`MemoryError::EmbeddingDimMismatch`].
+/// 5. Insert one row into `audit_log` with
+///    `actor='llm:router' action='embed'` and the payload shape
+///    pinned by [`build_embed_audit_payload`].
+///    **Best-effort:** an audit-insert failure is logged at
+///    `tracing::error!` but does **not** mask the embed `Ok(emb)` —
+///    matches `tool_host::dispatch` precedent.
+/// 6. Return the embedding vector.
+///
+/// ## What this does NOT do
+/// - Does not call `recall`. Caller composes `embed_query` →
+///   `RecallParams { query_embedding: Some(&emb), ... }` → `recall`.
+/// - Does not retry. The router's reqwest client carries the configured
+///   timeout; transport-level retries are a Phase-1-cont. optimisation.
+/// - Does not cache. Stateless function.
+pub async fn embed_query(
+    pool: &PgPool,
+    router: &Router,
+    text: &str,
+) -> Result<Vec<f32>, MemoryError> {
+    let model = router.config().embedding_model.clone();
+    let req = EmbeddingRequest::single(model.clone(), text);
+
+    let start = Instant::now();
+    let resp = router.embed(&req).await?;
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    if resp.data.len() != 1 {
+        // Router's own count check should fire first; this is
+        // belt-and-braces.
+        return Err(MemoryError::Router(RouterError::EmbeddingCountMismatch {
+            requested: 1,
+            returned: resp.data.len(),
+        }));
+    }
+    let emb = resp.data
+        .into_iter()
+        .next()
+        .expect("invariant: data.len()==1 checked above; if this fires a refactor broke the guard")
+        .embedding;
+
+    if emb.len() != EMBEDDING_DIM {
+        return Err(MemoryError::EmbeddingDimMismatch {
+            expected: EMBEDDING_DIM,
+            actual: emb.len(),
+            model,
+        });
+    }
+
+    // Best-effort audit. We hardcode "local" here matching
+    // RouterAgent::formulate_plan (core/src/scheduler/agent.rs:111).
+    // When Phase 5's PolicyGate may select Frontier for embed, swap
+    // this for `router.pick_embed_backend(&req).as_tag()`.
+    let payload = build_embed_audit_payload(&req.model, 1, EMBEDDING_DIM, "local", latency_ms);
+    if let Err(e) = audit::insert(pool, "llm:router", "embed", payload).await {
+        tracing::error!(
+            target: "hhagent::memory",
+            error = %e,
+            "embed_query audit insert failed; embedding result preserved"
+        );
+    }
+
+    Ok(emb)
 }
 
 #[cfg(test)]
