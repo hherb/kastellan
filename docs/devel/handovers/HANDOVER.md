@@ -5,8 +5,8 @@
 > [`README.md`](README.md) for the convention.
 
 **Last updated:** 2026-05-11
-**Last commit:** `e6e282f` (`docs(spec): cli_ask_e2e design + refresh HANDOVER header`); this session adds Task 4.4 (`cli_ask_e2e` integration test, +2 tests) on top of `e6e282f`.
-**Branch:** `main`. **Task 4.4 — `cli_ask_e2e` end-to-end integration test shipped this session.** Design spec: [`docs/superpowers/specs/2026-05-11-cli-ask-e2e-design.md`](../../superpowers/specs/2026-05-11-cli-ask-e2e-design.md).
+**Last commit:** `2a248c6` (`test(cli_ask_e2e): code-review follow-ups on Task 4.4`). Task 4.4 (`cli_ask_e2e`) landed on `main` in `e612f67` + `2a248c6` (the `/review` pass on the initial commit; helper extraction, redundant `drop(mock)` removal, `worker_threads(1)`, prompt-fingerprint assertion against captured request body, total audit-row-count assertion + tightened failure-path multiset).
+**Branch:** `main`. Working tree clean. No uncommitted work pending; this is a fresh session resuming cold.
 
 ---
 
