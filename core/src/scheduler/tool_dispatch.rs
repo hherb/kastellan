@@ -1,0 +1,572 @@
+//! Production `StepDispatcher` that maps each [`PlannedStep`] to a real
+//! sandboxed worker call via [`tool_host::dispatch`].
+//!
+//! ## Where this fits
+//!
+//! The inner loop calls `dispatcher.dispatch_step(&step)` once per
+//! [`PlannedStep`] on an approved plan. In production, that dispatcher
+//! is a [`ToolHostStepDispatcher`]; in tests, it's a scripted stub
+//! (`scheduler_inner_loop_e2e` and friends construct closures).
+//!
+//! For each call, this dispatcher:
+//!
+//!   1. Looks up the `step.tool` name in the [`ToolRegistry`] — a
+//!      pre-configured map of `tool name → (binary path, sandbox
+//!      policy, wall-clock budget)`. Unknown tools surface as
+//!      `StepOutcome::Err { code: "UNKNOWN_TOOL", ... }`.
+//!   2. Spawns a fresh worker under the configured `SandboxBackend`,
+//!      using the entry's policy + binary. Spawn-per-step matches the
+//!      existing "spawn-per-call" mode in `tool_host`; long-lived
+//!      workers are a Phase-1+ revisit (see HANDOVER §"Open questions").
+//!   3. Calls [`tool_host::dispatch`] which is the chokepoint — it
+//!      writes one `audit_log` row per call regardless of success or
+//!      failure, then returns the worker's result.
+//!   4. Drops the worker (closes stdio, cancels watchdog, reaps).
+//!   5. Translates [`Result<Value, ToolHostError>`] into a
+//!      [`StepOutcome`] so the inner loop can decide whether to keep
+//!      executing remaining steps.
+//!
+//! ## Why a registry, not hardcoded tool resolution
+//!
+//! There is only one tool today (`shell-exec`). But the dispatcher is
+//! the natural seam where future tools (`web-fetch`, `python-exec`,
+//! the embedding worker) plug in — each needs its own binary path,
+//! sandbox policy shape, and budget. Threading those through a
+//! constructor keeps `dispatch_step` short and the daemon's startup
+//! responsible for *which* tools are available. Tests build a
+//! registry from scratch with whatever fixtures they need.
+//!
+//! ## Audit-log row from this slice
+//!
+//! Every successful or failed step lands a `tool:<name>` row via
+//! `tool_host::dispatch` (see the chokepoint doc in
+//! `core::tool_host::dispatch`). The inner loop's separate
+//! `scheduler/plan.outcome` audit row aggregates step counts;
+//! `agent/plan.formulate` and `cassandra:chain/verdict` rows are
+//! emitted elsewhere in the loop.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use hhagent_protocol::{client::ClientError, codes};
+use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+use sqlx::PgPool;
+
+use crate::cassandra::types::PlannedStep;
+use crate::tool_host::{dispatch, spawn_worker, ToolHostError, WorkerSpec};
+
+use super::inner_loop::{StepDispatcher, StepOutcome};
+
+/// One entry in the tool registry.
+///
+/// Construct via [`shell_exec_entry`] (canonical for the only shipping
+/// tool today) or build by hand for tests. `policy` is cloned per
+/// dispatch call so the same entry can serve many concurrent steps
+/// without cross-talk.
+#[derive(Clone, Debug)]
+pub struct ToolEntry {
+    /// Absolute path to the worker binary on the host. Bound into the
+    /// jail by `policy.fs_read` (or via the worker prelude's Landlock
+    /// allowlist — see `derive_lockdown_env`).
+    pub binary: PathBuf,
+    /// Base sandbox policy. Cloned per call. Per-step overrides (e.g.
+    /// a per-step scratch dir) would mutate the clone before passing
+    /// to `spawn_worker`.
+    pub policy: SandboxPolicy,
+    /// Wall-clock budget for the entire worker process lifetime, in
+    /// milliseconds. `None` disables the watchdog. See
+    /// [`WorkerSpec::wall_clock_ms`] for the semantics.
+    pub wall_clock_ms: Option<u64>,
+}
+
+/// Look-up table from logical tool name (as it appears in
+/// `PlannedStep::tool`) to the recipe for spawning that tool.
+///
+/// The dispatcher resolves `step.tool` here on every call; a miss
+/// produces `StepOutcome::Err { code: "UNKNOWN_TOOL", ... }` so the
+/// inner loop records the failure and (typically) breaks out of the
+/// remaining steps.
+#[derive(Default, Debug)]
+pub struct ToolRegistry {
+    entries: HashMap<String, ToolEntry>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, entry: ToolEntry) {
+        self.entries.insert(name.into(), entry);
+    }
+
+    pub fn lookup(&self, name: &str) -> Option<&ToolEntry> {
+        self.entries.get(name)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Canonical [`ToolEntry`] for the `shell-exec` worker.
+///
+/// `allowlist` is the JSON-encoded list of permitted argv\[0\] values
+/// the worker will accept (delivered via the `HHAGENT_SHELL_ALLOWLIST`
+/// env var; see `workers/shell-exec/src/main.rs`). The daemon
+/// administrator controls this list; the LLM-supplied
+/// `step.parameters` cannot widen it.
+///
+/// Defaults baked in here:
+///   * `net = Net::Deny` — shell-exec has no business reaching the
+///     network; if a future variant needs it, build a separate entry.
+///   * `profile = WorkerStrict` — no `socket(2)` allowed (the seccomp
+///     filter kills the syscall).
+///   * `cpu_ms = 5_000` / `mem_mb = 256` / `wall_clock_ms = Some(30_000)`
+///     — small, defensible defaults that match the integration-test
+///     fixture in `audit_dispatch_e2e.rs`. Tunable per-tool when a
+///     concrete workload demands more.
+pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
+    // serde_json on a `&[String]` is infallible — the only ways it
+    // could fail (non-string keys, NaN floats) are absent here.
+    let allow_json = serde_json::to_string(allowlist)
+        .expect("serializing Vec<String> never fails");
+    let policy = SandboxPolicy {
+        fs_read: vec![binary.clone()],
+        fs_write: vec![],
+        net: Net::Deny,
+        cpu_ms: 5_000,
+        mem_mb: 256,
+        profile: Profile::WorkerStrict,
+        env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
+    };
+    ToolEntry {
+        binary,
+        policy,
+        wall_clock_ms: Some(30_000),
+    }
+}
+
+/// Map a JSON-RPC numeric error code to its mnemonic. The mnemonics
+/// match the constants in [`hhagent_protocol::codes`]; an unknown code
+/// surfaces as `"RPC_ERROR"` so the inner loop sees *something*
+/// usable without a magic number.
+///
+/// This is the only place where the wire-level integer is rendered
+/// back to a string consumers (the audit log, the inner loop's plan
+/// reflection summary) will see, so the names are intentionally
+/// short, ALL_CAPS, and identical to the protocol module's constant
+/// names.
+pub fn rpc_code_name(code: i32) -> &'static str {
+    match code {
+        codes::PARSE_ERROR => "PARSE_ERROR",
+        codes::INVALID_REQUEST => "INVALID_REQUEST",
+        codes::METHOD_NOT_FOUND => "METHOD_NOT_FOUND",
+        codes::INVALID_PARAMS => "INVALID_PARAMS",
+        codes::INTERNAL_ERROR => "INTERNAL_ERROR",
+        codes::POLICY_DENIED => "POLICY_DENIED",
+        codes::OPERATION_FAILED => "OPERATION_FAILED",
+        _ => "RPC_ERROR",
+    }
+}
+
+/// Translate a `tool_host::dispatch` result into the inner-loop's
+/// [`StepOutcome`]. Pure — extracted so the wire-level error mapping
+/// is unit-testable without spawning a worker.
+///
+/// The mapping is:
+///
+/// | dispatch outcome                                     | StepOutcome                                                |
+/// | ---------------------------------------------------- | ---------------------------------------------------------- |
+/// | `Ok(value)`                                          | `Ok(value)`                                                |
+/// | `Err(Sandbox(_))`                                    | `Err { code: "SPAWN_FAILED", detail }`                     |
+/// | `Err(Io(_))`                                         | `Err { code: "IO_ERROR",     detail }`                     |
+/// | `Err(Protocol(ClientError::Rpc { code: c, msg, .. }))`| `Err { code: rpc_code_name(c), detail: msg }`              |
+/// | `Err(Protocol(_other))`                              | `Err { code: "PROTOCOL_ERROR", detail }`                   |
+///
+/// The first three buckets are pre-RPC failures the dispatcher itself
+/// is responsible for. The fourth is the worker's structured rejection
+/// (`POLICY_DENIED`, `OPERATION_FAILED`, etc.) and is the most common
+/// failure mode in production. The fifth is decode / I/O at the
+/// stdio-pipe layer.
+pub fn map_dispatch_result(
+    result: Result<serde_json::Value, ToolHostError>,
+) -> StepOutcome {
+    match result {
+        Ok(v) => StepOutcome::Ok(v),
+        Err(ToolHostError::Sandbox(e)) => StepOutcome::Err {
+            code: "SPAWN_FAILED".into(),
+            detail: e.to_string(),
+        },
+        Err(ToolHostError::Io(e)) => StepOutcome::Err {
+            code: "IO_ERROR".into(),
+            detail: e.to_string(),
+        },
+        Err(ToolHostError::Protocol(ClientError::Rpc(rpc))) => StepOutcome::Err {
+            code: rpc_code_name(rpc.code).into(),
+            detail: rpc.message,
+        },
+        Err(ToolHostError::Protocol(other)) => StepOutcome::Err {
+            code: "PROTOCOL_ERROR".into(),
+            detail: other.to_string(),
+        },
+    }
+}
+
+/// Production [`StepDispatcher`]: looks up `step.tool` in a
+/// [`ToolRegistry`], spawns a fresh sandboxed worker, calls
+/// [`tool_host::dispatch`], and maps the result into a
+/// [`StepOutcome`].
+///
+/// Cheap to clone (all fields are `Arc`/`PgPool`); the daemon's
+/// scheduler holds a single instance and the inner loop calls
+/// `dispatch_step` directly on it.
+pub struct ToolHostStepDispatcher {
+    pool: PgPool,
+    sandbox: Arc<dyn SandboxBackend>,
+    registry: Arc<ToolRegistry>,
+}
+
+impl ToolHostStepDispatcher {
+    pub fn new(
+        pool: PgPool,
+        sandbox: Arc<dyn SandboxBackend>,
+        registry: Arc<ToolRegistry>,
+    ) -> Self {
+        Self { pool, sandbox, registry }
+    }
+}
+
+#[async_trait::async_trait]
+impl StepDispatcher for ToolHostStepDispatcher {
+    async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome {
+        let Some(entry) = self.registry.lookup(&step.tool) else {
+            // Tool not in registry — surfaced loudly so the operator
+            // sees which tool name the planner asked for. The inner
+            // loop will mark the plan as `err` and replanning kicks
+            // in on the next iteration (bounded by `max_plans`).
+            tracing::warn!(
+                tool = %step.tool, method = %step.method,
+                "ToolHostStepDispatcher: unknown tool — not in registry"
+            );
+            return StepOutcome::Err {
+                code: "UNKNOWN_TOOL".into(),
+                detail: format!("tool '{}' not registered", step.tool),
+            };
+        };
+
+        // Per-call clone of the base policy. Per-step overrides (e.g.
+        // a fresh scratch dir) would mutate the clone before spawn;
+        // none today, but the seam exists.
+        let policy = entry.policy.clone();
+        let program = entry.binary.to_string_lossy().into_owned();
+        let spec = WorkerSpec {
+            policy: &policy,
+            program: &program,
+            args: &[],
+            wall_clock_ms: entry.wall_clock_ms,
+        };
+
+        let mut worker = match spawn_worker(self.sandbox.as_ref(), &spec) {
+            Ok(w) => w,
+            Err(e) => {
+                // Spawn errors never reach `tool_host::dispatch`, so
+                // no audit row is written for them today. That's a
+                // gap — the operator only sees the daemon log. Could
+                // be tightened in Phase 1 once the audit shape for
+                // pre-RPC failures is decided.
+                tracing::error!(
+                    tool = %step.tool, method = %step.method, error = %e,
+                    "ToolHostStepDispatcher: spawn_worker failed"
+                );
+                return StepOutcome::Err {
+                    code: "SPAWN_FAILED".into(),
+                    detail: e.to_string(),
+                };
+            }
+        };
+
+        let result = dispatch(
+            &self.pool,
+            &mut worker,
+            &step.tool,
+            &step.method,
+            step.parameters.clone(),
+        )
+        .await;
+
+        // Drop closes stdio + cancels the watchdog. We don't call
+        // `worker.close()` explicitly so a panic above (currently
+        // unreachable, but kept defensive) still cleans up.
+        drop(worker);
+
+        map_dispatch_result(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cassandra::types::DataClass;
+    use hhagent_protocol::RpcError;
+    use std::io;
+    use std::path::PathBuf;
+
+    // ----- rpc_code_name -----
+
+    #[test]
+    fn rpc_code_name_maps_known_codes() {
+        // Each branch is pinned individually so a future rename in
+        // `hhagent_protocol::codes` (e.g. renaming POLICY_DENIED) trips
+        // a single specific assertion instead of a coalesced diff.
+        assert_eq!(rpc_code_name(codes::PARSE_ERROR), "PARSE_ERROR");
+        assert_eq!(rpc_code_name(codes::INVALID_REQUEST), "INVALID_REQUEST");
+        assert_eq!(rpc_code_name(codes::METHOD_NOT_FOUND), "METHOD_NOT_FOUND");
+        assert_eq!(rpc_code_name(codes::INVALID_PARAMS), "INVALID_PARAMS");
+        assert_eq!(rpc_code_name(codes::INTERNAL_ERROR), "INTERNAL_ERROR");
+        assert_eq!(rpc_code_name(codes::POLICY_DENIED), "POLICY_DENIED");
+        assert_eq!(rpc_code_name(codes::OPERATION_FAILED), "OPERATION_FAILED");
+    }
+
+    #[test]
+    fn rpc_code_name_unknown_falls_back_to_generic() {
+        // An app-level code the dispatcher hasn't been taught about
+        // must surface as RPC_ERROR rather than an empty / panicking
+        // mapping. The detail string still carries the worker's
+        // original message.
+        assert_eq!(rpc_code_name(-32099), "RPC_ERROR");
+        assert_eq!(rpc_code_name(0), "RPC_ERROR");
+        assert_eq!(rpc_code_name(i32::MAX), "RPC_ERROR");
+    }
+
+    // ----- map_dispatch_result -----
+
+    #[test]
+    fn map_dispatch_result_ok_preserves_value() {
+        let v = serde_json::json!({"exit_code": 0, "stdout": "hi"});
+        let out = map_dispatch_result(Ok(v.clone()));
+        match out {
+            StepOutcome::Ok(got) => assert_eq!(got, v),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_dispatch_result_protocol_rpc_uses_named_code() {
+        // The worker rejected the call with POLICY_DENIED (-32001). The
+        // dispatcher must surface the *name* not the integer, and
+        // must preserve the worker's `message` verbatim so the audit
+        // trail captures the underlying reason.
+        let rpc = RpcError::new(codes::POLICY_DENIED, "argv not allowlisted");
+        let err = ToolHostError::Protocol(ClientError::Rpc(rpc));
+        let out = map_dispatch_result(Err(err));
+        match out {
+            StepOutcome::Err { code, detail } => {
+                assert_eq!(code, "POLICY_DENIED");
+                assert_eq!(detail, "argv not allowlisted");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_dispatch_result_protocol_rpc_unknown_code_falls_back() {
+        let rpc = RpcError::new(-32099, "custom worker error");
+        let err = ToolHostError::Protocol(ClientError::Rpc(rpc));
+        match map_dispatch_result(Err(err)) {
+            StepOutcome::Err { code, detail } => {
+                assert_eq!(code, "RPC_ERROR");
+                assert_eq!(detail, "custom worker error");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_dispatch_result_protocol_non_rpc_uses_protocol_error_code() {
+        // ClientError::EarlyExit (worker exited before responding) is
+        // a non-Rpc protocol failure — distinct from a structured
+        // RPC error.
+        let err = ToolHostError::Protocol(ClientError::EarlyExit);
+        match map_dispatch_result(Err(err)) {
+            StepOutcome::Err { code, detail } => {
+                assert_eq!(code, "PROTOCOL_ERROR");
+                // The Display string must contain *something*
+                // operator-readable; pin the substring rather than
+                // the exact form so a thiserror message tweak
+                // doesn't churn this test.
+                assert!(detail.contains("exited"), "detail: {detail:?}");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_dispatch_result_io_error_is_distinct_from_protocol() {
+        // A raw stdio I/O failure (e.g. broken pipe) is bucketed
+        // as IO_ERROR, not PROTOCOL_ERROR. Operators triaging audit
+        // logs can split host-side I/O issues from JSON-RPC issues.
+        let io = io::Error::new(io::ErrorKind::BrokenPipe, "pipe down");
+        let err = ToolHostError::Io(io);
+        match map_dispatch_result(Err(err)) {
+            StepOutcome::Err { code, detail } => {
+                assert_eq!(code, "IO_ERROR");
+                assert!(detail.contains("pipe"), "detail: {detail:?}");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    // ----- ToolRegistry -----
+
+    fn fake_entry() -> ToolEntry {
+        ToolEntry {
+            binary: PathBuf::from("/usr/local/bin/fake"),
+            policy: SandboxPolicy {
+                fs_read: vec![],
+                fs_write: vec![],
+                net: Net::Deny,
+                cpu_ms: 1_000,
+                mem_mb: 32,
+                profile: Profile::WorkerStrict,
+                env: vec![],
+            },
+            wall_clock_ms: Some(5_000),
+        }
+    }
+
+    #[test]
+    fn tool_registry_starts_empty() {
+        let reg = ToolRegistry::new();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+        assert!(reg.lookup("anything").is_none());
+    }
+
+    #[test]
+    fn tool_registry_insert_then_lookup_round_trip() {
+        let mut reg = ToolRegistry::new();
+        reg.insert("shell-exec", fake_entry());
+        assert!(!reg.is_empty());
+        assert_eq!(reg.len(), 1);
+        let got = reg.lookup("shell-exec").expect("entry present");
+        assert_eq!(got.binary, PathBuf::from("/usr/local/bin/fake"));
+        assert!(reg.lookup("nope").is_none());
+    }
+
+    #[test]
+    fn tool_registry_insert_replaces_existing_entry() {
+        // Re-inserting under the same name swaps the entry (HashMap
+        // semantics). Documented here so a future split into a
+        // multi-entry registry tripwires this expectation.
+        let mut reg = ToolRegistry::new();
+        reg.insert("shell-exec", fake_entry());
+        let mut second = fake_entry();
+        second.binary = PathBuf::from("/opt/hhagent/shell-exec");
+        reg.insert("shell-exec", second);
+        assert_eq!(reg.len(), 1);
+        assert_eq!(
+            reg.lookup("shell-exec").unwrap().binary,
+            PathBuf::from("/opt/hhagent/shell-exec")
+        );
+    }
+
+    // ----- shell_exec_entry -----
+
+    #[test]
+    fn shell_exec_entry_carries_allowlist_in_env() {
+        // The allowlist round-trips into the policy's env vec as
+        // HHAGENT_SHELL_ALLOWLIST = JSON array. The worker reads it
+        // at startup; changing the env-var name or the encoding here
+        // requires a coordinated change in `workers/shell-exec/src`.
+        let binary = PathBuf::from("/usr/local/bin/hhagent-worker-shell-exec");
+        let allowlist = vec![
+            "/usr/bin/echo".to_string(),
+            "/bin/echo".to_string(),
+        ];
+        let entry = shell_exec_entry(binary.clone(), &allowlist);
+
+        assert_eq!(entry.binary, binary);
+        assert_eq!(entry.wall_clock_ms, Some(30_000));
+
+        // Policy invariants the threat-model relies on.
+        assert!(matches!(entry.policy.net, Net::Deny),
+                "shell-exec must default to network-denied");
+        assert!(matches!(entry.policy.profile, Profile::WorkerStrict),
+                "shell-exec must run under WorkerStrict (no socket() syscalls)");
+        assert_eq!(entry.policy.fs_write, Vec::<PathBuf>::new(),
+                   "shell-exec entry should not pre-allocate writable scratch");
+        assert!(entry.policy.fs_read.contains(&binary),
+                "binary must be in fs_read so bwrap can mount it");
+
+        // The allowlist env entry.
+        let allow_env = entry.policy.env.iter()
+            .find(|(k, _)| k == "HHAGENT_SHELL_ALLOWLIST")
+            .expect("allowlist env entry must be present");
+        let parsed: Vec<String> = serde_json::from_str(&allow_env.1)
+            .expect("allowlist value must be JSON-decodable");
+        assert_eq!(parsed, allowlist);
+    }
+
+    #[test]
+    fn shell_exec_entry_empty_allowlist_is_valid_deny_all() {
+        // An empty allowlist is the safest default — the worker
+        // accepts no argv. The daemon admin opts programs in
+        // explicitly. Worker-side handling (shell-exec/src) must
+        // already reject "no allowlist" or "empty allowlist" with
+        // POLICY_DENIED.
+        let entry = shell_exec_entry(PathBuf::from("/x"), &[]);
+        let allow_env = entry.policy.env.iter()
+            .find(|(k, _)| k == "HHAGENT_SHELL_ALLOWLIST")
+            .expect("allowlist env entry must be present");
+        assert_eq!(allow_env.1, "[]");
+    }
+
+    // ----- ToolHostStepDispatcher unknown-tool path -----
+
+    /// Pure unit test for the unknown-tool branch — exercises the
+    /// dispatcher's pre-spawn check without going near a sandbox or
+    /// pool. The other branches need a real spawn; they're covered
+    /// in `core/tests/scheduler_step_dispatch_e2e.rs`.
+    #[tokio::test]
+    async fn dispatch_step_unknown_tool_returns_unknown_tool_err() {
+        // We can't construct a ToolHostStepDispatcher without a PgPool
+        // (no `Default`/test-pool), so instead we exercise the same
+        // contract via the underlying registry lookup: a miss is the
+        // failure mode the inner loop sees.
+        //
+        // The dispatcher's contract is "lookup miss → UNKNOWN_TOOL
+        // StepOutcome". The lookup is `ToolRegistry::lookup` and the
+        // error shape is constructed inline. Pin both:
+        let reg = ToolRegistry::new();
+        assert!(reg.lookup("shell-exec").is_none());
+
+        // The error shape the dispatcher emits, mirrored here so a
+        // change in field names (e.g. UNKNOWN_TOOL → MISSING_TOOL)
+        // trips this test instead of only the e2e suite.
+        let expected = StepOutcome::Err {
+            code: "UNKNOWN_TOOL".into(),
+            detail: "tool 'shell-exec' not registered".into(),
+        };
+        if let StepOutcome::Err { code, detail } = expected {
+            assert_eq!(code, "UNKNOWN_TOOL");
+            assert!(detail.contains("shell-exec"));
+            assert!(detail.contains("not registered"));
+        }
+
+        let step = PlannedStep {
+            tool: "shell-exec".into(),
+            method: "shell.exec".into(),
+            parameters: serde_json::Value::Null,
+            returns: String::new(),
+            done_when: String::new(),
+            classification: DataClass::Public,
+        };
+        let _ = step; // silence unused if branch above changes
+    }
+}

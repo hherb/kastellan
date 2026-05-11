@@ -83,28 +83,33 @@ async fn main() -> Result<()> {
             prompts.clone(),
         ));
 
-    // Workspace root: env override → default under HOME state dir.
-    let workspace_root = std::env::var(hhagent_core::workspace::ENV_WORKSPACE_ROOT)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::PathBuf::from(h)
-                    .join(".local/state/hhagent/workspace"))
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/hhagent-workspace"))
-        });
-
-    // Sandbox backend (cross-platform). The dispatcher in this commit is
-    // a NOT_IMPLEMENTED placeholder; wiring to tool_host::dispatch lands
-    // in Task 3.2.bis. The placeholder still owns these handles so the
-    // follow-up does not have to change call sites.
+    // Sandbox backend (cross-platform).
     let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = sandbox_backend();
+
+    // Tool registry: each tool the scheduler may dispatch is opted in
+    // here. The registry is the host-side allowlist of *which* tools
+    // exist (separate from the per-tool argv allowlist, which lives
+    // inside `shell_exec_entry` via `HHAGENT_SHELL_ALLOWLIST`).
+    //
+    // Operators control which tools are reachable by setting env vars
+    // at daemon start. An absent / empty `HHAGENT_SHELL_EXEC_BIN`
+    // (e.g. the worker binary wasn't installed) means shell-exec is
+    // simply not registered — `dispatch_step` then returns
+    // `UNKNOWN_TOOL` for any plan trying to use it, and the inner
+    // loop replans accordingly. This is the same deny-by-default
+    // posture used in the egress proxy plan (Phase 3).
+    let tool_registry = Arc::new(build_tool_registry());
+    info!(
+        tool_count = tool_registry.len(),
+        "tool registry built"
+    );
 
     let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
-            hhagent_core::scheduler::runner::ToolHostStepDispatcher::new(
+            hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
                 pool.clone(),
                 sandbox.clone(),
-                workspace_root.clone(),
+                tool_registry,
             ),
         );
 
@@ -113,7 +118,6 @@ async fn main() -> Result<()> {
         formulator,
         review,
         dispatcher,
-        workspace_root.clone(),
     );
     info!("scheduler spawned (lane_fast + lane_long)");
 
@@ -245,12 +249,59 @@ async fn wait_for_shutdown() -> Result<()> {
     Ok(())
 }
 
+/// Build the registry of tools the scheduler may dispatch.
+///
+/// Each tool is opted in via a dedicated env var pair:
+///
+/// | Tool         | Binary path env             | Argv allowlist env             |
+/// | ------------ | --------------------------- | ------------------------------ |
+/// | `shell-exec` | `HHAGENT_SHELL_EXEC_BIN`    | `HHAGENT_SHELL_EXEC_ALLOWLIST` |
+///
+/// `HHAGENT_SHELL_EXEC_ALLOWLIST` is a colon-separated list of absolute
+/// paths the shell-exec worker will accept as `argv[0]`. Empty / unset
+/// → no programs allowlisted → every call returns `POLICY_DENIED`. This
+/// is the deny-by-default posture: the daemon administrator must
+/// explicitly opt programs in.
+///
+/// If `HHAGENT_SHELL_EXEC_BIN` is unset or the path does not exist,
+/// shell-exec is simply not registered. A plan that tries to use it
+/// will surface `UNKNOWN_TOOL` from the dispatcher.
+fn build_tool_registry() -> hhagent_core::scheduler::ToolRegistry {
+    let mut reg = hhagent_core::scheduler::ToolRegistry::new();
+
+    if let Some(bin_os) = std::env::var_os("HHAGENT_SHELL_EXEC_BIN") {
+        let binary = std::path::PathBuf::from(&bin_os);
+        if binary.is_file() {
+            let allowlist: Vec<String> = std::env::var("HHAGENT_SHELL_EXEC_ALLOWLIST")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.split(':').map(|p| p.to_string()).collect())
+                .unwrap_or_default();
+            let entry = hhagent_core::scheduler::shell_exec_entry(binary.clone(), &allowlist);
+            info!(
+                tool = "shell-exec",
+                binary = %binary.display(),
+                allowlist_len = allowlist.len(),
+                "registering tool"
+            );
+            reg.insert("shell-exec", entry);
+        } else {
+            tracing::warn!(
+                binary = %binary.display(),
+                "HHAGENT_SHELL_EXEC_BIN does not point to an existing file; \
+                 shell-exec NOT registered"
+            );
+        }
+    }
+
+    reg
+}
+
 /// Return the default sandbox backend for the current OS.
 ///
 /// Linux uses bubblewrap (`LinuxBwrap`); macOS uses Seatbelt
 /// (`MacosSeatbelt`). The `ToolHostStepDispatcher` owns the resulting
-/// `Arc` so the real `tool_host::dispatch` wiring in Task 3.2.bis
-/// does not have to change call sites.
+/// `Arc`.
 #[cfg(target_os = "linux")]
 fn sandbox_backend() -> Arc<dyn hhagent_sandbox::SandboxBackend> {
     Arc::new(hhagent_sandbox::linux_bwrap::LinuxBwrap::new())

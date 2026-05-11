@@ -437,13 +437,11 @@ async fn two_lanes_run_concurrently() {
         delay: Duration::from_millis(800),
     });
 
-    // Workspace root is unused by scripted dispatcher.
     let scheduler = spawn_scheduler(
         pool.clone(),
         formulator,
         review,
         dispatcher,
-        PathBuf::from("/tmp/hhagent-scheduler-lanes-test"),
     );
 
     // Wait for both `tasks_completed` NOTIFYs.
