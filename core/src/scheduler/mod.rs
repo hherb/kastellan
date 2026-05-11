@@ -17,7 +17,4 @@ pub mod runner;
 pub mod tool_dispatch;
 
 pub use runner::{spawn_scheduler, SchedulerHandle};
-pub use tool_dispatch::{
-    map_dispatch_result, rpc_code_name, shell_exec_entry, ToolEntry, ToolHostStepDispatcher,
-    ToolRegistry,
-};
+pub use tool_dispatch::{shell_exec_entry, ToolEntry, ToolHostStepDispatcher, ToolRegistry};

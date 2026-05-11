@@ -312,7 +312,6 @@ impl StepDispatcher for ToolHostStepDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cassandra::types::DataClass;
     use hhagent_protocol::RpcError;
     use std::io;
     use std::path::PathBuf;
@@ -527,46 +526,9 @@ mod tests {
         assert_eq!(allow_env.1, "[]");
     }
 
-    // ----- ToolHostStepDispatcher unknown-tool path -----
-
-    /// Pure unit test for the unknown-tool branch — exercises the
-    /// dispatcher's pre-spawn check without going near a sandbox or
-    /// pool. The other branches need a real spawn; they're covered
-    /// in `core/tests/scheduler_step_dispatch_e2e.rs`.
-    #[tokio::test]
-    async fn dispatch_step_unknown_tool_returns_unknown_tool_err() {
-        // We can't construct a ToolHostStepDispatcher without a PgPool
-        // (no `Default`/test-pool), so instead we exercise the same
-        // contract via the underlying registry lookup: a miss is the
-        // failure mode the inner loop sees.
-        //
-        // The dispatcher's contract is "lookup miss → UNKNOWN_TOOL
-        // StepOutcome". The lookup is `ToolRegistry::lookup` and the
-        // error shape is constructed inline. Pin both:
-        let reg = ToolRegistry::new();
-        assert!(reg.lookup("shell-exec").is_none());
-
-        // The error shape the dispatcher emits, mirrored here so a
-        // change in field names (e.g. UNKNOWN_TOOL → MISSING_TOOL)
-        // trips this test instead of only the e2e suite.
-        let expected = StepOutcome::Err {
-            code: "UNKNOWN_TOOL".into(),
-            detail: "tool 'shell-exec' not registered".into(),
-        };
-        if let StepOutcome::Err { code, detail } = expected {
-            assert_eq!(code, "UNKNOWN_TOOL");
-            assert!(detail.contains("shell-exec"));
-            assert!(detail.contains("not registered"));
-        }
-
-        let step = PlannedStep {
-            tool: "shell-exec".into(),
-            method: "shell.exec".into(),
-            parameters: serde_json::Value::Null,
-            returns: String::new(),
-            done_when: String::new(),
-            classification: DataClass::Public,
-        };
-        let _ = step; // silence unused if branch above changes
-    }
+    // The unknown-tool branch of `ToolHostStepDispatcher::dispatch_step`
+    // is covered end-to-end in `core/tests/scheduler_step_dispatch_e2e.rs`
+    // (the dispatcher needs a real `PgPool` to construct, so a pure unit
+    // test would be tautological). `tool_registry_starts_empty` above
+    // pins the underlying registry-miss contract.
 }

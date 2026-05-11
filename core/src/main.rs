@@ -99,10 +99,6 @@ async fn main() -> Result<()> {
     // loop replans accordingly. This is the same deny-by-default
     // posture used in the egress proxy plan (Phase 3).
     let tool_registry = Arc::new(build_tool_registry());
-    info!(
-        tool_count = tool_registry.len(),
-        "tool registry built"
-    );
 
     let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
@@ -272,10 +268,19 @@ fn build_tool_registry() -> hhagent_core::scheduler::ToolRegistry {
     if let Some(bin_os) = std::env::var_os("HHAGENT_SHELL_EXEC_BIN") {
         let binary = std::path::PathBuf::from(&bin_os);
         if binary.is_file() {
+            // Defensive: filter out empty entries from operator typos
+            // like `:` or `/usr/bin/echo::/bin/echo`. Without the filter
+            // an empty argv[0] would be shipped to the worker and
+            // bounce out as a less-obvious POLICY_DENIED.
             let allowlist: Vec<String> = std::env::var("HHAGENT_SHELL_EXEC_ALLOWLIST")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .map(|s| s.split(':').map(|p| p.to_string()).collect())
+                .map(|s| {
+                    s.split(':')
+                        .filter(|p| !p.is_empty())
+                        .map(|p| p.to_string())
+                        .collect()
+                })
                 .unwrap_or_default();
             let entry = hhagent_core::scheduler::shell_exec_entry(binary.clone(), &allowlist);
             info!(
