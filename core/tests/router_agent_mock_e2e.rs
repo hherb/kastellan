@@ -24,6 +24,14 @@
 //! canned-respond a single chat-completion. No `wiremock` /
 //! `httpmock` / `axum` dev-dep — the dependency footprint stays
 //! inspectable and the test is self-contained.
+//!
+//! Runtime: default `#[tokio::test]` (current-thread). This is fine
+//! today because `Router::send` is pure async — it does not call
+//! `tokio::task::block_in_place`. If a future refactor wraps a sync
+//! call here (e.g. fetching a frontier API key from `db::secrets`
+//! via `block_in_place`), these tests will need
+//! `#[tokio::test(flavor = "multi_thread")]` or they will panic at
+//! runtime ("can call blocking only when running on the multi-threaded runtime").
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,9 +76,23 @@ impl CannedResponse {
     }
 }
 
+/// Hard cap on inbound request bytes the mock will buffer before
+/// giving up. Real chat-completion requests are a few KiB; 1 MiB is
+/// generous headroom and a defensive guard so a buggy client cannot
+/// pin the mock task in unbounded reads.
+const MOCK_MAX_REQUEST_BYTES: usize = 1 << 20;
+
+/// Returns the base URL, a oneshot that fires when the request body
+/// has been served, and the spawned task's `JoinHandle`. The handle
+/// matters for the "never-dialed" assertion in
+/// `prompt_missing_short_circuits_before_dialing_backend`: that test
+/// must `abort()` the handle so the still-pending `accept().await`
+/// does not leak past the test boundary. Tests that *expect* the mock
+/// to serve a request can let the handle drop — the task exits
+/// naturally once it has served + responded + shut down the socket.
 async fn spawn_one_shot_mock(
     canned: CannedResponse,
-) -> (String, oneshot::Receiver<ServedRequest>) {
+) -> (String, oneshot::Receiver<ServedRequest>, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -78,7 +100,7 @@ async fn spawn_one_shot_mock(
     let base_url = format!("http://127.0.0.1:{port}");
 
     let (tx, rx) = oneshot::channel();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let (mut sock, _peer) = match listener.accept().await {
             Ok(p) => p,
             Err(e) => {
@@ -120,13 +142,13 @@ async fn spawn_one_shot_mock(
                     break;
                 }
             }
-            if buf.len() > 1 << 20 {
+            if buf.len() > MOCK_MAX_REQUEST_BYTES {
                 break;
             }
         }
     });
 
-    (base_url, rx)
+    (base_url, rx, handle)
 }
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
@@ -237,7 +259,7 @@ async fn happy_path_decodes_plan_and_populates_meta() {
     })
     .to_string();
 
-    let (base_url, served_rx) =
+    let (base_url, served_rx, _mock_join) =
         spawn_one_shot_mock(CannedResponse::ok_json(envelope_for(&plan_json))).await;
 
     let router = router_pointing_at(&base_url);
@@ -291,7 +313,7 @@ async fn decode_error_when_assistant_content_is_not_a_plan() {
     // plan — the inner loop's failure-handling depends on the typed
     // error.
     let envelope = envelope_for("not a plan, just chatter");
-    let (base_url, served_rx) =
+    let (base_url, served_rx, _mock_join) =
         spawn_one_shot_mock(CannedResponse::ok_json(envelope)).await;
 
     let router = router_pointing_at(&base_url);
@@ -333,7 +355,7 @@ async fn prompt_missing_short_circuits_before_dialing_backend() {
     // PromptMissing without touching the network. The mock's
     // served_rx is the witness: if the agent dialed the backend
     // anyway, the oneshot would fire.
-    let (base_url, served_rx) = spawn_one_shot_mock(CannedResponse::ok_json(
+    let (base_url, served_rx, mock_join) = spawn_one_shot_mock(CannedResponse::ok_json(
         envelope_for("never sent"),
     ))
     .await;
@@ -364,4 +386,11 @@ async fn prompt_missing_short_circuits_before_dialing_backend() {
         ),
         "RouterAgent dialed the backend despite missing prompt"
     );
+
+    // The mock task is still parked in `accept().await`. Abort it so
+    // the still-pending listener does not leak past the test
+    // boundary. (For the other two tests the task exits naturally
+    // after serving + responding + shutting down the socket; no
+    // explicit abort is needed there.)
+    mock_join.abort();
 }
