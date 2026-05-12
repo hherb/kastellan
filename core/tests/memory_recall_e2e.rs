@@ -311,6 +311,71 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
         .expect("empty-seeds graph-only recall");
         assert!(r.is_empty(), "empty seeds + graph-only must return empty");
 
+        // ─── Assertion 5: GRAPH_FANOUT_CAP_PER_SEED clamps hub expansion ─
+        //
+        // Build a hub entity connected to LEAF_COUNT (> cap) leaf entities,
+        // each linked to its own memory. With seed=[hub], `Graph::neighbors`
+        // returns at most `GRAPH_FANOUT_CAP_PER_SEED` entries, so the
+        // expanded set is {hub} ∪ ≤ cap leaves → at most cap distinct
+        // memory hits even though LEAF_COUNT > cap candidates exist.
+        // This pins the *behaviour* of the cap (the constant itself is
+        // pinned in unit tests).
+        use hhagent_core::memory::GRAPH_FANOUT_CAP_PER_SEED;
+        let cap_usize = GRAPH_FANOUT_CAP_PER_SEED as usize;
+        let leaf_count: usize = cap_usize + 8; // strictly greater than cap
+        let hub_id = graph_g
+            .upsert_entity("person", "hub", &serde_json::json!({}))
+            .await
+            .expect("upsert hub");
+        for i in 0..leaf_count {
+            let leaf_id = graph_g
+                .upsert_entity("thing", &format!("leaf-{i}"), &serde_json::json!({}))
+                .await
+                .expect("upsert leaf");
+            graph_g
+                .upsert_relation(hub_id, leaf_id, "knows", &serde_json::json!({}))
+                .await
+                .expect("upsert hub→leaf");
+            let leaf_mem = hhagent_db::memories::insert_memory(
+                &pool,
+                &format!("body-leaf-{i}"),
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("insert leaf memory");
+            hhagent_db::memories::link_memory_to_entities(&pool, leaf_mem, &[leaf_id])
+                .await
+                .expect("link leaf memory");
+        }
+
+        let r = recall(
+            &pool,
+            &RecallParams {
+                query_text: None,
+                query_embedding: None,
+                seed_entity_ids: Some(&[hub_id]),
+                k: 100, // generous so the cap (not k) is the limiter
+                modes: RecallModes::GRAPH_ONLY,
+            },
+        )
+        .await
+        .expect("hub-seed graph-only recall");
+
+        // Hub itself is not linked to any memory; all hits come from
+        // leaves. The cap must clamp the expansion to exactly `cap_usize`
+        // distinct leaf memories — proves the clamp engaged (not bypassed
+        // by future code changes that drop the per-seed `limit` arg).
+        assert_eq!(
+            r.len(),
+            cap_usize,
+            "GRAPH_FANOUT_CAP_PER_SEED ({}) must clamp the expansion to \
+             exactly cap leaves out of {} candidates; got {}",
+            cap_usize,
+            leaf_count,
+            r.len()
+        );
+
         pool.close().await;
     });
 }

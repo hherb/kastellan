@@ -180,11 +180,13 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
     }
     let lane_k = params.k.saturating_mul(LANE_FANOUT);
 
-    // Run each enabled lane. We could `tokio::join!` the two queries
-    // for marginal latency, but Phase 0 throughput doesn't warrant
-    // it and sequencing makes the error path simpler — a failure in
-    // either lane short-circuits the whole call rather than leaving
-    // a half-completed future to abort.
+    // Run each enabled lane. We could `try_join!` the three lane
+    // queries for marginal latency, but Phase 0 throughput doesn't
+    // warrant it and sequencing makes the error path simpler — a
+    // failure in any lane short-circuits the whole call rather than
+    // leaving half-completed futures to abort. (The graph lane fans
+    // its *internal* per-seed `neighbors` calls via `try_join_all`
+    // because it has no other work to interleave.)
     let mut lane_lists: Vec<Vec<i64>> = Vec::with_capacity(3);
 
     if params.modes.semantic {
@@ -238,8 +240,17 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
                 // Deduped expanded set: seeds ∪ all returned neighbour ids.
                 // HashSet strips duplicates when two seeds share a 1-hop
                 // hop, or when a seed is also a neighbour of another seed.
+                // Pre-sized to the upper bound (seeds + every returned
+                // neighbour) so the hot path doesn't rehash on hub-heavy
+                // seed sets — `GRAPH_FANOUT_CAP_PER_SEED` already bounds
+                // the worst case so this allocation is finite.
+                let neighbour_count: usize =
+                    neighbour_lists.iter().map(|l| l.len()).sum();
                 let mut expanded: std::collections::HashSet<i64> =
-                    seeds.iter().copied().collect();
+                    std::collections::HashSet::with_capacity(
+                        seeds.len() + neighbour_count,
+                    );
+                expanded.extend(seeds.iter().copied());
                 for list in &neighbour_lists {
                     for entity in list {
                         expanded.insert(entity.id);
