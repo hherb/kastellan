@@ -996,3 +996,310 @@ fn secrets_put_get_list_delete_round_trip() {
         pool.close().await;
     });
 }
+
+// ─── Graph lane: memory_entities + deleted_memories (0007 + 0008) ────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_entities_link_round_trip_and_idempotency() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "mel-d",
+        "mel-l",
+        &format!("hhagent-pg-mel-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "memory-entities-link"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::graph::Graph;
+
+    // Seed: 1 memory, 3 entities.
+    let mem_id = hhagent_db::memories::insert_memory(
+        &pool,
+        "alpha body",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert memory");
+
+    let graph = hhagent_db::graph::PgGraph::new(&pool);
+    let e1 = graph
+        .upsert_entity("person", "alice", &serde_json::json!({}))
+        .await
+        .expect("upsert e1");
+    let e2 = graph
+        .upsert_entity("person", "bob", &serde_json::json!({}))
+        .await
+        .expect("upsert e2");
+    let e3 = graph
+        .upsert_entity("animal", "cat", &serde_json::json!({}))
+        .await
+        .expect("upsert e3");
+
+    // First link: both new.
+    let n = hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
+        .await
+        .expect("link 1");
+    assert_eq!(n, 2, "first link of 2 fresh entities must insert 2 rows");
+
+    // Re-link same pair: idempotent.
+    let n = hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
+        .await
+        .expect("link 2");
+    assert_eq!(n, 0, "re-link of existing pairs must insert 0 rows");
+
+    // Mixed (one new, one dupe): only the new one counts.
+    let n = hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e3])
+        .await
+        .expect("link 3");
+    assert_eq!(n, 1, "mixed re-link + new must insert 1 row");
+
+    // Final count via raw SQL — defends against the helper's return
+    // value lying about idempotency.
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM memory_entities WHERE memory_id = $1",
+    )
+    .bind(mem_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    assert_eq!(row.0, 3, "memory_entities must hold exactly 3 distinct rows");
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_entities_cascade_on_entity_delete() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "mec-d",
+        "mec-l",
+        &format!("hhagent-pg-mec-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "memory-entities-cascade"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::graph::Graph;
+
+    let mem_id = hhagent_db::memories::insert_memory(
+        &pool,
+        "bravo body",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert memory");
+    let graph = hhagent_db::graph::PgGraph::new(&pool);
+    let e_id = graph
+        .upsert_entity("person", "alice", &serde_json::json!({}))
+        .await
+        .expect("upsert");
+
+    hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e_id])
+        .await
+        .expect("link");
+
+    // Deleting the entity cascades to memory_entities.
+    sqlx::query("DELETE FROM entities WHERE id = $1")
+        .bind(e_id)
+        .execute(&pool)
+        .await
+        .expect("delete entity");
+
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM memory_entities WHERE entity_id = $1",
+    )
+    .bind(e_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count links");
+    assert_eq!(row.0, 0, "entity delete must cascade to memory_entities");
+
+    // Memory itself is untouched (cascade flows downward only).
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM memories WHERE id = $1")
+        .bind(mem_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count memory");
+    assert_eq!(row.0, 1, "memory survives entity cascade");
+
+    // And not in deleted_memories.
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM deleted_memories WHERE id = $1",
+    )
+    .bind(mem_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count deleted");
+    assert_eq!(row.0, 0, "memory not deleted, so deleted_memories has no row");
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_delete_writes_deleted_memories_row() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "mda-d",
+        "mda-l",
+        &format!("hhagent-pg-mda-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "memory-delete-audit"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    // Build a memory with an embedding so we exercise the full row shape.
+    // Deterministic seeded vector via tests-common.
+    let emb = hhagent_tests_common::text_to_embedding("delete-audit-fixture");
+    let metadata = serde_json::json!({"k": "v"});
+    let mem_id = hhagent_db::memories::insert_memory(
+        &pool,
+        "audit body",
+        &metadata,
+        Some(&emb),
+    )
+    .await
+    .expect("insert memory");
+
+    let before: (time::OffsetDateTime,) =
+        sqlx::query_as("SELECT created_at FROM memories WHERE id = $1")
+            .bind(mem_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch created_at");
+    let original_created_at = before.0;
+
+    // Delete it.
+    sqlx::query("DELETE FROM memories WHERE id = $1")
+        .bind(mem_id)
+        .execute(&pool)
+        .await
+        .expect("delete memory");
+
+    // Audit row exists with matching shape.
+    let row: (i64, String, serde_json::Value, time::OffsetDateTime, time::OffsetDateTime) =
+        sqlx::query_as(
+            "SELECT id, body, metadata, created_at, deleted_at \
+             FROM deleted_memories WHERE id = $1",
+        )
+        .bind(mem_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch deleted");
+    assert_eq!(row.0, mem_id);
+    assert_eq!(row.1, "audit body");
+    assert_eq!(row.2, metadata);
+    assert_eq!(row.3, original_created_at, "created_at preserved verbatim");
+
+    let now = time::OffsetDateTime::now_utc();
+    let drift = (now - row.4).whole_seconds().abs();
+    assert!(drift < 5, "deleted_at must be within 5s of now (drift = {drift}s)");
+
+    // Verify the embedding column was copied by the trigger. We don't
+    // decode the vector itself (no pgvector Rust crate dep — see
+    // db/src/memories.rs module docs) but a NOT NULL check is enough
+    // to confirm the trigger function included the column in its
+    // INSERT (it would have been NULL by default if omitted).
+    let embedding_present: (bool,) = sqlx::query_as(
+        "SELECT (embedding IS NOT NULL) FROM deleted_memories WHERE id = $1",
+    )
+    .bind(mem_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch embedding presence");
+    assert!(
+        embedding_present.0,
+        "trigger must have copied non-null embedding into deleted_memories"
+    );
+
+    // Positive INSERT path: runtime role can INSERT directly into
+    // deleted_memories. The trigger above used this same GRANT
+    // (SECURITY INVOKER → runs as runtime), so this both pins the
+    // GRANT shape AND defends against a future migration regression
+    // that revokes INSERT and silently breaks the trigger.
+    let ins = sqlx::query(
+        "INSERT INTO deleted_memories (id, body, metadata, created_at) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(mem_id + 1_000_000) // disjoint id so we don't collide with the trigger-inserted row
+    .bind("direct-insert-fixture")
+    .bind(serde_json::json!({}))
+    .bind(original_created_at)
+    .execute(&pool)
+    .await;
+    assert!(
+        ins.is_ok(),
+        "direct INSERT into deleted_memories as runtime role must succeed (GRANT shape): {ins:?}"
+    );
+
+    // Append-only invariant: runtime cannot UPDATE or DELETE deleted_memories.
+    let upd = sqlx::query("UPDATE deleted_memories SET body = 'tampered' WHERE id = $1")
+        .bind(mem_id)
+        .execute(&pool)
+        .await;
+    assert!(upd.is_err(), "UPDATE on deleted_memories must be denied to runtime");
+
+    let del = sqlx::query("DELETE FROM deleted_memories WHERE id = $1")
+        .bind(mem_id)
+        .execute(&pool)
+        .await;
+    assert!(del.is_err(), "DELETE on deleted_memories must be denied to runtime");
+
+    pool.close().await;
+}

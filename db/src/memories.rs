@@ -338,6 +338,45 @@ where
     Ok(out)
 }
 
+/// Link a memory to a set of entities. Idempotent: re-linking the same
+/// pair is a no-op via ON CONFLICT DO NOTHING.
+///
+/// Returns the count of genuinely new links inserted — zero on a full
+/// re-link, partial counts on mixed (some new, some pre-existing).
+///
+/// Empty `entity_ids` is a fast-path no-op (no SQL issued, returns 0).
+/// FK violation (unknown memory_id or entity_id) surfaces as
+/// [`DbError::Query`]; ON CONFLICT DO NOTHING does not suppress FK
+/// failures — the whole batch fails atomically with zero rows inserted.
+///
+/// `executor` is generic over `sqlx::Executor` so the same helper works
+/// against `&PgPool` (production) and `&mut PgConnection` (test setup).
+pub async fn link_memory_to_entities<'e, E>(
+    executor: E,
+    memory_id: i64,
+    entity_ids: &[i64],
+) -> Result<u64, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if entity_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let result = sqlx::query(
+        "INSERT INTO memory_entities (memory_id, entity_id) \
+         SELECT $1::bigint, eid FROM unnest($2::bigint[]) AS t(eid) \
+         ON CONFLICT (memory_id, entity_id) DO NOTHING",
+    )
+    .bind(memory_id)
+    .bind(entity_ids)
+    .execute(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("link_memory_to_entities: {e}")))?;
+
+    Ok(result.rows_affected())
+}
+
 /// Format a `Vec<f32>` as the canonical pgvector text representation.
 ///
 /// pgvector's text input format is `[v0,v1,...,vN-1]` with a trailing
