@@ -57,6 +57,23 @@ impl StepOutcome {
     pub fn is_err(&self) -> bool { matches!(self, StepOutcome::Err { .. }) }
 }
 
+/// Bundle returned by [`run_to_terminal`] so the lane runner can
+/// build the spec §7 `task.finalize` summary row without re-querying.
+///
+/// `plan_count` is the final value of `TaskContext::plan_count` (one
+/// increment per formulator call) and is the natural value for the
+/// finalize payload's `total_llm_calls` field. `dispatch_count` is
+/// incremented once per `StepDispatcher::dispatch_step` call —
+/// regardless of whether the call returned `Ok` or `Err` — so the
+/// audit row reflects how often the host actually tried to dispatch
+/// a step, not how often it succeeded.
+#[derive(Clone, Debug)]
+pub struct InnerLoopResult {
+    pub outcome: Outcome,
+    pub plan_count: u32,
+    pub dispatch_count: u32,
+}
+
 /// Terminal result of the inner loop. The lane runner translates
 /// these into `tasks.state` + `tasks.result` via `db::tasks::finalize`.
 #[derive(Clone, Debug)]
@@ -106,25 +123,43 @@ pub trait StepDispatcher: Send + Sync {
     async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome;
 }
 
-/// Run the inner loop until terminal. Returns an `Outcome` that the
-/// lane runner finalises into a `tasks` row UPDATE.
+/// Run the inner loop until terminal. Returns an [`InnerLoopResult`]
+/// carrying the terminal [`Outcome`] plus the per-task counters the
+/// lane runner needs for the spec §7 `task.finalize` audit row.
 pub async fn run_to_terminal(
     pool: &PgPool,
     formulator: Arc<dyn PlanFormulator>,
     review: Arc<ChainReviewStage>,
     dispatcher: Arc<dyn StepDispatcher>,
     mut ctx: TaskContext,
-) -> Result<Outcome, InnerLoopError> {
+) -> Result<InnerLoopResult, InnerLoopError> {
     use hhagent_db::tasks;
+
+    // Tracks every `StepDispatcher::dispatch_step` call this task makes
+    // (success or failure). Reported back in `InnerLoopResult` for the
+    // spec §7 `task.finalize` summary row.
+    let mut dispatch_count: u32 = 0;
+
+    /// Local helper: wrap an `Outcome` with the counters captured so
+    /// far. Cuts the boilerplate at every early-return point.
+    macro_rules! finish {
+        ($outcome:expr) => {
+            Ok(InnerLoopResult {
+                outcome: $outcome,
+                plan_count: ctx.plan_count,
+                dispatch_count,
+            })
+        };
+    }
 
     loop {
         // Cancellation poll — top of loop.
         if tasks::observe_state(pool, ctx.task_id).await? == "cancelled" {
-            return Ok(Outcome::Cancelled);
+            return finish!(Outcome::Cancelled);
         }
 
         if ctx.plan_count >= ctx.max_plans {
-            return Ok(Outcome::Failed(format!(
+            return finish!(Outcome::Failed(format!(
                 "plan_iteration_cap_exceeded ({}>={})", ctx.plan_count, ctx.max_plans
             )));
         }
@@ -137,7 +172,7 @@ pub async fn run_to_terminal(
         // the formulator's own retry is therefore terminal here.
         let (plan, meta) = match formulator.formulate_plan(&ctx).await {
             Ok(x) => x,
-            Err(e) => return Ok(Outcome::Failed(format!("llm: {e}"))),
+            Err(e) => return finish!(Outcome::Failed(format!("llm: {e}"))),
         };
 
         ctx.plan_count += 1;
@@ -167,7 +202,7 @@ pub async fn run_to_terminal(
 
         match &verdict {
             Verdict::ConstitutionalBlock { principle, reason } =>
-                return Ok(Outcome::Blocked { principle: *principle, reason: reason.clone() }),
+                return finish!(Outcome::Blocked { principle: *principle, reason: reason.clone() }),
             Verdict::Block(reason) => {
                 ctx.blocks.push(reason.clone());
                 continue;  // bounded by plan_count cap on next iter
@@ -205,16 +240,17 @@ pub async fn run_to_terminal(
         if plan.is_terminal() {
             let result = plan.result.clone()
                 .unwrap_or_else(|| serde_json::json!({"kind": "text", "body": ""}));
-            return Ok(Outcome::Completed(result));
+            return finish!(Outcome::Completed(result));
         }
 
         // 4. Execute steps
         let mut outcomes: Vec<StepOutcome> = Vec::with_capacity(plan.steps.len());
         for step in &plan.steps {
             if tasks::observe_state(pool, ctx.task_id).await? == "cancelled" {
-                return Ok(Outcome::Cancelled);
+                return finish!(Outcome::Cancelled);
             }
             let outcome = dispatcher.dispatch_step(step).await;
+            dispatch_count = dispatch_count.saturating_add(1);
             let is_err = outcome.is_err();
             outcomes.push(outcome);
             if is_err { break; }

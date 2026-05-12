@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
+use time::OffsetDateTime;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
@@ -16,7 +17,11 @@ use crate::cassandra::review::ChainReviewStage;
 use crate::cassandra::types::DataClass;
 
 use super::agent::PlanFormulator;
-use super::inner_loop::{run_to_terminal, StepDispatcher, TaskContext};
+use super::audit::{
+    action_task_terminal, build_finalize_payload, build_lifecycle_payload, compute_duration_ms,
+    TaskFinalizeStats, ACTION_TASK_FINALIZE, ACTION_TASK_RUNNING, SCHEDULER_AUDIT_ACTOR,
+};
+use super::inner_loop::{run_to_terminal, InnerLoopResult, Outcome, StepDispatcher, TaskContext};
 
 /// Heartbeat interval for catch-up SELECT in case a `tasks_inserted`
 /// NOTIFY was lost across a listener reconnect.
@@ -139,17 +144,123 @@ async fn drain_lane(
             }
         };
 
-        let outcome = run_one(
+        // Spec §7 lifecycle row: pending → running.
+        // Best-effort: a DB error logging the transition must not
+        // prevent us from running the task (the canonical state lives
+        // in `tasks.state`; the audit row is for observation phase).
+        //
+        // `claimed.plan_count` is the value carried by the row from
+        // the DB at claim time. For a freshly-inserted pending task
+        // this is 0; for a task resumed after crash recovery (future
+        // work; `sweep_crashed` does not yet re-enqueue), it would be
+        // the count from before the crash — i.e. "plans run so far"
+        // rather than "plans run this session".
+        write_lifecycle_row(
+            pool,
+            ACTION_TASK_RUNNING,
+            claimed.id,
+            claimed.lane,
+            claimed.plan_count,
+        ).await;
+
+        let result = run_one(
             pool, formulator.clone(), review.clone(), dispatcher.clone(),
             &claimed, max_plans,
         ).await;
 
-        let final_state = outcome.final_state();
-        let result = outcome.result_payload();
-        if let Err(e) = tasks::finalize(pool, claimed.id, final_state, result).await {
-            eprintln!("scheduler[{}]: finalize task {} failed: {e}",
-                      lane.as_sql(), claimed.id);
+        let final_state = result.outcome.final_state();
+        let final_result_payload = result.outcome.result_payload();
+
+        // Capture `finished_at` *before* `tasks::finalize` so the
+        // finalize-payload's `total_duration_ms` measures inner-loop
+        // wall time only — not inner-loop wall time + the finalize
+        // UPDATE's round-trip latency. On a contended DB the latter
+        // can be the dominant term and would silently bias the
+        // observation-phase latency distribution.
+        let finished_at = OffsetDateTime::now_utc();
+
+        if let Err(e) = tasks::finalize(pool, claimed.id, final_state, final_result_payload).await {
+            tracing::warn!(
+                lane = lane.as_sql(), task_id = claimed.id, error = %e,
+                "tasks::finalize UPDATE failed (audit lifecycle row still emitted)"
+            );
         }
+
+        // Spec §7 lifecycle row: running → <terminal state>. Fires
+        // even if the `finalize` UPDATE was a no-op (e.g. the task
+        // was already cancelled out from under us by a CLI cancel
+        // racing the inner loop) — the scheduler still *observed*
+        // this transition, and that's what the actor='scheduler' row
+        // records. See [`super::audit`] module docs for the wider
+        // audit-vs-DB-state divergence note. Best-effort, same as the
+        // `running` row above.
+        write_lifecycle_row(
+            pool,
+            &action_task_terminal(final_state),
+            claimed.id,
+            claimed.lane,
+            i32::try_from(result.plan_count).unwrap_or(i32::MAX),
+        ).await;
+
+        // Spec §7 finalize summary row. Best-effort: the lifecycle
+        // row above carries the headline state; this row carries the
+        // counters for per-task latency analysis.
+        write_finalize_row(pool, &claimed, final_state, &result, finished_at).await;
+    }
+}
+
+/// Insert a `scheduler/task.<...>` lifecycle row. Errors are logged
+/// at WARN and swallowed — the canonical lifecycle state lives in the
+/// `tasks` table and the row is an observation-phase aid, not a
+/// correctness signal.
+async fn write_lifecycle_row(
+    pool: &PgPool,
+    action: &str,
+    task_id: i64,
+    lane: Lane,
+    plan_count: i32,
+) {
+    let payload = build_lifecycle_payload(task_id, lane, plan_count);
+    if let Err(e) =
+        hhagent_db::audit::insert(pool, SCHEDULER_AUDIT_ACTOR, action, payload).await
+    {
+        tracing::warn!(
+            task_id, action, error = %e,
+            "audit insert for scheduler lifecycle row failed (best-effort)"
+        );
+    }
+}
+
+/// Insert the per-task `scheduler/task.finalize` summary row. Best-
+/// effort, same posture as [`write_lifecycle_row`].
+async fn write_finalize_row(
+    pool: &PgPool,
+    claimed: &Task,
+    final_state: &str,
+    result: &InnerLoopResult,
+    finished_at: OffsetDateTime,
+) {
+    let stats = TaskFinalizeStats {
+        // `result.plan_count` is the inner loop's u32 counter; the DB
+        // column is i32. The cap on plans is small (single digits in
+        // practice), so the saturation is operationally dead code, but
+        // a silent `as i32` truncation would be a subtle bug if a
+        // future change ever lifted the cap.
+        plan_count: i32::try_from(result.plan_count).unwrap_or(i32::MAX),
+        total_llm_calls: result.plan_count,
+        total_dispatch_calls: result.dispatch_count,
+        total_duration_ms: compute_duration_ms(claimed.started_at, finished_at),
+        started_at: claimed.started_at,
+        finished_at,
+    };
+    let payload = build_finalize_payload(claimed.id, claimed.lane, final_state, &stats);
+    if let Err(e) = hhagent_db::audit::insert(
+        pool, SCHEDULER_AUDIT_ACTOR, ACTION_TASK_FINALIZE, payload,
+    ).await {
+        tracing::warn!(
+            task_id = claimed.id, state = final_state, error = %e,
+            "audit insert for scheduler task.finalize row failed (best-effort)"
+        );
     }
 }
 
@@ -160,9 +271,7 @@ async fn run_one(
     dispatcher: Arc<dyn StepDispatcher>,
     task: &Task,
     max_plans: u32,
-) -> super::inner_loop::Outcome {
-    use super::inner_loop::Outcome;
-
+) -> InnerLoopResult {
     let instruction = task.payload.get("instruction")
         .and_then(|v| v.as_str()).unwrap_or("").to_string();
 
@@ -175,13 +284,13 @@ async fn run_one(
         None => DataClass::Public,
         Some(v) => {
             let Some(s) = v.as_str() else {
-                return Outcome::Failed(format!(
+                return failed_result(format!(
                     "classification_floor in payload is not a string: {v:?}"
                 ));
             };
             match serde_json::from_str::<DataClass>(&format!("\"{}\"", s)) {
                 Ok(dc) => dc,
-                Err(_) => return Outcome::Failed(format!(
+                Err(_) => return failed_result(format!(
                     "unknown classification_floor: {s:?} (expected one of \
                      Public, Personal, ClinicalConfidential, Secret)"
                 )),
@@ -210,8 +319,20 @@ async fn run_one(
     };
 
     match run_to_terminal(pool, formulator, review, dispatcher, ctx).await {
-        Ok(o) => o,
-        Err(e) => Outcome::Failed(format!("inner_loop: {e}")),
+        Ok(r) => r,
+        Err(e) => failed_result(format!("inner_loop: {e}")),
+    }
+}
+
+/// Build an `InnerLoopResult` representing a `Failed` outcome with
+/// zero counters. Used at the pre-loop validation points in
+/// [`run_one`] (bad payload shape, classification override) where the
+/// inner loop never runs — counters are 0 in those branches.
+fn failed_result(detail: String) -> InnerLoopResult {
+    InnerLoopResult {
+        outcome: Outcome::Failed(detail),
+        plan_count: 0,
+        dispatch_count: 0,
     }
 }
 

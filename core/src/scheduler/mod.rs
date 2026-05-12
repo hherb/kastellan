@@ -9,8 +9,10 @@
 //!   - `inner_loop`     — per-task iterative replanning (TaskContext + run_to_terminal)
 //!   - `runner`         — per-lane runner loop
 //!   - `tool_dispatch`  — production `StepDispatcher` wiring to `tool_host::dispatch`
+//!   - `audit`          — pure helpers for scheduler-emitted audit rows (spec §7)
 
 pub mod agent;
+pub mod audit;
 pub mod inner_loop;
 pub mod prompts;
 pub mod runner;
