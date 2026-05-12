@@ -239,9 +239,9 @@ fn run_ask(args: &[String]) -> ExitCode {
 }
 
 async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCode {
-    use hhagent_core::cli_audit::cancel_and_audit;
+    use hhagent_core::cli_audit::{cancel_and_audit, submit_and_audit};
     use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::{get, insert_pending};
+    use hhagent_db::tasks::get;
     use sqlx::postgres::PgListener;
 
     let spec = match resolve_connect_spec() {
@@ -264,7 +264,7 @@ async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCo
         return ExitCode::from(1);
     }
 
-    let id = match insert_pending(
+    let id = match submit_and_audit(
         &pool,
         lane,
         serde_json::json!({"instruction": instruction, "kind": "ask"}),

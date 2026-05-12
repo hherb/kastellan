@@ -6,65 +6,76 @@
 //! Those producer events have their own audit row family with
 //! `actor='cli'`, distinct from the scheduler's observation rows.
 //!
-//! Both families share the same `action` strings
-//! (`action_task_terminal("<state>")` from [`crate::scheduler::audit`]) so
-//! observation-phase SQL filtering on `action LIKE 'task.%'` captures
-//! every transition regardless of producer/observer. The `actor` column
-//! is the structural signal that separates intent from observation.
+//! Both families share the same `action` strings — the submit row uses
+//! [`crate::scheduler::audit::ACTION_TASK_SUBMITTED`] and the terminal
+//! rows use `action_task_terminal("<state>")`, both from
+//! [`crate::scheduler::audit`] — so observation-phase SQL filtering on
+//! `action LIKE 'task.%'` captures every transition regardless of
+//! producer/observer. The `actor` column is the structural signal that
+//! separates intent from observation.
 //!
-//! ## Why two rows for one cancellation can be normal
+//! ## Why two rows for one logical event can be normal
 //!
-//! When the CLI cancels a task that is already `running`, two events
-//! happen in sequence:
+//! Two helpers live here and both can emit a producer row that is later
+//! followed by a scheduler observation row for the same logical event:
 //!
-//! 1. The CLI's producer-side intent — recorded here as
-//!    `actor='cli', action='task.cancelled'`.
-//! 2. The scheduler's observation — recorded in
-//!    [`crate::scheduler::runner`] as `actor='scheduler',
-//!    action='task.cancelled'` once the inner loop's `observe_state`
-//!    poll sees the new state.
+//! - **Submit:** `hhagent-cli ask` writes `actor='cli',
+//!   action='task.submitted'` at insert time; the scheduler later writes
+//!   `actor='scheduler', action='task.running'` when it claims the same
+//!   task. Two rows, one logical task entry.
+//! - **Cancel of a `running` task:** the CLI writes
+//!   `actor='cli', action='task.cancelled'`; the scheduler's inner-loop
+//!   `observe_state` poll later writes `actor='scheduler',
+//!   action='task.cancelled'` when it sees the new state. Two rows, one
+//!   logical cancellation.
 //!
-//! These are two distinct events for one logical cancellation, and
-//! observation-phase queries on `actor='cli' AND action='task.cancelled'`
-//! vs `actor='scheduler' AND action='task.cancelled'` answer two different
-//! questions: "who tried to cancel" vs "what did the scheduler observe".
+//! Observation-phase queries on `actor='cli' AND action='task.<x>'` vs
+//! `actor='scheduler' AND action='task.<x>'` answer two different
+//! questions: "what did the producer intend" vs "what did the scheduler
+//! observe".
 //!
-//! When the CLI cancels a `pending` task that has never been claimed,
-//! only the producer row fires — the scheduler never observes the
-//! transition. This file's headline reason for existing is closing that
-//! audit-trail gap: before this slice the CLI cancel of a pending task
-//! was completely invisible at the SQL layer.
+//! When the scheduler never observes the event — a `pending` task
+//! cancelled before claim, or a task submitted while the scheduler is
+//! down — only the producer row fires. This module's headline reason for
+//! existing is closing those audit-trail gaps: before producer rows
+//! existed, a CLI cancel of a never-claimed `pending` task was
+//! completely invisible at the SQL layer, and a submit followed by a
+//! scheduler outage had no row at all.
 //!
 //! ## Posture
 //!
 //! Audit insert is best-effort, matching the [`crate::tool_host::dispatch`]
 //! chokepoint pattern: a transient DB failure must not mask a successful
-//! cancellation, so the SQL UPDATE's success is the load-bearing event.
-//! Audit-emission failures are logged via `tracing::warn!` and swallowed.
+//! cancellation or submission, so the SQL UPDATE/INSERT's success is the
+//! load-bearing event. Audit-emission failures are logged via
+//! `tracing::warn!` and swallowed.
 //!
 //! ### Residual gap accepted by this posture
 //!
-//! The UPDATE and the audit INSERT are two separate statements, not one
-//! transaction. A crash (or audit-insert DB error) between them leaves
-//! the row in `cancelled` with no producer audit row. For a CLI cancel
-//! of a `running` task the scheduler's later observation row partially
-//! covers this — but for a CLI cancel of a never-claimed `pending` task
-//! the producer row is the **only** audit signal, so losing it
-//! reintroduces the very gap this module exists to close.
+//! The SQL write and the audit INSERT are two separate statements, not
+//! one transaction. A crash (or audit-insert DB error) between them
+//! leaves the row's state change real but with no producer audit row.
+//! For a CLI cancel of a `running` task the scheduler's later
+//! observation row partially covers this — but for a CLI cancel of a
+//! never-claimed `pending` task, or for any submit followed by a
+//! scheduler outage, the producer row is the **only** audit signal, so
+//! losing it reintroduces the very gap this module exists to close.
 //!
 //! This is accepted, not unintended: a transactional wrap would couple
-//! the cancellation's success to audit availability, which would mask
-//! cancels behind audit outages. The trade-off favours cancellation
-//! liveness over audit completeness. Observation-phase queries that
-//! depend on a strict 1:1 producer-row:cancel mapping must treat the
-//! audit-row count as a lower bound, not a total.
+//! the cancellation's or submission's success to audit availability,
+//! which would mask the underlying event behind audit outages. The
+//! trade-off favours liveness over audit completeness. Observation-phase
+//! queries that depend on a strict 1:1 producer-row:event mapping must
+//! treat the audit-row count as a lower bound, not a total.
 
 use hhagent_db::audit;
-use hhagent_db::tasks::{mark_cancelled, Task};
+use hhagent_db::tasks::{insert_pending, mark_cancelled, Lane, Task};
 use hhagent_db::DbError;
 use sqlx::PgPool;
 
-use crate::scheduler::audit::{action_task_terminal, build_lifecycle_payload};
+use crate::scheduler::audit::{
+    action_task_terminal, build_lifecycle_payload, ACTION_TASK_SUBMITTED,
+};
 
 /// Logical `actor` string written into every CLI-emitted audit row.
 /// Distinct from [`crate::scheduler::audit::SCHEDULER_AUDIT_ACTOR`] so
@@ -120,6 +131,66 @@ pub async fn cancel_and_audit(pool: &PgPool, task_id: i64) -> Result<CancelOutco
         );
     }
     Ok(CancelOutcome::Cancelled(task))
+}
+
+/// Producer-side task submission with audit-row emission.
+///
+/// Calls [`insert_pending`] and writes one `actor='cli'
+/// action='task.submitted'` row to `audit_log` with the canonical
+/// lifecycle payload `{task_id, lane, plan_count}` built via
+/// [`build_lifecycle_payload`] (`plan_count` is `0` by definition at
+/// submit time — included for shape parity with the rest of the
+/// `task.<state>` family so consumers don't need a special case).
+///
+/// On success returns the new task id. The audit insert is best-effort:
+/// a transient DB issue is logged at WARN but the id still propagates,
+/// because the SQL INSERT already committed and the task is now a real
+/// row in the `tasks` table — failing the call would be strictly worse
+/// than a missing audit row, and would couple submit liveness to audit
+/// availability the same way the cancel-slice trade-off documents.
+///
+/// # Two-rows-on-one-event note
+///
+/// `hhagent-cli ask` will produce two rows in `audit_log` for one
+/// logical task entry: this producer row at submit time, and the
+/// scheduler's later `task.running` observation row on claim. The split
+/// is intentional — observation queries asking "who submitted" use
+/// `actor='cli'`, queries asking "what did the scheduler observe" use
+/// `actor='scheduler'`.
+///
+/// # Ordering race vs `task.running`
+///
+/// `insert_pending` commits the new task row before this helper writes
+/// the audit row. A fast scheduler can claim the task and write its
+/// `actor='scheduler' action='task.running'` row before this helper's
+/// audit insert returns, leaving the two rows out of order by `ts` (and
+/// by `audit_log.id`, since both are assigned at INSERT time). Submit-
+/// to-claim latency queries that compute `running_ts - submit_ts` may
+/// therefore occasionally see negative deltas under contention. This
+/// is consistent with the cancel slice's non-transactional posture and
+/// is accepted — fixing it would require a transactional wrap that
+/// couples submit liveness to audit availability. Consumers must
+/// tolerate (or filter) the rare inverted-pair case rather than assume
+/// monotonic ordering between the producer and observation rows.
+pub async fn submit_and_audit(
+    pool: &PgPool,
+    lane: Lane,
+    payload: serde_json::Value,
+) -> Result<i64, DbError> {
+    let id = insert_pending(pool, lane, payload).await?;
+
+    let row_payload = build_lifecycle_payload(id, lane, 0);
+    if let Err(e) =
+        audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_TASK_SUBMITTED, row_payload).await
+    {
+        tracing::warn!(
+            task_id = id,
+            error = %e,
+            "cli_audit::submit_and_audit: audit insert failed (task itself was submitted)",
+        );
+    }
+
+    Ok(id)
 }
 
 #[cfg(test)]

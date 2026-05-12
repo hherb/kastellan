@@ -541,6 +541,8 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         let m = audit_multiset(&pool).await;
         assert_eq!(m.get(&("core".into(), "startup".into())), Some(&1),
                    "expected 1× core/startup; multiset = {m:?}");
+        assert_eq!(m.get(&("cli".into(), "task.submitted".into())), Some(&1),
+                   "expected 1× cli/task.submitted (producer-side row from hhagent-cli ask); multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&2),
                    "expected 2× agent/plan.formulate (one per LLM call); multiset = {m:?}");
         assert_eq!(m.get(&("cassandra:chain".into(), "verdict".into())), Some(&2),
@@ -562,7 +564,7 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
             .fetch_one(&pool)
             .await
             .expect("count audit_log");
-        let expected_total: i64 = 1 + 2 + 2 + 1 + 1 + 1 + 1 + 1; // = 10
+        let expected_total: i64 = 1 + 1 + 2 + 2 + 1 + 1 + 1 + 1 + 1; // = 11 (cli/task.submitted added)
         assert_eq!(
             total.0, expected_total,
             "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
@@ -747,6 +749,8 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         let m = audit_multiset(&pool).await;
         assert_eq!(m.get(&("core".into(), "startup".into())), Some(&1),
                    "expected 1× core/startup; multiset = {m:?}");
+        assert_eq!(m.get(&("cli".into(), "task.submitted".into())), Some(&1),
+                   "expected 1× cli/task.submitted (producer-side row from hhagent-cli ask); multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&3),
                    "expected 3× agent/plan.formulate (one per LLM call before cap); multiset = {m:?}");
         assert_eq!(m.get(&("cassandra:chain".into(), "verdict".into())), Some(&3),
@@ -766,7 +770,7 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
             .fetch_one(&pool)
             .await
             .expect("count audit_log");
-        let expected_total: i64 = 1 + 3 + 3 + 3 + 3 + 1 + 1 + 1; // = 16
+        let expected_total: i64 = 1 + 1 + 3 + 3 + 3 + 3 + 1 + 1 + 1; // = 17 (cli/task.submitted added)
         assert_eq!(
             total.0, expected_total,
             "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
