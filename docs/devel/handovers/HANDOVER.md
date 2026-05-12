@@ -4,11 +4,13 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-13 (CLI `task.submitted` producer audit row — branch `feat/cli-task-submitted-audit`)
-**Last commit (main):** `fdf1a52` (merge of PR #43 `feat/cli-cancel-audit`).
-**This session's working branch:** `feat/cli-task-submitted-audit` (off `main` at `fdf1a52`). Closes the HANDOVER "Immediate next pickups" item "`task.submitted` producer row from `hhagent-cli ask`" — symmetric to the just-merged cli-cancel-audit slice. Workspace test count: **353 → 354** (+1 integration test in new `core/tests/cli_submit_audit_e2e.rs`; `cli_ask_e2e.rs` multiset bumps don't add `#[test]` functions).
+**Last updated:** 2026-05-13 (issue #16 `WorkerCommand` seal tightened — branch `fix/worker-command-seal-tighten`)
+**Last commit (main):** `31ac414` (merge of PR #44 `feat/cli-task-submitted-audit`).
+**This session's working branch:** `fix/worker-command-seal-tighten` (off `main` at `31ac414`). Closes [issue #16](https://github.com/hherb/hhagent/issues/16) — tightens the `WorkerCommand` chokepoint seal from `pub(crate)` (open to every sibling module inside `hhagent_core`) to **module-private** (only `tool_host`'s own functions can construct one). Pure refactor; workspace test count unchanged at **354 / 0 fail / 0 SKIP / 2 pre-existing ignored doctests**. The `compile_fail` doctest on `WorkerCommand` still trips on the out-of-crate side; the workspace build itself is the regression pin on the in-crate sibling-module side.
 
-**Previous session (2026-05-13 → merged via PR #43 at `fdf1a52`) — CLI cancel audit row:** widened `db::tasks::mark_cancelled` to `Result<Option<Task>, _>` via `RETURNING`; new `core/src/cli_audit.rs` carrying `CLI_AUDIT_ACTOR = "cli"` const + `CancelOutcome` enum + `cancel_and_audit(pool, task_id)` helper; both `hhagent-cli` cancel call sites (SIGINT in `ask`, `tasks cancel` subcommand) rewired to the helper. Workspace count 349 → 353 (+4: 2 unit + 2 integration in `cli_cancel_audit_e2e.rs`).
+**Previous session (2026-05-13 → merged via PR #44 at `31ac414`) — CLI `task.submitted` producer audit row:** new `ACTION_TASK_SUBMITTED` const in `core/src/scheduler/audit.rs` + new `submit_and_audit(pool, lane, payload)` helper in `core/src/cli_audit.rs`; `hhagent-cli ask` rewired through the helper. Audit insert best-effort (chokepoint posture); id propagates even on audit failure. Workspace test count: 353 → **354** (+1 integration test in new `core/tests/cli_submit_audit_e2e.rs`; `cli_ask_e2e.rs` multiset bumps don't add `#[test]` functions).
+
+**Previous-previous session (2026-05-13 → merged via PR #43 at `fdf1a52`) — CLI cancel audit row:** widened `db::tasks::mark_cancelled` to `Result<Option<Task>, _>` via `RETURNING`; new `core/src/cli_audit.rs` carrying `CLI_AUDIT_ACTOR = "cli"` const + `CancelOutcome` enum + `cancel_and_audit(pool, task_id)` helper; both `hhagent-cli` cancel call sites (SIGINT in `ask`, `tasks cancel` subcommand) rewired to the helper. Workspace count 349 → 353 (+4: 2 unit + 2 integration in `cli_cancel_audit_e2e.rs`).
 
 **Previous session (2026-05-12 → merged 2026-05-13 via PR #41 at `76fe940`) — graph lane in `memory::recall`:** entity↔memory linkage via new `memory_entities` join table (migration `0007`) + AFTER DELETE journal on `memories` (migration `0008` → `deleted_memories`). `db::memories::{link_memory_to_entities, graph_search}` writer/reader helpers. `core::memory::recall.rs` gains `RecallModes::graph`, `RecallModes::GRAPH_ONLY`, `RecallParams::seed_entity_ids: Option<&[i64]>`, `GRAPH_FANOUT_CAP_PER_SEED: i64 = 32`, and a 1-hop graph lane fused alongside semantic + lexical via the existing RRF. `core/Cargo.toml` gained `futures = { workspace = true }` direct dep. Workspace count 342 → **349** (+3 DB integration / +4 core unit / +4 in-place assertion groups in `memory_recall_e2e`). Post-review work added a `GRAPH_FANOUT_CAP_PER_SEED` behavioural-pin e2e assertion (hub with `cap + 8` outbound relations → `GRAPH_ONLY` returns exactly `cap` memories), HashSet pre-sizing on the graph-lane expansion, and stale-comment cleanups. Code review surfaced [issue #42](https://github.com/hherb/hhagent/issues/42) (`deleted_memories` trigger uses `SECURITY INVOKER` — future role without INSERT silently breaks DELETE; **deferred until a second DELETE-capable role is proposed**).
 
@@ -95,7 +97,58 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-13 — CLI `task.submitted` producer audit row, branch `feat/cli-task-submitted-audit`)
+## Recently completed (this session, 2026-05-13 — issue #16 `WorkerCommand` seal tightened, branch `fix/worker-command-seal-tighten`)
+
+Branch: `fix/worker-command-seal-tighten` (off `main` at `31ac414`, the merge of PR #44). Closes [issue #16](https://github.com/hherb/hhagent/issues/16) — "tool_host: WorkerCommand seal has an in-crate hole — sibling modules can bypass dispatch".
+
+**Why this slice now.** PR #44 (cli-task-submitted-audit) just merged; tree was clean on `main`. The HANDOVER "Immediate next pickups" listed issue #16 as one of the open structural follow-ups to the Option-M chokepoint seal. The cost-to-benefit was small enough to warrant a focused slice rather than waiting for a sibling-module would-be bypass to surface in code review.
+
+**Why the hole existed.** Option M (commit `3279c6d`) made `WorkerCommand`'s fields + constructor + `SupervisedWorker::call` all `pub(crate)`. That blocks out-of-crate callers (verified by the `compile_fail` doctest on `WorkerCommand`) but leaves the door open for any sibling module inside `hhagent_core` (e.g. a future `scheduler::foo`) to construct a `WorkerCommand` and call a worker directly, bypassing the `dispatch` chokepoint and therefore the audit row. The Option-M doc comment acknowledged this and treated it as "visible in code review." Issue #16 argued — correctly — that code review doesn't compose as the crate grows.
+
+**Why the minimal-diff fix (variant of issue fix #1).** The issue listed three candidate fixes: (1) move the worker-spawn API into a private submodule, (2) CI grep guardrail, (3) clippy lint via private marker trait. A survey of in-crate callers found zero sibling-module users of `WorkerCommand::new` or `SupervisedWorker::call`:
+- `core/src/scheduler/tool_dispatch.rs` uses `spawn_worker` (still `pub`) + `dispatch` (still `pub`) and never reaches the sealed surface directly.
+- `core/tests/audit_dispatch_e2e.rs` holds a `&mut SupervisedWorker` but funnels every call through `dispatch`.
+- `core/tests/shell_exec_e2e.rs` references `WorkerCommand` only in a comment.
+
+So a full submodule reshuffle (fix #1 as literally stated) was unnecessary churn. Equivalent structural seal with a 4-line visibility-narrowing change: drop `pub(crate)` on `WorkerCommand::method`, `WorkerCommand::params`, `WorkerCommand::new`, and `SupervisedWorker::call` to no visibility modifier at all (module-private). Rust's privacy rules then make these symbols visible only from `tool_host` itself and its descendants (the `mod tests` inside `tool_host.rs` still compiles); sibling modules (`scheduler`, `cli_audit`, `memory`, …) cannot reach them at compile time.
+
+**Acceptance criteria from issue #16 satisfied:**
+- ✓ "A new file under `core/src/` cannot construct a `WorkerCommand` and call a worker directly without an explicit, reviewable opt-out." — The reviewable opt-out is now editing `tool_host.rs` itself; the workspace build is the structural regression test (any sibling-module attempt would be a `function is private` compile error).
+- ✓ "The Option-M `compile_fail` doctest still passes." — Verified: `cargo test -p hhagent-core --doc` runs the one doctest on `WorkerCommand` and it trips correctly (compile_fail asserts the body fails to compile, which it does because `::new` is no longer reachable).
+
+**Shape (1 file touched):**
+
+- **`core/src/tool_host.rs`** — four visibility narrowings:
+  * `pub(crate) method: String,` → `method: String,` (field, line 56)
+  * `pub(crate) params: serde_json::Value,` → `params: serde_json::Value,` (field, line 57)
+  * `pub(crate) fn new(...)` → `fn new(...)` (constructor, line 64)
+  * `pub fn call(...)` → `fn call(...)` (`SupervisedWorker::call`, line 264)
+- **Doc comment rewrites** on `WorkerCommand`, `WorkerCommand::new`, `SupervisedWorker::call`, and `dispatch`'s body comment — refreshed to describe the tighter seal and link to issue #16. The `compile_fail` doctest body is unchanged (out-of-crate code still can't reach `::new`, for slightly different reasons now: previously the constructor was `pub(crate)` so the path didn't expand; now it's module-private — same observable failure mode for any caller outside `tool_host`).
+- **In-module unit-test comment refresh** — the `worker_command_new_carries_method_and_params` test still compiles (descendant modules see parent's private items in Rust), but its comment now explains *why* it compiles and which side of the seal each regression pin defends.
+
+**TDD ordering** (per CLAUDE.md rule #2): the existing `compile_fail` doctest on `WorkerCommand` and the workspace build together form the regression pin. The doctest asserts the out-of-crate side; the workspace build asserts the in-crate sibling-module side. Both were green before the change (354 / 0 / 0 SKIP) and both stay green after — pure refactor.
+
+**What this slice deliberately does NOT do.**
+- **No submodule reshuffle.** Issue fix #1 as literally stated proposed moving the worker-spawn API into a private submodule. Equivalent seal achieved with a 4-line diff instead. If a future caller legitimately needs `SupervisedWorker::call` (e.g. for streaming / long-lived workers), the natural answer is to extend `dispatch` itself or add a sibling helper inside `tool_host.rs` — both reviewable opt-outs.
+- **No CI grep guardrail** (issue fix #2). Now obsolete: the type system enforces what the regex would have policed.
+- **No clippy lint via marker trait** (issue fix #3). Now obsolete for the same reason.
+- **No widening of `dispatch`'s contract.** The chokepoint's public surface (`pool, &mut SupervisedWorker, tool, method, params`) is unchanged.
+- **No tightening of `audit_log` write-on-success guarantees.** Best-effort posture preserved (see the `dispatch` function doc).
+
+**Verification.**
+- `cargo build --workspace` clean (proves no sibling caller exists).
+- `cargo test -p hhagent-core --doc` — 1 doctest, compile_fail trips correctly.
+- `cargo test --workspace` — 354 passed / 0 failed / 2 pre-existing ignored doctests, identical to baseline.
+
+**Test count delta:** 354 → **354** (no change — pure visibility refactor).
+
+**Files touched (2 modified):**
+- `core/src/tool_host.rs` — four visibility narrowings + doc/comment refreshes.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update; issue #16 marked closed.
+
+---
+
+## Recently completed (previous session, 2026-05-13 — CLI `task.submitted` producer audit row, branch `feat/cli-task-submitted-audit`)
 
 Branch: `feat/cli-task-submitted-audit` (off `main` at `fdf1a52`, the merge of PR #43). Closes the HANDOVER "Immediate next pickups" item that was filed the same day PR #43 merged: "`task.submitted` producer row from `hhagent-cli ask`".
 
@@ -906,7 +959,7 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 - **Production caller wiring for the graph lane:** extend `RouterAgent::formulate_plan` (or a new pre-recall step) to populate `seed_entity_ids` from entities extracted from the current task context. Requires an entity-extraction step to land first — that step is the real precondition. Flagged explicitly because the graph lane is a no-op in production until this wiring exists.
 - **`entities.embedding` population path:** `entities.embedding` is NULL for all entities today. A populated embedding column would seed an entity-similarity lane (find entities semantically close to the query, use them as graph-lane seeds even when the exact entity id is unknown). Deferred until observation phase; the structural seam (`entities.embedding vector(1024)`) already exists in the schema.
 - **File-size watch on `db/src/memories.rs`:** at 529 LOC (29 over the 500-LOC soft cap). Not warranting a split now, but if a future helper pushes beyond ~600 LOC, extract `vector_literal` + `check_embedding_dim` + `limit_as_i64` into a `memories/utils.rs` submodule.
-- **Issue #16 — close the in-crate hole in the `WorkerCommand` seal:** sibling modules inside `hhagent_core` can construct one and reach `SupervisedWorker::call` directly. Three candidate fixes filed.
+- ~~**Issue #16 — close the in-crate hole in the `WorkerCommand` seal:**~~ **Shipped this session 2026-05-13** on branch `fix/worker-command-seal-tighten` — see "Recently completed (this session)" entry at the top.
 - **Issue #17 — `memory::recall` warn-and-degrade on missing input may mask caller bugs:** tighten before Phase 1's scheduler is the production caller.
 - **Issue #32 — pre-existing dead-code warning in `core/tests/embedding_recall_e2e.rs::ServedRequest`:** silenced by `#[allow(dead_code)]` but not removed. Low priority.
 - **Option K — cross-platform exponential restart backoff:** filed but parked; no immediate need.
@@ -958,7 +1011,7 @@ Smaller follow-up to Option E. Today the cgroup layer hardcodes `CPUQuota=200%` 
 - [#13](https://github.com/hherb/hhagent/issues/13) — write a migration numbering / rename hygiene checklist; sqlx fingerprints version+slug, so a rename or edit on a shipped migration silently breaks startup on existing clusters
 - [#14](https://github.com/hherb/hhagent/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `core/tests/supervisor_e2e.rs` with a constant in `hhagent-core`'s public API or a real readiness signal
 - ~~[#15](https://github.com/hherb/hhagent/issues/15) — hoist the duplicated PG bring-up boilerplate into a workspace-level `tests-common` dev-dep crate~~ **closed 2026-05-12 by this session** (`refactor/tests-common-hoist`). New crate `hhagent-tests-common` ships `PgCluster` + `bring_up_pg_cluster` + RAII guards + skip helpers + sandbox factory + binary discovery + macOS launchd serial lock + deterministic SHA-256-seeded embedding seed; 8 byte-duplicated copies eliminated; workspace count unchanged at 342
-- [#16](https://github.com/hherb/hhagent/issues/16) — close the in-crate hole in the `WorkerCommand` seal (filed 2026-05-10)
+- ~~[#16](https://github.com/hherb/hhagent/issues/16) — close the in-crate hole in the `WorkerCommand` seal (filed 2026-05-10)~~ **closed 2026-05-13 by this session** (`fix/worker-command-seal-tighten`) — minimal-diff variant of issue fix #1: narrowed `WorkerCommand::{method, params, new}` + `SupervisedWorker::call` from `pub(crate)`/`pub` to module-private. The workspace build is the structural regression pin for sibling-module exclusion; the `compile_fail` doctest on `WorkerCommand` remains the out-of-crate pin.
 - [#17](https://github.com/hherb/hhagent/issues/17) — tighten `memory::recall` behaviour when input is missing (filed 2026-05-10)
 - [#20](https://github.com/hherb/hhagent/issues/20) — `agent_prompts` schema: PK on sha256 means renamed prompt files lose their original name (filed 2026-05-10 from PR #25 review)
 - [#21](https://github.com/hherb/hhagent/issues/21) — `core::scheduler::runner` per-iteration cancellation poll could be a `watch::Receiver` instead of a DB round-trip (filed 2026-05-10 from PR #25 review)

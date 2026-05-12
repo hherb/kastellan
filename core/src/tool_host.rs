@@ -27,41 +27,60 @@ pub enum ToolHostError {
 }
 
 /// A sealed JSON-RPC request shape. The fields and constructor are
-/// `pub(crate)`, and [`SupervisedWorker::call`] only accepts a
-/// `WorkerCommand` — so out-of-crate callers cannot construct one
-/// and therefore cannot invoke a worker without going through
-/// [`dispatch`]. This is the compile-time pin for the dispatcher
-/// chokepoint invariant (see `docs/architecture.md` and HANDOVER's
-/// Option M notes).
+/// **module-private** (no visibility modifier — narrower than
+/// `pub(crate)`), and [`SupervisedWorker::call`] is module-private
+/// too. Together they pin the dispatcher chokepoint invariant from
+/// both sides:
 ///
-/// Inside `hhagent_core`, sibling modules (e.g. a future
-/// `scheduler`) could in principle build one — but the only
-/// production caller is [`dispatch`], and any other in-crate use
-/// would be visible in code review.
+/// * **Out-of-crate callers** cannot reach the constructor (or the
+///   fields, or `.call`) because none of them are exported. The
+///   `compile_fail` doctest below is the regression pin for that
+///   side.
+/// * **Sibling modules inside `hhagent_core`** (e.g.
+///   `scheduler::tool_dispatch`, or any future module) cannot reach
+///   the constructor either — module-private items are visible only
+///   from the declaring module and its descendants, not from sibling
+///   modules. Adding a new caller therefore requires editing
+///   `tool_host.rs` itself, which is the explicit "reviewable
+///   opt-out" called for by [issue #16].
 ///
-/// The doctest below is the regression pin: an out-of-crate
-/// attempt to build a `WorkerCommand` must fail to compile.
+/// The build itself is the in-crate regression test: if a future
+/// sibling module attempted `WorkerCommand::new(...)` or
+/// `worker.call(...)`, the workspace would fail to compile with a
+/// "function is private" error.
+///
+/// See `docs/architecture.md` and HANDOVER's Option M notes for the
+/// chokepoint contract; the issue-#16 fix (2026-05-13) narrowed the
+/// originally-`pub(crate)` constructor to module-private so the seal
+/// holds against sibling modules too.
+///
+/// [issue #16]: https://github.com/hherb/hhagent/issues/16
 ///
 /// ```compile_fail
 /// // Each doctest is compiled as a separate crate that depends on
-/// // `hhagent_core`, so `pub(crate)` items are out of scope. The
-/// // following two lines therefore fail to compile — which is
-/// // exactly what makes the chokepoint a real compile-time
-/// // invariant rather than a code-review checklist item. Touch
-/// // either form (field literal or `::new`) and the test trips.
+/// // `hhagent_core`. `WorkerCommand` is `pub` so the `use` line
+/// // compiles, but the constructor is module-private (no `pub`
+/// // keyword at all) so the `::new` line is unreachable from any
+/// // crate other than `hhagent_core` itself — and even within
+/// // `hhagent_core` it is reachable only from `tool_host` and its
+/// // descendants. Touch either fact and the test trips.
 /// use hhagent_core::tool_host::WorkerCommand;
 /// let _via_new = WorkerCommand::new("echo", serde_json::Value::Null);
 /// ```
 pub struct WorkerCommand {
-    pub(crate) method: String,
-    pub(crate) params: serde_json::Value,
+    method: String,
+    params: serde_json::Value,
 }
 
 impl WorkerCommand {
-    /// Build a sealed command. `pub(crate)` so only this crate's
-    /// own modules can construct one — the canonical caller is
-    /// [`dispatch`].
-    pub(crate) fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
+    /// Build a sealed command. **Module-private** (no visibility
+    /// modifier) so only `tool_host`'s own functions can construct
+    /// one — the canonical (and currently only) caller is
+    /// [`dispatch`]. Sibling modules inside `hhagent_core` cannot
+    /// reach this constructor at compile time; adding a new caller
+    /// requires editing `tool_host.rs` itself, which is the
+    /// reviewable opt-out for the dispatcher chokepoint.
+    fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
         Self {
             method: method.into(),
             params,
@@ -141,10 +160,10 @@ pub async fn dispatch(
     let started = Instant::now();
 
     // Sealed command: `WorkerCommand` is the only argument shape
-    // `SupervisedWorker::call` accepts, and its constructor is
-    // `pub(crate)`. So this is the only path by which any
-    // caller — in-crate or out-of-crate — can land a JSON-RPC
-    // request on a sandboxed worker.
+    // `SupervisedWorker::call` accepts, and both its constructor and
+    // `call` itself are module-private (see issue #16). So this is
+    // the only path by which any caller — in-crate or out-of-crate —
+    // can land a JSON-RPC request on a sandboxed worker.
     let cmd = WorkerCommand::new(method, params);
     let call_result = tokio::task::block_in_place(|| worker.call(cmd));
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -255,13 +274,17 @@ pub struct SupervisedWorker {
 impl SupervisedWorker {
     /// Make one JSON-RPC call against the worker.
     ///
-    /// Takes a sealed [`WorkerCommand`] so only [`dispatch`] (or
-    /// another in-crate caller that has built one) can reach this
-    /// path. Out-of-crate code can hold a `&mut SupervisedWorker`
-    /// (as `core/tests/audit_dispatch_e2e.rs` does) but cannot
-    /// build a `WorkerCommand`, so it must funnel through
-    /// `dispatch` — which writes the audit row.
-    pub fn call(
+    /// **Module-private** (no visibility modifier — see issue #16 fix
+    /// 2026-05-13). Takes a sealed [`WorkerCommand`] so only
+    /// [`dispatch`] (the canonical caller, in the same module) can
+    /// reach this path. Both out-of-crate code and sibling modules
+    /// inside `hhagent_core` can hold a `&mut SupervisedWorker` (as
+    /// `core/tests/audit_dispatch_e2e.rs` does, and as
+    /// `core::scheduler::tool_dispatch` does), but neither can call
+    /// this method directly — they must funnel through `dispatch`,
+    /// which writes the audit row. The compile-time chokepoint is
+    /// now structural on both sides of the crate boundary.
+    fn call(
         &mut self,
         cmd: WorkerCommand,
     ) -> Result<serde_json::Value, ClientError> {
@@ -605,12 +628,19 @@ mod tests {
 
     #[test]
     fn worker_command_new_carries_method_and_params() {
-        // In-crate sanity check: the `pub(crate)` constructor preserves
-        // both the method name (any `Into<String>` form) and the
-        // serde_json value verbatim. The `compile_fail` doctest on
-        // `WorkerCommand` proves out-of-crate code cannot reach this
-        // constructor at all — together they pin the seal from both
-        // sides.
+        // In-module sanity check: the module-private constructor (see
+        // issue #16 fix 2026-05-13 — narrowed from `pub(crate)` to
+        // module-private) preserves both the method name (any
+        // `Into<String>` form) and the serde_json value verbatim.
+        // Tests inside `mod tests` are descendants of `tool_host` and
+        // therefore have access to its private items, so this
+        // assertion still compiles; sibling modules of `tool_host`
+        // (e.g. `scheduler`) do not have that access and the build
+        // would refuse a hypothetical `WorkerCommand::new(...)` from
+        // there. The `compile_fail` doctest on `WorkerCommand` is
+        // the regression pin for the out-of-crate side; the
+        // workspace build is the regression pin for the in-crate
+        // sibling-module side.
         let cmd = WorkerCommand::new("shell.exec", serde_json::json!({"argv": ["/bin/echo", "hi"]}));
         assert_eq!(cmd.method, "shell.exec");
         assert_eq!(cmd.params["argv"][0], "/bin/echo");
