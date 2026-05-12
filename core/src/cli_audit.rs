@@ -60,11 +60,13 @@
 //! audit-row count as a lower bound, not a total.
 
 use hhagent_db::audit;
-use hhagent_db::tasks::{mark_cancelled, Task};
+use hhagent_db::tasks::{insert_pending, mark_cancelled, Lane, Task};
 use hhagent_db::DbError;
 use sqlx::PgPool;
 
-use crate::scheduler::audit::{action_task_terminal, build_lifecycle_payload};
+use crate::scheduler::audit::{
+    action_task_terminal, build_lifecycle_payload, ACTION_TASK_SUBMITTED,
+};
 
 /// Logical `actor` string written into every CLI-emitted audit row.
 /// Distinct from [`crate::scheduler::audit::SCHEDULER_AUDIT_ACTOR`] so
@@ -120,6 +122,51 @@ pub async fn cancel_and_audit(pool: &PgPool, task_id: i64) -> Result<CancelOutco
         );
     }
     Ok(CancelOutcome::Cancelled(task))
+}
+
+/// Producer-side task submission with audit-row emission.
+///
+/// Calls [`insert_pending`] and writes one `actor='cli'
+/// action='task.submitted'` row to `audit_log` with the canonical
+/// lifecycle payload `{task_id, lane, plan_count}` built via
+/// [`build_lifecycle_payload`] (`plan_count` is `0` by definition at
+/// submit time — included for shape parity with the rest of the
+/// `task.<state>` family so consumers don't need a special case).
+///
+/// On success returns the new task id. The audit insert is best-effort:
+/// a transient DB issue is logged at WARN but the id still propagates,
+/// because the SQL INSERT already committed and the task is now a real
+/// row in the `tasks` table — failing the call would be strictly worse
+/// than a missing audit row, and would couple submit liveness to audit
+/// availability the same way the cancel-slice trade-off documents.
+///
+/// # Two-rows-on-one-event note
+///
+/// `hhagent-cli ask` will produce two rows in `audit_log` for one
+/// logical task entry: this producer row at submit time, and the
+/// scheduler's later `task.running` observation row on claim. The split
+/// is intentional — observation queries asking "who submitted" use
+/// `actor='cli'`, queries asking "what did the scheduler observe" use
+/// `actor='scheduler'`.
+pub async fn submit_and_audit(
+    pool: &PgPool,
+    lane: Lane,
+    payload: serde_json::Value,
+) -> Result<i64, DbError> {
+    let id = insert_pending(pool, lane, payload).await?;
+
+    let row_payload = build_lifecycle_payload(id, lane, 0);
+    if let Err(e) =
+        audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_TASK_SUBMITTED, row_payload).await
+    {
+        tracing::warn!(
+            task_id = id,
+            error = %e,
+            "cli_audit::submit_and_audit: audit insert failed (task itself was submitted)",
+        );
+    }
+
+    Ok(id)
 }
 
 #[cfg(test)]
