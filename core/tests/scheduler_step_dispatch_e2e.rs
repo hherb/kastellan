@@ -20,8 +20,16 @@
 //!      with the same actor/action, payload carrying `err` (not `result`).
 //!   3. **Unknown-tool path** — a step naming a tool absent from the
 //!      registry returns `StepOutcome::Err { code: "UNKNOWN_TOOL", detail }`
-//!      WITHOUT writing an audit row (the spawn never happens, so the
-//!      chokepoint is never reached). The detail names the missing tool.
+//!      and writes a single `actor="scheduler" action="step.unknown_tool"`
+//!      audit row (the spawn never happens, so the `tool_host::dispatch`
+//!      chokepoint is bypassed — the dispatcher itself is responsible
+//!      for the audit insert). The detail names the missing tool.
+//!   4. **Spawn-failure path** — a step naming a tool whose `ToolEntry`
+//!      carries an invalid policy (relative path in `fs_read`, rejected
+//!      up front by the sandbox backend) returns
+//!      `StepOutcome::Err { code: "SPAWN_FAILED", detail }` and writes
+//!      a single `actor="scheduler" action="step.spawn_failed"` audit
+//!      row carrying the sandbox error string.
 //!
 //! ## How it differs from `audit_dispatch_e2e.rs`
 //!
@@ -47,7 +55,8 @@ use std::time::{Duration, Instant};
 
 use hhagent_core::cassandra::types::{DataClass, PlannedStep};
 use hhagent_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
-use hhagent_core::scheduler::{shell_exec_entry, ToolHostStepDispatcher, ToolRegistry};
+use hhagent_core::scheduler::{shell_exec_entry, ToolEntry, ToolHostStepDispatcher, ToolRegistry};
+use hhagent_sandbox::{Net, Profile, SandboxPolicy};
 use hhagent_db::{
     build_initdb_argv, build_postgresql_auto_conf, default_pg_bin_dir_candidates,
     default_socket_dir, find_pg_bin_dir, InitDbOptions, PgConfigOptions,
@@ -355,14 +364,40 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
             .await
             .expect("connect runtime pool");
 
-        // Registry: register shell-exec with ECHO_PATH allowlisted.
+        // Registry: register shell-exec with ECHO_PATH allowlisted, plus
+        // `broken-tool` whose policy carries a relative `fs_read` path —
+        // both `LinuxBwrap::spawn_under_policy` and
+        // `MacosSeatbelt::spawn_under_policy` reject this up-front with
+        // `SandboxError::Backend`, so dispatching against `broken-tool`
+        // gives us a deterministic SPAWN_FAILED trigger without depending
+        // on a missing binary (which would race the worker's early exit
+        // and surface as IO_ERROR/PROTOCOL_ERROR instead).
         let mut registry = ToolRegistry::new();
         registry.insert(
             "shell-exec",
             shell_exec_entry(worker.clone(), &[ECHO_PATH.to_string()]),
         );
+        registry.insert(
+            "broken-tool",
+            ToolEntry {
+                binary: worker.clone(),
+                policy: SandboxPolicy {
+                    // Relative path here is the rejection trigger; both
+                    // sandbox backends validate absolute-path-ness before
+                    // doing anything else.
+                    fs_read: vec![PathBuf::from("relative/path/triggers/rejection")],
+                    fs_write: vec![],
+                    net: Net::Deny,
+                    cpu_ms: 1_000,
+                    mem_mb: 32,
+                    profile: Profile::WorkerStrict,
+                    env: vec![],
+                },
+                wall_clock_ms: Some(5_000),
+            },
+        );
         let registry = Arc::new(registry);
-        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.len(), 2);
 
         let sandbox = sandbox_arc();
         let dispatcher = ToolHostStepDispatcher::new(
@@ -420,16 +455,41 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
             "UNKNOWN_TOOL detail should name the missing tool, got: {detail}"
         );
 
+        // ---------- (4) Spawn failure (registered tool, invalid policy) -
+        // The `broken-tool` entry was registered with a relative path in
+        // `fs_read`, which the sandbox backend rejects up front. The
+        // dispatcher's spawn path returns `ToolHostError::Sandbox(_)` →
+        // SPAWN_FAILED, and (post-slice) writes an audit row.
+        let spawn_fail_step = step(
+            "broken-tool",
+            "shell.exec",
+            serde_json::json!({"argv": [ECHO_PATH, "never-runs"]}),
+        );
+        let outcome = dispatcher.dispatch_step(&spawn_fail_step).await;
+        let StepOutcome::Err { code, detail } = &outcome else {
+            panic!("expected Err, got {outcome:?}");
+        };
+        assert_eq!(
+            code, "SPAWN_FAILED",
+            "relative fs_read must surface as SPAWN_FAILED, not {code}",
+        );
+        assert!(
+            !detail.is_empty(),
+            "SPAWN_FAILED detail must carry the sandbox's error message",
+        );
+
         // ---------- audit_log assertions ----------
-        // Three rows:
-        //   - bring-up (`core`/`startup`)
-        //   - happy-path dispatch (`tool:shell-exec`/`shell.exec`, with `result`)
-        //   - policy-denied dispatch (`tool:shell-exec`/`shell.exec`, with `err`)
+        // Five rows:
+        //   - row 0 — bring-up (`core`/`startup`)
+        //   - row 1 — happy-path dispatch (`tool:shell-exec`/`shell.exec`, with `result`)
+        //   - row 2 — policy-denied dispatch (`tool:shell-exec`/`shell.exec`, with `err`)
+        //   - row 3 — unknown-tool dispatch (`scheduler`/`step.unknown_tool`, no `err`)
+        //   - row 4 — spawn-failed dispatch (`scheduler`/`step.spawn_failed`, with `err`)
         //
-        // The UNKNOWN_TOOL path never reaches `tool_host::dispatch`, so
-        // there is intentionally no audit row for it. If a future
-        // tightening writes a row for missing-tool, update this
-        // assertion to 4 rows and pin the shape of the 4th.
+        // Rows 3 + 4 are the contract for this slice: paths that short-
+        // circuit before `tool_host::dispatch` must still leave an audit
+        // trail, otherwise an operator triaging "the planner asked for X"
+        // or "X never started" has nothing to grep.
         let rows = sqlx::query_as::<_, (i64, String, String, serde_json::Value)>(
             "SELECT id, actor, action, payload FROM audit_log ORDER BY id",
         )
@@ -438,8 +498,8 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
         .expect("select audit_log");
         assert_eq!(
             rows.len(),
-            3,
-            "expected 3 rows (bring-up + ok + denied); got {rows:?}"
+            5,
+            "expected 5 rows (bring-up + ok + denied + unknown + spawn_fail); got {rows:?}",
         );
 
         // Row 0: bring-up.
@@ -463,6 +523,36 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
         assert!(p2.contains_key("err"));
         assert!(p2.contains_key("ms"));
         assert!(!p2.contains_key("result"));
+
+        // Row 3: unknown-tool — actor=scheduler, action=step.unknown_tool.
+        // No `err` field (there is no underlying error; just a missing
+        // registration). `tool`+`method`+`req`+`ms` mirror the chokepoint
+        // shape so audit consumers don't need a separate parser.
+        assert_eq!(rows[3].1, "scheduler");
+        assert_eq!(rows[3].2, "step.unknown_tool");
+        let p3 = rows[3].3.as_object().expect("payload object");
+        assert_eq!(p3.get("tool").and_then(|v| v.as_str()), Some("web-fetch"));
+        assert_eq!(p3.get("method").and_then(|v| v.as_str()), Some("fetch"));
+        assert!(p3.contains_key("req"));
+        assert!(p3.contains_key("ms"));
+        assert!(!p3.contains_key("err"),
+                "UNKNOWN_TOOL payload must not carry `err`; got {:#}", rows[3].3);
+
+        // Row 4: spawn-failed — actor=scheduler, action=step.spawn_failed,
+        // payload carries the sandbox error string under `err`.
+        assert_eq!(rows[4].1, "scheduler");
+        assert_eq!(rows[4].2, "step.spawn_failed");
+        let p4 = rows[4].3.as_object().expect("payload object");
+        assert_eq!(p4.get("tool").and_then(|v| v.as_str()), Some("broken-tool"));
+        assert_eq!(p4.get("method").and_then(|v| v.as_str()), Some("shell.exec"));
+        assert!(p4.contains_key("req"));
+        assert!(p4.contains_key("ms"));
+        let err_str = p4.get("err").and_then(|v| v.as_str())
+            .expect("SPAWN_FAILED payload must carry `err`");
+        assert!(
+            !err_str.is_empty(),
+            "spawn_failed err must be a non-empty sandbox error string",
+        );
 
         pool.close().await;
     });
