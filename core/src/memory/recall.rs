@@ -22,6 +22,7 @@
 //! doesn't appear. Items absent from *every* lane do not appear in
 //! the output.
 
+use hhagent_db::graph::Graph;
 use hhagent_db::memories::{fetch_by_ids, lexical_search, semantic_search, Memory, EMBEDDING_DIM};
 use hhagent_db::DbError;
 use sqlx::PgPool;
@@ -214,6 +215,47 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
                 tracing::warn!(
                     target: "hhagent::memory",
                     "lexical lane requested but query_text is empty; skipping"
+                );
+            }
+        }
+    }
+
+    if params.modes.graph {
+        match params.seed_entity_ids {
+            Some(seeds) if !seeds.is_empty() => {
+                // 1-hop outbound expansion via the Graph chokepoint,
+                // fanned out in parallel. Per-seed cap defends against
+                // hub explosion: an entity with thousands of outbound
+                // edges contributes at most GRAPH_FANOUT_CAP_PER_SEED.
+                let graph = hhagent_db::graph::PgGraph::new(pool);
+                let neighbour_lists = futures::future::try_join_all(
+                    seeds.iter().map(|&s| {
+                        graph.neighbors(s, None, GRAPH_FANOUT_CAP_PER_SEED)
+                    }),
+                )
+                .await?;
+
+                // Deduped expanded set: seeds ∪ all returned neighbour ids.
+                // HashSet strips duplicates when two seeds share a 1-hop
+                // hop, or when a seed is also a neighbour of another seed.
+                let mut expanded: std::collections::HashSet<i64> =
+                    seeds.iter().copied().collect();
+                for list in &neighbour_lists {
+                    for entity in list {
+                        expanded.insert(entity.id);
+                    }
+                }
+                let expanded_vec: Vec<i64> = expanded.into_iter().collect();
+
+                lane_lists.push(
+                    hhagent_db::memories::graph_search(pool, &expanded_vec, lane_k)
+                        .await?,
+                );
+            }
+            _ => {
+                tracing::warn!(
+                    target: "hhagent::memory",
+                    "graph lane requested but seed_entity_ids is empty or None; skipping"
                 );
             }
         }

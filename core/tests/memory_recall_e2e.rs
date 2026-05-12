@@ -128,6 +128,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             &RecallParams {
                 query_text: None,
                 query_embedding: Some(&emb_a),
+                seed_entity_ids: None,
                 k: 5,
                 modes: RecallModes::SEMANTIC_ONLY,
             },
@@ -148,6 +149,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             &RecallParams {
                 query_text: Some("alpha"),
                 query_embedding: None,
+                seed_entity_ids: None,
                 k: 5,
                 modes: RecallModes::LEXICAL_ONLY,
             },
@@ -166,6 +168,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             &RecallParams {
                 query_text: Some("alpha"),
                 query_embedding: Some(&emb_a),
+                seed_entity_ids: None,
                 k: 5,
                 modes: RecallModes::ALL,
             },
