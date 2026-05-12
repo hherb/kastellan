@@ -128,6 +128,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             &RecallParams {
                 query_text: None,
                 query_embedding: Some(&emb_a),
+                seed_entity_ids: None,
                 k: 5,
                 modes: RecallModes::SEMANTIC_ONLY,
             },
@@ -148,6 +149,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             &RecallParams {
                 query_text: Some("alpha"),
                 query_embedding: None,
+                seed_entity_ids: None,
                 k: 5,
                 modes: RecallModes::LEXICAL_ONLY,
             },
@@ -166,6 +168,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             &RecallParams {
                 query_text: Some("alpha"),
                 query_embedding: Some(&emb_a),
+                seed_entity_ids: None,
                 k: 5,
                 modes: RecallModes::ALL,
             },
@@ -190,6 +193,187 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
         assert!(
             fused_ids.contains(&id_b) && fused_ids.contains(&id_c),
             "fused list should include B and C below A; got {fused_ids:?}"
+        );
+
+        // ─── Graph lane: setup ─────────────────────────────────────────
+        //
+        // alice owns cat (relation); bob is unconnected.
+        // id_a is tagged with {alice, cat}; id_b with {cat}; id_c with {bob}.
+        use hhagent_db::graph::{Graph, PgGraph};
+        let graph_g = PgGraph::new(&pool);
+        let alice_id = graph_g
+            .upsert_entity("person", "alice", &serde_json::json!({}))
+            .await
+            .expect("upsert alice");
+        let bob_id = graph_g
+            .upsert_entity("person", "bob", &serde_json::json!({}))
+            .await
+            .expect("upsert bob");
+        let cat_id = graph_g
+            .upsert_entity("animal", "cat", &serde_json::json!({}))
+            .await
+            .expect("upsert cat");
+        graph_g
+            .upsert_relation(alice_id, cat_id, "owns", &serde_json::json!({}))
+            .await
+            .expect("upsert relation");
+
+        hhagent_db::memories::link_memory_to_entities(&pool, id_a, &[alice_id, cat_id])
+            .await
+            .expect("link id_a");
+        hhagent_db::memories::link_memory_to_entities(&pool, id_b, &[cat_id])
+            .await
+            .expect("link id_b");
+        hhagent_db::memories::link_memory_to_entities(&pool, id_c, &[bob_id])
+            .await
+            .expect("link id_c");
+
+        // ─── Assertion 1: GRAPH_ONLY with seed=[alice] surfaces A first ─
+        //
+        // Expanded set = {alice, cat} (alice + alice's 1-hop = cat).
+        // id_a is linked to BOTH alice and cat → hit count 2.
+        // id_b is linked to cat only → hit count 1.
+        // id_c is linked to bob (NOT in expanded) → absent from result.
+        let r = recall(
+            &pool,
+            &RecallParams {
+                query_text: None,
+                query_embedding: None,
+                seed_entity_ids: Some(&[alice_id]),
+                k: 10,
+                modes: RecallModes::GRAPH_ONLY,
+            },
+        )
+        .await
+        .expect("graph-only alice recall");
+        assert_eq!(r.len(), 2, "expected id_a + id_b only");
+        assert_eq!(r[0].id, id_a, "id_a (hit=2) must rank first");
+        assert_eq!(r[1].id, id_b, "id_b (hit=1) must rank second");
+        assert!(r.iter().all(|m| m.id != id_c), "id_c must be absent");
+
+        // ─── Assertion 2: GRAPH_ONLY with seed=[bob] surfaces C only ────
+        //
+        // Expanded set = {bob} (bob has no neighbours). Only id_c links bob.
+        let r = recall(
+            &pool,
+            &RecallParams {
+                query_text: None,
+                query_embedding: None,
+                seed_entity_ids: Some(&[bob_id]),
+                k: 10,
+                modes: RecallModes::GRAPH_ONLY,
+            },
+        )
+        .await
+        .expect("graph-only bob recall");
+        assert_eq!(r.len(), 1, "expected id_c only");
+        assert_eq!(r[0].id, id_c);
+
+        // ─── Assertion 3: ALL fuses graph + semantic + lexical ──────────
+        //
+        // query_text "alpha" + query_emb(text=BODY_A) + seed=[alice].
+        // Each lane's top-1 is id_a:
+        //   * semantic: id_a's embedding is exact match (cosine = 0)
+        //   * lexical: id_a's body contains "alpha"
+        //   * graph: id_a has hit count 2 (alice + cat)
+        // Fused RRF rank-1 must be id_a.
+        let q_emb = text_to_embedding(BODY_A);
+        let r = recall(
+            &pool,
+            &RecallParams {
+                query_text: Some("alpha"),
+                query_embedding: Some(&q_emb),
+                seed_entity_ids: Some(&[alice_id]),
+                k: 10,
+                modes: RecallModes::ALL,
+            },
+        )
+        .await
+        .expect("ALL-lanes alpha+alice recall");
+        assert_eq!(r[0].id, id_a, "fused top-1 must be id_a");
+
+        // ─── Assertion 4: empty seeds with graph mode on → lane skipped ─
+        //
+        // Empty seed slice + GRAPH_ONLY → no lane runs → empty fused list,
+        // not an error. Matches warn-and-skip semantics for missing inputs.
+        let empty: &[i64] = &[];
+        let r = recall(
+            &pool,
+            &RecallParams {
+                query_text: None,
+                query_embedding: None,
+                seed_entity_ids: Some(empty),
+                k: 10,
+                modes: RecallModes::GRAPH_ONLY,
+            },
+        )
+        .await
+        .expect("empty-seeds graph-only recall");
+        assert!(r.is_empty(), "empty seeds + graph-only must return empty");
+
+        // ─── Assertion 5: GRAPH_FANOUT_CAP_PER_SEED clamps hub expansion ─
+        //
+        // Build a hub entity connected to LEAF_COUNT (> cap) leaf entities,
+        // each linked to its own memory. With seed=[hub], `Graph::neighbors`
+        // returns at most `GRAPH_FANOUT_CAP_PER_SEED` entries, so the
+        // expanded set is {hub} ∪ ≤ cap leaves → at most cap distinct
+        // memory hits even though LEAF_COUNT > cap candidates exist.
+        // This pins the *behaviour* of the cap (the constant itself is
+        // pinned in unit tests).
+        use hhagent_core::memory::GRAPH_FANOUT_CAP_PER_SEED;
+        let cap_usize = GRAPH_FANOUT_CAP_PER_SEED as usize;
+        let leaf_count: usize = cap_usize + 8; // strictly greater than cap
+        let hub_id = graph_g
+            .upsert_entity("person", "hub", &serde_json::json!({}))
+            .await
+            .expect("upsert hub");
+        for i in 0..leaf_count {
+            let leaf_id = graph_g
+                .upsert_entity("thing", &format!("leaf-{i}"), &serde_json::json!({}))
+                .await
+                .expect("upsert leaf");
+            graph_g
+                .upsert_relation(hub_id, leaf_id, "knows", &serde_json::json!({}))
+                .await
+                .expect("upsert hub→leaf");
+            let leaf_mem = hhagent_db::memories::insert_memory(
+                &pool,
+                &format!("body-leaf-{i}"),
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("insert leaf memory");
+            hhagent_db::memories::link_memory_to_entities(&pool, leaf_mem, &[leaf_id])
+                .await
+                .expect("link leaf memory");
+        }
+
+        let r = recall(
+            &pool,
+            &RecallParams {
+                query_text: None,
+                query_embedding: None,
+                seed_entity_ids: Some(&[hub_id]),
+                k: 100, // generous so the cap (not k) is the limiter
+                modes: RecallModes::GRAPH_ONLY,
+            },
+        )
+        .await
+        .expect("hub-seed graph-only recall");
+
+        // Hub itself is not linked to any memory; all hits come from
+        // leaves. The cap must clamp the expansion to exactly `cap_usize`
+        // distinct leaf memories — proves the clamp engaged (not bypassed
+        // by future code changes that drop the per-seed `limit` arg).
+        assert_eq!(
+            r.len(),
+            cap_usize,
+            "GRAPH_FANOUT_CAP_PER_SEED ({}) must clamp the expansion to \
+             exactly cap leaves out of {} candidates; got {}",
+            cap_usize,
+            leaf_count,
+            r.len()
         );
 
         pool.close().await;

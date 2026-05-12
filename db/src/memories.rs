@@ -32,20 +32,22 @@
 //! sequential scan, which is fine at the corpus sizes this slice is
 //! exercised against (the integration test seeds 3 rows).
 //!
-//! ## Phase-1 holes deliberately left
+//! ## Phase-1 surface
 //!
-//! * **Graph lane.** "Three independent score lists, fused per-call"
-//!   originally included a graph traversal over `entities`/`relations`,
-//!   but the schema has no entity-to-memory linkage today. Adding one
-//!   (likely `memories.metadata->>'entities'` with a GIN-indexed JSONB
-//!   array, or a join table) is a separate design decision and a
-//!   separate slice. This module ships the two lanes (semantic +
-//!   lexical) that the existing schema already supports.
+//! * **Graph lane.** Shipped 2026-05-12. The `memory_entities` join
+//!   table (migration 0007) backs entity↔memory linkage; the
+//!   writer-side helper [`link_memory_to_entities`] and the read-side
+//!   helper [`graph_search`] live in this module. The 1-hop outbound
+//!   expansion (via the `db::graph::Graph` chokepoint) happens in
+//!   `core::memory::recall`. Future entity-similarity over
+//!   `entities.embedding` (still NULL today) is a separate Phase-1
+//!   follow-up.
 //! * **Embedding worker.** `insert_memory` accepts an `Option<&[f32]>`
-//!   and stores NULL when absent. The first production caller will
-//!   route the body through the (future) embedding worker before
-//!   inserting. Tests use the deterministic SHA-256-seeded helper
-//!   documented in `core/tests/memory_recall_e2e.rs`.
+//!   and stores NULL when absent. `embed_query` shipped via Option O
+//!   in `core::memory::embed`; the production caller routes the body
+//!   through the embedding worker before inserting. Tests use the
+//!   deterministic SHA-256-seeded helper documented in
+//!   `core/tests/memory_recall_e2e.rs`.
 
 use std::fmt::Write as _;
 
@@ -336,6 +338,94 @@ where
         }
     }
     Ok(out)
+}
+
+/// Link a memory to a set of entities. Idempotent: re-linking the same
+/// pair is a no-op via ON CONFLICT DO NOTHING.
+///
+/// Returns the count of genuinely new links inserted — zero on a full
+/// re-link, partial counts on mixed (some new, some pre-existing).
+///
+/// Empty `entity_ids` is a fast-path no-op (no SQL issued, returns 0).
+/// FK violation (unknown memory_id or entity_id) surfaces as
+/// [`DbError::Query`]; ON CONFLICT DO NOTHING does not suppress FK
+/// failures — the whole batch fails atomically with zero rows inserted.
+///
+/// `executor` is generic over `sqlx::Executor` so the same helper works
+/// against `&PgPool` (production) and `&mut PgConnection` (test setup).
+pub async fn link_memory_to_entities<'e, E>(
+    executor: E,
+    memory_id: i64,
+    entity_ids: &[i64],
+) -> Result<u64, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if entity_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let result = sqlx::query(
+        "INSERT INTO memory_entities (memory_id, entity_id) \
+         SELECT $1::bigint, eid FROM unnest($2::bigint[]) AS t(eid) \
+         ON CONFLICT (memory_id, entity_id) DO NOTHING",
+    )
+    .bind(memory_id)
+    .bind(entity_ids)
+    .execute(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("link_memory_to_entities: {e}")))?;
+
+    Ok(result.rows_affected())
+}
+
+/// Graph lane: rank memories by how many of the supplied entity ids
+/// they're linked to.
+///
+/// Returns up to `k` memory ids in best-first order (highest hit count
+/// first; ties broken by smaller id for stable ordering). `entity_ids`
+/// is the *already-expanded* set (seeds + 1-hop neighbours); expansion
+/// happens in `core::memory::recall`, not here, because graph
+/// traversal goes through the [`crate::graph::Graph`] chokepoint.
+///
+/// Empty `entity_ids` → empty Vec, no SQL issued. Duplicates in
+/// `entity_ids` are harmless: the PK on `memory_entities(memory_id,
+/// entity_id)` guarantees one row per pair, so `COUNT(*)` is
+/// equivalent to `COUNT(DISTINCT entity_id)` regardless of input
+/// duplication. The caller's expansion logic should dedup via
+/// `HashSet` anyway, but this helper does not enforce it.
+pub async fn graph_search<'e, E>(
+    executor: E,
+    entity_ids: &[i64],
+    k: usize,
+) -> Result<Vec<i64>, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if k == 0 || entity_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        "SELECT memory_id \
+         FROM memory_entities \
+         WHERE entity_id = ANY($1::bigint[]) \
+         GROUP BY memory_id \
+         ORDER BY COUNT(*) DESC, memory_id ASC \
+         LIMIT $2",
+    )
+    .bind(entity_ids)
+    .bind(limit_as_i64(k))
+    .fetch_all(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("graph_search: {e}")))?;
+
+    rows.into_iter()
+        .map(|r| {
+            r.try_get::<i64, _>(0)
+                .map_err(|e| DbError::Query(format!("decode memory_id: {e}")))
+        })
+        .collect()
 }
 
 /// Format a `Vec<f32>` as the canonical pgvector text representation.

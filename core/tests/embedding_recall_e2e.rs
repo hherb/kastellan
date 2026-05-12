@@ -455,6 +455,7 @@ fn full_text_to_recall_flow_uses_embed_query_then_recall() {
             &RecallParams {
                 query_text: None,
                 query_embedding: Some(&emb),
+                seed_entity_ids: None,
                 k: 3,
                 modes: RecallModes::SEMANTIC_ONLY,
             },
