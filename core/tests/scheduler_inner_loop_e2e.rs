@@ -412,14 +412,17 @@ async fn happy_path_one_plan_returns_completed() {
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
     let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
 
-    let outcome = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
         .unwrap();
 
-    match outcome {
+    match result.outcome {
         Outcome::Completed(v) => assert_eq!(v["body"], "pong"),
         o => panic!("expected Completed, got {:?}", o),
     }
+    // Spec §7 counter pin: one terminal plan, zero dispatch.
+    assert_eq!(result.plan_count, 1);
+    assert_eq!(result.dispatch_count, 0);
 }
 
 /// (b) Plan 1 dispatches a step that fails (no entry in dispatcher
@@ -443,14 +446,18 @@ async fn tool_fail_then_recover_returns_completed() {
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
     let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
 
-    let outcome = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
         .unwrap();
 
-    match outcome {
+    match result.outcome {
         Outcome::Completed(v) => assert_eq!(v["body"], "recovered"),
         o => panic!("expected Completed (after recovery), got {:?}", o),
     }
+    // Spec §7 counter pin: 2 plans (failing + recovery), 1 dispatch
+    // attempt (the failing step under plan 1; plan 2 is terminal).
+    assert_eq!(result.plan_count, 2);
+    assert_eq!(result.dispatch_count, 1);
 }
 
 /// (c) Formulator returns 3 non-terminal plans; cap is 3. After
@@ -477,17 +484,20 @@ async fn plan_iteration_cap_exhausted_returns_failed() {
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
     let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
 
-    let outcome = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
         .unwrap();
 
-    match outcome {
+    match result.outcome {
         Outcome::Failed(s) => assert!(
             s.contains("plan_iteration_cap_exceeded"),
             "expected cap message, got: {s}"
         ),
         o => panic!("expected Failed, got {:?}", o),
     }
+    // Spec §7 counter pin: cap=3 plans each ran a failing step.
+    assert_eq!(result.plan_count, 3);
+    assert_eq!(result.dispatch_count, 3);
 }
 
 /// (d) The inner loop is running in a spawned task. While iteration 1
@@ -542,12 +552,17 @@ async fn cancel_mid_execution_returns_cancelled() {
     // the top-of-loop `observe_state` for iter 2 catches the cancellation.
     release.notify_one();
 
-    let outcome = h.await.unwrap().unwrap();
+    let result = h.await.unwrap().unwrap();
     assert!(
-        matches!(outcome, Outcome::Cancelled),
+        matches!(result.outcome, Outcome::Cancelled),
         "expected Cancelled, got: {:?}",
-        outcome
+        result.outcome
     );
+    // Spec §7 counter pin: plan 1 was formulated and its step ran
+    // (paused on the barrier, then completed Ok before the top-of-loop
+    // cancellation check fired on iter 2). dispatch_count == 1.
+    assert_eq!(result.plan_count, 1);
+    assert_eq!(result.dispatch_count, 1);
 }
 
 /// Dispatcher that signals on first call, waits for a release, then

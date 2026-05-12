@@ -839,7 +839,8 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         assert_eq!(result_body, marker, "result.body must equal marker; got {result_body:?}");
 
         // Audit-log multiset. Approve verdict + non-terminal plan A's
-        // outcome row, plus the canonical bring-up.
+        // outcome row, plus the canonical bring-up + spec §7 scheduler
+        // lifecycle rows around the task.
         let m = audit_multiset(&pool).await;
         assert_eq!(m.get(&("core".into(), "startup".into())), Some(&1),
                    "expected 1× core/startup; multiset = {m:?}");
@@ -851,23 +852,58 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
                    "expected 1× tool:shell-exec/shell.exec (the echo step); multiset = {m:?}");
         assert_eq!(m.get(&("scheduler".into(), "plan.outcome".into())), Some(&1),
                    "expected 1× scheduler/plan.outcome (only plan A executed steps); multiset = {m:?}");
+        // Spec §7: one running-transition row + one terminal-state row
+        // + one finalize summary row per task.
+        assert_eq!(m.get(&("scheduler".into(), "task.running".into())), Some(&1),
+                   "expected 1× scheduler/task.running (claim_one transition); multiset = {m:?}");
+        assert_eq!(m.get(&("scheduler".into(), "task.completed".into())), Some(&1),
+                   "expected 1× scheduler/task.completed (happy-path terminal); multiset = {m:?}");
+        assert_eq!(m.get(&("scheduler".into(), "task.finalize".into())), Some(&1),
+                   "expected 1× scheduler/task.finalize (per-task summary); multiset = {m:?}");
 
         // Total row count. The multiset above pins individual (actor,
         // action) presence and count, but does NOT catch *unexpected*
-        // additional rows from a future audit-emitting refactor (e.g.
-        // a `scheduler/task.<state>` lifecycle row, spec §7). When
-        // such a row lands, the developer will see this exact
-        // assertion fail and update both the multiset and the total.
+        // additional rows from a future audit-emitting refactor. When
+        // a new scheduler-emitted row lands, the developer will see
+        // this exact assertion fail and update both the multiset and
+        // the total.
         let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
             .fetch_one(&pool)
             .await
             .expect("count audit_log");
-        let expected_total: i64 = 1 + 2 + 2 + 1 + 1; // = 7
+        let expected_total: i64 = 1 + 2 + 2 + 1 + 1 + 1 + 1 + 1; // = 10
         assert_eq!(
             total.0, expected_total,
             "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
             total.0
         );
+
+        // Spec §7 finalize payload spot-checks. Pins the headline
+        // aggregate fields so a future refactor that drops one (or
+        // accidentally renames `total_dispatch_calls` to `n_dispatch`)
+        // fails the test instead of silently degrading observation.
+        let finalize_payload: (sqlx::types::Json<serde_json::Value>,) = sqlx::query_as(
+            "SELECT payload FROM audit_log \
+             WHERE actor = 'scheduler' AND action = 'task.finalize' LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("select task.finalize row");
+        let fp = &finalize_payload.0.0;
+        assert_eq!(fp["state"], "completed",
+                   "task.finalize.state should be 'completed'; got {fp:?}");
+        assert_eq!(fp["plan_count"], 2,
+                   "task.finalize.plan_count should be 2 (one non-terminal + one terminal plan); got {fp:?}");
+        assert_eq!(fp["total_llm_calls"], 2,
+                   "task.finalize.total_llm_calls should be 2; got {fp:?}");
+        assert_eq!(fp["total_dispatch_calls"], 1,
+                   "task.finalize.total_dispatch_calls should be 1 (single echo step under plan A); got {fp:?}");
+        assert!(fp["total_duration_ms"].is_number(),
+                "task.finalize.total_duration_ms must be a number; got {fp:?}");
+        assert!(fp["started_at"].is_string(),
+                "task.finalize.started_at must be an RFC 3339 string; got {fp:?}");
+        assert!(fp["finished_at"].is_string(),
+                "task.finalize.finished_at must be an RFC 3339 string; got {fp:?}");
 
         pool.close().await;
     });
@@ -1033,6 +1069,15 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
                    "expected 3× tool:shell-exec/shell.exec (one per denied dispatch); multiset = {m:?}");
         assert_eq!(m.get(&("scheduler".into(), "plan.outcome".into())), Some(&3),
                    "expected 3× scheduler/plan.outcome (one per non-terminal plan); multiset = {m:?}");
+        // Spec §7: one running-transition + one terminal-state +
+        // one finalize summary per task. Terminal state for plan-cap
+        // failure is `task.failed`.
+        assert_eq!(m.get(&("scheduler".into(), "task.running".into())), Some(&1),
+                   "expected 1× scheduler/task.running (claim_one transition); multiset = {m:?}");
+        assert_eq!(m.get(&("scheduler".into(), "task.failed".into())), Some(&1),
+                   "expected 1× scheduler/task.failed (plan-cap exhaustion terminal); multiset = {m:?}");
+        assert_eq!(m.get(&("scheduler".into(), "task.finalize".into())), Some(&1),
+                   "expected 1× scheduler/task.finalize (per-task summary); multiset = {m:?}");
 
         // Total row count — catches unexpected additional audit rows.
         // See the matching comment in the happy-path test.
@@ -1040,12 +1085,32 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
             .fetch_one(&pool)
             .await
             .expect("count audit_log");
-        let expected_total: i64 = 1 + 3 + 3 + 3 + 3; // = 13
+        let expected_total: i64 = 1 + 3 + 3 + 3 + 3 + 1 + 1 + 1; // = 16
         assert_eq!(
             total.0, expected_total,
             "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
             total.0
         );
+
+        // Spec §7 finalize payload spot-check on the failure path.
+        // total_dispatch_calls must equal 3 — one per iteration's
+        // POLICY_DENIED step. plan_count == 3 (cap). state == "failed".
+        let finalize_payload: (sqlx::types::Json<serde_json::Value>,) = sqlx::query_as(
+            "SELECT payload FROM audit_log \
+             WHERE actor = 'scheduler' AND action = 'task.finalize' LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("select task.finalize row");
+        let fp = &finalize_payload.0.0;
+        assert_eq!(fp["state"], "failed",
+                   "task.finalize.state should be 'failed'; got {fp:?}");
+        assert_eq!(fp["plan_count"], 3,
+                   "task.finalize.plan_count should equal cap (3); got {fp:?}");
+        assert_eq!(fp["total_llm_calls"], 3,
+                   "task.finalize.total_llm_calls should be 3; got {fp:?}");
+        assert_eq!(fp["total_dispatch_calls"], 3,
+                   "task.finalize.total_dispatch_calls should be 3 (one per denied iter); got {fp:?}");
 
         pool.close().await;
     });

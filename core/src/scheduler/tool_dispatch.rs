@@ -245,9 +245,11 @@ pub fn map_dispatch_result(
 
 /// Logical actor string used in `audit_log` rows that the dispatcher
 /// itself writes (i.e. rows for short-circuit paths that never reach
-/// the `tool_host::dispatch` chokepoint). Lifted to a constant so a
-/// future rename can't drift between the writer and any reader.
-const SCHEDULER_AUDIT_ACTOR: &str = "scheduler";
+/// the `tool_host::dispatch` chokepoint). Sourced from the canonical
+/// constant in [`super::audit`] so the dispatcher's short-circuit
+/// rows and the lane runner's lifecycle rows can't drift on the
+/// actor string.
+use super::audit::SCHEDULER_AUDIT_ACTOR;
 
 /// `action` value for an `audit_log` row written when
 /// [`ToolRegistry::lookup`] missed: the planner named a tool that
