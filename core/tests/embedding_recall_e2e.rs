@@ -1,8 +1,11 @@
 //! End-to-end test for `core::memory::embed_query` and the full
 //! free-text-to-recall flow.
 //!
-//! Per-test Postgres cluster (8th duplication site; issue #15 tracks
-//! the hoist). Per-test hand-rolled TCP mock for `/embeddings`.
+//! Bring-up scaffolding + deterministic embedding seed now live in
+//! `hhagent-tests-common` (issue #15). The mock LLM TCP listener
+//! remains in-file because its `ServedRequest` shape varies by site
+//! (path field here; absent in other mocks); folding it into the
+//! shared crate would force a single shape on every consumer.
 //!
 //! Four cases:
 //!
@@ -20,282 +23,30 @@
 //!      `embed_query("alpha bravo charlie")` → recall(SEMANTIC_ONLY)
 //!      → top-1 is memory A; one `actor='llm:router'` row in audit
 //!      log.
-//!
-//! Skips silently with `[SKIP]` lines on hosts without Postgres or a
-//! reachable supervisor; `cargo test -- --nocapture` to see them.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, Instant};
-
-use hhagent_db::memories::{insert_memory, EMBEDDING_DIM};
-use hhagent_db::{
-    build_initdb_argv, build_postgresql_auto_conf, default_pg_bin_dir_candidates,
-    default_socket_dir, find_pg_bin_dir, InitDbOptions, PgConfigOptions,
-};
-use hhagent_supervisor::specs::postgres_service_spec;
-use hhagent_supervisor::{default_probe, default_supervisor, ServiceStatus, Supervisor};
+use std::time::Duration;
 
 use hhagent_core::memory::{embed_query, recall, MemoryError, RecallModes, RecallParams};
+use hhagent_db::memories::{insert_memory, EMBEDDING_DIM};
 use hhagent_llm_router::{Router, RouterConfig};
+use hhagent_tests_common::{
+    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, text_to_embedding,
+    unique_suffix,
+};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-// ---- PG bring-up helpers (copied verbatim from memory_recall_e2e.rs;
-//      8th duplication site; issue #15 tracks the hoist) ---------------
-
-fn skip_if_no_supervisor() -> bool {
-    match default_probe() {
-        Ok(()) => false,
-        Err(e) => {
-            eprintln!("\n[SKIP] supervisor probe failed: {e}\n");
-            true
-        }
-    }
-}
-
-fn pg_bin_dir_or_skip() -> Option<PathBuf> {
-    match find_pg_bin_dir(&default_pg_bin_dir_candidates()) {
-        Ok(dir) => Some(dir),
-        Err(e) => {
-            eprintln!("\n[SKIP] no Postgres install found: {e}\n");
-            None
-        }
-    }
-}
-
-fn unique_suffix() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{}-{}", std::process::id(), nanos)
-}
-
-fn unique_temp_root(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("hhagent-{}-{}", label, unique_suffix()))
-}
-
-fn current_username() -> String {
-    if let Some(u) = std::env::var_os("USER") {
-        let s = u.to_string_lossy().into_owned();
-        if !s.is_empty() {
-            return s;
-        }
-    }
-    if let Ok(out) = Command::new("whoami").output() {
-        if out.status.success() {
-            return String::from_utf8_lossy(&out.stdout).trim().to_string();
-        }
-    }
-    "hhagent".into()
-}
-
-struct ServiceGuard {
-    sup: Box<dyn Supervisor>,
-    name: String,
-}
-impl Drop for ServiceGuard {
-    fn drop(&mut self) {
-        let _ = self.sup.stop(&self.name);
-        let _ = self.sup.uninstall(&self.name);
-    }
-}
-
-struct PathGuard {
-    path: PathBuf,
-}
-impl Drop for PathGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-fn wait_for_status<F: Fn(ServiceStatus) -> bool>(
-    sup: &dyn Supervisor,
-    name: &str,
-    predicate: F,
-    timeout: Duration,
-) -> Result<ServiceStatus, String> {
-    let start = Instant::now();
-    let mut last = sup.status(name).map_err(|e| format!("status: {e}"))?;
-    loop {
-        if predicate(last) {
-            return Ok(last);
-        }
-        if start.elapsed() > timeout {
-            return Err(format!("timeout {:?}; last={last:?}", timeout));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-        last = sup.status(name).map_err(|e| format!("status: {e}"))?;
-    }
-}
-
-fn wait_for_socket(socket_dir: &Path, timeout: Duration) -> Result<(), String> {
-    let target = socket_dir.join(".s.PGSQL.5432");
-    let start = Instant::now();
-    loop {
-        if target.exists() {
-            return Ok(());
-        }
-        if start.elapsed() > timeout {
-            return Err(format!("timeout {:?} waiting for {}", timeout, target.display()));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// Bring up a per-test PG cluster (initdb + auto.conf + supervisor
-/// install + start). Returns the connection spec and the cleanup
-/// guards. Same shape as the helper in `audit_dispatch_e2e.rs` and
-/// `memory_recall_e2e.rs` — issue #15 will eventually hoist this into a
-/// shared `tests-common` dev-dep crate.
-fn bring_up_pg_cluster(
-    bin_dir: &Path,
-    suffix: &str,
-) -> (
-    hhagent_db::conn::ConnectSpec,
-    (ServiceGuard, PathGuard, PathGuard),
-) {
-    let postgres = bin_dir.join("postgres");
-    let initdb = bin_dir.join("initdb");
-
-    let data_root = unique_temp_root("embr-d");
-    let data_guard = PathGuard {
-        path: data_root.clone(),
-    };
-    let data_dir = data_root.join("data");
-    let socket_dir = default_socket_dir(&data_dir);
-    let log_dir = unique_temp_root("embr-l");
-    std::fs::create_dir_all(&log_dir).expect("create log dir");
-    let log_guard = PathGuard {
-        path: log_dir.clone(),
-    };
-
-    let user = current_username();
-    let argv = build_initdb_argv(
-        &initdb,
-        &InitDbOptions {
-            data_dir: data_dir.clone(),
-            username: user.clone(),
-            ..InitDbOptions::default()
-        },
-    );
-    let out = Command::new(&argv[0])
-        .args(&argv[1..])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LC_ALL", "C")
-        .output()
-        .expect("spawn initdb");
-    assert!(
-        out.status.success(),
-        "initdb failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    std::fs::create_dir(&socket_dir).expect("create socket dir");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&socket_dir).unwrap().permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(&socket_dir, perms).unwrap();
-    }
-    std::fs::write(
-        data_dir.join("postgresql.auto.conf"),
-        build_postgresql_auto_conf(&PgConfigOptions {
-            socket_dir: socket_dir.clone(),
-            ..PgConfigOptions::default()
-        }),
-    )
-    .expect("write postgresql.auto.conf");
-
-    let mut spec = postgres_service_spec(&postgres, &data_dir, &log_dir);
-    spec.name = format!("hhagent-supervisor-test-pg-embr-{suffix}");
-    assert!(spec.name.len() <= 200);
-    spec.stdout_log = Some(log_dir.join(format!("{}.out", spec.name)));
-    spec.stderr_log = Some(log_dir.join(format!("{}.err", spec.name)));
-
-    let sup = default_supervisor();
-    let service_guard = ServiceGuard {
-        sup: default_supervisor(),
-        name: spec.name.clone(),
-    };
-    sup.install(&spec).expect("install pg");
-    sup.start(&spec.name).expect("start pg");
-    wait_for_status(
-        sup.as_ref(),
-        &spec.name,
-        |s| s == ServiceStatus::Active,
-        Duration::from_secs(15),
-    )
-    .expect("pg active");
-    wait_for_socket(&socket_dir, Duration::from_secs(15)).expect("pg socket");
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(
-        sup.status(&spec.name).unwrap(),
-        ServiceStatus::Active,
-        "pg flap"
-    );
-
-    let conn_spec = hhagent_db::conn::ConnectSpec {
-        socket_dir: socket_dir.clone(),
-        user: user.clone(),
-        database: hhagent_db::conn::DEFAULT_APPLICATION_DB.to_string(),
-    };
-    (conn_spec, (service_guard, data_guard, log_guard))
-}
-
-/// Deterministic, dependency-free embedding stub for tests.
-///
-/// Hashes the input text with SHA-256 to produce a 32-byte seed, then
-/// runs an xorshift64 PRNG to fill 1024 floats in `[-1, 1]`, and
-/// finally L2-normalises so the cosine-similarity calculation is
-/// numerically clean.
-///
-/// Copied verbatim from `memory_recall_e2e.rs`; issue #15 tracks the
-/// workspace-level hoist.
-fn text_to_embedding(text: &str) -> Vec<f32> {
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(text.as_bytes());
-    let mut seed: u64 = 0;
-    for (i, b) in digest[..8].iter().enumerate() {
-        seed |= (*b as u64) << (i * 8);
-    }
-    if seed == 0 {
-        seed = 1;
-    }
-
-    let mut state = seed;
-    let mut v: Vec<f32> = Vec::with_capacity(EMBEDDING_DIM);
-    for _ in 0..EMBEDDING_DIM {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let bits = (state >> 40) as u32;
-        let unit = (bits as f32) / ((1u32 << 24) as f32);
-        v.push(unit * 2.0 - 1.0);
-    }
-
-    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in v.iter_mut() {
-            *x /= norm;
-        }
-    }
-    v
-}
-
-// ---- Mock helpers (copied verbatim from
-//      llm-router/tests/embedding_backend_e2e.rs; issue #15) -----------
+// ---- Mock LLM HTTP listener (site-specific shape) ---------------------
 
 #[derive(Debug, Clone)]
 struct ServedRequest {
+    #[allow(dead_code)]
     path: String,
+    #[allow(dead_code)]
     body: String,
 }
 
@@ -314,9 +65,7 @@ impl CannedResponse {
     }
 }
 
-async fn spawn_one_shot_mock(
-    canned: CannedResponse,
-) -> (String, oneshot::Receiver<ServedRequest>) {
+async fn spawn_one_shot_mock(canned: CannedResponse) -> (String, oneshot::Receiver<ServedRequest>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -341,8 +90,8 @@ async fn spawn_one_shot_mock(
             }
             buf.extend_from_slice(&tmp[..n]);
             if let Some(headers_end) = find_double_crlf(&buf) {
-                let header_str = std::str::from_utf8(&buf[..headers_end])
-                    .expect("headers are utf-8");
+                let header_str =
+                    std::str::from_utf8(&buf[..headers_end]).expect("headers are utf-8");
                 let content_length = header_content_length(header_str).unwrap_or(0);
                 let body_start = headers_end + 4;
                 let total_needed = body_start + content_length;
@@ -403,8 +152,6 @@ fn header_content_length(headers: &str) -> Option<usize> {
     None
 }
 
-// ---- Local router-builder helper -------------------------------------
-
 fn build_router_pointing_at(base_url: &str) -> Router {
     let cfg = RouterConfig {
         local_url: base_url.to_string(),
@@ -418,10 +165,6 @@ fn build_router_pointing_at(base_url: &str) -> Router {
     Router::new(cfg).expect("build router")
 }
 
-// ---- Shared async PG setup helper -----------------------------------
-
-/// Run probe (applies migrations + writes bring-up row), then connect
-/// the runtime pool. Returns pool.
 async fn setup_pg(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
     hhagent_db::probe::run(
         conn_spec,
@@ -437,14 +180,12 @@ async fn setup_pg(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
         .expect("connect runtime pool")
 }
 
-// ---- Build a canned 512-float vector for dim-mismatch tests ----------
-
 fn make_short_vec(n: usize) -> Vec<f32> {
     (0..n).map(|i| (i as f32) / (n as f32)).collect()
 }
 
 // ====================================================================
-// Test 1 — happy path: embed_query returns Vec<f32> of EMBEDDING_DIM
+// Test 1 — happy path
 // ====================================================================
 
 #[test]
@@ -458,7 +199,12 @@ fn embed_query_returns_vec_of_expected_dim() {
     };
 
     let suffix = unique_suffix();
-    let (conn_spec, _guards) = bring_up_pg_cluster(&bin_dir, &suffix);
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "embr-d",
+        "embr-l",
+        &format!("hhagent-supervisor-test-pg-embr-{suffix}"),
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -467,7 +213,7 @@ fn embed_query_returns_vec_of_expected_dim() {
         .expect("build tokio runtime");
 
     rt.block_on(async {
-        let pool = setup_pg(&conn_spec).await;
+        let pool = setup_pg(&cluster.conn_spec).await;
 
         let emb_vec = text_to_embedding("hello");
         assert_eq!(emb_vec.len(), EMBEDDING_DIM);
@@ -480,8 +226,12 @@ fn embed_query_returns_vec_of_expected_dim() {
             spawn_one_shot_mock(CannedResponse::ok_json(canned.to_string())).await;
         let router = build_router_pointing_at(&base_url);
 
-        let result = embed_query(&pool, &router, "hello").await.expect("embed_query ok");
-        assert_eq!(result.len(), EMBEDDING_DIM,
+        let result = embed_query(&pool, &router, "hello")
+            .await
+            .expect("embed_query ok");
+        assert_eq!(
+            result.len(),
+            EMBEDDING_DIM,
             "embed_query must return a vector of length {EMBEDDING_DIM}, got {}",
             result.len()
         );
@@ -505,7 +255,12 @@ fn embed_query_writes_llm_router_audit_row() {
     };
 
     let suffix = unique_suffix();
-    let (conn_spec, _guards) = bring_up_pg_cluster(&bin_dir, &suffix);
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "embr-d",
+        "embr-l",
+        &format!("hhagent-supervisor-test-pg-embr-{suffix}"),
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -514,7 +269,7 @@ fn embed_query_writes_llm_router_audit_row() {
         .expect("build tokio runtime");
 
     rt.block_on(async {
-        let pool = setup_pg(&conn_spec).await;
+        let pool = setup_pg(&cluster.conn_spec).await;
 
         let emb_vec = text_to_embedding("alpha bravo");
         let canned = serde_json::json!({
@@ -525,7 +280,9 @@ fn embed_query_writes_llm_router_audit_row() {
             spawn_one_shot_mock(CannedResponse::ok_json(canned.to_string())).await;
         let router = build_router_pointing_at(&base_url);
 
-        embed_query(&pool, &router, "alpha bravo").await.expect("embed_query ok");
+        embed_query(&pool, &router, "alpha bravo")
+            .await
+            .expect("embed_query ok");
 
         let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
             "SELECT actor, action, payload FROM audit_log \
@@ -543,14 +300,19 @@ fn embed_query_writes_llm_router_audit_row() {
         assert_eq!(payload["n_texts"], 1);
         assert_eq!(payload["dim"], 1024);
         assert_eq!(payload["backend"], "local");
-        assert!(payload["latency_ms"].is_u64(),
-            "latency_ms must be a JSON u64: {payload:?}");
+        assert!(
+            payload["latency_ms"].is_u64(),
+            "latency_ms must be a JSON u64: {payload:?}"
+        );
 
         // Privacy invariants — the text and embedding must not be in the row.
         let payload_str = serde_json::to_string(payload).unwrap();
         assert!(!payload_str.contains("\"input\""), "input leaked: {payload_str}");
         assert!(!payload_str.contains("alpha"), "user text leaked: {payload_str}");
-        assert!(!payload_str.contains("\"embedding\""), "embedding leaked: {payload_str}");
+        assert!(
+            !payload_str.contains("\"embedding\""),
+            "embedding leaked: {payload_str}"
+        );
 
         pool.close().await;
     });
@@ -571,7 +333,12 @@ fn embed_query_dim_mismatch_surfaces_typed_error_and_writes_no_audit_row() {
     };
 
     let suffix = unique_suffix();
-    let (conn_spec, _guards) = bring_up_pg_cluster(&bin_dir, &suffix);
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "embr-d",
+        "embr-l",
+        &format!("hhagent-supervisor-test-pg-embr-{suffix}"),
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -580,7 +347,7 @@ fn embed_query_dim_mismatch_surfaces_typed_error_and_writes_no_audit_row() {
         .expect("build tokio runtime");
 
     rt.block_on(async {
-        let pool = setup_pg(&conn_spec).await;
+        let pool = setup_pg(&cluster.conn_spec).await;
 
         // Mock returns a 512-float vector — wrong dim.
         let short_vec = make_short_vec(512);
@@ -596,7 +363,11 @@ fn embed_query_dim_mismatch_surfaces_typed_error_and_writes_no_audit_row() {
             .await
             .expect_err("dim must mismatch");
         match err {
-            MemoryError::EmbeddingDimMismatch { expected, actual, model } => {
+            MemoryError::EmbeddingDimMismatch {
+                expected,
+                actual,
+                model,
+            } => {
                 assert_eq!(expected, 1024);
                 assert_eq!(actual, 512);
                 assert_eq!(model, "embedding-test");
@@ -605,12 +376,11 @@ fn embed_query_dim_mismatch_surfaces_typed_error_and_writes_no_audit_row() {
         }
 
         // No audit row for the failure (chokepoint precedent).
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM audit_log WHERE actor = 'llm:router'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE actor = 'llm:router'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(n, 0, "failure must not write audit row");
 
         pool.close().await;
@@ -632,7 +402,12 @@ fn full_text_to_recall_flow_uses_embed_query_then_recall() {
     };
 
     let suffix = unique_suffix();
-    let (conn_spec, _guards) = bring_up_pg_cluster(&bin_dir, &suffix);
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "embr-d",
+        "embr-l",
+        &format!("hhagent-supervisor-test-pg-embr-{suffix}"),
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -641,7 +416,7 @@ fn full_text_to_recall_flow_uses_embed_query_then_recall() {
         .expect("build tokio runtime");
 
     rt.block_on(async {
-        let pool = setup_pg(&conn_spec).await;
+        let pool = setup_pg(&cluster.conn_spec).await;
 
         const BODY_A: &str = "alpha bravo charlie";
         const BODY_B: &str = "delta echo foxtrot";

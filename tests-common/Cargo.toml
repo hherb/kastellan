@@ -1,0 +1,29 @@
+[package]
+name        = "hhagent-tests-common"
+description = "Shared test fixtures: per-test Postgres bring-up, RAII guards, skip helpers, sandbox factory, mock LLM. Dev-dependency only."
+publish     = false
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+# This crate exists to deduplicate test scaffolding that was previously
+# byte-copied across eight integration tests (issue #15). It is consumed
+# from `[dev-dependencies]` only — never linked into a runtime binary.
+#
+# Dependency rationale: every helper here reaches across two-or-more
+# runtime crates (e.g. `bring_up_pg_cluster` glues `hhagent-db`'s initdb
+# argv builder to `hhagent-supervisor`'s `Supervisor` trait), so the
+# crate itself depends on the runtime crates whose surfaces it composes.
+# This is safe because `[dev-dependencies]` are excluded from the
+# downstream `cargo build` graph; no production binary picks up a
+# dependency on `hhagent-tests-common`.
+[dependencies]
+hhagent-db         = { path = "../db" }
+hhagent-supervisor = { path = "../supervisor" }
+hhagent-sandbox    = { path = "../sandbox" }
+serde_json         = { workspace = true }
+sha2               = { workspace = true }

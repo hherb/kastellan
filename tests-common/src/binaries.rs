@@ -1,0 +1,48 @@
+//! Workspace target-dir-aware binary discovery for integration tests
+//! that exec the workspace binaries.
+//!
+//! The compute is `CARGO_TARGET_DIR.unwrap_or(<workspace_root>/target)/debug/<name>`.
+//! `env!("CARGO_MANIFEST_DIR")` resolves at *compile time* to the
+//! manifest dir of this crate (`tests-common/`), and its parent is the
+//! workspace root because `tests-common` lives at the same depth as
+//! the runtime crates.
+//!
+//! All binaries are `cargo build --workspace` artifacts; callers
+//! `[SKIP]` cleanly when `exists()` returns `false` (i.e. the binary
+//! was not built yet — common on a freshly-cloned tree before the
+//! first `cargo build`).
+
+use std::path::PathBuf;
+
+/// Returns the path to `<workspace_root>/target/debug/<name>`,
+/// honouring `CARGO_TARGET_DIR` if set.
+///
+/// Existence is **not** checked — callers decide whether to skip,
+/// panic, or build on the fly.
+pub fn workspace_target_binary(name: &str) -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            manifest
+                .parent()
+                .expect("CARGO_MANIFEST_DIR has no parent — broken workspace layout")
+                .join("target")
+        });
+    target.join("debug").join(name)
+}
+
+/// Path to `hhagent-worker-shell-exec`.
+pub fn shell_exec_worker_binary() -> PathBuf {
+    workspace_target_binary("hhagent-worker-shell-exec")
+}
+
+/// Path to the agent core daemon (`hhagent`).
+pub fn core_binary() -> PathBuf {
+    workspace_target_binary("hhagent")
+}
+
+/// Path to the operator CLI (`hhagent-cli`).
+pub fn cli_binary() -> PathBuf {
+    workspace_target_binary("hhagent-cli")
+}

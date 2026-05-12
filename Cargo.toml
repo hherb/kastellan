@@ -7,6 +7,7 @@ members = [
     "sandbox",
     "supervisor",
     "protocol",
+    "tests-common",
     "workers/prelude",
     "workers/shell-exec",
 ]

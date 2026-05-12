@@ -845,10 +845,10 @@ dependencies = [
  "hhagent-protocol",
  "hhagent-sandbox",
  "hhagent-supervisor",
+ "hhagent-tests-common",
  "libc",
  "serde",
  "serde_json",
- "sha2",
  "sqlx",
  "tempfile",
  "thiserror",
@@ -864,6 +864,7 @@ version = "0.0.0"
 dependencies = [
  "aes-gcm",
  "hhagent-supervisor",
+ "hhagent-tests-common",
  "keyring",
  "serde",
  "serde_json",
@@ -916,6 +917,17 @@ dependencies = [
  "serde",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "hhagent-tests-common"
+version = "0.0.0"
+dependencies = [
+ "hhagent-db",
+ "hhagent-sandbox",
+ "hhagent-supervisor",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
