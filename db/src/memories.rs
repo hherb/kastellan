@@ -32,20 +32,22 @@
 //! sequential scan, which is fine at the corpus sizes this slice is
 //! exercised against (the integration test seeds 3 rows).
 //!
-//! ## Phase-1 holes deliberately left
+//! ## Phase-1 surface
 //!
-//! * **Graph lane.** "Three independent score lists, fused per-call"
-//!   originally included a graph traversal over `entities`/`relations`,
-//!   but the schema has no entity-to-memory linkage today. Adding one
-//!   (likely `memories.metadata->>'entities'` with a GIN-indexed JSONB
-//!   array, or a join table) is a separate design decision and a
-//!   separate slice. This module ships the two lanes (semantic +
-//!   lexical) that the existing schema already supports.
+//! * **Graph lane.** Shipped 2026-05-12. The `memory_entities` join
+//!   table (migration 0007) backs entity↔memory linkage; the
+//!   writer-side helper [`link_memory_to_entities`] and the read-side
+//!   helper [`graph_search`] live in this module. The 1-hop outbound
+//!   expansion (via the `db::graph::Graph` chokepoint) happens in
+//!   `core::memory::recall`. Future entity-similarity over
+//!   `entities.embedding` (still NULL today) is a separate Phase-1
+//!   follow-up.
 //! * **Embedding worker.** `insert_memory` accepts an `Option<&[f32]>`
-//!   and stores NULL when absent. The first production caller will
-//!   route the body through the (future) embedding worker before
-//!   inserting. Tests use the deterministic SHA-256-seeded helper
-//!   documented in `core/tests/memory_recall_e2e.rs`.
+//!   and stores NULL when absent. `embed_query` shipped via Option O
+//!   in `core::memory::embed`; the production caller routes the body
+//!   through the embedding worker before inserting. Tests use the
+//!   deterministic SHA-256-seeded helper documented in
+//!   `core/tests/memory_recall_e2e.rs`.
 
 use std::fmt::Write as _;
 

@@ -185,7 +185,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
     // it and sequencing makes the error path simpler — a failure in
     // either lane short-circuits the whole call rather than leaving
     // a half-completed future to abort.
-    let mut lane_lists: Vec<Vec<i64>> = Vec::with_capacity(2);
+    let mut lane_lists: Vec<Vec<i64>> = Vec::with_capacity(3);
 
     if params.modes.semantic {
         match params.query_embedding {
