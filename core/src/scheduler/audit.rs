@@ -57,10 +57,15 @@
 //!   `tasks.state`; this is the population of races where a producer
 //!   cancel beat the scheduler's finalize.
 //!
-//! Filed as a follow-up (see HANDOVER "next pickups"): when crash
-//! recovery / `task.crashed` row emission lands, the same posture
-//! holds — the audit row records the sweep's *intent*, not necessarily
-//! the post-UPDATE state of every row it claims to have crashed.
+//! The same posture applies to crash recovery: the
+//! [`super::crash_recovery::sweep_and_audit`] startup helper emits one
+//! `scheduler/task.crashed` row per recovered task. That row records
+//! the sweep's *intent* — `tasks::sweep_crashed`'s UPDATE returns the
+//! recovered rows via `RETURNING`, so the audit row reflects rows the
+//! sweep actually flipped. (A producer-side `mark_cancelled` racing
+//! the sweep is rejected at the DB layer because the sweep already
+//! transitioned the row out of `running`, so this concrete race does
+//! not produce divergence.)
 
 use hhagent_db::tasks::Lane;
 use serde_json::{json, Value};

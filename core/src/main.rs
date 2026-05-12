@@ -47,9 +47,14 @@ async fn main() -> Result<()> {
     let mirror = start_audit_mirror(pool.clone()).await;
 
     // Crash sweep: any task left in 'running' from a previous daemon
-    // instance whose lease has elapsed gets marked 'crashed'. Idempotent.
-    if let Err(e) = hhagent_db::tasks::sweep_crashed(&pool).await {
-        tracing::warn!(error = %e, "tasks::sweep_crashed failed (non-fatal)");
+    // instance whose lease has elapsed gets marked 'crashed'. Each
+    // recovered task also gets one `scheduler/task.crashed` audit row
+    // so observation-phase queries see the lifecycle transition.
+    // Idempotent.
+    match hhagent_core::scheduler::crash_recovery::sweep_and_audit(&pool).await {
+        Ok(0) => {}
+        Ok(n) => info!(crashed_tasks = n, "crash_recovery: swept tasks to 'crashed'"),
+        Err(e) => tracing::warn!(error = %e, "crash_recovery::sweep_and_audit failed (non-fatal)"),
     }
 
     // Load every prompts/*.md, hash, upsert into agent_prompts.

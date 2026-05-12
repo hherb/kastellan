@@ -309,8 +309,9 @@ async fn back_dated_lease_is_swept_to_crashed() {
     .unwrap();
 
     // The next daemon's startup sweep transitions expired-lease running rows to crashed.
-    let n = tasks::sweep_crashed(&pool).await.unwrap();
-    assert_eq!(n, 1, "sweep_crashed should have swept exactly 1 task");
+    let swept = tasks::sweep_crashed(&pool).await.unwrap();
+    assert_eq!(swept.len(), 1, "sweep_crashed should have swept exactly 1 task");
+    assert_eq!(swept[0].id, id, "swept row should be the one we back-dated");
     assert_eq!(
         tasks::observe_state(&pool, id).await.unwrap(),
         "crashed",
@@ -318,9 +319,120 @@ async fn back_dated_lease_is_swept_to_crashed() {
     );
 
     // Idempotent: a second sweep finds nothing to sweep.
+    assert!(
+        tasks::sweep_crashed(&pool).await.unwrap().is_empty(),
+        "second sweep_crashed should return an empty vec (idempotent)"
+    );
+}
+
+/// Pins the audit-row contract for the startup sweep, as a regression
+/// against [`hhagent_core::scheduler::crash_recovery::sweep_and_audit`].
+/// Two crashed tasks are planted (one on Fast, one on Long) so the
+/// per-row emission and lane preservation are both pinned in one test.
+///
+/// Asserts:
+///   1. `sweep_and_audit` returns the number of recovered rows.
+///   2. Each recovered task gets exactly one `audit_log` row with
+///      `actor='scheduler'` and `action='task.crashed'`, whose payload
+///      is the canonical lifecycle shape `{task_id, lane, plan_count}`
+///      (matches `audit::build_lifecycle_payload` — proves the helper
+///      is reused, not re-implemented).
+///   3. The lane field round-trips per task (Fast → "fast", Long → "long").
+///   4. Idempotency: a second call returns 0 and writes no new rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_and_audit_emits_one_task_crashed_row_per_recovered_task() {
+    let Some((pool, _guards)) = bring_up_pg("audit").await else {
+        return; // [SKIP]
+    };
+
+    use hhagent_db::tasks::{self, insert_pending, Lane};
+
+    // ── Plant two running-and-expired tasks on distinct lanes ────────
+    async fn plant_expired(pool: &sqlx::PgPool, lane: Lane) -> i64 {
+        let id = insert_pending(pool, lane, serde_json::json!({})).await.unwrap();
+        tasks::claim_one(pool, lane, 60).await.unwrap().unwrap();
+        sqlx::query(
+            "UPDATE tasks SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+    let fast_id = plant_expired(&pool, Lane::Fast).await;
+    let long_id = plant_expired(&pool, Lane::Long).await;
+
+    // Baseline: count audit rows whose actor='scheduler' and action='task.crashed'.
+    // The bring-up probe already wrote a 'core'/'startup' row; an earlier test
+    // run cannot bleed into this since each test owns its own PG cluster.
+    let baseline_crashed_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log \
+         WHERE actor = 'scheduler' AND action = 'task.crashed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(baseline_crashed_rows, 0, "no task.crashed rows before the sweep");
+
+    // ── Act ──────────────────────────────────────────────────────────
+    let n = hhagent_core::scheduler::crash_recovery::sweep_and_audit(&pool)
+        .await
+        .expect("sweep_and_audit");
+
+    // ── Assert state + count ────────────────────────────────────────
+    assert_eq!(n, 2, "two expired-lease tasks were planted; both must be swept");
+    assert_eq!(tasks::observe_state(&pool, fast_id).await.unwrap(), "crashed");
+    assert_eq!(tasks::observe_state(&pool, long_id).await.unwrap(), "crashed");
+
+    // ── Assert audit row count + per-row payload shape ──────────────
+    let crashed_rows: Vec<(i64, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, payload FROM audit_log \
+         WHERE actor = 'scheduler' AND action = 'task.crashed' \
+         ORDER BY id ASC",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert_eq!(
-        tasks::sweep_crashed(&pool).await.unwrap(),
-        0,
-        "second sweep_crashed should return 0 (idempotent)"
+        crashed_rows.len(),
+        2,
+        "one task.crashed audit row per recovered task"
+    );
+
+    // Map by task_id so the assertion is independent of insertion order.
+    let by_id: std::collections::HashMap<i64, &serde_json::Value> = crashed_rows
+        .iter()
+        .map(|(_, p)| (p["task_id"].as_i64().expect("task_id is integer"), p))
+        .collect();
+
+    let fast_payload = by_id.get(&fast_id).expect("audit row for fast task");
+    assert_eq!(fast_payload["lane"], "fast", "fast task → lane='fast'");
+    assert_eq!(fast_payload["plan_count"], 0, "freshly-claimed: plan_count=0");
+    assert_eq!(
+        fast_payload.as_object().unwrap().len(),
+        3,
+        "lifecycle payload has exactly task_id+lane+plan_count, no extras"
+    );
+
+    let long_payload = by_id.get(&long_id).expect("audit row for long task");
+    assert_eq!(long_payload["lane"], "long", "long task → lane='long'");
+    assert_eq!(long_payload["plan_count"], 0);
+
+    // ── Idempotency: a second call sweeps nothing and writes nothing ──
+    let second = hhagent_core::scheduler::crash_recovery::sweep_and_audit(&pool)
+        .await
+        .expect("sweep_and_audit idempotent");
+    assert_eq!(second, 0, "second call: nothing to sweep");
+    let final_crashed_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log \
+         WHERE actor = 'scheduler' AND action = 'task.crashed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        final_crashed_rows, 2,
+        "idempotent second sweep must not write new audit rows"
     );
 }

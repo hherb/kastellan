@@ -268,19 +268,28 @@ pub async fn mark_failed_running(pool: &PgPool, task_id: i64) -> Result<bool, Db
 
 /// Startup sweep. Marks every task whose lease has elapsed but is
 /// still `running` as `crashed`. Idempotent; safe to re-run.
-/// Returns the number of rows updated.
-pub async fn sweep_crashed(pool: &PgPool) -> Result<u64, DbError> {
-    let r = sqlx::query(
+///
+/// Returns the recovered rows (`RETURNING *`) so the caller can emit
+/// one `scheduler/task.crashed` audit row per task. The post-UPDATE
+/// state ('crashed') and post-UPDATE `finished_at` (now()) are included
+/// — that's the value RETURNING expressly returns, distinct from the
+/// pre-UPDATE row.
+///
+/// An empty vec means there was nothing to sweep (the idempotent case).
+pub async fn sweep_crashed(pool: &PgPool) -> Result<Vec<Task>, DbError> {
+    let rows = sqlx::query(
         "UPDATE tasks \
          SET state = 'crashed', \
              finished_at = now(), \
              updated_at = now() \
-         WHERE state = 'running' AND lease_expires_at < now()",
+         WHERE state = 'running' AND lease_expires_at < now() \
+         RETURNING id, state, lane, created_at, updated_at, started_at, \
+                   finished_at, lease_expires_at, plan_count, payload, result",
     )
-    .execute(pool)
+    .fetch_all(pool)
     .await
     .map_err(|e| DbError::Query(format!("tasks sweep_crashed: {e}")))?;
-    Ok(r.rows_affected())
+    rows.iter().map(decode_task_row).collect()
 }
 
 /// Mirror `tasks.plan_count` from the inner loop after each

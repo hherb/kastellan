@@ -1460,16 +1460,39 @@ async fn tasks_lifecycle_e2e() {
         .expect("back-date lease_expires_at");
 
     let swept = sweep_crashed(&pool).await.expect("sweep_crashed");
-    assert_eq!(swept, 1, "sweep_crashed must find exactly one expired lease");
+    assert_eq!(
+        swept.len(),
+        1,
+        "sweep_crashed must find exactly one expired lease"
+    );
+    // The returned row carries the full metadata the audit-emission layer
+    // needs to construct a `scheduler/task.crashed` lifecycle row without
+    // a second SELECT. Pinning these fields here protects the contract.
+    assert_eq!(swept[0].id, id3, "swept row must carry the original task id");
+    assert_eq!(swept[0].lane, Lane::Fast, "swept row must preserve lane");
+    assert_eq!(
+        swept[0].state, "crashed",
+        "swept row must reflect the post-UPDATE state (RETURNING returns the new value)"
+    );
+    assert_eq!(
+        swept[0].plan_count, 0,
+        "freshly-claimed task has plan_count=0"
+    );
+    assert!(
+        swept[0].finished_at.is_some(),
+        "RETURNING must include the now()-stamped finished_at the UPDATE set"
+    );
     assert_eq!(
         observe_state(&pool, id3).await.expect("observe_state id3"),
         "crashed"
     );
 
     // Idempotent: no running rows left with an expired lease.
-    assert_eq!(
-        sweep_crashed(&pool).await.expect("sweep_crashed idempotent"),
-        0,
+    assert!(
+        sweep_crashed(&pool)
+            .await
+            .expect("sweep_crashed idempotent")
+            .is_empty(),
         "second sweep_crashed must find nothing"
     );
 
