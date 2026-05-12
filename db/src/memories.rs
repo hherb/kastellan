@@ -377,6 +377,55 @@ where
     Ok(result.rows_affected())
 }
 
+/// Graph lane: rank memories by how many of the supplied entity ids
+/// they're linked to.
+///
+/// Returns up to `k` memory ids in best-first order (highest hit count
+/// first; ties broken by smaller id for stable ordering). `entity_ids`
+/// is the *already-expanded* set (seeds + 1-hop neighbours); expansion
+/// happens in `core::memory::recall`, not here, because graph
+/// traversal goes through the [`crate::graph::Graph`] chokepoint.
+///
+/// Empty `entity_ids` → empty Vec, no SQL issued. Duplicates in
+/// `entity_ids` are harmless: the PK on `memory_entities(memory_id,
+/// entity_id)` guarantees one row per pair, so `COUNT(*)` is
+/// equivalent to `COUNT(DISTINCT entity_id)` regardless of input
+/// duplication. The caller's expansion logic should dedup via
+/// `HashSet` anyway, but this helper does not enforce it.
+pub async fn graph_search<'e, E>(
+    executor: E,
+    entity_ids: &[i64],
+    k: usize,
+) -> Result<Vec<i64>, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if k == 0 || entity_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        "SELECT memory_id \
+         FROM memory_entities \
+         WHERE entity_id = ANY($1::bigint[]) \
+         GROUP BY memory_id \
+         ORDER BY COUNT(*) DESC, memory_id ASC \
+         LIMIT $2",
+    )
+    .bind(entity_ids)
+    .bind(limit_as_i64(k))
+    .fetch_all(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("graph_search: {e}")))?;
+
+    rows.into_iter()
+        .map(|r| {
+            r.try_get::<i64, _>(0)
+                .map_err(|e| DbError::Query(format!("decode memory_id: {e}")))
+        })
+        .collect()
+}
+
 /// Format a `Vec<f32>` as the canonical pgvector text representation.
 ///
 /// pgvector's text input format is `[v0,v1,...,vN-1]` with a trailing
