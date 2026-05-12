@@ -10,9 +10,11 @@
 //!   - `runner`         — per-lane runner loop
 //!   - `tool_dispatch`  — production `StepDispatcher` wiring to `tool_host::dispatch`
 //!   - `audit`          — pure helpers for scheduler-emitted audit rows (spec §7)
+//!   - `crash_recovery` — startup sweep + `task.crashed` audit row emission (spec §7)
 
 pub mod agent;
 pub mod audit;
+pub mod crash_recovery;
 pub mod inner_loop;
 pub mod prompts;
 pub mod runner;
