@@ -148,6 +148,13 @@ async fn drain_lane(
         // Best-effort: a DB error logging the transition must not
         // prevent us from running the task (the canonical state lives
         // in `tasks.state`; the audit row is for observation phase).
+        //
+        // `claimed.plan_count` is the value carried by the row from
+        // the DB at claim time. For a freshly-inserted pending task
+        // this is 0; for a task resumed after crash recovery (future
+        // work; `sweep_crashed` does not yet re-enqueue), it would be
+        // the count from before the crash — i.e. "plans run so far"
+        // rather than "plans run this session".
         write_lifecycle_row(
             pool,
             ACTION_TASK_RUNNING,
@@ -163,9 +170,20 @@ async fn drain_lane(
 
         let final_state = result.outcome.final_state();
         let final_result_payload = result.outcome.result_payload();
+
+        // Capture `finished_at` *before* `tasks::finalize` so the
+        // finalize-payload's `total_duration_ms` measures inner-loop
+        // wall time only — not inner-loop wall time + the finalize
+        // UPDATE's round-trip latency. On a contended DB the latter
+        // can be the dominant term and would silently bias the
+        // observation-phase latency distribution.
+        let finished_at = OffsetDateTime::now_utc();
+
         if let Err(e) = tasks::finalize(pool, claimed.id, final_state, final_result_payload).await {
-            eprintln!("scheduler[{}]: finalize task {} failed: {e}",
-                      lane.as_sql(), claimed.id);
+            tracing::warn!(
+                lane = lane.as_sql(), task_id = claimed.id, error = %e,
+                "tasks::finalize UPDATE failed (audit lifecycle row still emitted)"
+            );
         }
 
         // Spec §7 lifecycle row: running → <terminal state>. Fires
@@ -173,14 +191,15 @@ async fn drain_lane(
         // was already cancelled out from under us by a CLI cancel
         // racing the inner loop) — the scheduler still *observed*
         // this transition, and that's what the actor='scheduler' row
-        // records. Best-effort, same as the `running` row above.
-        let finished_at = OffsetDateTime::now_utc();
+        // records. See [`super::audit`] module docs for the wider
+        // audit-vs-DB-state divergence note. Best-effort, same as the
+        // `running` row above.
         write_lifecycle_row(
             pool,
             &action_task_terminal(final_state),
             claimed.id,
             claimed.lane,
-            result.plan_count as i32,
+            i32::try_from(result.plan_count).unwrap_or(i32::MAX),
         ).await;
 
         // Spec §7 finalize summary row. Best-effort: the lifecycle
@@ -222,7 +241,12 @@ async fn write_finalize_row(
     finished_at: OffsetDateTime,
 ) {
     let stats = TaskFinalizeStats {
-        plan_count: result.plan_count as i32,
+        // `result.plan_count` is the inner loop's u32 counter; the DB
+        // column is i32. The cap on plans is small (single digits in
+        // practice), so the saturation is operationally dead code, but
+        // a silent `as i32` truncation would be a subtle bug if a
+        // future change ever lifted the cap.
+        plan_count: i32::try_from(result.plan_count).unwrap_or(i32::MAX),
         total_llm_calls: result.plan_count,
         total_dispatch_calls: result.dispatch_count,
         total_duration_ms: compute_duration_ms(claimed.started_at, finished_at),

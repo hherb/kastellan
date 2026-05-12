@@ -26,6 +26,41 @@
 //! (in [`super::tool_dispatch`]) reuse [`SCHEDULER_AUDIT_ACTOR`] but
 //! belong to a different family (step-level short-circuits, not
 //! task-level transitions) and carry a different payload shape.
+//!
+//! # Caveat for observation-phase SQL: audit row vs `tasks.state`
+//!
+//! Both row families record what the scheduler **observed**, not what
+//! the DB UPDATE achieved. The most common case where these diverge is
+//! a race between the inner loop and a producer-side cancel:
+//!
+//! 1. Inner loop finishes with `Outcome::Completed` (or any other
+//!    terminal outcome — `Failed`, `TimedOut`, `Blocked`).
+//! 2. Before the lane runner's `tasks::finalize` UPDATE fires, a CLI
+//!    cancel has already set `state = 'cancelled'`.
+//! 3. `tasks::finalize` is a no-op (`WHERE state = 'running'` no
+//!    longer matches).
+//! 4. The scheduler still writes `scheduler/task.completed` +
+//!    `scheduler/task.finalize` rows because *it* saw the task
+//!    complete, even though `tasks.state` is now `'cancelled'`.
+//!
+//! Practical consequences for observation-phase queries:
+//!
+//! * Don't compute counts of e.g. "completed tasks" by joining
+//!   `audit_log.action = 'task.completed'` against `tasks.state =
+//!   'completed'` — either source alone is internally consistent, but
+//!   the two won't always agree.
+//! * The `task.finalize` payload's `state` field reflects the
+//!   scheduler's observation (the inner loop's `Outcome`), not the
+//!   post-UPDATE DB state.
+//! * To detect divergence after the fact, filter for tasks where the
+//!   `task.<state>` audit row's state segment doesn't match
+//!   `tasks.state`; this is the population of races where a producer
+//!   cancel beat the scheduler's finalize.
+//!
+//! Filed as a follow-up (see HANDOVER "next pickups"): when crash
+//! recovery / `task.crashed` row emission lands, the same posture
+//! holds — the audit row records the sweep's *intent*, not necessarily
+//! the post-UPDATE state of every row it claims to have crashed.
 
 use hhagent_db::tasks::Lane;
 use serde_json::{json, Value};
