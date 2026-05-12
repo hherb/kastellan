@@ -4,9 +4,11 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-13 (CLI cancel audit row — branch `feat/cli-cancel-audit`)
-**Last commit (main):** `76fe940` (merge of PR #41 `feat/memory-graph-lane`).
-**This session's working branch:** `feat/cli-cancel-audit` (off `main` at `830524b`, which is the doc-refresh commit on top of `76fe940`). Closes the HANDOVER "Immediate next pickups" item "`task.cancelled` row from CLI direct cancel of a `pending` task that was never claimed". Workspace test count: **349 → 353** (+4: 2 unit in `core::cli_audit::tests`, 2 integration in `core/tests/cli_cancel_audit_e2e.rs`).
+**Last updated:** 2026-05-13 (CLI `task.submitted` producer audit row — branch `feat/cli-task-submitted-audit`)
+**Last commit (main):** `fdf1a52` (merge of PR #43 `feat/cli-cancel-audit`).
+**This session's working branch:** `feat/cli-task-submitted-audit` (off `main` at `fdf1a52`). Closes the HANDOVER "Immediate next pickups" item "`task.submitted` producer row from `hhagent-cli ask`" — symmetric to the just-merged cli-cancel-audit slice. Workspace test count: **353 → 354** (+1 integration test in new `core/tests/cli_submit_audit_e2e.rs`; `cli_ask_e2e.rs` multiset bumps don't add `#[test]` functions).
+
+**Previous session (2026-05-13 → merged via PR #43 at `fdf1a52`) — CLI cancel audit row:** widened `db::tasks::mark_cancelled` to `Result<Option<Task>, _>` via `RETURNING`; new `core/src/cli_audit.rs` carrying `CLI_AUDIT_ACTOR = "cli"` const + `CancelOutcome` enum + `cancel_and_audit(pool, task_id)` helper; both `hhagent-cli` cancel call sites (SIGINT in `ask`, `tasks cancel` subcommand) rewired to the helper. Workspace count 349 → 353 (+4: 2 unit + 2 integration in `cli_cancel_audit_e2e.rs`).
 
 **Previous session (2026-05-12 → merged 2026-05-13 via PR #41 at `76fe940`) — graph lane in `memory::recall`:** entity↔memory linkage via new `memory_entities` join table (migration `0007`) + AFTER DELETE journal on `memories` (migration `0008` → `deleted_memories`). `db::memories::{link_memory_to_entities, graph_search}` writer/reader helpers. `core::memory::recall.rs` gains `RecallModes::graph`, `RecallModes::GRAPH_ONLY`, `RecallParams::seed_entity_ids: Option<&[i64]>`, `GRAPH_FANOUT_CAP_PER_SEED: i64 = 32`, and a 1-hop graph lane fused alongside semantic + lexical via the existing RRF. `core/Cargo.toml` gained `futures = { workspace = true }` direct dep. Workspace count 342 → **349** (+3 DB integration / +4 core unit / +4 in-place assertion groups in `memory_recall_e2e`). Post-review work added a `GRAPH_FANOUT_CAP_PER_SEED` behavioural-pin e2e assertion (hub with `cap + 8` outbound relations → `GRAPH_ONLY` returns exactly `cap` memories), HashSet pre-sizing on the graph-lane expansion, and stale-comment cleanups. Code review surfaced [issue #42](https://github.com/hherb/hhagent/issues/42) (`deleted_memories` trigger uses `SECURITY INVOKER` — future role without INSERT silently breaks DELETE; **deferred until a second DELETE-capable role is proposed**).
 
@@ -93,7 +95,56 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-13 — CLI cancel audit row, branch `feat/cli-cancel-audit`)
+## Recently completed (this session, 2026-05-13 — CLI `task.submitted` producer audit row, branch `feat/cli-task-submitted-audit`)
+
+Branch: `feat/cli-task-submitted-audit` (off `main` at `fdf1a52`, the merge of PR #43). Closes the HANDOVER "Immediate next pickups" item that was filed the same day PR #43 merged: "`task.submitted` producer row from `hhagent-cli ask`".
+
+**Why this slice now.** PR #43 (cli-cancel-audit) just shipped the first producer-side audit row family with `actor='cli'`. It closed the gap for cancel of a never-claimed `pending` task. The symmetric gap was that `hhagent-cli ask` itself emitted no audit row at submit time — the lifecycle stream visible in `audit_log` started at the scheduler's `task.running` observation on claim. Submit-to-claim latency queries had to join `audit_log` against `tasks.created_at` across two clocks, and tasks submitted while the scheduler was down (no claim ever happens) left no row at all. This slice closes that gap.
+
+**Shape (3 production files + 1 test file added + 1 test file bumped):**
+
+- **`core/src/scheduler/audit.rs`** — one new constant `pub const ACTION_TASK_SUBMITTED: &str = "task.submitted"` inserted between `ACTION_TASK_FINALIZE` and `ACTION_TASK_PREFIX`. Const, not builder, because submit is a fixed-string action (not the dynamic 5-variant terminal family `action_task_terminal` covers).
+- **`core/src/cli_audit.rs`** — new `pub async fn submit_and_audit(pool, lane, payload) -> Result<i64, DbError>`. Calls `tasks::insert_pending`; on Ok, best-effort emits one `actor='cli' action='task.submitted'` row with `build_lifecycle_payload(id, lane, 0)`. Audit failure → `tracing::warn!`, id still propagates (chokepoint posture). Same `Result<i64, _>` shape as the underlying `insert_pending`, so the call-site rewiring is a one-line swap.
+- **`core/src/bin/hhagent-cli.rs::ask_async`** — line 267 `insert_pending(...)` → `submit_and_audit(...)`. Import line widened; `insert_pending` dropped from the `tasks` import.
+- **NEW `core/tests/cli_submit_audit_e2e.rs`** — single integration test that pins both `Lane::Fast` and `Lane::Long` in one PG cluster bring-up. Asserts: (1) helper returns distinct ids for two calls, (2) `tasks` rows match expected state/lane/plan_count/payload, (3) `audit_log` gained exactly two `cli/task.submitted` rows, (4) both rows pin actor/action plus the 3-key payload `{task_id, lane, plan_count}` BTreeSet shape.
+- **`core/tests/cli_ask_e2e.rs`** — happy + failure multiset assertions bumped by 1 `cli/task.submitted` row each (totals `1 + 1 + 2 + 2 + 1 + 1 + 1 + 1 + 1 = 11` and `1 + 1 + 3 + 3 + 3 + 3 + 1 + 1 + 1 = 17`).
+
+**DB layer — no widening.** `tasks::insert_pending` stayed as `Result<i64, DbError>`. The cancel slice widened `mark_cancelled` to `Result<Option<Task>, _>` via `RETURNING *` because `plan_count` could have advanced between submit and cancel; at submit time `plan_count` is `0` by definition and the returned `id` plus the input `lane` give the helper everything `build_lifecycle_payload` needs. Smaller diff, no call-site churn.
+
+**Audit-row contract (the headline):**
+
+| When                                              | actor       | action            | payload keys                  |
+| ------------------------------------------------- | ----------- | ----------------- | ----------------------------- |
+| `hhagent-cli ask "..."` inserts a `pending` row   | `cli`       | `task.submitted`  | `{task_id, lane, plan_count}` (`plan_count` always 0 at submit) |
+
+Same payload shape as the scheduler's existing lifecycle rows — observation queries grouping by `(actor, action)` see the full submit → claim → terminal stream under one `WHERE action LIKE 'task.%'` filter, with `actor` separating producer intent from scheduler observation.
+
+**TDD ordering** (per CLAUDE.md rule #2):
+1. `ACTION_TASK_SUBMITTED` const landed first — pure addition, no test (the integration test verifies the literal in the audit row downstream).
+2. Wrote `core/tests/cli_submit_audit_e2e.rs` against the not-yet-existing `submit_and_audit` — compile-error red.
+3. Implemented `submit_and_audit` in `cli_audit.rs`; test green.
+4. Rewired `hhagent-cli.rs::ask_async`; `cli_ask_e2e.rs` red on multiset.
+5. Bumped `cli_ask_e2e.rs` multiset; full workspace green at 354.
+
+**What this slice deliberately does NOT do.**
+- **No producer row from future channel adapters.** No channel adapter exists today; YAGNI. When one lands, the same helper can be promoted (take `actor: &str`) or a separate `CHANNEL_AUDIT_ACTOR` const added — wire shape is identical.
+- **No producer `task.failed` row from `hhagent-cli tasks fail`.** Operator escape hatch; rare; scheduler's `task.crashed` lifecycle row already covers the running-after-restart path.
+- **No DB transaction wrapping `insert_pending` + audit insert.** Best-effort matches the chokepoint and cancel-slice posture, documented at the helper doc-comment level (same trade-off `cli_audit.rs` already documents for `cancel_and_audit`).
+
+**Test count delta:** 353 → **354** (+1 integration test).
+
+**Files touched (5 modified, 1 added):**
+- `core/src/scheduler/audit.rs` — `ACTION_TASK_SUBMITTED` const added.
+- `core/src/cli_audit.rs` — `submit_and_audit` helper added.
+- `core/src/bin/hhagent-cli.rs` — one-line swap + import widening at `ask_async`.
+- NEW `core/tests/cli_submit_audit_e2e.rs` — single integration test (~140 LOC).
+- `core/tests/cli_ask_e2e.rs` — happy + failure multiset bumps.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
+- `docs/superpowers/specs/2026-05-13-cli-task-submitted-audit-design.md` + `docs/superpowers/plans/2026-05-13-cli-task-submitted-audit.md` — spec + plan committed earlier in the branch.
+
+---
+
+## Recently completed (previous session, 2026-05-13 — CLI cancel audit row, branch `feat/cli-cancel-audit`)
 
 Branch: `feat/cli-cancel-audit` (off `main` at `830524b`, the doc-refresh on top of PR #41's merge `76fe940`). Closes the HANDOVER "Immediate next pickups" gap "`task.cancelled` row from CLI direct cancel of a `pending` task that was never claimed".
 
@@ -843,7 +894,7 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 - **`task.finalize` row for crashed tasks?** — open design question surfaced by this slice. The just-shipped `crash_recovery::sweep_and_audit` writes the lifecycle `task.crashed` row but deliberately does not emit a per-task `task.finalize` summary row, since `total_llm_calls` / `total_dispatch_calls` / `total_duration_ms` died with the previous daemon. Observation phase should decide whether a finalize row with `null`/`0` counters is better than no row at all (`WHERE action='task.finalize'` queries currently undercount by exactly the crashed-task population).
 - **e2e coverage for `task.finalize` with `started_at: null`** — flagged in PR #34 review (post-/fixall). The `started_at: None` JSON path in `build_finalize_payload` is unit-tested (`build_finalize_payload_started_at_null_when_absent`) but has no integration coverage. The race window is essentially zero on UDS-local PG (claim_one's `started_at = now()` lands before the row returns), so the missing coverage is theoretical. With the CLI `task.cancelled` row now shipping ([this session](#recently-completed-this-session-2026-05-13--cli-cancel-audit-row-branch-featcli-cancel-audit)), a follow-up could plant a producer cancel of a `pending` task and assert the eventual scheduler observation row has `started_at: null` in the finalize payload — but the scheduler never finalises a never-claimed task today, so the assertion population is empty by construction. Probably worth a separate slice that adds `task.finalize` for pure-producer-cancelled tasks too, or closing this item as moot.
 - ~~**`task.cancelled` row from CLI direct cancel of a `pending` task that was never claimed**~~ **Shipped this session 2026-05-13** as `actor='cli' action='task.cancelled'` via the new `core::cli_audit::cancel_and_audit` helper — see "Recently completed (this session)" entry at the top. Branch: `feat/cli-cancel-audit`.
-- **`task.submitted` producer row from `hhagent-cli ask`** — symmetric gap to the just-shipped `task.cancelled`. Today `hhagent-cli ask` calls `tasks::insert_pending` and emits no producer-side audit row; the lifecycle stream starts at `scheduler/task.running` on claim. A producer `actor='cli' action='task.submitted'` with payload `{task_id, lane, plan_count: 0}` would let observation queries reconstruct submit-to-claim latency and detect "submitted but never claimed" gaps (e.g. scheduler down). One-session slice that reuses the now-existing `CLI_AUDIT_ACTOR` constant + `build_lifecycle_payload` from `scheduler::audit` (action would be a new `action_task_submitted()` builder or just a literal `"task.submitted"`). Independent of CASSANDRA / observation work.
+- ~~**`task.submitted` producer row from `hhagent-cli ask`**~~ **Shipped this session 2026-05-13** as `actor='cli' action='task.submitted'` via the new `core::cli_audit::submit_and_audit` helper. Branch: `feat/cli-task-submitted-audit` (`ACTION_TASK_SUBMITTED` const, not a builder, slotted next to `ACTION_TASK_RUNNING` / `ACTION_TASK_FINALIZE`). See the "Recently completed (this session)" entry at the top.
 - **Per-tool argv allowlist hygiene** — the deny-by-default `HHAGENT_SHELL_EXEC_ALLOWLIST` env is acceptable for now, but production deployment needs a versioned per-host config (or `db::secrets`-stored allowlist) so a host restart can't accidentally widen it. Filed as a follow-up issue when the first non-test deployment lands.
 - ~~**Issue #15 — hoist tests-common dev-dep:**~~ **Shipped this session** — see "Recently completed (this session)" entry at the top.
 
