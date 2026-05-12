@@ -51,26 +51,41 @@ pub struct RecallModes {
     /// Run the `tsvector` + `ts_rank` lane. Requires
     /// [`RecallParams::query_text`] to be a non-empty string.
     pub lexical: bool,
+    /// Run the graph lane (1-hop outbound expansion of
+    /// [`RecallParams::seed_entity_ids`] via [`hhagent_db::graph::Graph::neighbors`],
+    /// then ranking via [`hhagent_db::memories::graph_search`]).
+    /// Requires `seed_entity_ids` to be a non-empty slice.
+    pub graph: bool,
 }
 
 impl RecallModes {
-    /// Run both lanes — the most common configuration. Phase 1's
+    /// Run every lane — the most common configuration. Phase 1's
     /// scheduler default.
     pub const ALL: RecallModes = RecallModes {
         semantic: true,
         lexical: true,
+        graph: true,
     };
 
     /// Run only the semantic lane.
     pub const SEMANTIC_ONLY: RecallModes = RecallModes {
         semantic: true,
         lexical: false,
+        graph: false,
     };
 
     /// Run only the lexical lane.
     pub const LEXICAL_ONLY: RecallModes = RecallModes {
         semantic: false,
         lexical: true,
+        graph: false,
+    };
+
+    /// Run only the graph lane.
+    pub const GRAPH_ONLY: RecallModes = RecallModes {
+        semantic: false,
+        lexical: false,
+        graph: true,
     };
 }
 
@@ -94,6 +109,13 @@ pub struct RecallParams<'a> {
     /// length [`EMBEDDING_DIM`] when present and the semantic lane is
     /// enabled.
     pub query_embedding: Option<&'a [f32]>,
+    /// Pre-resolved seed entity ids. Used by the graph lane; ignored
+    /// when [`RecallModes::graph`] is `false`. The caller resolves
+    /// entity names → ids out-of-band (via
+    /// [`hhagent_db::graph::Graph::get_entity`] or a future
+    /// extraction worker) before invoking recall. An empty slice with
+    /// the graph lane enabled is a warn-and-skip, not an error.
+    pub seed_entity_ids: Option<&'a [i64]>,
     /// Number of fused results to return. The per-lane queries pull
     /// `k * LANE_FANOUT` candidates so the fusion has enough overlap
     /// to work with even when the lanes disagree heavily — deeper-
@@ -105,11 +127,14 @@ pub struct RecallParams<'a> {
 }
 
 impl<'a> RecallParams<'a> {
-    /// Common-case constructor: both lanes, default budget.
+    /// Common-case constructor: semantic + lexical lanes, default
+    /// budget, no graph seeds. Callers that want the graph lane
+    /// populate [`RecallParams::seed_entity_ids`] explicitly.
     pub fn new(query_text: &'a str, query_embedding: &'a [f32]) -> Self {
         Self {
             query_text: Some(query_text),
             query_embedding: Some(query_embedding),
+            seed_entity_ids: None,
             k: hhagent_db::memories::DEFAULT_RECALL_K,
             modes: RecallModes::ALL,
         }
@@ -126,6 +151,15 @@ impl<'a> RecallParams<'a> {
 /// reason; tuning is a Phase-1 follow-up if measurement shows it
 /// matters.
 const LANE_FANOUT: usize = 4;
+
+/// Per-seed cap on outbound neighbour expansion in the graph lane.
+///
+/// Bounds the worst case: a "hub" entity with thousands of relations
+/// (followers, mentions, etc.) cannot flood the expanded set. The
+/// value is the order-of-magnitude that [`hhagent_db::graph::Graph::neighbors`]'s
+/// `limit` param accepts — generous for typical knowledge graphs,
+/// tight against pathological hubs.
+pub const GRAPH_FANOUT_CAP_PER_SEED: i64 = 32;
 
 /// Run the configured lanes, fuse via RRF, hydrate the top-`k` rows.
 ///
@@ -261,11 +295,15 @@ mod tests {
         let m = RecallModes::default();
         assert!(m.semantic);
         assert!(m.lexical);
+        assert!(m.graph);
     }
 
     #[test]
     fn recall_modes_all_is_every_lane_on() {
-        assert_eq!(RecallModes::ALL, RecallModes { semantic: true, lexical: true });
+        assert_eq!(
+            RecallModes::ALL,
+            RecallModes { semantic: true, lexical: true, graph: true }
+        );
     }
 
     #[test]
@@ -273,6 +311,7 @@ mod tests {
         let m = RecallModes::SEMANTIC_ONLY;
         assert!(m.semantic);
         assert!(!m.lexical);
+        assert!(!m.graph);
     }
 
     #[test]
@@ -280,6 +319,7 @@ mod tests {
         let m = RecallModes::LEXICAL_ONLY;
         assert!(!m.semantic);
         assert!(m.lexical);
+        assert!(!m.graph);
     }
 
     /// Empty input → empty output. RRF over no lists must not produce
@@ -380,5 +420,42 @@ mod tests {
         let ratio_60 = out_60[0].1 / out_60[1].1;
         let ratio_1 = out_1[0].1 / out_1[1].1;
         assert!(ratio_1 > ratio_60);
+    }
+
+    /// `RecallModes::ALL` now includes the graph lane (third lane
+    /// added in Option P). If a future fourth lane lands without
+    /// updating `ALL`, this trips loudly.
+    #[test]
+    fn recall_modes_all_includes_graph() {
+        assert!(RecallModes::ALL.graph);
+        assert!(RecallModes::ALL.semantic);
+        assert!(RecallModes::ALL.lexical);
+    }
+
+    /// `RecallModes::GRAPH_ONLY` exact shape pin.
+    #[test]
+    fn recall_modes_graph_only_is_only_graph() {
+        let m = RecallModes::GRAPH_ONLY;
+        assert!(!m.semantic);
+        assert!(!m.lexical);
+        assert!(m.graph);
+    }
+
+    /// `RecallParams::new(text, emb)` leaves `seed_entity_ids = None`
+    /// — graph lane stays off implicitly when caller doesn't opt in
+    /// via explicit field set. Preserves the no-breaking-call-sites
+    /// invariant for `new()` consumers.
+    #[test]
+    fn recall_params_new_default_seed_entity_ids_is_none() {
+        let emb: Vec<f32> = vec![0.0; 1024];
+        let params = RecallParams::new("query text", &emb);
+        assert!(params.seed_entity_ids.is_none());
+    }
+
+    /// Pin `GRAPH_FANOUT_CAP_PER_SEED = 32` so a future tune is an
+    /// explicit PR.
+    #[test]
+    fn graph_fanout_cap_per_seed_is_thirty_two() {
+        assert_eq!(GRAPH_FANOUT_CAP_PER_SEED, 32);
     }
 }
