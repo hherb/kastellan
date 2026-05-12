@@ -5,7 +5,7 @@
 //! per-OS so a single call site reads cleanly on Linux + macOS without
 //! per-test `#[cfg]` ladders.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
@@ -63,10 +63,10 @@ pub fn backend() -> Box<dyn SandboxBackend> {
 ///   from inside the worker before serve_stdio.
 /// * `env` carries `HHAGENT_SHELL_ALLOWLIST` as a JSON array of
 ///   strings (the worker's allowlist contract).
-pub fn policy_for_shell_exec(worker: &PathBuf, allowlist: &[&str]) -> SandboxPolicy {
+pub fn policy_for_shell_exec(worker: &Path, allowlist: &[&str]) -> SandboxPolicy {
     let allow_json = serde_json::to_string(allowlist).expect("serialize allowlist");
     SandboxPolicy {
-        fs_read: vec![worker.clone()],
+        fs_read: vec![worker.to_path_buf()],
         fs_write: vec![],
         net: Net::Deny,
         cpu_ms: 5_000,

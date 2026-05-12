@@ -15,10 +15,12 @@ use hhagent_supervisor::Supervisor;
 /// contract, so a service that was never started, or was already
 /// stopped, will drop cleanly.
 pub struct ServiceGuard {
-    /// Boxed because the trait is `dyn`-safe and we want to pass an
-    /// owned handle in (constructing a fresh `default_supervisor()`
-    /// for cleanup is wrong — Linux's `SystemdUser` carries a
-    /// pre-resolved `XDG_RUNTIME_DIR` that would re-probe).
+    /// Boxed because the trait is `dyn`-safe and the guard needs to
+    /// own its own handle (cannot borrow the test's handle without
+    /// pinning the guard's lifetime). Callers typically pass a fresh
+    /// `default_supervisor()` here: that re-probes `XDG_RUNTIME_DIR`
+    /// on Linux, which is wasteful but harmless — both probes resolve
+    /// to the same path, and the cost is one syscall during cleanup.
     pub sup: Box<dyn Supervisor>,
     pub name: String,
 }

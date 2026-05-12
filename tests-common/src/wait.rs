@@ -62,10 +62,22 @@ pub fn wait_for_socket(socket_dir: &Path, timeout: Duration) -> Result<(), Strin
     }
 }
 
-/// Tail a log file until any line matches `predicate(line)` or
-/// `timeout` elapses. On match, returns the matching line (without
+/// Tail a log file until any **single line** matches `predicate(line)`
+/// or `timeout` elapses. On match, returns the matching line (without
 /// trailing newline). On timeout, returns an error containing the
 /// full file content captured so far for triage.
+///
+/// # Predicate contract
+///
+/// The predicate is invoked once **per line**, not once per file
+/// body. Use this for substring/regex checks that fit within a single
+/// log line (`s.contains("scheduler spawned")`). If you need a
+/// body-spanning match (e.g. line A *and* line B both present in any
+/// order), read the file yourself and poll on the combined condition
+/// — this helper deliberately does not give you the whole-body view,
+/// because every current caller is a single-line check and the
+/// per-line contract gives a tighter, less-ambiguous return value
+/// (the matching line, not the entire body up to the match).
 ///
 /// The file is opened fresh on every poll — handles the case where
 /// the writer rotates or truncates between polls.
