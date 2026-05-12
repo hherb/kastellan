@@ -87,6 +87,17 @@ pub const ACTION_TASK_RUNNING: &str = "task.running";
 /// Carries the aggregate counters observation-phase SQL needs.
 pub const ACTION_TASK_FINALIZE: &str = "task.finalize";
 
+/// `action` value for the producer-side row written by `hhagent-cli ask`
+/// after `tasks::insert_pending` succeeds. Distinct from the scheduler's
+/// own `task.running` row that fires later on claim — paired with
+/// [`crate::cli_audit::CLI_AUDIT_ACTOR`] so observation queries grouping
+/// by `(actor, action)` can separate submit-time intent from
+/// scheduler-time observation. Carries the same lifecycle payload shape
+/// (`{task_id, lane, plan_count}`) the rest of the `task.<state>` family
+/// uses; `plan_count` is always 0 at submit by definition but is
+/// included for shape parity so consumers don't need a special case.
+pub const ACTION_TASK_SUBMITTED: &str = "task.submitted";
+
 /// `prefix` of the per-terminal-state lifecycle row's `action`.
 /// Full action is built via [`action_task_terminal`] so the writer
 /// and any reader can't drift on the separator/format.
