@@ -27,6 +27,24 @@
 //!   transient `audit_log` insert failure is logged at WARN and
 //!   swallowed so we don't roll back a successful sweep.
 //!
+//! ## Timestamp semantics (read before joining on `audit_log.ts`)
+//!
+//! The `task.crashed` row's `audit_log.ts` is **detection time, not
+//! crash time** — it's stamped when this module's INSERT lands at
+//! daemon startup, which can be hours after the previous daemon
+//! actually died. `tasks.finished_at` carries the same `now()`-at-sweep
+//! value and has the same caveat. Observation-phase queries that
+//! compute latency or recency from this row's `ts` will systematically
+//! over-attribute time to crashed tasks.
+//!
+//! The actual crash time is bounded only on the lower side: it
+//! happened at or after `tasks.started_at` (set by `claim_one` at
+//! claim time; not renewed during execution). `lease_expires_at` is
+//! NOT an upper bound — it's the moment the sweep first becomes
+//! *eligible* to detect the crash, not when the crash occurred. So
+//! `started_at ≤ crash_time ≤ audit_log.ts`, with no tighter upper
+//! bound recoverable from the row alone.
+//!
 //! ## What this module deliberately does NOT do
 //!
 //! * **No `task.finalize` summary row** for crashed tasks. The
