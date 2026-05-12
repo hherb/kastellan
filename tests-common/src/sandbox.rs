@@ -1,0 +1,77 @@
+//! Sandbox helpers: `[SKIP]` probe, backend factory, canonical
+//! shell-exec policy.
+//!
+//! Both `skip_if_sandbox_unavailable` and `backend()` are cfg-gated
+//! per-OS so a single call site reads cleanly on Linux + macOS without
+//! per-test `#[cfg]` ladders.
+
+use std::path::PathBuf;
+
+use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+
+/// Returns `true` if the per-OS sandbox backend's probe fails. Caller
+/// should `return` immediately to short-circuit the test.
+///
+/// Linux: requires bwrap + unprivileged user-namespace permission
+/// (AppArmor profile installed via
+/// `scripts/linux/install-bwrap-apparmor-profile.sh`).
+/// macOS: requires `/usr/bin/sandbox-exec` (present on all stock
+/// installs from 10.5+).
+#[cfg(target_os = "linux")]
+pub fn skip_if_sandbox_unavailable() -> bool {
+    use hhagent_sandbox::linux_bwrap::LinuxBwrap;
+    if let Err(e) = LinuxBwrap::probe() {
+        eprintln!("\n[SKIP] bwrap probe failed: {e}\n");
+        return true;
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+pub fn skip_if_sandbox_unavailable() -> bool {
+    use hhagent_sandbox::macos_seatbelt::MacosSeatbelt;
+    if let Err(e) = MacosSeatbelt::probe() {
+        eprintln!("\n[SKIP] sandbox-exec probe failed: {e}\n");
+        return true;
+    }
+    false
+}
+
+/// Boxed per-OS [`SandboxBackend`] for use in tests that spawn a
+/// real sandboxed worker. The cfg-gating mirrors `default_backend()`
+/// in `hhagent_sandbox` but stays here so tests don't import a
+/// production helper that may grow per-feature gates.
+#[cfg(target_os = "linux")]
+pub fn backend() -> Box<dyn SandboxBackend> {
+    Box::new(hhagent_sandbox::linux_bwrap::LinuxBwrap::new())
+}
+
+#[cfg(target_os = "macos")]
+pub fn backend() -> Box<dyn SandboxBackend> {
+    Box::new(hhagent_sandbox::macos_seatbelt::MacosSeatbelt::new())
+}
+
+/// Canonical sandbox policy for the shell-exec worker.
+///
+/// * `fs_read` = the worker binary itself (so it can be mapped at
+///   spawn).
+/// * `net = Deny` — shell-exec is never a network tool.
+/// * `cpu_ms = 5_000`, `mem_mb = 256` — generous defaults for the
+///   `echo` happy path; the tests that hit OOM or budget paths
+///   override these.
+/// * `profile = WorkerStrict` — Landlock + seccomp lockdown applied
+///   from inside the worker before serve_stdio.
+/// * `env` carries `HHAGENT_SHELL_ALLOWLIST` as a JSON array of
+///   strings (the worker's allowlist contract).
+pub fn policy_for_shell_exec(worker: &PathBuf, allowlist: &[&str]) -> SandboxPolicy {
+    let allow_json = serde_json::to_string(allowlist).expect("serialize allowlist");
+    SandboxPolicy {
+        fs_read: vec![worker.clone()],
+        fs_write: vec![],
+        net: Net::Deny,
+        cpu_ms: 5_000,
+        mem_mb: 256,
+        profile: Profile::WorkerStrict,
+        env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
+    }
+}
