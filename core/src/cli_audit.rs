@@ -41,6 +41,23 @@
 //! chokepoint pattern: a transient DB failure must not mask a successful
 //! cancellation, so the SQL UPDATE's success is the load-bearing event.
 //! Audit-emission failures are logged via `tracing::warn!` and swallowed.
+//!
+//! ### Residual gap accepted by this posture
+//!
+//! The UPDATE and the audit INSERT are two separate statements, not one
+//! transaction. A crash (or audit-insert DB error) between them leaves
+//! the row in `cancelled` with no producer audit row. For a CLI cancel
+//! of a `running` task the scheduler's later observation row partially
+//! covers this — but for a CLI cancel of a never-claimed `pending` task
+//! the producer row is the **only** audit signal, so losing it
+//! reintroduces the very gap this module exists to close.
+//!
+//! This is accepted, not unintended: a transactional wrap would couple
+//! the cancellation's success to audit availability, which would mask
+//! cancels behind audit outages. The trade-off favours cancellation
+//! liveness over audit completeness. Observation-phase queries that
+//! depend on a strict 1:1 producer-row:cancel mapping must treat the
+//! audit-row count as a lower bound, not a total.
 
 use hhagent_db::audit;
 use hhagent_db::tasks::{mark_cancelled, Task};

@@ -291,10 +291,11 @@ async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCo
             },
             result = &mut sigint => {
                 if result.is_ok() {
-                    // Best-effort: even if the audit insert hiccups, the
-                    // SIGINT path still exits 130. The helper emits the
-                    // producer-side `actor='cli' action='task.cancelled'`
-                    // row when the task was in a cancellable state.
+                    // Best-effort: even if the UPDATE or audit insert
+                    // hiccups, the SIGINT path still exits 130 — the
+                    // user has signalled they want out. On success the
+                    // helper emits the producer-side
+                    // `actor='cli' action='task.cancelled'` row.
                     let _ = cancel_and_audit(&pool, id).await;
                     eprintln!("ask: cancelled (task id {id})");
                     return ExitCode::from(130);  // standard SIGINT exit code
