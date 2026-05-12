@@ -239,8 +239,9 @@ fn run_ask(args: &[String]) -> ExitCode {
 }
 
 async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCode {
+    use hhagent_core::cli_audit::cancel_and_audit;
     use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::{get, insert_pending, mark_cancelled};
+    use hhagent_db::tasks::{get, insert_pending};
     use sqlx::postgres::PgListener;
 
     let spec = match resolve_connect_spec() {
@@ -290,7 +291,11 @@ async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCo
             },
             result = &mut sigint => {
                 if result.is_ok() {
-                    let _ = mark_cancelled(&pool, id).await;
+                    // Best-effort: even if the audit insert hiccups, the
+                    // SIGINT path still exits 130. The helper emits the
+                    // producer-side `actor='cli' action='task.cancelled'`
+                    // row when the task was in a cancellable state.
+                    let _ = cancel_and_audit(&pool, id).await;
                     eprintln!("ask: cancelled (task id {id})");
                     return ExitCode::from(130);  // standard SIGINT exit code
                 }
@@ -452,8 +457,8 @@ async fn tasks_status(args: &[String]) -> ExitCode {
 }
 
 async fn tasks_cancel(args: &[String]) -> ExitCode {
+    use hhagent_core::cli_audit::{cancel_and_audit, CancelOutcome};
     use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::mark_cancelled;
 
     let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(i) => i,
@@ -467,10 +472,13 @@ async fn tasks_cancel(args: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
-    match mark_cancelled(&pool, id).await {
-        Ok(true)  => { println!("cancelled task {id}"); ExitCode::from(0) }
-        Ok(false) => { eprintln!("task {id} not in cancellable state"); ExitCode::from(1) }
-        Err(e)    => { eprintln!("{e}"); ExitCode::from(1) }
+    // The helper writes the producer-side `actor='cli'
+    // action='task.cancelled'` audit row when the UPDATE flips a row.
+    // No row is written when the task is already terminal or absent.
+    match cancel_and_audit(&pool, id).await {
+        Ok(CancelOutcome::Cancelled(_))   => { println!("cancelled task {id}"); ExitCode::from(0) }
+        Ok(CancelOutcome::NotCancellable) => { eprintln!("task {id} not in cancellable state"); ExitCode::from(1) }
+        Err(e)                            => { eprintln!("{e}"); ExitCode::from(1) }
     }
 }
 

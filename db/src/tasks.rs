@@ -230,20 +230,31 @@ pub async fn observe_state(pool: &PgPool, task_id: i64) -> Result<String, DbErro
 
 /// Producer-side cancellation. Sets `state = 'cancelled'` only if the
 /// task is still in `pending` or `running`; the trigger fires the
-/// `tasks_cancelled` NOTIFY. Returns true iff a row was updated.
-pub async fn mark_cancelled(pool: &PgPool, task_id: i64) -> Result<bool, DbError> {
-    let r = sqlx::query(
+/// `tasks_cancelled` NOTIFY.
+///
+/// Returns the post-update row via `RETURNING` so the caller can emit
+/// one producer-side audit row (e.g. `actor='cli' action='task.cancelled'`)
+/// without a follow-up SELECT. `None` means the row was not in a
+/// cancellable state (already terminal, or does not exist) — idempotent.
+///
+/// Mirrors the shape [`sweep_crashed`] took on 2026-05-12 for the same
+/// reason: an audit emitter downstream needs the row's `lane` and
+/// `plan_count` to build the canonical lifecycle payload.
+pub async fn mark_cancelled(pool: &PgPool, task_id: i64) -> Result<Option<Task>, DbError> {
+    let row = sqlx::query(
         "UPDATE tasks \
          SET state = 'cancelled', \
              finished_at = now(), \
              updated_at = now() \
-         WHERE id = $1 AND state IN ('pending', 'running')",
+         WHERE id = $1 AND state IN ('pending', 'running') \
+         RETURNING id, state, lane, created_at, updated_at, started_at, \
+                   finished_at, lease_expires_at, plan_count, payload, result",
     )
     .bind(task_id)
-    .execute(pool)
+    .fetch_optional(pool)
     .await
     .map_err(|e| DbError::Query(format!("tasks mark_cancelled: {e}")))?;
-    Ok(r.rows_affected() == 1)
+    row.as_ref().map(decode_task_row).transpose()
 }
 
 /// Operator-side escape hatch: forcibly mark a `running` task as

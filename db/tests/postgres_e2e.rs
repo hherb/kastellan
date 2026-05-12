@@ -722,21 +722,31 @@ async fn tasks_lifecycle_e2e() {
     assert!(task.finished_at.is_some(), "finished_at must be set after finalize");
 
     // ── 4. mark_cancelled on a separate row ──────────────────────────
+    // Widened 2026-05-13 to return Option<Task> via RETURNING so producer-
+    // side callers can build an audit-row payload without a follow-up
+    // SELECT. Some(task) = a row was flipped to cancelled; None = the
+    // row was already terminal or did not exist.
     let id2 = insert_pending(&pool, Lane::Long, serde_json::json!({"instruction": "x"}))
         .await
         .expect("insert_pending id2");
-    let was_cancelled = mark_cancelled(&pool, id2).await.expect("mark_cancelled");
-    assert!(was_cancelled, "mark_cancelled must return true for a pending row");
+    let cancelled = mark_cancelled(&pool, id2).await.expect("mark_cancelled");
+    let task2 = cancelled.expect("mark_cancelled must return Some(task) for a pending row");
+    assert_eq!(task2.id, id2, "RETURNING shape pins row identity");
+    assert_eq!(task2.state, "cancelled", "post-update state is 'cancelled'");
+    assert_eq!(task2.lane, Lane::Long, "RETURNING shape pins lane round-trip");
+    assert_eq!(task2.plan_count, 0, "fresh pending task has plan_count=0");
+    assert!(task2.finished_at.is_some(), "finished_at set on cancel");
     assert_eq!(
         observe_state(&pool, id2).await.expect("observe_state id2"),
         "cancelled"
     );
 
     assert!(
-        !mark_cancelled(&pool, id2)
+        mark_cancelled(&pool, id2)
             .await
-            .expect("mark_cancelled idempotent"),
-        "mark_cancelled on an already-cancelled row must return false"
+            .expect("mark_cancelled idempotent")
+            .is_none(),
+        "mark_cancelled on an already-cancelled row must return None"
     );
 
     // ── 5. sweep_crashed ─────────────────────────────────────────────
