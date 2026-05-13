@@ -99,35 +99,78 @@ pub fn validate_argv0(argv0: &str) -> Result<(), ToolAllowlistError> {
 /// Add one allowlist entry. Idempotent — returns `Ok(true)` if a row
 /// was INSERTed, `Ok(false)` if the entry was already present.
 pub async fn add(
-    _pool: &PgPool,
-    _tool: &str,
-    _argv0: &str,
-    _created_by: &str,
+    pool: &PgPool,
+    tool: &str,
+    argv0: &str,
+    created_by: &str,
 ) -> Result<bool, ToolAllowlistError> {
-    unimplemented!("Task 3 implements this")
+    validate_tool_name(tool)?;
+    validate_argv0(argv0)?;
+    let rows = sqlx::query(
+        "INSERT INTO tool_allowlists (tool, argv0, created_by)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (tool, argv0) DO NOTHING",
+    )
+    .bind(tool)
+    .bind(argv0)
+    .bind(created_by)
+    .execute(pool)
+    .await?;
+    Ok(rows.rows_affected() == 1)
 }
 
 /// Remove one allowlist entry. Idempotent — returns `Ok(true)` if a
 /// row was deleted, `Ok(false)` if nothing matched.
 pub async fn remove(
-    _pool: &PgPool,
-    _tool: &str,
-    _argv0: &str,
+    pool: &PgPool,
+    tool: &str,
+    argv0: &str,
 ) -> Result<bool, ToolAllowlistError> {
-    unimplemented!("Task 3 implements this")
+    validate_tool_name(tool)?;
+    validate_argv0(argv0)?;
+    let rows = sqlx::query(
+        "DELETE FROM tool_allowlists WHERE tool = $1 AND argv0 = $2",
+    )
+    .bind(tool)
+    .bind(argv0)
+    .execute(pool)
+    .await?;
+    Ok(rows.rows_affected() == 1)
 }
 
 /// List the argv0 entries for one tool, ordered by argv0 ascending.
 pub async fn list_for_tool(
-    _pool: &PgPool,
-    _tool: &str,
+    pool: &PgPool,
+    tool: &str,
 ) -> Result<Vec<String>, ToolAllowlistError> {
-    unimplemented!("Task 3 implements this")
+    validate_tool_name(tool)?;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT argv0 FROM tool_allowlists WHERE tool = $1 ORDER BY argv0 ASC",
+    )
+    .bind(tool)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
 /// List every entry across every tool, ordered by `(tool, argv0)`.
-pub async fn list_all(_pool: &PgPool) -> Result<Vec<AllowlistEntry>, ToolAllowlistError> {
-    unimplemented!("Task 3 implements this")
+pub async fn list_all(pool: &PgPool) -> Result<Vec<AllowlistEntry>, ToolAllowlistError> {
+    let rows: Vec<(String, String, OffsetDateTime, String)> = sqlx::query_as(
+        "SELECT tool, argv0, created_at, created_by
+         FROM tool_allowlists
+         ORDER BY tool ASC, argv0 ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(tool, argv0, created_at, created_by)| AllowlistEntry {
+            tool,
+            argv0,
+            created_at,
+            created_by,
+        })
+        .collect())
 }
 
 // --- Tests ------------------------------------------------------------
