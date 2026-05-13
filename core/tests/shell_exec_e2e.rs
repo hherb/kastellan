@@ -5,12 +5,14 @@
 //! Runs on both Linux (bwrap) and macOS (Seatbelt).
 //!
 //! Why dispatch and not `worker.call(...)` directly: as of Option M
-//! (Phase 1 entry), `WorkerCommand` is sealed via `pub(crate)`, so
-//! out-of-crate callers — including these integration tests — cannot
-//! invoke a worker without going through `dispatch`. The chokepoint
-//! invariant (every tool/channel/routine action enters core through
-//! `dispatch`) is therefore enforced at compile time, not just by code
-//! review. The price of the seal: each test in this file brings up a
+//! (Phase 1 entry), `WorkerCommand`'s constructor and `SupervisedWorker::call`
+//! are module-private to `tool_host` (originally `pub(crate)`; tightened to
+//! module-private 2026-05-13 via issue #16), so out-of-crate callers —
+//! including these integration tests — cannot invoke a worker without
+//! going through `dispatch`. The chokepoint invariant (every
+//! tool/channel/routine action enters core through `dispatch`) is therefore
+//! enforced at compile time, not just by code review. The price of the
+//! seal: each test in this file brings up a
 //! per-test Postgres cluster so dispatch's audit-log INSERT has
 //! somewhere to land. `[SKIP]`s cleanly when PG, the supervisor, the
 //! worker binary, or a working sandbox is missing.
