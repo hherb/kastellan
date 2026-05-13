@@ -94,16 +94,16 @@ async fn main() -> Result<()> {
     // Tool registry: each tool the scheduler may dispatch is opted in
     // here. The registry is the host-side allowlist of *which* tools
     // exist (separate from the per-tool argv allowlist, which lives
-    // inside `shell_exec_entry` via `HHAGENT_SHELL_ALLOWLIST`).
+    // in the `tool_allowlists` DB table).
     //
-    // Operators control which tools are reachable by setting env vars
-    // at daemon start. An absent / empty `HHAGENT_SHELL_EXEC_BIN`
-    // (e.g. the worker binary wasn't installed) means shell-exec is
-    // simply not registered — `dispatch_step` then returns
-    // `UNKNOWN_TOOL` for any plan trying to use it, and the inner
-    // loop replans accordingly. This is the same deny-by-default
-    // posture used in the egress proxy plan (Phase 3).
-    let tool_registry = Arc::new(build_tool_registry());
+    // Operators control which tools are reachable via the DB. An
+    // absent / empty `HHAGENT_SHELL_EXEC_BIN` (e.g. the worker binary
+    // wasn't installed) means shell-exec is simply not registered —
+    // `dispatch_step` then returns `UNKNOWN_TOOL` for any plan trying
+    // to use it, and the inner loop replans accordingly. This is the
+    // same deny-by-default posture used in the egress proxy plan
+    // (Phase 3).
+    let tool_registry = Arc::new(build_tool_registry(&pool).await?);
 
     let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
@@ -252,41 +252,33 @@ async fn wait_for_shutdown() -> Result<()> {
 
 /// Build the registry of tools the scheduler may dispatch.
 ///
-/// Each tool is opted in via a dedicated env var pair:
-///
-/// | Tool         | Binary path env             | Argv allowlist env             |
-/// | ------------ | --------------------------- | ------------------------------ |
-/// | `shell-exec` | `HHAGENT_SHELL_EXEC_BIN`    | `HHAGENT_SHELL_EXEC_ALLOWLIST` |
-///
-/// `HHAGENT_SHELL_EXEC_ALLOWLIST` is a colon-separated list of absolute
-/// paths the shell-exec worker will accept as `argv[0]`. Empty / unset
-/// → no programs allowlisted → every call returns `POLICY_DENIED`. This
-/// is the deny-by-default posture: the daemon administrator must
-/// explicitly opt programs in.
+/// Reads the shell-exec argv allowlist from the `tool_allowlists` DB
+/// table (migration `0009`). `HHAGENT_SHELL_EXEC_ALLOWLIST` is no
+/// longer honored — a WARN is emitted if it is still set so operators
+/// know to migrate.
 ///
 /// If `HHAGENT_SHELL_EXEC_BIN` is unset or the path does not exist,
 /// shell-exec is simply not registered. A plan that tries to use it
 /// will surface `UNKNOWN_TOOL` from the dispatcher.
-fn build_tool_registry() -> hhagent_core::scheduler::ToolRegistry {
+///
+/// Emits one `actor='core' action='registry.loaded'` audit row carrying
+/// a per-tool summary (name, binary path, allowlist length, SHA-256 of
+/// the canonical-form allowlist). DB error during the load aborts
+/// bring-up; error during the audit row insert is best-effort only (a
+/// WARN is logged and bring-up continues).
+async fn build_tool_registry(
+    pool: &sqlx::PgPool,
+) -> anyhow::Result<hhagent_core::scheduler::ToolRegistry> {
+    use anyhow::Context as _;
     let mut reg = hhagent_core::scheduler::ToolRegistry::new();
+    let mut loaded: Vec<LoadedToolRecord> = Vec::new();
 
     if let Some(bin_os) = std::env::var_os("HHAGENT_SHELL_EXEC_BIN") {
         let binary = std::path::PathBuf::from(&bin_os);
         if binary.is_file() {
-            // Defensive: filter out empty entries from operator typos
-            // like `:` or `/usr/bin/echo::/bin/echo`. Without the filter
-            // an empty argv[0] would be shipped to the worker and
-            // bounce out as a less-obvious POLICY_DENIED.
-            let allowlist: Vec<String> = std::env::var("HHAGENT_SHELL_EXEC_ALLOWLIST")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|s| {
-                    s.split(':')
-                        .filter(|p| !p.is_empty())
-                        .map(|p| p.to_string())
-                        .collect()
-                })
-                .unwrap_or_default();
+            let allowlist = hhagent_db::tool_allowlists::list_for_tool(pool, "shell-exec")
+                .await
+                .context("loading shell-exec allowlist from DB")?;
             let entry = hhagent_core::scheduler::shell_exec_entry(binary.clone(), &allowlist);
             info!(
                 tool = "shell-exec",
@@ -294,6 +286,12 @@ fn build_tool_registry() -> hhagent_core::scheduler::ToolRegistry {
                 allowlist_len = allowlist.len(),
                 "registering tool"
             );
+            loaded.push(LoadedToolRecord {
+                name: "shell-exec".to_string(),
+                binary: binary.display().to_string(),
+                allowlist_len: allowlist.len(),
+                allowlist_sha256: sha256_argv0_list(&allowlist),
+            });
             reg.insert("shell-exec", entry);
         } else {
             tracing::warn!(
@@ -304,7 +302,73 @@ fn build_tool_registry() -> hhagent_core::scheduler::ToolRegistry {
         }
     }
 
-    reg
+    // Deprecation warning — does not block bring-up.
+    if std::env::var_os("HHAGENT_SHELL_EXEC_ALLOWLIST").is_some() {
+        tracing::warn!(
+            "HHAGENT_SHELL_EXEC_ALLOWLIST is no longer honored; \
+             use 'hhagent-cli tools allowlist add <tool> <argv0>' to populate the DB"
+        );
+    }
+
+    // Best-effort audit row: a transient DB failure here must not
+    // block daemon bring-up. The allowlist itself has already been
+    // loaded successfully.
+    if let Err(e) = write_registry_loaded_row(pool, &loaded).await {
+        tracing::warn!(error = %e, "registry.loaded audit row insert failed");
+    }
+
+    Ok(reg)
+}
+
+/// One per-tool record carried in the `registry.loaded` audit-row
+/// payload.
+#[derive(serde::Serialize)]
+struct LoadedToolRecord {
+    name: String,
+    binary: String,
+    allowlist_len: usize,
+    /// SHA-256 of the canonical-form allowlist:
+    /// `argv0_1 || '\n' || argv0_2 || '\n' || …` where the list is
+    /// lexicographically sorted and a trailing newline follows the
+    /// last entry. Empty list → SHA-256 of the empty string.
+    allowlist_sha256: String,
+}
+
+fn sha256_argv0_list(argv0s: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&String> = argv0s.iter().collect();
+    sorted.sort();
+    let mut hasher = Sha256::new();
+    for argv0 in sorted {
+        hasher.update(argv0.as_bytes());
+        hasher.update(b"\n");
+    }
+    let bytes = hasher.finalize();
+    hex_encode(&bytes)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
+async fn write_registry_loaded_row(
+    pool: &sqlx::PgPool,
+    tools: &[LoadedToolRecord],
+) -> Result<(), hhagent_db::DbError> {
+    let payload = serde_json::json!({ "tools": tools });
+    hhagent_db::audit::insert(
+        pool,
+        "core",
+        hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED,
+        payload,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Return the default sandbox backend for the current OS.
