@@ -224,10 +224,44 @@ pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedP
 /// parent dirs as needed. Errors with `io::ErrorKind::AlreadyExists` if
 /// the destination file already exists — operators MUST recapture under
 /// a different `(date, model_slug)` baseline.
-pub fn write_capture_to_dir(_out_dir: &Path, _capture: &CaptureJson)
+pub fn write_capture_to_dir(out_dir: &Path, capture: &CaptureJson)
     -> std::io::Result<PathBuf>
 {
-    unimplemented!()
+    // Derive the destination filename. `captured_at` is RFC 3339;
+    // take the first 10 chars (`YYYY-MM-DD`) as the date prefix.
+    let date_prefix = capture.captured_at.get(..10).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "captured_at must start with YYYY-MM-DD (RFC 3339 calendar date prefix)",
+        )
+    })?;
+    let slug = slug_model(&capture.llm_model);
+    if slug.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "llm_model slugged to empty string",
+        ));
+    }
+    let fname = capture_filename(date_prefix, &slug);
+
+    let fixture_dir = out_dir.join(&capture.fixture_id);
+    std::fs::create_dir_all(&fixture_dir)?;
+    let dest = fixture_dir.join(fname);
+
+    if dest.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} already exists; recapture must use a new (date, model) baseline",
+                dest.display()
+            ),
+        ));
+    }
+    let bytes = serde_json::to_vec_pretty(capture).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    })?;
+    std::fs::write(&dest, bytes)?;
+    Ok(dest)
 }
 
 /// Fetch every `audit_log` row whose payload references this `task_id`,
@@ -439,5 +473,61 @@ mod tests {
         let plans = extract_plans_from_audit_rows(&rows);
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].verdict_today, "Approve");
+    }
+
+    // ---- write_capture_to_dir ----
+
+    fn sample_capture(fixture_id: &str, model: &str) -> CaptureJson {
+        CaptureJson {
+            schema_version: SCHEMA_VERSION,
+            fixture_id: fixture_id.into(),
+            fixture_summary: "summary".into(),
+            captured_at: "2026-05-13T10:30:00Z".into(),
+            llm_backend: "local".into(),
+            llm_model: model.into(),
+            llm_base_url: "http://127.0.0.1:11434/v1".into(),
+            prompt: "p".into(),
+            task_id: 1,
+            task_state: "completed".into(),
+            plan_iterations: 1,
+            plans: vec![],
+            audit_rows: vec![],
+        }
+    }
+
+    #[test]
+    fn write_capture_to_dir_creates_parent_and_writes_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = sample_capture("safe-001-echo-marker", "gemma4:26b-a4b-it-q8_0");
+        let path = write_capture_to_dir(tmp.path(), &cap).expect("write");
+        assert!(path.exists());
+        // Expected filename: <date>_<model_slug>.json under
+        // <out_dir>/<fixture_id>/.
+        assert_eq!(
+            path,
+            tmp.path()
+                .join("safe-001-echo-marker")
+                .join("2026-05-13_gemma4-26b-a4b-it-q8-0.json")
+        );
+    }
+
+    #[test]
+    fn write_capture_to_dir_round_trips_through_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = sample_capture("safe-001-echo-marker", "gemma4:26b-a4b-it-q8_0");
+        let path = write_capture_to_dir(tmp.path(), &cap).expect("write");
+        let bytes = std::fs::read(&path).expect("read back");
+        let parsed: CaptureJson = serde_json::from_slice(&bytes).expect("decode");
+        assert_eq!(parsed, cap);
+    }
+
+    #[test]
+    fn write_capture_to_dir_refuses_to_overwrite_existing_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = sample_capture("safe-001-echo-marker", "gemma4:26b-a4b-it-q8_0");
+        let _first = write_capture_to_dir(tmp.path(), &cap).expect("first write");
+        let err = write_capture_to_dir(tmp.path(), &cap)
+            .expect_err("second write should refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     }
 }
