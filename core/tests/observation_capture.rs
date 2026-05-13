@@ -118,9 +118,15 @@ fn load_fixtures() -> Vec<FixtureMeta> {
     out
 }
 
-/// Try to dial `<base_url>/models` (OpenAI-compat health endpoint).
-/// Returns Ok if any HTTP response arrives within 5 s. On failure,
-/// returns a string suitable for inclusion in the test's panic message.
+/// Try to dial `<base_url>/v1/models` (OpenAI-compat health endpoint).
+/// Returns Ok if the server accepts our request and replies with at
+/// least one byte within 5 s. On failure, returns a string suitable for
+/// inclusion in the test's panic message.
+///
+/// We require a non-zero read so a stale listener that accepts and
+/// immediately closes (zero-byte read) does not pass the check —
+/// otherwise the orchestrator would race the LLM and surface confusing
+/// errors deep in the capture loop.
 fn check_llm_reachable(base_url: &str) -> Result<(), String> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -154,24 +160,28 @@ fn check_llm_reachable(base_url: &str) -> Result<(), String> {
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .ok();
-    // Send a minimal HTTP GET; we don't care about the response shape,
-    // just that the server speaks HTTP. Many LLM servers /models returns
-    // 200; some return 401; both prove the server is up.
+    // Send a minimal HTTP GET; we don't validate the response shape,
+    // just that the server speaks HTTP. /v1/models on a healthy LLM
+    // returns 200; some return 401; both prove the server is up and
+    // both write a status line that contains > 0 bytes.
     let mut s = stream;
     let req = format!("GET /v1/models HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     s.write_all(req.as_bytes())
         .map_err(|e| format!("write: {e}"))?;
     let mut buf = [0u8; 64];
-    let _ = s.read(&mut buf); // we don't validate the response body
+    let n = s.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+    if n == 0 {
+        return Err(format!(
+            "server at {addr} accepted the TCP connection but closed without writing a byte"
+        ));
+    }
     Ok(())
 }
 
-#[allow(dead_code)]
 struct DaemonHandles {
     _service: ServiceGuard,
     _core_log: PathGuard,
     _state: PathGuard,
-    stdout_path: PathBuf,
 }
 
 fn bring_up_daemon(
@@ -276,7 +286,6 @@ fn bring_up_daemon(
         _service: service,
         _core_log: core_log,
         _state: state_guard,
-        stdout_path,
     }
 }
 

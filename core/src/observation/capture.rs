@@ -224,9 +224,37 @@ pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedP
 /// parent dirs as needed. Errors with `io::ErrorKind::AlreadyExists` if
 /// the destination file already exists — operators MUST recapture under
 /// a different `(date, model_slug)` baseline.
+///
+/// `fixture_id` must be a single path segment: rejects empty, anything
+/// containing `/` or `\`, leading `.`, or NUL. This prevents a
+/// hand-edited or replayed `CaptureJson` from escaping `out_dir`.
+///
+/// Filesystem-collision is closed atomically via `create_new(true)`:
+/// the kernel returns `AlreadyExists` directly when the destination
+/// exists, eliminating the TOCTOU window a check-then-write would
+/// leave open.
 pub fn write_capture_to_dir(out_dir: &Path, capture: &CaptureJson)
     -> std::io::Result<PathBuf>
 {
+    // Reject fixture_ids that aren't single path segments. The on-disk
+    // layout is `<out_dir>/<fixture_id>/<filename>`; a `..` or `/` in
+    // the id would let a forged capture escape the captures root.
+    let fid = capture.fixture_id.as_str();
+    let bad_segment = fid.is_empty()
+        || fid.starts_with('.')
+        || fid.contains('/')
+        || fid.contains('\\')
+        || fid.contains('\0');
+    if bad_segment {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "fixture_id must be a single path segment with no '/', '\\\\', \
+                 leading '.', or NUL; got {fid:?}"
+            ),
+        ));
+    }
+
     // Derive the destination filename. `captured_at` is RFC 3339;
     // take the first 10 chars (`YYYY-MM-DD`) as the date prefix.
     let date_prefix = capture.captured_at.get(..10).ok_or_else(|| {
@@ -244,23 +272,23 @@ pub fn write_capture_to_dir(out_dir: &Path, capture: &CaptureJson)
     }
     let fname = capture_filename(date_prefix, &slug);
 
-    let fixture_dir = out_dir.join(&capture.fixture_id);
+    let fixture_dir = out_dir.join(fid);
     std::fs::create_dir_all(&fixture_dir)?;
     let dest = fixture_dir.join(fname);
 
-    if dest.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "{} already exists; recapture must use a new (date, model) baseline",
-                dest.display()
-            ),
-        ));
-    }
     let bytes = serde_json::to_vec_pretty(capture).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e)
     })?;
-    std::fs::write(&dest, bytes)?;
+    // Atomic check-and-create: the kernel returns AlreadyExists if the
+    // destination exists, closing the TOCTOU window. Operators MUST
+    // recapture under a new (date, model_slug) baseline.
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dest)?;
+    f.write_all(&bytes)?;
+    f.sync_all()?;
     Ok(dest)
 }
 
@@ -291,10 +319,15 @@ pub async fn fetch_audit_rows_for_task(
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let ts: time::OffsetDateTime = r.try_get("ts")?;
+        // RFC 3339 formatting of a valid OffsetDateTime cannot fail;
+        // `to_string()` would emit time's Debug-ish shape, NOT RFC 3339,
+        // and silently violate the CapturedAuditRow.ts contract.
+        let ts_rfc3339 = ts
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("RFC 3339 format cannot fail for a valid OffsetDateTime");
         out.push(CapturedAuditRow {
             id: r.try_get("id")?,
-            ts: ts.format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_else(|_| ts.to_string()),
+            ts: ts_rfc3339,
             actor: r.try_get("actor")?,
             action: r.try_get("action")?,
             payload: r.try_get("payload")?,
@@ -387,6 +420,29 @@ mod tests {
         let md = "# Summary\n\n## Subheading\n\nDetail.";
         let (_, body) = parse_fixture_prompt(md).expect("parse");
         assert_eq!(body, "## Subheading\n\nDetail.");
+    }
+
+    #[test]
+    fn parse_fixture_prompt_accepts_h1_with_no_space_after_hash() {
+        // Edge case: `#FOO` (no space after the hash) is accepted as an
+        // H1 with summary `FOO`. Pinned so the fallback branch in
+        // parse_fixture_prompt does not silently rot.
+        let md = "#FOO\n\nBody.";
+        let (summary, body) = parse_fixture_prompt(md).expect("parse");
+        assert_eq!(summary, "FOO");
+        assert_eq!(body, "Body.");
+    }
+
+    #[test]
+    fn parse_fixture_prompt_does_not_treat_h2_as_h1() {
+        // `## Subheading` is H2, not H1. Without an H1 line, parsing
+        // must fail with MissingH1 — the no-space-after-hash branch is
+        // gated on `!starts_with("##")`.
+        let md = "## Subheading\n\nBody.";
+        match parse_fixture_prompt(md) {
+            Err(ParseError::MissingH1) => {}
+            other => panic!("expected MissingH1, got {other:?}"),
+        }
     }
 
     #[test]
@@ -551,5 +607,43 @@ mod tests {
         let err = write_capture_to_dir(tmp.path(), &cap)
             .expect_err("second write should refuse");
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn write_capture_to_dir_rejects_short_captured_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cap = sample_capture("safe-001-echo-marker", "gemma4:26b-a4b-it-q8_0");
+        cap.captured_at = "2026".into(); // shorter than 10 chars
+        let err = write_capture_to_dir(tmp.path(), &cap).expect_err("must reject");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn write_capture_to_dir_rejects_punctuation_only_llm_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Punctuation-only model id slugs to "" — write must refuse
+        // rather than producing a filename that begins with "_" .
+        let cap = sample_capture("safe-001-echo-marker", ":::");
+        let err = write_capture_to_dir(tmp.path(), &cap).expect_err("must reject");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn write_capture_to_dir_rejects_path_traversal_in_fixture_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `..` would escape the captures root; `/` would escape the
+        // fixture directory; leading `.` would create a hidden dir;
+        // NUL is rejected by the filesystem. All must be rejected up
+        // front with InvalidInput.
+        for bad in ["../escape", "a/b", "a\\b", ".hidden", "", "with\0nul"] {
+            let cap = sample_capture(bad, "gemma4:26b-a4b-it-q8_0");
+            let err = write_capture_to_dir(tmp.path(), &cap)
+                .expect_err(&format!("must reject fixture_id={bad:?}"));
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "fixture_id={bad:?} must surface InvalidInput, got {err:?}"
+            );
+        }
     }
 }
