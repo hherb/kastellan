@@ -54,10 +54,11 @@ use hhagent_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
-/// Cancelling a `pending` task writes one canonical producer-side audit
-/// row and flips the row's state. Headline happy-path test for the slice.
+/// Cancelling a `pending` task writes **two** producer-side audit rows
+/// — one `task.cancelled` lifecycle + one `task.finalize` summary — and
+/// flips the row's state. Headline happy-path test for the slice.
 #[test]
-fn cancel_pending_task_writes_one_cli_audit_row() {
+fn cancel_pending_task_writes_lifecycle_and_finalize_rows() {
     if skip_if_no_supervisor() {
         return;
     }

@@ -130,12 +130,22 @@ async fn emit_task_crashed_row(pool: &PgPool, task: &Task) {
 ///
 /// `task.finished_at` is always `Some` after `sweep_crashed` (the
 /// `UPDATE … SET finished_at = now()` is unconditional), but the
-/// column type is `Option<OffsetDateTime>` so we defend with a
-/// fallback to the local clock if the optional ever surprises us.
+/// column type is `Option<OffsetDateTime>` so we defend with a fallback
+/// to the local clock if the optional ever surprises us. The fallback
+/// is surfaced via `tracing::error!` so the impossible case is loud,
+/// not silent — an emitted row with the audit emitter's wall clock as
+/// `finished_at` is off by the scheduler-lag delta, and operators
+/// looking at the resulting row need to know that.
 async fn emit_task_finalize_row(pool: &PgPool, task: &Task) {
-    let finished_at = task
-        .finished_at
-        .unwrap_or_else(OffsetDateTime::now_utc);
+    let finished_at = task.finished_at.unwrap_or_else(|| {
+        tracing::error!(
+            task_id = task.id,
+            "scheduler::crash_recovery::emit_task_finalize_row: task.finished_at is None \
+             after sweep_crashed — expected unconditional `UPDATE … SET finished_at = now()`; \
+             falling back to local clock so the audit row still emits",
+        );
+        OffsetDateTime::now_utc()
+    });
     let payload = build_crashed_finalize_payload(
         task.id,
         task.lane,

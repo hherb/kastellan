@@ -192,20 +192,31 @@ pub async fn cancel_and_audit(pool: &PgPool, task_id: i64) -> Result<CancelOutco
 /// producer-cancelled `pending` task. Best-effort, same posture as the
 /// lifecycle row in [`cancel_and_audit`].
 ///
-/// The counters and duration are pinned to known zeros because the task
-/// ran zero plan iterations and zero step dispatches before being
-/// cancelled. `started_at: None` is the wire signal "task was never
-/// claimed" — `build_finalize_payload` already serialises this as JSON
-/// null and falls `total_duration_ms` back to 0 via `compute_duration_ms`.
+/// The counters and duration are pinned to **known zeros**, passed
+/// literally as `0` in the [`TaskFinalizeStats`] — the task ran zero
+/// plan iterations and zero step dispatches before being cancelled, so
+/// no computation is needed. `started_at: None` is the wire signal "task
+/// was never claimed", which [`build_finalize_payload`] serialises as
+/// JSON `null`. These known zeros are wire-distinguishable from the
+/// crashed-task finalize's JSON-`null` counters, where the values were
+/// genuinely unrecoverable.
 ///
 /// `finished_at` falls back to the local clock if `task.finished_at` is
-/// somehow `None` — operationally dead code (the `mark_cancelled` UPDATE
-/// always sets it via `now()`), but defends the impossible case so a
-/// missing column doesn't panic.
+/// somehow `None` — operationally dead code (the `mark_cancelled`
+/// UPDATE always sets it via `now()`). The fallback exists so the row
+/// is still emitted with a plausible timestamp instead of panicking,
+/// and the violation is surfaced via `tracing::error!` so the
+/// impossible case is loud, not silent.
 async fn emit_producer_cancel_finalize(pool: &PgPool, task: &Task) {
-    let finished_at = task
-        .finished_at
-        .unwrap_or_else(OffsetDateTime::now_utc);
+    let finished_at = task.finished_at.unwrap_or_else(|| {
+        tracing::error!(
+            task_id = task.id,
+            "cli_audit::emit_producer_cancel_finalize: task.finished_at is None after \
+             mark_cancelled — expected unconditional `UPDATE … SET finished_at = now()`; \
+             falling back to local clock so the audit row still emits",
+        );
+        OffsetDateTime::now_utc()
+    });
     let stats = TaskFinalizeStats {
         plan_count: task.plan_count,
         total_llm_calls: 0,
