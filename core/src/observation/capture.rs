@@ -169,11 +169,18 @@ pub fn capture_filename(date_yyyy_mm_dd: &str, model_slug: &str) -> String {
 }
 
 /// Walk an audit-row stream for a single task and extract one
-/// [`CapturedPlan`] per `agent/plan.formulate` row. Pairs each plan
-/// with the immediately-following `cassandra:chain/verdict` row (if
-/// any) to populate `verdict_today`. Missing verdict row defaults to
-/// `"Approve"` silently — the original `audit_rows` stream in
-/// [`CaptureJson`] still preserves full truth.
+/// [`CapturedPlan`] per `agent/plan.formulate` row.
+///
+/// Pairing semantics: each plan is paired with the **first**
+/// `cassandra:chain/verdict` row that follows it in the audit stream.
+/// This is safe because the scheduler writes rows in strict
+/// `[plan, verdict, plan, verdict, ...]` order (see
+/// `core::scheduler::inner_loop`); the "first downstream verdict" and
+/// "immediately-following verdict" always coincide for valid input.
+///
+/// Missing verdict row → defaults to `"Approve"` silently; the
+/// original `audit_rows` stream in [`CaptureJson`] still preserves
+/// full truth so a downstream consumer can detect the gap.
 pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedPlan> {
     let mut out = Vec::new();
     let mut iter: u32 = 0;
