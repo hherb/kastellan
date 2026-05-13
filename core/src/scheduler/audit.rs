@@ -178,6 +178,48 @@ pub fn build_finalize_payload(
     })
 }
 
+/// Build the JSON payload for the `task.finalize` summary row of a
+/// **crashed** task (one recovered by the startup sweep).
+///
+/// Same 9-key shape as [`build_finalize_payload`] so observation-phase
+/// queries that filter on `action = 'task.finalize'` see a uniform
+/// projection. Two fields differ:
+///
+/// * `total_llm_calls` and `total_dispatch_calls` are JSON `null`
+///   because the dead daemon's in-memory counters were lost. `null` is
+///   the wire signal "unknowable" — distinguishable from `0` (which the
+///   runtime path emits to mean "observed zero").
+/// * `total_duration_ms` is `null` when `started_at` is `None`
+///   (the duration is unknowable without a start time). When
+///   `started_at` is present, it's the wall-clock distance from
+///   `started_at` to `finished_at` via [`compute_duration_ms`], same
+///   as the runtime path.
+///
+/// `state` is hard-pinned to `"crashed"` — the helper is single-purpose
+/// for the startup-sweep path, so a misuse can't produce a wrong
+/// state-string. Pinned by `build_crashed_finalize_payload_state_is_*`
+/// unit tests.
+pub fn build_crashed_finalize_payload(
+    task_id: i64,
+    lane: Lane,
+    plan_count: i32,
+    started_at: Option<OffsetDateTime>,
+    finished_at: OffsetDateTime,
+) -> Value {
+    let duration_ms: Option<u64> = started_at.map(|s| compute_duration_ms(Some(s), finished_at));
+    json!({
+        "task_id":              task_id,
+        "lane":                 lane.as_sql(),
+        "state":                "crashed",
+        "plan_count":           plan_count,
+        "total_llm_calls":      Value::Null,
+        "total_dispatch_calls": Value::Null,
+        "total_duration_ms":    duration_ms,
+        "started_at":           started_at.map(format_rfc3339),
+        "finished_at":          format_rfc3339(finished_at),
+    })
+}
+
 /// RFC 3339 string for an `OffsetDateTime`. Falls back to the empty
 /// string if `time` rejects the value — operationally impossible for
 /// `OffsetDateTime::now_utc()`-shaped inputs, but the empty string is
@@ -334,6 +376,126 @@ mod tests {
         let s = p["finished_at"].as_str().unwrap();
         let parsed = OffsetDateTime::parse(s, &Rfc3339).expect("rfc3339 round-trip");
         assert_eq!(parsed, sample_stats().finished_at);
+    }
+
+    // --- compute_duration_ms --------------------------------------------
+
+    // --- build_crashed_finalize_payload --------------------------------
+    //
+    // Companion to `build_finalize_payload` for the startup
+    // crash-recovery path. Same 9-key shape, but the two counters
+    // (`total_llm_calls`, `total_dispatch_calls`) are JSON `null`
+    // because they died with the previous daemon — null is the wire
+    // signal "unknowable", distinct from `0` which would mean
+    // "observed zero". `total_duration_ms` is `null` when `started_at`
+    // is missing (can't compute) and a number otherwise. `state` is
+    // hard-pinned to `"crashed"` so the helper can't be misused for
+    // any other terminal state.
+
+    #[test]
+    fn build_crashed_finalize_payload_shape_pins_exact_key_set() {
+        let p = build_crashed_finalize_payload(
+            42,
+            Lane::Fast,
+            3,
+            Some(datetime!(2026-05-12 10:00:00 UTC)),
+            datetime!(2026-05-12 10:00:05.432 UTC),
+        );
+        let expected: BTreeSet<String> = [
+            "task_id",
+            "lane",
+            "state",
+            "plan_count",
+            "total_llm_calls",
+            "total_dispatch_calls",
+            "total_duration_ms",
+            "started_at",
+            "finished_at",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(keys(&p), expected);
+    }
+
+    #[test]
+    fn build_crashed_finalize_payload_state_is_always_crashed() {
+        // The helper is single-purpose: a crash-recovery sweep emits
+        // `state="crashed"` regardless of caller intent. Caller errors
+        // can't produce a wrong state-string.
+        let finished = datetime!(2026-05-12 10:00:00 UTC);
+        let p = build_crashed_finalize_payload(1, Lane::Fast, 0, None, finished);
+        assert_eq!(p["state"], "crashed");
+        let p2 = build_crashed_finalize_payload(2, Lane::Long, 99, Some(finished), finished);
+        assert_eq!(p2["state"], "crashed");
+    }
+
+    #[test]
+    fn build_crashed_finalize_payload_counters_are_json_null() {
+        // The two aggregate counters were carried in the dead daemon's
+        // memory and cannot be recovered. JSON `null` is the wire
+        // signal "unknowable" — distinguishable from `0` (which the
+        // runtime path emits to mean "observed zero").
+        let p = build_crashed_finalize_payload(
+            1,
+            Lane::Fast,
+            5,
+            Some(datetime!(2026-05-12 10:00:00 UTC)),
+            datetime!(2026-05-12 10:00:01 UTC),
+        );
+        assert!(
+            p["total_llm_calls"].is_null(),
+            "total_llm_calls must be JSON null for crashed tasks (got {:?})",
+            p["total_llm_calls"]
+        );
+        assert!(
+            p["total_dispatch_calls"].is_null(),
+            "total_dispatch_calls must be JSON null for crashed tasks"
+        );
+    }
+
+    #[test]
+    fn build_crashed_finalize_payload_serialises_known_fields() {
+        let finished = datetime!(2026-05-12 10:00:05.432 UTC);
+        let p = build_crashed_finalize_payload(
+            99,
+            Lane::Long,
+            7,
+            Some(datetime!(2026-05-12 10:00:00 UTC)),
+            finished,
+        );
+        assert_eq!(p["task_id"], 99);
+        assert_eq!(p["lane"], "long");
+        assert_eq!(p["plan_count"], 7);
+        // finished_at always present; serialised as RFC 3339 string.
+        let s = p["finished_at"].as_str().expect("finished_at is a string");
+        let parsed = OffsetDateTime::parse(s, &Rfc3339).expect("rfc3339 round-trip");
+        assert_eq!(parsed, finished);
+    }
+
+    #[test]
+    fn build_crashed_finalize_payload_started_at_null_collapses_duration() {
+        // If `started_at` is missing (CLI cancel raced the claim, then
+        // a separate-daemon crash never recovered) the duration is
+        // unknowable too — both go to null, in lockstep.
+        let p = build_crashed_finalize_payload(
+            1,
+            Lane::Fast,
+            0,
+            None,
+            datetime!(2026-05-12 10:00:00 UTC),
+        );
+        assert!(p["started_at"].is_null());
+        assert!(p["total_duration_ms"].is_null());
+    }
+
+    #[test]
+    fn build_crashed_finalize_payload_computes_duration_when_started_at_present() {
+        let start = datetime!(2026-05-12 10:00:00 UTC);
+        let finish = datetime!(2026-05-12 10:00:01.250 UTC);
+        let p = build_crashed_finalize_payload(1, Lane::Fast, 0, Some(start), finish);
+        assert_eq!(p["total_duration_ms"], 1250);
+        assert!(p["started_at"].is_string());
     }
 
     // --- compute_duration_ms --------------------------------------------
