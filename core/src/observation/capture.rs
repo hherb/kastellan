@@ -107,8 +107,35 @@ pub enum ParseError {
 /// - Everything else is the body, trimmed.
 /// - Missing H1 → [`ParseError::MissingH1`].
 /// - Empty body after the H1 → [`ParseError::EmptyBody`].
-pub fn parse_fixture_prompt(_md: &str) -> Result<(String, String), ParseError> {
-    unimplemented!()
+pub fn parse_fixture_prompt(md: &str) -> Result<(String, String), ParseError> {
+    // Find the first '# ' line; everything before it is discarded.
+    let mut lines = md.lines();
+    let summary_line = loop {
+        match lines.next() {
+            None => return Err(ParseError::MissingH1),
+            Some(l) => {
+                let trimmed = l.trim_start();
+                if let Some(rest) = trimmed.strip_prefix("# ") {
+                    break rest.trim().to_string();
+                }
+                if trimmed.starts_with('#') && !trimmed.starts_with("##") {
+                    // "# alone" with no space → treat the rest of the line
+                    // (after '#') as the summary; still satisfies the H1
+                    // contract. This is an edge case for malformed inputs.
+                    break trimmed[1..].trim().to_string();
+                }
+            }
+        }
+    };
+
+    // Remainder is the body. Skip leading blank lines.
+    let body: String = lines.collect::<Vec<_>>().join("\n");
+    let body = body.trim_start_matches(|c: char| c == '\n' || c == ' ' || c == '\t' || c == '\r');
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(ParseError::EmptyBody);
+    }
+    Ok((summary_line, body.to_string()))
 }
 
 /// Filesystem-safe lower-case slug for an LLM model id.
@@ -234,5 +261,55 @@ mod tests {
         assert!(!fname.contains('/'));
         assert!(!fname.contains('\\'));
         assert!(fname.ends_with(".json"));
+    }
+
+    // ---- parse_fixture_prompt ----
+
+    #[test]
+    fn parse_fixture_prompt_happy_path() {
+        let md = "# Plain echo control\n\nSay HELLO and nothing else.";
+        let (summary, body) = parse_fixture_prompt(md).expect("parse");
+        assert_eq!(summary, "Plain echo control");
+        assert_eq!(body, "Say HELLO and nothing else.");
+    }
+
+    #[test]
+    fn parse_fixture_prompt_strips_multiple_blank_lines_after_h1() {
+        let md = "# Summary\n\n\n\nBody line.";
+        let (summary, body) = parse_fixture_prompt(md).expect("parse");
+        assert_eq!(summary, "Summary");
+        assert_eq!(body, "Body line.");
+    }
+
+    #[test]
+    fn parse_fixture_prompt_preserves_internal_blank_lines_in_body() {
+        let md = "# Summary\n\nFirst para.\n\nSecond para.";
+        let (_, body) = parse_fixture_prompt(md).expect("parse");
+        assert_eq!(body, "First para.\n\nSecond para.");
+    }
+
+    #[test]
+    fn parse_fixture_prompt_preserves_h2_in_body() {
+        let md = "# Summary\n\n## Subheading\n\nDetail.";
+        let (_, body) = parse_fixture_prompt(md).expect("parse");
+        assert_eq!(body, "## Subheading\n\nDetail.");
+    }
+
+    #[test]
+    fn parse_fixture_prompt_rejects_missing_h1() {
+        let md = "No leading hash.";
+        match parse_fixture_prompt(md) {
+            Err(ParseError::MissingH1) => {}
+            other => panic!("expected MissingH1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_fixture_prompt_rejects_empty_body() {
+        let md = "# Just the summary\n\n   \n\n";
+        match parse_fixture_prompt(md) {
+            Err(ParseError::EmptyBody) => {}
+            other => panic!("expected EmptyBody, got {other:?}"),
+        }
     }
 }
