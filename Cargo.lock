@@ -866,6 +866,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",
@@ -946,6 +947,7 @@ dependencies = [
  "hhagent-supervisor",
  "serde_json",
  "sha2",
+ "sqlx",
 ]
 
 [[package]]
