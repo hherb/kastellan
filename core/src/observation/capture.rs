@@ -275,10 +275,32 @@ pub fn write_capture_to_dir(out_dir: &Path, capture: &CaptureJson)
 /// (`step.unknown_tool`, `step.spawn_failed`), every per-tool dispatch
 /// row that carries `task_id` in its `req`, and the per-plan rows.
 pub async fn fetch_audit_rows_for_task(
-    _pool: &sqlx::PgPool,
-    _task_id: i64,
+    pool: &sqlx::PgPool,
+    task_id: i64,
 ) -> Result<Vec<CapturedAuditRow>, sqlx::Error> {
-    unimplemented!()
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT id, ts, actor, action, payload \
+         FROM audit_log \
+         WHERE payload @> jsonb_build_object('task_id', $1::bigint) \
+         ORDER BY id ASC",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let ts: time::OffsetDateTime = r.try_get("ts")?;
+        out.push(CapturedAuditRow {
+            id: r.try_get("id")?,
+            ts: ts.format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| ts.to_string()),
+            actor: r.try_get("actor")?,
+            action: r.try_get("action")?,
+            payload: r.try_get("payload")?,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
