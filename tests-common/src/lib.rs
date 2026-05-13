@@ -35,6 +35,7 @@
 //! Nothing here is shipped at runtime. The crate is `publish = false`
 //! and consumed only from `[dev-dependencies]`.
 
+pub mod allowlist;
 pub mod binaries;
 pub mod embedding;
 pub mod guards;
@@ -45,6 +46,7 @@ pub mod skip;
 pub mod temp;
 pub mod wait;
 
+pub use allowlist::seed_tool_allowlist;
 pub use binaries::{cli_binary, core_binary, shell_exec_worker_binary, workspace_target_binary};
 pub use embedding::text_to_embedding;
 pub use guards::{PathGuard, ServiceGuard};
