@@ -77,6 +77,11 @@ use time::OffsetDateTime;
 /// consumers can `WHERE actor = 'scheduler'` to capture both families.
 pub const SCHEDULER_AUDIT_ACTOR: &str = "scheduler";
 
+/// Action string for `actor='core'` audit rows emitted at daemon
+/// bring-up, summarising which tools were registered and the SHA-256
+/// of each tool's loaded allowlist. Cross-restart drift detection.
+pub const ACTION_REGISTRY_LOADED: &str = "registry.loaded";
+
 /// `action` value written when the lane runner claims a `pending` task
 /// and transitions it to `running`. Fires exactly once per `claim_one`
 /// success.
@@ -102,6 +107,14 @@ pub const ACTION_TASK_SUBMITTED: &str = "task.submitted";
 /// Full action is built via [`action_task_terminal`] so the writer
 /// and any reader can't drift on the separator/format.
 pub const ACTION_TASK_PREFIX: &str = "task.";
+
+/// Action string for `actor='cli'` audit rows emitted when an operator
+/// adds one allowlist entry via `hhagent-cli tools allowlist add`.
+pub const ACTION_TOOLS_ALLOWLIST_ADD: &str = "tools.allowlist.add";
+
+/// Action string for `actor='cli'` audit rows emitted when an operator
+/// removes one allowlist entry via `hhagent-cli tools allowlist remove`.
+pub const ACTION_TOOLS_ALLOWLIST_REMOVE: &str = "tools.allowlist.remove";
 
 /// Build the `action` string for a terminal-state lifecycle row.
 /// Centralises the `"task." + state` format so a future rename can't
