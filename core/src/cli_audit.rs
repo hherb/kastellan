@@ -42,6 +42,26 @@
 //! completely invisible at the SQL layer, and a submit followed by a
 //! scheduler outage had no row at all.
 //!
+//! ## Producer-side `task.finalize` for never-claimed pending tasks
+//!
+//! [`cancel_and_audit`] emits an additional `actor='cli'
+//! action='task.finalize'` summary row when (and only when) the cancel
+//! flips a task whose `started_at IS NULL` — i.e. one the scheduler
+//! never claimed. For these tasks the scheduler will never write its
+//! own observation-side finalize row, so observation-phase queries
+//! grouping on `action='task.finalize'` previously undercounted by
+//! exactly the producer-cancelled-pending population. The counters in
+//! that producer finalize row are **known zeros** (the task ran zero
+//! plan iterations) — wire-distinguishable from the JSON-`null`
+//! counters in the crashed-task finalize, where the values are
+//! genuinely unrecoverable.
+//!
+//! When the cancel flips a `running` task instead, the producer skips
+//! the finalize row: the scheduler's inner-loop `observe_state` poll
+//! will see the new state and emit its own
+//! `actor='scheduler' action='task.finalize'`, so a producer finalize
+//! would inflate the finalize stream.
+//!
 //! ## Posture
 //!
 //! Audit insert is best-effort, matching the [`crate::tool_host::dispatch`]
@@ -72,9 +92,11 @@ use hhagent_db::audit;
 use hhagent_db::tasks::{insert_pending, mark_cancelled, Lane, Task};
 use hhagent_db::DbError;
 use sqlx::PgPool;
+use time::OffsetDateTime;
 
 use crate::scheduler::audit::{
-    action_task_terminal, build_lifecycle_payload, ACTION_TASK_SUBMITTED,
+    action_task_terminal, build_finalize_payload, build_lifecycle_payload, TaskFinalizeStats,
+    ACTION_TASK_FINALIZE, ACTION_TASK_SUBMITTED,
 };
 
 /// Logical `actor` string written into every CLI-emitted audit row.
@@ -106,31 +128,102 @@ pub enum CancelOutcome {
 
 /// Producer-side cancellation with audit-row emission.
 ///
-/// Calls [`mark_cancelled`] and, on `Some(task)`, writes one
-/// `actor='cli' action='task.cancelled'` row to `audit_log` with the
-/// canonical lifecycle payload `{task_id, lane, plan_count}` built via
-/// [`build_lifecycle_payload`] — same shape as the scheduler's
-/// `task.<state>` rows so observation-phase SQL on
-/// `action LIKE 'task.%'` captures both producer intent and scheduler
-/// observation.
+/// Calls [`mark_cancelled`] and, on `Some(task)`, writes producer rows
+/// to `audit_log`:
 ///
-/// The audit insert is best-effort (chokepoint posture); a DB error
-/// there is logged via `tracing::warn!` and swallowed so a transient
+/// 1. **Always** one `actor='cli' action='task.cancelled'` row with the
+///    canonical lifecycle payload `{task_id, lane, plan_count}` built
+///    via [`build_lifecycle_payload`] — same shape as the scheduler's
+///    `task.<state>` rows so observation-phase SQL on
+///    `action LIKE 'task.%'` captures both producer intent and
+///    scheduler observation.
+/// 2. **Only when the task was never claimed** (`task.started_at.is_none()`):
+///    one `actor='cli' action='task.finalize'` summary row with
+///    `state='cancelled'`, `started_at: null`, and zero counters /
+///    duration. Rationale: the scheduler will never observe this task
+///    (it never claimed it), so without this row observation-phase SQL
+///    grouping on `action='task.finalize'` would silently undercount by
+///    exactly the producer-cancelled-pending population. The counters
+///    are **known** zeros (the task ran zero plan iterations and zero
+///    step dispatches) — distinct from the crashed-task finalize where
+///    they are JSON `null` because the dead daemon's counters were
+///    unrecoverable.
+///
+/// When the task was already `running` (`started_at.is_some()`) the
+/// scheduler's inner-loop `observe_state` poll will later write its own
+/// `actor='scheduler' action='task.finalize'` row; emitting a producer
+/// finalize here would double-count the finalize stream, so we skip it.
+/// The discriminator is purely DB-state-driven (`started_at IS NOT NULL`
+/// after the UPDATE), which is exactly the predicate that distinguishes
+/// "scheduler ever touched this task" from "scheduler never saw it."
+///
+/// Both audit inserts are best-effort (chokepoint posture); DB errors
+/// there are logged via `tracing::warn!` and swallowed so a transient
 /// audit failure cannot mask the successful SQL UPDATE.
 pub async fn cancel_and_audit(pool: &PgPool, task_id: i64) -> Result<CancelOutcome, DbError> {
     let Some(task) = mark_cancelled(pool, task_id).await? else {
         return Ok(CancelOutcome::NotCancellable);
     };
+
+    // 1. Lifecycle row — always.
     let action = action_task_terminal("cancelled");
     let payload = build_lifecycle_payload(task.id, task.lane, task.plan_count);
     if let Err(e) = audit::insert(pool, CLI_AUDIT_ACTOR, &action, payload).await {
         tracing::warn!(
             task_id,
             error = %e,
-            "cli_audit::cancel_and_audit: audit insert failed (cancel itself succeeded)",
+            "cli_audit::cancel_and_audit: lifecycle audit insert failed (cancel itself succeeded)",
         );
     }
+
+    // 2. Finalize summary row — only when the task was never claimed.
+    //    The scheduler will emit its own `task.finalize` for any task it
+    //    observed (the inner-loop `observe_state` poll catches the cancel
+    //    of a running task), so emitting one here would inflate the
+    //    finalize stream.
+    if task.started_at.is_none() {
+        emit_producer_cancel_finalize(pool, &task).await;
+    }
+
     Ok(CancelOutcome::Cancelled(task))
+}
+
+/// Insert one `actor='cli' action='task.finalize'` row for a
+/// producer-cancelled `pending` task. Best-effort, same posture as the
+/// lifecycle row in [`cancel_and_audit`].
+///
+/// The counters and duration are pinned to known zeros because the task
+/// ran zero plan iterations and zero step dispatches before being
+/// cancelled. `started_at: None` is the wire signal "task was never
+/// claimed" — `build_finalize_payload` already serialises this as JSON
+/// null and falls `total_duration_ms` back to 0 via `compute_duration_ms`.
+///
+/// `finished_at` falls back to the local clock if `task.finished_at` is
+/// somehow `None` — operationally dead code (the `mark_cancelled` UPDATE
+/// always sets it via `now()`), but defends the impossible case so a
+/// missing column doesn't panic.
+async fn emit_producer_cancel_finalize(pool: &PgPool, task: &Task) {
+    let finished_at = task
+        .finished_at
+        .unwrap_or_else(OffsetDateTime::now_utc);
+    let stats = TaskFinalizeStats {
+        plan_count: task.plan_count,
+        total_llm_calls: 0,
+        total_dispatch_calls: 0,
+        total_duration_ms: 0,
+        started_at: None,
+        finished_at,
+    };
+    let payload = build_finalize_payload(task.id, task.lane, "cancelled", &stats);
+    if let Err(e) =
+        audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_TASK_FINALIZE, payload).await
+    {
+        tracing::warn!(
+            task_id = task.id,
+            error = %e,
+            "cli_audit::cancel_and_audit: finalize audit insert failed (cancel itself succeeded)",
+        );
+    }
 }
 
 /// Producer-side task submission with audit-row emission.
