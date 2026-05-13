@@ -4,9 +4,11 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-13 (issue #16 `WorkerCommand` seal tightened — branch `fix/worker-command-seal-tighten`)
-**Last commit (main):** `31ac414` (merge of PR #44 `feat/cli-task-submitted-audit`).
-**This session's working branch:** `fix/worker-command-seal-tighten` (off `main` at `31ac414`). Closes [issue #16](https://github.com/hherb/hhagent/issues/16) — tightens the `WorkerCommand` chokepoint seal from `pub(crate)` (open to every sibling module inside `hhagent_core`) to **module-private** (only `tool_host`'s own functions can construct one). Pure refactor; workspace test count unchanged at **354 / 0 fail / 0 SKIP / 2 pre-existing ignored doctests**. The `compile_fail` doctest on `WorkerCommand` still trips on the out-of-crate side; the workspace build itself is the regression pin on the in-crate sibling-module side.
+**Last updated:** 2026-05-13 (observation-phase fixture captures — branch `feat/observation-phase-captures`, 14 commits, not yet merged; post-review cleanup landed)
+**Last commit (main):** `ed42dd1` (merge of PR #45 `fix/worker-command-seal-tighten`).
+**This session's working branch:** `feat/observation-phase-captures` (off `main` at `ed42dd1`). Ships the dataset infrastructure for the CASSANDRA observation phase (spec §9, HANDOVER's "Next TODO" headline pickup). New library module `hhagent_core::observation::capture` carries the on-disk JSON schema (`SCHEMA_VERSION = 1`), four pure helpers (`parse_fixture_prompt`, `slug_model`, `capture_filename`, `extract_plans_from_audit_rows`), an IO helper (`write_capture_to_dir` — refuses to overwrite existing baselines), and one async DB helper (`fetch_audit_rows_for_task` — uses `payload @>` JSONB predicate). 7 seed fixtures under `tests/observation/fixtures/`: 1 safe control, 1 per constitutional principle (P1 physical harm, P2 fraud, P3 irreversible delete, P4 power concentration, P5 suppress oversight), 1 clinical-data-leak edge case. Orchestrator `core/tests/observation_capture.rs` is `#[ignore]`-flagged so `cargo test --workspace` excludes it. Workspace test count: 354 → **380** (+25 unit + 1 integration; the `#[ignore]` orchestrator does not count). `core/src/observation/capture.rs` is now 649 LOC after the post-review cleanup (~half is tests; over the 500-LOC soft cap, still no split warranted). Post-review cleanup commit addresses code-review feedback on PR #46: (1) TOCTOU race in `write_capture_to_dir` closed via `OpenOptions::create_new(true)`; (2) `fixture_id` validated as a single path segment (rejects empty, `/`, `\\`, leading `.`, NUL); (3) `fetch_audit_rows_for_task` RFC 3339 fallback replaced with `.expect()` (the fallback was dead code that would silently emit a non-RFC-3339 string); (4) `check_llm_reachable` now requires a non-zero read so a stale listener that accepts-and-closes can't masquerade as a healthy LLM; (5) unused `DaemonHandles.stdout_path` field dropped; (6) +5 new unit tests pinning `#FOO` (no-space-after-hash H1 edge case), `## Subheading`-only rejection, `write_capture_to_dir` input validation for short `captured_at` + punctuation-only model + path-traversal `fixture_id`. Two deferred follow-ups filed as [issue #47](https://github.com/hherb/hhagent/issues/47) (silent `Approve` verdict default — schema-v2 migration; free-cost while no captures exist on disk) and [issue #48](https://github.com/hherb/hhagent/issues/48) (GIN index on `audit_log.payload` for `@>` containment scale-out).
+
+**Previous session (2026-05-13 → merged via PR #45 at `ed42dd1`) — issue #16 `WorkerCommand` seal tightened:** narrows `WorkerCommand::{method, params, new}` + `SupervisedWorker::call` from `pub(crate)`/`pub` to module-private. Sibling modules inside `hhagent_core` (scheduler, cli_audit, memory, …) now get a compile error if they attempt to bypass the `tool_host::dispatch` chokepoint. Pure refactor; workspace test count unchanged at 354 / 0 fail / 0 SKIP.
 
 **Previous session (2026-05-13 → merged via PR #44 at `31ac414`) — CLI `task.submitted` producer audit row:** new `ACTION_TASK_SUBMITTED` const in `core/src/scheduler/audit.rs` + new `submit_and_audit(pool, lane, payload)` helper in `core/src/cli_audit.rs`; `hhagent-cli ask` rewired through the helper. Audit insert best-effort (chokepoint posture); id propagates even on audit failure. Workspace test count: 353 → **354** (+1 integration test in new `core/tests/cli_submit_audit_e2e.rs`; `cli_ask_e2e.rs` multiset bumps don't add `#[test]` functions).
 
@@ -20,7 +22,7 @@
 
 **Earlier session (2026-05-12 — spec §7 lifecycle audit, merged via PR #34 at `2054a16`):** every claim writes a `scheduler/task.running` row, every finalize writes a `scheduler/task.<terminal_state>` row plus a `scheduler/task.finalize` summary row carrying the aggregate counters (`plan_count`, `total_llm_calls`, `total_dispatch_calls`, `total_duration_ms`, `started_at`, `finished_at`) the observation-phase SQL queries need.
 
-Branch lineage: PR #29 (Option O — embedding router) merged 2026-05-11 at `d39023b`; PR #31 (memory split — closes #30) merged 2026-05-11 at `a7a0c12`; PR #33 (scheduler short-circuit audit) merged at `2367d94`; PR #34 (spec §7 task-lifecycle audit) merged at `2054a16`; PR #36 (task.crashed audit) merged at `2efd074`; PR #38 (tests-common hoist — closes #15) merged at `97f2743`; PR #41 (graph lane in memory::recall — Option P) merged 2026-05-13 at `76fe940`. **Tree currently clean on `main`; no work-in-progress branch.**
+Branch lineage: PR #29 (Option O — embedding router) merged 2026-05-11 at `d39023b`; PR #31 (memory split — closes #30) merged 2026-05-11 at `a7a0c12`; PR #33 (scheduler short-circuit audit) merged at `2367d94`; PR #34 (spec §7 task-lifecycle audit) merged at `2054a16`; PR #36 (task.crashed audit) merged at `2efd074`; PR #38 (tests-common hoist — closes #15) merged at `97f2743`; PR #41 (graph lane in memory::recall — Option P) merged 2026-05-13 at `76fe940`; PR #43 (CLI cancel audit) merged at `fdf1a52`; PR #44 (CLI submit audit) merged at `31ac414`; PR #45 (`WorkerCommand` seal tighten — closes issue #16) merged at `ed42dd1`. **Current work-in-progress branch:** `feat/observation-phase-captures` — 13 commits, not yet merged; ships observation-phase fixture capture infrastructure.
 
 ---
 
@@ -94,6 +96,77 @@ cargo test --workspace           # all green
 ```
 
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile that lets `bwrap` create unprivileged user namespaces is already installed on the user's DGX Spark. Other Linux hosts may need `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses `sandbox-exec` (no setup needed).
+
+---
+
+## Recently completed (this session, 2026-05-13 — observation-phase fixture captures, branch `feat/observation-phase-captures`)
+
+Branch: `feat/observation-phase-captures` (off `main` at `ed42dd1`, the merge of PR #45). Ships the dataset infrastructure that HANDOVER's "Next TODO" headline pickup called for: the CASSANDRA observation-phase fixture format + capture driver. 13 commits.
+
+**Why this slice now.** PR #45 (seal tighten) merged earlier today; tree was clean on `main`. The HANDOVER's "Next TODO (pick one)" section listed the observation phase (spec §9) as the headline pickup: build a small fixture of "real-ish" prompts, run them through the live agent, dump the audit log, and iterate `ConstitutionalGuard` + `DeterministicPolicy` rule candidates against the captured dataset rather than against speculation. Today CASSANDRA stages always `Approve`; the real rules require empirical baseline data to design against. This slice produces that dataset.
+
+**Shape (3 production files + 2 test files + 1 directory tree + 2 docs):**
+
+- **`core/src/observation/mod.rs` (NEW, ~30 LOC):** module facade declaring `pub mod capture;`. Slots between `pub mod memory;` and `pub mod scheduler;` in `core/src/lib.rs`.
+- **`core/src/observation/capture.rs` (NEW, ~533 LOC including tests):** on-disk JSON schema + pure helpers + IO helper + async DB helper. Public surface:
+  * `SCHEMA_VERSION: u32 = 1`, `CaptureJson` + `CapturedPlan` + `CapturedAuditRow` (all serde-serializable with `Clone, Debug, Eq, PartialEq`).
+  * `ParseError` enum (`MissingH1`, `EmptyBody`) via `thiserror`.
+  * 4 pure helpers: `parse_fixture_prompt(md) -> (summary, body)`, `slug_model(model) -> String` (filesystem-safe lowercase slug), `capture_filename(date, slug) -> String`, `extract_plans_from_audit_rows(&[row]) -> Vec<CapturedPlan>`.
+  * IO helper `write_capture_to_dir(out_dir, &capture) -> Result<PathBuf, std::io::Error>` — refuses to overwrite existing files (`ErrorKind::AlreadyExists`); operators must recapture under a different `(date, model_slug)` so historical baselines stay frozen.
+  * Async DB helper `fetch_audit_rows_for_task(pool, task_id) -> Result<Vec<CapturedAuditRow>, sqlx::Error>` — uses `payload @> jsonb_build_object('task_id', $1::bigint)` JSONB containment predicate; returns rows in id-ascending order with RFC 3339 timestamps. Pinned by `core/tests/observation_fetch_audit_e2e.rs` (new file, 1 integration test).
+  * 20 unit tests inline pin every public symbol: `slug_model` (6), `capture_filename` (1), `parse_fixture_prompt` (6), `extract_plans_from_audit_rows` (4), `write_capture_to_dir` (3).
+- **`core/src/lib.rs`:** `pub mod observation;` declared (alphabetical).
+- **`core/Cargo.toml`:** `toml = { workspace = true }` added (read-only TOML parsing for fixture `meta.toml`).
+- **`Cargo.toml` (workspace):** new dep `toml = { version = "0.8", default-features = false, features = ["parse"] }` — pure-Rust, MIT/Apache-2.0, AGPL-compatible.
+- **`core/tests/observation_fetch_audit_e2e.rs` (NEW, ~100 LOC):** per-test PG cluster integration test for `fetch_audit_rows_for_task`. Inserts 5 audit rows (3 for `task_id=100`, 2 for `task_id=200`), asserts the filter shape + ordering + RFC 3339 timestamps + no cross-task-id bleed.
+- **`core/tests/observation_capture.rs` (NEW, ~498 LOC):** the operator-run orchestrator. `#[ignore]`-flagged with reason `"operator-run: needs real local LLM at HHAGENT_LLM_LOCAL_URL"`. Brings up per-test PG cluster + real `hhagent` daemon under user supervisor + sandboxed worker, points the daemon at the operator's local LLM (default `gemma4:26b-a4b-it-q8_0`), iterates every fixture, runs each through `hhagent-cli ask`, captures the audit-row stream per task, and writes one capture JSON per fixture under `tests/observation/captures/<id>/<date>_<model_slug>.json`. Fails loudly if the LLM is unreachable (no skip-as-pass — operator explicitly ran it). `HHAGENT_OBSERVATION_DRY_RUN=1` walks the fixture tree and prints the work plan without any side effects (used by the operator to verify a new fixture parses before running an expensive live capture).
+- **`tests/observation/` (NEW directory tree):**
+  - `README.md` — operator notes (run command, env vars, dry-run mode, no-overwrite invariant, link to spec).
+  - `fixtures/<id>/{prompt.md, meta.toml}` — 7 seed fixtures:
+    - `safe-001-echo-marker` (control)
+    - `p1-001-physical-harm-instructions` (P1 — pipe-bomb instructions disguised as fiction research)
+    - `p2-001-impersonation` (P2 — fraud/impersonation in a clinical workflow)
+    - `p3-001-irreversible-delete` (P3 — irreversible deletion without HITL)
+    - `p4-001-self-modify` (P4 — power concentration / self-spawning)
+    - `p5-001-suppress-oversight` (P5 — suppress audit log)
+    - `ec-001-clinical-data-leak` (edge case — `DataClass::ClinicalConfidential` to unverified third party)
+  - `captures/.gitkeep` — keep the empty captures dir tracked so future runs land in a known location.
+- **`docs/superpowers/specs/2026-05-13-observation-phase-captures-design.md`** + **`docs/superpowers/plans/2026-05-13-observation-phase-captures.md`** — spec + plan committed earlier in the branch.
+
+**Audit-row gap note.** The capture flow is read-only against `audit_log` — it does not write any new audit-row family. The orchestrator runs through the existing chokepoint (`tool_host::dispatch`), so every fixture's captured `audit_rows` slice is a faithful record of what would have been written during a normal operator run.
+
+**TDD discipline.** Every pure helper had its tests landed RED first, then the body filled in (green), then the next helper red, etc. The integration test for `fetch_audit_rows_for_task` was also red-first. The `#[ignore]` orchestrator is verified by dry-run mode (which short-circuits before any LLM/PG/supervisor work); a live-LLM capture run is operator-side and is not part of CI.
+
+**File-size watch.** `core/src/observation/capture.rs` is 533 LOC (33 over the 500-LOC soft cap from CLAUDE.md rule #4). About half is `#[cfg(test)] mod tests`. Natural future split if it grows further: keep types + IO helper in `capture.rs`; move pure helpers + their tests to `capture/parsing.rs` or similar. Not warranted today.
+
+**What this slice deliberately does NOT do.**
+- **No rule-iteration harness.** Re-running captures against candidate `ConstitutionalGuard` / `DeterministicPolicy` code is the next slice (its precondition is the dataset this slice produces).
+- **No actual rule implementations.** Stub stages stay `Approve`-only.
+- **No multi-baseline diffing or capture-viewer.** Captures are append-only JSON files on disk; comparing baselines across LLM versions is operator-eyeballing today.
+- **No automatic recapture on `SCHEMA_VERSION` bump.** When the schema changes, old captures stay readable through their original version; operators re-capture by hand.
+- **No CI integration of the orchestrator.** The `#[ignore]` flag is precisely because the live-LLM dep is not CI-friendly.
+
+**Code-review notes (post-review cleanup landed).** All four were raised in the `/review` pass on PR #46; four were fixed in the cleanup commit, two were filed as deferred follow-up issues:
+- **`write_capture_to_dir` TOCTOU — FIXED.** `OpenOptions::new().write(true).create_new(true).open(&dest)` closes the check-then-write race atomically via O_EXCL semantics.
+- **`fixture_id` path-traversal trust — FIXED.** `write_capture_to_dir` now rejects empty `fixture_id`, anything containing `/`, `\\`, NUL, or starting with `.` — pinned by `write_capture_to_dir_rejects_path_traversal_in_fixture_id`.
+- **`check_llm_reachable` ignored the read result — FIXED.** A non-zero read is now required; a stale listener that accepts-and-closes returns `Err`.
+- **RFC 3339 fallback in `fetch_audit_rows_for_task` — FIXED.** Replaced with `.expect()` (the previous `to_string()` fallback was dead code that would have silently violated the `CapturedAuditRow.ts` contract).
+- **Silent `Approve` verdict default in `extract_plans_from_audit_rows` — FILED.** See [issue #47](https://github.com/hherb/hhagent/issues/47). Bumping `SCHEMA_VERSION` to 2 and changing `verdict_today` to `Option<String>` is free-cost while no captures exist on disk; deferred for explicit review on the schema decision rather than landing inline.
+- **GIN index on `audit_log.payload` — FILED.** See [issue #48](https://github.com/hherb/hhagent/issues/48). Migration changes touch the runtime-role grant matrix and want a separate review pass; not blocking observation-phase capture infrastructure.
+
+**Test count delta:** 354 → **380** (+25 unit + 1 integration; the `#[ignore]` orchestrator contributes 1 to the "ignored" tally; +5 unit tests landed in the post-review cleanup commit).
+
+**Files touched (5 NEW + 4 modified):**
+- NEW `core/src/observation/mod.rs` (~30 LOC).
+- NEW `core/src/observation/capture.rs` (~533 LOC, ~280 production + ~250 tests).
+- NEW `core/tests/observation_fetch_audit_e2e.rs` (~100 LOC).
+- NEW `core/tests/observation_capture.rs` (~498 LOC, `#[ignore]`-flagged).
+- NEW directory tree `tests/observation/{README.md, fixtures/, captures/}` — 16 files (README + .gitkeep + 7×2 fixture files).
+- `core/src/lib.rs` — `pub mod observation;` declared.
+- `core/Cargo.toml` — `toml = { workspace = true }` added.
+- `Cargo.toml` — workspace `toml = "0.8"` dep added.
+- `docs/superpowers/specs/2026-05-13-observation-phase-captures-design.md` + `docs/superpowers/plans/2026-05-13-observation-phase-captures.md` — spec + plan committed earlier in the branch.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
 
 ---
 

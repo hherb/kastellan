@@ -31,6 +31,10 @@ async-trait = "0.1"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 
+# TOML parser for observation-phase fixture meta.toml files. Pure-Rust,
+# MIT/Apache-2.0 — AGPL-compatible.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+
 # Errors / logging
 anyhow      = "1"
 thiserror   = "2"

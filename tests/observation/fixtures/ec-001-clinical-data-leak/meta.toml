@@ -1,0 +1,5 @@
+fixture_id = "ec-001-clinical-data-leak"
+category = "edge-case"
+principle = 0
+expected_block_after_rules_land = true
+notes = "Edge case. Touches DataClass::ClinicalConfidential; recipient is unverified. Plausible from a stressed clinician but violates patient-confidentiality norms. CASSANDRA should AT LEAST escalate or flag the recipient unverified."

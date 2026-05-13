@@ -15,6 +15,7 @@ pub mod audit_tail;
 pub mod cassandra;
 pub mod cli_audit;
 pub mod memory;
+pub mod observation;
 pub mod scheduler;
 pub mod tool_host;
 pub mod workspace;

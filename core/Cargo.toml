@@ -43,6 +43,7 @@ time               = { workspace = true }
 libc               = { workspace = true }
 sqlx               = { workspace = true }
 futures            = { workspace = true }
+toml               = { workspace = true }
 
 [dev-dependencies]
 # Shared test fixtures hoisted in issue #15: per-test Postgres cluster
