@@ -45,27 +45,46 @@
 //! `started_at ≤ crash_time ≤ audit_log.ts`, with no tighter upper
 //! bound recoverable from the row alone.
 //!
+//! ## Finalize summary row (added 2026-05-13)
+//!
+//! For each recovered task this module **also** writes one
+//! `actor='scheduler' action='task.finalize'` row immediately after the
+//! `task.crashed` lifecycle row, mirroring the live-runtime ordering
+//! (`drain_lane` writes `task.<state>` then `task.finalize`). The
+//! payload uses [`super::audit::build_crashed_finalize_payload`], which
+//! emits `total_llm_calls` and `total_dispatch_calls` as JSON `null`
+//! (the dead daemon's in-memory counters are unrecoverable) and a
+//! computed `total_duration_ms` from `started_at` (set by `claim_one`)
+//! to `finished_at` (set by the sweep's `UPDATE … SET finished_at =
+//! now()`). With this row in place, observation-phase SQL grouping on
+//! `action='task.finalize'` sees the crashed-task population — which
+//! was previously invisible — and can distinguish "0 calls observed"
+//! (runtime path) from "unknowable" (sweep path) by the JSON-null
+//! marker.
+//!
 //! ## What this module deliberately does NOT do
 //!
-//! * **No `task.finalize` summary row** for crashed tasks. The
-//!   finalize-row payload (see [`super::audit::TaskFinalizeStats`])
-//!   carries aggregate counters (`total_llm_calls`,
-//!   `total_dispatch_calls`, `total_duration_ms`) that died with the
-//!   previous daemon. We could write the row with zero counters but
-//!   that would be a misleading data shape for the consumers that
-//!   subscribe to the finalize stream. Left as a follow-up.
 //! * **No re-enqueueing.** A crashed task is terminal; if the user
 //!   wants to retry, they re-submit. The previous handover note
 //!   ("future work; `sweep_crashed` does not yet re-enqueue") still
 //!   applies.
+//! * **No back-fill of `total_llm_calls` / `total_dispatch_calls` from
+//!   the audit log.** In principle one could `SELECT COUNT(*)` the
+//!   `agent/plan.formulate` and `tool:*` rows for the crashed task to
+//!   recover the counters. Deferred: the cost is per-task SQL on every
+//!   startup and observation phase hasn't established that the
+//!   counters are needed for crashed tasks. The JSON-null shape is the
+//!   honest "we don't know" signal in the meantime.
 
 use sqlx::PgPool;
+use time::OffsetDateTime;
 
 use hhagent_db::tasks::{self, Task};
 use hhagent_db::DbError;
 
 use super::audit::{
-    action_task_terminal, build_lifecycle_payload, SCHEDULER_AUDIT_ACTOR,
+    action_task_terminal, build_crashed_finalize_payload, build_lifecycle_payload,
+    ACTION_TASK_FINALIZE, SCHEDULER_AUDIT_ACTOR,
 };
 
 /// Run [`tasks::sweep_crashed`] and emit one `scheduler/task.crashed`
@@ -83,6 +102,7 @@ pub async fn sweep_and_audit(pool: &PgPool) -> Result<usize, DbError> {
     let crashed = tasks::sweep_crashed(pool).await?;
     for task in &crashed {
         emit_task_crashed_row(pool, task).await;
+        emit_task_finalize_row(pool, task).await;
     }
     Ok(crashed.len())
 }
@@ -100,6 +120,41 @@ async fn emit_task_crashed_row(pool: &PgPool, task: &Task) {
             task_id = task.id,
             error = %e,
             "audit insert for scheduler/task.crashed row failed (best-effort)"
+        );
+    }
+}
+
+/// Insert one `actor='scheduler' action='task.finalize'` summary row
+/// for a crashed task. Same posture as [`emit_task_crashed_row`]
+/// (best-effort).
+///
+/// `task.finished_at` is always `Some` after `sweep_crashed` (the
+/// `UPDATE … SET finished_at = now()` is unconditional), but the
+/// column type is `Option<OffsetDateTime>` so we defend with a
+/// fallback to the local clock if the optional ever surprises us.
+async fn emit_task_finalize_row(pool: &PgPool, task: &Task) {
+    let finished_at = task
+        .finished_at
+        .unwrap_or_else(OffsetDateTime::now_utc);
+    let payload = build_crashed_finalize_payload(
+        task.id,
+        task.lane,
+        task.plan_count,
+        task.started_at,
+        finished_at,
+    );
+    if let Err(e) = hhagent_db::audit::insert(
+        pool,
+        SCHEDULER_AUDIT_ACTOR,
+        ACTION_TASK_FINALIZE,
+        payload,
+    )
+    .await
+    {
+        tracing::warn!(
+            task_id = task.id,
+            error = %e,
+            "audit insert for scheduler/task.finalize (crashed) row failed (best-effort)"
         );
     }
 }
