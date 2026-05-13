@@ -96,7 +96,8 @@ use time::OffsetDateTime;
 
 use crate::scheduler::audit::{
     action_task_terminal, build_finalize_payload, build_lifecycle_payload, TaskFinalizeStats,
-    ACTION_TASK_FINALIZE, ACTION_TASK_SUBMITTED,
+    ACTION_TASK_FINALIZE, ACTION_TASK_SUBMITTED, ACTION_TOOLS_ALLOWLIST_ADD,
+    ACTION_TOOLS_ALLOWLIST_REMOVE,
 };
 
 /// Logical `actor` string written into every CLI-emitted audit row.
@@ -295,6 +296,77 @@ pub async fn submit_and_audit(
     }
 
     Ok(id)
+}
+
+/// Add one allowlist entry and emit one `actor='cli'
+/// action='tools.allowlist.add'` audit row on success.
+///
+/// Returns the DB-layer bool: `Ok(true)` means a row was INSERTed (and
+/// an audit row was emitted, best-effort); `Ok(false)` means the entry
+/// already existed and **no audit row is written** (the operator's
+/// state-change intent did not materialise; logging it would confuse
+/// "what was true at time T" reconstructions).
+///
+/// Audit-insert posture: best-effort. A transient DB failure on the
+/// audit row is logged via `tracing::warn!` and swallowed; the
+/// underlying `db::tool_allowlists::add` outcome propagates either way.
+pub async fn tools_allowlist_add_and_audit(
+    pool: &PgPool,
+    tool: &str,
+    argv0: &str,
+) -> Result<bool, hhagent_db::tool_allowlists::ToolAllowlistError> {
+    let inserted = hhagent_db::tool_allowlists::add(pool, tool, argv0, CLI_AUDIT_ACTOR).await?;
+    if inserted {
+        let payload = serde_json::json!({ "tool": tool, "argv0": argv0 });
+        if let Err(e) = hhagent_db::audit::insert(
+            pool,
+            CLI_AUDIT_ACTOR,
+            ACTION_TOOLS_ALLOWLIST_ADD,
+            payload,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %e,
+                tool = tool,
+                argv0 = argv0,
+                "tools_allowlist_add_and_audit: audit insert failed"
+            );
+        }
+    }
+    Ok(inserted)
+}
+
+/// Remove one allowlist entry and emit one `actor='cli'
+/// action='tools.allowlist.remove'` audit row on success.
+///
+/// Returns `Ok(true)` if a row was deleted (and audit row emitted
+/// best-effort); `Ok(false)` if nothing matched (no audit row).
+pub async fn tools_allowlist_remove_and_audit(
+    pool: &PgPool,
+    tool: &str,
+    argv0: &str,
+) -> Result<bool, hhagent_db::tool_allowlists::ToolAllowlistError> {
+    let removed = hhagent_db::tool_allowlists::remove(pool, tool, argv0).await?;
+    if removed {
+        let payload = serde_json::json!({ "tool": tool, "argv0": argv0 });
+        if let Err(e) = hhagent_db::audit::insert(
+            pool,
+            CLI_AUDIT_ACTOR,
+            ACTION_TOOLS_ALLOWLIST_REMOVE,
+            payload,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %e,
+                tool = tool,
+                argv0 = argv0,
+                "tools_allowlist_remove_and_audit: audit insert failed"
+            );
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
