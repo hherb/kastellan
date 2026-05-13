@@ -115,13 +115,30 @@ pub fn parse_fixture_prompt(_md: &str) -> Result<(String, String), ParseError> {
 ///
 /// "Qwen3-7B-Instruct" → "qwen3-7b-instruct"
 /// "gemma4:26b-a4b-it-q8_0" → "gemma4-26b-a4b-it-q8-0"
-pub fn slug_model(_model: &str) -> String {
-    unimplemented!()
+pub fn slug_model(model: &str) -> String {
+    let mut out = String::with_capacity(model.len());
+    let mut prev_was_hyphen = true; // drop leading hyphens by treating start as one
+    for ch in model.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            out.push(lower);
+            prev_was_hyphen = false;
+        } else if !prev_was_hyphen {
+            out.push('-');
+            prev_was_hyphen = true;
+        }
+        // else: skip — collapses runs of punctuation
+    }
+    // Drop a trailing '-' from the punctuation-end case.
+    if out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 /// `format!("{date}_{slug}.json")` — pure, single-line.
-pub fn capture_filename(_date_yyyy_mm_dd: &str, _model_slug: &str) -> String {
-    unimplemented!()
+pub fn capture_filename(date_yyyy_mm_dd: &str, model_slug: &str) -> String {
+    format!("{date_yyyy_mm_dd}_{model_slug}.json")
 }
 
 /// Walk an audit-row stream for a single task and extract one
@@ -174,5 +191,48 @@ mod tests {
     #[test]
     fn slug_model_lowercases_ascii_input() {
         assert_eq!(slug_model("Qwen3-7B-Instruct"), "qwen3-7b-instruct");
+    }
+
+    #[test]
+    fn slug_model_normalises_colon_and_underscore_punctuation() {
+        assert_eq!(slug_model("gemma4:26b-a4b-it-q8_0"), "gemma4-26b-a4b-it-q8-0");
+    }
+
+    #[test]
+    fn slug_model_collapses_runs_of_punctuation() {
+        // ".:_-" all map to a single '-' between alphanum runs.
+        assert_eq!(slug_model("model.with::lots__of---punct"), "model-with-lots-of-punct");
+    }
+
+    #[test]
+    fn slug_model_trims_leading_and_trailing_hyphens() {
+        assert_eq!(slug_model(":foo:"), "foo");
+        assert_eq!(slug_model("---foo---"), "foo");
+    }
+
+    #[test]
+    fn slug_model_returns_empty_string_for_punctuation_only_input() {
+        // Pure helper; caller is responsible for upstream validation
+        // (e.g. asserting that `llm_model` is non-empty in CaptureJson).
+        assert_eq!(slug_model(":::"), "");
+    }
+
+    #[test]
+    fn slug_model_preserves_alphanumeric_unicode_as_lowercased_ascii_loss() {
+        // Non-ASCII alphanumerics are treated as non-alphanumeric for
+        // simplicity (filesystem-safe ASCII slug). Operators using
+        // non-ASCII model ids will see them mapped to '-' runs.
+        assert_eq!(slug_model("Mödel-é"), "m-del");
+    }
+
+    // ---- capture_filename ----
+
+    #[test]
+    fn capture_filename_shape_pin() {
+        let fname = capture_filename("2026-05-13", "gemma4-26b-a4b-it-q8-0");
+        assert_eq!(fname, "2026-05-13_gemma4-26b-a4b-it-q8-0.json");
+        assert!(!fname.contains('/'));
+        assert!(!fname.contains('\\'));
+        assert!(fname.ends_with(".json"));
     }
 }
