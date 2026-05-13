@@ -36,6 +36,7 @@ pub mod pool;
 pub mod probe;
 pub mod secrets;
 pub mod tasks;
+pub mod tool_allowlists;
 
 /// Serialise unit tests that mutate process-wide environment variables.
 ///
