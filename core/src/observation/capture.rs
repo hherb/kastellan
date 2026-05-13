@@ -174,8 +174,39 @@ pub fn capture_filename(date_yyyy_mm_dd: &str, model_slug: &str) -> String {
 /// any) to populate `verdict_today`. Missing verdict row defaults to
 /// `"Approve"` silently — the original `audit_rows` stream in
 /// [`CaptureJson`] still preserves full truth.
-pub fn extract_plans_from_audit_rows(_rows: &[CapturedAuditRow]) -> Vec<CapturedPlan> {
-    unimplemented!()
+pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedPlan> {
+    let mut out = Vec::new();
+    let mut iter: u32 = 0;
+    for (i, row) in rows.iter().enumerate() {
+        if row.actor == "agent" && row.action == "plan.formulate" {
+            iter = iter.saturating_add(1);
+            let plan_json = row.payload.get("plan").cloned().unwrap_or(serde_json::Value::Null);
+            let step_count = plan_json
+                .get("steps")
+                .and_then(|s| s.as_array())
+                .map(|a| a.len() as u32)
+                .unwrap_or(0);
+            let data_ceiling = plan_json
+                .get("data_ceiling")
+                .and_then(|d| d.as_str())
+                .unwrap_or("Public")
+                .to_string();
+            // Look ahead for the next cassandra:chain/verdict row.
+            let verdict_today = rows[i + 1..]
+                .iter()
+                .find(|r| r.actor == "cassandra:chain" && r.action == "verdict")
+                .and_then(|r| r.payload.get("verdict").and_then(|v| v.as_str()).map(String::from))
+                .unwrap_or_else(|| "Approve".to_string());
+            out.push(CapturedPlan {
+                iter,
+                plan_json,
+                verdict_today,
+                step_count,
+                data_ceiling,
+            });
+        }
+    }
+    out
 }
 
 // ---- IO + async helpers (integration-tested) ----
@@ -311,5 +342,95 @@ mod tests {
             Err(ParseError::EmptyBody) => {}
             other => panic!("expected EmptyBody, got {other:?}"),
         }
+    }
+
+    // ---- extract_plans_from_audit_rows ----
+
+    fn fake_audit_row(id: i64, actor: &str, action: &str, payload: serde_json::Value)
+        -> CapturedAuditRow
+    {
+        CapturedAuditRow {
+            id,
+            ts: "2026-05-13T00:00:00Z".into(),
+            actor: actor.into(),
+            action: action.into(),
+            payload,
+        }
+    }
+
+    fn fake_plan_payload(decision: &str, steps_len: usize, data_ceiling: &str)
+        -> serde_json::Value
+    {
+        let steps: Vec<serde_json::Value> = (0..steps_len)
+            .map(|i| serde_json::json!({
+                "tool": "shell-exec",
+                "method": "shell.exec",
+                "parameters": {"argv": ["/usr/bin/echo", format!("s{i}")]},
+                "returns": "stdout",
+                "done_when": "exit_code == 0",
+                "classification": "Public",
+            }))
+            .collect();
+        serde_json::json!({
+            "plan": {
+                "context": "ctx",
+                "decision": decision,
+                "rationale": "why",
+                "steps": steps,
+                "data_ceiling": data_ceiling,
+            }
+        })
+    }
+
+    #[test]
+    fn extract_plans_empty_input_returns_empty_vec() {
+        let rows: Vec<CapturedAuditRow> = vec![];
+        assert!(extract_plans_from_audit_rows(&rows).is_empty());
+    }
+
+    #[test]
+    fn extract_plans_one_plan_one_verdict() {
+        let rows = vec![
+            fake_audit_row(1, "agent", "plan.formulate", fake_plan_payload("act", 1, "Public")),
+            fake_audit_row(2, "cassandra:chain", "verdict",
+                serde_json::json!({"verdict": "Approve"})),
+        ];
+        let plans = extract_plans_from_audit_rows(&rows);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].iter, 1);
+        assert_eq!(plans[0].verdict_today, "Approve");
+        assert_eq!(plans[0].step_count, 1);
+        assert_eq!(plans[0].data_ceiling, "Public");
+    }
+
+    #[test]
+    fn extract_plans_two_plans_two_verdicts_carry_iter_indices() {
+        let rows = vec![
+            fake_audit_row(1, "agent", "plan.formulate", fake_plan_payload("act", 2, "Personal")),
+            fake_audit_row(2, "cassandra:chain", "verdict",
+                serde_json::json!({"verdict": "Approve"})),
+            fake_audit_row(3, "agent", "plan.formulate",
+                fake_plan_payload("task_complete", 0, "Personal")),
+            fake_audit_row(4, "cassandra:chain", "verdict",
+                serde_json::json!({"verdict": "Approve"})),
+        ];
+        let plans = extract_plans_from_audit_rows(&rows);
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].iter, 1);
+        assert_eq!(plans[0].step_count, 2);
+        assert_eq!(plans[1].iter, 2);
+        assert_eq!(plans[1].step_count, 0);
+        assert_eq!(plans[1].data_ceiling, "Personal");
+    }
+
+    #[test]
+    fn extract_plans_defaults_to_approve_when_verdict_row_missing() {
+        let rows = vec![
+            fake_audit_row(1, "agent", "plan.formulate", fake_plan_payload("act", 1, "Public")),
+            // No following cassandra:chain/verdict row.
+        ];
+        let plans = extract_plans_from_audit_rows(&rows);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].verdict_today, "Approve");
     }
 }
