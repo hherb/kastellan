@@ -94,7 +94,7 @@ pub fn validate_argv0(argv0: &str) -> Result<(), ToolAllowlistError> {
     Ok(())
 }
 
-// --- I/O layer (filled in by Task 3) ----------------------------------
+// --- I/O layer ---------------------------------------------------------
 
 /// Add one allowlist entry. Idempotent — returns `Ok(true)` if a row
 /// was INSERTed, `Ok(false)` if the entry was already present.

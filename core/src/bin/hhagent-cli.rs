@@ -712,7 +712,7 @@ async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
 
 async fn tools_allowlist_list(args: &[String]) -> ExitCode {
     use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tool_allowlists::{list_all, list_for_tool};
+    use hhagent_db::tool_allowlists::list_all;
 
     let mut tool_filter: Option<String> = None;
     let mut i = 0;
@@ -742,26 +742,19 @@ async fn tools_allowlist_list(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
 
-    if let Some(tool) = tool_filter {
-        let entries = match list_for_tool(&pool, &tool).await {
-            Ok(v) => v,
-            Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
-        };
-        println!("{:<16}  {}", "TOOL", "ARGV0");
-        for argv0 in entries {
-            println!("{:<16}  {}", tool, argv0);
-        }
-    } else {
-        let entries = match list_all(&pool).await {
-            Ok(v) => v,
-            Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
-        };
+    let entries = match list_all(&pool).await {
+        Ok(v) => v,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let filtered: Vec<_> = match &tool_filter {
+        Some(t) => entries.into_iter().filter(|e| &e.tool == t).collect(),
+        None => entries,
+    };
+    println!("{:<16}  {:<48}  {:<24}  {}",
+        "TOOL", "ARGV0", "CREATED_AT", "CREATED_BY");
+    for e in filtered {
         println!("{:<16}  {:<48}  {:<24}  {}",
-            "TOOL", "ARGV0", "CREATED_AT", "CREATED_BY");
-        for e in entries {
-            println!("{:<16}  {:<48}  {:<24}  {}",
-                e.tool, e.argv0, e.created_at, e.created_by);
-        }
+            e.tool, e.argv0, e.created_at, e.created_by);
     }
     ExitCode::from(0)
 }
