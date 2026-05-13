@@ -338,7 +338,16 @@ async fn back_dated_lease_is_swept_to_crashed() {
 ///      (matches `audit::build_lifecycle_payload` — proves the helper
 ///      is reused, not re-implemented).
 ///   3. The lane field round-trips per task (Fast → "fast", Long → "long").
-///   4. Idempotency: a second call returns 0 and writes no new rows.
+///   4. Each recovered task **also** gets exactly one `task.finalize`
+///      summary row whose payload carries `state="crashed"`,
+///      `total_llm_calls`/`total_dispatch_calls` as JSON `null`
+///      (counters died with the previous daemon), and a numeric
+///      `total_duration_ms` plus an RFC 3339 `started_at` string
+///      because the back-dated task was claimed before the sweep.
+///      Observation-phase queries on `action='task.finalize'` now see
+///      the crashed-task population that was previously invisible.
+///   5. Idempotency: a second call returns 0 and writes no new rows of
+///      either family.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sweep_and_audit_emits_one_task_crashed_row_per_recovered_task() {
     let Some((pool, _guards)) = bring_up_pg("audit").await else {
@@ -419,6 +428,61 @@ async fn sweep_and_audit_emits_one_task_crashed_row_per_recovered_task() {
     assert_eq!(long_payload["lane"], "long", "long task → lane='long'");
     assert_eq!(long_payload["plan_count"], 0);
 
+    // ── Assert per-task `task.finalize` summary row + shape ──────────
+    // Symmetric to the runtime path (drain_lane writes `task.<state>`
+    // followed by `task.finalize`): the crash-recovery sweep emits the
+    // same pair so observation-phase SQL grouping on
+    // `action='task.finalize'` sees crashed tasks too. The counters are
+    // JSON `null` (the dead daemon's in-memory tallies are unrecoverable).
+    let finalize_rows: Vec<(i64, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, payload FROM audit_log \
+         WHERE actor = 'scheduler' AND action = 'task.finalize' \
+         ORDER BY id ASC",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        finalize_rows.len(),
+        2,
+        "one task.finalize audit row per recovered task"
+    );
+
+    let finalize_by_id: std::collections::HashMap<i64, &serde_json::Value> = finalize_rows
+        .iter()
+        .map(|(_, p)| (p["task_id"].as_i64().expect("task_id is integer"), p))
+        .collect();
+
+    for tid in [fast_id, long_id] {
+        let p = finalize_by_id
+            .get(&tid)
+            .unwrap_or_else(|| panic!("task.finalize row missing for task {tid}"));
+        assert_eq!(p["state"], "crashed", "finalize.state pins to 'crashed'");
+        assert!(
+            p["total_llm_calls"].is_null(),
+            "total_llm_calls must be JSON null on crashed-task finalize"
+        );
+        assert!(
+            p["total_dispatch_calls"].is_null(),
+            "total_dispatch_calls must be JSON null on crashed-task finalize"
+        );
+        // Back-dated tasks were claimed before the sweep, so started_at
+        // and a numeric duration are present. (A finalize row where the
+        // counters are nullable but duration is computed is the wire
+        // signal "we know when this task lived, just not what it did".)
+        assert!(p["started_at"].is_string(), "started_at present after claim");
+        assert!(
+            p["total_duration_ms"].is_number(),
+            "duration computable when started_at is present"
+        );
+        // 9 keys, no extras (defends against accidental payload bloat).
+        assert_eq!(
+            p.as_object().unwrap().len(),
+            9,
+            "finalize payload has exactly the 9 canonical keys"
+        );
+    }
+
     // ── Idempotency: a second call sweeps nothing and writes nothing ──
     let second = hhagent_core::scheduler::crash_recovery::sweep_and_audit(&pool)
         .await
@@ -433,6 +497,17 @@ async fn sweep_and_audit_emits_one_task_crashed_row_per_recovered_task() {
     .unwrap();
     assert_eq!(
         final_crashed_rows, 2,
-        "idempotent second sweep must not write new audit rows"
+        "idempotent second sweep must not write new task.crashed rows"
+    );
+    let final_finalize_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log \
+         WHERE actor = 'scheduler' AND action = 'task.finalize'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        final_finalize_rows, 2,
+        "idempotent second sweep must not write new task.finalize rows"
     );
 }
