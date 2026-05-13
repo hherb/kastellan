@@ -493,6 +493,10 @@ async fn capture_all_fixtures_against_live_llm() {
     let fname = capture_filename(&captured_at[..10], &slug);
     assert!(fname.ends_with(".json"));
 
-    drop(pool);
-    drop(cluster);
+    // Teardown is intentionally LEFT to scope-end RAII so the daemon
+    // (_daemon, declared before `pool`) drops AFTER pool but BEFORE
+    // cluster — the correct order: daemon stops while PG is still alive,
+    // then PG tears down. Explicit `drop(pool); drop(cluster);` would
+    // tear PG down first and force the daemon to shut down against a
+    // missing DB.
 }
