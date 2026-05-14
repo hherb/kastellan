@@ -25,6 +25,17 @@
 -- table owner; runtime callers continue to read audit_log via the
 -- existing SELECT grant from 0001/0002.
 --
+-- Locking note: this is a plain (non-`CONCURRENTLY`) `CREATE INDEX`, so
+-- Postgres takes a `ShareLock` on `audit_log` for the duration of the
+-- build — readers proceed, writers (including the agent's own audit
+-- inserts) block until the index is built. Fine at this project's
+-- single-user scale and on any fresh cluster; if you are applying this
+-- against a populated, write-busy cluster, switch to `CONCURRENTLY`
+-- (which requires running outside a transaction — i.e. not via the
+-- sqlx migration runner — and accepting that it may leave an INVALID
+-- index behind on failure). The sqlx runner wraps each migration in a
+-- transaction, so `CONCURRENTLY` is intentionally not used here.
+--
 -- See issue #48.
 CREATE INDEX IF NOT EXISTS audit_log_payload_gin
     ON audit_log
