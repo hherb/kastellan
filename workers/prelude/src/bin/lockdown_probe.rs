@@ -41,10 +41,18 @@
 //!     PR_SET_NO_NEW_PRIVS, which lock_down already set). Used by
 //!     `coreutils_smoke.rs` to audit BASE_ALLOW against common worker
 //!     binaries (`cp`, `cat`, `mkdir`, …). If `execve` fails, exit 71.
+//!
+//! lockdown-probe cpu-burner
+//!     Call rlimit::apply_from_env() and lock_down(), then enter a
+//!     CPU-bound busy loop. If HHAGENT_CPU_MS was set, the kernel kills
+//!     the process via SIGXCPU/SIGKILL within `cpu_seconds`. Used by
+//!     `rlimit_smoke.rs` to verify worker-side cpu_ms enforcement.
+//!     Exits 0 if the loop runs for > 10 wall-clock seconds (the test
+//!     interprets that as "rlimit failed to apply").
 //! ```
 //!
-//! All subcommands print `LOCKDOWN_REPORT: {report}` to stderr first, so
-//! the parent test can confirm which layers were active.
+//! All subcommands print `RLIMIT_REPORT: {report}` and `LOCKDOWN_REPORT: {report}`
+//! to stderr first, so the parent test can confirm which layers were active.
 
 use std::process::ExitCode;
 
@@ -55,7 +63,17 @@ fn main() -> ExitCode {
         return ExitCode::from(64);
     }
 
-    // Lock down first, then dispatch. If lock_down itself fails, that's a
+    // Apply rlimit first, matching serve_stdio's order. Cross-platform.
+    let rlimit_report = match hhagent_worker_prelude::rlimit::apply_from_env() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("RLIMIT_ERROR: {e}");
+            return ExitCode::from(72);
+        }
+    };
+    eprintln!("RLIMIT_REPORT: {rlimit_report:?}");
+
+    // Lock down next, then dispatch. If lock_down itself fails, that's a
     // distinct exit code so tests can tell "the filter machinery is
     // broken" apart from "the filter blocked the test action".
     let report = match hhagent_worker_prelude::lock_down() {
@@ -79,6 +97,7 @@ fn main() -> ExitCode {
         "seccomp-getpid" => probe_getpid(),
         #[cfg(target_os = "linux")]
         "exec-after-lockdown" => probe_exec_after_lockdown(&args[1..]),
+        "cpu-burner" => probe_cpu_burner(),
         other => {
             eprintln!("unknown subcommand: {other}");
             ExitCode::from(64)
@@ -222,4 +241,30 @@ fn errno() -> i32 {
     // Avoid pulling in libc::__errno_location signature differences across
     // glibc/musl by going through std.
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// Busy-loop on CPU until either:
+///   * the kernel kills us via SIGXCPU/SIGKILL (the rlimit fired), or
+///   * 10 wall-clock seconds elapse (rlimit didn't fire — test failure).
+///
+/// Used by `rlimit_smoke.rs` to verify the worker-side rlimit layer
+/// actually enforces the CPU budget the parent encoded in
+/// HHAGENT_CPU_MS. Volatile reads + writes defend against the loop
+/// being optimised away under release builds.
+fn probe_cpu_burner() -> ExitCode {
+    use std::time::Instant;
+    let start = Instant::now();
+    let mut counter: u64 = 0;
+    // Wall-clock cap is generous — 10s gives a 200 ms cpu_ms budget at
+    // least ~50x headroom to fire SIGXCPU even on a deeply contended
+    // host. If we reach the cap we exit 0, which the test treats as
+    // failure (the test expects to be killed by signal).
+    while start.elapsed().as_secs() < 10 {
+        // `read_volatile` + `write_volatile` keep the loop alive under
+        // release optimisations.
+        let prev = unsafe { std::ptr::read_volatile(&counter) };
+        unsafe { std::ptr::write_volatile(&mut counter, prev.wrapping_add(1)) };
+    }
+    eprintln!("cpu-burner: hit 10s wall-clock cap, counter={counter}");
+    ExitCode::from(0)
 }

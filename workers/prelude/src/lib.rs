@@ -38,7 +38,7 @@
 //! ## Cross-platform contract
 //!
 //! On non-Linux targets, [`lock_down`] is a no-op (returns
-//! [`LockdownReport::SkippedNonLinux`]). The cross-platform contract is
+//! [`LockdownReport::NonLinux`]). The cross-platform contract is
 //! preserved because the macOS Seatbelt backend (Phase 0b) installs the
 //! equivalent containment from the parent side — the worker process on
 //! macOS is launched already inside the Seatbelt profile.
@@ -47,6 +47,7 @@
 
 #[cfg(target_os = "linux")]
 pub mod landlock_lock;
+pub mod rlimit;
 #[cfg(target_os = "linux")]
 pub mod seccomp_lock;
 
@@ -54,18 +55,27 @@ use std::io;
 
 use hhagent_protocol::server::Handler;
 
-/// What `lock_down` actually managed to install. Returned so the worker can
-/// log it (and tests can assert on it).
+/// What `serve_stdio` actually managed to install. Returned so the
+/// worker can log it (and tests can assert on it).
+///
+/// Two-layer composition: `rlimit::apply_from_env` (cross-platform,
+/// POSIX `setrlimit`) plus `lock_down` (Linux Landlock + seccomp;
+/// no-op on macOS, where Seatbelt enforces containment from the parent
+/// side). `rlimit` runs *before* `lock_down` so the CPU ceiling is
+/// armed before any seccomp restrictions on `prlimit`-family syscalls.
 #[derive(Debug)]
 pub enum LockdownReport {
-    /// Both layers installed and enforcing.
+    /// Linux: Landlock + seccomp + rlimit.
     Linux {
         landlock: LandlockReport,
         seccomp: SeccompReport,
+        rlimit: rlimit::RlimitReport,
     },
-    /// Non-Linux target — both layers are no-ops here. Containment is the
-    /// parent's job (Seatbelt).
-    SkippedNonLinux,
+    /// macOS or other non-Linux: kernel containment is the parent's
+    /// job (Seatbelt), but rlimit still applies (POSIX).
+    NonLinux {
+        rlimit: rlimit::RlimitReport,
+    },
 }
 
 /// Status of the Landlock layer after `lock_down`.
@@ -120,37 +130,68 @@ pub enum LockdownError {
 /// returns an error). A kernel that lacks Landlock support is reported via
 /// [`LandlockReport::KernelTooOld`], not via an error — callers should still
 /// proceed, since bwrap is the primary containment layer.
+///
+/// **Does not apply `setrlimit`.** That's [`rlimit::apply_from_env`]'s job;
+/// [`serve_stdio`] composes the two. Callers using `lock_down` directly
+/// (e.g. the `lockdown-probe` binary) are responsible for invoking
+/// `rlimit::apply_from_env` themselves if they want CPU-time enforcement.
+/// The returned `LockdownReport` carries `rlimit: RlimitReport::Disabled`
+/// from this entry point.
 pub fn lock_down() -> Result<LockdownReport, LockdownError> {
     #[cfg(target_os = "linux")]
     {
         let landlock = landlock_lock::apply_from_env()?;
         let seccomp = seccomp_lock::apply_from_env()?;
-        Ok(LockdownReport::Linux { landlock, seccomp })
+        Ok(LockdownReport::Linux {
+            landlock,
+            seccomp,
+            rlimit: rlimit::RlimitReport::Disabled,
+        })
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Ok(LockdownReport::SkippedNonLinux)
+        Ok(LockdownReport::NonLinux {
+            rlimit: rlimit::RlimitReport::Disabled,
+        })
     }
 }
 
 /// Drop-in replacement for `hhagent_protocol::server::serve_stdio` that
-/// applies [`lock_down`] before entering the request loop. This is the
-/// recommended entry point for tool workers.
+/// applies `rlimit::apply_from_env` and [`lock_down`] before entering
+/// the request loop. This is the recommended entry point for tool
+/// workers.
 ///
-/// Errors from `lock_down` are returned as `io::Error` (kind `Other`) so the
-/// caller can use the same `?` chain it was already using for the protocol
-/// loop.
+/// Order matters:
+///
+/// 1. **`rlimit::apply_from_env` first.** Sets `RLIMIT_CPU` before any
+///    syscall restrictions land — defends against future seccomp profiles
+///    that ban `prlimit64`. Cross-platform (POSIX).
+/// 2. **`lock_down` second.** Linux Landlock + seccomp; no-op on macOS.
+///
+/// Both layers fail closed: any error returns `io::Error` and the worker
+/// exits before serving any request.
 pub fn serve_stdio<H: Handler>(handler: &mut H) -> io::Result<()> {
-    match lock_down() {
-        Ok(report) => {
-            // Single, structured line on stderr so the parent can capture it
-            // for the audit log without parsing JSON. Workers that want
-            // richer logging can call `lock_down` themselves and skip this.
-            eprintln!("hhagent-worker-prelude: lockdown {report:?}");
-        }
+    let rlimit = rlimit::apply_from_env().map_err(|e| io::Error::other(e.to_string()))?;
+
+    let report = match lock_down() {
+        Ok(LockdownReport::Linux {
+            landlock, seccomp, ..
+        }) => LockdownReport::Linux {
+            landlock,
+            seccomp,
+            rlimit,
+        },
+        Ok(LockdownReport::NonLinux { .. }) => LockdownReport::NonLinux { rlimit },
         Err(e) => {
-            return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
+            return Err(io::Error::other(e.to_string()));
         }
-    }
+    };
+
+    // Single, structured line on stderr so the parent can capture it
+    // for the audit log without parsing JSON. Workers that want
+    // richer logging can call `rlimit::apply_from_env` + `lock_down`
+    // themselves and skip this.
+    eprintln!("hhagent-worker-prelude: lockdown {report:?}");
+
     hhagent_protocol::server::serve_stdio(handler)
 }

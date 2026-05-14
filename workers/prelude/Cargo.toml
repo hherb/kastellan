@@ -14,6 +14,10 @@ hhagent-protocol = { path = "../../protocol" }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 thiserror        = { workspace = true }
+# libc gives us POSIX setrlimit on both Linux and macOS. The Landlock +
+# seccomp deps below remain Linux-only (the macOS prelude does no
+# kernel containment of its own — Seatbelt does it from the parent).
+libc             = "0.2"
 
 # Linux-only kernel containment helpers. On macOS these targets are skipped;
 # `lock_down()` is a no-op there because Seatbelt enforces equivalent policy
@@ -21,7 +25,6 @@ thiserror        = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock    = { workspace = true }
 seccompiler = { workspace = true }
-libc        = "0.2"
 
 [[bin]]
 name = "hhagent-lockdown-probe"
