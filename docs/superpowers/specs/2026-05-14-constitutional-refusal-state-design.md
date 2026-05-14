@@ -152,7 +152,7 @@ ALTER TABLE tasks ADD CONSTRAINT tasks_state_check
     ));
 ```
 
-The migration must also widen the `finished_at`-setting trigger function at [db/migrations/0005_tasks_scheduler.sql:82-83](../../../db/migrations/0005_tasks_scheduler.sql#L82-L83), whose body enumerates the same terminal-state set as the CHECK constraint. The trigger is `CREATE OR REPLACE FUNCTION`-able, so the migration drops in a refreshed function body with `'refused'` appended.
+The migration must also widen the `notify_task_completed` trigger function at [db/migrations/0005_tasks_scheduler.sql:76-88](../../../db/migrations/0005_tasks_scheduler.sql#L76-L88), whose body enumerates the same terminal-state set in two IN lists (for `NEW.state` and `OLD.state`) when deciding whether to fire the `tasks_completed` NOTIFY. The function is `CREATE OR REPLACE FUNCTION`-able, so the migration drops in a refreshed body with `'refused'` appended to both IN lists. (`tasks.finished_at` is set by application-level UPDATEs in `db::tasks::{finalize, mark_cancelled, sweep_crashed}` rather than by a trigger, so no `finished_at`-setter widening is needed; the new `'refused'` final state will get `finished_at = now()` set by the existing `tasks::finalize` UPDATE in the lane runner.)
 
 Brief `ACCESS EXCLUSIVE` lock; acceptable because `tasks` is small and there are no production rows. No data migration needed.
 
