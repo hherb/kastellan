@@ -169,6 +169,8 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         mem_mb: 256,
         profile: Profile::WorkerStrict,
         env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
+        cpu_quota_pct: None,
+        tasks_max: None,
     };
     ToolEntry {
         binary,

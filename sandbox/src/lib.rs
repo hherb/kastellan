@@ -47,25 +47,39 @@ pub struct SandboxPolicy {
     pub fs_write: Vec<PathBuf>,
     /// Network policy.
     pub net: Net,
-    /// Hard CPU-time limit (milliseconds).
+    /// Hard CPU-time limit (milliseconds). Enforced via
+    /// `setrlimit(RLIMIT_CPU)` from the worker prelude (POSIX, so applies
+    /// on Linux and macOS). `0` means "unset, no rlimit applied".
     pub cpu_ms: u64,
-    /// Hard memory limit (megabytes).
+    /// Hard memory limit (megabytes). Linux only — enforced via cgroup
+    /// `MemoryMax`. macOS memory enforcement is deferred to the future
+    /// micro-VM backend (RLIMIT_AS has high false-positive risk).
     pub mem_mb: u64,
     /// Profile preset.
     pub profile: Profile,
-    /// Environment variables to set inside the jail. Empty by default — the
-    /// host environment is **always** cleared before this is applied, so the
-    /// jail sees only what's listed here.
+    /// Per-worker CPU bandwidth ceiling (percent of one CPU). `None`
+    /// falls back to the defense-in-depth default (200%) hardcoded in
+    /// [`crate::linux_cgroup`]. Linux cgroup only — has no effect on
+    /// macOS (no equivalent primitive in Seatbelt).
+    #[serde(default)]
+    pub cpu_quota_pct: Option<u32>,
+    /// Per-worker max task count (cgroup `pids.max`). `None` falls
+    /// back to the defense-in-depth default (64). Linux cgroup only.
+    #[serde(default)]
+    pub tasks_max: Option<u64>,
+    /// Environment variables to set inside the jail. Empty by default
+    /// — the host environment is **always** cleared before this is
+    /// applied, so the jail sees only what's listed here.
     #[serde(default)]
     pub env: Vec<(String, String)>,
 }
 
 impl Default for SandboxPolicy {
     /// Conservative defaults: no FS access, no network, strict profile,
-    /// 1-second CPU budget, 64 MiB memory. Production callers (e.g.
-    /// `shell_exec_entry`) override the limits explicitly; the `Default`
-    /// impl exists so tests and future field additions can use
-    /// `..Default::default()` without churning every fixture.
+    /// 1-second CPU budget, 64 MiB memory, no cgroup overrides. Production
+    /// callers (e.g. `shell_exec_entry`) override the limits explicitly;
+    /// the `Default` impl exists so tests and future field additions can
+    /// use `..Default::default()` without churning every fixture.
     fn default() -> Self {
         Self {
             fs_read: Vec::new(),
@@ -74,6 +88,8 @@ impl Default for SandboxPolicy {
             cpu_ms: 1_000,
             mem_mb: 64,
             profile: Profile::default(),
+            cpu_quota_pct: None,
+            tasks_max: None,
             env: Vec::new(),
         }
     }
@@ -157,6 +173,16 @@ mod tests {
         assert_eq!(p.mem_mb, 64);
         assert_eq!(p.profile, Profile::WorkerStrict);
         assert!(p.env.is_empty());
+    }
+
+    /// Both new tunables default to `None`, which falls back to the
+    /// hardcoded defense-in-depth ceilings in `linux_cgroup`. Production
+    /// policies override explicitly when they need tighter caps.
+    #[test]
+    fn sandbox_policy_default_leaves_cpu_quota_and_tasks_max_unset() {
+        let p = SandboxPolicy::default();
+        assert_eq!(p.cpu_quota_pct, None);
+        assert_eq!(p.tasks_max, None);
     }
 
     #[test]
