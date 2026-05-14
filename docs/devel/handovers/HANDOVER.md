@@ -4,9 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-14 (batch issue cleanup — branch `chore/issues-batch-2026-05-14`, not yet merged)
-**Last commit (main):** `3e479f4` (merge of PR #53 `chore/lowhanging-fruit-cleanup-2026-05-14`).
-**This session's working branch:** `chore/issues-batch-2026-05-14` (off `main` at `3e479f4`). Ships **four bundled issue closures** picked from the open-issues survey as highest-value-now picks (see "Recently completed (this session)" entry below for the full per-issue breakdown):
+**Last updated:** 2026-05-14 (batch issue cleanup merged via PR #54 at `25c312c`; tree clean on `main`, no in-flight branch).
+**Last commit (main):** `25c312c` (merge of PR #54 `chore/issues-batch-2026-05-14`).
+**Previous session's working branch:** `chore/issues-batch-2026-05-14` (off `main` at `3e479f4`, merged via PR #54 at `25c312c`). Shipped **four bundled issue closures** picked from the open-issues survey as highest-value-now picks (see "Recently completed (previous session)" entry below for the full per-issue breakdown):
 
 1. **Issue #5 — BASE_ALLOW audit before Phase 4.** Added 19 coreutils binaries to a new integration test (`workers/prelude/tests/coreutils_smoke.rs`); discovered 6 syscall gaps (`mkdirat`, `unlinkat`, `renameat2`, `utimensat`, `fchown`, `fchmodat`/`fchmod` and legacy x86_64 variants), added all with one-line justifications under a new "Filesystem mutation" / "Filesystem permission mutation" section in `BASE_ALLOW`. New `lockdown-probe exec-after-lockdown` subcommand drives the test harness — applies `lock_down()` then `execve()`s into the target coreutil, which inherits the filter via `PR_SET_NO_NEW_PRIVS`.
 2. **Issue #6 prereq — `Default for SandboxPolicy`.** Added `impl Default for SandboxPolicy` (1-second CPU budget, 64 MiB RAM, `Net::Deny`, `Profile::WorkerStrict`, empty FS) plus `#[default]` on `Net::Deny` and `Profile::WorkerStrict`. Migrated 9 test fixtures across `sandbox/`, `core/`, `tests-common/` to `..SandboxPolicy::default()` so the impending `cpu_quota_pct`/`tasks_max` field additions don't churn every literal site.
@@ -119,7 +119,7 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-14 — batch issue cleanup, branch `chore/issues-batch-2026-05-14`)
+## Recently completed (previous session, 2026-05-14 — batch issue cleanup, merged via PR #54 at `25c312c`)
 
 Branch: `chore/issues-batch-2026-05-14` (off `main` at `3e479f4`, the merge of PR #53). Bundles four issue closures picked from the open-issues survey as highest-value-now (issue #5 before Phase 4; #6-prereq to cap fixture churn; #17 + #40 design contracts before scheduler ships; #47 + #50 + #20 schema-v2 while the on-disk dataset is empty). Each is a discrete logical commit in the branch.
 
