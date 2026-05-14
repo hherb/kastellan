@@ -152,6 +152,11 @@ pub fn allow_list_for(profile: Profile) -> Vec<i64> {
 // even though the kernel implements both at stable ABI numbers. Define
 // them locally so [`BASE_ALLOW`] compiles unchanged on both arches.
 //
+// Last checked: libc 0.2.186 (latest 0.2.x release as of 2026-05-14) —
+// still missing on `linux/gnu/b64/aarch64`. Re-check on every libc bump;
+// drop the aarch64 arms below the moment `libc::SYS_sendfile` /
+// `libc::SYS_fadvise64` resolve on that target. Tracked in issue #3.
+//
 // Numbers come from `arch/arm64/include/uapi/asm-generic/unistd.h`
 // (sendfile = 71, fadvise64 = 223) and `arch/x86/entry/syscalls/syscall_64.tbl`
 // (sendfile = 40, fadvise64 = 221). On x86_64 we forward to libc to

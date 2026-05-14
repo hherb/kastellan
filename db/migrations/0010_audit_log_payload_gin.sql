@@ -1,0 +1,31 @@
+-- 0010_audit_log_payload_gin.sql — index audit_log.payload for the
+-- containment predicate used by observation capture and any future
+-- payload-scoped queries.
+--
+-- Today `core::observation::capture::fetch_audit_rows_for_task` issues:
+--
+--     SELECT id, ts, actor, action, payload
+--     FROM audit_log
+--     WHERE payload @> jsonb_build_object('task_id', $1::bigint)
+--     ORDER BY id ASC
+--
+-- Without an index that covers `@>`, that predicate is a sequential
+-- scan over audit_log. Fine at observation-phase volumes (tens of
+-- rows) but degrades linearly as the table grows to weeks/months of
+-- production runs.
+--
+-- Why `jsonb_path_ops` instead of the default `jsonb_ops`:
+--   * `jsonb_path_ops` supports exactly the `@>` containment shape
+--     this query (and the broader payload-keyed read pattern) needs
+--   * Smaller on-disk footprint and faster lookups than `jsonb_ops`,
+--     which also supports `?`/`?|`/`?&` existence operators we do not
+--     use against audit_log.payload
+--
+-- No new GRANTs required: indexes inherit their privileges from the
+-- table owner; runtime callers continue to read audit_log via the
+-- existing SELECT grant from 0001/0002.
+--
+-- See issue #48.
+CREATE INDEX IF NOT EXISTS audit_log_payload_gin
+    ON audit_log
+    USING GIN (payload jsonb_path_ops);

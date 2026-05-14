@@ -1319,7 +1319,8 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     use hhagent_db::pool::connect_runtime_pool;
     use hhagent_db::probe::run as probe_run;
     use hhagent_db::tool_allowlists::{
-        add, list_all, list_for_tool, remove, AllowlistEntry, ToolAllowlistError,
+        add, list_all, list_for_tool, list_for_tool_full, remove, AllowlistEntry,
+        ToolAllowlistError,
     };
     use hhagent_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix};
 
@@ -1370,6 +1371,32 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
         assert_eq!(row.tool, "shell-exec");
         assert_eq!(row.created_by, "test");
     }
+
+    // (4b) list_for_tool_full returns the full row shape, server-side
+    // filtered (`WHERE tool = $1`). Seed a row under a second tool so the
+    // filter is non-trivial.
+    add(&pool, "other-tool", "/usr/bin/true", "test").await.unwrap();
+    let shell_rows = list_for_tool_full(&pool, "shell-exec").await.unwrap();
+    assert_eq!(shell_rows.len(), 2, "must include both shell-exec rows");
+    assert!(
+        shell_rows.iter().all(|r| r.tool == "shell-exec"),
+        "rows leaked from other tool: {shell_rows:?}",
+    );
+    let other_rows = list_for_tool_full(&pool, "other-tool").await.unwrap();
+    assert_eq!(other_rows.len(), 1);
+    assert_eq!(other_rows[0].argv0, "/usr/bin/true");
+    assert_eq!(other_rows[0].created_by, "test");
+    let missing = list_for_tool_full(&pool, "no-such-tool").await.unwrap();
+    assert!(missing.is_empty(), "unknown tool must return no rows: {missing:?}");
+    // Reject malformed tool names at the validator, same contract as
+    // list_for_tool / add / remove.
+    assert!(matches!(
+        list_for_tool_full(&pool, "bad name").await,
+        Err(ToolAllowlistError::InvalidToolName),
+    ));
+    // Drop the seeded row so the rest of the test sees the pre-existing
+    // 2-row state.
+    remove(&pool, "other-tool", "/usr/bin/true").await.unwrap();
 
     // (5) Idempotent remove.
     let removed = remove(&pool, "shell-exec", "/usr/bin/echo").await.unwrap();

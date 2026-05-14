@@ -186,7 +186,7 @@ async fn bring_up_database() -> Result<ConnectSpec> {
     .await
     .context("hhagent_db::probe::run failed")?;
 
-    info!("database probe succeeded");
+    info!("{}", hhagent_core::STARTUP_READY_MSG);
     Ok(spec)
 }
 
