@@ -226,6 +226,12 @@ pub const ENV_LANDLOCK_RW: &str = "HHAGENT_LANDLOCK_RW";
 /// Env var name read by `hhagent-worker-prelude::seccomp_lock` for the
 /// per-worker seccomp profile selector.
 pub const ENV_SECCOMP_PROFILE: &str = "HHAGENT_SECCOMP_PROFILE";
+/// Env var name read by `hhagent-worker-prelude::rlimit` for the
+/// `policy.cpu_ms` budget. Plumbed cross-platform — applied via
+/// `setrlimit(RLIMIT_CPU)` from the worker prelude before lock-down.
+/// Omitted (not set to `"0"`) when `policy.cpu_ms == 0` so the prelude
+/// can treat "unset" as the canonical `Disabled` signal.
+pub const ENV_CPU_MS: &str = "HHAGENT_CPU_MS";
 
 /// Spawn the worker under `backend` and return a [`SupervisedWorker`].
 ///
@@ -439,6 +445,7 @@ pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
     let mut out = policy.clone();
     let has_landlock = out.env.iter().any(|(k, _)| k == ENV_LANDLOCK_RW);
     let has_seccomp = out.env.iter().any(|(k, _)| k == ENV_SECCOMP_PROFILE);
+    let has_cpu_ms = out.env.iter().any(|(k, _)| k == ENV_CPU_MS);
 
     if !has_landlock {
         let rw_paths: Vec<String> = out
@@ -456,6 +463,11 @@ pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
             Profile::WorkerNetClient => "net_client",
         };
         out.env.push((ENV_SECCOMP_PROFILE.into(), value.into()));
+    }
+    // cpu_ms == 0 means "policy didn't set it"; omit the env so the
+    // prelude's apply_from_env sees no var and returns Disabled.
+    if !has_cpu_ms && policy.cpu_ms > 0 {
+        out.env.push((ENV_CPU_MS.into(), policy.cpu_ms.to_string()));
     }
     out
 }
@@ -524,6 +536,35 @@ mod tests {
             "caller-supplied env must not be duplicated"
         );
         assert_eq!(seccomp_entries[0].1, "none");
+    }
+
+    #[test]
+    fn derive_adds_cpu_ms_env_when_policy_sets_it() {
+        let mut p = base_policy();
+        p.cpu_ms = 2_500;
+        let derived = derive_lockdown_env(&p);
+        let cpu_ms_entry = derived
+            .env
+            .iter()
+            .find(|(k, _)| k == ENV_CPU_MS)
+            .expect("cpu_ms env must be derived when policy.cpu_ms > 0");
+        assert_eq!(cpu_ms_entry.1, "2500");
+    }
+
+    #[test]
+    fn derive_omits_cpu_ms_env_when_policy_is_zero() {
+        // policy.cpu_ms == 0 is the "no rlimit" sentinel (matches how
+        // policy.mem_mb == 0 means "omit MemoryMax" in linux_cgroup).
+        // The worker prelude reads "unset" as Disabled, so omitting the
+        // env is the right wire signal.
+        let mut p = base_policy();
+        p.cpu_ms = 0;
+        let derived = derive_lockdown_env(&p);
+        assert!(
+            !derived.env.iter().any(|(k, _)| k == ENV_CPU_MS),
+            "ENV_CPU_MS must be omitted when policy.cpu_ms == 0; env was {:?}",
+            derived.env
+        );
     }
 
     /// Opaque PID for the watchdog tests. With the injected [`noop_kill`]
