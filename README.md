@@ -14,6 +14,7 @@ A long-running personal AI agent that:
 - remote-controls a web browser, performs web searches and page fetches
 - executes Python in a strict sandbox
 - maintains persistent memory in Postgres with hybrid retrieval (pgvector + BM25 + graph)
+- reviews its own plans through **CASSANDRA**, a semantic oversight layer with hard-coded constitutional constraints, before any tool runs
 - runs continuously, periodically resetting its context window from memories and a persistent task list
 
 ## Design priorities (in order)
@@ -28,6 +29,16 @@ A long-running personal AI agent that:
 <p align="center">
   <img src="assets/security-architecture.png" alt="hhagent security architecture" width="800">
 </p>
+
+The mechanical layers along the bottom of the diagram — bwrap, Landlock,
+seccomp, the egress proxy, the dispatcher chokepoint — enforce *boundaries*:
+"this process cannot open that socket." The **CASSANDRA** layer running
+alongside the agent core enforces *intent*: "should the agent be doing this
+at all, given what the user actually asked for?" CASSANDRA reviews each
+plan (not each tool call) through a pipeline of deterministic and LLM
+stages, with five hard-coded constitutional constraints that no user,
+admin, or configuration change can override. See
+[`docs/cassandra_design_plan.md`](docs/cassandra_design_plan.md).
 
 ## Why another one?
 
@@ -67,6 +78,21 @@ pressure.
   New channels (Telegram, Signal, IMAP) and scheduled routines call
   into it — they never spawn workers themselves. Borrowed from
   IronClaw's `ToolDispatcher::dispatch()` and made non-negotiable.
+
+- **Semantic oversight on top of mechanical sandboxing
+  (CASSANDRA).** Kernel sandboxes catch "this process tried to open
+  that socket"; they cannot catch "send this confidential pathology
+  report to a recipient who happens to be permitted but contextually
+  wrong." Every plan the agent formulates is reviewed by CASSANDRA
+  before any tool runs — a chain of deterministic and LLM stages
+  enforcing five **constitutional constraints** (no physical harm,
+  no fraud / impersonation, no irreversible action without verified
+  human-in-the-loop, no power concentration, no oversight
+  suppression) that no user, admin, or configuration change can
+  override. Runtime verification at the dispatcher then re-checks
+  that what executes matches what was approved. The agent core never
+  bypasses this gate. See
+  [`docs/cassandra_design_plan.md`](docs/cassandra_design_plan.md).
 
 - **AGPL with AGPL-compatible deps only.** No CDDL, BUSL, SSPL,
   Elastic License, or "source-available" components. License hygiene
