@@ -671,6 +671,32 @@ async fn refusal_plan_terminates_with_state_refused() {
     // Counters
     assert_eq!(result.plan_count, 1, "single refusal plan");
     assert_eq!(result.dispatch_count, 0, "no steps to dispatch on a refusal plan");
+
+    // Audit-row contract for refusals (issue #23 spec §3).
+    //
+    // Exactly one agent/plan.formulate row, with:
+    //   - decision_kind == "refused"
+    //   - refused == { principle: 1, reason: "physical_harm" }
+    //   - plan_step_count == 0
+    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        .await
+        .expect("fetch audit rows");
+    let plan_rows: Vec<_> = rows.iter()
+        .filter(|r| r.actor == "agent" && r.action == "plan.formulate")
+        .collect();
+    assert_eq!(
+        plan_rows.len(),
+        1,
+        "expected exactly 1 agent/plan.formulate row; got rows = {rows:#?}"
+    );
+    let payload = &plan_rows[0].payload;
+    assert_eq!(
+        payload["decision_kind"], "refused",
+        "decision_kind must be 'refused' when plan.refused.is_some()"
+    );
+    assert_eq!(payload["refused"]["principle"], 1);
+    assert_eq!(payload["refused"]["reason"], "physical_harm");
+    assert_eq!(payload["plan_step_count"], 0);
 }
 
 /// (f) Agent emits a refusal plan (principle 1) AND the reviewer

@@ -323,6 +323,25 @@ async fn write_audit_plan_formulate(
     plan: &Plan,
     meta: &FormulationMeta,
 ) -> Result<(), InnerLoopError> {
+    // Issue #23 (spec §3): "refused" takes precedence over the
+    // is_terminal-derived "task_complete" so a refusal payload is
+    // wire-distinguishable from a successful completion via the same
+    // discriminator field — including the malformed-refusal-with-steps
+    // shape the inner-loop short-circuit also honours.
+    let decision_kind = if plan.is_refused() {
+        "refused"
+    } else if plan.is_terminal() {
+        crate::cassandra::types::DECISION_TERMINAL
+    } else {
+        "act"
+    };
+
+    // Explicit JSON null (not key-absent) so downstream JSONB queries
+    // can rely on `refused` always being present.
+    let refused = plan.refused.as_ref()
+        .map(|r| serde_json::json!({ "principle": r.principle, "reason": r.reason }))
+        .unwrap_or(serde_json::Value::Null);
+
     let payload = serde_json::json!({
         "task_id":          ctx.task_id,
         "plan_count":       ctx.plan_count,
@@ -333,7 +352,8 @@ async fn write_audit_plan_formulate(
         "latency_ms":       meta.latency_ms,
         "retry_count":      meta.retry_count,
         "plan_step_count":  plan.steps.len(),
-        "decision_kind":    if plan.is_terminal() { crate::cassandra::types::DECISION_TERMINAL } else { "act" },
+        "decision_kind":    decision_kind,
+        "refused":          refused,
     });
     hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
