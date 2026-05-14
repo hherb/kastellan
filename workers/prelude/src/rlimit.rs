@@ -159,28 +159,47 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Helper: temporarily set HHAGENT_CPU_MS, run a closure, then
-    /// restore the prior value. Returns the closure's value.
+    /// RAII guard that restores `HHAGENT_CPU_MS` to its prior value on
+    /// drop — including on unwind. Without this, an assertion failure
+    /// inside the closure passed to `with_env_var` would leak the test
+    /// value into subsequent tests sharing the same binary.
+    struct EnvRestore {
+        prior: Option<String>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(v) => std::env::set_var(ENV_CPU_MS, v),
+                None => std::env::remove_var(ENV_CPU_MS),
+            }
+        }
+    }
+
+    /// Helper: temporarily set `HHAGENT_CPU_MS`, run a closure, then
+    /// restore the prior value via [`EnvRestore`]'s `Drop`. Returns
+    /// the closure's value.
     ///
     /// Workspace is on Rust 2021 edition where `set_var` /
     /// `remove_var` are safe; the Mutex returned by `env_lock` is
     /// what makes them race-free within this binary.
+    ///
+    /// Drop order matters: `_restore` is declared after `_guard`, so it
+    /// drops first (LIFO) — the env is restored while the mutex is
+    /// still held, so a concurrent test never observes the leaked value.
     fn with_env_var<F, R>(value: Option<&str>, f: F) -> R
     where
         F: FnOnce() -> R,
     {
         let _guard = env_lock();
-        let prior = std::env::var(ENV_CPU_MS).ok();
+        let _restore = EnvRestore {
+            prior: std::env::var(ENV_CPU_MS).ok(),
+        };
         match value {
             Some(v) => std::env::set_var(ENV_CPU_MS, v),
             None => std::env::remove_var(ENV_CPU_MS),
         }
-        let out = f();
-        match prior {
-            Some(v) => std::env::set_var(ENV_CPU_MS, v),
-            None => std::env::remove_var(ENV_CPU_MS),
-        }
-        out
+        f()
     }
 
     #[test]
@@ -194,6 +213,18 @@ mod tests {
     fn apply_from_env_zero_returns_disabled() {
         let report = with_env_var(Some("0"), apply_from_env)
             .expect("apply_from_env must succeed when env is 0");
+        assert_eq!(report, RlimitReport::Disabled);
+    }
+
+    /// `HHAGENT_CPU_MS=""` is set-but-empty (e.g. a caller that did
+    /// `Command::env("HHAGENT_CPU_MS", "")`). The parse path would
+    /// reject it as garbage; we treat it as `Disabled` instead so the
+    /// "set to empty" wire form is interchangeable with "unset" — which
+    /// matches how `std::env::VarError::NotPresent` is mapped.
+    #[test]
+    fn apply_from_env_empty_string_returns_disabled() {
+        let report = with_env_var(Some(""), apply_from_env)
+            .expect("apply_from_env must succeed when env is the empty string");
         assert_eq!(report, RlimitReport::Disabled);
     }
 

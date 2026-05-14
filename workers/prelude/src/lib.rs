@@ -171,8 +171,7 @@ pub fn lock_down() -> Result<LockdownReport, LockdownError> {
 /// Both layers fail closed: any error returns `io::Error` and the worker
 /// exits before serving any request.
 pub fn serve_stdio<H: Handler>(handler: &mut H) -> io::Result<()> {
-    let rlimit = rlimit::apply_from_env()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let rlimit = rlimit::apply_from_env().map_err(|e| io::Error::other(e.to_string()))?;
 
     let report = match lock_down() {
         Ok(LockdownReport::Linux {
@@ -184,7 +183,7 @@ pub fn serve_stdio<H: Handler>(handler: &mut H) -> io::Result<()> {
         },
         Ok(LockdownReport::NonLinux { .. }) => LockdownReport::NonLinux { rlimit },
         Err(e) => {
-            return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
+            return Err(io::Error::other(e.to_string()));
         }
     };
 
