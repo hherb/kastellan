@@ -40,6 +40,16 @@ stages, with five hard-coded constitutional constraints that no user,
 admin, or configuration change can override. See
 [`docs/cassandra_design_plan.md`](docs/cassandra_design_plan.md).
 
+The diagram below traces a single user instruction through every gate —
+channel ingress, plan formulation, the CASSANDRA review pipeline
+(Stages −1 through 4), the dispatcher chokepoint, sandboxed worker
+execution, and the egress proxy — with the block / advisory / escalation
+branches drawn explicitly. Source: [`docs/security-request-flow.svg`](docs/security-request-flow.svg).
+
+<p align="center">
+  <img src="assets/security-request-flow.png" alt="Request flow through hhagent's security layers" width="1100">
+</p>
+
 ## Why another one?
 
 Several Rust personal-agent projects exist in the OpenClaw-derived
