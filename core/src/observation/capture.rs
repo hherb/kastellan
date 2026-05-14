@@ -3,8 +3,12 @@
 //! ## Schema
 //!
 //! [`SCHEMA_VERSION`] is bumped only on a breaking change to
-//! [`CaptureJson`]'s wire shape. Old captures stay readable through
-//! their original schema version; we never auto-migrate on disk.
+//! [`CaptureJson`]'s wire shape, and the value is written into every
+//! capture file so a future reader can branch on it. Today the crate
+//! only *writes* captures — there is no version-aware reader, so
+//! backward compatibility with older versions is the responsibility of
+//! whatever consumer reads them next (e.g. an observation-phase
+//! analyser). We never auto-migrate on disk.
 //!
 //! ## Helper purity
 //!
@@ -27,7 +31,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Bumped only on a breaking change to [`CaptureJson`]'s wire shape.
-/// Old captures stay readable through their original schema version.
+/// The value is written into every capture file so a future reader can
+/// branch on it (no such reader exists in-tree today — see the
+/// module-level docstring).
 ///
 /// History:
 /// * v1 — initial wire shape (PR #46).

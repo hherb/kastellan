@@ -42,6 +42,7 @@
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 const PROBE: &str = env!("CARGO_BIN_EXE_hhagent-lockdown-probe");
 
@@ -101,26 +102,32 @@ fn binary_present(path: &str) -> bool {
 /// integration tests skip when bwrap/userns/landlock won't load; we
 /// detect the same way — `LOCKDOWN_REPORT: Linux { ... Installed }`
 /// on stderr means the filter is enforcing.
+///
+/// Memoised via `OnceLock`: the answer is host-static, so the 19
+/// per-binary tests share a single probe-spawn cost.
 fn lockdown_enforces() -> bool {
-    let probe_out = Command::new(PROBE)
-        .args(["exec-after-lockdown", "/bin/true"])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HHAGENT_SECCOMP_PROFILE", "strict")
-        .env(
-            "HHAGENT_LANDLOCK_RW",
-            serde_json::to_string(&[SCRATCH_ROOT]).unwrap(),
-        )
-        .output()
-        .expect("spawn probe to check enforcement");
-    let stderr = String::from_utf8_lossy(&probe_out.stderr);
-    if !stderr.contains("Installed") {
-        eprintln!(
-            "\n[SKIP] seccomp filter not Installed; report:\n{stderr}\n"
-        );
-        return false;
-    }
-    true
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let probe_out = Command::new(PROBE)
+            .args(["exec-after-lockdown", "/bin/true"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HHAGENT_SECCOMP_PROFILE", "strict")
+            .env(
+                "HHAGENT_LANDLOCK_RW",
+                serde_json::to_string(&[SCRATCH_ROOT]).unwrap(),
+            )
+            .output()
+            .expect("spawn probe to check enforcement");
+        let stderr = String::from_utf8_lossy(&probe_out.stderr);
+        if !stderr.contains("Installed") {
+            eprintln!(
+                "\n[SKIP] seccomp filter not Installed; report:\n{stderr}\n"
+            );
+            return false;
+        }
+        true
+    })
 }
 
 /// Assert the child exited cleanly (no SIGSYS). Exit code itself can
