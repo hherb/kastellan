@@ -425,6 +425,23 @@ async fn happy_path_one_plan_returns_completed() {
     // Spec §7 counter pin: one terminal plan, zero dispatch.
     assert_eq!(result.plan_count, 1);
     assert_eq!(result.dispatch_count, 0);
+
+    // Issue #23 spec §3: the `refused` audit-row key is always present.
+    // On a non-refusal plan the value is explicit JSON null — distinct
+    // from key-absent so JSONB queries can rely on the key existing.
+    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        .await
+        .expect("fetch audit rows");
+    let plan_rows: Vec<_> = rows.iter()
+        .filter(|r| r.actor == "agent" && r.action == "plan.formulate")
+        .collect();
+    assert_eq!(plan_rows.len(), 1, "expected exactly 1 agent/plan.formulate row");
+    let payload = &plan_rows[0].payload;
+    assert_eq!(payload["decision_kind"], "task_complete");
+    assert!(
+        payload.get("refused").map_or(false, |v| v.is_null()),
+        "refused key must be present with JSON null on non-refusal rows; got payload = {payload:#?}"
+    );
 }
 
 /// (b) Plan 1 dispatches a step that fails (no entry in dispatcher

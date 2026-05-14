@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 /// constant.
 pub const DECISION_TERMINAL: &str = "task_complete";
 
+/// Audit-row `decision_kind` value for refusals (issue #23). Sibling
+/// to `DECISION_TERMINAL`: both are wire-strings exposed in the
+/// `agent/plan.formulate` payload, so they live as named constants
+/// rather than inline literals to keep a rename grep-able.
+pub const DECISION_REFUSED: &str = "refused";
+
 /// Classification of data flowing through a plan step.
 ///
 /// Outbound policy attaches to each level (see

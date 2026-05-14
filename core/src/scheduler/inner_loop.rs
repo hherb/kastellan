@@ -329,7 +329,7 @@ async fn write_audit_plan_formulate(
     // discriminator field — including the malformed-refusal-with-steps
     // shape the inner-loop short-circuit also honours.
     let decision_kind = if plan.is_refused() {
-        "refused"
+        crate::cassandra::types::DECISION_REFUSED
     } else if plan.is_terminal() {
         crate::cassandra::types::DECISION_TERMINAL
     } else {
