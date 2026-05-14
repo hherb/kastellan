@@ -475,11 +475,17 @@ async fn sweep_and_audit_emits_one_task_crashed_row_per_recovered_task() {
             p["total_duration_ms"].is_number(),
             "duration computable when started_at is present"
         );
-        // 9 keys, no extras (defends against accidental payload bloat).
+        // 10 keys, no extras (defends against accidental payload bloat).
+        // Issue #50 schema-v2 added `provenance`; the rest are the
+        // canonical 9-key shape from `build_finalize_payload`.
         assert_eq!(
             p.as_object().unwrap().len(),
-            9,
-            "finalize payload has exactly the 9 canonical keys"
+            10,
+            "finalize payload has exactly the 10 canonical keys"
+        );
+        assert_eq!(
+            p["provenance"], "crash_recovery",
+            "crashed-task finalize provenance must be 'crash_recovery'"
         );
     }
 

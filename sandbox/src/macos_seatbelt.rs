@@ -331,19 +331,11 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Net, Profile};
+    use crate::Net;
     use std::path::PathBuf;
 
     fn strict_policy() -> SandboxPolicy {
-        SandboxPolicy {
-            fs_read: vec![],
-            fs_write: vec![],
-            net: Net::Deny,
-            cpu_ms: 1_000,
-            mem_mb: 64,
-            profile: Profile::WorkerStrict,
-            env: vec![],
-        }
+        SandboxPolicy::default()
     }
 
     #[test]

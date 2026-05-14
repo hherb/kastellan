@@ -300,18 +300,13 @@ mod tests {
 
     #[test]
     fn extend_policy_appends_three_paths_without_clobbering_existing() {
-        use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+        use hhagent_sandbox::SandboxPolicy;
         let root = TestRoot::new("extend");
         let ws = Workspace::with_root(&root.0, "ext").unwrap();
 
         let mut policy = SandboxPolicy {
-            fs_read: vec![],
             fs_write: vec![PathBuf::from("/var/cache/hhagent")],
-            net: Net::Deny,
-            cpu_ms: 1_000,
-            mem_mb: 64,
-            profile: Profile::WorkerStrict,
-            env: vec![],
+            ..SandboxPolicy::default()
         };
         ws.extend_policy(&mut policy);
         assert_eq!(policy.fs_write.len(), 4);

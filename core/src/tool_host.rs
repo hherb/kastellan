@@ -463,19 +463,10 @@ pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_sandbox::Net;
     use std::path::PathBuf;
 
     fn base_policy() -> SandboxPolicy {
-        SandboxPolicy {
-            fs_read: vec![],
-            fs_write: vec![],
-            net: Net::Deny,
-            cpu_ms: 1_000,
-            mem_mb: 64,
-            profile: Profile::WorkerStrict,
-            env: vec![],
-        }
+        SandboxPolicy::default()
     }
 
     #[test]

@@ -267,6 +267,54 @@ pub const BASE_ALLOW: &[i64] = &[
     libc::SYS_getdents64,
     libc::SYS_umask,
 
+    // ---- Filesystem mutation ----
+    // Every common coreutil that mutates the filesystem hits one of
+    // these. They grant no capability beyond what `openat` already
+    // does (each operates on paths the caller can already see + write
+    // to via openat with O_CREAT/O_TRUNC); Landlock + bwrap bound the
+    // reachable path set independently. Added in the BASE_ALLOW audit
+    // for issue #5 — `mkdir`, `touch`, `mv`, `rm`, `gzip` would all
+    // SIGSYS at startup without these.
+    //
+    //   * `mkdirat`   — `mkdir` (create directory)
+    //   * `unlinkat`  — `rm`, `mv` (cross-device), `gzip` (remove src)
+    //   * `renameat`  — legacy rename family member
+    //   * `renameat2` — `mv` (atomic rename), modern variant with flags
+    //   * `utimensat` — `touch`, `cp -p`, `tar -x` (set mtime/atime)
+    //   * `linkat`    — `ln`, `cp --link` (hardlink); same capability
+    //     bounds as openat — creates one extra directory entry for an
+    //     already-reachable inode.
+    //   * `symlinkat` — `ln -s`, `cp --symbolic-link`
+    libc::SYS_mkdirat,
+    libc::SYS_unlinkat,
+    libc::SYS_renameat,
+    libc::SYS_renameat2,
+    libc::SYS_utimensat,
+    libc::SYS_linkat,
+    libc::SYS_symlinkat,
+
+    // ---- Filesystem permission mutation ----
+    // `fchmodat` + `fchmod` let callers change a file's mode bits.
+    // The reachable set is bounded by what the caller can already
+    // open() + write() to — Landlock + DAC still gate this — and a
+    // worker writing 0644 vs 0755 to its own scratch file isn't a
+    // capability uplift. Required by `tar -x` (preserve modes) and
+    // by any worker that creates an executable script in its scratch
+    // dir.
+    libc::SYS_fchmodat,
+    libc::SYS_fchmod,
+
+    // `fchown` + `fchownat`: change file ownership. The kernel
+    // already restricts these for non-root processes — a worker
+    // running as uid `hhagent` cannot `chown(uid=root)`; the most a
+    // worker can do is preserve or set ownership to its own uid/gid.
+    // Required by `gzip` (preserves group on the compressed
+    // replacement) and `cp -p` (preserves ownership when permissions
+    // permit). Not a capability uplift over what the worker's uid
+    // already has via `openat`. Issue #5 audit pin.
+    libc::SYS_fchown,
+    libc::SYS_fchownat,
+
     // ---- Polling / event notification ----
     // epoll_pwait2 is the timespec-aware variant; ppoll/pselect6 are the
     // sigmask-aware modern poll/select.
@@ -385,6 +433,26 @@ pub const BASE_ALLOW_X86_64_LEGACY: &[i64] = &[
     libc::SYS_readlink,
     libc::SYS_alarm,
     libc::SYS_pause,
+    // Legacy filesystem-mutation variants — the modern `at`-suffix
+    // syscalls are in [`BASE_ALLOW`]; on x86_64 the original names
+    // also exist and some statically-linked or older binaries still
+    // call them. Same capability bounds as the `at`-suffix variants
+    // (issue #5 BASE_ALLOW audit).
+    libc::SYS_unlink,
+    libc::SYS_rename,
+    libc::SYS_mkdir,
+    libc::SYS_rmdir,
+    libc::SYS_utime,
+    libc::SYS_utimes,
+    libc::SYS_futimesat,
+    libc::SYS_chmod,
+    libc::SYS_link,
+    libc::SYS_symlink,
+    libc::SYS_creat,
+    // Legacy chown family; kernel-enforced capability bounds apply
+    // identically to the `fchown`/`fchownat` entries in BASE_ALLOW.
+    libc::SYS_chown,
+    libc::SYS_lchown,
 ];
 
 #[cfg(not(target_arch = "x86_64"))]

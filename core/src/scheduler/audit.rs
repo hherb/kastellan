@@ -116,6 +116,22 @@ pub const ACTION_TOOLS_ALLOWLIST_ADD: &str = "tools.allowlist.add";
 /// removes one allowlist entry via `hhagent-cli tools allowlist remove`.
 pub const ACTION_TOOLS_ALLOWLIST_REMOVE: &str = "tools.allowlist.remove";
 
+/// Value of the `provenance` field in a `task.finalize` payload emitted
+/// from the scheduler's runtime path (the lane runner observed the task
+/// end-to-end). Counters are facts; `started_at` is always present.
+pub const FINALIZE_PROVENANCE_RUNTIME: &str = "runtime";
+
+/// Value of the `provenance` field in a `task.finalize` payload emitted
+/// from the startup crash-recovery sweep. Counters are JSON `null`
+/// because the dead daemon's in-memory counters were lost.
+pub const FINALIZE_PROVENANCE_CRASH_RECOVERY: &str = "crash_recovery";
+
+/// Value of the `provenance` field in a `task.finalize` payload emitted
+/// when a producer (`hhagent-cli`) cancels a `pending` task that was
+/// never claimed. Counters are zero by construction; `started_at` is
+/// always JSON `null`.
+pub const FINALIZE_PROVENANCE_PRODUCER_CANCEL_PENDING: &str = "producer_cancel_pending";
+
 /// Build the `action` string for a terminal-state lifecycle row.
 /// Centralises the `"task." + state` format so a future rename can't
 /// drift between the writer and any reader. Example: `"failed"` →
@@ -172,6 +188,13 @@ pub fn build_lifecycle_payload(task_id: i64, lane: Lane, plan_count: i32) -> Val
 /// finalised before `claim_one` set it (e.g. if a CLI cancel races a
 /// claim attempt). The wire representation is `null` in that case;
 /// `total_duration_ms` falls back to 0.
+///
+/// The `provenance` field is hard-pinned to
+/// [`FINALIZE_PROVENANCE_RUNTIME`] — this helper is the runtime
+/// scheduler's entry point. Crash-recovery and producer-cancel paths
+/// use [`build_crashed_finalize_payload`] and
+/// [`build_producer_cancel_finalize_payload`] respectively, each
+/// carrying its own provenance value. Issue #50 schema-v2.
 pub fn build_finalize_payload(
     task_id: i64,
     lane: Lane,
@@ -188,13 +211,14 @@ pub fn build_finalize_payload(
         "total_duration_ms":    stats.total_duration_ms,
         "started_at":           stats.started_at.map(format_rfc3339),
         "finished_at":          format_rfc3339(stats.finished_at),
+        "provenance":           FINALIZE_PROVENANCE_RUNTIME,
     })
 }
 
 /// Build the JSON payload for the `task.finalize` summary row of a
 /// **crashed** task (one recovered by the startup sweep).
 ///
-/// Same 9-key shape as [`build_finalize_payload`] so observation-phase
+/// Same 10-key shape as [`build_finalize_payload`] so observation-phase
 /// queries that filter on `action = 'task.finalize'` see a uniform
 /// projection. Two fields differ:
 ///
@@ -230,6 +254,49 @@ pub fn build_crashed_finalize_payload(
         "total_duration_ms":    duration_ms,
         "started_at":           started_at.map(format_rfc3339),
         "finished_at":          format_rfc3339(finished_at),
+        "provenance":           FINALIZE_PROVENANCE_CRASH_RECOVERY,
+    })
+}
+
+/// Build the JSON payload for the `task.finalize` summary row emitted
+/// when a producer (`hhagent-cli`) cancels a `pending` task that was
+/// never claimed by any scheduler lane runner.
+///
+/// Same 10-key shape as [`build_finalize_payload`] so observation-phase
+/// queries that filter on `action = 'task.finalize'` see a uniform
+/// projection. Hardcoded fields:
+///
+/// * `state` = `"cancelled"` — the task entered the `cancelled` terminal
+///   state directly from `pending`, bypassing every runtime counter.
+/// * `total_llm_calls` / `total_dispatch_calls` / `total_duration_ms`
+///   = `0` — the task ran zero plan iterations and zero step
+///   dispatches before being cancelled, so the values are known
+///   zeros (distinguishable from the crash-recovery path's JSON-null
+///   "unknowable").
+/// * `started_at` = JSON `null` — `mark_cancelled` never sets
+///   `started_at` because the task never entered `running`.
+/// * `provenance` = [`FINALIZE_PROVENANCE_PRODUCER_CANCEL_PENDING`].
+///
+/// Issue #50 schema-v2 introduces the explicit `provenance` signal so
+/// observation queries no longer have to discriminate via the
+/// `actor='cli' + total_llm_calls=0 + started_at=null` heuristic.
+pub fn build_producer_cancel_finalize_payload(
+    task_id: i64,
+    lane: Lane,
+    plan_count: i32,
+    finished_at: OffsetDateTime,
+) -> Value {
+    json!({
+        "task_id":              task_id,
+        "lane":                 lane.as_sql(),
+        "state":                "cancelled",
+        "plan_count":           plan_count,
+        "total_llm_calls":      0,
+        "total_dispatch_calls": 0,
+        "total_duration_ms":    0,
+        "started_at":           Value::Null,
+        "finished_at":          format_rfc3339(finished_at),
+        "provenance":           FINALIZE_PROVENANCE_PRODUCER_CANCEL_PENDING,
     })
 }
 
@@ -351,11 +418,23 @@ mod tests {
             "total_duration_ms",
             "started_at",
             "finished_at",
+            "provenance",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         assert_eq!(keys(&p), expected);
+    }
+
+    /// `build_finalize_payload` hardcodes `provenance="runtime"` —
+    /// this helper is the runtime scheduler's entry point. A future
+    /// refactor that lifts the value out of the helper must update
+    /// callers; the constant + this pin together make that explicit.
+    /// Issue #50 schema-v2.
+    #[test]
+    fn build_finalize_payload_provenance_is_runtime() {
+        let p = build_finalize_payload(1, Lane::Fast, "completed", &sample_stats());
+        assert_eq!(p["provenance"], FINALIZE_PROVENANCE_RUNTIME);
     }
 
     #[test]
@@ -396,7 +475,7 @@ mod tests {
     // --- build_crashed_finalize_payload --------------------------------
     //
     // Companion to `build_finalize_payload` for the startup
-    // crash-recovery path. Same 9-key shape, but the two counters
+    // crash-recovery path. Same 10-key shape, but the two counters
     // (`total_llm_calls`, `total_dispatch_calls`) are JSON `null`
     // because they died with the previous daemon — null is the wire
     // signal "unknowable", distinct from `0` which would mean
@@ -424,11 +503,134 @@ mod tests {
             "total_duration_ms",
             "started_at",
             "finished_at",
+            "provenance",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         assert_eq!(keys(&p), expected);
+    }
+
+    /// `build_crashed_finalize_payload` hardcodes
+    /// `provenance="crash_recovery"`. Issue #50 schema-v2.
+    #[test]
+    fn build_crashed_finalize_payload_provenance_is_crash_recovery() {
+        let p = build_crashed_finalize_payload(
+            1,
+            Lane::Fast,
+            0,
+            None,
+            datetime!(2026-05-12 10:00:00 UTC),
+        );
+        assert_eq!(p["provenance"], FINALIZE_PROVENANCE_CRASH_RECOVERY);
+    }
+
+    // --- build_producer_cancel_finalize_payload -------------------------
+    //
+    // Companion to `build_finalize_payload` for the producer-cancel
+    // path (`hhagent-cli ask` cancelling a `pending` task that was
+    // never claimed). Same 10-key shape; everything-known-constant
+    // values hardcoded. Issue #50 schema-v2 added `provenance` so
+    // observation queries no longer infer the path from
+    // `actor + total_llm_calls + started_at` heuristics.
+
+    #[test]
+    fn build_producer_cancel_finalize_payload_shape_pins_exact_key_set() {
+        let p = build_producer_cancel_finalize_payload(
+            42,
+            Lane::Fast,
+            0,
+            datetime!(2026-05-13 10:00:00 UTC),
+        );
+        let expected: BTreeSet<String> = [
+            "task_id",
+            "lane",
+            "state",
+            "plan_count",
+            "total_llm_calls",
+            "total_dispatch_calls",
+            "total_duration_ms",
+            "started_at",
+            "finished_at",
+            "provenance",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(keys(&p), expected);
+    }
+
+    #[test]
+    fn build_producer_cancel_finalize_payload_state_is_always_cancelled() {
+        let p = build_producer_cancel_finalize_payload(
+            1,
+            Lane::Long,
+            7,
+            datetime!(2026-05-13 10:00:00 UTC),
+        );
+        assert_eq!(p["state"], "cancelled");
+    }
+
+    #[test]
+    fn build_producer_cancel_finalize_payload_counters_are_known_zero() {
+        // Distinct from the crash-recovery path (JSON null = unknowable),
+        // the producer-cancel path KNOWS the counters are zero because
+        // the task never ran. Integer zero on the wire.
+        let p = build_producer_cancel_finalize_payload(
+            1,
+            Lane::Fast,
+            0,
+            datetime!(2026-05-13 10:00:00 UTC),
+        );
+        assert_eq!(p["total_llm_calls"], 0);
+        assert_eq!(p["total_dispatch_calls"], 0);
+        assert_eq!(p["total_duration_ms"], 0);
+    }
+
+    #[test]
+    fn build_producer_cancel_finalize_payload_started_at_is_always_null() {
+        // The task never entered `running`, so `mark_cancelled` never
+        // set `started_at`. JSON null is the wire signal "never claimed".
+        let p = build_producer_cancel_finalize_payload(
+            1,
+            Lane::Fast,
+            0,
+            datetime!(2026-05-13 10:00:00 UTC),
+        );
+        assert!(p["started_at"].is_null());
+    }
+
+    #[test]
+    fn build_producer_cancel_finalize_payload_provenance_is_producer_cancel_pending() {
+        let p = build_producer_cancel_finalize_payload(
+            1,
+            Lane::Fast,
+            0,
+            datetime!(2026-05-13 10:00:00 UTC),
+        );
+        assert_eq!(
+            p["provenance"],
+            FINALIZE_PROVENANCE_PRODUCER_CANCEL_PENDING
+        );
+    }
+
+    /// Provenance values are a closed set; the three helpers' outputs
+    /// must be discriminable on this field alone. Pinned so a future
+    /// addition (e.g. `"operator_fail"`) is a deliberate change.
+    #[test]
+    fn finalize_provenance_values_are_distinct() {
+        assert_ne!(
+            FINALIZE_PROVENANCE_RUNTIME,
+            FINALIZE_PROVENANCE_CRASH_RECOVERY
+        );
+        assert_ne!(
+            FINALIZE_PROVENANCE_RUNTIME,
+            FINALIZE_PROVENANCE_PRODUCER_CANCEL_PENDING
+        );
+        assert_ne!(
+            FINALIZE_PROVENANCE_CRASH_RECOVERY,
+            FINALIZE_PROVENANCE_PRODUCER_CANCEL_PENDING
+        );
     }
 
     #[test]

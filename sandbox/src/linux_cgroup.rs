@@ -174,19 +174,13 @@ pub fn cgroup_probe() -> Result<(), SandboxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Net, Profile};
 
     /// A minimal policy carrying only the fields the cgroup layer reads,
     /// so unit tests don't have to track the full `SandboxPolicy` shape.
     fn policy_with_mem(mb: u64) -> SandboxPolicy {
         SandboxPolicy {
-            fs_read: vec![],
-            fs_write: vec![],
-            net: Net::Deny,
-            cpu_ms: 1_000,
             mem_mb: mb,
-            profile: Profile::WorkerStrict,
-            env: vec![],
+            ..SandboxPolicy::default()
         }
     }
 

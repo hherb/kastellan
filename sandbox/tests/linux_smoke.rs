@@ -6,7 +6,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
-use hhagent_sandbox::{linux_bwrap::LinuxBwrap, Net, Profile, SandboxBackend, SandboxPolicy};
+use hhagent_sandbox::{linux_bwrap::LinuxBwrap, SandboxBackend, SandboxPolicy};
 
 /// Skip the test if this host's kernel won't let us create an unprivileged
 /// user namespace. Ubuntu 24.04+ requires an AppArmor profile for bwrap;
@@ -23,13 +23,8 @@ fn skip_if_no_userns() -> bool {
 
 fn strict_policy() -> SandboxPolicy {
     SandboxPolicy {
-        fs_read: vec![],
-        fs_write: vec![],
-        net: Net::Deny,
         cpu_ms: 5_000,
-        mem_mb: 64,
-        profile: Profile::WorkerStrict,
-        env: vec![],
+        ..SandboxPolicy::default()
     }
 }
 

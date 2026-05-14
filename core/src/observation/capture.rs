@@ -28,7 +28,13 @@ use thiserror::Error;
 
 /// Bumped only on a breaking change to [`CaptureJson`]'s wire shape.
 /// Old captures stay readable through their original schema version.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// History:
+/// * v1 — initial wire shape (PR #46).
+/// * v2 — [`CapturedPlan::verdict_today`] changed from `String` to
+///   `Option<String>` so a missing `cassandra:chain/verdict` row is
+///   distinguishable from a real `Approve` verdict. Issue #47.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Top-level on-disk envelope for one captured fixture run.
 ///
@@ -70,9 +76,12 @@ pub struct CapturedPlan {
     /// Full `Plan` JSON as the planner produced it (decoded from the
     /// `agent/plan.formulate` row's payload).
     pub plan_json: serde_json::Value,
-    /// Today: always "Approve" (CASSANDRA stub stages). When real rules
-    /// land this carries the rule's verdict.
-    pub verdict_today: String,
+    /// The `cassandra:chain/verdict` row's verdict string, paired with
+    /// this plan iteration. `None` means *no* verdict row was found in
+    /// the audit stream after this plan — wire-distinct from
+    /// `Some("Approve")` (which is a real Approve verdict). Schema-v2
+    /// bump (issue #47).
+    pub verdict_today: Option<String>,
     pub step_count: u32,
     pub data_ceiling: String,
 }
@@ -178,9 +187,11 @@ pub fn capture_filename(date_yyyy_mm_dd: &str, model_slug: &str) -> String {
 /// `core::scheduler::inner_loop`); the "first downstream verdict" and
 /// "immediately-following verdict" always coincide for valid input.
 ///
-/// Missing verdict row → defaults to `"Approve"` silently; the
-/// original `audit_rows` stream in [`CaptureJson`] still preserves
-/// full truth so a downstream consumer can detect the gap.
+/// Missing verdict row → `verdict_today: None`. Schema-v2 (issue #47)
+/// makes this distinct from `Some("Approve")` so downstream analysis
+/// can separate "agent ran, reviewer said Approve" from "agent ran,
+/// reviewer never weighed in". The original `audit_rows` stream in
+/// [`CaptureJson`] still preserves full truth either way.
 pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedPlan> {
     let mut out = Vec::new();
     let mut iter: u32 = 0;
@@ -199,11 +210,13 @@ pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedP
                 .unwrap_or("Public")
                 .to_string();
             // Look ahead for the next cassandra:chain/verdict row.
-            let verdict_today = rows[i + 1..]
+            // `None` means no verdict row followed this plan; the
+            // schema-v2 (issue #47) `Option<String>` shape makes that
+            // distinguishable from a real `Some("Approve")` verdict.
+            let verdict_today: Option<String> = rows[i + 1..]
                 .iter()
                 .find(|r| r.actor == "cassandra:chain" && r.action == "verdict")
-                .and_then(|r| r.payload.get("verdict").and_then(|v| v.as_str()).map(String::from))
-                .unwrap_or_else(|| "Approve".to_string());
+                .and_then(|r| r.payload.get("verdict").and_then(|v| v.as_str()).map(String::from));
             out.push(CapturedPlan {
                 iter,
                 plan_json,
@@ -517,7 +530,7 @@ mod tests {
         let plans = extract_plans_from_audit_rows(&rows);
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].iter, 1);
-        assert_eq!(plans[0].verdict_today, "Approve");
+        assert_eq!(plans[0].verdict_today, Some("Approve".to_string()));
         assert_eq!(plans[0].step_count, 1);
         assert_eq!(plans[0].data_ceiling, "Public");
     }
@@ -543,14 +556,47 @@ mod tests {
     }
 
     #[test]
-    fn extract_plans_defaults_to_approve_when_verdict_row_missing() {
+    fn extract_plans_returns_none_when_verdict_row_missing() {
+        // Schema-v2 (issue #47) bumps `verdict_today` from `String` to
+        // `Option<String>`. Missing verdict → `None` (was silently
+        // defaulted to `"Approve"` in v1, which lost the signal).
         let rows = vec![
             fake_audit_row(1, "agent", "plan.formulate", fake_plan_payload("act", 1, "Public")),
             // No following cassandra:chain/verdict row.
         ];
         let plans = extract_plans_from_audit_rows(&rows);
         assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].verdict_today, "Approve");
+        assert!(
+            plans[0].verdict_today.is_none(),
+            "missing verdict row must yield None (schema-v2)"
+        );
+    }
+
+    #[test]
+    fn extract_plans_some_approve_is_distinct_from_none() {
+        // The whole point of the schema-v2 bump: `Some("Approve")` and
+        // `None` are now distinct values. Same fixture pair as above,
+        // with vs without the verdict row.
+        let with_verdict = vec![
+            fake_audit_row(1, "agent", "plan.formulate", fake_plan_payload("act", 1, "Public")),
+            fake_audit_row(2, "cassandra:chain", "verdict",
+                serde_json::json!({"verdict": "Approve"})),
+        ];
+        let without_verdict = vec![
+            fake_audit_row(1, "agent", "plan.formulate", fake_plan_payload("act", 1, "Public")),
+        ];
+        let p_with = extract_plans_from_audit_rows(&with_verdict);
+        let p_without = extract_plans_from_audit_rows(&without_verdict);
+        assert_eq!(p_with[0].verdict_today, Some("Approve".to_string()));
+        assert_eq!(p_without[0].verdict_today, None);
+        assert_ne!(p_with[0].verdict_today, p_without[0].verdict_today);
+    }
+
+    /// `SCHEMA_VERSION` pin. Bumping requires a deliberate edit here
+    /// plus a migration note in the doc-comment.
+    #[test]
+    fn schema_version_is_two() {
+        assert_eq!(SCHEMA_VERSION, 2);
     }
 
     // ---- write_capture_to_dir ----

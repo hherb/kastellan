@@ -31,11 +31,17 @@ pub fn hash_content(content: &str) -> String {
     s
 }
 
-/// Upsert a prompt row. Idempotent on existing sha256: if the row
-/// already exists, this is a no-op (no UPDATE, since the GRANT shape
-/// forbids it — the ON CONFLICT DO NOTHING shape stays within the
-/// runtime role's permissions). Returns the sha256 either way so the
-/// caller can record it in the prompt cache.
+/// Upsert a prompt row. Idempotent on the composite key
+/// `(sha256, name)`: if the row already exists for that pair, this is
+/// a no-op (no UPDATE, since the GRANT shape forbids it — the
+/// `ON CONFLICT DO NOTHING` shape stays within the runtime role's
+/// permissions). Returns the sha256 either way so the caller can
+/// record it in the prompt cache.
+///
+/// Migration 0011 (issue #20) bumped the PK from `(sha256)` to
+/// `(sha256, name)`: two prompt files with identical content but
+/// different names now each get their own row, and a rename creates a
+/// fresh row instead of silently aliasing to the first-seen name.
 pub async fn upsert_prompt(
     pool: &PgPool,
     name: &str,
@@ -45,7 +51,7 @@ pub async fn upsert_prompt(
     sqlx::query(
         "INSERT INTO agent_prompts (sha256, name, content) \
          VALUES ($1, $2, $3) \
-         ON CONFLICT (sha256) DO NOTHING",
+         ON CONFLICT (sha256, name) DO NOTHING",
     )
     .bind(&sha)
     .bind(name)

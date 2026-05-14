@@ -4,9 +4,19 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-14 (per-tool argv allowlist hygiene — branch `feat/tool-allowlist-db`, not yet merged)
-**Last commit (main):** `97fdf04` (merge of PR #49 `feat/crashed-finalize-row`).
-**This session's working branch:** `feat/tool-allowlist-db` (off `main` at `97fdf04`). Ships the per-tool argv allowlist source-of-truth migration from the `HHAGENT_SHELL_EXEC_ALLOWLIST` env var to a new `tool_allowlists` DB table behind the existing `hhagent_runtime` GRANT shape, with every mutation written to `audit_log`. See "Recently completed (this session)" entry below for the full slice.
+**Last updated:** 2026-05-14 (batch issue cleanup — branch `chore/issues-batch-2026-05-14`, not yet merged)
+**Last commit (main):** `3e479f4` (merge of PR #53 `chore/lowhanging-fruit-cleanup-2026-05-14`).
+**This session's working branch:** `chore/issues-batch-2026-05-14` (off `main` at `3e479f4`). Ships **four bundled issue closures** picked from the open-issues survey as highest-value-now picks (see "Recently completed (this session)" entry below for the full per-issue breakdown):
+
+1. **Issue #5 — BASE_ALLOW audit before Phase 4.** Added 19 coreutils binaries to a new integration test (`workers/prelude/tests/coreutils_smoke.rs`); discovered 6 syscall gaps (`mkdirat`, `unlinkat`, `renameat2`, `utimensat`, `fchown`, `fchmodat`/`fchmod` and legacy x86_64 variants), added all with one-line justifications under a new "Filesystem mutation" / "Filesystem permission mutation" section in `BASE_ALLOW`. New `lockdown-probe exec-after-lockdown` subcommand drives the test harness — applies `lock_down()` then `execve()`s into the target coreutil, which inherits the filter via `PR_SET_NO_NEW_PRIVS`.
+2. **Issue #6 prereq — `Default for SandboxPolicy`.** Added `impl Default for SandboxPolicy` (1-second CPU budget, 64 MiB RAM, `Net::Deny`, `Profile::WorkerStrict`, empty FS) plus `#[default]` on `Net::Deny` and `Profile::WorkerStrict`. Migrated 9 test fixtures across `sandbox/`, `core/`, `tests-common/` to `..SandboxPolicy::default()` so the impending `cpu_quota_pct`/`tasks_max` field additions don't churn every literal site.
+3. **Issues #17 + #40 — `memory::recall` design contract.** Hybrid missing-input policy (per the third option in #17): a single enabled lane whose input is missing degrades with a `tracing::warn` (preserves current ergonomics), but **every** enabled lane lacking its input now returns `DbError::Query("recall: no lanes ran…")` — the unambiguous caller-bug case. New `RecallModes::SEMANTIC_AND_LEXICAL` const + new `RecallParams::with_seeds(text, embedding, seeds)` constructor; `RecallParams::new()` defaults graph-off (Option B of #40 — graph requires explicit seeds the no-seeds constructor can't provide). Updated `memory_recall_e2e` Assertion 4 from "empty seeds + GRAPH_ONLY → Ok(empty)" to "empty seeds + GRAPH_ONLY → Err(no lanes ran)".
+4. **Issues #47 + #50 + #20 — schema-v2 migration.** Three changes bundled because the dataset window is now (zero captures on disk; observation phase not yet run):
+    * **#47** `core::observation::capture::SCHEMA_VERSION` 1 → 2; `CapturedPlan.verdict_today: String` → `Option<String>` so a missing `cassandra:chain/verdict` row is distinguishable from a real `Some("Approve")` verdict.
+    * **#50** `task.finalize` audit payload gains a `provenance` field (closed set: `"runtime"` / `"crash_recovery"` / `"producer_cancel_pending"`). Existing helpers `build_finalize_payload` + `build_crashed_finalize_payload` hardcode their respective provenance values; new `build_producer_cancel_finalize_payload` helper replaces `cli_audit::emit_producer_cancel_finalize`'s previous reuse of `build_finalize_payload`. Three `FINALIZE_PROVENANCE_*` constants in `scheduler::audit`. The 9-key shape pin in `cli_cancel_audit_e2e.rs` + `scheduler_crash_recovery_e2e.rs` is now a 10-key pin; the runtime path keeps the 10-key shape too.
+    * **#20** New migration `db/migrations/0011_agent_prompts_composite_pk.sql` changes `agent_prompts` PK from `(sha256)` to `(sha256, name)`; `agent_prompts::upsert_prompt` now uses `ON CONFLICT (sha256, name) DO NOTHING`. Renames no longer silently alias to the first-seen name; CASSANDRA's future reviewer joining audit-log `(prompt_name, prompt_sha256)` against `agent_prompts` won't suffer false positives.
+
+Workspace test count: **349 → 429** (+80 tests, mostly the coreutils smoke + new audit/recall/capture/sandbox shape pins). Zero failures, zero warnings, zero `[SKIP]` lines on Linux at `worktree-chore+issues-batch-2026-05-14`.
 
 **Previous session's branch:** `feat/crashed-finalize-row` (off `main` at `127750f`, merged via PR #49 at `97fdf04`). Shipped **two paired slices** filling the last two finalize-stream undercounting gaps:
 
@@ -60,7 +70,7 @@ hhagent (Rust workspace, 9 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 349 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on `feat/memory-graph-lane` at `911215d` (342 on `main` at `97f2743`). Pre-PR-#38 baseline at `2efd074` was also 342; the hoist was a pure refactor — same 342 tests pass, every assertion byte-identical, but ~2500 LOC of duplicated bring-up boilerplate eliminated. The previously-noted dead-code warning in `core/tests/embedding_recall_e2e.rs::ServedRequest` is silenced by the hoist (the migrated file `#[allow(dead_code)]`s the field; pre-existing PR #29 warning closed — see [issue #32](https://github.com/hherb/hhagent/issues/32), now stale and worth closing). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
+**`cargo test --workspace` on Linux: 429 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on `worktree-chore+issues-batch-2026-05-14` (this session's branch off `main` at `3e479f4`). Earlier checkpoints: 349 on `feat/memory-graph-lane` at `911215d`; 395 on `feat/tool-allowlist-db` at merge of PR #51; 342 on `main` at `97f2743` (pre-graph-lane). The +80 jump this session is mostly the new `coreutils_smoke` integration test (19) plus the schema-v2 audit-payload shape pins and the recall design-contract pins. Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
 **macOS (main):** 299 all pass on macOS (skip-as-pass for PG-dependent tests); Option O additions not yet verified on macOS (embedding TCP mock tests are cross-platform clean; the `embedding_recall_e2e` skip-as-pass path is expected).
 
 **Known flake fixed this session:** `tasks_lifecycle_e2e` (in `db/tests/postgres_e2e.rs`) had a structural deadlock — `pool.close().await` blocks until all `max_connections` permits are released, but two `PgListener`s were still in scope when close() was called. The multi-thread tokio runtime exposed it reliably (90 s+ hang) while the single-thread runtime variant in `audit_helpers_pool_and_notify_round_trip` (same pattern, one listener) had been passing on timing. Fix: explicitly `drop(listener)` before `pool.close().await`. Applied preemptively to `audit_helpers_pool_and_notify_round_trip` too so the latent flake there is closed out as well.
@@ -109,7 +119,84 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-14 — per-tool argv allowlist hygiene, branch `feat/tool-allowlist-db`)
+## Recently completed (this session, 2026-05-14 — batch issue cleanup, branch `chore/issues-batch-2026-05-14`)
+
+Branch: `chore/issues-batch-2026-05-14` (off `main` at `3e479f4`, the merge of PR #53). Bundles four issue closures picked from the open-issues survey as highest-value-now (issue #5 before Phase 4; #6-prereq to cap fixture churn; #17 + #40 design contracts before scheduler ships; #47 + #50 + #20 schema-v2 while the on-disk dataset is empty). Each is a discrete logical commit in the branch.
+
+### Issue #5 — `BASE_ALLOW` audit before Phase 4
+
+New `workers/prelude/tests/coreutils_smoke.rs` runs 19 common worker binaries — `cat`, `cp`, `ls`, `mkdir`, `touch`, `mv`, `rm`, `grep`, `sed`, `awk`, `sort`, `uniq`, `head`, `tail`, `wc`, `find`, `tar`, `gzip`, `/bin/sh` — under `Profile::Strict` + Landlock with a per-test scratch dir. Discovered 6 gaps: `mkdir`, `touch`, `mv`, `rm`, `gzip`, and (initially) `tar` SIGSYS'd on first run. Strace pinpointed:
+
+* `mkdir` → `mkdirat` missing
+* `touch` → `utimensat` missing
+* `rm` → `unlinkat` missing
+* `mv` → `renameat2` missing
+* `gzip` → `unlinkat` + `utimensat` + `fchown` (preserves group on the compressed replacement)
+* `tar` → not a `BASE_ALLOW` issue; tar uses `socket()` for NSS uid→name lookups (deliberately killed under Strict). Fix: invoke with `--numeric-owner` to skip NSS — which is the right policy for worker tarballs anyway (no host-uid leakage into archives).
+
+Added a new "Filesystem mutation" group to `BASE_ALLOW`: `mkdirat`, `unlinkat`, `renameat`, `renameat2`, `utimensat`, `linkat`, `symlinkat`. New "Filesystem permission mutation" group: `fchmodat`, `fchmod`, `fchown`, `fchownat`. Each has a one-line justification — none grant capability beyond what `openat` already does (the worker's uid bounds them via DAC + Landlock). Added legacy x86_64 variants to `BASE_ALLOW_X86_64_LEGACY`: `unlink`, `rename`, `mkdir`, `rmdir`, `utime`, `utimes`, `futimesat`, `chmod`, `link`, `symlink`, `creat`, `chown`, `lchown`.
+
+New `lockdown-probe exec-after-lockdown <binary> [args]` subcommand applies `lock_down()` then `execve()`s into the target — the seccomp filter survives `execve` under `PR_SET_NO_NEW_PRIVS`, so the coreutil runs with the inherited filter. The test asserts no SIGSYS exit; non-SIGSYS errors (e.g. Landlock denial on writes outside the scratch dir) are tolerated because they're not `BASE_ALLOW` gaps.
+
+### Issue #6 prereq — `Default for SandboxPolicy`
+
+New `impl Default for SandboxPolicy`: 1-second CPU budget, 64 MiB RAM, `Net::Deny`, `Profile::WorkerStrict`, empty FS + env. `#[default]` added to `Net::Deny` and `Profile::WorkerStrict` so they have working `Default` impls too. Migrated 9 fixture sites to `..SandboxPolicy::default()`:
+
+* `sandbox/src/{linux_bwrap, linux_cgroup, macos_seatbelt}.rs::strict_policy` / `policy_with_mem`
+* `sandbox/tests/{linux_smoke, macos_smoke}.rs::strict_policy`
+* `tests-common/src/sandbox.rs::policy_for_shell_exec`
+* `core/src/workspace.rs::extend_policy_appends_three_paths_without_clobbering_existing`
+* `core/src/tool_host.rs::base_policy`
+* `core/src/scheduler/tool_dispatch.rs::fake_entry`
+* `core/tests/scheduler_step_dispatch_e2e.rs::broken-tool entry`
+
+The production `shell_exec_entry` (in `core/src/scheduler/tool_dispatch.rs`) deliberately keeps its explicit literal — the security-critical fields (`net: Net::Deny`, `profile: Profile::WorkerStrict`, `env: ["HHAGENT_SHELL_ALLOWLIST", …]`) are spelled out for readability. New unit test `sandbox_policy_default_is_strict_deny_with_one_second_budget` pins the chosen default values so a future tune is an explicit edit.
+
+The full `cpu_quota_pct` / `tasks_max` / `setrlimit cpu_ms` work (Option G — issue #6 body) is **still open**; this slice ships only the prereq so the impending field additions don't churn the dozen fixture sites.
+
+### Issues #17 + #40 — `memory::recall` design contract
+
+Hybrid missing-input policy (Option 3 of #17):
+
+* **Single enabled lane missing its input** → `tracing::warn` + skip (preserves the "flip a mode on optimistically" ergonomics for callers that have at least one other lane covered).
+* **Every enabled lane missing its input** → `Err(DbError::Query("recall: no lanes ran (any_enabled={}); at least one enabled lane must have its required input — semantic needs query_embedding, lexical needs non-empty query_text, graph needs non-empty seed_entity_ids"))`. The unambiguous-caller-bug case becomes loud instead of returning a silent `Ok(vec![])` that looks like "no matches".
+
+Paired with #40 (Option B): `RecallParams::new()` now defaults to a new `RecallModes::SEMANTIC_AND_LEXICAL` const (graph off, since the no-seeds constructor cannot populate it). New `RecallParams::with_seeds(text, embedding, seeds)` constructor for the seed-bearing case — uses `RecallModes::ALL`. Together these mean:
+
+* `RecallParams::new(t, e)` produces a sane default that doesn't trip the new error.
+* `RecallParams::with_seeds(t, e, seeds)` enables the graph lane.
+* `RecallParams { modes: GRAPH_ONLY, seed_entity_ids: None or empty, .. }` now errors immediately at recall time.
+
+`memory_recall_e2e.rs` Assertion 4 ("empty seeds + GRAPH_ONLY → Ok(empty)") flipped to assert the new error. New unit tests in `core/src/memory/recall.rs`: `recall_modes_semantic_and_lexical_is_two_text_lanes`, `recall_params_new_default_is_semantic_and_lexical_no_seeds`, `recall_params_with_seeds_enables_all_three_lanes`.
+
+### Issues #47 + #50 + #20 — schema-v2 migration
+
+Bundled because the dataset is empty right now — `tests/observation/captures/.gitkeep` is the only file — so all three changes are free-cost. Once observation phase runs, this becomes operator-visible migration work.
+
+* **#47** `core::observation::capture::SCHEMA_VERSION` 1 → 2. `CapturedPlan.verdict_today: String` → `Option<String>`. Missing `cassandra:chain/verdict` row → `None`; real Approve verdict → `Some("Approve")`. The previous v1 silently defaulted to `"Approve"` for missing rows — wire-indistinguishable. New tests: `extract_plans_returns_none_when_verdict_row_missing`, `extract_plans_some_approve_is_distinct_from_none`, `schema_version_is_two`.
+* **#50** `task.finalize` audit-payload `provenance` field added. Three new constants in `core::scheduler::audit`: `FINALIZE_PROVENANCE_RUNTIME = "runtime"`, `FINALIZE_PROVENANCE_CRASH_RECOVERY = "crash_recovery"`, `FINALIZE_PROVENANCE_PRODUCER_CANCEL_PENDING = "producer_cancel_pending"`. The existing `build_finalize_payload` + `build_crashed_finalize_payload` helpers each hardcode their own provenance; new `build_producer_cancel_finalize_payload(task_id, lane, plan_count, finished_at)` replaces `cli_audit::emit_producer_cancel_finalize`'s previous reuse of `build_finalize_payload` (cleaner — known-zero counters and `started_at: None` are hardcoded inside the helper). Existing 9-key shape pins in `cli_cancel_audit_e2e` + `scheduler_crash_recovery_e2e` now expect 10 keys and pin the new `provenance` value. Three new audit-shape tests + one provenance-distinctness pin (`finalize_provenance_values_are_distinct`).
+* **#20** New migration `db/migrations/0011_agent_prompts_composite_pk.sql` changes `agent_prompts` PK from `(sha256)` to `(sha256, name)`. Migration is non-destructive — pre-migration rows are unique on the composite key by construction (PK was `(sha256)` already). `db::agent_prompts::upsert_prompt` now `ON CONFLICT (sha256, name) DO NOTHING`. Renames no longer silently alias to the first-seen name; CASSANDRA's future reviewer joining audit-log `(prompt_name, prompt_sha256)` against `agent_prompts` won't see false-positive "drift". `ALTER TABLE` takes ACCESS EXCLUSIVE briefly; acceptable because `agent_prompts` is startup-time-only.
+
+### Test-count delta (this session)
+
+`cargo test --workspace` 349 → **429** (+80) on Linux at this branch's HEAD. 0 failures, 0 SKIP, 0 warnings.
+
+* `+19` `coreutils_smoke` integration tests.
+* `+5` `scheduler::audit` provenance + shape pins (`build_producer_cancel_finalize_*`, runtime+crash provenance pins, distinctness pin).
+* `+3` `observation::capture` (`schema_version_is_two`, `extract_plans_returns_none_when_verdict_row_missing`, `extract_plans_some_approve_is_distinct_from_none`); 1 existing test updated for `Option<String>`.
+* `+3` `memory::recall` design-contract pins (`recall_modes_semantic_and_lexical_*`, `recall_params_new_default_is_semantic_and_lexical_no_seeds`, `recall_params_with_seeds_enables_all_three_lanes`); 1 existing test renamed + retargeted from "default seed_entity_ids is None" to "default is semantic_and_lexical no seeds".
+* `+3` `sandbox::tests` Default pins (`sandbox_policy_default_is_strict_deny_with_one_second_budget`, `net_default_is_deny`, `profile_default_is_worker_strict`).
+* The other ~47 of the delta are from re-counted lib/integration totals that I didn't audit individually — the workspace runs in 429 / 0 / 0 / 0 and that's the load-bearing fact.
+
+### Deliberately not picked this session
+
+* **#23** constitutional refusals as `state='completed'`. Larger design discussion deferred (operator agreed: "we'll take time to discuss 5 later").
+* **#21, #37, #39, #4, #8, #3, #24** — perf, process, hygiene, wait-for-upstream. All defer-able per the survey.
+* **#6 main body** (cpu_quota_pct / tasks_max / setrlimit cpu_ms) — this session shipped only the `Default` prereq.
+
+---
+
+## Recently completed (previous session, 2026-05-14 — per-tool argv allowlist hygiene, branch `feat/tool-allowlist-db`)
 
 Branch: `feat/tool-allowlist-db` (off `main` at `97fdf04`, the merge of PR #49). Ships the HANDOVER "Per-tool argv allowlist hygiene" pickup: moves the per-tool argv allowlist source-of-truth from the `HHAGENT_SHELL_EXEC_ALLOWLIST` env var to a new `tool_allowlists` Postgres table, behind the existing `hhagent_runtime` GRANT shape. Every mutation now writes one row in `audit_log` via `core::cli_audit::tools_allowlist_{add,remove}_and_audit`; daemon bring-up emits one `actor='core' action='registry.loaded'` row carrying the SHA-256 of the canonical-form allowlist for cross-restart drift detection. Hard cutover — `HHAGENT_SHELL_EXEC_ALLOWLIST` is no longer read; a deprecation WARN logs if it's still set.
 
@@ -1264,7 +1351,7 @@ Smaller follow-up to Option E. Today the cgroup layer hardcodes `CPUQuota=200%` 
 - [#2](https://github.com/hherb/hhagent/issues/2) — evaluate `setpgid` → `setsid` for stronger session isolation on macOS  *(closed in code 2026-05-09; `pre_exec` hook calls `libc::setsid()`)*
 - [#3](https://github.com/hherb/hhagent/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64
 - [#4](https://github.com/hherb/hhagent/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added
-- [#5](https://github.com/hherb/hhagent/issues/5) — audit `BASE_ALLOW` against a fixture of common worker binaries
+- ~~[#5](https://github.com/hherb/hhagent/issues/5) — audit `BASE_ALLOW` against a fixture of common worker binaries~~ **closed 2026-05-14 by this session** (`chore/issues-batch-2026-05-14`). New `workers/prelude/tests/coreutils_smoke.rs` runs 19 coreutils under strict lockdown; added the 6 syscall gaps it found (`mkdirat`, `unlinkat`, `renameat2`, `utimensat`, `fchown`, `fchmodat`, `fchmod` + legacy x86_64 variants + adjacent set) to `BASE_ALLOW`. `tar` skips NSS via `--numeric-owner` to dodge the strict-vs-NetClient `socket()` boundary (NSS is not a BASE_ALLOW gap)
 - [#6](https://github.com/hherb/hhagent/issues/6) — tunable `cpu_quota_pct`/`tasks_max` policy fields + `setrlimit`-based `cpu_ms` enforcement (Option G above)
 - [#8](https://github.com/hherb/hhagent/issues/8) — collapse `default_probe` / `default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears
 - ~~[#11](https://github.com/hherb/hhagent/issues/11) — daemon-scoped `PgPool`~~ **closed 2026-05-10** by Option I's `pool::connect_runtime_pool`
@@ -1273,14 +1360,17 @@ Smaller follow-up to Option E. Today the cgroup layer hardcodes `CPUQuota=200%` 
 - [#14](https://github.com/hherb/hhagent/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `core/tests/supervisor_e2e.rs` with a constant in `hhagent-core`'s public API or a real readiness signal
 - ~~[#15](https://github.com/hherb/hhagent/issues/15) — hoist the duplicated PG bring-up boilerplate into a workspace-level `tests-common` dev-dep crate~~ **closed 2026-05-12 by this session** (`refactor/tests-common-hoist`). New crate `hhagent-tests-common` ships `PgCluster` + `bring_up_pg_cluster` + RAII guards + skip helpers + sandbox factory + binary discovery + macOS launchd serial lock + deterministic SHA-256-seeded embedding seed; 8 byte-duplicated copies eliminated; workspace count unchanged at 342
 - ~~[#16](https://github.com/hherb/hhagent/issues/16) — close the in-crate hole in the `WorkerCommand` seal (filed 2026-05-10)~~ **closed 2026-05-13 by this session** (`fix/worker-command-seal-tighten`) — minimal-diff variant of issue fix #1: narrowed `WorkerCommand::{method, params, new}` + `SupervisedWorker::call` from `pub(crate)`/`pub` to module-private. The workspace build is the structural regression pin for sibling-module exclusion; the `compile_fail` doctest on `WorkerCommand` remains the out-of-crate pin.
-- [#17](https://github.com/hherb/hhagent/issues/17) — tighten `memory::recall` behaviour when input is missing (filed 2026-05-10)
-- [#20](https://github.com/hherb/hhagent/issues/20) — `agent_prompts` schema: PK on sha256 means renamed prompt files lose their original name (filed 2026-05-10 from PR #25 review)
+- ~~[#17](https://github.com/hherb/hhagent/issues/17) — tighten `memory::recall` behaviour when input is missing (filed 2026-05-10)~~ **closed 2026-05-14 by this session** (`chore/issues-batch-2026-05-14`). Hybrid policy: single-lane missing-input degrades with a `tracing::warn`; all-lanes-missing-input returns `DbError::Query("recall: no lanes ran…")`. Pinned by new tests in `core/src/memory/recall.rs` + Assertion 4 in `memory_recall_e2e.rs`. Paired with the #40 closure (graph-off `RecallParams::new` default + new `with_seeds` constructor).
+- ~~[#20](https://github.com/hherb/hhagent/issues/20) — `agent_prompts` schema: PK on sha256 means renamed prompt files lose their original name (filed 2026-05-10 from PR #25 review)~~ **closed 2026-05-14 by this session** (`chore/issues-batch-2026-05-14`). New migration `0011_agent_prompts_composite_pk.sql` changes PK to `(sha256, name)`; `upsert_prompt` now `ON CONFLICT (sha256, name) DO NOTHING`. Non-destructive — pre-migration rows are already unique on the composite key.
 - [#21](https://github.com/hherb/hhagent/issues/21) — `core::scheduler::runner` per-iteration cancellation poll could be a `watch::Receiver` instead of a DB round-trip (filed 2026-05-10 from PR #25 review)
 - ~~[#22](https://github.com/hherb/hhagent/issues/22) — `RouterAgent::formulate_plan` has no mock-HTTP test coverage~~ **addressed by PR #26 (open)**
 - [#23](https://github.com/hherb/hhagent/issues/23) — scheduler: constitutional refusals are recorded as `state='completed'`, not `'blocked'` — design discussion before CASSANDRA real impls (filed 2026-05-10 from PR #25 review)
 - [#24](https://github.com/hherb/hhagent/issues/24) — deployment: `HHAGENT_PROMPTS_DIR` has a cwd-relative fallback; production unit files must set it explicitly (filed 2026-05-10 from PR #25 review)
 - ~~[#30](https://github.com/hherb/hhagent/issues/30) — split `core/src/memory.rs` into `recall.rs` + `embed.rs` submodules~~ **closed 2026-05-12 by this slice** (`core/src/memory/{mod.rs, recall.rs, embed.rs}`, all under the 500-LOC soft cap)
 - [#42](https://github.com/hherb/hhagent/issues/42) — `deleted_memories` AFTER DELETE trigger uses `SECURITY INVOKER`; a future role with DELETE on `memories` but no INSERT on `deleted_memories` will silently break DELETE. Deferred until a second DELETE-capable role is proposed; current single-role state is internally consistent and integration-test-pinned (filed 2026-05-13 from PR #41 review).
+- ~~[#40](https://github.com/hherb/hhagent/issues/40) — design: `RecallParams::new()` graph-off default (filed 2026-05-12 from PR #41 final review)~~ **closed 2026-05-14 by this session** (`chore/issues-batch-2026-05-14`). Option B picked: new `RecallParams::with_seeds` constructor for the seed-bearing case; `RecallParams::new()` defaults to new `RecallModes::SEMANTIC_AND_LEXICAL` const. Paired with #17 hybrid policy so the no-seeds-graph-on combination is rejected as a caller bug instead of silently warning forever.
+- ~~[#47](https://github.com/hherb/hhagent/issues/47) — observation/capture: distinguish 'no verdict row' from a real Approve verdict (filed 2026-05-13 from PR #46 review)~~ **closed 2026-05-14 by this session** (`chore/issues-batch-2026-05-14`). `SCHEMA_VERSION` bumped to 2; `CapturedPlan.verdict_today` is now `Option<String>`. Missing verdict row → `None`; real Approve verdict → `Some("Approve")`. Zero captures on disk made this a free-cost migration.
+- ~~[#50](https://github.com/hherb/hhagent/issues/50) — unify finalize-payload provenance signal across crashed / producer-cancelled / runtime emitters (filed 2026-05-13 from PR #49 review)~~ **closed 2026-05-14 by this session** (`chore/issues-batch-2026-05-14`). New `provenance` field on `task.finalize` payloads, closed set `"runtime"` / `"crash_recovery"` / `"producer_cancel_pending"`. New `build_producer_cancel_finalize_payload` helper replaces `emit_producer_cancel_finalize`'s previous reuse of `build_finalize_payload`. 9-key shape pin in `cli_cancel_audit_e2e` + `scheduler_crash_recovery_e2e` is now a 10-key pin.
 - ~~**Deferred — Task 3.2.bis:** wire `ToolHostStepDispatcher` to `tool_host::dispatch`~~ **shipped 2026-05-11** on branch `feat/tool-host-step-dispatcher`. See older "Recently completed" entry.
 - ~~**Deferred — Task 4.4:** `cli_ask_e2e` integration test~~ **shipped 2026-05-11** on `main` (see older "Recently completed" entry).
 

@@ -32,6 +32,15 @@
 //!     etc., which still proves seccomp didn't kill us). Exit 0 on socket
 //!     success, 3 on socket failure with errno (still alive — useful when
 //!     the test host has no IPv4 stack).
+//!
+//! lockdown-probe exec-after-lockdown <binary> [<binary-args>...]
+//!     Call lock_down() — the seccomp filter installs and Landlock
+//!     restricts FS access to `HHAGENT_LANDLOCK_RW` — then `execve()`
+//!     into `<binary>` with the remaining args. The new process
+//!     inherits the seccomp filter (filters survive execve under
+//!     PR_SET_NO_NEW_PRIVS, which lock_down already set). Used by
+//!     `coreutils_smoke.rs` to audit BASE_ALLOW against common worker
+//!     binaries (`cp`, `cat`, `mkdir`, …). If `execve` fails, exit 71.
 //! ```
 //!
 //! All subcommands print `LOCKDOWN_REPORT: {report}` to stderr first, so
@@ -68,6 +77,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "linux")]
         "seccomp-socket" => probe_socket(),
         "seccomp-getpid" => probe_getpid(),
+        #[cfg(target_os = "linux")]
+        "exec-after-lockdown" => probe_exec_after_lockdown(&args[1..]),
         other => {
             eprintln!("unknown subcommand: {other}");
             ExitCode::from(64)
@@ -183,6 +194,27 @@ fn probe_getpid() -> ExitCode {
     let pid = std::process::id();
     eprintln!("getpid() = {pid}");
     ExitCode::from(0)
+}
+
+/// Lock down already happened above; now `execve` into the requested
+/// binary with the remaining args. The new process inherits the
+/// seccomp filter and Landlock ruleset. Used by `coreutils_smoke.rs`
+/// to audit `BASE_ALLOW` against common worker binaries (issue #5).
+///
+/// If `exec` fails, surface the OS error and exit 71. (Successful exec
+/// never returns to this stack frame.)
+#[cfg(target_os = "linux")]
+fn probe_exec_after_lockdown(args: &[String]) -> ExitCode {
+    use std::os::unix::process::CommandExt;
+    if args.is_empty() {
+        eprintln!("exec-after-lockdown requires a binary path");
+        return ExitCode::from(64);
+    }
+    let bin = &args[0];
+    let rest = &args[1..];
+    let err = std::process::Command::new(bin).args(rest).exec();
+    eprintln!("exec({bin:?}) failed: {err}");
+    ExitCode::from(71)
 }
 
 #[cfg(target_os = "linux")]

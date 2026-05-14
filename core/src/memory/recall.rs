@@ -88,6 +88,16 @@ impl RecallModes {
         lexical: false,
         graph: true,
     };
+
+    /// Semantic + lexical lanes, graph off. The default
+    /// [`RecallParams::new`] modes (graph requires explicit seeds the
+    /// no-seeds constructor can't provide). Use
+    /// [`RecallModes::ALL`] when seeds are populated.
+    pub const SEMANTIC_AND_LEXICAL: RecallModes = RecallModes {
+        semantic: true,
+        lexical: true,
+        graph: false,
+    };
 }
 
 impl Default for RecallModes {
@@ -128,14 +138,37 @@ pub struct RecallParams<'a> {
 }
 
 impl<'a> RecallParams<'a> {
-    /// Common-case constructor: semantic + lexical lanes, default
-    /// budget, no graph seeds. Callers that want the graph lane
-    /// populate [`RecallParams::seed_entity_ids`] explicitly.
+    /// Common-case constructor: semantic + lexical lanes
+    /// ([`RecallModes::SEMANTIC_AND_LEXICAL`]), default budget, no graph
+    /// seeds. The graph lane stays off because there are no seeds to
+    /// run it against; turning it on without seeds would warn-and-skip
+    /// on every call (and is rejected outright once it becomes the only
+    /// enabled lane — see [`recall`]). Callers that have entity seeds
+    /// use [`RecallParams::with_seeds`] for the graph-enabled shape.
     pub fn new(query_text: &'a str, query_embedding: &'a [f32]) -> Self {
         Self {
             query_text: Some(query_text),
             query_embedding: Some(query_embedding),
             seed_entity_ids: None,
+            k: hhagent_db::memories::DEFAULT_RECALL_K,
+            modes: RecallModes::SEMANTIC_AND_LEXICAL,
+        }
+    }
+
+    /// Seed-bearing constructor: all three lanes ([`RecallModes::ALL`]),
+    /// default budget, seeds wired in for the graph lane. Use when the
+    /// caller has already resolved entity ids (e.g. from an
+    /// entity-extraction step or a [`hhagent_db::graph::Graph::get_entity`]
+    /// lookup) and wants the graph lane to contribute to fusion.
+    pub fn with_seeds(
+        query_text: &'a str,
+        query_embedding: &'a [f32],
+        seed_entity_ids: &'a [i64],
+    ) -> Self {
+        Self {
+            query_text: Some(query_text),
+            query_embedding: Some(query_embedding),
+            seed_entity_ids: Some(seed_entity_ids),
             k: hhagent_db::memories::DEFAULT_RECALL_K,
             modes: RecallModes::ALL,
         }
@@ -164,21 +197,43 @@ pub const GRAPH_FANOUT_CAP_PER_SEED: i64 = 32;
 
 /// Run the configured lanes, fuse via RRF, hydrate the top-`k` rows.
 ///
-/// Lanes that are enabled but lack their input (e.g. semantic enabled
-/// without a query_embedding) are skipped with a `tracing::warn` —
-/// degrading rather than erroring lets a caller flip a mode on
-/// optimistically without first checking for the input. The empty
-/// fused list is a valid recall result.
+/// ## Missing-input policy (hybrid; pinned by [issue #17][0])
+///
+/// A single enabled lane whose input is missing (e.g. semantic on, no
+/// `query_embedding`) is **skipped with a `tracing::warn`** —
+/// degrading per-lane lets a caller flip a mode on optimistically when
+/// the other lanes have what they need.
+///
+/// If **every** enabled lane lacks its input, this is a caller bug —
+/// fusion over zero lanes is unambiguously an empty result, and silent
+/// `Ok(vec![])` would mask the bug at the call site. Returns
+/// [`DbError::Query`] with a message identifying which lanes were
+/// requested and what input they expected.
+///
+/// Zero enabled lanes (`modes: RecallModes { ..false }`) is treated
+/// the same way: a caller asking for *no* lanes is asking for nothing.
+///
+/// [0]: https://github.com/hherb/hhagent/issues/17
+///
+/// ## Other error modes
 ///
 /// Errors propagate from the underlying sqlx queries via
-/// [`DbError`]. The fusion + hydration is best-effort: a hydration
-/// of `n` ids may return fewer than `n` rows when one was deleted
-/// concurrently — the caller observes a shorter list, not an error.
+/// [`DbError`]. A `query_embedding` of the wrong dimension is an
+/// immediate [`DbError::Query`] (dim mismatch is a hard contract, not
+/// a degrade case). The fusion + hydration is best-effort: a
+/// hydration of `n` ids may return fewer than `n` rows when one was
+/// deleted concurrently — the caller observes a shorter list, not an
+/// error.
 pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memory>, DbError> {
     if params.k == 0 {
         return Ok(Vec::new());
     }
     let lane_k = params.k.saturating_mul(LANE_FANOUT);
+
+    // Track whether any enabled lane actually has the input it needs.
+    // The "every enabled lane skipped" case is rejected at the bottom
+    // of this function — see the missing-input policy in the docstring.
+    let mut any_enabled = false;
 
     // Run each enabled lane. We could `try_join!` the three lane
     // queries for marginal latency, but Phase 0 throughput doesn't
@@ -190,6 +245,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
     let mut lane_lists: Vec<Vec<i64>> = Vec::with_capacity(3);
 
     if params.modes.semantic {
+        any_enabled = true;
         match params.query_embedding {
             Some(emb) if emb.len() == EMBEDDING_DIM => {
                 lane_lists.push(semantic_search(pool, emb, lane_k).await?);
@@ -209,6 +265,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
     }
 
     if params.modes.lexical {
+        any_enabled = true;
         match params.query_text {
             Some(t) if !t.trim().is_empty() => {
                 lane_lists.push(lexical_search(pool, t, lane_k).await?);
@@ -223,6 +280,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
     }
 
     if params.modes.graph {
+        any_enabled = true;
         match params.seed_entity_ids {
             Some(seeds) if !seeds.is_empty() => {
                 // 1-hop outbound expansion via the Graph chokepoint,
@@ -272,8 +330,17 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
         }
     }
 
+    // Hybrid missing-input policy: zero enabled lanes OR every enabled
+    // lane skipped (lane_lists still empty) is a caller bug — see the
+    // docstring. The error carries the diagnostic info the caller
+    // would otherwise have to dig out of a warn-log line.
     if lane_lists.is_empty() {
-        return Ok(Vec::new());
+        return Err(DbError::Query(format!(
+            "recall: no lanes ran (any_enabled={any_enabled}); \
+             at least one enabled lane must have its required input — \
+             semantic needs query_embedding, lexical needs non-empty query_text, \
+             graph needs non-empty seed_entity_ids"
+        )));
     }
 
     // Fuse and truncate to k. RRF returns scores too, but the typed
@@ -494,15 +561,47 @@ mod tests {
         assert!(m.graph);
     }
 
-    /// `RecallParams::new(text, emb)` leaves `seed_entity_ids = None`
-    /// — graph lane stays off implicitly when caller doesn't opt in
-    /// via explicit field set. Preserves the no-breaking-call-sites
-    /// invariant for `new()` consumers.
+    /// `RecallModes::SEMANTIC_AND_LEXICAL` is the default for
+    /// [`RecallParams::new`]: both text-bearing lanes on, graph off.
+    /// Pinned because the docs and call-site contract depend on it.
     #[test]
-    fn recall_params_new_default_seed_entity_ids_is_none() {
+    fn recall_modes_semantic_and_lexical_is_two_text_lanes() {
+        let m = RecallModes::SEMANTIC_AND_LEXICAL;
+        assert!(m.semantic);
+        assert!(m.lexical);
+        assert!(!m.graph);
+    }
+
+    /// `RecallParams::new(text, emb)` leaves `seed_entity_ids = None`
+    /// and uses [`RecallModes::SEMANTIC_AND_LEXICAL`] — graph lane is
+    /// off by default because the no-seeds constructor cannot
+    /// populate it. Issue #40 pin.
+    #[test]
+    fn recall_params_new_default_is_semantic_and_lexical_no_seeds() {
         let emb: Vec<f32> = vec![0.0; 1024];
         let params = RecallParams::new("query text", &emb);
         assert!(params.seed_entity_ids.is_none());
+        assert_eq!(params.modes, RecallModes::SEMANTIC_AND_LEXICAL);
+        // Specifically: graph is OFF by default. If a future change
+        // re-enables graph in `new()`, every prod caller starts
+        // warn-and-skipping on every call — pin against that.
+        assert!(!params.modes.graph);
+    }
+
+    /// `RecallParams::with_seeds` wires the graph lane on by populating
+    /// `seed_entity_ids` and switching `modes` to ALL. The seed-bearing
+    /// constructor is the only way to get graph contributions from the
+    /// canonical constructors. Issue #40 pin.
+    #[test]
+    fn recall_params_with_seeds_enables_all_three_lanes() {
+        let emb: Vec<f32> = vec![0.0; 1024];
+        let seeds: &[i64] = &[7, 42];
+        let params = RecallParams::with_seeds("query", &emb, seeds);
+        assert_eq!(params.seed_entity_ids, Some(seeds));
+        assert_eq!(params.modes, RecallModes::ALL);
+        assert!(params.modes.graph);
+        assert!(params.modes.semantic);
+        assert!(params.modes.lexical);
     }
 
     /// Pin `GRAPH_FANOUT_CAP_PER_SEED = 32` so a future tune is an

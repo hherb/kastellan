@@ -559,13 +559,8 @@ mod tests {
         ToolEntry {
             binary: PathBuf::from("/usr/local/bin/fake"),
             policy: SandboxPolicy {
-                fs_read: vec![],
-                fs_write: vec![],
-                net: Net::Deny,
-                cpu_ms: 1_000,
                 mem_mb: 32,
-                profile: Profile::WorkerStrict,
-                env: vec![],
+                ..SandboxPolicy::default()
             },
             wall_clock_ms: Some(5_000),
         }
