@@ -1313,3 +1313,141 @@ async fn memory_delete_writes_deleted_memories_row() {
 
     pool.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_allowlists_round_trip_and_grant_shape() {
+    use hhagent_db::pool::connect_runtime_pool;
+    use hhagent_db::probe::run as probe_run;
+    use hhagent_db::tool_allowlists::{
+        add, list_all, list_for_tool, remove, AllowlistEntry, ToolAllowlistError,
+    };
+    use hhagent_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix};
+
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ta-d",
+        "ta-l",
+        &format!("hhagent-postgres-tool-allowlists-e2e-{suffix}"),
+    );
+
+    probe_run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "tool-allowlists-e2e"}),
+    )
+    .await
+    .expect("probe run");
+    let pool = connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // (1) Idempotent add.
+    let inserted = add(&pool, "shell-exec", "/usr/bin/echo", "test").await.unwrap();
+    assert!(inserted, "first add must INSERT");
+    let inserted2 = add(&pool, "shell-exec", "/usr/bin/echo", "test").await.unwrap();
+    assert!(!inserted2, "duplicate add must be a no-op");
+
+    // (2) list_for_tool returns one entry.
+    let v = list_for_tool(&pool, "shell-exec").await.unwrap();
+    assert_eq!(v, vec!["/usr/bin/echo".to_string()]);
+
+    // (3) A second entry under the same tool.
+    let inserted3 = add(&pool, "shell-exec", "/bin/sh", "test").await.unwrap();
+    assert!(inserted3);
+    let v2 = list_for_tool(&pool, "shell-exec").await.unwrap();
+    assert_eq!(v2, vec!["/bin/sh".to_string(), "/usr/bin/echo".to_string()],
+        "list_for_tool must order argv0 ascending");
+
+    // (4) list_all surfaces metadata.
+    let all: Vec<AllowlistEntry> = list_all(&pool).await.unwrap();
+    assert_eq!(all.len(), 2);
+    for row in &all {
+        assert_eq!(row.tool, "shell-exec");
+        assert_eq!(row.created_by, "test");
+    }
+
+    // (5) Idempotent remove.
+    let removed = remove(&pool, "shell-exec", "/usr/bin/echo").await.unwrap();
+    assert!(removed);
+    let removed2 = remove(&pool, "shell-exec", "/usr/bin/echo").await.unwrap();
+    assert!(!removed2, "second remove must be a no-op");
+
+    // (6) GRANT shape: UPDATE on tool_allowlists denied to hhagent_runtime.
+    // SET ROLE explicitly in the same transaction so the test isn't
+    // sensitive to pool reuse.
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("SET ROLE hhagent_runtime")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let update_res = sqlx::query("UPDATE tool_allowlists SET argv0 = '/x' WHERE tool = 'shell-exec'")
+        .execute(&mut *conn)
+        .await;
+    let err = update_res.expect_err("UPDATE on tool_allowlists must be denied");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("permission denied") || msg.contains("denied for table"),
+        "unexpected error message: {msg}"
+    );
+    drop(conn);
+
+    // (7) CHECK constraint: relative argv0 rejected by Postgres even
+    // when the Rust validator is bypassed.
+    let bad = sqlx::query("INSERT INTO tool_allowlists (tool, argv0, created_by) VALUES ('shell-exec', 'echo', 'test')")
+        .execute(&pool)
+        .await;
+    let bad_err = bad.expect_err("relative argv0 must be CHECK-rejected");
+    let bad_msg = bad_err.to_string().to_lowercase();
+    assert!(
+        bad_msg.contains("check") || bad_msg.contains("violates"),
+        "unexpected error: {bad_msg}"
+    );
+
+    // (7b) CHECK constraint: `..` *segment* in argv0 rejected by Postgres
+    // even when the Rust validator is bypassed. Closes the path-confusion
+    // bypass at the SQL layer (defense-in-depth for direct DB writers).
+    for dotdot in [
+        "/usr/bin/../bin/echo",
+        "/..",
+        "/../bin/echo",
+        "/usr/bin/echo/..",
+    ] {
+        let res = sqlx::query("INSERT INTO tool_allowlists (tool, argv0, created_by) VALUES ('shell-exec', $1, 'test')")
+            .bind(dotdot)
+            .execute(&pool)
+            .await;
+        let err = res.expect_err(
+            "argv0 with `..` segment must be CHECK-rejected by Postgres",
+        );
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("check") || msg.contains("violates"),
+            "argv0 {dotdot:?} rejected for unexpected reason: {msg}"
+        );
+    }
+    // Conversely, `..` *within* a segment must be accepted (the validator
+    // explicitly permits filenames like `/usr/bin/foo..bar`, so the SQL
+    // CHECK must not over-reject and break legitimate paths).
+    sqlx::query("INSERT INTO tool_allowlists (tool, argv0, created_by) VALUES ('shell-exec-test-dotdot', '/usr/bin/foo..bar', 'test')")
+        .execute(&pool)
+        .await
+        .expect("`..` within a segment must pass the CHECK");
+
+    // (8) Validator gate: add() rejects a malformed argv0 before the DB
+    // sees it. Confirms the public API uses the validator, not just the
+    // SQL CHECK constraint.
+    let bad_argv0 = add(&pool, "shell-exec", "echo", "test").await;
+    assert!(matches!(bad_argv0, Err(ToolAllowlistError::InvalidArgv0)),
+        "expected InvalidArgv0; got {bad_argv0:?}");
+    let bad_tool = add(&pool, "shell exec", "/usr/bin/echo", "test").await;
+    assert!(matches!(bad_tool, Err(ToolAllowlistError::InvalidToolName)),
+        "expected InvalidToolName; got {bad_tool:?}");
+
+    drop(pool);
+    drop(cluster);
+}

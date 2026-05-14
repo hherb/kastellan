@@ -48,12 +48,12 @@ use hhagent_tests_common::{
 #[cfg(target_os = "macos")]
 use hhagent_tests_common::serial_lock;
 
-const ECHO_PATH_LINUX: &str = "/usr/bin/echo";
-const ECHO_PATH_MACOS: &str = "/bin/echo";
-const DATE_PATH_LINUX: &str = "/usr/bin/date";
-const DATE_PATH_MACOS: &str = "/bin/date";
-const LS_PATH_LINUX: &str = "/usr/bin/ls";
-const LS_PATH_MACOS: &str = "/bin/ls";
+// Per-OS argv0 path constants previously injected via env at daemon
+// bring-up. After 2026-05-14's allowlist hygiene work, the allowlist
+// is sourced from the `tool_allowlists` DB table (migration 0009);
+// operators must `hhagent-cli tools allowlist add` the paths their
+// fixtures expect before running this `#[ignore]`-flagged orchestrator.
+// See bring_up_daemon below for the exact seed commands.
 
 const DEFAULT_LLM_MODEL: &str = "gemma4:26b-a4b-it-q8_0";
 
@@ -244,20 +244,19 @@ fn bring_up_daemon(
         "HHAGENT_SHELL_EXEC_BIN".into(),
         shell_exec_worker_binary().to_string_lossy().into_owned(),
     ));
-    // Permissive allowlist for observation: echo, date, ls, cat (read-only).
-    let allowlist = if cfg!(target_os = "linux") {
-        format!(
-            "{}:{}:{}:{}",
-            ECHO_PATH_LINUX, DATE_PATH_LINUX, LS_PATH_LINUX, "/bin/cat"
-        )
-    } else {
-        format!(
-            "{}:{}:{}:{}",
-            ECHO_PATH_MACOS, DATE_PATH_MACOS, LS_PATH_MACOS, "/bin/cat"
-        )
-    };
-    spec.env
-        .push(("HHAGENT_SHELL_EXEC_ALLOWLIST".into(), allowlist));
+    // Allowlist is now sourced from the `tool_allowlists` table (see
+    // migration 0009). Operators running this `#[ignore]`-flagged test
+    // must seed the four argv0 paths (echo/date/ls/cat — read-only) for
+    // their OS before invoking the daemon, e.g.:
+    //
+    //   hhagent-cli tools allowlist add shell-exec /bin/echo
+    //   hhagent-cli tools allowlist add shell-exec /bin/date
+    //   hhagent-cli tools allowlist add shell-exec /bin/ls
+    //   hhagent-cli tools allowlist add shell-exec /bin/cat
+    //
+    // Without the seeds the orchestrator will silently observe
+    // POLICY_DENIED on every tool step. HHAGENT_SHELL_EXEC_ALLOWLIST
+    // env is no longer honored (deprecation WARN logs once on bring-up).
 
     let sup = default_supervisor();
     let service = ServiceGuard {
@@ -451,6 +450,23 @@ async fn capture_all_fixtures_against_live_llm() {
 
     let spec = ConnectSpec::default_for(&cluster.data_dir).expect("spec");
     let pool = connect_runtime_pool(&spec).await.expect("pool");
+
+    // Fast-fail if the shell-exec allowlist is empty: the captures would
+    // otherwise consist solely of POLICY_DENIED rows. See the bring_up_daemon
+    // comment for the `hhagent-cli tools allowlist add` commands operators
+    // must run first.
+    let shell_exec_allowlist_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tool_allowlists WHERE tool = 'shell-exec'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count shell-exec allowlist rows");
+    assert!(
+        shell_exec_allowlist_count > 0,
+        "tool_allowlists has zero shell-exec rows for this PG cluster — \
+         seed argv0 paths via `hhagent-cli tools allowlist add shell-exec /bin/echo` \
+         (etc.) before running this orchestrator; see bring_up_daemon comment."
+    );
 
     // RFC 3339 timestamp once at the top so all per-fixture captures
     // share a single date prefix in their filenames.

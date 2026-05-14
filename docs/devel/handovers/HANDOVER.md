@@ -4,9 +4,11 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-14 (crashed-task + producer-cancelled-pending `task.finalize` audit rows — branch `feat/crashed-finalize-row`, not yet merged)
-**Last commit (main):** `127750f` (merge of PR #46 `feat/observation-phase-captures`).
-**This session's working branch:** `feat/crashed-finalize-row` (off `main` at `127750f`). Ships **two paired slices** filling the last two finalize-stream undercounting gaps:
+**Last updated:** 2026-05-14 (per-tool argv allowlist hygiene — branch `feat/tool-allowlist-db`, not yet merged)
+**Last commit (main):** `97fdf04` (merge of PR #49 `feat/crashed-finalize-row`).
+**This session's working branch:** `feat/tool-allowlist-db` (off `main` at `97fdf04`). Ships the per-tool argv allowlist source-of-truth migration from the `HHAGENT_SHELL_EXEC_ALLOWLIST` env var to a new `tool_allowlists` DB table behind the existing `hhagent_runtime` GRANT shape, with every mutation written to `audit_log`. See "Recently completed (this session)" entry below for the full slice.
+
+**Previous session's branch:** `feat/crashed-finalize-row` (off `main` at `127750f`, merged via PR #49 at `97fdf04`). Shipped **two paired slices** filling the last two finalize-stream undercounting gaps:
 
 **Slice 1 — crashed-task finalize (2026-05-13).** New pure helper `core::scheduler::audit::build_crashed_finalize_payload(task_id, lane, plan_count, started_at, finished_at) -> Value` emits the same 9-key shape `build_finalize_payload` uses, but `total_llm_calls` and `total_dispatch_calls` are JSON `null` (the dead daemon's in-memory counters are unrecoverable — `null` is the wire signal "unknowable", distinguishable from `0` which the runtime path emits to mean "observed zero"); `total_duration_ms` falls back to `null` when `started_at` is missing, otherwise computes via the existing `compute_duration_ms` helper. `state` is hard-pinned to `"crashed"` so the helper can't be misused. `crash_recovery::sweep_and_audit` now writes the `task.finalize` row immediately after the `task.crashed` lifecycle row per recovered task (same ordering `drain_lane` uses in the runtime path).
 
@@ -107,7 +109,86 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-14 — producer-cancelled-pending `task.finalize` audit row, branch `feat/crashed-finalize-row`)
+## Recently completed (this session, 2026-05-14 — per-tool argv allowlist hygiene, branch `feat/tool-allowlist-db`)
+
+Branch: `feat/tool-allowlist-db` (off `main` at `97fdf04`, the merge of PR #49). Ships the HANDOVER "Per-tool argv allowlist hygiene" pickup: moves the per-tool argv allowlist source-of-truth from the `HHAGENT_SHELL_EXEC_ALLOWLIST` env var to a new `tool_allowlists` Postgres table, behind the existing `hhagent_runtime` GRANT shape. Every mutation now writes one row in `audit_log` via `core::cli_audit::tools_allowlist_{add,remove}_and_audit`; daemon bring-up emits one `actor='core' action='registry.loaded'` row carrying the SHA-256 of the canonical-form allowlist for cross-restart drift detection. Hard cutover — `HHAGENT_SHELL_EXEC_ALLOWLIST` is no longer read; a deprecation WARN logs if it's still set.
+
+**Why this slice now.** HANDOVER "Immediate next pickups" listed this as the focused engineering item after the operator-only observation-phase capture work. Cost-to-benefit was small enough — one migration, one DB module, one CLI surface, one e2e test, one rewire of `build_tool_registry`, one migration of `cli_ask_e2e` — to land before more ambitious work.
+
+**Shape (4 NEW files + 6 modified, across 9 TDD-ordered commits):**
+
+- **NEW `db/migrations/0009_tool_allowlists.sql`:** new table `tool_allowlists(tool TEXT, argv0 TEXT, created_at TIMESTAMPTZ, created_by TEXT, PRIMARY KEY(tool, argv0))`; CHECK constraints (non-empty tool, non-empty absolute argv0); `GRANT SELECT, INSERT, DELETE` to `hhagent_runtime` paired with `REVOKE UPDATE, TRUNCATE` (counteracts `0002`'s `ALTER DEFAULT PRIVILEGES`, matching the `0008_deleted_memories_audit` pattern). No new index — PK covers `WHERE tool = $1`.
+- **NEW `db/src/tool_allowlists.rs` (~270 LOC):** pure validators (`validate_tool_name`: ASCII alnum + `-`/`_`, ≤ 64 bytes; `validate_argv0`: non-empty absolute path, no NUL, no `..` segment — security-motivated, see in-code rationale); `ToolAllowlistError` enum + `AllowlistEntry` struct; async I/O `add` (`INSERT ... ON CONFLICT DO NOTHING`, returns `bool` for state-change), `remove` (`DELETE`, returns `bool`), `list_for_tool`, `list_all`. 6 unit tests + 1 integration test (`tool_allowlists_round_trip_and_grant_shape` pins idempotency + ASC ordering + GRANT shape — UPDATE denied — + CHECK constraint — relative argv0 rejected + validator-gate from public API).
+- **NEW `tests-common/src/allowlist.rs`:** `seed_tool_allowlist(pool, tool, &[&str])` bulk-INSERT helper for integration tests; bypasses CLI binary. Re-exported from `tests-common/src/lib.rs`. `sqlx` dep added to `tests-common/Cargo.toml`.
+- **NEW `core/tests/cli_tools_allowlist_e2e.rs` (~180 LOC):** subprocess-level pin for `hhagent-cli tools allowlist {add,remove,list}`. Per-test PG cluster + real CLI binary subprocesses. Pins: add (happy + idempotent), list, remove (happy + idempotent), validation error (relative argv0 → exit 2 with stderr "absolute"), audit multiset (exactly 1 `cli/tools.allowlist.add` + 1 `cli/tools.allowlist.remove` — no rows for idempotent no-ops or validation errors), payload spot-check `{tool, argv0}`.
+- **`core/src/scheduler/audit.rs`:** 3 new constants — `ACTION_REGISTRY_LOADED = "registry.loaded"` (slotted before the `ACTION_TASK_*` family), `ACTION_TOOLS_ALLOWLIST_ADD = "tools.allowlist.add"`, `ACTION_TOOLS_ALLOWLIST_REMOVE = "tools.allowlist.remove"` (after).
+- **`core/src/cli_audit.rs`:** 2 new helpers `tools_allowlist_{add,remove}_and_audit(pool, tool, argv0) -> Result<bool, ToolAllowlistError>` mirroring the existing `cancel_and_audit` / `submit_and_audit` pattern. Audit insert gated on state change (`Ok(true)`); best-effort posture (warn-and-swallow on audit insert failure; DB-layer result is load-bearing).
+- **`core/src/bin/hhagent-cli.rs`:** new `tools allowlist {add,remove,list}` subcommand tree using the existing hand-rolled dispatcher (no clap). All validation errors (`InvalidToolName`, `InvalidArgv0`, `Argv0HasNul`, `Argv0HasDotDot`) exit with code 2. Help text + file-level docstring updated.
+- **`core/src/main.rs::build_tool_registry`:** rewired from sync env-var-driven to `async fn(&PgPool) -> anyhow::Result<ToolRegistry>`. Reads `HHAGENT_SHELL_EXEC_BIN` (kept), queries `db::tool_allowlists::list_for_tool(pool, "shell-exec")` (NEW source-of-truth), builds the `ToolEntry`, emits one `actor='core' action='registry.loaded'` row with payload `{tools: [{name, binary, allowlist_len, allowlist_sha256}]}`. SHA-256 is over the canonical-form (lex-sorted, `\n`-terminated per entry, empty list → SHA-256 of empty string) so cross-restart drift becomes visible at a glance. Fail-closed on DB error during load; best-effort on audit row. Deprecation WARN on `HHAGENT_SHELL_EXEC_ALLOWLIST` if set. 3 new module-private helpers: `LoadedToolRecord` struct (`#[derive(serde::Serialize)]`), `sha256_argv0_list`, `hex_encode`, `write_registry_loaded_row` (returns `Result<(), hhagent_db::DbError>` — proper type, no `sqlx::Error::Protocol` smuggling). `core/Cargo.toml` gained `sha2 = { workspace = true }`.
+- **`core/tests/cli_ask_e2e.rs`:** dropped `HHAGENT_SHELL_EXEC_ALLOWLIST` env push; happy-path now seeds via `tests-common::seed_tool_allowlist(&pool, "shell-exec", &[ECHO_PATH])` before daemon start; failure-path seeds nothing (empty allowlist → `/bin/cat` is denied). Test setup uses `actor="test", action="setup"` for the explicit pre-daemon `probe::run` (distinct from `core/startup` so the existing `Some(&1)` assertion on the daemon's own startup row isn't inflated). Audit multiset assertions bumped to include `core/registry.loaded ×1` and `test/setup ×1`; total row counts went 11→13 (happy) and 17→19 (failure).
+
+**Audit-row contract (the headline):**
+
+| When                                                  | actor  | action                       | payload keys                                                                                  |
+| ----------------------------------------------------- | ------ | ---------------------------- | --------------------------------------------------------------------------------------------- |
+| `hhagent-cli tools allowlist add <tool> <argv0>` (INSERT) | `cli`  | `tools.allowlist.add`        | `{tool, argv0}`                                                                               |
+| `hhagent-cli tools allowlist remove <tool> <argv0>` (DELETE) | `cli`  | `tools.allowlist.remove`     | `{tool, argv0}`                                                                               |
+| Daemon bring-up (one per start, after registry built) | `core` | `registry.loaded`            | `{tools: [{name, binary, allowlist_len, allowlist_sha256}]}` (one entry per registered tool)  |
+
+Idempotent operations (re-add of existing entry, remove of non-existent entry) write no audit row — operator's state-change intent did not materialise. Validation errors (relative argv0, etc.) write no audit row either.
+
+**TDD ordering** (per CLAUDE.md rule #2 + the published implementation plan):
+1. Migration `0009` first.
+2. Validators + unit tests RED → GREEN.
+3. DB I/O layer + integration test RED → GREEN.
+4. Action constants (no own tests; constants are pure declarations).
+5. `cli_audit` helpers (no own tests; covered by Task 6).
+6. CLI subcommands + e2e test RED → GREEN.
+7. `tests-common::seed_tool_allowlist` helper (no own tests; consumed by Task 8).
+8. Rewire `build_tool_registry` + migrate `cli_ask_e2e` to seed via the new helper.
+
+Two code-review-driven fixes landed inline (post-implementer): (a) migration `0009` originally lacked the `REVOKE UPDATE, TRUNCATE` line — caught by code review against the established `0008` pattern; without the REVOKE, `0002`'s `ALTER DEFAULT PRIVILEGES` would silently grant `UPDATE` to `hhagent_runtime` despite the explicit GRANT listing only SELECT/INSERT/DELETE; (b) `write_registry_loaded_row` originally wrapped `DbError` as `sqlx::Error::Protocol(e.to_string())` to paper over the type mismatch — replaced with `Result<(), hhagent_db::DbError>` so the type is honest. Both fixes were single-line amendments to their respective task commits.
+
+**What this slice deliberately does NOT do.**
+- **`HHAGENT_SHELL_EXEC_BIN` stays as env.** Binary path is orthogonal to allowlist hygiene; one worker = one binary, and binaries are constrained by the build artifact set. Moving the binary path to DB is a separate slice when a second tool exists.
+- **No per-task allowlist scoping.** Today's allowlist is host-global. A future column `scope TEXT NOT NULL DEFAULT 'host'` + matching CLI flag would allow per-task narrowing.
+- **No env-var seed/fallback.** No production deployment exists yet — no compat burden to carry.
+- **No retroactive emission for previously-set env-var allowlists.** Operators must re-seed via `hhagent-cli tools allowlist add` on first daemon start with this code.
+
+**Test count delta:** 387 → **395** (+6 validator unit tests + 1 DB integration + 1 CLI e2e). `cli_ask_e2e` gained `core/registry.loaded` + `test/setup` multiset assertions but no new `#[test]` functions.
+
+**Post-review cleanup (this session, on top of the slice above):**
+
+Five issues surfaced by `/review` on PR #51; three fixed inline, two filed:
+
+1. **Migration `0009` CHECK gap (issue A, 75 confidence).** Module doc claimed the SQL CHECK was the "last-line-of-defence" for `validate_argv0`, but the CHECK only enforced `argv0 LIKE '/%'` — `..` segments slipped through. Tightened to `argv0 !~ '(^|/)\.\.(/|$)'`; module doc reworded to accurately describe what each layer enforces (NUL bytes are rejected at the Postgres TEXT protocol layer, full `tool` name charset stays in the Rust validator). Test `tool_allowlists_round_trip_and_grant_shape` extended with a regression block: 4 `..`-segment shapes rejected by the new CHECK, plus a positive case (`foo..bar` *within* a segment must pass — must not over-reject).
+2. **`observation_capture.rs` silent POLICY_DENIED (issue B, 75 confidence).** The `#[ignore]`-flagged orchestrator had become operator-seeded after this branch removed env-var allowlist auto-seeding; if the operator forgot to run the `hhagent-cli tools allowlist add` lines from the comment block, all captures would be POLICY_DENIED. Added a fast-fail assertion right after the runtime-pool connect: `SELECT COUNT(*) FROM tool_allowlists WHERE tool = 'shell-exec'` must be > 0 with a message pointing at the seeding instructions. Cheap, runs before any LLM cost is incurred.
+3. **`tests-common::policy_for_shell_exec` doc scope ambiguity (issue D, 25 confidence).** Added a "Scope" paragraph clarifying that this helper is for direct worker-spawn tests; daemon-backed tests seed `tool_allowlists` via `seed_tool_allowlist`.
+4. **`tools allowlist list --tool` does a client-side filter (issue C, 25 confidence).** Filed as [issue #52](https://github.com/hherb/hhagent/issues/52). At current scale (O(10s) of rows) the bypass of the `(tool, argv0)` PK is harmless; the clean fix needs a new `list_for_tool_full -> Vec<AllowlistEntry>` to preserve the `CREATED_AT`/`CREATED_BY` columns the CLI renders.
+5. **`tests-common/src/allowlist.rs` has no self-tests (issue E, 25 confidence).** Commented on [issue #39](https://github.com/hherb/hhagent/issues/39) folding the new `seed_tool_allowlist` helper into its existing "tests-common self-tests" scope. (DB-I/O helper, not one of the pure-function helpers the issue body originally enumerated.)
+
+Workspace test count unchanged at **395** — the cleanup augments existing assertions inside `tool_allowlists_round_trip_and_grant_shape` rather than adding new `#[test]` functions.
+
+**Files touched (4 NEW + 6 modified):**
+- NEW `db/migrations/0009_tool_allowlists.sql`.
+- NEW `db/src/tool_allowlists.rs` (~270 LOC incl. tests).
+- NEW `tests-common/src/allowlist.rs`.
+- NEW `core/tests/cli_tools_allowlist_e2e.rs` (~180 LOC).
+- `db/src/lib.rs` — `pub mod tool_allowlists;` declared.
+- `db/tests/postgres_e2e.rs` — `tool_allowlists_round_trip_and_grant_shape` test added.
+- `tests-common/Cargo.toml` + `tests-common/src/lib.rs` — `sqlx` dep + module declaration + re-export.
+- `core/src/scheduler/audit.rs` — 3 new constants.
+- `core/src/cli_audit.rs` — 2 new helpers + updated `use` block.
+- `core/src/bin/hhagent-cli.rs` — `tools allowlist` subcommand tree (~150 LOC added); help text + file-level docstring updated.
+- `core/src/main.rs` — `build_tool_registry` rewired async + DB-backed; 4 new module-private helpers (`LoadedToolRecord`, `sha256_argv0_list`, `hex_encode`, `write_registry_loaded_row`).
+- `core/Cargo.toml` — `sha2 = { workspace = true }` added.
+- `core/tests/cli_ask_e2e.rs` — env-var push dropped; seed-helper call added per test; multiset assertions bumped.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
+- `docs/superpowers/specs/2026-05-14-tool-allowlist-hygiene-design.md` + `docs/superpowers/plans/2026-05-14-tool-allowlist-hygiene.md` — spec + plan committed at the start of the branch.
+
+---
+
+## Recently completed (previous session, 2026-05-14 — producer-cancelled-pending `task.finalize` audit row, branch `feat/crashed-finalize-row`)
 
 Branch: `feat/crashed-finalize-row` (continued from yesterday's crashed-task slice; both will land in one PR). Closes the last `task.finalize` undercounting gap: a CLI cancel of a `pending` task (one the scheduler never claimed) was emitting `cli/task.cancelled` but no producer-side finalize, so observation-phase SQL on `action='task.finalize'` was silently missing the producer-cancelled-pending population. With this slice + yesterday's crashed-task slice, the finalize stream now covers all five terminal-state paths (`completed`, `failed`, `crashed`, `cancelled` via runtime, and `cancelled` via producer-of-never-claimed).
 
@@ -1128,7 +1209,7 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 - ~~**e2e coverage for `task.finalize` with `started_at: null`**~~ **Effectively closed 2026-05-14** by the producer-cancelled-pending finalize slice (this session). The runtime-path scheduler `started_at: null` coverage is still moot by construction (scheduler never finalises a never-claimed task), but the producer-side `cli/task.finalize` row now ships exactly that shape — `started_at: null` is the load-bearing wire signal for "task was never claimed" — and `cancel_pending_task_writes_lifecycle_and_finalize_rows` asserts the JSON-null serialisation directly. The remaining theoretical scheduler-path gap could be closed by simulating a producer-cancel race against an in-flight claim, but the assertion population is empty by construction so the e2e test would have nothing to plant. Consider this item resolved.
 - ~~**`task.cancelled` row from CLI direct cancel of a `pending` task that was never claimed**~~ **Shipped this session 2026-05-13** as `actor='cli' action='task.cancelled'` via the new `core::cli_audit::cancel_and_audit` helper — see "Recently completed (this session)" entry at the top. Branch: `feat/cli-cancel-audit`.
 - ~~**`task.submitted` producer row from `hhagent-cli ask`**~~ **Shipped this session 2026-05-13** as `actor='cli' action='task.submitted'` via the new `core::cli_audit::submit_and_audit` helper. Branch: `feat/cli-task-submitted-audit` (`ACTION_TASK_SUBMITTED` const, not a builder, slotted next to `ACTION_TASK_RUNNING` / `ACTION_TASK_FINALIZE`). See the "Recently completed (this session)" entry at the top.
-- **Per-tool argv allowlist hygiene** — the deny-by-default `HHAGENT_SHELL_EXEC_ALLOWLIST` env is acceptable for now, but production deployment needs a versioned per-host config (or `db::secrets`-stored allowlist) so a host restart can't accidentally widen it. Filed as a follow-up issue when the first non-test deployment lands.
+- ~~**Per-tool argv allowlist hygiene**~~ **Shipped this session 2026-05-14** on branch `feat/tool-allowlist-db` — see "Recently completed (this session)" entry at the top. Migration `0009_tool_allowlists.sql` + new `db::tool_allowlists` module + `core::cli_audit::tools_allowlist_{add,remove}_and_audit` helpers + `hhagent-cli tools allowlist {add,remove,list}` subcommands + async DB-backed `build_tool_registry` + `actor='core' action='registry.loaded'` audit row with SHA-256 of canonical-form allowlist for cross-restart drift detection.
 - ~~**Issue #15 — hoist tests-common dev-dep:**~~ **Shipped this session** — see "Recently completed (this session)" entry at the top.
 
 **Existing Phase 1 cont. pickups (updated priority):**

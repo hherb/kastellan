@@ -25,8 +25,9 @@ use hhagent_supervisor::specs::core_service_spec;
 use hhagent_supervisor::{default_supervisor, ServiceStatus};
 use hhagent_tests_common::{
     bring_up_pg_cluster, cli_binary, core_binary, current_username, pg_bin_dir_or_skip,
-    shell_exec_worker_binary, skip_if_no_supervisor, skip_if_sandbox_unavailable, unique_suffix,
-    unique_temp_root, wait_for_log_match, wait_for_status, PathGuard, PgCluster, ServiceGuard,
+    seed_tool_allowlist, shell_exec_worker_binary, skip_if_no_supervisor,
+    skip_if_sandbox_unavailable, unique_suffix, unique_temp_root, wait_for_log_match,
+    wait_for_status, PathGuard, PgCluster, ServiceGuard,
 };
 #[cfg(target_os = "macos")]
 use hhagent_tests_common::serial_lock;
@@ -310,16 +311,14 @@ fn bring_up_daemon(
     // synchronously on accept, so on a healthy host this is sub-ms.
     spec.env.push(("HHAGENT_LLM_TIMEOUT_MS".into(), "5000".into()));
 
-    // Tool registry: register shell-exec with only ECHO_PATH
-    // allowlisted. Plan A's echo step succeeds; the failure path's
-    // `/bin/cat` step deliberately is NOT in the allowlist and will
-    // return POLICY_DENIED at the worker.
+    // Tool registry: register shell-exec. The argv allowlist is now
+    // loaded from the DB at daemon start — see build_tool_registry.
+    // Tests seed the allowlist via seed_tool_allowlist() before
+    // calling bring_up_daemon so the daemon sees the correct entries.
     spec.env.push((
         "HHAGENT_SHELL_EXEC_BIN".into(),
         shell_exec_worker_binary().to_string_lossy().into_owned(),
     ));
-    spec.env
-        .push(("HHAGENT_SHELL_EXEC_ALLOWLIST".into(), ECHO_PATH.into()));
 
     let sup = default_supervisor();
     let service_guard = ServiceGuard {
@@ -478,6 +477,28 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         )),
     ]));
 
+    // Apply migrations explicitly and seed the shell-exec allowlist
+    // before the daemon boots — build_tool_registry reads the
+    // allowlist from the DB now. The daemon's own probe will
+    // idempotently re-apply migrations.
+    rt.block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "test",
+            "setup",
+            serde_json::json!({"test": "cli_ask_e2e_setup"}),
+        )
+        .await
+        .expect("probe run");
+        let seed_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("seed pool");
+        seed_tool_allowlist(&seed_pool, "shell-exec", &[ECHO_PATH])
+            .await
+            .expect("seed shell-exec allowlist");
+        drop(seed_pool);
+    });
+
     let (daemon, _daemon_guards) =
         bring_up_daemon(&suffix, &cluster.data_dir, &mock.base_url, &user);
 
@@ -541,6 +562,8 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         let m = audit_multiset(&pool).await;
         assert_eq!(m.get(&("core".into(), "startup".into())), Some(&1),
                    "expected 1× core/startup; multiset = {m:?}");
+        assert_eq!(m.get(&("core".into(), "registry.loaded".into())), Some(&1),
+                   "expected 1× core/registry.loaded (build_tool_registry summary row); multiset = {m:?}");
         assert_eq!(m.get(&("cli".into(), "task.submitted".into())), Some(&1),
                    "expected 1× cli/task.submitted (producer-side row from hhagent-cli ask); multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&2),
@@ -564,7 +587,11 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
             .fetch_one(&pool)
             .await
             .expect("count audit_log");
-        let expected_total: i64 = 1 + 1 + 2 + 2 + 1 + 1 + 1 + 1 + 1; // = 11 (cli/task.submitted added)
+        // +1 for test/setup (pre-seed probe), +1 core/startup, +1 core/registry.loaded,
+        // +1 cli/task.submitted, +2 agent/plan.formulate, +2 cassandra:chain/verdict,
+        // +1 tool:shell-exec/shell.exec, +1 scheduler/plan.outcome,
+        // +1 scheduler/task.running, +1 scheduler/task.completed, +1 scheduler/task.finalize
+        let expected_total: i64 = 1 + 1 + 1 + 1 + 2 + 2 + 1 + 1 + 1 + 1 + 1; // = 13
         assert_eq!(
             total.0, expected_total,
             "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
@@ -661,6 +688,21 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         denied_plan,
     ]));
 
+    // Apply migrations before the daemon boots so build_tool_registry
+    // can connect. No allowlist seeding: every shell.exec call must
+    // surface POLICY_DENIED, which is the failure-path's assertion
+    // target.
+    rt.block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "test",
+            "setup",
+            serde_json::json!({"test": "cli_ask_e2e_setup"}),
+        )
+        .await
+        .expect("probe run");
+    });
+
     let (daemon, _daemon_guards) =
         bring_up_daemon(&suffix, &cluster.data_dir, &mock.base_url, &user);
 
@@ -749,6 +791,8 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         let m = audit_multiset(&pool).await;
         assert_eq!(m.get(&("core".into(), "startup".into())), Some(&1),
                    "expected 1× core/startup; multiset = {m:?}");
+        assert_eq!(m.get(&("core".into(), "registry.loaded".into())), Some(&1),
+                   "expected 1× core/registry.loaded (build_tool_registry summary row); multiset = {m:?}");
         assert_eq!(m.get(&("cli".into(), "task.submitted".into())), Some(&1),
                    "expected 1× cli/task.submitted (producer-side row from hhagent-cli ask); multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&3),
@@ -770,7 +814,11 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
             .fetch_one(&pool)
             .await
             .expect("count audit_log");
-        let expected_total: i64 = 1 + 1 + 3 + 3 + 3 + 3 + 1 + 1 + 1; // = 17 (cli/task.submitted added)
+        // +1 test/setup (pre-seed probe), +1 core/startup, +1 core/registry.loaded,
+        // +1 cli/task.submitted, +3 agent/plan.formulate, +3 cassandra:chain/verdict,
+        // +3 tool:shell-exec/shell.exec, +3 scheduler/plan.outcome,
+        // +1 scheduler/task.running, +1 scheduler/task.failed, +1 scheduler/task.finalize
+        let expected_total: i64 = 1 + 1 + 1 + 1 + 3 + 3 + 3 + 3 + 1 + 1 + 1; // = 19
         assert_eq!(
             total.0, expected_total,
             "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
