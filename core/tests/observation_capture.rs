@@ -451,6 +451,23 @@ async fn capture_all_fixtures_against_live_llm() {
     let spec = ConnectSpec::default_for(&cluster.data_dir).expect("spec");
     let pool = connect_runtime_pool(&spec).await.expect("pool");
 
+    // Fast-fail if the shell-exec allowlist is empty: the captures would
+    // otherwise consist solely of POLICY_DENIED rows. See the bring_up_daemon
+    // comment for the `hhagent-cli tools allowlist add` commands operators
+    // must run first.
+    let shell_exec_allowlist_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tool_allowlists WHERE tool = 'shell-exec'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count shell-exec allowlist rows");
+    assert!(
+        shell_exec_allowlist_count > 0,
+        "tool_allowlists has zero shell-exec rows for this PG cluster — \
+         seed argv0 paths via `hhagent-cli tools allowlist add shell-exec /bin/echo` \
+         (etc.) before running this orchestrator; see bring_up_daemon comment."
+    );
+
     // RFC 3339 timestamp once at the top so all per-fixture captures
     // share a single date prefix in their filenames.
     let captured_at = time::OffsetDateTime::now_utc()

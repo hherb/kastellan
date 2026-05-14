@@ -157,6 +157,18 @@ Two code-review-driven fixes landed inline (post-implementer): (a) migration `00
 
 **Test count delta:** 387 → **395** (+6 validator unit tests + 1 DB integration + 1 CLI e2e). `cli_ask_e2e` gained `core/registry.loaded` + `test/setup` multiset assertions but no new `#[test]` functions.
 
+**Post-review cleanup (this session, on top of the slice above):**
+
+Five issues surfaced by `/review` on PR #51; three fixed inline, two filed:
+
+1. **Migration `0009` CHECK gap (issue A, 75 confidence).** Module doc claimed the SQL CHECK was the "last-line-of-defence" for `validate_argv0`, but the CHECK only enforced `argv0 LIKE '/%'` — `..` segments slipped through. Tightened to `argv0 !~ '(^|/)\.\.(/|$)'`; module doc reworded to accurately describe what each layer enforces (NUL bytes are rejected at the Postgres TEXT protocol layer, full `tool` name charset stays in the Rust validator). Test `tool_allowlists_round_trip_and_grant_shape` extended with a regression block: 4 `..`-segment shapes rejected by the new CHECK, plus a positive case (`foo..bar` *within* a segment must pass — must not over-reject).
+2. **`observation_capture.rs` silent POLICY_DENIED (issue B, 75 confidence).** The `#[ignore]`-flagged orchestrator had become operator-seeded after this branch removed env-var allowlist auto-seeding; if the operator forgot to run the `hhagent-cli tools allowlist add` lines from the comment block, all captures would be POLICY_DENIED. Added a fast-fail assertion right after the runtime-pool connect: `SELECT COUNT(*) FROM tool_allowlists WHERE tool = 'shell-exec'` must be > 0 with a message pointing at the seeding instructions. Cheap, runs before any LLM cost is incurred.
+3. **`tests-common::policy_for_shell_exec` doc scope ambiguity (issue D, 25 confidence).** Added a "Scope" paragraph clarifying that this helper is for direct worker-spawn tests; daemon-backed tests seed `tool_allowlists` via `seed_tool_allowlist`.
+4. **`tools allowlist list --tool` does a client-side filter (issue C, 25 confidence).** Filed as [issue #52](https://github.com/hherb/hhagent/issues/52). At current scale (O(10s) of rows) the bypass of the `(tool, argv0)` PK is harmless; the clean fix needs a new `list_for_tool_full -> Vec<AllowlistEntry>` to preserve the `CREATED_AT`/`CREATED_BY` columns the CLI renders.
+5. **`tests-common/src/allowlist.rs` has no self-tests (issue E, 25 confidence).** Commented on [issue #39](https://github.com/hherb/hhagent/issues/39) folding the new `seed_tool_allowlist` helper into its existing "tests-common self-tests" scope. (DB-I/O helper, not one of the pure-function helpers the issue body originally enumerated.)
+
+Workspace test count unchanged at **395** — the cleanup augments existing assertions inside `tool_allowlists_round_trip_and_grant_shape` rather than adding new `#[test]` functions.
+
 **Files touched (4 NEW + 6 modified):**
 - NEW `db/migrations/0009_tool_allowlists.sql`.
 - NEW `db/src/tool_allowlists.rs` (~270 LOC incl. tests).

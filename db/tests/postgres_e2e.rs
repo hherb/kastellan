@@ -1408,6 +1408,36 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
         "unexpected error: {bad_msg}"
     );
 
+    // (7b) CHECK constraint: `..` *segment* in argv0 rejected by Postgres
+    // even when the Rust validator is bypassed. Closes the path-confusion
+    // bypass at the SQL layer (defense-in-depth for direct DB writers).
+    for dotdot in [
+        "/usr/bin/../bin/echo",
+        "/..",
+        "/../bin/echo",
+        "/usr/bin/echo/..",
+    ] {
+        let res = sqlx::query("INSERT INTO tool_allowlists (tool, argv0, created_by) VALUES ('shell-exec', $1, 'test')")
+            .bind(dotdot)
+            .execute(&pool)
+            .await;
+        let err = res.expect_err(
+            "argv0 with `..` segment must be CHECK-rejected by Postgres",
+        );
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("check") || msg.contains("violates"),
+            "argv0 {dotdot:?} rejected for unexpected reason: {msg}"
+        );
+    }
+    // Conversely, `..` *within* a segment must be accepted (the validator
+    // explicitly permits filenames like `/usr/bin/foo..bar`, so the SQL
+    // CHECK must not over-reject and break legitimate paths).
+    sqlx::query("INSERT INTO tool_allowlists (tool, argv0, created_by) VALUES ('shell-exec-test-dotdot', '/usr/bin/foo..bar', 'test')")
+        .execute(&pool)
+        .await
+        .expect("`..` within a segment must pass the CHECK");
+
     // (8) Validator gate: add() rejects a malformed argv0 before the DB
     // sees it. Confirms the public API uses the validator, not just the
     // SQL CHECK constraint.

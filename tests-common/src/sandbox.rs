@@ -63,6 +63,15 @@ pub fn backend() -> Box<dyn SandboxBackend> {
 ///   from inside the worker before serve_stdio.
 /// * `env` carries `HHAGENT_SHELL_ALLOWLIST` as a JSON array of
 ///   strings (the worker's allowlist contract).
+///
+/// Scope: this helper is for *direct* worker-spawn tests (e.g.
+/// `shell_exec_e2e`, `audit_dispatch_e2e`) that bypass the daemon and
+/// drive the worker themselves. Daemon-backed tests (e.g.
+/// `cli_ask_e2e`, `observation_capture`) do not use this helper —
+/// they seed the `tool_allowlists` table via
+/// [`crate::allowlist::seed_tool_allowlist`] and let the daemon's
+/// `build_tool_registry` pack `HHAGENT_SHELL_ALLOWLIST` from the DB
+/// at spawn time.
 pub fn policy_for_shell_exec(worker: &Path, allowlist: &[&str]) -> SandboxPolicy {
     let allow_json = serde_json::to_string(allowlist).expect("serialize allowlist");
     SandboxPolicy {

@@ -7,8 +7,13 @@
 //!
 //! Validators here are the user-facing gate — they produce typed errors
 //! that surface as readable CLI messages. The SQL-layer CHECK constraints
-//! on the table are the last-line-of-defence pin (a future caller that
-//! bypassed these validators would still get rejected by Postgres).
+//! on the table (migration `0009_tool_allowlists.sql`) provide
+//! defense-in-depth for callers that bypass these validators: the table
+//! rejects empty `argv0`, non-absolute paths, and `..` *segments*. NUL
+//! bytes are rejected at the Postgres protocol layer (TEXT columns
+//! refuse the 0x00 byte). The SQL layer does NOT cover the full charset
+//! validation on `tool` names — keep `validate_tool_name` as the single
+//! authoritative source there.
 
 use sqlx::PgPool;
 use time::OffsetDateTime;

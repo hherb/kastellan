@@ -23,6 +23,15 @@
 -- `0002` — without these REVOKEs the default-privilege machinery would
 -- still grant them.
 
+-- CHECK constraint scope (defense-in-depth for callers that bypass the
+-- Rust validators in `db::tool_allowlists`):
+--   * `argv0 LIKE '/%'`     — leading slash (absolute path)
+--   * `argv0 !~ '(^|/)\.\.(/|$)'` — no `..` *segment* (between `/`s or
+--     at either end). Rejects path-confusion bypasses like
+--     `/usr/bin/../bin/echo` while still allowing `..` *within* a
+--     filename segment (e.g. `/usr/bin/foo..bar`).
+--   * NUL bytes inside `argv0` are not handled here because Postgres
+--     TEXT columns reject the 0x00 byte at the protocol layer.
 CREATE TABLE tool_allowlists (
     tool       TEXT NOT NULL,
     argv0      TEXT NOT NULL,
@@ -30,7 +39,11 @@ CREATE TABLE tool_allowlists (
     created_by TEXT NOT NULL,
     PRIMARY KEY (tool, argv0),
     CHECK (octet_length(tool) > 0),
-    CHECK (octet_length(argv0) > 0 AND argv0 LIKE '/%')
+    CHECK (
+        octet_length(argv0) > 0
+        AND argv0 LIKE '/%'
+        AND argv0 !~ '(^|/)\.\.(/|$)'
+    )
 );
 
 GRANT SELECT, INSERT, DELETE ON tool_allowlists TO hhagent_runtime;
