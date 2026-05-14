@@ -254,6 +254,18 @@ pub async fn run_to_terminal(
                     );
                     ctx.blocks.push(format!("escalate(no-channel): {reason}"));
                     continue;
+                } else {
+                    // Escalate on a refusal plan: refusal stands and no
+                    // degradation happens (the loop terminates). Surface
+                    // a journal line so operators grepping for Escalate
+                    // events don't silently miss this case.
+                    tracing::info!(
+                        task_id = ctx.task_id,
+                        plan_count = ctx.plan_count,
+                        severity = ?sev,
+                        reason = %reason,
+                        "Verdict::Escalate on refusal plan — refusal stands, no degradation"
+                    );
                 }
             }
             Verdict::Advisory(c) => {
