@@ -59,18 +59,20 @@ pub enum RlimitError {
 /// even a 1 ms budget produces a meaningful kill (after at least one
 /// second of CPU time, which is the kernel's resolution).
 ///
-/// Saturates on overflow rather than panicking: a caller passing
-/// `u64::MAX` gets back `u64::MAX`, not a runtime panic.
+/// Saturates on overflow rather than panicking: the `+ 999` step uses
+/// `saturating_add`, so a caller passing `u64::MAX` divides the
+/// saturated intermediate by 1000 and gets back `u64::MAX / 1000` (≈
+/// 1.84 × 10¹⁶ seconds — effectively unlimited), not a runtime panic.
 ///
 /// ```text
-/// 0       → 0
-/// 1       → 1
-/// 999     → 1
-/// 1000    → 1
-/// 1001    → 2
-/// 1999    → 2
-/// 2000    → 2
-/// u64::MAX → u64::MAX  (saturating)
+/// 0        → 0
+/// 1        → 1
+/// 999      → 1
+/// 1000     → 1
+/// 1001     → 2
+/// 1999     → 2
+/// 2000     → 2
+/// u64::MAX → u64::MAX / 1000  (saturating intermediate, then div)
 /// ```
 pub fn cpu_ms_to_seconds(ms: u64) -> u64 {
     if ms == 0 {
