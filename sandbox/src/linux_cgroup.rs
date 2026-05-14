@@ -17,11 +17,12 @@
 //!     hitting the cap). On hosts without swap, `MemorySwapMax=0` is a
 //!     no-op — emitting it unconditionally is harmless and keeps the
 //!     contract honest.
-//!   - `CPUQuota = 200%` — at most two CPUs of bandwidth. Hardcoded
-//!     defense-in-depth default; not yet driven from `SandboxPolicy`.
-//!     Resists CPU starvation of the host when policy doesn't tighten
-//!     it further.
-//!   - `TasksMax = 64` — fork-bomb resistance. Hardcoded default.
+//!   - `CPUQuota` — policy-driven via `policy.cpu_quota_pct`; the named
+//!     const `DEFAULT_CPU_QUOTA_PCT` (200, i.e. two CPUs) is the
+//!     defense-in-depth fallback when the policy doesn't tighten it
+//!     further. Resists CPU starvation of the host.
+//!   - `TasksMax` — policy-driven via `policy.tasks_max`; the named
+//!     const `DEFAULT_TASKS_MAX` (64) is the defense-in-depth fallback.
 //!     Workers that legitimately use a few helper threads (Rust runtime,
 //!     Python interpreter) stay well under this; a runaway loop
 //!     spawning processes hits `EAGAIN` quickly.
@@ -32,10 +33,6 @@
 //!     bandwidth, not budget). Eventual enforcement will be via
 //!     `setrlimit(RLIMIT_CPU)` from the worker prelude before
 //!     `exec(2)`. Tracked as a follow-up GitHub issue.
-//!   - Tunable `cpu_quota_pct` / `tasks_max` policy fields. The two
-//!     defaults above are hardcoded for now to avoid a `SandboxPolicy`
-//!     schema change in the same session that introduces the cgroup
-//!     wiring. Tracked as a follow-up GitHub issue.
 //!
 //! Why `--scope` and not `--service`:
 //!   - `--scope` runs the wrapped command in the **foreground** of the
@@ -50,16 +47,16 @@ use crate::{SandboxError, SandboxPolicy};
 
 /// Defense-in-depth CPU bandwidth ceiling: at most 2 CPUs.
 ///
-/// Resists CPU starvation of the host even when `policy.cpu_ms` is
-/// unset or large. Will become tunable once `SandboxPolicy` grows a
-/// `cpu_quota_pct` field.
+/// Used as the fallback when `policy.cpu_quota_pct` is `None`.
+/// Resists CPU starvation of the host even when no stricter per-policy
+/// override is set.
 const DEFAULT_CPU_QUOTA_PCT: u32 = 200;
 
 /// Defense-in-depth task ceiling: 64 tasks per worker.
 ///
+/// Used as the fallback when `policy.tasks_max` is `None`.
 /// Defends against fork-bombs without breaking workers that use a
-/// small number of helper threads. Will become tunable once
-/// `SandboxPolicy` grows a `tasks_max` field.
+/// small number of helper threads (Rust runtime, Python interpreter).
 const DEFAULT_TASKS_MAX: u64 = 64;
 
 /// Build the `systemd-run` prefix argv for wrapping a sandboxed worker.
@@ -117,13 +114,20 @@ pub fn build_systemd_run_argv(policy: &SandboxPolicy) -> Vec<String> {
         argv.push("MemorySwapMax=0".into());
     }
 
-    // CPU bandwidth cap (defense-in-depth default; not policy-driven yet).
+    // CPU bandwidth cap. Policy-driven via `cpu_quota_pct`; the named
+    // const is the defense-in-depth fallback when the policy doesn't
+    // tighten it further.
+    let cpu_quota_pct = policy.cpu_quota_pct.unwrap_or(DEFAULT_CPU_QUOTA_PCT);
     argv.push("-p".into());
-    argv.push(format!("CPUQuota={}%", DEFAULT_CPU_QUOTA_PCT));
+    argv.push(format!("CPUQuota={cpu_quota_pct}%"));
 
-    // Task count cap (defense-in-depth default; not policy-driven yet).
+    // Task count cap. Policy-driven via `tasks_max`; the named const is
+    // the defense-in-depth fallback. A worker that legitimately uses a
+    // few helper threads (Rust runtime, Python interpreter) stays well
+    // under 64; tighten via policy.tasks_max for stricter cases.
+    let tasks_max = policy.tasks_max.unwrap_or(DEFAULT_TASKS_MAX);
     argv.push("-p".into());
-    argv.push(format!("TasksMax={}", DEFAULT_TASKS_MAX));
+    argv.push(format!("TasksMax={tasks_max}"));
 
     // The `--` separator tells systemd-run that everything after is the
     // command to execute, not more `systemd-run` flags.
@@ -259,6 +263,53 @@ mod tests {
         assert!(
             joined.contains("-p TasksMax=64"),
             "expected default TasksMax=64 in: {joined}"
+        );
+    }
+
+    /// Helper: a policy that sets cpu_quota_pct.
+    fn policy_with_cpu_quota(pct: u32) -> SandboxPolicy {
+        SandboxPolicy {
+            mem_mb: 64,
+            cpu_quota_pct: Some(pct),
+            ..SandboxPolicy::default()
+        }
+    }
+
+    /// Helper: a policy that sets tasks_max.
+    fn policy_with_tasks_max(n: u64) -> SandboxPolicy {
+        SandboxPolicy {
+            mem_mb: 64,
+            tasks_max: Some(n),
+            ..SandboxPolicy::default()
+        }
+    }
+
+    #[test]
+    fn argv_uses_policy_cpu_quota_when_set() {
+        let argv = build_systemd_run_argv(&policy_with_cpu_quota(50));
+        let joined = argv.join(" ");
+        assert!(
+            joined.contains("-p CPUQuota=50%"),
+            "expected CPUQuota=50% from policy override in: {joined}"
+        );
+        // Make sure the default 200% isn't *also* present.
+        assert!(
+            !joined.contains("CPUQuota=200%"),
+            "default 200% should not leak through when policy overrides it: {joined}"
+        );
+    }
+
+    #[test]
+    fn argv_uses_policy_tasks_max_when_set() {
+        let argv = build_systemd_run_argv(&policy_with_tasks_max(8));
+        let joined = argv.join(" ");
+        assert!(
+            joined.contains("-p TasksMax=8"),
+            "expected TasksMax=8 from policy override in: {joined}"
+        );
+        assert!(
+            !joined.contains("TasksMax=64"),
+            "default TasksMax=64 should not leak when policy overrides it: {joined}"
         );
     }
 
