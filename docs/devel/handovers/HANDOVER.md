@@ -4,11 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-14 (issue #23 design spec committed on `feat/refusal-state` — distinguishing agent self-refusal from successful completion in `tasks.state`).
+**Last updated:** 2026-05-14 (issue #23 shipped on `feat/refusal-state` — constitutional refusals now distinct from successful completion in `tasks.state`; 9 commits, ready for PR).
 **Last commit (main):** `5f543d2` (docs: embed request-flow diagram PNG in README). The session-open delta on `main` since the previous Option G HANDOVER entry was: PR #56 (`feat/sandbox-cpu-rlimit-quota`) merged at `5c30275`, README CASSANDRA blurb `c2f4b28`, and a small docs/security-architecture diagram series (PR #58 → `5f543d2`).
-**This session's working branch:** `feat/refusal-state` (off `main` at `5f543d2`). Ships a **design spec only** (`docs/superpowers/specs/2026-05-14-constitutional-refusal-state-design.md`) closing the design half of [issue #23](https://github.com/hherb/hhagent/issues/23) — _constitutional refusals recorded as `state='completed'` instead of being distinguishable_. The matching implementation plan is the next artefact for this session (via `writing-plans` skill); the code change is a focused single-PR slice across `core::cassandra::types`, `core::scheduler::inner_loop`, `prompts/agent_planner.md`, `db/migrations/0012_tasks_state_refused.sql`, and the matching tests.
-
-**Design summary (full detail in the spec):** new optional `Plan.refused: { principle: u8, reason: String }` field; new `Outcome::Refused { principle, reason, body }` variant; new terminal `tasks.state='refused'` value distinct from existing `'blocked'` (reviewer-detected); inner-loop short-circuit on `plan.refused.is_some()` after reviewer always runs (defense in depth, `Verdict::ConstitutionalBlock` still wins over agent refusal — provenance preserved); `agent/plan.formulate` audit-row payload gains `refused: {…}` + `decision_kind = "refused"`; planner prompt adds one sentence + a `"refused": null` default in the JSON example. Migration `0012` widens both the `tasks_state_check` CHECK constraint and the `finished_at`-setting trigger to include `'refused'`.
+**This session's working branch:** `feat/refusal-state` (off `main` at `5f543d2`, 9 commits ahead, not yet merged). Closes [issue #23](https://github.com/hherb/hhagent/issues/23). Workspace test count 446 → **454** (+8 across all tasks); zero failures, zero warnings, zero `[SKIP]` lines on Linux.
 
 **Previous session's branch (now merged):** `feat/sandbox-cpu-rlimit-quota` (off `main` at `6f259c8`, which is `25c312c` + the small `docs(handover)` correctness fix), merged via PR #56 at `5c30275`. Shipped **Option G / issue #6 main body** — `cpu_quota_pct` + `tasks_max` policy fields driving the Linux cgroup ceilings, plus cross-platform `setrlimit(RLIMIT_CPU)` enforcement for `policy.cpu_ms` from the worker prelude. 15 commits including spec + plan + per-task TDD commits + review-nit fixups. **Cross-platform CPU-budget parity is now closed** — macOS still lacks memory enforcement (waiting on the Apple `container` micro-VM backend, [issue #55](https://github.com/hherb/hhagent/issues/55) discovery spike).
 
@@ -94,7 +92,7 @@ hhagent (Rust workspace, 9 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 446 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on `feat/sandbox-cpu-rlimit-quota` (this session's branch). Earlier checkpoints: 429 on `chore/issues-batch-2026-05-14` (post-PR #54); 349 on `feat/memory-graph-lane` at `911215d`; 395 on `feat/tool-allowlist-db` at merge of PR #51; 342 on `main` at `97f2743` (pre-graph-lane). The +17 jump this session is the cgroup-tunable-override pins (2 in sandbox), the cpu_ms_to_seconds boundary pins (6) + apply_from_env env/FFI pins (4) in `workers/prelude::rlimit::tests`, the derive_lockdown_env CPU-ms env-derivation pins (2), the `sandbox_policy_default_leaves_cpu_quota_and_tasks_max_unset` pin (1), and the new `rlimit_smoke.rs` cross-platform integration tests (2). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit markers).
+**`cargo test --workspace` on Linux: 454 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on `feat/refusal-state` (this session's branch). Earlier checkpoints: 446 on `feat/sandbox-cpu-rlimit-quota` (Option G); 429 on `chore/issues-batch-2026-05-14` (post-PR #54); 349 on `feat/memory-graph-lane`; 342 on `main` at `97f2743` (pre-graph-lane). The +8 jump this session is the issue #23 (constitutional refusal state) work: 3 new `Plan` shape pins in `cassandra::types::tests`, 1 new `Outcome::Refused` payload pin in `scheduler::inner_loop::tests`, 1 new `tasks_state_refused_passes_check_constraint` DB integration test, 2 new scenarios in `scheduler_inner_loop_e2e` (`refusal_plan_terminates_with_state_refused` + `reviewer_constitutional_block_wins_over_agent_refusal`), and 1 extension of the existing `outcome_final_state_mapping` test. Three pre-existing doctests in `hhagent-core`, `hhagent-sandbox`, and `hhagent-worker-prelude` are `ignored` (explicit markers).
 **macOS (main):** 299 all pass on macOS (skip-as-pass for PG-dependent tests); Option O additions not yet verified on macOS (embedding TCP mock tests are cross-platform clean; the `embedding_recall_e2e` skip-as-pass path is expected).
 
 **Known flake fixed this session:** `tasks_lifecycle_e2e` (in `db/tests/postgres_e2e.rs`) had a structural deadlock — `pool.close().await` blocks until all `max_connections` permits are released, but two `PgListener`s were still in scope when close() was called. The multi-thread tokio runtime exposed it reliably (90 s+ hang) while the single-thread runtime variant in `audit_helpers_pool_and_notify_round_trip` (same pattern, one listener) had been passing on timing. Fix: explicitly `drop(listener)` before `pool.close().await`. Applied preemptively to `audit_helpers_pool_and_notify_round_trip` too so the latent flake there is closed out as well.
@@ -140,6 +138,85 @@ cargo test --workspace           # all green
 ```
 
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile that lets `bwrap` create unprivileged user namespaces is already installed on the user's DGX Spark. Other Linux hosts may need `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses `sandbox-exec` (no setup needed).
+
+---
+
+## Recently completed (this session, 2026-05-14 — constitutional refusal state, branch `feat/refusal-state`)
+
+Branch: `feat/refusal-state` (off `main` at `5f543d2`, **9 commits, not yet merged — ready for PR**). Closes [issue #23](https://github.com/hherb/hhagent/issues/23) — _constitutional refusals are recorded as `state='completed'`, not `'blocked'`_. The agent's self-refusal path collapsed into `tasks.state='completed'` (same shape as a successful task); the reviewer-detected `Verdict::ConstitutionalBlock` path mapped to `'blocked'`. After this slice, the two are wire-distinguishable and the operator-visible `tasks` table can be queried directly without prose-matching `result.body`.
+
+**Why this slice now.** Session opened with `main` clean at `5f543d2` (Option G merged + README/diagram updates landed). The "Next TODO (pick one)" listed issue #23 as one of the three engineering pickups not blocked on operator action (the other two being the macOS micro-VM spike, issue #55, and the rule-iteration harness which needs the observation-phase dataset first). #23 was an explicit "design discussion before CASSANDRA real impls" — a small, focused, single-PR slice that lays the rails for future operator UIs + rule-iteration work without committing to any specific real rules yet.
+
+**Shape (full detail in the spec + plan):**
+
+1. **New `RefusedReason { principle: u8, reason: String }` struct + new optional `Plan.refused` field** in `core/src/cassandra/types.rs`, with `#[serde(default, skip_serializing_if = "Option::is_none")]` so absent values cost nothing on the wire. New `Plan::is_refused()` helper, independent of `is_terminal` (the four-corner `(is_refused × is_terminal)` matrix is unit-tested). 8 existing `Plan { ... }` struct-literal sites updated with `refused: None,` (no `Default` impl on `Plan` — deliberate, every field is meaningful).
+2. **New `Outcome::Refused { principle: u8, reason: String, body: String }` variant** in `core/src/scheduler/inner_loop.rs`, parallel to `Outcome::Blocked` (which encodes reviewer-detected `ConstitutionalBlock`). `final_state()` returns `"refused"`; `result_payload()` returns 4-key `{kind, principle, reason, body}` matching the spec's wire contract.
+3. **DB migration `0012_tasks_state_refused.sql`** widens both the `tasks_state_check` CHECK constraint (adds `'refused'`) and the `notify_task_completed` trigger function (`CREATE OR REPLACE FUNCTION` swaps in a body with `'refused'` appended to both IN clauses — for `NEW.state` and `OLD.state`). Brief `ACCESS EXCLUSIVE` lock; acceptable because `tasks` is small and no production rows exist. Pinned by `tasks_state_refused_passes_check_constraint` integration test in `db/tests/postgres_e2e.rs`: positive (UPDATE → `'refused'` succeeds + read-back) + negative (UPDATE → `'garbage'` rejected).
+4. **Inner-loop short-circuit** in `run_to_terminal`. Reviewer always runs first (defense in depth). `Verdict::ConstitutionalBlock` still wins → `Outcome::Blocked` (existing, unchanged). New step 4: if `plan.refused.is_some()` AND reviewer didn't CB, return `Outcome::Refused` — even when the reviewer returned `Block`/`Escalate` (refusal is terminal; non-CB verdicts get audit-logged but don't loop the agent back via `continue`). `body` extracted from `plan.result.body` (or empty string if absent). Two new e2e scenarios: `refusal_plan_terminates_with_state_refused` (refusal + reviewer-Approve → `Outcome::Refused`) and `reviewer_constitutional_block_wins_over_agent_refusal` (refusal with principle 1 + scripted CB with principle 3 → `Outcome::Blocked` with reviewer's principle 3 winning).
+5. **Audit-row payload extension.** `agent/plan.formulate` payload gains `refused: { principle, reason } | null` (always present — explicit JSON null, not key-absent — so JSONB queries can rely on the key). `decision_kind` gains a third value: `"refused"` whenever `plan.refused.is_some()`, regardless of plan-terminal shape. Precedence: `"refused"` > `"task_complete"` > `"act"`. New `DECISION_REFUSED: &str = "refused"` constant in `core::cassandra::types` parallel to existing `DECISION_TERMINAL` so future renames stay grep-able. Happy-path scenario extended with a `refused: null` assertion to pin the key-always-present contract on non-refusal rows.
+6. **Planner-prompt update** in `prompts/agent_planner.md`. JSON-schema example gets `"refused": null,` plus a prose paragraph noting it is populated only on constitutional refusal. The constitutional-refusal paragraph gets one new sentence instructing the planner to emit `refused: { principle: <1..5>, reason: "<short structured tag, lowercase snake_case>" }` alongside the existing `decision: "task_complete"` + `steps: []` + `result.body` shape. The `agent_prompts` SHA-256 ledger (migrations 0006 + 0011) records the new hash on next daemon start automatically.
+
+**Audit-row contract (the headline):**
+
+| When                                       | actor      | action            | payload keys                                                                                          |
+| ------------------------------------------ | ---------- | ----------------- | ----------------------------------------------------------------------------------------------------- |
+| Agent emits a refusal plan                 | `agent`    | `plan.formulate`  | existing keys + `refused: {principle, reason}` + `decision_kind="refused"`                            |
+| Agent emits a non-refusal plan             | `agent`    | `plan.formulate`  | existing keys + `refused: null` + `decision_kind` ∈ {`"task_complete"`, `"act"`}                      |
+| Scheduler observes refusal terminal state  | `scheduler`| `task.refused`    | `{task_id, lane, plan_count}` — auto-derived from `Outcome::final_state()` via the existing helper    |
+| Scheduler emits per-task finalize row      | `scheduler`| `task.finalize`   | existing 10-key shape with `state="refused"`                                                          |
+
+**Precedence rule (spec §2):**
+
+| Reviewer verdict          | `plan.refused.is_some()` | Outcome                                          |
+| ------------------------- | ------------------------ | ------------------------------------------------ |
+| `ConstitutionalBlock`     | any                      | `Outcome::Blocked` (reviewer's principle wins)   |
+| `Block` / `Escalate`      | true                     | `Outcome::Refused` (refusal is terminal)         |
+| `Block` / `Escalate`      | false                    | `continue` (existing retry — UNCHANGED)          |
+| `Advisory` / `Approve`    | true                     | `Outcome::Refused`                               |
+| `Advisory` / `Approve`    | false, plan terminal     | `Outcome::Completed` (UNCHANGED)                 |
+| `Advisory` / `Approve`    | false, plan with steps   | execute (UNCHANGED)                              |
+
+Malformed refusal (`refused.is_some()` AND non-empty `steps`) honours the refusal and drops the steps; `decision_kind="refused"` still fires regardless of malformed-shape. The audit row records the malformed shape so the planner-prompt regression is diagnosable.
+
+**TDD ordering (per CLAUDE.md rule #2):**
+
+Each task is a single RED → GREEN → commit cycle. Two-stage review (spec compliance + code quality) per task; review-driven fixups land as small follow-up commits where needed. Order: types/helpers → Outcome variant → migration → loop short-circuit → audit payload → prompt → HANDOVER/ROADMAP. Workspace stays green between every task.
+
+**Branch history (9 commits, oldest first):**
+
+- `162ac4a` — `docs(spec): issue #23 — distinguish constitutional refusals in tasks.state`
+- `44e33e8` — `docs(plan): issue #23 — constitutional refusal state implementation plan` (also corrected a small spec inaccuracy about the `notify_task_completed` trigger vs an imagined `finished_at`-setter trigger)
+- `acafdb0` — Task 1: `RefusedReason` struct + `Plan.refused` field + `is_refused()` (5 files, 123 insertions)
+- `2e2056d` — Task 2: `Outcome::Refused` variant + arms (1 file, 39 insertions)
+- `001b684` — Task 3: migration `0012` (CHECK + trigger) + integration test (2 files, 79 insertions)
+- `9702546` — Task 4: refusal short-circuit + 2 e2e scenarios + `ScriptedConstitutionalBlockStage` stub (2 files, 188 insertions)
+- `f6ea081` — Task 5: audit-row `refused` + `decision_kind="refused"` (2 files, 41 insertions)
+- `8148431` — Task 5 fixup: `DECISION_REFUSED` constant + happy-path `refused: null` test pin (3 files, 24 insertions)
+- `182c766` — Task 6: planner-prompt update (1 file, 4 insertions)
+- `f29dd94` — Task 6 fixup: prose noun-pile cleanup (1 file, 1 insertion)
+
+**Test count delta:** 446 → **454** (+8 new `#[test]` functions: 3 in `cassandra::types::tests` + 1 new in `scheduler::inner_loop::tests` for `outcome_refused_result_payload` + 1 new in `db/tests/postgres_e2e.rs` for the CHECK constraint + 2 new in `core/tests/scheduler_inner_loop_e2e.rs` for the refusal scenarios + 1 implicit from `outcome_final_state_mapping` being extended). Zero failures, zero warnings, zero `[SKIP]` lines on Linux.
+
+**What this slice deliberately does NOT do.**
+
+- **Real `ConstitutionalGuard` / `DeterministicPolicy` rule implementations.** Still waiting on the observation-phase dataset (operator action — run `cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture` against the local LLM). This slice ships the rails so real rules land cleanly afterwards.
+- **CLI-side "show refusals" surface.** `hhagent-cli tasks list --state refused` works for free with the new state value; no special-case viewer.
+- **Channel-bus refusal notifications.** No channel-bus exists.
+- **Retroactive migration of older rows.** No `state='completed'` row is currently a constitutional refusal (CASSANDRA stubs always Approve; no operator-side refusals captured yet).
+- **`Plan::refused` value validation (`principle ∈ 1..=5`).** Explicit non-goal — the value is operator-visible in the audit log; range-validation would land later if needed.
+- **Production caller assertion that the LLM actually emits `refused`.** The planner prompt is updated; whether the LLM follows the new instruction is verified by re-running the observation-phase captures against the new prompt (operator action).
+
+**Files touched (5 production + 3 test + 1 prompt + 2 docs):**
+- `core/src/cassandra/types.rs` — `RefusedReason` + `Plan.refused` + `is_refused()` + `DECISION_REFUSED` const + 3 new tests
+- `core/src/cassandra/review.rs` — 1 test helper (`dummy_plan`) updated for new field
+- `core/src/scheduler/inner_loop.rs` — `Outcome::Refused` variant + `final_state` + `result_payload` + short-circuit + audit-row payload widening + 1 unit test (`outcome_refused_result_payload_carries_principle_reason_and_body`)
+- `db/migrations/0012_tasks_state_refused.sql` — NEW
+- `db/tests/postgres_e2e.rs` — 1 new CHECK-constraint integration test
+- `core/tests/scheduler_inner_loop_e2e.rs` — `ScriptedConstitutionalBlockStage` + 2 new scenarios + happy-path `refused: null` assertion
+- `core/tests/scheduler_lanes_e2e.rs` — 2 helpers updated for new field
+- `prompts/agent_planner.md` — JSON-schema example + constitutional-refusal paragraph
+- `docs/superpowers/specs/2026-05-14-constitutional-refusal-state-design.md` + `docs/superpowers/plans/2026-05-14-constitutional-refusal-state.md` — spec + plan
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update
 
 ---
 
@@ -1322,6 +1399,7 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 - ~~**`task.cancelled` row from CLI direct cancel of a `pending` task that was never claimed**~~ **Shipped this session 2026-05-13** as `actor='cli' action='task.cancelled'` via the new `core::cli_audit::cancel_and_audit` helper — see "Recently completed (this session)" entry at the top. Branch: `feat/cli-cancel-audit`.
 - ~~**`task.submitted` producer row from `hhagent-cli ask`**~~ **Shipped this session 2026-05-13** as `actor='cli' action='task.submitted'` via the new `core::cli_audit::submit_and_audit` helper. Branch: `feat/cli-task-submitted-audit` (`ACTION_TASK_SUBMITTED` const, not a builder, slotted next to `ACTION_TASK_RUNNING` / `ACTION_TASK_FINALIZE`). See the "Recently completed (this session)" entry at the top.
 - ~~**Per-tool argv allowlist hygiene**~~ **Shipped this session 2026-05-14** on branch `feat/tool-allowlist-db` — see "Recently completed (this session)" entry at the top. Migration `0009_tool_allowlists.sql` + new `db::tool_allowlists` module + `core::cli_audit::tools_allowlist_{add,remove}_and_audit` helpers + `hhagent-cli tools allowlist {add,remove,list}` subcommands + async DB-backed `build_tool_registry` + `actor='core' action='registry.loaded'` audit row with SHA-256 of canonical-form allowlist for cross-restart drift detection.
+- ~~**Issue #23 — distinguish constitutional refusals in `tasks.state`**~~ **Shipped this session 2026-05-14** on branch `feat/refusal-state` (9 commits, ready for PR). New `Plan.refused` field + `Outcome::Refused` variant + `tasks.state='refused'` distinct from reviewer-detected `'blocked'` + inner-loop short-circuit (reviewer always runs; CB still wins) + `agent/plan.formulate` audit-row gains `refused: {…}` + `decision_kind="refused"` + migration `0012` widens CHECK and trigger + planner prompt updated. Test count 446 → 454 (+8). See "Recently completed (this session)" entry at the top.
 - ~~**Issue #15 — hoist tests-common dev-dep:**~~ **Shipped this session** — see "Recently completed (this session)" entry at the top.
 
 **Existing Phase 1 cont. pickups (updated priority):**
@@ -1384,7 +1462,7 @@ Branch `feat/sandbox-cpu-rlimit-quota` (15 commits, not yet merged). See the "Re
 - ~~[#20](https://github.com/hherb/hhagent/issues/20) — `agent_prompts` schema: PK on sha256 means renamed prompt files lose their original name (filed 2026-05-10 from PR #25 review)~~ **closed 2026-05-14 by this session** (`chore/issues-batch-2026-05-14`). New migration `0011_agent_prompts_composite_pk.sql` changes PK to `(sha256, name)`; `upsert_prompt` now `ON CONFLICT (sha256, name) DO NOTHING`. Non-destructive — pre-migration rows are already unique on the composite key.
 - [#21](https://github.com/hherb/hhagent/issues/21) — `core::scheduler::runner` per-iteration cancellation poll could be a `watch::Receiver` instead of a DB round-trip (filed 2026-05-10 from PR #25 review)
 - ~~[#22](https://github.com/hherb/hhagent/issues/22) — `RouterAgent::formulate_plan` has no mock-HTTP test coverage~~ **addressed by PR #26 (open)**
-- [#23](https://github.com/hherb/hhagent/issues/23) — scheduler: constitutional refusals are recorded as `state='completed'`, not `'blocked'` — design discussion before CASSANDRA real impls (filed 2026-05-10 from PR #25 review)
+- ~~[#23](https://github.com/hherb/hhagent/issues/23) — scheduler: constitutional refusals are recorded as `state='completed'`, not `'blocked'`~~ **closed 2026-05-14 by this session** (`feat/refusal-state`, 9 commits, ready for PR). New optional `Plan.refused` field + new `Outcome::Refused` variant + new terminal `tasks.state='refused'` distinct from `'blocked'` (reviewer-detected). Migration `0012` widens CHECK + trigger. Audit row gains `refused: {…}` + `decision_kind="refused"`. Inner-loop short-circuit after reviewer always runs (defense in depth — `Verdict::ConstitutionalBlock` still wins, provenance preserved). Planner prompt updated. Test count 446 → 454 (+8). See top-of-HANDOVER "Recently completed (this session)" for the full breakdown.
 - [#24](https://github.com/hherb/hhagent/issues/24) — deployment: `HHAGENT_PROMPTS_DIR` has a cwd-relative fallback; production unit files must set it explicitly (filed 2026-05-10 from PR #25 review)
 - ~~[#30](https://github.com/hherb/hhagent/issues/30) — split `core/src/memory.rs` into `recall.rs` + `embed.rs` submodules~~ **closed 2026-05-12 by this slice** (`core/src/memory/{mod.rs, recall.rs, embed.rs}`, all under the 500-LOC soft cap)
 - [#42](https://github.com/hherb/hhagent/issues/42) — `deleted_memories` AFTER DELETE trigger uses `SECURITY INVOKER`; a future role with DELETE on `memories` but no INSERT on `deleted_memories` will silently break DELETE. Deferred until a second DELETE-capable role is proposed; current single-role state is internally consistent and integration-test-pinned (filed 2026-05-13 from PR #41 review).
