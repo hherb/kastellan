@@ -4,19 +4,19 @@
   <desc>Vertical flowchart of a user instruction from channel ingress through plan formulation, CASSANDRA review pipeline (Stages -1..4), dispatcher chokepoint, sandboxed worker execution, egress proxy, and response — with block, advisory, and escalation branches.</desc>
 
   <defs>
-    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#234e7e"/>
     </marker>
-    <marker id="arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <marker id="arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#b22222"/>
     </marker>
-    <marker id="arrAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <marker id="arrAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#b8860b"/>
     </marker>
-    <marker id="arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#246b3a"/>
     </marker>
-    <marker id="arrGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <marker id="arrGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
     </marker>
     <linearGradient id="cassGrad" x1="0" y1="0" x2="0" y2="1">
@@ -138,7 +138,7 @@
   <text x="1260" y="1052" text-anchor="middle" font-size="11" fill="#555">runs in its own sandbox</text>
 
   <!-- anonymiser feeds back into Stage 3 -->
-  <path d="M 1260 1056 Q 1260 1130 1100 1180" fill="none" stroke="#b8860b" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arrAmber)"/>
+  <path d="M 1260 1056 Q 1000 1110 820 1177" fill="none" stroke="#b8860b" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arrAmber)"/>
 
   <line x1="700" y1="1098" x2="700" y2="1128" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
 
@@ -152,7 +152,7 @@
 
   <!-- Stage 3 verdict branches -->
   <!-- BLOCK -->
-  <line x1="920" y1="1190" x2="1100" y2="1140" stroke="#b22222" stroke-width="2" marker-end="url(#arrRed)"/>
+  <line x1="852" y1="1190" x2="1100" y2="1140" stroke="#b22222" stroke-width="2" marker-end="url(#arrRed)"/>
   <text x="1010" y="1156" text-anchor="middle" font-size="11" fill="#b22222" font-weight="bold">BLOCK / CONSTITUTIONAL</text>
   <rect x="1100" y="1110" width="320" height="44" rx="8" fill="#c9302c" stroke="#5a0000"/>
   <text x="1260" y="1138" text-anchor="middle" font-weight="bold" fill="#fff">Tier 3 / Tier 0  →  audit + notify user</text>
@@ -166,7 +166,7 @@
   <text x="1260" y="1246" text-anchor="middle" font-size="11" fill="#3a2300">timeout (15 min default) = DENY</text>
 
   <!-- ADVISORY (loops back to plan rebuild) -->
-  <line x1="920" y1="1246" x2="1100" y2="1290" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <line x1="852" y1="1246" x2="1100" y2="1290" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
   <text x="1010" y="1280" text-anchor="middle" font-size="11" fill="#7a5a00" font-weight="bold">ADVISORY</text>
   <rect x="1100" y="1280" width="320" height="60" rx="8" fill="#f5d76e" stroke="#a07a00"/>
   <text x="1260" y="1302" text-anchor="middle" font-weight="bold">Tier 1  →  inject concern into agent</text>
@@ -174,8 +174,8 @@
   <text x="1260" y="1334" text-anchor="middle" font-size="11" fill="#555">(repeat advisory  →  Tier 2)</text>
 
   <!-- Loop arrow back to plan formulation (advisory revise) -->
-  <path d="M 1100 1310 Q 1460 1310 1460 360 Q 1460 320 700 320" fill="none" stroke="#b8860b" stroke-width="1.5" stroke-dasharray="4,3"/>
-  <text x="1460" y="800" font-size="11" fill="#7a5a00" transform="rotate(90 1460 800)">revise → re-submit plan (full re-review)</text>
+  <path d="M 1420 1310 L 1470 1310 L 1470 320 L 860 320" fill="none" stroke="#b8860b" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arrAmber)"/>
+  <text x="1450" y="800" font-size="11" fill="#7a5a00" transform="rotate(-90 1450 800)">revise → re-submit plan (full re-review)</text>
 
   <!-- APPROVE down -->
   <line x1="700" y1="1308" x2="700" y2="1340" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
