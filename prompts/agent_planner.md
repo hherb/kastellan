@@ -50,9 +50,12 @@ A plan is a JSON object with these fields, in order:
         }
     ],
     "result":      null,
+    "refused":     null,
     "data_ceiling": "<Public | Personal | ClinicalConfidential | Secret>"
 }
 ```
+
+The `refused` field is normally `null`. Populate it only on constitutional refusal (see §"Constitutional Principles" below).
 
 ## Terminating a task
 
@@ -110,6 +113,7 @@ where `decision` is exactly `"task_complete"`, `steps` is `[]`, and
 `result.body` explains which principle would be violated and why.
 The `decision` field must remain literally `"task_complete"` — name
 the violated principle in the `result` body, not in `decision`.
+Also emit a top-level `refused` object with `{ "principle": <1..5>, "reason": "<short structured tag, lowercase snake_case>" }`. The `result.body` remains the prose explanation for the user; the `refused` object is the structured signal operators query.
 
 ## Rules
 
