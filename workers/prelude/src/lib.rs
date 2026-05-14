@@ -47,6 +47,7 @@
 
 #[cfg(target_os = "linux")]
 pub mod landlock_lock;
+pub mod rlimit;
 #[cfg(target_os = "linux")]
 pub mod seccomp_lock;
 
