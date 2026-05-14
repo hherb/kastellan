@@ -27,12 +27,15 @@
 //!     Python interpreter) stay well under this; a runaway loop
 //!     spawning processes hits `EAGAIN` quickly.
 //!
-//! What this module does **not** yet enforce:
-//!   - `policy.cpu_ms` is documented as a CPU-time budget. cgroup v2
-//!     has no direct primitive for that (its CPU primitive is
-//!     bandwidth, not budget). Eventual enforcement will be via
-//!     `setrlimit(RLIMIT_CPU)` from the worker prelude before
-//!     `exec(2)`. Tracked as a follow-up GitHub issue.
+//! What this module does NOT enforce (handled elsewhere):
+//!   - `policy.cpu_ms` is enforced via `setrlimit(RLIMIT_CPU)` from
+//!     [`hhagent_worker_prelude::rlimit::apply_from_env`] (cross-platform,
+//!     POSIX), called from `serve_stdio` before `lock_down`. The
+//!     `HHAGENT_CPU_MS` env var is set on the policy by
+//!     `core::tool_host::derive_lockdown_env` from `policy.cpu_ms`.
+//!     cgroup v2 has no direct CPU-seconds-budget primitive (its CPU
+//!     primitive is bandwidth, not budget), so the rlimit path is the
+//!     natural home for that enforcement.
 //!
 //! Why `--scope` and not `--service`:
 //!   - `--scope` runs the wrapped command in the **foreground** of the
