@@ -126,6 +126,7 @@ mod tests {
             steps: vec![],
             result: Some(serde_json::json!("ok")),
             data_ceiling: DataClass::Public,
+            refused: None,
         }
     }
 

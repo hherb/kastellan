@@ -387,6 +387,7 @@ mod tests {
                 steps: vec![],
                 result: None,
                 data_ceiling: DataClass::Public,
+                refused: None,
             },
             vec![StepOutcome::Ok(serde_json::json!("x")), StepOutcome::Err {
                 code: "POLICY_DENIED".into(), detail: "no".into(),

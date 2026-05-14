@@ -356,6 +356,7 @@ fn task_complete_plan(body: &str) -> Plan {
         steps: vec![],
         result: Some(serde_json::json!({"kind": "text", "body": body})),
         data_ceiling: DataClass::Public,
+        refused: None,
     }
 }
 
@@ -374,6 +375,7 @@ fn one_step_plan(tool: &str, method: &str) -> Plan {
         }],
         result: None,
         data_ceiling: DataClass::Public,
+        refused: None,
     }
 }
 
