@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+use hhagent_sandbox::{SandboxBackend, SandboxPolicy};
 
 /// Returns `true` if the per-OS sandbox backend's probe fails. Caller
 /// should `return` immediately to short-circuit the test.
@@ -76,11 +76,9 @@ pub fn policy_for_shell_exec(worker: &Path, allowlist: &[&str]) -> SandboxPolicy
     let allow_json = serde_json::to_string(allowlist).expect("serialize allowlist");
     SandboxPolicy {
         fs_read: vec![worker.to_path_buf()],
-        fs_write: vec![],
-        net: Net::Deny,
         cpu_ms: 5_000,
         mem_mb: 256,
-        profile: Profile::WorkerStrict,
         env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
+        ..SandboxPolicy::default()
     }
 }

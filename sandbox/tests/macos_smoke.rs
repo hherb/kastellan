@@ -8,7 +8,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 #[allow(unused_imports)]
-use hhagent_sandbox::{macos_seatbelt::MacosSeatbelt, Net, Profile, SandboxBackend, SandboxPolicy};
+use hhagent_sandbox::{macos_seatbelt::MacosSeatbelt, SandboxBackend, SandboxPolicy};
 
 /// Skip the test if Seatbelt is unavailable on this host. Prints to stderr
 /// via `eprintln!` so `cargo test -- --nocapture` shows the skip line —
@@ -27,13 +27,8 @@ fn skip_if_no_seatbelt() -> bool {
 
 fn strict_policy() -> SandboxPolicy {
     SandboxPolicy {
-        fs_read: vec![],
-        fs_write: vec![],
-        net: Net::Deny,
         cpu_ms: 5_000,
-        mem_mb: 64,
-        profile: Profile::WorkerStrict,
-        env: vec![],
+        ..SandboxPolicy::default()
     }
 }
 

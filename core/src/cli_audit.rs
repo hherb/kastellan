@@ -95,7 +95,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 
 use crate::scheduler::audit::{
-    action_task_terminal, build_finalize_payload, build_lifecycle_payload, TaskFinalizeStats,
+    action_task_terminal, build_lifecycle_payload, build_producer_cancel_finalize_payload,
     ACTION_TASK_FINALIZE, ACTION_TASK_SUBMITTED, ACTION_TOOLS_ALLOWLIST_ADD,
     ACTION_TOOLS_ALLOWLIST_REMOVE,
 };
@@ -193,14 +193,15 @@ pub async fn cancel_and_audit(pool: &PgPool, task_id: i64) -> Result<CancelOutco
 /// producer-cancelled `pending` task. Best-effort, same posture as the
 /// lifecycle row in [`cancel_and_audit`].
 ///
-/// The counters and duration are pinned to **known zeros**, passed
-/// literally as `0` in the [`TaskFinalizeStats`] — the task ran zero
+/// The counters and duration are pinned to **known zeros** inside
+/// [`build_producer_cancel_finalize_payload`] — the task ran zero
 /// plan iterations and zero step dispatches before being cancelled, so
-/// no computation is needed. `started_at: None` is the wire signal "task
-/// was never claimed", which [`build_finalize_payload`] serialises as
-/// JSON `null`. These known zeros are wire-distinguishable from the
-/// crashed-task finalize's JSON-`null` counters, where the values were
-/// genuinely unrecoverable.
+/// no computation is needed. `started_at` is always JSON `null` (the
+/// wire signal "task was never claimed"). These known zeros are
+/// wire-distinguishable from the crashed-task finalize's JSON-`null`
+/// counters, where the values were genuinely unrecoverable — the
+/// `provenance` field (issue #50 schema-v2) makes the distinction
+/// explicit without consumers having to reason about it.
 ///
 /// `finished_at` falls back to the local clock if `task.finished_at` is
 /// somehow `None` — operationally dead code (the `mark_cancelled`
@@ -208,6 +209,10 @@ pub async fn cancel_and_audit(pool: &PgPool, task_id: i64) -> Result<CancelOutco
 /// is still emitted with a plausible timestamp instead of panicking,
 /// and the violation is surfaced via `tracing::error!` so the
 /// impossible case is loud, not silent.
+///
+/// Wire shape: [`build_producer_cancel_finalize_payload`], including the
+/// `provenance="producer_cancel_pending"` discriminator added in issue
+/// #50 schema-v2.
 async fn emit_producer_cancel_finalize(pool: &PgPool, task: &Task) {
     let finished_at = task.finished_at.unwrap_or_else(|| {
         tracing::error!(
@@ -218,15 +223,12 @@ async fn emit_producer_cancel_finalize(pool: &PgPool, task: &Task) {
         );
         OffsetDateTime::now_utc()
     });
-    let stats = TaskFinalizeStats {
-        plan_count: task.plan_count,
-        total_llm_calls: 0,
-        total_dispatch_calls: 0,
-        total_duration_ms: 0,
-        started_at: None,
+    let payload = build_producer_cancel_finalize_payload(
+        task.id,
+        task.lane,
+        task.plan_count,
         finished_at,
-    };
-    let payload = build_finalize_payload(task.id, task.lane, "cancelled", &stats);
+    );
     if let Err(e) =
         audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_TASK_FINALIZE, payload).await
     {

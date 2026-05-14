@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 use hhagent_core::cassandra::types::{DataClass, PlannedStep};
 use hhagent_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
 use hhagent_core::scheduler::{shell_exec_entry, ToolEntry, ToolHostStepDispatcher, ToolRegistry};
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use hhagent_sandbox::SandboxPolicy;
 use hhagent_db::{
     build_initdb_argv, build_postgresql_auto_conf, default_pg_bin_dir_candidates,
     default_socket_dir, find_pg_bin_dir, InitDbOptions, PgConfigOptions,
@@ -386,12 +386,8 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
                     // sandbox backends validate absolute-path-ness before
                     // doing anything else.
                     fs_read: vec![PathBuf::from("relative/path/triggers/rejection")],
-                    fs_write: vec![],
-                    net: Net::Deny,
-                    cpu_ms: 1_000,
                     mem_mb: 32,
-                    profile: Profile::WorkerStrict,
-                    env: vec![],
+                    ..SandboxPolicy::default()
                 },
                 wall_clock_ms: Some(5_000),
             },

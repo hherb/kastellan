@@ -21,17 +21,19 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Coarse profile presets that map to backend-specific defaults.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Profile {
     /// Strictest: no net by default, scratch FS only, minimal syscall set.
+    #[default]
     WorkerStrict,
     /// Slightly relaxed for workers that need outbound HTTPS via the egress proxy.
     WorkerNetClient,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub enum Net {
     /// Deny all network access.
+    #[default]
     Deny,
     /// Allowlist of "host:port" entries. Egress still flows through the egress proxy.
     Allowlist(Vec<String>),
@@ -56,6 +58,25 @@ pub struct SandboxPolicy {
     /// jail sees only what's listed here.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+}
+
+impl Default for SandboxPolicy {
+    /// Conservative defaults: no FS access, no network, strict profile,
+    /// 1-second CPU budget, 64 MiB memory. Production callers (e.g.
+    /// `shell_exec_entry`) override the limits explicitly; the `Default`
+    /// impl exists so tests and future field additions can use
+    /// `..Default::default()` without churning every fixture.
+    fn default() -> Self {
+        Self {
+            fs_read: Vec::new(),
+            fs_write: Vec::new(),
+            net: Net::default(),
+            cpu_ms: 1_000,
+            mem_mb: 64,
+            profile: Profile::default(),
+            env: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -112,5 +133,39 @@ impl SandboxBackend for NotYetImplemented {
         Err(SandboxError::Backend(
             "no sandbox backend for this OS — only Linux and macOS are supported".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Default` pins the most-restrictive sensible values: no FS access,
+    /// no network, `WorkerStrict` profile, 1-second CPU budget, 64 MiB
+    /// memory. The intent is that adding a field to [`SandboxPolicy`]
+    /// (e.g. issue #6's `cpu_quota_pct`) doesn't require touching every
+    /// test fixture; production callers must override the limits
+    /// explicitly. Pinned so a future change to the defaults is a
+    /// deliberate audit-trail edit.
+    #[test]
+    fn sandbox_policy_default_is_strict_deny_with_one_second_budget() {
+        let p = SandboxPolicy::default();
+        assert!(p.fs_read.is_empty());
+        assert!(p.fs_write.is_empty());
+        assert!(matches!(p.net, Net::Deny));
+        assert_eq!(p.cpu_ms, 1_000);
+        assert_eq!(p.mem_mb, 64);
+        assert_eq!(p.profile, Profile::WorkerStrict);
+        assert!(p.env.is_empty());
+    }
+
+    #[test]
+    fn net_default_is_deny() {
+        assert!(matches!(Net::default(), Net::Deny));
+    }
+
+    #[test]
+    fn profile_default_is_worker_strict() {
+        assert_eq!(Profile::default(), Profile::WorkerStrict);
     }
 }

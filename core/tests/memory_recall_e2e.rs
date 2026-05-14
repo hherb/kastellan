@@ -292,12 +292,17 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
         .expect("ALL-lanes alpha+alice recall");
         assert_eq!(r[0].id, id_a, "fused top-1 must be id_a");
 
-        // ─── Assertion 4: empty seeds with graph mode on → lane skipped ─
+        // ─── Assertion 4: empty seeds with graph as ONLY lane → error ───
         //
-        // Empty seed slice + GRAPH_ONLY → no lane runs → empty fused list,
-        // not an error. Matches warn-and-skip semantics for missing inputs.
+        // Empty seed slice + GRAPH_ONLY = every enabled lane lacks its
+        // input. Per the hybrid missing-input policy (issue #17), that's
+        // a caller bug — fusion over zero lanes is unambiguously an
+        // empty result, and silent `Ok(vec![])` would mask it. The
+        // single-lane-skipped degrade case is still exercised in the
+        // ALL-lanes assertion above (which surfaces id_a even when
+        // graph contributes a lane).
         let empty: &[i64] = &[];
-        let r = recall(
+        let err = recall(
             &pool,
             &RecallParams {
                 query_text: None,
@@ -308,8 +313,12 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             },
         )
         .await
-        .expect("empty-seeds graph-only recall");
-        assert!(r.is_empty(), "empty seeds + graph-only must return empty");
+        .expect_err("empty-seeds graph-only must error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("recall:") && msg.contains("no lanes ran"),
+            "error must mention 'recall: no lanes ran'; got {msg}"
+        );
 
         // ─── Assertion 5: GRAPH_FANOUT_CAP_PER_SEED clamps hub expansion ─
         //

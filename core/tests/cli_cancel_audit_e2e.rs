@@ -10,7 +10,7 @@
 //!        scheduler's `task.<state>` rows so observation-phase SQL can
 //!        `WHERE action LIKE 'task.%'` and capture both producer intent
 //!        and scheduler observation,
-//!      - one `action='task.finalize'` with the canonical 9-key summary
+//!      - one `action='task.finalize'` with the canonical 10-key summary
 //!        payload, `state='cancelled'`, `started_at: null` (the task was
 //!        never claimed), and zero counters/duration (the task ran zero
 //!        plan iterations and zero step dispatches — these are *known*
@@ -257,7 +257,9 @@ fn cancel_pending_task_writes_lifecycle_and_finalize_rows() {
             "finalize.finished_at must be a non-null RFC 3339 string"
         );
 
-        // 9-key payload-shape pin (matches build_finalize_payload).
+        // 10-key payload-shape pin (matches build_producer_cancel_finalize_payload).
+        // Issue #50 schema-v2: `provenance` field added so consumers
+        // don't have to infer the path from `(actor, counters, started_at)`.
         let fkeys: std::collections::BTreeSet<_> = fp
             .as_object()
             .expect("finalize payload is a JSON object")
@@ -274,11 +276,21 @@ fn cancel_pending_task_writes_lifecycle_and_finalize_rows() {
             "total_duration_ms",
             "started_at",
             "finished_at",
+            "provenance",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         assert_eq!(fkeys, fexpected, "cli/task.finalize payload key set");
+
+        // Provenance discriminator pin (issue #50). Wire signal that
+        // this finalize row came from a producer-cancelled-pending
+        // path, not a runtime or crash-recovery path.
+        assert_eq!(
+            fp.get("provenance").and_then(|v| v.as_str()),
+            Some("producer_cancel_pending"),
+            "cli/task.finalize provenance must be 'producer_cancel_pending'"
+        );
 
         pool.close().await;
     });
