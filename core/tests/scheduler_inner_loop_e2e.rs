@@ -442,6 +442,19 @@ async fn happy_path_one_plan_returns_completed() {
         payload.get("refused").map_or(false, |v| v.is_null()),
         "refused key must be present with JSON null on non-refusal rows; got payload = {payload:#?}"
     );
+
+    // Slice A (2026-05-15): payload carries full Plan + classification_floor.
+    let plan_back: Plan =
+        serde_json::from_value(payload["plan"].clone())
+            .expect("plan payload key must deserialise into a Plan");
+    assert_eq!(plan_back.decision, "task_complete",
+        "plan round-trip must preserve decision");
+    assert_eq!(plan_back.steps.len(), 0,
+        "plan round-trip must preserve steps");
+    assert_eq!(
+        payload["classification_floor"], "Public",
+        "classification_floor must serialise as PascalCase string (Public for unset producer floor)"
+    );
 }
 
 /// (b) Plan 1 dispatches a step that fails (no entry in dispatcher
@@ -733,6 +746,19 @@ async fn refusal_plan_terminates_with_state_refused() {
     assert_eq!(payload["refused"]["principle"], 1);
     assert_eq!(payload["refused"]["reason"], "physical_harm");
     assert_eq!(payload["plan_step_count"], 0);
+
+    // Slice A: refusal plan body round-trips including refused field.
+    let plan_back: Plan =
+        serde_json::from_value(payload["plan"].clone())
+            .expect("refusal plan must round-trip");
+    assert!(plan_back.refused.is_some(),
+        "round-tripped refusal plan must carry refused: Some(..)");
+    assert_eq!(plan_back.refused.as_ref().unwrap().principle, 1);
+    assert_eq!(plan_back.refused.as_ref().unwrap().reason, "physical_harm");
+    assert_eq!(
+        payload["classification_floor"], "Public",
+        "test fixture's task has no classification_floor in payload; defaults to Public"
+    );
 }
 
 /// (f) Agent emits a refusal plan (principle 1) AND the reviewer
