@@ -213,18 +213,30 @@ pub async fn run_to_terminal(
         let verdict = review.review(&plan, &rctx).await;
         write_audit_verdict(pool, &ctx, &verdict, verdict_start.elapsed().as_millis() as u64).await?;
 
+        // Precedence (issue #23 spec §2):
+        //   Verdict CB                       → Outcome::Blocked   (reviewer wins)
+        //   plan.refused.is_some(), no CB    → Outcome::Refused   (agent's refusal stands)
+        //   plan terminal, neither           → Outcome::Completed
+        //   non-terminal                     → execute steps
         match &verdict {
             Verdict::ConstitutionalBlock { principle, reason } =>
                 return finish!(Outcome::Blocked { principle: *principle, reason: reason.clone() }),
             Verdict::Block(reason) => {
-                ctx.blocks.push(reason.clone());
-                continue;  // bounded by plan_count cap on next iter
+                // When the agent self-refused, Block does not loop back —
+                // the refusal is already terminal. Fall through to the
+                // if-let-Some check below. For normal (non-refusal) plans,
+                // continue so the agent can revise.
+                if plan.refused.is_none() {
+                    ctx.blocks.push(reason.clone());
+                    continue;  // bounded by plan_count cap on next iter
+                }
             }
             Verdict::Escalate(reason, sev) => {
-                // No channel bus in this scope — treat as Block so the
-                // agent gets a chance to revise. The audit row above
-                // already records `verdict_kind=escalate`, but the
-                // runtime degradation (escalate → block) is invisible
+                // Same rationale as Block: a refusal plan must not loop.
+                // No channel bus in this scope — for non-refusal plans,
+                // treat as Block so the agent gets a chance to revise.
+                // The audit row above already records `verdict_kind=escalate`,
+                // but the runtime degradation (escalate → block) is invisible
                 // to anyone not reading the audit log; a warn keeps it
                 // grep-able in the daemon journal.
                 //
@@ -232,21 +244,45 @@ pub async fn run_to_terminal(
                 //   the Escalate verdict to the operator channel and
                 //   await a verdict from there. The site to update is
                 //   this match arm. See HANDOVER §"channel bus".
-                tracing::warn!(
-                    task_id = ctx.task_id,
-                    plan_count = ctx.plan_count,
-                    severity = ?sev,
-                    reason = %reason,
-                    "Verdict::Escalate degraded to Block (channel-bus not wired)"
-                );
-                ctx.blocks.push(format!("escalate(no-channel): {reason}"));
-                continue;
+                if plan.refused.is_none() {
+                    tracing::warn!(
+                        task_id = ctx.task_id,
+                        plan_count = ctx.plan_count,
+                        severity = ?sev,
+                        reason = %reason,
+                        "Verdict::Escalate degraded to Block (channel-bus not wired)"
+                    );
+                    ctx.blocks.push(format!("escalate(no-channel): {reason}"));
+                    continue;
+                }
             }
             Verdict::Advisory(c) => {
-                ctx.advisories.push(c.clone());
-                // proceed
+                // Only record advisory when the plan is not a refusal;
+                // no point accumulating advisories we are about to discard.
+                if plan.refused.is_none() {
+                    ctx.advisories.push(c.clone());
+                }
+                // proceed in both cases — falls through to the refusal check
             }
             Verdict::Approve => { /* proceed */ }
+        }
+
+        // Agent self-declared a constitutional refusal. Reviewer's non-CB
+        // verdict (Approve / Advisory / Block / Escalate) does NOT override —
+        // refusal is terminal. The verdict row is already audit-logged above.
+        // Steps (if any) are dropped: execution is unsafe under a self-declared
+        // violation, and looping would spin until the plan cap (wrong).
+        if let Some(refused) = plan.refused.clone() {
+            let body = plan.result.as_ref()
+                .and_then(|v| v.get("body"))
+                .and_then(|b| b.as_str())
+                .map(String::from)
+                .unwrap_or_default();
+            return finish!(Outcome::Refused {
+                principle: refused.principle,
+                reason: refused.reason,
+                body,
+            });
         }
 
         // 3. Terminal check
