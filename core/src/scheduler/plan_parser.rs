@@ -26,11 +26,14 @@
 //!    structurally broken, the error surfaces to the agent loop as
 //!    `AgentError::Decode` (same surface as the strict path) and the
 //!    inner loop counts it as a failed plan iteration.
-//!
-//! Returning the offset where the parse landed costs nothing extra and
-//! lets the future audit-row payload include "raw started at byte N"
-//! for forensic diffs across model versions — currently unused, the
-//! helper just returns the parsed `Plan`.
+//! 4. **First `{` wins.** The lenient path anchors on the *first* `{`
+//!    in the input. If a model emits prose that contains a `{`
+//!    character *before* the real JSON body (e.g. "expected shape is
+//!    `{tool, method, params}`: ```json\n{…real plan…}\n```"), the
+//!    stream-deserializer will try to parse from that earlier `{`,
+//!    fail, and the helper re-emits the strict-path error. The failure
+//!    mode is "fail decode → failed plan iteration", never "succeed
+//!    with the wrong JSON value picked from later in the response".
 
 use crate::cassandra::types::Plan;
 
@@ -185,6 +188,35 @@ mod tests {
         let err = parse_plan_lenient(raw).err().expect("must error");
         // Pinned: parse fails. We don't care about the exact wording.
         let _ = err;
+    }
+
+    #[test]
+    fn earlier_stray_open_brace_in_prose_yields_decode_error_not_misparse() {
+        // Pins the "first `{` wins" contract documented at module top:
+        // if a model emits prose that contains a `{` before the real
+        // JSON body, the lenient path anchors on the *earlier* `{`,
+        // fails to parse it, and re-emits the strict-path error. The
+        // failure mode is "fail decode" (counted as a failed plan
+        // iteration), NEVER "succeed with the wrong value extracted
+        // from later in the response". A future refactor that gets
+        // fancier with extraction (e.g. skipping non-JSON-looking
+        // prefixes) MUST preserve this safety: silently parsing the
+        // *second* `{` would let a prose-described decoy plan slip
+        // past the contract this test pins.
+        let raw = format!(
+            "The expected shape is {{tool, method, params}}; here's the plan:\n```json\n{}\n```",
+            canonical_plan_json()
+        );
+        let err = parse_plan_lenient(&raw)
+            .err()
+            .expect("must error: earlier `{` in prose poisons the lenient anchor");
+        // Strict-path error position confirms the strict-path error
+        // was re-emitted (not the lenient path's deeper position).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("line 1 column 1"),
+            "expected strict-path error position; got {msg}"
+        );
     }
 
     #[test]
