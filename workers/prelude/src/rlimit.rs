@@ -211,9 +211,17 @@ mod tests {
     /// The kernel returns success regardless of whether the worker
     /// ever uses any CPU, so this only proves the FFI path is wired.
     /// Effective enforcement is covered by `rlimit_smoke.rs`.
+    ///
+    /// **NOTE for maintainers:** this test permanently lowers
+    /// `RLIMIT_CPU` for the test binary process to 30 CPU-seconds.
+    /// `setrlimit` is process-scoped and the hard limit can only be
+    /// tightened thereafter, not raised. All other tests in this
+    /// binary must complete within that 30-second CPU budget — easy
+    /// today (the prelude unit suite finishes in <1 s wall-clock with
+    /// trivial CPU use), but if a CPU-heavy test gets added later it
+    /// may need its own binary or a wider initial budget here.
     #[test]
     fn apply_from_env_with_generous_budget_applies() {
-        // 30 seconds; well above anything this test itself would use.
         let report = with_env_var(Some("30000"), apply_from_env)
             .expect("apply_from_env must succeed with a generous budget");
         match report {
