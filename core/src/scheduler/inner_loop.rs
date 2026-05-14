@@ -83,6 +83,12 @@ pub enum Outcome {
     Cancelled,
     TimedOut,
     Blocked { principle: u8, reason: String },
+    /// Agent self-declared a constitutional refusal. Sourced from
+    /// `plan.refused` in the inner loop. Distinct from `Blocked`
+    /// (which is the reviewer-detected `Verdict::ConstitutionalBlock`
+    /// path). `body` carries the planner's prose `result.body` so the
+    /// user-facing explanation is preserved in the audit + DB result.
+    Refused { principle: u8, reason: String, body: String },
 }
 
 impl Outcome {
@@ -93,6 +99,7 @@ impl Outcome {
             Outcome::Cancelled    => "cancelled",
             Outcome::TimedOut     => "timed_out",
             Outcome::Blocked { .. } => "blocked",
+            Outcome::Refused { .. } => "refused",
         }
     }
 
@@ -102,6 +109,12 @@ impl Outcome {
             Outcome::Failed(s)    => Some(serde_json::json!({"kind": "error", "detail": s})),
             Outcome::Blocked { principle, reason } =>
                 Some(serde_json::json!({"kind": "blocked", "principle": principle, "reason": reason})),
+            Outcome::Refused { principle, reason, body } => Some(serde_json::json!({
+                "kind": "refused",
+                "principle": principle,
+                "reason": reason,
+                "body": body,
+            })),
             _ => None,
         }
     }
@@ -359,6 +372,32 @@ mod tests {
         assert_eq!(Outcome::Cancelled.final_state(), "cancelled");
         assert_eq!(Outcome::TimedOut.final_state(), "timed_out");
         assert_eq!(Outcome::Blocked { principle: 1, reason: "r".into() }.final_state(), "blocked");
+        assert_eq!(
+            Outcome::Refused { principle: 1, reason: "harm".into(), body: "explanation".into() }
+                .final_state(),
+            "refused",
+        );
+    }
+
+    #[test]
+    fn outcome_refused_result_payload_carries_principle_reason_and_body() {
+        let o = Outcome::Refused {
+            principle: 2,
+            reason: "fraud_or_impersonation".into(),
+            body: "Signing under your identity would impersonate you.".into(),
+        };
+        let p = o.result_payload().unwrap();
+        assert_eq!(p["kind"], "refused");
+        assert_eq!(p["principle"], 2);
+        assert_eq!(p["reason"], "fraud_or_impersonation");
+        assert_eq!(p["body"], "Signing under your identity would impersonate you.");
+
+        // Exact key set — guards against accidental payload bloat.
+        let keys: std::collections::BTreeSet<String> = p.as_object().unwrap()
+            .keys().cloned().collect();
+        let expected: std::collections::BTreeSet<String> =
+            ["kind", "principle", "reason", "body"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(keys, expected);
     }
 
     #[test]
