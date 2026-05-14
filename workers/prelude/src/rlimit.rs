@@ -20,8 +20,6 @@
 //! no `SIGXCPU` handler installed so the soft hit terminates the
 //! process immediately — equivalent to a clean kill.
 
-use std::env;
-
 /// Env var read by [`apply_from_env`]. Set by
 /// `hhagent_core::tool_host::derive_lockdown_env` from
 /// `policy.cpu_ms`.
