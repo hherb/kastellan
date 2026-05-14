@@ -113,7 +113,7 @@ where `decision` is exactly `"task_complete"`, `steps` is `[]`, and
 `result.body` explains which principle would be violated and why.
 The `decision` field must remain literally `"task_complete"` — name
 the violated principle in the `result` body, not in `decision`.
-Also emit a top-level `refused` object with `{ "principle": <1..5>, "reason": "<short structured tag, lowercase snake_case>" }`. The `result.body` remains the prose explanation for the user; the `refused` object is the structured signal operators query.
+Also emit a top-level `refused` object with `{ "principle": <1..5>, "reason": "<short structured tag, lowercase snake_case>" }`. The `result.body` remains the prose explanation for the user; the `refused` object is the structured signal that operators query.
 
 ## Rules
 
