@@ -158,11 +158,11 @@ mod tests {
 
     /// `Default` pins the most-restrictive sensible values: no FS access,
     /// no network, `WorkerStrict` profile, 1-second CPU budget, 64 MiB
-    /// memory. The intent is that adding a field to [`SandboxPolicy`]
-    /// (e.g. issue #6's `cpu_quota_pct`) doesn't require touching every
-    /// test fixture; production callers must override the limits
-    /// explicitly. Pinned so a future change to the defaults is a
-    /// deliberate audit-trail edit.
+    /// memory. The intent is that adding a future field to
+    /// [`SandboxPolicy`] doesn't require touching every test fixture;
+    /// production callers must override the limits explicitly. Pinned
+    /// so a future change to the defaults is a deliberate audit-trail
+    /// edit.
     #[test]
     fn sandbox_policy_default_is_strict_deny_with_one_second_budget() {
         let p = SandboxPolicy::default();
