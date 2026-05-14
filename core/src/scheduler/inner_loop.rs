@@ -83,6 +83,12 @@ pub enum Outcome {
     Cancelled,
     TimedOut,
     Blocked { principle: u8, reason: String },
+    /// Agent self-declared a constitutional refusal. Sourced from
+    /// `plan.refused` in the inner loop. Distinct from `Blocked`
+    /// (which is the reviewer-detected `Verdict::ConstitutionalBlock`
+    /// path). `body` carries the planner's prose `result.body` so the
+    /// user-facing explanation is preserved in the audit + DB result.
+    Refused { principle: u8, reason: String, body: String },
 }
 
 impl Outcome {
@@ -93,6 +99,7 @@ impl Outcome {
             Outcome::Cancelled    => "cancelled",
             Outcome::TimedOut     => "timed_out",
             Outcome::Blocked { .. } => "blocked",
+            Outcome::Refused { .. } => "refused",
         }
     }
 
@@ -102,6 +109,12 @@ impl Outcome {
             Outcome::Failed(s)    => Some(serde_json::json!({"kind": "error", "detail": s})),
             Outcome::Blocked { principle, reason } =>
                 Some(serde_json::json!({"kind": "blocked", "principle": principle, "reason": reason})),
+            Outcome::Refused { principle, reason, body } => Some(serde_json::json!({
+                "kind": "refused",
+                "principle": principle,
+                "reason": reason,
+                "body": body,
+            })),
             _ => None,
         }
     }
@@ -200,18 +213,30 @@ pub async fn run_to_terminal(
         let verdict = review.review(&plan, &rctx).await;
         write_audit_verdict(pool, &ctx, &verdict, verdict_start.elapsed().as_millis() as u64).await?;
 
+        // Precedence (issue #23 spec §2):
+        //   Verdict CB                       → Outcome::Blocked   (reviewer wins)
+        //   plan.refused.is_some(), no CB    → Outcome::Refused   (agent's refusal stands)
+        //   plan terminal, neither           → Outcome::Completed
+        //   non-terminal                     → execute steps
         match &verdict {
             Verdict::ConstitutionalBlock { principle, reason } =>
                 return finish!(Outcome::Blocked { principle: *principle, reason: reason.clone() }),
             Verdict::Block(reason) => {
-                ctx.blocks.push(reason.clone());
-                continue;  // bounded by plan_count cap on next iter
+                // When the agent self-refused, Block does not loop back —
+                // the refusal is already terminal. Fall through to the
+                // if-let-Some check below. For normal (non-refusal) plans,
+                // continue so the agent can revise.
+                if plan.refused.is_none() {
+                    ctx.blocks.push(reason.clone());
+                    continue;  // bounded by plan_count cap on next iter
+                }
             }
             Verdict::Escalate(reason, sev) => {
-                // No channel bus in this scope — treat as Block so the
-                // agent gets a chance to revise. The audit row above
-                // already records `verdict_kind=escalate`, but the
-                // runtime degradation (escalate → block) is invisible
+                // Same rationale as Block: a refusal plan must not loop.
+                // No channel bus in this scope — for non-refusal plans,
+                // treat as Block so the agent gets a chance to revise.
+                // The audit row above already records `verdict_kind=escalate`,
+                // but the runtime degradation (escalate → block) is invisible
                 // to anyone not reading the audit log; a warn keeps it
                 // grep-able in the daemon journal.
                 //
@@ -219,21 +244,57 @@ pub async fn run_to_terminal(
                 //   the Escalate verdict to the operator channel and
                 //   await a verdict from there. The site to update is
                 //   this match arm. See HANDOVER §"channel bus".
-                tracing::warn!(
-                    task_id = ctx.task_id,
-                    plan_count = ctx.plan_count,
-                    severity = ?sev,
-                    reason = %reason,
-                    "Verdict::Escalate degraded to Block (channel-bus not wired)"
-                );
-                ctx.blocks.push(format!("escalate(no-channel): {reason}"));
-                continue;
+                if plan.refused.is_none() {
+                    tracing::warn!(
+                        task_id = ctx.task_id,
+                        plan_count = ctx.plan_count,
+                        severity = ?sev,
+                        reason = %reason,
+                        "Verdict::Escalate degraded to Block (channel-bus not wired)"
+                    );
+                    ctx.blocks.push(format!("escalate(no-channel): {reason}"));
+                    continue;
+                } else {
+                    // Escalate on a refusal plan: refusal stands and no
+                    // degradation happens (the loop terminates). Surface
+                    // a journal line so operators grepping for Escalate
+                    // events don't silently miss this case.
+                    tracing::info!(
+                        task_id = ctx.task_id,
+                        plan_count = ctx.plan_count,
+                        severity = ?sev,
+                        reason = %reason,
+                        "Verdict::Escalate on refusal plan — refusal stands, no degradation"
+                    );
+                }
             }
             Verdict::Advisory(c) => {
-                ctx.advisories.push(c.clone());
-                // proceed
+                // Only record advisory when the plan is not a refusal;
+                // no point accumulating advisories we are about to discard.
+                if plan.refused.is_none() {
+                    ctx.advisories.push(c.clone());
+                }
+                // proceed in both cases — falls through to the refusal check
             }
             Verdict::Approve => { /* proceed */ }
+        }
+
+        // Agent self-declared a constitutional refusal. Reviewer's non-CB
+        // verdict (Approve / Advisory / Block / Escalate) does NOT override —
+        // refusal is terminal. The verdict row is already audit-logged above.
+        // Steps (if any) are dropped: execution is unsafe under a self-declared
+        // violation, and looping would spin until the plan cap (wrong).
+        if let Some(refused) = plan.refused.clone() {
+            let body = plan.result.as_ref()
+                .and_then(|v| v.get("body"))
+                .and_then(|b| b.as_str())
+                .map(String::from)
+                .unwrap_or_default();
+            return finish!(Outcome::Refused {
+                principle: refused.principle,
+                reason: refused.reason,
+                body,
+            });
         }
 
         // 3. Terminal check
@@ -274,6 +335,25 @@ async fn write_audit_plan_formulate(
     plan: &Plan,
     meta: &FormulationMeta,
 ) -> Result<(), InnerLoopError> {
+    // Issue #23 (spec §3): "refused" takes precedence over the
+    // is_terminal-derived "task_complete" so a refusal payload is
+    // wire-distinguishable from a successful completion via the same
+    // discriminator field — including the malformed-refusal-with-steps
+    // shape the inner-loop short-circuit also honours.
+    let decision_kind = if plan.is_refused() {
+        crate::cassandra::types::DECISION_REFUSED
+    } else if plan.is_terminal() {
+        crate::cassandra::types::DECISION_TERMINAL
+    } else {
+        "act"
+    };
+
+    // Explicit JSON null (not key-absent) so downstream JSONB queries
+    // can rely on `refused` always being present.
+    let refused = plan.refused.as_ref()
+        .map(|r| serde_json::json!({ "principle": r.principle, "reason": r.reason }))
+        .unwrap_or(serde_json::Value::Null);
+
     let payload = serde_json::json!({
         "task_id":          ctx.task_id,
         "plan_count":       ctx.plan_count,
@@ -284,7 +364,8 @@ async fn write_audit_plan_formulate(
         "latency_ms":       meta.latency_ms,
         "retry_count":      meta.retry_count,
         "plan_step_count":  plan.steps.len(),
-        "decision_kind":    if plan.is_terminal() { crate::cassandra::types::DECISION_TERMINAL } else { "act" },
+        "decision_kind":    decision_kind,
+        "refused":          refused,
     });
     hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
@@ -359,6 +440,32 @@ mod tests {
         assert_eq!(Outcome::Cancelled.final_state(), "cancelled");
         assert_eq!(Outcome::TimedOut.final_state(), "timed_out");
         assert_eq!(Outcome::Blocked { principle: 1, reason: "r".into() }.final_state(), "blocked");
+        assert_eq!(
+            Outcome::Refused { principle: 1, reason: "harm".into(), body: "explanation".into() }
+                .final_state(),
+            "refused",
+        );
+    }
+
+    #[test]
+    fn outcome_refused_result_payload_carries_principle_reason_and_body() {
+        let o = Outcome::Refused {
+            principle: 2,
+            reason: "fraud_or_impersonation".into(),
+            body: "Signing under your identity would impersonate you.".into(),
+        };
+        let p = o.result_payload().unwrap();
+        assert_eq!(p["kind"], "refused");
+        assert_eq!(p["principle"], 2);
+        assert_eq!(p["reason"], "fraud_or_impersonation");
+        assert_eq!(p["body"], "Signing under your identity would impersonate you.");
+
+        // Exact key set — guards against accidental payload bloat.
+        let keys: std::collections::BTreeSet<String> = p.as_object().unwrap()
+            .keys().cloned().collect();
+        let expected: std::collections::BTreeSet<String> =
+            ["kind", "principle", "reason", "body"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(keys, expected);
     }
 
     #[test]
@@ -387,6 +494,7 @@ mod tests {
                 steps: vec![],
                 result: None,
                 data_ceiling: DataClass::Public,
+                refused: None,
             },
             vec![StepOutcome::Ok(serde_json::json!("x")), StepOutcome::Err {
                 code: "POLICY_DENIED".into(), detail: "no".into(),

@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 /// constant.
 pub const DECISION_TERMINAL: &str = "task_complete";
 
+/// Audit-row `decision_kind` value for refusals (issue #23). Sibling
+/// to `DECISION_TERMINAL`: both are wire-strings exposed in the
+/// `agent/plan.formulate` payload, so they live as named constants
+/// rather than inline literals to keep a rename grep-able.
+pub const DECISION_REFUSED: &str = "refused";
+
 /// Classification of data flowing through a plan step.
 ///
 /// Outbound policy attaches to each level (see
@@ -53,6 +59,20 @@ pub struct PlannedStep {
     pub classification: DataClass,
 }
 
+/// Structured marker the planner attaches to a plan when self-declaring
+/// a constitutional refusal. Present iff the agent refuses to proceed;
+/// drives [`Outcome::Refused`] short-circuit in the inner loop and
+/// surfaces verbatim in the `agent/plan.formulate` audit-row payload.
+///
+/// `principle` is the 1..=5 index from `prompts/agent_planner.md`.
+/// `reason` is a short structured tag (lowercase snake_case) — the
+/// human-readable explanation lives in `Plan.result.body`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RefusedReason {
+    pub principle: u8,
+    pub reason:    String,
+}
+
 /// One agent-formulated plan, reviewed as a unit.
 ///
 /// The terminal signal: `decision == "task_complete"` AND
@@ -68,6 +88,18 @@ pub struct Plan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
     pub data_ceiling: DataClass,
+    /// Present iff the agent self-declared a constitutional refusal.
+    /// Drives `Outcome::Refused` short-circuit; surfaced in the
+    /// `agent/plan.formulate` audit-row payload as the structured
+    /// operator-visible signal. Absent on every non-refusal plan.
+    ///
+    /// When this is `Some`, the planner is also expected to emit
+    /// `decision == "task_complete"`, `steps == []`, and an explanation
+    /// in `result.body`. The inner loop honours the refusal even when
+    /// the planner-shape is malformed (e.g. non-empty `steps`); see
+    /// [`super::inner_loop::run_to_terminal`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<RefusedReason>,
 }
 
 // Invariant (enforced by future Stage 0 — not by stubs in this work's scope):
@@ -82,6 +114,15 @@ impl Plan {
         self.decision == DECISION_TERMINAL
             && self.steps.is_empty()
             && self.result.is_some()
+    }
+
+    /// Returns true iff the agent self-declared a constitutional
+    /// refusal on this plan. Independent of `is_terminal` — the two
+    /// helpers don't conflate; a well-formed refusal is both, but a
+    /// malformed refusal-with-steps is `is_refused()` only and is
+    /// still honoured by the inner loop.
+    pub fn is_refused(&self) -> bool {
+        self.refused.is_some()
     }
 }
 
@@ -117,6 +158,7 @@ mod tests {
             steps: vec![],
             result: Some(serde_json::json!({"kind": "text", "body": "ok"})),
             data_ceiling: DataClass::Public,
+            refused: None,
         };
         assert!(p.is_terminal(), "all three present");
 
@@ -148,6 +190,7 @@ mod tests {
             steps: vec![],
             result: None,
             data_ceiling: DataClass::Public,
+            refused: None,
         };
         let s = serde_json::to_string(&p).unwrap();
 
@@ -162,6 +205,86 @@ mod tests {
         // back to Plan { result: None } via the #[serde(default)] hint.
         let p2: Plan = serde_json::from_str(&s).unwrap();
         assert_eq!(p, p2);
+    }
+
+    #[test]
+    fn plan_round_trips_refused_field_some() {
+        let p = Plan {
+            context: "c".into(),
+            decision: "task_complete".into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({
+                "kind": "text",
+                "body": "Principle 1 would be violated."
+            })),
+            data_ceiling: DataClass::Public,
+            refused: Some(RefusedReason {
+                principle: 1,
+                reason: "physical_harm".into(),
+            }),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let p2: Plan = serde_json::from_str(&s).unwrap();
+        assert_eq!(p, p2, "Plan with refused: Some(...) must round-trip");
+    }
+
+    #[test]
+    fn plan_omits_refused_key_when_none() {
+        let p = Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert!(
+            parsed.get("refused").is_none(),
+            "expected `refused` key absent when None; got JSON: {s}"
+        );
+
+        // Round-trip remains lossless via #[serde(default)].
+        let p2: Plan = serde_json::from_str(&s).unwrap();
+        assert_eq!(p, p2);
+    }
+
+    #[test]
+    fn plan_is_refused_is_independent_of_is_terminal() {
+        // The four corners of the (is_refused × is_terminal) matrix.
+        let base = Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+        };
+
+        // Neither
+        assert!(!base.is_refused() && !base.is_terminal());
+
+        // Terminal only
+        let mut p = base.clone();
+        p.decision = "task_complete".into();
+        p.result = Some(serde_json::json!({"kind": "text", "body": "done"}));
+        assert!(!p.is_refused() && p.is_terminal());
+
+        // Refused only (non-terminal — malformed shape, but the helper is independent)
+        let mut p = base.clone();
+        p.refused = Some(RefusedReason { principle: 2, reason: "fraud".into() });
+        assert!(p.is_refused() && !p.is_terminal());
+
+        // Both (the well-formed refusal case)
+        let mut p = base.clone();
+        p.decision = "task_complete".into();
+        p.result = Some(serde_json::json!({"kind": "text", "body": "I cannot."}));
+        p.refused = Some(RefusedReason { principle: 1, reason: "physical_harm".into() });
+        assert!(p.is_refused() && p.is_terminal());
     }
 
     #[test]

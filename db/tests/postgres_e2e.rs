@@ -1478,3 +1478,84 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     drop(pool);
     drop(cluster);
 }
+
+/// Pin that `tasks.state = 'refused'` passes the CHECK constraint added
+/// by migration `0012_tasks_state_refused.sql`, and that invalid state
+/// values are still rejected.
+///
+/// Scenarios:
+///   1. Positive: UPDATE a row to `state = 'refused'` succeeds and the
+///      value round-trips correctly.
+///   2. Negative: UPDATE to `state = 'garbage'` is still rejected by
+///      the widened `tasks_state_check` CHECK constraint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tasks_state_refused_passes_check_constraint() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ref-d",
+        "ref-l",
+        &format!("hhagent-supervisor-test-pg-refused-{suffix}"),
+    );
+
+    // Probe applies all migrations (0001–0012) and sets up roles/grants.
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "refused-state-check"}),
+    )
+    .await
+    .expect("probe run");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("connect runtime pool");
+
+    // Seed a pending task via raw SQL.
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (lane, state, payload) \
+         VALUES ('fast', 'pending', '{}'::jsonb) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("seed pending task");
+
+    // ── Positive: 'refused' accepted by the widened CHECK constraint ─────
+    let ok = sqlx::query(
+        "UPDATE tasks SET state = 'refused', finished_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await;
+    assert!(
+        ok.is_ok(),
+        "UPDATE to state='refused' should succeed (migration 0012 widens the CHECK); got {ok:?}"
+    );
+
+    let final_state: String = sqlx::query_scalar("SELECT state::text FROM tasks WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back state");
+    assert_eq!(final_state, "refused", "state must round-trip as 'refused'");
+
+    // ── Negative: 'garbage' still rejected ───────────────────────────────
+    let err = sqlx::query("UPDATE tasks SET state = 'garbage' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await;
+    assert!(
+        err.is_err(),
+        "UPDATE to state='garbage' must be rejected by tasks_state_check; got {err:?}"
+    );
+
+    pool.close().await;
+}

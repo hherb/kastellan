@@ -356,6 +356,7 @@ fn task_complete_plan(body: &str) -> Plan {
         steps: vec![],
         result: Some(serde_json::json!({"kind": "text", "body": body})),
         data_ceiling: DataClass::Public,
+        refused: None,
     }
 }
 
@@ -374,6 +375,7 @@ fn one_step_plan(tool: &str, method: &str) -> Plan {
         }],
         result: None,
         data_ceiling: DataClass::Public,
+        refused: None,
     }
 }
 
@@ -423,6 +425,23 @@ async fn happy_path_one_plan_returns_completed() {
     // Spec §7 counter pin: one terminal plan, zero dispatch.
     assert_eq!(result.plan_count, 1);
     assert_eq!(result.dispatch_count, 0);
+
+    // Issue #23 spec §3: the `refused` audit-row key is always present.
+    // On a non-refusal plan the value is explicit JSON null — distinct
+    // from key-absent so JSONB queries can rely on the key existing.
+    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        .await
+        .expect("fetch audit rows");
+    let plan_rows: Vec<_> = rows.iter()
+        .filter(|r| r.actor == "agent" && r.action == "plan.formulate")
+        .collect();
+    assert_eq!(plan_rows.len(), 1, "expected exactly 1 agent/plan.formulate row");
+    let payload = &plan_rows[0].payload;
+    assert_eq!(payload["decision_kind"], "task_complete");
+    assert!(
+        payload.get("refused").map_or(false, |v| v.is_null()),
+        "refused key must be present with JSON null on non-refusal rows; got payload = {payload:#?}"
+    );
 }
 
 /// (b) Plan 1 dispatches a step that fails (no entry in dispatcher
@@ -580,4 +599,272 @@ impl StepDispatcher for BarrierDispatcher {
         self.release.notified().await;
         StepOutcome::Ok(serde_json::json!("step-ok"))
     }
+}
+
+/// Returns a scripted `ConstitutionalBlock` verdict. Used to pin the
+/// precedence rule: reviewer's CB overrides the agent's refusal field.
+struct ScriptedConstitutionalBlockStage {
+    principle: u8,
+    reason: String,
+}
+
+#[async_trait]
+impl hhagent_core::cassandra::review::ReviewStage for ScriptedConstitutionalBlockStage {
+    fn name(&self) -> &str { "scripted-cb" }
+    async fn review(
+        &self,
+        _plan: &hhagent_core::cassandra::types::Plan,
+        _ctx: &hhagent_core::cassandra::review::ReviewStageContext<'_>,
+    ) -> hhagent_core::cassandra::types::Verdict {
+        hhagent_core::cassandra::types::Verdict::ConstitutionalBlock {
+            principle: self.principle,
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+/// Returns a scripted non-CB `Block` verdict. Used to pin the precedence
+/// rule that `Verdict::Block` on a refusal plan does NOT loop the agent
+/// back via `continue` — the refusal is already terminal.
+struct ScriptedBlockStage {
+    reason: String,
+}
+
+#[async_trait]
+impl hhagent_core::cassandra::review::ReviewStage for ScriptedBlockStage {
+    fn name(&self) -> &str { "scripted-block" }
+    async fn review(
+        &self,
+        _plan: &hhagent_core::cassandra::types::Plan,
+        _ctx: &hhagent_core::cassandra::review::ReviewStageContext<'_>,
+    ) -> hhagent_core::cassandra::types::Verdict {
+        hhagent_core::cassandra::types::Verdict::Block(self.reason.clone())
+    }
+}
+
+/// (e) Agent emits a refusal plan (plan.refused.is_some()); loop returns
+///     Outcome::Refused with the correct principle, reason, and body.
+///     Reviewer always approves — refusal field takes precedence over
+///     a non-CB verdict.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refusal_plan_terminates_with_state_refused() {
+    let Some((pool, _guards)) = bring_up_pg("iref").await else {
+        return; // [SKIP]
+    };
+
+    let id = insert_pending(&pool, Lane::Fast, serde_json::json!({}))
+        .await
+        .unwrap();
+    let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
+
+    let plan = Plan {
+        context: "refusing".into(),
+        decision: "task_complete".into(),
+        rationale: "principle 1 violated".into(),
+        steps: vec![],
+        result: Some(serde_json::json!({
+            "kind": "text",
+            "body": "I cannot help with that; it would risk physical harm.",
+        })),
+        data_ceiling: DataClass::Public,
+        refused: Some(hhagent_core::cassandra::types::RefusedReason {
+            principle: 1,
+            reason: "physical_harm".into(),
+        }),
+    };
+
+    let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
+    let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
+        .await
+        .unwrap();
+
+    // Outcome shape
+    match &result.outcome {
+        Outcome::Refused { principle, reason, body } => {
+            assert_eq!(*principle, 1);
+            assert_eq!(reason, "physical_harm");
+            assert!(body.contains("physical harm"), "expected body to mention 'physical harm', got: {body}");
+        }
+        other => panic!("expected Outcome::Refused, got {other:?}"),
+    }
+
+    // final_state contract
+    assert_eq!(result.outcome.final_state(), "refused");
+
+    // result_payload contract — 4-key shape
+    let payload = result.outcome.result_payload().expect("Refused carries a payload");
+    assert_eq!(payload["kind"], "refused");
+    assert_eq!(payload["principle"], 1);
+    assert_eq!(payload["reason"], "physical_harm");
+    assert!(
+        payload["body"].as_str().unwrap().contains("physical harm"),
+        "payload body should mention 'physical harm'"
+    );
+
+    // Counters
+    assert_eq!(result.plan_count, 1, "single refusal plan");
+    assert_eq!(result.dispatch_count, 0, "no steps to dispatch on a refusal plan");
+
+    // Audit-row contract for refusals (issue #23 spec §3).
+    //
+    // Exactly one agent/plan.formulate row, with:
+    //   - decision_kind == "refused"
+    //   - refused == { principle: 1, reason: "physical_harm" }
+    //   - plan_step_count == 0
+    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        .await
+        .expect("fetch audit rows");
+    let plan_rows: Vec<_> = rows.iter()
+        .filter(|r| r.actor == "agent" && r.action == "plan.formulate")
+        .collect();
+    assert_eq!(
+        plan_rows.len(),
+        1,
+        "expected exactly 1 agent/plan.formulate row; got rows = {rows:#?}"
+    );
+    let payload = &plan_rows[0].payload;
+    assert_eq!(
+        payload["decision_kind"], "refused",
+        "decision_kind must be 'refused' when plan.refused.is_some()"
+    );
+    assert_eq!(payload["refused"]["principle"], 1);
+    assert_eq!(payload["refused"]["reason"], "physical_harm");
+    assert_eq!(payload["plan_step_count"], 0);
+}
+
+/// (f) Agent emits a refusal plan (principle 1) AND the reviewer
+///     independently returns Verdict::ConstitutionalBlock (principle 3).
+///     The reviewer's CB must win — outcome is Blocked with principle 3,
+///     not Refused with principle 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reviewer_constitutional_block_wins_over_agent_refusal() {
+    let Some((pool, _guards)) = bring_up_pg("icbw").await else {
+        return; // [SKIP]
+    };
+
+    let id = insert_pending(&pool, Lane::Fast, serde_json::json!({}))
+        .await
+        .unwrap();
+    let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
+
+    // Plan: agent claims principle 1; reviewer independently detects principle 3.
+    let plan = Plan {
+        context: "refusing-1".into(),
+        decision: "task_complete".into(),
+        rationale: "agent claims P1 violation".into(),
+        steps: vec![],
+        result: Some(serde_json::json!({
+            "kind": "text",
+            "body": "agent prose mentioning P1",
+        })),
+        data_ceiling: DataClass::Public,
+        refused: Some(hhagent_core::cassandra::types::RefusedReason {
+            principle: 1,
+            reason: "physical_harm_agent_side".into(),
+        }),
+    };
+
+    let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
+    // Reviewer returns ConstitutionalBlock with a different principle than the agent.
+    let review = Arc::new(ChainReviewStage::new(vec![Arc::new(ScriptedConstitutionalBlockStage {
+        principle: 3,
+        reason: "irreversible_action_no_HITL".into(),
+    })]));
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
+        .await
+        .unwrap();
+
+    // Reviewer's CB wins; outcome is Blocked with the reviewer's principle.
+    match &result.outcome {
+        Outcome::Blocked { principle, reason } => {
+            assert_eq!(*principle, 3, "reviewer's principle 3 must win over agent's principle 1");
+            assert_eq!(reason, "irreversible_action_no_HITL");
+        }
+        other => panic!("expected Outcome::Blocked (reviewer wins), got {other:?}"),
+    }
+    assert_eq!(result.outcome.final_state(), "blocked");
+}
+
+/// (g) Agent emits a refusal plan AND the reviewer returns a non-CB
+///     `Verdict::Block`. Spec §2 precedence: a non-CB verdict must NOT
+///     override the refusal — refusal is terminal, the loop must NOT
+///     `continue`, and the final outcome is `Outcome::Refused`. The
+///     reviewer's block verdict is still audit-logged for forensic
+///     reconstruction, but the agent's self-refusal stands.
+///
+///     This locks the `if plan.refused.is_none()` guard in the
+///     `Verdict::Block` arm. A regression that drops the guard would
+///     loop the agent back until the `max_plans` cap and end as
+///     `Outcome::Failed("plan cap")` instead of `Outcome::Refused`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verdict_block_on_refusal_plan_does_not_loop() {
+    let Some((pool, _guards)) = bring_up_pg("ibrf").await else {
+        return; // [SKIP]
+    };
+
+    let id = insert_pending(&pool, Lane::Fast, serde_json::json!({}))
+        .await
+        .unwrap();
+    let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
+
+    let plan = Plan {
+        context: "refusing".into(),
+        decision: "task_complete".into(),
+        rationale: "principle 4 violated".into(),
+        steps: vec![],
+        result: Some(serde_json::json!({
+            "kind": "text",
+            "body": "I will not proceed — privacy boundary.",
+        })),
+        data_ceiling: DataClass::Public,
+        refused: Some(hhagent_core::cassandra::types::RefusedReason {
+            principle: 4,
+            reason: "privacy_violation".into(),
+        }),
+    };
+
+    // Only one plan is queued. If the loop incorrectly `continue`s on
+    // Block-against-refusal, the next formulator call returns an error
+    // (queue empty) — that would surface as a failure mode loud enough
+    // to distinguish from the intended Refused outcome.
+    let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
+    let review = Arc::new(ChainReviewStage::new(vec![Arc::new(ScriptedBlockStage {
+        reason: "reviewer flagged; refusal still stands".into(),
+    })]));
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
+        .await
+        .unwrap();
+
+    // Outcome: Refused with the agent's principle/reason; not Blocked,
+    // not Failed (which a loop would produce on the empty-queue path).
+    match &result.outcome {
+        Outcome::Refused { principle, reason, .. } => {
+            assert_eq!(*principle, 4);
+            assert_eq!(reason, "privacy_violation");
+        }
+        other => panic!("expected Outcome::Refused, got {other:?}"),
+    }
+    assert_eq!(result.outcome.final_state(), "refused");
+
+    // Pin no-loop: exactly one plan formulated, zero steps dispatched.
+    assert_eq!(result.plan_count, 1, "refusal+Block must not loop the agent");
+    assert_eq!(result.dispatch_count, 0);
+
+    // The reviewer's Block verdict is still audit-logged (forensic
+    // record), even though it did not override the refusal.
+    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        .await
+        .expect("fetch audit rows");
+    let verdict_rows: Vec<_> = rows.iter()
+        .filter(|r| r.actor == "cassandra:chain" && r.action == "verdict")
+        .collect();
+    assert_eq!(verdict_rows.len(), 1, "expected exactly 1 verdict row");
+    assert_eq!(verdict_rows[0].payload["verdict_kind"], "block");
 }
