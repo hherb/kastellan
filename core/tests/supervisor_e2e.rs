@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use hhagent_core::STARTUP_READY_MSG;
 use hhagent_supervisor::specs::core_service_spec;
 use hhagent_supervisor::{default_supervisor, ServiceStatus};
 use hhagent_tests_common::{
@@ -223,12 +224,14 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
     }
 
     // ---------- step 4: sanity-check log lines ----------
+    // Pin the readiness signal to the constant exported by hhagent-core so
+    // a future rename fails to compile rather than silently timing out.
     wait_for_log_match(
         &stdout_path,
-        |s| s.contains("database probe succeeded"),
+        |s| s.contains(STARTUP_READY_MSG),
         Duration::from_secs(10),
     )
-    .expect("daemon should log 'database probe succeeded' within 10s");
+    .unwrap_or_else(|_| panic!("daemon should log {STARTUP_READY_MSG:?} within 10s"));
 
     // ---------- step 5: read the audit_log row ----------
     let psql = bin_dir.join("psql");

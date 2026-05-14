@@ -144,6 +144,10 @@ pub async fn remove(
 }
 
 /// List the argv0 entries for one tool, ordered by argv0 ascending.
+///
+/// Returns only the argv0 string — the cheap shape used by
+/// `build_tool_registry` at daemon bring-up. Callers that need the full
+/// row (created_at / created_by) should use [`list_for_tool_full`].
 pub async fn list_for_tool(
     pool: &PgPool,
     tool: &str,
@@ -156,6 +160,36 @@ pub async fn list_for_tool(
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(|(s,)| s).collect())
+}
+
+/// Like [`list_for_tool`] but returns the full [`AllowlistEntry`] shape
+/// (`tool`, `argv0`, `created_at`, `created_by`). Used by the
+/// `hhagent-cli tools allowlist list --tool <name>` path so the WHERE
+/// predicate runs on the PK-indexed server side instead of the CLI
+/// filtering client-side over [`list_all`].
+pub async fn list_for_tool_full(
+    pool: &PgPool,
+    tool: &str,
+) -> Result<Vec<AllowlistEntry>, ToolAllowlistError> {
+    validate_tool_name(tool)?;
+    let rows: Vec<(String, String, OffsetDateTime, String)> = sqlx::query_as(
+        "SELECT tool, argv0, created_at, created_by
+         FROM tool_allowlists
+         WHERE tool = $1
+         ORDER BY argv0 ASC",
+    )
+    .bind(tool)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(tool, argv0, created_at, created_by)| AllowlistEntry {
+            tool,
+            argv0,
+            created_at,
+            created_by,
+        })
+        .collect())
 }
 
 /// List every entry across every tool, ordered by `(tool, argv0)`.

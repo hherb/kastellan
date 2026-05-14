@@ -44,10 +44,30 @@ use tokio::sync::oneshot;
 
 #[derive(Debug, Clone)]
 struct ServedRequest {
-    #[allow(dead_code)]
     path: String,
-    #[allow(dead_code)]
     body: String,
+}
+
+/// Pin the wire shape of the embedding request the router sent: the path
+/// must be `/embeddings`, and the JSON body must carry the expected
+/// `model` plus a single-element `input` array containing `text`.
+fn assert_embedding_request(served: &ServedRequest, text: &str) {
+    assert_eq!(
+        served.path, "/embeddings",
+        "router must POST to /embeddings, got {:?}",
+        served.path,
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(&served.body).expect("served request body is JSON");
+    assert_eq!(
+        body["model"], "embedding-test",
+        "model mismatch in request body: {body}",
+    );
+    assert_eq!(
+        body["input"],
+        serde_json::json!([text]),
+        "input must be a single-element array carrying the caller's text: {body}",
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -222,7 +242,7 @@ fn embed_query_returns_vec_of_expected_dim() {
             "data": [{"index": 0, "embedding": emb_vec}],
             "model": "embedding-test"
         });
-        let (base_url, _served) =
+        let (base_url, served_rx) =
             spawn_one_shot_mock(CannedResponse::ok_json(canned.to_string())).await;
         let router = build_router_pointing_at(&base_url);
 
@@ -235,6 +255,9 @@ fn embed_query_returns_vec_of_expected_dim() {
             "embed_query must return a vector of length {EMBEDDING_DIM}, got {}",
             result.len()
         );
+
+        let served = served_rx.await.expect("mock recorded request");
+        assert_embedding_request(&served, "hello");
 
         pool.close().await;
     });
@@ -276,13 +299,16 @@ fn embed_query_writes_llm_router_audit_row() {
             "data": [{"index": 0, "embedding": emb_vec}],
             "model": "embedding-test"
         });
-        let (base_url, _served) =
+        let (base_url, served_rx) =
             spawn_one_shot_mock(CannedResponse::ok_json(canned.to_string())).await;
         let router = build_router_pointing_at(&base_url);
 
         embed_query(&pool, &router, "alpha bravo")
             .await
             .expect("embed_query ok");
+
+        let served = served_rx.await.expect("mock recorded request");
+        assert_embedding_request(&served, "alpha bravo");
 
         let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
             "SELECT actor, action, payload FROM audit_log \
@@ -355,13 +381,18 @@ fn embed_query_dim_mismatch_surfaces_typed_error_and_writes_no_audit_row() {
             "data": [{"index": 0, "embedding": short_vec}],
             "model": "embedding-test"
         });
-        let (base_url, _served) =
+        let (base_url, served_rx) =
             spawn_one_shot_mock(CannedResponse::ok_json(canned.to_string())).await;
         let router = build_router_pointing_at(&base_url);
 
         let err = embed_query(&pool, &router, "hello")
             .await
             .expect_err("dim must mismatch");
+
+        // The HTTP request was sent and answered before the dim-check
+        // ran on the client; pin the wire shape regardless.
+        let served = served_rx.await.expect("mock recorded request");
+        assert_embedding_request(&served, "hello");
         match err {
             MemoryError::EmbeddingDimMismatch {
                 expected,
@@ -441,13 +472,16 @@ fn full_text_to_recall_flow_uses_embed_query_then_recall() {
             "data": [{"index": 0, "embedding": emb_a.clone()}],
             "model": "embedding-test"
         });
-        let (base_url, _served) =
+        let (base_url, served_rx) =
             spawn_one_shot_mock(CannedResponse::ok_json(canned.to_string())).await;
         let router = build_router_pointing_at(&base_url);
 
         // embed_query the matching text.
         let emb = embed_query(&pool, &router, BODY_A).await.expect("embed");
         assert_eq!(emb.len(), EMBEDDING_DIM);
+
+        let served = served_rx.await.expect("mock recorded request");
+        assert_embedding_request(&served, BODY_A);
 
         // Plug into recall — semantic-only lane.
         let mems = recall(

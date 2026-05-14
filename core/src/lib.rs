@@ -21,3 +21,17 @@ pub mod tool_host;
 pub mod workspace;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Log line emitted by the `hhagent` daemon's `main` after the database
+/// bring-up probe completes. Tests and supervisors poll the daemon's
+/// redirected stdout for this string to decide that the daemon is ready.
+///
+/// Exposing it as a `const` (rather than a free-form `info!` literal)
+/// turns a future rename into a compile-time break for every external
+/// consumer, instead of a silent timeout in the `supervisor_e2e`
+/// integration test.
+///
+/// Replace with a real readiness protocol (e.g. a JSON-RPC notification
+/// over a side channel) when the daemon grows other heartbeat signals;
+/// see issue #14.
+pub const STARTUP_READY_MSG: &str = "database probe succeeded";
