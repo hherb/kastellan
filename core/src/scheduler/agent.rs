@@ -16,6 +16,7 @@ use hhagent_llm_router::messages::{ChatMessage, ChatRequest};
 use hhagent_llm_router::{Router, RouterError};
 
 use super::inner_loop::TaskContext;
+use super::plan_parser::parse_plan_lenient;
 use super::prompts::PromptCache;
 
 #[derive(Debug, Error)]
@@ -99,7 +100,10 @@ impl PlanFormulator for RouterAgent {
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
 
-        let plan: Plan = serde_json::from_str(&raw).map_err(|e| AgentError::Decode {
+        // Tolerant of markdown-fenced JSON (```json … ```) and short
+        // model preambles before the JSON body. See
+        // `super::plan_parser::parse_plan_lenient` for the contract.
+        let plan: Plan = parse_plan_lenient(&raw).map_err(|e| AgentError::Decode {
             detail: e.to_string(),
             raw: raw.clone(),
         })?;

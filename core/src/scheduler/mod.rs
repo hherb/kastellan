@@ -6,6 +6,7 @@
 //! Module split:
 //!   - `prompts`        — version-tracked agent prompts (PromptCache + ledger)
 //!   - `agent`          — formulate_plan LLM adapter
+//!   - `plan_parser`    — pure helper that turns an LLM response into a Plan, tolerant of markdown-fenced JSON
 //!   - `inner_loop`     — per-task iterative replanning (TaskContext + run_to_terminal)
 //!   - `runner`         — per-lane runner loop
 //!   - `tool_dispatch`  — production `StepDispatcher` wiring to `tool_host::dispatch`
@@ -16,6 +17,7 @@ pub mod agent;
 pub mod audit;
 pub mod crash_recovery;
 pub mod inner_loop;
+pub mod plan_parser;
 pub mod prompts;
 pub mod runner;
 pub mod tool_dispatch;

@@ -42,24 +42,63 @@ use hhagent_supervisor::specs::core_service_spec;
 use hhagent_supervisor::{default_supervisor, ServiceStatus};
 use hhagent_tests_common::{
     bring_up_pg_cluster, cli_binary, core_binary, current_username, pg_bin_dir_or_skip,
-    shell_exec_worker_binary, skip_if_no_supervisor, skip_if_sandbox_unavailable, unique_suffix,
-    unique_temp_root, wait_for_log_match, wait_for_status, PathGuard, PgCluster, ServiceGuard,
+    seed_tool_allowlist, shell_exec_worker_binary, skip_if_no_supervisor,
+    skip_if_sandbox_unavailable, unique_suffix, unique_temp_root, wait_for_log_match,
+    wait_for_status, PathGuard, PgCluster, ServiceGuard,
 };
 #[cfg(target_os = "macos")]
 use hhagent_tests_common::serial_lock;
 
-// Per-OS argv0 path constants previously injected via env at daemon
-// bring-up. After 2026-05-14's allowlist hygiene work, the allowlist
-// is sourced from the `tool_allowlists` DB table (migration 0009);
-// operators must `hhagent-cli tools allowlist add` the paths their
-// fixtures expect before running this `#[ignore]`-flagged orchestrator.
-// See bring_up_daemon below for the exact seed commands.
+// Per-OS argv0 paths for the read-only coreutils the seed fixtures may
+// reach for (echo / date / ls / cat). The allowlist matches argv[0]
+// verbatim (no realpath), so Linux callers spelling `/bin/echo` would
+// not hit the same row as `/usr/bin/echo` even though the kernel resolves
+// both to the same inode. We pick the canonical path per OS — same
+// convention `cli_ask_e2e.rs::ECHO_PATH` already uses.
+#[cfg(target_os = "linux")]
+const ECHO_PATH: &str = "/usr/bin/echo";
+#[cfg(target_os = "macos")]
+const ECHO_PATH: &str = "/bin/echo";
+#[cfg(target_os = "linux")]
+const DATE_PATH: &str = "/usr/bin/date";
+#[cfg(target_os = "macos")]
+const DATE_PATH: &str = "/bin/date";
+#[cfg(target_os = "linux")]
+const LS_PATH: &str = "/usr/bin/ls";
+#[cfg(target_os = "macos")]
+const LS_PATH: &str = "/bin/ls";
+#[cfg(target_os = "linux")]
+const CAT_PATH: &str = "/usr/bin/cat";
+#[cfg(target_os = "macos")]
+const CAT_PATH: &str = "/bin/cat";
 
 const DEFAULT_LLM_MODEL: &str = "gemma4:26b-a4b-it-q8_0";
 
-/// 120 s per fixture is generous: real warm capture against a loaded
-/// model is 5-15 s on the operator's DGX. The slack is for cold-start.
-const PER_FIXTURE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default per-fixture wall-clock budget. Sized to allow up to the
+/// 3-plan cap on a moderately fast local model; reasoning-heavy or
+/// large quantised models may need more. Operators override with
+/// `HHAGENT_OBSERVATION_PER_FIXTURE_TIMEOUT_SECS`.
+const DEFAULT_PER_FIXTURE_TIMEOUT_SECS: u64 = 600;
+
+/// Default per-LLM-call timeout the orchestrator forces on the daemon
+/// via `HHAGENT_LLM_TIMEOUT_MS`. Picked to be smaller than the per-fixture
+/// wall-clock budget so a hung call surfaces as a transport error inside
+/// the agent loop (and the agent can retry within the same fixture)
+/// rather than as a wall-clock kill from the test harness. Operators
+/// override with `HHAGENT_OBSERVATION_LLM_TIMEOUT_MS`.
+const DEFAULT_LLM_TIMEOUT_MS: u64 = 180_000;
+
+fn per_fixture_timeout() -> Duration {
+    let secs = std::env::var("HHAGENT_OBSERVATION_PER_FIXTURE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PER_FIXTURE_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+fn llm_timeout_ms_string() -> String {
+    std::env::var("HHAGENT_OBSERVATION_LLM_TIMEOUT_MS").unwrap_or_else(|_| DEFAULT_LLM_TIMEOUT_MS.to_string())
+}
 
 /// Locate `tests/observation/` relative to the workspace root.
 fn observation_root() -> PathBuf {
@@ -182,6 +221,8 @@ struct DaemonHandles {
     _service: ServiceGuard,
     _core_log: PathGuard,
     _state: PathGuard,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
 }
 
 fn bring_up_daemon(
@@ -209,7 +250,7 @@ fn bring_up_daemon(
     let stdout_path = core_log_dir.join(format!("{}.out", spec.name));
     let stderr_path = core_log_dir.join(format!("{}.err", spec.name));
     spec.stdout_log = Some(stdout_path.clone());
-    spec.stderr_log = Some(stderr_path);
+    spec.stderr_log = Some(stderr_path.clone());
 
     spec.env.push((
         "HHAGENT_DATA_DIR".into(),
@@ -238,25 +279,22 @@ fn bring_up_daemon(
         "HHAGENT_LLM_LOCAL_MODEL".into(),
         llm_model.to_string(),
     ));
-    spec.env.push(("HHAGENT_LLM_TIMEOUT_MS".into(), "120000".into()));
+    spec.env.push(("HHAGENT_LLM_TIMEOUT_MS".into(), llm_timeout_ms_string()));
 
     spec.env.push((
         "HHAGENT_SHELL_EXEC_BIN".into(),
         shell_exec_worker_binary().to_string_lossy().into_owned(),
     ));
     // Allowlist is now sourced from the `tool_allowlists` table (see
-    // migration 0009). Operators running this `#[ignore]`-flagged test
-    // must seed the four argv0 paths (echo/date/ls/cat — read-only) for
-    // their OS before invoking the daemon, e.g.:
-    //
-    //   hhagent-cli tools allowlist add shell-exec /bin/echo
-    //   hhagent-cli tools allowlist add shell-exec /bin/date
-    //   hhagent-cli tools allowlist add shell-exec /bin/ls
-    //   hhagent-cli tools allowlist add shell-exec /bin/cat
-    //
-    // Without the seeds the orchestrator will silently observe
-    // POLICY_DENIED on every tool step. HHAGENT_SHELL_EXEC_ALLOWLIST
+    // migration 0009). The orchestrator seeds the four argv0 paths
+    // (echo/date/ls/cat — read-only) for its OS via
+    // `seed_tool_allowlist` immediately after pool connect, before the
+    // fast-fail assertion (which exists as defence-in-depth in case a
+    // future refactor breaks the seeding path). HHAGENT_SHELL_EXEC_ALLOWLIST
     // env is no longer honored (deprecation WARN logs once on bring-up).
+    // Operators do not need to run `hhagent-cli tools allowlist add`
+    // manually — the per-test PG cluster is ephemeral; only the
+    // orchestrator can reach it.
 
     let sup = default_supervisor();
     let service = ServiceGuard {
@@ -285,7 +323,32 @@ fn bring_up_daemon(
         _service: service,
         _core_log: core_log,
         _state: state_guard,
+        stdout_path,
+        stderr_path,
     }
+}
+
+/// Diagnostic dump of the daemon's stdout/stderr log files to the test's
+/// stderr. Called at the end of every capture run so operators can see
+/// the daemon's tracing output before the PathGuard RAII teardown wipes
+/// the log dir. Cheap (the files are small) and only fires under the
+/// HHAGENT_OBSERVATION_DUMP_DAEMON_LOG env knob to avoid spam when the
+/// captures are all clean.
+fn dump_daemon_log(label: &str, path: &Path) {
+    if std::env::var("HHAGENT_OBSERVATION_DUMP_DAEMON_LOG").is_err() {
+        return;
+    }
+    eprintln!("\n[obs] ===== daemon {label} ({}) =====", path.display());
+    match std::fs::read_to_string(path) {
+        Ok(s) if s.is_empty() => eprintln!("[obs]   (empty)"),
+        Ok(s) => {
+            for line in s.lines() {
+                eprintln!("[obs]   {line}");
+            }
+        }
+        Err(e) => eprintln!("[obs]   <unreadable: {e}>"),
+    }
+    eprintln!("[obs] ===== end daemon {label} =====\n");
 }
 
 /// Submit one prompt via `hhagent-cli ask`, then capture the audit-log
@@ -308,6 +371,7 @@ async fn capture_one_fixture(
         .expect("snapshot max id");
 
     let start = Instant::now();
+    let per_fixture = per_fixture_timeout();
     let output = Command::new(cli_binary())
         .arg("ask")
         .arg(&fixture.prompt)
@@ -320,10 +384,10 @@ async fn capture_one_fixture(
         .expect("spawn hhagent-cli ask");
     let elapsed = start.elapsed();
     assert!(
-        elapsed < PER_FIXTURE_TIMEOUT,
+        elapsed < per_fixture,
         "fixture {} exceeded {:?}; CLI elapsed {:?}",
         fixture.fixture_id,
-        PER_FIXTURE_TIMEOUT,
+        per_fixture,
         elapsed
     );
     let _ = output; // exit code and stdout body are informational
@@ -446,15 +510,45 @@ async fn capture_all_fixtures_against_live_llm() {
         &format!("hhagent-supervisor-test-pg-obs-{suffix}"),
     );
 
+    // Seed the per-test PG cluster's `tool_allowlists` BEFORE the daemon
+    // starts. `build_tool_registry` reads the allowlist once at startup
+    // and caches it; seeding after `bring_up_daemon` would leave the
+    // daemon with an empty allowlist and all shell-exec calls would
+    // POLICY_DENIED. Same pattern `cli_ask_e2e.rs::bring_up_daemon` uses:
+    // run probe → connect seed_pool → seed → drop seed_pool → start daemon.
+    //
+    // The probe is required before the seed because the `tool_allowlists`
+    // table is created by migration 0009; the seed pool's runtime-role
+    // connection cannot insert into a non-existent table.
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "test",
+        "setup",
+        serde_json::json!({"test": "observation_capture_setup"}),
+    )
+    .await
+    .expect("probe run");
+    {
+        let seed_pool = connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("seed pool");
+        seed_tool_allowlist(
+            &seed_pool,
+            "shell-exec",
+            &[ECHO_PATH, DATE_PATH, LS_PATH, CAT_PATH],
+        )
+        .await
+        .expect("seed shell-exec allowlist for observation cluster");
+    } // seed_pool dropped here, freeing the connection before daemon start
+
     let _daemon = bring_up_daemon(&suffix, &cluster.data_dir, &llm_base_url, &llm_model, &user);
 
     let spec = ConnectSpec::default_for(&cluster.data_dir).expect("spec");
     let pool = connect_runtime_pool(&spec).await.expect("pool");
 
-    // Fast-fail if the shell-exec allowlist is empty: the captures would
-    // otherwise consist solely of POLICY_DENIED rows. See the bring_up_daemon
-    // comment for the `hhagent-cli tools allowlist add` commands operators
-    // must run first.
+    // Defence-in-depth: confirm the seed actually landed before paying
+    // any LLM cost. A future refactor that breaks the seeding path would
+    // otherwise surface as silent POLICY_DENIED on every tool step.
     let shell_exec_allowlist_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tool_allowlists WHERE tool = 'shell-exec'",
     )
@@ -464,8 +558,9 @@ async fn capture_all_fixtures_against_live_llm() {
     assert!(
         shell_exec_allowlist_count > 0,
         "tool_allowlists has zero shell-exec rows for this PG cluster — \
-         seed argv0 paths via `hhagent-cli tools allowlist add shell-exec /bin/echo` \
-         (etc.) before running this orchestrator; see bring_up_daemon comment."
+         the orchestrator's seed_tool_allowlist call above should have \
+         populated it; this assertion exists as defence-in-depth against \
+         a future refactor that breaks the seeding path."
     );
 
     // RFC 3339 timestamp once at the top so all per-fixture captures
@@ -499,6 +594,22 @@ async fn capture_all_fixtures_against_live_llm() {
             cap.task_state,
             cap.plan_iterations
         );
+        // On failure surface the `tasks.result` `detail` so the operator
+        // can see *why* the agent failed without rummaging through audit
+        // rows. Best-effort; a missing column or null result just logs
+        // a short note.
+        if cap.task_state == "failed" {
+            let result_json: Option<serde_json::Value> =
+                sqlx::query_scalar("SELECT result FROM tasks WHERE id = $1")
+                    .bind(cap.task_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or(None);
+            match result_json {
+                Some(v) => eprintln!("[obs]     tasks.result: {}", v),
+                None => eprintln!("[obs]     tasks.result: <null>"),
+            }
+        }
         summary.insert(fixture.fixture_id.clone(), cap.task_state);
     }
 
@@ -517,6 +628,16 @@ async fn capture_all_fixtures_against_live_llm() {
     assert!(!slug.is_empty(), "llm_model must slug to non-empty");
     let fname = capture_filename(&captured_at[..10], &slug);
     assert!(fname.ends_with(".json"));
+
+    // Operator-facing diagnostic dump of the daemon logs. Gated behind
+    // HHAGENT_OBSERVATION_DUMP_DAEMON_LOG=1 so clean runs stay quiet.
+    // Captures live in tests/observation/captures/ so the data is safe;
+    // this is purely for understanding *why* a capture turned out the
+    // way it did when the audit-log slice doesn't tell the whole story
+    // (e.g. plan_iterations=0 / total_llm_calls=0 — the daemon's tracing
+    // output is the only evidence of what failed in formulate_plan).
+    dump_daemon_log("stdout", &_daemon.stdout_path);
+    dump_daemon_log("stderr", &_daemon.stderr_path);
 
     // Teardown is intentionally LEFT to scope-end RAII so the daemon
     // (_daemon, declared before `pool`) drops AFTER pool but BEFORE
