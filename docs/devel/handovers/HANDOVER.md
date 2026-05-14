@@ -4,9 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-14 (observation-phase first capture run merged via PR #60; +1 post-merge test pin `a812989` raises workspace count from 464 → 465).
-**Last commit (main):** `7588b9e` (Merge pull request #60 from hherb/feat/observation-capture-baseline). Tree clean.
-**Session-start working state (this session, 2026-05-14):** clean on `main` at `7588b9e`. Workspace test count **465** (post-`a812989` stray-`{` regression pin); zero failures, zero warnings, zero `[SKIP]` lines on Linux. 7 capture JSONs on disk under `tests/observation/captures/<id>/2026-05-14_gemma4-26b-a4b-it-q8-0.json` from the previous session.
+**Last updated:** 2026-05-15 (Slice A of rule-iteration harness shipped: agent/plan.formulate audit-row payload now carries full Plan + classification_floor).
+**Last commit (main):** `7588b9e` (Merge pull request #60). This session is on branch `feat/audit-plan-formulate-carries-plan-body` carrying 5 commits (3 docs + 2 implementation) on top of main; PR pending.
+**Session-end working state (this session, 2026-05-15):** clean on branch `feat/audit-plan-formulate-carries-plan-body`. Workspace test count **467** (post-A1 +2 unit tests); zero failures, zero warnings, zero [SKIP] lines on Linux. 7 capture JSONs on disk from the previous session under `tests/observation/captures/`.
 **Previous session (now merged):** `feat/observation-capture-baseline` (off `main` at `f1fea54`, merged via PR #60 at `7588b9e`). Plus one post-merge review-driven test pin `a812989` (`test(scheduler): pin parse_plan_lenient safety on stray-{ in prose`) — defends the "first `{` wins" contract in `core::scheduler::plan_parser` against a future refactor silently parsing the *second* `{` and letting a prose-described decoy plan slip past the contract. Workspace test count 455 → 464 (capture-baseline slice) → **465** (post-merge pin).
 **Previous-previous session (now merged):** `feat/refusal-state` (off `main` at `5f543d2`, merged via PR #59 at `f1fea54`). Closed [issue #23](https://github.com/hherb/hhagent/issues/23). Workspace test count 446 → 455 (+9 across all tasks).
 
@@ -140,6 +140,47 @@ cargo test --workspace           # all green
 ```
 
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile that lets `bwrap` create unprivileged user namespaces is already installed on the user's DGX Spark. Other Linux hosts may need `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses `sandbox-exec` (no setup needed).
+
+---
+
+## Recently completed (this session, 2026-05-15 — Slice A: audit-payload bump on agent/plan.formulate, branch `feat/audit-plan-formulate-carries-plan-body`)
+
+Branch: `feat/audit-plan-formulate-carries-plan-body` (off `main` at `7588b9e`). Pure-additive bump on the `agent/plan.formulate` audit-row payload: 11 keys → 13 keys, adding `plan` (full serialised Plan) and `classification_floor` (task-level `DataClass` string). Closes the precondition for the rule-iteration harness (Slice B); together these are everything the reviewer pipeline needs to be replayed offline.
+
+**Shape (1 production file + 1 e2e test modified):**
+
+- **`core/src/scheduler/inner_loop.rs` — extracted pure `build_plan_formulate_payload`.** Same pattern `scheduler/audit.rs` already uses (`build_finalize_payload`, `build_lifecycle_payload`); the wire shape is now unit-testable without a Postgres pool. 2 new unit tests pin the 13-key set (BTreeSet equality assertion so a future accidental extra/missing key trips loudly) and the round-trip shape of `plan` + `classification_floor`. `write_audit_plan_formulate` shrinks to a one-line shim over the helper + `hhagent_db::audit::insert`.
+
+- **`core/tests/scheduler_inner_loop_e2e.rs` — extended two scenarios** (happy path around line 440; refusal around line 730). New assertions deserialise `payload["plan"]` back into a `Plan` and pin the round-trip; both scenarios assert `payload["classification_floor"]` is the PascalCase string `"Public"` (the test fixtures' tasks don't set `classification_floor` in `tasks.payload`, so `runner.rs` defaults it to Public per the security comment at line 278).
+
+**Audit-row contract (the headline):**
+
+| When                                       | actor | action            | payload keys (13)                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------ | ----- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Agent emits any plan (refusal or not)      | agent | `plan.formulate`  | existing 11 + `plan` (full serialised Plan: context/decision/rationale/steps/result/data_ceiling/refused) + `classification_floor` (task-level DataClass string: "Public" / "Personal" / "ClinicalConfidential" / "Secret")                                                                                          |
+
+**Test count delta:** 465 → **467** (+2 new unit tests in `scheduler::inner_loop::tests`).
+
+**TDD ordering** (per CLAUDE.md rule #2):
+1. Wrote 2 unit tests for `build_plan_formulate_payload` — confirmed compile-error RED.
+2. Extracted the helper + added the 2 new fields — unit tests green.
+3. Extended e2e assertion blocks — confirmed they pass against the new writer.
+4. Workspace test: 467 / 0 fail / 0 SKIP / 0 warnings.
+
+**What this slice deliberately does NOT do.**
+- **No on-disk capture re-emission.** Existing `tests/observation/captures/*.json` files retain `plan_json: null`; operator recaptures (one-time action against their local LLM) to get the new shape. Slice B's harness handles the missing-plan-body case gracefully.
+- **No schema migration.** Pure audit-row payload bump; downstream JSONB consumers unaffected if they don't request the new keys.
+- **No `data_ceiling` change.** The Plan's own `data_ceiling` field is unrelated to the task's `classification_floor`; both round-trip independently (plan-level inferred ceiling vs task-level producer floor; spec §7).
+
+**Open follow-up surfaces.**
+- **`core/src/observation/capture.rs::extract_plans_from_audit_rows`** already reads `payload.get("plan")` and falls back to `null`; with this slice's payload bump it auto-lights-up on recapture. No code change in the capture-side helper.
+- **Audit envelope truncation:** a plan with 20+ act-steps could push past the 4 KiB SHA-256 truncate threshold; this is the existing safety net (forensics still works via the SHA prefix). Real-world plans are typically <1 KiB; truncation is the right answer for the rare oversized case.
+- **`core/src/scheduler/inner_loop.rs` LOC growth.** Pre-A1 was 508 LOC; post-A1 is ~642 LOC (well over the 500-LOC soft cap). The cap was already breached before this slice; the new ~134 LOC adds to that. Natural future split candidate: lift the three `write_audit_*` writers + `build_plan_formulate_payload` into a sibling `core/src/scheduler/inner_loop_audit.rs`, parallel to how `audit.rs` centralises lifecycle/finalize. Not a blocker for A1+A2.
+
+**Files touched (3 modified):**
+- `core/src/scheduler/inner_loop.rs` — extract pure helper + add 2 fields + 2 new unit tests.
+- `core/tests/scheduler_inner_loop_e2e.rs` — 2 assertion blocks extended.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
 
 ---
 
