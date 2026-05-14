@@ -329,12 +329,23 @@ pub async fn run_to_terminal(
     }
 }
 
-async fn write_audit_plan_formulate(
-    pool: &PgPool,
-    ctx: &TaskContext,
+/// Pure builder for the `agent/plan.formulate` audit-row payload.
+///
+/// Extracted from `write_audit_plan_formulate` so the wire shape is
+/// unit-testable without a live Postgres pool. The 13-key shape pins
+/// (in this file's `tests` module) defend against accidental drift.
+///
+/// Slice A (2026-05-15) added `plan` (full serialised Plan) +
+/// `classification_floor` (task-level DataClass) so captures carry
+/// everything the reviewer pipeline needs to be replayed offline —
+/// see `core::observation::replay`.
+pub(crate) fn build_plan_formulate_payload(
+    task_id: i64,
+    plan_count: u32,
+    classification_floor: DataClass,
     plan: &Plan,
     meta: &FormulationMeta,
-) -> Result<(), InnerLoopError> {
+) -> serde_json::Value {
     // Issue #23 (spec §3): "refused" takes precedence over the
     // is_terminal-derived "task_complete" so a refusal payload is
     // wire-distinguishable from a successful completion via the same
@@ -354,19 +365,48 @@ async fn write_audit_plan_formulate(
         .map(|r| serde_json::json!({ "principle": r.principle, "reason": r.reason }))
         .unwrap_or(serde_json::Value::Null);
 
-    let payload = serde_json::json!({
-        "task_id":          ctx.task_id,
-        "plan_count":       ctx.plan_count,
-        "prompt_name":      meta.prompt_name,
-        "prompt_sha256":    meta.prompt_sha256,
-        "llm_model":        meta.llm_model,
-        "llm_backend":      meta.llm_backend,
-        "latency_ms":       meta.latency_ms,
-        "retry_count":      meta.retry_count,
-        "plan_step_count":  plan.steps.len(),
-        "decision_kind":    decision_kind,
-        "refused":          refused,
-    });
+    // `plan` is the full Plan JSON. Together with `classification_floor`
+    // this is what enables offline replay (Slice B / observation::replay).
+    // Plans are typically <1 KiB; the audit-envelope SHA-256 truncation
+    // at 4 KiB is the safety net for the rare oversized case.
+    let plan_json = serde_json::to_value(plan)
+        .expect("Plan serialisation cannot fail (no non-string keys, no NaN)");
+
+    // PascalCase string via DataClass's #[serde(rename_all = "PascalCase")].
+    let classification_floor_json = serde_json::to_value(classification_floor)
+        .expect("DataClass serialisation cannot fail (closed enum, no payloads)");
+
+    serde_json::json!({
+        "task_id":              task_id,
+        "plan_count":           plan_count,
+        "prompt_name":          meta.prompt_name,
+        "prompt_sha256":        meta.prompt_sha256,
+        "llm_model":            meta.llm_model,
+        "llm_backend":          meta.llm_backend,
+        "latency_ms":           meta.latency_ms,
+        "retry_count":          meta.retry_count,
+        "plan_step_count":      plan.steps.len(),
+        "decision_kind":        decision_kind,
+        "refused":              refused,
+        // Slice A additions:
+        "plan":                 plan_json,
+        "classification_floor": classification_floor_json,
+    })
+}
+
+async fn write_audit_plan_formulate(
+    pool: &PgPool,
+    ctx: &TaskContext,
+    plan: &Plan,
+    meta: &FormulationMeta,
+) -> Result<(), InnerLoopError> {
+    let payload = build_plan_formulate_payload(
+        ctx.task_id,
+        ctx.plan_count,
+        ctx.classification_floor,
+        plan,
+        meta,
+    );
     hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
 }
@@ -481,6 +521,100 @@ mod tests {
         let err = StepOutcome::Err { code: "POLICY_DENIED".into(), detail: "no".into() };
         assert!(!ok.is_err());
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_carries_full_plan_and_classification_floor() {
+        let plan = Plan {
+            context: "ctx".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![PlannedStep {
+                tool: "shell-exec".into(),
+                method: "shell.exec".into(),
+                parameters: serde_json::json!({"argv": ["/bin/echo", "hi"]}),
+                returns: "stdout".into(),
+                done_when: "echoed".into(),
+                classification: DataClass::Public,
+            }],
+            result: None,
+            data_ceiling: DataClass::Personal,
+            refused: None,
+        };
+        let meta = FormulationMeta {
+            prompt_name: "agent_planner".into(),
+            prompt_sha256: "deadbeef".into(),
+            llm_model: "gemma4:26b".into(),
+            llm_backend: "local".into(),
+            latency_ms: 42,
+            retry_count: 0,
+        };
+        let payload = build_plan_formulate_payload(
+            /*task_id*/ 7,
+            /*plan_count*/ 1,
+            /*classification_floor*/ DataClass::ClinicalConfidential,
+            &plan,
+            &meta,
+        );
+
+        // New: full Plan JSON round-trips byte-for-byte.
+        let plan_back: Plan = serde_json::from_value(payload["plan"].clone())
+            .expect("plan key must deserialise back into a Plan");
+        assert_eq!(plan_back, plan, "plan payload field must round-trip");
+
+        // New: task-level classification_floor stringified PascalCase.
+        assert_eq!(
+            payload["classification_floor"], "ClinicalConfidential",
+            "classification_floor must serialise as PascalCase string"
+        );
+
+        // Existing 11 keys remain unchanged.
+        assert_eq!(payload["task_id"], 7);
+        assert_eq!(payload["plan_count"], 1);
+        assert_eq!(payload["decision_kind"], "act");
+        assert_eq!(payload["plan_step_count"], 1);
+        assert!(payload["refused"].is_null());
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_pins_thirteen_keys() {
+        // Pin the total key count so a future additive change to the
+        // wire shape becomes a deliberate, reviewable edit instead of
+        // an accidental drift.
+        let plan = Plan {
+            context: "".into(),
+            decision: "task_complete".into(),
+            rationale: "".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": "ok"})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+        };
+        let meta = FormulationMeta {
+            prompt_name: "agent_planner".into(),
+            prompt_sha256: "x".into(),
+            llm_model: "m".into(),
+            llm_backend: "local".into(),
+            latency_ms: 0,
+            retry_count: 0,
+        };
+        let payload = build_plan_formulate_payload(
+            1, 0, DataClass::Public, &plan, &meta,
+        );
+        let keys: std::collections::BTreeSet<&str> = payload
+            .as_object()
+            .expect("payload is a JSON object")
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "task_id", "plan_count", "prompt_name", "prompt_sha256",
+            "llm_model", "llm_backend", "latency_ms", "retry_count",
+            "plan_step_count", "decision_kind", "refused",
+            // Slice A additions:
+            "plan", "classification_floor",
+        ].into_iter().collect();
+        assert_eq!(keys, expected, "payload key set drifted; update the pin deliberately");
     }
 
     #[test]
