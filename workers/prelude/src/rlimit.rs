@@ -83,9 +83,144 @@ pub fn cpu_ms_to_seconds(ms: u64) -> u64 {
     ms.saturating_add(999) / 1_000
 }
 
+/// Read `HHAGENT_CPU_MS` and apply `RLIMIT_CPU` if set and non-zero.
+///
+/// Returns `Disabled` if the env var is unset, empty, or `"0"`. Returns
+/// an error if the value is set but not parseable as `u64`, or if
+/// `setrlimit` itself fails (rare — `EPERM` only when the soft limit
+/// would exceed the hard limit, which can't happen here since we set
+/// them equal).
+///
+/// Called by [`crate::serve_stdio`] before [`crate::lock_down`].
+pub fn apply_from_env() -> Result<RlimitReport, RlimitError> {
+    let raw = match std::env::var(ENV_CPU_MS) {
+        Ok(s) if s.is_empty() => return Ok(RlimitReport::Disabled),
+        Ok(s) => s,
+        Err(std::env::VarError::NotPresent) => return Ok(RlimitReport::Disabled),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(RlimitError::Env("value is not valid UTF-8".into()));
+        }
+    };
+
+    let ms: u64 = raw
+        .parse()
+        .map_err(|e| RlimitError::Env(format!("parse {raw:?} as u64: {e}")))?;
+    let cpu_seconds = cpu_ms_to_seconds(ms);
+
+    if cpu_seconds == 0 {
+        return Ok(RlimitReport::Disabled);
+    }
+
+    apply_cpu_seconds(cpu_seconds).map(|()| RlimitReport::Applied { cpu_seconds })
+}
+
+/// Call `setrlimit(RLIMIT_CPU, { rlim_cur, rlim_max } = (cpu_seconds, cpu_seconds))`.
+///
+/// Setting soft == hard means the kernel sends `SIGXCPU` and (since the
+/// worker has no handler) the process terminates immediately at the
+/// soft limit. This is the cleanest kill semantics RLIMIT_CPU offers.
+fn apply_cpu_seconds(cpu_seconds: u64) -> Result<(), RlimitError> {
+    // libc's rlim_t is u64 on glibc/musl Linux and u64 on macOS — both
+    // accept our u64 input directly. The cast is explicit so a future
+    // platform with a narrower rlim_t fails loudly at the type layer.
+    let lim = libc::rlimit {
+        rlim_cur: cpu_seconds as libc::rlim_t,
+        rlim_max: cpu_seconds as libc::rlim_t,
+    };
+    // SAFETY: setrlimit takes a resource id (immediate) and a pointer
+    // to a stack-local rlimit struct; the struct lives for the entire
+    // duration of the call. Failure mode is a -1 return + errno set.
+    let rc = unsafe { libc::setrlimit(libc::RLIMIT_CPU, &lim) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(RlimitError::SetRlimit(err.to_string()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Tests in this module mutate the process-wide env block, which
+    /// cargo's per-binary test harness runs in parallel by default.
+    /// Take this mutex while inside any `apply_from_env` test so two
+    /// tests don't trample each other's `HHAGENT_CPU_MS` setting.
+    ///
+    /// Pattern lifted from `hhagent_tests_common::serial::serial_lock`.
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static M: OnceLock<Mutex<()>> = OnceLock::new();
+        // unwrap_or_else handles the rare poisoned-mutex case: a test
+        // that panics while holding the lock would otherwise abort
+        // every subsequent test with a useless error.
+        M.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Helper: temporarily set HHAGENT_CPU_MS, run a closure, then
+    /// restore the prior value. Returns the closure's value.
+    ///
+    /// Workspace is on Rust 2021 edition where `set_var` /
+    /// `remove_var` are safe; the Mutex returned by `env_lock` is
+    /// what makes them race-free within this binary.
+    fn with_env_var<F, R>(value: Option<&str>, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _guard = env_lock();
+        let prior = std::env::var(ENV_CPU_MS).ok();
+        match value {
+            Some(v) => std::env::set_var(ENV_CPU_MS, v),
+            None => std::env::remove_var(ENV_CPU_MS),
+        }
+        let out = f();
+        match prior {
+            Some(v) => std::env::set_var(ENV_CPU_MS, v),
+            None => std::env::remove_var(ENV_CPU_MS),
+        }
+        out
+    }
+
+    #[test]
+    fn apply_from_env_unset_returns_disabled() {
+        let report = with_env_var(None, apply_from_env)
+            .expect("apply_from_env must succeed when env is unset");
+        assert_eq!(report, RlimitReport::Disabled);
+    }
+
+    #[test]
+    fn apply_from_env_zero_returns_disabled() {
+        let report = with_env_var(Some("0"), apply_from_env)
+            .expect("apply_from_env must succeed when env is 0");
+        assert_eq!(report, RlimitReport::Disabled);
+    }
+
+    #[test]
+    fn apply_from_env_garbage_returns_env_error() {
+        let err = with_env_var(Some("not-a-number"), apply_from_env)
+            .expect_err("apply_from_env must reject garbage");
+        match err {
+            RlimitError::Env(_) => {}
+            other => panic!("expected RlimitError::Env, got {other:?}"),
+        }
+    }
+
+    /// Happy path: a generous CPU budget gets applied without error.
+    /// The kernel returns success regardless of whether the worker
+    /// ever uses any CPU, so this only proves the FFI path is wired.
+    /// Effective enforcement is covered by `rlimit_smoke.rs`.
+    #[test]
+    fn apply_from_env_with_generous_budget_applies() {
+        // 30 seconds; well above anything this test itself would use.
+        let report = with_env_var(Some("30000"), apply_from_env)
+            .expect("apply_from_env must succeed with a generous budget");
+        match report {
+            RlimitReport::Applied { cpu_seconds } => assert_eq!(cpu_seconds, 30),
+            RlimitReport::Disabled => panic!("expected Applied, got Disabled"),
+        }
+    }
 
     #[test]
     fn cpu_ms_to_seconds_zero_yields_zero() {
