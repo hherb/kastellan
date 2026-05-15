@@ -24,7 +24,7 @@
 //! fabricates a synthetic `Plan` from derived fields, because that
 //! would let the operator design rules against fake inputs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -232,6 +232,68 @@ fn render_new_verdict(snap: &VerdictSnapshot) -> String {
         // Bare kinds: approve, advisory, block.
         other => other.to_string(),
     }
+}
+
+/// Walk `dir/<fixture_id>/<filename>.json` files and deserialise each
+/// into a `CaptureJson`. Returns one entry per file, sorted by
+/// `(fixture_id, captured_at, path)` for stable output across runs.
+///
+/// Errors aggregate at the file level: one malformed file's
+/// `serde_json::Error` is logged via `eprintln!` and the file is
+/// skipped; the walk continues. The function returns `Err` only when
+/// the root directory cannot be opened at all.
+pub fn load_captures_from_dir(dir: &Path) -> std::io::Result<Vec<LoadedCapture>> {
+    let mut out: Vec<LoadedCapture> = Vec::new();
+    for fixture_entry in std::fs::read_dir(dir)? {
+        let fixture_entry = match fixture_entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("replay: skipping unreadable entry in {dir:?}: {e}");
+                continue;
+            }
+        };
+        let fixture_path = fixture_entry.path();
+        if !fixture_path.is_dir() { continue; }
+
+        let inner = match std::fs::read_dir(&fixture_path) {
+            Ok(it) => it,
+            Err(e) => {
+                eprintln!("replay: skipping unreadable fixture dir {fixture_path:?}: {e}");
+                continue;
+            }
+        };
+
+        for file_entry in inner {
+            let Ok(file_entry) = file_entry else { continue; };
+            let path = file_entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("replay: read({path:?}) failed: {e}");
+                    continue;
+                }
+            };
+            let capture: CaptureJson = match serde_json::from_slice(&bytes) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("replay: parse({path:?}) failed: {e}");
+                    continue;
+                }
+            };
+            out.push(LoadedCapture { path, capture });
+        }
+    }
+    // Stable sort: (fixture_id, captured_at, path). Path tie-break
+    // makes the walk-order deterministic across filesystems with
+    // different inode orderings.
+    out.sort_by(|a, b| {
+        a.capture.fixture_id.cmp(&b.capture.fixture_id)
+            .then_with(|| a.capture.captured_at.cmp(&b.capture.captured_at))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    Ok(out)
 }
 
 /// Replay one capture's plan iterations through the candidate chain.
