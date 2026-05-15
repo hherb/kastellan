@@ -1,0 +1,119 @@
+//! Offline replay of captured plans through a candidate
+//! `ChainReviewStage`. Pure-functional; no DB, no LLM, no daemon —
+//! the harness reads `CaptureJson` files from disk, replays each
+//! captured plan through the provided chain, and reports per-fixture
+//! verdict deltas against the recorded baseline.
+//!
+//! Slice B of the rule-iteration harness spec
+//! (`docs/superpowers/specs/2026-05-15-rule-iteration-harness-design.md`).
+//!
+//! ## Public surface
+//!
+//! - [`VerdictSnapshot`] — JSON-serialisable projection of a `Verdict`.
+//! - [`ReplayedPlan`] / [`ReplayResult`] — per-plan / per-capture row.
+//! - [`replay_capture`] — async; runs one capture through a chain.
+//! - [`load_captures_from_dir`] — I/O; deserialises a captures tree.
+//! - [`format_report_table`] — pure; ASCII table for stdout.
+//!
+//! ## Missing plan body
+//!
+//! Captures produced before Slice A's audit-payload bump
+//! (2026-05-15) carry `plan_json: null`. `replay_capture` emits a
+//! [`ReplayedPlan`] with `skipped_reason: Some(...)` and
+//! `new_verdict: None` for each such plan; it never silently
+//! fabricates a synthetic `Plan` from derived fields, because that
+//! would let the operator design rules against fake inputs.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::cassandra::types::Verdict;
+use crate::observation::capture::CaptureJson;
+
+/// JSON-serialisable projection of a [`Verdict`]. Keeps the
+/// discriminator kind separate from the detail so the harness can
+/// compare verdicts ignoring detail-string churn ("physical harm" vs
+/// "weapons" both project to the same `kind = "constitutional_block"`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VerdictSnapshot {
+    /// One of `"approve" | "advisory" | "escalate" | "block" |
+    /// "constitutional_block"`. Lowercase + underscore matches the
+    /// existing `cassandra:chain/verdict` audit-row `verdict_kind`
+    /// strings (see `core/src/scheduler/inner_loop.rs`).
+    pub kind: String,
+    pub detail: Option<serde_json::Value>,
+}
+
+impl VerdictSnapshot {
+    /// Pure projection of a [`Verdict`] into the wire shape.
+    pub fn from_verdict(v: &Verdict) -> Self {
+        match v {
+            Verdict::Approve => Self {
+                kind: "approve".into(),
+                detail: None,
+            },
+            Verdict::Advisory(msg) => Self {
+                kind: "advisory".into(),
+                detail: Some(serde_json::json!(msg)),
+            },
+            Verdict::Escalate(concern, severity) => Self {
+                kind: "escalate".into(),
+                detail: Some(serde_json::json!({
+                    "concern": concern,
+                    "severity": severity,
+                })),
+            },
+            Verdict::Block(reason) => Self {
+                kind: "block".into(),
+                detail: Some(serde_json::json!(reason)),
+            },
+            Verdict::ConstitutionalBlock { principle, reason } => Self {
+                kind: "constitutional_block".into(),
+                detail: Some(serde_json::json!({
+                    "principle": principle,
+                    "reason": reason,
+                })),
+            },
+        }
+    }
+}
+
+/// Result of replaying one plan iteration through the candidate chain.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplayedPlan {
+    pub iter: u32,
+    /// Verdict recorded in the capture (the `cassandra:chain/verdict`
+    /// row's `verdict_kind` string). `None` when the capture has no
+    /// verdict row for this iteration.
+    pub baseline_verdict: Option<String>,
+    /// Verdict from the candidate chain. `None` when the plan body
+    /// was missing from the capture (pre-Slice-A) and replay was
+    /// skipped.
+    pub new_verdict: Option<VerdictSnapshot>,
+    /// True iff `new_verdict.kind` differs from `baseline_verdict`.
+    /// Detail strings ignored. False whenever `skipped_reason.is_some()`.
+    pub is_delta: bool,
+    /// Populated iff the plan was skipped. Operator sees which
+    /// fixtures need recapture.
+    pub skipped_reason: Option<String>,
+}
+
+/// Aggregate result for one capture file replayed against a chain.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplayResult {
+    pub fixture_id: String,
+    pub fixture_summary: String,
+    pub captured_at: String,
+    pub llm_model: String,
+    pub plans_replayed: u32,
+    pub plans_skipped_missing_body: u32,
+    pub per_plan: Vec<ReplayedPlan>,
+}
+
+/// One capture file loaded from disk.
+#[derive(Clone, Debug)]
+pub struct LoadedCapture {
+    pub path: PathBuf,
+    pub capture: CaptureJson,
+}

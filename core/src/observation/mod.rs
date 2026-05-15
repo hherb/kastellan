@@ -29,3 +29,4 @@
 //! reporting which fixtures' verdicts changed.
 
 pub mod capture;
+pub mod replay;
