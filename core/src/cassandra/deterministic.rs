@@ -148,7 +148,12 @@ pub fn screen_plan_for_classification_violations(
             });
         }
     }
-    // I3: every step.classification <= plan.data_ceiling (lowest violating index wins)
+    // I3: every step.classification <= plan.data_ceiling (lowest violating index wins).
+    //
+    // MUST be a separate loop from I2: I2 runs all steps before I3 starts, so an
+    // I2 violation at a higher step index still wins over an I3 violation at a
+    // lower index. Fusing the two loops with `if/else` would silently break the
+    // declared-order precedence pinned by `i2_wins_over_i3_when_both_could_fire`.
     for (i, s) in plan.steps.iter().enumerate() {
         if s.classification.rank() > plan.data_ceiling.rank() {
             return Some(ClassificationViolation::StepClassificationAboveCeiling {
