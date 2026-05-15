@@ -848,9 +848,22 @@ fn run_observation_replay(args: &[String]) -> ExitCode {
 /// level up. For installed binaries neither env var is set; fall back
 /// to CWD-relative `tests/observation/captures`. Operator can always
 /// override via `--captures-dir`.
+///
+/// Invariant: this binary lives in the `core/` crate. If it ever
+/// moves, the `pop()`-to-workspace-root assumption breaks and the
+/// default path resolves to the wrong place. The `debug_assert`
+/// below catches the relocation during local dev (release builds
+/// will silently produce the wrong default — `--captures-dir`
+/// remains the escape hatch).
 fn default_captures_dir() -> PathBuf {
     if let Some(manifest) = std::env::var_os("CARGO_MANIFEST_DIR") {
         let mut p = PathBuf::from(manifest);
+        debug_assert_eq!(
+            p.file_name().and_then(|s| s.to_str()),
+            Some("core"),
+            "default_captures_dir assumes hhagent-cli lives in core/ \
+             (CARGO_MANIFEST_DIR = {p:?})"
+        );
         p.pop(); // strip `/core` to reach workspace root
         p.push("tests/observation/captures");
         return p;

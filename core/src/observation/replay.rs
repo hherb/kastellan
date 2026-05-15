@@ -124,10 +124,10 @@ pub struct LoadedCapture {
 /// `baseline = None` + `new = Some("approve")` is not a delta (same
 /// default posture). `baseline = None` + `new = Some(other)` IS a
 /// delta (a rule fired where the capture observed no verdict).
-fn is_delta(baseline: Option<&str>, new: Option<&String>) -> bool {
+fn is_delta(baseline: Option<&str>, new: Option<&str>) -> bool {
     let Some(new_kind) = new else { return false; };
     match baseline {
-        Some(b) => b != new_kind.as_str(),
+        Some(b) => b != new_kind,
         None => new_kind != "approve",
     }
 }
@@ -322,15 +322,16 @@ pub async fn replay_capture(
     let mut replayed: u32 = 0;
     let mut skipped: u32 = 0;
 
-    // Pull every agent/plan.formulate audit row in order so we can map
-    // the i-th plan iteration to its matching row for the
-    // classification_floor lookup (Slice A payload key). The audit
-    // stream is already in id-ascending order by construction.
+    // Pull every agent/plan.formulate audit row up front. We look the
+    // matching row up *by `plan_count`* per iteration (not by index)
+    // so a missing or out-of-order row produces a clean fallback to
+    // `DataClass::Public` instead of a silent off-by-one skew. The
+    // audit stream is already in id-ascending order by construction.
     let plan_rows: Vec<&CapturedAuditRow> = capture.audit_rows.iter()
         .filter(|r| r.actor == "agent" && r.action == "plan.formulate")
         .collect();
 
-    for (i, cp) in capture.plans.iter().enumerate() {
+    for cp in capture.plans.iter() {
         if cp.plan_json.is_null() {
             skipped = skipped.saturating_add(1);
             per_plan.push(ReplayedPlan {
@@ -367,11 +368,18 @@ pub async fn replay_capture(
         // Classification floor: prefer the audit-row's
         // classification_floor (post-Slice-A) over the plan's
         // data_ceiling (different concept; plan-level inferred
-        // ceiling vs task-level producer floor). Fallback: Public.
-        let classification_floor = plan_rows.get(i)
+        // ceiling vs task-level producer floor). The row is matched
+        // by `plan_count == cp.iter` so a dropped or reordered row
+        // doesn't silently misalign with the wrong iteration; fallback
+        // on no-match is `DataClass::Public` (producer default).
+        let classification_floor = plan_rows.iter()
+            .find(|r| {
+                r.payload.get("plan_count")
+                    .and_then(|v| v.as_u64())
+                    == Some(cp.iter as u64)
+            })
             .and_then(|r| r.payload.get("classification_floor"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| serde_json::from_str::<DataClass>(&format!("\"{}\"", s)).ok())
+            .and_then(|v| serde_json::from_value::<DataClass>(v.clone()).ok())
             .unwrap_or(DataClass::Public);
 
         let ctx = ReviewStageContext {
@@ -386,7 +394,7 @@ pub async fn replay_capture(
 
         let delta = is_delta(
             cp.verdict_today.as_deref(),
-            Some(&snap.kind),
+            Some(snap.kind.as_str()),
         );
 
         per_plan.push(ReplayedPlan {
@@ -480,17 +488,17 @@ mod tests {
 
     #[test]
     fn is_delta_false_when_both_approve() {
-        assert!(!is_delta(Some("approve"), Some(&"approve".to_string())));
+        assert!(!is_delta(Some("approve"), Some("approve")));
     }
 
     #[test]
     fn is_delta_true_when_baseline_approve_new_block() {
-        assert!(is_delta(Some("approve"), Some(&"block".to_string())));
+        assert!(is_delta(Some("approve"), Some("block")));
     }
 
     #[test]
     fn is_delta_true_when_baseline_approve_new_constitutional_block() {
-        assert!(is_delta(Some("approve"), Some(&"constitutional_block".to_string())));
+        assert!(is_delta(Some("approve"), Some("constitutional_block")));
     }
 
     #[test]
@@ -498,14 +506,14 @@ mod tests {
         // Baseline absent + new verdict is anything but approve = delta.
         // Operator wants to see "something fired where the capture
         // never observed a verdict."
-        assert!(is_delta(None, Some(&"block".to_string())));
+        assert!(is_delta(None, Some("block")));
     }
 
     #[test]
     fn is_delta_false_when_baseline_missing_new_approve() {
         // Baseline absent + new approve = not a delta. "Same default
         // posture" — nothing interesting to flag.
-        assert!(!is_delta(None, Some(&"approve".to_string())));
+        assert!(!is_delta(None, Some("approve")));
     }
 
     #[test]
