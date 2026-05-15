@@ -119,13 +119,45 @@ impl ClassificationViolation {
 ///
 /// Returns `Some(violation)` on the first hit (declared order: I1, I2,
 /// I3; within per-step invariants, lowest `step_index` wins); `None`
-/// on a clean plan. The body lands in Task 2 — this scaffold compiles
-/// but always returns `None` so Task 1's tests can exercise the enum
-/// shape independently.
+/// on a clean plan.
+///
+/// The three checks form a total enforcement: every plan that round-
+/// trips the helper as `None` satisfies all three invariants
+/// simultaneously. Conversely, a violating plan always surfaces the
+/// *single most fundamental* violation per the declared order —
+/// the caller never needs to interpret a list of co-occurring
+/// violations.
 pub fn screen_plan_for_classification_violations(
-    _plan: &Plan,
-    _floor: DataClass,
+    plan: &Plan,
+    floor: DataClass,
 ) -> Option<ClassificationViolation> {
+    // I1: plan.data_ceiling >= floor
+    if plan.data_ceiling.rank() < floor.rank() {
+        return Some(ClassificationViolation::CeilingBelowFloor {
+            ceiling: plan.data_ceiling,
+            floor,
+        });
+    }
+    // I2: every step.classification >= floor (lowest violating index wins)
+    for (i, s) in plan.steps.iter().enumerate() {
+        if s.classification.rank() < floor.rank() {
+            return Some(ClassificationViolation::StepClassificationBelowFloor {
+                step_index: i,
+                step_class: s.classification,
+                floor,
+            });
+        }
+    }
+    // I3: every step.classification <= plan.data_ceiling (lowest violating index wins)
+    for (i, s) in plan.steps.iter().enumerate() {
+        if s.classification.rank() > plan.data_ceiling.rank() {
+            return Some(ClassificationViolation::StepClassificationAboveCeiling {
+                step_index: i,
+                step_class: s.classification,
+                ceiling:    plan.data_ceiling,
+            });
+        }
+    }
     None
 }
 
@@ -189,21 +221,229 @@ mod tests {
         assert!(s3.contains("ClinicalConfidential"), "got: {s3}");
     }
 
-    #[test]
-    fn scaffold_screen_returns_none_today() {
-        // Task 2 fills the body. For now the scaffold returns None
-        // unconditionally so we can land the enum shape first.
-        let plan = Plan {
+    // ---- screen_plan_for_classification_violations ----
+
+    fn step(class: DataClass) -> super::super::types::PlannedStep {
+        super::super::types::PlannedStep {
+            tool: "shell-exec".into(),
+            method: "shell.exec".into(),
+            parameters: serde_json::json!({}),
+            returns: "".into(),
+            done_when: "".into(),
+            classification: class,
+        }
+    }
+
+    fn plan(ceiling: DataClass, steps: Vec<DataClass>) -> Plan {
+        Plan {
             context: "c".into(),
             decision: "act".into(),
             rationale: "r".into(),
-            steps: vec![],
+            steps: steps.into_iter().map(step).collect(),
             result: None,
-            data_ceiling: DataClass::Public,
+            data_ceiling: ceiling,
             refused: None,
-        };
+        }
+    }
+
+    #[test]
+    fn approves_clean_plan_with_default_public_floor() {
+        // All Public — the existing default shape. No invariant fires.
+        let p = plan(DataClass::Public, vec![DataClass::Public, DataClass::Public]);
         assert_eq!(
-            screen_plan_for_classification_violations(&plan, DataClass::Public),
+            screen_plan_for_classification_violations(&p, DataClass::Public),
+            None,
+        );
+    }
+
+    #[test]
+    fn approves_well_formed_clinical_plan() {
+        // floor=ClinicalConfidential, ceiling=ClinicalConfidential,
+        // every step at ClinicalConfidential. No invariant fires.
+        let p = plan(
+            DataClass::ClinicalConfidential,
+            vec![DataClass::ClinicalConfidential, DataClass::ClinicalConfidential],
+        );
+        assert_eq!(
+            screen_plan_for_classification_violations(&p, DataClass::ClinicalConfidential),
+            None,
+        );
+    }
+
+    #[test]
+    fn i1_fires_when_ceiling_below_floor() {
+        // floor=ClinicalConfidential, ceiling=Public. I1 violated.
+        let p = plan(DataClass::Public, vec![DataClass::Public]);
+        let got = screen_plan_for_classification_violations(&p, DataClass::ClinicalConfidential);
+        assert_eq!(
+            got,
+            Some(ClassificationViolation::CeilingBelowFloor {
+                ceiling: DataClass::Public,
+                floor:   DataClass::ClinicalConfidential,
+            }),
+        );
+    }
+
+    #[test]
+    fn i1_does_not_fire_when_ceiling_equal_to_floor() {
+        let p = plan(DataClass::Personal, vec![DataClass::Personal]);
+        assert_eq!(
+            screen_plan_for_classification_violations(&p, DataClass::Personal),
+            None,
+        );
+    }
+
+    #[test]
+    fn i2_fires_on_step_below_floor() {
+        // ceiling satisfies I1 (>= floor), but step 1 is Public while
+        // floor is ClinicalConfidential. I2 violated at step_index=1.
+        let p = plan(
+            DataClass::ClinicalConfidential,
+            vec![DataClass::ClinicalConfidential, DataClass::Public],
+        );
+        let got = screen_plan_for_classification_violations(&p, DataClass::ClinicalConfidential);
+        assert_eq!(
+            got,
+            Some(ClassificationViolation::StepClassificationBelowFloor {
+                step_index: 1,
+                step_class: DataClass::Public,
+                floor:      DataClass::ClinicalConfidential,
+            }),
+        );
+    }
+
+    #[test]
+    fn i2_picks_lowest_step_index_when_multiple_violate() {
+        // Both step 0 and step 2 violate I2. Lowest index (0) wins.
+        let p = plan(
+            DataClass::ClinicalConfidential,
+            vec![
+                DataClass::Public,
+                DataClass::ClinicalConfidential,
+                DataClass::Personal,
+            ],
+        );
+        let got = screen_plan_for_classification_violations(&p, DataClass::ClinicalConfidential);
+        assert_eq!(
+            got,
+            Some(ClassificationViolation::StepClassificationBelowFloor {
+                step_index: 0,
+                step_class: DataClass::Public,
+                floor:      DataClass::ClinicalConfidential,
+            }),
+        );
+    }
+
+    #[test]
+    fn i3_fires_on_step_above_ceiling() {
+        // ceiling=Public, step 0 at Personal. I1 holds (Public >= Public
+        // floor); I2 holds (Personal >= Public floor); I3 violated.
+        let p = plan(DataClass::Public, vec![DataClass::Personal]);
+        let got = screen_plan_for_classification_violations(&p, DataClass::Public);
+        assert_eq!(
+            got,
+            Some(ClassificationViolation::StepClassificationAboveCeiling {
+                step_index: 0,
+                step_class: DataClass::Personal,
+                ceiling:    DataClass::Public,
+            }),
+        );
+    }
+
+    #[test]
+    fn i3_picks_lowest_step_index_when_multiple_violate() {
+        // Both step 1 and step 2 violate I3 (ceiling=Public). Lowest
+        // index (1) wins.
+        let p = plan(
+            DataClass::Public,
+            vec![
+                DataClass::Public,
+                DataClass::Personal,
+                DataClass::ClinicalConfidential,
+            ],
+        );
+        let got = screen_plan_for_classification_violations(&p, DataClass::Public);
+        assert_eq!(
+            got,
+            Some(ClassificationViolation::StepClassificationAboveCeiling {
+                step_index: 1,
+                step_class: DataClass::Personal,
+                ceiling:    DataClass::Public,
+            }),
+        );
+    }
+
+    #[test]
+    fn i1_wins_over_i2_when_both_could_fire() {
+        // ceiling=Public, floor=ClinicalConfidential, step at Public.
+        // BOTH I1 (Public < ClinicalConfidential) AND I2 (step Public
+        // < ClinicalConfidential) fire. Declared-order precedence
+        // says I1 wins.
+        let p = plan(DataClass::Public, vec![DataClass::Public]);
+        let got = screen_plan_for_classification_violations(&p, DataClass::ClinicalConfidential);
+        assert_eq!(
+            got,
+            Some(ClassificationViolation::CeilingBelowFloor {
+                ceiling: DataClass::Public,
+                floor:   DataClass::ClinicalConfidential,
+            }),
+        );
+    }
+
+    #[test]
+    fn i2_wins_over_i3_when_both_could_fire() {
+        // ceiling=Personal, floor=Personal, step 0 at ClinicalConfidential
+        // (above ceiling -> I3), step 1 at Public (below floor -> I2).
+        // I2 runs all-steps before I3 starts, so step 1's I2 violation
+        // wins even though step 0 has a lower index than step 1.
+        let p = plan(
+            DataClass::Personal,
+            vec![
+                DataClass::ClinicalConfidential,
+                DataClass::Public,
+            ],
+        );
+        let got = screen_plan_for_classification_violations(&p, DataClass::Personal);
+        assert_eq!(
+            got,
+            Some(ClassificationViolation::StepClassificationBelowFloor {
+                step_index: 1,
+                step_class: DataClass::Public,
+                floor:      DataClass::Personal,
+            }),
+            "I2 must run all-steps before I3 starts; step 1's I2 violation wins over step 0's I3",
+        );
+    }
+
+    #[test]
+    fn empty_steps_plan_only_checks_i1() {
+        // No steps: I2 and I3 vacuously hold. I1 still applies.
+        let p = plan(DataClass::Public, vec![]);
+        // floor satisfied -> Approve
+        assert_eq!(
+            screen_plan_for_classification_violations(&p, DataClass::Public),
+            None,
+        );
+        // floor higher than ceiling -> I1 fires even with no steps
+        let got = screen_plan_for_classification_violations(&p, DataClass::Personal);
+        assert_eq!(
+            got,
+            Some(ClassificationViolation::CeilingBelowFloor {
+                ceiling: DataClass::Public,
+                floor:   DataClass::Personal,
+            }),
+        );
+    }
+
+    #[test]
+    fn higher_step_class_than_floor_is_fine() {
+        // floor=Public, step=ClinicalConfidential. This is the "I
+        // touched more-sensitive data than my output floor requires"
+        // case — fine. Combined with ceiling=ClinicalConfidential it's
+        // a clean clinical plan with a Public-floored task.
+        let p = plan(DataClass::ClinicalConfidential, vec![DataClass::ClinicalConfidential]);
+        assert_eq!(
+            screen_plan_for_classification_violations(&p, DataClass::Public),
             None,
         );
     }
