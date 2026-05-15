@@ -61,9 +61,10 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        "ask"   => run_ask(&args[2..]),
-        "tasks" => run_tasks(&args[2..]),
-        "tools" => run_tools(&args[2..]),
+        "ask"         => run_ask(&args[2..]),
+        "tasks"       => run_tasks(&args[2..]),
+        "tools"       => run_tools(&args[2..]),
+        "observation" => run_observation(&args[2..]),
         "--help" | "-h" | "help" => {
             println!("{}", help_text());
             ExitCode::from(0)
@@ -88,6 +89,7 @@ usage:
     hhagent-cli tools allowlist add    <tool> <argv0>
     hhagent-cli tools allowlist remove <tool> <argv0>
     hhagent-cli tools allowlist list   [--tool <name>]
+    hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
     hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 
 flags (audit tail):
@@ -97,6 +99,15 @@ flags (audit tail):
                     --from-start for a 'cat' of the JSONL files).
     --state-dir P   Override the state dir (default: $HHAGENT_STATE_DIR
                     or $HOME/.local/state/hhagent).
+
+flags (observation replay):
+    --captures-dir P  Override the captures directory (default:
+                      tests/observation/captures relative to
+                      CARGO_MANIFEST_DIR for cargo-run, or cwd for
+                      installed binaries).
+    --model SLUG      Filter to captures whose filename contains the
+                      slug (e.g. gemma4-26b-a4b-it-q8-0). Without it,
+                      every <fixture_id>/*.json is replayed.
 "
 }
 
@@ -761,6 +772,149 @@ async fn tools_allowlist_list(args: &[String]) -> ExitCode {
         println!("{:<16}  {:<48}  {:<24}  {}",
             e.tool, e.argv0, e.created_at, e.created_by);
     }
+    ExitCode::from(0)
+}
+
+// ============================================================
+// `observation replay` subcommand
+// ============================================================
+
+fn run_observation(args: &[String]) -> ExitCode {
+    if args.is_empty() {
+        eprintln!("usage: hhagent-cli observation replay [opts]");
+        return ExitCode::from(2);
+    }
+    match args[0].as_str() {
+        "replay" => run_observation_replay(&args[1..]),
+        other => {
+            eprintln!("observation: unknown subcommand {other}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_observation_replay(args: &[String]) -> ExitCode {
+    let mut captures_dir: Option<PathBuf> = None;
+    let mut model_filter: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--captures-dir" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => captures_dir = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--captures-dir requires a PATH argument");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--model" => {
+                i += 1;
+                match args.get(i) {
+                    Some(s) => model_filter = Some(s.clone()),
+                    None => {
+                        eprintln!("--model requires a SLUG argument");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            other => {
+                eprintln!("observation replay: unknown flag {other}");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+
+    let dir = captures_dir.unwrap_or_else(default_captures_dir);
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("observation replay: failed to build tokio runtime: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    rt.block_on(observation_replay_async(&dir, model_filter.as_deref()))
+}
+
+/// Default captures dir. For `cargo run` invocations
+/// `CARGO_MANIFEST_DIR` points at `core/`; the workspace root is one
+/// level up. For installed binaries neither env var is set; fall back
+/// to CWD-relative `tests/observation/captures`. Operator can always
+/// override via `--captures-dir`.
+fn default_captures_dir() -> PathBuf {
+    if let Some(manifest) = std::env::var_os("CARGO_MANIFEST_DIR") {
+        let mut p = PathBuf::from(manifest);
+        p.pop(); // strip `/core` to reach workspace root
+        p.push("tests/observation/captures");
+        return p;
+    }
+    PathBuf::from("tests/observation/captures")
+}
+
+async fn observation_replay_async(
+    dir: &std::path::Path,
+    model_filter: Option<&str>,
+) -> ExitCode {
+    use std::sync::Arc;
+    use hhagent_core::cassandra::review::{
+        ChainReviewStage, ConstitutionalGuard, DeterministicPolicy,
+    };
+    use hhagent_core::observation::replay::{
+        format_report_table, load_captures_from_dir, replay_capture, ReplayResult,
+    };
+
+    let loaded = match load_captures_from_dir(dir) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("observation replay: cannot open {dir:?}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if loaded.is_empty() {
+        println!("(no captures found in {})", dir.display());
+        return ExitCode::from(0);
+    }
+
+    // Production chain composition. Operator iterates by editing the
+    // ConstitutionalGuard / DeterministicPolicy bodies in
+    // core/src/cassandra/review.rs and re-running this subcommand.
+    let chain = ChainReviewStage::new(vec![
+        Arc::new(ConstitutionalGuard),
+        Arc::new(DeterministicPolicy),
+    ]);
+
+    let mut results: Vec<ReplayResult> = Vec::new();
+    let mut filtered_out: u32 = 0;
+    for entry in loaded {
+        if let Some(filter) = model_filter {
+            let fname = entry.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !fname.contains(filter) {
+                filtered_out = filtered_out.saturating_add(1);
+                continue;
+            }
+        }
+        let r = replay_capture(&entry.capture, &chain).await;
+        results.push(r);
+    }
+
+    if results.is_empty() {
+        eprintln!(
+            "observation replay: no captures matched filter (--model {} filtered out {})",
+            model_filter.unwrap_or("<none>"),
+            filtered_out,
+        );
+        return ExitCode::from(0);
+    }
+
+    print!("{}", format_report_table(&results));
     ExitCode::from(0)
 }
 
