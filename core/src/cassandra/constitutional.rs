@@ -157,12 +157,17 @@ pub fn screen_instruction_for_principle_violations(
     // by themselves (e.g. "the audit log is too noisy") are *not*
     // sufficient; the verb has to express an intent to remove
     // oversight.
-    let has_disable_verb = s.contains("disable")
+    //
+    // Single-word verbs (`disable`, `silence`, `suspend`) use whole-
+    // word matching via `contains_word` so passive/state forms like
+    // "Is the audit log disabled?" don't fire — those are diagnostic
+    // questions, not commands to suppress oversight.
+    let has_disable_verb = contains_word(&s, "disable")
         || s.contains("turn off")
         || s.contains("stop logging")
         || s.contains("pause logging")
-        || s.contains("silence")
-        || s.contains("suspend");
+        || contains_word(&s, "silence")
+        || contains_word(&s, "suspend");
     let has_oversight_object = s.contains("audit log")
         || s.contains("audit trail")
         || s.contains("the logging")
@@ -173,6 +178,30 @@ pub fn screen_instruction_for_principle_violations(
     }
 
     None
+}
+
+/// Whole-word substring check: returns true if `needle` appears in
+/// `haystack` with no ASCII alphanumeric character immediately before
+/// or after. Keeps the matching strategy in the "no regex, no NLP"
+/// spirit while preventing single-word verbs like `disable` /
+/// `silence` / `suspend` from matching their passive/state forms
+/// (`disabled`, `silenced`, `suspended`).
+///
+/// `needle` is assumed to be ASCII (every caller is a hand-written
+/// English phrase). Non-ASCII characters in `haystack` are treated as
+/// non-alphanumeric by `is_ascii_alphanumeric`, which is the desired
+/// behavior — a Unicode punctuation glyph next to the needle should
+/// not block the word boundary.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let nlen = needle.len();
+    let hlen = bytes.len();
+    haystack.match_indices(needle).any(|(pos, _)| {
+        let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+        let end = pos + nlen;
+        let after_ok = end == hlen || !bytes[end].is_ascii_alphanumeric();
+        before_ok && after_ok
+    })
 }
 
 #[cfg(test)]
@@ -359,6 +388,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn passive_disabled_state_does_not_fire_p5() {
+        // Diagnostic question, not a command. "disabled" is the
+        // adjective form of "disable" — the whole-word check on the
+        // verb must reject it so the operator can troubleshoot audit-
+        // log state without tripping the constitutional guard.
+        let q = "Is the audit log disabled? I'm not seeing any rows for the last hour.";
+        assert_eq!(
+            screen_instruction_for_principle_violations(q),
+            None,
+            "passive 'disabled?' state question must not trip P5"
+        );
+    }
+
+    #[test]
+    fn passive_silenced_state_does_not_fire_p5() {
+        // Same shape as the disabled-state test but for `silence` —
+        // pin that `silenced` (passive past-participle) does not
+        // match the `silence` verb under whole-word matching.
+        let q = "Why has the monitoring alert been silenced for the last hour?";
+        assert_eq!(
+            screen_instruction_for_principle_violations(q),
+            None,
+            "passive 'silenced' state question must not trip P5"
+        );
+    }
+
+    #[test]
+    fn passive_suspended_state_does_not_fire_p5() {
+        // Same shape for `suspend` — `suspended` as an adjective on a
+        // diagnostic question about monitoring state must not fire.
+        let q = "I notice monitoring is suspended on this node — what's the recovery procedure?";
+        assert_eq!(
+            screen_instruction_for_principle_violations(q),
+            None,
+            "passive 'suspended' state question must not trip P5"
+        );
+    }
+
     // -------- Pure-function edge cases --------
 
     #[test]
@@ -397,5 +465,38 @@ mod tests {
             Some((3, "irreversible_action_without_hitl")),
             "multi-violation prompt returns the first principle in declared order"
         );
+    }
+
+    // -------- `contains_word` helper --------
+
+    #[test]
+    fn contains_word_matches_at_start_middle_end() {
+        assert!(contains_word("disable the audit log", "disable"));
+        assert!(contains_word("please disable now", "disable"));
+        assert!(contains_word("audit log: disable", "disable"));
+    }
+
+    #[test]
+    fn contains_word_rejects_passive_and_compound_forms() {
+        assert!(!contains_word("the audit log is disabled", "disable"));
+        assert!(!contains_word("predisable everything", "disable"));
+        assert!(!contains_word("undisable now", "disable"));
+        assert!(!contains_word("silenced", "silence"));
+        assert!(!contains_word("suspended", "suspend"));
+    }
+
+    #[test]
+    fn contains_word_accepts_punctuation_boundary() {
+        // Trailing question mark / period / comma are valid word
+        // boundaries — they're not alphanumeric, so the verb still
+        // matches even when sentence-terminal.
+        assert!(contains_word("can we disable?", "disable"));
+        assert!(contains_word("disable, please", "disable"));
+        assert!(contains_word("disable.", "disable"));
+    }
+
+    #[test]
+    fn contains_word_handles_empty_haystack() {
+        assert!(!contains_word("", "disable"));
     }
 }
