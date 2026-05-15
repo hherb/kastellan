@@ -247,6 +247,20 @@ pub async fn run_to_terminal(
             );
         }
 
+        // Agent-side floor-raise: if the plan requests a higher floor than
+        // the producer set, elevate ctx BEFORE the audit row is written
+        // (so the row reflects the elevated floor + AgentRaised source)
+        // and BEFORE the reviewer chain runs (so DP sees the new floor
+        // for I1 + I2 checks).
+        if apply_floor_raise(&mut ctx, &plan) {
+            tracing::info!(
+                task_id = ctx.task_id,
+                plan_count = ctx.plan_count,
+                new_floor = ctx.classification_floor.as_pascal_str(),
+                "agent raised classification floor"
+            );
+        }
+
         write_audit_plan_formulate(pool, &ctx, &plan, &meta).await?;
 
         // 2. CASSANDRA review
@@ -386,6 +400,29 @@ pub async fn run_to_terminal(
 /// `classification_floor` (task-level DataClass) so captures carry
 /// everything the reviewer pipeline needs to be replayed offline —
 /// see `core::observation::replay`.
+/// Apply `plan.floor_request` to `ctx` if it raises the current floor.
+/// Pure side-effect on `ctx`. Returns true iff `ctx` was mutated.
+///
+/// Never lowers the floor: a `floor_request` whose rank is ≤ the
+/// current floor is a no-op (pinned by
+/// `agent_floor_request_lower_than_producer_is_ignored`).
+///
+/// On a successful raise, also flips
+/// `ctx.classification_floor_source` to `AgentRaised` and clears
+/// `ctx.classification_floor_signals` (the signals explained the
+/// original CLI inference, not the elevated floor).
+fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
+    if let Some(req) = plan.floor_request {
+        if req.rank() > ctx.classification_floor.rank() {
+            ctx.classification_floor = req;
+            ctx.classification_floor_source = ClassificationFloorSource::AgentRaised;
+            ctx.classification_floor_signals.clear();
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
@@ -591,6 +628,85 @@ mod tests {
         let err = StepOutcome::Err { code: "POLICY_DENIED".into(), detail: "no".into() };
         assert!(!ok.is_err());
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn agent_floor_request_higher_than_producer_elevates_ctx() {
+        let mut c = ctx();
+        // Start at Public (Default source).
+        assert_eq!(c.classification_floor, DataClass::Public);
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::Default);
+
+        let plan = Plan {
+            context: "c".into(), decision: "d".into(), rationale: "r".into(),
+            steps: vec![], result: None,
+            data_ceiling: DataClass::ClinicalConfidential, refused: None,
+            floor_request: Some(DataClass::ClinicalConfidential),
+        };
+        let raised = apply_floor_raise(&mut c, &plan);
+        assert!(raised);
+        assert_eq!(c.classification_floor, DataClass::ClinicalConfidential);
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::AgentRaised);
+        assert!(c.classification_floor_signals.is_empty());
+    }
+
+    #[test]
+    fn agent_floor_request_lower_than_producer_is_ignored() {
+        let mut c = ctx();
+        c.classification_floor = DataClass::ClinicalConfidential;
+        c.classification_floor_source = ClassificationFloorSource::Operator;
+
+        let plan = Plan {
+            context: "c".into(), decision: "d".into(), rationale: "r".into(),
+            steps: vec![], result: None,
+            data_ceiling: DataClass::Public, refused: None,
+            // floor_request below current floor — must NOT lower:
+            floor_request: Some(DataClass::Public),
+        };
+        let raised = apply_floor_raise(&mut c, &plan);
+        assert!(!raised, "lower floor_request must be ignored");
+        assert_eq!(c.classification_floor, DataClass::ClinicalConfidential);
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::Operator);
+    }
+
+    #[test]
+    fn agent_floor_request_equal_to_producer_is_no_op() {
+        let mut c = ctx();
+        c.classification_floor = DataClass::Personal;
+        c.classification_floor_source = ClassificationFloorSource::CliInferred;
+        c.classification_floor_signals = vec!["my_email".into()];
+
+        let plan = Plan {
+            context: "c".into(), decision: "d".into(), rationale: "r".into(),
+            steps: vec![], result: None,
+            data_ceiling: DataClass::Personal, refused: None,
+            floor_request: Some(DataClass::Personal),
+        };
+        let raised = apply_floor_raise(&mut c, &plan);
+        assert!(!raised, "equal-rank floor_request must be a no-op");
+        assert_eq!(c.classification_floor, DataClass::Personal);
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::CliInferred);
+        assert_eq!(c.classification_floor_signals, vec!["my_email".to_string()]);
+    }
+
+    #[test]
+    fn agent_floor_request_none_is_no_op() {
+        let mut c = ctx();
+        c.classification_floor = DataClass::Public;
+        c.classification_floor_source = ClassificationFloorSource::CliInferred;
+        c.classification_floor_signals = vec!["patient".into()];
+
+        let plan = Plan {
+            context: "c".into(), decision: "d".into(), rationale: "r".into(),
+            steps: vec![], result: None,
+            data_ceiling: DataClass::Public, refused: None,
+            floor_request: None,
+        };
+        let raised = apply_floor_raise(&mut c, &plan);
+        assert!(!raised);
+        // CLI inference state is preserved when there's no raise request.
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::CliInferred);
+        assert_eq!(c.classification_floor_signals, vec!["patient".to_string()]);
     }
 
     #[test]
