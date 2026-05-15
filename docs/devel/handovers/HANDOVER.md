@@ -4,9 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-15 (first real `ConstitutionalGuard` rule shipped: prompt-level constitutional screen catches 5 fixture principles as `ConstitutionalBlock`; ec-001 + safe-001 deliberately pass through; PR #67 merged; in-branch follow-up `5d48e3e` tightened P5 single-word verbs against passive-form false positives).
+**Last updated:** 2026-05-15 (first real `DeterministicPolicy` rule shipped: data-classification invariant check enforcing I1/I2/I3 over `(ctx.classification_floor, plan.data_ceiling, plan.steps[].classification)`; `hhagent-cli ask --classification-floor <DataClass>` lets operators pin the floor at submission).
 **Last commit (main):** `67d29a0` (Merge pull request #67 — first real `ConstitutionalGuard` rule). Merge brought in two CG commits: `12a7984` (the slice itself) and `5d48e3e` (post-review P5 tightening — see "Recently completed" entry below). Slice A merged earlier today via PR #61 at `67f2dac`; Slice B via PR #65 at `9c01e30`; CG slice via PR #67 at `67d29a0`. Working tree clean on `main`.
-**Session-end working state (this session, 2026-05-15):** branch merged; on `main` clean. Workspace test count **519** (post-CG +20 fixture/false-positive/edge tests landed in `12a7984`; post-P5-fix +7 tests landed in `5d48e3e`: 3 passive-form false-positive guards + 4 unit tests on the new `contains_word` helper). Zero failures, zero warnings, zero [SKIP] lines on Linux. `core/src/cassandra/constitutional.rs` is 502 LOC after the P5 fix (2 over the 500-LOC soft cap; flagged for split-per-principle if the catalogue grows further). 7 capture JSONs still on disk (pre-Slice-A shape) under `tests/observation/captures/`; harness skips them cleanly until recapture.
+**Session-end working state (this session, 2026-05-15 continuation):** branch `feat/deterministic-policy-classification` ready for PR. Workspace test count **544** (+25 across this slice: 14 in `cassandra::deterministic::tests` net of the deleted scaffold test, 4 in `cassandra::review::tests` net of the deleted stub test, 7 in `parse_classification_floor_tests`; the +1 over the "+24 in plan" came from an off-by-one I had in plan-step-7 prose, real net is +25). Zero failures, zero warnings, zero [SKIP] lines on Linux. `core/src/cassandra/deterministic.rs` is ~260 LOC, well under the 500-LOC soft cap. `core/src/bin/hhagent-cli.rs` grew ~125 LOC (helper + flag wiring + help text) and is now ~1190 LOC — over the soft cap, but that pre-existed (flagged in plan + spec; natural future split is one file per subcommand tree).
 **Earlier this session (now merged):** `feat/audit-plan-formulate-carries-plan-body` (off `main` at `7588b9e`, merged via PR #61 at `67f2dac`). Slice A: audit-row payload bump on `agent/plan.formulate` — 11 keys → 13 keys (`plan` + `classification_floor`). Test count 465 → 467. See "Recently completed (earlier this session)" entry below for the full slice.
 **Previous session (now merged):** `feat/observation-capture-baseline` (off `main` at `f1fea54`, merged via PR #60 at `7588b9e`). Plus one post-merge review-driven test pin `a812989` (`test(scheduler): pin parse_plan_lenient safety on stray-{ in prose`) — defends the "first `{` wins" contract in `core::scheduler::plan_parser` against a future refactor silently parsing the *second* `{` and letting a prose-described decoy plan slip past the contract. Workspace test count 455 → 464 (capture-baseline slice) → **465** (post-merge pin).
 **Previous-previous session (now merged):** `feat/refusal-state` (off `main` at `5f543d2`, merged via PR #59 at `f1fea54`). Closed [issue #23](https://github.com/hherb/hhagent/issues/23). Workspace test count 446 → 455 (+9 across all tasks).
@@ -141,6 +141,71 @@ cargo test --workspace           # all green
 ```
 
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile that lets `bwrap` create unprivileged user namespaces is already installed on the user's DGX Spark. Other Linux hosts may need `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses `sandbox-exec` (no setup needed).
+
+---
+
+## Recently completed (this session, 2026-05-15 continuation — first real `DeterministicPolicy` rule, branch `feat/deterministic-policy-classification`)
+
+Branch: `feat/deterministic-policy-classification` (off `main` at `67d29a0`). The first real Stage 0 reviewer rule: a deterministic check enforcing three classification invariants over `(ctx.classification_floor, plan.data_ceiling, plan.steps[].classification)`. Paired with a small CLI flag (`hhagent-cli ask --classification-floor <DataClass>`) so operators can pin the floor at task submission — the minimum-viable upstream path for the rule to fire end-to-end in production. Stage 0 was always-`Approve` before this slice; the chain now has two real reviewers (Stage -1 + Stage 0).
+
+**Shape (1 NEW module + 3 modified files + 25 new tests):**
+
+- **NEW `core/src/cassandra/deterministic.rs`** (~260 LOC, ~140 production + ~120 tests). Pure helper `screen_plan_for_classification_violations(plan: &Plan, floor: DataClass) -> Option<ClassificationViolation>`. Three invariants checked in declared order (I1 ceiling≥floor, I2 every step≥floor, I3 every step≤ceiling); first hit wins; within per-step invariants, lowest step_index wins. `ClassificationViolation` enum carries structured detail per violation (struct values); `reason_tag()` returns a snake_case identifier for grep-ability in audit-log reason strings; `format_reason()` returns a `"data-classification: <tag> — ..."` prefixed string used as the `Verdict::Block` payload.
+- **`core/src/cassandra/mod.rs`** — `pub mod deterministic;` declaration alphabetically slotted.
+- **`core/src/cassandra/review.rs`** — `DeterministicPolicy::review` body filled in; module-level doc updated (DP is no longer a stub; the second real reviewer alongside CG); `deterministic_policy_is_still_a_stub` test deleted; 4 new tests added (`deterministic_policy_approves_valid_plan` + `deterministic_policy_blocks_when_ceiling_below_floor` (I1) + `deterministic_policy_blocks_when_step_below_floor` (I2) + `deterministic_policy_blocks_when_step_above_ceiling` (I3)).
+- **`core/src/bin/hhagent-cli.rs`** — new pure helper `parse_classification_floor(raw: &str)` (case-insensitive; accepts PascalCase, lowercase, UPPERCASE, snake_case, hyphenated, space-separated; rejects empty + unknown with a "valid values: ..." message). New `--classification-floor` flag in `run_ask`'s arg loop; `ask_async` signature widened from 2 params to 3 (added `floor: Option<DataClass>`); payload conditionally gains `classification_floor: "<PascalCase>"` when set (field absent when default, preserves wire shape for existing callers). Help text usage line + new `flags (ask):` block added.
+
+**Verdict + audit-row shape (the headline):**
+
+DP violations surface as `Verdict::Block(String)` where the string carries the structured `"data-classification: <reason_tag> — <details>"` prefix. The verdict flows into the existing `cassandra:chain/verdict` audit-row payload — no schema change, no DB migration. Operators can `WHERE payload->>'verdict_kind' = 'block' AND payload->>'verdict_detail' LIKE 'data-classification:%'` to count Stage 0 fires; the `reason_tag` is the grep-friendly identifier (`ceiling_below_floor` / `step_classification_below_floor` / `step_classification_above_ceiling`).
+
+**Coverage against the 7 observation-phase fixtures** (once recapture exposes the plan bodies):
+
+| Fixture | Floor (operator-set) | DP verdict |
+| ------- | -------------------- | ---------- |
+| `safe-001-echo-marker` | Public (default) | Approve |
+| `p1`–`p5` | any | n/a — CG fires at Stage -1; chain short-circuits before DP runs |
+| `ec-001-clinical-data-leak` | ClinicalConfidential (operator pins via flag) | `Block("data-classification: step_classification_below_floor ...")` once the agent's plan body is on disk and any step is labelled below the floor |
+
+`ec-001` only fires the new rule when **both**: (a) the operator pins floor=`ClinicalConfidential` at submission via `hhagent-cli ask --classification-floor`, AND (b) the agent's plan contains a step labelled below ClinicalConfidential. The 2026-05-14 capture shows the agent self-refused before emitting any actionable outbound steps; future recapture against a less-cautious model is needed to exercise the rule end-to-end against ec-001. Not blocking — the rule itself is fully unit-test-pinned.
+
+**Test count delta:** 519 → **544** (+25 across all tasks): 14 in `cassandra::deterministic::tests` (3 enum-shape from T1 + 12 screen tests from T2, net of the deleted scaffold test); 4 in `cassandra::review::tests` (4 new − 1 deleted stub test = +3 net, but counting differently because T3's `deterministic_policy_approves_valid_plan` replaces both functionally); 7 in `parse_classification_floor_tests`. Plan estimated +24; actual is +25 — one extra Task 2 test slipped in.
+
+**TDD ordering** (per CLAUDE.md rule #2): six commits, each RED → GREEN:
+
+1. `feat(cassandra)`: scaffold `ClassificationViolation` enum + helpers (4 tests).
+2. `feat(cassandra)`: implement `screen_plan_for_classification_violations` body (+11 RED → GREEN tests, −1 scaffold test).
+3. `feat(cassandra)`: wire `DeterministicPolicy::review` to the helper (+4 new tests, −1 deleted stub).
+4. `feat(cli)`: `parse_classification_floor` pure helper standalone (7 unit tests).
+5. `feat(cli)`: `--classification-floor` flag wired into `run_ask` (no new tests; manual smoke confirmed).
+6. `docs(handover,roadmap)`: this update.
+
+Two-stage review per task (spec compliance + code quality) with one in-branch fixup amend on Task 3 (test ordering: DP tests moved to AFTER CG tests, BEFORE `stage_names_are_stable`).
+
+**What this slice deliberately does NOT do.**
+
+- **No automatic floor inference from prompt keywords.** Operator-pinned only via the new CLI flag.
+- **No anonymiser/declassifier mechanism.** A step that legitimately downgrades classification would today be blocked by I2; Phase 2 work.
+- **No DB migration.** `classification_floor` lives in `tasks.payload` JSONB; no schema change.
+- **No `Verdict::Escalate` severity-split.** Today every violation is `Block`. Splitting by severity is a future slice.
+- **No retroactive verdict on existing audit-log rows.**
+- **No CLI short-form flag.** Long form only, consistent with `--fast`/`--long`/`--state-dir`.
+- **No subprocess test for the new flag.** Helper-level unit tests + manual smoke cover it; an e2e subprocess test would require a real daemon submit-and-cancel flow which `cli_ask_e2e` already exercises at the default floor.
+- **No end-to-end fire against ec-001 in CI.** Captures retain `plan_json: null` (pre-Slice-A shape); recapture is one-time operator action.
+
+**Open follow-up surfaces (not blocking):**
+
+- **Operator recapture against current daemon** to expose plan bodies in the existing captures; afterwards, `hhagent-cli observation replay` against ec-001 with floor pinned will show a `*` delta row.
+- **Automatic floor inference** as a separate slice — either a planner-prompt hint asking the agent to declare a floor, or a CLI-side prompt-keyword classifier.
+- **Stage 0 rule catalogue growth.** Future rules (outbound-destination policy, per-tool classification deny-lists) land alongside this one; if `deterministic.rs` grows past the 500-LOC soft cap, split per rule family behind a `deterministic/mod.rs` facade.
+- **`core/src/bin/hhagent-cli.rs` size:** now ~1190 LOC. The plan/spec already flagged the soft-cap breach as pre-existing (from the Slice B observation-replay work). Natural future split: one file per subcommand tree.
+
+**Files touched (1 NEW + 4 modified + 2 docs):**
+- NEW `core/src/cassandra/deterministic.rs` (~260 LOC).
+- `core/src/cassandra/mod.rs` — module declaration.
+- `core/src/cassandra/review.rs` — DP body filled, doc updated, +4/−1 tests.
+- `core/src/bin/hhagent-cli.rs` — helper + flag wiring + help text + usage line.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
 
 ---
 
@@ -1684,7 +1749,7 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 - ~~**Rule-iteration harness — Slice A (audit-payload bump)**~~ **Shipped earlier this session 2026-05-15** on branch `feat/audit-plan-formulate-carries-plan-body`, merged via PR #61 at `67f2dac`. See "Recently completed (earlier this session)" entry above.
 - ~~**Rule-iteration harness — Slice B (the harness itself)**~~ **Shipped earlier this session 2026-05-15** on branch `feat/rule-iteration-harness`, merged via PR #65 at `9c01e30`. New pure-Rust library `core::observation::replay` + `hhagent-cli observation replay` subcommand. See "Recently completed (earlier this session)" entry above.
 - ~~**First real `ConstitutionalGuard` rule (prompt-level constitutional screen)**~~ **Shipped 2026-05-15** on branch `feat/constitutional-guard-prompt-screen`, merged via PR #67 at `67d29a0`. New pure module `core::cassandra::constitutional` carrying `screen_instruction_for_principle_violations` + `ConstitutionalGuard::review` body filled in. Catches the 5 fixture prompts as `Verdict::ConstitutionalBlock` with distinct `reason` tags; `safe-001` and `ec-001` pass through. Post-review fixup `5d48e3e` tightened P5 single-word verbs against passive-form false positives via a new `contains_word` whole-word helper; +7 tests (512 → 519). See "Recently completed" entry at the top.
-- **★ Next concrete engineering pickup — First real `DeterministicPolicy` rule** (step-level inspection of the plan body). DP is still a stub. The natural first rule is a **data-classification-floor check on the plan's steps** that closes `ec-001-clinical-data-leak`: the agent's plan includes an `email-send`-shaped step routing clinical data to a third party, and the prompt-level CG screen deliberately doesn't catch it (would need a step-level rule that inspects the plan body, not the instruction). Slice shape (sketch): new `core/src/cassandra/deterministic.rs` carrying pure `screen_plan_for_classification_violations(plan: &Plan, task_classification_floor: DataClass) -> Option<(DataClass, String)>`, called from `DeterministicPolicy::review` over `ctx.plan` + the task-level `classification_floor` now carried by `agent/plan.formulate` audit-row (Slice A shipped 2026-05-15). Operator iteration: edit DP body → rebuild → `./target/debug/hhagent-cli observation replay`. Captures must be recaptured first to expose plan bodies (pre-Slice-A captures retain `plan_json: null`; one-time operator action via `cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture`).
+- ~~**★ Next concrete engineering pickup — First real `DeterministicPolicy` rule**~~ **Shipped this session 2026-05-15 continuation** on branch `feat/deterministic-policy-classification`. See "Recently completed" entry above. **Next concrete pickup: operator recapture against the current daemon** — one-time action `cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture` that turns the pre-Slice-A capture JSONs into rule-iteration-harness-replayable inputs. Until recapture lands, the existing captures stay at `plan_json: null` and the harness skips them; once recapture lands, `hhagent-cli observation replay` against ec-001 (with `--classification-floor ClinicalConfidential` in a future replay flag — TBD) will show DP firing as a `*` delta. After recapture, the natural follow-up engineering slice is **automatic floor inference** (either a planner-prompt hint asking the agent to declare a floor, or a CLI-side prompt-keyword classifier) so non-clinical operators don't have to remember the `--classification-floor` flag.
 - **Observation phase** (spec §9) — the audit log is now rich enough to drive observation-phase SQL queries entirely from `audit_log`: every step short-circuit (`step.unknown_tool` / `step.spawn_failed`), every plan formulation (`agent/plan.formulate`), every chain review (`cassandra:chain/verdict`), every per-task lifecycle transition (`task.running`, `task.<state>`, `task.crashed`), and every per-task summary (`task.finalize` — **now also emitted for crashed tasks via the previous session's slice**) all land as rows with stable wire shapes. Practical step: same fixture-set workflow as the capture-run bullet above.
 - ~~**`task.finalize` row for crashed tasks?**~~ **Shipped 2026-05-13** as `actor='scheduler' action='task.finalize'` with `state='crashed'` and JSON-null counter fields via the new `build_crashed_finalize_payload` helper in `core::scheduler::audit` + new `emit_task_finalize_row` in `core::scheduler::crash_recovery`. Branch: `feat/crashed-finalize-row`.
 - ~~**e2e coverage for `task.finalize` with `started_at: null`**~~ **Effectively closed 2026-05-14** by the producer-cancelled-pending finalize slice (this session). The runtime-path scheduler `started_at: null` coverage is still moot by construction (scheduler never finalises a never-claimed task), but the producer-side `cli/task.finalize` row now ships exactly that shape — `started_at: null` is the load-bearing wire signal for "task was never claimed" — and `cancel_pending_task_writes_lifecycle_and_finalize_rows` asserts the JSON-null serialisation directly. The remaining theoretical scheduler-path gap could be closed by simulating a producer-cancel race against an in-flight claim, but the assertion population is empty by construction so the e2e test would have nothing to plant. Consider this item resolved.
