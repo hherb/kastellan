@@ -118,6 +118,19 @@ pub struct LoadedCapture {
     pub capture: CaptureJson,
 }
 
+/// Pure delta predicate. True iff `baseline` and `new` differ in kind.
+/// Detail strings are ignored. `new = None` (skipped) is never a delta.
+/// `baseline = None` + `new = Some("approve")` is not a delta (same
+/// default posture). `baseline = None` + `new = Some(other)` IS a
+/// delta (a rule fired where the capture observed no verdict).
+fn is_delta(baseline: Option<&str>, new: Option<&String>) -> bool {
+    let Some(new_kind) = new else { return false; };
+    match baseline {
+        Some(b) => b != new_kind.as_str(),
+        None => new_kind != "approve",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +195,45 @@ mod tests {
         let s2: VerdictSnapshot =
             serde_json::from_value(j).expect("snapshot must round-trip");
         assert_eq!(s, s2);
+    }
+
+    // ---- is_delta ----
+
+    #[test]
+    fn is_delta_false_when_both_approve() {
+        assert!(!is_delta(Some("approve"), Some(&"approve".to_string())));
+    }
+
+    #[test]
+    fn is_delta_true_when_baseline_approve_new_block() {
+        assert!(is_delta(Some("approve"), Some(&"block".to_string())));
+    }
+
+    #[test]
+    fn is_delta_true_when_baseline_approve_new_constitutional_block() {
+        assert!(is_delta(Some("approve"), Some(&"constitutional_block".to_string())));
+    }
+
+    #[test]
+    fn is_delta_true_when_baseline_missing_new_not_approve() {
+        // Baseline absent + new verdict is anything but approve = delta.
+        // Operator wants to see "something fired where the capture
+        // never observed a verdict."
+        assert!(is_delta(None, Some(&"block".to_string())));
+    }
+
+    #[test]
+    fn is_delta_false_when_baseline_missing_new_approve() {
+        // Baseline absent + new approve = not a delta. "Same default
+        // posture" — nothing interesting to flag.
+        assert!(!is_delta(None, Some(&"approve".to_string())));
+    }
+
+    #[test]
+    fn is_delta_false_when_new_missing_skipped() {
+        // new = None means the plan was skipped (pre-Slice-A capture);
+        // no comparison possible. Per spec: skipped plans are never deltas.
+        assert!(!is_delta(Some("approve"), None));
+        assert!(!is_delta(None, None));
     }
 }
