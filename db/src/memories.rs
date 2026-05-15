@@ -108,6 +108,10 @@ fn limit_as_i64(k: usize) -> i64 {
 pub enum MemoryLayer {
     /// L0 — meta-rules / hard constraints (e.g. "never `rm -rf`").
     /// Hand-curated seed data only; never written by the agent itself.
+    /// [`insert_memory_at_layer`] **rejects** this variant with
+    /// [`DbError::PolicyViolation`]; the only writer path is
+    /// [`seed_meta_memory`], deliberately named so a `grep` over the
+    /// tree surfaces every L0 write site.
     Meta = 0,
     /// L1 — insight index. Small routing pointers loaded
     /// unconditionally into every system prompt by
@@ -499,10 +503,17 @@ where
 /// Insert a memory row tagged with an explicit layer.
 ///
 /// [`insert_memory`] is the shorthand for the L2 (Stable) case; callers
-/// that genuinely mean L0 / L1 / L3 / L4 must use this helper and say
-/// so. The DB-level `DEFAULT 2` on the column belongs to the plain
+/// that genuinely mean L1 / L3 / L4 must use this helper and say so.
+/// The DB-level `DEFAULT 2` on the column belongs to the plain
 /// `insert_memory` SQL shape — this helper passes the layer explicitly
 /// so a future column-default change can't silently affect L1 writers.
+///
+/// **L0 ([`MemoryLayer::Meta`]) is rejected here** with
+/// [`DbError::PolicyViolation`]. L0 is reserved for hand-curated
+/// meta-rules ("never `rm -rf`") that constrain the agent itself; the
+/// agent loop must never grow its own constraints. Seed inserts go
+/// through [`seed_meta_memory`] instead — a separate, explicitly named
+/// admin path so a code review can see L0 writes at a glance.
 ///
 /// Layer-CHECK violation is unreachable through this signature: the
 /// [`MemoryLayer`] enum is the only producer of the bound value, and
@@ -510,6 +521,51 @@ where
 /// mismatch is rejected up front by the shared [`check_embedding_dim`]
 /// helper (same operator-readable shape as [`insert_memory`]).
 pub async fn insert_memory_at_layer<'e, E>(
+    executor: E,
+    body: &str,
+    metadata: &serde_json::Value,
+    embedding: Option<&[f32]>,
+    layer: MemoryLayer,
+) -> Result<i64, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if matches!(layer, MemoryLayer::Meta) {
+        return Err(DbError::PolicyViolation(
+            "L0 (Meta) writes must go through seed_meta_memory; \
+             insert_memory_at_layer is for L1/L3/L4 only"
+                .to_string(),
+        ));
+    }
+    insert_row_at_layer_unchecked(executor, body, metadata, embedding, layer).await
+}
+
+/// Insert an L0 (meta-rule) memory row.
+///
+/// Separate from [`insert_memory_at_layer`] on purpose: L0 rows are
+/// hard agent-constraints (e.g. "never `rm -rf`") and a `grep` for this
+/// function name is the auditable record of every place the codebase
+/// chose to grow L0. The agent loop must not call this — only operator
+/// tooling / migrations / seed scripts should.
+///
+/// The body of this function is intentionally a thin pass-through to
+/// the shared writer; the value-add is the named entry point.
+pub async fn seed_meta_memory<'e, E>(
+    executor: E,
+    body: &str,
+    metadata: &serde_json::Value,
+    embedding: Option<&[f32]>,
+) -> Result<i64, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    insert_row_at_layer_unchecked(executor, body, metadata, embedding, MemoryLayer::Meta).await
+}
+
+/// Internal writer shared by [`insert_memory_at_layer`] and
+/// [`seed_meta_memory`]. Bypasses the L0 policy check — callers above
+/// are responsible for upholding the policy.
+async fn insert_row_at_layer_unchecked<'e, E>(
     executor: E,
     body: &str,
     metadata: &serde_json::Value,
@@ -557,12 +613,17 @@ where
 
 /// Load up to `cap` rows at the specified layer, newest first.
 ///
-/// Returns rows in `(created_at DESC, id DESC)` order so the caller gets
-/// stable, deterministic ordering across calls with the same `cap`. The
-/// `(layer, created_at DESC)` index from migration 0013 covers this
-/// query directly; the id tiebreaker is a sequential lookup on the
-/// already-narrow result set (no second index needed at L1's expected
-/// cardinality).
+/// Returns rows in `(created_at DESC, id DESC)` order. The `id DESC`
+/// tiebreaker is deliberate: `created_at` is `now()`-sourced at insert
+/// time and Postgres clock resolution is microseconds, so two L1 rows
+/// inserted in the same `tokio::spawn` burst can collide on
+/// `created_at`. The tiebreaker keeps `load_layer` deterministic for
+/// tests that seed rows sequentially without sleeping. The
+/// `(layer, created_at DESC)` index from migration 0013 covers the
+/// filter and the primary sort; the `id DESC` tiebreaker is resolved
+/// in memory over the already-narrow result set (no second index
+/// needed at L1's expected cardinality — if L4 / Digest grows large,
+/// reconsider).
 ///
 /// `cap = 0` is a fast-path no-op (no SQL issued). Rows whose layer
 /// column reads back as an out-of-range SMALLINT surface as

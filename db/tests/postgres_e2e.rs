@@ -1618,11 +1618,17 @@ async fn memories_layer_default_is_stable() {
     pool.close().await;
 }
 
-/// `insert_memory_at_layer` round-trips each MemoryLayer value, and
-/// `load_layer` filters strictly by layer (no cross-layer leakage).
+/// `insert_memory_at_layer` round-trips each non-L0 layer, and the L0
+/// admin path `seed_meta_memory` round-trips the L0 case. `load_layer`
+/// filters strictly by layer (no cross-layer leakage). The L0
+/// rejection contract is asserted at the bottom of this test (kept in
+/// one place to avoid spinning up a second PG cluster — the rejection
+/// short-circuits before any SQL is issued).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn insert_memory_at_layer_round_trip() {
-    use hhagent_db::memories::{insert_memory_at_layer, load_layer, MemoryLayer};
+    use hhagent_db::memories::{
+        insert_memory_at_layer, load_layer, seed_meta_memory, MemoryLayer,
+    };
 
     if skip_if_no_supervisor() {
         return;
@@ -1652,16 +1658,20 @@ async fn insert_memory_at_layer_round_trip() {
         .await
         .expect("pool");
 
-    let layers = [
-        (MemoryLayer::Meta, "meta-l0"),
+    let l0_id = seed_meta_memory(&pool, "meta-l0", &serde_json::json!({}), None)
+        .await
+        .expect("seed L0");
+
+    let non_l0 = [
         (MemoryLayer::Index, "index-l1"),
         (MemoryLayer::Stable, "stable-l2"),
         (MemoryLayer::Skill, "skill-l3"),
         (MemoryLayer::Digest, "digest-l4"),
     ];
 
-    let mut inserted_ids: Vec<(MemoryLayer, i64, &str)> = Vec::with_capacity(layers.len());
-    for (layer, body) in layers.iter().copied() {
+    let mut inserted_ids: Vec<(MemoryLayer, i64, &str)> = Vec::with_capacity(5);
+    inserted_ids.push((MemoryLayer::Meta, l0_id, "meta-l0"));
+    for (layer, body) in non_l0.iter().copied() {
         let id = insert_memory_at_layer(&pool, body, &serde_json::json!({}), None, layer)
             .await
             .expect("insert at layer");
@@ -1694,6 +1704,39 @@ async fn insert_memory_at_layer_round_trip() {
         );
         assert_eq!(rows[0].body, body);
     }
+
+    // Policy: insert_memory_at_layer must reject L0 (Meta) — the only
+    // legitimate L0 writer is seed_meta_memory above. The rejection
+    // happens before any SQL is issued, so we exercise it on the same
+    // pool to avoid spinning up a separate cluster.
+    let rejected = insert_memory_at_layer(
+        &pool,
+        "l0 via agent-loop path (forbidden)",
+        &serde_json::json!({}),
+        None,
+        MemoryLayer::Meta,
+    )
+    .await;
+    match rejected {
+        Err(hhagent_db::DbError::PolicyViolation(msg)) => {
+            assert!(
+                msg.contains("L0") && msg.contains("seed_meta_memory"),
+                "PolicyViolation message must name L0 and the correct admin path; got: {msg}"
+            );
+        }
+        Err(other) => panic!("expected DbError::PolicyViolation, got {other:?}"),
+        Ok(id) => panic!("L0 write via insert_memory_at_layer must be rejected; got id {id}"),
+    }
+
+    // The rejection must not have created any row in `memories`.
+    let l0_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE layer = 0")
+        .fetch_one(&pool)
+        .await
+        .expect("count L0 rows");
+    assert_eq!(
+        l0_count, 1,
+        "exactly one L0 row from seed_meta_memory; rejected insert must not have leaked into memories"
+    );
 
     pool.close().await;
 }

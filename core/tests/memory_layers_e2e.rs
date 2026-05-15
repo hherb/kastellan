@@ -9,16 +9,21 @@
 //!   2. `load_l1` returns only L1 rows, newest-first, ignoring rows at
 //!      every other layer.
 //!   3. The `cap_rows` knob hard-caps the row count.
-//!   4. The `cap_bytes` knob hard-caps the cumulative body length; a
-//!      single oversized row is dropped silently.
+//!   4. The `cap_bytes` knob hard-caps the cumulative body length; an
+//!      over-budget single row is dropped (with a `tracing::warn!`).
+//!   5. `load_l1_default` is observationally equivalent to `load_l1`
+//!      with the published default caps — the convenience wrapper
+//!      cannot silently empty the L1 block via a fat-fingered `0`.
 //!
 //! Skips silently with `[SKIP]` lines on hosts without Postgres or a
 //! reachable supervisor; `cargo test -- --nocapture` to see them.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::memory::layers::{load_l1, L1_DEFAULT_CAP_BYTES, L1_DEFAULT_CAP_ROWS};
-use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+use hhagent_core::memory::layers::{
+    load_l1, load_l1_default, L1_DEFAULT_CAP_BYTES, L1_DEFAULT_CAP_ROWS,
+};
+use hhagent_db::memories::{insert_memory_at_layer, seed_meta_memory, MemoryLayer};
 use hhagent_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
@@ -111,13 +116,17 @@ fn load_l1_returns_only_l1_rows_newest_first() {
         // newest-first ordering when there's exactly one L1 row, but
         // it does pin the cross-layer no-leakage contract: even
         // though L0/L2/L3/L4 rows are written *after* the L1 row,
-        // load_l1 still returns only the L1 row.
+        // load_l1 still returns only the L1 row. L0 goes through
+        // `seed_meta_memory` (insert_memory_at_layer rejects L0 by
+        // contract — see `seed_meta_memory` doc).
         let l1_body = "l1 routing pointer to skill X";
         let _ = insert_memory_at_layer(&pool, l1_body, &serde_json::json!({}), None, MemoryLayer::Index)
             .await
             .expect("insert L1");
+        seed_meta_memory(&pool, "meta rule", &serde_json::json!({}), None)
+            .await
+            .expect("seed L0");
         for (layer, body) in [
-            (MemoryLayer::Meta, "meta rule"),
             (MemoryLayer::Stable, "stable fact"),
             (MemoryLayer::Skill, "skill template"),
             (MemoryLayer::Digest, "session digest"),
@@ -258,9 +267,11 @@ fn load_l1_respects_byte_cap() {
             l1.len()
         );
 
-        // At 100-byte budget: the first row alone (2048 > 100) is
-        // dropped silently by the byte loop's `break`. Expected: 0
-        // rows.
+        // At 100-byte budget: the first row alone (2048 > 100) so the
+        // byte loop breaks before pushing it; an over-budget *single*
+        // row also emits `tracing::warn!` (not asserted here — the
+        // warn-on-drop branch is exercised, the side effect is for
+        // operator logs). Expected: 0 rows.
         let l1 = load_l1(&pool, 32, 100).await.expect("load_l1 with cap_bytes=100");
         assert_eq!(
             l1.len(),
@@ -268,6 +279,72 @@ fn load_l1_respects_byte_cap() {
             "no L1 row fits under a 100-byte cap; got {} rows",
             l1.len()
         );
+
+        pool.close().await;
+    });
+}
+
+#[test]
+fn load_l1_default_matches_explicit_default_caps() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l1d-d",
+        "l1d-l",
+        &format!("hhagent-supervisor-test-pg-l1default-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "load-l1-default"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Three small L1 rows so neither cap can plausibly intervene
+        // — the parity claim is observable only when the budget is not
+        // the limiting factor in either call.
+        for i in 0..3 {
+            insert_memory_at_layer(
+                &pool,
+                &format!("l1 row #{i}"),
+                &serde_json::json!({}),
+                None,
+                MemoryLayer::Index,
+            )
+            .await
+            .expect("insert L1");
+        }
+
+        let via_default = load_l1_default(&pool).await.expect("load_l1_default");
+        let via_explicit = load_l1(&pool, L1_DEFAULT_CAP_ROWS, L1_DEFAULT_CAP_BYTES)
+            .await
+            .expect("load_l1 with explicit defaults");
+
+        assert_eq!(
+            via_default.len(),
+            via_explicit.len(),
+            "row count must match between load_l1_default and explicit-default call"
+        );
+        for (a, b) in via_default.iter().zip(via_explicit.iter()) {
+            assert_eq!(a.id, b.id, "id must match for the same prefix slot");
+            assert_eq!(a.body, b.body, "body must match for the same prefix slot");
+            assert_eq!(a.layer, b.layer, "layer must match for the same prefix slot");
+        }
 
         pool.close().await;
     });

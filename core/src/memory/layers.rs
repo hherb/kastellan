@@ -48,23 +48,28 @@ pub const L1_DEFAULT_CAP_BYTES: usize = 4096;
 
 /// Load L1 rows for prompt pinning.
 ///
-/// Returns at most `cap_rows`, truncating earlier if the cumulative
-/// body byte length would exceed `cap_bytes`. Rows come back
-/// newest-first (`(created_at DESC, id DESC)` from
+/// Returns at most `cap_rows`, truncating earlier if pushing the next
+/// row would make the cumulative body byte length *strictly exceed*
+/// `cap_bytes`. The boundary is inclusive — rows that fill `cap_bytes`
+/// exactly still fit. Rows come back newest-first
+/// (`(created_at DESC, id DESC)` from
 /// [`hhagent_db::memories::load_layer`]); the caller concatenates them
 /// into the system prompt verbatim.
 ///
 /// Returns `Ok(vec![])` when no L1 rows exist — that is the expected
 /// state until something explicitly writes one. Not an error.
 ///
-/// A row whose body alone exceeds `cap_bytes` is dropped silently: the
-/// byte loop breaks before pushing it. The conservative choice — an
-/// over-budget single row would blow the prompt. A future slice may
-/// add `tracing::warn!` here once there's a log-volume budget for this
-/// class of warning.
+/// A row whose body alone exceeds `cap_bytes` is dropped (the byte
+/// loop breaks before pushing it) and a `tracing::warn!` is emitted
+/// with the row id and the over-budget size so an operator can either
+/// retire the row or raise the budget. The conservative choice — an
+/// over-budget single row would blow the prompt — but the drop is no
+/// longer silent.
 ///
 /// `cap_rows = 0` or `cap_bytes = 0` returns `Ok(vec![])` immediately
-/// (the caller asked for nothing).
+/// (the caller asked for nothing). Most callers should not pass `0`
+/// by accident — prefer [`load_l1_default`], which pins the published
+/// defaults so a fat-fingered `0` can't silently empty the L1 block.
 pub async fn load_l1(
     pool: &PgPool,
     cap_rows: usize,
@@ -86,12 +91,38 @@ pub async fn load_l1(
         // > cap_bytes` — overflow becomes "definitely over the cap,"
         // which is the safe direction.
         if bytes_used.saturating_add(row_bytes) > cap_bytes {
+            // Distinguish "one row is by itself over budget" (operator
+            // signal: retire the row or raise the cap) from "the
+            // budget is just full" (expected exit condition). The
+            // former gets a `tracing::warn!` with the offending id so
+            // it surfaces in logs; the latter stays silent.
+            if acc.is_empty() && row_bytes > cap_bytes {
+                tracing::warn!(
+                    memory_id = row.id,
+                    row_bytes,
+                    cap_bytes,
+                    "load_l1: dropping L1 row whose body alone exceeds cap_bytes; \
+                     prompt pinning will skip it"
+                );
+            }
             break;
         }
         bytes_used += row_bytes;
         acc.push(row);
     }
     Ok(acc)
+}
+
+/// Convenience wrapper over [`load_l1`] that pins the published
+/// defaults ([`L1_DEFAULT_CAP_ROWS`], [`L1_DEFAULT_CAP_BYTES`]).
+///
+/// Prefer this from the prompt assembler. It exists specifically so
+/// a caller cannot accidentally pass `cap_rows = 0` or `cap_bytes = 0`
+/// (which silently empty the L1 block) — overriding the caps requires
+/// calling [`load_l1`] explicitly, which forces the override to be
+/// deliberate at the call site.
+pub async fn load_l1_default(pool: &PgPool) -> Result<Vec<Memory>, DbError> {
+    load_l1(pool, L1_DEFAULT_CAP_ROWS, L1_DEFAULT_CAP_BYTES).await
 }
 
 #[cfg(test)]
