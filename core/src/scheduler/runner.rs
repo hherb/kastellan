@@ -311,6 +311,9 @@ async fn run_one(
         lane: task.lane,
         instruction,
         classification_floor,
+        // Default until Task 5 reads source + signals from `task.payload`.
+        classification_floor_source: crate::scheduler::inner_loop::ClassificationFloorSource::Default,
+        classification_floor_signals: vec![],
         plans: vec![],
         advisories: vec![],
         blocks: vec![],

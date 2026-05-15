@@ -387,6 +387,8 @@ fn make_ctx(task_id: i64, max_plans: u32) -> TaskContext {
         lane: Lane::Fast,
         instruction: "ping".into(),
         classification_floor: DataClass::Public,
+        classification_floor_source: hhagent_core::scheduler::inner_loop::ClassificationFloorSource::Default,
+        classification_floor_signals: vec![],
         plans: vec![],
         advisories: vec![],
         blocks: vec![],
