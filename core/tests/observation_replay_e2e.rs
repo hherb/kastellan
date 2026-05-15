@@ -23,6 +23,7 @@ fn approve_baseline_capture() -> CaptureJson {
         result: Some(serde_json::json!({"kind": "text", "body": "ok"})),
         data_ceiling: DataClass::Public,
         refused: None,
+        floor_request: None,
     };
     let plan_value = serde_json::to_value(&plan).unwrap();
     CaptureJson {

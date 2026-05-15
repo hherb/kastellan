@@ -738,6 +738,7 @@ mod tests {
             result: Some(serde_json::json!({"kind": "text", "body": "ok"})),
             data_ceiling: DataClass::Public,
             refused: None,
+            floor_request: None,
         }
     }
 

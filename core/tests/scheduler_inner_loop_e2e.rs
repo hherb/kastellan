@@ -357,6 +357,7 @@ fn task_complete_plan(body: &str) -> Plan {
         result: Some(serde_json::json!({"kind": "text", "body": body})),
         data_ceiling: DataClass::Public,
         refused: None,
+        floor_request: None,
     }
 }
 
@@ -376,6 +377,7 @@ fn one_step_plan(tool: &str, method: &str) -> Plan {
         result: None,
         data_ceiling: DataClass::Public,
         refused: None,
+        floor_request: None,
     }
 }
 
@@ -684,6 +686,7 @@ async fn refusal_plan_terminates_with_state_refused() {
             principle: 1,
             reason: "physical_harm".into(),
         }),
+        floor_request: None,
     };
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
@@ -791,6 +794,7 @@ async fn reviewer_constitutional_block_wins_over_agent_refusal() {
             principle: 1,
             reason: "physical_harm_agent_side".into(),
         }),
+        floor_request: None,
     };
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
@@ -852,6 +856,7 @@ async fn verdict_block_on_refusal_plan_does_not_loop() {
             principle: 4,
             reason: "privacy_violation".into(),
         }),
+        floor_request: None,
     };
 
     // Only one plan is queued. If the loop incorrectly `continue`s on

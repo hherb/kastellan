@@ -350,6 +350,7 @@ fn task_complete_plan(body: &str) -> Plan {
         result: Some(serde_json::json!({"kind": "text", "body": body})),
         data_ceiling: DataClass::Public,
         refused: None,
+        floor_request: None,
     }
 }
 
@@ -369,6 +370,7 @@ fn one_step_plan(tool: &str, method: &str) -> Plan {
         result: None,
         data_ceiling: DataClass::Public,
         refused: None,
+        floor_request: None,
     }
 }
 

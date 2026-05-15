@@ -540,6 +540,7 @@ mod tests {
             result: None,
             data_ceiling: DataClass::Personal,
             refused: None,
+            floor_request: None,
         };
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
@@ -589,6 +590,7 @@ mod tests {
             result: Some(serde_json::json!({"kind": "text", "body": "ok"})),
             data_ceiling: DataClass::Public,
             refused: None,
+            floor_request: None,
         };
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
@@ -629,6 +631,7 @@ mod tests {
                 result: None,
                 data_ceiling: DataClass::Public,
                 refused: None,
+                floor_request: None,
             },
             vec![StepOutcome::Ok(serde_json::json!("x")), StepOutcome::Err {
                 code: "POLICY_DENIED".into(), detail: "no".into(),

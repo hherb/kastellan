@@ -256,6 +256,7 @@ mod tests {
             result: None,
             data_ceiling: ceiling,
             refused: None,
+            floor_request: None,
         }
     }
 
