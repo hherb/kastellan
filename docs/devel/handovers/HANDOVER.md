@@ -4,9 +4,10 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-15 (Slice A of rule-iteration harness shipped: agent/plan.formulate audit-row payload now carries full Plan + classification_floor).
-**Last commit (main):** `7588b9e` (Merge pull request #60). This session is on branch `feat/audit-plan-formulate-carries-plan-body` carrying 6 commits (4 docs + 2 implementation: 1 feat + 1 e2e test pin) on top of main; PR [#61](https://github.com/hherb/hhagent/pull/61) open.
-**Session-end working state (this session, 2026-05-15):** clean on branch `feat/audit-plan-formulate-carries-plan-body`. Workspace test count **467** (post-A1 +2 unit tests); zero failures, zero warnings, zero [SKIP] lines on Linux. 7 capture JSONs on disk from the previous session under `tests/observation/captures/`.
+**Last updated:** 2026-05-15 (Slice B of rule-iteration harness shipped: `core::observation::replay` library + `hhagent-cli observation replay` subcommand).
+**Last commit (main):** `243440f` (Merge pull request #64 — L1 always-in-context insight-index design docs; storage primitives queued in a future slice). Slice A merged earlier today via PR #61 at `67f2dac` (since then docs-only PR #64 landed). This session is on branch `feat/rule-iteration-harness` carrying 8 implementation commits (1 scaffold + 4 helpers + 2 e2e + 1 CLI + 1 CLI e2e) on top of main; PR to be opened after the docs commit lands.
+**Session-end working state (this session, 2026-05-15):** clean on branch `feat/rule-iteration-harness`. Workspace test count **492** (post-Slice-B +25: 6 VerdictSnapshot + 6 is_delta + 6 format_report_table + 2 replay_capture unit + 2 e2e library + 3 e2e CLI); zero failures, zero warnings, zero [SKIP] lines on Linux. 7 capture JSONs still on disk (pre-Slice-A shape) under `tests/observation/captures/`; the harness skips them cleanly via `plans_skipped_missing_body` until the operator recaptures.
+**Earlier this session (now merged):** `feat/audit-plan-formulate-carries-plan-body` (off `main` at `7588b9e`, merged via PR #61 at `67f2dac`). Slice A: audit-row payload bump on `agent/plan.formulate` — 11 keys → 13 keys (`plan` + `classification_floor`). Test count 465 → 467. See "Recently completed (earlier this session)" entry below for the full slice.
 **Previous session (now merged):** `feat/observation-capture-baseline` (off `main` at `f1fea54`, merged via PR #60 at `7588b9e`). Plus one post-merge review-driven test pin `a812989` (`test(scheduler): pin parse_plan_lenient safety on stray-{ in prose`) — defends the "first `{` wins" contract in `core::scheduler::plan_parser` against a future refactor silently parsing the *second* `{` and letting a prose-described decoy plan slip past the contract. Workspace test count 455 → 464 (capture-baseline slice) → **465** (post-merge pin).
 **Previous-previous session (now merged):** `feat/refusal-state` (off `main` at `5f543d2`, merged via PR #59 at `f1fea54`). Closed [issue #23](https://github.com/hherb/hhagent/issues/23). Workspace test count 446 → 455 (+9 across all tasks).
 
@@ -94,7 +95,7 @@ hhagent (Rust workspace, 9 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 465 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on `main` at `7588b9e` + post-merge fixup `a812989` (the stray-`{` regression pin adds 1 unit test to `plan_parser`). Earlier checkpoints: 464 on the PR #60 branch tip just before the post-merge fixup; 455 on `main` at `f1fea54` (PR #59 merge of `feat/refusal-state`). Earlier checkpoints: 446 on `feat/sandbox-cpu-rlimit-quota` (Option G); 429 on `chore/issues-batch-2026-05-14` (post-PR #54); 349 on `feat/memory-graph-lane`; 342 on `main` at `97f2743` (pre-graph-lane). The +9 jump from the previous session is the issue #23 (constitutional refusal state) work: 3 new `Plan` shape pins in `cassandra::types::tests`, 1 new `Outcome::Refused` payload pin in `scheduler::inner_loop::tests`, 1 new `tasks_state_refused_passes_check_constraint` DB integration test, 3 new scenarios in `scheduler_inner_loop_e2e` (`refusal_plan_terminates_with_state_refused`, `reviewer_constitutional_block_wins_over_agent_refusal`, plus the post-handover-review `verdict_block_on_refusal_plan_does_not_loop` scenario added in commit `91a792d`), and 1 extension of the existing `outcome_final_state_mapping` test. Three pre-existing doctests in `hhagent-core`, `hhagent-sandbox`, and `hhagent-worker-prelude` are `ignored` (explicit markers).
+**`cargo test --workspace` on Linux: 492 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** on branch `feat/rule-iteration-harness` (off `main` at `243440f`). Earlier checkpoints: 467 on `main` at `67f2dac` (PR #61 merge of Slice A — audit-payload bump); 465 on `main` at `7588b9e` + post-merge fixup `a812989` (the stray-`{` regression pin adds 1 unit test to `plan_parser`); 464 on the PR #60 branch tip just before the post-merge fixup; 455 on `main` at `f1fea54` (PR #59 merge of `feat/refusal-state`). Earlier checkpoints: 446 on `feat/sandbox-cpu-rlimit-quota` (Option G); 429 on `chore/issues-batch-2026-05-14` (post-PR #54); 349 on `feat/memory-graph-lane`; 342 on `main` at `97f2743` (pre-graph-lane). The +9 jump from the previous session is the issue #23 (constitutional refusal state) work: 3 new `Plan` shape pins in `cassandra::types::tests`, 1 new `Outcome::Refused` payload pin in `scheduler::inner_loop::tests`, 1 new `tasks_state_refused_passes_check_constraint` DB integration test, 3 new scenarios in `scheduler_inner_loop_e2e` (`refusal_plan_terminates_with_state_refused`, `reviewer_constitutional_block_wins_over_agent_refusal`, plus the post-handover-review `verdict_block_on_refusal_plan_does_not_loop` scenario added in commit `91a792d`), and 1 extension of the existing `outcome_final_state_mapping` test. Three pre-existing doctests in `hhagent-core`, `hhagent-sandbox`, and `hhagent-worker-prelude` are `ignored` (explicit markers).
 **macOS (main):** 299 all pass on macOS (skip-as-pass for PG-dependent tests); Option O additions not yet verified on macOS (embedding TCP mock tests are cross-platform clean; the `embedding_recall_e2e` skip-as-pass path is expected).
 
 **Known flake fixed this session:** `tasks_lifecycle_e2e` (in `db/tests/postgres_e2e.rs`) had a structural deadlock — `pool.close().await` blocks until all `max_connections` permits are released, but two `PgListener`s were still in scope when close() was called. The multi-thread tokio runtime exposed it reliably (90 s+ hang) while the single-thread runtime variant in `audit_helpers_pool_and_notify_round_trip` (same pattern, one listener) had been passing on timing. Fix: explicitly `drop(listener)` before `pool.close().await`. Applied preemptively to `audit_helpers_pool_and_notify_round_trip` too so the latent flake there is closed out as well.
@@ -143,7 +144,77 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-15 — Slice A: audit-payload bump on agent/plan.formulate, branch `feat/audit-plan-formulate-carries-plan-body`)
+## Recently completed (this session, 2026-05-15 — Slice B: rule-iteration harness, branch `feat/rule-iteration-harness`)
+
+Branch: `feat/rule-iteration-harness` (off `main` at `243440f`). The harness that turns captured plans into an offline iteration loop for `ConstitutionalGuard` + `DeterministicPolicy` rule sets. Stubs still always-`Approve`; this slice ships the mechanism so the operator can edit a real rule body, rebuild, re-run, and read off per-fixture verdict deltas — no daemon, no DB, no LLM.
+
+**Shape (1 NEW library + 1 modified CLI + 2 NEW integration test files):**
+
+- **NEW `core/src/observation/replay.rs` (~580 LOC incl. tests).** Public surface: `VerdictSnapshot::from_verdict`, `ReplayedPlan`, `ReplayResult`, `LoadedCapture`; pure `is_delta` + `render_new_verdict` + `format_report_table`; async `replay_capture(capture, chain) -> ReplayResult`; I/O `load_captures_from_dir(dir) -> Result<Vec<LoadedCapture>>`. Skips a plan with `plan_json: null` via `plans_skipped_missing_body` counter — never fabricates synthetic Plan from derived fields (would let the operator design rules against fake inputs). Classification floor preference: audit-row's `classification_floor` (post-Slice-A) > `DataClass::Public` default. Bare per-plan deserialise failure on a non-null `plan_json` surfaces as a skip with a distinct reason so corruption is operator-visible.
+- **`core/src/observation/mod.rs`** — `pub mod replay;` declared alongside `pub mod capture;`.
+- **`core/src/bin/hhagent-cli.rs`** — new `observation` top-level subcommand routing to `run_observation_replay` (hand-rolled argv, no clap dep; same shape as the existing `tools allowlist` tree). `--captures-dir PATH` + `--model SLUG` flags; default captures-dir resolves via `CARGO_MANIFEST_DIR` for `cargo run`, falls back to cwd-relative for installed binaries. Help text updated.
+- **NEW `core/tests/observation_replay_e2e.rs`** — 2 library-level scenarios using synthetic `CaptureJson` written to a per-test `TempDir`: (1) approve baseline with full `plan` body → no delta; (2) pre-Slice-A capture (`plan_json: null`) → skipped with reason.
+- **NEW `core/tests/observation_replay_cli_e2e.rs`** — 3 subprocess scenarios via `hhagent_tests_common::cli_binary`: (1) happy path (synthetic approve baseline writes to tempdir; subprocess prints fixture row + "1 plans across 1 fixtures" summary line; exit 0); (2) unknown-flag → exit 2; (3) empty captures dir → exit 0 + "no captures found" hint.
+
+**Report format (the headline operator artefact):**
+
+```
+fixture                                  iter  baseline    new                         d?
+--------------------------------------  ----  ----------- --------------------------- --
+safe-001-echo-marker                       1  approve     approve                      .
+p1-001-physical-harm-instructions          1  approve     constitutional_block(p=1)    *
+p2-001-impersonation                       1  approve     [skipped: plan body missin]  -
+
+3 plans across 3 fixtures . 1 delta . 1 skipped
+```
+
+ASCII-only; fixed column widths; grep-friendly. Markers `.` (no delta) / `*` (delta) / `-` (skipped). Constitutional blocks render with principle index (`constitutional_block(p=1)`); escalates with severity (`escalate(high)`); others as bare kind.
+
+**Delta semantics** (pinned by `is_delta` unit tests):
+- `new = None` (skipped) is never a delta — no comparison possible.
+- `baseline = None` + `new = "approve"` is not a delta (same default posture).
+- `baseline = None` + `new = anything-else` IS a delta (a rule fired where the capture observed no verdict — operator wants to see that).
+- `baseline = "approve"` + `new = "block"` IS a delta. Detail strings ignored.
+
+**Operator iteration loop:** edit `ConstitutionalGuard::review` (or `DeterministicPolicy::review`) body in `core/src/cassandra/review.rs` → `cargo build --bin hhagent-cli` → `./target/debug/hhagent-cli observation replay`. Deterministic; no daemon spin-up cost.
+
+**Test count delta:** 467 → **492** (+25: 6 VerdictSnapshot + 6 is_delta + 6 format_report_table + 2 replay_capture unit + 2 e2e library + 3 e2e CLI).
+
+**TDD ordering** (per CLAUDE.md rule #2): eight commits, each RED → GREEN.
+1. B1 — scaffold types only (`VerdictSnapshot`, `ReplayedPlan`, `ReplayResult`, `LoadedCapture` + `from_verdict` projection); module wired into `observation/mod.rs`.
+2. B2 — 6 unit tests pin `VerdictSnapshot::from_verdict` for every `Verdict` variant + a serde round-trip.
+3. B3 — RED with `is_delta` tests → GREEN by implementing the pure helper.
+4. B4 — RED with 6 `format_report_table` tests → GREEN with the column-width-stable formatter + `render_new_verdict` private helper.
+5. B5 — RED with 2 `replay_capture` tests → GREEN by implementing the async function plus widening the top-of-file `use` block.
+6. B6 — RED with the integration-test file → GREEN by implementing `load_captures_from_dir` (file-level error aggregation; stable sort).
+7. B7 — CLI subcommand wiring + help text (`run_observation` dispatcher + `run_observation_replay` + `default_captures_dir` + `observation_replay_async`).
+8. B8 — 3 subprocess scenarios pin happy path / unknown-flag / empty-dir.
+
+**What this slice deliberately does NOT do.**
+- **No real `ConstitutionalGuard` / `DeterministicPolicy` rule.** Stubs stay always-`Approve`; the harness mechanism is what ships. First real rule is a follow-up slice.
+- **No `--json` output.** Text-only table; pipe to `grep` / `awk` for ad-hoc analysis. YAGNI until a CI consumer exists.
+- **No fail-on-delta exit code.** Deltas are the harness's reason to exist.
+- **No multi-baseline diffing.** One model per run via `--model SLUG`; the operator can compare runs side-by-side manually.
+- **No history of past replay runs.** Re-run on demand; results stream to stdout only.
+- **No CI integration.** Operator-run; the captures it operates on are operator-produced.
+- **No JSON repair on `plan_json` decode errors.** A non-null `plan_json` that fails to deserialise is surfaced as a skip with a "plan body decode error: …" reason — same posture as the `plan_json: null` skip path. Operator decides whether to recapture or hand-fix the file.
+
+**Files touched (3 NEW + 3 modified):**
+- NEW `core/src/observation/replay.rs` (~580 LOC).
+- NEW `core/tests/observation_replay_e2e.rs` (~155 LOC).
+- NEW `core/tests/observation_replay_cli_e2e.rs` (~140 LOC).
+- `core/src/observation/mod.rs` — module declaration.
+- `core/src/bin/hhagent-cli.rs` — new top-level subcommand + help text.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
+
+**Open follow-up surfaces (not blocking).**
+- **First real `ConstitutionalGuard` rule** — design + landed in a follow-up slice. The captures already on disk (gemma4 baseline) show the agent self-refused 6/7 fixtures *before* emitting actionable plan steps, so the first real rule likely keys on the instruction (prompt text via `ReviewStageContext.instruction`) rather than the plan steps — to catch cases where the agent failed to self-refuse.
+- **Operator recapture against current daemon** — the existing `tests/observation/captures/<id>/2026-05-14_gemma4-26b-a4b-it-q8-0.json` files retain `plan_json: null` because they were produced before Slice A. Recapture via `cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture` turns them into replay-able inputs.
+- **`core/src/bin/hhagent-cli.rs` LOC growth** — 797 LOC before this slice; ~950 after. Well over the 500-LOC soft cap. Natural future split candidate: one file per subcommand tree (`audit_tail.rs` / `ask.rs` / `tasks.rs` / `tools_allowlist.rs` / `observation_replay.rs`) plus a dispatch entry point. Not warranted today but worth noting.
+
+---
+
+## Recently completed (earlier this session, 2026-05-15 — Slice A: audit-payload bump on agent/plan.formulate, branch `feat/audit-plan-formulate-carries-plan-body`, merged via PR #61 at `67f2dac`)
 
 Branch: `feat/audit-plan-formulate-carries-plan-body` (off `main` at `7588b9e`). Pure-additive bump on the `agent/plan.formulate` audit-row payload: 11 keys → 13 keys, adding `plan` (full serialised Plan) and `classification_floor` (task-level `DataClass` string). Closes the precondition for the rule-iteration harness (Slice B); together these are everything the reviewer pipeline needs to be replayed offline.
 
@@ -1507,7 +1578,8 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 
 - ~~**Observation phase — capture run** (operator action)~~ **First baseline shipped this session 2026-05-14** under `tests/observation/captures/<id>/2026-05-14_gemma4-26b-a4b-it-q8-0.json` (7 files; 6 refused + 1 completed) against the operator's local ollama `gemma4:26b-a4b-it-q8_0`. Three orchestrator/agent bugs found and fixed inline (seeding-order, per-fixture timeout sizing, strict JSON parser rejecting markdown-fenced output). The new `core::scheduler::plan_parser::parse_plan_lenient` helper is the load-bearing production change; +9 unit tests. See "Recently completed (this session)" entry at the top. The rule-iteration harness below is now unblocked. **Recapture against alternative models (qwen3.6:35b-a3b after `/no_think`, nemotron3:33b-q8, etc.) is operator-driven follow-up** — orchestrator's env knobs already support it; no further code changes required.
 - **[Issue #55](https://github.com/hherb/hhagent/issues/55) — macOS `container` micro-VM discovery spike** (engineering, filed 2026-05-14) — one-session feasibility check of Apple `container` CLI as the macOS micro-VM backend (Firecracker equivalent). With Option G shipping cross-platform CPU-budget enforcement, the open macOS gap is now memory (Seatbelt has no primitive; `RLIMIT_AS` deferred for false-positive risk). Spike answers: is the CLI stable, can JSON-RPC stdio work over the container boundary, what's the `SandboxPolicy` mapping shape, what's cold-start latency. Throwaway POC + half-page write-up; commit-or-back-out before sinking 2+ sessions into a full backend.
-- ~~**Rule-iteration harness — Slice A (audit-payload bump)**~~ **Shipped this session 2026-05-15** on branch `feat/audit-plan-formulate-carries-plan-body` (PR [#61](https://github.com/hherb/hhagent/pull/61) open). See "Recently completed (this session)" entry above. **Slice B (the harness itself)** is the next concrete pickup — create branch `feat/rule-iteration-harness` off `main` after Slice A merges; tasks B1–B9 in [`docs/superpowers/plans/2026-05-15-rule-iteration-harness.md`](../../superpowers/plans/2026-05-15-rule-iteration-harness.md). Will turn the always-`Approve` stub CASSANDRA stages into real `ConstitutionalGuard` + `DeterministicPolicy` rule sets fed by empirical data, not speculation.
+- ~~**Rule-iteration harness — Slice A (audit-payload bump)**~~ **Shipped earlier this session 2026-05-15** on branch `feat/audit-plan-formulate-carries-plan-body`, merged via PR #61 at `67f2dac`. See "Recently completed (earlier this session)" entry above.
+- ~~**Rule-iteration harness — Slice B (the harness itself)**~~ **Shipped this session 2026-05-15** on branch `feat/rule-iteration-harness`. New pure-Rust library `core::observation::replay` + `hhagent-cli observation replay` subcommand. See "Recently completed (this session)" entry above. **First real `ConstitutionalGuard` rule** (or `DeterministicPolicy` rule) is the next concrete pickup — the captures already show the agent self-refused 6/7 fixtures, so a prompt-level guard catching cases where the agent failed to self-refuse is the natural first candidate. Iterate by editing `core/src/cassandra/review.rs` body → rebuild → `./target/debug/hhagent-cli observation replay` to read off verdict deltas.
 - **Observation phase** (spec §9) — the audit log is now rich enough to drive observation-phase SQL queries entirely from `audit_log`: every step short-circuit (`step.unknown_tool` / `step.spawn_failed`), every plan formulation (`agent/plan.formulate`), every chain review (`cassandra:chain/verdict`), every per-task lifecycle transition (`task.running`, `task.<state>`, `task.crashed`), and every per-task summary (`task.finalize` — **now also emitted for crashed tasks via the previous session's slice**) all land as rows with stable wire shapes. Practical step: same fixture-set workflow as the capture-run bullet above.
 - ~~**`task.finalize` row for crashed tasks?**~~ **Shipped 2026-05-13** as `actor='scheduler' action='task.finalize'` with `state='crashed'` and JSON-null counter fields via the new `build_crashed_finalize_payload` helper in `core::scheduler::audit` + new `emit_task_finalize_row` in `core::scheduler::crash_recovery`. Branch: `feat/crashed-finalize-row`.
 - ~~**e2e coverage for `task.finalize` with `started_at: null`**~~ **Effectively closed 2026-05-14** by the producer-cancelled-pending finalize slice (this session). The runtime-path scheduler `started_at: null` coverage is still moot by construction (scheduler never finalises a never-claimed task), but the producer-side `cli/task.finalize` row now ships exactly that shape — `started_at: null` is the load-bearing wire signal for "task was never claimed" — and `cancel_pending_task_writes_lifecycle_and_finalize_rows` asserts the JSON-null serialisation directly. The remaining theoretical scheduler-path gap could be closed by simulating a producer-cancel race against an in-flight claim, but the assertion population is empty by construction so the e2e test would have nothing to plant. Consider this item resolved.
