@@ -8,7 +8,7 @@
 //!   of `audit_log` written by the mirror task —
 //!   see [`hhagent_core::audit_mirror`]).
 //!
-//! * `ask "<instruction>" [--fast|--long]` — submit a task to the
+//! * `ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]` — submit a task to the
 //!   scheduler, LISTEN for the completion NOTIFY, then print the
 //!   result. Ctrl-C cancels the pending/running task.
 //!
@@ -24,7 +24,7 @@
 //! Usage:
 //!
 //! ```text
-//! hhagent-cli ask "<instruction>" [--fast|--long]
+//! hhagent-cli ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]
 //! hhagent-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
 //! hhagent-cli tasks status <id>
 //! hhagent-cli tasks cancel <id>
@@ -80,7 +80,7 @@ fn help_text() -> &'static str {
     "hhagent-cli — operator CLI for hhagent
 
 usage:
-    hhagent-cli ask \"<instruction>\" [--fast|--long]
+    hhagent-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]
     hhagent-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
     hhagent-cli tasks status <id>
     hhagent-cli tasks cancel <id>
@@ -91,6 +91,16 @@ usage:
     hhagent-cli tools allowlist list   [--tool <name>]
     hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
     hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
+
+flags (ask):
+    --fast | --long             Lane selection (default: --fast).
+    --classification-floor V    Set the task-level data classification
+                                floor. Valid values: Public (default),
+                                Personal, ClinicalConfidential, Secret.
+                                Pin a non-Public floor when the task
+                                involves sensitive data so the Stage 0
+                                reviewer can catch classification leaks
+                                in the agent's plans.
 
 flags (audit tail):
     --from-start    Replay every line in every existing audit file
@@ -260,12 +270,27 @@ pub(crate) fn parse_classification_floor(
 
 fn run_ask(args: &[String]) -> ExitCode {
     let mut lane = hhagent_db::tasks::Lane::Fast;
+    let mut floor: Option<hhagent_core::cassandra::DataClass> = None;
     let mut instruction: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--long" => { lane = hhagent_db::tasks::Lane::Long; }
             "--fast" => { lane = hhagent_db::tasks::Lane::Fast; }
+            "--classification-floor" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    eprintln!("--classification-floor requires a value");
+                    return ExitCode::from(2);
+                };
+                match parse_classification_floor(val) {
+                    Ok(f) => floor = Some(f),
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             other if other.starts_with("--") => {
                 eprintln!("ask: unknown flag {other}");
                 return ExitCode::from(2);
@@ -281,7 +306,7 @@ fn run_ask(args: &[String]) -> ExitCode {
         i += 1;
     }
     let Some(instruction) = instruction else {
-        eprintln!("usage: hhagent-cli ask \"<instruction>\" [--fast|--long]");
+        eprintln!("usage: hhagent-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]");
         return ExitCode::from(2);
     };
 
@@ -298,10 +323,14 @@ fn run_ask(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    rt.block_on(ask_async(lane, instruction))
+    rt.block_on(ask_async(lane, instruction, floor))
 }
 
-async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCode {
+async fn ask_async(
+    lane: hhagent_db::tasks::Lane,
+    instruction: String,
+    floor: Option<hhagent_core::cassandra::DataClass>,
+) -> ExitCode {
     use hhagent_core::cli_audit::{cancel_and_audit, submit_and_audit};
     use hhagent_db::pool::connect_runtime_pool;
     use hhagent_db::tasks::get;
@@ -327,13 +356,17 @@ async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCo
         return ExitCode::from(1);
     }
 
-    let id = match submit_and_audit(
-        &pool,
-        lane,
-        serde_json::json!({"instruction": instruction, "kind": "ask"}),
-    )
-    .await
-    {
+    let mut payload = serde_json::json!({"instruction": instruction, "kind": "ask"});
+    if let Some(f) = floor {
+        // Serialise via serde_json so the wire shape matches what
+        // scheduler::runner reads at task.payload.classification_floor
+        // (PascalCase string).
+        let v = serde_json::to_value(f).expect("DataClass serialises");
+        if let serde_json::Value::Object(ref mut m) = payload {
+            m.insert("classification_floor".to_string(), v);
+        }
+    }
+    let id = match submit_and_audit(&pool, lane, payload).await {
         Ok(i) => i,
         Err(e) => { eprintln!("ask: insert failed: {e}"); return ExitCode::from(1); }
     };
