@@ -89,27 +89,35 @@ impl ClassificationViolation {
     /// Human-readable verdict reason, prefixed with the structured
     /// `"data-classification: <tag>"` so operators can both eyeball
     /// the violation and grep for it.
+    ///
+    /// `DataClass` values are rendered via
+    /// [`DataClass::as_pascal_str`](super::types::DataClass::as_pascal_str)
+    /// — the same string used on the serde wire — so audit log readers
+    /// can cross-grep the rendered name against task payloads. Avoid
+    /// switching this to `Debug` formatting: it would couple the
+    /// audit-log contract to a derive-output convention that's only
+    /// de-facto stable.
     pub fn format_reason(&self) -> String {
         match self {
             Self::CeilingBelowFloor { ceiling, floor } => format!(
-                "data-classification: {} — plan.data_ceiling={:?} is below task.classification_floor={:?}",
+                "data-classification: {} — plan.data_ceiling={} is below task.classification_floor={}",
                 self.reason_tag(),
-                ceiling,
-                floor,
+                ceiling.as_pascal_str(),
+                floor.as_pascal_str(),
             ),
             Self::StepClassificationBelowFloor { step_index, step_class, floor } => format!(
-                "data-classification: {} — step {} classified as {:?} but task.classification_floor={:?}",
+                "data-classification: {} — step {} classified as {} but task.classification_floor={}",
                 self.reason_tag(),
                 step_index,
-                step_class,
-                floor,
+                step_class.as_pascal_str(),
+                floor.as_pascal_str(),
             ),
             Self::StepClassificationAboveCeiling { step_index, step_class, ceiling } => format!(
-                "data-classification: {} — step {} classified as {:?} but plan.data_ceiling={:?}",
+                "data-classification: {} — step {} classified as {} but plan.data_ceiling={}",
                 self.reason_tag(),
                 step_index,
-                step_class,
-                ceiling,
+                step_class.as_pascal_str(),
+                ceiling.as_pascal_str(),
             ),
         }
     }

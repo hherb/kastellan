@@ -353,6 +353,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deterministic_policy_only_emits_block_or_approve_today() {
+        // Spec calls out `Verdict::Escalate` severity-split as deferred
+        // to a later slice (see `super::deterministic` module doc, "Out
+        // of scope"). Pin the "fail-closed across the board" property
+        // explicitly so any future change that starts emitting
+        // `Escalate` from DP trips a dedicated test instead of slipping
+        // through the per-invariant tests' broader `Verdict::Block`
+        // match arm.
+        let dp = DeterministicPolicy;
+        let mk_step = |c| super::super::types::PlannedStep {
+            tool: "shell-exec".into(),
+            method: "shell.exec".into(),
+            parameters: serde_json::json!({}),
+            returns: "".into(),
+            done_when: "".into(),
+            classification: c,
+        };
+        let mk_plan = |ceiling, steps: Vec<DataClass>| Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: steps.into_iter().map(mk_step).collect(),
+            result: None,
+            data_ceiling: ceiling,
+            refused: None,
+        };
+        let mk_ctx = |floor| ReviewStageContext {
+            task_id: 1,
+            instruction: "anything",
+            classification_floor: floor,
+            plan_count: 0,
+        };
+
+        // I1 fixture
+        let v1 = dp
+            .review(
+                &mk_plan(DataClass::Public, vec![]),
+                &mk_ctx(DataClass::ClinicalConfidential),
+            )
+            .await;
+        assert!(matches!(v1, Verdict::Block(_)), "I1 verdict was {v1:?}");
+
+        // I2 fixture
+        let v2 = dp
+            .review(
+                &mk_plan(DataClass::ClinicalConfidential, vec![DataClass::Public]),
+                &mk_ctx(DataClass::ClinicalConfidential),
+            )
+            .await;
+        assert!(matches!(v2, Verdict::Block(_)), "I2 verdict was {v2:?}");
+
+        // I3 fixture
+        let v3 = dp
+            .review(
+                &mk_plan(DataClass::Public, vec![DataClass::ClinicalConfidential]),
+                &mk_ctx(DataClass::Public),
+            )
+            .await;
+        assert!(matches!(v3, Verdict::Block(_)), "I3 verdict was {v3:?}");
+
+        // Clean plan stays Approve.
+        let v_ok = dp
+            .review(
+                &mk_plan(DataClass::Public, vec![DataClass::Public]),
+                &mk_ctx(DataClass::Public),
+            )
+            .await;
+        assert_eq!(v_ok, Verdict::Approve);
+    }
+
+    #[tokio::test]
     async fn deterministic_policy_blocks_when_step_above_ceiling() {
         // I3: ceiling=Public, step 0 at ClinicalConfidential.
         let dp = DeterministicPolicy;

@@ -361,6 +361,16 @@ async fn ask_async(
         // Serialise via serde_json so the wire shape matches what
         // scheduler::runner reads at task.payload.classification_floor
         // (PascalCase string).
+        //
+        // Note: this writes the field whenever `--classification-floor`
+        // is supplied, including when the value equals the implicit
+        // default (`Public`). The two cases are semantically equivalent
+        // for the runner (both resolve to `Public`), but keeping the
+        // explicit-Public payload distinct from the omitted-default
+        // payload preserves an audit-grep-able signal that the operator
+        // deliberately pinned the floor at task submission. A future
+        // normalisation pass can collapse them if the explicit-vs-
+        // omitted distinction proves unused.
         let v = serde_json::to_value(f).expect("DataClass serialises");
         if let serde_json::Value::Object(ref mut m) = payload {
             m.insert("classification_floor".to_string(), v);
