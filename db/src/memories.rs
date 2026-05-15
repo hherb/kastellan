@@ -95,6 +95,65 @@ fn limit_as_i64(k: usize) -> i64 {
     i64::try_from(k).unwrap_or(i64::MAX)
 }
 
+/// Memory hierarchy layers, mirroring GenericAgent's 5-layer design.
+///
+/// Discriminant values 0..=4 match the SMALLINT stored in
+/// `memories.layer` and `deleted_memories.layer` (migrations 0013 +
+/// 0014). The CHECK constraint at the DB boundary guarantees no other
+/// value is ever read back, so [`MemoryLayer::from_db`] only needs to
+/// defend against a corrupted-row case; production code paths never
+/// trip it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i16)]
+pub enum MemoryLayer {
+    /// L0 — meta-rules / hard constraints (e.g. "never `rm -rf`").
+    /// Hand-curated seed data only; never written by the agent itself.
+    Meta = 0,
+    /// L1 — insight index. Small routing pointers loaded
+    /// unconditionally into every system prompt by
+    /// `core::memory::layers::load_l1`. The whole point of the layer
+    /// is "fits in the prompt regardless of similarity score."
+    Index = 1,
+    /// L2 — stable accumulated facts. Default for [`insert_memory`]
+    /// and the layer every pre-migration row backfills to.
+    Stable = 2,
+    /// L3 — skills / SOPs (parameterised procedures). Reserved; no
+    /// writer in the slice that introduced this enum.
+    Skill = 3,
+    /// L4 — session digests. Reserved; no writer in the slice that
+    /// introduced this enum.
+    Digest = 4,
+}
+
+impl MemoryLayer {
+    /// Decode the SMALLINT stored in `memories.layer` / `deleted_memories.layer`.
+    ///
+    /// The DB CHECK constraint forbids out-of-range values, so this
+    /// only returns `Err` if the column was tampered with via a path
+    /// that bypassed the constraint (e.g. a future migration with a
+    /// bug). The error type is [`DbError::Invariant`] specifically
+    /// because hitting it means the schema invariant was broken —
+    /// not a transient query failure.
+    pub fn from_db(raw: i16) -> Result<Self, DbError> {
+        match raw {
+            0 => Ok(Self::Meta),
+            1 => Ok(Self::Index),
+            2 => Ok(Self::Stable),
+            3 => Ok(Self::Skill),
+            4 => Ok(Self::Digest),
+            other => Err(DbError::Invariant(format!(
+                "memory layer out of range: {other}"
+            ))),
+        }
+    }
+
+    /// Encode the layer as the SMALLINT value bound to SQL parameters.
+    /// Pair with [`Self::from_db`] for round-trips.
+    pub fn as_db(self) -> i16 {
+        self as i16
+    }
+}
+
 /// One row from `memories` returned from a fully hydrated query.
 ///
 /// `embedding` is intentionally NOT decoded back into a `Vec<f32>` —
@@ -113,6 +172,11 @@ pub struct Memory {
     /// source URL, originator entity, etc. The schema enforces no
     /// shape — that's by design.
     pub metadata: serde_json::Value,
+    /// Memory hierarchy layer (migrations 0013 + 0014). Defaults to
+    /// [`MemoryLayer::Stable`] at the DB level for any row inserted
+    /// without an explicit layer; [`insert_memory_at_layer`] is the
+    /// writer-side helper for non-default layers.
+    pub layer: MemoryLayer,
     /// `now()`-derived insertion timestamp. The recall path returns it
     /// unsorted (the caller may sort by recency as a tiebreaker
     /// downstream).
@@ -304,7 +368,7 @@ where
     }
 
     let rows = sqlx::query(
-        "SELECT id, body, metadata, created_at \
+        "SELECT id, body, metadata, layer, created_at \
          FROM memories \
          WHERE id = ANY($1)",
     )
@@ -325,10 +389,14 @@ where
         let metadata: serde_json::Value = r
             .try_get(2)
             .map_err(|e| DbError::Query(format!("decode memory.metadata: {e}")))?;
-        let created_at: time::OffsetDateTime = r
+        let layer_raw: i16 = r
             .try_get(3)
+            .map_err(|e| DbError::Query(format!("decode memory.layer: {e}")))?;
+        let layer = MemoryLayer::from_db(layer_raw)?;
+        let created_at: time::OffsetDateTime = r
+            .try_get(4)
             .map_err(|e| DbError::Query(format!("decode memory.created_at: {e}")))?;
-        by_id.insert(id, Memory { id, body, metadata, created_at });
+        by_id.insert(id, Memory { id, body, metadata, layer, created_at });
     }
 
     let mut out = Vec::with_capacity(ids.len());
@@ -426,6 +494,127 @@ where
                 .map_err(|e| DbError::Query(format!("decode memory_id: {e}")))
         })
         .collect()
+}
+
+/// Insert a memory row tagged with an explicit layer.
+///
+/// [`insert_memory`] is the shorthand for the L2 (Stable) case; callers
+/// that genuinely mean L0 / L1 / L3 / L4 must use this helper and say
+/// so. The DB-level `DEFAULT 2` on the column belongs to the plain
+/// `insert_memory` SQL shape — this helper passes the layer explicitly
+/// so a future column-default change can't silently affect L1 writers.
+///
+/// Layer-CHECK violation is unreachable through this signature: the
+/// [`MemoryLayer`] enum is the only producer of the bound value, and
+/// every discriminant is within the CHECK range. Embedding dimension
+/// mismatch is rejected up front by the shared [`check_embedding_dim`]
+/// helper (same operator-readable shape as [`insert_memory`]).
+pub async fn insert_memory_at_layer<'e, E>(
+    executor: E,
+    body: &str,
+    metadata: &serde_json::Value,
+    embedding: Option<&[f32]>,
+    layer: MemoryLayer,
+) -> Result<i64, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if let Some(v) = embedding {
+        check_embedding_dim("insert", v)?;
+    }
+
+    // Two SQL shapes (with vs. without embedding) — same rationale as
+    // [`insert_memory`]: NULL-vector casts work, but the planner's
+    // decision tree is simpler when the column reference is a literal
+    // column. The `layer` bind is added to both shapes.
+    let row = if let Some(v) = embedding {
+        let lit = vector_literal(v);
+        sqlx::query(
+            "INSERT INTO memories (body, metadata, embedding, layer) \
+             VALUES ($1, $2, $3::vector, $4) RETURNING id",
+        )
+        .bind(body)
+        .bind(metadata)
+        .bind(lit)
+        .bind(layer.as_db())
+        .fetch_one(executor)
+        .await
+    } else {
+        sqlx::query(
+            "INSERT INTO memories (body, metadata, layer) \
+             VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(body)
+        .bind(metadata)
+        .bind(layer.as_db())
+        .fetch_one(executor)
+        .await
+    }
+    .map_err(|e| DbError::Query(format!("insert memory at layer {layer:?}: {e}")))?;
+    row.try_get::<i64, _>(0)
+        .map_err(|e| DbError::Query(format!("decode memory.id: {e}")))
+}
+
+/// Load up to `cap` rows at the specified layer, newest first.
+///
+/// Returns rows in `(created_at DESC, id DESC)` order so the caller gets
+/// stable, deterministic ordering across calls with the same `cap`. The
+/// `(layer, created_at DESC)` index from migration 0013 covers this
+/// query directly; the id tiebreaker is a sequential lookup on the
+/// already-narrow result set (no second index needed at L1's expected
+/// cardinality).
+///
+/// `cap = 0` is a fast-path no-op (no SQL issued). Rows whose layer
+/// column reads back as an out-of-range SMALLINT surface as
+/// [`DbError::Invariant`] via [`MemoryLayer::from_db`] — the schema
+/// CHECK forbids that case, so hitting it means an operator must
+/// investigate.
+pub async fn load_layer<'e, E>(
+    executor: E,
+    layer: MemoryLayer,
+    cap: usize,
+) -> Result<Vec<Memory>, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if cap == 0 {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        "SELECT id, body, metadata, layer, created_at \
+         FROM memories \
+         WHERE layer = $1 \
+         ORDER BY created_at DESC, id DESC \
+         LIMIT $2",
+    )
+    .bind(layer.as_db())
+    .bind(limit_as_i64(cap))
+    .fetch_all(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("load_layer {layer:?}: {e}")))?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let id: i64 = r
+            .try_get(0)
+            .map_err(|e| DbError::Query(format!("decode memory.id: {e}")))?;
+        let body: String = r
+            .try_get(1)
+            .map_err(|e| DbError::Query(format!("decode memory.body: {e}")))?;
+        let metadata: serde_json::Value = r
+            .try_get(2)
+            .map_err(|e| DbError::Query(format!("decode memory.metadata: {e}")))?;
+        let layer_raw: i16 = r
+            .try_get(3)
+            .map_err(|e| DbError::Query(format!("decode memory.layer: {e}")))?;
+        let layer = MemoryLayer::from_db(layer_raw)?;
+        let created_at: time::OffsetDateTime = r
+            .try_get(4)
+            .map_err(|e| DbError::Query(format!("decode memory.created_at: {e}")))?;
+        out.push(Memory { id, body, metadata, layer, created_at });
+    }
+    Ok(out)
 }
 
 /// Format a `Vec<f32>` as the canonical pgvector text representation.

@@ -120,6 +120,14 @@ pub enum DbError {
     #[error("required environment variable unset: {0}")]
     EnvVarMissing(&'static str),
 
+    /// A persisted value violates a schema invariant the code relies
+    /// on (e.g. a CHECK-constrained column read back with a value
+    /// outside the allowed range). Distinct from [`DbError::Query`]
+    /// because the schema, not the query, is the broken contract —
+    /// retrying won't help; an operator must investigate.
+    #[error("postgres invariant violated: {0}")]
+    Invariant(String),
+
     /// Catchall for other errors not fitting other variants.
     #[error("{0}")]
     Other(String),

@@ -1559,3 +1559,207 @@ async fn tasks_state_refused_passes_check_constraint() {
 
     pool.close().await;
 }
+
+/// Migration 0013 — every new memory row gets `layer = 2` (Stable) by
+/// default. The plain `insert_memory` call site (which has no layer
+/// argument) is the one production callers use today; the default flows
+/// from the column-level `DEFAULT 2` in the migration, not from any
+/// Rust default — so this test pins the DB-layer contract, not the
+/// Rust-API contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn memories_layer_default_is_stable() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ml-d",
+        "ml-l",
+        &format!("hhagent-pg-mlayer-default-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "memory-layer-default"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    let mem_id = hhagent_db::memories::insert_memory(
+        &pool,
+        "default-layer body",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert memory");
+
+    let layer: i16 = sqlx::query_scalar("SELECT layer FROM memories WHERE id = $1")
+        .bind(mem_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch layer");
+    assert_eq!(
+        layer, 2,
+        "fresh insert_memory must default to layer = 2 (Stable / L2)"
+    );
+
+    pool.close().await;
+}
+
+/// `insert_memory_at_layer` round-trips each MemoryLayer value, and
+/// `load_layer` filters strictly by layer (no cross-layer leakage).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn insert_memory_at_layer_round_trip() {
+    use hhagent_db::memories::{insert_memory_at_layer, load_layer, MemoryLayer};
+
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "mr-d",
+        "mr-l",
+        &format!("hhagent-pg-mlayer-round-trip-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "memory-layer-round-trip"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    let layers = [
+        (MemoryLayer::Meta, "meta-l0"),
+        (MemoryLayer::Index, "index-l1"),
+        (MemoryLayer::Stable, "stable-l2"),
+        (MemoryLayer::Skill, "skill-l3"),
+        (MemoryLayer::Digest, "digest-l4"),
+    ];
+
+    let mut inserted_ids: Vec<(MemoryLayer, i64, &str)> = Vec::with_capacity(layers.len());
+    for (layer, body) in layers.iter().copied() {
+        let id = insert_memory_at_layer(&pool, body, &serde_json::json!({}), None, layer)
+            .await
+            .expect("insert at layer");
+        inserted_ids.push((layer, id, body));
+    }
+
+    // load_layer(L1) returns exactly the L1 row.
+    let l1 = load_layer(&pool, MemoryLayer::Index, 100)
+        .await
+        .expect("load_layer L1");
+    assert_eq!(l1.len(), 1, "L1 must return exactly the one L1 row");
+    assert_eq!(l1[0].body, "index-l1");
+
+    // load_layer(L3) returns exactly the L3 row.
+    let l3 = load_layer(&pool, MemoryLayer::Skill, 100)
+        .await
+        .expect("load_layer L3");
+    assert_eq!(l3.len(), 1, "L3 must return exactly the one L3 row");
+    assert_eq!(l3[0].body, "skill-l3");
+
+    // No cross-layer leakage: each layer query returns its row only.
+    for (layer, _id, body) in inserted_ids.iter().copied() {
+        let rows = load_layer(&pool, layer, 100)
+            .await
+            .expect("load_layer for fixture");
+        assert_eq!(
+            rows.len(),
+            1,
+            "layer {layer:?} must return exactly its one fixture row"
+        );
+        assert_eq!(rows[0].body, body);
+    }
+
+    pool.close().await;
+}
+
+/// The deleted_memories AFTER DELETE trigger (migrations 0008 + 0014)
+/// must carry the `layer` column into the audit row so post-deletion
+/// forensics can tell whether a deleted row was a load-bearing L1
+/// pointer or a routine L2 fact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn memory_delete_preserves_layer_in_audit() {
+    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "md-d",
+        "md-l",
+        &format!("hhagent-pg-mlayer-delete-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "memory-layer-delete-audit"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    let mem_id = insert_memory_at_layer(
+        &pool,
+        "l1 routing pointer",
+        &serde_json::json!({}),
+        None,
+        MemoryLayer::Index,
+    )
+    .await
+    .expect("insert L1 memory");
+
+    sqlx::query("DELETE FROM memories WHERE id = $1")
+        .bind(mem_id)
+        .execute(&pool)
+        .await
+        .expect("delete memory");
+
+    let audit_layer: i16 =
+        sqlx::query_scalar("SELECT layer FROM deleted_memories WHERE id = $1")
+            .bind(mem_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch deleted_memories.layer");
+    assert_eq!(
+        audit_layer, 1,
+        "AFTER DELETE trigger must copy the source row's layer (L1 = 1) into the audit row"
+    );
+
+    pool.close().await;
+}
