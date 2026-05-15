@@ -117,3 +117,70 @@ pub struct LoadedCapture {
     pub path: PathBuf,
     pub capture: CaptureJson,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cassandra::types::Severity;
+
+    // ---- VerdictSnapshot::from_verdict ----
+
+    #[test]
+    fn verdict_snapshot_approve_has_no_detail() {
+        let s = VerdictSnapshot::from_verdict(&Verdict::Approve);
+        assert_eq!(s.kind, "approve");
+        assert!(s.detail.is_none());
+    }
+
+    #[test]
+    fn verdict_snapshot_advisory_carries_message_as_detail_string() {
+        let s = VerdictSnapshot::from_verdict(&Verdict::Advisory("careful".into()));
+        assert_eq!(s.kind, "advisory");
+        assert_eq!(s.detail, Some(serde_json::json!("careful")));
+    }
+
+    #[test]
+    fn verdict_snapshot_escalate_carries_concern_and_severity_object() {
+        let s = VerdictSnapshot::from_verdict(&Verdict::Escalate(
+            "high latency".into(),
+            Severity::High,
+        ));
+        assert_eq!(s.kind, "escalate");
+        assert_eq!(
+            s.detail,
+            Some(serde_json::json!({"concern": "high latency", "severity": "high"})),
+        );
+    }
+
+    #[test]
+    fn verdict_snapshot_block_carries_reason_as_detail_string() {
+        let s = VerdictSnapshot::from_verdict(&Verdict::Block("denied".into()));
+        assert_eq!(s.kind, "block");
+        assert_eq!(s.detail, Some(serde_json::json!("denied")));
+    }
+
+    #[test]
+    fn verdict_snapshot_constitutional_block_carries_principle_and_reason() {
+        let s = VerdictSnapshot::from_verdict(&Verdict::ConstitutionalBlock {
+            principle: 1,
+            reason: "physical_harm".into(),
+        });
+        assert_eq!(s.kind, "constitutional_block");
+        assert_eq!(
+            s.detail,
+            Some(serde_json::json!({"principle": 1, "reason": "physical_harm"})),
+        );
+    }
+
+    #[test]
+    fn verdict_snapshot_round_trips_through_serde_json() {
+        let s = VerdictSnapshot::from_verdict(&Verdict::ConstitutionalBlock {
+            principle: 2,
+            reason: "fraud".into(),
+        });
+        let j = serde_json::to_value(&s).expect("snapshot must serialise");
+        let s2: VerdictSnapshot =
+            serde_json::from_value(j).expect("snapshot must round-trip");
+        assert_eq!(s, s2);
+    }
+}
