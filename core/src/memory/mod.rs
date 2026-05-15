@@ -44,6 +44,7 @@
 //! mock.
 
 mod embed;
+pub mod layers;
 mod recall;
 
 // Re-export the public surface so external callers see a flat
