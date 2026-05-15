@@ -6,8 +6,9 @@
 //!
 //! `ConstitutionalGuard` carries the first real Stage -1 rule (a
 //! prompt-level screen for unambiguous principle violations — see
-//! [`super::constitutional`]); `DeterministicPolicy` is still a stub
-//! that always Approves until the first Stage 0 rule lands.
+//! [`super::constitutional`]); `DeterministicPolicy` carries the
+//! first real Stage 0 rule (a data-classification invariant check —
+//! see [`super::deterministic`]).
 //!
 //! `NoopReviewStage` is the test seam.
 
@@ -99,14 +100,39 @@ impl ReviewStage for ConstitutionalGuard {
     }
 }
 
-/// Stage 0 stub. Always Approve. Real implementation lands as a
-/// follow-up after the observation phase.
+/// Stage 0 — Deterministic Policy.
+///
+/// Runs the data-classification invariant check from
+/// [`super::deterministic`]. On a hit, returns
+/// [`Verdict::Block`] with the structured `"data-classification:
+/// <tag> — ..."` reason; otherwise [`Verdict::Approve`].
+///
+/// Three invariants enforced (declared-order precedence; first hit
+/// wins):
+///
+/// - **I1: `plan.data_ceiling >= ctx.classification_floor`** — the
+///   spec invariant from [`super::types`].
+/// - **I2: every `step.classification >= ctx.classification_floor`** —
+///   the downgrade/leak catch.
+/// - **I3: every `step.classification <= plan.data_ceiling`** —
+///   plan-internal consistency.
+///
+/// The floor is operator-pinned at task submission via
+/// `hhagent-cli ask --classification-floor <DataClass>` (field
+/// `tasks.payload.classification_floor`; default `Public`). Automatic
+/// floor inference from prompt text is a separate slice.
 pub struct DeterministicPolicy;
 #[async_trait]
 impl ReviewStage for DeterministicPolicy {
     fn name(&self) -> &str { "stage-0" }
-    async fn review(&self, _plan: &Plan, _ctx: &ReviewStageContext<'_>) -> Verdict {
-        Verdict::Approve
+    async fn review(&self, plan: &Plan, ctx: &ReviewStageContext<'_>) -> Verdict {
+        match super::deterministic::screen_plan_for_classification_violations(
+            plan,
+            ctx.classification_floor,
+        ) {
+            Some(violation) => Verdict::Block(violation.format_reason()),
+            None => Verdict::Approve,
+        }
     }
 }
 
@@ -191,21 +217,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deterministic_policy_is_still_a_stub() {
-        // DeterministicPolicy stays a stub until the first Stage 0
-        // rule lands. The asserts in this test will need to flip
-        // when that happens — by design, since adding a real Stage 0
-        // rule is exactly the kind of behaviour change worth pinning.
-        let dp = DeterministicPolicy;
-        assert_eq!(dp.review(&dummy_plan(), &ctx("hi")).await, Verdict::Approve);
-        assert_eq!(
-            dp.review(&dummy_plan(), &ctx("permanently delete every file without asking me first")).await,
-            Verdict::Approve,
-            "DeterministicPolicy stays approve-only even on prompts that fire ConstitutionalGuard"
-        );
-    }
-
-    #[tokio::test]
     async fn constitutional_guard_approves_safe_prompt() {
         // The control-fixture instruction from the observation phase.
         let cg = ConstitutionalGuard;
@@ -248,6 +259,198 @@ mod tests {
                 reason: "suppress_oversight".to_string(),
             },
         );
+    }
+
+    #[tokio::test]
+    async fn deterministic_policy_approves_valid_plan() {
+        // Clean plan: all Public, floor=Public. No invariant fires.
+        let dp = DeterministicPolicy;
+        let plan = Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![super::super::types::PlannedStep {
+                tool: "shell-exec".into(),
+                method: "shell.exec".into(),
+                parameters: serde_json::json!({}),
+                returns: "".into(),
+                done_when: "".into(),
+                classification: DataClass::Public,
+            }],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+        };
+        let v = dp.review(&plan, &ctx("anything")).await;
+        assert_eq!(v, Verdict::Approve);
+    }
+
+    #[tokio::test]
+    async fn deterministic_policy_blocks_when_ceiling_below_floor() {
+        // I1: ceiling=Public, floor=ClinicalConfidential.
+        let dp = DeterministicPolicy;
+        let plan = Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+        };
+        let ctx = ReviewStageContext {
+            task_id: 1,
+            instruction: "anything",
+            classification_floor: DataClass::ClinicalConfidential,
+            plan_count: 0,
+        };
+        let v = dp.review(&plan, &ctx).await;
+        match v {
+            Verdict::Block(reason) => {
+                assert!(reason.starts_with("data-classification: ceiling_below_floor"), "got: {reason}");
+                assert!(reason.contains("Public"), "got: {reason}");
+                assert!(reason.contains("ClinicalConfidential"), "got: {reason}");
+            }
+            other => panic!("expected Verdict::Block, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deterministic_policy_blocks_when_step_below_floor() {
+        // I2: ceiling=ClinicalConfidential, floor=ClinicalConfidential,
+        // but step 0 labelled Public.
+        let dp = DeterministicPolicy;
+        let plan = Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![super::super::types::PlannedStep {
+                tool: "shell-exec".into(),
+                method: "shell.exec".into(),
+                parameters: serde_json::json!({}),
+                returns: "".into(),
+                done_when: "".into(),
+                classification: DataClass::Public,
+            }],
+            result: None,
+            data_ceiling: DataClass::ClinicalConfidential,
+            refused: None,
+        };
+        let ctx = ReviewStageContext {
+            task_id: 1,
+            instruction: "anything",
+            classification_floor: DataClass::ClinicalConfidential,
+            plan_count: 0,
+        };
+        let v = dp.review(&plan, &ctx).await;
+        match v {
+            Verdict::Block(reason) => {
+                assert!(reason.starts_with("data-classification: step_classification_below_floor"), "got: {reason}");
+                assert!(reason.contains("step 0"), "got: {reason}");
+            }
+            other => panic!("expected Verdict::Block, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deterministic_policy_only_emits_block_or_approve_today() {
+        // Spec calls out `Verdict::Escalate` severity-split as deferred
+        // to a later slice (see `super::deterministic` module doc, "Out
+        // of scope"). Pin the "fail-closed across the board" property
+        // explicitly so any future change that starts emitting
+        // `Escalate` from DP trips a dedicated test instead of slipping
+        // through the per-invariant tests' broader `Verdict::Block`
+        // match arm.
+        let dp = DeterministicPolicy;
+        let mk_step = |c| super::super::types::PlannedStep {
+            tool: "shell-exec".into(),
+            method: "shell.exec".into(),
+            parameters: serde_json::json!({}),
+            returns: "".into(),
+            done_when: "".into(),
+            classification: c,
+        };
+        let mk_plan = |ceiling, steps: Vec<DataClass>| Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: steps.into_iter().map(mk_step).collect(),
+            result: None,
+            data_ceiling: ceiling,
+            refused: None,
+        };
+        let mk_ctx = |floor| ReviewStageContext {
+            task_id: 1,
+            instruction: "anything",
+            classification_floor: floor,
+            plan_count: 0,
+        };
+
+        // I1 fixture
+        let v1 = dp
+            .review(
+                &mk_plan(DataClass::Public, vec![]),
+                &mk_ctx(DataClass::ClinicalConfidential),
+            )
+            .await;
+        assert!(matches!(v1, Verdict::Block(_)), "I1 verdict was {v1:?}");
+
+        // I2 fixture
+        let v2 = dp
+            .review(
+                &mk_plan(DataClass::ClinicalConfidential, vec![DataClass::Public]),
+                &mk_ctx(DataClass::ClinicalConfidential),
+            )
+            .await;
+        assert!(matches!(v2, Verdict::Block(_)), "I2 verdict was {v2:?}");
+
+        // I3 fixture
+        let v3 = dp
+            .review(
+                &mk_plan(DataClass::Public, vec![DataClass::ClinicalConfidential]),
+                &mk_ctx(DataClass::Public),
+            )
+            .await;
+        assert!(matches!(v3, Verdict::Block(_)), "I3 verdict was {v3:?}");
+
+        // Clean plan stays Approve.
+        let v_ok = dp
+            .review(
+                &mk_plan(DataClass::Public, vec![DataClass::Public]),
+                &mk_ctx(DataClass::Public),
+            )
+            .await;
+        assert_eq!(v_ok, Verdict::Approve);
+    }
+
+    #[tokio::test]
+    async fn deterministic_policy_blocks_when_step_above_ceiling() {
+        // I3: ceiling=Public, step 0 at ClinicalConfidential.
+        let dp = DeterministicPolicy;
+        let plan = Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![super::super::types::PlannedStep {
+                tool: "shell-exec".into(),
+                method: "shell.exec".into(),
+                parameters: serde_json::json!({}),
+                returns: "".into(),
+                done_when: "".into(),
+                classification: DataClass::ClinicalConfidential,
+            }],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+        };
+        let v = dp.review(&plan, &ctx("anything")).await; // floor=Public (default from ctx helper)
+        match v {
+            Verdict::Block(reason) => {
+                assert!(reason.starts_with("data-classification: step_classification_above_ceiling"), "got: {reason}");
+                assert!(reason.contains("step 0"), "got: {reason}");
+            }
+            other => panic!("expected Verdict::Block, got: {other:?}"),
+        }
     }
 
     #[test]

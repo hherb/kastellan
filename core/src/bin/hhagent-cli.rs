@@ -8,7 +8,7 @@
 //!   of `audit_log` written by the mirror task —
 //!   see [`hhagent_core::audit_mirror`]).
 //!
-//! * `ask "<instruction>" [--fast|--long]` — submit a task to the
+//! * `ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]` — submit a task to the
 //!   scheduler, LISTEN for the completion NOTIFY, then print the
 //!   result. Ctrl-C cancels the pending/running task.
 //!
@@ -24,7 +24,7 @@
 //! Usage:
 //!
 //! ```text
-//! hhagent-cli ask "<instruction>" [--fast|--long]
+//! hhagent-cli ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]
 //! hhagent-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
 //! hhagent-cli tasks status <id>
 //! hhagent-cli tasks cancel <id>
@@ -80,7 +80,7 @@ fn help_text() -> &'static str {
     "hhagent-cli — operator CLI for hhagent
 
 usage:
-    hhagent-cli ask \"<instruction>\" [--fast|--long]
+    hhagent-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]
     hhagent-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
     hhagent-cli tasks status <id>
     hhagent-cli tasks cancel <id>
@@ -91,6 +91,16 @@ usage:
     hhagent-cli tools allowlist list   [--tool <name>]
     hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
     hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
+
+flags (ask):
+    --fast | --long             Lane selection (default: --fast).
+    --classification-floor V    Set the task-level data classification
+                                floor. Valid values: Public (default),
+                                Personal, ClinicalConfidential, Secret.
+                                Pin a non-Public floor when the task
+                                involves sensitive data so the Stage 0
+                                reviewer can catch classification leaks
+                                in the agent's plans.
 
 flags (audit tail):
     --from-start    Replay every line in every existing audit file
@@ -215,18 +225,72 @@ fn resolve_connect_spec() -> Result<hhagent_db::conn::ConnectSpec, String> {
         .map_err(|e| format!("resolving Postgres connection: {e}"))
 }
 
+/// Parse a `--classification-floor` CLI value into a `DataClass`.
+///
+/// Case-insensitive; accepts canonical `PascalCase`, lowercase,
+/// `UPPERCASE`, hyphen-separated, snake_case, and space-separated
+/// forms (`clinical_confidential`, `clinical-confidential`,
+/// `clinical confidential` all map to
+/// `DataClass::ClinicalConfidential`).
+///
+/// Returns `Err(message)` on unknown values or empty input; the
+/// message lists every valid value so the operator can correct in
+/// one step.
+pub(crate) fn parse_classification_floor(
+    raw: &str,
+) -> Result<hhagent_core::cassandra::DataClass, String> {
+    use hhagent_core::cassandra::DataClass;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "--classification-floor: empty value; valid values: Public, Personal, ClinicalConfidential, Secret"
+                .to_string(),
+        );
+    }
+    // Normalise: drop all `_`, `-`, and ASCII whitespace; lowercase.
+    let normalised: String = trimmed
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != '_' && *c != '-')
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    match normalised.as_str() {
+        "public" => Ok(DataClass::Public),
+        "personal" => Ok(DataClass::Personal),
+        "clinicalconfidential" => Ok(DataClass::ClinicalConfidential),
+        "secret" => Ok(DataClass::Secret),
+        _ => Err(format!(
+            "--classification-floor: unknown value {raw:?}; valid values: Public, Personal, ClinicalConfidential, Secret"
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // `ask` subcommand
 // ---------------------------------------------------------------------------
 
 fn run_ask(args: &[String]) -> ExitCode {
     let mut lane = hhagent_db::tasks::Lane::Fast;
+    let mut floor: Option<hhagent_core::cassandra::DataClass> = None;
     let mut instruction: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--long" => { lane = hhagent_db::tasks::Lane::Long; }
             "--fast" => { lane = hhagent_db::tasks::Lane::Fast; }
+            "--classification-floor" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    eprintln!("--classification-floor requires a value");
+                    return ExitCode::from(2);
+                };
+                match parse_classification_floor(val) {
+                    Ok(f) => floor = Some(f),
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             other if other.starts_with("--") => {
                 eprintln!("ask: unknown flag {other}");
                 return ExitCode::from(2);
@@ -242,7 +306,7 @@ fn run_ask(args: &[String]) -> ExitCode {
         i += 1;
     }
     let Some(instruction) = instruction else {
-        eprintln!("usage: hhagent-cli ask \"<instruction>\" [--fast|--long]");
+        eprintln!("usage: hhagent-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]");
         return ExitCode::from(2);
     };
 
@@ -259,10 +323,14 @@ fn run_ask(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    rt.block_on(ask_async(lane, instruction))
+    rt.block_on(ask_async(lane, instruction, floor))
 }
 
-async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCode {
+async fn ask_async(
+    lane: hhagent_db::tasks::Lane,
+    instruction: String,
+    floor: Option<hhagent_core::cassandra::DataClass>,
+) -> ExitCode {
     use hhagent_core::cli_audit::{cancel_and_audit, submit_and_audit};
     use hhagent_db::pool::connect_runtime_pool;
     use hhagent_db::tasks::get;
@@ -288,13 +356,27 @@ async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCo
         return ExitCode::from(1);
     }
 
-    let id = match submit_and_audit(
-        &pool,
-        lane,
-        serde_json::json!({"instruction": instruction, "kind": "ask"}),
-    )
-    .await
-    {
+    let mut payload = serde_json::json!({"instruction": instruction, "kind": "ask"});
+    if let Some(f) = floor {
+        // Serialise via serde_json so the wire shape matches what
+        // scheduler::runner reads at task.payload.classification_floor
+        // (PascalCase string).
+        //
+        // Note: this writes the field whenever `--classification-floor`
+        // is supplied, including when the value equals the implicit
+        // default (`Public`). The two cases are semantically equivalent
+        // for the runner (both resolve to `Public`), but keeping the
+        // explicit-Public payload distinct from the omitted-default
+        // payload preserves an audit-grep-able signal that the operator
+        // deliberately pinned the floor at task submission. A future
+        // normalisation pass can collapse them if the explicit-vs-
+        // omitted distinction proves unused.
+        let v = serde_json::to_value(f).expect("DataClass serialises");
+        if let serde_json::Value::Object(ref mut m) = payload {
+            m.insert("classification_floor".to_string(), v);
+        }
+    }
+    let id = match submit_and_audit(&pool, lane, payload).await {
         Ok(i) => i,
         Err(e) => { eprintln!("ask: insert failed: {e}"); return ExitCode::from(1); }
     };
@@ -960,5 +1042,58 @@ mod tasks_tail_tests {
     fn skips_non_json_lines() {
         assert!(!line_matches_task("not json at all", 42));
         assert!(!line_matches_task("", 42));
+    }
+}
+
+#[cfg(test)]
+mod parse_classification_floor_tests {
+    use super::parse_classification_floor;
+    use hhagent_core::cassandra::DataClass;
+
+    #[test]
+    fn accepts_canonical_pascal_case() {
+        assert_eq!(parse_classification_floor("Public").unwrap(), DataClass::Public);
+        assert_eq!(parse_classification_floor("Personal").unwrap(), DataClass::Personal);
+        assert_eq!(parse_classification_floor("ClinicalConfidential").unwrap(), DataClass::ClinicalConfidential);
+        assert_eq!(parse_classification_floor("Secret").unwrap(), DataClass::Secret);
+    }
+
+    #[test]
+    fn accepts_lowercase() {
+        assert_eq!(parse_classification_floor("public").unwrap(), DataClass::Public);
+        assert_eq!(parse_classification_floor("clinical_confidential").unwrap(), DataClass::ClinicalConfidential);
+    }
+
+    #[test]
+    fn accepts_uppercase() {
+        assert_eq!(parse_classification_floor("PUBLIC").unwrap(), DataClass::Public);
+        assert_eq!(parse_classification_floor("CLINICAL_CONFIDENTIAL").unwrap(), DataClass::ClinicalConfidential);
+    }
+
+    #[test]
+    fn accepts_mixed_case_and_separator_variants() {
+        // Hyphen-separated common in CLIs; spaces unusual but cheap to allow.
+        assert_eq!(parse_classification_floor("clinical-confidential").unwrap(), DataClass::ClinicalConfidential);
+        assert_eq!(parse_classification_floor("Clinical Confidential").unwrap(), DataClass::ClinicalConfidential);
+    }
+
+    #[test]
+    fn rejects_unknown_value_with_helpful_message() {
+        let err = parse_classification_floor("topsecret").unwrap_err();
+        assert!(err.contains("topsecret"), "expected input echoed; got: {err}");
+        assert!(err.contains("valid values"), "expected 'valid values' phrase; got: {err}");
+        assert!(err.contains("Public"), "expected list of valid values; got: {err}");
+        assert!(err.contains("ClinicalConfidential"), "expected list of valid values; got: {err}");
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        let err = parse_classification_floor("").unwrap_err();
+        assert!(err.contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace() {
+        assert_eq!(parse_classification_floor("  Public  ").unwrap(), DataClass::Public);
     }
 }

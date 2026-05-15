@@ -37,6 +37,22 @@ impl DataClass {
             DataClass::Secret => 3,
         }
     }
+
+    /// Canonical PascalCase string, identical to the serde wire form.
+    ///
+    /// Used by audit-log reason strings (e.g. `DeterministicPolicy`'s
+    /// `Verdict::Block` payload) so the rendered class name is part of
+    /// a formal contract instead of relying on the de-facto stability of
+    /// `Debug`. Renaming any branch here is a contract break — operators
+    /// grep audit logs for these exact tokens.
+    pub fn as_pascal_str(self) -> &'static str {
+        match self {
+            DataClass::Public => "Public",
+            DataClass::Personal => "Personal",
+            DataClass::ClinicalConfidential => "ClinicalConfidential",
+            DataClass::Secret => "Secret",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -147,6 +163,28 @@ mod tests {
         assert!(DataClass::Public.rank() < DataClass::Personal.rank());
         assert!(DataClass::Personal.rank() < DataClass::ClinicalConfidential.rank());
         assert!(DataClass::ClinicalConfidential.rank() < DataClass::Secret.rank());
+    }
+
+    #[test]
+    fn data_class_as_pascal_str_matches_serde_wire_form() {
+        // Pin the audit-log contract: `as_pascal_str` MUST stay
+        // byte-identical to the serde wire form so the rendered class
+        // name in `Verdict::Block` reasons (and any other audit string)
+        // can be cross-grepped with task payloads.
+        for c in [
+            DataClass::Public,
+            DataClass::Personal,
+            DataClass::ClinicalConfidential,
+            DataClass::Secret,
+        ] {
+            let wire = serde_json::to_value(c).unwrap();
+            let wire_str = wire.as_str().expect("DataClass serialises as JSON string");
+            assert_eq!(
+                c.as_pascal_str(),
+                wire_str,
+                "as_pascal_str must equal serde wire form for {c:?}",
+            );
+        }
     }
 
     #[test]

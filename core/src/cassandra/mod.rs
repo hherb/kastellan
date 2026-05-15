@@ -13,6 +13,7 @@
 //! the scheduler-side contract.
 
 pub mod constitutional;
+pub mod deterministic;
 pub mod review;
 pub mod types;
 
