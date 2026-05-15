@@ -198,6 +198,19 @@ pub fn capture_filename(date_yyyy_mm_dd: &str, model_slug: &str) -> String {
 /// can separate "agent ran, reviewer said Approve" from "agent ran,
 /// reviewer never weighed in". The original `audit_rows` stream in
 /// [`CaptureJson`] still preserves full truth either way.
+///
+/// Note on `plan_json: Value::Null`. Slice A (2026-05-15) added the
+/// `plan` payload key, but a `null` extracted here is *ambiguous* and
+/// can mean any of three things, in increasing severity:
+///   1. Pre-Slice-A capture (operator must recapture).
+///   2. The producer wrote a payload that exceeded
+///      [`hhagent_db::audit::PAYLOAD_MAX_BYTES`] (4 KiB) and
+///      [`hhagent_db::audit::truncate_payload`] replaced the entire
+///      object with the `{_truncated, sha256, len}` envelope — `plan`
+///      was nuked along with every other key.
+///   3. A genuine writer regression dropped the key.
+/// Slice B's harness should treat (2) specifically by checking the
+/// raw row payload for `_truncated == true` before falling through.
 pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedPlan> {
     let mut out = Vec::new();
     let mut iter: u32 = 0;
