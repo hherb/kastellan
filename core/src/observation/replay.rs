@@ -28,8 +28,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cassandra::types::Verdict;
-use crate::observation::capture::CaptureJson;
+use crate::cassandra::review::{ChainReviewStage, ReviewStage, ReviewStageContext};
+use crate::cassandra::types::{DataClass, Plan, Verdict};
+use crate::observation::capture::{CaptureJson, CapturedAuditRow};
 
 /// JSON-serialisable projection of a [`Verdict`]. Keeps the
 /// discriminator kind separate from the detail so the harness can
@@ -230,6 +231,120 @@ fn render_new_verdict(snap: &VerdictSnapshot) -> String {
         }
         // Bare kinds: approve, advisory, block.
         other => other.to_string(),
+    }
+}
+
+/// Replay one capture's plan iterations through the candidate chain.
+/// Async because `ReviewStage::review` is async; no I/O performed by
+/// this function (the chain may be I/O-bearing if a real stage uses
+/// async DB queries, but the harness itself is in-process).
+///
+/// Per-plan behaviour:
+/// - `capture.plans[i].plan_json` is JSON null → emit `ReplayedPlan`
+///   with `skipped_reason: Some(...)`; never fabricate a synthetic
+///   `Plan` from derived fields.
+/// - `plan_json` deserialises into a `Plan` → call `chain.review` and
+///   build a `VerdictSnapshot`.
+///
+/// `ReviewStageContext` reconstruction:
+/// - `task_id`, `instruction`, `plan_count` from the capture.
+/// - `classification_floor` from the matching audit-row's
+///   `classification_floor` field if present (post-Slice-A); final
+///   fallback to `DataClass::Public` (the producer default for a task
+///   that doesn't pin a floor).
+pub async fn replay_capture(
+    capture: &CaptureJson,
+    chain: &ChainReviewStage,
+) -> ReplayResult {
+    let mut per_plan = Vec::with_capacity(capture.plans.len());
+    let mut replayed: u32 = 0;
+    let mut skipped: u32 = 0;
+
+    // Pull every agent/plan.formulate audit row in order so we can map
+    // the i-th plan iteration to its matching row for the
+    // classification_floor lookup (Slice A payload key). The audit
+    // stream is already in id-ascending order by construction.
+    let plan_rows: Vec<&CapturedAuditRow> = capture.audit_rows.iter()
+        .filter(|r| r.actor == "agent" && r.action == "plan.formulate")
+        .collect();
+
+    for (i, cp) in capture.plans.iter().enumerate() {
+        if cp.plan_json.is_null() {
+            skipped = skipped.saturating_add(1);
+            per_plan.push(ReplayedPlan {
+                iter: cp.iter,
+                baseline_verdict: cp.verdict_today.clone(),
+                new_verdict: None,
+                is_delta: false,
+                skipped_reason: Some(
+                    "plan body missing; recapture against current daemon \
+                     (Slice A's audit-payload v2)".into()
+                ),
+            });
+            continue;
+        }
+
+        // Decode the plan body. A capture with non-null plan_json
+        // that fails to deserialise is operator-facing corruption —
+        // surface it as a skip with a distinct reason.
+        let plan: Plan = match serde_json::from_value(cp.plan_json.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                skipped = skipped.saturating_add(1);
+                per_plan.push(ReplayedPlan {
+                    iter: cp.iter,
+                    baseline_verdict: cp.verdict_today.clone(),
+                    new_verdict: None,
+                    is_delta: false,
+                    skipped_reason: Some(format!("plan body decode error: {e}")),
+                });
+                continue;
+            }
+        };
+
+        // Classification floor: prefer the audit-row's
+        // classification_floor (post-Slice-A) over the plan's
+        // data_ceiling (different concept; plan-level inferred
+        // ceiling vs task-level producer floor). Fallback: Public.
+        let classification_floor = plan_rows.get(i)
+            .and_then(|r| r.payload.get("classification_floor"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str::<DataClass>(&format!("\"{}\"", s)).ok())
+            .unwrap_or(DataClass::Public);
+
+        let ctx = ReviewStageContext {
+            task_id: capture.task_id,
+            instruction: &capture.prompt,
+            classification_floor,
+            plan_count: cp.iter,
+        };
+
+        let verdict = chain.review(&plan, &ctx).await;
+        let snap = VerdictSnapshot::from_verdict(&verdict);
+
+        let delta = is_delta(
+            cp.verdict_today.as_deref(),
+            Some(&snap.kind),
+        );
+
+        per_plan.push(ReplayedPlan {
+            iter: cp.iter,
+            baseline_verdict: cp.verdict_today.clone(),
+            new_verdict: Some(snap),
+            is_delta: delta,
+            skipped_reason: None,
+        });
+        replayed = replayed.saturating_add(1);
+    }
+
+    ReplayResult {
+        fixture_id: capture.fixture_id.clone(),
+        fixture_summary: capture.fixture_summary.clone(),
+        captured_at: capture.captured_at.clone(),
+        llm_model: capture.llm_model.clone(),
+        plans_replayed: replayed,
+        plans_skipped_missing_body: skipped,
+        per_plan,
     }
 }
 
@@ -464,5 +579,154 @@ mod tests {
             s.contains("0 plans") || s.contains("0 fixtures"),
             "summary line must report zero counts; got:\n{s}"
         );
+    }
+
+    // ---- replay_capture ----
+
+    use std::sync::Arc;
+
+    use crate::cassandra::review::{ChainReviewStage, NoopReviewStage};
+    use crate::cassandra::types::{DataClass, Plan};
+    use crate::observation::capture::{CapturedAuditRow, CapturedPlan};
+
+    fn rich_plan_audit_row(id: i64, task_id: i64, plan_body: &Plan) -> CapturedAuditRow {
+        // Mimics post-Slice-A agent/plan.formulate payload.
+        CapturedAuditRow {
+            id,
+            ts: "2026-05-15T00:00:00Z".into(),
+            actor: "agent".into(),
+            action: "plan.formulate".into(),
+            payload: serde_json::json!({
+                "task_id": task_id,
+                "plan_count": 1,
+                "decision_kind": "task_complete",
+                "plan_step_count": plan_body.steps.len(),
+                "refused": serde_json::Value::Null,
+                "plan": serde_json::to_value(plan_body).unwrap(),
+                "classification_floor": "Public",
+            }),
+        }
+    }
+
+    fn verdict_audit_row(id: i64, task_id: i64, kind: &str) -> CapturedAuditRow {
+        CapturedAuditRow {
+            id,
+            ts: "2026-05-15T00:00:01Z".into(),
+            actor: "cassandra:chain".into(),
+            action: "verdict".into(),
+            payload: serde_json::json!({
+                "task_id": task_id,
+                "plan_count": 1,
+                "verdict_kind": kind,
+                "detail": serde_json::Value::Null,
+                "latency_ms": 0,
+            }),
+        }
+    }
+
+    fn pre_slice_a_plan_audit_row(id: i64, task_id: i64) -> CapturedAuditRow {
+        // Mimics pre-Slice-A — no `plan` key.
+        CapturedAuditRow {
+            id,
+            ts: "2026-05-14T00:00:00Z".into(),
+            actor: "agent".into(),
+            action: "plan.formulate".into(),
+            payload: serde_json::json!({
+                "task_id": task_id,
+                "plan_count": 1,
+                "decision_kind": "task_complete",
+                "plan_step_count": 0,
+                "refused": serde_json::Value::Null,
+            }),
+        }
+    }
+
+    fn synthetic_capture(audit_rows: Vec<CapturedAuditRow>, plans: Vec<CapturedPlan>) -> CaptureJson {
+        CaptureJson {
+            schema_version: 2,
+            fixture_id: "test-fixture".into(),
+            fixture_summary: "synthetic for replay_capture test".into(),
+            captured_at: "2026-05-15T00:00:00Z".into(),
+            llm_backend: "local".into(),
+            llm_model: "gemma4:26b".into(),
+            llm_base_url: "http://localhost:11434/v1".into(),
+            prompt: "test prompt".into(),
+            task_id: 1,
+            task_state: "completed".into(),
+            plan_iterations: plans.len() as u32,
+            plans,
+            audit_rows,
+        }
+    }
+
+    fn terminal_plan() -> Plan {
+        Plan {
+            context: "".into(),
+            decision: "task_complete".into(),
+            rationale: "".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": "ok"})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_capture_against_noop_chain_yields_approve_no_delta() {
+        let plan = terminal_plan();
+        let audit_rows = vec![
+            rich_plan_audit_row(1, 1, &plan),
+            verdict_audit_row(2, 1, "approve"),
+        ];
+        let plans = vec![CapturedPlan {
+            iter: 1,
+            plan_json: serde_json::to_value(&plan).unwrap(),
+            verdict_today: Some("approve".into()),
+            step_count: 0,
+            data_ceiling: "Public".into(),
+        }];
+        let capture = synthetic_capture(audit_rows, plans);
+        let chain = ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]);
+
+        let result = replay_capture(&capture, &chain).await;
+        assert_eq!(result.fixture_id, "test-fixture");
+        assert_eq!(result.plans_replayed, 1);
+        assert_eq!(result.plans_skipped_missing_body, 0);
+        assert_eq!(result.per_plan.len(), 1);
+        let p = &result.per_plan[0];
+        assert_eq!(p.iter, 1);
+        assert_eq!(p.baseline_verdict.as_deref(), Some("approve"));
+        assert_eq!(p.new_verdict.as_ref().unwrap().kind, "approve");
+        assert!(!p.is_delta);
+        assert!(p.skipped_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn replay_capture_skips_when_plan_body_is_null() {
+        // Pre-Slice-A capture shape — plan_json: null on the
+        // CapturedPlan AND no `plan` key in the audit-row payload.
+        let plans = vec![CapturedPlan {
+            iter: 1,
+            plan_json: serde_json::Value::Null,
+            verdict_today: Some("approve".into()),
+            step_count: 0,
+            data_ceiling: "Public".into(),
+        }];
+        let audit_rows = vec![
+            pre_slice_a_plan_audit_row(1, 1),
+            verdict_audit_row(2, 1, "approve"),
+        ];
+        let capture = synthetic_capture(audit_rows, plans);
+        let chain = ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]);
+
+        let result = replay_capture(&capture, &chain).await;
+        assert_eq!(result.plans_replayed, 0);
+        assert_eq!(result.plans_skipped_missing_body, 1);
+        assert_eq!(result.per_plan.len(), 1);
+        let p = &result.per_plan[0];
+        assert!(p.new_verdict.is_none());
+        assert!(p.skipped_reason.is_some(),
+            "skipped_reason must be populated when plan_json is null");
+        assert!(!p.is_delta);
     }
 }
