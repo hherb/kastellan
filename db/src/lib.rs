@@ -120,6 +120,24 @@ pub enum DbError {
     #[error("required environment variable unset: {0}")]
     EnvVarMissing(&'static str),
 
+    /// A persisted value violates a schema invariant the code relies
+    /// on (e.g. a CHECK-constrained column read back with a value
+    /// outside the allowed range). Distinct from [`DbError::Query`]
+    /// because the schema, not the query, is the broken contract —
+    /// retrying won't help; an operator must investigate.
+    #[error("postgres invariant violated: {0}")]
+    Invariant(String),
+
+    /// A caller asked the storage layer to do something the storage
+    /// layer is *contractually forbidden to do*, independent of any
+    /// SQL state — e.g. writing an L0 (meta-rule) memory row through
+    /// the agent-loop writer. Distinct from [`DbError::Query`] (the
+    /// SQL itself is fine) and from [`DbError::Invariant`] (no read
+    /// surfaced bad state). Retrying never helps; the caller must
+    /// route the request through the correct admin path.
+    #[error("storage policy violation: {0}")]
+    PolicyViolation(String),
+
     /// Catchall for other errors not fitting other variants.
     #[error("{0}")]
     Other(String),
