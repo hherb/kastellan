@@ -198,7 +198,7 @@ Pure-additive; existing JSONB consumers (replay harness, observation captures) k
 
 - **Recall-lane wiring** — next natural slice. Needs query embedding + (separately) entity extraction for graph seeds.
 - **L1 promotion writer** — until this lands, L1 stays empty in production (`l1_count = 0` on every audit row).
-- **`inner_loop.rs` split** — file grew from 870 to ~977 LOC (+16 from Task 5's emissions + Task 4's `FormulationMeta {}` literal updates). Pre-existing 500-LOC breach extended. Natural split: lift `build_plan_formulate_payload` + the audit writers into `core/src/scheduler/inner_loop_audit.rs`.
+- **`inner_loop.rs` split** — file grew from 870 to **991 LOC** (+121 across the slice — the new audit-row inserts in Task 5 plus the `FormulationMeta {}` literal additions in Task 4's test fixtures). Pre-existing 500-LOC breach extended significantly. Natural split: lift `build_plan_formulate_payload` + the audit writers into `core/src/scheduler/inner_loop_audit.rs`. This is now a higher-priority follow-up than the spec originally projected.
 - **Replay-harness refresh** — pre-Slice-C captures don't carry the 3 new keys. Re-capture turns them into harness inputs that exercise drift detection.
 - **Process notes worth keeping:** Two-stage review caught two scope-creep moments during this slice — a `PassThroughSystemPromptBuilder` type not in the spec (reverted in `48c9145`) and a value-round-trip test gap that would have masked a hypothetical "wrong field" wiring bug (added in `58ab5ef`). The fixup commit pattern (spec violation → revert; code-quality gap → add coverage) kept the slice clean.
 

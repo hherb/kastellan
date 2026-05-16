@@ -320,7 +320,8 @@ impl PlanFormulator for ScriptedFormulator {
                 llm_backend: "local".into(),
                 latency_ms: 1,
                 retry_count: 0,
-                assembled_prompt_sha256: "test-assembled-sha".into(),
+                // SHA-256 of empty string — matches StaticSystemPromptBuilder::empty()
+                assembled_prompt_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
                 l0_count: 0,
                 l1_count: 0,
             },
@@ -462,6 +463,21 @@ async fn happy_path_one_plan_returns_completed() {
         payload["classification_floor"], "Public",
         "classification_floor must serialise as PascalCase string (Public for unset producer floor)"
     );
+
+    // Slice C (prompt assembler, 2026-05-16): mid-tier
+    // regression gate for the 3 new audit keys. The cli_ask_e2e
+    // happy path also asserts these end-to-end, but that test
+    // requires the full sandbox + worker stack; this one runs
+    // wherever Postgres is reachable.
+    assert!(payload.get("system_prompt_sha256")
+        .and_then(|v| v.as_str())
+        .map(|s| s.len() == 64)
+        .unwrap_or(false),
+        "plan.formulate must carry system_prompt_sha256 as a 64-char hex string; got {payload:?}");
+    assert!(payload.get("l0_count").and_then(|v| v.as_u64()).is_some(),
+        "plan.formulate must carry numeric l0_count; got {payload:?}");
+    assert!(payload.get("l1_count").and_then(|v| v.as_u64()).is_some(),
+        "plan.formulate must carry numeric l1_count; got {payload:?}");
 }
 
 /// (b) Plan 1 dispatches a step that fails (no entry in dispatcher
