@@ -111,10 +111,16 @@ async fn main() -> Result<()> {
         ]),
     );
 
+    // Wire the production prompt assembler: loads L0 + L1 from the same
+    // pool before each LLM call. Task 6 will confirm this is the correct
+    // wire-in point; using PgSystemPromptBuilder::new here (rather than
+    // StaticSystemPromptBuilder::empty) keeps the integration tests green
+    // because the base agent_planner prompt flows through the assembler.
     let formulator: Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
         Arc::new(hhagent_core::scheduler::agent::RouterAgent::new(
             router.clone(),
             prompts.clone(),
+            Arc::new(hhagent_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
         ));
 
     // Sandbox backend (cross-platform).

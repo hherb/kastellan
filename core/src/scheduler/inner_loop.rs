@@ -765,6 +765,9 @@ mod tests {
             llm_backend: "local".into(),
             latency_ms: 42,
             retry_count: 0,
+            assembled_prompt_sha256: "test-assembled-sha".into(),
+            l0_count: 0,
+            l1_count: 0,
         };
         let payload = build_plan_formulate_payload(
             /*task_id*/ 7,
@@ -817,6 +820,9 @@ mod tests {
             llm_backend: "local".into(),
             latency_ms: 0,
             retry_count: 0,
+            assembled_prompt_sha256: "test-assembled-sha".into(),
+            l0_count: 0,
+            l1_count: 0,
         };
         let payload = build_plan_formulate_payload(
             1, 0, DataClass::Public,
@@ -852,6 +858,8 @@ mod tests {
             prompt_name: "p".into(), prompt_sha256: "h".into(),
             llm_model: "m".into(), llm_backend: "local".into(),
             latency_ms: 1, retry_count: 0,
+            assembled_prompt_sha256: "test-assembled-sha".into(),
+            l0_count: 0, l1_count: 0,
         };
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::Public, ClassificationFloorSource::Default, &[], &plan, &meta,
@@ -876,6 +884,8 @@ mod tests {
             prompt_name: "p".into(), prompt_sha256: "h".into(),
             llm_model: "m".into(), llm_backend: "local".into(),
             latency_ms: 1, retry_count: 0,
+            assembled_prompt_sha256: "test-assembled-sha".into(),
+            l0_count: 0, l1_count: 0,
         };
         let signals = vec!["patient".to_string(), "pathology".to_string()];
         let payload = build_plan_formulate_payload(
@@ -909,6 +919,8 @@ mod tests {
             prompt_name: "p".into(), prompt_sha256: "h".into(),
             llm_model: "m".into(), llm_backend: "local".into(),
             latency_ms: 1, retry_count: 0,
+            assembled_prompt_sha256: "test-assembled-sha".into(),
+            l0_count: 0, l1_count: 0,
         };
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::ClinicalConfidential,

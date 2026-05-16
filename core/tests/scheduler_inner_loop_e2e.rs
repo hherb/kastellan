@@ -320,6 +320,9 @@ impl PlanFormulator for ScriptedFormulator {
                 llm_backend: "local".into(),
                 latency_ms: 1,
                 retry_count: 0,
+                assembled_prompt_sha256: "test-assembled-sha".into(),
+                l0_count: 0,
+                l1_count: 0,
             },
         ))
     }
