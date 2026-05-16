@@ -779,9 +779,9 @@ mod tests {
             llm_backend: "local".into(),
             latency_ms: 42,
             retry_count: 0,
-            assembled_prompt_sha256: "test-assembled-sha".into(),
-            l0_count: 0,
-            l1_count: 0,
+            assembled_prompt_sha256: "cafebabe".into(),
+            l0_count: 7,
+            l1_count: 3,
         };
         let payload = build_plan_formulate_payload(
             /*task_id*/ 7,
@@ -804,12 +804,26 @@ mod tests {
             "classification_floor must serialise as PascalCase string"
         );
 
-        // Existing 11 keys remain unchanged.
+        // Existing 14 keys (11 originals + Slice A's plan + classification_floor + Slice B's classification_floor_source) remain unchanged.
         assert_eq!(payload["task_id"], 7);
         assert_eq!(payload["plan_count"], 1);
         assert_eq!(payload["decision_kind"], "act");
         assert_eq!(payload["plan_step_count"], 1);
         assert!(payload["refused"].is_null());
+
+        // Slice C (prompt assembler, 2026-05-16): value round-trips
+        // for the 3 new keys catch a "wrong field" bug — e.g. a
+        // refactor that wired meta.prompt_sha256 (the base prompt)
+        // into the system_prompt_sha256 key instead of
+        // meta.assembled_prompt_sha256 (the assembled prompt). The
+        // shape-pin tests above check the key set; these check the
+        // values flow from the right meta fields.
+        assert_eq!(payload["system_prompt_sha256"], "cafebabe",
+            "system_prompt_sha256 must come from meta.assembled_prompt_sha256");
+        assert_eq!(payload["l0_count"], 7u64,
+            "l0_count must come from meta.l0_count");
+        assert_eq!(payload["l1_count"], 3u64,
+            "l1_count must come from meta.l1_count");
     }
 
     #[test]
