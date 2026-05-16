@@ -4,9 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-16 (L0 seed data loader — shipped on branch `feat/l0-seed-loader`; new `core::memory::l0_seed` module + `db::memories::load_active_l0` + starter TOML + daemon wire-in + `l0.seeded` audit row; +28 tests; workspace 607 → **635**).
-**Last commit (branch HEAD):** `a582cf3` (Task 5 — ship starter L0 meta-rules TOML). 10 commits on branch off `main` at `305941a`: spec/plan (`7153b48`, `4567c0b`) → Task 1 + fixup (`f515eea`, `9f0e979`) → Task 2 + fixup (`80966bd`, `10f4770`) → Task 3 + fixup (`69d39f6`, `b2f8861`) → Task 4 (`dca29dc`) → Task 5 (`a582cf3`).
-**Session-end verification:** `cargo test --workspace` on branch HEAD: **635 passed, 0 failed, 4 ignored, 0 [SKIP] lines, 0 warnings** on Linux. `core/src/memory/l0_seed.rs` ~660 LOC (370 impl + ~290 inline tests; implementation alone well under the 500-LOC soft cap; matches the `core/src/memory/layers.rs` inline-tests precedent). `core/src/main.rs` 437 LOC (up from ~415 — flagged in code review as a slow-creep concern; a future `startup::bring_up(pool)` extraction would help if more seed/loader tasks land in main.rs).
+**Last updated:** 2026-05-16 (L0 seed data loader — shipped on branch `feat/l0-seed-loader`; new `core::memory::l0_seed` module + `db::memories::load_active_l0` + starter TOML + daemon wire-in + `l0.seeded` audit row; +31 tests; workspace 607 → **638**).
+**Last commit (branch HEAD):** `a582cf3` (Task 5 — ship starter L0 meta-rules TOML). 11 commits on branch off `main` at `305941a`: spec/plan (`7153b48`, `4567c0b`) → Task 1 + fixup (`f515eea`, `9f0e979`) → Task 2 + fixup (`80966bd`, `10f4770`) → Task 3 + fixup (`69d39f6`, `b2f8861`) → Task 4 (`dca29dc`) → Task 5 (`a582cf3`) → Task 6 docs (`e8f34eb`).
+**Session-end verification:** `cargo test --workspace` on branch HEAD: **638 passed, 0 failed, 4 ignored, 0 [SKIP] lines, 0 warnings** on Linux. `core/src/memory/l0_seed.rs` ~660 LOC (370 impl + ~290 inline tests; implementation alone well under the 500-LOC soft cap; matches the `core/src/memory/layers.rs` inline-tests precedent). `core/src/main.rs` 437 LOC (up from ~415 — flagged in code review as a slow-creep concern; a future `startup::bring_up(pool)` extraction would help if more seed/loader tasks land in main.rs).
 
 **Post-review fixups (2026-05-16):**
 
@@ -159,7 +159,7 @@ cargo test --workspace           # all green
 
 ## Recently completed (this session, 2026-05-16 — L0 seed data loader, branch `feat/l0-seed-loader`)
 
-Branch: `feat/l0-seed-loader` (off `main` at `305941a`, 10 commits). Spec: [`docs/superpowers/specs/2026-05-16-l0-seed-loader-design.md`](../../superpowers/specs/2026-05-16-l0-seed-loader-design.md). Plan: [`docs/superpowers/plans/2026-05-16-l0-seed-loader.md`](../../superpowers/plans/2026-05-16-l0-seed-loader.md). Implements the HANDOVER's "Next concrete engineering pickup #2": startup-time loader that turns a hand-edited TOML of meta-rules into L0 (Meta) rows via the existing `seed_meta_memory` admin function, idempotent on `(l0_rule_id, body_sha256)`.
+Branch: `feat/l0-seed-loader` (off `main` at `305941a`, 11 commits). Spec: [`docs/superpowers/specs/2026-05-16-l0-seed-loader-design.md`](../../superpowers/specs/2026-05-16-l0-seed-loader-design.md). Plan: [`docs/superpowers/plans/2026-05-16-l0-seed-loader.md`](../../superpowers/plans/2026-05-16-l0-seed-loader.md). Implements the HANDOVER's "Next concrete engineering pickup #2": startup-time loader that turns a hand-edited TOML of meta-rules into L0 (Meta) rows via the existing `seed_meta_memory` admin function, idempotent on `(l0_rule_id, body_sha256)`.
 
 **Shape (3 NEW + 4 modified + 2 docs):**
 
@@ -198,7 +198,7 @@ Branch: `feat/l0-seed-loader` (off `main` at `305941a`, 10 commits). Spec: [`doc
 
 Five keys exactly; pinned implicitly via the `L0SeedReport` struct field set + the wire-in helper's `serde_json::json!` literal. No schema migration. Operator-visible breadcrumb that the loader ran, with cross-restart drift detection via the SHA-256 of the source file content.
 
-**Test count delta:** **607 → 635** (+28: 19 unit + 9 DB integration). Zero failures, zero warnings, zero `[SKIP]` lines on Linux.
+**Test count delta:** **607 → 638** (+31: 19 unit + 12 DB integration — the integration count grew by 3 in the final-review fixup commit covering `L0Error::Io` trigger, the warn-and-drop branch, and the `cap_bytes == 0` fast-path). Zero failures, zero warnings, zero `[SKIP]` lines on Linux.
 
 **TDD ordering (per CLAUDE.md rule #2):** five RED → GREEN → commit cycles, each with a small post-review fixup landing as a follow-up commit on the same branch. Two-stage review (spec compliance + code quality) per task; fixup commits address any code-review findings before moving to the next task.
 

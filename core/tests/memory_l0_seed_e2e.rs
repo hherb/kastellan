@@ -598,3 +598,158 @@ fn load_l0_active_excludes_legacy_l0_rows_without_rule_id() {
         pool.close().await;
     });
 }
+
+/// Final-review follow-up: `L0Error::Io` is constructed when
+/// `seed_l0_from_file` is called against a path that does not exist.
+/// The daemon's `l0_path.exists()` guard normally elides this branch,
+/// but the API is public — pin the surface.
+#[test]
+fn seed_from_file_returns_io_error_on_missing_path() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0p-d",
+        "l0p-l",
+        &format!("hhagent-supervisor-test-pg-l0iopath-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-io-missing"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("definitely-does-not-exist.toml");
+        let err = seed_l0_from_file(&pool, &missing)
+            .await
+            .expect_err("missing file must fail");
+        assert!(matches!(err, L0Error::Io { .. }), "got {err:?}");
+
+        pool.close().await;
+    });
+}
+
+/// Final-review follow-up: the `tracing::warn!` branch in
+/// `load_l0_active` fires when the *first* (newest) row's body alone
+/// exceeds `cap_bytes`. The existing oversize test seeds a smaller
+/// row last (newest), so the budget breaks AFTER admitting one row.
+/// This scenario keeps the accumulator empty when the budget breaks,
+/// exercising the warn-and-drop branch.
+#[test]
+fn load_l0_active_warns_when_first_row_alone_exceeds_cap_bytes() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0w-d",
+        "l0w-l",
+        &format!("hhagent-supervisor-test-pg-l0warn-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-warn"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Single rule, 700-byte body. cap_bytes = 500 < 700 → the
+        // newest (only) row trips the
+        // `acc.is_empty() && row_bytes > cap_bytes` branch and is
+        // dropped with a warn (not asserted in-process, but the
+        // empty-result assertion proves the branch fired).
+        let big_body = "z".repeat(700);
+        let rules = vec![L0Rule {
+            id: "lonely_big".to_string(),
+            body: big_body,
+            tags: Vec::new(),
+        }];
+        seed_l0_from_rules(&pool, seed_path(), "sha-lonely", &rules)
+            .await
+            .expect("seed");
+
+        let active = load_l0_active(&pool, L0_DEFAULT_CAP_ROWS, 500)
+            .await
+            .expect("load");
+        assert!(active.is_empty(), "first row alone over cap must be dropped");
+
+        pool.close().await;
+    });
+}
+
+/// Final-review follow-up: standalone pin on the `cap_bytes == 0`
+/// fast-path. The existing `respects_cap_rows` test already covers
+/// `cap_rows == 0`; this one closes the symmetric gap.
+#[test]
+fn load_l0_active_zero_cap_bytes_returns_empty() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0z-d",
+        "l0z-l",
+        &format!("hhagent-supervisor-test-pg-l0zerobytes-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-zero-bytes"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        let rules = vec![make_rule("r1", "anything")];
+        seed_l0_from_rules(&pool, seed_path(), "sha", &rules)
+            .await
+            .expect("seed");
+
+        let active = load_l0_active(&pool, L0_DEFAULT_CAP_ROWS, 0)
+            .await
+            .expect("load with cap_bytes=0");
+        assert!(active.is_empty(), "cap_bytes=0 must return empty");
+
+        pool.close().await;
+    });
+}

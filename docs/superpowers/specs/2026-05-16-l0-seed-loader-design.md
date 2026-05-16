@@ -251,13 +251,18 @@ pub async fn load_l0_active_default(
 
 ```sql
 SELECT DISTINCT ON (metadata->>'l0_rule_id')
-       id, body, metadata, embedding::text, layer, created_at
+       id, body, metadata, layer, created_at
   FROM memories
  WHERE layer = 0
    AND metadata ? 'l0_rule_id'
  ORDER BY metadata->>'l0_rule_id', created_at DESC, id DESC
  LIMIT $1
 ```
+
+(The `Memory` struct has no `embedding` field, so the SELECT
+deliberately omits the column. Including `embedding::text` would
+cost PG a pgvector→text encoding per L0 row for bytes that would
+be discarded.)
 
 `metadata ? 'l0_rule_id'` is the safety check against legacy L0 rows
 written by a future hand-fixup (or test) that lacked the rule_id key
