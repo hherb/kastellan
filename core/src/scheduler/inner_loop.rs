@@ -15,6 +15,44 @@ use crate::cassandra::types::{DataClass, Plan, PlannedStep, Verdict};
 
 use super::agent::{AgentError, FormulationMeta, PlanFormulator};
 
+/// Provenance of the current `classification_floor` value.
+///
+/// Carried in [`TaskContext`] and emitted into the
+/// `agent/plan.formulate` audit-row payload so operators can trace
+/// any DP-blocked plan back to how the floor was set.
+///
+/// Wire form (lowercase snake_case via serde) matches the
+/// operator-visible audit-log token — renaming any branch is an
+/// audit-trail contract break. Mirrors the `as_pascal_str` shape on
+/// `DataClass`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassificationFloorSource {
+    /// Operator explicitly passed `--classification-floor X`.
+    Operator,
+    /// CLI keyword classifier elevated above Public.
+    CliInferred,
+    /// Agent raised the floor mid-task via `Plan.floor_request`.
+    AgentRaised,
+    /// No inference matched and no operator flag was set.
+    Default,
+}
+
+impl ClassificationFloorSource {
+    /// Canonical lowercase snake_case string, identical to the serde wire
+    /// form. Used by audit-log payload emitters so the rendered tag is a
+    /// formal contract instead of relying on the de-facto stability of
+    /// `Debug`. Renaming any branch is an audit-trail contract break.
+    pub fn as_snake_str(self) -> &'static str {
+        match self {
+            ClassificationFloorSource::Operator    => "operator",
+            ClassificationFloorSource::CliInferred => "cli_inferred",
+            ClassificationFloorSource::AgentRaised => "agent_raised",
+            ClassificationFloorSource::Default     => "default",
+        }
+    }
+}
+
 /// Per-task accumulator state passed to the agent each iteration.
 #[derive(Debug)]
 pub struct TaskContext {
@@ -22,6 +60,15 @@ pub struct TaskContext {
     pub lane: hhagent_db::tasks::Lane,
     pub instruction: String,
     pub classification_floor: DataClass,
+    /// Provenance of `classification_floor`. Set at task entry by
+    /// `runner::run_inner_loop_for_task`; mutated to `AgentRaised` on
+    /// successful agent floor-raise (see `apply_floor_raise`).
+    pub classification_floor_source: ClassificationFloorSource,
+    /// Matched signal tags from CLI keyword inference. Non-empty iff
+    /// `classification_floor_source == CliInferred`. Cleared on agent
+    /// raise (the tags explained the original CLI inference, not the
+    /// elevated floor).
+    pub classification_floor_signals: Vec<String>,
     pub plans: Vec<(Plan, Vec<StepOutcome>)>,
     pub advisories: Vec<String>,
     pub blocks: Vec<String>,
@@ -200,6 +247,20 @@ pub async fn run_to_terminal(
             );
         }
 
+        // Agent-side floor-raise: if the plan requests a higher floor than
+        // the producer set, elevate ctx BEFORE the audit row is written
+        // (so the row reflects the elevated floor + AgentRaised source)
+        // and BEFORE the reviewer chain runs (so DP sees the new floor
+        // for I1 + I2 checks).
+        if apply_floor_raise(&mut ctx, &plan) {
+            tracing::info!(
+                task_id = ctx.task_id,
+                plan_count = ctx.plan_count,
+                new_floor = ctx.classification_floor.as_pascal_str(),
+                "agent raised classification floor"
+            );
+        }
+
         write_audit_plan_formulate(pool, &ctx, &plan, &meta).await?;
 
         // 2. CASSANDRA review
@@ -329,20 +390,51 @@ pub async fn run_to_terminal(
     }
 }
 
+/// Apply `plan.floor_request` to `ctx` if it raises the current floor.
+/// Pure side-effect on `ctx`. Returns true iff `ctx` was mutated.
+///
+/// Never lowers the floor: a `floor_request` whose rank is ≤ the
+/// current floor is a no-op (pinned by
+/// `agent_floor_request_lower_than_producer_is_ignored`).
+///
+/// On a successful raise, also flips
+/// `ctx.classification_floor_source` to `AgentRaised` and clears
+/// `ctx.classification_floor_signals` (the signals explained the
+/// original CLI inference, not the elevated floor).
+fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
+    if let Some(req) = plan.floor_request {
+        if req.rank() > ctx.classification_floor.rank() {
+            ctx.classification_floor = req;
+            ctx.classification_floor_source = ClassificationFloorSource::AgentRaised;
+            ctx.classification_floor_signals.clear();
+            return true;
+        }
+    }
+    false
+}
+
 /// Pure builder for the `agent/plan.formulate` audit-row payload.
 ///
 /// Extracted from `write_audit_plan_formulate` so the wire shape is
-/// unit-testable without a live Postgres pool. The 13-key shape pins
-/// (in this file's `tests` module) defend against accidental drift.
+/// unit-testable without a live Postgres pool. The 14/15-key shape pins
+/// (in this file's `tests` module) defend against accidental drift —
+/// 14 keys for non-`CliInferred` sources, 15 when `CliInferred` carries
+/// matched signals.
 ///
 /// Slice A (2026-05-15) added `plan` (full serialised Plan) +
 /// `classification_floor` (task-level DataClass) so captures carry
 /// everything the reviewer pipeline needs to be replayed offline —
 /// see `core::observation::replay`.
+///
+/// Slice B (2026-05-16) added `classification_floor_source` (always)
+/// and conditional `classification_floor_signals` (CliInferred only)
+/// so audit consumers can trace how the floor was set.
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
     classification_floor: DataClass,
+    classification_floor_source: ClassificationFloorSource,
+    classification_floor_signals: &[String],
     plan: &Plan,
     meta: &FormulationMeta,
 ) -> serde_json::Value {
@@ -376,22 +468,39 @@ pub(crate) fn build_plan_formulate_payload(
     let classification_floor_json = serde_json::to_value(classification_floor)
         .expect("DataClass serialisation cannot fail (closed enum, no payloads)");
 
-    serde_json::json!({
-        "task_id":              task_id,
-        "plan_count":           plan_count,
-        "prompt_name":          meta.prompt_name,
-        "prompt_sha256":        meta.prompt_sha256,
-        "llm_model":            meta.llm_model,
-        "llm_backend":          meta.llm_backend,
-        "latency_ms":           meta.latency_ms,
-        "retry_count":          meta.retry_count,
-        "plan_step_count":      plan.steps.len(),
-        "decision_kind":        decision_kind,
-        "refused":              refused,
-        // Slice A additions:
-        "plan":                 plan_json,
-        "classification_floor": classification_floor_json,
-    })
+    let mut obj = serde_json::Map::new();
+    obj.insert("task_id".into(),         serde_json::json!(task_id));
+    obj.insert("plan_count".into(),      serde_json::json!(plan_count));
+    obj.insert("prompt_name".into(),     serde_json::json!(meta.prompt_name));
+    obj.insert("prompt_sha256".into(),   serde_json::json!(meta.prompt_sha256));
+    obj.insert("llm_model".into(),       serde_json::json!(meta.llm_model));
+    obj.insert("llm_backend".into(),     serde_json::json!(meta.llm_backend));
+    obj.insert("latency_ms".into(),      serde_json::json!(meta.latency_ms));
+    obj.insert("retry_count".into(),     serde_json::json!(meta.retry_count));
+    obj.insert("plan_step_count".into(), serde_json::json!(plan.steps.len()));
+    obj.insert("decision_kind".into(),   serde_json::json!(decision_kind));
+    obj.insert("refused".into(),         refused);
+    // Slice A:
+    obj.insert("plan".into(),                 plan_json);
+    obj.insert("classification_floor".into(), classification_floor_json);
+    // Slice B (automatic floor inference, 2026-05-16):
+    obj.insert(
+        "classification_floor_source".into(),
+        serde_json::json!(classification_floor_source.as_snake_str()),
+    );
+    // Signals key only appears when source is CliInferred AND we have
+    // signals. Other sources (Operator / AgentRaised / Default) omit
+    // the key (saving JSON payload bytes and making the absence itself
+    // a wire signal that no CLI inference was the load-bearing decision).
+    if classification_floor_source == ClassificationFloorSource::CliInferred
+        && !classification_floor_signals.is_empty()
+    {
+        obj.insert(
+            "classification_floor_signals".into(),
+            serde_json::json!(classification_floor_signals),
+        );
+    }
+    serde_json::Value::Object(obj)
 }
 
 async fn write_audit_plan_formulate(
@@ -404,6 +513,8 @@ async fn write_audit_plan_formulate(
         ctx.task_id,
         ctx.plan_count,
         ctx.classification_floor,
+        ctx.classification_floor_source,
+        &ctx.classification_floor_signals,
         plan,
         meta,
     );
@@ -465,11 +576,37 @@ mod tests {
             lane: hhagent_db::tasks::Lane::Fast,
             instruction: "ping".into(),
             classification_floor: DataClass::Public,
+            classification_floor_source: ClassificationFloorSource::Default,
+            classification_floor_signals: vec![],
             plans: vec![],
             advisories: vec![],
             blocks: vec![],
             plan_count: 0,
             max_plans: 3,
+        }
+    }
+
+    #[test]
+    fn classification_floor_source_as_snake_str_matches_serde_wire_form() {
+        // Pin the audit-log contract: `as_snake_str` MUST stay
+        // byte-identical to the serde wire form so the rendered token
+        // in the `classification_floor_source` payload key can be
+        // cross-grepped with operator-visible logs. Mirrors the
+        // `data_class_as_pascal_str_matches_serde_wire_form` pin.
+        for s in [
+            ClassificationFloorSource::Operator,
+            ClassificationFloorSource::CliInferred,
+            ClassificationFloorSource::AgentRaised,
+            ClassificationFloorSource::Default,
+        ] {
+            let wire = serde_json::to_value(s).unwrap();
+            let wire_str = wire.as_str()
+                .expect("ClassificationFloorSource serialises as JSON string");
+            assert_eq!(
+                s.as_snake_str(),
+                wire_str,
+                "as_snake_str must equal serde wire form for {s:?}",
+            );
         }
     }
 
@@ -524,6 +661,85 @@ mod tests {
     }
 
     #[test]
+    fn agent_floor_request_higher_than_producer_elevates_ctx() {
+        let mut c = ctx();
+        // Start at Public (Default source).
+        assert_eq!(c.classification_floor, DataClass::Public);
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::Default);
+
+        let plan = Plan {
+            context: "c".into(), decision: "d".into(), rationale: "r".into(),
+            steps: vec![], result: None,
+            data_ceiling: DataClass::ClinicalConfidential, refused: None,
+            floor_request: Some(DataClass::ClinicalConfidential),
+        };
+        let raised = apply_floor_raise(&mut c, &plan);
+        assert!(raised);
+        assert_eq!(c.classification_floor, DataClass::ClinicalConfidential);
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::AgentRaised);
+        assert!(c.classification_floor_signals.is_empty());
+    }
+
+    #[test]
+    fn agent_floor_request_lower_than_producer_is_ignored() {
+        let mut c = ctx();
+        c.classification_floor = DataClass::ClinicalConfidential;
+        c.classification_floor_source = ClassificationFloorSource::Operator;
+
+        let plan = Plan {
+            context: "c".into(), decision: "d".into(), rationale: "r".into(),
+            steps: vec![], result: None,
+            data_ceiling: DataClass::Public, refused: None,
+            // floor_request below current floor — must NOT lower:
+            floor_request: Some(DataClass::Public),
+        };
+        let raised = apply_floor_raise(&mut c, &plan);
+        assert!(!raised, "lower floor_request must be ignored");
+        assert_eq!(c.classification_floor, DataClass::ClinicalConfidential);
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::Operator);
+    }
+
+    #[test]
+    fn agent_floor_request_equal_to_producer_is_no_op() {
+        let mut c = ctx();
+        c.classification_floor = DataClass::Personal;
+        c.classification_floor_source = ClassificationFloorSource::CliInferred;
+        c.classification_floor_signals = vec!["my_email".into()];
+
+        let plan = Plan {
+            context: "c".into(), decision: "d".into(), rationale: "r".into(),
+            steps: vec![], result: None,
+            data_ceiling: DataClass::Personal, refused: None,
+            floor_request: Some(DataClass::Personal),
+        };
+        let raised = apply_floor_raise(&mut c, &plan);
+        assert!(!raised, "equal-rank floor_request must be a no-op");
+        assert_eq!(c.classification_floor, DataClass::Personal);
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::CliInferred);
+        assert_eq!(c.classification_floor_signals, vec!["my_email".to_string()]);
+    }
+
+    #[test]
+    fn agent_floor_request_none_is_no_op() {
+        let mut c = ctx();
+        c.classification_floor = DataClass::Public;
+        c.classification_floor_source = ClassificationFloorSource::CliInferred;
+        c.classification_floor_signals = vec!["patient".into()];
+
+        let plan = Plan {
+            context: "c".into(), decision: "d".into(), rationale: "r".into(),
+            steps: vec![], result: None,
+            data_ceiling: DataClass::Public, refused: None,
+            floor_request: None,
+        };
+        let raised = apply_floor_raise(&mut c, &plan);
+        assert!(!raised);
+        // CLI inference state is preserved when there's no raise request.
+        assert_eq!(c.classification_floor_source, ClassificationFloorSource::CliInferred);
+        assert_eq!(c.classification_floor_signals, vec!["patient".to_string()]);
+    }
+
+    #[test]
     fn build_plan_formulate_payload_carries_full_plan_and_classification_floor() {
         let plan = Plan {
             context: "ctx".into(),
@@ -540,6 +756,7 @@ mod tests {
             result: None,
             data_ceiling: DataClass::Personal,
             refused: None,
+            floor_request: None,
         };
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
@@ -553,6 +770,8 @@ mod tests {
             /*task_id*/ 7,
             /*plan_count*/ 1,
             /*classification_floor*/ DataClass::ClinicalConfidential,
+            /*classification_floor_source*/ ClassificationFloorSource::Default,
+            /*classification_floor_signals*/ &[],
             &plan,
             &meta,
         );
@@ -577,10 +796,10 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_pins_thirteen_keys() {
+    fn build_plan_formulate_payload_pins_fourteen_keys_for_default_source() {
         // Pin the total key count so a future additive change to the
         // wire shape becomes a deliberate, reviewable edit instead of
-        // an accidental drift.
+        // an accidental drift. Default source: 14 keys (no signals).
         let plan = Plan {
             context: "".into(),
             decision: "task_complete".into(),
@@ -589,6 +808,7 @@ mod tests {
             result: Some(serde_json::json!({"kind": "text", "body": "ok"})),
             data_ceiling: DataClass::Public,
             refused: None,
+            floor_request: None,
         };
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
@@ -599,7 +819,9 @@ mod tests {
             retry_count: 0,
         };
         let payload = build_plan_formulate_payload(
-            1, 0, DataClass::Public, &plan, &meta,
+            1, 0, DataClass::Public,
+            ClassificationFloorSource::Default, &[],
+            &plan, &meta,
         );
         let keys: std::collections::BTreeSet<&str> = payload
             .as_object()
@@ -613,8 +835,92 @@ mod tests {
             "plan_step_count", "decision_kind", "refused",
             // Slice A additions:
             "plan", "classification_floor",
+            // Slice B (automatic floor inference, 2026-05-16):
+            "classification_floor_source",
         ].into_iter().collect();
         assert_eq!(keys, expected, "payload key set drifted; update the pin deliberately");
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_default_source_omits_signals_key() {
+        let plan = Plan {
+            context: "".into(), decision: "task_complete".into(), rationale: "".into(),
+            steps: vec![], result: Some(serde_json::json!({"kind":"text","body":"ok"})),
+            data_ceiling: DataClass::Public, refused: None, floor_request: None,
+        };
+        let meta = FormulationMeta {
+            prompt_name: "p".into(), prompt_sha256: "h".into(),
+            llm_model: "m".into(), llm_backend: "local".into(),
+            latency_ms: 1, retry_count: 0,
+        };
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public, ClassificationFloorSource::Default, &[], &plan, &meta,
+        );
+        let obj = payload.as_object().expect("payload is an object");
+        assert_eq!(obj.len(), 14,
+            "default-source payload should have 14 keys; got {} keys: {:?}",
+            obj.len(), obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
+        assert!(obj.get("classification_floor_signals").is_none(),
+            "signals key must be ABSENT when source is not cli_inferred");
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_cli_inferred_source_has_15_keys_with_signals() {
+        let plan = Plan {
+            context: "".into(), decision: "task_complete".into(), rationale: "".into(),
+            steps: vec![], result: Some(serde_json::json!({"kind":"text","body":"ok"})),
+            data_ceiling: DataClass::ClinicalConfidential, refused: None, floor_request: None,
+        };
+        let meta = FormulationMeta {
+            prompt_name: "p".into(), prompt_sha256: "h".into(),
+            llm_model: "m".into(), llm_backend: "local".into(),
+            latency_ms: 1, retry_count: 0,
+        };
+        let signals = vec!["patient".to_string(), "pathology".to_string()];
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::ClinicalConfidential,
+            ClassificationFloorSource::CliInferred, &signals,
+            &plan, &meta,
+        );
+        let obj = payload.as_object().expect("payload is an object");
+        assert_eq!(obj.len(), 15,
+            "cli_inferred payload should have 15 keys (default 14 + signals); got {} keys: {:?}",
+            obj.len(), obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj["classification_floor_source"], serde_json::Value::String("cli_inferred".into()));
+        let arr = obj["classification_floor_signals"].as_array()
+            .expect("signals key is an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0], serde_json::Value::String("patient".into()));
+        assert_eq!(arr[1], serde_json::Value::String("pathology".into()));
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_agent_raised_source_omits_signals() {
+        // After an agent raise, signals are cleared — they only explain the
+        // original CLI inference, not the elevated floor.
+        let plan = Plan {
+            context: "".into(), decision: "task_complete".into(), rationale: "".into(),
+            steps: vec![], result: None,
+            data_ceiling: DataClass::ClinicalConfidential, refused: None,
+            floor_request: Some(DataClass::ClinicalConfidential),
+        };
+        let meta = FormulationMeta {
+            prompt_name: "p".into(), prompt_sha256: "h".into(),
+            llm_model: "m".into(), llm_backend: "local".into(),
+            latency_ms: 1, retry_count: 0,
+        };
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::ClinicalConfidential,
+            ClassificationFloorSource::AgentRaised,
+            &[],  // empty: signals are cleared on raise
+            &plan, &meta,
+        );
+        let obj = payload.as_object().expect("payload is an object");
+        assert_eq!(obj.len(), 14,
+            "agent_raised should have 14 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
+        assert!(obj.get("classification_floor_signals").is_none());
     }
 
     #[test]
@@ -629,6 +935,7 @@ mod tests {
                 result: None,
                 data_ceiling: DataClass::Public,
                 refused: None,
+                floor_request: None,
             },
             vec![StepOutcome::Ok(serde_json::json!("x")), StepOutcome::Err {
                 code: "POLICY_DENIED".into(), detail: "no".into(),

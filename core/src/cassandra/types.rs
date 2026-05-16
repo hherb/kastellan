@@ -116,10 +116,23 @@ pub struct Plan {
     /// [`super::inner_loop::run_to_terminal`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<RefusedReason>,
+    /// Agent-side request to raise the producer-set classification floor
+    /// for the rest of the task. `None` (the default) leaves the floor
+    /// unchanged. A `Some(class)` whose rank is ≤ the current floor is
+    /// honoured as a no-op (never lowers; pinned by
+    /// `agent_floor_request_lower_than_producer_is_ignored` in
+    /// `scheduler::inner_loop::tests`).
+    ///
+    /// Round-trips through serde with `skip_serializing_if = Option::is_none`
+    /// so existing fixtures stay byte-stable when the agent doesn't
+    /// emit a request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_request: Option<DataClass>,
 }
 
-// Invariant (enforced by future Stage 0 — not by stubs in this work's scope):
-//   plan.data_ceiling >= task.classification_floor
+// Invariant (enforced by Stage 0 / `DeterministicPolicy`, see
+// `cassandra::deterministic::screen_plan_for_classification_violations`):
+//   plan.data_ceiling >= task.classification_floor    (I1)
 // i.e. outputs cannot be classified *below* the producer-pinned floor without
 // passage through an anonymiser/declassifier (anonymiser is out of scope here).
 // The floor is a producer-set minimum on outputs; the ceiling is the inferred
@@ -197,6 +210,7 @@ mod tests {
             result: Some(serde_json::json!({"kind": "text", "body": "ok"})),
             data_ceiling: DataClass::Public,
             refused: None,
+            floor_request: None,
         };
         assert!(p.is_terminal(), "all three present");
 
@@ -229,6 +243,7 @@ mod tests {
             result: None,
             data_ceiling: DataClass::Public,
             refused: None,
+            floor_request: None,
         };
         let s = serde_json::to_string(&p).unwrap();
 
@@ -261,6 +276,7 @@ mod tests {
                 principle: 1,
                 reason: "physical_harm".into(),
             }),
+            floor_request: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let p2: Plan = serde_json::from_str(&s).unwrap();
@@ -277,6 +293,7 @@ mod tests {
             result: None,
             data_ceiling: DataClass::Public,
             refused: None,
+            floor_request: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -291,6 +308,50 @@ mod tests {
     }
 
     #[test]
+    fn plan_floor_request_round_trips_when_absent() {
+        // Absent floor_request must serde-skip via `skip_serializing_if`,
+        // matching the existing `refused` / `result` shape.
+        let p = Plan {
+            context:       "c".into(),
+            decision:      "task_complete".into(),
+            rationale:     "r".into(),
+            steps:         vec![],
+            result:        None,
+            data_ceiling:  DataClass::Public,
+            refused:       None,
+            floor_request: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(
+            !s.contains("floor_request"),
+            "absent floor_request must not serialise (skip_serializing_if); got: {s}",
+        );
+        let back: Plan = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.floor_request, None);
+    }
+
+    #[test]
+    fn plan_floor_request_round_trips_when_set() {
+        let p = Plan {
+            context:       "c".into(),
+            decision:      "task_complete".into(),
+            rationale:     "r".into(),
+            steps:         vec![],
+            result:        None,
+            data_ceiling:  DataClass::Public,
+            refused:       None,
+            floor_request: Some(DataClass::ClinicalConfidential),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(
+            s.contains(r#""floor_request":"ClinicalConfidential""#),
+            "set floor_request must serialise as PascalCase string; got: {s}",
+        );
+        let back: Plan = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.floor_request, Some(DataClass::ClinicalConfidential));
+    }
+
+    #[test]
     fn plan_is_refused_is_independent_of_is_terminal() {
         // The four corners of the (is_refused × is_terminal) matrix.
         let base = Plan {
@@ -301,6 +362,7 @@ mod tests {
             result: None,
             data_ceiling: DataClass::Public,
             refused: None,
+            floor_request: None,
         };
 
         // Neither

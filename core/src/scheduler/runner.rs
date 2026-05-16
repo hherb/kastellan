@@ -297,6 +297,43 @@ async fn run_one(
             }
         }
     };
+    // Provenance: source defaults to "default" when absent. An
+    // unrecognised value is a producer bug — fail closed parallel to
+    // classification_floor above. Renaming any of the four serde
+    // wire tokens (operator / cli_inferred / agent_raised / default)
+    // breaks this read; both writer (CLI / inner-loop) and reader
+    // (here) go through `ClassificationFloorSource` so the contract
+    // is single-sourced.
+    let classification_floor_source = match task.payload.get("classification_floor_source") {
+        None => crate::scheduler::inner_loop::ClassificationFloorSource::Default,
+        Some(v) => {
+            let Some(s) = v.as_str() else {
+                return failed_result(format!(
+                    "classification_floor_source in payload is not a string: {v:?}"
+                ));
+            };
+            match serde_json::from_str::<crate::scheduler::inner_loop::ClassificationFloorSource>(
+                &format!("\"{}\"", s)
+            ) {
+                Ok(src) => src,
+                Err(_) => return failed_result(format!(
+                    "unknown classification_floor_source: {s:?} (expected one of \
+                     operator, cli_inferred, agent_raised, default)"
+                )),
+            }
+        }
+    };
+    // Signals: empty array iff absent or not an array. Each entry must
+    // be a string; non-string entries are skipped silently (better than
+    // failing the task on a non-load-bearing presentation field).
+    let classification_floor_signals: Vec<String> = task.payload
+        .get("classification_floor_signals")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect())
+        .unwrap_or_default();
+
     // Bound the override by u32::MAX explicitly: an `as u32` cast would
     // silently roll over a producer-supplied 2^33 to a small number,
     // which then *under*shoots the lane default. Falling back to the
@@ -311,6 +348,8 @@ async fn run_one(
         lane: task.lane,
         instruction,
         classification_floor,
+        classification_floor_source,
+        classification_floor_signals,
         plans: vec![],
         advisories: vec![],
         blocks: vec![],

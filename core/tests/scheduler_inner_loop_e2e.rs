@@ -357,6 +357,7 @@ fn task_complete_plan(body: &str) -> Plan {
         result: Some(serde_json::json!({"kind": "text", "body": body})),
         data_ceiling: DataClass::Public,
         refused: None,
+        floor_request: None,
     }
 }
 
@@ -376,6 +377,7 @@ fn one_step_plan(tool: &str, method: &str) -> Plan {
         result: None,
         data_ceiling: DataClass::Public,
         refused: None,
+        floor_request: None,
     }
 }
 
@@ -385,6 +387,8 @@ fn make_ctx(task_id: i64, max_plans: u32) -> TaskContext {
         lane: Lane::Fast,
         instruction: "ping".into(),
         classification_floor: DataClass::Public,
+        classification_floor_source: hhagent_core::scheduler::inner_loop::ClassificationFloorSource::Default,
+        classification_floor_signals: vec![],
         plans: vec![],
         advisories: vec![],
         blocks: vec![],
@@ -684,6 +688,7 @@ async fn refusal_plan_terminates_with_state_refused() {
             principle: 1,
             reason: "physical_harm".into(),
         }),
+        floor_request: None,
     };
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
@@ -791,6 +796,7 @@ async fn reviewer_constitutional_block_wins_over_agent_refusal() {
             principle: 1,
             reason: "physical_harm_agent_side".into(),
         }),
+        floor_request: None,
     };
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
@@ -852,6 +858,7 @@ async fn verdict_block_on_refusal_plan_does_not_loop() {
             principle: 4,
             reason: "privacy_violation".into(),
         }),
+        floor_request: None,
     };
 
     // Only one plan is queued. If the loop incorrectly `continue`s on
@@ -893,4 +900,128 @@ async fn verdict_block_on_refusal_plan_does_not_loop() {
         .collect();
     assert_eq!(verdict_rows.len(), 1, "expected exactly 1 verdict row");
     assert_eq!(verdict_rows[0].payload["verdict_kind"], "block");
+}
+
+/// (h) Agent emits a plan with `floor_request: ClinicalConfidential`
+///     over a task submitted with floor=Public + a single step
+///     classified as Public. The inner loop must elevate ctx BEFORE
+///     review, so the real `DeterministicPolicy` Stage 0 reviewer
+///     sees the elevated floor and its I2 invariant (step >= floor)
+///     fires — the plan is blocked.
+///
+///     Pins the agent-raise → DP-block chain end-to-end with the
+///     PRODUCTION reviewer rule (not a scripted stub). Also pins the
+///     audit-row contract: `agent/plan.formulate` carries
+///     `classification_floor: "ClinicalConfidential"` and
+///     `classification_floor_source: "agent_raised"` (the original
+///     CLI/operator source is replaced on raise per spec §5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_floor_raise_chain_blocks_low_classification_step() {
+    let Some((pool, _guards)) = bring_up_pg("iafr").await else {
+        return; // [SKIP]
+    };
+
+    let id = insert_pending(&pool, Lane::Fast, serde_json::json!({}))
+        .await
+        .unwrap();
+    let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
+
+    // Plan 1: agent raises floor to Clinical + a step classified Public
+    // (which is BELOW the elevated floor → DP I2 fires → Block).
+    //
+    // data_ceiling is set to Clinical to satisfy I1 (ceiling >= floor)
+    // — if data_ceiling were Public, I1 would fire first and we'd be
+    // testing I1 not I2. The test specifically targets I2 because that's
+    // the invariant most likely to be silently violated by an agent that
+    // raises the floor but forgets to upgrade a step's classification.
+    let plan1 = Plan {
+        context: "raising-floor".into(),
+        decision: "act".into(),
+        rationale: "this involves clinical work".into(),
+        steps: vec![PlannedStep {
+            tool: "shell-exec".into(),
+            method: "shell.exec".into(),
+            parameters: serde_json::json!({"argv": ["/bin/echo", "hi"]}),
+            returns: "stdout".into(),
+            done_when: "echoed".into(),
+            classification: DataClass::Public,  // BELOW the elevated floor
+        }],
+        result: None,
+        data_ceiling: DataClass::ClinicalConfidential,
+        refused: None,
+        floor_request: Some(DataClass::ClinicalConfidential),  // RAISE!
+    };
+    // The inner loop will loop until the plan cap; queue plan1 enough
+    // times to exhaust the cap, then the outcome is Failed("plan cap").
+    // We're not asserting the final outcome (Completed/Failed/Blocked)
+    // — we're asserting that the FIRST plan's audit row carries the
+    // elevated floor and AgentRaised source.
+    let formulator = Arc::new(ScriptedFormulator::new(vec![
+        plan1.clone(), plan1.clone(), plan1.clone(),
+    ]));
+    // Use the REAL DeterministicPolicy — the rule under test is its I2
+    // invariant against the elevated floor.
+    let review = Arc::new(ChainReviewStage::new(vec![
+        Arc::new(hhagent_core::cassandra::review::DeterministicPolicy),
+    ]));
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
+        .await
+        .unwrap();
+
+    // The plan looped (DP returned Block each iteration) until the cap.
+    // Outcome is Failed because the agent never produced an acceptable
+    // plan within budget.
+    match &result.outcome {
+        Outcome::Failed(msg) => {
+            assert!(msg.contains("plan_iteration_cap_exceeded"),
+                "expected plan-cap failure; got: {msg}");
+        }
+        other => panic!("expected Outcome::Failed (plan cap exhausted), got {other:?}"),
+    }
+
+    // Audit pin: every plan.formulate row carries the elevated floor
+    // and the AgentRaised source.
+    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        .await
+        .expect("fetch audit rows");
+    let plan_rows: Vec<_> = rows.iter()
+        .filter(|r| r.actor == "agent" && r.action == "plan.formulate")
+        .collect();
+    assert_eq!(plan_rows.len(), 3, "expected 3 plan.formulate rows (one per cap iter)");
+    for (i, r) in plan_rows.iter().enumerate() {
+        assert_eq!(
+            r.payload["classification_floor"], "ClinicalConfidential",
+            "plan {i}: floor must be elevated to ClinicalConfidential"
+        );
+        assert_eq!(
+            r.payload["classification_floor_source"], "agent_raised",
+            "plan {i}: source must be agent_raised after the raise"
+        );
+        assert!(
+            r.payload.get("classification_floor_signals").is_none(),
+            "plan {i}: signals must be absent under agent_raised"
+        );
+    }
+
+    // Verdict pin: every reviewer call returned a Block verdict from
+    // the I2 invariant.
+    let verdict_rows: Vec<_> = rows.iter()
+        .filter(|r| r.actor == "cassandra:chain" && r.action == "verdict")
+        .collect();
+    assert_eq!(verdict_rows.len(), 3, "expected 3 verdict rows");
+    for (i, r) in verdict_rows.iter().enumerate() {
+        assert_eq!(r.payload["verdict_kind"], "block",
+            "verdict {i}: must be block (DP I2 fired)");
+        // Block-verdict detail is the raw reason string (see
+        // `write_audit_verdict` in inner_loop.rs: Verdict::Block(r) →
+        // json!(r) goes into the "detail" field).
+        let detail = r.payload["detail"].as_str()
+            .expect("detail must be a string for Block verdict");
+        assert!(
+            detail.starts_with("data-classification: step_classification_below_floor"),
+            "verdict {i}: detail must reference DP I2 reason_tag; got: {detail}"
+        );
+    }
 }

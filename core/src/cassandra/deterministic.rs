@@ -35,9 +35,6 @@
 //!
 //! ## Out of scope (filed as follow-ups)
 //!
-//! - **Automatic floor inference from prompt keywords.** The floor is
-//!   operator-pinned via `hhagent-cli ask --classification-floor`.
-//!   Inferring it from instruction text is a separate slice.
 //! - **Anonymiser / declassifier mechanism.** A step that legitimately
 //!   downgrades classification (e.g. a "summarise without identifiers"
 //!   step) would today be blocked by I2. The anonymiser path is a
@@ -256,6 +253,7 @@ mod tests {
             result: None,
             data_ceiling: ceiling,
             refused: None,
+            floor_request: None,
         }
     }
 

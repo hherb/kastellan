@@ -326,6 +326,54 @@ fn run_ask(args: &[String]) -> ExitCode {
     rt.block_on(ask_async(lane, instruction, floor))
 }
 
+/// Pure builder for the producer-side classification-floor decision.
+///
+/// Resolves `(floor, source, signals)` for an `ask` submission given:
+///   - `instruction`: the user prompt (input to `infer_floor`).
+///   - `operator_flag`: `Some(class)` iff `--classification-floor` was passed.
+///   - `warn_on_suppress`: callback fired when the operator-explicit value
+///     is LOWER than what inference would have produced (so the suppression
+///     is operator-visible via `tracing::warn!` in the production caller).
+///
+/// Trust posture (producer-trusted, mirroring spec §2):
+///   - Operator-explicit ALWAYS wins. The operator is committing to the
+///     floor; inference results are visible via the warn callback but
+///     never override.
+///   - No operator flag + Public-with-no-signals → `Default` (no
+///     elevation, no presentation noise).
+///   - No operator flag + matched signals → `CliInferred` (carries the
+///     matched tags for audit-row provenance).
+///
+/// Extracted as a pure helper so the wire shape is unit-testable
+/// without spinning up a Postgres pool or the tokio runtime.
+fn resolve_floor_for_submission(
+    instruction: &str,
+    operator_flag: Option<hhagent_core::cassandra::DataClass>,
+    warn_on_suppress: &mut dyn FnMut(hhagent_core::cassandra::DataClass, &[&'static str]),
+) -> (
+    hhagent_core::cassandra::DataClass,
+    hhagent_core::scheduler::inner_loop::ClassificationFloorSource,
+    Vec<&'static str>,
+) {
+    use hhagent_core::cassandra::DataClass;
+    use hhagent_core::classification_inference::infer_floor;
+    use hhagent_core::scheduler::inner_loop::ClassificationFloorSource as Src;
+
+    if let Some(op) = operator_flag {
+        // Operator wins. Optionally warn if inference would have elevated.
+        let inferred = infer_floor(instruction);
+        if inferred.class.rank() > op.rank() {
+            warn_on_suppress(inferred.class, &inferred.signals);
+        }
+        return (op, Src::Operator, vec![]);
+    }
+    let inferred = infer_floor(instruction);
+    if inferred.class == DataClass::Public && inferred.signals.is_empty() {
+        return (DataClass::Public, Src::Default, vec![]);
+    }
+    (inferred.class, Src::CliInferred, inferred.signals)
+}
+
 async fn ask_async(
     lane: hhagent_db::tasks::Lane,
     instruction: String,
@@ -357,23 +405,44 @@ async fn ask_async(
     }
 
     let mut payload = serde_json::json!({"instruction": instruction, "kind": "ask"});
-    if let Some(f) = floor {
-        // Serialise via serde_json so the wire shape matches what
-        // scheduler::runner reads at task.payload.classification_floor
-        // (PascalCase string).
-        //
-        // Note: this writes the field whenever `--classification-floor`
-        // is supplied, including when the value equals the implicit
-        // default (`Public`). The two cases are semantically equivalent
-        // for the runner (both resolve to `Public`), but keeping the
-        // explicit-Public payload distinct from the omitted-default
-        // payload preserves an audit-grep-able signal that the operator
-        // deliberately pinned the floor at task submission. A future
-        // normalisation pass can collapse them if the explicit-vs-
-        // omitted distinction proves unused.
-        let v = serde_json::to_value(f).expect("DataClass serialises");
-        if let serde_json::Value::Object(ref mut m) = payload {
-            m.insert("classification_floor".to_string(), v);
+
+    // Resolve floor + source + signals via the pure helper. The closure
+    // captures `floor` so we can render its PascalCase string for the
+    // warn line when inference would have elevated above the operator's
+    // pinned value.
+    let mut suppressed: Option<(hhagent_core::cassandra::DataClass, Vec<&'static str>)> = None;
+    let (resolved_floor, resolved_source, resolved_signals) =
+        resolve_floor_for_submission(&instruction, floor, &mut |c, s| {
+            suppressed = Some((c, s.to_vec()));
+        });
+    if let Some((inferred_class, inferred_sigs)) = &suppressed {
+        tracing::warn!(
+            inferred_class = inferred_class.as_pascal_str(),
+            inferred_signals = ?inferred_sigs,
+            operator_floor = floor.map(|f| f.as_pascal_str()).unwrap_or(""),
+            "--classification-floor explicitly suppressed an elevation the keyword classifier would have made"
+        );
+    }
+    if let serde_json::Value::Object(ref mut m) = payload {
+        // Floor as PascalCase string (matches `scheduler::runner`'s reader).
+        m.insert(
+            "classification_floor".into(),
+            serde_json::to_value(resolved_floor).expect("DataClass serialises"),
+        );
+        // Source: always written, snake_case (matches the reader's
+        // `from_str::<ClassificationFloorSource>` expectation).
+        m.insert(
+            "classification_floor_source".into(),
+            serde_json::json!(resolved_source.as_snake_str()),
+        );
+        // Signals: only when present (omitted for Operator / Default /
+        // empty CliInferred — though the helper never emits empty
+        // CliInferred).
+        if !resolved_signals.is_empty() {
+            m.insert(
+                "classification_floor_signals".into(),
+                serde_json::json!(resolved_signals),
+            );
         }
     }
     let id = match submit_and_audit(&pool, lane, payload).await {
@@ -1095,5 +1164,93 @@ mod parse_classification_floor_tests {
     #[test]
     fn trims_surrounding_whitespace() {
         assert_eq!(parse_classification_floor("  Public  ").unwrap(), DataClass::Public);
+    }
+}
+
+/// Tests for the producer-side floor resolution helper.
+#[cfg(test)]
+mod resolve_floor_for_submission_tests {
+    use super::resolve_floor_for_submission;
+    use hhagent_core::cassandra::DataClass;
+    use hhagent_core::scheduler::inner_loop::ClassificationFloorSource as Src;
+
+    #[test]
+    fn no_operator_flag_no_signals_returns_default() {
+        let mut suppressed = false;
+        let (cls, src, sigs) = resolve_floor_for_submission(
+            "How do I write a quicksort in Rust?",
+            None,
+            &mut |_, _| { suppressed = true; },
+        );
+        assert_eq!(cls, DataClass::Public);
+        assert_eq!(src, Src::Default);
+        assert!(sigs.is_empty());
+        assert!(!suppressed, "no warn should fire for non-clinical prompt with no operator flag");
+    }
+
+    #[test]
+    fn no_operator_flag_clinical_signals_returns_cli_inferred() {
+        let mut suppressed = false;
+        let (cls, src, sigs) = resolve_floor_for_submission(
+            "Translate the patient's pathology report.",
+            None,
+            &mut |_, _| { suppressed = true; },
+        );
+        assert_eq!(cls, DataClass::ClinicalConfidential);
+        assert_eq!(src, Src::CliInferred);
+        assert!(sigs.contains(&"patient"));
+        assert!(sigs.contains(&"pathology"));
+        assert!(!suppressed, "no warn — operator flag was absent, not suppressing");
+    }
+
+    #[test]
+    fn operator_flag_wins_and_warns_when_inference_would_elevate() {
+        let mut suppressed_class: Option<DataClass> = None;
+        let mut suppressed_signals: Vec<&'static str> = vec![];
+        let (cls, src, sigs) = resolve_floor_for_submission(
+            "Translate the patient's pathology report.",
+            Some(DataClass::Public),  // operator pinned LOWER than inference
+            &mut |c, s| {
+                suppressed_class = Some(c);
+                suppressed_signals = s.to_vec();
+            },
+        );
+        assert_eq!(cls, DataClass::Public, "operator wins");
+        assert_eq!(src, Src::Operator);
+        assert!(sigs.is_empty(), "Operator source carries no signals");
+        assert_eq!(suppressed_class, Some(DataClass::ClinicalConfidential),
+            "warn should fire because inference would have elevated to Clinical");
+        assert!(suppressed_signals.contains(&"patient"));
+    }
+
+    #[test]
+    fn operator_flag_wins_and_no_warn_when_inference_does_not_elevate() {
+        let mut suppressed = false;
+        let (cls, src, sigs) = resolve_floor_for_submission(
+            "How do I write a quicksort in Rust?",
+            Some(DataClass::ClinicalConfidential),
+            &mut |_, _| { suppressed = true; },
+        );
+        assert_eq!(cls, DataClass::ClinicalConfidential);
+        assert_eq!(src, Src::Operator);
+        assert!(sigs.is_empty());
+        assert!(!suppressed, "inference inferred Public (not elevating); no warn");
+    }
+
+    #[test]
+    fn operator_flag_equal_to_inference_does_not_warn() {
+        // Inference would return Clinical; operator pinned Clinical.
+        // The suppression condition is strict inequality (inferred > op);
+        // matching values are not a suppression.
+        let mut suppressed = false;
+        let (cls, src, sigs) = resolve_floor_for_submission(
+            "Translate the patient's pathology report.",
+            Some(DataClass::ClinicalConfidential),
+            &mut |_, _| { suppressed = true; },
+        );
+        assert_eq!(cls, DataClass::ClinicalConfidential);
+        assert_eq!(src, Src::Operator);
+        assert!(sigs.is_empty());
+        assert!(!suppressed, "matching operator value is not a suppression");
     }
 }
