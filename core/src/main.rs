@@ -65,6 +65,35 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("loading prompts from {:?}", prompts_dir))?;
 
+    // Seed L0 (meta-rule) rows from the operator-edited TOML file.
+    // Default: `seeds/memory/l0_meta_rules.toml` relative to CWD.
+    // Override: `HHAGENT_L0_RULES_FILE` env var. Missing file is
+    // logged at info level and skipped (daemon still comes up).
+    // Malformed file is fatal (loader returns Err, ? propagates) —
+    // matches probe::run fail-closed posture.
+    let l0_path = std::env::var("HHAGENT_L0_RULES_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("seeds/memory/l0_meta_rules.toml"));
+    if l0_path.exists() {
+        let report = hhagent_core::memory::l0_seed::seed_l0_from_file(&pool, &l0_path)
+            .await
+            .with_context(|| format!("seeding L0 rules from {:?}", l0_path))?;
+        // Best-effort audit row: a transient DB failure here must not
+        // block daemon bring-up. The L0 rows themselves are already
+        // committed; mirrors `write_registry_loaded_row` posture.
+        if let Err(e) = write_l0_seeded_row(&pool, &report).await {
+            tracing::warn!(error = %e, "l0.seeded audit row insert failed");
+        }
+        info!(
+            rules = report.rules_loaded,
+            new = report.new_rows_written,
+            unchanged = report.unchanged_skipped,
+            "L0 seed loader completed"
+        );
+    } else {
+        info!(path = ?l0_path, "no L0 rules file found, skipping seed");
+    }
+
     // LLM router (existing skeleton).
     let router_cfg = hhagent_llm_router::RouterConfig::from_env()
         .map_err(|e| anyhow!("RouterConfig::from_env: {e}"))?;
@@ -365,6 +394,27 @@ async fn write_registry_loaded_row(
         pool,
         "core",
         hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED,
+        payload,
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn write_l0_seeded_row(
+    pool: &sqlx::PgPool,
+    report: &hhagent_core::memory::l0_seed::L0SeedReport,
+) -> Result<(), hhagent_db::DbError> {
+    let payload = serde_json::json!({
+        "rules_loaded": report.rules_loaded,
+        "new_rows_written": report.new_rows_written,
+        "unchanged_skipped": report.unchanged_skipped,
+        "source_path": report.source_path.to_string_lossy(),
+        "source_sha256": report.source_sha256,
+    });
+    hhagent_db::audit::insert(
+        pool,
+        "core",
+        hhagent_core::scheduler::audit::ACTION_L0_SEEDED,
         payload,
     )
     .await

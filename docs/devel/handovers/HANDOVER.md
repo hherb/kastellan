@@ -4,9 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-16 (issue #71 — runner rejects producer-supplied `agent_raised` provenance — shipped on `fix/runner-reject-agent-raised-provenance`; post-review fixup binds the reject to the parsed enum variant rather than a string literal; +9 unit tests; workspace 598 → **607**).
-**Last commit (main):** `4ddfe3b` (Merge pull request #70 — automatic classification-floor inference), with `09618ca` (post-review docstring + `classification_floor_source_as_snake_str_matches_serde_wire_form` pin) on top.
-**Session-end working state (this session, 2026-05-16):** branch `fix/runner-reject-agent-raised-provenance` carries `a6335ab` (initial mitigation), `e9d0162` (docs), and a post-review fixup commit rewriting the reject to a parse-first + variant-match shape so the audit-trail enforcement binds to `ClassificationFloorSource::AgentRaised` rather than the wire literal `"agent_raised"`. Workspace test count **598 → 607** (+9 unit tests in `scheduler::runner::tests`: original 8 pins + `agent_raised_reject_binds_to_enum_variant_not_string_literal`, which feeds `as_snake_str()` into the helper). Zero failures, zero warnings, zero `[SKIP]` lines on Linux. `core/src/scheduler/runner.rs` ~540 LOC (just over the 500-LOC soft cap — natural future split candidate: lift the parsing helpers into a sibling `scheduler/payload_validation.rs` once a second helper materialises; not warranted today). Follow-up [issue #73](https://github.com/hherb/hhagent/issues/73) filed for the deferred e2e integration test + `TaskContext` constructor doc note.
+**Last updated:** 2026-05-16 (L0 seed data loader — shipped on branch `feat/l0-seed-loader`; new `core::memory::l0_seed` module + `db::memories::load_active_l0` + starter TOML + daemon wire-in + `l0.seeded` audit row; +31 tests; workspace 607 → **638**).
+**Last commit (branch HEAD):** `a582cf3` (Task 5 — ship starter L0 meta-rules TOML). 11 commits on branch off `main` at `305941a`: spec/plan (`7153b48`, `4567c0b`) → Task 1 + fixup (`f515eea`, `9f0e979`) → Task 2 + fixup (`80966bd`, `10f4770`) → Task 3 + fixup (`69d39f6`, `b2f8861`) → Task 4 (`dca29dc`) → Task 5 (`a582cf3`) → Task 6 docs (`e8f34eb`).
+**Session-end verification:** `cargo test --workspace` on branch HEAD: **638 passed, 0 failed, 4 ignored, 0 [SKIP] lines, 0 warnings** on Linux. `core/src/memory/l0_seed.rs` ~660 LOC (370 impl + ~290 inline tests; implementation alone well under the 500-LOC soft cap; matches the `core/src/memory/layers.rs` inline-tests precedent). `core/src/main.rs` 437 LOC (up from ~415 — flagged in code review as a slow-creep concern; a future `startup::bring_up(pool)` extraction would help if more seed/loader tasks land in main.rs).
 
 **Post-review fixups (2026-05-16):**
 
@@ -157,7 +157,95 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-16 — issue #71 runner rejects producer-supplied `agent_raised`, branch `fix/runner-reject-agent-raised-provenance`)
+## Recently completed (this session, 2026-05-16 — L0 seed data loader, branch `feat/l0-seed-loader`)
+
+Branch: `feat/l0-seed-loader` (off `main` at `305941a`, 11 commits). Spec: [`docs/superpowers/specs/2026-05-16-l0-seed-loader-design.md`](../../superpowers/specs/2026-05-16-l0-seed-loader-design.md). Plan: [`docs/superpowers/plans/2026-05-16-l0-seed-loader.md`](../../superpowers/plans/2026-05-16-l0-seed-loader.md). Implements the HANDOVER's "Next concrete engineering pickup #2": startup-time loader that turns a hand-edited TOML of meta-rules into L0 (Meta) rows via the existing `seed_meta_memory` admin function, idempotent on `(l0_rule_id, body_sha256)`.
+
+**Shape (3 NEW + 4 modified + 2 docs):**
+
+- **NEW `core/src/memory/l0_seed.rs`** (~660 LOC; 370 impl + ~290 inline tests). Public surface:
+  - Types: `L0Rule { id, body, tags }`, `L0Error` (4 variants: TomlParse, Validation, Io, Db with `#[from] DbError`), `L0SeedReport { rules_loaded, new_rows_written, unchanged_skipped, source_path, source_sha256 }`.
+  - Constants: `L0_DEFAULT_CAP_ROWS = 64`, `L0_DEFAULT_CAP_BYTES = 8192`, `L0_MAX_BODY_BYTES = 1024`, `L0_MAX_ID_LEN = 64`.
+  - Pure: `parse_l0_rules(source_path, toml_str)` with full validation (id charset `[a-z0-9_]+`, id ≤ 64B, body non-empty after trim, body ≤ 1024B, duplicate id hard-error, empty tags rejected, `#[serde(deny_unknown_fields)]` on both `L0RulesFile` and `L0RuleRaw` for typo-catching); `compute_body_sha256(body)`; `compute_source_sha256(toml_str)`; `build_l0_metadata(rule_id, body_sha256, tags, source_path)` (exactly 4 keys, pinned by `build_l0_metadata_pins_key_set`).
+  - Async DB writer: `seed_l0_from_rules(pool, source_path, source_sha256, rules)` — per-rule `SELECT EXISTS (... metadata->>'l0_rule_id' = $1 AND metadata->>'body_sha256' = $2 ...)` then on miss `seed_meta_memory(pool, body, metadata, None)`.
+  - File wrapper: `seed_l0_from_file(pool, path)` — `tokio::fs::read_to_string` → `compute_source_sha256` → `parse_l0_rules` → `seed_l0_from_rules`. Fail-closed on parse/validation errors.
+  - Read-side: `load_l0_active(pool, cap_rows, cap_bytes)` wraps `db::memories::load_active_l0` with in-Rust byte caps (mirrors `load_l1`'s saturating_add idiom; oversize single row dropped with `tracing::warn!` carrying the `l0_rule_id`); `load_l0_active_default(pool)` pins the two published caps.
+
+- **MODIFIED `db/src/memories.rs`** — new `load_active_l0(executor, cap_rows) -> Result<Vec<Memory>, DbError>`. SQL is `SELECT DISTINCT ON (metadata->>'l0_rule_id') ... WHERE layer = 0 AND metadata ? 'l0_rule_id'` ordered inside by `(rule_id, created_at DESC, id DESC)`, outer-wrapped to `ORDER BY created_at DESC, id DESC LIMIT $1`. Rows missing the rule_id metadata key are excluded from the active set (defense against legacy hand-fixed L0 rows). Post-review fixup dropped a dead `embedding::text` column from the SELECT (the `Memory` struct has no embedding field; PG was paying the pgvector→text encoding cost for bytes immediately discarded).
+
+- **MODIFIED `core/src/main.rs`** — wire-in block placed immediately after the prompts loader (line ~68) and before the LLM router setup. Reads `HHAGENT_L0_RULES_FILE` (default: `seeds/memory/l0_meta_rules.toml`, cwd-relative); `l0_path.exists()` guard → soft-skip with `info!` on missing file; malformed file → `Err` via `with_context`, daemon refuses to start (fail-closed parallel to `probe::run`). New private helper `write_l0_seeded_row(pool, &report) -> Result<(), DbError>` mirrors the existing `write_registry_loaded_row` precedent — same signature shape, payload by value, terminal `.map(|_| ())`.
+
+- **MODIFIED `core/src/scheduler/audit.rs`** — new `pub const ACTION_L0_SEEDED: &str = "l0.seeded";` adjacent to `ACTION_REGISTRY_LOADED`. Doc comment names every payload key and explains *why* the row is operator-load-bearing (cross-restart drift detection via the file hash).
+
+- **NEW `core/tests/memory_l0_seed_e2e.rs`** (~580 LOC) — 9 DB integration scenarios:
+    1. `seed_from_rules_writes_new_rows` — fresh DB, 2 rules → new=2, skipped=0; every row layer=Meta + all 4 metadata keys present.
+    2. `seed_from_rules_is_idempotent_on_unchanged_input` — seed twice with same input → second run new=0, skipped=2; total rows in DB still 2.
+    3. `seed_from_rules_writes_new_row_on_edited_body` — seed v1; edit one body; seed v2 → new=1, skipped=1; active set surfaces the edited body; total rows at layer 0 is 3 (old + new + untouched).
+    4. `seed_from_file_reads_parses_and_seeds` — temp file with 2 rules → end-to-end round-trip; `source_sha256.len() == 64`.
+    5. `seed_from_file_fails_closed_on_malformed_toml` — unterminated string → `Err(TomlParse)`; zero rows written.
+    6. `load_l0_active_returns_newest_per_rule_id` — seed v1, sleep 5ms, seed v2 same rule_id → active set returns 1 row (the newer body).
+    7. `load_l0_active_respects_cap_rows` — 3 rules seeded; `cap_rows=2` → 2 rows; `cap_rows=0` → empty.
+    8. `load_l0_active_oversize_body_dropped_silently` — big (600B) then small (100B) rules; `cap_bytes=500` → only small fits (big drops via saturating_add break).
+    9. `load_l0_active_excludes_legacy_l0_rows_without_rule_id` — direct `seed_meta_memory` with empty metadata + a real rule → active set returns the real rule only; total layer-0 count is 2.
+
+- **NEW `seeds/memory/l0_meta_rules.toml`** — starter file with 2 defensible-default rules (`never_rm_rf` for recursive-delete safety, `refusal_is_terminal` for refusal stickiness). Operator-owned thereafter.
+
+**Audit-row contract (the new row):**
+
+| When | actor | action | payload keys |
+| ---- | ----- | ------ | ------------ |
+| Daemon startup when L0 file present | core | `l0.seeded` | `rules_loaded`, `new_rows_written`, `unchanged_skipped`, `source_path`, `source_sha256` |
+
+Five keys exactly; pinned implicitly via the `L0SeedReport` struct field set + the wire-in helper's `serde_json::json!` literal. No schema migration. Operator-visible breadcrumb that the loader ran, with cross-restart drift detection via the SHA-256 of the source file content.
+
+**Test count delta:** **607 → 638** (+31: 19 unit + 12 DB integration — the integration count grew by 3 in the final-review fixup commit covering `L0Error::Io` trigger, the warn-and-drop branch, and the `cap_bytes == 0` fast-path). Zero failures, zero warnings, zero `[SKIP]` lines on Linux.
+
+**TDD ordering (per CLAUDE.md rule #2):** five RED → GREEN → commit cycles, each with a small post-review fixup landing as a follow-up commit on the same branch. Two-stage review (spec compliance + code quality) per task; fixup commits address any code-review findings before moving to the next task.
+
+| Task | Commit(s) | What shipped |
+| ---- | --------- | ------------ |
+| Spec | `7153b48` | Spec at `docs/superpowers/specs/2026-05-16-l0-seed-loader-design.md` |
+| Plan | `4567c0b` | 6-task implementation plan |
+| 1 | `f515eea` + `9f0e979` | Module scaffold + pure parser + 19 unit tests (initial 17 + KAT against SHA-256 empty-string vector + empty-tag rejection pin) |
+| 2 | `80966bd` + `10f4770` | `db::memories::load_active_l0` + `seed_l0_from_rules` + 3 integration tests; post-review dropped dead `embedding::text` column from the SELECT |
+| 3 | `69d39f6` + `b2f8861` | `seed_l0_from_file` + `load_l0_active` + `load_l0_active_default` + 6 more integration tests; post-review referenced `L0_DEFAULT_CAP_BYTES` constant in 3 test call sites + dropped stale "Body shipped in Task 3" doc markers |
+| 4 | `dca29dc` | Wire-in in `core/src/main.rs` + `write_l0_seeded_row` helper + new `ACTION_L0_SEEDED` const |
+| 5 | `a582cf3` | Starter TOML at `seeds/memory/l0_meta_rules.toml` with 2 defensible-default rules |
+| 6 | (this commit) | HANDOVER + ROADMAP update |
+
+**What this slice deliberately does NOT do** (matches the spec's non-goals):
+
+- **No prompt-assembler wiring.** `load_l0_active_default` ships but nothing consumes it. Same posture as the L1 slice — storage primitive ships ahead of consumer. The prompt-assembler `llm_router::build_system_prompt` slice is now unblocked.
+- **No L0 admin CLI.** Future `hhagent-cli l0 list/diff/lint` is filed if observation surfaces a need.
+- **No hot-reload on file change.** Operator edits + restarts the daemon to pick up changes; matches the `agent_prompts` cadence.
+- **No tag-based filtering at load time.** Tags are stored in metadata for future ops queries.
+- **No embeddings on L0 rows.** They're pinned into every prompt unconditionally; no semantic-recall path is needed.
+- **No dedicated audit-row shape pin test.** Covered indirectly by `db` audit round-trip tests + the wire-in's `serde_json::json!` literal pins the 5-key shape at the build-error level. The implementer noted a pre-existing `cli_ask_e2e::ask_subprocess_completes_planned_task_end_to_end` flake (multiset audit-event assertion missing one `task.finalize` event) that re-runs cleanly — flagged for future investigation but unrelated to L0 changes (different subsystem, scheduler).
+- **No automatic L2→L0 promotion.** L0 is hand-curated only.
+
+**Open follow-up surfaces (not blocking):**
+
+- **Prompt-assembler `llm_router::build_system_prompt`** is now the natural next pickup — both `load_l0_active` and `load_l1` are available; the slice concatenates them under a global token cap.
+- **Pre-existing `cli_ask_e2e` flake** (multiset audit-event assertion missing one `task.finalize` event): not caused by this slice, observed in Task 2 + Task 3 runs but re-runs cleanly. Investigate when next touching the scheduler audit-emit path.
+- **`core/src/main.rs` LOC creep** — now 437 LOC. Each future seed/loader task adds ~25 LOC of the same shape. A future `startup::bring_up(pool)` extraction would amortise. Not warranted today.
+- **`load_l0_active` per-test PG cluster cost (~18 s across 6 read-side tests)** could be amortised by sharing a cluster across read-only scenarios. Same pattern as the existing L1 + recall tests; refactor would touch the whole memory-test family. Filed mentally; not blocking.
+
+**Files touched (3 NEW + 4 modified + 2 docs + 1 starter file):**
+
+- NEW `core/src/memory/l0_seed.rs`.
+- NEW `core/tests/memory_l0_seed_e2e.rs`.
+- NEW `seeds/memory/l0_meta_rules.toml`.
+- NEW `docs/superpowers/specs/2026-05-16-l0-seed-loader-design.md`.
+- NEW `docs/superpowers/plans/2026-05-16-l0-seed-loader.md`.
+- `core/src/memory/mod.rs` — `pub mod l0_seed;` declaration.
+- `db/src/memories.rs` — `load_active_l0` added (no embedding column in SELECT after the post-review fixup).
+- `core/src/main.rs` — wire-in + `write_l0_seeded_row` helper.
+- `core/src/scheduler/audit.rs` — `ACTION_L0_SEEDED` const.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
+
+---
+
+## Recently completed (previous session, 2026-05-16 — issue #71 runner rejects producer-supplied `agent_raised`, branch `fix/runner-reject-agent-raised-provenance`)
 
 Branch: `fix/runner-reject-agent-raised-provenance` (off `main` at `4ddfe3b`, single commit `a6335ab` ready for PR). Closes [issue #71](https://github.com/hherb/hhagent/issues/71) — _audit-trail integrity: producer-supplied `agent_raised` provenance accepted without validation_, filed during PR #70 code review. The fix follows the "fail-loud at task entry" mitigation (Option 1 in the issue body); the alternative two-token-enum design (Option 2) was rejected as out-of-proportion for the threat.
 
