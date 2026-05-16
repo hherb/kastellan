@@ -622,6 +622,33 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         assert!(fp["finished_at"].is_string(),
                 "task.finalize.finished_at must be an RFC 3339 string; got {fp:?}");
 
+        // Slice — automatic floor inference (2026-05-16): every
+        // agent/plan.formulate row carries `classification_floor_source`.
+        // Happy-path instruction is the marker string ("EXEC_E2E_HAPPY_…");
+        // no clinical / secret / personal keywords match the catalogue, so
+        // the inference returns Public + empty signals → source=Default
+        // and the `classification_floor_signals` key is omitted.
+        let plan_rows: Vec<(sqlx::types::Json<serde_json::Value>,)> = sqlx::query_as(
+            "SELECT payload FROM audit_log \
+             WHERE actor = 'agent' AND action = 'plan.formulate' \
+             ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("select plan.formulate rows");
+        assert_eq!(plan_rows.len(), 2, "expected 2 plan.formulate rows");
+        for (i, row) in plan_rows.iter().enumerate() {
+            let p = &row.0.0;
+            let src = p.get("classification_floor_source")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!(
+                    "plan.formulate row {i} must carry classification_floor_source; got {p:?}"));
+            assert_eq!(src, "default",
+                "plan.formulate row {i}: expected source=default for non-clinical 'marker' prompt; got {src:?}");
+            assert!(p.get("classification_floor_signals").is_none(),
+                "plan.formulate row {i}: default source must omit signals key; got {p:?}");
+        }
+
         pool.close().await;
     });
 
