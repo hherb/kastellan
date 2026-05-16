@@ -52,7 +52,7 @@ pub use pg_builder::{PgSystemPromptBuilder, StaticSystemPromptBuilder};
 pub enum PromptAssemblyError {
     /// One of the layer loaders returned an error from `db::memories`.
     #[error("memory load failed: {0}")]
-    Memory(#[from] DbError),
+    MemoryLoad(#[from] DbError),
 }
 
 /// Result of a [`SystemPromptBuilder::build`] call.

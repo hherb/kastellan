@@ -104,6 +104,8 @@ mod tests {
         assert_eq!(r2.system_prompt, "FIXED-OUTPUT");
         assert_eq!(r1.l0_count, 0, "static builder always reports 0 l0 rows");
         assert_eq!(r1.l1_count, 0, "static builder always reports 0 l1 rows");
+        assert_eq!(r2.l0_count, 0, "second call must also report 0 l0 rows");
+        assert_eq!(r2.l1_count, 0, "second call must also report 0 l1 rows");
     }
 
     #[tokio::test]
