@@ -4,9 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-16 (post-code-review hardening on the L1 memory-layer storage primitive — L0 writer policy is now enforced in code, not just doc; new `seed_meta_memory` admin path; `load_l1_default` convenience; oversize-L1-row drop now `tracing::warn!`s; new `DbError::PolicyViolation` variant).
-**Last commit (main):** `b1c63e2` (Merge pull request #68 — first real `DeterministicPolicy` rule). Branch `feat/memory-layer-l1-index` ready for PR — 4 commits off `main` plus a 5th post-review fixup commit (see "Post-review fixups" below).
-**Session-end working state (this session, 2026-05-16 fresh):** branch `feat/memory-layer-l1-index` ready for PR. Workspace test count **556 → 557** (+1 — `load_l1_default_matches_explicit_default_caps` in `memory_layers_e2e.rs`; the L0-rejection assertion was folded into the existing `insert_memory_at_layer_round_trip` test to avoid spinning up a second PG cluster). Zero failures, zero warnings, zero `[SKIP]` lines on Linux. `db/src/memories.rs` 769 → **~830** LOC (new `seed_meta_memory` + extracted `insert_row_at_layer_unchecked` helper); same 500-LOC-soft-cap breach as before. `core/src/memory/layers.rs` 138 → **165** LOC (new `load_l1_default` + `tracing::warn!` branch).
+**Last updated:** 2026-05-16 (automatic classification-floor inference shipped on `feat/automatic-floor-inference`; CLI-side keyword classifier + agent-side raise-only channel; +40 tests; workspace 557 → 597).
+**Last commit (main):** `eb8e4bd` (Merge pull request #69 — L1 memory-layer storage primitive + post-review hardening).
+**Session-end working state (this session, 2026-05-16):** branch `feat/automatic-floor-inference` ready for PR — 11 commits off `main` (1 spec + 1 plan + 9 task commits; tip `6fb70b9`). Workspace test count **557 → 597** (+40 across all tasks). Zero failures, zero warnings, zero `[SKIP]` lines on Linux. New file `core/src/classification_inference.rs` 394 LOC (well under the 500-LOC soft cap). `core/src/scheduler/inner_loop.rs` 700 → ~870 LOC (pre-existing soft-cap breach extended ~+170 LOC for the source enum + payload widening + raise check + 7 new unit tests). `core/src/bin/hhagent-cli.rs` 1089 → ~1260 LOC (pre-existing breach extended).
 
 **Post-review fixups (2026-05-16):**
 
@@ -157,7 +157,96 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-15 — L1 memory-layer storage primitive, branch `feat/memory-layer-l1-index`)
+## Recently completed (this session, 2026-05-16 — automatic classification-floor inference, branch `feat/automatic-floor-inference`)
+
+Branch: `feat/automatic-floor-inference` (off `main` at `eb8e4bd`, the merge of PR #69). Spec: [`docs/superpowers/specs/2026-05-16-automatic-floor-inference-design.md`](../../superpowers/specs/2026-05-16-automatic-floor-inference-design.md). Plan: [`docs/superpowers/plans/2026-05-16-automatic-floor-inference.md`](../../superpowers/plans/2026-05-16-automatic-floor-inference.md). Closes the HANDOVER "Next concrete engineering pickup #2" (automatic floor inference) so non-clinical operators no longer need to remember `--classification-floor` for clinical work.
+
+**Hybrid design (chosen via brainstorming):** CLI-side keyword classifier as the primary inference site (producer-trusted, runs before submission, deterministic) + agent-side raise-only channel via new `Plan.floor_request` (defence in depth; the agent can elevate the floor after observing inputs but never lower it).
+
+**Shape (1 NEW pure module + 1 new Plan field + 1 new enum + 1 new pure helper in the CLI + 1 inner-loop check + 4 modified files + 1 prompt change + 2 docs):**
+
+- **NEW `core/src/classification_inference.rs`** (394 LOC, ~150 production + ~240 tests). Public surface: `InferredFloor { class: DataClass, signals: Vec<&'static str> }` + `infer_floor(instruction: &str) -> InferredFloor`. Tiered scan over per-class catalogues (Secret > Clinical > Personal > Public); first class with ≥1 match wins; all matching signals from the winning class are collected. Private `contains_word` helper mirrors the `ConstitutionalGuard` post-review precedent from commit `5d48e3e` — whole-word ASCII alphanumeric byte boundaries + lowercase-fold; multi-word phrases use bare `contains` since they have no whole-word collision shape.
+- **NEW `Plan.floor_request: Option<DataClass>`** in `core/src/cassandra/types.rs`. `#[serde(default, skip_serializing_if = "Option::is_none")]` so existing fixtures stay byte-stable. Semantic: agent's request to RAISE the floor for the rest of the task; lower requests are silently no-ops (pinned by `agent_floor_request_lower_than_producer_is_ignored`).
+- **NEW `ClassificationFloorSource` enum** in `core/src/scheduler/inner_loop.rs`: `{Operator, CliInferred, AgentRaised, Default}` with `#[serde(rename_all = "snake_case")]` + `as_snake_str()` for audit-log emission. `TaskContext` widened with `classification_floor_source` and `classification_floor_signals` fields.
+- **`build_plan_formulate_payload` widened**: 13 keys → 14 keys (default; adds `classification_floor_source`) / 15 keys (when source is `cli_inferred`; adds `classification_floor_signals` array). Pure-additive — existing JSONB consumers (replay harness, observation capture) keep working unchanged.
+- **NEW private helper `apply_floor_raise(&mut ctx, plan) -> bool`** in `inner_loop.rs`. Called after `plan_count += 1` and BEFORE `write_audit_plan_formulate` + reviewer chain, so the audit row reflects the elevated floor and DP's I1/I2 invariants see the new bar. Never lowers; on raise sets `source = AgentRaised` and clears `signals`.
+- **`core/src/scheduler/runner.rs`** reads `classification_floor_source` (default `Default`) + `classification_floor_signals` (default empty) from `task.payload` and threads them into `TaskContext`. Unrecognised source string is fail-closed (parallel to existing `classification_floor` handling).
+- **NEW `resolve_floor_for_submission` pure helper** in `core/src/bin/hhagent-cli.rs`. Maps `(instruction, operator_flag)` → `(floor, source, signals)`. Operator-explicit always wins; a `tracing::warn!` fires when inference would have elevated above the operator's pinned value (operator-visible suppression breadcrumb in the daemon journal).
+- **`ask_async` payload builder** now writes the new keys into `tasks.payload`. CLI prompt-to-task path resolves the floor before submission; producer commits to a floor.
+- **`prompts/agent_planner.md`** — added `"floor_request": null,` to the JSON-schema example + one new paragraph explaining the field's semantic distinction from `data_ceiling` (touches vs. governs outputs). The `agent_prompts` SHA-256 ledger records the new hash on next daemon start automatically (no migration).
+
+**Audit-row contract (the headline):**
+
+| When | actor | action | payload keys |
+| ---- | ----- | ------ | ------------ |
+| Agent emits any plan, source=Default | agent | `plan.formulate` | 14 keys (existing 13 + `classification_floor_source: "default"`) |
+| Agent emits any plan, source=CliInferred | agent | `plan.formulate` | 15 keys (default 14 + `classification_floor_signals: ["tag1", "tag2", ...]`) |
+| Agent emits any plan, source=Operator | agent | `plan.formulate` | 14 keys (no signals — operator commitment carries no breadcrumb) |
+| Agent raises floor mid-task | agent | `plan.formulate` | 14 keys (no signals — agent raise is the new load-bearing fact; CLI signals no longer explain the current floor) |
+
+Pure-additive; downstream JSONB consumers (replay harness, observation captures) keep working unchanged. `hhagent-cli observation replay` against ec-001 (with operator-pinned `--classification-floor ClinicalConfidential`) shows a `*` delta row once recapture lands.
+
+**Test count delta:** **557 → 597** (+40 across all tasks):
+- `core/src/cassandra/types.rs::tests`: +2 (Plan.floor_request round-trip when absent + when set).
+- `core/src/classification_inference::tests`: +20 (per-class catalogue coverage + tier priority + case insensitivity + alias collapse).
+- `core/src/classification_inference::contains_word_tests`: +5 (whole-word edge cases).
+- `core/src/scheduler/inner_loop.rs::tests`: +7 (4 floor-raise unit tests + 3 payload-shape pins for default/cli_inferred/agent_raised sources; the existing `pins_thirteen_keys` was renamed and updated to `pins_fourteen_keys_for_default_source`).
+- `core/src/bin/hhagent-cli.rs::resolve_floor_for_submission_tests`: +5 (no-op default / cli-inferred / operator-wins-with-warn / operator-wins-no-warn / operator-equal-no-warn).
+- `core/tests/scheduler_inner_loop_e2e.rs`: +1 integration scenario (`agent_floor_raise_chain_blocks_low_classification_step` — uses the REAL `DeterministicPolicy`, not a stub).
+- `core/tests/cli_ask_e2e.rs` happy-path: extended with payload assertions for the new source+signals keys (no new `#[test]` functions).
+
+Zero failures, zero warnings, zero `[SKIP]` lines on Linux.
+
+**TDD ordering (per CLAUDE.md rule #2):** matches the plan's task list verbatim — each task is one RED → GREEN → commit cycle:
+
+1. `feat(cassandra)`: `Plan.floor_request` field + 2 serde round-trip tests (`cd11321`).
+2. `feat(core)`: `classification_inference` pure module — full catalogues + 25 unit tests (`6d93eae`).
+3. `feat(scheduler)`: `TaskContext` provenance fields + `ClassificationFloorSource` enum + `build_plan_formulate_payload` widening + 3 payload-shape unit tests (`226e013`).
+4. `feat(scheduler)`: inner-loop `apply_floor_raise` check + 4 unit tests (`0a34e8c`).
+5. `feat(scheduler)`: `runner.rs` reads source + signals from payload (`c110407`).
+6. `feat(cli)`: `resolve_floor_for_submission` helper + `ask_async` wiring + `tracing::warn!` on suppression + 5 unit tests (`7b3fa67`).
+7. `feat(prompt)`: planner JSON-schema update + explanatory paragraph (`727e770`).
+8. `test(scheduler,cli)`: integration tests — `agent_floor_raise_chain_blocks_low_classification_step` + `cli_ask_e2e` payload assertions (`6fb70b9`).
+9. `docs(handover,roadmap)`: this update.
+
+**What this slice deliberately does NOT do** (matches the spec's non-goals):
+
+- **No ML/LLM classifier.** Deterministic keyword-only, per the existing "no NLP" posture.
+- **No multilingual support.** English-only — matches the user (an anglophone EM physician).
+- **No declassifier/anonymiser path.** A plan that legitimately downgrades a Clinical-input → Public-output (e.g. anonymised text) is still blocked by I2 at the elevated floor. Phase 2+ work.
+- **No pattern learning from observation captures.** The catalogue is hand-edited; once observation phase shows misses, add patterns by hand.
+- **No retroactive re-classification of existing audit rows.** Audit rows are point-in-time; new behaviour applies to future submissions.
+- **No CLI override flag for the inference logic.** No `--no-infer-floor`. The operator can always pin explicitly with `--classification-floor`.
+- **No agent-side floor LOWER request.** Silently a no-op (pinned by unit test).
+- **No expansion of Personal-class signals beyond a tiny seed.** Personal patterns are fuzzy; grow the catalogue only when real workloads surface needs.
+- **No daemon-side re-inference.** The CLI is the canonical inference site; the daemon trusts what the producer wrote. Future channel-bus adapters (Phase 2+) must run their own inference before submitting.
+
+**Open follow-up surfaces (not blocking):**
+
+- **Operator recapture against current daemon** — pre-Slice-A captures retain `plan_json: null` and now also retain the pre-Slice-B payload (no source/signals keys). Recapture turns them into harness-replay-able inputs that exercise the new rule end-to-end against ec-001. One-time operator action.
+- **`floor_request` → `data_ceiling` propagation** — today `floor_request` and `data_ceiling` are independent fields. If the agent raises the floor but forgets to bump `data_ceiling`, DP's I3 invariant could fire spuriously. A future slice could derive `effective_ceiling = max(data_ceiling, floor_request)` if real workloads surface the case.
+- **Pattern catalogue lifecycle** — once observation-phase captures show under-detection cases, add the missing pattern. Track in a future `pattern_misses.md` if the catalogue grows.
+- **`core/src/scheduler/inner_loop.rs` LOC growth** — now ~870 LOC (over 500-LOC soft cap, pre-existing breach extended). Natural future split: lift `build_plan_formulate_payload` + `apply_floor_raise` + the three `write_audit_*` writers into a sibling `core/src/scheduler/inner_loop_audit.rs`. Not warranted today but worth flagging.
+
+**Files touched (1 NEW + 7 modified + 2 docs + 1 prompt + 1 plan + 1 spec):**
+
+- NEW `core/src/classification_inference.rs` (394 LOC).
+- NEW `docs/superpowers/specs/2026-05-16-automatic-floor-inference-design.md` (380 LOC).
+- NEW `docs/superpowers/plans/2026-05-16-automatic-floor-inference.md` (1723 LOC).
+- `core/src/lib.rs` — `pub mod classification_inference;` declaration.
+- `core/src/cassandra/types.rs` — `Plan.floor_request` field + 2 unit tests; existing test fixtures patched.
+- `core/src/scheduler/inner_loop.rs` — `ClassificationFloorSource` enum + `TaskContext` widening + `apply_floor_raise` helper + `build_plan_formulate_payload` widening + 7 new unit tests; inner-loop wire-in.
+- `core/src/scheduler/runner.rs` — read source + signals from `task.payload`.
+- `core/src/bin/hhagent-cli.rs` — `resolve_floor_for_submission` helper + `ask_async` payload wiring + `tracing::warn!` on suppression + 5 unit tests.
+- `core/tests/scheduler_inner_loop_e2e.rs` — 1 new integration scenario + helper updates.
+- `core/tests/cli_ask_e2e.rs` — payload assertion extensions.
+- `core/tests/router_agent_mock_e2e.rs`, `core/tests/scheduler_lanes_e2e.rs`, `core/tests/observation_replay_e2e.rs`, `core/tests/observation_replay_cli_e2e.rs`, `core/src/cassandra/{review,deterministic}.rs`, `core/src/observation/replay.rs` — `floor_request: None,` added to every existing Plan literal site (20 sites total via batch-script).
+- `prompts/agent_planner.md` — JSON-schema example + explanatory paragraph.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
+
+---
+
+## Recently completed (previous session, 2026-05-15 — L1 memory-layer storage primitive, branch `feat/memory-layer-l1-index`)
 
 Branch: `feat/memory-layer-l1-index` (off `main` at `b1c63e2`, the merge of PR #68). Spec: [`docs/superpowers/specs/2026-05-15-memory-layer-l1-index-design.md`](../../superpowers/specs/2026-05-15-memory-layer-l1-index-design.md). Storage primitive for the GenericAgent-inspired 5-layer memory hierarchy (L0 meta-rules / L1 insight index / L2 stable facts / L3 skills / L4 session digests). Today's slice ships the column + two `db` helpers + one `core` wrapper; consumers (future prompt assembler / L0 seeder / L3 crystalliser / L4 digester) land in follow-up slices, gated on this column existing.
 
@@ -1825,12 +1914,13 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
 - ~~**First real `ConstitutionalGuard` rule (prompt-level constitutional screen)**~~ **Shipped 2026-05-15** on branch `feat/constitutional-guard-prompt-screen`, merged via PR #67 at `67d29a0`. New pure module `core::cassandra::constitutional` carrying `screen_instruction_for_principle_violations` + `ConstitutionalGuard::review` body filled in. Catches the 5 fixture prompts as `Verdict::ConstitutionalBlock` with distinct `reason` tags; `safe-001` and `ec-001` pass through. Post-review fixup `5d48e3e` tightened P5 single-word verbs against passive-form false positives via a new `contains_word` whole-word helper; +7 tests (512 → 519). See "Recently completed" entry at the top.
 - ~~**★ Next concrete engineering pickup — First real `DeterministicPolicy` rule**~~ **Shipped this session 2026-05-15 continuation** on branch `feat/deterministic-policy-classification`, merged via PR #68 at `b1c63e2`. See "Recently completed" entry above.
 - ~~**Memory L1 always-in-context insight-index storage primitive**~~ **Shipped this session 2026-05-15** on branch `feat/memory-layer-l1-index`. Migrations `0013` + `0014` add the `layer SMALLINT NOT NULL CHECK BETWEEN 0 AND 4` column on `memories` + mirror it on `deleted_memories`; `db::memories::{MemoryLayer, insert_memory_at_layer, load_layer}` are the new typed surfaces; `core::memory::layers::load_l1(pool, cap_rows, cap_bytes)` is the prompt-pinning loader with hard caps (32 rows / 4 KiB). +10 tests (546 → 556). Unblocks L0 seeder, prompt assembler, L3 skill crystalliser, L4 session digest. See "Recently completed (this session)" entry above.
+- ~~**Automatic floor inference**~~ **Shipped this session 2026-05-16** on branch `feat/automatic-floor-inference`. Hybrid design (CLI-side keyword classifier + agent-side raise-only `Plan.floor_request` channel). +40 tests (557 → 597). See "Recently completed (this session)" entry above.
 - **★ Next concrete engineering pickups:**
-    1. **Operator recapture against the current daemon** (operator action) — one-time `cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture` against the local LLM. Turns the pre-Slice-A capture JSONs into rule-iteration-harness-replayable inputs. Until recapture lands, the existing captures stay at `plan_json: null` and `hhagent-cli observation replay` skips them. After recapture, against ec-001 (with `--classification-floor ClinicalConfidential` in a future replay flag — TBD) the new DP rule from PR #68 will show a `*` delta.
-    2. **Automatic floor inference** (engineering, depends on no specific upstream) — either a planner-prompt hint asking the agent to declare a floor in the plan, or a CLI-side prompt-keyword classifier, so non-clinical operators don't have to remember `--classification-floor` for clinical work. Spec yet to be written.
-    3. **L0 seed data loader** (engineering, depends on the L1 slice above) — startup-time loader that reads a hand-edited TOML/YAML of meta-rules into L0 `memories` rows, idempotent on re-run. Pre-req: the L1 slice above. Spec yet to be written.
-    4. **Prompt-assembler `llm_router::build_system_prompt`** (engineering, depends on L0 seed loader) — first consumer of `load_l1`; concatenates `[L0 rules]` + `[L1 index]` + `[task]` + `[recall(query)]`, enforces a global token cap by dropping in priority order L4 → L2 → L3 → L1 → L0. Pre-req: L0 seed loader. Spec yet to be written.
-    5. **[Issue #55](https://github.com/hherb/hhagent/issues/55) — macOS `container` micro-VM discovery spike** (engineering, filed 2026-05-14, not blocked) — one-session feasibility check of Apple `container` CLI as the macOS micro-VM backend. Throwaway POC + half-page write-up.
+    1. **Operator recapture against the current daemon** (operator action) — one-time `cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture` against the local LLM. Turns the pre-Slice-A capture JSONs into rule-iteration-harness-replayable inputs. Until recapture lands, the existing captures stay at `plan_json: null` and `hhagent-cli observation replay` skips them. After recapture, against ec-001 (the clinical-data-leak fixture) the new DP rule from PR #68 plus this session's automatic floor inference will show a `*` delta — the keyword classifier will infer Clinical from the prompt without needing operator flag.
+    2. **L0 seed data loader** (engineering, depends on the L1 slice) — startup-time loader that reads a hand-edited TOML/YAML of meta-rules into L0 `memories` rows via `seed_meta_memory`, idempotent on re-run. Pre-req: the L1 slice (already on `main`). Spec yet to be written.
+    3. **Prompt-assembler `llm_router::build_system_prompt`** (engineering, depends on L0 seed loader) — first consumer of `load_l1`; concatenates `[L0 rules]` + `[L1 index]` + `[task]` + `[recall(query)]`, enforces a global token cap by dropping in priority order L4 → L2 → L3 → L1 → L0. Pre-req: L0 seed loader. Spec yet to be written.
+    4. **[Issue #55](https://github.com/hherb/hhagent/issues/55) — macOS `container` micro-VM discovery spike** (engineering, filed 2026-05-14, not blocked) — one-session feasibility check of Apple `container` CLI as the macOS micro-VM backend. Throwaway POC + half-page write-up.
+    5. **Pattern catalogue lifecycle for `classification_inference`** (engineering, depends on observation-phase recapture) — once recapture shows under-detection cases (clinical work that didn't elevate), add the missing pattern. Tracking in a future `pattern_misses.md` if the catalogue grows enough to warrant.
 - **Observation phase** (spec §9) — the audit log is now rich enough to drive observation-phase SQL queries entirely from `audit_log`: every step short-circuit (`step.unknown_tool` / `step.spawn_failed`), every plan formulation (`agent/plan.formulate`), every chain review (`cassandra:chain/verdict`), every per-task lifecycle transition (`task.running`, `task.<state>`, `task.crashed`), and every per-task summary (`task.finalize` — **now also emitted for crashed tasks via the previous session's slice**) all land as rows with stable wire shapes. Practical step: same fixture-set workflow as the capture-run bullet above.
 - ~~**`task.finalize` row for crashed tasks?**~~ **Shipped 2026-05-13** as `actor='scheduler' action='task.finalize'` with `state='crashed'` and JSON-null counter fields via the new `build_crashed_finalize_payload` helper in `core::scheduler::audit` + new `emit_task_finalize_row` in `core::scheduler::crash_recovery`. Branch: `feat/crashed-finalize-row`.
 - ~~**e2e coverage for `task.finalize` with `started_at: null`**~~ **Effectively closed 2026-05-14** by the producer-cancelled-pending finalize slice (this session). The runtime-path scheduler `started_at: null` coverage is still moot by construction (scheduler never finalises a never-claimed task), but the producer-side `cli/task.finalize` row now ships exactly that shape — `started_at: null` is the load-bearing wire signal for "task was never claimed" — and `cancel_pending_task_writes_lifecycle_and_finalize_rows` asserts the JSON-null serialisation directly. The remaining theoretical scheduler-path gap could be closed by simulating a producer-cancel race against an in-flight claim, but the assertion population is empty by construction so the e2e test would have nothing to plant. Consider this item resolved.
