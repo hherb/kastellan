@@ -90,40 +90,6 @@ impl SystemPromptBuilder for StaticSystemPromptBuilder {
     }
 }
 
-/// Test-only pass-through builder.
-///
-/// Returns the `base` argument unchanged with zero L0/L1 counts. Use
-/// this in tests that need the cached `agent_planner` prompt to flow
-/// through to the wire without L0/L1 framing (no Postgres available).
-///
-/// `pub` (not `cfg(test)`) so `core/tests/*.rs` integration tests can
-/// import it without a separate dev-dep export.
-pub struct PassThroughSystemPromptBuilder;
-
-impl PassThroughSystemPromptBuilder {
-    /// Construct a pass-through builder.
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for PassThroughSystemPromptBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl SystemPromptBuilder for PassThroughSystemPromptBuilder {
-    async fn build(&self, base: &str) -> Result<AssembledPrompt, PromptAssemblyError> {
-        Ok(AssembledPrompt {
-            system_prompt: base.to_owned(),
-            l0_count: 0,
-            l1_count: 0,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

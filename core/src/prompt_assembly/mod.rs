@@ -38,7 +38,7 @@ pub mod assemble;
 pub mod pg_builder;
 
 pub use assemble::assemble_system_prompt;
-pub use pg_builder::{PassThroughSystemPromptBuilder, PgSystemPromptBuilder, StaticSystemPromptBuilder};
+pub use pg_builder::{PgSystemPromptBuilder, StaticSystemPromptBuilder};
 
 /// Error returned by [`SystemPromptBuilder::build`] when the underlying
 /// memory loaders fail.
