@@ -392,10 +392,10 @@ fn failed_result(detail: String) -> InnerLoopResult {
 /// All `Err` variants carry a human-readable diagnostic suitable for
 /// passing straight into [`failed_result`].
 ///
-/// Pure function: no I/O, no side effects, no allocations beyond the
-/// returned `String` on the error path. Renaming any branch of
-/// [`ClassificationFloorSource`] is an audit-trail contract break;
-/// the reject set here is the wire-level enforcement of that contract.
+/// Pure function: no I/O, no side effects. Renaming any branch of
+/// [`ClassificationFloorSource`] is an audit-trail contract break; the
+/// reject here matches on the parsed variant (not the wire string) so a
+/// rename of `AgentRaised` + its serde tag propagates automatically.
 ///
 /// [issue #71]: https://github.com/hherb/hhagent/issues/71
 fn parse_classification_floor_source_from_payload(
@@ -409,24 +409,26 @@ fn parse_classification_floor_source_from_payload(
             "classification_floor_source in payload is not a string: {v:?}"
         ));
     };
-    // Reject `agent_raised` BEFORE the generic serde parse so the
-    // diagnostic names the contract instead of merely "unknown value".
-    // Operator-visible message gives the next session a fighting chance
-    // to grep for "reserved" or "internal-only" and find this site.
-    if s == "agent_raised" {
-        return Err(
-            "classification_floor_source = \"agent_raised\" is reserved for \
-             the inner loop's apply_floor_raise — producers must not supply it. \
-             Use operator / cli_inferred / default at submission time."
-                .to_string(),
-        );
-    }
-    serde_json::from_str::<ClassificationFloorSource>(&format!("\"{}\"", s)).map_err(|_| {
-        format!(
+    // Parse first, then reject the `AgentRaised` variant on a structural
+    // match. Binding the reject to the enum variant (rather than a
+    // string literal) means a future rename of `AgentRaised` + its
+    // serde tag + `as_snake_str` continues to be rejected here without
+    // a parallel edit. The dedicated diagnostic is preserved so an
+    // operator grepping the daemon journal for "reserved" still finds
+    // this site.
+    match serde_json::from_value::<ClassificationFloorSource>(v.clone()) {
+        Ok(ClassificationFloorSource::AgentRaised) => Err(format!(
+            "classification_floor_source = {:?} is reserved for the inner \
+             loop's apply_floor_raise — producers must not supply it. \
+             Use operator / cli_inferred / default at submission time.",
+            ClassificationFloorSource::AgentRaised.as_snake_str(),
+        )),
+        Ok(src) => Ok(src),
+        Err(_) => Err(format!(
             "unknown classification_floor_source: {s:?} (expected one of \
              operator, cli_inferred, default)"
-        )
-    })
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -503,6 +505,32 @@ mod tests {
         );
         assert!(
             err.contains("unknown") || err.contains("expected one of"),
+            "error must name the contract: {err}",
+        );
+    }
+
+    #[test]
+    fn agent_raised_reject_binds_to_enum_variant_not_string_literal() {
+        // Defense-in-depth pin: the reject inside
+        // `parse_classification_floor_source_from_payload` matches on
+        // the parsed `ClassificationFloorSource::AgentRaised` variant.
+        // Feeding it the canonical wire form via `as_snake_str()`
+        // exercises the same path a forging producer would. If a future
+        // refactor rewires the reject to a hard-coded string literal,
+        // and someone separately renames `AgentRaised` + its serde tag
+        // (which `as_snake_str_matches_serde_wire_form` in `inner_loop`
+        // forces to stay in lockstep), the literal would silently go
+        // out of date — this test would still catch it because the
+        // input is derived from the enum, not a constant.
+        let wire = ClassificationFloorSource::AgentRaised.as_snake_str();
+        let v = json!(wire);
+        let err = parse_classification_floor_source_from_payload(Some(&v)).unwrap_err();
+        assert!(
+            err.contains(wire),
+            "error must echo the rejected wire form {wire:?}: {err}",
+        );
+        assert!(
+            err.contains("reserved") || err.contains("apply_floor_raise"),
             "error must name the contract: {err}",
         );
     }
