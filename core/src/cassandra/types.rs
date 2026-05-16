@@ -130,8 +130,9 @@ pub struct Plan {
     pub floor_request: Option<DataClass>,
 }
 
-// Invariant (enforced by future Stage 0 — not by stubs in this work's scope):
-//   plan.data_ceiling >= task.classification_floor
+// Invariant (enforced by Stage 0 / `DeterministicPolicy`, see
+// `cassandra::deterministic::screen_plan_for_classification_violations`):
+//   plan.data_ceiling >= task.classification_floor    (I1)
 // i.e. outputs cannot be classified *below* the producer-pinned floor without
 // passage through an anonymiser/declassifier (anonymiser is out of scope here).
 // The floor is a producer-set minimum on outputs; the ceiling is the inferred

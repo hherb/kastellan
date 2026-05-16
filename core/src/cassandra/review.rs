@@ -117,10 +117,14 @@ impl ReviewStage for ConstitutionalGuard {
 /// - **I3: every `step.classification <= plan.data_ceiling`** —
 ///   plan-internal consistency.
 ///
-/// The floor is operator-pinned at task submission via
-/// `hhagent-cli ask --classification-floor <DataClass>` (field
-/// `tasks.payload.classification_floor`; default `Public`). Automatic
-/// floor inference from prompt text is a separate slice.
+/// The floor is set at task submission via
+/// `hhagent-cli ask --classification-floor <DataClass>` (operator
+/// override) or by automatic keyword inference from the prompt
+/// (`core::classification_inference`). Provenance lands in
+/// `tasks.payload.classification_floor` /
+/// `tasks.payload.classification_floor_source`. The agent may
+/// additionally raise (never lower) the floor mid-task via
+/// `Plan.floor_request`; see `scheduler::inner_loop::apply_floor_raise`.
 pub struct DeterministicPolicy;
 #[async_trait]
 impl ReviewStage for DeterministicPolicy {

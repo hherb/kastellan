@@ -390,16 +390,6 @@ pub async fn run_to_terminal(
     }
 }
 
-/// Pure builder for the `agent/plan.formulate` audit-row payload.
-///
-/// Extracted from `write_audit_plan_formulate` so the wire shape is
-/// unit-testable without a live Postgres pool. The 13-key shape pins
-/// (in this file's `tests` module) defend against accidental drift.
-///
-/// Slice A (2026-05-15) added `plan` (full serialised Plan) +
-/// `classification_floor` (task-level DataClass) so captures carry
-/// everything the reviewer pipeline needs to be replayed offline —
-/// see `core::observation::replay`.
 /// Apply `plan.floor_request` to `ctx` if it raises the current floor.
 /// Pure side-effect on `ctx`. Returns true iff `ctx` was mutated.
 ///
@@ -423,6 +413,22 @@ fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
     false
 }
 
+/// Pure builder for the `agent/plan.formulate` audit-row payload.
+///
+/// Extracted from `write_audit_plan_formulate` so the wire shape is
+/// unit-testable without a live Postgres pool. The 14/15-key shape pins
+/// (in this file's `tests` module) defend against accidental drift —
+/// 14 keys for non-`CliInferred` sources, 15 when `CliInferred` carries
+/// matched signals.
+///
+/// Slice A (2026-05-15) added `plan` (full serialised Plan) +
+/// `classification_floor` (task-level DataClass) so captures carry
+/// everything the reviewer pipeline needs to be replayed offline —
+/// see `core::observation::replay`.
+///
+/// Slice B (2026-05-16) added `classification_floor_source` (always)
+/// and conditional `classification_floor_signals` (CliInferred only)
+/// so audit consumers can trace how the floor was set.
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
@@ -577,6 +583,30 @@ mod tests {
             blocks: vec![],
             plan_count: 0,
             max_plans: 3,
+        }
+    }
+
+    #[test]
+    fn classification_floor_source_as_snake_str_matches_serde_wire_form() {
+        // Pin the audit-log contract: `as_snake_str` MUST stay
+        // byte-identical to the serde wire form so the rendered token
+        // in the `classification_floor_source` payload key can be
+        // cross-grepped with operator-visible logs. Mirrors the
+        // `data_class_as_pascal_str_matches_serde_wire_form` pin.
+        for s in [
+            ClassificationFloorSource::Operator,
+            ClassificationFloorSource::CliInferred,
+            ClassificationFloorSource::AgentRaised,
+            ClassificationFloorSource::Default,
+        ] {
+            let wire = serde_json::to_value(s).unwrap();
+            let wire_str = wire.as_str()
+                .expect("ClassificationFloorSource serialises as JSON string");
+            assert_eq!(
+                s.as_snake_str(),
+                wire_str,
+                "as_snake_str must equal serde wire form for {s:?}",
+            );
         }
     }
 
