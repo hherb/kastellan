@@ -353,8 +353,6 @@ pub async fn seed_l0_from_rules(
 }
 
 /// Convenience: read + parse + seed.
-///
-/// Body shipped in Task 3.
 pub async fn seed_l0_from_file(pool: &PgPool, path: &Path) -> Result<L0SeedReport, L0Error> {
     let content = tokio::fs::read_to_string(path).await.map_err(|e| L0Error::Io {
         path: path.to_path_buf(),
@@ -367,8 +365,6 @@ pub async fn seed_l0_from_file(pool: &PgPool, path: &Path) -> Result<L0SeedRepor
 
 /// Returns the currently-active L0 rule set — newest version per
 /// `l0_rule_id` — newest-first, bounded by the two caps.
-///
-/// Body shipped in Task 3.
 pub async fn load_l0_active(
     pool: &PgPool,
     cap_rows: usize,
@@ -412,8 +408,6 @@ pub async fn load_l0_active(
 }
 
 /// Convenience wrapper pinning the two published defaults.
-///
-/// Body shipped in Task 3.
 pub async fn load_l0_active_default(pool: &PgPool) -> Result<Vec<Memory>, DbError> {
     load_l0_active(pool, L0_DEFAULT_CAP_ROWS, L0_DEFAULT_CAP_BYTES).await
 }

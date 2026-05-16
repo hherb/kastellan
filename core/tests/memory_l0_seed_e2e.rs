@@ -14,7 +14,7 @@ use std::path::Path;
 
 use hhagent_core::memory::l0_seed::{
     load_l0_active, load_l0_active_default, seed_l0_from_file, seed_l0_from_rules,
-    L0Error, L0Rule, L0_DEFAULT_CAP_ROWS,
+    L0Error, L0Rule, L0_DEFAULT_CAP_BYTES, L0_DEFAULT_CAP_ROWS,
 };
 use hhagent_db::memories::load_active_l0;
 use hhagent_tests_common::{
@@ -295,7 +295,7 @@ body = "rule B body"
         assert_eq!(report.source_path, path);
         assert_eq!(report.source_sha256.len(), 64, "SHA-256 hex");
 
-        let active = load_l0_active(&pool, L0_DEFAULT_CAP_ROWS, 8192).await.expect("load");
+        let active = load_l0_active(&pool, L0_DEFAULT_CAP_ROWS, L0_DEFAULT_CAP_BYTES).await.expect("load");
         assert_eq!(active.len(), 2);
 
         pool.close().await;
@@ -453,11 +453,11 @@ fn load_l0_active_respects_cap_rows() {
             .await
             .expect("seed");
 
-        let two = load_l0_active(&pool, 2, 8192).await.expect("cap 2");
+        let two = load_l0_active(&pool, 2, L0_DEFAULT_CAP_BYTES).await.expect("cap 2");
         assert_eq!(two.len(), 2, "cap_rows must trim DB-side");
 
         // Defense-in-depth: cap_rows = 0 returns empty.
-        let zero = load_l0_active(&pool, 0, 8192).await.expect("cap 0");
+        let zero = load_l0_active(&pool, 0, L0_DEFAULT_CAP_BYTES).await.expect("cap 0");
         assert!(zero.is_empty());
 
         pool.close().await;
