@@ -1,0 +1,23 @@
+# L0 meta-rules / hard constraints loaded into every system prompt at
+# the highest priority. Edit + commit + daemon restart to update.
+#
+# The loader is idempotent on (rule_id, body_sha256); old versions of
+# edited rules stay in the database for audit. Removing a rule from
+# this file does NOT delete it from the database — `hhagent-cli`
+# tooling (future slice) will surface and prune stale rules.
+#
+# Each rule needs:
+#   id     stable identifier, [a-z0-9_]+, unique within this file
+#   body   the rule text the agent reads; <= 1024 bytes, one sentence
+#   tags   optional array of strings; not used at load time today,
+#          reserved for future filtering
+
+[[rule]]
+id = "never_rm_rf"
+body = "Never invoke 'rm -rf' or any equivalent recursive destructive command without explicit operator confirmation. If a task plan calls for one, stop and ask."
+tags = ["safety", "filesystem"]
+
+[[rule]]
+id = "refusal_is_terminal"
+body = "If the constitutional reviewer or your own plan emits a refusal, do not re-enter the action loop on the same task. Surface the refusal and stop."
+tags = ["safety", "constitutional"]
