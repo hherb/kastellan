@@ -301,12 +301,55 @@ pub fn build_l0_metadata(
 ///
 /// Body shipped in Task 2.
 pub async fn seed_l0_from_rules(
-    _pool: &PgPool,
-    _source_path: &Path,
-    _source_sha256: &str,
-    _rules: &[L0Rule],
+    pool: &PgPool,
+    source_path: &Path,
+    source_sha256: &str,
+    rules: &[L0Rule],
 ) -> Result<L0SeedReport, L0Error> {
-    todo!("ships in Task 2")
+    let mut report = L0SeedReport {
+        rules_loaded: rules.len(),
+        new_rows_written: 0,
+        unchanged_skipped: 0,
+        source_path: source_path.to_path_buf(),
+        source_sha256: source_sha256.to_string(),
+    };
+
+    for rule in rules {
+        let body_sha256 = compute_body_sha256(&rule.body);
+
+        // Idempotency check: does `(l0_rule_id, body_sha256)` already
+        // exist at layer 0? sqlx::query_scalar with `EXISTS` returns
+        // a single bool; no row construction overhead.
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM memories \
+                  WHERE layer = 0 \
+                    AND metadata->>'l0_rule_id' = $1 \
+                    AND metadata->>'body_sha256' = $2 \
+              )",
+        )
+        .bind(&rule.id)
+        .bind(&body_sha256)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            L0Error::Db(DbError::Query(format!(
+                "l0 idempotency check ({}): {e}",
+                rule.id
+            )))
+        })?;
+
+        if exists {
+            report.unchanged_skipped += 1;
+            continue;
+        }
+
+        let metadata = build_l0_metadata(&rule.id, &body_sha256, &rule.tags, source_path);
+        hhagent_db::memories::seed_meta_memory(pool, &rule.body, &metadata, None).await?;
+        report.new_rows_written += 1;
+    }
+
+    Ok(report)
 }
 
 /// Convenience: read + parse + seed.

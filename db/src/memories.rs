@@ -678,6 +678,96 @@ where
     Ok(out)
 }
 
+/// Load the currently-active L0 rule set, deduplicated by
+/// `metadata->>'l0_rule_id'`.
+///
+/// L0 rows are append-only by `seed_meta_memory`; an edited rule
+/// produces a *new* row with the same `l0_rule_id` and a different
+/// `body_sha256`. The active set is the newest row per
+/// `l0_rule_id`. Rows missing the `l0_rule_id` metadata key (e.g.
+/// hand-written test rows or future legacy fixtures) are excluded —
+/// they're not part of the seed-loader's universe.
+///
+/// Returns up to `cap_rows` rows ordered by
+/// `(l0_rule_id ASC, created_at DESC, id DESC)` for stable per-rule
+/// dedup, but the *outer* return order is `created_at DESC, id DESC`
+/// across the deduplicated set so the caller can drop oldest-first
+/// when budgeting. The `id DESC` tiebreaker matches `load_layer` for
+/// microsecond-clock collisions.
+///
+/// `cap_rows = 0` is a fast-path no-op (no SQL issued). Saturating
+/// cast on `cap_rows` via `limit_as_i64` matches `load_layer`.
+pub async fn load_active_l0<'e, E>(
+    executor: E,
+    cap_rows: usize,
+) -> Result<Vec<Memory>, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if cap_rows == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = limit_as_i64(cap_rows);
+
+    // Two-step SELECT:
+    //   1. DISTINCT ON (rule_id) ORDER BY rule_id, created_at DESC,
+    //      id DESC — newest row per rule.
+    //   2. Outer wrapper re-orders by created_at DESC across the
+    //      deduplicated set so the caller's byte-budget drop logic
+    //      cuts oldest-first (consistent with load_layer).
+    //
+    // The `metadata ? 'l0_rule_id'` predicate excludes any L0 rows
+    // written without the rule_id metadata key. Such rows are not
+    // part of the seed-loader's universe and would otherwise produce
+    // a NULL group from the DISTINCT ON.
+    let rows = sqlx::query(
+        "SELECT id, body, metadata, embedding::text, layer, created_at \
+         FROM ( \
+             SELECT DISTINCT ON (metadata->>'l0_rule_id') \
+                    id, body, metadata, embedding, layer, created_at \
+               FROM memories \
+              WHERE layer = 0 \
+                AND metadata ? 'l0_rule_id' \
+              ORDER BY metadata->>'l0_rule_id', created_at DESC, id DESC \
+         ) AS dedup \
+         ORDER BY created_at DESC, id DESC \
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("load_active_l0: {e}")))?;
+
+    let mut out: Vec<Memory> = Vec::with_capacity(rows.len());
+    for row in rows {
+        use sqlx::Row;
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|e| DbError::Query(format!("decode id: {e}")))?;
+        let body: String = row
+            .try_get("body")
+            .map_err(|e| DbError::Query(format!("decode body: {e}")))?;
+        let metadata: serde_json::Value = row
+            .try_get("metadata")
+            .map_err(|e| DbError::Query(format!("decode metadata: {e}")))?;
+        let layer_raw: i16 = row
+            .try_get("layer")
+            .map_err(|e| DbError::Query(format!("decode layer: {e}")))?;
+        let layer = MemoryLayer::from_db(layer_raw)?;
+        let created_at: time::OffsetDateTime = row
+            .try_get("created_at")
+            .map_err(|e| DbError::Query(format!("decode created_at: {e}")))?;
+        out.push(Memory {
+            id,
+            body,
+            metadata,
+            layer,
+            created_at,
+        });
+    }
+    Ok(out)
+}
+
 /// Format a `Vec<f32>` as the canonical pgvector text representation.
 ///
 /// pgvector's text input format is `[v0,v1,...,vN-1]` with a trailing
