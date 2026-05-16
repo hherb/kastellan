@@ -13,7 +13,8 @@
 use std::path::Path;
 
 use hhagent_core::memory::l0_seed::{
-    seed_l0_from_rules, L0Rule, L0_DEFAULT_CAP_ROWS,
+    load_l0_active, load_l0_active_default, seed_l0_from_file, seed_l0_from_rules,
+    L0Error, L0Rule, L0_DEFAULT_CAP_ROWS,
 };
 use hhagent_db::memories::load_active_l0;
 use hhagent_tests_common::{
@@ -237,6 +238,362 @@ fn seed_from_rules_writes_new_row_on_edited_body() {
         .await
         .expect("count");
         assert_eq!(count, 3, "edited rule must leave its old row behind for audit");
+
+        pool.close().await;
+    });
+}
+
+#[test]
+fn seed_from_file_reads_parses_and_seeds() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0f-d",
+        "l0f-l",
+        &format!("hhagent-supervisor-test-pg-l0file-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-from-file"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Write a small TOML to a temp dir.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("l0.toml");
+        let toml = r#"
+[[rule]]
+id = "from_file_a"
+body = "rule A body"
+
+[[rule]]
+id = "from_file_b"
+body = "rule B body"
+"#;
+        tokio::fs::write(&path, toml).await.expect("write toml");
+
+        let report = seed_l0_from_file(&pool, &path).await.expect("seed");
+        assert_eq!(report.rules_loaded, 2);
+        assert_eq!(report.new_rows_written, 2);
+        assert_eq!(report.unchanged_skipped, 0);
+        assert_eq!(report.source_path, path);
+        assert_eq!(report.source_sha256.len(), 64, "SHA-256 hex");
+
+        let active = load_l0_active(&pool, L0_DEFAULT_CAP_ROWS, 8192).await.expect("load");
+        assert_eq!(active.len(), 2);
+
+        pool.close().await;
+    });
+}
+
+#[test]
+fn seed_from_file_fails_closed_on_malformed_toml() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0m-d",
+        "l0m-l",
+        &format!("hhagent-supervisor-test-pg-l0mal-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-malformed"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("bad.toml");
+        // Missing body, unterminated string — toml crate must reject.
+        tokio::fs::write(&path, "[[rule]]\nid = \"x\"\nbody = \"oops")
+            .await
+            .expect("write");
+
+        let err = seed_l0_from_file(&pool, &path)
+            .await
+            .expect_err("malformed toml must fail closed");
+        assert!(matches!(err, L0Error::TomlParse { .. }), "got {err:?}");
+
+        // No rows written.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memories WHERE layer = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 0, "fail-closed must write zero rows");
+
+        pool.close().await;
+    });
+}
+
+#[test]
+fn load_l0_active_returns_newest_per_rule_id() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0d-d",
+        "l0d-l",
+        &format!("hhagent-supervisor-test-pg-l0dedup-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-dedup"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Seed v1, then v2 of the same rule_id.
+        let v1 = vec![make_rule("ruleX", "version 1")];
+        seed_l0_from_rules(&pool, seed_path(), "sha-1", &v1)
+            .await
+            .expect("v1");
+        // Sleep 5 ms so created_at differs at microsecond resolution
+        // (defense-in-depth — the `id DESC` tiebreaker would also
+        // pick the newer row, but pinning on created_at is the
+        // documented load_active_l0 contract).
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let v2 = vec![make_rule("ruleX", "version 2")];
+        seed_l0_from_rules(&pool, seed_path(), "sha-2", &v2)
+            .await
+            .expect("v2");
+
+        let active = load_l0_active_default(&pool).await.expect("load");
+        assert_eq!(active.len(), 1, "dedup must return one row per rule_id");
+        assert_eq!(active[0].body, "version 2", "newest version wins");
+
+        pool.close().await;
+    });
+}
+
+#[test]
+fn load_l0_active_respects_cap_rows() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0r-d",
+        "l0r-l",
+        &format!("hhagent-supervisor-test-pg-l0caprows-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-cap-rows"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        let rules = vec![
+            make_rule("r1", "a"),
+            make_rule("r2", "b"),
+            make_rule("r3", "c"),
+        ];
+        seed_l0_from_rules(&pool, seed_path(), "sha", &rules)
+            .await
+            .expect("seed");
+
+        let two = load_l0_active(&pool, 2, 8192).await.expect("cap 2");
+        assert_eq!(two.len(), 2, "cap_rows must trim DB-side");
+
+        // Defense-in-depth: cap_rows = 0 returns empty.
+        let zero = load_l0_active(&pool, 0, 8192).await.expect("cap 0");
+        assert!(zero.is_empty());
+
+        pool.close().await;
+    });
+}
+
+#[test]
+fn load_l0_active_oversize_body_dropped_silently() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0o-d",
+        "l0o-l",
+        &format!("hhagent-supervisor-test-pg-l0over-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-oversize"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Seed the big body first (older); the small body second
+        // (newer). load_active_l0 returns newest-first, so the small
+        // body comes back at index 0, fits. The big body comes back
+        // at index 1; cumulative bytes exceed cap_bytes=500 → break.
+        let big_body = "x".repeat(600);
+        let small_body = "y".repeat(100);
+
+        let rules1 = vec![L0Rule {
+            id: "big".to_string(),
+            body: big_body.clone(),
+            tags: Vec::new(),
+        }];
+        seed_l0_from_rules(&pool, seed_path(), "sha-big", &rules1)
+            .await
+            .expect("seed big");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let rules2 = vec![L0Rule {
+            id: "small".to_string(),
+            body: small_body.clone(),
+            tags: Vec::new(),
+        }];
+        seed_l0_from_rules(&pool, seed_path(), "sha-small", &rules2)
+            .await
+            .expect("seed small");
+
+        // cap_bytes = 500 < big body (600). The small body (newer,
+        // 100 B) comes back first and fits; the big body (older,
+        // 600 B) comes back second and pushes cumulative bytes past
+        // the cap → break.
+        let active = load_l0_active(&pool, L0_DEFAULT_CAP_ROWS, 500).await.expect("load");
+        assert_eq!(active.len(), 1, "only the small body fits");
+        assert_eq!(active[0].body, small_body);
+
+        pool.close().await;
+    });
+}
+
+#[test]
+fn load_l0_active_excludes_legacy_l0_rows_without_rule_id() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0l-d",
+        "l0l-l",
+        &format!("hhagent-supervisor-test-pg-l0legacy-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-legacy"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // A "legacy" L0 row written directly via seed_meta_memory with
+        // empty metadata (no l0_rule_id). load_active_l0 must skip it.
+        hhagent_db::memories::seed_meta_memory(
+            &pool,
+            "legacy without rule_id",
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .expect("seed legacy");
+
+        // A real L0 rule.
+        let rules = vec![make_rule("real", "real rule body")];
+        seed_l0_from_rules(&pool, seed_path(), "sha", &rules)
+            .await
+            .expect("seed real");
+
+        let active = load_l0_active_default(&pool).await.expect("load");
+        assert_eq!(active.len(), 1, "legacy row must be excluded");
+        assert_eq!(active[0].body, "real rule body");
+
+        // Sanity: layer-0 total is 2 (the legacy row is in the table,
+        // just not in the active set).
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memories WHERE layer = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 2);
 
         pool.close().await;
     });

@@ -355,8 +355,14 @@ pub async fn seed_l0_from_rules(
 /// Convenience: read + parse + seed.
 ///
 /// Body shipped in Task 3.
-pub async fn seed_l0_from_file(_pool: &PgPool, _path: &Path) -> Result<L0SeedReport, L0Error> {
-    todo!("ships in Task 3")
+pub async fn seed_l0_from_file(pool: &PgPool, path: &Path) -> Result<L0SeedReport, L0Error> {
+    let content = tokio::fs::read_to_string(path).await.map_err(|e| L0Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let source_sha256 = compute_source_sha256(&content);
+    let rules = parse_l0_rules(path, &content)?;
+    seed_l0_from_rules(pool, path, &source_sha256, &rules).await
 }
 
 /// Returns the currently-active L0 rule set — newest version per
@@ -364,18 +370,52 @@ pub async fn seed_l0_from_file(_pool: &PgPool, _path: &Path) -> Result<L0SeedRep
 ///
 /// Body shipped in Task 3.
 pub async fn load_l0_active(
-    _pool: &PgPool,
-    _cap_rows: usize,
-    _cap_bytes: usize,
+    pool: &PgPool,
+    cap_rows: usize,
+    cap_bytes: usize,
 ) -> Result<Vec<Memory>, DbError> {
-    todo!("ships in Task 3")
+    if cap_rows == 0 || cap_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    let candidates = hhagent_db::memories::load_active_l0(pool, cap_rows).await?;
+
+    let mut acc: Vec<Memory> = Vec::with_capacity(candidates.len());
+    let mut bytes_used: usize = 0;
+    for row in candidates {
+        let row_bytes = row.body.len();
+        // saturating_add: defense-in-depth against a future caller
+        // somehow supplying a row whose body length wraps usize on
+        // accumulation. Overflow → "definitely over the cap," the
+        // safe direction. Mirrors load_l1's idiom.
+        if bytes_used.saturating_add(row_bytes) > cap_bytes {
+            if acc.is_empty() && row_bytes > cap_bytes {
+                let rule_id = row
+                    .metadata
+                    .get("l0_rule_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                tracing::warn!(
+                    memory_id = row.id,
+                    l0_rule_id = rule_id,
+                    row_bytes,
+                    cap_bytes,
+                    "load_l0_active: dropping L0 row whose body alone exceeds cap_bytes; \
+                     prompt pinning will skip this rule"
+                );
+            }
+            break;
+        }
+        bytes_used += row_bytes;
+        acc.push(row);
+    }
+    Ok(acc)
 }
 
 /// Convenience wrapper pinning the two published defaults.
 ///
 /// Body shipped in Task 3.
-pub async fn load_l0_active_default(_pool: &PgPool) -> Result<Vec<Memory>, DbError> {
-    todo!("ships in Task 3")
+pub async fn load_l0_active_default(pool: &PgPool) -> Result<Vec<Memory>, DbError> {
+    load_l0_active(pool, L0_DEFAULT_CAP_ROWS, L0_DEFAULT_CAP_BYTES).await
 }
 
 #[cfg(test)]
