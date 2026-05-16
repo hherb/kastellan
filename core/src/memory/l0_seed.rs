@@ -293,13 +293,11 @@ pub fn build_l0_metadata(
 }
 
 // ---------------------------------------------------------------------
-// DB writers + readers — bodies land in Task 2 + Task 3.
+// DB writers + readers.
 // ---------------------------------------------------------------------
 
 /// Seed parsed rules into `memories`, idempotent on
 /// `(l0_rule_id, body_sha256)`.
-///
-/// Body shipped in Task 2.
 pub async fn seed_l0_from_rules(
     pool: &PgPool,
     source_path: &Path,

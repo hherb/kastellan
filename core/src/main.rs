@@ -78,7 +78,12 @@ async fn main() -> Result<()> {
         let report = hhagent_core::memory::l0_seed::seed_l0_from_file(&pool, &l0_path)
             .await
             .with_context(|| format!("seeding L0 rules from {:?}", l0_path))?;
-        write_l0_seeded_row(&pool, &report).await?;
+        // Best-effort audit row: a transient DB failure here must not
+        // block daemon bring-up. The L0 rows themselves are already
+        // committed; mirrors `write_registry_loaded_row` posture.
+        if let Err(e) = write_l0_seeded_row(&pool, &report).await {
+            tracing::warn!(error = %e, "l0.seeded audit row insert failed");
+        }
         info!(
             rules = report.rules_loaded,
             new = report.new_rows_written,
