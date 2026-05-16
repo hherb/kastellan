@@ -522,6 +522,24 @@ tag = ["a"]
         assert!(rules[0].tags.is_empty());
     }
 
+    #[test]
+    fn parse_rejects_empty_tag_string() {
+        let toml = r#"
+[[rule]]
+id = "with_blank_tag"
+body = "ok"
+tags = ["", "real_tag"]
+"#;
+        let err = parse_l0_rules(p(), toml).expect_err("must fail");
+        match err {
+            L0Error::Validation { detail, .. } => {
+                assert!(detail.contains("with_blank_tag"), "got {detail}");
+                assert!(detail.contains("empty"), "got {detail}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
     // --- pure helpers --------------------------------------------------
 
     #[test]
@@ -559,6 +577,20 @@ tag = ["a"]
         assert_ne!(h1, h3, "trailing newline must change the hash");
         assert_eq!(h1.len(), 64, "sha256 hex is 64 chars");
         assert!(h1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    /// Known-answer test for the hex encoder. A nibble-swap or
+    /// off-by-one bug in `hex_encode_lower` would pass every other
+    /// hash test (stable, whitespace-sensitive, correct length,
+    /// lowercase-hex) while silently corrupting every body_sha256
+    /// the loader writes. Pin against the canonical empty-string
+    /// SHA-256 to catch that class of regression.
+    #[test]
+    fn compute_body_sha256_matches_known_answer_for_empty_string() {
+        assert_eq!(
+            compute_body_sha256(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
     }
 
     #[test]
