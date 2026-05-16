@@ -49,13 +49,25 @@ A plan is a JSON object with these fields, in order:
             "classification": "<Public | Personal | ClinicalConfidential | Secret>"
         }
     ],
-    "result":      null,
-    "refused":     null,
-    "data_ceiling": "<Public | Personal | ClinicalConfidential | Secret>"
+    "result":         null,
+    "refused":        null,
+    "floor_request":  null,
+    "data_ceiling":   "<Public | Personal | ClinicalConfidential | Secret>"
 }
 ```
 
 The `refused` field is normally `null`. Populate it only on constitutional refusal (see §"Constitutional Principles" below).
+
+The `floor_request` field is normally `null`. Populate it as a
+`DataClass` string (`"Personal"`, `"ClinicalConfidential"`, or
+`"Secret"`) if, while planning, you observe that the work involves
+data above the floor the producer set in `classification_floor`. This
+RAISES the task's classification floor for all subsequent reviewer
+checks and plan iterations. You cannot LOWER the floor this way — a
+request below the current floor is silently a no-op. This is distinct
+from `data_ceiling` (which records the highest class of data the plan
+TOUCHES). `floor_request` is the agent's view of how strictly the
+OUTPUTS should be governed.
 
 ## Terminating a task
 
