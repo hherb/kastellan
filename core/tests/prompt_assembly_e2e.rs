@@ -93,6 +93,18 @@ fn pg_builder_build_against_seeded_db() {
                 "L1 section missing/wrong shape; got:\n{s}");
         assert!(s.contains("<base>\nBASE BODY\n</base>\n"),
                 "base section missing; got:\n{s}");
+
+        // Positional ordering: L0 before L1 before base. The pure
+        // assembler's unit tests cover this, but the e2e test pins
+        // the same contract end-to-end so a future PgSystemPromptBuilder
+        // regression can't silently reorder sections.
+        let l0_end = s.find("</l0_meta_rules>").expect("L0 close tag");
+        let l1_start = s.find("<l1_insights>").expect("L1 open tag");
+        let base_start = s.find("<base>").expect("base open tag");
+        assert!(l0_end < l1_start, "L0 must precede L1; offsets {l0_end}/{l1_start}");
+        assert!(l1_start < base_start, "L1 must precede base; offsets {l1_start}/{base_start}");
+
+        pool.close().await;
     });
 }
 
@@ -136,5 +148,7 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
             result.system_prompt, "<base>\nBASE BODY\n</base>\n",
             "empty-DB build must return just the <base> block"
         );
+
+        pool.close().await;
     });
 }
