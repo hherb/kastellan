@@ -16,14 +16,73 @@
 //! * [`assemble::assemble_system_prompt`] — pure: takes `&[Memory]`
 //!   slices and a base `&str`, returns the assembled `String`. Empty
 //!   layers are omitted entirely (no tag emitted).
+//! * [`pg_builder::PgSystemPromptBuilder`] — async impl of
+//!   [`SystemPromptBuilder`] that holds a [`PgPool`] and calls
+//!   the two loaders before invoking the pure assembler.
+//! * [`pg_builder::StaticSystemPromptBuilder`] — test impl that
+//!   returns a fixed string with `(l0_count, l1_count) = (0, 0)`.
 //!
 //! ## Why a trait instead of a free function
 //!
-//! Parallel to the existing [`PlanFormulator`](crate::scheduler::agent::PlanFormulator)
-//! seam. Tests swap in the static impl; production wires the PG impl
+//! Parallel to the existing
+//! [`PlanFormulator`](crate::scheduler::agent::PlanFormulator) seam.
+//! Tests swap in the static impl; production wires the PG impl
 //! through `RouterAgent::new`. A future recall-aware impl is a new
 //! type implementing the same trait, not a rewrite.
 
+use async_trait::async_trait;
+use hhagent_db::DbError;
+use thiserror::Error;
+
 pub mod assemble;
+pub mod pg_builder;
 
 pub use assemble::assemble_system_prompt;
+pub use pg_builder::{PgSystemPromptBuilder, StaticSystemPromptBuilder};
+
+/// Error returned by [`SystemPromptBuilder::build`] when the underlying
+/// memory loaders fail.
+///
+/// The variant exists primarily so callers (specifically
+/// [`crate::scheduler::agent::RouterAgent::formulate_plan`]) can
+/// fail-closed on memory-load errors. Running with a degraded prompt
+/// (missing L0 → missing constitutional posture) is more dangerous than
+/// failing the plan iteration and letting the scheduler retry.
+#[derive(Debug, Error)]
+pub enum PromptAssemblyError {
+    /// One of the layer loaders returned an error from `db::memories`.
+    #[error("memory load failed: {0}")]
+    Memory(#[from] DbError),
+}
+
+/// Result of a [`SystemPromptBuilder::build`] call.
+///
+/// Carries the assembled `system_prompt` plus the per-layer row counts.
+/// The counts come straight from the loader output at the moment of
+/// assembly — they cannot drift away from what the model actually saw.
+/// `RouterAgent` writes them into the `plan.formulate` audit row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledPrompt {
+    /// The full system message text the model will see.
+    pub system_prompt: String,
+    /// Number of L0 (meta-rule) rows that fed into the assembly.
+    pub l0_count: usize,
+    /// Number of L1 (insight-index) rows that fed into the assembly.
+    pub l1_count: usize,
+}
+
+/// Async seam between `RouterAgent` and the L0/L1 loaders.
+///
+/// Production: [`PgSystemPromptBuilder`] (runs the DB loaders).
+/// Tests: [`StaticSystemPromptBuilder`] (fixed string + zero counts).
+///
+/// **Fail-closed contract:** any error from the underlying memory
+/// loaders propagates as [`PromptAssemblyError`]. The caller must
+/// surface it (don't fall back to base-only — see
+/// [`PromptAssemblyError`] docstring for why).
+#[async_trait]
+pub trait SystemPromptBuilder: Send + Sync {
+    /// Assemble a system prompt by combining the loaded L0/L1 rows
+    /// with the supplied `base`.
+    async fn build(&self, base: &str) -> Result<AssembledPrompt, PromptAssemblyError>;
+}
