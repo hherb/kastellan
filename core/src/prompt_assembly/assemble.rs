@@ -26,6 +26,19 @@
 //! 4. Bodies pass through verbatim (no HTML-style escaping of `<` `>`).
 //!    Operators curate L0/L1 content; trust posture matches the rest
 //!    of the memory store.
+//!
+//!    **SAFETY — prompt-injection seam.** This contract holds *only*
+//!    while every body fed into the assembler is operator-curated. If
+//!    any agent-writable layer (e.g. a future L1 promotion writer that
+//!    sources content from agent output) flows rows in here, the lack
+//!    of escaping becomes a prompt-injection vector: agent-controlled
+//!    text could close the `<l1_insights>` block and inject new
+//!    framing the model trusts at meta-rule level. See the L1-writer
+//!    follow-up in `docs/devel/handovers/HANDOVER.md` ("recall lane
+//!    wiring" / future "L3/L4 writers" — if any *promotion* writer is
+//!    added that pulls from agent-authored content, revisit this
+//!    contract before merging). Threat-model reference:
+//!    `docs/threat-model.md` (LLM-compromise scenario).
 //! 5. Deterministic: same `(l0, l1, base)` produces the same bytes.
 
 use hhagent_db::memories::Memory;

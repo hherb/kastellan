@@ -43,6 +43,15 @@ impl PgSystemPromptBuilder {
 #[async_trait]
 impl SystemPromptBuilder for PgSystemPromptBuilder {
     async fn build(&self, base: &str) -> Result<AssembledPrompt, PromptAssemblyError> {
+        // TODO(token-cap, issue #78): both loaders are uncapped at
+        // the I/O layer beyond `load_l1_default`'s internal row-count
+        // + byte caps. Safe today (L1 is empty in prod until a
+        // promotion writer lands), but the day an L1 writer arrives
+        // the assembled prompt can balloon. When the deferred "global
+        // token cap with priority drop" follow-up lands, plumb a
+        // budget through here so the assembler can priority-drop rows
+        // rather than relying solely on per-layer caps inside the
+        // loaders. See https://github.com/hherb/hhagent/issues/78.
         let l0 = load_l0_active_default(&self.pool).await?;
         let l1 = load_l1_default(&self.pool).await?;
         let system_prompt = assemble_system_prompt(&l0, &l1, base);
