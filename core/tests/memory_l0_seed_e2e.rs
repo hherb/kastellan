@@ -13,7 +13,7 @@
 use std::path::Path;
 
 use hhagent_core::memory::l0_seed::{
-    seed_l0_from_rules, L0Rule,
+    seed_l0_from_rules, L0Rule, L0_DEFAULT_CAP_ROWS,
 };
 use hhagent_db::memories::load_active_l0;
 use hhagent_tests_common::{
@@ -83,7 +83,7 @@ fn seed_from_rules_writes_new_rows() {
         assert_eq!(report.new_rows_written, 2);
         assert_eq!(report.unchanged_skipped, 0);
 
-        let active = load_active_l0(&pool, 64).await.expect("load");
+        let active = load_active_l0(&pool, L0_DEFAULT_CAP_ROWS).await.expect("load");
         assert_eq!(active.len(), 2);
         // Both rules visible; bodies match.
         let bodies: std::collections::HashSet<&str> =
@@ -160,7 +160,7 @@ fn seed_from_rules_is_idempotent_on_unchanged_input() {
         assert_eq!(r2.new_rows_written, 0);
         assert_eq!(r2.unchanged_skipped, 2);
 
-        let active = load_active_l0(&pool, 64).await.expect("load");
+        let active = load_active_l0(&pool, L0_DEFAULT_CAP_ROWS).await.expect("load");
         assert_eq!(active.len(), 2);
 
         pool.close().await;
@@ -219,7 +219,7 @@ fn seed_from_rules_writes_new_row_on_edited_body() {
         assert_eq!(r2.unchanged_skipped, 1); // rule_b already there
 
         // Active set has 2 rows; rule_a body is the edited one.
-        let active = load_active_l0(&pool, 64).await.expect("load");
+        let active = load_active_l0(&pool, L0_DEFAULT_CAP_ROWS).await.expect("load");
         assert_eq!(active.len(), 2);
         let mut by_rule_id: std::collections::HashMap<String, String> = Default::default();
         for m in &active {

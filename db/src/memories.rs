@@ -721,10 +721,10 @@ where
     // part of the seed-loader's universe and would otherwise produce
     // a NULL group from the DISTINCT ON.
     let rows = sqlx::query(
-        "SELECT id, body, metadata, embedding::text, layer, created_at \
+        "SELECT id, body, metadata, layer, created_at \
          FROM ( \
              SELECT DISTINCT ON (metadata->>'l0_rule_id') \
-                    id, body, metadata, embedding, layer, created_at \
+                    id, body, metadata, layer, created_at \
                FROM memories \
               WHERE layer = 0 \
                 AND metadata ? 'l0_rule_id' \
