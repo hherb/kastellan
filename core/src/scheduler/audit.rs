@@ -82,6 +82,15 @@ pub const SCHEDULER_AUDIT_ACTOR: &str = "scheduler";
 /// of each tool's loaded allowlist. Cross-restart drift detection.
 pub const ACTION_REGISTRY_LOADED: &str = "registry.loaded";
 
+/// Action label written by the L0 seed loader at daemon startup.
+///
+/// One row per startup when the L0 rules file is present. The
+/// payload carries `rules_loaded`, `new_rows_written`,
+/// `unchanged_skipped`, `source_path`, and `source_sha256` —
+/// operator-visible breadcrumb that the loader ran, plus
+/// cross-restart drift detection via the file hash.
+pub const ACTION_L0_SEEDED: &str = "l0.seeded";
+
 /// `action` value written when the lane runner claims a `pending` task
 /// and transitions it to `running`. Fires exactly once per `claim_one`
 /// success.
