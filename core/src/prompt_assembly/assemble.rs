@@ -205,10 +205,13 @@ mod tests {
         // output shape stable regardless of how the prompt file ends.
         let out_no_nl = assemble_system_prompt(&[], &[], "no trailing nl");
         let out_with_nl = assemble_system_prompt(&[], &[], "with trailing nl\n");
-        assert!(out_no_nl.ends_with("with trailing nl\n</base>\n")
-                || out_no_nl.ends_with("no trailing nl\n</base>\n"),
-                "closing tag must follow a newline; got {out_no_nl:?}");
-        assert!(out_with_nl.ends_with("</base>\n"),
-                "closing tag must follow a newline; got {out_with_nl:?}");
+        assert_eq!(
+            out_no_nl, "<base>\nno trailing nl\n</base>\n",
+            "no-trailing-newline input must be normalized; got {out_no_nl:?}"
+        );
+        assert_eq!(
+            out_with_nl, "<base>\nwith trailing nl\n</base>\n",
+            "with-trailing-newline input passes through; got {out_with_nl:?}"
+        );
     }
 }
