@@ -4,8 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-16 (L0 seed data loader — shipped on branch `feat/l0-seed-loader`; new `core::memory::l0_seed` module + `db::memories::load_active_l0` + starter TOML + daemon wire-in + `l0.seeded` audit row; +31 tests; workspace 607 → **638**).
-**Last commit (branch HEAD):** `a582cf3` (Task 5 — ship starter L0 meta-rules TOML). 11 commits on branch off `main` at `305941a`: spec/plan (`7153b48`, `4567c0b`) → Task 1 + fixup (`f515eea`, `9f0e979`) → Task 2 + fixup (`80966bd`, `10f4770`) → Task 3 + fixup (`69d39f6`, `b2f8861`) → Task 4 (`dca29dc`) → Task 5 (`a582cf3`) → Task 6 docs (`e8f34eb`).
+**Last updated:** 2026-05-16 (prompt assembler — shipped on branch `feat/prompt-assembler-l0-l1`; new `core::prompt_assembly` module + `SystemPromptBuilder` trait + `PgSystemPromptBuilder`/`StaticSystemPromptBuilder` impls + 3 new `plan.formulate` audit-row keys; +14 tests; workspace 638 → **652**).
+**Last commit (branch HEAD):** `7181074`. 13 commits on branch off `main` at `3cd6364`: spec (`7062e5e`) + plan (`95737cf`) → Task 1 + fixup (`5213277`, `f5de46c`) → Task 2 + fixup (`d238163`, `421a5b9`) → Task 3 + fixup (`8ed1abd`, `b2c88db`) → Task 4 + fixup (`8b2e3af`, `48c9145`) → Task 5 + fixup (`7c5544f`, `58ab5ef`) → Task 6 (`7181074`).
 **Session-end verification:** `cargo test --workspace` on branch HEAD: **638 passed, 0 failed, 4 ignored, 0 [SKIP] lines, 0 warnings** on Linux. `core/src/memory/l0_seed.rs` ~660 LOC (370 impl + ~290 inline tests; implementation alone well under the 500-LOC soft cap; matches the `core/src/memory/layers.rs` inline-tests precedent). `core/src/main.rs` 437 LOC (up from ~415 — flagged in code review as a slow-creep concern; a future `startup::bring_up(pool)` extraction would help if more seed/loader tasks land in main.rs).
 
 **Post-review fixups (2026-05-16):**
@@ -154,6 +154,66 @@ cargo test --workspace           # all green
 ```
 
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile that lets `bwrap` create unprivileged user namespaces is already installed on the user's DGX Spark. Other Linux hosts may need `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses `sandbox-exec` (no setup needed).
+
+---
+
+## Recently completed (this session, 2026-05-16 — prompt assembler L0 + L1 wiring, branch `feat/prompt-assembler-l0-l1`)
+
+Branch: `feat/prompt-assembler-l0-l1` (off `main` at `3cd6364`, 13 commits). Spec: [`docs/superpowers/specs/2026-05-16-prompt-assembler-design.md`](../../superpowers/specs/2026-05-16-prompt-assembler-design.md). Plan: [`docs/superpowers/plans/2026-05-16-prompt-assembler.md`](../../superpowers/plans/2026-05-16-prompt-assembler.md). First real consumer of `load_l0_active_default` + `load_l1_default` (shipped by PR #69 + PR #74).
+
+**Shape (4 NEW + 5 modified):**
+
+- **NEW `core/src/prompt_assembly/`** (3 files, ~500 LOC total). Public surface: pure `assemble_system_prompt(l0, l1, base) -> String`, async `SystemPromptBuilder` trait returning `AssembledPrompt { system_prompt, l0_count, l1_count }`, prod `PgSystemPromptBuilder` (PgPool-backed), test `StaticSystemPromptBuilder` (`::empty()` and `::new(content)` constructors), `PromptAssemblyError::MemoryLoad(#[from] DbError)` error type.
+- **NEW `core/tests/prompt_assembly_e2e.rs`** — 2 DB integration scenarios: seeded DB (2 L0 + 1 L1) → expected shape with correct counts + positional ordering pin; empty DB → `<base>` block only with `(0, 0)` counts.
+- **`core/src/scheduler/agent.rs`** — `RouterAgent::new` gains `Arc<dyn SystemPromptBuilder>` argument; `FormulationMeta` widened by 3 fields (`assembled_prompt_sha256`, `l0_count`, `l1_count`); new `AgentError::PromptAssembly` variant; `formulate_plan` calls the builder before constructing the `ChatRequest` (fail-closed on memory-load errors so a degraded prompt never reaches the model).
+- **`core/src/scheduler/inner_loop.rs`** — `build_plan_formulate_payload` emits 3 new keys (`system_prompt_sha256`, `l0_count`, `l1_count`); existing 14/15-key pin tests renamed and bumped to 17/18 keys.
+- **`core/src/main.rs`** — constructs `PgSystemPromptBuilder::new(pool.clone())` and passes into `RouterAgent::new`. (Originally Task 6 in the plan; folded into the Task 4 commit because `cli_ask_e2e` asserts the planner prompt content appears on the wire — the plan's intended `StaticSystemPromptBuilder::empty()` stub would have broken that.)
+- **`core/tests/router_agent_mock_e2e.rs`** + **`core/tests/scheduler_inner_loop_e2e.rs`** + **`core/tests/scheduler_lanes_e2e.rs`** + **`core/tests/cli_ask_e2e.rs`** — constructor and `FormulationMeta {}` literal updates; payload-assertion additions.
+
+**Audit-row contract (the headline):**
+
+| When | actor | action | payload keys (before → after) |
+| ---- | ----- | ------ | ----------------------------- |
+| Agent emits plan (default source) | agent | `plan.formulate` | 14 → **17** keys |
+| Agent emits plan (cli_inferred source) | agent | `plan.formulate` | 15 → **18** keys |
+| Agent emits plan (operator source) | agent | `plan.formulate` | 14 → **17** keys |
+| Agent emits plan (agent_raised source) | agent | `plan.formulate` | 14 → **17** keys |
+
+Pure-additive; existing JSONB consumers (replay harness, observation captures) keep working unchanged.
+
+**Test count delta:** **638 → 652** (+14: 10 unit in `assemble.rs` + 2 unit in `pg_builder.rs` + 2 DB integration in `prompt_assembly_e2e.rs`). Zero failures, zero warnings, zero `[SKIP]` lines on Linux.
+
+**TDD ordering** (per CLAUDE.md rule #2): RED → GREEN → commit per task, with a small post-review fixup landing as a follow-up commit on the same branch when the two-stage review (spec compliance + code quality) surfaced an issue.
+
+**What this slice deliberately does NOT do** (matches the spec's non-goals):
+
+- **No recall lane wiring.** Semantic/lexical/graph search stays unwired. Next natural slice.
+- **No global token cap with priority drop.** Both L0 and L1 already enforce per-loader caps (8 KiB + 4 KiB respectively); no over-budget condition exists with only L0+L1+base.
+- **No L3 / L4 writers.** Empty layers stay empty.
+- **No prompt assembly for reviewer chain.** CG / DP are deterministic Rust today.
+- **No prompt caching across iterations.** Two small DB queries per plan iteration; cheap relative to the LLM call.
+- **No metadata in row rendering.** `l0_rule_id` stays out of the prompt body; still in audit + source TOML.
+
+**Open follow-up surfaces (not blocking):**
+
+- **Recall-lane wiring** — next natural slice. Needs query embedding + (separately) entity extraction for graph seeds.
+- **L1 promotion writer** — until this lands, L1 stays empty in production (`l1_count = 0` on every audit row).
+- **`inner_loop.rs` split** — file grew from 870 to ~977 LOC (+16 from Task 5's emissions + Task 4's `FormulationMeta {}` literal updates). Pre-existing 500-LOC breach extended. Natural split: lift `build_plan_formulate_payload` + the audit writers into `core/src/scheduler/inner_loop_audit.rs`.
+- **Replay-harness refresh** — pre-Slice-C captures don't carry the 3 new keys. Re-capture turns them into harness inputs that exercise drift detection.
+- **Process notes worth keeping:** Two-stage review caught two scope-creep moments during this slice — a `PassThroughSystemPromptBuilder` type not in the spec (reverted in `48c9145`) and a value-round-trip test gap that would have masked a hypothetical "wrong field" wiring bug (added in `58ab5ef`). The fixup commit pattern (spec violation → revert; code-quality gap → add coverage) kept the slice clean.
+
+**Files touched (4 NEW + 5 modified + 2 docs + 1 plan + 1 spec):**
+
+- NEW `core/src/prompt_assembly/mod.rs` + `assemble.rs` + `pg_builder.rs`.
+- NEW `core/tests/prompt_assembly_e2e.rs`.
+- NEW `docs/superpowers/specs/2026-05-16-prompt-assembler-design.md`.
+- NEW `docs/superpowers/plans/2026-05-16-prompt-assembler.md`.
+- `core/src/lib.rs` — `pub mod prompt_assembly;`.
+- `core/src/scheduler/agent.rs` — RouterAgent widening + FormulationMeta widening + new error variant.
+- `core/src/scheduler/inner_loop.rs` — `build_plan_formulate_payload` +3 keys + pin-test renames + value round-trips.
+- `core/src/main.rs` — `PgSystemPromptBuilder` wire-in.
+- `core/tests/router_agent_mock_e2e.rs` + `scheduler_inner_loop_e2e.rs` + `scheduler_lanes_e2e.rs` + `cli_ask_e2e.rs` — constructor and payload-assertion updates.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
 
 ---
 
