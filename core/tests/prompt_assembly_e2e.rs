@@ -191,11 +191,11 @@ fn pg_builder_with_recalled_renders_block_against_seeded_db() {
         // Empty DB → no L0/L1 sections; recalled context supplied
         // directly so we exercise the <recalled> rendering without
         // going through the real recall lane.
-        let recalled = hhagent_core::recall_assembly::RecalledContext {
-            ids: vec![10, 20],
-            bodies: vec!["RECALL ALPHA".into(), "RECALL BETA".into()],
-            query_sha256: "a".repeat(64),
-        };
+        let recalled = hhagent_core::recall_assembly::RecalledContext::new(
+            vec![10, 20],
+            vec!["RECALL ALPHA".into(), "RECALL BETA".into()],
+            "a".repeat(64),
+        );
 
         let builder = PgSystemPromptBuilder::new(pool.clone());
         let result = builder.build_with_recalled("BASE BODY", &recalled)

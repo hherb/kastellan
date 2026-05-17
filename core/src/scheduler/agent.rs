@@ -167,8 +167,12 @@ impl PlanFormulator for RouterAgent {
         // recall_count is `usize` → `u32` via `as`; the cap_and_split
         // helper bounds the row count to L_RECALL_CAP_BYTES/min-body
         // size = at most ~4096 rows in the pathological 1-byte case,
-        // so a u32 has 6 orders of magnitude of headroom.
-        let recall_count = recalled.ids.len() as u32;
+        // so a u32 has 6 orders of magnitude of headroom. Sourced from
+        // RecalledContext::len() (bodies.len()) — the same field the
+        // assembler renders and the prompt-builder records as
+        // `recalled_count` — so the audit row, the assembled bytes, and
+        // the AssembledPrompt all agree.
+        let recall_count = recalled.len() as u32;
 
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),

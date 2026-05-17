@@ -60,7 +60,11 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
             system_prompt,
             l0_count: l0.len(),
             l1_count: l1.len(),
-            recalled_count: recalled.ids.len(),
+            // Source from RecalledContext::len() (bodies.len()) — what
+            // the assembler actually rendered — rather than ids.len(),
+            // so any future divergence fails towards the rendered truth.
+            // The new() constructor invariant makes the two equal today.
+            recalled_count: recalled.len(),
         })
     }
 }
@@ -101,7 +105,7 @@ impl SystemPromptBuilder for StaticSystemPromptBuilder {
             system_prompt: self.fixed.clone(),
             l0_count: 0,
             l1_count: 0,
-            recalled_count: recalled.ids.len(),
+            recalled_count: recalled.len(),
         })
     }
 }
@@ -140,15 +144,15 @@ mod tests {
     async fn static_builder_build_with_recalled_passes_recalled_count_through() {
         use crate::recall_assembly::RecalledContext;
         let b = StaticSystemPromptBuilder::new("FIXED");
-        let recalled = RecalledContext {
-            ids: vec![1, 2],
-            bodies: vec!["body one".into(), "body two".into()],
-            query_sha256: "a".repeat(64),
-        };
+        let recalled = RecalledContext::new(
+            vec![1, 2],
+            vec!["body one".into(), "body two".into()],
+            "a".repeat(64),
+        );
         let r = b.build_with_recalled("base", &recalled).await.unwrap();
         // StaticSystemPromptBuilder ignores base + recalled in the
         // assembled string (it's fixed), but the recalled_count field
-        // must report the supplied recalled.ids.len() so RouterAgent
+        // must report the supplied recalled.len() so RouterAgent
         // can write the audit row with the right number.
         assert_eq!(r.system_prompt, "FIXED");
         assert_eq!(r.l0_count, 0);

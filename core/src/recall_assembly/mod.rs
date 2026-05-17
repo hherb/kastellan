@@ -68,9 +68,17 @@ pub enum RecallError {
     DbLane(#[from] DbError),
 }
 
-/// Output of a [`RecallBuilder::build`] call. By construction
-/// `bodies.len() == ids.len()`; both vectors are in fused-rank order
-/// (semantic + lexical, fused via RRF; see [`crate::memory::recall`]).
+/// Output of a [`RecallBuilder::build`] call.
+///
+/// **Invariant:** `bodies.len() == ids.len()`. Enforced by
+/// [`Self::new`] (the canonical constructor) — direct struct-literal
+/// construction skips the check and is reserved for the
+/// `RecalledContext::empty` sentinel and internal callers that build
+/// the two vectors together (e.g. `cap_and_split`). External crates
+/// must use [`Self::new`].
+///
+/// Both vectors are in fused-rank order (semantic + lexical, fused via
+/// RRF; see [`crate::memory::recall`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecalledContext {
     /// Memory ids in fused order, capped at the byte cap (see
@@ -79,15 +87,42 @@ pub struct RecalledContext {
     pub ids: Vec<i64>,
     /// Bodies in the same order as [`Self::ids`]. Cumulative byte
     /// length ≤ [`L_RECALL_CAP_BYTES`]; rows that would breach the
-    /// cap are dropped with `tracing::warn!`.
+    /// cap are dropped with `tracing::warn!`. This is the field the
+    /// assembler iterates over and the canonical source for
+    /// [`Self::len`].
     pub bodies: Vec<String>,
     /// Hex SHA-256 of the query text (the task instruction). Lets
     /// observation phase detect paraphrase-vs-drift across captures.
     /// Always 64 hex chars (SHA-256 of any input, including empty).
+    ///
+    /// **Caveat on the degrade path:** when [`RecallBuilder::build`]
+    /// returns `Err` and the caller in `RouterAgent::formulate_plan`
+    /// substitutes [`Self::empty`], this field becomes the SHA-256 of
+    /// the *empty string* — not the SHA-256 of the actual instruction
+    /// that was being processed. Observation SQL that joins rows on
+    /// `recall_query_sha256` must treat the canonical empty-string
+    /// digest (`e3b0c442…`) as "recall did not run successfully" rather
+    /// than "this query was empty".
     pub query_sha256: String,
 }
 
 impl RecalledContext {
+    /// Canonical constructor. Enforces the `ids.len() == bodies.len()`
+    /// invariant the rest of the module relies on (the assembler
+    /// iterates over `bodies`; `recalled_count` audit-row key is sourced
+    /// from `bodies.len()`). Panics on mismatch — this is a programmer
+    /// error, not a runtime failure mode.
+    pub fn new(ids: Vec<i64>, bodies: Vec<String>, query_sha256: String) -> Self {
+        assert_eq!(
+            ids.len(),
+            bodies.len(),
+            "RecalledContext::new: ids.len() must equal bodies.len() \
+             (assembler renders bodies, audit row counts bodies — \
+             a divergence would silently desync the wire shape)",
+        );
+        Self { ids, bodies, query_sha256 }
+    }
+
     /// The empty/degraded-recall sentinel.
     ///
     /// `query_sha256` is the SHA-256 of the empty byte string so the
@@ -109,7 +144,15 @@ impl RecalledContext {
     /// True iff zero rows were recalled (the failure-degraded state
     /// also satisfies this).
     pub fn is_empty(&self) -> bool {
-        self.ids.is_empty()
+        self.bodies.is_empty()
+    }
+
+    /// Number of recalled rows. Sourced from `bodies` (what the
+    /// assembler actually renders) so any divergence from `ids` —
+    /// which the `new()` constructor prevents — fails towards the
+    /// rendered truth rather than the labelling.
+    pub fn len(&self) -> usize {
+        self.bodies.len()
     }
 }
 
@@ -172,5 +215,34 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         );
+    }
+
+    #[test]
+    fn new_accepts_matched_lengths_and_sets_len_from_bodies() {
+        let c = RecalledContext::new(
+            vec![10, 20],
+            vec!["a".into(), "b".into()],
+            sha256_hex(b"q"),
+        );
+        assert_eq!(c.len(), 2);
+        assert!(!c.is_empty());
+        assert_eq!(c.ids.len(), c.bodies.len());
+    }
+
+    #[test]
+    #[should_panic(expected = "ids.len() must equal bodies.len()")]
+    fn new_panics_on_length_mismatch() {
+        let _ = RecalledContext::new(
+            vec![10, 20],
+            vec!["only one".into()],
+            sha256_hex(b"q"),
+        );
+    }
+
+    #[test]
+    fn empty_has_len_zero_and_is_empty() {
+        let c = RecalledContext::empty();
+        assert_eq!(c.len(), 0);
+        assert!(c.is_empty());
     }
 }

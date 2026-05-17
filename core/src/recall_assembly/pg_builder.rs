@@ -50,7 +50,14 @@ pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, V
             // or raise the cap); stay quiet on normal "cap filled after
             // N rows" exits (that's the expected end of the loop, not
             // an operator signal).
-            if ids.is_empty() && row.body.len() > cap_bytes {
+            //
+            // `ids.is_empty()` is sufficient here: it implies `used == 0`
+            // (we only push to both vectors after incrementing `used`),
+            // which means `next == row.body.len()`, so the only way
+            // `next > cap_bytes` with no rows kept is `row.body.len() >
+            // cap_bytes`. The earlier `&& row.body.len() > cap_bytes`
+            // guard was redundant.
+            if ids.is_empty() {
                 tracing::warn!(
                     target: "hhagent::recall_assembly",
                     memory_id = row.id,
@@ -118,13 +125,10 @@ impl RecallBuilder for PgRecallBuilder {
         params.modes = RecallModes::SEMANTIC_AND_LEXICAL;
         let rows = recall(&self.pool, &params).await?;
 
-        // Step 3 — byte-cap into the final RecalledContext.
+        // Step 3 — byte-cap into the final RecalledContext. cap_and_split
+        // builds ids/bodies side-by-side so the new() invariant holds.
         let (ids, bodies) = cap_and_split(rows, L_RECALL_CAP_BYTES);
-        Ok(RecalledContext {
-            ids,
-            bodies,
-            query_sha256,
-        })
+        Ok(RecalledContext::new(ids, bodies, query_sha256))
     }
 }
 
@@ -144,19 +148,11 @@ impl StaticRecallBuilder {
 
     /// Construct with an explicit (ids, bodies, query) triple. The
     /// `query_sha256` field is computed automatically so the test
-    /// caller doesn't have to hand-hash. Panics if `ids.len() != bodies.len()`.
+    /// caller doesn't have to hand-hash. Panics if `ids.len() != bodies.len()`
+    /// (delegated to [`RecalledContext::new`]).
     pub fn with(ids: Vec<i64>, bodies: Vec<String>, query: &str) -> Self {
-        assert_eq!(
-            ids.len(),
-            bodies.len(),
-            "StaticRecallBuilder::with: ids.len() must equal bodies.len()",
-        );
         Self {
-            fixed: RecalledContext {
-                ids,
-                bodies,
-                query_sha256: sha256_hex(query.as_bytes()),
-            },
+            fixed: RecalledContext::new(ids, bodies, sha256_hex(query.as_bytes())),
         }
     }
 }

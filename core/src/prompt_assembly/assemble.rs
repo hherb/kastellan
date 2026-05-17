@@ -178,11 +178,11 @@ mod tests {
     fn renders_recalled_block_between_l1_and_base() {
         let l0 = vec![mem(1, "L0 RULE", MemoryLayer::Meta)];
         let l1 = vec![mem(2, "L1 INSIGHT", MemoryLayer::Index)];
-        let recalled = RecalledContext {
-            ids: vec![100, 101],
-            bodies: vec!["RECALL ONE".into(), "RECALL TWO".into()],
-            query_sha256: "f".repeat(64),
-        };
+        let recalled = RecalledContext::new(
+            vec![100, 101],
+            vec!["RECALL ONE".into(), "RECALL TWO".into()],
+            "f".repeat(64),
+        );
         let out = assemble_system_prompt(&l0, &l1, &recalled, "BASE");
 
         // Positional ordering pin.
@@ -209,11 +209,11 @@ mod tests {
         // is to trust the model's tokeniser. Pin the pass-through so a
         // future "escape `<`" patch is a deliberate decision, not a
         // silent regression.
-        let recalled = RecalledContext {
-            ids: vec![1],
-            bodies: vec!["body with <closing> tag".into()],
-            query_sha256: "0".repeat(64),
-        };
+        let recalled = RecalledContext::new(
+            vec![1],
+            vec!["body with <closing> tag".into()],
+            "0".repeat(64),
+        );
         let out = assemble_system_prompt(&[], &[], &recalled, "BASE");
         assert!(out.contains("- body with <closing> tag\n"),
                 "body must pass through verbatim; got:\n{out}");

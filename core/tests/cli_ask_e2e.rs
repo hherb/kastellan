@@ -246,13 +246,17 @@ fn envelope_for(plan_json_string: &str) -> String {
 /// `embed_query` validates that the returned embedding vector has
 /// exactly `EMBEDDING_DIM = 1024` elements; any other length causes a
 /// `MemoryError::EmbeddingDimMismatch` which triggers the
-/// degrade-and-warn path in `formulate_plan`. Using 1024 zeros avoids
-/// that warning noise in the test logs.
+/// degrade-and-warn path in `formulate_plan`. The byte values don't
+/// matter for these tests: the `memories` table is never seeded, so
+/// both recall lanes return 0 rows regardless of the query vector.
+/// Using `0.001` (a small non-zero value) keeps the embedding numerically
+/// well-defined for pgvector's cosine operator without relying on any
+/// implementation-defined behaviour for the all-zeros edge case.
 fn embedding_envelope() -> String {
-    let zeros: Vec<f32> = vec![0.0f32; 1024];
+    let filler: Vec<f32> = vec![0.001f32; 1024];
     serde_json::json!({
         "object": "list",
-        "data": [{"object": "embedding", "index": 0, "embedding": zeros}],
+        "data": [{"object": "embedding", "index": 0, "embedding": filler}],
         "model": "test-local-model"
     })
     .to_string()
@@ -942,11 +946,12 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
 
         // Slice D (recall lane, 2026-05-17): every plan.formulate row
         // must carry the three recall keys produced by PgRecallBuilder.
-        // Zero-vector embeddings yield an empty result set from pgvector
-        // (cosine similarity undefined → 0 rows returned), so
-        // recall_count=0 and recalled_memory_ids=[] are expected here.
-        // recall_query_sha256 is always the SHA-256 of the task
-        // instruction, computed before the recall fan-out.
+        // The `memories` table is empty in this test (we never seed it),
+        // so both the semantic and lexical lanes return 0 rows regardless
+        // of what embedding the mock returns — hence recall_count=0 and
+        // recalled_memory_ids=[]. recall_query_sha256 is always the
+        // SHA-256 of the task instruction, computed before the recall
+        // fan-out, so it's present and 64 hex chars even on the empty path.
         let plan_rows: Vec<(sqlx::types::Json<serde_json::Value>,)> = sqlx::query_as(
             "SELECT payload FROM audit_log \
              WHERE actor = 'agent' AND action = 'plan.formulate' \
