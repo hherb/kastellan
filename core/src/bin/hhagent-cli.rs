@@ -989,9 +989,9 @@ async fn memory_l1_add(args: &[String]) -> ExitCode {
     use hhagent_core::memory::l1_promote::L1WriteOutcome;
     use hhagent_db::pool::connect_runtime_pool;
 
-    let body = match args.first() {
-        Some(b) => b,
-        None => {
+    let body = match args {
+        [b] => b,
+        _ => {
             eprintln!("usage: hhagent-cli memory l1 add <body>");
             return ExitCode::from(2);
         }
@@ -1026,7 +1026,20 @@ async fn memory_l1_list(args: &[String]) -> ExitCode {
     use hhagent_core::memory::l1_promote::list_l1;
     use hhagent_db::pool::connect_runtime_pool;
 
-    let all = args.iter().any(|s| s == "--all");
+    let mut all = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--all" => {
+                all = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("memory l1 list: unknown flag '{other}'");
+                return ExitCode::from(2);
+            }
+        }
+    }
 
     let spec = match resolve_connect_spec() {
         Ok(s) => s,
