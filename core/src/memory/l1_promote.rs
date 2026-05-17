@@ -1,9 +1,9 @@
 //! Writer for `MemoryLayer::Index` (L1) rows. Two callers:
 //!
 //! 1. **Operator** — via `hhagent-cli memory l1 add <body>` →
-//!    [`crate::cli_audit::l1_add_and_audit`].
+//!    `crate::cli_audit::l1_add_and_audit`.
 //! 2. **Agent-raised** — via `Plan.l1_insight` consumed by
-//!    [`crate::scheduler::runner::drain_lane`] on `Outcome::Completed`.
+//!    `crate::scheduler::runner::drain_lane` on `Outcome::Completed`.
 //!
 //! Both callers share the same validation + dedup discipline:
 //! validate via [`validate_l1_body`], compute SHA-256, EXISTS-check
@@ -81,12 +81,14 @@ impl L1WriteOutcome {
 /// (so the writer never inserts leading/trailing whitespace). On
 /// failure returns [`L1Error::Validation`] with a human-readable reason.
 ///
-/// Rejections (in declared order, first hit wins):
-/// 1. Empty after trim.
-/// 2. Contains any newline (`\n` or `\r`).
+/// Rejections (in actual runtime order; first hit wins):
+/// 1. Contains any newline (`\n` or `\r`) — checked on the **raw**
+///    body BEFORE trim, so a trailing `\n` cannot silently slip
+///    past via `.trim()` stripping it.
+/// 2. Empty after trim.
 /// 3. Contains any other ASCII control character (< 0x20, excluding
-///    `\t`/`\n`/`\r` which are handled separately; `\t` is rejected
-///    so bullet indentation stays uniform).
+///    `\n`/`\r` which are caught by item 1; includes `\t` since
+///    indented bullets would break the flat-insight format).
 /// 4. Contains the literal substring `<l1_insights>` or `</l1_insights>`
 ///    (threat-model §6 defence — an agent-raised body cannot close
 ///    the trust-marked block early).
@@ -128,6 +130,12 @@ pub fn compute_body_sha256(body: &str) -> String {
 /// Build the `metadata` JSONB blob for a new L1 row. Schema:
 /// `{source, body_sha256, created_at, task_id?}`. `task_id` is
 /// present iff `source` is `L1Source::AgentRaised`.
+///
+/// **Coupling note:** The literal strings `"operator"` and
+/// `"agent_raised"` MUST match `L1Source`'s serde
+/// `rename_all = "snake_case"` output. If you add a new `L1Source`
+/// variant, update this function in lockstep. Cross-pinned by the
+/// `build_l1_metadata_serde_agrees_with_l1_source` test below.
 pub fn build_l1_metadata(
     source: &L1Source,
     body_sha256: &str,
@@ -172,7 +180,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_newlines() {
-        for s in &["foo\nbar", "foo\r\nbar", "trailing\n", "\nleading"] {
+        for s in &["foo\nbar", "foo\r\nbar", "trailing\n", "\nleading", "foo\rbar"] {
             let err = validate_l1_body(s).expect_err(s);
             match err {
                 L1Error::Validation(msg) => assert!(msg.contains("newline"), "got: {msg}"),
@@ -294,5 +302,25 @@ mod tests {
 
         let ag = serde_json::to_value(&L1Source::AgentRaised { task_id: 7 }).expect("serialize");
         assert_eq!(ag, serde_json::json!({"source": "agent_raised", "task_id": 7}));
+    }
+
+    #[test]
+    fn build_l1_metadata_serde_agrees_with_l1_source() {
+        // Cross-pin: the source string emitted by build_l1_metadata
+        // must equal the string emitted by L1Source's serde representation.
+        // A future variant addition that updates one but not the other
+        // trips this test.
+        for (source, expected_source_str) in &[
+            (L1Source::Operator, "operator"),
+            (L1Source::AgentRaised { task_id: 42 }, "agent_raised"),
+        ] {
+            let serde_value = serde_json::to_value(source).expect("serialize");
+            let serde_source = serde_value.get("source").unwrap().as_str().unwrap();
+            assert_eq!(serde_source, *expected_source_str, "L1Source serde drift");
+
+            let metadata = build_l1_metadata(source, "sha", "2026-05-17T00:00:00Z");
+            let metadata_source = metadata.get("source").unwrap().as_str().unwrap();
+            assert_eq!(metadata_source, *expected_source_str, "build_l1_metadata drift");
+        }
     }
 }
