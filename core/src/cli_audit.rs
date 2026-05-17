@@ -95,9 +95,10 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 
 use crate::scheduler::audit::{
-    action_task_terminal, build_lifecycle_payload, build_producer_cancel_finalize_payload,
-    ACTION_TASK_FINALIZE, ACTION_TASK_SUBMITTED, ACTION_TOOLS_ALLOWLIST_ADD,
-    ACTION_TOOLS_ALLOWLIST_REMOVE,
+    action_task_terminal, build_lifecycle_payload, build_l1_write_payload,
+    build_producer_cancel_finalize_payload,
+    ACTION_L1_ADDED, ACTION_L1_REMOVED, ACTION_TASK_FINALIZE, ACTION_TASK_SUBMITTED,
+    ACTION_TOOLS_ALLOWLIST_ADD, ACTION_TOOLS_ALLOWLIST_REMOVE,
 };
 
 /// Logical `actor` string written into every CLI-emitted audit row.
@@ -371,6 +372,69 @@ pub async fn tools_allowlist_remove_and_audit(
     Ok(removed)
 }
 
+/// Compose `memory::l1_promote::promote_l1` with one `actor='cli'
+/// action='l1.added'` audit row. The audit row IS written even on
+/// `SkippedDuplicate` (records the operator intent); it is NOT
+/// written on `L1Error::Validation` (operator sees the error on
+/// stderr; mirrors `l0_seed`'s posture).
+///
+/// Returns the `L1WriteOutcome` and the audit row id (0 if the
+/// audit insert failed; that's logged at WARN but doesn't propagate).
+pub async fn l1_add_and_audit(
+    pool: &PgPool,
+    body: &str,
+) -> Result<(crate::memory::l1_promote::L1WriteOutcome, i64), crate::memory::l1_promote::L1Error> {
+    use crate::memory::l1_promote::{compute_body_sha256, promote_l1, validate_l1_body, L1Source};
+
+    // Validate first so the body we audit and the body we SHA-256
+    // both come from the same trimmed slice as promote_l1's internal
+    // validation. validate_l1_body is cheap (pure CPU) so running it
+    // twice (once here, once inside promote_l1) is fine.
+    let trimmed = validate_l1_body(body)?.to_string();
+    let source = L1Source::Operator;
+    let outcome = promote_l1(pool, &trimmed, source.clone()).await?;
+    let body_sha256 = compute_body_sha256(&trimmed);
+
+    let payload = build_l1_write_payload(&outcome, &source, &body_sha256);
+    let audit_id = match hhagent_db::audit::insert(
+        pool, CLI_AUDIT_ACTOR, ACTION_L1_ADDED, payload,
+    ).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "l1.added audit insert failed (best-effort)");
+            0
+        }
+    };
+
+    Ok((outcome, audit_id))
+}
+
+/// Compose `memory::l1_promote::remove_l1` with one `actor='cli'
+/// action='l1.removed'` audit row. Audit row is written even when
+/// `deleted = false` (records the operator intent + the missing-id
+/// outcome).
+pub async fn l1_remove_and_audit(
+    pool: &PgPool,
+    memory_id: i64,
+) -> Result<(bool, i64), hhagent_db::DbError> {
+    use crate::memory::l1_promote::remove_l1;
+
+    let deleted = remove_l1(pool, memory_id).await?;
+    let payload = serde_json::json!({"memory_id": memory_id, "deleted": deleted});
+
+    let audit_id = match hhagent_db::audit::insert(
+        pool, CLI_AUDIT_ACTOR, ACTION_L1_REMOVED, payload,
+    ).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "l1.removed audit insert failed (best-effort)");
+            0
+        }
+    };
+
+    Ok((deleted, audit_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +455,32 @@ mod tests {
             CLI_AUDIT_ACTOR,
             crate::scheduler::audit::SCHEDULER_AUDIT_ACTOR
         );
+    }
+
+    #[test]
+    fn l1_add_and_audit_signature_compile_pin() {
+        fn _signature_pin<'a>(
+            pool: &'a sqlx::PgPool,
+            body: &'a str,
+        ) -> impl std::future::Future<
+            Output = Result<
+                (crate::memory::l1_promote::L1WriteOutcome, i64),
+                crate::memory::l1_promote::L1Error,
+            >,
+        > + 'a {
+            l1_add_and_audit(pool, body)
+        }
+        let _ = _signature_pin;
+    }
+
+    #[test]
+    fn l1_remove_and_audit_signature_compile_pin() {
+        fn _signature_pin<'a>(
+            pool: &'a sqlx::PgPool,
+            memory_id: i64,
+        ) -> impl std::future::Future<Output = Result<(bool, i64), hhagent_db::DbError>> + 'a {
+            l1_remove_and_audit(pool, memory_id)
+        }
+        let _ = _signature_pin;
     }
 }
