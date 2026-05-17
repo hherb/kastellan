@@ -496,6 +496,17 @@ async fn happy_path_one_plan_returns_completed() {
     let ids_len = payload["recalled_memory_ids"].as_array().unwrap().len() as u64;
     assert_eq!(n, ids_len,
         "recall_count must equal recalled_memory_ids.len(); got {n} vs {ids_len}");
+
+    // l1_insight key: ScriptedFormulator produces a Plan without l1_insight,
+    // so the payload key MUST be present-and-null (JSONB ? operator finds it).
+    assert!(
+        payload.get("l1_insight").is_some(),
+        "plan.formulate payload must include l1_insight key (got payload: {payload:?})"
+    );
+    assert!(
+        payload.get("l1_insight").unwrap().is_null(),
+        "ScriptedFormulator emits no l1_insight; payload should be JSON null"
+    );
 }
 
 /// (b) Plan 1 dispatches a step that fails (no entry in dispatcher
@@ -802,6 +813,17 @@ async fn refusal_plan_terminates_with_state_refused() {
         payload["classification_floor"], "Public",
         "test fixture's task has no classification_floor in payload; defaults to Public"
     );
+
+    // l1_insight key: ScriptedFormulator produces a Plan without l1_insight,
+    // so the payload key MUST be present-and-null (JSONB ? operator finds it).
+    assert!(
+        payload.get("l1_insight").is_some(),
+        "plan.formulate payload must include l1_insight key (got payload: {payload:?})"
+    );
+    assert!(
+        payload.get("l1_insight").unwrap().is_null(),
+        "ScriptedFormulator emits no l1_insight; payload should be JSON null"
+    );
 }
 
 /// (f) Agent emits a refusal plan (principle 1) AND the reviewer
@@ -1043,6 +1065,18 @@ async fn agent_floor_raise_chain_blocks_low_classification_step() {
         assert!(
             r.payload.get("classification_floor_signals").is_none(),
             "plan {i}: signals must be absent under agent_raised"
+        );
+
+        // l1_insight key: ScriptedFormulator produces a Plan without l1_insight,
+        // so the payload key MUST be present-and-null (JSONB ? operator finds it).
+        assert!(
+            r.payload.get("l1_insight").is_some(),
+            "plan {i}: plan.formulate payload must include l1_insight key (got payload: {:?})",
+            r.payload
+        );
+        assert!(
+            r.payload.get("l1_insight").unwrap().is_null(),
+            "plan {i}: ScriptedFormulator emits no l1_insight; payload should be JSON null"
         );
     }
 
