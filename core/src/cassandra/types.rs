@@ -128,6 +128,19 @@ pub struct Plan {
     /// emit a request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub floor_request: Option<DataClass>,
+    /// Agent-raised L1 insight candidate. Only honoured on terminal
+    /// plans that reach `Outcome::Completed` (i.e. reviewer didn't
+    /// Block/Escalate/ConstitutionalBlock and the agent didn't refuse).
+    /// The inner loop captures this into `InnerLoopResult.terminal_l1_insight`;
+    /// `runner::drain_lane` writes it to `MemoryLayer::Index` with provenance
+    /// `L1Source::AgentRaised { task_id }`.
+    ///
+    /// Validation rules + length cap live in [`crate::memory::l1_promote`];
+    /// a payload that fails validation produces an `actor='scheduler'
+    /// action='l1.promoted'` row with `action: "rejected_validation"` but
+    /// does NOT abort task finalize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l1_insight: Option<String>,
 }
 
 // Invariant (enforced by Stage 0 / `DeterministicPolicy`, see
@@ -152,6 +165,19 @@ impl Plan {
     /// still honoured by the inner loop.
     pub fn is_refused(&self) -> bool {
         self.refused.is_some()
+    }
+
+    /// Returns `Some(insight)` iff this plan would produce
+    /// `Outcome::Completed` AND carries an `l1_insight`. Encapsulates
+    /// the agent-raised L1-promotion gate so the inner-loop call site
+    /// stays small. `is_terminal()` is the existing check
+    /// (`decision == DECISION_TERMINAL && steps.is_empty() && result.is_some()`).
+    pub fn is_completion_with_insight(&self) -> Option<&str> {
+        if self.is_terminal() {
+            self.l1_insight.as_deref()
+        } else {
+            None
+        }
     }
 }
 
@@ -211,6 +237,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         assert!(p.is_terminal(), "all three present");
 
@@ -244,6 +271,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         let s = serde_json::to_string(&p).unwrap();
 
@@ -277,6 +305,7 @@ mod tests {
                 reason: "physical_harm".into(),
             }),
             floor_request: None,
+            l1_insight: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let p2: Plan = serde_json::from_str(&s).unwrap();
@@ -294,6 +323,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -320,6 +350,7 @@ mod tests {
             data_ceiling:  DataClass::Public,
             refused:       None,
             floor_request: None,
+            l1_insight:    None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(
@@ -341,6 +372,7 @@ mod tests {
             data_ceiling:  DataClass::Public,
             refused:       None,
             floor_request: Some(DataClass::ClinicalConfidential),
+            l1_insight:    None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(
@@ -363,6 +395,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
 
         // Neither
@@ -400,5 +433,74 @@ mod tests {
             let v2: Verdict = serde_json::from_str(&s).unwrap();
             assert_eq!(v, v2);
         }
+    }
+
+    #[test]
+    fn is_completion_with_insight_returns_some_when_terminal_and_insight_present() {
+        let plan = Plan {
+            context: "".into(),
+            decision: DECISION_TERMINAL.into(),
+            rationale: "".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": "answer"})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: Some("shell-exec /bin/ls works for dirs".into()),
+        };
+        assert_eq!(plan.is_completion_with_insight(), Some("shell-exec /bin/ls works for dirs"));
+    }
+
+    #[test]
+    fn is_completion_with_insight_returns_none_when_not_terminal() {
+        let plan = Plan {
+            context: "".into(),
+            decision: "step_required".into(),  // not DECISION_TERMINAL
+            rationale: "".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": "x"})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: Some("foo".into()),
+        };
+        assert!(plan.is_completion_with_insight().is_none());
+    }
+
+    #[test]
+    fn is_completion_with_insight_returns_none_when_insight_absent() {
+        let plan = Plan {
+            context: "".into(),
+            decision: DECISION_TERMINAL.into(),
+            rationale: "".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": "x"})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+        };
+        assert!(plan.is_completion_with_insight().is_none());
+    }
+
+    #[test]
+    fn plan_l1_insight_serde_round_trip_omits_none() {
+        let plan = Plan {
+            context: "c".into(),
+            decision: DECISION_TERMINAL.into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": "x"})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+        };
+        let s = serde_json::to_string(&plan).expect("serialize");
+        assert!(!s.contains("l1_insight"), "None should be omitted via skip_serializing_if; got: {s}");
+
+        // And the round-trip survives deserialization with the field absent.
+        let plan2: Plan = serde_json::from_str(&s).expect("deserialize");
+        assert!(plan2.l1_insight.is_none());
     }
 }

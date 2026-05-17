@@ -176,6 +176,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         }
     }
 
@@ -286,6 +287,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         let v = dp.review(&plan, &ctx("anything")).await;
         assert_eq!(v, Verdict::Approve);
@@ -304,6 +306,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         let ctx = ReviewStageContext {
             task_id: 1,
@@ -343,6 +346,7 @@ mod tests {
             data_ceiling: DataClass::ClinicalConfidential,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         let ctx = ReviewStageContext {
             task_id: 1,
@@ -387,6 +391,7 @@ mod tests {
             data_ceiling: ceiling,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         let mk_ctx = |floor| ReviewStageContext {
             task_id: 1,
@@ -452,6 +457,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         let v = dp.review(&plan, &ctx("anything")).await; // floor=Public (default from ctx helper)
         match v {

@@ -739,6 +739,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         }
     }
 

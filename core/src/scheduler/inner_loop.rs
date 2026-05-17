@@ -705,6 +705,7 @@ mod tests {
             steps: vec![], result: None,
             data_ceiling: DataClass::ClinicalConfidential, refused: None,
             floor_request: Some(DataClass::ClinicalConfidential),
+            l1_insight: None,
         };
         let raised = apply_floor_raise(&mut c, &plan);
         assert!(raised);
@@ -725,6 +726,7 @@ mod tests {
             data_ceiling: DataClass::Public, refused: None,
             // floor_request below current floor — must NOT lower:
             floor_request: Some(DataClass::Public),
+            l1_insight: None,
         };
         let raised = apply_floor_raise(&mut c, &plan);
         assert!(!raised, "lower floor_request must be ignored");
@@ -744,6 +746,7 @@ mod tests {
             steps: vec![], result: None,
             data_ceiling: DataClass::Personal, refused: None,
             floor_request: Some(DataClass::Personal),
+            l1_insight: None,
         };
         let raised = apply_floor_raise(&mut c, &plan);
         assert!(!raised, "equal-rank floor_request must be a no-op");
@@ -764,6 +767,7 @@ mod tests {
             steps: vec![], result: None,
             data_ceiling: DataClass::Public, refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         let raised = apply_floor_raise(&mut c, &plan);
         assert!(!raised);
@@ -790,6 +794,7 @@ mod tests {
             data_ceiling: DataClass::Personal,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         };
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
@@ -858,6 +863,7 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         }
     }
 
@@ -1015,6 +1021,7 @@ mod tests {
             context: "".into(), decision: "task_complete".into(), rationale: "".into(),
             steps: vec![], result: Some(serde_json::json!({"kind":"text","body":"ok"})),
             data_ceiling: DataClass::Public, refused: None, floor_request: None,
+            l1_insight: None,
         };
         let meta = FormulationMeta {
             prompt_name: "p".into(), prompt_sha256: "h".into(),
@@ -1046,6 +1053,7 @@ mod tests {
             steps: vec![], result: None,
             data_ceiling: DataClass::ClinicalConfidential, refused: None,
             floor_request: Some(DataClass::ClinicalConfidential),
+            l1_insight: None,
         };
         let meta = FormulationMeta {
             prompt_name: "p".into(), prompt_sha256: "h".into(),
@@ -1082,6 +1090,7 @@ mod tests {
                 data_ceiling: DataClass::Public,
                 refused: None,
                 floor_request: None,
+                l1_insight: None,
             },
             vec![StepOutcome::Ok(serde_json::json!("x")), StepOutcome::Err {
                 code: "POLICY_DENIED".into(), detail: "no".into(),
