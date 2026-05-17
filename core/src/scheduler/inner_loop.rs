@@ -889,8 +889,8 @@ mod tests {
             &meta,
         );
         let obj = payload.as_object().expect("payload object");
-        let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
-        keys.sort();
+        let got: std::collections::BTreeSet<&str> =
+            obj.keys().map(|s| s.as_str()).collect();
         let expected: std::collections::BTreeSet<&str> = [
             "task_id", "plan_count", "prompt_name", "prompt_sha256",
             "llm_model", "llm_backend", "latency_ms", "retry_count",
@@ -899,7 +899,6 @@ mod tests {
             "system_prompt_sha256", "l0_count", "l1_count",
             "recalled_memory_ids", "recall_count", "recall_query_sha256",
         ].into_iter().collect();
-        let got: std::collections::BTreeSet<&str> = keys.into_iter().collect();
         assert_eq!(got, expected,
             "default-source payload must carry exactly 20 keys; diff:\n\
              missing = {:?}\nextra = {:?}",
@@ -928,7 +927,7 @@ mod tests {
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::ClinicalConfidential,
             ClassificationFloorSource::CliInferred,
-            &["patient".to_string()],
+            &["patient".to_string(), "pathology".to_string()],
             &plan,
             &meta,
         );
@@ -937,7 +936,11 @@ mod tests {
             "cli_inferred source with signals must carry 21 keys (20 default + signals); got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>(),
         );
-        assert_eq!(payload["classification_floor_signals"], serde_json::json!(["patient"]));
+        assert_eq!(
+            payload["classification_floor_signals"],
+            serde_json::json!(["patient", "pathology"]),
+            "all signals (not just the first) must pass through to the audit payload",
+        );
     }
 
     #[test]
