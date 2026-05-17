@@ -44,8 +44,19 @@
 //!    added that pulls from agent-authored content, revisit this
 //!    contract before merging). Threat-model reference:
 //!    `docs/threat-model.md` (LLM-compromise scenario).
+//!
+//!    **Note for `<recalled>` bodies:** Unlike L0/L1, recall bodies are
+//!    *not* operator-curated — any process with `INSERT` privilege on
+//!    `memories` writes them, and recall surfaces whatever the lanes
+//!    return. Phase 1 trusts the model's tokeniser for recall rows on
+//!    the same basis as L0/L1; if an adversarial-input scenario is
+//!    identified (e.g. attacker-supplied content in `memories` flowing
+//!    here via the recall lane), sanitise before passing to this
+//!    function. The `recalled_block_passes_xml_chars_in_body_verbatim`
+//!    test pins the current pass-through posture so any future
+//!    sanitiser is a deliberate behaviour change, not a silent fix.
 //! 5. The `<recalled>` block is omitted when the
-//!    [`crate::recall_assembly::RecalledContext`] is empty (the
+//!    [`RecalledContext`] is empty (the
 //!    failure-degraded state). Recall is enrichment, not policy —
 //!    this asymmetry is deliberate.
 //! 6. Deterministic: same `(l0, l1, recalled, base)` produces the
@@ -89,7 +100,7 @@ pub fn assemble_system_prompt(
         out.push_str("</l1_insights>\n\n");
     }
 
-    if !recalled.bodies.is_empty() {
+    if !recalled.is_empty() {
         out.push_str("<recalled>\n");
         for body in &recalled.bodies {
             out.push_str("- ");
@@ -112,6 +123,7 @@ pub fn assemble_system_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recall_assembly::RecalledContext;
     use hhagent_db::memories::{Memory, MemoryLayer};
     use time::OffsetDateTime;
 
@@ -133,7 +145,7 @@ mod tests {
         let out = assemble_system_prompt(
             &[],
             &[],
-            &crate::recall_assembly::RecalledContext::empty(),
+            &RecalledContext::empty(),
             "BASE BODY",
         );
         assert_eq!(
@@ -153,7 +165,7 @@ mod tests {
         let out = assemble_system_prompt(
             &l0,
             &l1,
-            &crate::recall_assembly::RecalledContext::empty(),
+            &RecalledContext::empty(),
             "BASE BODY",
         );
         assert!(!out.contains("<recalled>"),
@@ -166,7 +178,7 @@ mod tests {
     fn renders_recalled_block_between_l1_and_base() {
         let l0 = vec![mem(1, "L0 RULE", MemoryLayer::Meta)];
         let l1 = vec![mem(2, "L1 INSIGHT", MemoryLayer::Index)];
-        let recalled = crate::recall_assembly::RecalledContext {
+        let recalled = RecalledContext {
             ids: vec![100, 101],
             bodies: vec!["RECALL ONE".into(), "RECALL TWO".into()],
             query_sha256: "f".repeat(64),
@@ -197,7 +209,7 @@ mod tests {
         // is to trust the model's tokeniser. Pin the pass-through so a
         // future "escape `<`" patch is a deliberate decision, not a
         // silent regression.
-        let recalled = crate::recall_assembly::RecalledContext {
+        let recalled = RecalledContext {
             ids: vec![1],
             bodies: vec!["body with <closing> tag".into()],
             query_sha256: "0".repeat(64),
@@ -210,7 +222,7 @@ mod tests {
     #[test]
     fn l0_only_skips_l1_section() {
         let l0 = vec![mem(1, "rule one", MemoryLayer::Meta)];
-        let out = assemble_system_prompt(&l0, &[], &crate::recall_assembly::RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
         assert!(out.starts_with("<l0_meta_rules>\n"), "L0 section first; got:\n{out}");
         assert!(!out.contains("<l1_insights>"), "L1 must be skipped when empty; got:\n{out}");
         assert!(out.contains("<base>\nBASE\n</base>\n"), "base must be present; got:\n{out}");
@@ -219,7 +231,7 @@ mod tests {
     #[test]
     fn l1_only_skips_l0_section() {
         let l1 = vec![mem(1, "insight one", MemoryLayer::Index)];
-        let out = assemble_system_prompt(&[], &l1, &crate::recall_assembly::RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&[], &l1, &RecalledContext::empty(), "BASE");
         assert!(!out.contains("<l0_meta_rules>"), "L0 must be skipped when empty; got:\n{out}");
         assert!(out.contains("<l1_insights>\n- insight one\n</l1_insights>"),
                 "L1 section present; got:\n{out}");
@@ -229,7 +241,7 @@ mod tests {
     fn both_layers_assembled_in_order_with_blank_separators() {
         let l0 = vec![mem(1, "rule one", MemoryLayer::Meta)];
         let l1 = vec![mem(2, "insight one", MemoryLayer::Index)];
-        let out = assemble_system_prompt(&l0, &l1, &crate::recall_assembly::RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &l1, &RecalledContext::empty(), "BASE");
         let expected = concat!(
             "<l0_meta_rules>\n",
             "- rule one\n",
@@ -253,7 +265,7 @@ mod tests {
             mem(2, "second", MemoryLayer::Meta),
             mem(3, "third", MemoryLayer::Meta),
         ];
-        let out = assemble_system_prompt(&l0, &[], &crate::recall_assembly::RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
         for needle in ["- first\n", "- second\n", "- third\n"] {
             assert!(out.contains(needle), "missing {needle:?} in {out}");
         }
@@ -266,7 +278,7 @@ mod tests {
         // — a future refactor that tries to indent continuation lines
         // would break this test deliberately.
         let l0 = vec![mem(1, "line one\nline two", MemoryLayer::Meta)];
-        let out = assemble_system_prompt(&l0, &[], &crate::recall_assembly::RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
         assert!(out.contains("- line one\nline two\n"),
                 "multi-line body must pass through verbatim; got:\n{out}");
     }
@@ -277,7 +289,7 @@ mod tests {
         // refactor that adds HTML escaping would break this test
         // deliberately so the team can re-evaluate the trust posture.
         let l0 = vec![mem(1, "guard <secret> and </tag>", MemoryLayer::Meta)];
-        let out = assemble_system_prompt(&l0, &[], &crate::recall_assembly::RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
         assert!(out.contains("- guard <secret> and </tag>\n"),
                 "XML chars must pass through; got:\n{out}");
     }
@@ -286,8 +298,8 @@ mod tests {
     fn output_is_deterministic_for_same_inputs() {
         let l0 = vec![mem(1, "rule one", MemoryLayer::Meta)];
         let l1 = vec![mem(2, "insight", MemoryLayer::Index)];
-        let a = assemble_system_prompt(&l0, &l1, &crate::recall_assembly::RecalledContext::empty(), "BASE");
-        let b = assemble_system_prompt(&l0, &l1, &crate::recall_assembly::RecalledContext::empty(), "BASE");
+        let a = assemble_system_prompt(&l0, &l1, &RecalledContext::empty(), "BASE");
+        let b = assemble_system_prompt(&l0, &l1, &RecalledContext::empty(), "BASE");
         assert_eq!(a, b, "same inputs must yield same bytes");
     }
 
@@ -300,7 +312,7 @@ mod tests {
             mem(2, "second-newest", MemoryLayer::Meta),
             mem(1, "oldest", MemoryLayer::Meta),
         ];
-        let out = assemble_system_prompt(&l0, &[], &crate::recall_assembly::RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
         let idx_a = out.find("- third-newest").expect("first row present");
         let idx_b = out.find("- second-newest").expect("second row present");
         let idx_c = out.find("- oldest").expect("third row present");
@@ -314,8 +326,8 @@ mod tests {
         // newline, the assembler inserts one before `</base>\n` so the
         // closing tag always sits on its own line. This keeps the
         // output shape stable regardless of how the prompt file ends.
-        let out_no_nl = assemble_system_prompt(&[], &[], &crate::recall_assembly::RecalledContext::empty(), "no trailing nl");
-        let out_with_nl = assemble_system_prompt(&[], &[], &crate::recall_assembly::RecalledContext::empty(), "with trailing nl\n");
+        let out_no_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "no trailing nl");
+        let out_with_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "with trailing nl\n");
         assert_eq!(
             out_no_nl, "<base>\nno trailing nl\n</base>\n",
             "no-trailing-newline input must be normalized; got {out_no_nl:?}"
