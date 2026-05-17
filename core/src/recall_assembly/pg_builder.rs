@@ -26,6 +26,7 @@ use super::{sha256_hex, RecallBuilder, RecalledContext, RecallError};
 /// The `cap_bytes` parameter is expected to be [`L_RECALL_CAP_BYTES`]
 /// in production; tests may pass a smaller value to exercise the cap
 /// path without constructing kilobyte-sized bodies.
+#[allow(dead_code)] // Task 5 (PgRecallBuilder::build) will call this.
 pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, Vec<String>) {
     let mut ids = Vec::with_capacity(rows.len());
     let mut bodies = Vec::with_capacity(rows.len());
@@ -34,14 +35,29 @@ pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, V
     for row in rows {
         let next = used.saturating_add(row.body.len());
         if next > cap_bytes {
-            tracing::warn!(
-                target: "hhagent::recall_assembly",
-                memory_id = row.id,
-                row_bytes = row.body.len(),
-                used_bytes = used,
-                cap_bytes,
-                "recall row exceeds cap; dropping this and any remaining recall rows",
-            );
+            // Mirror load_l1's warn-vs-debug split: warn loudly only when
+            // a single row alone is over budget (operator can retire it
+            // or raise the cap); stay quiet on normal "cap filled after
+            // N rows" exits (that's the expected end of the loop, not
+            // an operator signal).
+            if ids.is_empty() && row.body.len() > cap_bytes {
+                tracing::warn!(
+                    target: "hhagent::recall_assembly",
+                    memory_id = row.id,
+                    row_bytes = row.body.len(),
+                    cap_bytes,
+                    "recall row body alone exceeds cap; dropping this and any remaining recall rows",
+                );
+            } else {
+                tracing::debug!(
+                    target: "hhagent::recall_assembly",
+                    memory_id = row.id,
+                    row_bytes = row.body.len(),
+                    used_bytes = used,
+                    cap_bytes,
+                    "recall cap full; stopping",
+                );
+            }
             break;
         }
         used = next;
@@ -177,6 +193,19 @@ mod tests {
         let (ids, bodies) = super::cap_and_split(rows, 5);
         assert_eq!(ids, vec![1], "only the first row fits under the cap");
         assert_eq!(bodies, vec!["aaaa"]);
+    }
+
+    #[test]
+    fn cap_and_split_exact_cap_keeps_all_rows() {
+        // 2 rows of 2 bytes each, total 4 bytes, cap 4 bytes. After
+        // row 1: next = 2, not > 4 → keep. After row 2: next = 4,
+        // not > 4 → keep. Boundary pin: `>` not `>=` means rows that
+        // fill cap_bytes exactly still fit. Mirrors load_l1's
+        // cap_bytes inclusivity contract.
+        let rows = vec![mem(1, "ab"), mem(2, "cd")];
+        let (ids, bodies) = super::cap_and_split(rows, 4);
+        assert_eq!(ids, vec![1, 2], "exact-cap fill must keep both rows");
+        assert_eq!(bodies, vec!["ab", "cd"]);
     }
 
     #[tokio::test]
