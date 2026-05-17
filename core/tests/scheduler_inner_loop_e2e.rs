@@ -324,6 +324,9 @@ impl PlanFormulator for ScriptedFormulator {
                 assembled_prompt_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
                 l0_count: 0,
                 l1_count: 0,
+                recalled_memory_ids: Vec::new(),
+                recall_count: 0,
+                recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
             },
         ))
     }

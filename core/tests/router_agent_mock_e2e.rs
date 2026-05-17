@@ -38,6 +38,7 @@ use std::time::Duration;
 
 use hhagent_core::cassandra::types::DataClass;
 use hhagent_core::prompt_assembly::StaticSystemPromptBuilder;
+use hhagent_core::recall_assembly::StaticRecallBuilder;
 use hhagent_core::scheduler::agent::{AgentError, PlanFormulator, RouterAgent};
 use hhagent_core::scheduler::inner_loop::TaskContext;
 use hhagent_core::scheduler::prompts::{PromptCache, PromptEntry};
@@ -271,7 +272,12 @@ async fn happy_path_decodes_plan_and_populates_meta() {
     let prompts = prompts_with_agent_planner();
     // StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT): no L0/L1 added,
     // but the cached base prompt flows to the wire verbatim.
-    let agent = RouterAgent::new(router, prompts, Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)));
+    let agent = RouterAgent::new(
+        router,
+        prompts,
+        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
+        Arc::new(StaticRecallBuilder::empty()),
+    );
 
     let (plan, meta) = agent.formulate_plan(&ctx()).await.expect("happy path");
 
@@ -327,7 +333,12 @@ async fn decode_error_when_assistant_content_is_not_a_plan() {
     let prompts = prompts_with_agent_planner();
     // StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT): no L0/L1 added,
     // but the cached base prompt flows to the wire verbatim.
-    let agent = RouterAgent::new(router, prompts, Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)));
+    let agent = RouterAgent::new(
+        router,
+        prompts,
+        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
+        Arc::new(StaticRecallBuilder::empty()),
+    );
 
     let err = agent
         .formulate_plan(&ctx())
@@ -371,7 +382,12 @@ async fn prompt_missing_short_circuits_before_dialing_backend() {
 
     let router = router_pointing_at(&base_url);
     let prompts = empty_prompts();
-    let agent = RouterAgent::new(router, prompts, Arc::new(StaticSystemPromptBuilder::empty()));
+    let agent = RouterAgent::new(
+        router,
+        prompts,
+        Arc::new(StaticSystemPromptBuilder::empty()),
+        Arc::new(StaticRecallBuilder::empty()),
+    );
 
     let err = agent.formulate_plan(&ctx()).await.expect_err("must fail");
     assert!(

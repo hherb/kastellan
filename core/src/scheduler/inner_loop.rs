@@ -782,6 +782,9 @@ mod tests {
             assembled_prompt_sha256: "cafebabe".into(),
             l0_count: 7,
             l1_count: 3,
+            recalled_memory_ids: Vec::new(),
+            recall_count: 0,
+            recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
         };
         let payload = build_plan_formulate_payload(
             /*task_id*/ 7,
@@ -851,6 +854,9 @@ mod tests {
             assembled_prompt_sha256: "ax".into(),
             l0_count: 0,
             l1_count: 0,
+            recalled_memory_ids: Vec::new(),
+            recall_count: 0,
+            recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
         };
         let payload = build_plan_formulate_payload(
             1, 0, DataClass::Public,
@@ -890,6 +896,8 @@ mod tests {
             latency_ms: 1, retry_count: 0,
             assembled_prompt_sha256: "ah".into(),
             l0_count: 0, l1_count: 0,
+            recalled_memory_ids: Vec::new(), recall_count: 0,
+            recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
         };
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::Public, ClassificationFloorSource::Default, &[], &plan, &meta,
@@ -916,6 +924,8 @@ mod tests {
             latency_ms: 1, retry_count: 0,
             assembled_prompt_sha256: "ah".into(),
             l0_count: 0, l1_count: 0,
+            recalled_memory_ids: Vec::new(), recall_count: 0,
+            recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
         };
         let signals = vec!["patient".to_string(), "pathology".to_string()];
         let payload = build_plan_formulate_payload(
@@ -951,6 +961,8 @@ mod tests {
             latency_ms: 1, retry_count: 0,
             assembled_prompt_sha256: "ah".into(),
             l0_count: 0, l1_count: 0,
+            recalled_memory_ids: Vec::new(), recall_count: 0,
+            recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
         };
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::ClinicalConfidential,

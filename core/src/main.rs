@@ -121,6 +121,10 @@ async fn main() -> Result<()> {
             router.clone(),
             prompts.clone(),
             Arc::new(hhagent_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
+            Arc::new(hhagent_core::recall_assembly::PgRecallBuilder::new(
+                pool.clone(),
+                router.clone(),
+            )),
         ));
 
     // Sandbox backend (cross-platform).
