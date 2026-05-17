@@ -455,6 +455,13 @@ fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
 /// Slice D (2026-05-17) added `recalled_memory_ids`, `recall_count`,
 /// and `recall_query_sha256` so the observation phase can audit which
 /// memories the recall lane surfaced and detect drift across captures.
+///
+/// Slice E (2026-05-17) added `l1_insight` (the agent-raised L1 promotion
+/// candidate from `Plan.l1_insight`, explicit JSON `null` when absent
+/// — matches the `refused` precedent so JSONB `?` queries find every
+/// row). The runner reads `InnerLoopResult.terminal_l1_insight` in
+/// `drain_lane` and emits the `actor='scheduler' action='l1.promoted'`
+/// row when the agent set a value and the plan reached `Outcome::Completed`.
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
