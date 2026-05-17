@@ -8,8 +8,49 @@
 //!   so cross-crate integration tests in `core/tests/*.rs` can use it.
 
 use async_trait::async_trait;
+use hhagent_db::memories::Memory;
 
 use super::{sha256_hex, RecallBuilder, RecalledContext, RecallError};
+
+/// Greedy newest-first cap: walk `rows` in order, push as long as
+/// cumulative body bytes stay ≤ `cap_bytes`. The first row that
+/// would push cumulative bytes over the cap is dropped (with a
+/// `tracing::warn!`) and the walk stops — matches the L1 loader's
+/// `saturating_add` break idiom in `core::memory::layers::load_l1`.
+///
+/// Pure helper, no I/O. Doesn't drop later rows that might
+/// individually fit — that would risk reorder vs. the RRF-fused
+/// order coming out of `recall`. Operators see the dropped id in
+/// logs and can either retire the oversized memory or raise the cap.
+///
+/// The `cap_bytes` parameter is expected to be [`L_RECALL_CAP_BYTES`]
+/// in production; tests may pass a smaller value to exercise the cap
+/// path without constructing kilobyte-sized bodies.
+pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, Vec<String>) {
+    let mut ids = Vec::with_capacity(rows.len());
+    let mut bodies = Vec::with_capacity(rows.len());
+    let mut used: usize = 0;
+
+    for row in rows {
+        let next = used.saturating_add(row.body.len());
+        if next > cap_bytes {
+            tracing::warn!(
+                target: "hhagent::recall_assembly",
+                memory_id = row.id,
+                row_bytes = row.body.len(),
+                used_bytes = used,
+                cap_bytes,
+                "recall row exceeds cap; dropping this and any remaining recall rows",
+            );
+            break;
+        }
+        used = next;
+        ids.push(row.id);
+        bodies.push(row.body);
+    }
+
+    (ids, bodies)
+}
 
 /// Production builder. Body lands in Task 5; the constructor + struct
 /// are declared here so the trait impl compiles.
@@ -88,6 +129,55 @@ impl RecallBuilder for StaticRecallBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hhagent_db::memories::{Memory, MemoryLayer};
+    use time::OffsetDateTime;
+
+    fn mem(id: i64, body: &str) -> Memory {
+        Memory {
+            id,
+            body: body.to_string(),
+            metadata: serde_json::json!({}),
+            layer: MemoryLayer::Stable,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn cap_and_split_empty_input_returns_empty_vectors() {
+        let (ids, bodies) = super::cap_and_split(vec![], 4096);
+        assert!(ids.is_empty());
+        assert!(bodies.is_empty());
+    }
+
+    #[test]
+    fn cap_and_split_below_cap_keeps_all_rows() {
+        let rows = vec![mem(1, "aaa"), mem(2, "bb"), mem(3, "c")];
+        let (ids, bodies) = super::cap_and_split(rows, 100);
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(bodies, vec!["aaa", "bb", "c"]);
+    }
+
+    #[test]
+    fn cap_and_split_drops_oversize_first_row_returns_empty() {
+        // Single row 10 bytes, cap 5 bytes → row is dropped entirely.
+        let rows = vec![mem(7, "0123456789")];
+        let (ids, bodies) = super::cap_and_split(rows, 5);
+        assert!(ids.is_empty(), "oversize-first-row must be dropped");
+        assert!(bodies.is_empty());
+    }
+
+    #[test]
+    fn cap_and_split_stops_at_cap_keeping_rows_that_fit() {
+        // Row 1 = 4 bytes, row 2 = 4 bytes, cap = 5. Only row 1 fits
+        // (after row 1: 4 used, room for 1 byte; row 2 needs 4 more
+        // and would exceed cap → dropped). Row 3 would individually
+        // fit but the function stops at the first dropped row to
+        // preserve RRF-fused order.
+        let rows = vec![mem(1, "aaaa"), mem(2, "bbbb"), mem(3, "c")];
+        let (ids, bodies) = super::cap_and_split(rows, 5);
+        assert_eq!(ids, vec![1], "only the first row fits under the cap");
+        assert_eq!(bodies, vec!["aaaa"]);
+    }
 
     #[tokio::test]
     async fn static_builder_empty_returns_empty_context() {
