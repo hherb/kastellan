@@ -172,7 +172,12 @@ impl Plan {
     /// the agent-raised L1-promotion gate so the inner-loop call site
     /// stays small. `is_terminal()` is the existing check
     /// (`decision == DECISION_TERMINAL && steps.is_empty() && result.is_some()`).
-    pub fn is_completion_with_insight(&self) -> Option<&str> {
+    ///
+    /// Named `completion_insight` (noun form) rather than
+    /// `is_completion_with_insight` to follow Rust convention that
+    /// `is_*` methods return `bool` — contrast with the sibling helpers
+    /// `is_terminal()` and `is_refused()`.
+    pub fn completion_insight(&self) -> Option<&str> {
         if self.is_terminal() {
             self.l1_insight.as_deref()
         } else {
@@ -436,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn is_completion_with_insight_returns_some_when_terminal_and_insight_present() {
+    fn completion_insight_returns_some_when_terminal_and_insight_present() {
         let plan = Plan {
             context: "".into(),
             decision: DECISION_TERMINAL.into(),
@@ -448,11 +453,11 @@ mod tests {
             floor_request: None,
             l1_insight: Some("shell-exec /bin/ls works for dirs".into()),
         };
-        assert_eq!(plan.is_completion_with_insight(), Some("shell-exec /bin/ls works for dirs"));
+        assert_eq!(plan.completion_insight(), Some("shell-exec /bin/ls works for dirs"));
     }
 
     #[test]
-    fn is_completion_with_insight_returns_none_when_not_terminal() {
+    fn completion_insight_returns_none_when_not_terminal() {
         let plan = Plan {
             context: "".into(),
             decision: "step_required".into(),  // not DECISION_TERMINAL
@@ -464,11 +469,11 @@ mod tests {
             floor_request: None,
             l1_insight: Some("foo".into()),
         };
-        assert!(plan.is_completion_with_insight().is_none());
+        assert!(plan.completion_insight().is_none());
     }
 
     #[test]
-    fn is_completion_with_insight_returns_none_when_insight_absent() {
+    fn completion_insight_returns_none_when_insight_absent() {
         let plan = Plan {
             context: "".into(),
             decision: DECISION_TERMINAL.into(),
@@ -480,7 +485,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
         };
-        assert!(plan.is_completion_with_insight().is_none());
+        assert!(plan.completion_insight().is_none());
     }
 
     #[test]
@@ -502,5 +507,41 @@ mod tests {
         // And the round-trip survives deserialization with the field absent.
         let plan2: Plan = serde_json::from_str(&s).expect("deserialize");
         assert!(plan2.l1_insight.is_none());
+    }
+
+    #[test]
+    fn plan_l1_insight_serde_round_trip_carries_some_value() {
+        let plan = Plan {
+            context: "c".into(),
+            decision: DECISION_TERMINAL.into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": "x"})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: Some("a useful insight".into()),
+        };
+        let s = serde_json::to_string(&plan).expect("serialize");
+        assert!(s.contains("\"l1_insight\":\"a useful insight\""), "Some value should serialize; got: {s}");
+
+        let plan2: Plan = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(plan2.l1_insight.as_deref(), Some("a useful insight"));
+    }
+
+    #[test]
+    fn completion_insight_returns_none_when_terminal_decision_but_result_missing() {
+        let plan = Plan {
+            context: "".into(),
+            decision: DECISION_TERMINAL.into(),
+            rationale: "".into(),
+            steps: vec![],
+            result: None,  // missing result -> is_terminal() = false
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: Some("insight".into()),
+        };
+        assert!(plan.completion_insight().is_none());
     }
 }

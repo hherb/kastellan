@@ -4,7 +4,7 @@
 
 **Goal:** Ship the first writer for `MemoryLayer::Index` rows. Two paths: operator-explicit (`hhagent-cli memory l1 {add,list,remove}`) and agent-raised (`Plan.l1_insight` consumed by the inner loop on `Outcome::Completed`).
 
-**Architecture:** A pure validator + idempotent writer module (`core::memory::l1_promote`) is shared by both paths. The operator path goes through `cli_audit::l1_*_and_audit` helpers (mirrors `tools_allowlist`). The agent-raised path is gated by `Plan::is_completion_with_insight()` and emitted in `runner::drain_lane` after the existing `task.finalize` row. Three new audit-row actions (`l1.added`, `l1.removed`, `l1.promoted`); one pure-additive payload key on `agent/plan.formulate` (`l1_insight`).
+**Architecture:** A pure validator + idempotent writer module (`core::memory::l1_promote`) is shared by both paths. The operator path goes through `cli_audit::l1_*_and_audit` helpers (mirrors `tools_allowlist`). The agent-raised path is gated by `Plan::completion_insight()` and emitted in `runner::drain_lane` after the existing `task.finalize` row. Three new audit-row actions (`l1.added`, `l1.removed`, `l1.promoted`); one pure-additive payload key on `agent/plan.formulate` (`l1_insight`).
 
 **Tech Stack:** Rust workspace (sqlx + tokio + serde). `hhagent-tests-common::bring_up_pg_cluster` for PG-backed unit tests. Mirror of existing `core::memory::l0_seed` shape from PR #77.
 
@@ -96,7 +96,7 @@ The codebase **does not put PG-backed `#[tokio::test]` tests inline** in `core/s
 
 This means some of the test snippets shown in **Tasks 1, 4, 5, 9, 10** below are written as if they were inline-able (with `#[tokio::test]` + `bring_up_pg_cluster`), but in the actual implementation:
 
-- **Pure helpers** (`validate_l1_body`, `compute_body_sha256`, `build_l1_metadata`, `build_l1_write_payload`, `Plan::is_completion_with_insight`): ship as inline `#[test]` unit tests in their module's `mod tests`. These are Tasks 2, 3, 6 (small pure-test budgets).
+- **Pure helpers** (`validate_l1_body`, `compute_body_sha256`, `build_l1_metadata`, `build_l1_write_payload`, `Plan::completion_insight`): ship as inline `#[test]` unit tests in their module's `mod tests`. These are Tasks 2, 3, 6 (small pure-test budgets).
 - **PG-backed scenarios** (every test that needs `PgPool`): ship in the integration test files:
   - `db/tests/postgres_e2e.rs` — Task 1's `delete_memory_at_layer` PG coverage.
   - `core/tests/memory_l1_promote_e2e.rs` — Tasks 4, 5, 9, 10's PG coverage (one file, all scenarios — Task 12 is where they land).
@@ -263,7 +263,7 @@ EOF
 
 ---
 
-## Task 2: `Plan.l1_insight` field + `Plan::is_completion_with_insight()` accessor + cascade
+## Task 2: `Plan.l1_insight` field + `Plan::completion_insight()` accessor + cascade
 
 **Files:**
 - Modify: `core/src/cassandra/types.rs` (new field + accessor + new unit tests)
@@ -277,7 +277,7 @@ Append to `core/src/cassandra/types.rs` (find `mod tests` and add at the bottom)
 
 ```rust
     #[test]
-    fn is_completion_with_insight_returns_some_when_terminal_and_insight_present() {
+    fn completion_insight_returns_some_when_terminal_and_insight_present() {
         let plan = Plan {
             context: "".into(),
             decision: DECISION_TERMINAL.into(),
@@ -289,11 +289,11 @@ Append to `core/src/cassandra/types.rs` (find `mod tests` and add at the bottom)
             floor_request: None,
             l1_insight: Some("shell-exec /bin/ls works for dirs".into()),
         };
-        assert_eq!(plan.is_completion_with_insight(), Some("shell-exec /bin/ls works for dirs"));
+        assert_eq!(plan.completion_insight(), Some("shell-exec /bin/ls works for dirs"));
     }
 
     #[test]
-    fn is_completion_with_insight_returns_none_when_not_terminal() {
+    fn completion_insight_returns_none_when_not_terminal() {
         let plan = Plan {
             context: "".into(),
             decision: "step_required".into(),  // not DECISION_TERMINAL
@@ -305,11 +305,11 @@ Append to `core/src/cassandra/types.rs` (find `mod tests` and add at the bottom)
             floor_request: None,
             l1_insight: Some("foo".into()),
         };
-        assert!(plan.is_completion_with_insight().is_none());
+        assert!(plan.completion_insight().is_none());
     }
 
     #[test]
-    fn is_completion_with_insight_returns_none_when_insight_absent() {
+    fn completion_insight_returns_none_when_insight_absent() {
         let plan = Plan {
             context: "".into(),
             decision: DECISION_TERMINAL.into(),
@@ -321,7 +321,7 @@ Append to `core/src/cassandra/types.rs` (find `mod tests` and add at the bottom)
             floor_request: None,
             l1_insight: None,
         };
-        assert!(plan.is_completion_with_insight().is_none());
+        assert!(plan.completion_insight().is_none());
     }
 
     #[test]
@@ -351,7 +351,7 @@ Append to `core/src/cassandra/types.rs` (find `mod tests` and add at the bottom)
 ```bash
 cargo test -p hhagent-core cassandra::types 2>&1 | tail -30
 # Expected: compile error "no field `l1_insight` on type `Plan`"
-# AND: error[E0599]: no method named `is_completion_with_insight`
+# AND: error[E0599]: no method named `completion_insight`
 ```
 
 - [ ] **Step 2.3: Add the `Plan.l1_insight` field and accessor**
@@ -382,7 +382,7 @@ Then in the `impl Plan { ... }` block (line ~141), add the accessor below `is_re
     /// the agent-raised L1-promotion gate so the inner-loop call site
     /// stays small. `is_terminal()` is the existing check
     /// (`decision == DECISION_TERMINAL && steps.is_empty() && result.is_some()`).
-    pub fn is_completion_with_insight(&self) -> Option<&str> {
+    pub fn completion_insight(&self) -> Option<&str> {
         if self.is_terminal() {
             self.l1_insight.as_deref()
         } else {
@@ -433,7 +433,7 @@ git add core/src/cassandra/types.rs \
         core/tests/scheduler_inner_loop_e2e.rs \
         core/tests/scheduler_lanes_e2e.rs
 git commit -m "$(cat <<'EOF'
-feat(cassandra,types): Plan.l1_insight + is_completion_with_insight accessor
+feat(cassandra,types): Plan.l1_insight + completion_insight accessor
 
 Adds the agent-raised L1 promotion channel: a new optional
 `Plan.l1_insight: Option<String>` field with the same
@@ -442,7 +442,7 @@ shape as `refused` and `floor_request`. Existing `Plan` fixtures
 in serialized form (audit-row payloads, observation captures)
 remain byte-stable when the field is unset.
 
-The new `Plan::is_completion_with_insight() -> Option<&str>`
+The new `Plan::completion_insight() -> Option<&str>`
 accessor returns `Some(insight)` iff `is_terminal() && l1_insight.is_some()`.
 Encapsulates the agent-raised emit gate so the upcoming inner-loop
 hook stays small.
@@ -1619,7 +1619,7 @@ let mut captured_l1_insight: Option<String> = None;
 
 // Inside the loop, right after the reviewer's Approve/Advisory arm
 // passes and before `if plan.is_terminal()` (around line 362), insert:
-if let Some(insight) = plan.is_completion_with_insight() {
+if let Some(insight) = plan.completion_insight() {
     captured_l1_insight = Some(insight.to_string());
 }
 
@@ -1686,7 +1686,7 @@ git commit -m "$(cat <<'EOF'
 feat(core,scheduler,inner_loop): capture terminal_l1_insight + plan.formulate key
 
 `InnerLoopResult` gains `terminal_l1_insight: Option<String>`. The
-inner loop captures the value from `Plan::is_completion_with_insight()`
+inner loop captures the value from `Plan::completion_insight()`
 during the loop body (before the terminal check, so the value is
 captured at exactly the iteration where the plan would produce
 Outcome::Completed). The runner reads this in drain_lane (Task 9).
@@ -2861,7 +2861,7 @@ EOF
   - "Validation rules for L1 body" → Task 3 (validator unit tests).
   - "Dedup behaviour" → Task 4 (`promote_l1` EXISTS-check) + Task 12 (cross-source dedup integration).
   - "Agent-raised provenance enforcement" → Task 9 (drain_lane is the only L1Source::AgentRaised constructor).
-  - "Emit gate" → Task 8 (`Plan::is_completion_with_insight` + `terminal_l1_insight` capture).
+  - "Emit gate" → Task 8 (`Plan::completion_insight` + `terminal_l1_insight` capture).
   - "Data flow" → end-to-end coverage in Task 12.
   - "Audit-row contract" → Task 6 (`build_l1_write_payload`) + Tasks 8, 10 (consumers).
   - "Test budget +28 to +35" → ~+28-35 budgeted across Tasks 1-14.

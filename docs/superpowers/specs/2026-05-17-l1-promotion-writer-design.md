@@ -34,7 +34,7 @@ In scope (this slice):
 - New module [`core/src/memory/l1_promote.rs`](../../../core/src/memory/l1_promote.rs) — pure validator + async writer + audit-helper shape. Mirrors the [`core/src/memory/l0_seed.rs`](../../../core/src/memory/l0_seed.rs) precedent from PR #77.
 - New `db::memories::delete_memory_at_layer(executor, id, layer) -> Result<bool, DbError>` async helper. DELETE with the `layer = $2` guard (defense against an operator deleting an L0 / L3 row via the L1 CLI path); fires the existing AFTER DELETE trigger so the journal entry lands in `deleted_memories`.
 - New `Plan::l1_insight: Option<String>` field. `#[serde(default, skip_serializing_if = "Option::is_none")]` so existing fixtures stay byte-stable.
-- New `Plan::is_completion_with_insight() -> Option<&str>` accessor that returns `Some(insight)` iff `self.is_terminal() && self.l1_insight.is_some()`. Encapsulates the agent-raised gate so the inner-loop call site stays small. (`Plan::is_terminal()` is the existing helper at [`core/src/cassandra/types.rs:142`](../../../core/src/cassandra/types.rs#L142) — checks `decision == "task_complete"`, `steps.is_empty()`, `result.is_some()`.)
+- New `Plan::completion_insight() -> Option<&str>` accessor that returns `Some(insight)` iff `self.is_terminal() && self.l1_insight.is_some()`. Encapsulates the agent-raised gate so the inner-loop call site stays small. Named `completion_insight` (noun form) rather than `is_completion_with_insight` to follow Rust convention that `is_*` methods return `bool`. (`Plan::is_terminal()` is the existing helper at [`core/src/cassandra/types.rs:142`](../../../core/src/cassandra/types.rs#L142) — checks `decision == "task_complete"`, `steps.is_empty()`, `result.is_some()`.)
 - `agent_planner.md` prompt update: one paragraph teaching the model when to set `l1_insight`, plus `"l1_insight": null` in the JSON-schema example. The agent_prompts SHA-256 ledger records the new prompt on next daemon start (existing mechanism, no change).
 - `InnerLoopResult.terminal_l1_insight: Option<String>` field. Populated only on `Outcome::Completed`.
 - `core::scheduler::inner_loop::build_plan_formulate_payload` gains an `l1_insight` payload key (pulled from `plan.l1_insight`, explicit JSON `null` when absent — mirrors the `refused` precedent). **Audit-row bump: 20/21 keys → 21/22 keys, pure-additive.**
@@ -110,7 +110,7 @@ Single gate: `Outcome::Completed`. Justification:
 
 - All other outcomes (`Failed`, `Blocked`, `Refused`, `Cancelled`) silently drop `terminal_l1_insight` if the plan had one. The inner loop only populates `terminal_l1_insight` on the `Outcome::Completed` arm.
 
-- The `Plan::is_completion_with_insight()` accessor encapsulates the gate. It returns `Some(insight)` iff the plan would have produced `Outcome::Completed` AND carries `l1_insight`. The inner loop calls this exactly once at the point where it has both signals available.
+- The `Plan::completion_insight()` accessor encapsulates the gate. It returns `Some(insight)` iff the plan would have produced `Outcome::Completed` AND carries `l1_insight`. The inner loop calls this exactly once at the point where it has both signals available.
 
 The drain_lane hook never needs to inspect the Plan directly; it just reads `result.terminal_l1_insight`.
 
@@ -138,7 +138,7 @@ Agent-raised path:
 
   inner_loop::run_to_terminal
     └── reviewer: Verdict::Approve
-    └── plan.is_completion_with_insight() → Some("learned X")
+    └── plan.completion_insight() → Some("learned X")
     └── InnerLoopResult { outcome: Completed(result), terminal_l1_insight: Some("learned X"), ... }
 
   runner::drain_lane (after write_finalize_row)
@@ -160,7 +160,7 @@ NEW (5):
 MODIFIED (8):
 - `db/src/memories.rs` — `delete_memory_at_layer` async helper.
 - `core/src/memory/mod.rs` — `pub mod l1_promote;`.
-- `core/src/cassandra/types.rs` — `Plan.l1_insight` field + `Plan::is_completion_with_insight()` accessor + a couple of new unit tests pinning the accessor.
+- `core/src/cassandra/types.rs` — `Plan.l1_insight` field + `Plan::completion_insight()` accessor + a couple of new unit tests pinning the accessor.
 - `prompts/agent_planner.md` — one paragraph + JSON-schema example update.
 - `core/src/scheduler/inner_loop.rs` — `InnerLoopResult.terminal_l1_insight` + populate on the Completed arm + `build_plan_formulate_payload` adds `l1_insight` key + update the 4 pin tests + add 1 new pin test for the new key.
 - `core/src/scheduler/runner.rs` — `drain_lane` hook after `write_finalize_row`.
@@ -195,7 +195,7 @@ Estimate: **+28 to +35 tests**, workspace 674 → ~702-709.
 
 - ~12 unit tests in `core/src/memory/l1_promote.rs::tests` (validator rejections + accepts trim; SHA-256 determinism; build_l1_metadata key-set; promote_l1 happy/dedup-existing/validation-rejected paths — these are unit-tier because the EXISTS check + insert can use the `PgPool` constructed by the test harness, same way `l0_seed` tests work).
 - 4 unit tests in `core/src/scheduler/audit.rs::tests` covering `build_l1_write_payload` shape for each `(Source, Outcome)` combination.
-- 2 unit tests in `core/src/cassandra/types.rs::tests` for `Plan::is_completion_with_insight` (positive + each negative-gate path).
+- 2 unit tests in `core/src/cassandra/types.rs::tests` for `Plan::completion_insight` (positive + each negative-gate path).
 - 6-8 DB integration tests in `core/tests/memory_l1_promote_e2e.rs`:
   - Operator add path → 1 L1 row + 1 audit row, `action: "inserted"`.
   - Operator add idempotency → second call returns SkippedDuplicate, 0 new rows, 1 new audit row with `action: "skipped_duplicate"`.
