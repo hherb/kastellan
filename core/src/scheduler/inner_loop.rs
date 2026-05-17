@@ -119,6 +119,13 @@ pub struct InnerLoopResult {
     pub outcome: Outcome,
     pub plan_count: u32,
     pub dispatch_count: u32,
+    /// `l1_insight` from the terminal plan, captured only when the
+    /// inner loop reaches `Outcome::Completed`. The lane runner reads
+    /// this in `drain_lane` and writes one `actor='scheduler'
+    /// action='l1.promoted'` audit row if `Some`. `None` on every
+    /// other outcome (Failed / Cancelled — Refused / Blocked are
+    /// also not Outcome::Completed).
+    pub terminal_l1_insight: Option<String>,
 }
 
 /// Terminal result of the inner loop. The lane runner translates
@@ -202,13 +209,20 @@ pub async fn run_to_terminal(
 
     /// Local helper: wrap an `Outcome` with the counters captured so
     /// far. Cuts the boilerplate at every early-return point.
+    /// `$insight` is the `terminal_l1_insight` value — `None` for all
+    /// non-Completed outcomes; the Completed arm passes `captured_l1_insight`.
     macro_rules! finish {
-        ($outcome:expr) => {
+        ($outcome:expr, $insight:expr) => {
             Ok(InnerLoopResult {
                 outcome: $outcome,
                 plan_count: ctx.plan_count,
                 dispatch_count,
+                terminal_l1_insight: $insight,
             })
+        };
+        // Convenience form for all non-Completed arms: insight is always None.
+        ($outcome:expr) => {
+            finish!($outcome, None)
         };
     }
 
@@ -362,7 +376,11 @@ pub async fn run_to_terminal(
         if plan.is_terminal() {
             let result = plan.result.clone()
                 .unwrap_or_else(|| serde_json::json!({"kind": "text", "body": ""}));
-            return finish!(Outcome::Completed(result));
+            // Capture the agent-raised l1_insight on the EXACT iteration where
+            // Outcome::Completed will fire. We use plan.completion_insight()
+            // which encapsulates the gate (is_terminal && l1_insight.is_some()).
+            let captured_l1_insight: Option<String> = plan.completion_insight().map(|s| s.to_string());
+            return finish!(Outcome::Completed(result), captured_l1_insight);
         }
 
         // 4. Execute steps
@@ -418,7 +436,7 @@ fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
 /// Extracted from `write_audit_plan_formulate` so the wire shape is
 /// unit-testable without a live Postgres pool. The shape pins
 /// (in this file's `tests` module) defend against accidental drift —
-/// 20 keys for non-`CliInferred` sources, 21 when `CliInferred` carries
+/// 21 keys for non-`CliInferred` sources, 22 when `CliInferred` carries
 /// matched signals.
 ///
 /// Slice A (2026-05-15) added `plan` (full serialised Plan) +
@@ -488,6 +506,17 @@ pub(crate) fn build_plan_formulate_payload(
     obj.insert("plan_step_count".into(), serde_json::json!(plan.steps.len()));
     obj.insert("decision_kind".into(),   serde_json::json!(decision_kind));
     obj.insert("refused".into(),         refused);
+    // Slice E (l1-promotion-writer, 2026-05-18): the agent-raised L1
+    // insight on the terminal plan. Explicit JSON null (not key-absent)
+    // so JSONB queries `WHERE payload ? 'l1_insight'` find the row even
+    // when the agent did not set an insight — mirrors the `refused` precedent.
+    obj.insert(
+        "l1_insight".into(),
+        match &plan.l1_insight {
+            Some(s) => serde_json::Value::String(s.clone()),
+            None => serde_json::Value::Null,
+        },
+    );
     // Slice A:
     obj.insert("plan".into(),                 plan_json);
     obj.insert("classification_floor".into(), classification_floor_json);
@@ -868,10 +897,12 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_pins_twenty_keys_for_default_source() {
-        // Slice D (2026-05-17, recall-lane wiring) bumps the
+    fn build_plan_formulate_payload_pins_twenty_one_keys_for_default_source() {
+        // Slice D (2026-05-17, recall-lane wiring) bumped the
         // default-source key count from 17 to 20 by adding
         // recalled_memory_ids, recall_count, recall_query_sha256.
+        // Slice E (2026-05-18, l1-promotion-writer) bumps to 21 by
+        // adding l1_insight.
         let plan = make_text_plan();
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
@@ -904,9 +935,10 @@ mod tests {
             "plan", "classification_floor", "classification_floor_source",
             "system_prompt_sha256", "l0_count", "l1_count",
             "recalled_memory_ids", "recall_count", "recall_query_sha256",
+            "l1_insight",
         ].into_iter().collect();
         assert_eq!(got, expected,
-            "default-source payload must carry exactly 20 keys; diff:\n\
+            "default-source payload must carry exactly 21 keys; diff:\n\
              missing = {:?}\nextra = {:?}",
             expected.difference(&got).collect::<Vec<_>>(),
             got.difference(&expected).collect::<Vec<_>>(),
@@ -914,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_cli_inferred_source_has_21_keys_with_signals() {
+    fn build_plan_formulate_payload_cli_inferred_source_has_22_keys_with_signals() {
         let plan = make_text_plan();
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
@@ -938,8 +970,8 @@ mod tests {
             &meta,
         );
         let obj = payload.as_object().expect("payload object");
-        assert_eq!(obj.len(), 21,
-            "cli_inferred source with signals must carry 21 keys (20 default + signals); got {} keys: {:?}",
+        assert_eq!(obj.len(), 22,
+            "cli_inferred source with signals must carry 22 keys (21 default + signals); got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -1036,8 +1068,8 @@ mod tests {
             1, 1, DataClass::Public, ClassificationFloorSource::Default, &[], &plan, &meta,
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 20,
-            "default-source payload should have 20 keys; got {} keys: {:?}",
+        assert_eq!(obj.len(), 21,
+            "default-source payload should have 21 keys; got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
         assert!(obj.get("classification_floor_signals").is_none(),
@@ -1071,8 +1103,8 @@ mod tests {
             &plan, &meta,
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 20,
-            "agent_raised should have 20 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj.len(), 21,
+            "agent_raised should have 21 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
         assert!(obj.get("classification_floor_signals").is_none());
     }
@@ -1100,5 +1132,76 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s[0]["decision"], "act");
         assert_eq!(s[0]["step_outcomes"], serde_json::json!(["ok", "err"]));
+    }
+
+    // ── Slice E: l1_insight payload key + InnerLoopResult field pins ──────
+
+    fn make_default_meta() -> FormulationMeta {
+        FormulationMeta {
+            prompt_name: "agent_planner".into(),
+            prompt_sha256: "p1".into(),
+            llm_model: "lm".into(),
+            llm_backend: "local".into(),
+            latency_ms: 1,
+            retry_count: 0,
+            assembled_prompt_sha256: "ax".into(),
+            l0_count: 0,
+            l1_count: 0,
+            recalled_memory_ids: Vec::new(),
+            recall_count: 0,
+            recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+        }
+    }
+
+    #[test]
+    fn plan_formulate_payload_carries_l1_insight_when_set() {
+        let plan_with_insight = Plan {
+            l1_insight: Some("learned X".into()),
+            ..make_text_plan()
+        };
+        let meta = make_default_meta();
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public,
+            ClassificationFloorSource::Default,
+            &[],
+            &plan_with_insight,
+            &meta,
+        );
+        assert_eq!(
+            payload.get("l1_insight").expect("l1_insight key must be present"),
+            &serde_json::Value::String("learned X".into()),
+        );
+    }
+
+    #[test]
+    fn plan_formulate_payload_carries_explicit_null_l1_insight_when_unset() {
+        // The key must be present-but-null when the agent does not set it,
+        // so JSONB queries `WHERE payload ? 'l1_insight'` find the row.
+        let plan = make_text_plan(); // l1_insight: None
+        let meta = make_default_meta();
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public,
+            ClassificationFloorSource::Default,
+            &[],
+            &plan,
+            &meta,
+        );
+        assert_eq!(
+            payload.get("l1_insight").expect("l1_insight key must be present even when None"),
+            &serde_json::Value::Null,
+        );
+    }
+
+    #[test]
+    fn inner_loop_result_terminal_l1_insight_default_is_none() {
+        // Structural pin: any newly-built InnerLoopResult should default
+        // terminal_l1_insight to None unless explicitly set.
+        let result = InnerLoopResult {
+            outcome: Outcome::Failed("test".into()),
+            plan_count: 0,
+            dispatch_count: 0,
+            terminal_l1_insight: None,
+        };
+        assert!(result.terminal_l1_insight.is_none());
     }
 }

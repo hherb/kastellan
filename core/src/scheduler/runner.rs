@@ -358,6 +358,7 @@ fn failed_result(detail: String) -> InnerLoopResult {
         outcome: Outcome::Failed(detail),
         plan_count: 0,
         dispatch_count: 0,
+        terminal_l1_insight: None,
     }
 }
 
