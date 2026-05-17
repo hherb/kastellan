@@ -13,13 +13,14 @@
 //! See `docs/superpowers/specs/2026-05-17-l1-promotion-writer-design.md`
 //! for the full design.
 
-use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+use hhagent_db::memories::{insert_memory_at_layer, load_layer, Memory, MemoryLayer};
 use hhagent_db::DbError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use crate::memory::layers::load_l1_default;
 
 /// Maximum body length in bytes for an L1 row. Half of L0's
 /// `L0_MAX_BODY_BYTES = 1024`; the L1 read cap is 4 KiB across
@@ -229,6 +230,30 @@ pub async fn promote_l1(
     Ok(L1WriteOutcome::Inserted { memory_id: new_id })
 }
 
+/// Operator-facing list view.
+///
+/// - `all = false` returns the **in-prompt** slice via `load_l1_default`
+///   (newest-first, capped at 32 rows / 4 KiB). What the prompt
+///   assembler will actually render.
+/// - `all = true` returns every row at `layer = 1` (newest-first,
+///   no byte cap, no row cap). For operator audit / cleanup.
+pub async fn list_l1(pool: &PgPool, all: bool) -> Result<Vec<Memory>, DbError> {
+    if all {
+        load_layer(pool, MemoryLayer::Index, usize::MAX).await
+    } else {
+        load_l1_default(pool).await
+    }
+}
+
+/// Operator-facing remove. Layer-guarded via
+/// `hhagent_db::memories::delete_memory_at_layer`: cannot delete
+/// an L0 / L2 / L3 row even if the operator typoed the id.
+///
+/// Returns `true` iff a row was deleted.
+pub async fn remove_l1(pool: &PgPool, id: i64) -> Result<bool, DbError> {
+    hhagent_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Index).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +427,27 @@ mod tests {
             let metadata_source = metadata.get("source").unwrap().as_str().unwrap();
             assert_eq!(metadata_source, *expected_source_str, "build_l1_metadata drift");
         }
+    }
+
+    #[test]
+    fn list_l1_signature_compile_pin() {
+        fn _signature_pin<'a>(
+            pool: &'a sqlx::PgPool,
+            all: bool,
+        ) -> impl std::future::Future<Output = Result<Vec<hhagent_db::memories::Memory>, hhagent_db::DbError>> + 'a {
+            list_l1(pool, all)
+        }
+        let _ = _signature_pin;
+    }
+
+    #[test]
+    fn remove_l1_signature_compile_pin() {
+        fn _signature_pin<'a>(
+            pool: &'a sqlx::PgPool,
+            id: i64,
+        ) -> impl std::future::Future<Output = Result<bool, hhagent_db::DbError>> + 'a {
+            remove_l1(pool, id)
+        }
+        let _ = _signature_pin;
     }
 }
