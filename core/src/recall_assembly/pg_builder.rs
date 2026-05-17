@@ -7,10 +7,15 @@
 //!   regardless of the query string. Always `pub` (not `cfg(test)`)
 //!   so cross-crate integration tests in `core/tests/*.rs` can use it.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use hhagent_db::memories::Memory;
+use sqlx::PgPool;
+use hhagent_llm_router::Router;
 
-use super::{sha256_hex, RecallBuilder, RecalledContext, RecallError};
+use crate::memory::{embed_query, recall, RecallParams, RecallModes};
+use super::{sha256_hex, RecallBuilder, RecalledContext, RecallError, L_RECALL_CAP_BYTES};
 
 /// Greedy newest-first cap: walk `rows` in order, push as long as
 /// cumulative body bytes stay ≤ `cap_bytes`. The first row that
@@ -26,7 +31,6 @@ use super::{sha256_hex, RecallBuilder, RecalledContext, RecallError};
 /// The `cap_bytes` parameter is expected to be [`L_RECALL_CAP_BYTES`]
 /// in production; tests may pass a smaller value to exercise the cap
 /// path without constructing kilobyte-sized bodies.
-#[allow(dead_code)] // Task 5 (PgRecallBuilder::build) will call this.
 pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, Vec<String>) {
     let mut ids = Vec::with_capacity(rows.len());
     let mut bodies = Vec::with_capacity(rows.len());
@@ -68,37 +72,51 @@ pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, V
     (ids, bodies)
 }
 
-/// Production builder. Body lands in Task 5; the constructor + struct
-/// are declared here so the trait impl compiles.
+/// Production builder. Composes [`embed_query`] + [`recall`] over a
+/// shared [`PgPool`] and [`Router`]; caps the rendered bodies via
+/// [`cap_and_split`].
+///
+/// Holds `PgPool` by value (cheap to clone via sqlx's internal `Arc`
+/// — matches the [`crate::prompt_assembly::PgSystemPromptBuilder`]
+/// convention) and `Router` behind an `Arc` (the same `Arc<Router>`
+/// already constructed in `main.rs`).
 pub struct PgRecallBuilder {
-    // Fields land in Task 5 with the body. Keep the struct private
-    // to-be-revealed; only `new` is public surface today.
-    _placeholder: (),
+    pool: PgPool,
+    router: Arc<Router>,
 }
 
 impl PgRecallBuilder {
-    /// **Task 5 will replace this** with a real constructor taking
-    /// `(PgPool, Arc<Router>)`. Stubbed today so module shape compiles.
-    pub fn new() -> Self {
-        Self { _placeholder: () }
-    }
-}
-
-impl Default for PgRecallBuilder {
-    fn default() -> Self {
-        Self::new()
+    /// Construct a builder pinned to the supplied pool and router.
+    pub fn new(pool: PgPool, router: Arc<Router>) -> Self {
+        Self { pool, router }
     }
 }
 
 #[async_trait]
 impl RecallBuilder for PgRecallBuilder {
-    async fn build(&self, _query: &str) -> Result<RecalledContext, RecallError> {
-        // Task 5 replaces this body. Today: empty context so the
-        // module compiles and degrade-and-warn callers behave sanely
-        // if the stub is reached (it should not be — `main.rs` wires
-        // the real impl in Task 8, which lands together with the
-        // Task 5 body).
-        Ok(RecalledContext::empty())
+    async fn build(&self, query: &str) -> Result<RecalledContext, RecallError> {
+        let query_sha256 = sha256_hex(query.as_bytes());
+
+        // Step 1 — turn the query text into an embedding (writes the
+        // actor='llm:router' action='embed' audit row internally).
+        let emb = embed_query(&self.pool, &self.router, query).await?;
+
+        // Step 2 — fan out semantic + lexical lanes. Graph lane stays
+        // off because we have no entity seeds at this slice — that's a
+        // separate "entity extraction" follow-up. The empty seeds vec
+        // + SEMANTIC_AND_LEXICAL modes is the cleanest call shape
+        // (matches RecallParams::new's defaults).
+        let mut params = RecallParams::new(query, &emb);
+        params.modes = RecallModes::SEMANTIC_AND_LEXICAL;
+        let rows = recall(&self.pool, &params).await?;
+
+        // Step 3 — byte-cap into the final RecalledContext.
+        let (ids, bodies) = cap_and_split(rows, L_RECALL_CAP_BYTES);
+        Ok(RecalledContext {
+            ids,
+            bodies,
+            query_sha256,
+        })
     }
 }
 
