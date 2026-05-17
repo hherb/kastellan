@@ -124,4 +124,29 @@ mod tests {
     fn static_builder_with_panics_on_length_mismatch() {
         let _ = StaticRecallBuilder::with(vec![1, 2], vec!["only one".into()], "q");
     }
+
+    #[tokio::test]
+    async fn static_builder_with_empty_vectors_uses_real_query_hash_not_empty_sentinel() {
+        // The valid empty-rows-but-real-query case: a recall that
+        // returned zero memories for a non-empty query is wire-distinct
+        // from a `StaticRecallBuilder::empty()` (or a degraded recall
+        // with no query embedded yet). is_empty() returns true for
+        // both, but query_sha256 differs — and the audit row carries
+        // the distinction. Pinning this prevents a future refactor
+        // from collapsing the two cases.
+        let b = StaticRecallBuilder::with(vec![], vec![], "q");
+        let c = b.build("ignored").await.expect("static build never fails");
+        assert!(c.is_empty(), "ids and bodies are empty by construction");
+        assert!(c.ids.is_empty());
+        assert!(c.bodies.is_empty());
+        // Critical: query_sha256 must reflect the supplied query "q",
+        // NOT the canonical empty-string sentinel.
+        assert_ne!(
+            c.query_sha256,
+            super::super::RecalledContext::empty().query_sha256,
+            "with(vec![], vec![], \"q\") must NOT produce the canonical empty-string sentinel",
+        );
+        assert_eq!(c.query_sha256, sha256_hex(b"q"),
+                   "query_sha256 must equal sha256_hex(b\"q\")");
+    }
 }

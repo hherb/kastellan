@@ -94,12 +94,15 @@ impl RecalledContext {
     /// field is always 64 hex chars (consumers can pin the length
     /// without a special case for "no recall ran").
     pub fn empty() -> Self {
-        let mut h = Sha256::new();
-        h.update(b"");
         Self {
             ids: Vec::new(),
             bodies: Vec::new(),
-            query_sha256: format!("{:x}", h.finalize()),
+            // Call sha256_hex(b"") rather than inlining the hash so
+            // there's a single hash-format control point (`sha256_hex`
+            // below). Forward reference within the same module is
+            // fine in Rust; preserves the canonical sentinel via the
+            // helper a downstream contributor would expect.
+            query_sha256: sha256_hex(b""),
         }
     }
 
