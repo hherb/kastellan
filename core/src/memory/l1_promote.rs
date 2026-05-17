@@ -165,6 +165,67 @@ pub fn build_l1_metadata(
     serde_json::Value::Object(obj)
 }
 
+use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+use sqlx::PgPool;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+
+/// Promote a single L1 row. Validates, computes SHA-256, EXISTS-checks
+/// against `layer = 1` rows by `metadata->>'body_sha256'`, inserts on
+/// miss. Idempotent on body SHA-256 across all source variants — the
+/// dedup is source-agnostic (a body the operator added is not promoted
+/// again when the agent later raises it, and vice versa).
+///
+/// The `metadata` blob carries `{source, body_sha256, created_at, task_id?}`
+/// per [`build_l1_metadata`].
+///
+/// **Embedding:** not populated. L1 is loaded by sequential scan via
+/// `load_l1` (newest-first, byte-capped); the embedding column would
+/// only matter if L1 rows ever flowed through `recall(SEMANTIC_ONLY)`.
+/// They don't today; a future hybrid always-in-context + semantically-
+/// retrieved approach can backfill.
+pub async fn promote_l1(
+    pool: &PgPool,
+    body: &str,
+    source: L1Source,
+) -> Result<L1WriteOutcome, L1Error> {
+    let trimmed = validate_l1_body(body)?;
+    let body_sha256 = compute_body_sha256(trimmed);
+
+    // EXISTS-check keyed on metadata->>'body_sha256' at layer = 1.
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM memories \
+         WHERE layer = $1 AND metadata->>'body_sha256' = $2 \
+         ORDER BY id ASC LIMIT 1",
+    )
+    .bind(MemoryLayer::Index.as_db())
+    .bind(&body_sha256)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| L1Error::Db(hhagent_db::DbError::Query(
+        format!("promote_l1 EXISTS-check body_sha256={body_sha256}: {e}")
+    )))?;
+
+    if let Some(existing_id) = existing {
+        return Ok(L1WriteOutcome::SkippedDuplicate { memory_id: existing_id });
+    }
+
+    let created_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .expect("rfc3339 format");
+    let metadata = build_l1_metadata(&source, &body_sha256, &created_at);
+
+    let new_id = insert_memory_at_layer(
+        pool,
+        trimmed,
+        &metadata,
+        None, // embedding not populated for L1 v1
+        MemoryLayer::Index,
+    )
+    .await?;
+    Ok(L1WriteOutcome::Inserted { memory_id: new_id })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +363,22 @@ mod tests {
 
         let ag = serde_json::to_value(&L1Source::AgentRaised { task_id: 7 }).expect("serialize");
         assert_eq!(ag, serde_json::json!({"source": "agent_raised", "task_id": 7}));
+    }
+
+    #[test]
+    fn promote_l1_signature_compile_pin() {
+        // Compile-only smoke: verify the function signature stays
+        // (pool: &PgPool, body: &str, source: L1Source) -> Result<L1WriteOutcome, L1Error>.
+        // Full DB-backed coverage lives in core/tests/memory_l1_promote_e2e.rs.
+        fn _signature_pin<'a>(
+            pool: &'a sqlx::PgPool,
+            body: &'a str,
+            source: L1Source,
+        ) -> impl std::future::Future<Output = Result<L1WriteOutcome, L1Error>> + 'a {
+            promote_l1(pool, body, source)
+        }
+        // No call — just ensure the function exists and has this signature.
+        let _ = _signature_pin;
     }
 
     #[test]
