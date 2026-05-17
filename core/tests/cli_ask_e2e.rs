@@ -693,6 +693,14 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
                 "plan.formulate row {i} must carry numeric l0_count; got {p:?}");
             assert!(p.get("l1_count").and_then(|v| v.as_u64()).is_some(),
                 "plan.formulate row {i} must carry numeric l1_count; got {p:?}");
+            assert!(p.get("recall_count").and_then(|v| v.as_u64()).is_some(),
+                "plan.formulate row {i} must carry numeric recall_count; got {p:?}");
+            assert!(p.get("recalled_memory_ids").and_then(|v| v.as_array()).is_some(),
+                "plan.formulate row {i} must carry array recalled_memory_ids; got {p:?}");
+            let sha = p.get("recall_query_sha256").and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("plan.formulate row {i} must carry recall_query_sha256; got {p:?}"));
+            assert_eq!(sha.len(), 64,
+                "plan.formulate row {i}: recall_query_sha256 must be 64 hex chars; got {sha}");
         }
 
         pool.close().await;
@@ -931,6 +939,34 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
                    "task.finalize.total_llm_calls should be 3; got {fp:?}");
         assert_eq!(fp["total_dispatch_calls"], 3,
                    "task.finalize.total_dispatch_calls should be 3 (one per denied iter); got {fp:?}");
+
+        // Slice D (recall lane, 2026-05-17): every plan.formulate row
+        // must carry the three recall keys produced by PgRecallBuilder.
+        // Zero-vector embeddings yield an empty result set from pgvector
+        // (cosine similarity undefined → 0 rows returned), so
+        // recall_count=0 and recalled_memory_ids=[] are expected here.
+        // recall_query_sha256 is always the SHA-256 of the task
+        // instruction, computed before the recall fan-out.
+        let plan_rows: Vec<(sqlx::types::Json<serde_json::Value>,)> = sqlx::query_as(
+            "SELECT payload FROM audit_log \
+             WHERE actor = 'agent' AND action = 'plan.formulate' \
+             ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("select plan.formulate rows (cap-exhaustion path)");
+        assert_eq!(plan_rows.len(), 3, "expected 3 plan.formulate rows (cap-exhaustion path)");
+        for (i, row) in plan_rows.iter().enumerate() {
+            let p = &row.0.0;
+            assert!(p.get("recall_count").and_then(|v| v.as_u64()).is_some(),
+                "plan.formulate row {i} must carry numeric recall_count; got {p:?}");
+            assert!(p.get("recalled_memory_ids").and_then(|v| v.as_array()).is_some(),
+                "plan.formulate row {i} must carry array recalled_memory_ids; got {p:?}");
+            let sha = p.get("recall_query_sha256").and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("plan.formulate row {i} must carry recall_query_sha256; got {p:?}"));
+            assert_eq!(sha.len(), 64,
+                "plan.formulate row {i}: recall_query_sha256 must be 64 hex chars; got {sha}");
+        }
 
         pool.close().await;
     });
