@@ -324,6 +324,9 @@ impl PlanFormulator for ScriptedFormulator {
                 assembled_prompt_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
                 l0_count: 0,
                 l1_count: 0,
+                recalled_memory_ids: Vec::new(),
+                recall_count: 0,
+                recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
             },
         ))
     }
@@ -478,6 +481,19 @@ async fn happy_path_one_plan_returns_completed() {
         "plan.formulate must carry numeric l0_count; got {payload:?}");
     assert!(payload.get("l1_count").and_then(|v| v.as_u64()).is_some(),
         "plan.formulate must carry numeric l1_count; got {payload:?}");
+    assert!(payload.get("recall_count").and_then(|v| v.as_u64()).is_some(),
+        "plan.formulate must carry numeric recall_count; got {payload:?}");
+    assert!(payload.get("recalled_memory_ids").and_then(|v| v.as_array()).is_some(),
+        "plan.formulate must carry array recalled_memory_ids; got {payload:?}");
+    let sha = payload.get("recall_query_sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("plan.formulate must carry string recall_query_sha256; got {payload:?}"));
+    assert_eq!(sha.len(), 64, "recall_query_sha256 must be 64 hex chars; got {sha}");
+    // Cross-key consistency: count must equal the ids array length.
+    let n = payload["recall_count"].as_u64().unwrap();
+    let ids_len = payload["recalled_memory_ids"].as_array().unwrap().len() as u64;
+    assert_eq!(n, ids_len,
+        "recall_count must equal recalled_memory_ids.len(); got {n} vs {ids_len}");
 }
 
 /// (b) Plan 1 dispatches a step that fails (no entry in dispatcher

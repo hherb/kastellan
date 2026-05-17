@@ -235,6 +235,33 @@ fn envelope_for(plan_json_string: &str) -> String {
     .to_string()
 }
 
+/// Build an OpenAI-compatible embedding response envelope.
+///
+/// `PgRecallBuilder::build` calls `embed_query` (→ `router.embed`) once
+/// per plan iteration, BEFORE the chat-completion call. The mock serves
+/// requests in FIFO order regardless of URL path, so the queue must
+/// contain an embedding envelope for each plan iteration or the chat
+/// responses will be consumed by the embed request.
+///
+/// `embed_query` validates that the returned embedding vector has
+/// exactly `EMBEDDING_DIM = 1024` elements; any other length causes a
+/// `MemoryError::EmbeddingDimMismatch` which triggers the
+/// degrade-and-warn path in `formulate_plan`. The byte values don't
+/// matter for these tests: the `memories` table is never seeded, so
+/// both recall lanes return 0 rows regardless of the query vector.
+/// Using `0.001` (a small non-zero value) keeps the embedding numerically
+/// well-defined for pgvector's cosine operator without relying on any
+/// implementation-defined behaviour for the all-zeros edge case.
+fn embedding_envelope() -> String {
+    let filler: Vec<f32> = vec![0.001f32; 1024];
+    serde_json::json!({
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0, "embedding": filler}],
+        "model": "test-local-model"
+    })
+    .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Daemon bring-up — wires the `hhagent` core service to the per-test
 // PG cluster + mock LLM + workspace prompts + per-test allowlist.
@@ -468,8 +495,13 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         .build()
         .expect("build multi-threaded tokio runtime");
 
+    // Each plan iteration: (1) embed request for recall, (2) chat
+    // completion for plan generation. 2 iterations → 4 total mock
+    // responses, interleaved embed/chat/embed/chat.
     let mock = rt.block_on(spawn_queued_mock(vec![
+        embedding_envelope(),
         envelope_for(&plan_json("act", echo_step(&marker), None)),
+        embedding_envelope(),
         envelope_for(&plan_json(
             "task_complete",
             serde_json::json!([]),
@@ -568,6 +600,10 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
                    "expected 1× cli/task.submitted (producer-side row from hhagent-cli ask); multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&2),
                    "expected 2× agent/plan.formulate (one per LLM call); multiset = {m:?}");
+        // PgRecallBuilder calls embed_query once per plan iteration before
+        // the chat-completion: 2 plan iterations → 2 embed audit rows.
+        assert_eq!(m.get(&("llm:router".into(), "embed".into())), Some(&2),
+                   "expected 2× llm:router/embed (one per recall+plan iteration); multiset = {m:?}");
         assert_eq!(m.get(&("cassandra:chain".into(), "verdict".into())), Some(&2),
                    "expected 2× cassandra:chain/verdict (one per plan); multiset = {m:?}");
         assert_eq!(m.get(&("tool:shell-exec".into(), "shell.exec".into())), Some(&1),
@@ -588,10 +624,11 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
             .await
             .expect("count audit_log");
         // +1 for test/setup (pre-seed probe), +1 core/startup, +1 core/registry.loaded,
-        // +1 cli/task.submitted, +2 agent/plan.formulate, +2 cassandra:chain/verdict,
-        // +1 tool:shell-exec/shell.exec, +1 scheduler/plan.outcome,
-        // +1 scheduler/task.running, +1 scheduler/task.completed, +1 scheduler/task.finalize
-        let expected_total: i64 = 1 + 1 + 1 + 1 + 2 + 2 + 1 + 1 + 1 + 1 + 1; // = 13
+        // +1 cli/task.submitted, +2 agent/plan.formulate, +2 llm:router/embed (recall),
+        // +2 cassandra:chain/verdict, +1 tool:shell-exec/shell.exec,
+        // +1 scheduler/plan.outcome, +1 scheduler/task.running,
+        // +1 scheduler/task.completed, +1 scheduler/task.finalize
+        let expected_total: i64 = 1 + 1 + 1 + 1 + 2 + 2 + 2 + 1 + 1 + 1 + 1 + 1; // = 15
         assert_eq!(
             total.0, expected_total,
             "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
@@ -660,26 +697,39 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
                 "plan.formulate row {i} must carry numeric l0_count; got {p:?}");
             assert!(p.get("l1_count").and_then(|v| v.as_u64()).is_some(),
                 "plan.formulate row {i} must carry numeric l1_count; got {p:?}");
+            assert!(p.get("recall_count").and_then(|v| v.as_u64()).is_some(),
+                "plan.formulate row {i} must carry numeric recall_count; got {p:?}");
+            assert!(p.get("recalled_memory_ids").and_then(|v| v.as_array()).is_some(),
+                "plan.formulate row {i} must carry array recalled_memory_ids; got {p:?}");
+            let sha = p.get("recall_query_sha256").and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("plan.formulate row {i} must carry recall_query_sha256; got {p:?}"));
+            assert_eq!(sha.len(), 64,
+                "plan.formulate row {i}: recall_query_sha256 must be 64 hex chars; got {sha}");
         }
 
         pool.close().await;
     });
 
-    // Mock dial count: 2 — happy path is exactly 2 LLM calls.
+    // Mock dial count: 4 — 2 embed requests (one per recall call) +
+    // 2 chat-completion requests (one per plan iteration). The mock
+    // serves all request types from the same FIFO queue, so total HTTP
+    // round-trips is 2×(embed + chat) = 4.
     let captured = mock.requests.lock().unwrap();
     assert_eq!(
         captured.len(),
-        2,
-        "expected daemon to dial mock exactly 2× in happy path; got {}",
+        4,
+        "expected daemon to dial mock exactly 4× in happy path (2 embed + 2 chat); got {}",
         captured.len()
     );
-    // First request must carry the cached `agent_planner` prompt.
-    let first_body = &captured[0];
+    // Second request (index 1) is the first chat-completion and must
+    // carry the cached `agent_planner` prompt. Index 0 is the first
+    // embedding request body.
+    let first_chat_body = &captured[1];
     assert!(
-        first_body.contains("Constitutional Principles"),
-        "first request must carry the cached planner prompt; got first {} chars:\n{}",
-        first_body.len().min(800),
-        &first_body[..first_body.len().min(800)],
+        first_chat_body.contains("Constitutional Principles"),
+        "first chat request (index 1) must carry the cached planner prompt; got first {} chars:\n{}",
+        first_chat_body.len().min(800),
+        &first_chat_body[..first_chat_body.len().min(800)],
     );
 }
 
@@ -721,10 +771,17 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
     // every iteration the inner-loop replans. On the fourth would-be
     // iteration the plan-iter cap kicks in (DEFAULT_MAX_PLANS_FAST=3)
     // and we return Outcome::Failed.
+    //
+    // Each plan iteration: (1) embed request for recall, (2) chat
+    // completion for plan generation. 3 iterations → 6 total mock
+    // responses, interleaved embed/chat/embed/chat/embed/chat.
     let denied_plan = envelope_for(&plan_json("act", cat_passwd_step(), None));
     let mock = rt.block_on(spawn_queued_mock(vec![
+        embedding_envelope(),
         denied_plan.clone(),
+        embedding_envelope(),
         denied_plan.clone(),
+        embedding_envelope(),
         denied_plan,
     ]));
 
@@ -837,6 +894,10 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
                    "expected 1× cli/task.submitted (producer-side row from hhagent-cli ask); multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&3),
                    "expected 3× agent/plan.formulate (one per LLM call before cap); multiset = {m:?}");
+        // PgRecallBuilder calls embed_query once per plan iteration before
+        // the chat-completion: 3 plan iterations → 3 embed audit rows.
+        assert_eq!(m.get(&("llm:router".into(), "embed".into())), Some(&3),
+                   "expected 3× llm:router/embed (one per recall+plan iteration); multiset = {m:?}");
         assert_eq!(m.get(&("cassandra:chain".into(), "verdict".into())), Some(&3),
                    "expected 3× cassandra:chain/verdict (one per plan); multiset = {m:?}");
         assert_eq!(m.get(&("tool:shell-exec".into(), "shell.exec".into())), Some(&3),
@@ -855,10 +916,11 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
             .await
             .expect("count audit_log");
         // +1 test/setup (pre-seed probe), +1 core/startup, +1 core/registry.loaded,
-        // +1 cli/task.submitted, +3 agent/plan.formulate, +3 cassandra:chain/verdict,
-        // +3 tool:shell-exec/shell.exec, +3 scheduler/plan.outcome,
-        // +1 scheduler/task.running, +1 scheduler/task.failed, +1 scheduler/task.finalize
-        let expected_total: i64 = 1 + 1 + 1 + 1 + 3 + 3 + 3 + 3 + 1 + 1 + 1; // = 19
+        // +1 cli/task.submitted, +3 agent/plan.formulate, +3 llm:router/embed (recall),
+        // +3 cassandra:chain/verdict, +3 tool:shell-exec/shell.exec,
+        // +3 scheduler/plan.outcome, +1 scheduler/task.running,
+        // +1 scheduler/task.failed, +1 scheduler/task.finalize
+        let expected_total: i64 = 1 + 1 + 1 + 1 + 3 + 3 + 3 + 3 + 3 + 1 + 1 + 1; // = 22
         assert_eq!(
             total.0, expected_total,
             "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
@@ -882,12 +944,45 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         assert_eq!(fp["total_dispatch_calls"], 3,
                    "task.finalize.total_dispatch_calls should be 3 (one per denied iter); got {fp:?}");
 
+        // Slice D (recall lane, 2026-05-17): every plan.formulate row
+        // must carry the three recall keys produced by PgRecallBuilder.
+        // The `memories` table is empty in this test (we never seed it),
+        // so both the semantic and lexical lanes return 0 rows regardless
+        // of what embedding the mock returns — hence recall_count=0 and
+        // recalled_memory_ids=[]. recall_query_sha256 is always the
+        // SHA-256 of the task instruction, computed before the recall
+        // fan-out, so it's present and 64 hex chars even on the empty path.
+        let plan_rows: Vec<(sqlx::types::Json<serde_json::Value>,)> = sqlx::query_as(
+            "SELECT payload FROM audit_log \
+             WHERE actor = 'agent' AND action = 'plan.formulate' \
+             ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("select plan.formulate rows (cap-exhaustion path)");
+        assert_eq!(plan_rows.len(), 3, "expected 3 plan.formulate rows (cap-exhaustion path)");
+        for (i, row) in plan_rows.iter().enumerate() {
+            let p = &row.0.0;
+            assert!(p.get("recall_count").and_then(|v| v.as_u64()).is_some(),
+                "plan.formulate row {i} must carry numeric recall_count; got {p:?}");
+            assert!(p.get("recalled_memory_ids").and_then(|v| v.as_array()).is_some(),
+                "plan.formulate row {i} must carry array recalled_memory_ids; got {p:?}");
+            let sha = p.get("recall_query_sha256").and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("plan.formulate row {i} must carry recall_query_sha256; got {p:?}"));
+            assert_eq!(sha.len(), 64,
+                "plan.formulate row {i}: recall_query_sha256 must be 64 hex chars; got {sha}");
+        }
+
         pool.close().await;
     });
 
+    // Mock dial count: 6 — 3 embed requests (one per recall call) +
+    // 3 chat-completion requests (one per plan iteration before cap).
+    // The mock serves all request types from the same FIFO queue, so
+    // total HTTP round-trips is 3×(embed + chat) = 6.
     let dialed = mock.requests.lock().unwrap().len();
     assert_eq!(
-        dialed, 3,
-        "expected daemon to dial mock exactly 3× before cap; got {dialed}"
+        dialed, 6,
+        "expected daemon to dial mock exactly 6× before cap (3 embed + 3 chat); got {dialed}"
     );
 }

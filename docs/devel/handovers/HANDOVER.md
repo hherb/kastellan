@@ -4,9 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-16 (prompt assembler — shipped on branch `feat/prompt-assembler-l0-l1`; new `core::prompt_assembly` module + `SystemPromptBuilder` trait + `PgSystemPromptBuilder`/`StaticSystemPromptBuilder` impls + 3 new `plan.formulate` audit-row keys; +14 tests; workspace 638 → **652**).
-**Last commit (branch HEAD):** `7181074`. 13 commits on branch off `main` at `3cd6364`: spec (`7062e5e`) + plan (`95737cf`) → Task 1 + fixup (`5213277`, `f5de46c`) → Task 2 + fixup (`d238163`, `421a5b9`) → Task 3 + fixup (`8ed1abd`, `b2c88db`) → Task 4 + fixup (`8b2e3af`, `48c9145`) → Task 5 + fixup (`7c5544f`, `58ab5ef`) → Task 6 (`7181074`).
-**Session-end verification:** `cargo test --workspace` on branch HEAD: **638 passed, 0 failed, 4 ignored, 0 [SKIP] lines, 0 warnings** on Linux. `core/src/memory/l0_seed.rs` ~660 LOC (370 impl + ~290 inline tests; implementation alone well under the 500-LOC soft cap; matches the `core/src/memory/layers.rs` inline-tests precedent). `core/src/main.rs` 437 LOC (up from ~415 — flagged in code review as a slow-creep concern; a future `startup::bring_up(pool)` extraction would help if more seed/loader tasks land in main.rs).
+**Last updated:** 2026-05-17 (recall-lane wiring — shipped on branch `feat/recall-lane-wiring`; new `core::recall_assembly` module + `RecallBuilder` trait + `PgRecallBuilder`/`StaticRecallBuilder` impls + widened `assemble_system_prompt` 3-arg → 4-arg + `SystemPromptBuilder::build_with_recalled` + 3 new `plan.formulate` audit-row keys; +19 tests; workspace 652 → **671**).
+**Last commit (branch HEAD):** `0c68328`. 16 commits on branch off `main` at `2f339c3`: spec (`76a342b`) + plan (`45b2121`) → Task 1 + fixup (`2b7e773`, `9d4432a`) → Task 2 + fixup (`3127031`, `67c84e5`) → Task 3 (`5f072ea`) → Task 4 + fixup (`690da86`, `57632a1`) → Task 5 + fixup (`3270b8c`, `84d62cd`) → Tasks 6+7+8 atomic (`abffe51`) → Task 9 + fixup (`1055f7f`, `8d2e580`) → Task 10 (`ae8af69`) → Task 11 (`0c68328`).
+**Session-end verification:** `cargo test --workspace` on branch HEAD: **671 passed, 0 failed, 4 ignored, 0 [SKIP] lines, 0 warnings** on Linux. `core/src/scheduler/inner_loop.rs` now **1095 LOC** (was 991 pre-slice; +104 from the 3 new payload keys + 4 new pin tests + `make_text_plan` fixture); this widens the pre-existing 500-LOC breach from "595 over cap" to "595 + 104 = ~600 over cap" — the inner_loop_audit.rs split follow-up the prompt-assembler slice flagged is now substantially more urgent. `core/src/recall_assembly/{mod.rs, pg_builder.rs}` ship at 176 LOC + 297 LOC (both well under the cap). `core/src/scheduler/agent.rs` grew from 176 → **212 LOC** (still well under cap).
 
 **Post-review fixups (2026-05-16):**
 
@@ -157,7 +157,94 @@ cargo test --workspace           # all green
 
 ---
 
-## Recently completed (this session, 2026-05-16 — prompt assembler L0 + L1 wiring, branch `feat/prompt-assembler-l0-l1`)
+## Recently completed (this session, 2026-05-17 — recall-lane wiring, branch `feat/recall-lane-wiring`)
+
+Branch: `feat/recall-lane-wiring` (off `main` at `2f339c3`, 16 commits). Spec: [`docs/superpowers/specs/2026-05-17-recall-lane-wiring-design.md`](../../superpowers/specs/2026-05-17-recall-lane-wiring-design.md). Plan: [`docs/superpowers/plans/2026-05-17-recall-lane-wiring.md`](../../superpowers/plans/2026-05-17-recall-lane-wiring.md). First production consumer of `Router::embed` (Option O, 2026-05-12) and `core::memory::recall(SEMANTIC | LEXICAL)` (PR #41, 2026-05-13).
+
+**Shape (3 NEW + 7 modified):**
+
+- **NEW `core/src/recall_assembly/`** (2 files, ~470 LOC total). Public surface: `RecalledContext { ids: Vec<i64>, bodies: Vec<String>, query_sha256: String }` value type + `RecalledContext::empty()` sentinel (SHA-256 of empty string), async `RecallBuilder` trait, prod `PgRecallBuilder { pool: PgPool, router: Arc<Router> }`, test `StaticRecallBuilder` (`::empty()` + `::with(ids, bodies, query)` constructors with length-match panic), `RecallError::{EmbedQuery(MemoryError), DbLane(DbError)}` error type with `#[from]` derives, pure `pub(crate) cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, Vec<String>)` byte-cap helper (mirrors `load_l1`'s saturating_add + break + warn-only-on-single-row-oversized idiom), `L_RECALL_CAP_BYTES = 4096` (mirrors L1's 4 KiB).
+- **NEW `core/tests/recall_assembly_e2e.rs`** — 1 cross-platform integration test against a per-test PG cluster + hand-rolled `tokio::net::TcpListener` mock for `/embeddings`. Seeds 3 memories with deterministic `text_to_embedding` vectors; asserts the matching memory ranks #1 via fused RRF; pins the exact `query_sha256` value (not just length).
+- **`core/src/prompt_assembly/assemble.rs`** — `assemble_system_prompt` widened 3-arg → 4-arg (`l0, l1, recalled, base`). New `<recalled>` block slotted between `<l1_insights>` and `<base>` when non-empty; empty context omits the tag entirely, producing byte-identical v1 output. Doc rules 4 SAFETY block extended to call out that `<recalled>` bodies are NOT operator-curated (unlike L0/L1). The threat-model note is now load-bearing for future Phase-3 input sanitisation decisions.
+- **`core/src/prompt_assembly/mod.rs`** — `SystemPromptBuilder` trait gains `build_with_recalled(base, &RecalledContext)`; the existing `build(base)` becomes a thin default-impl shim delegating with `RecalledContext::empty()`. `AssembledPrompt` gains a `recalled_count: usize` field.
+- **`core/src/prompt_assembly/pg_builder.rs`** — `PgSystemPromptBuilder::build_with_recalled` is the sole required impl method (the trait default fills in `build`). `StaticSystemPromptBuilder::build_with_recalled` does the same. The legacy `build()` shim is verified byte-identical via the new `prompt_assembly_e2e::pg_builder_with_recalled_renders_block_against_seeded_db` test's `assert_eq!(r_via_legacy, r_via_explicit_empty)` pin.
+- **`core/src/scheduler/agent.rs`** — `RouterAgent::new` gains a 4th `recall_builder: Arc<dyn RecallBuilder>` argument. `formulate_plan` runs recall BEFORE the prompt assembler with **degrade-and-warn** posture (recall failure → `tracing::warn!` + `RecalledContext::empty()`; explicit asymmetry vs the prompt assembler's fail-closed posture). `FormulationMeta` widened by 3 fields: `recalled_memory_ids: Vec<i64>`, `recall_count: u32`, `recall_query_sha256: String`. New `AgentError` variants not needed — recall errors are swallowed inside `formulate_plan`.
+- **`core/src/scheduler/inner_loop.rs`** — `build_plan_formulate_payload` emits 3 new keys (`recalled_memory_ids` array, `recall_count` numeric, `recall_query_sha256` string). Default-source payload key count grows 17 → 20; `cli_inferred` source (with signals) grows 18 → 21. 4 new pin tests replace the deleted 17/18-key tests; `BTreeSet::difference` provides missing/extra reporting. New `make_text_plan()` test fixture.
+- **`core/src/main.rs`** — constructs `Arc::new(PgRecallBuilder::new(pool.clone(), router.clone()))` and passes as 4th arg to `RouterAgent::new`.
+- **`core/tests/cli_ask_e2e.rs`** — substantial cascade-fix not anticipated by the plan. The new recall lane calls `embed_query` (→ `router.embed`) per plan iteration, which hits the same mock-LLM URL as chat-completions. The mock queue dequeues FIFO regardless of path, so embed requests would consume responses meant for chat. Fix: new `embedding_envelope()` helper (1024-float zero vector, correct `EMBEDDING_DIM`); interleaved mock queues (embed→chat per iteration); dial-count assertions bumped 2→4 (happy) and 3→6 (plan-cap); audit-row count assertions bumped 13→15 (happy, gaining 2 `llm:router/embed` rows) and 19→22 (plan-cap, gaining 3).
+- **`core/tests/router_agent_mock_e2e.rs`** — 3 `RouterAgent::new` call sites updated with `Arc::new(StaticRecallBuilder::empty())` as 4th arg; happy-path test gains 3 assertions on the new meta fields.
+- **`core/tests/scheduler_inner_loop_e2e.rs`** — `ScriptedFormulator`'s `FormulationMeta` literal updated; happy-path mid-tier audit gate gains 4 assertions on the 3 new payload keys (presence + shape + cross-key consistency `recall_count == recalled_memory_ids.len()`).
+- **`core/tests/scheduler_lanes_e2e.rs`** — `ScriptedFormulator`'s `FormulationMeta` literal updated.
+- **`core/tests/prompt_assembly_e2e.rs`** — 2 existing tests gain `recalled_count == 0` assertions; 1 new test pins `build_with_recalled` rendering + legacy `build()` parity via the byte-equality assertion.
+
+**Audit-row contract (the headline):**
+
+| Source              | Before | After  | New keys                                                                         |
+|---------------------|--------|--------|----------------------------------------------------------------------------------|
+| `default`           | 17     | **20** | `recalled_memory_ids`, `recall_count`, `recall_query_sha256`                     |
+| `cli_inferred`      | 18     | **21** | (same three; `classification_floor_signals` already present, retained)           |
+| `operator`          | 17     | **20** | (same three)                                                                     |
+| `agent_raised`      | 17     | **20** | (same three)                                                                     |
+
+Pure-additive; existing JSONB consumers (replay harness, observation captures) keep working unchanged.
+
+**Test count delta:** **652 → 671** (+19: 5 in `recall_assembly::mod.rs::tests` + 4 in `recall_assembly::pg_builder::tests` + 4 new in `assemble::tests` + 1 in `prompt_assembly::pg_builder::tests` + 2 net in `inner_loop::tests` + 1 e2e in `recall_assembly_e2e` + 1 e2e in `prompt_assembly_e2e` + 1 fixup test from Task 1 fix + 1 from Task 4 fix). Zero failures, zero warnings, zero `[SKIP]` lines on Linux. Original plan estimated +18; actual +19 reflects two defensive tests added during review-fix cycles (empty-vectors test for `StaticRecallBuilder::with` in Task 1 fix; exact-cap boundary pin in Task 4 fix).
+
+**TDD ordering (per CLAUDE.md rule #2):** RED → GREEN → commit per task, with two-stage review (spec compliance + code quality) per task. Review-fix commits land in-branch when reviewers surface issues. Tasks 6+7+8 commit atomically because Task 6's `RouterAgent` widening breaks the build until Tasks 7 (main.rs) and 8 (test call sites) fix the cascade.
+
+| Task | Commit(s) | What shipped |
+| ---- | --------- | ------------ |
+| Spec | `76a342b` | Spec at `docs/superpowers/specs/2026-05-17-recall-lane-wiring-design.md` |
+| Plan | `45b2121` | 12-task implementation plan |
+| 1 | `2b7e773` + `9d4432a` | Module scaffold + `RecalledContext`/`RecallBuilder`/`StaticRecallBuilder`/`L_RECALL_CAP_BYTES` + 5 unit tests; post-review fixup uses `sha256_hex(b"")` in `empty()` (DRY) + adds the empty-vectors test |
+| 2 | `3127031` + `67c84e5` | `assemble_system_prompt` widened to 4-arg + 4 new tests + 9 pre-existing tests migrated to 4-arg; post-review fixup uses `recalled.is_empty()` (encapsulation) + SAFETY block extension + test-module import cleanup (13 fully-qualified paths collapsed) |
+| 3 | `5f072ea` | `SystemPromptBuilder::build_with_recalled` + `AssembledPrompt::recalled_count` + 1 unit test; `build` becomes a thin default-impl shim |
+| 4 | `690da86` + `57632a1` | `cap_and_split` pure helper + 4 unit tests; post-review fixup splits warn/debug (mirrors `load_l1` precedent) + `#[allow(dead_code)]` for transient window + exact-cap boundary pin |
+| 5 | `3270b8c` + `84d62cd` | Real `PgRecallBuilder::build` body + cross-platform e2e test with hand-rolled TCP mock; post-review fixup adds explanatory comment on `RecallParams::new` choice + refreshes stale `cap_and_split` docstring + strengthens `query_sha256` assertion from length-only to exact-value |
+| 6+7+8 | `abffe51` | RouterAgent constructor widening + `FormulationMeta` 3 new fields + `formulate_plan` recall integration with degrade-and-warn + main.rs wire-in + all test call-site cascades INCLUDING the unanticipated `cli_ask_e2e.rs` substantial fix (interleaved mock queues + new dial-count + new audit-count math). One atomic commit |
+| 9 | `1055f7f` + `8d2e580` | `build_plan_formulate_payload` emits 3 new keys + 4 new pin tests (17/18 → 20/21 + round-trip + format pin) + folded-in cleanup of Tasks 6+7+8 review items in `router_agent_mock_e2e.rs`; post-review fixup restores 2-element signals coverage + drops redundant `keys.sort()` |
+| 10 | `ae8af69` | Mid-tier audit-key gate in `scheduler_inner_loop_e2e` happy path (in-place assertion expansion, no new `#[test]`) |
+| 11 | `0c68328` | `prompt_assembly_e2e` test for `build_with_recalled` rendering + legacy `build()` parity pin |
+| 12 | (this commit) | HANDOVER + ROADMAP update |
+
+**What this slice deliberately does NOT do** (matches the spec's non-goals):
+
+- **No graph lane.** Needs entity extraction from `ctx.instruction` first — separate slice.
+- **No L1 promotion writer.** Recall reads what's in the `memories` table; L1 stays empty in production until a separate slice writes to `MemoryLayer::Index`.
+- **No global token cap with priority drop.** Each loader still enforces its own per-loader cap (L0: 8 KiB / L1: 4 KiB / recall: 4 KiB). The `RecallBuilder::build` and `SystemPromptBuilder::build_with_recalled` doc comments both carry `TODO(issue #78)` markers at the I/O sites. Lands when all three loaders' combined budget can overflow context.
+- **No recall caching across plan iterations.** Re-runs on every iteration (matches the L0/L1 cadence — `PgSystemPromptBuilder::build_with_recalled` is called per-iteration in `RouterAgent::formulate_plan`).
+- **No reviewer-chain recall.** `ConstitutionalGuard` / `DeterministicPolicy` are deterministic Rust checks; no LLM call, no prompt.
+- **No new env vars, no new operator surfaces.** `PgRecallBuilder` uses the same `PgPool` + `Router` already constructed for everything else.
+
+**Open follow-up surfaces (not blocking):**
+
+- **`core/src/scheduler/inner_loop.rs` LOC creep** — now **1095 LOC** (was 991 before this slice; +104 from new keys + pin tests + `make_text_plan` fixture). The pre-existing 500-LOC breach is now substantially wider; the `inner_loop_audit.rs` split flagged by the prompt-assembler slice is now substantially more urgent. Natural split: lift `build_plan_formulate_payload` + the audit writers + the pin tests into `core/src/scheduler/inner_loop_audit.rs`.
+- **Entity extraction + graph-lane wiring** — the natural next slice. With recall live in production, the graph lane is the only remaining `RecallModes` variant that's a no-op. Pre-req: extract `(noun, type)` tuples from `ctx.instruction` (probably a deterministic NER pass plus a fallback LLM call), resolve to `entities.id` via `Graph::get_entity`, plumb into `RecallParams::with_seeds`. Spec to be written.
+- **L1 promotion writer** — until this lands, L1 stays empty in production and `l1_count` is always 0 in audit rows. The simplest first writer: at session-end, distil one-line "what was learned" insights from the audit log and `insert_memory_at_layer(Index, ...)`. Spec to be written.
+- **Mock HTTP listener pattern duplication** — `recall_assembly_e2e.rs` is now the third site with a hand-rolled `tokio::net::TcpListener` + JSON envelope for an OpenAI-compatible mock. Code review flagged extracting to `hhagent-tests-common::mock_http`. Filed mentally; not blocking.
+- **`router_agent_mock_e2e` defensive test for recall-failure path** — the trait's degrade-and-warn contract is documented and the production code is exercised end-to-end via `cli_ask_e2e`, but there's no unit-tier test that explicitly mocks a `RecallBuilder` returning `Err(EmbedQuery)` to verify the agent swallows it. Worth adding if the recall surface grows.
+- **Issue #78 (global token cap with priority drop)** — both `PgRecallBuilder::build` and `PgSystemPromptBuilder::build_with_recalled` carry `TODO(issue #78)` markers at the loader-call sites. The day an L1 writer arrives and the assembled prompt can balloon, the priority-drop logic per the HANDOVER's spec headline lands as a separate slice.
+- **`cli_ask_e2e.rs` cascade-fix as a code-smell signal** — the unanticipated breakage from sharing the mock-LLM URL across chat + embed suggests `RouterConfig` could split `embedding_url` from `local_url` in test contexts to avoid the shared FIFO queue. Today both default to the same URL because production vLLM/Ollama serve both on one port. Not urgent; filed mentally.
+
+**Files touched (3 NEW + 7 modified + 2 docs + 1 plan + 1 spec):**
+
+- NEW `core/src/recall_assembly/mod.rs` + `pg_builder.rs`.
+- NEW `core/tests/recall_assembly_e2e.rs`.
+- NEW `docs/superpowers/specs/2026-05-17-recall-lane-wiring-design.md`.
+- NEW `docs/superpowers/plans/2026-05-17-recall-lane-wiring.md`.
+- `core/src/lib.rs` — `pub mod recall_assembly;`.
+- `core/src/prompt_assembly/assemble.rs` — 4-arg widening + `<recalled>` rendering + SAFETY block extension + 4 new tests + 9 pre-existing tests migrated.
+- `core/src/prompt_assembly/mod.rs` — `SystemPromptBuilder::build_with_recalled` + `AssembledPrompt::recalled_count`.
+- `core/src/prompt_assembly/pg_builder.rs` — both impls pruned to single `build_with_recalled` method.
+- `core/src/scheduler/agent.rs` — `RouterAgent::new` 4-arg + `formulate_plan` recall integration + `FormulationMeta` 3 new fields.
+- `core/src/scheduler/inner_loop.rs` — `build_plan_formulate_payload` 3 new keys + 4 new pin tests + `make_text_plan` fixture.
+- `core/src/main.rs` — `PgRecallBuilder` wire-in.
+- `core/tests/router_agent_mock_e2e.rs` + `scheduler_inner_loop_e2e.rs` + `scheduler_lanes_e2e.rs` + `cli_ask_e2e.rs` + `prompt_assembly_e2e.rs` — call-site cascades + assertion expansions + new test in `prompt_assembly_e2e.rs`.
+- `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
+
+---
+
+## Recently completed (previous session, 2026-05-16 — prompt assembler L0 + L1 wiring, branch `feat/prompt-assembler-l0-l1`)
 
 Branch: `feat/prompt-assembler-l0-l1` (off `main` at `3cd6364`, 13 commits). Spec: [`docs/superpowers/specs/2026-05-16-prompt-assembler-design.md`](../../superpowers/specs/2026-05-16-prompt-assembler-design.md). Plan: [`docs/superpowers/plans/2026-05-16-prompt-assembler.md`](../../superpowers/plans/2026-05-16-prompt-assembler.md). First real consumer of `load_l0_active_default` + `load_l1_default` (shipped by PR #69 + PR #74).
 

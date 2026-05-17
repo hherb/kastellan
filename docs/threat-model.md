@@ -20,6 +20,14 @@ Nothing else.
 3. **A Python dependency contains a supply-chain backdoor**.
 4. **The agent autonomously authors malicious Python** and runs it (Phase 4 capability).
 5. **A messaging-channel peer impersonates the user**.
+6. **Memory-write injection** — a process (or compromised worker) with `INSERT`
+   on `memories` plants attacker-controlled text. The recall lane
+   (`core::recall_assembly`, wired into `RouterAgent::formulate_plan` from
+   2026-05-17) surfaces matching rows verbatim inside the assembled system
+   prompt's `<recalled>` block. Phase 1 trusts the model's tokeniser on the
+   same basis as L0/L1; if `memories` writes ever become reachable from a
+   less-trusted code path (e.g. a tool worker), the recall lane must
+   sanitise (or partition by trust label) before rendering.
 
 ## Out of scope
 

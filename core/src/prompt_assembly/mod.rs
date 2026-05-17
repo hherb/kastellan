@@ -69,6 +69,12 @@ pub struct AssembledPrompt {
     pub l0_count: usize,
     /// Number of L1 (insight-index) rows that fed into the assembly.
     pub l1_count: usize,
+    /// Number of recalled-memory rows that fed into the assembly.
+    /// `0` for callers that don't run recall (e.g. tests using
+    /// `StaticSystemPromptBuilder::empty()` without calling
+    /// `build_with_recalled`). RouterAgent writes this into the
+    /// `recall_count` audit-row key.
+    pub recalled_count: usize,
 }
 
 /// Async seam between `RouterAgent` and the L0/L1 loaders.
@@ -83,6 +89,24 @@ pub struct AssembledPrompt {
 #[async_trait]
 pub trait SystemPromptBuilder: Send + Sync {
     /// Assemble a system prompt by combining the loaded L0/L1 rows
-    /// with the supplied `base`.
-    async fn build(&self, base: &str) -> Result<AssembledPrompt, PromptAssemblyError>;
+    /// with the supplied `base`. Equivalent to
+    /// [`Self::build_with_recalled`] with an empty
+    /// [`crate::recall_assembly::RecalledContext`].
+    ///
+    /// Retained as a convenience for call sites that pre-date the
+    /// recall-lane wiring slice (mostly tests).
+    async fn build(&self, base: &str) -> Result<AssembledPrompt, PromptAssemblyError> {
+        self.build_with_recalled(base, &crate::recall_assembly::RecalledContext::empty()).await
+    }
+
+    /// Assemble a system prompt by combining the loaded L0/L1 rows,
+    /// the supplied `recalled` context, and `base`.
+    ///
+    /// Production use site: `RouterAgent::formulate_plan` calls
+    /// `RecallBuilder::build(query)` first, then passes the result here.
+    async fn build_with_recalled(
+        &self,
+        base: &str,
+        recalled: &crate::recall_assembly::RecalledContext,
+    ) -> Result<AssembledPrompt, PromptAssemblyError>;
 }

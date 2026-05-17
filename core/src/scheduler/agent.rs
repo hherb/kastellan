@@ -61,6 +61,19 @@ pub struct FormulationMeta {
     /// Number of L1 rows the assembler folded in. Stays 0 in
     /// production until an L1 promotion writer lands.
     pub l1_count: usize,
+    /// Memory ids the recall lane surfaced for this iteration's
+    /// instruction (RRF-fused order, capped at `L_RECALL_CAP_BYTES`).
+    /// Empty when recall returned nothing or degraded due to error.
+    /// Written verbatim to the `recalled_memory_ids` audit-row key.
+    pub recalled_memory_ids: Vec<i64>,
+    /// `recalled_memory_ids.len() as u32`. Redundant but cheap to
+    /// query — observation-phase SQL avoids `jsonb_array_length` for
+    /// the common "did recall fire at all?" question.
+    pub recall_count: u32,
+    /// Hex SHA-256 of the query text (the task instruction). Lets
+    /// observation phase detect when paraphrased prompts produce the
+    /// same recalled-id set vs. genuine drift.
+    pub recall_query_sha256: String,
 }
 
 /// Production adapter: calls the real `Router::send`.
@@ -68,6 +81,7 @@ pub struct RouterAgent {
     router: std::sync::Arc<Router>,
     prompts: std::sync::Arc<PromptCache>,
     prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
+    recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
 }
 
 impl RouterAgent {
@@ -75,8 +89,9 @@ impl RouterAgent {
         router: std::sync::Arc<Router>,
         prompts: std::sync::Arc<PromptCache>,
         prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
+        recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
     ) -> Self {
-        Self { router, prompts, prompt_builder }
+        Self { router, prompts, prompt_builder, recall_builder }
     }
 }
 
@@ -90,10 +105,28 @@ impl PlanFormulator for RouterAgent {
             .ok_or(AgentError::PromptMissing)?;
 
         let base = entry.content.clone();
-        // Assemble L0 + L1 + base BEFORE dialing the LLM so a
-        // memory-load error short-circuits the same way as a missing
-        // prompt — never run the model with a degraded safety prompt.
-        let assembled = self.prompt_builder.build(&base).await
+
+        // Per-iteration recall. Asymmetric posture vs the prompt
+        // assembler below: recall failure DEGRADES (we still want the
+        // model to plan with L0/L1/base even if retrieval is broken),
+        // while prompt-assembly failure is FAIL-CLOSED (a degraded
+        // safety prompt would have the agent flying blind on operator
+        // rules). See spec "Failure-mode matrix".
+        let recalled = match self.recall_builder.build(&ctx.instruction).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hhagent::scheduler::agent",
+                    error = %e,
+                    "recall failed; continuing with empty recall context",
+                );
+                crate::recall_assembly::RecalledContext::empty()
+            }
+        };
+
+        let assembled = self.prompt_builder
+            .build_with_recalled(&base, &recalled)
+            .await
             .map_err(AgentError::PromptAssembly)?;
         let assembled_prompt_sha256 = {
             use sha2::{Digest, Sha256};
@@ -103,10 +136,6 @@ impl PlanFormulator for RouterAgent {
         };
 
         let user_msg = serialise_context_for_agent(ctx);
-
-        // Clone the model name before constructing the request so we can
-        // reference it later for FormulationMeta without fighting the borrow
-        // checker (req is moved into send's &req borrow).
         let local_model = self.router.config().local_model.clone();
 
         let req = ChatRequest {
@@ -123,8 +152,6 @@ impl PlanFormulator for RouterAgent {
         let resp = self.router.send(&req).await?;
         let latency_ms = start.elapsed().as_millis() as u64;
 
-        // ChatMessage.content is String (not Option<String>); take the first
-        // choice's message content directly.
         let raw = resp.choices.first()
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
@@ -137,6 +164,16 @@ impl PlanFormulator for RouterAgent {
             raw: raw.clone(),
         })?;
 
+        // recall_count is `usize` → `u32` via `as`; the cap_and_split
+        // helper bounds the row count to L_RECALL_CAP_BYTES/min-body
+        // size = at most ~4096 rows in the pathological 1-byte case,
+        // so a u32 has 6 orders of magnitude of headroom. Sourced from
+        // RecalledContext::len() (bodies.len()) — the same field the
+        // assembler renders and the prompt-builder records as
+        // `recalled_count` — so the audit row, the assembled bytes, and
+        // the AssembledPrompt all agree.
+        let recall_count = recalled.len() as u32;
+
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
             prompt_sha256: entry.sha256.clone(),
@@ -147,6 +184,9 @@ impl PlanFormulator for RouterAgent {
             assembled_prompt_sha256,
             l0_count: assembled.l0_count,
             l1_count: assembled.l1_count,
+            recalled_memory_ids: recalled.ids,
+            recall_count,
+            recall_query_sha256: recalled.query_sha256,
         };
         Ok((plan, meta))
     }
