@@ -156,3 +156,74 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
         pool.close().await;
     });
 }
+
+#[test]
+fn pg_builder_with_recalled_renders_block_against_seeded_db() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "par-d",
+        "par-l",
+        &format!("hhagent-supervisor-test-pg-par-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "prompt-assembly-with-recalled"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Empty DB → no L0/L1 sections; recalled context supplied
+        // directly so we exercise the <recalled> rendering without
+        // going through the real recall lane.
+        let recalled = hhagent_core::recall_assembly::RecalledContext {
+            ids: vec![10, 20],
+            bodies: vec!["RECALL ALPHA".into(), "RECALL BETA".into()],
+            query_sha256: "a".repeat(64),
+        };
+
+        let builder = PgSystemPromptBuilder::new(pool.clone());
+        let result = builder.build_with_recalled("BASE BODY", &recalled)
+            .await
+            .expect("build_with_recalled");
+
+        assert_eq!(result.l0_count, 0);
+        assert_eq!(result.l1_count, 0);
+        assert_eq!(result.recalled_count, 2);
+        let s = &result.system_prompt;
+        assert!(s.contains("<recalled>\n- RECALL ALPHA\n- RECALL BETA\n</recalled>"),
+                "recalled block missing/wrong shape; got:\n{s}");
+        assert!(s.contains("<base>\nBASE BODY\n</base>\n"),
+                "base section missing; got:\n{s}");
+
+        // Empty-recalled fallback: build() (the legacy 1-arg shim) must
+        // produce identical output to build_with_recalled(base, &empty).
+        let r_via_legacy = builder.build("BASE BODY").await.expect("legacy build");
+        let r_via_explicit_empty = builder
+            .build_with_recalled(
+                "BASE BODY",
+                &hhagent_core::recall_assembly::RecalledContext::empty(),
+            )
+            .await
+            .expect("explicit empty build");
+        assert_eq!(r_via_legacy.system_prompt, r_via_explicit_empty.system_prompt,
+                   "legacy build() must produce byte-identical output to build_with_recalled(base, &empty)");
+
+        pool.close().await;
+    });
+}
