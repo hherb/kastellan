@@ -544,10 +544,9 @@ where
 /// matches `layer`. Returns `true` if a row was deleted; `false` if
 /// no row matched (id absent or layer mismatch).
 ///
-/// The layer guard exists so that callers of the L1 CLI cannot
-/// accidentally delete an L0 / L2 / L3 row through this path —
-/// the upcoming `hhagent-cli memory l1 remove <id>` operator subcommand
-/// passes `MemoryLayer::Index` here.
+/// The layer guard exists so that `hhagent-cli memory l1 remove <id>`
+/// cannot accidentally delete an L0 / L2 / L3 row through this path —
+/// the operator subcommand passes `MemoryLayer::Index` here.
 ///
 /// The existing AFTER DELETE trigger on `memories` (migration
 /// `0008_deleted_memories_audit.sql`) journals the deleted row's
@@ -566,7 +565,7 @@ where
         .bind(layer.as_db())
         .execute(executor)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DbError::Query(format!("delete_memory_at_layer id={id}: {e}")))?;
     Ok(rows.rows_affected() == 1)
 }
 

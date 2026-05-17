@@ -1807,22 +1807,14 @@ async fn memory_delete_preserves_layer_in_audit() {
     pool.close().await;
 }
 
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("build multi-threaded tokio runtime")
-}
-
 /// `delete_memory_at_layer` happy path: insert an L1 row, delete it via
 /// the layer-guarded helper, assert `true` returned; second call returns
 /// `false` (row already gone).
 ///
 /// Also verifies the AFTER DELETE trigger (migration 0008) journals the
 /// deletion into `deleted_memories`.
-#[test]
-fn delete_memory_at_layer_happy_path() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_memory_at_layer_happy_path() {
     use hhagent_db::memories::{delete_memory_at_layer, insert_memory_at_layer, MemoryLayer};
 
     if skip_if_no_supervisor() {
@@ -1840,67 +1832,65 @@ fn delete_memory_at_layer_happy_path() {
         &format!("hhagent-pg-del-at-layer-{suffix}"),
     );
 
-    rt().block_on(async {
-        hhagent_db::probe::run(
-            &cluster.conn_spec,
-            "core",
-            "startup",
-            serde_json::json!({"purpose": "delete-memory-at-layer-happy"}),
-        )
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"purpose": "delete-memory-at-layer-happy"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
-        .expect("probe");
+        .expect("pool");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
-            .await
-            .expect("pool");
+    // Seed an L1 row.
+    let id = insert_memory_at_layer(
+        &pool,
+        "l1-body-to-delete",
+        &serde_json::json!({"source": "operator"}),
+        None,
+        MemoryLayer::Index,
+    )
+    .await
+    .expect("insert L1 row");
 
-        // Seed an L1 row.
-        let id = insert_memory_at_layer(
-            &pool,
-            "l1-body-to-delete",
-            &serde_json::json!({"source": "operator"}),
-            None,
-            MemoryLayer::Index,
-        )
+    // First delete: must return true (row existed and matched layer).
+    let deleted = delete_memory_at_layer(&pool, id, MemoryLayer::Index)
         .await
-        .expect("insert L1 row");
+        .expect("delete L1 row");
+    assert!(deleted, "first delete must return true — row matched id + layer");
 
-        // First delete: must return true (row existed and matched layer).
-        let deleted = delete_memory_at_layer(&pool, id, MemoryLayer::Index)
+    // Second delete: must return false (row is gone).
+    let deleted_again = delete_memory_at_layer(&pool, id, MemoryLayer::Index)
+        .await
+        .expect("delete again (idempotent call)");
+    assert!(
+        !deleted_again,
+        "second delete must return false — row already gone"
+    );
+
+    // AFTER DELETE trigger (migration 0008) must have journalled the row.
+    let audit_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM deleted_memories WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
             .await
-            .expect("delete L1 row");
-        assert!(deleted, "first delete must return true — row matched id + layer");
+            .expect("count deleted_memories");
+    assert_eq!(
+        audit_count, 1,
+        "AFTER DELETE trigger must have written exactly one deleted_memories row"
+    );
 
-        // Second delete: must return false (row is gone).
-        let deleted_again = delete_memory_at_layer(&pool, id, MemoryLayer::Index)
-            .await
-            .expect("delete again (idempotent call)");
-        assert!(
-            !deleted_again,
-            "second delete must return false — row already gone"
-        );
-
-        // AFTER DELETE trigger (migration 0008) must have journalled the row.
-        let audit_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM deleted_memories WHERE id = $1")
-                .bind(id)
-                .fetch_one(&pool)
-                .await
-                .expect("count deleted_memories");
-        assert_eq!(
-            audit_count, 1,
-            "AFTER DELETE trigger must have written exactly one deleted_memories row"
-        );
-
-        pool.close().await;
-    });
+    pool.close().await;
 }
 
 /// `delete_memory_at_layer` wrong-layer guard: inserting an L2 (Stable)
 /// row and calling `delete_memory_at_layer` with `MemoryLayer::Index`
 /// must return `false` and leave the row untouched in `memories`.
-#[test]
-fn delete_memory_at_layer_rejects_wrong_layer() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_memory_at_layer_rejects_wrong_layer() {
     use hhagent_db::memories::{delete_memory_at_layer, fetch_by_ids, insert_memory, MemoryLayer};
 
     if skip_if_no_supervisor() {
@@ -1918,48 +1908,46 @@ fn delete_memory_at_layer_rejects_wrong_layer() {
         &format!("hhagent-pg-del-wrong-layer-{suffix}"),
     );
 
-    rt().block_on(async {
-        hhagent_db::probe::run(
-            &cluster.conn_spec,
-            "core",
-            "startup",
-            serde_json::json!({"purpose": "delete-memory-at-layer-wrong-layer"}),
-        )
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"purpose": "delete-memory-at-layer-wrong-layer"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
-        .expect("probe");
+        .expect("pool");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
-            .await
-            .expect("pool");
+    // Seed an L2 (Stable) row via insert_memory (DB DEFAULT 2).
+    let id = insert_memory(
+        &pool,
+        "stable-body",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert L2 row");
 
-        // Seed an L2 (Stable) row via insert_memory (DB DEFAULT 2).
-        let id = insert_memory(
-            &pool,
-            "stable-body",
-            &serde_json::json!({}),
-            None,
-        )
+    // Attempt to delete it via the L1 guard — must be rejected.
+    let deleted = delete_memory_at_layer(&pool, id, MemoryLayer::Index)
         .await
-        .expect("insert L2 row");
+        .expect("delete wrong-layer call");
+    assert!(
+        !deleted,
+        "wrong-layer guard must return false (L2 row not touched by L1 DELETE)"
+    );
 
-        // Attempt to delete it via the L1 guard — must be rejected.
-        let deleted = delete_memory_at_layer(&pool, id, MemoryLayer::Index)
-            .await
-            .expect("delete wrong-layer call");
-        assert!(
-            !deleted,
-            "wrong-layer guard must return false (L2 row not touched by L1 DELETE)"
-        );
+    // The L2 row must still exist.
+    let rows = fetch_by_ids(&pool, &[id]).await.expect("fetch_by_ids");
+    assert_eq!(
+        rows.len(),
+        1,
+        "L2 row must survive the wrong-layer guard; fetch_by_ids must return it"
+    );
+    assert_eq!(rows[0].id, id);
 
-        // The L2 row must still exist.
-        let rows = fetch_by_ids(&pool, &[id]).await.expect("fetch_by_ids");
-        assert_eq!(
-            rows.len(),
-            1,
-            "L2 row must survive the wrong-layer guard; fetch_by_ids must return it"
-        );
-        assert_eq!(rows[0].id, id);
-
-        pool.close().await;
-    });
+    pool.close().await;
 }
