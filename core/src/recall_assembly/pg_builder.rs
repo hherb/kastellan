@@ -18,15 +18,21 @@ use crate::memory::{embed_query, recall, RecallParams, RecallModes};
 use super::{sha256_hex, RecallBuilder, RecalledContext, RecallError, L_RECALL_CAP_BYTES};
 
 /// Greedy newest-first cap: walk `rows` in order, push as long as
-/// cumulative body bytes stay ≤ `cap_bytes`. The first row that
-/// would push cumulative bytes over the cap is dropped (with a
-/// `tracing::warn!`) and the walk stops — matches the L1 loader's
-/// `saturating_add` break idiom in `core::memory::layers::load_l1`.
+/// cumulative body bytes stay ≤ `cap_bytes`. The first row that would
+/// push cumulative bytes over the cap is dropped and the walk stops —
+/// matches the L1 loader's `saturating_add` break idiom in
+/// `core::memory::layers::load_l1`.
+///
+/// Logging follows the L1 precedent's warn-vs-debug split:
+/// - A single row whose body alone exceeds the cap emits
+///   `tracing::warn!` (operator signal: retire the memory or raise
+///   the cap).
+/// - Rows dropped because the cap is already full after N kept rows
+///   emit `tracing::debug!` (normal exit, not an operator problem).
 ///
 /// Pure helper, no I/O. Doesn't drop later rows that might
 /// individually fit — that would risk reorder vs. the RRF-fused
-/// order coming out of `recall`. Operators see the dropped id in
-/// logs and can either retire the oversized memory or raise the cap.
+/// order coming out of `recall`.
 ///
 /// The `cap_bytes` parameter is expected to be [`L_RECALL_CAP_BYTES`]
 /// in production; tests may pass a smaller value to exercise the cap
@@ -103,9 +109,11 @@ impl RecallBuilder for PgRecallBuilder {
 
         // Step 2 — fan out semantic + lexical lanes. Graph lane stays
         // off because we have no entity seeds at this slice — that's a
-        // separate "entity extraction" follow-up. The empty seeds vec
-        // + SEMANTIC_AND_LEXICAL modes is the cleanest call shape
-        // (matches RecallParams::new's defaults).
+        // separate "entity extraction" follow-up.
+        //
+        // RecallParams::new (not ::with_seeds) — no seeds present, so
+        // with_seeds with an empty slice would be semantically wrong.
+        // new() also defaults modes to SEMANTIC_AND_LEXICAL.
         let mut params = RecallParams::new(query, &emb);
         params.modes = RecallModes::SEMANTIC_AND_LEXICAL;
         let rows = recall(&self.pool, &params).await?;

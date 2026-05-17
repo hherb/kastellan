@@ -144,11 +144,19 @@ fn pg_recall_builder_round_trips_against_seeded_pool_and_mock_embedding() {
             seeded_ids[1]
         );
         assert_eq!(recalled.bodies[0], "delta echo foxtrot");
-        assert_eq!(
-            recalled.query_sha256.len(),
-            64,
-            "query_sha256 must be 64 hex chars"
-        );
+        // Pin the exact SHA-256 of the query text so a bug that
+        // swapped in the empty-string sentinel (sha256_hex(b"")) or
+        // any other input would fail loudly. SHA-256("delta echo foxtrot")
+        // computed via sha2 = e9faf828bb31edc70d10e2bf9ac4715c83f37c3ff0b3d6cab9c2db6c2b8e8eee.
+        // Keep the length pin as a redundant guard.
+        assert_eq!(recalled.query_sha256.len(), 64,
+                   "query_sha256 must be 64 hex chars");
+        let mut hasher = sha2::Sha256::new();
+        use sha2::Digest;
+        hasher.update(b"delta echo foxtrot");
+        let expected = format!("{:x}", hasher.finalize());
+        assert_eq!(recalled.query_sha256, expected,
+                   "query_sha256 must be SHA-256 of the exact query text");
 
         pool.close().await;
     });
