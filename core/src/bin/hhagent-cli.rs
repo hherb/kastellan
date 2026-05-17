@@ -1055,8 +1055,8 @@ async fn memory_l1_list(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
 
-    println!("{:<8}  {:<32}  {}",
-        "ID", "CREATED_AT", "BODY");
+    println!("{:<8}  {:<32}  BODY",
+        "ID", "CREATED_AT");
     for r in rows {
         println!("{:<8}  {:<32}  {}",
             r.id, r.created_at, r.body);
@@ -1068,9 +1068,9 @@ async fn memory_l1_remove(args: &[String]) -> ExitCode {
     use hhagent_core::cli_audit::l1_remove_and_audit;
     use hhagent_db::pool::connect_runtime_pool;
 
-    let id_str = match args.first() {
-        Some(s) => s,
-        None => {
+    let id_str = match args {
+        [s] => s,
+        _ => {
             eprintln!("usage: hhagent-cli memory l1 remove <id>");
             return ExitCode::from(2);
         }

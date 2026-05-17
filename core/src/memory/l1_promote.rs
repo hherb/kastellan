@@ -141,7 +141,7 @@ pub fn compute_body_sha256(body: &str) -> String {
 /// `rename_all = "snake_case"` output. If you add a new `L1Source`
 /// variant, update this function in lockstep. Cross-pinned by the
 /// `build_l1_metadata_serde_agrees_with_l1_source` test below.
-pub fn build_l1_metadata(
+pub(crate) fn build_l1_metadata(
     source: &L1Source,
     body_sha256: &str,
     created_at_rfc3339: &str,

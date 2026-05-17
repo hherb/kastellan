@@ -136,9 +136,9 @@ pub struct Plan {
     /// `L1Source::AgentRaised { task_id }`.
     ///
     /// Validation rules + length cap live in [`crate::memory::l1_promote`];
-    /// a payload that fails validation produces an `actor='scheduler'
-    /// action='l1.promoted'` row with `action: "rejected_validation"` but
-    /// does NOT abort task finalize.
+    /// a payload that fails validation causes the write to be skipped
+    /// entirely — a `tracing::warn!` is emitted by
+    /// `runner::write_l1_promoted_row` but no audit row is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l1_insight: Option<String>,
 }
