@@ -416,9 +416,9 @@ fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
 /// Pure builder for the `agent/plan.formulate` audit-row payload.
 ///
 /// Extracted from `write_audit_plan_formulate` so the wire shape is
-/// unit-testable without a live Postgres pool. The 17/18-key shape pins
+/// unit-testable without a live Postgres pool. The shape pins
 /// (in this file's `tests` module) defend against accidental drift —
-/// 17 keys for non-`CliInferred` sources, 18 when `CliInferred` carries
+/// 20 keys for non-`CliInferred` sources, 21 when `CliInferred` carries
 /// matched signals.
 ///
 /// Slice A (2026-05-15) added `plan` (full serialised Plan) +
@@ -433,6 +433,10 @@ fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
 /// Slice C (2026-05-16) added `system_prompt_sha256`, `l0_count`, and
 /// `l1_count` so operators can detect L0/L1 drift across daemon restarts
 /// and operator edits without grepping logs.
+///
+/// Slice D (2026-05-17) added `recalled_memory_ids`, `recall_count`,
+/// and `recall_query_sha256` so the observation phase can audit which
+/// memories the recall lane surfaced and detect drift across captures.
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
@@ -502,6 +506,21 @@ pub(crate) fn build_plan_formulate_payload(
     );
     obj.insert("l0_count".into(), serde_json::json!(meta.l0_count));
     obj.insert("l1_count".into(), serde_json::json!(meta.l1_count));
+    // Slice D (recall-lane wiring, 2026-05-17): the recall lane's
+    // contribution to this iteration. recalled_memory_ids is the
+    // RRF-fused id list capped by L_RECALL_CAP_BYTES; recall_count is
+    // a cheap-to-query duplicate of its length; recall_query_sha256 is
+    // a stable hash of the query text the agent embedded so the
+    // observation phase can detect paraphrase vs. genuine drift.
+    obj.insert(
+        "recalled_memory_ids".into(),
+        serde_json::json!(meta.recalled_memory_ids),
+    );
+    obj.insert("recall_count".into(), serde_json::json!(meta.recall_count));
+    obj.insert(
+        "recall_query_sha256".into(),
+        serde_json::json!(meta.recall_query_sha256),
+    );
     // Signals key only appears when source is CliInferred AND we have
     // signals. Other sources (Operator / AgentRaised / Default) omit
     // the key (saving JSON payload bytes and making the absence itself
@@ -829,12 +848,8 @@ mod tests {
             "l1_count must come from meta.l1_count");
     }
 
-    #[test]
-    fn build_plan_formulate_payload_pins_seventeen_keys_for_default_source() {
-        // Pin the total key count so a future additive change to the
-        // wire shape becomes a deliberate, reviewable edit instead of
-        // an accidental drift. Default source: 17 keys (no signals).
-        let plan = Plan {
+    fn make_text_plan() -> Plan {
+        Plan {
             context: "".into(),
             decision: "task_complete".into(),
             rationale: "".into(),
@@ -843,13 +858,133 @@ mod tests {
             data_ceiling: DataClass::Public,
             refused: None,
             floor_request: None,
-        };
+        }
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_pins_twenty_keys_for_default_source() {
+        // Slice D (2026-05-17, recall-lane wiring) bumps the
+        // default-source key count from 17 to 20 by adding
+        // recalled_memory_ids, recall_count, recall_query_sha256.
+        let plan = make_text_plan();
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
-            prompt_sha256: "x".into(),
-            llm_model: "m".into(),
+            prompt_sha256: "p1".into(),
+            llm_model: "lm".into(),
             llm_backend: "local".into(),
-            latency_ms: 0,
+            latency_ms: 1,
+            retry_count: 0,
+            assembled_prompt_sha256: "ax".into(),
+            l0_count: 0,
+            l1_count: 0,
+            recalled_memory_ids: vec![100, 200],
+            recall_count: 2,
+            recall_query_sha256: "f".repeat(64),
+        };
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public,
+            ClassificationFloorSource::Default,
+            &[],
+            &plan,
+            &meta,
+        );
+        let obj = payload.as_object().expect("payload object");
+        let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        let expected: std::collections::BTreeSet<&str> = [
+            "task_id", "plan_count", "prompt_name", "prompt_sha256",
+            "llm_model", "llm_backend", "latency_ms", "retry_count",
+            "plan_step_count", "decision_kind", "refused",
+            "plan", "classification_floor", "classification_floor_source",
+            "system_prompt_sha256", "l0_count", "l1_count",
+            "recalled_memory_ids", "recall_count", "recall_query_sha256",
+        ].into_iter().collect();
+        let got: std::collections::BTreeSet<&str> = keys.into_iter().collect();
+        assert_eq!(got, expected,
+            "default-source payload must carry exactly 20 keys; diff:\n\
+             missing = {:?}\nextra = {:?}",
+            expected.difference(&got).collect::<Vec<_>>(),
+            got.difference(&expected).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_cli_inferred_source_has_21_keys_with_signals() {
+        let plan = make_text_plan();
+        let meta = FormulationMeta {
+            prompt_name: "agent_planner".into(),
+            prompt_sha256: "p1".into(),
+            llm_model: "lm".into(),
+            llm_backend: "local".into(),
+            latency_ms: 1,
+            retry_count: 0,
+            assembled_prompt_sha256: "ax".into(),
+            l0_count: 0,
+            l1_count: 0,
+            recalled_memory_ids: vec![1],
+            recall_count: 1,
+            recall_query_sha256: "9".repeat(64),
+        };
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::ClinicalConfidential,
+            ClassificationFloorSource::CliInferred,
+            &["patient".to_string()],
+            &plan,
+            &meta,
+        );
+        let obj = payload.as_object().expect("payload object");
+        assert_eq!(obj.len(), 21,
+            "cli_inferred source with signals must carry 21 keys (20 default + signals); got {} keys: {:?}",
+            obj.len(), obj.keys().collect::<Vec<_>>(),
+        );
+        assert_eq!(payload["classification_floor_signals"], serde_json::json!(["patient"]));
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_recall_keys_round_trip_through_meta() {
+        let plan = make_text_plan();
+        let meta = FormulationMeta {
+            prompt_name: "agent_planner".into(),
+            prompt_sha256: "p1".into(),
+            llm_model: "lm".into(),
+            llm_backend: "local".into(),
+            latency_ms: 1,
+            retry_count: 0,
+            assembled_prompt_sha256: "ax".into(),
+            l0_count: 0,
+            l1_count: 0,
+            recalled_memory_ids: vec![42, 99, 7],
+            recall_count: 3,
+            recall_query_sha256: "deadbeef".repeat(8), // 64 hex chars
+        };
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public,
+            ClassificationFloorSource::Default,
+            &[],
+            &plan,
+            &meta,
+        );
+        assert_eq!(payload["recalled_memory_ids"], serde_json::json!([42, 99, 7]),
+                   "recalled_memory_ids must round-trip from meta.recalled_memory_ids");
+        assert_eq!(payload["recall_count"], 3u64,
+                   "recall_count must round-trip from meta.recall_count");
+        assert_eq!(payload["recall_query_sha256"], serde_json::json!("deadbeef".repeat(8)),
+                   "recall_query_sha256 must round-trip from meta.recall_query_sha256");
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_recall_query_sha256_is_64_hex_chars_in_empty_default() {
+        // Defensive format pin: when recall degraded (or no rows
+        // returned), the sha256 of the empty string still satisfies
+        // the 64-hex-char contract. Observation phase SQL can pin the
+        // format without a special case.
+        let plan = make_text_plan();
+        let meta = FormulationMeta {
+            prompt_name: "agent_planner".into(),
+            prompt_sha256: "p1".into(),
+            llm_model: "lm".into(),
+            llm_backend: "local".into(),
+            latency_ms: 1,
             retry_count: 0,
             assembled_prompt_sha256: "ax".into(),
             l0_count: 0,
@@ -859,28 +994,16 @@ mod tests {
             recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
         };
         let payload = build_plan_formulate_payload(
-            1, 0, DataClass::Public,
-            ClassificationFloorSource::Default, &[],
-            &plan, &meta,
+            1, 1, DataClass::Public,
+            ClassificationFloorSource::Default,
+            &[],
+            &plan,
+            &meta,
         );
-        let keys: std::collections::BTreeSet<&str> = payload
-            .as_object()
-            .expect("payload is a JSON object")
-            .keys()
-            .map(|s| s.as_str())
-            .collect();
-        let expected: std::collections::BTreeSet<&str> = [
-            "task_id", "plan_count", "prompt_name", "prompt_sha256",
-            "llm_model", "llm_backend", "latency_ms", "retry_count",
-            "plan_step_count", "decision_kind", "refused",
-            // Slice A additions:
-            "plan", "classification_floor",
-            // Slice B (automatic floor inference):
-            "classification_floor_source",
-            // Slice C (prompt assembler, this commit):
-            "system_prompt_sha256", "l0_count", "l1_count",
-        ].into_iter().collect();
-        assert_eq!(keys, expected, "payload key set drifted; update the pin deliberately");
+        let sha = payload["recall_query_sha256"].as_str().expect("string");
+        assert_eq!(sha.len(), 64, "recall_query_sha256 must always be 64 chars; got {sha}");
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "recall_query_sha256 must be hex; got {sha}");
     }
 
     #[test]
@@ -903,46 +1026,12 @@ mod tests {
             1, 1, DataClass::Public, ClassificationFloorSource::Default, &[], &plan, &meta,
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 17,
-            "default-source payload should have 17 keys; got {} keys: {:?}",
+        assert_eq!(obj.len(), 20,
+            "default-source payload should have 20 keys; got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
         assert!(obj.get("classification_floor_signals").is_none(),
             "signals key must be ABSENT when source is not cli_inferred");
-    }
-
-    #[test]
-    fn build_plan_formulate_payload_cli_inferred_source_has_18_keys_with_signals() {
-        let plan = Plan {
-            context: "".into(), decision: "task_complete".into(), rationale: "".into(),
-            steps: vec![], result: Some(serde_json::json!({"kind":"text","body":"ok"})),
-            data_ceiling: DataClass::ClinicalConfidential, refused: None, floor_request: None,
-        };
-        let meta = FormulationMeta {
-            prompt_name: "p".into(), prompt_sha256: "h".into(),
-            llm_model: "m".into(), llm_backend: "local".into(),
-            latency_ms: 1, retry_count: 0,
-            assembled_prompt_sha256: "ah".into(),
-            l0_count: 0, l1_count: 0,
-            recalled_memory_ids: Vec::new(), recall_count: 0,
-            recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
-        };
-        let signals = vec!["patient".to_string(), "pathology".to_string()];
-        let payload = build_plan_formulate_payload(
-            1, 1, DataClass::ClinicalConfidential,
-            ClassificationFloorSource::CliInferred, &signals,
-            &plan, &meta,
-        );
-        let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 18,
-            "cli_inferred payload should have 18 keys (default 17 + signals); got {} keys: {:?}",
-            obj.len(), obj.keys().collect::<Vec<_>>());
-        assert_eq!(obj["classification_floor_source"], serde_json::Value::String("cli_inferred".into()));
-        let arr = obj["classification_floor_signals"].as_array()
-            .expect("signals key is an array");
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0], serde_json::Value::String("patient".into()));
-        assert_eq!(arr[1], serde_json::Value::String("pathology".into()));
     }
 
     #[test]
@@ -971,8 +1060,8 @@ mod tests {
             &plan, &meta,
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 17,
-            "agent_raised should have 17 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj.len(), 20,
+            "agent_raised should have 20 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
         assert!(obj.get("classification_floor_signals").is_none());
     }

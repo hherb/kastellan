@@ -307,6 +307,15 @@ async fn happy_path_decodes_plan_and_populates_meta() {
         meta.latency_ms
     );
 
+    // Recall fields (slice D 2026-05-17): StaticRecallBuilder::empty()
+    // returns no rows + the canonical SHA-256 of the empty string.
+    assert!(meta.recalled_memory_ids.is_empty(),
+        "StaticRecallBuilder::empty() → no recalled ids; got {:?}", meta.recalled_memory_ids);
+    assert_eq!(meta.recall_count, 0,
+        "StaticRecallBuilder::empty() → recall_count 0; got {}", meta.recall_count);
+    assert_eq!(meta.recall_query_sha256.len(), 64,
+        "recall_query_sha256 must always be 64 hex chars; got len {}", meta.recall_query_sha256.len());
+
     // The system prompt sent on the wire was the cached prompt content
     // verbatim — pin via the served body. (We don't pin the full
     // request shape because that's `local_backend_e2e.rs`'s job.)
