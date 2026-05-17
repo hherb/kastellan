@@ -647,6 +647,19 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
                 "plan.formulate row {i}: expected source=default for non-clinical 'marker' prompt; got {src:?}");
             assert!(p.get("classification_floor_signals").is_none(),
                 "plan.formulate row {i}: default source must omit signals key; got {p:?}");
+            // Slice C (prompt assembler, 2026-05-16): the three new
+            // keys are present on every plan.formulate row. The exact
+            // SHA varies across runs because the assembled prompt
+            // includes the L0 starter rules; just assert presence + shape.
+            assert!(p.get("system_prompt_sha256")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len() == 64)
+                .unwrap_or(false),
+                "plan.formulate row {i} must carry system_prompt_sha256 as a 64-char hex string; got {p:?}");
+            assert!(p.get("l0_count").and_then(|v| v.as_u64()).is_some(),
+                "plan.formulate row {i} must carry numeric l0_count; got {p:?}");
+            assert!(p.get("l1_count").and_then(|v| v.as_u64()).is_some(),
+                "plan.formulate row {i} must carry numeric l1_count; got {p:?}");
         }
 
         pool.close().await;

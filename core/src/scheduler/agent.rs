@@ -27,6 +27,10 @@ pub enum AgentError {
     Decode { detail: String, raw: String },
     #[error("agent prompt 'agent_planner' not found in cache")]
     PromptMissing,
+    /// L0/L1 load failed under the [`SystemPromptBuilder`]; the scheduler's
+    /// retry policy decides whether to retry or fail permanently.
+    #[error("prompt assembly: {0}")]
+    PromptAssembly(#[from] crate::prompt_assembly::PromptAssemblyError),
 }
 
 #[async_trait]
@@ -47,20 +51,32 @@ pub struct FormulationMeta {
     pub llm_backend: String,
     pub latency_ms: u64,
     pub retry_count: u32,
+    /// SHA-256 (hex) of the *assembled* system prompt the model
+    /// actually saw — distinct from `prompt_sha256`, which is the
+    /// base agent_planner.md hash only.
+    pub assembled_prompt_sha256: String,
+    /// Number of L0 rows the assembler folded in. Operator triage:
+    /// 0 here on a clinical task means the L0 seeder didn't run.
+    pub l0_count: usize,
+    /// Number of L1 rows the assembler folded in. Stays 0 in
+    /// production until an L1 promotion writer lands.
+    pub l1_count: usize,
 }
 
 /// Production adapter: calls the real `Router::send`.
 pub struct RouterAgent {
     router: std::sync::Arc<Router>,
     prompts: std::sync::Arc<PromptCache>,
+    prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
 }
 
 impl RouterAgent {
     pub fn new(
         router: std::sync::Arc<Router>,
         prompts: std::sync::Arc<PromptCache>,
+        prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
     ) -> Self {
-        Self { router, prompts }
+        Self { router, prompts, prompt_builder }
     }
 }
 
@@ -73,6 +89,19 @@ impl PlanFormulator for RouterAgent {
         let entry = self.prompts.get("agent_planner")
             .ok_or(AgentError::PromptMissing)?;
 
+        let base = entry.content.clone();
+        // Assemble L0 + L1 + base BEFORE dialing the LLM so a
+        // memory-load error short-circuits the same way as a missing
+        // prompt — never run the model with a degraded safety prompt.
+        let assembled = self.prompt_builder.build(&base).await
+            .map_err(AgentError::PromptAssembly)?;
+        let assembled_prompt_sha256 = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(assembled.system_prompt.as_bytes());
+            format!("{:x}", h.finalize())
+        };
+
         let user_msg = serialise_context_for_agent(ctx);
 
         // Clone the model name before constructing the request so we can
@@ -83,7 +112,7 @@ impl PlanFormulator for RouterAgent {
         let req = ChatRequest {
             model: local_model.clone(),
             messages: vec![
-                ChatMessage::system(entry.content.clone()),
+                ChatMessage::system(assembled.system_prompt),
                 ChatMessage::user(user_msg),
             ],
             max_tokens: None,
@@ -115,6 +144,9 @@ impl PlanFormulator for RouterAgent {
             llm_backend: "local".to_string(),
             latency_ms,
             retry_count: 0,
+            assembled_prompt_sha256,
+            l0_count: assembled.l0_count,
+            l1_count: assembled.l1_count,
         };
         Ok((plan, meta))
     }

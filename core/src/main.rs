@@ -111,10 +111,16 @@ async fn main() -> Result<()> {
         ]),
     );
 
+    // System-prompt builder: loads L0 (meta-rules) + L1 (insight index)
+    // from the runtime pool on every plan iteration and frames them as
+    // <l0_meta_rules>/<l1_insights>/<base> before each LLM call. Holds
+    // PgPool by value (sqlx wraps connections in an internal Arc so
+    // pool.clone() is cheap).
     let formulator: Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
         Arc::new(hhagent_core::scheduler::agent::RouterAgent::new(
             router.clone(),
             prompts.clone(),
+            Arc::new(hhagent_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
         ));
 
     // Sandbox backend (cross-platform).

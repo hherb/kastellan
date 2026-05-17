@@ -416,9 +416,9 @@ fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
 /// Pure builder for the `agent/plan.formulate` audit-row payload.
 ///
 /// Extracted from `write_audit_plan_formulate` so the wire shape is
-/// unit-testable without a live Postgres pool. The 14/15-key shape pins
+/// unit-testable without a live Postgres pool. The 17/18-key shape pins
 /// (in this file's `tests` module) defend against accidental drift —
-/// 14 keys for non-`CliInferred` sources, 15 when `CliInferred` carries
+/// 17 keys for non-`CliInferred` sources, 18 when `CliInferred` carries
 /// matched signals.
 ///
 /// Slice A (2026-05-15) added `plan` (full serialised Plan) +
@@ -429,6 +429,10 @@ fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
 /// Slice B (2026-05-16) added `classification_floor_source` (always)
 /// and conditional `classification_floor_signals` (CliInferred only)
 /// so audit consumers can trace how the floor was set.
+///
+/// Slice C (2026-05-16) added `system_prompt_sha256`, `l0_count`, and
+/// `l1_count` so operators can detect L0/L1 drift across daemon restarts
+/// and operator edits without grepping logs.
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
@@ -488,6 +492,16 @@ pub(crate) fn build_plan_formulate_payload(
         "classification_floor_source".into(),
         serde_json::json!(classification_floor_source.as_snake_str()),
     );
+    // Slice C (prompt-assembler, 2026-05-16): drift detection for
+    // L0/L1 across daemon restarts and operator edits. `prompt_sha256`
+    // above is the BASE prompt only; `system_prompt_sha256` here is
+    // the assembled prompt the model actually saw.
+    obj.insert(
+        "system_prompt_sha256".into(),
+        serde_json::json!(meta.assembled_prompt_sha256),
+    );
+    obj.insert("l0_count".into(), serde_json::json!(meta.l0_count));
+    obj.insert("l1_count".into(), serde_json::json!(meta.l1_count));
     // Signals key only appears when source is CliInferred AND we have
     // signals. Other sources (Operator / AgentRaised / Default) omit
     // the key (saving JSON payload bytes and making the absence itself
@@ -765,6 +779,9 @@ mod tests {
             llm_backend: "local".into(),
             latency_ms: 42,
             retry_count: 0,
+            assembled_prompt_sha256: "cafebabe".into(),
+            l0_count: 7,
+            l1_count: 3,
         };
         let payload = build_plan_formulate_payload(
             /*task_id*/ 7,
@@ -787,19 +804,33 @@ mod tests {
             "classification_floor must serialise as PascalCase string"
         );
 
-        // Existing 11 keys remain unchanged.
+        // Existing 14 keys (11 originals + Slice A's plan + classification_floor + Slice B's classification_floor_source) remain unchanged.
         assert_eq!(payload["task_id"], 7);
         assert_eq!(payload["plan_count"], 1);
         assert_eq!(payload["decision_kind"], "act");
         assert_eq!(payload["plan_step_count"], 1);
         assert!(payload["refused"].is_null());
+
+        // Slice C (prompt assembler, 2026-05-16): value round-trips
+        // for the 3 new keys catch a "wrong field" bug — e.g. a
+        // refactor that wired meta.prompt_sha256 (the base prompt)
+        // into the system_prompt_sha256 key instead of
+        // meta.assembled_prompt_sha256 (the assembled prompt). The
+        // shape-pin tests above check the key set; these check the
+        // values flow from the right meta fields.
+        assert_eq!(payload["system_prompt_sha256"], "cafebabe",
+            "system_prompt_sha256 must come from meta.assembled_prompt_sha256");
+        assert_eq!(payload["l0_count"], 7u64,
+            "l0_count must come from meta.l0_count");
+        assert_eq!(payload["l1_count"], 3u64,
+            "l1_count must come from meta.l1_count");
     }
 
     #[test]
-    fn build_plan_formulate_payload_pins_fourteen_keys_for_default_source() {
+    fn build_plan_formulate_payload_pins_seventeen_keys_for_default_source() {
         // Pin the total key count so a future additive change to the
         // wire shape becomes a deliberate, reviewable edit instead of
-        // an accidental drift. Default source: 14 keys (no signals).
+        // an accidental drift. Default source: 17 keys (no signals).
         let plan = Plan {
             context: "".into(),
             decision: "task_complete".into(),
@@ -817,6 +848,9 @@ mod tests {
             llm_backend: "local".into(),
             latency_ms: 0,
             retry_count: 0,
+            assembled_prompt_sha256: "ax".into(),
+            l0_count: 0,
+            l1_count: 0,
         };
         let payload = build_plan_formulate_payload(
             1, 0, DataClass::Public,
@@ -835,8 +869,10 @@ mod tests {
             "plan_step_count", "decision_kind", "refused",
             // Slice A additions:
             "plan", "classification_floor",
-            // Slice B (automatic floor inference, 2026-05-16):
+            // Slice B (automatic floor inference):
             "classification_floor_source",
+            // Slice C (prompt assembler, this commit):
+            "system_prompt_sha256", "l0_count", "l1_count",
         ].into_iter().collect();
         assert_eq!(keys, expected, "payload key set drifted; update the pin deliberately");
     }
@@ -852,13 +888,15 @@ mod tests {
             prompt_name: "p".into(), prompt_sha256: "h".into(),
             llm_model: "m".into(), llm_backend: "local".into(),
             latency_ms: 1, retry_count: 0,
+            assembled_prompt_sha256: "ah".into(),
+            l0_count: 0, l1_count: 0,
         };
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::Public, ClassificationFloorSource::Default, &[], &plan, &meta,
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 14,
-            "default-source payload should have 14 keys; got {} keys: {:?}",
+        assert_eq!(obj.len(), 17,
+            "default-source payload should have 17 keys; got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
         assert!(obj.get("classification_floor_signals").is_none(),
@@ -866,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_cli_inferred_source_has_15_keys_with_signals() {
+    fn build_plan_formulate_payload_cli_inferred_source_has_18_keys_with_signals() {
         let plan = Plan {
             context: "".into(), decision: "task_complete".into(), rationale: "".into(),
             steps: vec![], result: Some(serde_json::json!({"kind":"text","body":"ok"})),
@@ -876,6 +914,8 @@ mod tests {
             prompt_name: "p".into(), prompt_sha256: "h".into(),
             llm_model: "m".into(), llm_backend: "local".into(),
             latency_ms: 1, retry_count: 0,
+            assembled_prompt_sha256: "ah".into(),
+            l0_count: 0, l1_count: 0,
         };
         let signals = vec!["patient".to_string(), "pathology".to_string()];
         let payload = build_plan_formulate_payload(
@@ -884,8 +924,8 @@ mod tests {
             &plan, &meta,
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 15,
-            "cli_inferred payload should have 15 keys (default 14 + signals); got {} keys: {:?}",
+        assert_eq!(obj.len(), 18,
+            "cli_inferred payload should have 18 keys (default 17 + signals); got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("cli_inferred".into()));
         let arr = obj["classification_floor_signals"].as_array()
@@ -909,6 +949,8 @@ mod tests {
             prompt_name: "p".into(), prompt_sha256: "h".into(),
             llm_model: "m".into(), llm_backend: "local".into(),
             latency_ms: 1, retry_count: 0,
+            assembled_prompt_sha256: "ah".into(),
+            l0_count: 0, l1_count: 0,
         };
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::ClinicalConfidential,
@@ -917,8 +959,8 @@ mod tests {
             &plan, &meta,
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 14,
-            "agent_raised should have 14 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj.len(), 17,
+            "agent_raised should have 17 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
         assert!(obj.get("classification_floor_signals").is_none());
     }
