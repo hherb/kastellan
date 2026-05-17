@@ -13,9 +13,13 @@
 //! See `docs/superpowers/specs/2026-05-17-l1-promotion-writer-design.md`
 //! for the full design.
 
+use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
 use hhagent_db::DbError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 /// Maximum body length in bytes for an L1 row. Half of L0's
 /// `L0_MAX_BODY_BYTES = 1024`; the L1 read cap is 4 KiB across
@@ -165,11 +169,6 @@ pub fn build_l1_metadata(
     serde_json::Value::Object(obj)
 }
 
-use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
-use sqlx::PgPool;
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
-
 /// Promote a single L1 row. Validates, computes SHA-256, EXISTS-checks
 /// against `layer = 1` rows by `metadata->>'body_sha256'`, inserts on
 /// miss. Idempotent on body SHA-256 across all source variants — the
@@ -193,10 +192,14 @@ pub async fn promote_l1(
     let body_sha256 = compute_body_sha256(trimmed);
 
     // EXISTS-check keyed on metadata->>'body_sha256' at layer = 1.
+    // No `ORDER BY` — dedup doesn't care which matching row's id we get,
+    // just whether ANY row exists. A future partial unique index on
+    // `(metadata->>'body_sha256') WHERE layer = 1` would also benefit
+    // from the omission (no forced index-ordered scan).
     let existing: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM memories \
          WHERE layer = $1 AND metadata->>'body_sha256' = $2 \
-         ORDER BY id ASC LIMIT 1",
+         LIMIT 1",
     )
     .bind(MemoryLayer::Index.as_db())
     .bind(&body_sha256)
