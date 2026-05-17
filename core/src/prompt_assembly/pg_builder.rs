@@ -42,28 +42,25 @@ impl PgSystemPromptBuilder {
 
 #[async_trait]
 impl SystemPromptBuilder for PgSystemPromptBuilder {
-    async fn build(&self, base: &str) -> Result<AssembledPrompt, PromptAssemblyError> {
-        // TODO(token-cap, issue #78): both loaders are uncapped at
-        // the I/O layer beyond `load_l1_default`'s internal row-count
-        // + byte caps. Safe today (L1 is empty in prod until a
-        // promotion writer lands), but the day an L1 writer arrives
-        // the assembled prompt can balloon. When the deferred "global
-        // token cap with priority drop" follow-up lands, plumb a
-        // budget through here so the assembler can priority-drop rows
-        // rather than relying solely on per-layer caps inside the
-        // loaders. See https://github.com/hherb/hhagent/issues/78.
+    async fn build_with_recalled(
+        &self,
+        base: &str,
+        recalled: &crate::recall_assembly::RecalledContext,
+    ) -> Result<AssembledPrompt, PromptAssemblyError> {
+        // TODO(token-cap, issue #78): all three loaders (L0, L1,
+        // recalled) are uncapped at the I/O layer beyond their
+        // internal per-layer caps. Safe today because both L1 and the
+        // recalled-bodies cap are bounded; the deferred "global token
+        // cap with priority drop" follow-up will plumb a budget
+        // through here. See https://github.com/hherb/hhagent/issues/78.
         let l0 = load_l0_active_default(&self.pool).await?;
         let l1 = load_l1_default(&self.pool).await?;
-        let system_prompt = assemble_system_prompt(
-            &l0,
-            &l1,
-            &crate::recall_assembly::RecalledContext::empty(),
-            base,
-        );
+        let system_prompt = assemble_system_prompt(&l0, &l1, recalled, base);
         Ok(AssembledPrompt {
             system_prompt,
             l0_count: l0.len(),
             l1_count: l1.len(),
+            recalled_count: recalled.ids.len(),
         })
     }
 }
@@ -95,11 +92,16 @@ impl StaticSystemPromptBuilder {
 
 #[async_trait]
 impl SystemPromptBuilder for StaticSystemPromptBuilder {
-    async fn build(&self, _base: &str) -> Result<AssembledPrompt, PromptAssemblyError> {
+    async fn build_with_recalled(
+        &self,
+        _base: &str,
+        recalled: &crate::recall_assembly::RecalledContext,
+    ) -> Result<AssembledPrompt, PromptAssemblyError> {
         Ok(AssembledPrompt {
             system_prompt: self.fixed.clone(),
             l0_count: 0,
             l1_count: 0,
+            recalled_count: recalled.ids.len(),
         })
     }
 }
@@ -118,8 +120,10 @@ mod tests {
         assert_eq!(r2.system_prompt, "FIXED-OUTPUT");
         assert_eq!(r1.l0_count, 0, "static builder always reports 0 l0 rows");
         assert_eq!(r1.l1_count, 0, "static builder always reports 0 l1 rows");
+        assert_eq!(r1.recalled_count, 0);
         assert_eq!(r2.l0_count, 0, "second call must also report 0 l0 rows");
         assert_eq!(r2.l1_count, 0, "second call must also report 0 l1 rows");
+        assert_eq!(r2.recalled_count, 0);
     }
 
     #[tokio::test]
@@ -129,5 +133,26 @@ mod tests {
         assert_eq!(r.system_prompt, "", "empty constructor yields empty system_prompt");
         assert_eq!(r.l0_count, 0);
         assert_eq!(r.l1_count, 0);
+        assert_eq!(r.recalled_count, 0);
+    }
+
+    #[tokio::test]
+    async fn static_builder_build_with_recalled_passes_recalled_count_through() {
+        use crate::recall_assembly::RecalledContext;
+        let b = StaticSystemPromptBuilder::new("FIXED");
+        let recalled = RecalledContext {
+            ids: vec![1, 2],
+            bodies: vec!["body one".into(), "body two".into()],
+            query_sha256: "a".repeat(64),
+        };
+        let r = b.build_with_recalled("base", &recalled).await.unwrap();
+        // StaticSystemPromptBuilder ignores base + recalled in the
+        // assembled string (it's fixed), but the recalled_count field
+        // must report the supplied recalled.ids.len() so RouterAgent
+        // can write the audit row with the right number.
+        assert_eq!(r.system_prompt, "FIXED");
+        assert_eq!(r.l0_count, 0);
+        assert_eq!(r.l1_count, 0);
+        assert_eq!(r.recalled_count, 2, "recalled_count must reflect the supplied context");
     }
 }

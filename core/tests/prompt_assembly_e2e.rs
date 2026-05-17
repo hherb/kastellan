@@ -84,6 +84,8 @@ fn pg_builder_build_against_seeded_db() {
 
         assert_eq!(result.l0_count, 2, "two L0 rows seeded: {result:?}");
         assert_eq!(result.l1_count, 1, "one L1 row seeded: {result:?}");
+        assert_eq!(result.recalled_count, 0,
+                   "build() with no recall context defaults to recalled_count = 0; got: {result:?}");
         let s = &result.system_prompt;
         assert!(s.starts_with("<l0_meta_rules>\n"),
                 "L0 section first; got:\n{s}");
@@ -144,6 +146,8 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
 
         assert_eq!(result.l0_count, 0, "no rows seeded: {result:?}");
         assert_eq!(result.l1_count, 0, "no rows seeded: {result:?}");
+        assert_eq!(result.recalled_count, 0,
+                   "build() with no recall context defaults to recalled_count = 0; got: {result:?}");
         assert_eq!(
             result.system_prompt, "<base>\nBASE BODY\n</base>\n",
             "empty-DB build must return just the <base> block"
