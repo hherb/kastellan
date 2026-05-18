@@ -2518,3 +2518,178 @@ async fn entity_kinds_cache_hits_warm_does_not_re_query() {
 
     pool.close().await;
 }
+
+// ─── graph_search quarantine filter (Task 4) ─────────────────────────
+
+/// Production callers pass `include_quarantined=false`; only the
+/// promoted side of the entity table should contribute memory ids to
+/// the graph lane. A memory linked exclusively to quarantined entities
+/// must NOT surface even when its entity_id appears in the seed set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_search_excludes_quarantined_by_default() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "gsq-d",
+        "gsq-l",
+        &format!("hhagent-pg-gsq-excl-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "graph_search-excludes-quarantined"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // Two entities: one promoted (quarantine=FALSE), one quarantined.
+    // Inserted via raw SQL because `Graph::upsert_entity` doesn't
+    // expose the quarantine column (defaults TRUE, promotion is the
+    // future operator path).
+    let ent_promoted: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'Alice Promoted', 'alice promoted', FALSE) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert promoted entity");
+
+    let ent_quar: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'Bob Quarantined', 'bob quarantined', TRUE) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert quarantined entity");
+
+    // Two memories, one linked to each entity.
+    let mem_promoted = hhagent_db::memories::insert_memory(
+        &pool,
+        "memory linked to promoted entity",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert mem_promoted");
+
+    let mem_quar = hhagent_db::memories::insert_memory(
+        &pool,
+        "memory linked to quarantined entity",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert mem_quar");
+
+    hhagent_db::memories::link_memory_to_entities(&pool, mem_promoted, &[ent_promoted])
+        .await
+        .expect("link mem_promoted");
+    hhagent_db::memories::link_memory_to_entities(&pool, mem_quar, &[ent_quar])
+        .await
+        .expect("link mem_quar");
+
+    // Production call: include_quarantined=false.
+    let hits = hhagent_db::memories::graph_search(
+        &pool,
+        &[ent_promoted, ent_quar],
+        10,
+        false,
+    )
+    .await
+    .expect("graph_search");
+
+    assert_eq!(
+        hits,
+        vec![mem_promoted],
+        "graph_search with include_quarantined=false must drop memories \
+         whose only linked entities are quarantined"
+    );
+
+    pool.close().await;
+}
+
+/// The operator-review CLI path passes `include_quarantined=true` so
+/// reviewers can see what the v2 extractor staged. Confirm the flag
+/// genuinely overrides the filter, including for entities still in
+/// their default quarantined state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_search_includes_quarantined_when_flag_true() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "gsq-d",
+        "gsq-l",
+        &format!("hhagent-pg-gsq-incl-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "graph_search-includes-quarantined"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let ent_quar: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'Carol Quarantined', 'carol quarantined', TRUE) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert quarantined entity");
+
+    let mem = hhagent_db::memories::insert_memory(
+        &pool,
+        "memory linked to quarantined entity (operator path)",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert mem");
+
+    hhagent_db::memories::link_memory_to_entities(&pool, mem, &[ent_quar])
+        .await
+        .expect("link mem");
+
+    // Operator path: include_quarantined=true.
+    let hits = hhagent_db::memories::graph_search(&pool, &[ent_quar], 10, true)
+        .await
+        .expect("graph_search");
+
+    assert_eq!(
+        hits,
+        vec![mem],
+        "graph_search with include_quarantined=true must surface \
+         memories linked only to quarantined entities"
+    );
+
+    pool.close().await;
+}

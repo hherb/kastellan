@@ -317,8 +317,13 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
                 let expanded_vec: Vec<i64> = expanded.into_iter().collect();
 
                 lane_lists.push(
-                    hhagent_db::memories::graph_search(pool, &expanded_vec, lane_k)
-                        .await?,
+                    hhagent_db::memories::graph_search(
+                        pool,
+                        &expanded_vec,
+                        lane_k,
+                        false,
+                    )
+                    .await?,
                 );
             }
             _ => {

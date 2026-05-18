@@ -470,6 +470,7 @@ pub async fn graph_search<'e, E>(
     executor: E,
     entity_ids: &[i64],
     k: usize,
+    include_quarantined: bool,
 ) -> Result<Vec<i64>, DbError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -478,22 +479,29 @@ where
         return Ok(Vec::new());
     }
 
+    // JOIN entities + filter on quarantine. When include_quarantined
+    // is TRUE, the predicate short-circuits via `OR $3` so the planner
+    // skips the entity-table probe on the operator-CLI path.
     let rows = sqlx::query(
-        "SELECT memory_id \
-         FROM memory_entities \
-         WHERE entity_id = ANY($1::bigint[]) \
-         GROUP BY memory_id \
-         ORDER BY COUNT(*) DESC, memory_id ASC \
+        "SELECT me.memory_id \
+         FROM memory_entities me \
+         JOIN entities e ON me.entity_id = e.id \
+         WHERE me.entity_id = ANY($1::bigint[]) \
+           AND ($3 OR e.quarantine = FALSE) \
+         GROUP BY me.memory_id \
+         ORDER BY COUNT(*) DESC, me.memory_id ASC \
          LIMIT $2",
     )
     .bind(entity_ids)
     .bind(limit_as_i64(k))
+    .bind(include_quarantined)
     .fetch_all(executor)
     .await
     .map_err(|e| DbError::Query(format!("graph_search: {e}")))?;
 
     rows.into_iter()
         .map(|r| {
+            use sqlx::Row;
             r.try_get::<i64, _>(0)
                 .map_err(|e| DbError::Query(format!("decode memory_id: {e}")))
         })
