@@ -90,8 +90,14 @@ pub fn dispatch_indicates_worker_dead<T>(result: &Result<T, ToolHostError>) -> b
         Ok(_) => false,
         Err(ToolHostError::Sandbox(_)) => false, // pre-spawn; no worker to be dead
         Err(ToolHostError::Io(_)) => true,
+        // Exhaustive on `ClientError` so any future variant added to `hhagent-protocol`
+        // breaks the build here and forces a deliberate classification decision rather
+        // than silently inheriting the "dead" default.
         Err(ToolHostError::Protocol(ClientError::Rpc(_))) => false,
-        Err(ToolHostError::Protocol(_)) => true,
+        Err(ToolHostError::Protocol(ClientError::Io(_))) => true,
+        Err(ToolHostError::Protocol(ClientError::Decode(_))) => true,
+        Err(ToolHostError::Protocol(ClientError::EarlyExit)) => true,
+        Err(ToolHostError::Protocol(ClientError::IdMismatch { .. })) => true,
     }
 }
 
@@ -188,6 +194,9 @@ pub(crate) fn slot_for(registry: &WarmRegistry, tool_name: &str) -> Arc<ToolSlot
 ///      as wiring bugs (return `Io(InvalidInput)` so the dispatcher's
 ///      `step.spawn_failed` audit row still fires).
 ///   2. `slot_for(registry, tool_name)` looks up or creates the per-tool slot.
+///      `tool_name` is the logical registry key (i.e. `PlannedStep::tool`), NOT the
+///      binary basename — keying by basename would silently collide for two tools
+///      whose binaries happen to share a `file_name` and is a security-relevant bug.
 ///   3. `slot.state.clone().lock_owned().await` — concurrent same-tool acquires
 ///      serialise here.
 ///   4. Honor `next_spawn_allowed_at` (restart backoff): sleep until allowed.
@@ -197,6 +206,7 @@ pub(crate) async fn acquire_impl(
     sandbox: &dyn SandboxBackend,
     backoff: RestartBackoff,
     registry: &WarmRegistry,
+    tool_name: &str,
     entry: &ToolEntry,
 ) -> Result<WorkerHandle, ToolHostError> {
     let caps = match &entry.lifecycle {
@@ -209,13 +219,7 @@ pub(crate) async fn acquire_impl(
         }
     };
 
-    let tool_name = entry
-        .binary
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| entry.binary.to_string_lossy().into_owned());
-
-    let slot = slot_for(registry, &tool_name);
+    let slot = slot_for(registry, tool_name);
     let mut guard = Arc::clone(&slot.state).lock_owned().await;
 
     // Honor restart backoff. If `next_spawn_allowed_at` is in the future, sleep until

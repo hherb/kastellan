@@ -22,6 +22,13 @@ use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec
 ///
 /// The variant is private; consumers only see the `worker_mut` and `report_crash`
 /// methods.
+///
+/// **Drop runtime contract:** the `IdleTimeout` variant's Drop impl calls
+/// `tokio::spawn` to schedule the one-shot idle-teardown task, so it must run inside a
+/// live tokio runtime. The production caller (`ToolHostStepDispatcher::dispatch_step`)
+/// satisfies this trivially — Drop happens on the async stack. Tests that construct or
+/// drop an idle-timeout handle must use `#[tokio::test]`. Dropping outside a runtime
+/// panics from inside Drop.
 pub struct WorkerHandle {
     kind: WorkerHandleKind,
 }
@@ -157,7 +164,17 @@ pub trait WorkerLifecycleManager: Send + Sync {
     /// Acquire a `WorkerHandle` for `entry`'s tool. The handle's lifetime equals one
     /// JSON-RPC request: caller dispatches against it, then drops it. Slice 1 always
     /// terminates the underlying worker on drop; slice 2 may hand it back to a pool.
-    async fn acquire(&self, entry: &ToolEntry) -> Result<WorkerHandle, ToolHostError>;
+    ///
+    /// `tool_name` is the logical registry key (i.e. `PlannedStep::tool`). It is the
+    /// warm-cache key for `IdleTimeoutLifecycle` — using the registry key rather than
+    /// the binary basename means two tools whose binaries happen to share a `file_name`
+    /// (e.g. `/opt/a/inference` and `/opt/b/inference`) get separate slots. The
+    /// `SingleUseLifecycle` impl ignores it because it never caches.
+    async fn acquire(
+        &self,
+        tool_name: &str,
+        entry: &ToolEntry,
+    ) -> Result<WorkerHandle, ToolHostError>;
 }
 
 /// Single-use lifecycle: spawn one worker per acquire, terminate on drop.
@@ -176,7 +193,15 @@ impl SingleUseLifecycle {
 
 #[async_trait]
 impl WorkerLifecycleManager for SingleUseLifecycle {
-    async fn acquire(&self, entry: &ToolEntry) -> Result<WorkerHandle, ToolHostError> {
+    async fn acquire(
+        &self,
+        _tool_name: &str,
+        entry: &ToolEntry,
+    ) -> Result<WorkerHandle, ToolHostError> {
+        // `_tool_name` is unused: single-use never caches, so there is no per-tool slot
+        // to key by. The parameter exists on the trait for `IdleTimeoutLifecycle`'s
+        // warm-cache key (see trait doc).
+        //
         // Per-call clone of the base policy so concurrent dispatches against the same
         // `ToolEntry` cannot mutate each other's policy. The clone matches the
         // discipline the pre-refactor inline path used.
@@ -258,11 +283,16 @@ impl IdleTimeoutLifecycle {
 
 #[async_trait]
 impl WorkerLifecycleManager for IdleTimeoutLifecycle {
-    async fn acquire(&self, entry: &ToolEntry) -> Result<WorkerHandle, ToolHostError> {
+    async fn acquire(
+        &self,
+        tool_name: &str,
+        entry: &ToolEntry,
+    ) -> Result<WorkerHandle, ToolHostError> {
         super::idle_timeout::acquire_impl(
             self.sandbox.as_ref(),
             self.backoff,
             &self.registry,
+            tool_name,
             entry,
         )
         .await
@@ -296,7 +326,7 @@ mod tests {
             wall_clock_ms: None,
             lifecycle: Lifecycle::SingleUse,
         };
-        let r = mgr.acquire(&entry).await;
+        let r = mgr.acquire("test-tool", &entry).await;
         assert!(r.is_err(), "must return Err on wiring bug");
     }
 

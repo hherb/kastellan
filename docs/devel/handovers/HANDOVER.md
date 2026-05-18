@@ -36,6 +36,17 @@ Consumes the spec at `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-
 
 **File-size note:** `core/src/worker_lifecycle/idle_timeout.rs` ships at **521 LOC** — 21 over the 500 soft cap. About half is the embedded `#[cfg(test)] mod tests` block (14 pure-helper tests). Natural split candidate: lift the test module into a sibling `idle_timeout_tests.rs` via `#[cfg(test)] mod idle_timeout_tests;`. Deferred — not load-bearing for slice 2 and a future test addition can trigger the split organically.
 
+**Post-review fixups (2026-05-18):**
+
+1. **`WorkerLifecycleManager::acquire` takes `tool_name: &str`** — the warm-cache key is now the logical registry key (`PlannedStep::tool`) instead of `entry.binary.file_name()`. Two tools whose binaries happen to share a basename used to collide in the warm slot; the new shape forces the caller to pass tool identity explicitly. The dispatcher passes `&step.tool`; `SingleUseLifecycle::acquire` ignores the parameter (no cache to key). Issue [#84](https://github.com/hherb/hhagent/issues/84) captures the related (deferred) queue-depth observability work.
+2. **Crash classifier exhaustive on `ClientError`** — `dispatch_indicates_worker_dead` now matches each `ClientError` variant explicitly (`Rpc` alive; `Io`/`Decode`/`EarlyExit`/`IdMismatch` dead). A future variant added in `hhagent-protocol` breaks the build here and forces a deliberate classification rather than silently inheriting "dead."
+3. **`WorkerHandle` Drop runtime contract documented** — the type-level doc now states that the `IdleTimeout` variant's Drop calls `tokio::spawn` and therefore must run inside a live tokio runtime; tests must use `#[tokio::test]`.
+4. **Concurrent-serialisation test is deterministic** — `concurrent_acquires_for_same_tool_serialize` replaced the 25 ms timing-dependent sleep with a `tokio::sync::oneshot` signal so task 1 deterministically wins the slot before task 2 starts.
+5. **Test owns the logical tool name** — `worker_lifecycle_idle_timeout_e2e.rs` uses a `const TOOL_NAME: &str = "shell-exec-idle-test"` and passes it into every `acquire` + `_test_slot_*` call. The old `tool_name_for_binary` helper that re-derived production's `file_name()` key is gone.
+6. **Process-narrative comments trimmed** in `tool_dispatch.rs::dispatch_step` (slice-1 architecture note + classifier-table inline doc); the long-form lives in the spec and the classifier docstring.
+
+Test count and counts unchanged (still **751 passed / 0 failed / 0 warnings**). Three follow-up GitHub issues filed for items deferred out of scope: [#84](https://github.com/hherb/hhagent/issues/84) (queue-depth visibility), [#85](https://github.com/hherb/hhagent/issues/85) (teardown-task accumulation under high request rate), [#86](https://github.com/hherb/hhagent/issues/86) (struct-literal bypass of `Lifecycle::idle_timeout` validator).
+
 ## Recently completed (this session, 2026-05-18 — worker lifecycle slice 1, branch `feat/worker-lifecycle-slice-1`, bundled with slice 2 in one PR)
 
 Consumes the spec at `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md` (landed on `main` 2026-05-18 at `99e97cf`) and produces the first runtime slice. The plan lives at `docs/superpowers/plans/2026-05-18-worker-lifecycle-slice-1.md` (committed as `781acba`, the first commit on the branch).

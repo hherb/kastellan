@@ -305,13 +305,10 @@ fn build_scheduler_step_failure_payload(
 /// for a [`crate::worker_lifecycle::WorkerHandle`], calls
 /// [`tool_host::dispatch`], and maps the result into a [`StepOutcome`].
 ///
-/// **Slice-1 architecture note:** the previous version held an
-/// `Arc<dyn SandboxBackend>` and called `spawn_worker` inline. That
-/// spawn path now lives behind the
-/// [`crate::worker_lifecycle::WorkerLifecycleManager::acquire`] seam so
-/// slice 2 can swap `SingleUseLifecycle` for an idle-timeout pool
-/// without touching this struct. See
-/// `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`.
+/// The spawn path lives behind
+/// [`crate::worker_lifecycle::WorkerLifecycleManager::acquire`]; see
+/// `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md` for the
+/// lifecycle contract.
 ///
 /// Cheap to clone (all fields are `Arc`/`PgPool`); the daemon's
 /// scheduler holds a single instance and the inner loop calls
@@ -383,14 +380,12 @@ impl StepDispatcher for ToolHostStepDispatcher {
             };
         };
 
-        // Slice-1 lifecycle seam: `SingleUseLifecycle::acquire` does the same
-        // `spawn_worker(self.sandbox.as_ref(), &spec)` call inline as the old code
-        // did. The `ToolHostError` it returns is byte-equivalent to the previous
-        // direct-call shape, so the `SPAWN_FAILED` audit path below is unchanged.
-        // Slice 2's `IdleTimeoutLifecycle` will instead return an `Err(ToolHostError)`
-        // only on real spawn failures; warm-cache hits never reach this `match` arm
-        // at all.
-        let mut handle = match self.lifecycle.acquire(entry).await {
+        // The manager owns the spawn/warm-cache decision. `acquire` returns
+        // `Err(ToolHostError)` only on real spawn failures (warm-cache hits never
+        // reach the `Err` arm); the `SPAWN_FAILED` audit row below treats both
+        // lifecycle policies uniformly. Pass `&step.tool` (the logical registry key)
+        // so the idle-timeout warm-cache keys by tool identity, not binary basename.
+        let mut handle = match self.lifecycle.acquire(&step.tool, entry).await {
             Ok(h) => h,
             Err(e) => {
                 // Spawn failure short-circuits before
@@ -443,22 +438,15 @@ impl StepDispatcher for ToolHostStepDispatcher {
         )
         .await;
 
-        // Slice 2: signal to the lifecycle manager whether the worker survived. For
-        // single-use this is a no-op; for idle-timeout it suppresses the worker-return
-        // path so the dead worker isn't put back into the warm slot, and bumps the
-        // restart-backoff counter. Classified using the protocol-error variant —
-        // transport-level failures (`Io`, `Decode`, `EarlyExit`, `IdMismatch`) indicate
-        // the worker died; `Rpc(_)` errors mean the worker rejected the call but is
-        // alive.
+        // Signal worker death to the manager. No-op for single-use; for idle-timeout
+        // this suppresses the worker-return path and bumps the restart-backoff counter.
+        // See `dispatch_indicates_worker_dead` for the variant→liveness mapping.
         if crate::worker_lifecycle::idle_timeout::dispatch_indicates_worker_dead(&result) {
             handle.report_crash();
         }
 
-        // Drop closes stdio + cancels the watchdog. For `SingleUseLifecycle`, dropping
-        // the handle drops the inner `SupervisedWorker`; for `IdleTimeoutLifecycle`,
-        // Drop hands the worker back to the warm slot (or terminates it if
-        // `report_crash` was called, the request cap fired, or the worker aged out)
-        // and schedules an idle-teardown task.
+        // Drop runs the lifecycle-appropriate teardown: terminate (single-use) or
+        // return-to-slot + schedule idle-teardown (idle-timeout).
         drop(handle);
 
         map_dispatch_result(result)
