@@ -14,6 +14,30 @@
 
 ---
 
+## ⚠️ READ FIRST: POC spike findings (2026-05-18)
+
+**Before implementing any task in this plan**, read `docs/superpowers/specs/2026-05-18-gliner-relex-spike-notes.md`. The spike (run after this plan was drafted) surfaced four corrections to assumptions baked into the tasks below. The corrections are also annotated inline at the affected tasks, but the spike notes carry the full reasoning + the raw measurements.
+
+**Summary of corrections by affected task:**
+
+| Task | Original assumption | Correct shape |
+|---|---|---|
+| **Task 1.3** (`server.py`) | One `threshold` field covers entities + relations | Add optional `relation_threshold` field (defaults to `threshold` when omitted); production callers should pass `≥ 0.5` for both. Validators accept both. |
+| **Task 1.4** (`model.py`) | Call `self._instance.predict_relations(text, labels=..., relations=..., threshold=...)` | Call `self._instance.inference(texts=[text], labels=..., relations=..., threshold=..., relation_threshold=..., return_relations=True, flat_ner=False)`. Note `texts=[text]` batch shape — pass a single-element list, unwrap `entities[0]` and `relations[0]` from the result. |
+| **Task 1.4** (`model.py`) | Triple output shape `{subject, relation, object, score}` | Upstream returns `{head: entity_dict, tail: entity_dict, relation: str, score: float}` where head/tail carry full Entity dicts. Wrapper preserves this — does NOT rename to subject/object. Truncation filter still works (key on `head["text"]` and `tail["text"]` membership). |
+| **Task 1.5** (`__main__.py`) | `torch.cuda.is_available() == True` ⇒ use CUDA | On the DGX Spark, vLLM owns 107 GB of unified memory; `torch.cuda.is_available()` returns `True` but `model.to("cuda")` OOMs. Wrap the `cuda` branch with `torch.cuda.mem_get_info(0)` probe; require `free >= 3 GiB` before committing. Fall back to CPU otherwise (no warning; CPU is a first-class production posture at p50 ~157 ms warm). |
+| **Task 2.2** (Rust `Triple`) | `pub struct Triple { subject, relation, object, score }` | `pub struct Triple { head: Entity, tail: Entity, relation: String, score: f32 }` — head and tail are nested `Entity` (not just surface strings). |
+
+The spike also validated:
+- **License chain holds** (Apache 2.0 model card + Apache 2.0 upstream lib).
+- **uv sync works cleanly** with the pinned deps; resolved gliner 0.2.26 / torch 2.12.0+cu130 / transformers 5.1.0 on the DGX Spark.
+- **CPU warm latency is ~157 ms p50** (samples ranged 136-174 ms over 10 warm calls of a 9-word memory body). Well under the design spec's 200 ms target.
+- **Cold-start is ~3.7 s** (load + `.to(cpu)`). Adequate for the spec's 30 s startup ceiling.
+- **Entity recall is excellent on medical content** (`Dr Smith → person 0.999`, `asthma → disease 0.999`, `Dr Smith --[treats]--> asthma 0.980`).
+- **Technical content gets noisy relations** at threshold 0.3 (148 triples from one input; mostly duplicates from overlapping entity subspans). Threshold ≥ 0.5 trims this substantially. Deduplication is the consumer's job, not the worker's.
+
+---
+
 ## File Structure
 
 ### Slice 1 — Python worker

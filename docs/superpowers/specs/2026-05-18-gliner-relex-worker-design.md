@@ -1,13 +1,23 @@
 # GLiNER-Relex Worker — Design Spec
 
-**Status:** design, not yet planned
+**Status:** design — implementation plan written, POC spike completed 2026-05-18
 **Author:** Horst Herb + Claude Opus 4.7 (brainstorming pass 2026-05-18)
 **Date:** 2026-05-18
 **Companion docs:**
+- `docs/superpowers/specs/2026-05-18-gliner-relex-spike-notes.md` — **READ FIRST.** POC spike findings; supersedes four points in this spec (method name, relation envelope, threshold defaults, CUDA-availability detection).
 - `docs/superpowers/specs/2026-05-18-gliner-relex-feasibility-study.md` — license chain + capability + cross-platform notes; this spec assumes its findings
 - `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md` — defines `Lifecycle::IdleTimeout` + `Contract { stateless: true }`; this worker is the first consumer
 - `docs/superpowers/specs/2026-05-18-entity-extraction-graph-lane-design.md` — v1 entity-extraction design; this worker MAY become its v2 replacement on a later slice (out of scope here)
 - `docs/threat-model.md` — per-worker sandbox invariant the worker preserves
+
+## Updates from the POC spike (2026-05-18)
+
+The spike at `scripts/spike/gliner-relex/` (deleted; results in the spike notes file) found four places where this spec's initial drafting needs correction before implementation begins. **The relation envelope correction in §"JSON-RPC wire contract" below already reflects spike finding #2; the other three are recorded inline in the implementation plan's task notes and are summarised here:**
+
+1. **Upstream method is `model.inference(texts=[text], labels=..., relations=..., threshold=..., relation_threshold=..., return_relations=True, flat_ner=False)`**, not `predict_relations`. (Plan's Task 1.4 update.)
+2. **Relation envelope is `{head: Entity, tail: Entity, relation: str, score: f32}`** — both head and tail carry full entity dicts inline, not just surface strings. (This section's "Response" example below has been updated; plan's Task 2.2 `Triple` struct ditto.)
+3. **Threshold defaults: entity ≥ 0.5, relation ≥ 0.5.** The model produces heavy noise at threshold 0.3 (148 relations on one sample from overlapping entity subspans). The `ExtractRequest` schema below gains an optional `relation_threshold` field separate from `threshold`.
+4. **CUDA availability is not the same as CUDA memory availability.** On the DGX Spark, vLLM owned the GPU; `torch.cuda.is_available()` returned `True` but `model.to("cuda")` OOMed. Plan's Task 1.5 `_resolve_device` needs a `torch.cuda.mem_get_info()` probe before committing to `cuda`. CPU is a first-class production posture — p50 warm latency on the spike's CPU run was 157 ms, well under the design's 200 ms warm-call target.
 
 ## Why this document exists
 
@@ -71,18 +81,20 @@ The worker advertises exactly one method: `extract`. The wire shape is shared be
   "params": {
     "text": "Dr Smith treats asthma in his Mosman clinic.",
     "entity_labels": ["person", "organization", "location", "disease"],
-    "relation_labels": ["treats", "located_in", "works_at"],
+    "relation_labels": ["treats", "located in", "works at"],
     "threshold": 0.5,
+    "relation_threshold": 0.5,
     "max_entities": 64
   }
 }
 ```
 
 - `text` (required, string): UTF-8 input. Empty string → `INVALID_INPUT`.
-- `entity_labels` (required, array of strings): zero-shot entity types to look for. Must be non-empty.
-- `relation_labels` (required, array of strings): zero-shot relation types. Empty array is valid — the worker runs entity extraction only and returns `triples: []`. Useful for consumers that only need entities.
-- `threshold` (optional, float, default `0.5`): score threshold for both entities and relations.
-- `max_entities` (optional, integer, default `64`): cap on returned entity count to bound payload size. Triples filtered to those whose subject and object both survive the entity cap.
+- `entity_labels` (required, array of strings): zero-shot entity types to look for. Must be non-empty. Use natural-language strings — the model card uses `"located in"` not `"located_in"`.
+- `relation_labels` (required, array of strings): zero-shot relation types. Empty array is valid — the worker skips the RE pass and returns `triples: []`. Useful for consumers that only need entities.
+- `threshold` (optional, float, default `0.5`): score threshold for entity detection. Anything below this is filtered before the response.
+- `relation_threshold` (optional, float, default `= threshold`): separate score threshold for relations. The model can produce dense candidate triples from overlapping entity subspans (spike measured 148 triples on one input at 0.3), so a 0.5 floor on relations specifically is recommended in production. Omitting this field reuses the entity `threshold`.
+- `max_entities` (optional, integer, default `64`): cap on returned entity count to bound payload size. Triples filtered to those whose `head.text` and `tail.text` both survive the entity cap.
 
 ### Response
 
@@ -92,18 +104,25 @@ The worker advertises exactly one method: `extract`. The wire shape is shared be
   "id": "<echoed>",
   "result": {
     "entities": [
-      {"text": "Dr Smith", "label": "person", "start": 0, "end": 8, "score": 0.92},
-      {"text": "asthma", "label": "disease", "start": 16, "end": 22, "score": 0.88},
-      {"text": "Mosman", "label": "location", "start": 30, "end": 36, "score": 0.81}
+      {"text": "Dr Smith", "label": "person", "start": 0, "end": 8, "score": 0.999},
+      {"text": "asthma", "label": "disease", "start": 16, "end": 22, "score": 0.999},
+      {"text": "Mosman", "label": "location", "start": 30, "end": 36, "score": 0.770}
     ],
     "triples": [
-      {"subject": "Dr Smith", "relation": "treats", "object": "asthma", "score": 0.79}
+      {
+        "head":     {"text": "Dr Smith", "label": "person", "start": 0, "end": 8, "score": 0.999},
+        "tail":     {"text": "asthma",   "label": "disease", "start": 16, "end": 22, "score": 0.999},
+        "relation": "treats",
+        "score":    0.980
+      }
     ]
   }
 }
 ```
 
-Empty `entities` and `triples` arrays are valid and signal "no extractions above threshold." Caller treats this as success, not failure.
+Each triple carries the full `head` and `tail` entity dicts inline (matches upstream `model.inference` shape; consumers reading `head.label` / `head.start` get them for free without a second lookup). `relation` is the natural-language relation label string verbatim from the caller's `relation_labels` array. Empty `entities` and `triples` arrays are valid and signal "no extractions above threshold." Caller treats this as success, not failure.
+
+**Triple-level deduplication is out of scope for the worker.** The model emits multiple near-identical triples from overlapping entity subspans (e.g. `("Dr Smith", "treats", "asthma")` may appear alongside `("Smith", "treats", "asthma")`); the consumer slice decides how to dedup since the right policy is consumer-specific.
 
 ### Errors
 
