@@ -28,7 +28,134 @@
 //!   its actual call site. See HANDOVER's design-spec section for the
 //!   rationale.
 
+use std::path::PathBuf;
+
+use hhagent_sandbox::{Net, Profile, SandboxPolicy};
 use serde::{Deserialize, Serialize};
+
+use crate::scheduler::ToolEntry;
+use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle};
+
+/// Resolved paths + config for the GLiNER-Relex worker.
+///
+/// Populated by the daemon's startup code from environment variables
+/// (see `core/src/main.rs::build_gliner_relex_entry`) and passed into
+/// [`gliner_relex_entry`] to build the manifest.
+///
+/// Production callers should construct this via the daemon helper;
+/// tests build it directly to pin manifest shape without touching the
+/// real filesystem.
+#[derive(Debug, Clone)]
+pub struct GlinerRelexEnv {
+    /// Absolute path to the uv-generated console-script shim:
+    /// `<worker_dir>/.venv/bin/hhagent-worker-gliner-relex`. This is
+    /// the binary the dispatcher spawns under sandbox; `pyproject.toml`
+    /// declares `[project.scripts] hhagent-worker-gliner-relex` so
+    /// `uv sync` creates the file.
+    pub script_path: PathBuf,
+    /// Absolute path to the worker venv root: `<worker_dir>/.venv/`.
+    /// Mounted read-only into the sandbox via `policy.fs_read` so the
+    /// Python interpreter + site-packages are visible from inside the
+    /// jail.
+    pub venv_dir: PathBuf,
+    /// Absolute path to the model snapshot directory; operator stages
+    /// this via `scripts/workers/gliner-relex/install.sh`. Mounted
+    /// read-only via `policy.fs_read`. Daemon refuses to register the
+    /// worker if this path doesn't exist on disk at startup.
+    pub weights_dir: PathBuf,
+    /// HF repo ID matching the on-disk snapshot. One of
+    /// `knowledgator/gliner-relex-multi-v1.0` (default) or
+    /// `knowledgator/gliner-relex-large-v0.5`. Forwarded via env var
+    /// to the worker for its own startup-time logging only — the
+    /// worker loads from `weights_dir` directly.
+    pub model_id: String,
+    /// `auto` / `cuda` / `cpu`. `auto` lets the worker probe
+    /// `torch.cuda.mem_get_info(0)` for >= 3 GiB free (per spike
+    /// correction #4) and pick CUDA or fall back to CPU silently.
+    /// `mps` is reserved for the macOS follow-up plan.
+    pub device: String,
+}
+
+/// Construct the [`ToolEntry`] for the gliner-relex worker.
+///
+/// The returned entry is registered in `core::main` when
+/// `HHAGENT_GLINER_RELEX_ENABLE=1` and the weights directory exists
+/// on disk. Without those preconditions the entry is skip-registered
+/// (existing deployments byte-equivalent) and calls to `gliner-relex`
+/// return `UNKNOWN_TOOL` from the dispatcher.
+///
+/// Manifest decisions worth knowing (all match the design spec):
+///
+/// - **`Lifecycle::IdleTimeout`** with 10-minute idle window, 10 000
+///   request cap, daily age-out, and 5 s grace. This is the
+///   first-ever idle-timeout consumer in the tree (see
+///   `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`).
+/// - **`Contract { stateless: true }`** — required by
+///   `Lifecycle::idle_timeout`'s validator. The worker is genuinely
+///   stateless: each `extract` request runs the model on its own
+///   text and returns; no memory of prior requests.
+/// - **`cpu_ms: 0`** — disables `setrlimit(RLIMIT_CPU)`. The rlimit
+///   is cumulative across the process's whole lifetime; on a warm
+///   worker doing thousands of inferences it would fire even when
+///   no single request is pathological. The cgroup `cpu_quota_pct`
+///   ceiling + `Lifecycle::max_age_seconds` rotation handle the
+///   actual safety needs; per-request hang detection is dispatcher
+///   work that the worker-lifecycle spec deliberately punts.
+/// - **`wall_clock_ms: None`** — same logic. Warm workers are
+///   long-lived by design; `Lifecycle::max_age_seconds` (24 h) is
+///   the rotation budget.
+/// - **`Net::Deny`** — the worker has no business reaching the
+///   network. `HF_HUB_OFFLINE=1` + `TRANSFORMERS_OFFLINE=1` are
+///   defense-in-depth env hints to the libraries themselves.
+/// - **`mem_mb: 4_096`** — sized for `multi-v1.0` (~2-3 GB resident)
+///   with headroom. Operators picking `large-v0.5` (~4-5 GB) need
+///   to bump this; flagged in the README's env-var table.
+pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
+    let policy = SandboxPolicy {
+        fs_read: vec![env.weights_dir.clone(), env.venv_dir.clone()],
+        fs_write: vec![],
+        net: Net::Deny,
+        cpu_ms: 0,
+        mem_mb: 4_096,
+        profile: Profile::WorkerStrict,
+        cpu_quota_pct: Some(400),
+        tasks_max: Some(64),
+        env: vec![
+            (
+                "HHAGENT_GLINER_RELEX_WEIGHTS_DIR".to_string(),
+                env.weights_dir.to_string_lossy().into_owned(),
+            ),
+            (
+                "HHAGENT_GLINER_RELEX_MODEL".to_string(),
+                env.model_id.clone(),
+            ),
+            (
+                "HHAGENT_GLINER_RELEX_DEVICE".to_string(),
+                env.device.clone(),
+            ),
+            ("HF_HUB_OFFLINE".to_string(), "1".to_string()),
+            ("TRANSFORMERS_OFFLINE".to_string(), "1".to_string()),
+        ],
+    };
+
+    let lifecycle = Lifecycle::idle_timeout(
+        IdleTimeoutCaps {
+            idle_seconds: 600,
+            max_requests: 10_000,
+            max_age_seconds: 86_400,
+            grace_period_seconds: 5,
+        },
+        Contract { stateless: true },
+    )
+    .expect("manifest declares stateless = true; validator must accept");
+
+    ToolEntry {
+        binary: env.script_path.clone(),
+        policy,
+        wall_clock_ms: None,
+        lifecycle,
+    }
+}
 
 /// Maximum number of distinct entity labels per `extract` request.
 ///
@@ -243,5 +370,150 @@ mod tests {
         assert_eq!(MAX_ENTITY_LABELS, 64);
         assert_eq!(MAX_RELATION_LABELS, 64);
         assert_eq!(MAX_TEXT_BYTES, 8192);
+    }
+
+    /// Shared test fixture: a GlinerRelexEnv pointing at /tmp paths
+    /// that won't actually be touched (the manifest constructor is
+    /// pure — no filesystem access). Path strings are visible in
+    /// assertions below so a refactor that changes them gets caught.
+    fn test_env() -> GlinerRelexEnv {
+        GlinerRelexEnv {
+            script_path: PathBuf::from("/tmp/fake/.venv/bin/hhagent-worker-gliner-relex"),
+            venv_dir: PathBuf::from("/tmp/fake/.venv"),
+            weights_dir: PathBuf::from("/tmp/fake/weights/multi-v1.0"),
+            model_id: "knowledgator/gliner-relex-multi-v1.0".to_string(),
+            device: "auto".to_string(),
+        }
+    }
+
+    #[test]
+    fn entry_carries_idle_timeout_lifecycle_with_spec_caps() {
+        let env = test_env();
+        let entry = gliner_relex_entry(&env);
+        match entry.lifecycle {
+            Lifecycle::IdleTimeout { caps, contract } => {
+                assert!(
+                    contract.stateless,
+                    "must declare stateless=true for idle_timeout"
+                );
+                assert_eq!(caps.idle_seconds, 600);
+                assert_eq!(caps.max_requests, 10_000);
+                assert_eq!(caps.max_age_seconds, 86_400);
+                assert_eq!(caps.grace_period_seconds, 5);
+            }
+            Lifecycle::SingleUse => panic!("expected IdleTimeout, got SingleUse"),
+        }
+    }
+
+    #[test]
+    fn entry_disables_per_request_kill_switches_for_warm_worker() {
+        // The two knobs that are *deliberately* off for warm workers
+        // — see the design spec + the per-field rationale on
+        // gliner_relex_entry. Pinning here so a future "harden the
+        // worker" pass doesn't quietly re-enable either without an
+        // explicit revisit of the lifecycle semantics.
+        let env = test_env();
+        let entry = gliner_relex_entry(&env);
+        assert_eq!(
+            entry.policy.cpu_ms, 0,
+            "cpu_ms must be 0; RLIMIT_CPU is cumulative and would fire across many warm calls"
+        );
+        assert!(
+            entry.wall_clock_ms.is_none(),
+            "wall_clock_ms must be None; lifecycle.max_age_seconds is the rotation budget"
+        );
+    }
+
+    #[test]
+    fn entry_denies_network() {
+        let env = test_env();
+        let entry = gliner_relex_entry(&env);
+        match entry.policy.net {
+            Net::Deny => {}
+            other => panic!("expected Net::Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_uses_strict_profile() {
+        let env = test_env();
+        let entry = gliner_relex_entry(&env);
+        match entry.policy.profile {
+            Profile::WorkerStrict => {}
+            other => panic!("expected Profile::WorkerStrict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_mounts_weights_and_venv_read_only_no_writes() {
+        let env = test_env();
+        let entry = gliner_relex_entry(&env);
+        assert!(
+            entry.policy.fs_read.contains(&env.weights_dir),
+            "weights dir must be in fs_read so the model can load"
+        );
+        assert!(
+            entry.policy.fs_read.contains(&env.venv_dir),
+            "venv dir must be in fs_read so the Python interpreter + site-packages are visible"
+        );
+        assert!(
+            entry.policy.fs_write.is_empty(),
+            "stateless worker writes nothing; fs_write must stay empty"
+        );
+    }
+
+    #[test]
+    fn entry_carries_offline_and_routing_env_vars() {
+        let env = test_env();
+        let entry = gliner_relex_entry(&env);
+        // Build a map view; the order in the Vec<(K, V)> is incidental.
+        let env_map: std::collections::HashMap<&str, &str> = entry
+            .policy
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        assert_eq!(env_map.get("HF_HUB_OFFLINE"), Some(&"1"));
+        assert_eq!(env_map.get("TRANSFORMERS_OFFLINE"), Some(&"1"));
+        assert_eq!(
+            env_map.get("HHAGENT_GLINER_RELEX_MODEL"),
+            Some(&env.model_id.as_str())
+        );
+        assert_eq!(
+            env_map.get("HHAGENT_GLINER_RELEX_DEVICE"),
+            Some(&env.device.as_str())
+        );
+        // The weights path is plumbed via env so the worker's
+        // __main__.py knows where to load from. Compare the stringified
+        // form because the policy env stores `String`, not `PathBuf`.
+        let expected_weights = env.weights_dir.to_string_lossy().into_owned();
+        assert_eq!(
+            env_map.get("HHAGENT_GLINER_RELEX_WEIGHTS_DIR"),
+            Some(&expected_weights.as_str())
+        );
+    }
+
+    #[test]
+    fn entry_sets_cgroup_ceilings_for_warm_inference() {
+        // cpu_quota_pct=400 (4 CPUs) and tasks_max=64 are
+        // worker-specific defaults; explicit pin so a global default
+        // tweak doesn't silently widen what the gliner-relex worker
+        // gets.
+        let env = test_env();
+        let entry = gliner_relex_entry(&env);
+        assert_eq!(entry.policy.cpu_quota_pct, Some(400));
+        assert_eq!(entry.policy.tasks_max, Some(64));
+        assert_eq!(
+            entry.policy.mem_mb, 4_096,
+            "4 GiB sized for multi-v1.0; large-v0.5 operators must bump"
+        );
+    }
+
+    #[test]
+    fn entry_binary_points_at_the_venv_shim() {
+        let env = test_env();
+        let entry = gliner_relex_entry(&env);
+        assert_eq!(entry.binary, env.script_path);
     }
 }
