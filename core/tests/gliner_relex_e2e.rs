@@ -26,11 +26,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hhagent_core::scheduler::ToolEntry;
-use hhagent_core::tool_host;
+use hhagent_core::tool_host::{self, ToolHostError};
 use hhagent_core::worker_lifecycle::{IdleTimeoutLifecycle, WorkerLifecycleManager};
 use hhagent_core::workers::gliner_relex::{
     gliner_relex_entry, ExtractRequest, ExtractResponse, GlinerRelexEnv,
 };
+use hhagent_protocol::client::ClientError;
 use hhagent_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, PgCluster,
@@ -293,4 +294,97 @@ async fn warm_reuse_two_calls_keep_one_worker_warm() {
         lifecycle._test_slot_has_warm("gliner-relex").await,
         "slot must stay warm after second call drop (well under max_requests=10_000)"
     );
+}
+
+/// gliner-relex's INVALID_INPUT (Python-side code -32001) reaches the
+/// caller as `ClientError::Rpc { code: -32001 }`, and the worker
+/// stays alive after the request-local error — a subsequent valid
+/// call hits the same warm slot.
+///
+/// Two structural guarantees in one test:
+///   1. The Python-side `INVALID_INPUT` envelope decodes into the
+///      Rust client's typed RpcError, with the wire-stable -32001
+///      code intact (matches `MAX_TEXT_BYTES` + `empty text` paths
+///      in the Python validators).
+///   2. The dispatcher's crash classifier doesn't trip on RPC-level
+///      errors (per `dispatch_indicates_worker_dead` —
+///      `ClientError::Rpc` is alive); the warm worker survives + the
+///      next call succeeds against it.
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_input_returns_rpc_error_and_worker_stays_alive() {
+    let Some(entry) = build_test_entry() else {
+        return;
+    };
+    let Some((_cluster, pool)) = bring_up_pg("err").await else {
+        return;
+    };
+
+    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = Arc::from(backend());
+    let lifecycle = IdleTimeoutLifecycle::new(sandbox);
+
+    let mut handle = lifecycle
+        .acquire("gliner-relex", &entry)
+        .await
+        .expect("acquire gliner-relex worker");
+
+    // Empty text fails the `text: not empty` validator on the Python
+    // side → -32001 INVALID_INPUT.
+    let bad_req = ExtractRequest {
+        text: String::new(),
+        entity_labels: vec!["x".into()],
+        relation_labels: vec![],
+        threshold: Some(0.5),
+        relation_threshold: Some(0.5),
+        max_entities: Some(8),
+    };
+    let bad_params = serde_json::to_value(&bad_req).unwrap();
+
+    let outcome = tool_host::dispatch(
+        &pool,
+        handle.worker_mut(),
+        "gliner-relex",
+        "extract",
+        bad_params,
+    )
+    .await;
+
+    let err = outcome.expect_err("empty text must surface an error");
+    match err {
+        ToolHostError::Protocol(ClientError::Rpc(rpc_err)) => {
+            // -32001 is the gliner-relex INVALID_INPUT code (matches
+            // `errors.py`'s `INVALID_INPUT = -32001`). Pinning the
+            // exact numeric value rather than a string match because
+            // the Python message text is incidental.
+            assert_eq!(
+                rpc_err.code, -32001,
+                "expected INVALID_INPUT (-32001), got {rpc_err:?}"
+            );
+        }
+        other => {
+            panic!("expected Protocol(Rpc(_)) with code -32001, got {other:?}");
+        }
+    }
+
+    // Worker must still be alive — make a valid call on the same
+    // handle. The dispatch path classifies RPC-level errors as
+    // "worker alive" (see `dispatch_indicates_worker_dead`), so the
+    // SupervisedWorker should still be ready.
+    let good_req = ExtractRequest {
+        text: "alpha beta gamma".to_string(),
+        entity_labels: vec!["x".into()],
+        relation_labels: vec![],
+        threshold: Some(0.3),
+        relation_threshold: Some(0.3),
+        max_entities: Some(8),
+    };
+    let good_params = serde_json::to_value(&good_req).unwrap();
+    tool_host::dispatch(
+        &pool,
+        handle.worker_mut(),
+        "gliner-relex",
+        "extract",
+        good_params,
+    )
+    .await
+    .expect("dispatch after INVALID_INPUT must still succeed (worker stays alive)");
 }
