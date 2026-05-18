@@ -75,11 +75,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use hhagent_protocol::{client::ClientError, codes};
-use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+use hhagent_sandbox::{Net, Profile, SandboxPolicy};
 use sqlx::PgPool;
 
 use crate::cassandra::types::PlannedStep;
-use crate::tool_host::{dispatch, spawn_worker, ToolHostError, WorkerSpec};
+use crate::tool_host::{dispatch, ToolHostError};
 
 use super::inner_loop::{StepDispatcher, StepOutcome};
 
@@ -301,26 +301,34 @@ fn build_scheduler_step_failure_payload(
 }
 
 /// Production [`StepDispatcher`]: looks up `step.tool` in a
-/// [`ToolRegistry`], spawns a fresh sandboxed worker, calls
-/// [`tool_host::dispatch`], and maps the result into a
-/// [`StepOutcome`].
+/// [`ToolRegistry`], asks the [`crate::worker_lifecycle::WorkerLifecycleManager`]
+/// for a [`crate::worker_lifecycle::WorkerHandle`], calls
+/// [`tool_host::dispatch`], and maps the result into a [`StepOutcome`].
+///
+/// **Slice-1 architecture note:** the previous version held an
+/// `Arc<dyn SandboxBackend>` and called `spawn_worker` inline. That
+/// spawn path now lives behind the
+/// [`crate::worker_lifecycle::WorkerLifecycleManager::acquire`] seam so
+/// slice 2 can swap `SingleUseLifecycle` for an idle-timeout pool
+/// without touching this struct. See
+/// `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`.
 ///
 /// Cheap to clone (all fields are `Arc`/`PgPool`); the daemon's
 /// scheduler holds a single instance and the inner loop calls
 /// `dispatch_step` directly on it.
 pub struct ToolHostStepDispatcher {
     pool: PgPool,
-    sandbox: Arc<dyn SandboxBackend>,
+    lifecycle: Arc<dyn crate::worker_lifecycle::WorkerLifecycleManager>,
     registry: Arc<ToolRegistry>,
 }
 
 impl ToolHostStepDispatcher {
     pub fn new(
         pool: PgPool,
-        sandbox: Arc<dyn SandboxBackend>,
+        lifecycle: Arc<dyn crate::worker_lifecycle::WorkerLifecycleManager>,
         registry: Arc<ToolRegistry>,
     ) -> Self {
-        Self { pool, sandbox, registry }
+        Self { pool, lifecycle, registry }
     }
 }
 
@@ -375,20 +383,15 @@ impl StepDispatcher for ToolHostStepDispatcher {
             };
         };
 
-        // Per-call clone of the base policy. Per-step overrides (e.g.
-        // a fresh scratch dir) would mutate the clone before spawn;
-        // none today, but the seam exists.
-        let policy = entry.policy.clone();
-        let program = entry.binary.to_string_lossy().into_owned();
-        let spec = WorkerSpec {
-            policy: &policy,
-            program: &program,
-            args: &[],
-            wall_clock_ms: entry.wall_clock_ms,
-        };
-
-        let mut worker = match spawn_worker(self.sandbox.as_ref(), &spec) {
-            Ok(w) => w,
+        // Slice-1 lifecycle seam: `SingleUseLifecycle::acquire` does the same
+        // `spawn_worker(self.sandbox.as_ref(), &spec)` call inline as the old code
+        // did. The `ToolHostError` it returns is byte-equivalent to the previous
+        // direct-call shape, so the `SPAWN_FAILED` audit path below is unchanged.
+        // Slice 2's `IdleTimeoutLifecycle` will instead return an `Err(ToolHostError)`
+        // only on real spawn failures; warm-cache hits never reach this `match` arm
+        // at all.
+        let mut handle = match self.lifecycle.acquire(entry).await {
+            Ok(h) => h,
             Err(e) => {
                 // Spawn failure short-circuits before
                 // `tool_host::dispatch`, so the chokepoint never sees
@@ -399,7 +402,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
                 let err_string = e.to_string();
                 tracing::error!(
                     tool = %step.tool, method = %step.method, error = %err_string,
-                    "ToolHostStepDispatcher: spawn_worker failed"
+                    "ToolHostStepDispatcher: lifecycle.acquire failed"
                 );
 
                 let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -433,7 +436,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
 
         let result = dispatch(
             &self.pool,
-            &mut worker,
+            handle.worker_mut(),
             &step.tool,
             &step.method,
             step.parameters.clone(),
@@ -442,8 +445,12 @@ impl StepDispatcher for ToolHostStepDispatcher {
 
         // Drop closes stdio + cancels the watchdog. We don't call
         // `worker.close()` explicitly so a panic above (currently
-        // unreachable, but kept defensive) still cleans up.
-        drop(worker);
+        // unreachable, but kept defensive) still cleans up. For
+        // `SingleUseLifecycle`, dropping the handle drops the inner
+        // `SupervisedWorker`; slice 2's `IdleTimeoutLifecycle` will
+        // intercept this Drop to hand the worker back to the warm-pool
+        // instead.
+        drop(handle);
 
         map_dispatch_result(result)
     }

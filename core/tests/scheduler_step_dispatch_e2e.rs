@@ -390,15 +390,20 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
                     ..SandboxPolicy::default()
                 },
                 wall_clock_ms: Some(5_000),
+                lifecycle: hhagent_core::worker_lifecycle::Lifecycle::SingleUse,
             },
         );
         let registry = Arc::new(registry);
         assert_eq!(registry.len(), 2);
 
         let sandbox = sandbox_arc();
+        let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
+            Arc::new(hhagent_core::worker_lifecycle::SingleUseLifecycle::new(
+                sandbox,
+            ));
         let dispatcher = ToolHostStepDispatcher::new(
             pool.clone(),
-            sandbox,
+            lifecycle,
             registry,
         );
 

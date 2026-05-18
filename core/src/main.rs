@@ -144,11 +144,21 @@ async fn main() -> Result<()> {
     // (Phase 3).
     let tool_registry = Arc::new(build_tool_registry(&pool).await?);
 
+    // Slice 1 of the worker-lifecycle work (spec
+    // `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`)
+    // puts the spawn-per-request path behind a manager. `SingleUseLifecycle` is
+    // the only impl shipped in slice 1; shell-exec declares
+    // `Lifecycle::SingleUse` so behaviour is byte-equivalent to pre-slice main.
+    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
+        Arc::new(hhagent_core::worker_lifecycle::SingleUseLifecycle::new(
+            sandbox.clone(),
+        ));
+
     let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
             hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
                 pool.clone(),
-                sandbox.clone(),
+                lifecycle,
                 tool_registry,
             ),
         );
