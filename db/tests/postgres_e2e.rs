@@ -1061,7 +1061,7 @@ async fn memory_entities_link_round_trip_and_idempotency() {
         .await
         .expect("upsert e2");
     let e3 = graph
-        .upsert_entity("animal", "cat", &serde_json::json!({}))
+        .upsert_entity("object", "cat", &serde_json::json!({}))
         .await
         .expect("upsert e3");
 
