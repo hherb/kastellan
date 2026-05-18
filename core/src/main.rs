@@ -399,97 +399,73 @@ async fn build_tool_registry(
 
 /// Build the GLiNER-Relex tool entry from environment variables.
 ///
-/// Returns `None` (with an info log) when the worker is opted-out by
-/// the default — `HHAGENT_GLINER_RELEX_ENABLE` unset or `0`. This is
-/// the production posture for every deployment that hasn't run
-/// `scripts/workers/gliner-relex/install.sh` and explicitly turned
-/// the worker on.
+/// Thin daemon-startup wrapper around
+/// [`hhagent_core::workers::gliner_relex::resolve_env`]: passes the
+/// real `std::env::var` + [`std::path::Path::is_dir`] /
+/// [`std::path::Path::exists`] predicates, then converts the typed
+/// [`hhagent_core::workers::gliner_relex::ResolveSkipReason`] into a
+/// structured `tracing::info!` / `tracing::error!` line. Returns `None`
+/// on every skip path so the daemon boots without the worker. Fail-closed
+/// per the design spec — the daemon continues but the operator log says
+/// exactly why the worker isn't reachable.
 ///
-/// Returns `None` (with an error log) when the env is requested but a
-/// precondition fails (weights dir missing on disk, script shim
-/// missing). Fail-closed by default per the design spec — the daemon
-/// continues but the operator log says exactly why the worker isn't
-/// reachable. Operators preferring hard refusal can wrap this in a
-/// supervisor-level health probe.
+/// Env vars consulted (full list documented on `resolve_env`):
 ///
-/// Required env:
-///   * `HHAGENT_GLINER_RELEX_ENABLE = "1"` — opt-in flag.
-///   * `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` — absolute path to the model
-///     snapshot dir (operator stages this via the install script).
-///
-/// Optional env:
-///   * `HHAGENT_GLINER_RELEX_MODEL` (default
-///     `knowledgator/gliner-relex-multi-v1.0`).
-///   * `HHAGENT_GLINER_RELEX_DEVICE` (default `auto`).
-///   * `HHAGENT_GLINER_RELEX_VENV_DIR` (default
-///     `$HHAGENT_DATA_DIR/workers/gliner-relex/.venv`, falling back to
-///     `$HOME/.local/share/hhagent/workers/gliner-relex/.venv`).
+/// - `HHAGENT_GLINER_RELEX_ENABLE` — must be `"1"` (trimmed). Default
+///   skip-register.
+/// - `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` — required; absolute path.
+/// - `HHAGENT_GLINER_RELEX_MODEL` (default `multi-v1.0`).
+/// - `HHAGENT_GLINER_RELEX_DEVICE` (default `auto`).
+/// - `HHAGENT_GLINER_RELEX_VENV_DIR` (default
+///   `$HHAGENT_DATA_DIR/workers/gliner-relex/.venv`, last-resort
+///   `$HOME/.local/share/hhagent/...`).
 fn build_gliner_relex_entry()
 -> Option<hhagent_core::scheduler::tool_dispatch::ToolEntry> {
-    use std::path::PathBuf;
+    use hhagent_core::workers::gliner_relex::{gliner_relex_entry, resolve_env};
 
-    use hhagent_core::workers::gliner_relex::{gliner_relex_entry, GlinerRelexEnv};
-
-    let enable = std::env::var("HHAGENT_GLINER_RELEX_ENABLE").unwrap_or_default();
-    if enable != "1" {
-        tracing::info!(
-            "gliner-relex: HHAGENT_GLINER_RELEX_ENABLE != \"1\"; skip registering"
-        );
-        return None;
-    }
-
-    let weights_dir = match std::env::var("HHAGENT_GLINER_RELEX_WEIGHTS_DIR") {
-        Ok(v) => PathBuf::from(v),
-        Err(_) => {
-            tracing::error!(
-                "gliner-relex enabled but HHAGENT_GLINER_RELEX_WEIGHTS_DIR unset; skip registering"
-            );
-            return None;
+    match resolve_env(
+        |k| std::env::var(k).ok(),
+        |p| p.is_dir(),
+        |p| p.exists(),
+    ) {
+        Ok(env) => Some(gliner_relex_entry(&env)),
+        Err(reason) => {
+            log_gliner_relex_skip(&reason);
+            None
         }
-    };
-    if !weights_dir.is_dir() {
-        tracing::error!(
-            weights_dir = %weights_dir.display(),
+    }
+}
+
+/// Convert a typed [`hhagent_core::workers::gliner_relex::ResolveSkipReason`]
+/// into the appropriate `tracing` line. Kept separate from
+/// `build_gliner_relex_entry` so the resolver-result branches stay
+/// trivially reviewable.
+fn log_gliner_relex_skip(
+    reason: &hhagent_core::workers::gliner_relex::ResolveSkipReason,
+) {
+    use hhagent_core::workers::gliner_relex::ResolveSkipReason as R;
+    match reason {
+        R::Disabled => tracing::info!(
+            "gliner-relex: HHAGENT_GLINER_RELEX_ENABLE != \"1\"; skip registering"
+        ),
+        R::WeightsDirEnvMissing => tracing::error!(
+            "gliner-relex enabled but HHAGENT_GLINER_RELEX_WEIGHTS_DIR unset; \
+             skip registering"
+        ),
+        R::WeightsDirNotADir { path } => tracing::error!(
+            weights_dir = %path.display(),
             "gliner-relex enabled but weights dir missing on disk; skip registering"
-        );
-        return None;
-    }
-
-    let model_id = std::env::var("HHAGENT_GLINER_RELEX_MODEL")
-        .unwrap_or_else(|_| "knowledgator/gliner-relex-multi-v1.0".to_string());
-    let device = std::env::var("HHAGENT_GLINER_RELEX_DEVICE")
-        .unwrap_or_else(|_| "auto".to_string());
-
-    // Resolve the venv shim path. Operator can override via env; the
-    // default tracks `HHAGENT_DATA_DIR/workers/gliner-relex/.venv` so
-    // operators who stage via the install script with the standard
-    // data dir don't need a second env var.
-    let venv_dir = std::env::var("HHAGENT_GLINER_RELEX_VENV_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let data = std::env::var("HHAGENT_DATA_DIR").unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                format!("{home}/.local/share/hhagent")
-            });
-            PathBuf::from(data).join("workers/gliner-relex/.venv")
-        });
-    let script_path = venv_dir.join("bin").join("hhagent-worker-gliner-relex");
-    if !script_path.exists() {
-        tracing::error!(
-            script_path = %script_path.display(),
+        ),
+        R::VenvDirUnresolvable => tracing::error!(
+            "gliner-relex enabled but venv dir unresolvable \
+             (HHAGENT_GLINER_RELEX_VENV_DIR, HHAGENT_DATA_DIR, and HOME all unset); \
+             skip registering"
+        ),
+        R::ScriptShimMissing { path } => tracing::error!(
+            script_path = %path.display(),
             "gliner-relex enabled but venv shim missing; skip registering"
-        );
-        return None;
+        ),
     }
-
-    let env = GlinerRelexEnv {
-        script_path,
-        venv_dir,
-        weights_dir,
-        model_id,
-        device,
-    };
-    Some(gliner_relex_entry(&env))
 }
 
 /// One per-tool record carried in the `registry.loaded` audit-row

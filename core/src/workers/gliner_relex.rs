@@ -28,7 +28,7 @@
 //!   its actual call site. See HANDOVER's design-spec section for the
 //!   rationale.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use hhagent_sandbox::{Net, Profile, SandboxPolicy};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle};
 /// Production callers should construct this via the daemon helper;
 /// tests build it directly to pin manifest shape without touching the
 /// real filesystem.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlinerRelexEnv {
     /// Absolute path to the uv-generated console-script shim:
     /// `<worker_dir>/.venv/bin/hhagent-worker-gliner-relex`. This is
@@ -118,11 +118,21 @@ pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // main` with ModuleNotFoundError. Compute the sibling `src/` from
     // the documented `<worker_dir>/.venv` contract on `venv_dir` and
     // bind it read-only too.
+    //
+    // `Path::parent()` only returns `None` when the path is the root
+    // `/` or a single relative component like `foo`. A `venv_dir` that
+    // resolves to either is a wiring bug in the caller — daemon
+    // startup walks `.venv/bin/<shim>` and the env-resolver always
+    // anchors the venv path under at least one extra directory
+    // (`HHAGENT_GLINER_RELEX_VENV_DIR` is required to be absolute by
+    // the operator; the `HHAGENT_DATA_DIR` / `HOME` fallbacks tack on
+    // `workers/gliner-relex/.venv`). So fail loudly here rather than
+    // silently mounting the wrong path.
     let worker_src_dir = env
         .venv_dir
         .parent()
-        .map(|worker_dir| worker_dir.join("src"))
-        .unwrap_or_else(|| env.venv_dir.join("../src"));
+        .expect("GlinerRelexEnv.venv_dir must have a parent (got a root/relative path)")
+        .join("src");
 
     let policy = SandboxPolicy {
         fs_read: vec![
@@ -195,6 +205,126 @@ pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
         wall_clock_ms: None,
         lifecycle,
     }
+}
+
+/// Reason the daemon's [`GlinerRelexEnv`] resolver returned no entry.
+///
+/// `resolve_env` either yields a populated [`GlinerRelexEnv`] or one of
+/// these structured variants. The daemon turns each variant into a
+/// `tracing::info!` / `tracing::error!` line at startup so operators
+/// can tell at a glance which precondition isn't met. Tests exercise
+/// each branch directly without touching process-wide environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveSkipReason {
+    /// `HHAGENT_GLINER_RELEX_ENABLE` is unset, empty, or anything other
+    /// than `"1"` (after trim). This is the production default — every
+    /// deployment that hasn't run `scripts/workers/gliner-relex/install.sh`
+    /// and explicitly enabled the worker lands here.
+    Disabled,
+    /// `HHAGENT_GLINER_RELEX_ENABLE=1` but
+    /// `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` is unset.
+    WeightsDirEnvMissing,
+    /// `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` is set but the path doesn't
+    /// resolve to a directory on disk at daemon-startup time.
+    WeightsDirNotADir { path: PathBuf },
+    /// None of `HHAGENT_GLINER_RELEX_VENV_DIR`, `HHAGENT_DATA_DIR`, or
+    /// `HOME` is set — there is no anchor to default the venv path
+    /// against. This is the failure mode that previously fell through
+    /// to `/tmp` silently; surfacing it explicitly so the operator log
+    /// shows the misconfiguration.
+    VenvDirUnresolvable,
+    /// Resolved `<venv_dir>/bin/hhagent-worker-gliner-relex` doesn't
+    /// exist on disk.
+    ScriptShimMissing { path: PathBuf },
+}
+
+/// Resolve a [`GlinerRelexEnv`] from a generic env lookup + filesystem
+/// predicates.
+///
+/// This is the pure core of `core::main::build_gliner_relex_entry`. The
+/// daemon passes [`std::env::var`] + [`Path::is_dir`] + [`Path::exists`];
+/// tests pass in-memory fakes to exercise each skip-register branch
+/// without touching the process environment or filesystem.
+///
+/// Env vars consulted (same names + semantics as the production helper):
+///
+/// - `HHAGENT_GLINER_RELEX_ENABLE` — must be `"1"` (whitespace-trimmed)
+///   to register the worker. Anything else (unset / `0` / `true` / `on`)
+///   returns [`ResolveSkipReason::Disabled`].
+/// - `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` — required; absolute path to the
+///   model snapshot.
+/// - `HHAGENT_GLINER_RELEX_MODEL` — optional; default
+///   `knowledgator/gliner-relex-multi-v1.0`.
+/// - `HHAGENT_GLINER_RELEX_DEVICE` — optional; default `auto`.
+/// - `HHAGENT_GLINER_RELEX_VENV_DIR` — optional; if set, used verbatim.
+/// - `HHAGENT_DATA_DIR` — optional anchor for the venv default
+///   (`<data>/workers/gliner-relex/.venv`).
+/// - `HOME` — last-resort anchor (`<home>/.local/share/hhagent/...`).
+///   If neither `HHAGENT_DATA_DIR` nor `HOME` is set and the operator
+///   didn't pass `HHAGENT_GLINER_RELEX_VENV_DIR`, returns
+///   [`ResolveSkipReason::VenvDirUnresolvable`] rather than silently
+///   defaulting to `/tmp` — that earlier silent fallback hid
+///   misconfiguration on minimal-env hosts (containers, system
+///   services) where the operator usually meant `HHAGENT_DATA_DIR` to
+///   be set.
+pub fn resolve_env<EnvLookup, IsDir, Exists>(
+    env_lookup: EnvLookup,
+    is_dir: IsDir,
+    exists: Exists,
+) -> Result<GlinerRelexEnv, ResolveSkipReason>
+where
+    EnvLookup: Fn(&str) -> Option<String>,
+    IsDir: Fn(&Path) -> bool,
+    Exists: Fn(&Path) -> bool,
+{
+    let enable = env_lookup("HHAGENT_GLINER_RELEX_ENABLE").unwrap_or_default();
+    // `trim` so a stray newline from `echo "1" > envfile` doesn't fail
+    // the opt-in silently. Strict on the value itself: only `"1"`
+    // counts. Inviting `true` / `yes` / `on` would surface the next
+    // operator's dialect debate; the README documents `=1` explicitly.
+    if enable.trim() != "1" {
+        return Err(ResolveSkipReason::Disabled);
+    }
+
+    let weights_dir = match env_lookup("HHAGENT_GLINER_RELEX_WEIGHTS_DIR") {
+        Some(v) => PathBuf::from(v),
+        None => return Err(ResolveSkipReason::WeightsDirEnvMissing),
+    };
+    if !is_dir(&weights_dir) {
+        return Err(ResolveSkipReason::WeightsDirNotADir { path: weights_dir });
+    }
+
+    let model_id = env_lookup("HHAGENT_GLINER_RELEX_MODEL")
+        .unwrap_or_else(|| "knowledgator/gliner-relex-multi-v1.0".to_string());
+    let device = env_lookup("HHAGENT_GLINER_RELEX_DEVICE")
+        .unwrap_or_else(|| "auto".to_string());
+
+    // Anchor priority: explicit override > data-dir > home. No
+    // `/tmp` fallback — see ResolveSkipReason::VenvDirUnresolvable
+    // for the rationale.
+    let venv_dir = if let Some(v) = env_lookup("HHAGENT_GLINER_RELEX_VENV_DIR") {
+        PathBuf::from(v)
+    } else if let Some(data_dir) = env_lookup("HHAGENT_DATA_DIR") {
+        PathBuf::from(data_dir).join("workers/gliner-relex/.venv")
+    } else if let Some(home) = env_lookup("HOME") {
+        PathBuf::from(home)
+            .join(".local/share/hhagent/workers/gliner-relex/.venv")
+    } else {
+        return Err(ResolveSkipReason::VenvDirUnresolvable);
+    };
+
+    let script_path = venv_dir.join("bin").join("hhagent-worker-gliner-relex");
+    if !exists(&script_path) {
+        return Err(ResolveSkipReason::ScriptShimMissing { path: script_path });
+    }
+
+    Ok(GlinerRelexEnv {
+        script_path,
+        venv_dir,
+        weights_dir,
+        model_id,
+        device,
+    })
 }
 
 /// Maximum number of distinct entity labels per `extract` request.
@@ -581,5 +711,216 @@ mod tests {
         let env = test_env();
         let entry = gliner_relex_entry(&env);
         assert_eq!(entry.binary, env.script_path);
+    }
+
+    // ---- resolve_env unit tests --------------------------------------
+    //
+    // The resolver is the pure core of `core::main::build_gliner_relex_entry`.
+    // Tests pass in-memory env-var + filesystem fakes so every skip-register
+    // branch is reachable without touching the process environment or the
+    // real filesystem. Production behaviour is exercised by the e2e tests
+    // in `core/tests/gliner_relex_e2e.rs`.
+
+    use std::collections::{HashMap, HashSet};
+
+    /// Build an env-lookup closure backed by a fixed map.
+    fn env_map_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// Match-anything fs predicate (every path exists / is a dir).
+    fn always_true(_: &Path) -> bool {
+        true
+    }
+
+    /// Match-nothing fs predicate (no path exists / is a dir).
+    fn always_false(_: &Path) -> bool {
+        false
+    }
+
+    #[test]
+    fn resolve_env_disabled_when_enable_unset() {
+        let env = env_map_of(&[]);
+        let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
+        assert_eq!(r, Err(ResolveSkipReason::Disabled));
+    }
+
+    #[test]
+    fn resolve_env_disabled_when_enable_is_zero_or_truthy_alias() {
+        for v in ["0", "true", "yes", "on", ""] {
+            let env = env_map_of(&[("HHAGENT_GLINER_RELEX_ENABLE", v)]);
+            let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
+            assert_eq!(
+                r,
+                Err(ResolveSkipReason::Disabled),
+                "enable={v:?} must be Disabled (strict on the value, only \"1\" enables)"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_env_trims_whitespace_on_enable() {
+        // Common operator footgun: `echo "1" > /etc/hhagent/env` yields
+        // a value ending in `\n`. The README documents `=1` but trimming
+        // is cheap insurance.
+        let env = env_map_of(&[
+            ("HHAGENT_GLINER_RELEX_ENABLE", " 1\n"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+            ("HHAGENT_DATA_DIR", "/srv/data"),
+        ]);
+        let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
+        assert!(
+            matches!(r, Ok(_)),
+            "trimmed \" 1\\n\" must be accepted, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_env_returns_weights_env_missing() {
+        let env = env_map_of(&[("HHAGENT_GLINER_RELEX_ENABLE", "1")]);
+        let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
+        assert_eq!(r, Err(ResolveSkipReason::WeightsDirEnvMissing));
+    }
+
+    #[test]
+    fn resolve_env_returns_weights_dir_not_a_dir() {
+        let env = env_map_of(&[
+            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/missing"),
+            ("HHAGENT_DATA_DIR", "/srv/data"),
+        ]);
+        let r = resolve_env(|k| env.get(k).cloned(), always_false, always_true);
+        match r {
+            Err(ResolveSkipReason::WeightsDirNotADir { path }) => {
+                assert_eq!(path, PathBuf::from("/srv/missing"));
+            }
+            other => panic!("expected WeightsDirNotADir, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_env_returns_venv_unresolvable_when_no_anchor() {
+        // Enable + weights set + dir exists, but none of the three venv
+        // anchors set. Pre-refactor this would silently fall through to
+        // `/tmp/.local/share/hhagent/...`; now it surfaces a structured
+        // skip reason so the operator log says exactly what's missing.
+        let env = env_map_of(&[
+            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+        ]);
+        let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
+        assert_eq!(r, Err(ResolveSkipReason::VenvDirUnresolvable));
+    }
+
+    #[test]
+    fn resolve_env_returns_script_shim_missing() {
+        // Weights dir exists but the venv shim doesn't (operator
+        // staged the weights but forgot `uv sync`).
+        let env = env_map_of(&[
+            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+            ("HHAGENT_GLINER_RELEX_VENV_DIR", "/opt/glr/.venv"),
+        ]);
+        // weights dir is a dir; script doesn't exist.
+        let r = resolve_env(
+            |k| env.get(k).cloned(),
+            |p| p == Path::new("/srv/weights"),
+            always_false,
+        );
+        match r {
+            Err(ResolveSkipReason::ScriptShimMissing { path }) => {
+                assert_eq!(
+                    path,
+                    PathBuf::from("/opt/glr/.venv/bin/hhagent-worker-gliner-relex")
+                );
+            }
+            other => panic!("expected ScriptShimMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_env_happy_path_explicit_venv_dir_wins() {
+        // Explicit `HHAGENT_GLINER_RELEX_VENV_DIR` must override the
+        // `HHAGENT_DATA_DIR`-derived default, even when both are set.
+        let env = env_map_of(&[
+            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+            ("HHAGENT_GLINER_RELEX_VENV_DIR", "/opt/explicit/.venv"),
+            ("HHAGENT_DATA_DIR", "/srv/data"),
+        ]);
+        let exists_paths: HashSet<PathBuf> = ["/srv/weights", "/opt/explicit/.venv/bin/hhagent-worker-gliner-relex"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let r = resolve_env(
+            |k| env.get(k).cloned(),
+            |p| exists_paths.contains(p),
+            |p| exists_paths.contains(p),
+        )
+        .expect("happy path");
+        assert_eq!(r.venv_dir, PathBuf::from("/opt/explicit/.venv"));
+        assert_eq!(
+            r.script_path,
+            PathBuf::from("/opt/explicit/.venv/bin/hhagent-worker-gliner-relex")
+        );
+        assert_eq!(r.weights_dir, PathBuf::from("/srv/weights"));
+        assert_eq!(r.model_id, "knowledgator/gliner-relex-multi-v1.0");
+        assert_eq!(r.device, "auto");
+    }
+
+    #[test]
+    fn resolve_env_happy_path_uses_hhagent_data_dir() {
+        let env = env_map_of(&[
+            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+            ("HHAGENT_DATA_DIR", "/srv/data"),
+            ("HHAGENT_GLINER_RELEX_MODEL", "knowledgator/gliner-relex-large-v0.5"),
+            ("HHAGENT_GLINER_RELEX_DEVICE", "cuda"),
+        ]);
+        let exists_paths: HashSet<PathBuf> = [
+            "/srv/weights",
+            "/srv/data/workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let r = resolve_env(
+            |k| env.get(k).cloned(),
+            |p| exists_paths.contains(p),
+            |p| exists_paths.contains(p),
+        )
+        .expect("happy path");
+        assert_eq!(r.venv_dir, PathBuf::from("/srv/data/workers/gliner-relex/.venv"));
+        assert_eq!(r.model_id, "knowledgator/gliner-relex-large-v0.5");
+        assert_eq!(r.device, "cuda");
+    }
+
+    #[test]
+    fn resolve_env_happy_path_home_fallback_when_no_data_dir() {
+        let env = env_map_of(&[
+            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+            ("HOME", "/home/op"),
+        ]);
+        let exists_paths: HashSet<PathBuf> = [
+            "/srv/weights",
+            "/home/op/.local/share/hhagent/workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let r = resolve_env(
+            |k| env.get(k).cloned(),
+            |p| exists_paths.contains(p),
+            |p| exists_paths.contains(p),
+        )
+        .expect("happy path");
+        assert_eq!(
+            r.venv_dir,
+            PathBuf::from("/home/op/.local/share/hhagent/workers/gliner-relex/.venv")
+        );
     }
 }
