@@ -2556,10 +2556,23 @@ The *defining* architectural difference: hhagent enforces **one OS process + one
 
 ## How to update this document at session end
 
-1. **Bump header fields** — `Last updated`, `Last commit`, `Branch` at the top.
+**Header first, prose last.** The header is what the next session reads first
+and treats as authoritative; stale header fields silently mislead future
+sessions even when the prose is correct. Follow the steps in this order:
+
+1. **Bump header fields at the top — before writing any prose:**
+   - `Last updated:` → today's date.
+   - `Last commit on <branch>:` → the hash of the most recent shipped commit.
+     Confirm with `git log --oneline -1`.
+   - `Session-end verification:` → re-run `cargo test --workspace` and copy
+     the **passed / failed / ignored / `[SKIP]`** counts into this line.
+   - **Every test-count number embedded elsewhere in the doc that changed
+     this session** (e.g. the headline test count, "Test count delta" lines
+     in Recently-completed entries). A fresh agent grep-finds them and will
+     trust whatever is there.
 2. **Move "Next TODO" → "Recently completed (this session)"** if the picked option shipped, with enough detail that the next session can understand the decision (file paths, why-not-X, gotchas, test-count delta).
 3. **Write a fresh "Next TODO (pick one)"** with options sized for one session each — include file paths, gotchas, and the verification step.
-4. **Refresh "Working state"** — green-test count, anything new under stubs, anything that became real.
+4. **Refresh "Working state"** — anything new under stubs, anything that became real.
 5. **Tick the matching items off in [`../ROADMAP.md`](../ROADMAP.md)** with the commit hash.
 6. **Commit both files together** with a `docs(handover): ...` message.
 
