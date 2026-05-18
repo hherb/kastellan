@@ -10,13 +10,18 @@
 //!   - `WorkerLifecycleManager` — async trait that lends out `WorkerHandle`s.
 //!   - `SingleUseLifecycle` — spawn-per-request impl.
 //!   - `IdleTimeoutLifecycle` — warm-keeping impl (slice 2 runtime).
+//!   - `CompositeLifecycle` — production manager that dispatches by `entry.lifecycle`
+//!     (added with the gliner-relex slice 2; lets a mixed registry hold both
+//!     `Lifecycle::SingleUse` and `Lifecycle::IdleTimeout` entries side by side).
 //!   - `WorkerHandle` — `&mut`-able holder of a live `SupervisedWorker`.
 //!   - `RestartBackoff` — operator-tunable exponential backoff configuration.
 
+pub mod composite;
 pub mod idle_timeout;
 pub mod manager;
 pub mod types;
 
+pub use composite::CompositeLifecycle;
 pub use idle_timeout::RestartBackoff;
 pub use manager::{IdleTimeoutLifecycle, SingleUseLifecycle, WorkerHandle, WorkerLifecycleManager};
 pub use types::{Contract, IdleTimeoutCaps, Lifecycle, LifecycleValidationError};
