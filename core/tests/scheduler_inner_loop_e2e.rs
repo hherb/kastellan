@@ -1090,8 +1090,8 @@ async fn agent_floor_raise_chain_blocks_low_classification_step() {
         assert_eq!(r.payload["verdict_kind"], "block",
             "verdict {i}: must be block (DP I2 fired)");
         // Block-verdict detail is the raw reason string (see
-        // `write_audit_verdict` in inner_loop.rs: Verdict::Block(r) →
-        // json!(r) goes into the "detail" field).
+        // `write_audit_verdict` in scheduler::inner_loop_audit:
+        // Verdict::Block(r) → json!(r) goes into the "detail" field).
         let detail = r.payload["detail"].as_str()
             .expect("detail must be a string for Block verdict");
         assert!(
