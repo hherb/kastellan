@@ -111,10 +111,13 @@ pub fn assemble_system_prompt(
     }
 
     out.push_str("<base>\n");
-    out.push_str(base);
-    if !base.ends_with('\n') {
-        out.push('\n');
-    }
+    // Collapse 0..N trailing newlines on `base` to exactly one. The
+    // closing `</base>\n` then always sits flush against the body —
+    // no blank line in front of it — regardless of how the prompt
+    // file (or caller) chose to terminate. Cheaper than re-allocating
+    // because `trim_end_matches` returns a `&str` slice.
+    out.push_str(base.trim_end_matches('\n'));
+    out.push('\n');
     out.push_str("</base>\n");
 
     out
@@ -321,20 +324,32 @@ mod tests {
     }
 
     #[test]
-    fn base_without_trailing_newline_is_normalized() {
-        // If the caller passes a base prompt without a terminating
-        // newline, the assembler inserts one before `</base>\n` so the
-        // closing tag always sits on its own line. This keeps the
-        // output shape stable regardless of how the prompt file ends.
+    fn base_trailing_newlines_are_normalized_to_exactly_one() {
+        // Whatever the caller passes — zero, one, or many trailing
+        // newlines — the assembler collapses to exactly one before
+        // `</base>\n`. The closing tag always sits on its own line with
+        // no blank line in front of it, regardless of how the prompt
+        // file ends. This keeps the output deterministic across
+        // editor / prompt-file conventions.
         let out_no_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "no trailing nl");
-        let out_with_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "with trailing nl\n");
+        let out_one_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "with trailing nl\n");
+        let out_two_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "with two trailing nl\n\n");
+        let out_many_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "many trailing nls\n\n\n\n");
         assert_eq!(
             out_no_nl, "<base>\nno trailing nl\n</base>\n",
             "no-trailing-newline input must be normalized; got {out_no_nl:?}"
         );
         assert_eq!(
-            out_with_nl, "<base>\nwith trailing nl\n</base>\n",
-            "with-trailing-newline input passes through; got {out_with_nl:?}"
+            out_one_nl, "<base>\nwith trailing nl\n</base>\n",
+            "single-trailing-newline input passes through; got {out_one_nl:?}"
+        );
+        assert_eq!(
+            out_two_nl, "<base>\nwith two trailing nl\n</base>\n",
+            "two trailing newlines must collapse to one (no blank line before close tag); got {out_two_nl:?}"
+        );
+        assert_eq!(
+            out_many_nl, "<base>\nmany trailing nls\n</base>\n",
+            "many trailing newlines must collapse to one; got {out_many_nl:?}"
         );
     }
 }
