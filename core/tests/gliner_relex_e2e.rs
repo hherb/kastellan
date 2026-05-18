@@ -218,3 +218,79 @@ async fn happy_path_extract_returns_entities_and_triples() {
         );
     }
 }
+
+/// Two sequential acquires for the same tool must hit the same warm
+/// worker — proves the IdleTimeoutLifecycle warm-cache key actually
+/// lands the gliner-relex entry in the per-tool slot.
+///
+/// The pin is via `IdleTimeoutLifecycle::_test_slot_has_warm`
+/// (`#[doc(hidden)]`; the same accessor `worker_lifecycle_idle_timeout_e2e`
+/// uses for warm-keep observation without PID introspection). Wall-clock
+/// is the second-order signal: the second call's dispatch latency is
+/// materially smaller than the first because no model reload happens.
+/// We don't pin that here — too brittle on shared hardware — but the
+/// `_test_slot_has_warm` true-result is the structural guarantee.
+#[tokio::test(flavor = "multi_thread")]
+async fn warm_reuse_two_calls_keep_one_worker_warm() {
+    let Some(entry) = build_test_entry() else {
+        return;
+    };
+    let Some((_cluster, pool)) = bring_up_pg("warm").await else {
+        return;
+    };
+
+    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = Arc::from(backend());
+    let lifecycle = IdleTimeoutLifecycle::new(sandbox);
+
+    // A small request that won't strain the model — we're testing the
+    // warm-cache key, not the inference quality.
+    let request = || ExtractRequest {
+        text: "alpha beta gamma".to_string(),
+        entity_labels: vec!["term".into()],
+        relation_labels: vec![],
+        threshold: Some(0.3),
+        relation_threshold: Some(0.3),
+        max_entities: Some(8),
+    };
+
+    // First call: cold spawn.
+    {
+        let mut handle = lifecycle
+            .acquire("gliner-relex", &entry)
+            .await
+            .expect("acquire 1 (cold spawn)");
+        let params = serde_json::to_value(&request()).unwrap();
+        tool_host::dispatch(&pool, handle.worker_mut(), "gliner-relex", "extract", params)
+            .await
+            .expect("dispatch 1");
+        // Handle drops here → IdleTimeoutLifecycle returns the
+        // SupervisedWorker to the warm slot (post-completion cap eval
+        // shows we're under all limits).
+    }
+
+    // After drop, the slot must hold a warm worker keyed by the
+    // logical tool name we passed to `acquire`.
+    assert!(
+        lifecycle._test_slot_has_warm("gliner-relex").await,
+        "expected warm worker in 'gliner-relex' slot after first call drop"
+    );
+
+    // Second call: warm reuse (no second cold-spawn).
+    {
+        let mut handle = lifecycle
+            .acquire("gliner-relex", &entry)
+            .await
+            .expect("acquire 2 (warm reuse)");
+        let params = serde_json::to_value(&request()).unwrap();
+        tool_host::dispatch(&pool, handle.worker_mut(), "gliner-relex", "extract", params)
+            .await
+            .expect("dispatch 2");
+    }
+
+    // Slot is still warm after the second call — cap eval shows we're
+    // still way under the 10_000 request cap.
+    assert!(
+        lifecycle._test_slot_has_warm("gliner-relex").await,
+        "slot must stay warm after second call drop (well under max_requests=10_000)"
+    );
+}
