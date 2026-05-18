@@ -75,11 +75,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use hhagent_protocol::{client::ClientError, codes};
-use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+use hhagent_sandbox::{Net, Profile, SandboxPolicy};
 use sqlx::PgPool;
 
 use crate::cassandra::types::PlannedStep;
-use crate::tool_host::{dispatch, spawn_worker, ToolHostError, WorkerSpec};
+use crate::tool_host::{dispatch, ToolHostError};
 
 use super::inner_loop::{StepDispatcher, StepOutcome};
 
@@ -103,6 +103,11 @@ pub struct ToolEntry {
     /// milliseconds. `None` disables the watchdog. See
     /// [`WorkerSpec::wall_clock_ms`] for the semantics.
     pub wall_clock_ms: Option<u64>,
+    /// Lifecycle policy. Defaults to [`Lifecycle::SingleUse`] (current
+    /// behaviour); inference workers in slice 2+ will declare
+    /// [`Lifecycle::IdleTimeout`]. See
+    /// `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`.
+    pub lifecycle: crate::worker_lifecycle::Lifecycle,
 }
 
 /// Look-up table from logical tool name (as it appears in
@@ -176,6 +181,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         binary,
         policy,
         wall_clock_ms: Some(30_000),
+        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
     }
 }
 
@@ -295,26 +301,31 @@ fn build_scheduler_step_failure_payload(
 }
 
 /// Production [`StepDispatcher`]: looks up `step.tool` in a
-/// [`ToolRegistry`], spawns a fresh sandboxed worker, calls
-/// [`tool_host::dispatch`], and maps the result into a
-/// [`StepOutcome`].
+/// [`ToolRegistry`], asks the [`crate::worker_lifecycle::WorkerLifecycleManager`]
+/// for a [`crate::worker_lifecycle::WorkerHandle`], calls
+/// [`tool_host::dispatch`], and maps the result into a [`StepOutcome`].
+///
+/// The spawn path lives behind
+/// [`crate::worker_lifecycle::WorkerLifecycleManager::acquire`]; see
+/// `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md` for the
+/// lifecycle contract.
 ///
 /// Cheap to clone (all fields are `Arc`/`PgPool`); the daemon's
 /// scheduler holds a single instance and the inner loop calls
 /// `dispatch_step` directly on it.
 pub struct ToolHostStepDispatcher {
     pool: PgPool,
-    sandbox: Arc<dyn SandboxBackend>,
+    lifecycle: Arc<dyn crate::worker_lifecycle::WorkerLifecycleManager>,
     registry: Arc<ToolRegistry>,
 }
 
 impl ToolHostStepDispatcher {
     pub fn new(
         pool: PgPool,
-        sandbox: Arc<dyn SandboxBackend>,
+        lifecycle: Arc<dyn crate::worker_lifecycle::WorkerLifecycleManager>,
         registry: Arc<ToolRegistry>,
     ) -> Self {
-        Self { pool, sandbox, registry }
+        Self { pool, lifecycle, registry }
     }
 }
 
@@ -369,20 +380,13 @@ impl StepDispatcher for ToolHostStepDispatcher {
             };
         };
 
-        // Per-call clone of the base policy. Per-step overrides (e.g.
-        // a fresh scratch dir) would mutate the clone before spawn;
-        // none today, but the seam exists.
-        let policy = entry.policy.clone();
-        let program = entry.binary.to_string_lossy().into_owned();
-        let spec = WorkerSpec {
-            policy: &policy,
-            program: &program,
-            args: &[],
-            wall_clock_ms: entry.wall_clock_ms,
-        };
-
-        let mut worker = match spawn_worker(self.sandbox.as_ref(), &spec) {
-            Ok(w) => w,
+        // The manager owns the spawn/warm-cache decision. `acquire` returns
+        // `Err(ToolHostError)` only on real spawn failures (warm-cache hits never
+        // reach the `Err` arm); the `SPAWN_FAILED` audit row below treats both
+        // lifecycle policies uniformly. Pass `&step.tool` (the logical registry key)
+        // so the idle-timeout warm-cache keys by tool identity, not binary basename.
+        let mut handle = match self.lifecycle.acquire(&step.tool, entry).await {
+            Ok(h) => h,
             Err(e) => {
                 // Spawn failure short-circuits before
                 // `tool_host::dispatch`, so the chokepoint never sees
@@ -393,7 +397,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
                 let err_string = e.to_string();
                 tracing::error!(
                     tool = %step.tool, method = %step.method, error = %err_string,
-                    "ToolHostStepDispatcher: spawn_worker failed"
+                    "ToolHostStepDispatcher: lifecycle.acquire failed"
                 );
 
                 let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -427,17 +431,23 @@ impl StepDispatcher for ToolHostStepDispatcher {
 
         let result = dispatch(
             &self.pool,
-            &mut worker,
+            handle.worker_mut(),
             &step.tool,
             &step.method,
             step.parameters.clone(),
         )
         .await;
 
-        // Drop closes stdio + cancels the watchdog. We don't call
-        // `worker.close()` explicitly so a panic above (currently
-        // unreachable, but kept defensive) still cleans up.
-        drop(worker);
+        // Signal worker death to the manager. No-op for single-use; for idle-timeout
+        // this suppresses the worker-return path and bumps the restart-backoff counter.
+        // See `dispatch_indicates_worker_dead` for the variant→liveness mapping.
+        if crate::worker_lifecycle::idle_timeout::dispatch_indicates_worker_dead(&result) {
+            handle.report_crash();
+        }
+
+        // Drop runs the lifecycle-appropriate teardown: terminate (single-use) or
+        // return-to-slot + schedule idle-teardown (idle-timeout).
+        drop(handle);
 
         map_dispatch_result(result)
     }
@@ -565,6 +575,7 @@ mod tests {
                 ..SandboxPolicy::default()
             },
             wall_clock_ms: Some(5_000),
+            lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         }
     }
 
@@ -653,6 +664,21 @@ mod tests {
             .find(|(k, _)| k == "HHAGENT_SHELL_ALLOWLIST")
             .expect("allowlist env entry must be present");
         assert_eq!(allow_env.1, "[]");
+    }
+
+    #[test]
+    fn shell_exec_entry_declares_single_use_lifecycle() {
+        // Shell-exec must remain single-use forever — per-request isolation IS its
+        // security model. If a future change to `shell_exec_entry` accidentally swaps
+        // this for `IdleTimeout`, this test trips so the regression is caught at PR
+        // time rather than in production. See
+        // `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md` §"The
+        // two policies" for why shell-exec stays in the `single_use` category.
+        let entry = shell_exec_entry(PathBuf::from("/x"), &[]);
+        assert!(matches!(
+            entry.lifecycle,
+            crate::worker_lifecycle::Lifecycle::SingleUse
+        ));
     }
 
     // The unknown-tool branch of `ToolHostStepDispatcher::dispatch_step`

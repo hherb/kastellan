@@ -21,6 +21,7 @@ pub mod prompt_assembly;
 pub mod recall_assembly;
 pub mod scheduler;
 pub mod tool_host;
+pub mod worker_lifecycle;
 pub mod workspace;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
