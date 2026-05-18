@@ -67,6 +67,7 @@
 //! transitioned the row out of `running`, so this concrete race does
 //! not produce divergence.)
 
+use crate::memory::l1_promote::{L1Source, L1WriteOutcome};
 use hhagent_db::tasks::Lane;
 use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
@@ -90,6 +91,23 @@ pub const ACTION_REGISTRY_LOADED: &str = "registry.loaded";
 /// operator-visible breadcrumb that the loader ran, plus
 /// cross-restart drift detection via the file hash.
 pub const ACTION_L0_SEEDED: &str = "l0.seeded";
+
+/// Action string for `actor='cli' action='l1.added'` audit rows.
+/// Emitted by `cli_audit::l1_add_and_audit` after a successful
+/// `hhagent-cli memory l1 add` call. The payload is built by
+/// [`build_l1_write_payload`].
+pub const ACTION_L1_ADDED: &str = "l1.added";
+
+/// Action string for `actor='cli' action='l1.removed'` audit rows.
+/// Emitted by `cli_audit::l1_remove_and_audit` after a successful
+/// `hhagent-cli memory l1 remove`. Payload: `{memory_id, deleted}`.
+pub const ACTION_L1_REMOVED: &str = "l1.removed";
+
+/// Action string for `actor='scheduler' action='l1.promoted'` audit
+/// rows. Emitted by `runner::drain_lane` when the terminal plan
+/// carried `l1_insight` and the inner loop reached `Outcome::Completed`.
+/// The payload is built by [`build_l1_write_payload`].
+pub const ACTION_L1_PROMOTED: &str = "l1.promoted";
 
 /// `action` value written when the lane runner claims a `pending` task
 /// and transitions it to `running`. Fires exactly once per `claim_one`
@@ -315,6 +333,46 @@ pub fn build_producer_cancel_finalize_payload(
 /// loud in `audit tail` output where a panic would be silent.
 fn format_rfc3339(ts: OffsetDateTime) -> String {
     ts.format(&Rfc3339).unwrap_or_default()
+}
+
+/// Build the payload for `l1.added` (operator) and `l1.promoted`
+/// (agent-raised) audit rows. Single helper so both paths land
+/// byte-identical rows on the common keys.
+///
+/// Operator shape: `{source: "operator", action, memory_id, body_sha256}` (4 keys).
+/// Agent-raised shape: `{source: "agent_raised", task_id, action, memory_id, body_sha256}` (5 keys).
+pub fn build_l1_write_payload(
+    outcome: &L1WriteOutcome,
+    source: &L1Source,
+    body_sha256: &str,
+) -> Value {
+    let mut obj = serde_json::Map::new();
+    match source {
+        L1Source::Operator => {
+            obj.insert("source".into(), Value::String("operator".into()));
+        }
+        L1Source::AgentRaised { task_id } => {
+            obj.insert("source".into(), Value::String("agent_raised".into()));
+            obj.insert(
+                "task_id".into(),
+                Value::Number(serde_json::Number::from(*task_id)),
+            );
+        }
+    }
+    let (action_str, memory_id) = match outcome {
+        L1WriteOutcome::Inserted { memory_id } => ("inserted", *memory_id),
+        L1WriteOutcome::SkippedDuplicate { memory_id } => ("skipped_duplicate", *memory_id),
+    };
+    obj.insert("action".into(), Value::String(action_str.into()));
+    obj.insert(
+        "memory_id".into(),
+        Value::Number(serde_json::Number::from(memory_id)),
+    );
+    obj.insert(
+        "body_sha256".into(),
+        Value::String(body_sha256.into()),
+    );
+    Value::Object(obj)
 }
 
 /// Compute `total_duration_ms` for the finalize payload, clamping
@@ -745,5 +803,68 @@ mod tests {
     fn compute_duration_ms_returns_zero_when_started_at_missing() {
         let finish = datetime!(2026-05-12 10:00:00 UTC);
         assert_eq!(compute_duration_ms(None, finish), 0);
+    }
+
+    // --- build_l1_write_payload -----------------------------------------
+
+    #[test]
+    fn build_l1_write_payload_operator_inserted_shape() {
+        let payload = build_l1_write_payload(
+            &L1WriteOutcome::Inserted { memory_id: 42 },
+            &L1Source::Operator,
+            "abc123",
+        );
+        assert_eq!(
+            payload,
+            json!({"source": "operator", "action": "inserted", "memory_id": 42, "body_sha256": "abc123"}),
+        );
+    }
+
+    #[test]
+    fn build_l1_write_payload_operator_skipped_duplicate_shape() {
+        let payload = build_l1_write_payload(
+            &L1WriteOutcome::SkippedDuplicate { memory_id: 7 },
+            &L1Source::Operator,
+            "def456",
+        );
+        assert_eq!(
+            payload,
+            json!({"source": "operator", "action": "skipped_duplicate", "memory_id": 7, "body_sha256": "def456"}),
+        );
+    }
+
+    #[test]
+    fn build_l1_write_payload_agent_raised_carries_task_id() {
+        let payload = build_l1_write_payload(
+            &L1WriteOutcome::Inserted { memory_id: 88 },
+            &L1Source::AgentRaised { task_id: 123 },
+            "abc123",
+        );
+        assert_eq!(
+            payload,
+            json!({"source": "agent_raised", "task_id": 123, "action": "inserted", "memory_id": 88, "body_sha256": "abc123"}),
+        );
+    }
+
+    #[test]
+    fn build_l1_write_payload_agent_raised_skipped_duplicate_shape() {
+        let payload = build_l1_write_payload(
+            &L1WriteOutcome::SkippedDuplicate { memory_id: 88 },
+            &L1Source::AgentRaised { task_id: 99 },
+            "ddd",
+        );
+        assert_eq!(
+            payload,
+            json!({"source": "agent_raised", "task_id": 99, "action": "skipped_duplicate", "memory_id": 88, "body_sha256": "ddd"}),
+        );
+    }
+
+    #[test]
+    fn l1_action_constants_are_distinct_and_stable() {
+        // Stability check: these strings are wire contract. A future
+        // rename would invalidate JSONB queries grouped on `action`.
+        assert_eq!(ACTION_L1_ADDED, "l1.added");
+        assert_eq!(ACTION_L1_REMOVED, "l1.removed");
+        assert_eq!(ACTION_L1_PROMOTED, "l1.promoted");
     }
 }

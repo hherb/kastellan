@@ -45,6 +45,7 @@
 
 mod embed;
 pub mod l0_seed;
+pub mod l1_promote;
 pub mod layers;
 mod recall;
 

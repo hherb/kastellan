@@ -18,8 +18,9 @@ use crate::cassandra::types::DataClass;
 
 use super::agent::PlanFormulator;
 use super::audit::{
-    action_task_terminal, build_finalize_payload, build_lifecycle_payload, compute_duration_ms,
-    TaskFinalizeStats, ACTION_TASK_FINALIZE, ACTION_TASK_RUNNING, SCHEDULER_AUDIT_ACTOR,
+    action_task_terminal, build_finalize_payload, build_lifecycle_payload, build_l1_write_payload,
+    compute_duration_ms, TaskFinalizeStats, ACTION_L1_PROMOTED, ACTION_TASK_FINALIZE,
+    ACTION_TASK_RUNNING, SCHEDULER_AUDIT_ACTOR,
 };
 use super::inner_loop::{
     run_to_terminal, ClassificationFloorSource, InnerLoopResult, Outcome, StepDispatcher,
@@ -209,6 +210,15 @@ async fn drain_lane(
         // row above carries the headline state; this row carries the
         // counters for per-task latency analysis.
         write_finalize_row(pool, &claimed, final_state, &result, finished_at).await;
+
+        // Agent-raised L1 promotion. Best-effort: a degraded write
+        // never aborts task finalize. The terminal plan's `l1_insight`
+        // is captured by the inner loop into `result.terminal_l1_insight`
+        // only when Outcome::Completed; all other outcomes leave the
+        // field None, so this branch is a no-op for them.
+        if let Some(insight) = result.terminal_l1_insight.as_deref() {
+            write_l1_promoted_row(pool, claimed.id, insight).await;
+        }
     }
 }
 
@@ -263,6 +273,49 @@ async fn write_finalize_row(
         tracing::warn!(
             task_id = claimed.id, state = final_state, error = %e,
             "audit insert for scheduler task.finalize row failed (best-effort)"
+        );
+    }
+}
+
+/// Best-effort agent-raised L1 promotion writer. Called by
+/// [`drain_lane`] after the `task.finalize` audit row is written.
+///
+/// Posture: errors are logged at WARN and swallowed. The task is
+/// already finalized in the canonical `tasks` table; the L1 row +
+/// audit row are observability aids, not correctness signals.
+/// Validation errors from `promote_l1` are also swallowed (with
+/// distinct WARN diagnostics so the operator can see which path failed).
+async fn write_l1_promoted_row(pool: &PgPool, task_id: i64, insight: &str) {
+    use crate::memory::l1_promote::{promote_l1, L1Error, L1Source};
+
+    let source = L1Source::AgentRaised { task_id };
+    let outcome = match promote_l1(pool, insight, source.clone()).await {
+        Ok(o) => o,
+        Err(L1Error::Validation(msg)) => {
+            tracing::warn!(
+                task_id, error = %msg,
+                "agent-raised L1 promotion rejected on validation (skipping audit row)"
+            );
+            return;
+        }
+        Err(L1Error::Db(e)) => {
+            tracing::warn!(
+                task_id, error = %e,
+                "agent-raised L1 promotion DB error (skipping audit row)"
+            );
+            return;
+        }
+    };
+
+    let body_sha256 = crate::memory::l1_promote::compute_body_sha256(insight.trim());
+    let payload = build_l1_write_payload(&outcome, &source, &body_sha256);
+
+    if let Err(e) = hhagent_db::audit::insert(
+        pool, SCHEDULER_AUDIT_ACTOR, ACTION_L1_PROMOTED, payload,
+    ).await {
+        tracing::warn!(
+            task_id, error = %e,
+            "audit insert for scheduler l1.promoted row failed (best-effort)"
         );
     }
 }
@@ -358,6 +411,7 @@ fn failed_result(detail: String) -> InnerLoopResult {
         outcome: Outcome::Failed(detail),
         plan_count: 0,
         dispatch_count: 0,
+        terminal_l1_insight: None,
     }
 }
 
@@ -533,6 +587,18 @@ mod tests {
             err.contains("reserved") || err.contains("apply_floor_raise"),
             "error must name the contract: {err}",
         );
+    }
+
+    #[test]
+    fn write_l1_promoted_row_signature_compile_pin() {
+        fn _signature_pin<'a>(
+            pool: &'a sqlx::PgPool,
+            task_id: i64,
+            insight: &'a str,
+        ) -> impl std::future::Future<Output = ()> + 'a {
+            super::write_l1_promoted_row(pool, task_id, insight)
+        }
+        let _ = _signature_pin;
     }
 
     #[test]

@@ -51,6 +51,7 @@ A plan is a JSON object with these fields, in order:
     ],
     "result":         null,
     "refused":        null,
+    "l1_insight":     null,
     "floor_request":  null,
     "data_ceiling":   "<Public | Personal | ClinicalConfidential | Secret>"
 }
@@ -68,6 +69,8 @@ request below the current floor is silently a no-op. This is distinct
 from `data_ceiling` (which records the highest class of data the plan
 TOUCHES). `floor_request` is the agent's view of how strictly the
 OUTPUTS should be governed.
+
+**Optional: `l1_insight`.** On a *terminal* plan (`decision: "task_complete"` with `steps: []`) you may include `l1_insight` as a single short bullet (≤ 300 characters, no newlines) capturing a **generalizable lesson** learned across this task — something useful for *future* tasks, not a summary of *this* task. Examples: "shell-exec /usr/bin/ls reliably enumerates dir contents", "tasks needing /etc/shadow access always POLICY_DENIED — escalate via human approval first". Omit the field if no generalizable lesson exists; false positives bloat the always-in-context insight block and degrade later planning. The field is dropped if the reviewer Blocks, Escalates, or if you self-refuse.
 
 ## Terminating a task
 

@@ -254,6 +254,7 @@ mod tests {
             data_ceiling: ceiling,
             refused: None,
             floor_request: None,
+            l1_insight: None,
         }
     }
 

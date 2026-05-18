@@ -540,6 +540,35 @@ where
     insert_row_at_layer_unchecked(executor, body, metadata, embedding, layer).await
 }
 
+/// Delete one row from `memories` by id, but **only** if its layer
+/// matches `layer`. Returns `true` if a row was deleted; `false` if
+/// no row matched (id absent or layer mismatch).
+///
+/// The layer guard exists so that `hhagent-cli memory l1 remove <id>`
+/// cannot accidentally delete an L0 / L2 / L3 row through this path —
+/// the operator subcommand passes `MemoryLayer::Index` here.
+///
+/// The existing AFTER DELETE trigger on `memories` (migration
+/// `0008_deleted_memories_audit.sql`) journals the deleted row's
+/// body, metadata, embedding, and `original_created_at` into the
+/// `deleted_memories` table for the audit trail.
+pub async fn delete_memory_at_layer<'e, E>(
+    executor: E,
+    id: i64,
+    layer: MemoryLayer,
+) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let rows = sqlx::query("DELETE FROM memories WHERE id = $1 AND layer = $2")
+        .bind(id)
+        .bind(layer.as_db())
+        .execute(executor)
+        .await
+        .map_err(|e| DbError::Query(format!("delete_memory_at_layer id={id}: {e}")))?;
+    Ok(rows.rows_affected() == 1)
+}
+
 /// Insert an L0 (meta-rule) memory row.
 ///
 /// Separate from [`insert_memory_at_layer`] on purpose: L0 rows are

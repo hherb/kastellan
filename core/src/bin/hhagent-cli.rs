@@ -21,6 +21,13 @@
 //!   on a real state change; idempotent no-ops and validation errors
 //!   write no audit row.
 //!
+//! * `memory l1 add|list|remove` — operator-facing management of
+//!   layer-1 (in-prompt insight) memories. Add/remove emit one
+//!   `actor='cli' action='l1.{added,removed}'` audit row per
+//!   operation. `add` is idempotent (duplicate body_sha256 returns
+//!   `skipped_duplicate`); `list` prints the in-prompt slice by
+//!   default, or every L1 row with `--all`.
+//!
 //! Usage:
 //!
 //! ```text
@@ -33,6 +40,9 @@
 //! hhagent-cli tools allowlist add    <tool> <argv0>
 //! hhagent-cli tools allowlist remove <tool> <argv0>
 //! hhagent-cli tools allowlist list   [--tool <name>]
+//! hhagent-cli memory l1 add    <body>
+//! hhagent-cli memory l1 list   [--all]
+//! hhagent-cli memory l1 remove <id>
 //! hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 //! ```
 //!
@@ -64,6 +74,7 @@ fn main() -> ExitCode {
         "ask"         => run_ask(&args[2..]),
         "tasks"       => run_tasks(&args[2..]),
         "tools"       => run_tools(&args[2..]),
+        "memory"      => run_memory(&args[2..]),
         "observation" => run_observation(&args[2..]),
         "--help" | "-h" | "help" => {
             println!("{}", help_text());
@@ -89,6 +100,9 @@ usage:
     hhagent-cli tools allowlist add    <tool> <argv0>
     hhagent-cli tools allowlist remove <tool> <argv0>
     hhagent-cli tools allowlist list   [--tool <name>]
+    hhagent-cli memory l1 add    <body>
+    hhagent-cli memory l1 list   [--all]
+    hhagent-cli memory l1 remove <id>
     hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
     hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 
@@ -924,6 +938,168 @@ async fn tools_allowlist_list(args: &[String]) -> ExitCode {
             e.tool, e.argv0, e.created_at, e.created_by);
     }
     ExitCode::from(0)
+}
+
+// ============================================================
+// `memory l1 {add,list,remove}` subcommand tree
+// ============================================================
+
+fn run_memory(args: &[String]) -> ExitCode {
+    if args.is_empty() {
+        eprintln!("usage: hhagent-cli memory l1 <add|list|remove> ...");
+        return ExitCode::from(2);
+    }
+    match args[0].as_str() {
+        "l1"  => run_memory_l1(&args[1..]),
+        other => {
+            eprintln!("memory: unknown subgroup '{other}'; expected: l1");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_memory_l1(args: &[String]) -> ExitCode {
+    if args.is_empty() {
+        eprintln!("usage: hhagent-cli memory l1 <add|list|remove> ...");
+        return ExitCode::from(2);
+    }
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("memory l1: failed to build tokio runtime: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match args[0].as_str() {
+        "add"    => rt.block_on(memory_l1_add(&args[1..])),
+        "list"   => rt.block_on(memory_l1_list(&args[1..])),
+        "remove" => rt.block_on(memory_l1_remove(&args[1..])),
+        other    => {
+            eprintln!("memory l1: unknown action '{other}'; expected: add | list | remove");
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn memory_l1_add(args: &[String]) -> ExitCode {
+    use hhagent_core::cli_audit::l1_add_and_audit;
+    use hhagent_core::memory::l1_promote::L1WriteOutcome;
+    use hhagent_db::pool::connect_runtime_pool;
+
+    let body = match args {
+        [b] => b,
+        _ => {
+            eprintln!("usage: hhagent-cli memory l1 add <body>");
+            return ExitCode::from(2);
+        }
+    };
+
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+
+    match l1_add_and_audit(&pool, body).await {
+        Ok((L1WriteOutcome::Inserted { memory_id }, _)) => {
+            println!("inserted id={memory_id}");
+            ExitCode::from(0)
+        }
+        Ok((L1WriteOutcome::SkippedDuplicate { memory_id }, _)) => {
+            println!("skipped_duplicate id={memory_id} (body_sha256 already at layer 1)");
+            ExitCode::from(0)
+        }
+        Err(e) => {
+            eprintln!("memory l1 add: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn memory_l1_list(args: &[String]) -> ExitCode {
+    use hhagent_core::memory::l1_promote::list_l1;
+    use hhagent_db::pool::connect_runtime_pool;
+
+    let mut all = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--all" => {
+                all = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("memory l1 list: unknown flag '{other}'");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+
+    let rows = match list_l1(&pool, all).await {
+        Ok(r) => r,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+
+    println!("{:<8}  {:<32}  BODY",
+        "ID", "CREATED_AT");
+    for r in rows {
+        println!("{:<8}  {:<32}  {}",
+            r.id, r.created_at, r.body);
+    }
+    ExitCode::from(0)
+}
+
+async fn memory_l1_remove(args: &[String]) -> ExitCode {
+    use hhagent_core::cli_audit::l1_remove_and_audit;
+    use hhagent_db::pool::connect_runtime_pool;
+
+    let id_str = match args {
+        [s] => s,
+        _ => {
+            eprintln!("usage: hhagent-cli memory l1 remove <id>");
+            return ExitCode::from(2);
+        }
+    };
+    let id: i64 = match id_str.parse() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("memory l1 remove: invalid id '{id_str}': {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+
+    match l1_remove_and_audit(&pool, id).await {
+        Ok((true, _))  => { println!("removed id={id}"); ExitCode::from(0) }
+        Ok((false, _)) => {
+            println!("no row at layer 1 with id={id} (already gone or wrong layer)");
+            ExitCode::from(0)
+        }
+        Err(e) => { eprintln!("memory l1 remove: {e}"); ExitCode::from(1) }
+    }
 }
 
 // ============================================================

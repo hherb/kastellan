@@ -20,6 +20,7 @@ fn approve_capture() -> CaptureJson {
         data_ceiling: DataClass::Public,
         refused: None,
         floor_request: None,
+        l1_insight: None,
     };
     let plan_value = serde_json::to_value(&plan).unwrap();
     CaptureJson {
