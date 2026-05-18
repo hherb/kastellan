@@ -238,28 +238,13 @@ mod tests {
         }
     }
 
-    /// Happy path: a generous CPU budget gets applied without error.
-    /// The kernel returns success regardless of whether the worker
-    /// ever uses any CPU, so this only proves the FFI path is wired.
-    /// Effective enforcement is covered by `rlimit_smoke.rs`.
-    ///
-    /// **NOTE for maintainers:** this test permanently lowers
-    /// `RLIMIT_CPU` for the test binary process to 30 CPU-seconds.
-    /// `setrlimit` is process-scoped and the hard limit can only be
-    /// tightened thereafter, not raised. All other tests in this
-    /// binary must complete within that 30-second CPU budget — easy
-    /// today (the prelude unit suite finishes in <1 s wall-clock with
-    /// trivial CPU use), but if a CPU-heavy test gets added later it
-    /// may need its own binary or a wider initial budget here.
-    #[test]
-    fn apply_from_env_with_generous_budget_applies() {
-        let report = with_env_var(Some("30000"), apply_from_env)
-            .expect("apply_from_env must succeed with a generous budget");
-        match report {
-            RlimitReport::Applied { cpu_seconds } => assert_eq!(cpu_seconds, 30),
-            RlimitReport::Disabled => panic!("expected Applied, got Disabled"),
-        }
-    }
+    // Happy-path coverage of `apply_from_env` (env var set + setrlimit
+    // succeeds → `Applied { cpu_seconds }`) lives in the subprocess-
+    // isolated `tests/rlimit_apply_smoke.rs` integration test. The
+    // in-process variant was removed in issue #57 because `setrlimit`
+    // is process-scoped — calling it from a unit test permanently
+    // lowered the test binary's CPU budget for every subsequent test
+    // in the same run.
 
     #[test]
     fn cpu_ms_to_seconds_zero_yields_zero() {

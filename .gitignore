@@ -6,7 +6,8 @@ Cargo.lock.bak
 # Editors / IDEs
 .idea/
 .vscode/
-.claude/setting.local.json
+.claude/settings.local.json
+.claude/worktrees/
 *.swp
 *.swo
 

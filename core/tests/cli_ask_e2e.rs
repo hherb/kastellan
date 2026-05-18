@@ -69,23 +69,75 @@ fn skip_if_any_binary_missing() -> bool {
 /// mock task in an unbounded read.
 const MOCK_MAX_REQUEST_BYTES: usize = 1 << 20;
 
-/// Multi-shot HTTP mock for the LLM router.
+/// The kind of OpenAI-compatible endpoint a captured request targets.
 ///
-/// Serves canned 200-OK JSON bodies from a queue in FIFO order. Once
-/// the queue is exhausted, every subsequent request gets a `503
-/// Service Unavailable` so an unexpected extra LLM call surfaces as
-/// `RouterError::HttpStatus` in the daemon log AND as a `tasks.state
-/// = "failed"` row in the test's final assertion — i.e. loud, not
-/// silent.
+/// Used by the URL-routing mock to dispatch responses from the right
+/// per-endpoint queue and to keep capture lists separate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointKind {
+    Embedding,
+    Chat,
+}
+
+/// Classify a request path into one of the two endpoint kinds the
+/// daemon actually exercises.
+///
+/// Production paths look like `/v1/embeddings` and `/v1/chat/completions`,
+/// but we deliberately match by substring rather than exact equality
+/// — that way a future router refactor that changes the URL prefix
+/// (or adds a trailing `?stream=false`) does not silently break this
+/// classifier. Anything that contains `embeddings` is an embed request;
+/// every other path is treated as a chat-completion. Pure: `&str → Kind`.
+fn classify_endpoint(path: &str) -> EndpointKind {
+    if path.contains("embeddings") {
+        EndpointKind::Embedding
+    } else {
+        EndpointKind::Chat
+    }
+}
+
+/// Extract the request-target (path) from an HTTP request-line string,
+/// e.g. `"POST /v1/embeddings HTTP/1.1"` → `"/v1/embeddings"`.
+///
+/// Returns `None` if the line doesn't split into at least three
+/// whitespace-separated tokens. Pure: `&str → Option<&str>`.
+fn parse_request_path(headers: &str) -> Option<&str> {
+    let first_line = headers.lines().next()?;
+    let mut parts = first_line.split_whitespace();
+    let _method = parts.next()?;
+    parts.next()
+}
+
+/// Multi-shot HTTP mock for the LLM router, dispatching by URL path.
+///
+/// Serves canned 200-OK JSON bodies from one of two queues — embedding
+/// or chat-completion — chosen by the request's URL path. Each queue
+/// is FIFO; once a queue is exhausted, every subsequent request to that
+/// endpoint gets a `503 Service Unavailable` so an unexpected extra
+/// LLM call surfaces as `RouterError::HttpStatus` in the daemon log
+/// AND as a `tasks.state = "failed"` row in the test's final assertion
+/// — i.e. loud, not silent.
+///
+/// **Why per-endpoint queues, not a single FIFO** — the daemon's
+/// `PgRecallBuilder::build` issues an embed before the chat-completion
+/// today, but that ordering is not load-bearing on production behaviour.
+/// A single shared FIFO would desync silently if a future refactor
+/// parallelises embed+chat (the chat handler pops an embedding body or
+/// vice-versa) or if any new caller adds an extra embed somewhere
+/// upstream. Two queues fail loudly: an unexpected dial-count mismatch
+/// surfaces as a 503 on the correct endpoint, not a misleading body-
+/// shape error in the consumer.
 ///
 /// The accept loop runs forever (one connection at a time) until the
 /// `JoinHandle` is aborted. `Drop` aborts it for us so the mock cannot
 /// leak past the test boundary.
 struct MockLlm {
     base_url: String,
-    /// Captured request bodies in arrival order. Useful for asserting
-    /// the daemon dialed N times.
-    requests: Arc<Mutex<Vec<String>>>,
+    /// Captured embedding-request bodies in arrival order. Useful for
+    /// asserting the daemon dialed the embed endpoint N times.
+    embed_requests: Arc<Mutex<Vec<String>>>,
+    /// Captured chat-completion request bodies in arrival order.
+    chat_requests: Arc<Mutex<Vec<String>>>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -97,17 +149,24 @@ impl Drop for MockLlm {
     }
 }
 
-async fn spawn_queued_mock(responses: Vec<String>) -> MockLlm {
+async fn spawn_url_routed_mock(
+    embed_responses: Vec<String>,
+    chat_responses: Vec<String>,
+) -> MockLlm {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
     let port = listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");
 
-    let queue = Arc::new(Mutex::new(responses));
-    let queue_for_task = queue.clone();
-    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
-    let requests_for_task = requests.clone();
+    let embed_queue = Arc::new(Mutex::new(embed_responses));
+    let embed_queue_for_task = embed_queue.clone();
+    let chat_queue = Arc::new(Mutex::new(chat_responses));
+    let chat_queue_for_task = chat_queue.clone();
+    let embed_requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let embed_requests_for_task = embed_requests.clone();
+    let chat_requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let chat_requests_for_task = chat_requests.clone();
 
     let join = tokio::spawn(async move {
         loop {
@@ -118,7 +177,11 @@ async fn spawn_queued_mock(responses: Vec<String>) -> MockLlm {
 
             let mut buf = Vec::with_capacity(4096);
             let mut tmp = [0u8; 1024];
-            let req_body: Option<String> = loop {
+            // Two outputs from the read loop: the request body string
+            // (for capture) and the URL kind (for dispatch). `None` on
+            // either means "malformed / truncated — serve 503 and move
+            // on" rather than panicking.
+            let parsed: Option<(EndpointKind, String)> = loop {
                 let n = match sock.read(&mut tmp).await {
                     Ok(n) => n,
                     Err(_) => break None,
@@ -132,12 +195,15 @@ async fn spawn_queued_mock(responses: Vec<String>) -> MockLlm {
                         Ok(s) => s,
                         Err(_) => break None,
                     };
+                    let kind = parse_request_path(header_str)
+                        .map(classify_endpoint)
+                        .unwrap_or(EndpointKind::Chat);
                     let content_length = header_content_length(header_str).unwrap_or(0);
                     let body_start = headers_end + 4;
                     let total_needed = body_start + content_length;
                     if buf.len() >= total_needed {
                         match String::from_utf8(buf[body_start..total_needed].to_vec()) {
-                            Ok(b) => break Some(b),
+                            Ok(b) => break Some((kind, b)),
                             Err(_) => break None,
                         }
                     }
@@ -147,20 +213,26 @@ async fn spawn_queued_mock(responses: Vec<String>) -> MockLlm {
                 }
             };
 
-            if let Some(body) = req_body {
-                requests_for_task.lock().unwrap().push(body);
-            }
-
-            // FIFO dequeue: daemon dials the LLM once per plan
-            // iteration; the test plants the i-th expected response in
-            // queue position i.
-            let next: Option<String> = {
-                let mut q = queue_for_task.lock().unwrap();
-                if q.is_empty() {
-                    None
-                } else {
-                    Some(q.remove(0))
+            // Capture into the per-endpoint list and dequeue the next
+            // canned response from the matching queue. Each endpoint
+            // has its own FIFO so an unexpected extra dial to one side
+            // surfaces as a 503 on that side, not a body-shape error
+            // on the other.
+            let next: Option<String> = if let Some((kind, body)) = parsed {
+                match kind {
+                    EndpointKind::Embedding => {
+                        embed_requests_for_task.lock().unwrap().push(body);
+                        let mut q = embed_queue_for_task.lock().unwrap();
+                        if q.is_empty() { None } else { Some(q.remove(0)) }
+                    }
+                    EndpointKind::Chat => {
+                        chat_requests_for_task.lock().unwrap().push(body);
+                        let mut q = chat_queue_for_task.lock().unwrap();
+                        if q.is_empty() { None } else { Some(q.remove(0)) }
+                    }
                 }
+            } else {
+                None
             };
 
             let resp = match next {
@@ -189,7 +261,8 @@ async fn spawn_queued_mock(responses: Vec<String>) -> MockLlm {
 
     MockLlm {
         base_url,
-        requests,
+        embed_requests,
+        chat_requests,
         join: Some(join),
     }
 }
@@ -218,6 +291,63 @@ fn header_content_length(headers: &str) -> Option<usize> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Unit tests for the URL-routing dispatcher helpers.
+//
+// The e2e tests below skip on hosts without a supervisor / sandbox /
+// Postgres toolchain (e.g. plain macOS dev boxes), so the load-bearing
+// classifier + path parser get their coverage from these in-file unit
+// tests. Keep them here so the helpers and their pins live in one file.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod mock_router_unit_tests {
+    use super::*;
+
+    #[test]
+    fn classify_endpoint_routes_embeddings_paths_to_embedding() {
+        assert_eq!(classify_endpoint("/v1/embeddings"), EndpointKind::Embedding);
+        assert_eq!(classify_endpoint("/embeddings"), EndpointKind::Embedding);
+        // Query string / version drift defends against a future router
+        // refactor that adds extra suffix bytes.
+        assert_eq!(
+            classify_endpoint("/v2/embeddings?stream=false"),
+            EndpointKind::Embedding,
+        );
+    }
+
+    #[test]
+    fn classify_endpoint_defaults_unknown_paths_to_chat() {
+        assert_eq!(
+            classify_endpoint("/v1/chat/completions"),
+            EndpointKind::Chat,
+        );
+        // No "embeddings" substring → falls through to Chat.
+        assert_eq!(classify_endpoint("/v1/anything-else"), EndpointKind::Chat);
+        assert_eq!(classify_endpoint("/"), EndpointKind::Chat);
+    }
+
+    #[test]
+    fn parse_request_path_extracts_the_target_from_a_request_line() {
+        let headers = "POST /v1/embeddings HTTP/1.1\r\nHost: localhost\r\n";
+        assert_eq!(parse_request_path(headers), Some("/v1/embeddings"));
+    }
+
+    #[test]
+    fn parse_request_path_handles_chat_completions_target() {
+        let headers = "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n";
+        assert_eq!(parse_request_path(headers), Some("/v1/chat/completions"));
+    }
+
+    #[test]
+    fn parse_request_path_returns_none_for_malformed_input() {
+        // Single-token request line — no path field.
+        assert_eq!(parse_request_path("GET"), None);
+        // Empty input.
+        assert_eq!(parse_request_path(""), None);
+    }
+}
+
 /// Wrap `plan_json` in an OpenAI-compatible chat-completion envelope.
 fn envelope_for(plan_json_string: &str) -> String {
     serde_json::json!({
@@ -238,10 +368,10 @@ fn envelope_for(plan_json_string: &str) -> String {
 /// Build an OpenAI-compatible embedding response envelope.
 ///
 /// `PgRecallBuilder::build` calls `embed_query` (→ `router.embed`) once
-/// per plan iteration, BEFORE the chat-completion call. The mock serves
-/// requests in FIFO order regardless of URL path, so the queue must
-/// contain an embedding envelope for each plan iteration or the chat
-/// responses will be consumed by the embed request.
+/// per plan iteration, BEFORE the chat-completion call. The mock now
+/// dispatches by URL path, so the embed queue holds one envelope per
+/// expected embed dial and the chat queue holds one envelope per
+/// expected plan-iteration — independent of call ordering.
 ///
 /// `embed_query` validates that the returned embedding vector has
 /// exactly `EMBEDDING_DIM = 1024` elements; any other length causes a
@@ -496,18 +626,20 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         .expect("build multi-threaded tokio runtime");
 
     // Each plan iteration: (1) embed request for recall, (2) chat
-    // completion for plan generation. 2 iterations → 4 total mock
-    // responses, interleaved embed/chat/embed/chat.
-    let mock = rt.block_on(spawn_queued_mock(vec![
-        embedding_envelope(),
-        envelope_for(&plan_json("act", echo_step(&marker), None)),
-        embedding_envelope(),
-        envelope_for(&plan_json(
-            "task_complete",
-            serde_json::json!([]),
-            Some(serde_json::json!({"kind": "text", "body": &marker})),
-        )),
-    ]));
+    // completion for plan generation. 2 iterations → 2 embed responses
+    // and 2 chat responses. The mock routes by URL path so the two
+    // queues are independent.
+    let mock = rt.block_on(spawn_url_routed_mock(
+        vec![embedding_envelope(), embedding_envelope()],
+        vec![
+            envelope_for(&plan_json("act", echo_step(&marker), None)),
+            envelope_for(&plan_json(
+                "task_complete",
+                serde_json::json!([]),
+                Some(serde_json::json!({"kind": "text", "body": &marker})),
+            )),
+        ],
+    ));
 
     // Apply migrations explicitly and seed the shell-exec allowlist
     // before the daemon boots — build_tool_registry reads the
@@ -710,24 +842,28 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         pool.close().await;
     });
 
-    // Mock dial count: 4 — 2 embed requests (one per recall call) +
-    // 2 chat-completion requests (one per plan iteration). The mock
-    // serves all request types from the same FIFO queue, so total HTTP
-    // round-trips is 2×(embed + chat) = 4.
-    let captured = mock.requests.lock().unwrap();
+    // Mock dial count: 2 embeds + 2 chat-completions (one of each per
+    // plan iteration). With URL routing each endpoint's count is
+    // asserted independently — an unexpected extra dial to one side
+    // does not silently inflate the other side's total.
+    let embed_dialed = mock.embed_requests.lock().unwrap().len();
+    let chat_dialed = mock.chat_requests.lock().unwrap().len();
     assert_eq!(
-        captured.len(),
-        4,
-        "expected daemon to dial mock exactly 4× in happy path (2 embed + 2 chat); got {}",
-        captured.len()
+        embed_dialed, 2,
+        "expected daemon to dial mock embed endpoint exactly 2× in happy path; got {embed_dialed}",
     );
-    // Second request (index 1) is the first chat-completion and must
-    // carry the cached `agent_planner` prompt. Index 0 is the first
-    // embedding request body.
-    let first_chat_body = &captured[1];
+    assert_eq!(
+        chat_dialed, 2,
+        "expected daemon to dial mock chat endpoint exactly 2× in happy path; got {chat_dialed}",
+    );
+    // First chat-completion must carry the cached `agent_planner`
+    // prompt. With URL routing this is `chat_requests[0]`, regardless
+    // of how the embed dials interleave.
+    let chat_captured = mock.chat_requests.lock().unwrap();
+    let first_chat_body = &chat_captured[0];
     assert!(
         first_chat_body.contains("Constitutional Principles"),
-        "first chat request (index 1) must carry the cached planner prompt; got first {} chars:\n{}",
+        "first chat request must carry the cached planner prompt; got first {} chars:\n{}",
         first_chat_body.len().min(800),
         &first_chat_body[..first_chat_body.len().min(800)],
     );
@@ -773,17 +909,17 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
     // and we return Outcome::Failed.
     //
     // Each plan iteration: (1) embed request for recall, (2) chat
-    // completion for plan generation. 3 iterations → 6 total mock
-    // responses, interleaved embed/chat/embed/chat/embed/chat.
+    // completion for plan generation. 3 iterations → 3 embed responses
+    // and 3 chat responses (the same denied plan repeated).
     let denied_plan = envelope_for(&plan_json("act", cat_passwd_step(), None));
-    let mock = rt.block_on(spawn_queued_mock(vec![
-        embedding_envelope(),
-        denied_plan.clone(),
-        embedding_envelope(),
-        denied_plan.clone(),
-        embedding_envelope(),
-        denied_plan,
-    ]));
+    let mock = rt.block_on(spawn_url_routed_mock(
+        vec![
+            embedding_envelope(),
+            embedding_envelope(),
+            embedding_envelope(),
+        ],
+        vec![denied_plan.clone(), denied_plan.clone(), denied_plan],
+    ));
 
     // Apply migrations before the daemon boots so build_tool_registry
     // can connect. No allowlist seeding: every shell.exec call must
@@ -976,13 +1112,17 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         pool.close().await;
     });
 
-    // Mock dial count: 6 — 3 embed requests (one per recall call) +
-    // 3 chat-completion requests (one per plan iteration before cap).
-    // The mock serves all request types from the same FIFO queue, so
-    // total HTTP round-trips is 3×(embed + chat) = 6.
-    let dialed = mock.requests.lock().unwrap().len();
+    // Mock dial count: 3 embeds + 3 chat-completions, one of each per
+    // plan iteration before the cap fires. Per-endpoint assertions
+    // catch a stray extra dial to either side directly.
+    let embed_dialed = mock.embed_requests.lock().unwrap().len();
+    let chat_dialed = mock.chat_requests.lock().unwrap().len();
     assert_eq!(
-        dialed, 6,
-        "expected daemon to dial mock exactly 6× before cap (3 embed + 3 chat); got {dialed}"
+        embed_dialed, 3,
+        "expected daemon to dial mock embed endpoint exactly 3× before cap; got {embed_dialed}",
+    );
+    assert_eq!(
+        chat_dialed, 3,
+        "expected daemon to dial mock chat endpoint exactly 3× before cap; got {chat_dialed}",
     );
 }
