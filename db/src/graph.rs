@@ -171,14 +171,19 @@ impl<'a> Graph for PgGraph<'a> {
         name: &str,
         attrs: &serde_json::Value,
     ) -> Result<i64, DbError> {
-        // ON CONFLICT key matches the `UNIQUE (kind, name)` index in
-        // `0001_init.sql`. `updated_at = now()` records the most
-        // recent change so a future "stale entity" sweep can use it.
+        // Migration 0015 replaced the (kind, name) UNIQUE with
+        // (kind, name_norm) — case/whitespace/NFC-insensitive dedup.
+        // `name` keeps the FIRST writer's display form; `attrs`
+        // updates on conflict. `name_norm` is computed via the
+        // canonical `normalize_entity_name` helper so this writer
+        // matches the v2 extractor's `upsert_entities_and_relations`
+        // exactly (same input → same dedup key).
+        let name_norm = crate::normalize_entity_name(name);
         let row = sqlx::query(
             r#"
-            INSERT INTO entities (kind, name, attrs)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (kind, name) DO UPDATE
+            INSERT INTO entities (kind, name, name_norm, attrs)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (kind, name_norm) DO UPDATE
               SET attrs = EXCLUDED.attrs,
                   updated_at = now()
             RETURNING id
@@ -186,6 +191,7 @@ impl<'a> Graph for PgGraph<'a> {
         )
         .bind(kind)
         .bind(name)
+        .bind(&name_norm)
         .bind(attrs)
         .fetch_one(self.pool)
         .await

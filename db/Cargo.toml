@@ -15,6 +15,14 @@ serde_json = { workspace = true }
 thiserror  = { workspace = true }
 tracing    = { workspace = true }
 
+# `entities.name_norm` dedup key (migration 0015) is computed Rust-side
+# so the same input maps to the same canonical form on every host —
+# avoids a locale-sensitive `lower()` on the Postgres side. NFC
+# composition is the load-bearing piece: `café` (1 char) and
+# `cafe\u{0301}` (e + combining acute) must collapse to the same row.
+# See `entity_name::normalize_entity_name`.
+unicode-normalization = "0.1"
+
 # Async runtime + Postgres driver. The pure helpers in `lib.rs` (the
 # `build_*` functions, `find_pg_bin_dir`, etc.) do NOT depend on these,
 # but the runtime probe (`probe::run`) does — it talks Postgres over a

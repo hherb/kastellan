@@ -1,23 +1,32 @@
-//! Entity extraction: query-time NER for the recall graph lane.
+//! Canonical form for `entities.name_norm` — the dedup key column
+//! added by migration `0015`.
 //!
-//! This module owns the `EntityExtractor` trait and its production
-//! impl `GlinerRelexExtractor` (in `gliner_relex.rs`), plus the
-//! `NoOpEntityExtractor` used when the gliner-relex worker isn't
-//! configured.
-//!
-//! See `docs/superpowers/specs/2026-05-19-entity-extraction-v2-gliner-relex-design.md`
-//! for the architecture rationale (single-pass joint NER+RE via the
-//! gliner-relex worker; quarantine-on-upsert; Rust-side normalization
-//! for case/whitespace/Unicode-insensitive dedup).
+//! Lives in `hhagent-db` (not `hhagent-core`) because the schema
+//! that depends on it lives here: `PgGraph::upsert_entity` and the
+//! v2 entity extractor's `upsert_entities_and_relations` both need
+//! to compute the same value for the same input, and a single source
+//! of truth in the foundational crate makes that hard to drift.
 
-pub mod gliner_relex;
-
-/// Canonical form for entity-name dedup. Re-exported from
-/// `hhagent-db` so the v2 extractor and `PgGraph::upsert_entity`
-/// share one normalization implementation — schema concern (the
-/// `entities.name_norm` column) lives in the db crate; core just
-/// re-exports for convenience at the call sites.
-pub use hhagent_db::normalize_entity_name;
+/// Canonical form for entity-name dedup. Done on the Rust side so the
+/// normalization is the same on every host and PostgreSQL doesn't need
+/// a locale-sensitive `lower()` call.
+///
+/// Pipeline:
+///   1. Unicode NFC composition (`café` == `cafe\u{0301}`)
+///   2. ASCII/Unicode lowercase (`Smith` == `SMITH` == `smith`)
+///   3. Whitespace-run collapse to a single space + edge trim
+///
+/// Punctuation is NOT stripped — `Dr. Smith` and `Dr Smith` stay
+/// distinct (stripping `.` would conflate `U.S.` and `US`).
+pub fn normalize_entity_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    name.nfc()
+        .collect::<String>()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 #[cfg(test)]
 mod tests {
@@ -39,7 +48,6 @@ mod tests {
 
     #[test]
     fn normalize_preserves_punctuation() {
-        // Important: punctuation NOT stripped (U.S. vs US conflation risk).
         assert_eq!(normalize_entity_name("Dr. Smith"), "dr. smith");
         assert_ne!(
             normalize_entity_name("Dr. Smith"),
@@ -50,7 +58,6 @@ mod tests {
 
     #[test]
     fn normalize_applies_nfc_to_unicode() {
-        // "café" composed (1 char é) vs decomposed (e + combining acute).
         let composed = "café";
         let decomposed = "cafe\u{0301}";
         assert_ne!(composed, decomposed, "raw inputs differ in NFC vs NFD");
