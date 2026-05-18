@@ -47,10 +47,14 @@ if [ "${HHAGENT_GLINER_RELEX_INSTALL_LARGE:-0}" = "1" ]; then
 fi
 
 # ----- license-chain sanity check -----
-if [ ! -f "$WEIGHTS_DIR/multi-v1.0/config.json" ]; then
-  echo "error: model card files not found at $WEIGHTS_DIR/multi-v1.0 - download failed" >&2
-  exit 2
-fi
+# multi-v1.0 ships `gliner_config.json` (not a plain `config.json`) and
+# `model.safetensors`; both must be present for the worker to load.
+for required in gliner_config.json model.safetensors; do
+  if [ ! -f "$WEIGHTS_DIR/multi-v1.0/$required" ]; then
+    echo "error: $required not found at $WEIGHTS_DIR/multi-v1.0 - download failed" >&2
+    exit 2
+  fi
+done
 
 echo
 echo "ok: gliner-relex weights at $WEIGHTS_DIR"

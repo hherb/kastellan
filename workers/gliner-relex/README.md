@@ -25,12 +25,14 @@ Required tools on PATH: `uv`, `hf` (or `huggingface-cli`), `python3`.
 
 ```sh
 cd workers/gliner-relex
-HHAGENT_GLINER_RELEX_WEIGHTS_DIR=$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0 \
-HHAGENT_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
-HHAGENT_GLINER_RELEX_DEVICE=auto \
 echo '{"jsonrpc":"2.0","id":1,"method":"extract","params":{"text":"Dr Smith treats asthma in Mosman.","entity_labels":["person","disease","location"],"relation_labels":["treats","located_in"]}}' \
-  | uv run hhagent-worker-gliner-relex
+  | env HHAGENT_GLINER_RELEX_WEIGHTS_DIR="$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0" \
+        HHAGENT_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
+        HHAGENT_GLINER_RELEX_DEVICE=auto \
+    uv run hhagent-worker-gliner-relex
 ```
+
+The `env` wrapper is load-bearing: a bare `VAR=value cmd1 | cmd2` shell prefix only sets the env for `cmd1` (the echo), not `cmd2` (the worker). With `env` on the right side of the pipe, the env vars reach `uv run`.
 
 Expected: a single JSON-RPC response line on stdout with at least one entity and one triple. Cold start ~3-5 s on CPU (per the POC spike on the DGX Spark), warm calls ~157 ms p50 on CPU / sub-100 ms on CUDA.
 
@@ -52,9 +54,17 @@ Result envelope (per spike correction #2 — head and tail carry full entity dic
 ```json
 {
   "entities": [{"text": "Dr Smith", "label": "person", "start": 0, "end": 8, "score": 0.999}],
-  "triples":  [{"head": {...entity dict...}, "tail": {...entity dict...}, "relation": "treats", "score": 0.980}]
+  "triples":  [{"head": {"text": "Dr Smith", "type": "person", "start": 0, "end": 8, "entity_idx": 0},
+                "tail": {"text": "asthma",   "type": "disease", "start": 16, "end": 22, "entity_idx": 1},
+                "relation": "treats", "score": 0.995}]
 }
 ```
+
+Field-key naming observed on real `multi-v1.0` output (2026-05-18 smoke test):
+- Top-level `entities[]` items use `text`, `label`, `start`, `end`, `score`.
+- Nested `head` / `tail` items use `text`, `type` (NOT `label`), `start`, `end`, `entity_idx`. No `score` on the nested copy.
+
+A consumer that wants the entity type from the triple's head/tail can read `head.type` directly, or index back into `entities[head.entity_idx]` for the full top-level shape including the score. The worker passes the upstream shape through unchanged.
 
 Triple-level deduplication is NOT performed by the worker — consumers decide their own policy.
 
