@@ -222,6 +222,38 @@ impl IdleTimeoutLifecycle {
             registry: super::idle_timeout::empty_registry(),
         }
     }
+
+    /// Test-only inspector: returns whether the slot for `tool_name` has a warm worker.
+    /// Used by `worker_lifecycle_idle_timeout_e2e.rs` to pin idle teardown + crash
+    /// recovery semantics without depending on PID introspection. The lookup is
+    /// async-friendly: it briefly takes the outer std-mutex on the registry, then
+    /// takes the per-slot tokio mutex.
+    #[doc(hidden)]
+    pub async fn _test_slot_has_warm(&self, tool_name: &str) -> bool {
+        let map = self.registry.lock().expect("warm-registry mutex poisoned");
+        let Some(slot) = map.get(tool_name) else {
+            return false;
+        };
+        let slot = Arc::clone(slot);
+        drop(map);
+        let state = slot.state.lock().await;
+        state.warm.is_some()
+    }
+
+    /// Test-only inspector: returns the warm slot's `consecutive_restarts` counter.
+    /// Used by the crash-recovery e2e to assert that `report_crash` flowed through to
+    /// the restart-backoff bookkeeping. Returns 0 if the slot is absent.
+    #[doc(hidden)]
+    pub async fn _test_slot_consecutive_restarts(&self, tool_name: &str) -> u32 {
+        let map = self.registry.lock().expect("warm-registry mutex poisoned");
+        let Some(slot) = map.get(tool_name) else {
+            return 0;
+        };
+        let slot = Arc::clone(slot);
+        drop(map);
+        let state = slot.state.lock().await;
+        state.consecutive_restarts
+    }
 }
 
 #[async_trait]
