@@ -111,8 +111,25 @@ pub struct GlinerRelexEnv {
 ///   with headroom. Operators picking `large-v0.5` (~4-5 GB) need
 ///   to bump this; flagged in the README's env-var table.
 pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
+    // The venv uses an editable install (uv's default for hatchling
+    // workspace projects); `.venv/.../_editable_impl_*.pth` points at
+    // `<worker_dir>/src`. Mounting only `.venv` would let Python start
+    // but fail on `from hhagent_worker_gliner_relex.__main__ import
+    // main` with ModuleNotFoundError. Compute the sibling `src/` from
+    // the documented `<worker_dir>/.venv` contract on `venv_dir` and
+    // bind it read-only too.
+    let worker_src_dir = env
+        .venv_dir
+        .parent()
+        .map(|worker_dir| worker_dir.join("src"))
+        .unwrap_or_else(|| env.venv_dir.join("../src"));
+
     let policy = SandboxPolicy {
-        fs_read: vec![env.weights_dir.clone(), env.venv_dir.clone()],
+        fs_read: vec![
+            env.weights_dir.clone(),
+            env.venv_dir.clone(),
+            worker_src_dir,
+        ],
         fs_write: vec![],
         net: Net::Deny,
         cpu_ms: 0,
@@ -135,6 +152,29 @@ pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
             ),
             ("HF_HUB_OFFLINE".to_string(), "1".to_string()),
             ("TRANSFORMERS_OFFLINE".to_string(), "1".to_string()),
+            // PyTorch's _dynamo (transitively imported by transformers)
+            // calls getpass.getuser() at module-import time, which
+            // falls back to pwd.getpwuid(os.getuid()) when no
+            // LOGNAME/USER/LNAME/USERNAME is set. The sandbox has no
+            // /etc/passwd, so that fallback raises KeyError and the
+            // worker exits before serving any RPC. Setting USER skips
+            // the pwd lookup entirely (getpass picks the first
+            // non-empty env var). The value is arbitrary; we use
+            // "hhagent" as a marker that this is the worker, not a
+            // real user account.
+            ("USER".to_string(), "hhagent".to_string()),
+            // TORCHINDUCTOR_CACHE_DIR pre-empts the home-dir cache
+            // computation that triggers the getpass.getuser path
+            // above (defense in depth — the USER env var alone is
+            // sufficient today, but a future torch refactor could
+            // re-route through getuid()). /tmp is tmpfs inside the
+            // sandbox so this is ephemeral per-spawn; no leakage to
+            // the host. Slice 2 doesn't use torch.compile so the
+            // cache stays effectively empty.
+            (
+                "TORCHINDUCTOR_CACHE_DIR".to_string(),
+                "/tmp/torchinductor".to_string(),
+            ),
         ],
     };
 
@@ -445,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_mounts_weights_and_venv_read_only_no_writes() {
+    fn entry_mounts_weights_and_venv_and_src_read_only_no_writes() {
         let env = test_env();
         let entry = gliner_relex_entry(&env);
         assert!(
@@ -455,6 +495,20 @@ mod tests {
         assert!(
             entry.policy.fs_read.contains(&env.venv_dir),
             "venv dir must be in fs_read so the Python interpreter + site-packages are visible"
+        );
+        // Editable-install source dir, computed as <worker_dir>/src
+        // where <worker_dir> == venv_dir.parent(). The venv ships a
+        // `.pth` file that points Python here; without the mount, the
+        // worker fails to import its own package inside the sandbox.
+        let expected_src = env
+            .venv_dir
+            .parent()
+            .expect("test_env venv_dir has a parent")
+            .join("src");
+        assert!(
+            entry.policy.fs_read.contains(&expected_src),
+            "editable-install src dir must be in fs_read; got {:?}",
+            entry.policy.fs_read
         );
         assert!(
             entry.policy.fs_write.is_empty(),
@@ -491,6 +545,18 @@ mod tests {
         assert_eq!(
             env_map.get("HHAGENT_GLINER_RELEX_WEIGHTS_DIR"),
             Some(&expected_weights.as_str())
+        );
+        // USER + TORCHINDUCTOR_CACHE_DIR are sandbox-hygiene shims
+        // that keep PyTorch's _dynamo import from blowing up on the
+        // missing /etc/passwd. See the long comment on
+        // gliner_relex_entry for the failure mode they avoid.
+        assert!(
+            env_map.contains_key("USER"),
+            "USER env var must be set; otherwise getpass.getuser() in torch._dynamo crashes on missing /etc/passwd"
+        );
+        assert_eq!(
+            env_map.get("TORCHINDUCTOR_CACHE_DIR"),
+            Some(&"/tmp/torchinductor")
         );
     }
 
