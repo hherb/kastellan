@@ -49,6 +49,15 @@
 //!     `rlimit_smoke.rs` to verify worker-side cpu_ms enforcement.
 //!     Exits 0 if the loop runs for > 10 wall-clock seconds (the test
 //!     interprets that as "rlimit failed to apply").
+//!
+//! lockdown-probe rlimit-report
+//!     No-op subcommand: the prelude path at the top of `main` runs
+//!     (apply_from_env → lock_down → both reports printed to stderr)
+//!     and then we exit 0 without doing anything else. Used by
+//!     `rlimit_apply_smoke.rs` to assert the happy-path FFI shape of
+//!     `apply_from_env` from a fresh subprocess — keeps the
+//!     `setrlimit` side-effect out of the prelude unit-test binary
+//!     (where it would permanently lower the test binary's CPU budget).
 //! ```
 //!
 //! All subcommands print `RLIMIT_REPORT: {report}` and `LOCKDOWN_REPORT: {report}`
@@ -98,6 +107,7 @@ fn main() -> ExitCode {
         #[cfg(target_os = "linux")]
         "exec-after-lockdown" => probe_exec_after_lockdown(&args[1..]),
         "cpu-burner" => probe_cpu_burner(),
+        "rlimit-report" => probe_rlimit_report(),
         other => {
             eprintln!("unknown subcommand: {other}");
             ExitCode::from(64)
@@ -266,5 +276,16 @@ fn probe_cpu_burner() -> ExitCode {
         unsafe { std::ptr::write_volatile(&mut counter, prev.wrapping_add(1)) };
     }
     eprintln!("cpu-burner: hit 10s wall-clock cap, counter={counter}");
+    ExitCode::from(0)
+}
+
+/// No-op subcommand used by `rlimit_apply_smoke.rs`.
+///
+/// The prelude path at the top of `main` already ran (apply_from_env →
+/// lock_down → both reports stderr'd). Exiting cleanly with 0 lets the
+/// parent test read the printed `RLIMIT_REPORT:` line and assert the
+/// happy-path FFI shape without driving any further behaviour from
+/// inside the lockdown.
+fn probe_rlimit_report() -> ExitCode {
     ExitCode::from(0)
 }

@@ -4,11 +4,46 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-18 (continuation — GLiNER-Relex worker **Slice 1 implementation** (Python worker), 8 commits, **fast-forward merged into `main` 2026-05-18 at `36a2f4f`** after Task 1.8's green workspace verification — `feat/gliner-relex-slice-1` branch may still exist locally for inspection but is no longer load-bearing). New Python package at [`workers/gliner-relex/`](../../../workers/gliner-relex/) under hatchling + uv (sets the convention for every future Python worker in the tree). Ships the JSON-RPC stdio loop, the `extract` dispatch + validators, the GLiNER model wrapper using upstream's `model.inference(texts=[text], ..., return_relations=True, flat_ner=False)` per spike correction #1, the entry point with env parsing + CUDA `mem_get_info` probe per spike correction #4, the operator install script + README, and 24 pytest tests (6 errors + 12 server + 6 model). Operator smoke test against real weights succeeded end-to-end on CPU (vLLM still owns the GPU): 3 entities, 3 triples, canonical `Dr Smith --[treats]--> asthma (0.995)`. Three real bugs surfaced + fixed during the smoke test: install.sh sanity check used `config.json` instead of the actual `gliner_config.json`; README's `VAR=val ... | uv run` pattern set env only for `echo` (left of pipe); real model's nested head/tail keys use `type` + `entity_idx` not the `label` the spike notes paraphrased. **No Rust changes** — Slice 2 (Rust manifest + e2e) is the next session's pickup. Earlier today: design spec + implementation plan + POC spike landed (5 docs commits `4b8939a`...`0223f4d`); see "previous session, earlier today" entry below for that work.
-**Last commit on `main`:** `36a2f4f` (`docs(handover,roadmap): GLiNER-Relex Slice 1 (Python worker) — session-end sync`). This session's tip on main: `36a2f4f` (handover sync) ← `1c36f56` (smoke-test-driven fixes to install.sh + README) ← `a0a748e` (README + install.sh) ← `23b706b` (__main__.py + env parsing + CUDA mem probe) ← `3edd317` (model.py + GLiNER wrapper) ← `845a7c3` (server.py + stdio + validators) ← `849f751` (errors.py + JSON-RPC envelopes) ← `8adef7e` (scaffold uv project + lockfile) ← `0223f4d` (earlier-today session-end sync) ← `da3f653` (spike findings) ← `760bcf4` (implementation plan) ← `536699c` (design spec) ← `4b8939a` (PR #83 merge sync) ← `b7dba3a` (PR #83 worker lifecycle slices 1+2 merge) ← `2fece27` (post-review fixups) ← `dcf8438` (slice-2 handover/ROADMAP sync) ← `3cd3bb4` (slice-2 e2e tests) ← `f5f0944` (slice-2 runtime + crash detection) ← `f281428` (slice-2 pure helpers) ← `2c938ee` (slice-2 plan) ← `334f4e2` (slice-1 handover/ROADMAP sync) ← `780c9a8` (slice-1 dispatcher wiring) ← `4b4fd4e` (slice-1 ToolEntry.lifecycle) ← `fa96d71` (slice-1 manager trait) ← `b5e519e` (slice-1 types) ← `781acba` (slice-1 plan) ← `6b73893` (issue #81 split).
-**Session-end verification:** **Rust workspace: 751 passed / 0 failed / 4 ignored / 0 warnings on Linux — baseline preserved**, as designed (Slice 1 is Python-only; no Rust changes). Python suite at `workers/gliner-relex/`: **24 pytest tests passing** in 1.7 s (6 errors + 12 server + 6 model; whole suite via `uv run pytest`). Operator smoke test against real `knowledgator/gliner-relex-multi-v1.0` weights produces the expected wire shape end-to-end (3 entities, 3 triples on the medical sample). Plan's Task 1.7 manual gate passed on the DGX Spark on CPU (vLLM still owns the GPU); CUDA path will be exercised when vLLM is offline.
+**Last updated:** 2026-05-18 (Tech-debt batch — branch `worktree-chore+tech-debt-batch-2026-05-18`, 7 commits including review fixup, one PR (PR #87), now merged with `origin/main` post-GLiNER-Relex-Slice-1 ff-merge. Closed four well-isolated GitHub issues picked from the open-issues survey, deliberately avoiding the memory / NER work area (parallel session active) and the just-merged worker-lifecycle code: **#77** prompt-assembly trailing-newline normalization (3-line fix + extended test pinning the 0/1/2/many newline cases); **#80** `cli_ask_e2e` mock dispatches by URL path with two per-endpoint FIFOs instead of one shared FIFO, plus 5 new in-file unit tests for the dispatch helpers since the outer e2e tests skip on macOS dev boxes; **#57** moved `apply_from_env` happy-path to a subprocess-isolated integration test (`tests/rlimit_apply_smoke.rs`) plus new `lockdown-probe rlimit-report` subcommand, eliminating the process-wide `setrlimit` side-effect that lowered the prelude test binary's CPU budget for every subsequent test; **#4** promoted the bump-the-header step to step 1 of the end-of-session checklist in both README.md and HANDOVER.md so header drift can't silently mislead the next session. Plus one drive-by `.gitignore` typo fix (`setting.local.json` → `settings.local.json`, and added `.claude/worktrees/`), and one review-fixup commit (`088fec6`) trimming an implementation-detail line from the #77 fix comment per CLAUDE.md's "don't explain WHAT" rule. **Earlier today, in parallel on `main`:** GLiNER-Relex Slice 1 (Python worker) ff-merged at `dfb1126` — see the "parallel session" entries below. Also earlier (already on `main`): worker-lifecycle slices 1+2 merged via PR #83 at `b7dba3a`.
+**Last commit on `main`:** `dfb1126` (`docs(handover,roadmap): mark GLiNER-Relex Slice 1 ff-merged on main`). The tech-debt commits live on `worktree-chore+tech-debt-batch-2026-05-18`, not yet merged. Branch tip before merge of `origin/main`: `088fec6` (review fixup); merge commit follows. Recent main history (post-`b7dba3a`): `dfb1126` (GLiNER-Relex Slice 1 ff-merge sync) → `36a2f4f` (GLiNER-Relex Slice 1 session-end sync) → `1c36f56` (smoke-test fixes) → `a0a748e` (README + install) → `23b706b` (entry point) → `3edd317` (model wrapper) → `845a7c3` (stdio server) → `849f751` (errors) → `8adef7e` (uv scaffold) → `0223f4d` (earlier-today sync) → `da3f653` (POC spike notes) → `760bcf4` (impl plan) → `536699c` (design spec) → `4b8939a` (PR #83 merge sync) → `b7dba3a` (PR #83 worker-lifecycle merge).
+**Session-end verification:** `cargo test --workspace` on `worktree-chore+tech-debt-batch-2026-05-18` (post-`088fec6` comment trim, pre-merge with `origin/main`): **726 passed, 0 failed, 3 ignored, 0 [SKIP] lines, 0 warnings** on macOS (no Postgres + no Linux-only seccomp/landlock suites, hence the lower headline vs. the Linux 751 baseline — this session ran the test on macOS). Test delta vs. main baseline on macOS (720): +5 new `mock_router_unit_tests` (issue #80), +2 new subprocess `rlimit_apply_smoke` tests (issue #57), -1 removed in-process `apply_from_env_with_generous_budget_applies` (issue #57). Issue #77 reused its existing happy-path test slot (renamed + extended assertions, net 0). Issue #4 + the `.gitignore` typo fix are docs/config and don't change test counts. The `088fec6` review-fixup is comment-only (no behaviour, no test count). Linux full-suite baseline (next agent to re-run on a Linux box) should land at **758 passed** (751 + 7 net new). Note: the merge with `origin/main` brings in GLiNER-Relex Slice 1 (Python-only), which does not change Rust test counts; re-run on the merged tree to confirm. `core/src/bin/hhagent-cli.rs` at **1432 LOC** still the headline 500-LOC breach pickup.
 
-## Recently completed (this session, 2026-05-18 continuation — GLiNER-Relex worker Slice 1 — Python worker)
+## Recently completed (this session, 2026-05-18 — tech-debt batch, branch `worktree-chore+tech-debt-batch-2026-05-18`, 7 commits, one PR)
+
+Operator-driven pickup: NER work is in progress on the memory subsystem (other process), so this session deliberately avoided `core::memory` and the just-merged `worker_lifecycle` code. Picked four well-isolated open issues from the GitHub backlog where the change touches one or two files each and the merge-conflict surface is near zero.
+
+**What shipped:**
+
+1. **Issue #77 — `assemble_system_prompt` trailing-newline normalization.** The old logic appended a newline only when `base` didn't end with one — so `base` ending `…\n\n` produced `<base>\n…\n\n</base>\n` (blank line before close tag). Switched to `trim_end_matches('\n')` + unconditional single newline: the close tag now always sits flush against the body, regardless of how the prompt file or caller terminates. The existing happy-path test was renamed `base_trailing_newlines_are_normalized_to_exactly_one` and extended to pin the 0 / 1 / 2 / many newline cases — a future refactor that re-introduces "first newline wins, rest pass through" trips on a deliberate regression. Single file: `core/src/prompt_assembly/assemble.rs`.
+
+2. **Issue #80 — `cli_ask_e2e` mock dispatches by URL path.** The OpenAI-compat mock under `core/tests/cli_ask_e2e.rs` previously served every request from a single FIFO queue regardless of URL — fragile because `PgRecallBuilder::build` issuing embed-before-chat strictly ordered is not load-bearing on production behaviour. Refactored:
+   - Replaced `spawn_queued_mock(Vec<String>)` with `spawn_url_routed_mock(embed_responses, chat_responses)`.
+   - Parses the request-line via `parse_request_path` + classifies via `classify_endpoint` (substring match `"embeddings"` → `EndpointKind::Embedding`; everything else → `Chat`). Substring match defends against benign URL drift.
+   - Per-endpoint captured request lists (`embed_requests`, `chat_requests`) so dial-count assertions check each side independently — a stray extra dial surfaces as a 503 on that side, not an off-by-one body-shape error on the other.
+   - Two test callsites' assertions updated to `embed_requests.len()` + `chat_requests.len()`; "first chat carries cached planner prompt" now reads `chat_requests[0]` directly.
+   - 5 new in-file `mock_router_unit_tests` pin `classify_endpoint` + `parse_request_path` so the load-bearing dispatch logic gets coverage on macOS dev boxes where the outer e2e tests skip (no supervisor / sandbox / Postgres toolchain).
+
+3. **Issue #57 — `apply_from_env` happy-path moved to subprocess.** The in-process unit test called `setrlimit(RLIMIT_CPU, 30)` on the test binary, permanently lowering the prelude test binary's CPU budget for every subsequent test in the same run (latent foot-gun the moment a CPU-heavy unit test gets added). Moved to a subprocess-isolated integration test:
+   - New `lockdown-probe rlimit-report` subcommand — no-op; relies on the existing `eprintln!("RLIMIT_REPORT: {report:?}")` line at the top of `main` and exits 0.
+   - New `workers/prelude/tests/rlimit_apply_smoke.rs` with two tests: happy-path (`HHAGENT_CPU_MS=30000` → stderr contains `RLIMIT_REPORT: Applied { cpu_seconds: 30 }`) and negative control (no env → `RLIMIT_REPORT: Disabled`). Cross-platform.
+   - Dropped the in-process test + the NOTE-for-maintainers comment about the process-wide side-effect; replaced with a short pointer to the new integration file.
+
+4. **Issue #4 — bump-the-header step is now step 1 of the end-of-session checklist.** HANDOVER.md drifted twice in recent sessions because the "Recently completed" prose was updated but the header fields at the top (Last updated / Last commit / Session-end verification + the embedded test counts) were not. A fresh agent grep-finds the wrong hash + wrong test count and silently drifts off-state. Updated both `docs/devel/handovers/README.md` (the discoverable entry point — replaced the 4-bullet sketch with a 6-step numbered checklist + a "Why header-first matters" paragraph so future maintainers don't trim it) and HANDOVER.md's "How to update this document at session end" section so step 1 enumerates Last updated / Last commit / Session-end verification + the explicit reminder that every embedded test-count number that changed must be bumped, not just the headline.
+
+5. **Drive-by — `.gitignore` typo.** Line 9 read `.claude/setting.local.json` (missing the 's'). The actual filename Claude Code writes is `.claude/settings.local.json`, so the rule was a no-op and the file kept appearing in `git status` untracked. Fixed + added `.claude/worktrees/` so harness-managed isolated worktrees don't leak into status.
+
+**Test count delta (workspace, on macOS):** 720 → **726** (+6 net: +5 in #80, +2 in #57, -1 in #57). Linux baseline projection: 751 → 758. Zero failed, zero warnings on macOS.
+
+**What this session deliberately did NOT touch:**
+
+- **`core::memory` / `memory::recall`** — NER integration is in progress in a sibling process.
+- **`core::worker_lifecycle` (slices 1 + 2)** — just merged via PR #83; issues #84 / #85 / #86 are valid pickups but were filed as deferred follow-ups by the post-review fixups and are themselves the area an immediate follow-up agent would re-touch. Leaving them for a focused worker-lifecycle session.
+
+**Filed during the session:** none new — used a `cargo test --workspace` flake on `audit_tail::tests::tail_loop_from_start_replays_then_exits` as a one-time observation (passed 3× on re-run, same commit), not material for an issue file.
+
+---
+
+## Recently completed (parallel session, 2026-05-18 continuation — GLiNER-Relex worker Slice 1 — Python worker, ff-merged to `main` at `dfb1126`)
 
 Consumes the implementation plan at [`docs/superpowers/plans/2026-05-18-gliner-relex-worker.md`](../../superpowers/plans/2026-05-18-gliner-relex-worker.md) and the design spec at [`docs/superpowers/specs/2026-05-18-gliner-relex-worker-design.md`](../../superpowers/specs/2026-05-18-gliner-relex-worker-design.md) (both landed on `main` earlier today). Ships Slice 1 in 7 commits on `feat/gliner-relex-slice-1` — the entire Python worker package, operator setup, and docs. Slice 2 (Rust manifest + e2e tests) is deliberately separate; it's the next session's pickup.
 
@@ -50,7 +85,7 @@ Consumes the implementation plan at [`docs/superpowers/plans/2026-05-18-gliner-r
 
 ---
 
-## Recently completed (previous session, earlier today 2026-05-18 — GLiNER-Relex worker design + plan + POC spike; docs-only)
+## Recently completed (parallel session, earlier today 2026-05-18 — GLiNER-Relex worker design + plan + POC spike; docs-only)
 
 Five commits, all docs (no code; no test count delta). The goal was to write the design spec + implementation plan for the first `Lifecycle::IdleTimeout` consumer that worker-lifecycle slice 2 (PR #83) unblocked, plus run a throwaway Python POC spike that validates the design's assumptions before any code lands. Per the operator's scope choice: "Plan + Python POC spike", with worker-only integration scope (no v2 entity-extraction consumer wiring), uv-managed venv per worker (sets the convention for all future Python workers), Linux-first with documented macOS gap.
 
@@ -2631,10 +2666,23 @@ The *defining* architectural difference: hhagent enforces **one OS process + one
 
 ## How to update this document at session end
 
-1. **Bump header fields** — `Last updated`, `Last commit`, `Branch` at the top.
+**Header first, prose last.** The header is what the next session reads first
+and treats as authoritative; stale header fields silently mislead future
+sessions even when the prose is correct. Follow the steps in this order:
+
+1. **Bump header fields at the top — before writing any prose:**
+   - `Last updated:` → today's date.
+   - `Last commit on <branch>:` → the hash of the most recent shipped commit.
+     Confirm with `git log --oneline -1`.
+   - `Session-end verification:` → re-run `cargo test --workspace` and copy
+     the **passed / failed / ignored / `[SKIP]`** counts into this line.
+   - **Every test-count number embedded elsewhere in the doc that changed
+     this session** (e.g. the headline test count, "Test count delta" lines
+     in Recently-completed entries). A fresh agent grep-finds them and will
+     trust whatever is there.
 2. **Move "Next TODO" → "Recently completed (this session)"** if the picked option shipped, with enough detail that the next session can understand the decision (file paths, why-not-X, gotchas, test-count delta).
 3. **Write a fresh "Next TODO (pick one)"** with options sized for one session each — include file paths, gotchas, and the verification step.
-4. **Refresh "Working state"** — green-test count, anything new under stubs, anything that became real.
+4. **Refresh "Working state"** — anything new under stubs, anything that became real.
 5. **Tick the matching items off in [`../ROADMAP.md`](../ROADMAP.md)** with the commit hash.
 6. **Commit both files together** with a `docs(handover): ...` message.
 
