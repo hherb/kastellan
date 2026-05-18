@@ -443,13 +443,22 @@ impl StepDispatcher for ToolHostStepDispatcher {
         )
         .await;
 
-        // Drop closes stdio + cancels the watchdog. We don't call
-        // `worker.close()` explicitly so a panic above (currently
-        // unreachable, but kept defensive) still cleans up. For
-        // `SingleUseLifecycle`, dropping the handle drops the inner
-        // `SupervisedWorker`; slice 2's `IdleTimeoutLifecycle` will
-        // intercept this Drop to hand the worker back to the warm-pool
-        // instead.
+        // Slice 2: signal to the lifecycle manager whether the worker survived. For
+        // single-use this is a no-op; for idle-timeout it suppresses the worker-return
+        // path so the dead worker isn't put back into the warm slot, and bumps the
+        // restart-backoff counter. Classified using the protocol-error variant —
+        // transport-level failures (`Io`, `Decode`, `EarlyExit`, `IdMismatch`) indicate
+        // the worker died; `Rpc(_)` errors mean the worker rejected the call but is
+        // alive.
+        if crate::worker_lifecycle::idle_timeout::dispatch_indicates_worker_dead(&result) {
+            handle.report_crash();
+        }
+
+        // Drop closes stdio + cancels the watchdog. For `SingleUseLifecycle`, dropping
+        // the handle drops the inner `SupervisedWorker`; for `IdleTimeoutLifecycle`,
+        // Drop hands the worker back to the warm slot (or terminates it if
+        // `report_crash` was called, the request cap fired, or the worker aged out)
+        // and schedules an idle-teardown task.
         drop(handle);
 
         map_dispatch_result(result)

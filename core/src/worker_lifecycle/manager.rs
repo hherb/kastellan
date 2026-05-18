@@ -12,25 +12,71 @@ use crate::scheduler::tool_dispatch::ToolEntry;
 use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
 
 /// Holder of an exclusively-owned, live `SupervisedWorker` lent out by a lifecycle
-/// manager. The dispatcher calls `worker_mut()` to get the `&mut SupervisedWorker`
-/// that `tool_host::dispatch` wants.
+/// manager.
 ///
-/// **Slice 1 Drop semantics:** the default `Drop` drops the inner `SupervisedWorker`,
-/// whose own `Drop` closes stdio + cancels the watchdog. For `SingleUseLifecycle` this
-/// is exactly the right behaviour — the worker exits.
+/// Slice 1 shipped this as a thin newtype around `SupervisedWorker`. Slice 2 widens it
+/// to an enum because idle-timeout drop semantics differ structurally from single-use:
+///   - `SingleUse`: Drop terminates the worker (default behaviour of `SupervisedWorker`).
+///   - `IdleTimeout`: Drop returns the worker to its warm slot (or terminates if the
+///     worker died, the request cap fired, or the worker aged out).
 ///
-/// **Slice 2 will replace this:** the handle will carry a back-channel to the manager
-/// so `Drop` hands the worker back to the warm-pool instead of terminating it. Slice 1
-/// keeps the type minimal so the slice-2 extension is additive.
+/// The variant is private; consumers only see the `worker_mut` and `report_crash`
+/// methods.
 pub struct WorkerHandle {
-    worker: SupervisedWorker,
+    kind: WorkerHandleKind,
+}
+
+enum WorkerHandleKind {
+    SingleUse {
+        worker: Option<SupervisedWorker>,
+    },
+    IdleTimeout {
+        worker: Option<SupervisedWorker>,
+        slot_guard: Option<tokio::sync::OwnedMutexGuard<super::idle_timeout::ToolState>>,
+        slot: Option<Arc<super::idle_timeout::ToolSlot>>,
+        spawned_at: std::time::Instant,
+        request_count_so_far: u64,
+        caps: super::types::IdleTimeoutCaps,
+        died: bool,
+        backoff: super::idle_timeout::RestartBackoff,
+    },
 }
 
 impl WorkerHandle {
     /// Construct a single-use handle. Module-private — only the lifecycle implementations
-    /// in this file can build one.
+    /// in this file (and the slice-2 runtime in `super::idle_timeout`) can build one.
     pub(crate) fn single_use(worker: SupervisedWorker) -> Self {
-        Self { worker }
+        Self {
+            kind: WorkerHandleKind::SingleUse {
+                worker: Some(worker),
+            },
+        }
+    }
+
+    /// Construct an idle-timeout handle. Module-private. Called only from
+    /// `super::idle_timeout::acquire_impl` once it has the slot guard + bookkeeping.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn idle_timeout(
+        worker: SupervisedWorker,
+        slot_guard: tokio::sync::OwnedMutexGuard<super::idle_timeout::ToolState>,
+        slot: Arc<super::idle_timeout::ToolSlot>,
+        spawned_at: std::time::Instant,
+        request_count_so_far: u64,
+        caps: super::types::IdleTimeoutCaps,
+        backoff: super::idle_timeout::RestartBackoff,
+    ) -> Self {
+        Self {
+            kind: WorkerHandleKind::IdleTimeout {
+                worker: Some(worker),
+                slot_guard: Some(slot_guard),
+                slot: Some(slot),
+                spawned_at,
+                request_count_so_far,
+                caps,
+                died: false,
+                backoff,
+            },
+        }
     }
 
     /// Exclusive `&mut` to the live worker. The intended caller is
@@ -38,7 +84,64 @@ impl WorkerHandle {
     /// chokepoint seal (issue #16) is unchanged because `SupervisedWorker::call` itself
     /// stays module-private to `tool_host`.
     pub fn worker_mut(&mut self) -> &mut SupervisedWorker {
-        &mut self.worker
+        match &mut self.kind {
+            WorkerHandleKind::SingleUse { worker } => worker
+                .as_mut()
+                .expect("worker_mut called after worker was moved out"),
+            WorkerHandleKind::IdleTimeout { worker, .. } => worker
+                .as_mut()
+                .expect("worker_mut called after worker was moved out"),
+        }
+    }
+
+    /// Caller signals the dispatch error indicated worker death.
+    ///
+    /// For `SingleUse` this is a no-op (the worker exits on Drop regardless). For
+    /// `IdleTimeout` this suppresses the worker-return path so the dead worker isn't
+    /// put back into the slot, and bumps the restart-backoff counter on the slot's
+    /// state so the next acquire waits.
+    pub fn report_crash(&mut self) {
+        if let WorkerHandleKind::IdleTimeout { died, .. } = &mut self.kind {
+            *died = true;
+        }
+    }
+}
+
+impl Drop for WorkerHandle {
+    fn drop(&mut self) {
+        match &mut self.kind {
+            WorkerHandleKind::SingleUse { worker } => {
+                // Take + drop. `SupervisedWorker`'s own Drop closes stdio + cancels
+                // the watchdog. Byte-equivalent to slice 1.
+                drop(worker.take());
+            }
+            WorkerHandleKind::IdleTimeout {
+                worker,
+                slot_guard,
+                slot,
+                spawned_at,
+                request_count_so_far,
+                caps,
+                died,
+                backoff,
+            } => {
+                let worker_opt = worker.take();
+                let guard = slot_guard
+                    .take()
+                    .expect("slot_guard absent in idle-timeout Drop");
+                let slot_opt = slot.take();
+                super::idle_timeout::release_idle_timeout_worker(
+                    worker_opt,
+                    guard,
+                    slot_opt,
+                    *spawned_at,
+                    *request_count_so_far,
+                    caps.clone(),
+                    *died,
+                    *backoff,
+                );
+            }
+        }
     }
 }
 
@@ -90,46 +193,54 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
     }
 }
 
-/// Idle-timeout lifecycle stub.
+/// Idle-timeout lifecycle: warm-keep one worker per tool name; tear down post-completion
+/// when any of `idle_seconds` / `max_requests` / `max_age_seconds` fires.
 ///
-/// **Slice 1 declares this type so downstream code can name it; runtime invocation
-/// panics with `unimplemented!()`.** The `acquire` body intentionally panics rather
-/// than returning an error so any accidental wiring of an idle-timeout worker into
-/// slice 1's daemon trips loudly on the first request rather than silently falling
-/// through to a `SPAWN_FAILED` audit row.
-///
-/// Slice 2 (the GLiNER-Relex prereq) replaces this body with the spawn-on-demand /
-/// post-completion-cap / crash-recovery runtime per the spec.
+/// Slice-2 production impl. The runtime (warm cache, idle teardown, crash recovery,
+/// restart backoff) lives in `super::idle_timeout`; this struct is the thin facade
+/// `WorkerLifecycleManager` consumers see.
 pub struct IdleTimeoutLifecycle {
-    _private: (),
+    sandbox: Arc<dyn SandboxBackend>,
+    backoff: super::idle_timeout::RestartBackoff,
+    registry: super::idle_timeout::WarmRegistry,
 }
 
 impl IdleTimeoutLifecycle {
-    pub fn new() -> Self {
-        Self { _private: () }
+    /// Construct with default exponential backoff (1s, 2s, 4s, 8s, …, capped at 60s).
+    pub fn new(sandbox: Arc<dyn SandboxBackend>) -> Self {
+        Self::with_backoff(sandbox, super::idle_timeout::RestartBackoff::default())
     }
-}
 
-impl Default for IdleTimeoutLifecycle {
-    fn default() -> Self {
-        Self::new()
+    /// Construct with operator-supplied backoff configuration.
+    pub fn with_backoff(
+        sandbox: Arc<dyn SandboxBackend>,
+        backoff: super::idle_timeout::RestartBackoff,
+    ) -> Self {
+        Self {
+            sandbox,
+            backoff,
+            registry: super::idle_timeout::empty_registry(),
+        }
     }
 }
 
 #[async_trait]
 impl WorkerLifecycleManager for IdleTimeoutLifecycle {
-    async fn acquire(&self, _entry: &ToolEntry) -> Result<WorkerHandle, ToolHostError> {
-        unimplemented!(
-            "idle_timeout lifecycle runtime — slice 2; \
-             slice 1 ships SingleUseLifecycle only"
+    async fn acquire(&self, entry: &ToolEntry) -> Result<WorkerHandle, ToolHostError> {
+        super::idle_timeout::acquire_impl(
+            self.sandbox.as_ref(),
+            self.backoff,
+            &self.registry,
+            entry,
         )
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker_lifecycle::types::{Contract, IdleTimeoutCaps, Lifecycle};
+    use crate::worker_lifecycle::types::Lifecycle;
 
     #[test]
     fn single_use_lifecycle_constructor_holds_the_sandbox_backend() {
@@ -141,31 +252,20 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "idle_timeout lifecycle runtime — slice 2")]
-    async fn idle_timeout_lifecycle_acquire_panics_until_slice_2() {
-        // The stub exists at the type level so downstream code (a future
-        // `WorkerManifest` parser, slice 2's runtime) can refer to it without
-        // conditional compilation. Runtime invocation is deliberately wired to
-        // `unimplemented!()` so a test that accidentally routes idle-timeout traffic
-        // through slice 1's daemon trips loudly.
-        let caps = IdleTimeoutCaps {
-            idle_seconds: 60,
-            max_requests: 100,
-            max_age_seconds: 3600,
-            grace_period_seconds: 5,
-        };
-        let contract = Contract { stateless: true };
-        let lc = Lifecycle::idle_timeout(caps, contract).expect("valid lifecycle");
-        let mgr = IdleTimeoutLifecycle::new();
-        // We need a `ToolEntry` to call acquire — defer to a dummy. The acquire body
-        // panics before reading any field of the entry, so the dummy is safe.
+    async fn idle_timeout_acquire_on_single_use_entry_returns_wiring_error() {
+        // Defensive: an idle-timeout manager called with a single-use entry is a
+        // wiring bug. The manager returns an `Io(InvalidInput)` error rather than
+        // panicking so the dispatcher's `step.spawn_failed` audit row still fires.
+        let sandbox: Arc<dyn SandboxBackend> = Arc::from(hhagent_sandbox::default_backend());
+        let mgr = IdleTimeoutLifecycle::new(sandbox);
         let entry = crate::scheduler::tool_dispatch::ToolEntry {
             binary: std::path::PathBuf::from("/nope"),
             policy: hhagent_sandbox::SandboxPolicy::default(),
             wall_clock_ms: None,
-            lifecycle: lc,
+            lifecycle: Lifecycle::SingleUse,
         };
-        let _ = mgr.acquire(&entry).await;
+        let r = mgr.acquire(&entry).await;
+        assert!(r.is_err(), "must return Err on wiring bug");
     }
 
     #[test]
