@@ -103,6 +103,11 @@ pub struct ToolEntry {
     /// milliseconds. `None` disables the watchdog. See
     /// [`WorkerSpec::wall_clock_ms`] for the semantics.
     pub wall_clock_ms: Option<u64>,
+    /// Lifecycle policy. Defaults to [`Lifecycle::SingleUse`] (current
+    /// behaviour); inference workers in slice 2+ will declare
+    /// [`Lifecycle::IdleTimeout`]. See
+    /// `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`.
+    pub lifecycle: crate::worker_lifecycle::Lifecycle,
 }
 
 /// Look-up table from logical tool name (as it appears in
@@ -176,6 +181,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         binary,
         policy,
         wall_clock_ms: Some(30_000),
+        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
     }
 }
 
@@ -565,6 +571,7 @@ mod tests {
                 ..SandboxPolicy::default()
             },
             wall_clock_ms: Some(5_000),
+            lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         }
     }
 
@@ -653,6 +660,21 @@ mod tests {
             .find(|(k, _)| k == "HHAGENT_SHELL_ALLOWLIST")
             .expect("allowlist env entry must be present");
         assert_eq!(allow_env.1, "[]");
+    }
+
+    #[test]
+    fn shell_exec_entry_declares_single_use_lifecycle() {
+        // Shell-exec must remain single-use forever — per-request isolation IS its
+        // security model. If a future change to `shell_exec_entry` accidentally swaps
+        // this for `IdleTimeout`, this test trips so the regression is caught at PR
+        // time rather than in production. See
+        // `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md` §"The
+        // two policies" for why shell-exec stays in the `single_use` category.
+        let entry = shell_exec_entry(PathBuf::from("/x"), &[]);
+        assert!(matches!(
+            entry.lifecycle,
+            crate::worker_lifecycle::Lifecycle::SingleUse
+        ));
     }
 
     // The unknown-tool branch of `ToolHostStepDispatcher::dispatch_step`
