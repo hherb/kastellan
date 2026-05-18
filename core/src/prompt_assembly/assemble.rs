@@ -114,8 +114,7 @@ pub fn assemble_system_prompt(
     // Collapse 0..N trailing newlines on `base` to exactly one. The
     // closing `</base>\n` then always sits flush against the body —
     // no blank line in front of it — regardless of how the prompt
-    // file (or caller) chose to terminate. Cheaper than re-allocating
-    // because `trim_end_matches` returns a `&str` slice.
+    // file (or caller) chose to terminate.
     out.push_str(base.trim_end_matches('\n'));
     out.push('\n');
     out.push_str("</base>\n");
