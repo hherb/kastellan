@@ -15,6 +15,7 @@ pub mod audit_tail;
 pub mod cassandra;
 pub mod classification_inference;
 pub mod cli_audit;
+pub mod entity_extraction;
 pub mod memory;
 pub mod observation;
 pub mod prompt_assembly;
