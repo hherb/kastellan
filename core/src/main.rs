@@ -144,15 +144,21 @@ async fn main() -> Result<()> {
     // (Phase 3).
     let tool_registry = Arc::new(build_tool_registry(&pool).await?);
 
-    // Slice 1 of the worker-lifecycle work (spec
-    // `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`)
-    // puts the spawn-per-request path behind a manager. `SingleUseLifecycle` is
-    // the only impl shipped in slice 1; shell-exec declares
-    // `Lifecycle::SingleUse` so behaviour is byte-equivalent to pre-slice main.
-    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
-        Arc::new(hhagent_core::worker_lifecycle::SingleUseLifecycle::new(
-            sandbox.clone(),
-        ));
+    // Worker lifecycle (spec
+    // `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`).
+    //
+    // The dispatcher gets a single `Arc<dyn WorkerLifecycleManager>`,
+    // but `ToolEntry.lifecycle` may carry either `SingleUse`
+    // (shell-exec — per-request isolation is its security model) or
+    // `IdleTimeout` (gliner-relex — warm-keep the model across calls).
+    // `CompositeLifecycle` routes each `acquire` call to the right
+    // inner manager by inspecting `entry.lifecycle`. For deployments
+    // that register only `SingleUse` entries (the default — gliner-relex
+    // is opt-in via env), behaviour is byte-equivalent to the prior
+    // single-use-only wiring.
+    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
+        hhagent_core::worker_lifecycle::CompositeLifecycle::new(sandbox.clone()),
+    );
 
     let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
@@ -359,6 +365,28 @@ async fn build_tool_registry(
         );
     }
 
+    // gliner-relex (opt-in: env-gated). Skip-register by default so
+    // existing deployments are byte-equivalent to pre-slice main.
+    if let Some(entry) = build_gliner_relex_entry() {
+        info!(
+            tool = "gliner-relex",
+            binary = %entry.binary.display(),
+            "registering tool"
+        );
+        // No allowlist concept for gliner-relex (it has one method,
+        // `extract`; no argv-style command surface). The
+        // `LoadedToolRecord` shape requires `allowlist_*` fields so
+        // the audit-row schema stays uniform; populate them with the
+        // empty-list canonical form.
+        loaded.push(LoadedToolRecord {
+            name: "gliner-relex".to_string(),
+            binary: entry.binary.display().to_string(),
+            allowlist_len: 0,
+            allowlist_sha256: sha256_argv0_list(&[]),
+        });
+        reg.insert("gliner-relex", entry);
+    }
+
     // Best-effort audit row: a transient DB failure here must not
     // block daemon bring-up. The allowlist itself has already been
     // loaded successfully.
@@ -367,6 +395,101 @@ async fn build_tool_registry(
     }
 
     Ok(reg)
+}
+
+/// Build the GLiNER-Relex tool entry from environment variables.
+///
+/// Returns `None` (with an info log) when the worker is opted-out by
+/// the default — `HHAGENT_GLINER_RELEX_ENABLE` unset or `0`. This is
+/// the production posture for every deployment that hasn't run
+/// `scripts/workers/gliner-relex/install.sh` and explicitly turned
+/// the worker on.
+///
+/// Returns `None` (with an error log) when the env is requested but a
+/// precondition fails (weights dir missing on disk, script shim
+/// missing). Fail-closed by default per the design spec — the daemon
+/// continues but the operator log says exactly why the worker isn't
+/// reachable. Operators preferring hard refusal can wrap this in a
+/// supervisor-level health probe.
+///
+/// Required env:
+///   * `HHAGENT_GLINER_RELEX_ENABLE = "1"` — opt-in flag.
+///   * `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` — absolute path to the model
+///     snapshot dir (operator stages this via the install script).
+///
+/// Optional env:
+///   * `HHAGENT_GLINER_RELEX_MODEL` (default
+///     `knowledgator/gliner-relex-multi-v1.0`).
+///   * `HHAGENT_GLINER_RELEX_DEVICE` (default `auto`).
+///   * `HHAGENT_GLINER_RELEX_VENV_DIR` (default
+///     `$HHAGENT_DATA_DIR/workers/gliner-relex/.venv`, falling back to
+///     `$HOME/.local/share/hhagent/workers/gliner-relex/.venv`).
+fn build_gliner_relex_entry()
+-> Option<hhagent_core::scheduler::tool_dispatch::ToolEntry> {
+    use std::path::PathBuf;
+
+    use hhagent_core::workers::gliner_relex::{gliner_relex_entry, GlinerRelexEnv};
+
+    let enable = std::env::var("HHAGENT_GLINER_RELEX_ENABLE").unwrap_or_default();
+    if enable != "1" {
+        tracing::info!(
+            "gliner-relex: HHAGENT_GLINER_RELEX_ENABLE != \"1\"; skip registering"
+        );
+        return None;
+    }
+
+    let weights_dir = match std::env::var("HHAGENT_GLINER_RELEX_WEIGHTS_DIR") {
+        Ok(v) => PathBuf::from(v),
+        Err(_) => {
+            tracing::error!(
+                "gliner-relex enabled but HHAGENT_GLINER_RELEX_WEIGHTS_DIR unset; skip registering"
+            );
+            return None;
+        }
+    };
+    if !weights_dir.is_dir() {
+        tracing::error!(
+            weights_dir = %weights_dir.display(),
+            "gliner-relex enabled but weights dir missing on disk; skip registering"
+        );
+        return None;
+    }
+
+    let model_id = std::env::var("HHAGENT_GLINER_RELEX_MODEL")
+        .unwrap_or_else(|_| "knowledgator/gliner-relex-multi-v1.0".to_string());
+    let device = std::env::var("HHAGENT_GLINER_RELEX_DEVICE")
+        .unwrap_or_else(|_| "auto".to_string());
+
+    // Resolve the venv shim path. Operator can override via env; the
+    // default tracks `HHAGENT_DATA_DIR/workers/gliner-relex/.venv` so
+    // operators who stage via the install script with the standard
+    // data dir don't need a second env var.
+    let venv_dir = std::env::var("HHAGENT_GLINER_RELEX_VENV_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let data = std::env::var("HHAGENT_DATA_DIR").unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                format!("{home}/.local/share/hhagent")
+            });
+            PathBuf::from(data).join("workers/gliner-relex/.venv")
+        });
+    let script_path = venv_dir.join("bin").join("hhagent-worker-gliner-relex");
+    if !script_path.exists() {
+        tracing::error!(
+            script_path = %script_path.display(),
+            "gliner-relex enabled but venv shim missing; skip registering"
+        );
+        return None;
+    }
+
+    let env = GlinerRelexEnv {
+        script_path,
+        venv_dir,
+        weights_dir,
+        model_id,
+        device,
+    };
+    Some(gliner_relex_entry(&env))
 }
 
 /// One per-tool record carried in the `registry.loaded` audit-row
