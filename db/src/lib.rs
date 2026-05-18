@@ -30,6 +30,7 @@ use thiserror::Error;
 pub mod agent_prompts;
 pub mod audit;
 pub mod conn;
+pub mod entity_kinds;
 pub mod entity_name;
 pub mod graph;
 pub mod memories;

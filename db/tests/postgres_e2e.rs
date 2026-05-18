@@ -2357,3 +2357,164 @@ async fn relation_persists_when_endpoints_quarantined() {
     admin.close().await;
     pool.close().await;
 }
+
+// ─── entity_kinds module: KindsCache + fetch_kinds ────────────────────
+//
+// Three tests pin the behaviour of the cache wrapper introduced for
+// the v2 entity extractor:
+//
+//   1. `entity_kinds_cache_returns_seeded_list`: first call to a
+//      fresh cache returns all 20 seeded kinds, including the FK
+//      fallback target (`undefined`), a representative single-word
+//      kind (`person`), and a multi-word kind (`phone number` — the
+//      space is load-bearing and easy to silently regress).
+//   2. `entity_kinds_fetch_kinds_orders_alphabetically`: the raw
+//      `fetch_kinds` helper returns rows in `ORDER BY kind`, so
+//      callers can rely on deterministic order without re-sorting.
+//   3. `entity_kinds_cache_hits_warm_does_not_re_query`: two calls in
+//      quick succession return structurally-equal Vecs. We can't
+//      observe "no SQL issued" from outside the cache, so the test
+//      pins return-stability as a proxy.
+//
+// Same cluster-bring-up pattern as the migration-0015 tests above.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entity_kinds_cache_returns_seeded_list() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ek-d",
+        "ek-l",
+        &format!("hhagent-pg-ek-seeded-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entity-kinds-cache-seeded"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let cache = hhagent_db::entity_kinds::KindsCache::new();
+    let kinds = cache.list_kinds(&pool).await.expect("list_kinds");
+
+    assert_eq!(
+        kinds.len(),
+        20,
+        "migration 0015 seeds exactly 20 kinds; got {} ({:?})",
+        kinds.len(),
+        kinds
+    );
+    assert!(
+        kinds.iter().any(|k| k == "undefined"),
+        "'undefined' must be present (FK fallback target); got {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| k == "person"),
+        "'person' must be present; got {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| k == "phone number"),
+        "'phone number' (with space) must be present; got {kinds:?}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entity_kinds_fetch_kinds_orders_alphabetically() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ek-d",
+        "ek-l",
+        &format!("hhagent-pg-ek-order-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entity-kinds-fetch-order"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let kinds = hhagent_db::entity_kinds::fetch_kinds(&pool)
+        .await
+        .expect("fetch_kinds");
+
+    let mut sorted = kinds.clone();
+    sorted.sort();
+    assert_eq!(
+        kinds, sorted,
+        "fetch_kinds must return rows in ORDER BY kind; got {kinds:?}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entity_kinds_cache_hits_warm_does_not_re_query() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ek-d",
+        "ek-l",
+        &format!("hhagent-pg-ek-warm-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entity-kinds-cache-warm"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let cache = hhagent_db::entity_kinds::KindsCache::new();
+    let first = cache.list_kinds(&pool).await.expect("list_kinds #1");
+    let second = cache.list_kinds(&pool).await.expect("list_kinds #2");
+    assert_eq!(
+        first, second,
+        "back-to-back list_kinds within TTL must return identical Vecs"
+    );
+
+    pool.close().await;
+}
