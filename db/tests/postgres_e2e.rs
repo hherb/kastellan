@@ -2772,3 +2772,220 @@ async fn graph_search_includes_quarantined_when_flag_true() {
 
     pool.close().await;
 }
+
+// ─── Entities review surface (0015) ─────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_list_filters_by_state_kind_and_since() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "elf-d",
+        "elf-l",
+        &format!("hhagent-pg-elf-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-list-filters"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{list_entities, EntityState, ListFilter};
+    use time::OffsetDateTime;
+
+    // Seed 4 entities — 2 quarantined (different kinds), 1 approved, 1 old.
+    sqlx::query(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) VALUES
+        ('person', 'Quar Alice', 'quar alice', TRUE),
+        ('place',  'Quar Mosman', 'quar mosman', TRUE),
+        ('person', 'OK Bob', 'ok bob', FALSE),
+        ('person', 'Old Carol', 'old carol', TRUE)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Back-date Old Carol so the --since filter excludes it.
+    sqlx::query(
+        "UPDATE entities SET created_at = now() - interval '7 days' WHERE name = 'Old Carol'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Default filter (quarantined, limit 50, no other filters).
+    let rows = list_entities(&pool, &ListFilter::default()).await.unwrap();
+    let names: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains("Quar Alice"));
+    assert!(names.contains("Quar Mosman"));
+    assert!(names.contains("Old Carol"));
+    assert!(
+        !names.contains("OK Bob"),
+        "approved entity must not appear in default filter"
+    );
+    assert_eq!(rows.len(), 3, "expected 3 quarantined rows, got {}", rows.len());
+
+    // Filter by kind=person.
+    let rows = list_entities(
+        &pool,
+        &ListFilter {
+            kind: Some("person".into()),
+            ..ListFilter::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "expected 2 quarantined persons");
+    for r in &rows {
+        assert_eq!(r.kind, "person");
+    }
+
+    // Filter by state=approved.
+    let rows = list_entities(
+        &pool,
+        &ListFilter {
+            state: EntityState::Approved,
+            ..ListFilter::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "OK Bob");
+    assert!(!rows[0].quarantine);
+
+    // Filter by since = now - 1 day. Old Carol must be excluded.
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::days(1);
+    let rows = list_entities(
+        &pool,
+        &ListFilter {
+            since: Some(cutoff),
+            ..ListFilter::default()
+        },
+    )
+    .await
+    .unwrap();
+    let names: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.name.as_str()).collect();
+    assert!(
+        !names.contains("Old Carol"),
+        "back-dated row must be excluded by --since"
+    );
+    assert!(names.contains("Quar Alice"));
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_list_min_mentions_filter_uses_join_count() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "emm-d",
+        "emm-l",
+        &format!("hhagent-pg-emm-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-min-mentions"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{list_entities, ListFilter};
+
+    // Seed 1 entity with 0 mentions and 1 entity with 2 mentions.
+    sqlx::query(
+        "INSERT INTO entities (kind, name, name_norm) VALUES
+        ('person', 'Zero', 'zero'),
+        ('person', 'Two',  'two')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let two_id: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Two'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // Two memories linked only to the 'Two' entity.
+    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    let mem1 = insert_memory_at_layer(
+        &pool,
+        "body 1",
+        &serde_json::json!({}),
+        None,
+        MemoryLayer::Stable,
+    )
+    .await
+    .unwrap();
+    let mem2 = insert_memory_at_layer(
+        &pool,
+        "body 2",
+        &serde_json::json!({}),
+        None,
+        MemoryLayer::Stable,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memory_entities (memory_id, entity_id) VALUES ($1, $2), ($3, $2)",
+    )
+    .bind(mem1)
+    .bind(two_id)
+    .bind(mem2)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // min_mentions=1 — only 'Two' qualifies.
+    let rows = list_entities(
+        &pool,
+        &ListFilter {
+            min_mentions: 1,
+            ..ListFilter::default()
+        },
+    )
+    .await
+    .unwrap();
+    let names: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains("Two"));
+    assert!(!names.contains("Zero"));
+
+    // Verify mention_count is surfaced correctly.
+    let two_row = rows.iter().find(|r| r.name == "Two").unwrap();
+    assert_eq!(two_row.mention_count, 2);
+
+    pool.close().await;
+}
