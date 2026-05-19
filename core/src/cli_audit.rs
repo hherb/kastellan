@@ -382,6 +382,7 @@ pub async fn tools_allowlist_remove_and_audit(
 /// audit insert failed; that's logged at WARN but doesn't propagate).
 pub async fn l1_add_and_audit(
     pool: &PgPool,
+    extractor: &dyn crate::entity_extraction::EntityExtractor,
     body: &str,
 ) -> Result<(crate::memory::l1_promote::L1WriteOutcome, i64), crate::memory::l1_promote::L1Error> {
     use crate::memory::l1_promote::{compute_body_sha256, promote_l1, validate_l1_body, L1Source};
@@ -392,7 +393,7 @@ pub async fn l1_add_and_audit(
     // twice (once here, once inside promote_l1) is fine.
     let trimmed = validate_l1_body(body)?.to_string();
     let source = L1Source::Operator;
-    let outcome = promote_l1(pool, &trimmed, source.clone()).await?;
+    let outcome = promote_l1(pool, extractor, &trimmed, source.clone()).await?;
     let body_sha256 = compute_body_sha256(&trimmed);
 
     let payload = build_l1_write_payload(&outcome, &source, &body_sha256);
@@ -459,8 +460,12 @@ mod tests {
 
     #[test]
     fn l1_add_and_audit_signature_compile_pin() {
+        // Compile-only: the function exists with the widened signature
+        // (pool, extractor, body). Full DB-backed coverage is in
+        // core/tests/memory_l1_promote_e2e.rs.
         fn _signature_pin<'a>(
             pool: &'a sqlx::PgPool,
+            extractor: &'a crate::entity_extraction::NoOpEntityExtractor,
             body: &'a str,
         ) -> impl std::future::Future<
             Output = Result<
@@ -468,7 +473,7 @@ mod tests {
                 crate::memory::l1_promote::L1Error,
             >,
         > + 'a {
-            l1_add_and_audit(pool, body)
+            l1_add_and_audit(pool, extractor, body)
         }
         let _ = _signature_pin;
     }

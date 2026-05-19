@@ -10,6 +10,7 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use hhagent_core::cli_audit::{l1_add_and_audit, l1_remove_and_audit};
+use hhagent_core::entity_extraction::NoOpEntityExtractor;
 use hhagent_core::memory::l1_promote::{promote_l1, list_l1, L1Source, L1WriteOutcome, L1Error};
 use hhagent_db::memories::MemoryLayer;
 use hhagent_tests_common::{
@@ -59,7 +60,7 @@ fn operator_add_writes_l1_row_and_audit_row() {
             .await
             .expect("pool");
 
-        let (outcome, _audit_id) = l1_add_and_audit(&pool, "operator insight one")
+        let (outcome, _audit_id) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "operator insight one")
             .await
             .expect("l1_add_and_audit");
 
@@ -138,7 +139,7 @@ fn operator_add_is_idempotent_on_body_sha256() {
             .await
             .expect("pool");
 
-        let (first, _) = l1_add_and_audit(&pool, "X")
+        let (first, _) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "X")
             .await
             .expect("first add");
         assert!(
@@ -146,7 +147,7 @@ fn operator_add_is_idempotent_on_body_sha256() {
             "first call must be Inserted"
         );
 
-        let (second, _) = l1_add_and_audit(&pool, "X")
+        let (second, _) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "X")
             .await
             .expect("second add");
         assert!(
@@ -222,7 +223,7 @@ fn operator_add_rejects_invalid_body_with_no_audit_row() {
 
         let invalid_bodies = ["", "  ", "has\nnewline", "</l1_insights>"];
         for body in &invalid_bodies {
-            let err = l1_add_and_audit(&pool, body)
+            let err = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), body)
                 .await
                 .expect_err(&format!("expected error for body {body:?}"));
             assert!(
@@ -288,7 +289,7 @@ fn operator_remove_deletes_and_audits() {
             .expect("pool");
 
         // Seed one row.
-        let (outcome, _) = l1_add_and_audit(&pool, "row to be removed")
+        let (outcome, _) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "row to be removed")
             .await
             .expect("add");
         let memory_id = outcome.memory_id();
@@ -450,6 +451,7 @@ fn agent_raised_promote_l1_writes_l1_row_with_task_id_metadata() {
 
         let outcome = promote_l1(
             &pool,
+            &NoOpEntityExtractor::new(),
             "shell-exec /bin/echo works",
             L1Source::AgentRaised { task_id: 17 },
         )
@@ -517,7 +519,7 @@ fn agent_raised_promote_dedups_against_operator_row() {
             .expect("pool");
 
         // Operator seeds "shared" first.
-        let (op_outcome, _) = l1_add_and_audit(&pool, "shared")
+        let (op_outcome, _) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "shared")
             .await
             .expect("operator add");
         let op_id = op_outcome.memory_id();
@@ -525,6 +527,7 @@ fn agent_raised_promote_dedups_against_operator_row() {
         // Agent-raised call with the same body.
         let agent_outcome = promote_l1(
             &pool,
+            &NoOpEntityExtractor::new(),
             "shared",
             L1Source::AgentRaised { task_id: 99 },
         )
@@ -597,6 +600,7 @@ fn list_l1_in_prompt_vs_all_distinguishes_at_cap_boundary() {
         for i in 0u32..40 {
             promote_l1(
                 &pool,
+                &NoOpEntityExtractor::new(),
                 &format!("distinct insight row {i:03}"),
                 L1Source::AgentRaised { task_id: i64::from(i) },
             )
@@ -615,6 +619,94 @@ fn list_l1_in_prompt_vs_all_distinguishes_at_cap_boundary() {
         // list_l1(true) → all rows, uncapped.
         let all = list_l1(&pool, true).await.expect("list_l1 true");
         assert_eq!(all.len(), 40, "all-rows slice must return all 40 rows");
+
+        pool.close().await;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Task 6 — caller-side e2e: StaticEntityExtractor wired through L1 writer
+// ---------------------------------------------------------------------------
+
+/// Verify that `promote_l1` with a `StaticEntityExtractor` returns
+/// `L1WriteOutcome::Inserted` carrying a `Some(LinkOutcome)` that reflects
+/// the scripted entity count, and that `memory_entities` rows are persisted.
+#[test]
+fn promote_l1_inserted_outcome_carries_link_outcome() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    use hhagent_core::entity_extraction::StaticEntityExtractor;
+    use hhagent_db::graph::{Graph, PgGraph};
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l1el-d",
+        "l1el-l",
+        &format!("hhagent-supervisor-test-pg-l1el-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l1-entity-link"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Pre-create two entities so StaticEntityExtractor's ids resolve via FK.
+        let graph = PgGraph::new(&pool);
+        let e1 = graph
+            .upsert_entity("person", "carol", &serde_json::json!({}))
+            .await
+            .expect("e1");
+        // "concept" is a seeded entity kind in migration 0015.
+        let e2 = graph
+            .upsert_entity("concept", "alpha", &serde_json::json!({}))
+            .await
+            .expect("e2");
+
+        let extractor = StaticEntityExtractor::with_ids(vec![e1, e2]);
+
+        let outcome = promote_l1(
+            &pool,
+            &extractor,
+            "carol leads project alpha",
+            L1Source::Operator,
+        )
+        .await
+        .expect("promote_l1");
+
+        match outcome {
+            L1WriteOutcome::Inserted { memory_id, link_outcome } => {
+                let link =
+                    link_outcome.expect("link_outcome must be Some on Inserted");
+                assert_eq!(link.n_entities_linked, 2, "2 entities linked");
+                assert_eq!(link.seeds.ids, vec![e1, e2], "seed ids match");
+
+                // Confirm memory_entities rows were persisted.
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM memory_entities WHERE memory_id = $1",
+                )
+                .bind(memory_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+                assert_eq!(count, 2, "2 memory_entities rows for the inserted memory");
+            }
+            other => panic!("expected Inserted, got {other:?}"),
+        }
 
         pool.close().await;
     });

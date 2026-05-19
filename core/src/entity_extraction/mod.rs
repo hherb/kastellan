@@ -46,7 +46,7 @@ pub enum SeedSource {
 }
 
 /// What the extractor returns to `RouterAgent::formulate_plan`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EntitySeeds {
     pub ids: Vec<i64>,
     pub source: SeedSource,

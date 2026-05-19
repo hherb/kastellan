@@ -986,6 +986,7 @@ fn run_memory_l1(args: &[String]) -> ExitCode {
 
 async fn memory_l1_add(args: &[String]) -> ExitCode {
     use hhagent_core::cli_audit::l1_add_and_audit;
+    use hhagent_core::entity_extraction::NoOpEntityExtractor;
     use hhagent_core::memory::l1_promote::L1WriteOutcome;
     use hhagent_db::pool::connect_runtime_pool;
 
@@ -1006,9 +1007,20 @@ async fn memory_l1_add(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
 
-    match l1_add_and_audit(&pool, body).await {
-        Ok((L1WriteOutcome::Inserted { memory_id }, _)) => {
+    // Operator-explicit additions are intentionally NOT auto-linked:
+    // the spec routes auto-linking through write paths the agent
+    // controls, while operator-added L1 rows go through this CLI.
+    // A future `hhagent-cli memory relink` subcommand will fill the
+    // gap in batch. Emit a one-line stderr hint on success so the
+    // operator isn't surprised by an empty graph lane for these rows.
+    let extractor = NoOpEntityExtractor::new();
+    match l1_add_and_audit(&pool, &extractor, body).await {
+        Ok((L1WriteOutcome::Inserted { memory_id, .. }, _)) => {
             println!("inserted id={memory_id}");
+            eprintln!(
+                "note: operator-added L1 rows are not auto-linked to entities; \
+                 batch backfill via the future 'memory relink' subcommand"
+            );
             ExitCode::from(0)
         }
         Ok((L1WriteOutcome::SkippedDuplicate { memory_id }, _)) => {

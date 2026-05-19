@@ -452,11 +452,14 @@ async fn two_lanes_run_concurrently() {
         delay: Duration::from_millis(800),
     });
 
+    let entity_extractor: Arc<dyn hhagent_core::entity_extraction::EntityExtractor> =
+        Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new());
     let scheduler = spawn_scheduler(
         pool.clone(),
         formulator,
         review,
         dispatcher,
+        entity_extractor,
     );
 
     // Wait for both `tasks_completed` NOTIFYs.

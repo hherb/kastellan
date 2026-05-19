@@ -57,43 +57,6 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "crash_recovery::sweep_and_audit failed (non-fatal)"),
     }
 
-    // Load every prompts/*.md, hash, upsert into agent_prompts.
-    let prompts_dir = std::env::var("HHAGENT_PROMPTS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("prompts"));
-    let prompts = hhagent_core::scheduler::prompts::load_prompts_from_dir(&pool, &prompts_dir)
-        .await
-        .with_context(|| format!("loading prompts from {:?}", prompts_dir))?;
-
-    // Seed L0 (meta-rule) rows from the operator-edited TOML file.
-    // Default: `seeds/memory/l0_meta_rules.toml` relative to CWD.
-    // Override: `HHAGENT_L0_RULES_FILE` env var. Missing file is
-    // logged at info level and skipped (daemon still comes up).
-    // Malformed file is fatal (loader returns Err, ? propagates) —
-    // matches probe::run fail-closed posture.
-    let l0_path = std::env::var("HHAGENT_L0_RULES_FILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("seeds/memory/l0_meta_rules.toml"));
-    if l0_path.exists() {
-        let report = hhagent_core::memory::l0_seed::seed_l0_from_file(&pool, &l0_path)
-            .await
-            .with_context(|| format!("seeding L0 rules from {:?}", l0_path))?;
-        // Best-effort audit row: a transient DB failure here must not
-        // block daemon bring-up. The L0 rows themselves are already
-        // committed; mirrors `write_registry_loaded_row` posture.
-        if let Err(e) = write_l0_seeded_row(&pool, &report).await {
-            tracing::warn!(error = %e, "l0.seeded audit row insert failed");
-        }
-        info!(
-            rules = report.rules_loaded,
-            new = report.new_rows_written,
-            unchanged = report.unchanged_skipped,
-            "L0 seed loader completed"
-        );
-    } else {
-        info!(path = ?l0_path, "no L0 rules file found, skipping seed");
-    }
-
     // LLM router (existing skeleton).
     let router_cfg = hhagent_llm_router::RouterConfig::from_env()
         .map_err(|e| anyhow!("RouterConfig::from_env: {e}"))?;
@@ -206,6 +169,47 @@ async fn main() -> Result<()> {
             }
         };
 
+    // Load every prompts/*.md, hash, upsert into agent_prompts.
+    let prompts_dir = std::env::var("HHAGENT_PROMPTS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("prompts"));
+    let prompts = hhagent_core::scheduler::prompts::load_prompts_from_dir(&pool, &prompts_dir)
+        .await
+        .with_context(|| format!("loading prompts from {:?}", prompts_dir))?;
+
+    // Seed L0 (meta-rule) rows from the operator-edited TOML file.
+    // Default: `seeds/memory/l0_meta_rules.toml` relative to CWD.
+    // Override: `HHAGENT_L0_RULES_FILE` env var. Missing file is
+    // logged at info level and skipped (daemon still comes up).
+    // Malformed file is fatal (loader returns Err, ? propagates) —
+    // matches probe::run fail-closed posture.
+    let l0_path = std::env::var("HHAGENT_L0_RULES_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("seeds/memory/l0_meta_rules.toml"));
+    if l0_path.exists() {
+        let report = hhagent_core::memory::l0_seed::seed_l0_from_file(
+            &pool, &*entity_extractor, &l0_path,
+        )
+        .await
+        .with_context(|| format!("seeding L0 rules from {:?}", l0_path))?;
+        // Best-effort audit row: a transient DB failure here must not
+        // block daemon bring-up. The L0 rows themselves are already
+        // committed; mirrors `write_registry_loaded_row` posture.
+        if let Err(e) = write_l0_seeded_row(&pool, &report).await {
+            tracing::warn!(error = %e, "l0.seeded audit row insert failed");
+        }
+        info!(
+            rules = report.rules_loaded,
+            new = report.new_rows_written,
+            unchanged = report.unchanged_skipped,
+            entities_linked = report.entities_linked,
+            link_failures = report.link_failures,
+            "L0 seed loader completed"
+        );
+    } else {
+        info!(path = ?l0_path, "no L0 rules file found, skipping seed");
+    }
+
     // PlanFormulator — takes the extractor as 5th arg (Task 14 widened
     // the signature; Task 15 supplies the constructed extractor).
     let formulator: Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
@@ -234,6 +238,7 @@ async fn main() -> Result<()> {
         formulator,
         review,
         dispatcher,
+        entity_extractor.clone(),
     );
     info!("scheduler spawned (lane_fast + lane_long)");
 
@@ -593,6 +598,8 @@ async fn write_l0_seeded_row(
         "unchanged_skipped": report.unchanged_skipped,
         "source_path": report.source_path.to_string_lossy(),
         "source_sha256": report.source_sha256,
+        "entities_linked": report.entities_linked,
+        "link_failures": report.link_failures,
     });
     hhagent_db::audit::insert(
         pool,

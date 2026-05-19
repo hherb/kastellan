@@ -10,6 +10,18 @@
 //! at `layer = 1` keyed on `metadata->>'body_sha256'`, insert on
 //! miss via [`hhagent_db::memories::insert_memory_at_layer`].
 //!
+//! ## Side effect: entity auto-link
+//!
+//! On the agent-raised path (`runner::write_l1_promoted_row`), every
+//! newly-inserted L1 row is passed to
+//! [`crate::memory::entity_link::link_memory_entities`] in
+//! degrade-and-warn posture; the resulting `Option<LinkOutcome>`
+//! rides along in [`L1WriteOutcome::Inserted::link_outcome`]. The
+//! operator path (`cli_audit::l1_add_and_audit`) injects a
+//! [`crate::entity_extraction::NoOpEntityExtractor`] so operator-added
+//! rows stay un-auto-linked by design (batch-relink subcommand is the
+//! future workflow).
+//!
 //! See `docs/superpowers/specs/2026-05-17-l1-promotion-writer-design.md`
 //! for the full design.
 
@@ -20,6 +32,8 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use crate::entity_extraction::EntityExtractor;
+use crate::memory::entity_link::{link_memory_entities, LinkOutcome};
 use crate::memory::layers::load_l1_default;
 
 /// Maximum body length in bytes for an L1 row. Half of L0's
@@ -62,21 +76,34 @@ pub enum L1Error {
 }
 
 /// Outcome of a single `promote_l1` call.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[derive(Clone, Debug)]
 pub enum L1WriteOutcome {
-    /// New L1 row inserted at the carried `memory_id`.
-    Inserted { memory_id: i64 },
+    /// New L1 row inserted at the carried `memory_id`. `link_outcome`
+    /// is `Some(_)` on auto-link success — INCLUDING the NoOp
+    /// extractor case, which carries an empty
+    /// [`LinkOutcome`] (`n_entities_linked = 0`, empty seeds). It is
+    /// `None` ONLY when auto-link errored after the memory row was
+    /// committed (extract or DB failure; a WARN was already logged).
+    /// In short: `Some` means "the link step ran to completion"; the
+    /// distinction between "0 entities linked because NoOp" and "link
+    /// step errored out" is the `Some` / `None` split.
+    ///
+    /// Operator + agent callers can both ignore the new field — the
+    /// variant widening is purely additive at the match level via `..`.
+    Inserted {
+        memory_id: i64,
+        link_outcome: Option<LinkOutcome>,
+    },
     /// A row with the same `body_sha256` already exists at
-    /// `layer = 1` (carrying the existing `memory_id`). No
-    /// new row was written.
+    /// `layer = 1` (carrying the existing `memory_id`). No new row
+    /// was written; no link attempt was made.
     SkippedDuplicate { memory_id: i64 },
 }
 
 impl L1WriteOutcome {
     pub fn memory_id(&self) -> i64 {
         match self {
-            L1WriteOutcome::Inserted { memory_id }
+            L1WriteOutcome::Inserted { memory_id, .. }
             | L1WriteOutcome::SkippedDuplicate { memory_id } => *memory_id,
         }
     }
@@ -186,6 +213,7 @@ pub(crate) fn build_l1_metadata(
 /// retrieved approach can backfill.
 pub async fn promote_l1(
     pool: &PgPool,
+    extractor: &dyn EntityExtractor,
     body: &str,
     source: L1Source,
 ) -> Result<L1WriteOutcome, L1Error> {
@@ -227,7 +255,25 @@ pub async fn promote_l1(
         MemoryLayer::Index,
     )
     .await?;
-    Ok(L1WriteOutcome::Inserted { memory_id: new_id })
+
+    // Auto-link entities. Same degrade-and-warn posture as L0:
+    // a failure here leaves the L1 row unlinked but otherwise intact.
+    let link_outcome = match link_memory_entities(
+        pool, extractor, new_id, "L1", trimmed,
+    )
+    .await
+    {
+        Ok(outcome) => Some(outcome),
+        Err(e) => {
+            tracing::warn!(
+                error = %e, memory_id = new_id, layer = "L1",
+                "auto-linker degraded; memory survives unlinked"
+            );
+            None
+        }
+    };
+
+    Ok(L1WriteOutcome::Inserted { memory_id: new_id, link_outcome })
 }
 
 /// Operator-facing list view.
@@ -396,14 +442,16 @@ mod tests {
     #[test]
     fn promote_l1_signature_compile_pin() {
         // Compile-only smoke: verify the function signature stays
-        // (pool: &PgPool, body: &str, source: L1Source) -> Result<L1WriteOutcome, L1Error>.
+        // (pool: &PgPool, extractor: &dyn EntityExtractor, body: &str, source: L1Source)
+        // -> Result<L1WriteOutcome, L1Error>.
         // Full DB-backed coverage lives in core/tests/memory_l1_promote_e2e.rs.
         fn _signature_pin<'a>(
             pool: &'a sqlx::PgPool,
+            extractor: &'a dyn crate::entity_extraction::EntityExtractor,
             body: &'a str,
             source: L1Source,
         ) -> impl std::future::Future<Output = Result<L1WriteOutcome, L1Error>> + 'a {
-            promote_l1(pool, body, source)
+            promote_l1(pool, extractor, body, source)
         }
         // No call — just ensure the function exists and has this signature.
         let _ = _signature_pin;
