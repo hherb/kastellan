@@ -299,8 +299,11 @@ fn parse_entity_state(s: &str) -> Result<hhagent_db::entities::EntityState, Stri
 }
 
 /// Parse the `--drop` flag value. Comma-separated i64s; whitespace
-/// around commas is permitted; empty segments are rejected; negative
-/// or non-numeric entries are rejected.
+/// around commas is permitted; empty segments and non-numeric entries
+/// are rejected. Negative ids parse successfully and are passed through
+/// to `merge_entities`, which surfaces them as `EntitiesError::NotFound`
+/// (BIGSERIAL ids are always positive in practice, so an operator typo
+/// like `--drop -5` ends in a clear NotFound rather than a parse error).
 fn parse_id_list(s: &str) -> Result<Vec<i64>, String> {
     let mut out = Vec::new();
     for raw in s.split(',') {
@@ -1350,16 +1353,25 @@ async fn entities_show(args: &[String]) -> ExitCode {
     println!();
     println!("linked memories (showing first {} of {}):",
         mems.len(), entity.mention_count);
+    // Layer is constrained to 0..=4 by the schema CHECK constraint, so
+    // the `other` branch is operationally dead code. We still render
+    // unknown layers as `L<n>` rather than aborting the whole listing
+    // mid-iteration — a constraint violation is a DB-level alarm, not a
+    // reason to truncate the operator's view of the entity's mentions.
     for m in mems {
-        let layer_name = match m.layer {
-            0 => "L0",
-            1 => "L1",
-            2 => "L2",
-            3 => "L3",
-            4 => "L4",
+        let layer_name: std::borrow::Cow<'_, str> = match m.layer {
+            0 => "L0".into(),
+            1 => "L1".into(),
+            2 => "L2".into(),
+            3 => "L3".into(),
+            4 => "L4".into(),
             other => {
-                eprintln!("unexpected layer {other} on memory id {}", m.memory_id);
-                return ExitCode::from(1);
+                eprintln!(
+                    "entities show: unexpected layer {other} on memory id {} \
+                     (schema CHECK violation; rendering as L{other})",
+                    m.memory_id,
+                );
+                format!("L{other}").into()
             }
         };
         println!("  {layer_name}  id={:<6}  {}", m.memory_id, m.body_preview);
@@ -1396,8 +1408,9 @@ async fn entities_approve(args: &[String]) -> ExitCode {
     };
 
     let mut any_not_found = false;
-    for id in ids {
-        match entities_approve_and_audit(&pool, id).await {
+    let total = ids.len();
+    for (idx, id) in ids.iter().enumerate() {
+        match entities_approve_and_audit(&pool, *id).await {
             Ok(ApproveOutcome::Approved { kind, name }) => {
                 println!("id={id}: approved {kind} {name}");
             }
@@ -1410,6 +1423,13 @@ async fn entities_approve(args: &[String]) -> ExitCode {
             }
             Err(e) => {
                 eprintln!("entities approve: id={id}: {e}");
+                let remaining = total - idx - 1;
+                if remaining > 0 {
+                    eprintln!(
+                        "entities approve: stopped after error on id={id}; \
+                         {remaining} remaining id(s) not attempted",
+                    );
+                }
                 return ExitCode::from(1);
             }
         }
@@ -1446,8 +1466,9 @@ async fn entities_reject(args: &[String]) -> ExitCode {
     };
 
     let mut any_not_found = false;
-    for id in ids {
-        match entities_reject_and_audit(&pool, id).await {
+    let total = ids.len();
+    for (idx, id) in ids.iter().enumerate() {
+        match entities_reject_and_audit(&pool, *id).await {
             Ok(RejectOutcome::Rejected { kind, name, mentions_dropped }) => {
                 println!("id={id}: rejected {kind} {name} (mentions_dropped={mentions_dropped})");
             }
@@ -1457,6 +1478,13 @@ async fn entities_reject(args: &[String]) -> ExitCode {
             }
             Err(e) => {
                 eprintln!("entities reject: id={id}: {e}");
+                let remaining = total - idx - 1;
+                if remaining > 0 {
+                    eprintln!(
+                        "entities reject: stopped after error on id={id}; \
+                         {remaining} remaining id(s) not attempted",
+                    );
+                }
                 return ExitCode::from(1);
             }
         }

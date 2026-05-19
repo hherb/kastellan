@@ -3243,6 +3243,80 @@ async fn entities_merge_retargets_links_and_drops_duplicates() {
     pool.close().await;
 }
 
+/// Pins the documented semantic difference between
+/// `links_retargeted` (distinct memories newly visible from keep) and
+/// `links_dropped_as_duplicate` (memory_entities ROWS absorbed by the
+/// ON CONFLICT DO NOTHING). When one memory is linked to BOTH drops
+/// AND to keep, it contributes 2 to `dup_count` (one row per drop)
+/// but 0 to `links_retargeted` (keep already had this memory). The
+/// merge-happy-path test above exercises the 1:1 case where the two
+/// counters coincide; this test exercises the multi-drop overlap that
+/// makes them diverge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_merge_dup_count_sums_rows_across_multiple_drops() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "emd-d",
+        "emd-l",
+        &format!("hhagent-pg-emd-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-merge-dup-rows"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::merge_entities;
+    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+
+    sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES
+        ('person', 'Smith',  'smith'),
+        ('person', 'SMITH',  'smith_2'),
+        ('person', 'smithy', 'smithy')")
+        .execute(&pool).await.unwrap();
+    let keep:   i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Smith'").fetch_one(&pool).await.unwrap();
+    let drop_a: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'SMITH'").fetch_one(&pool).await.unwrap();
+    let drop_b: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'smithy'").fetch_one(&pool).await.unwrap();
+
+    // One memory linked to keep + drop_a + drop_b. The ON CONFLICT will
+    // absorb two rows (drop_a→keep already exists, drop_b→keep already
+    // exists), but the memory is not newly visible from keep — keep
+    // already had the link.
+    let mem = insert_memory_at_layer(&pool, "m", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES ($1, $2), ($1, $3), ($1, $4)")
+        .bind(mem).bind(keep).bind(drop_a).bind(drop_b)
+        .execute(&pool).await.unwrap();
+
+    let outcome = merge_entities(&pool, keep, &[drop_a, drop_b]).await.unwrap();
+    assert_eq!(outcome.links_retargeted, 0,
+        "keep already had this memory — nothing newly visible: {outcome:?}");
+    assert_eq!(outcome.links_dropped_as_duplicate, 2,
+        "memory was linked to both drops; dup_count counts rows, not memories: {outcome:?}");
+
+    // keep retains exactly one link to mem after the merge.
+    let kept_links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_entities WHERE entity_id = $1")
+        .bind(keep).fetch_one(&pool).await.unwrap();
+    assert_eq!(kept_links, 1);
+
+    pool.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_merge_refuses_cross_kind_and_keep_in_drop_list() {
     if skip_if_no_supervisor() {
