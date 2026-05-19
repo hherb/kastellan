@@ -26,7 +26,7 @@ use hhagent_db::{audit, memories::link_memory_to_entities, DbError};
 /// What the auto-linker did, for caller telemetry. Returned on success
 /// only; on failure the caller receives [`LinkError`] and decides
 /// whether to count it as a degrade.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkOutcome {
     /// Post-`ON CONFLICT DO NOTHING` row count from
     /// [`hhagent_db::memories::link_memory_to_entities`]. May be smaller

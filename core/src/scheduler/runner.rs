@@ -10,6 +10,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
+use crate::entity_extraction::EntityExtractor;
+
 use hhagent_db::tasks::{self, Lane, Task, DEFAULT_DEADLINE_FAST_S, DEFAULT_DEADLINE_LONG_S,
     DEFAULT_MAX_PLANS_FAST, DEFAULT_MAX_PLANS_LONG};
 
@@ -52,15 +54,18 @@ pub fn spawn_scheduler(
     formulator: Arc<dyn PlanFormulator>,
     review: Arc<ChainReviewStage>,
     dispatcher: Arc<dyn StepDispatcher>,
+    entity_extractor: Arc<dyn EntityExtractor>,
 ) -> SchedulerHandle {
     let (tx, rx) = watch::channel(false);
 
     let fast = tokio::spawn(lane_loop(
         pool.clone(), formulator.clone(), review.clone(), dispatcher.clone(),
+        entity_extractor.clone(),
         Lane::Fast, DEFAULT_DEADLINE_FAST_S, DEFAULT_MAX_PLANS_FAST, rx.clone(),
     ));
     let long = tokio::spawn(lane_loop(
         pool, formulator, review, dispatcher,
+        entity_extractor,
         Lane::Long, DEFAULT_DEADLINE_LONG_S, DEFAULT_MAX_PLANS_LONG, rx,
     ));
 
@@ -72,6 +77,7 @@ async fn lane_loop(
     formulator: Arc<dyn PlanFormulator>,
     review: Arc<ChainReviewStage>,
     dispatcher: Arc<dyn StepDispatcher>,
+    entity_extractor: Arc<dyn EntityExtractor>,
     lane: Lane,
     deadline_seconds: i64,
     max_plans: u32,
@@ -102,6 +108,7 @@ async fn lane_loop(
     // is what keeps the drain race-free with newly-arriving tasks.
     drain_lane(
         &pool, formulator.clone(), review.clone(), dispatcher.clone(),
+        entity_extractor.clone(),
         lane, deadline_seconds, max_plans, &shutdown,
     ).await;
     if *shutdown.borrow() { return; }
@@ -118,6 +125,7 @@ async fn lane_loop(
 
         drain_lane(
             &pool, formulator.clone(), review.clone(), dispatcher.clone(),
+            entity_extractor.clone(),
             lane, deadline_seconds, max_plans, &shutdown,
         ).await;
     }
@@ -132,6 +140,7 @@ async fn drain_lane(
     formulator: Arc<dyn PlanFormulator>,
     review: Arc<ChainReviewStage>,
     dispatcher: Arc<dyn StepDispatcher>,
+    entity_extractor: Arc<dyn EntityExtractor>,
     lane: Lane,
     deadline_seconds: i64,
     max_plans: u32,
@@ -217,7 +226,7 @@ async fn drain_lane(
         // only when Outcome::Completed; all other outcomes leave the
         // field None, so this branch is a no-op for them.
         if let Some(insight) = result.terminal_l1_insight.as_deref() {
-            write_l1_promoted_row(pool, claimed.id, insight).await;
+            write_l1_promoted_row(pool, &*entity_extractor, claimed.id, insight).await;
         }
     }
 }
@@ -285,11 +294,11 @@ async fn write_finalize_row(
 /// audit row are observability aids, not correctness signals.
 /// Validation errors from `promote_l1` are also swallowed (with
 /// distinct WARN diagnostics so the operator can see which path failed).
-async fn write_l1_promoted_row(pool: &PgPool, task_id: i64, insight: &str) {
+async fn write_l1_promoted_row(pool: &PgPool, extractor: &dyn EntityExtractor, task_id: i64, insight: &str) {
     use crate::memory::l1_promote::{promote_l1, L1Error, L1Source};
 
     let source = L1Source::AgentRaised { task_id };
-    let outcome = match promote_l1(pool, insight, source.clone()).await {
+    let outcome = match promote_l1(pool, extractor, insight, source.clone()).await {
         Ok(o) => o,
         Err(L1Error::Validation(msg)) => {
             tracing::warn!(
@@ -591,12 +600,16 @@ mod tests {
 
     #[test]
     fn write_l1_promoted_row_signature_compile_pin() {
+        // Compile-only: the function exists with the widened signature
+        // (pool, extractor, task_id, insight). Full DB-backed coverage is in
+        // core/tests/scheduler_lanes_e2e.rs.
         fn _signature_pin<'a>(
             pool: &'a sqlx::PgPool,
+            extractor: &'a crate::entity_extraction::NoOpEntityExtractor,
             task_id: i64,
             insight: &'a str,
         ) -> impl std::future::Future<Output = ()> + 'a {
-            super::write_l1_promoted_row(pool, task_id, insight)
+            super::write_l1_promoted_row(pool, extractor, task_id, insight)
         }
         let _ = _signature_pin;
     }

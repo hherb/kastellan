@@ -10,6 +10,7 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use hhagent_core::cli_audit::{l1_add_and_audit, l1_remove_and_audit};
+use hhagent_core::entity_extraction::NoOpEntityExtractor;
 use hhagent_core::memory::l1_promote::{promote_l1, list_l1, L1Source, L1WriteOutcome, L1Error};
 use hhagent_db::memories::MemoryLayer;
 use hhagent_tests_common::{
@@ -59,7 +60,7 @@ fn operator_add_writes_l1_row_and_audit_row() {
             .await
             .expect("pool");
 
-        let (outcome, _audit_id) = l1_add_and_audit(&pool, "operator insight one")
+        let (outcome, _audit_id) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "operator insight one")
             .await
             .expect("l1_add_and_audit");
 
@@ -138,7 +139,7 @@ fn operator_add_is_idempotent_on_body_sha256() {
             .await
             .expect("pool");
 
-        let (first, _) = l1_add_and_audit(&pool, "X")
+        let (first, _) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "X")
             .await
             .expect("first add");
         assert!(
@@ -146,7 +147,7 @@ fn operator_add_is_idempotent_on_body_sha256() {
             "first call must be Inserted"
         );
 
-        let (second, _) = l1_add_and_audit(&pool, "X")
+        let (second, _) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "X")
             .await
             .expect("second add");
         assert!(
@@ -222,7 +223,7 @@ fn operator_add_rejects_invalid_body_with_no_audit_row() {
 
         let invalid_bodies = ["", "  ", "has\nnewline", "</l1_insights>"];
         for body in &invalid_bodies {
-            let err = l1_add_and_audit(&pool, body)
+            let err = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), body)
                 .await
                 .expect_err(&format!("expected error for body {body:?}"));
             assert!(
@@ -288,7 +289,7 @@ fn operator_remove_deletes_and_audits() {
             .expect("pool");
 
         // Seed one row.
-        let (outcome, _) = l1_add_and_audit(&pool, "row to be removed")
+        let (outcome, _) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "row to be removed")
             .await
             .expect("add");
         let memory_id = outcome.memory_id();
@@ -450,6 +451,7 @@ fn agent_raised_promote_l1_writes_l1_row_with_task_id_metadata() {
 
         let outcome = promote_l1(
             &pool,
+            &NoOpEntityExtractor::new(),
             "shell-exec /bin/echo works",
             L1Source::AgentRaised { task_id: 17 },
         )
@@ -517,7 +519,7 @@ fn agent_raised_promote_dedups_against_operator_row() {
             .expect("pool");
 
         // Operator seeds "shared" first.
-        let (op_outcome, _) = l1_add_and_audit(&pool, "shared")
+        let (op_outcome, _) = l1_add_and_audit(&pool, &NoOpEntityExtractor::new(), "shared")
             .await
             .expect("operator add");
         let op_id = op_outcome.memory_id();
@@ -525,6 +527,7 @@ fn agent_raised_promote_dedups_against_operator_row() {
         // Agent-raised call with the same body.
         let agent_outcome = promote_l1(
             &pool,
+            &NoOpEntityExtractor::new(),
             "shared",
             L1Source::AgentRaised { task_id: 99 },
         )
@@ -597,6 +600,7 @@ fn list_l1_in_prompt_vs_all_distinguishes_at_cap_boundary() {
         for i in 0u32..40 {
             promote_l1(
                 &pool,
+                &NoOpEntityExtractor::new(),
                 &format!("distinct insight row {i:03}"),
                 L1Source::AgentRaised { task_id: i64::from(i) },
             )

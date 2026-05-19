@@ -360,7 +360,7 @@ pub fn build_l1_write_payload(
         }
     }
     let (action_str, memory_id) = match outcome {
-        L1WriteOutcome::Inserted { memory_id } => ("inserted", *memory_id),
+        L1WriteOutcome::Inserted { memory_id, .. } => ("inserted", *memory_id),
         L1WriteOutcome::SkippedDuplicate { memory_id } => ("skipped_duplicate", *memory_id),
     };
     obj.insert("action".into(), Value::String(action_str.into()));
@@ -810,7 +810,7 @@ mod tests {
     #[test]
     fn build_l1_write_payload_operator_inserted_shape() {
         let payload = build_l1_write_payload(
-            &L1WriteOutcome::Inserted { memory_id: 42 },
+            &L1WriteOutcome::Inserted { memory_id: 42, link_outcome: None },
             &L1Source::Operator,
             "abc123",
         );
@@ -836,7 +836,7 @@ mod tests {
     #[test]
     fn build_l1_write_payload_agent_raised_carries_task_id() {
         let payload = build_l1_write_payload(
-            &L1WriteOutcome::Inserted { memory_id: 88 },
+            &L1WriteOutcome::Inserted { memory_id: 88, link_outcome: None },
             &L1Source::AgentRaised { task_id: 123 },
             "abc123",
         );

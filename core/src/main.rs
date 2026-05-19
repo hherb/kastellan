@@ -236,6 +236,7 @@ async fn main() -> Result<()> {
         formulator,
         review,
         dispatcher,
+        entity_extractor.clone(),
     );
     info!("scheduler spawned (lane_fast + lane_long)");
 

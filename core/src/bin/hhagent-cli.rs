@@ -986,6 +986,7 @@ fn run_memory_l1(args: &[String]) -> ExitCode {
 
 async fn memory_l1_add(args: &[String]) -> ExitCode {
     use hhagent_core::cli_audit::l1_add_and_audit;
+    use hhagent_core::entity_extraction::NoOpEntityExtractor;
     use hhagent_core::memory::l1_promote::L1WriteOutcome;
     use hhagent_db::pool::connect_runtime_pool;
 
@@ -1006,8 +1007,9 @@ async fn memory_l1_add(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
 
-    match l1_add_and_audit(&pool, body).await {
-        Ok((L1WriteOutcome::Inserted { memory_id }, _)) => {
+    let extractor = NoOpEntityExtractor::new();
+    match l1_add_and_audit(&pool, &extractor, body).await {
+        Ok((L1WriteOutcome::Inserted { memory_id, .. }, _)) => {
             println!("inserted id={memory_id}");
             ExitCode::from(0)
         }
