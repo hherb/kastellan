@@ -14,7 +14,7 @@ use hhagent_db::memories::Memory;
 use sqlx::PgPool;
 use hhagent_llm_router::Router;
 
-use crate::memory::{embed_query, recall, RecallParams, RecallModes};
+use crate::memory::{embed_query, recall, RecallParams};
 use super::{sha256_hex, RecallBuilder, RecalledContext, RecallError, L_RECALL_CAP_BYTES};
 
 /// Greedy newest-first cap: walk `rows` in order, push as long as
@@ -107,22 +107,27 @@ impl PgRecallBuilder {
 
 #[async_trait]
 impl RecallBuilder for PgRecallBuilder {
-    async fn build(&self, query: &str) -> Result<RecalledContext, RecallError> {
+    async fn build_with_seeds(
+        &self,
+        query: &str,
+        seeds: &[i64],
+    ) -> Result<RecalledContext, RecallError> {
         let query_sha256 = sha256_hex(query.as_bytes());
 
         // Step 1 — turn the query text into an embedding (writes the
         // actor='llm:router' action='embed' audit row internally).
         let emb = embed_query(&self.pool, &self.router, query).await?;
 
-        // Step 2 — fan out semantic + lexical lanes. Graph lane stays
-        // off because we have no entity seeds at this slice — that's a
-        // separate "entity extraction" follow-up.
-        //
-        // RecallParams::new (not ::with_seeds) — no seeds present, so
-        // with_seeds with an empty slice would be semantically wrong.
-        // new() also defaults modes to SEMANTIC_AND_LEXICAL.
-        let mut params = RecallParams::new(query, &emb);
-        params.modes = RecallModes::SEMANTIC_AND_LEXICAL;
+        // Step 2 — fan out lanes. Seeded vs. semantic+lexical-only:
+        // choose params shape. RecallParams::new defaults to
+        // SEMANTIC_AND_LEXICAL; with_seeds defaults to ALL
+        // (semantic+lexical+graph). Both correct for their respective
+        // seed-presence cases — no override needed.
+        let params = if seeds.is_empty() {
+            RecallParams::new(query, &emb)
+        } else {
+            RecallParams::with_seeds(query, &emb, seeds)
+        };
         let rows = recall(&self.pool, &params).await?;
 
         // Step 3 — byte-cap into the final RecalledContext. cap_and_split
@@ -159,7 +164,11 @@ impl StaticRecallBuilder {
 
 #[async_trait]
 impl RecallBuilder for StaticRecallBuilder {
-    async fn build(&self, _query: &str) -> Result<RecalledContext, RecallError> {
+    async fn build_with_seeds(
+        &self,
+        _query: &str,
+        _seeds: &[i64],
+    ) -> Result<RecalledContext, RecallError> {
         Ok(self.fixed.clone())
     }
 }
