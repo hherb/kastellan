@@ -1188,7 +1188,7 @@ fn run_entities(args: &[String]) -> ExitCode {
 }
 
 async fn entities_list(args: &[String]) -> ExitCode {
-    use hhagent_db::entities::{list_entities, EntityState, ListFilter};
+    use hhagent_db::entities::{list_entities, ListFilter};
     use hhagent_db::pool::connect_runtime_pool;
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
@@ -1266,11 +1266,6 @@ async fn entities_list(args: &[String]) -> ExitCode {
             }
         }
     }
-    // Acknowledge the EntityState::Any variant exists (silences a potential
-    // future unused-variant warning if no test exercises Any). It's the
-    // operator's call to surface via --state any.
-    let _ = EntityState::Any;
-
     let spec = match resolve_connect_spec() {
         Ok(s) => s,
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
@@ -1339,7 +1334,7 @@ async fn entities_show(args: &[String]) -> ExitCode {
     let (entity, mems) = match get_entity_with_mentions(&pool, id).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            eprintln!("entity id {id} not found");
+            eprintln!("entities show: id={id} not found");
             return ExitCode::from(1);
         }
         Err(e) => { eprintln!("entities show: {e}"); return ExitCode::from(1); }
