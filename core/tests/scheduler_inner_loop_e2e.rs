@@ -327,6 +327,9 @@ impl PlanFormulator for ScriptedFormulator {
                 recalled_memory_ids: Vec::new(),
                 recall_count: 0,
                 recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+                graph_seed_entity_ids: Vec::new(),
+                graph_seed_count: 0,
+                graph_seed_source: hhagent_core::entity_extraction::SeedSource::None,
             },
         ))
     }

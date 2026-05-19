@@ -33,7 +33,7 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// Extracted from `write_audit_plan_formulate` so the wire shape is
 /// unit-testable without a live Postgres pool. The shape pins
 /// (in this file's `tests` module) defend against accidental drift —
-/// 21 keys for non-`CliInferred` sources, 22 when `CliInferred` carries
+/// 24 keys for non-`CliInferred` sources, 25 when `CliInferred` carries
 /// matched signals.
 ///
 /// Slice A (2026-05-15) added `plan` (full serialised Plan) +
@@ -59,6 +59,11 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// row). The runner reads `InnerLoopResult.terminal_l1_insight` in
 /// `drain_lane` and emits the `actor='scheduler' action='l1.promoted'`
 /// row when the agent set a value and the plan reached `Outcome::Completed`.
+///
+/// Slice F (2026-05-19) added `graph_seed_entity_ids`, `graph_seed_count`,
+/// and `graph_seed_source` so the observation phase can audit which
+/// entity ids the gliner-relex extractor resolved for the graph lane
+/// and which extraction path produced them.
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
@@ -153,6 +158,19 @@ pub(crate) fn build_plan_formulate_payload(
     obj.insert(
         "recall_query_sha256".into(),
         serde_json::json!(meta.recall_query_sha256),
+    );
+    // Slice F (entity-extraction v2, 2026-05-19): the graph-lane seeds
+    // the extractor resolved + which path produced them. `_source`
+    // serializes as snake_case ("gliner_relex" / "none") — JSONB queries
+    // filter via WHERE payload->>'graph_seed_source' = 'gliner_relex'.
+    obj.insert(
+        "graph_seed_entity_ids".into(),
+        serde_json::json!(meta.graph_seed_entity_ids),
+    );
+    obj.insert("graph_seed_count".into(), serde_json::json!(meta.graph_seed_count));
+    obj.insert(
+        "graph_seed_source".into(),
+        serde_json::to_value(meta.graph_seed_source).expect("SeedSource serializes"),
     );
     // Signals key only appears when source is CliInferred AND we have
     // signals. Other sources (Operator / AgentRaised / Default) omit
@@ -268,6 +286,9 @@ mod tests {
             recalled_memory_ids: Vec::new(),
             recall_count: 0,
             recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+            graph_seed_entity_ids: Vec::new(),
+            graph_seed_count: 0,
+            graph_seed_source: crate::entity_extraction::SeedSource::None,
         }
     }
 
@@ -329,12 +350,14 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_pins_twenty_one_keys_for_default_source() {
+    fn build_plan_formulate_payload_pins_twenty_four_keys_for_default_source() {
         // Slice D (2026-05-17, recall-lane wiring) bumped the
         // default-source key count from 17 to 20 by adding
         // recalled_memory_ids, recall_count, recall_query_sha256.
-        // Slice E (2026-05-18, l1-promotion-writer) bumps to 21 by
+        // Slice E (2026-05-18, l1-promotion-writer) bumped to 21 by
         // adding l1_insight.
+        // Slice F (2026-05-19, entity-extraction v2) bumps to 24 by
+        // adding graph_seed_entity_ids, graph_seed_count, graph_seed_source.
         let meta = FormulationMeta {
             recalled_memory_ids: vec![100, 200],
             recall_count: 2,
@@ -356,9 +379,10 @@ mod tests {
             "system_prompt_sha256", "l0_count", "l1_count",
             "recalled_memory_ids", "recall_count", "recall_query_sha256",
             "l1_insight",
+            "graph_seed_entity_ids", "graph_seed_count", "graph_seed_source",
         ].into_iter().collect();
         assert_eq!(got, expected,
-            "default-source payload must carry exactly 21 keys; diff:\n\
+            "default-source payload must carry exactly 24 keys; diff:\n\
              missing = {:?}\nextra = {:?}",
             expected.difference(&got).collect::<Vec<_>>(),
             got.difference(&expected).collect::<Vec<_>>(),
@@ -366,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_cli_inferred_source_has_22_keys_with_signals() {
+    fn build_plan_formulate_payload_cli_inferred_source_has_25_keys_with_signals() {
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::ClinicalConfidential,
             ClassificationFloorSource::CliInferred,
@@ -374,8 +398,8 @@ mod tests {
             &make_text_plan(), &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload object");
-        assert_eq!(obj.len(), 22,
-            "cli_inferred + signals must carry 22 keys (21 default + signals); got {} keys: {:?}",
+        assert_eq!(obj.len(), 25,
+            "cli_inferred + signals must carry 25 keys (24 default + signals); got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -403,6 +427,39 @@ mod tests {
     }
 
     #[test]
+    fn build_plan_formulate_payload_graph_seed_keys_round_trip_through_meta() {
+        // Slice F (2026-05-19, entity-extraction v2): the three
+        // graph_seed_* keys must round-trip through the meta struct
+        // and serialize SeedSource as snake_case.
+        let meta = FormulationMeta {
+            graph_seed_entity_ids: vec![11, 22, 33],
+            graph_seed_count: 3,
+            graph_seed_source: crate::entity_extraction::SeedSource::GlinerRelex,
+            ..make_default_meta()
+        };
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public, ClassificationFloorSource::Default,
+            &[], &make_text_plan(), &meta,
+        );
+        assert_eq!(payload["graph_seed_entity_ids"], serde_json::json!([11, 22, 33]));
+        assert_eq!(payload["graph_seed_count"], 3u64);
+        assert_eq!(payload["graph_seed_source"], serde_json::json!("gliner_relex"));
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_graph_seed_source_serializes_none_as_snake_case() {
+        // Default meta has SeedSource::None — must serialize as "none",
+        // matching the snake_case rename_all on the enum.
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public, ClassificationFloorSource::Default,
+            &[], &make_text_plan(), &make_default_meta(),
+        );
+        assert_eq!(payload["graph_seed_source"], serde_json::json!("none"));
+        assert_eq!(payload["graph_seed_entity_ids"], serde_json::json!([] as [i64; 0]));
+        assert_eq!(payload["graph_seed_count"], 0u64);
+    }
+
+    #[test]
     fn build_plan_formulate_payload_recall_query_sha256_is_64_hex_chars_in_empty_default() {
         // When recall degraded (or returned no rows), the sha256 of the
         // empty string still satisfies the 64-hex-char contract.
@@ -424,7 +481,7 @@ mod tests {
             &[], &make_text_plan(), &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 21);
+        assert_eq!(obj.len(), 24);
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
         assert!(obj.get("classification_floor_signals").is_none(),
             "signals key must be ABSENT when source is not cli_inferred");
@@ -446,8 +503,8 @@ mod tests {
             &plan, &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 21,
-            "agent_raised should have 21 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj.len(), 24,
+            "agent_raised should have 24 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
         assert!(obj.get("classification_floor_signals").is_none());
     }

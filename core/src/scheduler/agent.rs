@@ -74,6 +74,16 @@ pub struct FormulationMeta {
     /// observation phase detect when paraphrased prompts produce the
     /// same recalled-id set vs. genuine drift.
     pub recall_query_sha256: String,
+    /// Slice F (entity-extraction v2, 2026-05-19): the entity ids the
+    /// gliner-relex extractor (or NoOp) resolved for this query.
+    /// Empty when extraction degraded or no entities matched.
+    pub graph_seed_entity_ids: Vec<i64>,
+    /// `graph_seed_entity_ids.len() as u32`. Cheap-to-query duplicate
+    /// for observation-phase SQL.
+    pub graph_seed_count: u32,
+    /// Which extraction path produced the seeds. v2 production is
+    /// always `SeedSource::GlinerRelex` or `SeedSource::None`.
+    pub graph_seed_source: crate::entity_extraction::SeedSource,
 }
 
 /// Production adapter: calls the real `Router::send`.
@@ -187,6 +197,11 @@ impl PlanFormulator for RouterAgent {
             recalled_memory_ids: recalled.ids,
             recall_count,
             recall_query_sha256: recalled.query_sha256,
+            // Slice F (entity-extraction v2, 2026-05-19): defaults
+            // here; Task 14 wires the real extractor output in.
+            graph_seed_entity_ids: Vec::new(),
+            graph_seed_count: 0,
+            graph_seed_source: crate::entity_extraction::SeedSource::None,
         };
         Ok((plan, meta))
     }
