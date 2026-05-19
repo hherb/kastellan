@@ -28,11 +28,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeedSource {
-    /// gliner-relex worker returned a non-empty entity list and the
-    /// upsert resolved at least one id.
+    /// At least one gliner-relex chunk dispatched and decoded
+    /// successfully. The `EntitySeeds::ids` vector may still be empty —
+    /// when the model recognised nothing in the input, the extractor
+    /// returns `GlinerRelex` + empty ids rather than `None`. This is
+    /// load-bearing for observation-phase SQL:
+    ///   * `graph_seed_source='gliner_relex' AND graph_seed_count=0`
+    ///     → the model ran and produced zero entities (interesting:
+    ///     either low-signal input or a model-recall regression).
+    ///   * `graph_seed_source='none'`
+    ///     → the extractor never produced usable output (worker absent,
+    ///     all chunks failed, DB error, NoOp).
     GlinerRelex,
-    /// Extractor degraded (worker absent / chunk failures / DB error)
-    /// or returned zero entities. Graph lane proceeds with seeds=[].
+    /// Extractor degraded (worker absent / every chunk failed / DB
+    /// error) or wasn't configured. Graph lane proceeds with seeds=[].
     None,
 }
 

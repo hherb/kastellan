@@ -141,6 +141,16 @@ async fn main() -> Result<()> {
         hhagent_core::worker_lifecycle::CompositeLifecycle::new(sandbox.clone()),
     );
 
+    // Resolve gliner-relex once. The resolver emits its own
+    // info!/error! line on each skip-reason; calling it twice (as an
+    // earlier wiring did) would double up that signal in the operator
+    // log. The `Option<ToolEntry>` flows into BOTH the registry insert
+    // (so `PlannedStep`-routed callers can reach the same warm slot)
+    // and the extractor construction (so `RouterAgent::formulate_plan`
+    // gets a real extractor). `ToolEntry` is `Clone`; the duplication
+    // is intentional and load-bearing per the v2 design spec.
+    let gliner_relex_entry = build_gliner_relex_entry();
+
     // Tool registry: each tool the scheduler may dispatch is opted in
     // here. The registry is the host-side allowlist of *which* tools
     // exist (separate from the per-tool argv allowlist, which lives
@@ -153,22 +163,18 @@ async fn main() -> Result<()> {
     // to use it, and the inner loop replans accordingly. This is the
     // same deny-by-default posture used in the egress proxy plan
     // (Phase 3).
-    let tool_registry = Arc::new(build_tool_registry(&pool).await?);
+    let tool_registry = Arc::new(build_tool_registry(&pool, gliner_relex_entry.clone()).await?);
 
     // Entity extractor (v2). When gliner-relex is configured, builds a
     // typed Client over the shared lifecycle Arc + worker manifest and
     // returns GlinerRelexExtractor. When the worker isn't configured
     // (HHAGENT_GLINER_RELEX_ENABLE=0 or preconditions failed), falls
     // back to NoOpEntityExtractor — daemon stays up; graph lane stays
-    // empty; the WARN is the only operator signal.
-    //
-    // `build_gliner_relex_entry` is a pure env resolver (returns a
-    // fresh `ToolEntry` each call), so calling it here in addition to
-    // inside `build_tool_registry` is safe — both call sites get
-    // equivalent entries that route to the same warm slot via
-    // `CompositeLifecycle`'s tool-name keyed dispatch.
+    // empty. The skip-reason log was already emitted by
+    // `build_gliner_relex_entry` above; this branch only logs the
+    // post-resolution wiring outcome.
     let entity_extractor: Arc<dyn hhagent_core::entity_extraction::EntityExtractor> =
-        match build_gliner_relex_entry() {
+        match gliner_relex_entry {
             Some(entry) => {
                 tracing::info!(
                     target: "hhagent::main",
@@ -187,6 +193,11 @@ async fn main() -> Result<()> {
                 )
             }
             None => {
+                // WARN level per the v2 design spec's failure-mode
+                // matrix ("HHAGENT_GLINER_RELEX_ENABLE=0 (default) or
+                // weights missing | Daemon starts; one WARN line at
+                // startup"). The resolver's own info!/error! line was
+                // already emitted; this is the wiring-outcome breadcrumb.
                 tracing::warn!(
                     target: "hhagent::main",
                     "gliner-relex not configured; using NoOpEntityExtractor (graph lane disabled)",
@@ -372,6 +383,7 @@ async fn wait_for_shutdown() -> Result<()> {
 /// WARN is logged and bring-up continues).
 async fn build_tool_registry(
     pool: &sqlx::PgPool,
+    gliner_relex_entry: Option<hhagent_core::scheduler::tool_dispatch::ToolEntry>,
 ) -> anyhow::Result<hhagent_core::scheduler::ToolRegistry> {
     use anyhow::Context as _;
     let mut reg = hhagent_core::scheduler::ToolRegistry::new();
@@ -415,10 +427,13 @@ async fn build_tool_registry(
     }
 
     // gliner-relex (opt-in: env-gated). Skip-register by default so
-    // existing deployments are byte-equivalent to pre-slice main.
-    if let Some(entry) = build_gliner_relex_entry() {
+    // existing deployments are byte-equivalent to pre-slice main. The
+    // entry is resolved once at `main()` startup and threaded in via
+    // the parameter so the skip-reason log line fires exactly once per
+    // bring-up.
+    if let Some(entry) = gliner_relex_entry {
         info!(
-            tool = "gliner-relex",
+            tool = hhagent_core::workers::gliner_relex::Client::TOOL_NAME,
             binary = %entry.binary.display(),
             "registering tool"
         );
@@ -428,12 +443,12 @@ async fn build_tool_registry(
         // the audit-row schema stays uniform; populate them with the
         // empty-list canonical form.
         loaded.push(LoadedToolRecord {
-            name: "gliner-relex".to_string(),
+            name: hhagent_core::workers::gliner_relex::Client::TOOL_NAME.to_string(),
             binary: entry.binary.display().to_string(),
             allowlist_len: 0,
             allowlist_sha256: sha256_argv0_list(&[]),
         });
-        reg.insert("gliner-relex", entry);
+        reg.insert(hhagent_core::workers::gliner_relex::Client::TOOL_NAME, entry);
     }
 
     // Best-effort audit row: a transient DB failure here must not

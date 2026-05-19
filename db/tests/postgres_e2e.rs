@@ -2180,7 +2180,9 @@ async fn kind_delete_sets_default_to_undefined() {
     .expect("probe");
 
     // Admin pool: OS user / cluster superuser (no SET ROLE). Needed
-    // because the runtime role lacks INSERT/DELETE on entity_kinds.
+    // because the runtime role's write privileges on `entity_kinds`
+    // were revoked in migration 0016 — operator-only writes by design.
+    // See the dedicated permission-denied test below.
     let admin = sqlx::postgres::PgPool::connect_with(cluster.conn_spec.to_pg_connect_options())
         .await
         .expect("admin pool");
@@ -2258,6 +2260,83 @@ async fn entities_kind_fk_blocks_unknown_kind() {
     assert!(
         err.contains("entities_kind_fk") || err.to_lowercase().contains("foreign key"),
         "FK error expected; got: {err}"
+    );
+
+    pool.close().await;
+}
+
+/// Migration 0016: the runtime role must NOT be able to write to
+/// `entity_kinds` — adding a kind is an operator-deliberate act, not
+/// something the agent / extractor / any runtime path should be allowed
+/// to do silently. 0002's `ALTER DEFAULT PRIVILEGES` would otherwise
+/// hand the runtime role full CRUD on every new table; 0016 REVOKEs
+/// INSERT/UPDATE/DELETE/TRUNCATE on `entity_kinds` to restore the
+/// "operator-only writes" invariant 0015's comment claimed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entity_kinds_writes_denied_to_runtime_role() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m16-d",
+        "m16-l",
+        &format!("hhagent-pg-m16-revoke-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0016-revoke-entity-kinds-writes"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // SELECT must still work (extractor's KindsCache depends on it).
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity_kinds")
+        .fetch_one(&pool)
+        .await
+        .expect("runtime SELECT on entity_kinds must succeed");
+    assert!(n >= 20, "0015 seeds at least 20 kinds; got {n}");
+
+    // INSERT must be rejected with permission denied.
+    let r = sqlx::query("INSERT INTO entity_kinds (kind) VALUES ('runtime_should_not_insert')")
+        .execute(&pool)
+        .await;
+    let err = format!("{:?}", r.expect_err("runtime INSERT must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied; got: {err}",
+    );
+
+    // UPDATE must also be rejected.
+    let r = sqlx::query("UPDATE entity_kinds SET description = 'tampered' WHERE kind = 'person'")
+        .execute(&pool)
+        .await;
+    let err = format!("{:?}", r.expect_err("runtime UPDATE must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied; got: {err}",
+    );
+
+    // DELETE must also be rejected.
+    let r = sqlx::query("DELETE FROM entity_kinds WHERE kind = 'person'")
+        .execute(&pool)
+        .await;
+    let err = format!("{:?}", r.expect_err("runtime DELETE must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied; got: {err}",
     );
 
     pool.close().await;
