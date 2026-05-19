@@ -6,7 +6,7 @@
 
 **Last updated:** 2026-05-20 (Operator quarantine-review CLI — branch `feat/entities-quarantine-review`, 10 implementation commits + 2 docs commits, **workspace 848 → 880 (+32)** with 0 failures / 0 warnings / 0 [SKIP]).
 
-**Last commit on `feat/entities-quarantine-review`:** `7dbd4dc` (`test(memory_recall_e2e): graph lane lights up after operator approve + Task 8 fix`).
+**Last commit on `feat/entities-quarantine-review`:** `e87243e` (`docs(handover,roadmap): operator quarantine-review CLI — session-end sync`).
 
 **Session-end verification:** **Rust workspace: 880 passed / 0 failed / 4 ignored / 0 warnings on Linux, 0 [SKIP] lines** (`cargo test --workspace` on the DGX, branch `feat/entities-quarantine-review`).
 
