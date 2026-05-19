@@ -22,6 +22,16 @@
 //! and the daemon refuses to start. Silently coming up with a stale
 //! or partial L0 set is more dangerous than not coming up at all.
 //!
+//! ## Side effect: entity auto-link
+//!
+//! Every newly-written L0 row is passed to
+//! [`crate::memory::entity_link::link_memory_entities`] in
+//! degrade-and-warn posture (a link failure leaves the memory row
+//! intact). The cumulative outcome lands in [`L0SeedReport`]'s
+//! `entities_linked` / `link_failures` fields; the per-row attempt
+//! emits a `memory_linker/entity_link` audit row. Rows that are
+//! sha256-idempotency-skipped are NOT re-extracted on each seed pass.
+//!
 //! ## What this module does NOT do
 //!
 //! - No embeddings on L0 rows (they're pinned into every prompt; no
@@ -364,7 +374,7 @@ pub async fn seed_l0_from_rules(
         // quarantine-review CLI's "relink unlinked memories"
         // subcommand.
         match crate::memory::entity_link::link_memory_entities(
-            extractor, pool, memory_id, "L0", &rule.body,
+            pool, extractor, memory_id, "L0", &rule.body,
         )
         .await
         {
@@ -373,8 +383,8 @@ pub async fn seed_l0_from_rules(
             }
             Err(e) => {
                 tracing::warn!(
-                    error = %e, memory_id, l0_rule_id = %rule.id,
-                    "L0 auto-linker degraded; memory survives unlinked"
+                    error = %e, memory_id, layer = "L0", l0_rule_id = %rule.id,
+                    "auto-linker degraded; memory survives unlinked"
                 );
                 report.link_failures += 1;
             }

@@ -202,6 +202,8 @@ async fn main() -> Result<()> {
             rules = report.rules_loaded,
             new = report.new_rows_written,
             unchanged = report.unchanged_skipped,
+            entities_linked = report.entities_linked,
+            link_failures = report.link_failures,
             "L0 seed loader completed"
         );
     } else {
@@ -596,6 +598,8 @@ async fn write_l0_seeded_row(
         "unchanged_skipped": report.unchanged_skipped,
         "source_path": report.source_path.to_string_lossy(),
         "source_sha256": report.source_sha256,
+        "entities_linked": report.entities_linked,
+        "link_failures": report.link_failures,
     });
     hhagent_db::audit::insert(
         pool,

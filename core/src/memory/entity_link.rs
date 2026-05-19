@@ -54,9 +54,19 @@ pub enum LinkError {
 /// `LinkError::Db` MUST NOT be treated as a memory-write failure
 /// by the caller — the memory row is already committed. Production
 /// callers log the error at WARN, increment a degrade counter, and
-/// continue. The audit row is written EVEN on failure (with
-/// `n_entities_linked = 0` and `seed_source = "none"`) so the
-/// observation phase sees every link attempt.
+/// continue. The audit row is written EVEN on failure so the
+/// observation phase sees every link attempt; the shape varies by
+/// failure mode:
+///
+/// * **Extract failed** — `n_seeds = 0`, `seed_source = "none"`,
+///   `n_entities_linked = 0`. The extractor never produced output.
+/// * **Extract OK, DB link failed** — `n_seeds > 0`, `seed_source =
+///   <real source>`, `n_entities_linked = 0`. Distinguishable from
+///   the extract-failure case by `(n_seeds > 0 AND n_entities_linked
+///   = 0)`; surfaces the post-extract DB hiccup.
+/// * **Success** — `n_entities_linked` is the post-`ON CONFLICT DO
+///   NOTHING` row count; may be smaller than `n_seeds` on idempotent
+///   re-runs.
 ///
 /// `layer_label` is a stringly-typed identifier of the calling layer
 /// (`"L0"`, `"L1"`, future `"L2"`/`"L3"`/`"L4"`). It goes straight into
@@ -67,72 +77,106 @@ pub enum LinkError {
 /// case is a path optimisation (empty `seeds.ids` short-circuits at the
 /// fast-path in `link_memory_to_entities`) rather than a branch.
 pub async fn link_memory_entities(
-    extractor: &dyn EntityExtractor,
     pool: &PgPool,
+    extractor: &dyn EntityExtractor,
     memory_id: i64,
     layer_label: &'static str,
     body: &str,
 ) -> Result<LinkOutcome, LinkError> {
-    let extract_result = extractor.extract(body).await;
-
-    let (seeds, n_linked) = match extract_result {
-        Ok(seeds) => {
-            // ON CONFLICT DO NOTHING in link_memory_to_entities makes
-            // this idempotent on re-runs; empty seeds short-circuit at
-            // the existing fast-path so the NoOp extractor case is
-            // essentially free (no SQL issued).
-            let n = link_memory_to_entities(pool, memory_id, &seeds.ids).await?;
-            (seeds, n)
-        }
+    let seeds = match extractor.extract(body).await {
+        Ok(s) => s,
         Err(e) => {
-            // Audit the failed attempt; the audit insert is best-effort
-            // (its own error is logged but doesn't shadow the primary
-            // extract error). We then propagate the extract error so
-            // the caller's `Err` arm runs (warn-log + degrade-counter).
-            let payload = build_entity_link_payload(
+            // Extract-failure audit row. Observation-phase consumers
+            // see `n_seeds = 0` and `seed_source = "none"` — the
+            // canonical "the extractor never produced output" shape.
+            write_audit_row(
+                pool,
                 memory_id,
                 layer_label,
                 /* n_entities_linked */ 0,
                 /* n_seeds */ 0,
                 SeedSource::None,
                 None,
-            );
-            if let Err(audit_err) = audit::insert(
-                pool,
-                "memory_linker",
-                "entity_link",
-                payload,
             )
-            .await
-            {
-                tracing::warn!(
-                    error = %audit_err, memory_id,
-                    "memory_linker degraded-path audit row failed"
-                );
-            }
+            .await;
+            return Err(LinkError::from(e));
+        }
+    };
+
+    // ON CONFLICT DO NOTHING in link_memory_to_entities makes this
+    // idempotent on re-runs; empty seeds short-circuit at the existing
+    // fast-path so the NoOp extractor case is essentially free (no SQL
+    // issued).
+    let n_linked = match link_memory_to_entities(pool, memory_id, &seeds.ids).await {
+        Ok(n) => n,
+        Err(e) => {
+            // DB-link-failure audit row. Distinct from the extract-
+            // failure shape: extract succeeded, so `n_seeds` and
+            // `seed_source` reflect the real extractor output, while
+            // `n_entities_linked = 0` flags that the link step failed
+            // after the memory row was committed. Observation-phase
+            // SQL filtering on (n_seeds > 0 AND n_entities_linked = 0)
+            // surfaces exactly this failure mode.
+            write_audit_row(
+                pool,
+                memory_id,
+                layer_label,
+                /* n_entities_linked */ 0,
+                seeds.ids.len() as u64,
+                seeds.source,
+                seeds.model_version.as_deref(),
+            )
+            .await;
             return Err(LinkError::from(e));
         }
     };
 
     // Success-path audit row.
-    let payload = build_entity_link_payload(
+    write_audit_row(
+        pool,
         memory_id,
         layer_label,
         n_linked,
         seeds.ids.len() as u64,
         seeds.source,
         seeds.model_version.as_deref(),
-    );
-    // Best-effort: an audit-insert failure here doesn't roll back the
-    // already-committed link rows. Log + continue.
-    if let Err(e) = audit::insert(pool, "memory_linker", "entity_link", payload).await {
-        tracing::warn!(error = %e, memory_id, "memory_linker audit row failed");
-    }
+    )
+    .await;
 
     Ok(LinkOutcome {
         n_entities_linked: n_linked,
         seeds,
     })
+}
+
+/// Best-effort `memory_linker/entity_link` audit-row insert. A failure
+/// here is logged at WARN but does NOT propagate — the canonical state
+/// (memory row + memory_entities rows) is already committed by the
+/// time this is called on the success path; on the failure paths the
+/// caller is about to return Err with the primary error.
+async fn write_audit_row(
+    pool: &PgPool,
+    memory_id: i64,
+    layer_label: &'static str,
+    n_entities_linked: u64,
+    n_seeds: u64,
+    seed_source: SeedSource,
+    model_version: Option<&str>,
+) {
+    let payload = build_entity_link_payload(
+        memory_id,
+        layer_label,
+        n_entities_linked,
+        n_seeds,
+        seed_source,
+        model_version,
+    );
+    if let Err(e) = audit::insert(pool, "memory_linker", "entity_link", payload).await {
+        tracing::warn!(
+            error = %e, memory_id, layer = layer_label,
+            "memory_linker audit row failed"
+        );
+    }
 }
 
 /// Pure builder: 6 keys, BTreeMap-ordered (matches the convention from

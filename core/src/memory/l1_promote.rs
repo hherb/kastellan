@@ -10,6 +10,18 @@
 //! at `layer = 1` keyed on `metadata->>'body_sha256'`, insert on
 //! miss via [`hhagent_db::memories::insert_memory_at_layer`].
 //!
+//! ## Side effect: entity auto-link
+//!
+//! On the agent-raised path (`runner::write_l1_promoted_row`), every
+//! newly-inserted L1 row is passed to
+//! [`crate::memory::entity_link::link_memory_entities`] in
+//! degrade-and-warn posture; the resulting `Option<LinkOutcome>`
+//! rides along in [`L1WriteOutcome::Inserted::link_outcome`]. The
+//! operator path (`cli_audit::l1_add_and_audit`) injects a
+//! [`crate::entity_extraction::NoOpEntityExtractor`] so operator-added
+//! rows stay un-auto-linked by design (batch-relink subcommand is the
+//! future workflow).
+//!
 //! See `docs/superpowers/specs/2026-05-17-l1-promotion-writer-design.md`
 //! for the full design.
 
@@ -67,12 +79,17 @@ pub enum L1Error {
 #[derive(Clone, Debug)]
 pub enum L1WriteOutcome {
     /// New L1 row inserted at the carried `memory_id`. `link_outcome`
-    /// is `Some(_)` on auto-link success (including the NoOp case
-    /// where seeds are empty) and `None` on auto-link error (the
-    /// memory body is committed; the link step failed and a WARN was
-    /// already logged). Operator + agent callers can both ignore the
-    /// new field — the variant widening is purely additive at the
-    /// match level via `..`.
+    /// is `Some(_)` on auto-link success — INCLUDING the NoOp
+    /// extractor case, which carries an empty
+    /// [`LinkOutcome`] (`n_entities_linked = 0`, empty seeds). It is
+    /// `None` ONLY when auto-link errored after the memory row was
+    /// committed (extract or DB failure; a WARN was already logged).
+    /// In short: `Some` means "the link step ran to completion"; the
+    /// distinction between "0 entities linked because NoOp" and "link
+    /// step errored out" is the `Some` / `None` split.
+    ///
+    /// Operator + agent callers can both ignore the new field — the
+    /// variant widening is purely additive at the match level via `..`.
     Inserted {
         memory_id: i64,
         link_outcome: Option<LinkOutcome>,
@@ -242,15 +259,15 @@ pub async fn promote_l1(
     // Auto-link entities. Same degrade-and-warn posture as L0:
     // a failure here leaves the L1 row unlinked but otherwise intact.
     let link_outcome = match link_memory_entities(
-        extractor, pool, new_id, "L1", trimmed,
+        pool, extractor, new_id, "L1", trimmed,
     )
     .await
     {
         Ok(outcome) => Some(outcome),
         Err(e) => {
             tracing::warn!(
-                error = %e, memory_id = new_id,
-                "L1 auto-linker degraded; memory survives unlinked"
+                error = %e, memory_id = new_id, layer = "L1",
+                "auto-linker degraded; memory survives unlinked"
             );
             None
         }

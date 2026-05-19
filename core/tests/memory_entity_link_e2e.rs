@@ -116,8 +116,8 @@ fn link_inserts_memory_entities_rows_and_writes_audit_row() {
 
         let extractor = StaticEntityExtractor::with_ids(vec![e1, e2, e3]);
         let outcome = link_memory_entities(
-            &extractor,
             &pool,
+            &extractor,
             memory_id,
             "L0",
             "alice took ibuprofen for her headache",
@@ -198,8 +198,8 @@ fn link_with_noop_extractor_writes_no_rows_but_writes_audit_row() {
 
         let extractor = NoOpEntityExtractor::new();
         let outcome = link_memory_entities(
-            &extractor,
             &pool,
+            &extractor,
             memory_id,
             "L0",
             "the body that no extractor will inspect",
@@ -265,13 +265,13 @@ fn link_is_idempotent_on_rerun_with_same_seeds() {
         let extractor = StaticEntityExtractor::with_ids(vec![e1, e2]);
 
         // First call: 2 fresh links.
-        let out1 = link_memory_entities(&extractor, &pool, memory_id, "L0", "bob took aspirin")
+        let out1 = link_memory_entities(&pool, &extractor, memory_id, "L0", "bob took aspirin")
             .await
             .expect("first link");
         assert_eq!(out1.n_entities_linked, 2);
 
         // Second call: 0 new links (ON CONFLICT DO NOTHING).
-        let out2 = link_memory_entities(&extractor, &pool, memory_id, "L0", "bob took aspirin")
+        let out2 = link_memory_entities(&pool, &extractor, memory_id, "L0", "bob took aspirin")
             .await
             .expect("second link");
         assert_eq!(out2.n_entities_linked, 0);
@@ -299,6 +299,95 @@ fn link_is_idempotent_on_rerun_with_same_seeds() {
         // Second row records the 0-link outcome.
         assert_eq!(link_rows[1].payload["n_entities_linked"], 0u64);
         assert_eq!(link_rows[1].payload["n_seeds"], 2u64);
+
+        pool.close().await;
+    });
+}
+
+/// Regression pin for the audit-row-on-DB-failure invariant. Forcing
+/// `link_memory_to_entities` to fail with a FK violation (unknown
+/// entity_id) must STILL produce a `memory_linker/entity_link` audit
+/// row carrying the real seeds source + `n_seeds > 0` + the failure
+/// flag `n_entities_linked = 0`. Without this row, observation-phase
+/// SQL would be blind to the post-extract DB-link failure mode.
+#[test]
+fn link_db_failure_still_writes_audit_row_with_seed_info() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+
+    rt().block_on(async {
+        let Some((_cluster, pool)) = bring_up_pg("dberr").await else {
+            return;
+        };
+
+        let memory_id = seed_meta_memory(
+            &pool,
+            "body whose entities live nowhere",
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .expect("seed_meta_memory");
+
+        let rows_before = fetch_since(&pool, 0, FETCH_LIMIT)
+            .await
+            .expect("fetch_since before")
+            .len();
+
+        // A bogus entity id that cannot exist in the entities table —
+        // forces the FK constraint in memory_entities to reject the
+        // INSERT batch, surfacing as DbError::Query.
+        let bogus_entity_id: i64 = i64::MAX;
+        let extractor = StaticEntityExtractor::with_ids(vec![bogus_entity_id]);
+
+        let err = link_memory_entities(
+            &pool,
+            &extractor,
+            memory_id,
+            "L0",
+            "body whose entities live nowhere",
+        )
+        .await
+        .expect_err("FK violation must surface as Err");
+        match err {
+            hhagent_core::memory::entity_link::LinkError::Db(_) => {}
+            other => panic!("expected LinkError::Db, got {other:?}"),
+        }
+
+        // The audit row MUST still be present, distinguishable from the
+        // extract-failure shape: n_seeds = 1 (extract succeeded) and
+        // n_entities_linked = 0 (DB link failed).
+        let rows_after = fetch_since(&pool, 0, FETCH_LIMIT)
+            .await
+            .expect("fetch_since after");
+        assert_eq!(
+            rows_after.len(),
+            rows_before + 1,
+            "audit row must be written even on DB-link failure",
+        );
+        let link_row = rows_after
+            .iter()
+            .find(|r| r.actor == "memory_linker" && r.action == "entity_link")
+            .expect("memory_linker/entity_link audit row present");
+        assert_eq!(link_row.payload["memory_id"], memory_id);
+        assert_eq!(link_row.payload["layer"], "L0");
+        assert_eq!(link_row.payload["n_entities_linked"], 0u64);
+        assert_eq!(link_row.payload["n_seeds"], 1u64);
+        assert_eq!(link_row.payload["seed_source"], "gliner_relex");
+
+        // Observation-phase consumers distinguish "extract failed" from
+        // "extract OK + DB link failed" by exactly the n_seeds > 0
+        // disjunct. Pin both sides here so a future refactor that
+        // accidentally collapses the two paths trips the assertion.
+        let n_seeds = link_row.payload["n_seeds"].as_u64().expect("u64");
+        let n_linked = link_row.payload["n_entities_linked"]
+            .as_u64()
+            .expect("u64");
+        assert!(
+            n_seeds > 0 && n_linked == 0,
+            "DB-link-failure audit shape must be (n_seeds > 0, n_entities_linked = 0)",
+        );
 
         pool.close().await;
     });
@@ -426,7 +515,7 @@ fn link_against_real_extractor_writes_real_entity_ids() {
         .await
         .expect("seed");
 
-        let outcome = link_memory_entities(&*extractor, &pool, memory_id, "L0", body)
+        let outcome = link_memory_entities(&pool, &*extractor, memory_id, "L0", body)
             .await
             .expect("real-model link should succeed");
 
@@ -503,10 +592,10 @@ fn link_extends_to_l0_seed_path_end_to_end() {
         .await
         .expect("seed2");
 
-        let o1 = link_memory_entities(&*extractor, &pool, mem1, "L0", rule1)
+        let o1 = link_memory_entities(&pool, &*extractor, mem1, "L0", rule1)
             .await
             .expect("link1");
-        let o2 = link_memory_entities(&*extractor, &pool, mem2, "L0", rule2)
+        let o2 = link_memory_entities(&pool, &*extractor, mem2, "L0", rule2)
             .await
             .expect("link2");
 
