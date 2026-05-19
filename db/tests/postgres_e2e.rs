@@ -1061,7 +1061,7 @@ async fn memory_entities_link_round_trip_and_idempotency() {
         .await
         .expect("upsert e2");
     let e3 = graph
-        .upsert_entity("animal", "cat", &serde_json::json!({}))
+        .upsert_entity("object", "cat", &serde_json::json!({}))
         .await
         .expect("upsert e3");
 
@@ -1948,6 +1948,827 @@ async fn delete_memory_at_layer_rejects_wrong_layer() {
         "L2 row must survive the wrong-layer guard; fetch_by_ids must return it"
     );
     assert_eq!(rows[0].id, id);
+
+    pool.close().await;
+}
+
+// ─── Migration 0015: entity_kinds + quarantine + name_norm ────────────
+//
+// These five tests pin the shape introduced by
+// `0015_entity_kinds_and_quarantine.sql`:
+//
+//   1. Schema check (`migration_0015_seeds_entity_kinds_and_adds_quarantine`):
+//      20 seed kinds, `undefined` present, `quarantine` DEFAULT TRUE,
+//      `name_norm` NOT NULL, FK `entities_kind_fk` exists, unique index
+//      `entities_kind_name_norm_idx` exists.
+//   2. Dedup behaviour (`entities_upsert_dedup_by_name_norm`):
+//      two inserts with the same `name_norm` dedup to one row; the
+//      first writer's display `name` is preserved.
+//   3. FK fallback (`kind_delete_sets_default_to_undefined`):
+//      deleting a kind reparents existing entities to `undefined`
+//      (ON DELETE SET DEFAULT path).
+//   4. FK guard (`entities_kind_fk_blocks_unknown_kind`):
+//      INSERT with an unknown kind is rejected by the FK.
+//   5. Cascade vs. quarantine (`relation_persists_when_endpoints_quarantined`):
+//      relations between quarantined entities persist; deleting an
+//      endpoint still cascades the edge (0001's ON DELETE CASCADE).
+//
+// All five share the existing cluster-bring-up pattern
+// (`skip_if_no_supervisor` + `pg_bin_dir_or_skip` + `bring_up_pg_cluster`).
+// "Runtime pool" = `pool::connect_runtime_pool`; "admin pool" = a fresh
+// `PgPool::connect_with(cluster.conn_spec.to_pg_connect_options())`
+// (i.e. the OS user = cluster superuser, no SET ROLE) used for
+// operations that require privileges the runtime role doesn't have
+// (deleting from `entity_kinds`, deleting entities owned by other
+// roles, etc.).
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_0015_seeds_entity_kinds_and_adds_quarantine() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m15-d",
+        "m15-l",
+        &format!("hhagent-pg-m15-shape-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0015-shape"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // entity_kinds present + 20 seed rows.
+    let n_kinds: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity_kinds")
+        .fetch_one(&pool)
+        .await
+        .expect("count entity_kinds");
+    assert_eq!(n_kinds, 20, "migration seeds 20 default kinds");
+
+    // 'undefined' specifically present (FK fallback target).
+    let n_undefined: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM entity_kinds WHERE kind = 'undefined'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count undefined");
+    assert_eq!(n_undefined, 1, "'undefined' kind must exist for FK fallback");
+
+    // entities.quarantine column present with DEFAULT TRUE.
+    let col_default: String = sqlx::query_scalar(
+        "SELECT column_default FROM information_schema.columns \
+         WHERE table_name='entities' AND column_name='quarantine'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("query quarantine default");
+    assert!(
+        col_default.starts_with("true"),
+        "quarantine DEFAULT TRUE; got {col_default}"
+    );
+
+    // entities.name_norm column present, NOT NULL.
+    let nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable FROM information_schema.columns \
+         WHERE table_name='entities' AND column_name='name_norm'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("query name_norm nullable");
+    assert_eq!(nullable, "NO", "name_norm must be NOT NULL");
+
+    // FK from entities.kind exists.
+    let n_fks: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.table_constraints \
+         WHERE table_name='entities' AND constraint_name='entities_kind_fk' \
+           AND constraint_type='FOREIGN KEY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("query fk");
+    assert_eq!(n_fks, 1, "entities_kind_fk must exist");
+
+    // Unique index on (kind, name_norm) exists.
+    let n_uniq: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_indexes \
+         WHERE tablename='entities' AND indexname='entities_kind_name_norm_idx'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("query unique idx");
+    assert_eq!(n_uniq, 1, "entities_kind_name_norm_idx must exist");
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_upsert_dedup_by_name_norm() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m15-d",
+        "m15-l",
+        &format!("hhagent-pg-m15-dedup-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0015-dedup"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // Insert "Dr Smith"; second insert with "DR SMITH" (different
+    // display, same name_norm) must hit ON CONFLICT and NOT create
+    // a second row. Display form (`name`) preserves the FIRST insert.
+    let id1: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'Dr Smith', 'dr smith', TRUE) \
+         ON CONFLICT (kind, name_norm) DO NOTHING \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("first insert");
+
+    let id2_opt: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'DR SMITH', 'dr smith', TRUE) \
+         ON CONFLICT (kind, name_norm) DO NOTHING \
+         RETURNING id",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("second insert");
+    assert!(
+        id2_opt.is_none(),
+        "second insert with same name_norm must conflict"
+    );
+
+    // Existing row's display name still 'Dr Smith' (first writer wins).
+    let display: String = sqlx::query_scalar("SELECT name FROM entities WHERE id = $1")
+        .bind(id1)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch display");
+    assert_eq!(display, "Dr Smith", "first writer's display preserved");
+
+    // Final row count = 1 (defends against a future regression that
+    // silently relaxed the unique constraint).
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM entities WHERE kind='person' AND name_norm='dr smith'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    assert_eq!(n, 1, "exactly one row for (person, 'dr smith')");
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kind_delete_sets_default_to_undefined() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m15-d",
+        "m15-l",
+        &format!("hhagent-pg-m15-fkdef-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0015-fk-default"}),
+    )
+    .await
+    .expect("probe");
+
+    // Admin pool: OS user / cluster superuser (no SET ROLE). Needed
+    // because the runtime role's write privileges on `entity_kinds`
+    // were revoked in migration 0016 — operator-only writes by design.
+    // See the dedicated permission-denied test below.
+    let admin = sqlx::postgres::PgPool::connect_with(cluster.conn_spec.to_pg_connect_options())
+        .await
+        .expect("admin pool");
+
+    // Seed a custom kind + an entity of that kind.
+    sqlx::query("INSERT INTO entity_kinds (kind) VALUES ('test_temp_kind')")
+        .execute(&admin)
+        .await
+        .expect("insert temp kind");
+    let ent_id: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('test_temp_kind', 'X', 'x', TRUE) RETURNING id",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("insert entity");
+
+    // Delete the kind (FK ON DELETE SET DEFAULT → 'undefined').
+    sqlx::query("DELETE FROM entity_kinds WHERE kind = 'test_temp_kind'")
+        .execute(&admin)
+        .await
+        .expect("delete kind");
+
+    let reparented: String = sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
+        .bind(ent_id)
+        .fetch_one(&admin)
+        .await
+        .expect("fetch reparented");
+    assert_eq!(
+        reparented, "undefined",
+        "FK ON DELETE SET DEFAULT must reparent"
+    );
+
+    admin.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_kind_fk_blocks_unknown_kind() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m15-d",
+        "m15-l",
+        &format!("hhagent-pg-m15-fkblk-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0015-fk-block"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let r = sqlx::query(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('this_kind_does_not_exist', 'X', 'x', TRUE)",
+    )
+    .execute(&pool)
+    .await;
+    assert!(r.is_err(), "insert of unknown kind must fail FK constraint");
+    let err = format!("{:?}", r.unwrap_err());
+    assert!(
+        err.contains("entities_kind_fk") || err.to_lowercase().contains("foreign key"),
+        "FK error expected; got: {err}"
+    );
+
+    pool.close().await;
+}
+
+/// Migration 0016: the runtime role must NOT be able to write to
+/// `entity_kinds` — adding a kind is an operator-deliberate act, not
+/// something the agent / extractor / any runtime path should be allowed
+/// to do silently. 0002's `ALTER DEFAULT PRIVILEGES` would otherwise
+/// hand the runtime role full CRUD on every new table; 0016 REVOKEs
+/// INSERT/UPDATE/DELETE/TRUNCATE on `entity_kinds` to restore the
+/// "operator-only writes" invariant 0015's comment claimed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entity_kinds_writes_denied_to_runtime_role() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m16-d",
+        "m16-l",
+        &format!("hhagent-pg-m16-revoke-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0016-revoke-entity-kinds-writes"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // SELECT must still work (extractor's KindsCache depends on it).
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity_kinds")
+        .fetch_one(&pool)
+        .await
+        .expect("runtime SELECT on entity_kinds must succeed");
+    assert!(n >= 20, "0015 seeds at least 20 kinds; got {n}");
+
+    // INSERT must be rejected with permission denied.
+    let r = sqlx::query("INSERT INTO entity_kinds (kind) VALUES ('runtime_should_not_insert')")
+        .execute(&pool)
+        .await;
+    let err = format!("{:?}", r.expect_err("runtime INSERT must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied; got: {err}",
+    );
+
+    // UPDATE must also be rejected.
+    let r = sqlx::query("UPDATE entity_kinds SET description = 'tampered' WHERE kind = 'person'")
+        .execute(&pool)
+        .await;
+    let err = format!("{:?}", r.expect_err("runtime UPDATE must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied; got: {err}",
+    );
+
+    // DELETE must also be rejected.
+    let r = sqlx::query("DELETE FROM entity_kinds WHERE kind = 'person'")
+        .execute(&pool)
+        .await;
+    let err = format!("{:?}", r.expect_err("runtime DELETE must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied; got: {err}",
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_persists_when_endpoints_quarantined() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m15-d",
+        "m15-l",
+        &format!("hhagent-pg-m15-relq-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0015-relation-quarantine"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // Two quarantined entities + a relation between them.
+    let head: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'Alpha', 'alpha', TRUE) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("head");
+    let tail: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('disease', 'Beta', 'beta', TRUE) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("tail");
+    let _rel: i64 = sqlx::query_scalar(
+        "INSERT INTO relations (src_id, dst_id, kind) VALUES ($1, $2, 'treats') RETURNING id",
+    )
+    .bind(head)
+    .bind(tail)
+    .fetch_one(&pool)
+    .await
+    .expect("relation");
+
+    // Relation row exists.
+    let n_rels: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM relations WHERE src_id=$1 AND dst_id=$2 AND kind='treats'",
+    )
+    .bind(head)
+    .bind(tail)
+    .fetch_one(&pool)
+    .await
+    .expect("count rel");
+    assert_eq!(
+        n_rels, 1,
+        "relation between quarantined endpoints must persist"
+    );
+
+    // Deleting one endpoint cascades the relation. Use the admin pool
+    // because the head row was inserted by the runtime role under the
+    // shared cluster; either pool can DELETE here, but the admin pool
+    // mirrors the plan's "operator-driven" framing.
+    let admin = sqlx::postgres::PgPool::connect_with(cluster.conn_spec.to_pg_connect_options())
+        .await
+        .expect("admin pool");
+    sqlx::query("DELETE FROM entities WHERE id = $1")
+        .bind(head)
+        .execute(&admin)
+        .await
+        .expect("delete head");
+
+    let n_rels_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM relations WHERE src_id=$1 AND dst_id=$2",
+    )
+    .bind(head)
+    .bind(tail)
+    .fetch_one(&pool)
+    .await
+    .expect("count rel after");
+    assert_eq!(n_rels_after, 0, "relation must cascade-delete with endpoint");
+
+    admin.close().await;
+    pool.close().await;
+}
+
+// ─── entity_kinds module: KindsCache + fetch_kinds ────────────────────
+//
+// Three tests pin the behaviour of the cache wrapper introduced for
+// the v2 entity extractor:
+//
+//   1. `entity_kinds_cache_returns_seeded_list`: first call to a
+//      fresh cache returns all 20 seeded kinds, including the FK
+//      fallback target (`undefined`), a representative single-word
+//      kind (`person`), and a multi-word kind (`phone number` — the
+//      space is load-bearing and easy to silently regress).
+//   2. `entity_kinds_fetch_kinds_orders_alphabetically`: the raw
+//      `fetch_kinds` helper returns rows in `ORDER BY kind`, so
+//      callers can rely on deterministic order without re-sorting.
+//   3. `entity_kinds_cache_hits_warm_does_not_re_query`: two calls in
+//      quick succession return structurally-equal Vecs. We can't
+//      observe "no SQL issued" from outside the cache, so the test
+//      pins return-stability as a proxy.
+//
+// Same cluster-bring-up pattern as the migration-0015 tests above.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entity_kinds_cache_returns_seeded_list() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ek-d",
+        "ek-l",
+        &format!("hhagent-pg-ek-seeded-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entity-kinds-cache-seeded"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let cache = hhagent_db::entity_kinds::KindsCache::new();
+    let kinds = cache.list_kinds(&pool).await.expect("list_kinds");
+
+    assert_eq!(
+        kinds.len(),
+        20,
+        "migration 0015 seeds exactly 20 kinds; got {} ({:?})",
+        kinds.len(),
+        kinds
+    );
+    assert!(
+        kinds.iter().any(|k| k == "undefined"),
+        "'undefined' must be present (FK fallback target); got {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| k == "person"),
+        "'person' must be present; got {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| k == "phone number"),
+        "'phone number' (with space) must be present; got {kinds:?}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entity_kinds_fetch_kinds_orders_alphabetically() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ek-d",
+        "ek-l",
+        &format!("hhagent-pg-ek-order-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entity-kinds-fetch-order"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let kinds = hhagent_db::entity_kinds::fetch_kinds(&pool)
+        .await
+        .expect("fetch_kinds");
+
+    let mut sorted = kinds.clone();
+    sorted.sort();
+    assert_eq!(
+        kinds, sorted,
+        "fetch_kinds must return rows in ORDER BY kind; got {kinds:?}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entity_kinds_cache_hits_warm_does_not_re_query() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ek-d",
+        "ek-l",
+        &format!("hhagent-pg-ek-warm-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entity-kinds-cache-warm"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let cache = hhagent_db::entity_kinds::KindsCache::new();
+    let first = cache.list_kinds(&pool).await.expect("list_kinds #1");
+    let second = cache.list_kinds(&pool).await.expect("list_kinds #2");
+    assert_eq!(
+        first, second,
+        "back-to-back list_kinds within TTL must return identical Vecs"
+    );
+
+    pool.close().await;
+}
+
+// ─── graph_search quarantine filter (Task 4) ─────────────────────────
+
+/// Production callers pass `include_quarantined=false`; only the
+/// promoted side of the entity table should contribute memory ids to
+/// the graph lane. A memory linked exclusively to quarantined entities
+/// must NOT surface even when its entity_id appears in the seed set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_search_excludes_quarantined_by_default() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "gsq-d",
+        "gsq-l",
+        &format!("hhagent-pg-gsq-excl-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "graph_search-excludes-quarantined"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // Two entities: one promoted (quarantine=FALSE), one quarantined.
+    // Inserted via raw SQL because `Graph::upsert_entity` doesn't
+    // expose the quarantine column (defaults TRUE, promotion is the
+    // future operator path).
+    let ent_promoted: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'Alice Promoted', 'alice promoted', FALSE) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert promoted entity");
+
+    let ent_quar: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'Bob Quarantined', 'bob quarantined', TRUE) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert quarantined entity");
+
+    // Two memories, one linked to each entity.
+    let mem_promoted = hhagent_db::memories::insert_memory(
+        &pool,
+        "memory linked to promoted entity",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert mem_promoted");
+
+    let mem_quar = hhagent_db::memories::insert_memory(
+        &pool,
+        "memory linked to quarantined entity",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert mem_quar");
+
+    hhagent_db::memories::link_memory_to_entities(&pool, mem_promoted, &[ent_promoted])
+        .await
+        .expect("link mem_promoted");
+    hhagent_db::memories::link_memory_to_entities(&pool, mem_quar, &[ent_quar])
+        .await
+        .expect("link mem_quar");
+
+    // Production call: include_quarantined=false.
+    let hits = hhagent_db::memories::graph_search(
+        &pool,
+        &[ent_promoted, ent_quar],
+        10,
+        false,
+    )
+    .await
+    .expect("graph_search");
+
+    assert_eq!(
+        hits,
+        vec![mem_promoted],
+        "graph_search with include_quarantined=false must drop memories \
+         whose only linked entities are quarantined"
+    );
+
+    pool.close().await;
+}
+
+/// The operator-review CLI path passes `include_quarantined=true` so
+/// reviewers can see what the v2 extractor staged. Confirm the flag
+/// genuinely overrides the filter, including for entities still in
+/// their default quarantined state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_search_includes_quarantined_when_flag_true() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "gsq-d",
+        "gsq-l",
+        &format!("hhagent-pg-gsq-incl-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "graph_search-includes-quarantined"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let ent_quar: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'Carol Quarantined', 'carol quarantined', TRUE) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert quarantined entity");
+
+    let mem = hhagent_db::memories::insert_memory(
+        &pool,
+        "memory linked to quarantined entity (operator path)",
+        &serde_json::json!({}),
+        None,
+    )
+    .await
+    .expect("insert mem");
+
+    hhagent_db::memories::link_memory_to_entities(&pool, mem, &[ent_quar])
+        .await
+        .expect("link mem");
+
+    // Operator path: include_quarantined=true.
+    let hits = hhagent_db::memories::graph_search(&pool, &[ent_quar], 10, true)
+        .await
+        .expect("graph_search");
+
+    assert_eq!(
+        hits,
+        vec![mem],
+        "graph_search with include_quarantined=true must surface \
+         memories linked only to quarantined entities"
+    );
 
     pool.close().await;
 }

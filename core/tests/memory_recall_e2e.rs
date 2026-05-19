@@ -35,6 +35,20 @@ use hhagent_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, text_to_embedding,
     unique_suffix,
 };
+use sqlx::PgPool;
+
+/// Migration 0015 sets `entities.quarantine` to `TRUE` by default, and
+/// `PgGraph::upsert_entity` deliberately leaves the column untouched so
+/// extractor-authored entities require operator review before they
+/// influence recall. The fixtures here are seeded directly via the graph
+/// API, so we flip the flag manually — matches the pattern used in
+/// `db/tests/postgres_e2e.rs` for the same reason.
+async fn unquarantine_all_entities(pool: &PgPool) {
+    sqlx::query("UPDATE entities SET quarantine = FALSE")
+        .execute(pool)
+        .await
+        .expect("unquarantine all entities");
+}
 
 const BODY_A: &str = "alpha bravo charlie gathered for the briefing";
 const BODY_B: &str = "delta echo foxtrot ran aground at midnight";
@@ -210,7 +224,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             .await
             .expect("upsert bob");
         let cat_id = graph_g
-            .upsert_entity("animal", "cat", &serde_json::json!({}))
+            .upsert_entity("object", "cat", &serde_json::json!({}))
             .await
             .expect("upsert cat");
         graph_g
@@ -227,6 +241,11 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
         hhagent_db::memories::link_memory_to_entities(&pool, id_c, &[bob_id])
             .await
             .expect("link id_c");
+
+        // Migration 0015 quarantines new entities by default; the recall
+        // path filters quarantined rows out, so un-quarantine the
+        // fixtures before exercising graph_search.
+        unquarantine_all_entities(&pool).await;
 
         // ─── Assertion 1: GRAPH_ONLY with seed=[alice] surfaces A first ─
         //
@@ -338,7 +357,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             .expect("upsert hub");
         for i in 0..leaf_count {
             let leaf_id = graph_g
-                .upsert_entity("thing", &format!("leaf-{i}"), &serde_json::json!({}))
+                .upsert_entity("object", &format!("leaf-{i}"), &serde_json::json!({}))
                 .await
                 .expect("upsert leaf");
             graph_g
@@ -357,6 +376,10 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
                 .await
                 .expect("link leaf memory");
         }
+
+        // Un-quarantine the freshly-inserted hub and leaf entities
+        // (migration 0015 default) before the cap-clamp assertion.
+        unquarantine_all_entities(&pool).await;
 
         let r = recall(
             &pool,

@@ -74,6 +74,16 @@ pub struct FormulationMeta {
     /// observation phase detect when paraphrased prompts produce the
     /// same recalled-id set vs. genuine drift.
     pub recall_query_sha256: String,
+    /// Slice F (entity-extraction v2, 2026-05-19): the entity ids the
+    /// gliner-relex extractor (or NoOp) resolved for this query.
+    /// Empty when extraction degraded or no entities matched.
+    pub graph_seed_entity_ids: Vec<i64>,
+    /// `graph_seed_entity_ids.len() as u32`. Cheap-to-query duplicate
+    /// for observation-phase SQL.
+    pub graph_seed_count: u32,
+    /// Which extraction path produced the seeds. v2 production is
+    /// always `SeedSource::GlinerRelex` or `SeedSource::None`.
+    pub graph_seed_source: crate::entity_extraction::SeedSource,
 }
 
 /// Production adapter: calls the real `Router::send`.
@@ -82,6 +92,7 @@ pub struct RouterAgent {
     prompts: std::sync::Arc<PromptCache>,
     prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
     recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
+    entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
 }
 
 impl RouterAgent {
@@ -90,8 +101,9 @@ impl RouterAgent {
         prompts: std::sync::Arc<PromptCache>,
         prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
         recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
+        entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
     ) -> Self {
-        Self { router, prompts, prompt_builder, recall_builder }
+        Self { router, prompts, prompt_builder, recall_builder, entity_extractor }
     }
 }
 
@@ -106,13 +118,28 @@ impl PlanFormulator for RouterAgent {
 
         let base = entry.content.clone();
 
-        // Per-iteration recall. Asymmetric posture vs the prompt
-        // assembler below: recall failure DEGRADES (we still want the
-        // model to plan with L0/L1/base even if retrieval is broken),
-        // while prompt-assembly failure is FAIL-CLOSED (a degraded
-        // safety prompt would have the agent flying blind on operator
-        // rules). See spec "Failure-mode matrix".
-        let recalled = match self.recall_builder.build(&ctx.instruction).await {
+        // Entity extraction. Degrade-and-warn on failure.
+        let seeds = match self.entity_extractor.extract(&ctx.instruction).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hhagent::scheduler::agent",
+                    error = %e,
+                    "entity extraction failed; continuing with empty seeds",
+                );
+                crate::entity_extraction::EntitySeeds::empty()
+            }
+        };
+
+        // Per-iteration recall, now seeded. Asymmetric posture vs the
+        // prompt assembler below: recall failure DEGRADES (we still want
+        // the model to plan with L0/L1/base even if retrieval is
+        // broken), while prompt-assembly failure is FAIL-CLOSED (a
+        // degraded safety prompt would have the agent flying blind on
+        // operator rules). See spec "Failure-mode matrix".
+        let recalled = match self.recall_builder
+            .build_with_seeds(&ctx.instruction, &seeds.ids).await
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
@@ -174,6 +201,11 @@ impl PlanFormulator for RouterAgent {
         // the AssembledPrompt all agree.
         let recall_count = recalled.len() as u32;
 
+        // seeds.ids needs to be moved/cloned into the struct; capture
+        // count + source first so we can read them after the move.
+        let graph_seed_count = seeds.ids.len() as u32;
+        let graph_seed_source = seeds.source;
+
         let meta = FormulationMeta {
             prompt_name: "agent_planner".into(),
             prompt_sha256: entry.sha256.clone(),
@@ -187,6 +219,9 @@ impl PlanFormulator for RouterAgent {
             recalled_memory_ids: recalled.ids,
             recall_count,
             recall_query_sha256: recalled.query_sha256,
+            graph_seed_entity_ids: seeds.ids,
+            graph_seed_count,
+            graph_seed_source,
         };
         Ok((plan, meta))
     }

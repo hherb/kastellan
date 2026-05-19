@@ -30,6 +30,8 @@ use thiserror::Error;
 pub mod agent_prompts;
 pub mod audit;
 pub mod conn;
+pub mod entity_kinds;
+pub mod entity_name;
 pub mod graph;
 pub mod memories;
 pub mod pool;
@@ -37,6 +39,8 @@ pub mod probe;
 pub mod secrets;
 pub mod tasks;
 pub mod tool_allowlists;
+
+pub use entity_name::normalize_entity_name;
 
 /// Serialise unit tests that mutate process-wide environment variables.
 ///

@@ -174,8 +174,22 @@ pub const L_RECALL_CAP_BYTES: usize = 4096;
 /// so the agent can keep both calls structurally similar.
 #[async_trait]
 pub trait RecallBuilder: Send + Sync {
-    /// Build a [`RecalledContext`] for the given query text.
-    async fn build(&self, query: &str) -> Result<RecalledContext, RecallError>;
+    /// Build a [`RecalledContext`] for the given query text + seed
+    /// entity ids. `seeds = &[]` is valid and means "no graph lane
+    /// this call" — semantic + lexical only.
+    async fn build_with_seeds(
+        &self,
+        query: &str,
+        seeds: &[i64],
+    ) -> Result<RecalledContext, RecallError>;
+
+    /// Default-impl shim. Existing call sites that don't pass seeds
+    /// still compile. Production code goes through `build_with_seeds`
+    /// via `RouterAgent::formulate_plan`; this shim is for test
+    /// fixtures and any non-formulate caller.
+    async fn build(&self, query: &str) -> Result<RecalledContext, RecallError> {
+        self.build_with_seeds(query, &[]).await
+    }
 }
 
 /// Compute the hex SHA-256 of a byte slice. Used by [`PgRecallBuilder`]

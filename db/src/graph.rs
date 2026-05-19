@@ -91,9 +91,17 @@ pub struct Relation {
 /// usable; if Phase 1 needs them, wrap with an explicit
 /// `async-trait` shim at the call site.
 pub trait Graph {
-    /// Insert-or-update by `(kind, name)`. Returns the entity's id.
+    /// Insert-or-update by `(kind, name_norm)`. Returns the entity's id.
     /// `attrs` overwrites on conflict (no JSONB merge — the upserter
     /// is the source of truth for the row's full attribute set).
+    ///
+    /// **Quarantine default (migration 0015).** Inserted rows ship with
+    /// `quarantine=TRUE` per the column default; this writer does not
+    /// override it. Production `graph_search` filters quarantined rows
+    /// out, so entities created here are invisible to recall until an
+    /// operator (or a future maintenance-CLI path) flips the column.
+    /// Existing rows hit on conflict keep their current `quarantine`
+    /// state — neither path silently un-quarantines.
     fn upsert_entity(
         &self,
         kind: &str,
@@ -171,14 +179,19 @@ impl<'a> Graph for PgGraph<'a> {
         name: &str,
         attrs: &serde_json::Value,
     ) -> Result<i64, DbError> {
-        // ON CONFLICT key matches the `UNIQUE (kind, name)` index in
-        // `0001_init.sql`. `updated_at = now()` records the most
-        // recent change so a future "stale entity" sweep can use it.
+        // Migration 0015 replaced the (kind, name) UNIQUE with
+        // (kind, name_norm) — case/whitespace/NFC-insensitive dedup.
+        // `name` keeps the FIRST writer's display form; `attrs`
+        // updates on conflict. `name_norm` is computed via the
+        // canonical `normalize_entity_name` helper so this writer
+        // matches the v2 extractor's `upsert_entities_and_relations`
+        // exactly (same input → same dedup key).
+        let name_norm = crate::normalize_entity_name(name);
         let row = sqlx::query(
             r#"
-            INSERT INTO entities (kind, name, attrs)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (kind, name) DO UPDATE
+            INSERT INTO entities (kind, name, name_norm, attrs)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (kind, name_norm) DO UPDATE
               SET attrs = EXCLUDED.attrs,
                   updated_at = now()
             RETURNING id
@@ -186,6 +199,7 @@ impl<'a> Graph for PgGraph<'a> {
         )
         .bind(kind)
         .bind(name)
+        .bind(&name_norm)
         .bind(attrs)
         .fetch_one(self.pool)
         .await

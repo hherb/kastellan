@@ -277,6 +277,7 @@ async fn happy_path_decodes_plan_and_populates_meta() {
         prompts,
         Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
         Arc::new(StaticRecallBuilder::empty()),
+        Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new()),
     );
 
     let (plan, meta) = agent.formulate_plan(&ctx()).await.expect("happy path");
@@ -347,6 +348,7 @@ async fn decode_error_when_assistant_content_is_not_a_plan() {
         prompts,
         Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
         Arc::new(StaticRecallBuilder::empty()),
+        Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new()),
     );
 
     let err = agent
@@ -396,6 +398,7 @@ async fn prompt_missing_short_circuits_before_dialing_backend() {
         prompts,
         Arc::new(StaticSystemPromptBuilder::empty()),
         Arc::new(StaticRecallBuilder::empty()),
+        Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new()),
     );
 
     let err = agent.formulate_plan(&ctx()).await.expect_err("must fail");
