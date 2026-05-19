@@ -116,19 +116,30 @@ async fn main() -> Result<()> {
     // <l0_meta_rules>/<l1_insights>/<base> before each LLM call. Holds
     // PgPool by value (sqlx wraps connections in an internal Arc so
     // pool.clone() is cheap).
-    let formulator: Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
-        Arc::new(hhagent_core::scheduler::agent::RouterAgent::new(
-            router.clone(),
-            prompts.clone(),
-            Arc::new(hhagent_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
-            Arc::new(hhagent_core::recall_assembly::PgRecallBuilder::new(
-                pool.clone(),
-                router.clone(),
-            )),
-        ));
-
     // Sandbox backend (cross-platform).
     let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = sandbox_backend();
+
+    // Worker lifecycle (spec
+    // `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`).
+    //
+    // Created once and shared between the step dispatcher (existing
+    // consumer) and the v2 entity-extraction client (new consumer). The
+    // same `Arc` is the same warm-keep slot for gliner-relex regardless
+    // of whether the call originates from a PlannedStep or an extractor
+    // invocation.
+    //
+    // The dispatcher gets a single `Arc<dyn WorkerLifecycleManager>`,
+    // but `ToolEntry.lifecycle` may carry either `SingleUse`
+    // (shell-exec — per-request isolation is its security model) or
+    // `IdleTimeout` (gliner-relex — warm-keep the model across calls).
+    // `CompositeLifecycle` routes each `acquire` call to the right
+    // inner manager by inspecting `entry.lifecycle`. For deployments
+    // that register only `SingleUse` entries (the default — gliner-relex
+    // is opt-in via env), behaviour is byte-equivalent to the prior
+    // single-use-only wiring.
+    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
+        hhagent_core::worker_lifecycle::CompositeLifecycle::new(sandbox.clone()),
+    );
 
     // Tool registry: each tool the scheduler may dispatch is opted in
     // here. The registry is the host-side allowlist of *which* tools
@@ -144,21 +155,59 @@ async fn main() -> Result<()> {
     // (Phase 3).
     let tool_registry = Arc::new(build_tool_registry(&pool).await?);
 
-    // Worker lifecycle (spec
-    // `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`).
+    // Entity extractor (v2). When gliner-relex is configured, builds a
+    // typed Client over the shared lifecycle Arc + worker manifest and
+    // returns GlinerRelexExtractor. When the worker isn't configured
+    // (HHAGENT_GLINER_RELEX_ENABLE=0 or preconditions failed), falls
+    // back to NoOpEntityExtractor — daemon stays up; graph lane stays
+    // empty; the WARN is the only operator signal.
     //
-    // The dispatcher gets a single `Arc<dyn WorkerLifecycleManager>`,
-    // but `ToolEntry.lifecycle` may carry either `SingleUse`
-    // (shell-exec — per-request isolation is its security model) or
-    // `IdleTimeout` (gliner-relex — warm-keep the model across calls).
-    // `CompositeLifecycle` routes each `acquire` call to the right
-    // inner manager by inspecting `entry.lifecycle`. For deployments
-    // that register only `SingleUse` entries (the default — gliner-relex
-    // is opt-in via env), behaviour is byte-equivalent to the prior
-    // single-use-only wiring.
-    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
-        hhagent_core::worker_lifecycle::CompositeLifecycle::new(sandbox.clone()),
-    );
+    // `build_gliner_relex_entry` is a pure env resolver (returns a
+    // fresh `ToolEntry` each call), so calling it here in addition to
+    // inside `build_tool_registry` is safe — both call sites get
+    // equivalent entries that route to the same warm slot via
+    // `CompositeLifecycle`'s tool-name keyed dispatch.
+    let entity_extractor: Arc<dyn hhagent_core::entity_extraction::EntityExtractor> =
+        match build_gliner_relex_entry() {
+            Some(entry) => {
+                tracing::info!(
+                    target: "hhagent::main",
+                    "gliner-relex configured; constructing v2 entity extractor",
+                );
+                let client = hhagent_core::workers::gliner_relex::Client::new(
+                    lifecycle.clone(),
+                    pool.clone(),
+                    entry,
+                );
+                Arc::new(
+                    hhagent_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
+                        client,
+                        pool.clone(),
+                    ),
+                )
+            }
+            None => {
+                tracing::warn!(
+                    target: "hhagent::main",
+                    "gliner-relex not configured; using NoOpEntityExtractor (graph lane disabled)",
+                );
+                Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new())
+            }
+        };
+
+    // PlanFormulator — takes the extractor as 5th arg (Task 14 widened
+    // the signature; Task 15 supplies the constructed extractor).
+    let formulator: Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
+        Arc::new(hhagent_core::scheduler::agent::RouterAgent::new(
+            router.clone(),
+            prompts.clone(),
+            Arc::new(hhagent_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
+            Arc::new(hhagent_core::recall_assembly::PgRecallBuilder::new(
+                pool.clone(),
+                router.clone(),
+            )),
+            entity_extractor.clone(),
+        ));
 
     let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
