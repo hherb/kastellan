@@ -12,14 +12,21 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use hhagent_core::entity_extraction::{
-    NoOpEntityExtractor, SeedSource, StaticEntityExtractor,
+    EntityExtractor, NoOpEntityExtractor, SeedSource, StaticEntityExtractor,
 };
 use hhagent_core::memory::entity_link::link_memory_entities;
+use hhagent_core::worker_lifecycle::{CompositeLifecycle, WorkerLifecycleManager};
+use hhagent_core::workers::gliner_relex::{gliner_relex_entry, Client, GlinerRelexEnv};
+use hhagent_core::entity_extraction::gliner_relex::GlinerRelexExtractor;
 use hhagent_db::audit::fetch_since;
 use hhagent_db::memories::seed_meta_memory;
 use hhagent_tests_common::{
-    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
+    backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
+    skip_if_sandbox_unavailable, unique_suffix,
 };
 
 /// Build a Tokio runtime for sync-style tests. Mirrors the convention
@@ -292,6 +299,233 @@ fn link_is_idempotent_on_rerun_with_same_seeds() {
         // Second row records the 0-link outcome.
         assert_eq!(link_rows[1].payload["n_entities_linked"], 0u64);
         assert_eq!(link_rows[1].payload["n_seeds"], 2u64);
+
+        pool.close().await;
+    });
+}
+
+// --- Real-model tier (skip-as-pass without venv + weights) ---
+//
+// The three helpers below (`resolve_worker_script`, `resolve_weights_dir`,
+// `build_real_extractor`) are duplicated from `entity_extraction_e2e.rs`.
+// Marker: if a third caller appears, lift them into `hhagent-tests-common`.
+
+/// Resolve the in-tree gliner-relex venv shim path. Returns `None` with
+/// a `[SKIP]` print when the path doesn't exist.
+fn resolve_worker_script() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .expect("CARGO_MANIFEST_DIR has no parent")
+        .to_path_buf();
+    let script = workspace_root
+        .join("workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex");
+    if !script.exists() {
+        eprintln!(
+            "\n[SKIP] gliner-relex venv shim not built at {} — run scripts/workers/gliner-relex/install.sh\n",
+            script.display()
+        );
+        return None;
+    }
+    Some(script)
+}
+
+/// Resolve the `multi-v1.0` weights dir. Honours
+/// `HHAGENT_GLINER_RELEX_WEIGHTS_DIR`, then `HHAGENT_DATA_DIR`, then
+/// `$HOME/.local/share/hhagent`. Skip on missing.
+fn resolve_weights_dir() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("HHAGENT_GLINER_RELEX_WEIGHTS_DIR") {
+        let p = PathBuf::from(explicit);
+        if p.is_dir() {
+            return Some(p);
+        }
+        eprintln!(
+            "\n[SKIP] HHAGENT_GLINER_RELEX_WEIGHTS_DIR points at {} which isn't a directory\n",
+            p.display()
+        );
+        return None;
+    }
+    let data_dir = std::env::var("HHAGENT_DATA_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".local/share/hhagent"))
+        })?;
+    let weights = data_dir.join("workers/gliner-relex/weights/multi-v1.0");
+    if !weights.is_dir() {
+        eprintln!(
+            "\n[SKIP] gliner-relex weights dir missing at {} — run scripts/workers/gliner-relex/install.sh\n",
+            weights.display()
+        );
+        return None;
+    }
+    Some(weights)
+}
+
+/// Build a live `GlinerRelexExtractor` backed by the real gliner-relex worker.
+/// Returns `None` (with a `[SKIP]` print) when any precondition is absent:
+/// opt-in env-var, sandbox, supervisor, venv shim, or weights dir.
+async fn build_real_extractor(pool: &sqlx::PgPool) -> Option<Arc<dyn EntityExtractor>> {
+    if std::env::var("HHAGENT_GLINER_RELEX_ENABLE").ok().as_deref() != Some("1") {
+        eprintln!("\n[SKIP] HHAGENT_GLINER_RELEX_ENABLE != \"1\"\n");
+        return None;
+    }
+    if skip_if_sandbox_unavailable() {
+        return None;
+    }
+    if skip_if_no_supervisor() {
+        return None;
+    }
+    let script = resolve_worker_script()?;
+    let weights = resolve_weights_dir()?;
+    let venv_dir = script
+        .parent()
+        .and_then(|bin| bin.parent())
+        .expect("script_path is .venv/bin/<bin> — both parent levels must exist")
+        .to_path_buf();
+    let env = GlinerRelexEnv {
+        script_path: script,
+        venv_dir,
+        weights_dir: weights,
+        model_id: "knowledgator/gliner-relex-multi-v1.0".to_string(),
+        device: "auto".to_string(),
+    };
+    let entry = gliner_relex_entry(&env);
+    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = Arc::from(backend());
+    let lifecycle: Arc<dyn WorkerLifecycleManager> =
+        Arc::new(CompositeLifecycle::new(sandbox));
+    let client = Client::new(lifecycle, pool.clone(), entry);
+    let extractor = GlinerRelexExtractor::new(client, pool.clone());
+    Some(Arc::new(extractor))
+}
+
+#[test]
+fn link_against_real_extractor_writes_real_entity_ids() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+
+    rt().block_on(async {
+        let Some((_cluster, pool)) = bring_up_pg("real").await else {
+            return;
+        };
+
+        let Some(extractor) = build_real_extractor(&pool).await else {
+            return; // [SKIP] line already printed by build_real_extractor
+        };
+
+        let body = "Dr Smith treats asthma in Mosman.";
+        let memory_id = seed_meta_memory(
+            &pool,
+            body,
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .expect("seed");
+
+        let outcome = link_memory_entities(&*extractor, &pool, memory_id, "L0", body)
+            .await
+            .expect("real-model link should succeed");
+
+        assert!(
+            outcome.n_entities_linked >= 2,
+            "expected ≥2 entity links from the medical sentence, got {}",
+            outcome.n_entities_linked
+        );
+        assert_eq!(outcome.seeds.source, SeedSource::GlinerRelex);
+        assert_eq!(outcome.seeds.model_version.as_deref(), Some("multi-v1.0"));
+
+        // Verify quarantine-by-default: every newly-extracted entity is
+        // quarantined, so production graph_search (include_quarantined=false)
+        // returns zero rows even though the link rows exist.
+        let n_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memory_entities me \
+             JOIN entities e ON me.entity_id = e.id \
+             WHERE me.memory_id = $1 AND e.quarantine = FALSE",
+        )
+        .bind(memory_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count unquarantined links");
+        assert_eq!(n_rows, 0, "every newly-extracted entity is quarantined by default");
+
+        // Audit row carries model version + the gliner_relex source.
+        let rows = fetch_since(&pool, 0, FETCH_LIMIT)
+            .await
+            .expect("fetch_since");
+        let link_row = rows
+            .iter()
+            .find(|r| r.actor == "memory_linker" && r.action == "entity_link")
+            .expect("memory_linker/entity_link audit row present");
+        assert_eq!(link_row.payload["model_version"], "multi-v1.0");
+        assert_eq!(link_row.payload["seed_source"], "gliner_relex");
+
+        pool.close().await;
+    });
+}
+
+#[test]
+fn link_extends_to_l0_seed_path_end_to_end() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+
+    rt().block_on(async {
+        let Some((_cluster, pool)) = bring_up_pg("e2e").await else {
+            return;
+        };
+
+        let Some(extractor) = build_real_extractor(&pool).await else {
+            return; // [SKIP] line already printed by build_real_extractor
+        };
+
+        // Two rules, each containing distinct entities.
+        let rule1 = "Dr Smith treats asthma in Mosman.";
+        let rule2 = "Nurse Jones manages diabetes at Royal North Shore.";
+
+        let mem1 = seed_meta_memory(
+            &pool,
+            rule1,
+            &serde_json::json!({"l0_rule_id": "r1"}),
+            None,
+        )
+        .await
+        .expect("seed1");
+        let mem2 = seed_meta_memory(
+            &pool,
+            rule2,
+            &serde_json::json!({"l0_rule_id": "r2"}),
+            None,
+        )
+        .await
+        .expect("seed2");
+
+        let o1 = link_memory_entities(&*extractor, &pool, mem1, "L0", rule1)
+            .await
+            .expect("link1");
+        let o2 = link_memory_entities(&*extractor, &pool, mem2, "L0", rule2)
+            .await
+            .expect("link2");
+
+        assert!(o1.n_entities_linked > 0, "first rule produced entity links");
+        assert!(o2.n_entities_linked > 0, "second rule produced entity links");
+
+        // Each memory got its own distinct link set.
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memory_entities WHERE memory_id IN ($1, $2)",
+        )
+        .bind(mem1)
+        .bind(mem2)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert!(
+            total >= 4,
+            "expected ≥4 total link rows across both memories, got {total}"
+        );
 
         pool.close().await;
     });
