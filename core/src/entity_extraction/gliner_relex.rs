@@ -14,8 +14,9 @@
 //!      row (`emit_extract_entities_audit`).
 //!   7. Return `EntitySeeds`.
 
-#[allow(unused_imports)] // ExtractRequest/ExtractResponse/Entity/Triple are used in Tasks 8-11.
-use crate::workers::gliner_relex::{Entity, ExtractRequest, ExtractResponse, Triple};
+use crate::workers::gliner_relex::{Entity, ExtractResponse, Triple};
+#[allow(unused_imports)] // ExtractRequest is used in Tasks 9-11.
+use crate::workers::gliner_relex::ExtractRequest;
 
 /// Maximum chunk size in bytes — sized below the worker's 8192-byte
 /// cap with headroom for label-list overhead in the JSON envelope.
@@ -86,6 +87,62 @@ pub fn chunk_text(text: &str, chunk_size_bytes: usize, overlap_bytes: usize) -> 
     chunks
 }
 
+use crate::entity_extraction::normalize_entity_name;
+use std::collections::HashSet;
+
+/// Merge per-chunk extract responses into a single deduped response.
+/// Entities are deduped by `(label, normalize_entity_name(text))` —
+/// first occurrence's display form wins (matches the DB upsert's
+/// first-writer-wins on `entities.name`). Triples are deduped by
+/// `(head_norm, tail_norm, relation_norm)` — same first-wins
+/// discipline. Entity offsets in the merged response are re-anchored
+/// to the original text's byte position via `byte_offset`.
+///
+/// Inputs are `(byte_offset, response)` pairs. Returns one merged
+/// response.
+pub fn merge_chunks(chunk_responses: Vec<(usize, ExtractResponse)>) -> ExtractResponse {
+    let mut entities: Vec<Entity> = Vec::new();
+    let mut seen_entities: HashSet<(String, String)> = HashSet::new();
+    let mut triples: Vec<Triple> = Vec::new();
+    let mut seen_triples: HashSet<(String, String, String)> = HashSet::new();
+
+    for (offset, resp) in chunk_responses {
+        for ent in resp.entities {
+            let key = (ent.label.clone(), normalize_entity_name(&ent.text));
+            if !seen_entities.contains(&key) {
+                seen_entities.insert(key);
+                // Re-anchor start/end to the original-text byte position.
+                let anchored = Entity {
+                    text: ent.text,
+                    label: ent.label,
+                    start: ent.start.saturating_add(offset as u32),
+                    end: ent.end.saturating_add(offset as u32),
+                    score: ent.score,
+                };
+                entities.push(anchored);
+            }
+        }
+        for tri in resp.triples {
+            let key = (
+                normalize_entity_name(&tri.head.text),
+                normalize_entity_name(&tri.tail.text),
+                tri.relation.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" "),
+            );
+            if !seen_triples.contains(&key) {
+                seen_triples.insert(key);
+                // Triples preserve their head/tail entity_idx as-is.
+                // Consumers should not rely on entity_idx after merge
+                // (it points into a chunk-local entity list, not the
+                // merged list). The upsert path resolves head/tail by
+                // text/label lookup anyway.
+                triples.push(tri);
+            }
+        }
+    }
+
+    ExtractResponse { entities, triples }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +195,80 @@ mod tests {
         for c in &chunks {
             assert!(std::str::from_utf8(c.text.as_bytes()).is_ok());
         }
+    }
+
+    use crate::workers::gliner_relex::{Entity, Triple, TripleEntity, ExtractResponse};
+
+    fn ent(text: &str, label: &str, start: u32, end: u32) -> Entity {
+        Entity {
+            text: text.into(),
+            label: label.into(),
+            start, end,
+            score: 0.9,
+        }
+    }
+
+    fn tent(text: &str, ty: &str, idx: u32) -> TripleEntity {
+        TripleEntity {
+            text: text.into(),
+            r#type: ty.into(),
+            start: 0,
+            end: text.len() as u32,
+            entity_idx: idx,
+        }
+    }
+
+    #[test]
+    fn merge_chunks_dedups_entities_by_label_and_norm() {
+        let resp_a = ExtractResponse {
+            entities: vec![ent("Dr Smith", "person", 0, 8)],
+            triples: vec![],
+        };
+        let resp_b = ExtractResponse {
+            // Same person, different case — must dedup.
+            entities: vec![ent("DR SMITH", "person", 5, 13)],
+            triples: vec![],
+        };
+        let merged = merge_chunks(vec![(0, resp_a), (7500, resp_b)]);
+        assert_eq!(merged.entities.len(), 1, "case-insensitive dedup");
+        assert_eq!(merged.entities[0].text, "Dr Smith", "first-writer-wins on display");
+    }
+
+    #[test]
+    fn merge_chunks_re_anchors_offsets_to_original_text() {
+        let resp_a = ExtractResponse {
+            entities: vec![ent("alpha", "concept", 0, 5)],
+            triples: vec![],
+        };
+        let resp_b = ExtractResponse {
+            entities: vec![ent("beta", "concept", 0, 4)],
+            triples: vec![],
+        };
+        // Second chunk starts at byte 7500 in the original text.
+        let merged = merge_chunks(vec![(0, resp_a), (7500, resp_b)]);
+        assert_eq!(merged.entities[0].start, 0);
+        assert_eq!(merged.entities[0].end, 5);
+        assert_eq!(merged.entities[1].start, 7500);
+        assert_eq!(merged.entities[1].end, 7500 + 4);
+    }
+
+    #[test]
+    fn merge_chunks_dedups_triples_by_head_tail_relation() {
+        let triple_a = Triple {
+            head: tent("Dr Smith", "person", 0),
+            tail: tent("asthma", "disease", 1),
+            relation: "treats".into(),
+            score: 0.95,
+        };
+        let triple_b = Triple {
+            head: tent("DR SMITH", "person", 0),  // case-insensitive same
+            tail: tent("Asthma", "disease", 1),
+            relation: "TREATS".into(),
+            score: 0.92,
+        };
+        let resp_a = ExtractResponse { entities: vec![], triples: vec![triple_a] };
+        let resp_b = ExtractResponse { entities: vec![], triples: vec![triple_b] };
+        let merged = merge_chunks(vec![(0, resp_a), (5000, resp_b)]);
+        assert_eq!(merged.triples.len(), 1, "case-insensitive triple dedup");
     }
 }
