@@ -3191,8 +3191,12 @@ async fn entities_merge_retargets_links_and_drops_duplicates() {
     use hhagent_db::entities::merge_entities;
     use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
 
-    // 3 person entities, target is 'Smith' (the variant 'SMITH' should be
-    // a near-duplicate, 'Dr. Smith' another).
+    // 3 person entities: 'Smith' is the canonical row; 'SMITH' is a
+    // near-duplicate the operator wants to merge in. The (kind, name_norm)
+    // unique constraint from migration 0015 would reject two rows with
+    // name_norm='smith', so the seed uses an artificial 'smith_2' value.
+    // A real extractor wouldn't produce two such rows — but the merge
+    // operation must still handle whatever the operator finds in the DB.
     sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES
         ('person', 'Smith',     'smith'),
         ('person', 'SMITH',     'smith_2'),

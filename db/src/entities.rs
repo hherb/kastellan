@@ -1,11 +1,5 @@
 //! Operator-facing entity review surface.
 //!
-// FILE-SIZE NOTE: this file ships at ~573 LOC, ~73 over the 500-LOC
-// soft cap. Natural split (`entities/{types.rs, review.rs, mod.rs}`)
-// is deferred — the types and the 5 review operations cohabit cleanly
-// today, and the test module is the main bulk. Reconsider if a sixth
-// operation or a second consumer outside the test suite materialises.
-//!
 //! Migration `0015_entity_kinds_and_quarantine.sql` introduced
 //! `entities.quarantine BOOLEAN NOT NULL DEFAULT TRUE` — every newly
 //! extracted entity is invisible to production `graph_search` (which
@@ -25,6 +19,12 @@
 //! `entities` (migration `0002` default GRANT, never revoked) and
 //! `memory_entities` rows cascade via the FK from migration `0007`.
 //! `entity_kinds` (migration `0016` REVOKE) is deliberately untouched.
+
+// FILE-SIZE NOTE: this file ships at ~573 LOC, ~73 over the 500-LOC
+// soft cap. Natural split (`entities/{types.rs, review.rs, mod.rs}`)
+// is deferred — the types and the 5 review operations cohabit cleanly
+// today, and the test module is the main bulk. Reconsider if a sixth
+// operation or a second consumer outside the test suite materialises.
 
 use crate::DbError;
 use sqlx::PgPool;
@@ -492,11 +492,13 @@ pub async fn merge_entities(
         Some(t) => t,
     };
 
-    // Lock each drop + verify kind. ANY($1) preserves the input ordering
-    // in the WHERE filter; the kind-mismatch check loops over the result
-    // and compares to keep_kind, surfacing the first offending id.
+    // Lock each drop + verify kind. ORDER BY id is load-bearing: it
+    // forces a consistent lock-acquisition order so two concurrent
+    // merge_entities calls with overlapping drop sets cannot deadlock.
+    // The kind-mismatch check loops over the result and compares to
+    // keep_kind, surfacing the first offending id.
     let drop_rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT id, kind FROM entities WHERE id = ANY($1) FOR UPDATE",
+        "SELECT id, kind FROM entities WHERE id = ANY($1) ORDER BY id FOR UPDATE",
     )
     .bind(drop_ids)
     .fetch_all(&mut *tx)
@@ -529,8 +531,13 @@ pub async fn merge_entities(
         }
     }
 
-    // Count BOTH-linked memories before we mutate. This is the
-    // "links_dropped_as_duplicate" count.
+    // Count duplicate links — rows in memory_entities where entity_id is
+    // a drop AND memory_id is also linked to keep. Counts ROWS, not
+    // DISTINCT memories: if a memory is linked to two different drops
+    // AND to keep, it adds 2 here. links_retargeted (the ON-CONFLICT
+    // INSERT rows_affected) reports distinct retargets, so the two
+    // counters report different facets: this one is "links absorbed by
+    // dedup", the other is "unique memories newly visible from keep".
     let dup_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM memory_entities WHERE entity_id = ANY($1)
