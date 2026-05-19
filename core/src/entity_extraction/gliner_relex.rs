@@ -14,9 +14,7 @@
 //!      row (`emit_extract_entities_audit`).
 //!   7. Return `EntitySeeds`.
 
-use crate::workers::gliner_relex::{Entity, ExtractResponse, Triple};
-#[allow(unused_imports)] // ExtractRequest is used in Tasks 9-11.
-use crate::workers::gliner_relex::ExtractRequest;
+use crate::workers::gliner_relex::{Entity, ExtractResponse, ExtractRequest, Triple};
 
 /// Maximum chunk size in bytes — sized below the worker's 8192-byte
 /// cap with headroom for label-list overhead in the JSON envelope.
@@ -273,6 +271,120 @@ pub async fn upsert_entities_and_relations(
         n_entities_upserted_new: n_new,
         n_relations_inserted,
     })
+}
+
+use crate::entity_extraction::{EntityExtractor, EntityExtractionError, EntitySeeds, SeedSource};
+use crate::workers::gliner_relex::Client;
+use async_trait::async_trait;
+use hhagent_db::entity_kinds::KindsCache;
+use std::sync::Arc;
+
+/// Default thresholds (per spike correction #3 — model is noisy below 0.5).
+pub const DEFAULT_THRESHOLD: f32 = 0.5;
+pub const DEFAULT_RELATION_THRESHOLD: f32 = 0.5;
+
+pub struct GlinerRelexExtractor {
+    client: Client,
+    pool: PgPool,
+    kinds_cache: Arc<KindsCache>,
+    /// v2 ships entities-only. A future slice picks the relation
+    /// vocabulary (a `relation_kinds` table mirrors `entity_kinds`).
+    relation_labels: Vec<String>,
+}
+
+impl GlinerRelexExtractor {
+    pub fn new(client: Client, pool: PgPool) -> Self {
+        Self {
+            client,
+            pool,
+            kinds_cache: Arc::new(KindsCache::new()),
+            relation_labels: Vec::new(),
+        }
+    }
+
+    /// For tests / future slices that want to pass non-empty relation
+    /// labels (triggers triple capture).
+    pub fn with_relation_labels(mut self, labels: Vec<String>) -> Self {
+        self.relation_labels = labels;
+        self
+    }
+}
+
+#[async_trait]
+impl EntityExtractor for GlinerRelexExtractor {
+    async fn extract(&self, query_text: &str) -> Result<EntitySeeds, EntityExtractionError> {
+        let started = std::time::Instant::now();
+        let chunks = chunk_text(query_text, CHUNK_SIZE_BYTES, OVERLAP_BYTES);
+        if chunks.is_empty() {
+            // Empty input — return None source, no audit row.
+            return Ok(EntitySeeds::empty());
+        }
+
+        let labels = self.kinds_cache.list_kinds(&self.pool).await?;
+        let mut chunk_responses: Vec<(usize, ExtractResponse)> = Vec::new();
+
+        for chunk in &chunks {
+            let req = ExtractRequest {
+                text: chunk.text.clone(),
+                entity_labels: labels.clone(),
+                relation_labels: self.relation_labels.clone(),
+                threshold: Some(DEFAULT_THRESHOLD),
+                relation_threshold: Some(DEFAULT_RELATION_THRESHOLD),
+                max_entities: None,
+            };
+            match self.client.extract(req).await {
+                Ok(resp) => chunk_responses.push((chunk.byte_offset, resp)),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "hhagent::entity_extraction",
+                        error = %e,
+                        chunk_offset = chunk.byte_offset,
+                        "client.extract failed; degrading chunk",
+                    );
+                }
+            }
+        }
+
+        if chunk_responses.is_empty() {
+            // All chunks failed.
+            return Ok(EntitySeeds::empty());
+        }
+
+        let n_chunks = chunk_responses.len();
+        let merged = merge_chunks(chunk_responses);
+        let outcome = upsert_entities_and_relations(&self.pool, &merged).await?;
+        let latency_ms_total = started.elapsed().as_millis() as u64;
+
+        // Emit summary audit row — best-effort, WARN on failure.
+        let payload = crate::scheduler::audit::build_extract_entities_payload(
+            query_text.len(),
+            n_chunks,
+            merged.entities.len(),
+            merged.triples.len(),
+            outcome.n_entities_upserted_new,
+            outcome.n_relations_inserted,
+            "multi-v1.0",
+            latency_ms_total,
+        );
+        if let Err(e) = hhagent_db::audit::insert(
+            &self.pool,
+            "extractor:gliner-relex",
+            crate::scheduler::audit::ACTION_EXTRACT_ENTITIES,
+            payload,
+        ).await {
+            tracing::warn!(
+                target: "hhagent::entity_extraction",
+                error = %e,
+                "extract_entities audit row insert failed; not propagating",
+            );
+        }
+
+        Ok(EntitySeeds {
+            ids: outcome.entity_ids,
+            source: SeedSource::GlinerRelex,
+            model_version: Some("multi-v1.0".into()),
+        })
+    }
 }
 
 #[cfg(test)]
