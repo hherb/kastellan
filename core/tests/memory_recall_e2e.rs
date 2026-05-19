@@ -411,3 +411,171 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
         pool.close().await;
     });
 }
+
+/// End-to-end recall pin demonstrating the operator-approval flow
+/// closes the graph lane in production.
+///
+/// Seeds two quarantined entities each linked to one memory. Confirms:
+///   1. recall(GRAPH_ONLY) returns 0 — quarantined-by-default
+///      invariant.
+///   2. After entities_approve_and_audit on one, recall returns the
+///      matching memory.
+///   3. After entities_reject_and_audit on the other, recall still
+///      returns the approved one. The rejected entity's
+///      memory_entities row cascades; the memory row itself survives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recall_graph_lane_lights_up_after_operator_approve_and_reject() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "recall-ql-d",
+        "recall-ql-l",
+        &format!("hhagent-postgres-recall-quarantine-lane-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"test": "recall_graph_lane_quarantine"}),
+    )
+    .await
+    .expect("probe run");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("connect runtime pool");
+
+    use hhagent_core::cli_audit::{entities_approve_and_audit, entities_reject_and_audit};
+    use hhagent_db::entities::{ApproveOutcome, RejectOutcome};
+    use hhagent_db::memories::insert_memory_at_layer;
+    use hhagent_db::memories::MemoryLayer;
+
+    // Seed quarantined entities — deliberately do NOT call
+    // unquarantine_all_entities here. The whole point of the test
+    // is that they start quarantined.
+    sqlx::query("INSERT INTO entities (kind, name, name_norm, quarantine) VALUES \
+        ('person', 'Recall Alice', 'recall alice', TRUE), \
+        ('person', 'Recall Bob',   'recall bob',   TRUE)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let alice: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Recall Alice'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let bob: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Recall Bob'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let mem_alice = insert_memory_at_layer(
+        &pool,
+        "Alice's body — graph lane should surface this after approval",
+        &serde_json::json!({}),
+        None,
+        MemoryLayer::Stable,
+    )
+    .await
+    .unwrap();
+    let mem_bob = insert_memory_at_layer(
+        &pool,
+        "Bob's body — should disappear after operator rejects entity",
+        &serde_json::json!({}),
+        None,
+        MemoryLayer::Stable,
+    )
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES ($1, $3), ($2, $4)")
+        .bind(mem_alice)
+        .bind(mem_bob)
+        .bind(alice)
+        .bind(bob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 1. Both quarantined -> graph lane returns 0 hits.
+    let res = recall(
+        &pool,
+        &RecallParams {
+            query_text: None,
+            query_embedding: None,
+            seed_entity_ids: Some(&[alice, bob]),
+            k: 10,
+            modes: RecallModes::GRAPH_ONLY,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.len(), 0, "quarantined-by-default invariant violated: {res:?}");
+
+    // 2. Approve Alice -> graph lane surfaces her memory.
+    assert!(matches!(
+        entities_approve_and_audit(&pool, alice).await.unwrap(),
+        ApproveOutcome::Approved { .. }
+    ));
+    let res = recall(
+        &pool,
+        &RecallParams {
+            query_text: None,
+            query_embedding: None,
+            seed_entity_ids: Some(&[alice, bob]),
+            k: 10,
+            modes: RecallModes::GRAPH_ONLY,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.len(), 1, "after approving Alice, expected 1 hit; got {res:?}");
+    assert_eq!(res[0].id, mem_alice);
+
+    // 3. Reject Bob -> graph lane still returns just Alice's memory.
+    assert!(matches!(
+        entities_reject_and_audit(&pool, bob).await.unwrap(),
+        RejectOutcome::Rejected { .. }
+    ));
+    let res = recall(
+        &pool,
+        &RecallParams {
+            query_text: None,
+            query_embedding: None,
+            seed_entity_ids: Some(&[alice, bob]),
+            k: 10,
+            modes: RecallModes::GRAPH_ONLY,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.len(), 1, "after rejecting Bob, should still have 1 hit; got {res:?}");
+    assert_eq!(res[0].id, mem_alice);
+
+    // 4. memory_entities for Bob is gone (cascade).
+    let me_bob: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM memory_entities WHERE entity_id = $1")
+            .bind(bob)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(me_bob, 0, "Bob's memory_entities row should have cascaded");
+
+    // Bob's memory itself survives the entity rejection.
+    let mem_bob_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE id = $1")
+            .bind(mem_bob)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(mem_bob_count, 1, "Bob's memory row must survive entity rejection");
+
+    pool.close().await;
+}

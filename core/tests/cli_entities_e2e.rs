@@ -559,6 +559,10 @@ async fn cli_entities_merge_writes_audit_row() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_entities_bad_args_exit_code_two() {
     let bin = cli_binary();
+    if !bin.exists() {
+        eprintln!("[SKIP] cli_entities_bad_args_exit_code_two: hhagent-cli binary not built at {}", bin.display());
+        return;
+    }
 
     // Sub-case a: `entities approve` with no ids.
     let out_a = Command::new(&bin)
