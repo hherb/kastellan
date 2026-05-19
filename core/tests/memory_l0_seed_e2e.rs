@@ -12,6 +12,7 @@
 
 use std::path::Path;
 
+use hhagent_core::entity_extraction::NoOpEntityExtractor;
 use hhagent_core::memory::l0_seed::{
     load_l0_active, load_l0_active_default, seed_l0_from_file, seed_l0_from_rules,
     L0Error, L0Rule, L0_DEFAULT_CAP_BYTES, L0_DEFAULT_CAP_ROWS,
@@ -76,7 +77,7 @@ fn seed_from_rules_writes_new_rows() {
             make_rule("rule_a", "first body"),
             make_rule("rule_b", "second body"),
         ];
-        let report = seed_l0_from_rules(&pool, seed_path(), "src-sha-1", &rules)
+        let report = seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "src-sha-1", &rules)
             .await
             .expect("seed");
 
@@ -148,14 +149,14 @@ fn seed_from_rules_is_idempotent_on_unchanged_input() {
             make_rule("rule_b", "second body"),
         ];
 
-        let r1 = seed_l0_from_rules(&pool, seed_path(), "sha", &rules)
+        let r1 = seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha", &rules)
             .await
             .expect("seed-1");
         assert_eq!(r1.new_rows_written, 2);
         assert_eq!(r1.unchanged_skipped, 0);
 
         // Same input again → zero new rows.
-        let r2 = seed_l0_from_rules(&pool, seed_path(), "sha", &rules)
+        let r2 = seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha", &rules)
             .await
             .expect("seed-2");
         assert_eq!(r2.new_rows_written, 0);
@@ -203,7 +204,7 @@ fn seed_from_rules_writes_new_row_on_edited_body() {
             make_rule("rule_a", "original body"),
             make_rule("rule_b", "untouched body"),
         ];
-        let r1 = seed_l0_from_rules(&pool, seed_path(), "sha-1", &rules_v1)
+        let r1 = seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha-1", &rules_v1)
             .await
             .expect("seed-v1");
         assert_eq!(r1.new_rows_written, 2);
@@ -213,7 +214,7 @@ fn seed_from_rules_writes_new_row_on_edited_body() {
             make_rule("rule_a", "edited body"),
             make_rule("rule_b", "untouched body"),
         ];
-        let r2 = seed_l0_from_rules(&pool, seed_path(), "sha-2", &rules_v2)
+        let r2 = seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha-2", &rules_v2)
             .await
             .expect("seed-v2");
         assert_eq!(r2.new_rows_written, 1); // rule_a got a new row
@@ -288,7 +289,7 @@ body = "rule B body"
 "#;
         tokio::fs::write(&path, toml).await.expect("write toml");
 
-        let report = seed_l0_from_file(&pool, &path).await.expect("seed");
+        let report = seed_l0_from_file(&pool, &NoOpEntityExtractor::new(), &path).await.expect("seed");
         assert_eq!(report.rules_loaded, 2);
         assert_eq!(report.new_rows_written, 2);
         assert_eq!(report.unchanged_skipped, 0);
@@ -340,7 +341,7 @@ fn seed_from_file_fails_closed_on_malformed_toml() {
             .await
             .expect("write");
 
-        let err = seed_l0_from_file(&pool, &path)
+        let err = seed_l0_from_file(&pool, &NoOpEntityExtractor::new(), &path)
             .await
             .expect_err("malformed toml must fail closed");
         assert!(matches!(err, L0Error::TomlParse { .. }), "got {err:?}");
@@ -391,7 +392,7 @@ fn load_l0_active_returns_newest_per_rule_id() {
 
         // Seed v1, then v2 of the same rule_id.
         let v1 = vec![make_rule("ruleX", "version 1")];
-        seed_l0_from_rules(&pool, seed_path(), "sha-1", &v1)
+        seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha-1", &v1)
             .await
             .expect("v1");
         // Sleep 5 ms so created_at differs at microsecond resolution
@@ -401,7 +402,7 @@ fn load_l0_active_returns_newest_per_rule_id() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
         let v2 = vec![make_rule("ruleX", "version 2")];
-        seed_l0_from_rules(&pool, seed_path(), "sha-2", &v2)
+        seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha-2", &v2)
             .await
             .expect("v2");
 
@@ -449,7 +450,7 @@ fn load_l0_active_respects_cap_rows() {
             make_rule("r2", "b"),
             make_rule("r3", "c"),
         ];
-        seed_l0_from_rules(&pool, seed_path(), "sha", &rules)
+        seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha", &rules)
             .await
             .expect("seed");
 
@@ -507,7 +508,7 @@ fn load_l0_active_oversize_body_dropped_silently() {
             body: big_body.clone(),
             tags: Vec::new(),
         }];
-        seed_l0_from_rules(&pool, seed_path(), "sha-big", &rules1)
+        seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha-big", &rules1)
             .await
             .expect("seed big");
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -517,7 +518,7 @@ fn load_l0_active_oversize_body_dropped_silently() {
             body: small_body.clone(),
             tags: Vec::new(),
         }];
-        seed_l0_from_rules(&pool, seed_path(), "sha-small", &rules2)
+        seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha-small", &rules2)
             .await
             .expect("seed small");
 
@@ -577,7 +578,7 @@ fn load_l0_active_excludes_legacy_l0_rows_without_rule_id() {
 
         // A real L0 rule.
         let rules = vec![make_rule("real", "real rule body")];
-        seed_l0_from_rules(&pool, seed_path(), "sha", &rules)
+        seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha", &rules)
             .await
             .expect("seed real");
 
@@ -636,7 +637,7 @@ fn seed_from_file_returns_io_error_on_missing_path() {
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let missing = tmp.path().join("definitely-does-not-exist.toml");
-        let err = seed_l0_from_file(&pool, &missing)
+        let err = seed_l0_from_file(&pool, &NoOpEntityExtractor::new(), &missing)
             .await
             .expect_err("missing file must fail");
         assert!(matches!(err, L0Error::Io { .. }), "got {err:?}");
@@ -693,7 +694,7 @@ fn load_l0_active_warns_when_first_row_alone_exceeds_cap_bytes() {
             body: big_body,
             tags: Vec::new(),
         }];
-        seed_l0_from_rules(&pool, seed_path(), "sha-lonely", &rules)
+        seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha-lonely", &rules)
             .await
             .expect("seed");
 
@@ -741,7 +742,7 @@ fn load_l0_active_zero_cap_bytes_returns_empty() {
             .expect("pool");
 
         let rules = vec![make_rule("r1", "anything")];
-        seed_l0_from_rules(&pool, seed_path(), "sha", &rules)
+        seed_l0_from_rules(&pool, &NoOpEntityExtractor::new(), seed_path(), "sha", &rules)
             .await
             .expect("seed");
 

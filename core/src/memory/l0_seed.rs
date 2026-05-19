@@ -151,6 +151,14 @@ pub struct L0SeedReport {
     /// SHA-256 of the source file content (for cross-restart drift
     /// detection in the audit row).
     pub source_sha256: String,
+    /// Cumulative `LinkOutcome::n_entities_linked` across all
+    /// newly-written rows in this seed pass. Already-existing rows
+    /// (sha256-idempotency skip) don't re-extract.
+    pub entities_linked: u64,
+    /// Count of newly-written rows where the auto-link step failed
+    /// (extract or DB error). The memory body is safe; future relink
+    /// tooling can fill in the gap.
+    pub link_failures: u32,
 }
 
 /// Parse + validate the TOML rule file content.
@@ -300,6 +308,7 @@ pub fn build_l0_metadata(
 /// `(l0_rule_id, body_sha256)`.
 pub async fn seed_l0_from_rules(
     pool: &PgPool,
+    extractor: &dyn crate::entity_extraction::EntityExtractor,
     source_path: &Path,
     source_sha256: &str,
     rules: &[L0Rule],
@@ -310,6 +319,8 @@ pub async fn seed_l0_from_rules(
         unchanged_skipped: 0,
         source_path: source_path.to_path_buf(),
         source_sha256: source_sha256.to_string(),
+        entities_linked: 0,
+        link_failures: 0,
     };
 
     for rule in rules {
@@ -343,22 +354,49 @@ pub async fn seed_l0_from_rules(
         }
 
         let metadata = build_l0_metadata(&rule.id, &body_sha256, &rule.tags, source_path);
-        hhagent_db::memories::seed_meta_memory(pool, &rule.body, &metadata, None).await?;
+        let memory_id =
+            hhagent_db::memories::seed_meta_memory(pool, &rule.body, &metadata, None).await?;
         report.new_rows_written += 1;
+
+        // Auto-link entities. Degrade-and-warn posture — a failure
+        // here leaves the memory unlinked but otherwise intact.
+        // Production hosts will re-link via the future operator
+        // quarantine-review CLI's "relink unlinked memories"
+        // subcommand.
+        match crate::memory::entity_link::link_memory_entities(
+            extractor, pool, memory_id, "L0", &rule.body,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                report.entities_linked += outcome.n_entities_linked;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e, memory_id, l0_rule_id = %rule.id,
+                    "L0 auto-linker degraded; memory survives unlinked"
+                );
+                report.link_failures += 1;
+            }
+        }
     }
 
     Ok(report)
 }
 
 /// Convenience: read + parse + seed.
-pub async fn seed_l0_from_file(pool: &PgPool, path: &Path) -> Result<L0SeedReport, L0Error> {
+pub async fn seed_l0_from_file(
+    pool: &PgPool,
+    extractor: &dyn crate::entity_extraction::EntityExtractor,
+    path: &Path,
+) -> Result<L0SeedReport, L0Error> {
     let content = tokio::fs::read_to_string(path).await.map_err(|e| L0Error::Io {
         path: path.to_path_buf(),
         source: e,
     })?;
     let source_sha256 = compute_source_sha256(&content);
     let rules = parse_l0_rules(path, &content)?;
-    seed_l0_from_rules(pool, path, &source_sha256, &rules).await
+    seed_l0_from_rules(pool, extractor, path, &source_sha256, &rules).await
 }
 
 /// Returns the currently-active L0 rule set — newest version per
