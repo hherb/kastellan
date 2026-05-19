@@ -754,3 +754,88 @@ fn load_l0_active_zero_cap_bytes_returns_empty() {
         pool.close().await;
     });
 }
+
+// ---------------------------------------------------------------------------
+// Task 6 — caller-side e2e: StaticEntityExtractor wired through L0 writer
+// ---------------------------------------------------------------------------
+
+/// Verify that `seed_l0_from_rules` with a `StaticEntityExtractor` correctly
+/// propagates entity links into `memory_entities` and reports them in
+/// `L0SeedReport.entities_linked`.
+#[test]
+fn seed_l0_auto_links_entities_via_extractor() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    use hhagent_core::entity_extraction::StaticEntityExtractor;
+    use hhagent_db::graph::{Graph, PgGraph};
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l0el-d",
+        "l0el-l",
+        &format!("hhagent-supervisor-test-pg-l0el-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l0-entity-link"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Pre-create three entities so StaticEntityExtractor's ids resolve via FK.
+        let graph = PgGraph::new(&pool);
+        let e1 = graph
+            .upsert_entity("person", "alice", &serde_json::json!({}))
+            .await
+            .expect("e1");
+        let e2 = graph
+            .upsert_entity("drug", "metformin", &serde_json::json!({}))
+            .await
+            .expect("e2");
+        let e3 = graph
+            .upsert_entity("disease", "diabetes", &serde_json::json!({}))
+            .await
+            .expect("e3");
+
+        let extractor = StaticEntityExtractor::with_ids(vec![e1, e2, e3]);
+        let rules = vec![make_rule("r1", "alice takes metformin for diabetes")];
+
+        let report =
+            seed_l0_from_rules(&pool, &extractor, seed_path(), "sha-link", &rules)
+                .await
+                .expect("seed");
+
+        assert_eq!(report.new_rows_written, 1, "one new rule written");
+        assert_eq!(
+            report.entities_linked, 3,
+            "expected 3 entity links via auto-linker"
+        );
+        assert_eq!(report.link_failures, 0, "no link failures");
+
+        // Confirm memory_entities rows were actually persisted.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memory_entities WHERE memory_id IN \
+             (SELECT id FROM memories WHERE metadata->>'l0_rule_id' = 'r1')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 3, "3 memory_entities rows for rule r1");
+
+        pool.close().await;
+    });
+}

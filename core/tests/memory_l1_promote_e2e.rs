@@ -623,3 +623,91 @@ fn list_l1_in_prompt_vs_all_distinguishes_at_cap_boundary() {
         pool.close().await;
     });
 }
+
+// ---------------------------------------------------------------------------
+// Task 6 — caller-side e2e: StaticEntityExtractor wired through L1 writer
+// ---------------------------------------------------------------------------
+
+/// Verify that `promote_l1` with a `StaticEntityExtractor` returns
+/// `L1WriteOutcome::Inserted` carrying a `Some(LinkOutcome)` that reflects
+/// the scripted entity count, and that `memory_entities` rows are persisted.
+#[test]
+fn promote_l1_inserted_outcome_carries_link_outcome() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    use hhagent_core::entity_extraction::StaticEntityExtractor;
+    use hhagent_db::graph::{Graph, PgGraph};
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l1el-d",
+        "l1el-l",
+        &format!("hhagent-supervisor-test-pg-l1el-{suffix}"),
+    );
+
+    rt().block_on(async {
+        hhagent_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l1-entity-link"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Pre-create two entities so StaticEntityExtractor's ids resolve via FK.
+        let graph = PgGraph::new(&pool);
+        let e1 = graph
+            .upsert_entity("person", "carol", &serde_json::json!({}))
+            .await
+            .expect("e1");
+        // "concept" is a seeded entity kind in migration 0015.
+        let e2 = graph
+            .upsert_entity("concept", "alpha", &serde_json::json!({}))
+            .await
+            .expect("e2");
+
+        let extractor = StaticEntityExtractor::with_ids(vec![e1, e2]);
+
+        let outcome = promote_l1(
+            &pool,
+            &extractor,
+            "carol leads project alpha",
+            L1Source::Operator,
+        )
+        .await
+        .expect("promote_l1");
+
+        match outcome {
+            L1WriteOutcome::Inserted { memory_id, link_outcome } => {
+                let link =
+                    link_outcome.expect("link_outcome must be Some on Inserted");
+                assert_eq!(link.n_entities_linked, 2, "2 entities linked");
+                assert_eq!(link.seeds.ids, vec![e1, e2], "seed ids match");
+
+                // Confirm memory_entities rows were persisted.
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM memory_entities WHERE memory_id = $1",
+                )
+                .bind(memory_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+                assert_eq!(count, 2, "2 memory_entities rows for the inserted memory");
+            }
+            other => panic!("expected Inserted, got {other:?}"),
+        }
+
+        pool.close().await;
+    });
+}
