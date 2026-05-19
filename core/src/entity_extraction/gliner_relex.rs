@@ -143,6 +143,138 @@ pub fn merge_chunks(chunk_responses: Vec<(usize, ExtractResponse)>) -> ExtractRe
     ExtractResponse { entities, triples }
 }
 
+use sqlx::PgPool;
+
+/// Result of the upsert pass.
+pub struct UpsertOutcome {
+    /// IDs of every entity in the merged response, in original order
+    /// (whether newly inserted or pre-existing). This is what the
+    /// extractor returns to recall as the graph-lane seeds.
+    pub entity_ids: Vec<i64>,
+    /// Number of entity rows the upsert created (not counting
+    /// ON CONFLICT hits).
+    pub n_entities_upserted_new: u32,
+    /// Number of relation rows the upsert created.
+    pub n_relations_inserted: u32,
+}
+
+// Integration test coverage in core/tests/entity_extraction_e2e.rs:
+//   - upsert_creates_quarantined_entities
+//   - upsert_is_idempotent_on_rerun
+//   - upsert_dedup_works_with_case_variants
+/// Upsert every entity in `merged.entities` into the `entities` table
+/// (quarantine=TRUE on new rows; conflict by `(kind, name_norm)` →
+/// preserve existing row including its quarantine state). Then for
+/// every triple in `merged.triples`, look up the head and tail entity
+/// ids and insert into `relations` if no row already exists with the
+/// same `(src_id, dst_id, kind)` triple.
+///
+/// Best-effort idempotent: rerunning with the same input produces no
+/// new rows.
+pub async fn upsert_entities_and_relations(
+    pool: &PgPool,
+    merged: &ExtractResponse,
+) -> Result<UpsertOutcome, crate::entity_extraction::EntityExtractionError> {
+    let mut entity_ids = Vec::with_capacity(merged.entities.len());
+    let mut n_new: u32 = 0;
+
+    // Per-entity upsert. Each entity gets one INSERT attempt; on
+    // conflict, we follow up with a SELECT to resolve the existing id.
+    // This is two round-trips for existing entities and one for new
+    // ones — acceptable for v2's typical 5–20 entities per extract.
+    for ent in &merged.entities {
+        let name_norm = normalize_entity_name(&ent.text);
+        // First try INSERT ... ON CONFLICT DO NOTHING RETURNING id.
+        let inserted_id: Option<i64> = sqlx::query_scalar(
+            "INSERT INTO entities (kind, name, name_norm, quarantine) \
+             VALUES ($1, $2, $3, TRUE) \
+             ON CONFLICT (kind, name_norm) DO NOTHING \
+             RETURNING id",
+        )
+        .bind(&ent.label)
+        .bind(&ent.text)
+        .bind(&name_norm)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| hhagent_db::DbError::Query(format!("upsert entity: {e}")))?;
+
+        let id = match inserted_id {
+            Some(id) => {
+                n_new += 1;
+                id
+            }
+            None => {
+                // Pre-existing row — resolve via SELECT.
+                sqlx::query_scalar(
+                    "SELECT id FROM entities WHERE kind = $1 AND name_norm = $2",
+                )
+                .bind(&ent.label)
+                .bind(&name_norm)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| hhagent_db::DbError::Query(format!("resolve entity id: {e}")))?
+            }
+        };
+        entity_ids.push(id);
+    }
+
+    // Build a (label, name_norm) → id index so we can resolve triple
+    // endpoints without re-querying.
+    let mut by_key: std::collections::HashMap<(String, String), i64> =
+        std::collections::HashMap::new();
+    for (ent, id) in merged.entities.iter().zip(entity_ids.iter()) {
+        by_key.insert(
+            (ent.label.clone(), normalize_entity_name(&ent.text)),
+            *id,
+        );
+    }
+
+    let mut n_relations_inserted: u32 = 0;
+    for tri in &merged.triples {
+        let head_key = (tri.head.r#type.clone(), normalize_entity_name(&tri.head.text));
+        let tail_key = (tri.tail.r#type.clone(), normalize_entity_name(&tri.tail.text));
+        let head_id = match by_key.get(&head_key) {
+            Some(id) => *id,
+            None => continue,  // triple references unknown entity — skip
+        };
+        let tail_id = match by_key.get(&tail_key) {
+            Some(id) => *id,
+            None => continue,
+        };
+        let relation_norm = tri.relation
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Schema allows multi-edges intentionally (0001 comment); we
+        // dedup at the application layer via WHERE NOT EXISTS to make
+        // re-extraction idempotent.
+        let n: u64 = sqlx::query(
+            "INSERT INTO relations (src_id, dst_id, kind, attrs) \
+             SELECT $1, $2, $3, '{}'::jsonb \
+             WHERE NOT EXISTS ( \
+                 SELECT 1 FROM relations \
+                 WHERE src_id = $1 AND dst_id = $2 AND kind = $3 \
+             )",
+        )
+        .bind(head_id)
+        .bind(tail_id)
+        .bind(&relation_norm)
+        .execute(pool)
+        .await
+        .map_err(|e| hhagent_db::DbError::Query(format!("insert relation: {e}")))?
+        .rows_affected();
+        n_relations_inserted += n as u32;
+    }
+
+    Ok(UpsertOutcome {
+        entity_ids,
+        n_entities_upserted_new: n_new,
+        n_relations_inserted,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
