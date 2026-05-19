@@ -210,7 +210,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             .await
             .expect("upsert bob");
         let cat_id = graph_g
-            .upsert_entity("animal", "cat", &serde_json::json!({}))
+            .upsert_entity("object", "cat", &serde_json::json!({}))
             .await
             .expect("upsert cat");
         graph_g
@@ -338,7 +338,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             .expect("upsert hub");
         for i in 0..leaf_count {
             let leaf_id = graph_g
-                .upsert_entity("thing", &format!("leaf-{i}"), &serde_json::json!({}))
+                .upsert_entity("object", &format!("leaf-{i}"), &serde_json::json!({}))
                 .await
                 .expect("upsert leaf");
             graph_g
