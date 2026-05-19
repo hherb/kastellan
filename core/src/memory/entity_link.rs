@@ -21,9 +21,6 @@ use sqlx::PgPool;
 use crate::entity_extraction::{
     EntityExtractionError, EntityExtractor, EntitySeeds, SeedSource,
 };
-// `audit` and `link_memory_to_entities` are unused at the scaffold stage;
-// Task 2 fills in the `link_memory_entities` body that calls them.
-#[allow(unused_imports)]
 use hhagent_db::{audit, memories::link_memory_to_entities, DbError};
 
 /// What the auto-linker did, for caller telemetry. Returned on success
@@ -76,12 +73,66 @@ pub async fn link_memory_entities(
     layer_label: &'static str,
     body: &str,
 ) -> Result<LinkOutcome, LinkError> {
-    // Task 1 scaffold: stubbed body. Task 2 fills in the real
-    // implementation. The scaffold exists so Task 1's unit tests
-    // (which test `build_entity_link_payload` only) compile against
-    // the rest of the module.
-    let _ = (extractor, pool, memory_id, layer_label, body);
-    unimplemented!("link_memory_entities body lands in Task 2")
+    let extract_result = extractor.extract(body).await;
+
+    let (seeds, n_linked) = match extract_result {
+        Ok(seeds) => {
+            // ON CONFLICT DO NOTHING in link_memory_to_entities makes
+            // this idempotent on re-runs; empty seeds short-circuit at
+            // the existing fast-path so the NoOp extractor case is
+            // essentially free (no SQL issued).
+            let n = link_memory_to_entities(pool, memory_id, &seeds.ids).await?;
+            (seeds, n)
+        }
+        Err(e) => {
+            // Audit the failed attempt; the audit insert is best-effort
+            // (its own error is logged but doesn't shadow the primary
+            // extract error). We then propagate the extract error so
+            // the caller's `Err` arm runs (warn-log + degrade-counter).
+            let payload = build_entity_link_payload(
+                memory_id,
+                layer_label,
+                /* n_entities_linked */ 0,
+                /* n_seeds */ 0,
+                SeedSource::None,
+                None,
+            );
+            if let Err(audit_err) = audit::insert(
+                pool,
+                "memory_linker",
+                "entity_link",
+                payload,
+            )
+            .await
+            {
+                tracing::warn!(
+                    error = %audit_err, memory_id,
+                    "memory_linker degraded-path audit row failed"
+                );
+            }
+            return Err(LinkError::from(e));
+        }
+    };
+
+    // Success-path audit row.
+    let payload = build_entity_link_payload(
+        memory_id,
+        layer_label,
+        n_linked,
+        seeds.ids.len() as u64,
+        seeds.source,
+        seeds.model_version.as_deref(),
+    );
+    // Best-effort: an audit-insert failure here doesn't roll back the
+    // already-committed link rows. Log + continue.
+    if let Err(e) = audit::insert(pool, "memory_linker", "entity_link", payload).await {
+        tracing::warn!(error = %e, memory_id, "memory_linker audit row failed");
+    }
+
+    Ok(LinkOutcome {
+        n_entities_linked: n_linked,
+        seeds,
+    })
 }
 
 /// Pure builder: 6 keys, BTreeMap-ordered (matches the convention from
