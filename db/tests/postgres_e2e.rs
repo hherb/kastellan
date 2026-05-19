@@ -2989,3 +2989,171 @@ async fn entities_list_min_mentions_filter_uses_join_count() {
 
     pool.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_approve_flips_quarantine_and_is_idempotent() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "eaf-d",
+        "eaf-l",
+        &format!("hhagent-pg-eaf-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-approve"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{approve_entity, ApproveOutcome};
+
+    sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES ('person', 'Approve Me', 'approve me')")
+        .execute(&pool).await.unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Approve Me'")
+        .fetch_one(&pool).await.unwrap();
+
+    // First call: Approved.
+    match approve_entity(&pool, id).await.unwrap() {
+        ApproveOutcome::Approved { kind, name } => {
+            assert_eq!(kind, "person");
+            assert_eq!(name, "Approve Me");
+        }
+        other => panic!("expected Approved, got {other:?}"),
+    }
+    // DB state must reflect the flip.
+    let quarantine: bool = sqlx::query_scalar("SELECT quarantine FROM entities WHERE id = $1")
+        .bind(id).fetch_one(&pool).await.unwrap();
+    assert!(!quarantine);
+
+    // Second call: AlreadyApproved.
+    assert!(matches!(approve_entity(&pool, id).await.unwrap(), ApproveOutcome::AlreadyApproved));
+
+    // Unknown id: NotFound.
+    assert!(matches!(approve_entity(&pool, 999_999).await.unwrap(), ApproveOutcome::NotFound));
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_reject_cascades_memory_entities_and_returns_count() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "erc-d",
+        "erc-l",
+        &format!("hhagent-pg-erc-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-reject"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{reject_entity, RejectOutcome};
+    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+
+    sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES ('person', 'Reject Me', 'reject me')")
+        .execute(&pool).await.unwrap();
+    let entity_id: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Reject Me'")
+        .fetch_one(&pool).await.unwrap();
+
+    // Link two memories to the entity.
+    let mem1 = insert_memory_at_layer(&pool, "body one", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    let mem2 = insert_memory_at_layer(&pool, "body two", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES ($1, $3), ($2, $3)")
+        .bind(mem1).bind(mem2).bind(entity_id)
+        .execute(&pool).await.unwrap();
+
+    match reject_entity(&pool, entity_id).await.unwrap() {
+        RejectOutcome::Rejected { kind, name, mentions_dropped } => {
+            assert_eq!(kind, "person");
+            assert_eq!(name, "Reject Me");
+            assert_eq!(mentions_dropped, 2);
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+
+    // Entity is gone.
+    let entity_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE id = $1")
+        .bind(entity_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(entity_count, 0);
+    // memory_entities rows cascaded.
+    let me_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_entities WHERE entity_id = $1")
+        .bind(entity_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(me_count, 0);
+    // Memory rows themselves survive.
+    let mem_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE id IN ($1, $2)")
+        .bind(mem1).bind(mem2).fetch_one(&pool).await.unwrap();
+    assert_eq!(mem_count, 2);
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_reject_returns_not_found_on_unknown_id() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ernf-d",
+        "ernf-l",
+        &format!("hhagent-pg-ernf-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-reject-notfound"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{reject_entity, RejectOutcome};
+    assert!(matches!(
+        reject_entity(&pool, 999_999).await.unwrap(),
+        RejectOutcome::NotFound
+    ));
+
+    pool.close().await;
+}

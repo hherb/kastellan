@@ -324,6 +324,112 @@ pub async fn get_entity_with_mentions(
     Ok(Some((entity_row, previews)))
 }
 
+/// Flip `quarantine` from TRUE to FALSE for one entity inside a
+/// single transaction, distinguishing already-approved from not-found.
+///
+/// Transaction shape:
+///   BEGIN;
+///   SELECT id, kind, name, quarantine FROM entities WHERE id = $1 FOR UPDATE;
+///   -- branch on observed state:
+///   --   None                -> COMMIT, return NotFound
+///   --   quarantine = FALSE  -> COMMIT, return AlreadyApproved
+///   --   quarantine = TRUE   -> UPDATE … SET quarantine = FALSE, COMMIT,
+///                               return Approved { kind, name }
+pub async fn approve_entity(
+    pool: &PgPool,
+    id: i64,
+) -> Result<ApproveOutcome, EntitiesError> {
+    let mut tx = pool.begin().await.map_err(|e| {
+        EntitiesError::Db(DbError::Query(format!("approve_entity begin: {e}")))
+    })?;
+    let row: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT kind, name, quarantine FROM entities WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        EntitiesError::Db(DbError::Query(format!("approve_entity select {id}: {e}")))
+    })?;
+    let (kind, name, quarantine) = match row {
+        None => {
+            tx.commit().await.ok();
+            return Ok(ApproveOutcome::NotFound);
+        }
+        Some(t) => t,
+    };
+    if !quarantine {
+        tx.commit().await.ok();
+        return Ok(ApproveOutcome::AlreadyApproved);
+    }
+    sqlx::query("UPDATE entities SET quarantine = FALSE, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            EntitiesError::Db(DbError::Query(format!("approve_entity update {id}: {e}")))
+        })?;
+    tx.commit().await.map_err(|e| {
+        EntitiesError::Db(DbError::Query(format!("approve_entity commit {id}: {e}")))
+    })?;
+    Ok(ApproveOutcome::Approved { kind, name })
+}
+
+/// Delete one entity inside a single transaction, capturing the cascade
+/// row count from `memory_entities` for the audit-row payload.
+///
+/// Transaction shape:
+///   BEGIN;
+///   SELECT id, kind, name FROM entities WHERE id = $1 FOR UPDATE;
+///   -- on None -> COMMIT, return NotFound
+///   SELECT COUNT(*) FROM memory_entities WHERE entity_id = $1;
+///   DELETE FROM entities WHERE id = $1;   -- cascades memory_entities
+///   COMMIT;
+pub async fn reject_entity(
+    pool: &PgPool,
+    id: i64,
+) -> Result<RejectOutcome, EntitiesError> {
+    let mut tx = pool.begin().await.map_err(|e| {
+        EntitiesError::Db(DbError::Query(format!("reject_entity begin: {e}")))
+    })?;
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT kind, name FROM entities WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        EntitiesError::Db(DbError::Query(format!("reject_entity select {id}: {e}")))
+    })?;
+    let (kind, name) = match row {
+        None => {
+            tx.commit().await.ok();
+            return Ok(RejectOutcome::NotFound);
+        }
+        Some(t) => t,
+    };
+    let mentions_dropped: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memory_entities WHERE entity_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| {
+        EntitiesError::Db(DbError::Query(format!("reject_entity count {id}: {e}")))
+    })?;
+    sqlx::query("DELETE FROM entities WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            EntitiesError::Db(DbError::Query(format!("reject_entity delete {id}: {e}")))
+        })?;
+    tx.commit().await.map_err(|e| {
+        EntitiesError::Db(DbError::Query(format!("reject_entity commit {id}: {e}")))
+    })?;
+    Ok(RejectOutcome::Rejected { kind, name, mentions_dropped })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
