@@ -197,13 +197,22 @@ pub async fn upsert_entities_and_relations(
     // round-trip. (Issue #90; Layer A only — full-batch unnest is
     // deferred.)
     //
+    // Concurrency bonus: DO UPDATE acquires a row-level exclusive
+    // lock on the conflict-hit row and atomically returns the
+    // resolved id. The old DO NOTHING + follow-up SELECT did not
+    // lock, so concurrent upserts of the same (kind, name_norm)
+    // had a narrow window where the SELECT could see uncommitted
+    // state. The new path is atomically race-safe; the trade-off
+    // is brief serialization under contention on the same key
+    // (a non-issue at v2's per-task concurrency).
+    //
     // Side effect of the no-op UPDATE: Postgres advances xmin and
     // writes a new tuple version even though no column changed.
     // Acceptable at v2 volume; autovacuum absorbs it without
     // operator action.
     for ent in &merged.entities {
         let name_norm = normalize_entity_name(&ent.text);
-        let row: (i64, bool) = sqlx::query_as(
+        let (id, inserted): (i64, bool) = sqlx::query_as(
             "INSERT INTO entities (kind, name, name_norm, quarantine) \
              VALUES ($1, $2, $3, TRUE) \
              ON CONFLICT (kind, name_norm) DO UPDATE \
@@ -216,10 +225,10 @@ pub async fn upsert_entities_and_relations(
         .fetch_one(pool)
         .await
         .map_err(|e| hhagent_db::DbError::Query(format!("upsert entity: {e}")))?;
-        if row.1 {
+        if inserted {
             n_new += 1;
         }
-        entity_ids.push(row.0);
+        entity_ids.push(id);
     }
 
     // Build a (label, name_norm) → id index so we can resolve triple
