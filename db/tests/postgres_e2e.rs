@@ -3389,8 +3389,9 @@ async fn entities_merge_refuses_cross_kind_and_keep_in_drop_list() {
 // the three migration-0015 / 0016 tests above:
 //
 //   1. Schema check (`migration_0017_seeds_relation_kinds_and_adds_fk`):
-//      the lookup table exists, 17 seed kinds are present, `undefined`
-//      is among them, `relations_kind_fk` is wired, and
+//      the lookup table exists, 19 seed kinds are present (1
+//      `undefined` fallback + 18 starter relations), `undefined` is
+//      among them, `relations_kind_fk` is wired, and
 //      `fetch_relation_kinds` returns the same set the cache will use.
 //
 //   2. FK behaviour (`relation_kinds_fk_rejects_unknown_kind_and_sets_default_on_delete`):
@@ -3486,7 +3487,7 @@ async fn migration_0017_seeds_relation_kinds_and_adds_fk() {
     );
 
     // `fetch_relation_kinds` is the source-of-truth for the
-    // `RelationKindsCache`. Pin it returns the same 17 seeds the
+    // `RelationKindsCache`. Pin it returns the same 19 seeds the
     // direct COUNT(*) saw and includes the load-bearing ones.
     let kinds = hhagent_db::relation_kinds::fetch_relation_kinds(&pool)
         .await

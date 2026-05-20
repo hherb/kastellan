@@ -365,6 +365,13 @@ impl GlinerRelexExtractor {
     /// silently lose entity-extraction signal too.
     async fn resolve_relation_labels(&self) -> Vec<String> {
         match &self.relation_labels {
+            // `Override` is the test-only seam: the caller supplies the
+            // exact list passed to the worker. We do NOT apply
+            // `strip_undefined_label` here — tests need to be able to
+            // pin the worker's behaviour against arbitrary inputs
+            // (including `undefined`, if a test ever wants to assert
+            // how the worker reacts to it). Production callers must use
+            // `FromDb`, where the filter is applied.
             RelationLabelSource::Override(labels) => labels.clone(),
             RelationLabelSource::FromDb(cache) => match cache.list_kinds(&self.pool).await {
                 Ok(labels) => strip_undefined_label(labels),
@@ -395,7 +402,7 @@ impl GlinerRelexExtractor {
 /// Pure helper, deterministic, no I/O — extracted from the live cache
 /// path so the filter contract is unit-testable without spinning up
 /// Postgres.
-pub fn strip_undefined_label(labels: Vec<String>) -> Vec<String> {
+pub(crate) fn strip_undefined_label(labels: Vec<String>) -> Vec<String> {
     labels.into_iter().filter(|k| k != "undefined").collect()
 }
 

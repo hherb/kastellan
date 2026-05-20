@@ -27,8 +27,9 @@
 --   (3) Seed vocabulary is intentionally small and biased toward the
 --       clinical/medical domain that the entity_kinds taxonomy
 --       already favours (patient, doctor, drug, treatment, …). The
---       17 seeds cover the common relation shapes a clinical note
---       would surface; operators extend via direct `INSERT INTO
+--       18 starter seeds (plus `undefined` for FK fallback, 19 total)
+--       cover the common relation shapes a clinical note would
+--       surface; operators extend via direct `INSERT INTO
 --       relation_kinds` (no automatic widening from the extractor —
 --       a foreign label coming back from GLiNER must be rejected,
 --       not silently added).
