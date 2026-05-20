@@ -82,7 +82,7 @@ pub(crate) fn multi_thread_runtime(prefix: &str) -> Result<tokio::runtime::Runti
 /// known-action match**, so a typo at the dispatch site (Issue #97)
 /// no longer pays the cost of spawning worker threads it never uses.
 ///
-/// Doc-pin: `prefix` flows verbatim into the failure diagnostic so
+/// Note: `prefix` flows verbatim into the failure diagnostic so
 /// operators can tell which dispatcher hit the (rare) build error.
 pub(crate) fn with_runtime<F>(prefix: &str, fut: F) -> ExitCode
 where
