@@ -143,6 +143,21 @@ pub const ACTION_TOOLS_ALLOWLIST_ADD: &str = "tools.allowlist.add";
 /// removes one allowlist entry via `hhagent-cli tools allowlist remove`.
 pub const ACTION_TOOLS_ALLOWLIST_REMOVE: &str = "tools.allowlist.remove";
 
+/// `actor='cli' action='entities.approved'` — operator flipped a
+/// quarantined entity to approved. Payload: {entity_id, kind, name}.
+pub const ACTION_ENTITIES_APPROVED: &str = "entities.approved";
+
+/// `actor='cli' action='entities.rejected'` — operator deleted a
+/// quarantined entity. Payload:
+/// {entity_id, kind, name, mentions_dropped}. The `mentions_dropped`
+/// field is the number of `memory_entities` rows cascaded by the FK.
+pub const ACTION_ENTITIES_REJECTED: &str = "entities.rejected";
+
+/// `actor='cli' action='entities.merged'` — operator consolidated near-
+/// duplicate entities. Payload: {kept_id, kept_kind, kept_name,
+/// dropped_ids, links_retargeted, links_dropped_as_duplicate}.
+pub const ACTION_ENTITIES_MERGED: &str = "entities.merged";
+
 /// Value of the `provenance` field in a `task.finalize` payload emitted
 /// from the scheduler's runtime path (the lane runner observed the task
 /// end-to-end). Counters are facts; `started_at` is always present.
@@ -373,6 +388,57 @@ pub fn build_l1_write_payload(
         Value::String(body_sha256.into()),
     );
     Value::Object(obj)
+}
+
+/// Build the wire-stable payload for `actor='cli' action='entities.approved'`.
+/// Keys: {entity_id, kind, name} (3 keys, BTreeSet-pinned in tests).
+pub fn build_entities_approved_payload(
+    entity_id: i64,
+    kind: &str,
+    name: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "entity_id": entity_id,
+        "kind":      kind,
+        "name":      name,
+    })
+}
+
+/// Build the wire-stable payload for `actor='cli' action='entities.rejected'`.
+/// Keys: {entity_id, kind, name, mentions_dropped} (4 keys).
+pub fn build_entities_rejected_payload(
+    entity_id: i64,
+    kind: &str,
+    name: &str,
+    mentions_dropped: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "entity_id":        entity_id,
+        "kind":             kind,
+        "name":             name,
+        "mentions_dropped": mentions_dropped,
+    })
+}
+
+/// Build the wire-stable payload for `actor='cli' action='entities.merged'`.
+/// Keys: {kept_id, kept_kind, kept_name, dropped_ids, links_retargeted,
+/// links_dropped_as_duplicate} (6 keys).
+pub fn build_entities_merged_payload(
+    kept_id: i64,
+    kept_kind: &str,
+    kept_name: &str,
+    dropped_ids: &[i64],
+    links_retargeted: i64,
+    links_dropped_as_duplicate: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kept_id":                     kept_id,
+        "kept_kind":                   kept_kind,
+        "kept_name":                   kept_name,
+        "dropped_ids":                 dropped_ids,
+        "links_retargeted":            links_retargeted,
+        "links_dropped_as_duplicate":  links_dropped_as_duplicate,
+    })
 }
 
 /// Compute `total_duration_ms` for the finalize payload, clamping
@@ -866,6 +932,61 @@ mod tests {
         assert_eq!(ACTION_L1_ADDED, "l1.added");
         assert_eq!(ACTION_L1_REMOVED, "l1.removed");
         assert_eq!(ACTION_L1_PROMOTED, "l1.promoted");
+    }
+
+    // --- entities.{approved,rejected,merged} ----------------------------
+
+    #[test]
+    fn action_entities_approved_string_is_pinned() {
+        assert_eq!(ACTION_ENTITIES_APPROVED, "entities.approved");
+    }
+
+    #[test]
+    fn action_entities_rejected_string_is_pinned() {
+        assert_eq!(ACTION_ENTITIES_REJECTED, "entities.rejected");
+    }
+
+    #[test]
+    fn action_entities_merged_string_is_pinned() {
+        assert_eq!(ACTION_ENTITIES_MERGED, "entities.merged");
+    }
+
+    #[test]
+    fn build_entities_approved_payload_has_exact_three_keys() {
+        use std::collections::BTreeSet;
+        let v = build_entities_approved_payload(7, "person", "Dr Smith");
+        let keys: BTreeSet<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        let expected: BTreeSet<&str> = ["entity_id", "kind", "name"].iter().copied().collect();
+        assert_eq!(keys, expected);
+        assert_eq!(v["entity_id"], 7);
+        assert_eq!(v["kind"], "person");
+        assert_eq!(v["name"], "Dr Smith");
+    }
+
+    #[test]
+    fn build_entities_rejected_payload_has_exact_four_keys() {
+        use std::collections::BTreeSet;
+        let v = build_entities_rejected_payload(7, "person", "Dr Smith", 3);
+        let keys: BTreeSet<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        let expected: BTreeSet<&str> = ["entity_id", "kind", "name", "mentions_dropped"]
+            .iter().copied().collect();
+        assert_eq!(keys, expected);
+        assert_eq!(v["mentions_dropped"], 3);
+    }
+
+    #[test]
+    fn build_entities_merged_payload_has_exact_six_keys() {
+        use std::collections::BTreeSet;
+        let v = build_entities_merged_payload(1, "person", "Smith", &[2, 3], 4, 1);
+        let keys: BTreeSet<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        let expected: BTreeSet<&str> = [
+            "kept_id", "kept_kind", "kept_name",
+            "dropped_ids", "links_retargeted", "links_dropped_as_duplicate",
+        ].iter().copied().collect();
+        assert_eq!(keys, expected);
+        assert_eq!(v["dropped_ids"].as_array().unwrap().len(), 2);
+        assert_eq!(v["links_retargeted"], 4);
+        assert_eq!(v["links_dropped_as_duplicate"], 1);
     }
 }
 

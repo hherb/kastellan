@@ -2772,3 +2772,613 @@ async fn graph_search_includes_quarantined_when_flag_true() {
 
     pool.close().await;
 }
+
+// ─── Entities review surface (0015) ─────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_list_filters_by_state_kind_and_since() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "elf-d",
+        "elf-l",
+        &format!("hhagent-pg-elf-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-list-filters"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{list_entities, EntityState, ListFilter};
+    use time::OffsetDateTime;
+
+    // Seed 4 entities — 2 quarantined (different kinds), 1 approved, 1 old.
+    sqlx::query(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) VALUES
+        ('person', 'Quar Alice', 'quar alice', TRUE),
+        ('place',  'Quar Mosman', 'quar mosman', TRUE),
+        ('person', 'OK Bob', 'ok bob', FALSE),
+        ('person', 'Old Carol', 'old carol', TRUE)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Back-date Old Carol so the --since filter excludes it.
+    sqlx::query(
+        "UPDATE entities SET created_at = now() - interval '7 days' WHERE name = 'Old Carol'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Default filter (quarantined, limit 50, no other filters).
+    let rows = list_entities(&pool, &ListFilter::default()).await.unwrap();
+    let names: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains("Quar Alice"));
+    assert!(names.contains("Quar Mosman"));
+    assert!(names.contains("Old Carol"));
+    assert!(
+        !names.contains("OK Bob"),
+        "approved entity must not appear in default filter"
+    );
+    assert_eq!(rows.len(), 3, "expected 3 quarantined rows, got {}", rows.len());
+
+    // Filter by kind=person.
+    let rows = list_entities(
+        &pool,
+        &ListFilter {
+            kind: Some("person".into()),
+            ..ListFilter::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "expected 2 quarantined persons");
+    for r in &rows {
+        assert_eq!(r.kind, "person");
+    }
+
+    // Filter by state=approved.
+    let rows = list_entities(
+        &pool,
+        &ListFilter {
+            state: EntityState::Approved,
+            ..ListFilter::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "OK Bob");
+    assert!(!rows[0].quarantine);
+
+    // Filter by since = now - 1 day. Old Carol must be excluded.
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::days(1);
+    let rows = list_entities(
+        &pool,
+        &ListFilter {
+            since: Some(cutoff),
+            ..ListFilter::default()
+        },
+    )
+    .await
+    .unwrap();
+    let names: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.name.as_str()).collect();
+    assert!(
+        !names.contains("Old Carol"),
+        "back-dated row must be excluded by --since"
+    );
+    assert!(names.contains("Quar Alice"));
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_list_min_mentions_filter_uses_join_count() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "emm-d",
+        "emm-l",
+        &format!("hhagent-pg-emm-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-min-mentions"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{list_entities, ListFilter};
+
+    // Seed 1 entity with 0 mentions and 1 entity with 2 mentions.
+    sqlx::query(
+        "INSERT INTO entities (kind, name, name_norm) VALUES
+        ('person', 'Zero', 'zero'),
+        ('person', 'Two',  'two')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let two_id: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Two'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // Two memories linked only to the 'Two' entity.
+    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    let mem1 = insert_memory_at_layer(
+        &pool,
+        "body 1",
+        &serde_json::json!({}),
+        None,
+        MemoryLayer::Stable,
+    )
+    .await
+    .unwrap();
+    let mem2 = insert_memory_at_layer(
+        &pool,
+        "body 2",
+        &serde_json::json!({}),
+        None,
+        MemoryLayer::Stable,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memory_entities (memory_id, entity_id) VALUES ($1, $2), ($3, $2)",
+    )
+    .bind(mem1)
+    .bind(two_id)
+    .bind(mem2)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // min_mentions=1 — only 'Two' qualifies.
+    let rows = list_entities(
+        &pool,
+        &ListFilter {
+            min_mentions: 1,
+            ..ListFilter::default()
+        },
+    )
+    .await
+    .unwrap();
+    let names: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains("Two"));
+    assert!(!names.contains("Zero"));
+
+    // Verify mention_count is surfaced correctly.
+    let two_row = rows.iter().find(|r| r.name == "Two").unwrap();
+    assert_eq!(two_row.mention_count, 2);
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_approve_flips_quarantine_and_is_idempotent() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "eaf-d",
+        "eaf-l",
+        &format!("hhagent-pg-eaf-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-approve"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{approve_entity, ApproveOutcome};
+
+    sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES ('person', 'Approve Me', 'approve me')")
+        .execute(&pool).await.unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Approve Me'")
+        .fetch_one(&pool).await.unwrap();
+
+    // First call: Approved.
+    match approve_entity(&pool, id).await.unwrap() {
+        ApproveOutcome::Approved { kind, name } => {
+            assert_eq!(kind, "person");
+            assert_eq!(name, "Approve Me");
+        }
+        other => panic!("expected Approved, got {other:?}"),
+    }
+    // DB state must reflect the flip.
+    let quarantine: bool = sqlx::query_scalar("SELECT quarantine FROM entities WHERE id = $1")
+        .bind(id).fetch_one(&pool).await.unwrap();
+    assert!(!quarantine);
+
+    // Second call: AlreadyApproved.
+    assert!(matches!(approve_entity(&pool, id).await.unwrap(), ApproveOutcome::AlreadyApproved));
+
+    // Unknown id: NotFound.
+    assert!(matches!(approve_entity(&pool, 999_999).await.unwrap(), ApproveOutcome::NotFound));
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_reject_cascades_memory_entities_and_returns_count() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "erc-d",
+        "erc-l",
+        &format!("hhagent-pg-erc-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-reject"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{reject_entity, RejectOutcome};
+    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+
+    sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES ('person', 'Reject Me', 'reject me')")
+        .execute(&pool).await.unwrap();
+    let entity_id: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Reject Me'")
+        .fetch_one(&pool).await.unwrap();
+
+    // Link two memories to the entity.
+    let mem1 = insert_memory_at_layer(&pool, "body one", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    let mem2 = insert_memory_at_layer(&pool, "body two", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES ($1, $3), ($2, $3)")
+        .bind(mem1).bind(mem2).bind(entity_id)
+        .execute(&pool).await.unwrap();
+
+    match reject_entity(&pool, entity_id).await.unwrap() {
+        RejectOutcome::Rejected { kind, name, mentions_dropped } => {
+            assert_eq!(kind, "person");
+            assert_eq!(name, "Reject Me");
+            assert_eq!(mentions_dropped, 2);
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+
+    // Entity is gone.
+    let entity_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE id = $1")
+        .bind(entity_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(entity_count, 0);
+    // memory_entities rows cascaded.
+    let me_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_entities WHERE entity_id = $1")
+        .bind(entity_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(me_count, 0);
+    // Memory rows themselves survive.
+    let mem_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE id IN ($1, $2)")
+        .bind(mem1).bind(mem2).fetch_one(&pool).await.unwrap();
+    assert_eq!(mem_count, 2);
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_reject_returns_not_found_on_unknown_id() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ernf-d",
+        "ernf-l",
+        &format!("hhagent-pg-ernf-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-reject-notfound"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{reject_entity, RejectOutcome};
+    assert!(matches!(
+        reject_entity(&pool, 999_999).await.unwrap(),
+        RejectOutcome::NotFound
+    ));
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_merge_retargets_links_and_drops_duplicates() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "emr-d",
+        "emr-l",
+        &format!("hhagent-pg-emr-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-merge-retarget"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::merge_entities;
+    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+
+    // 3 person entities: 'Smith' is the canonical row; 'SMITH' is a
+    // near-duplicate the operator wants to merge in. The (kind, name_norm)
+    // unique constraint from migration 0015 would reject two rows with
+    // name_norm='smith', so the seed uses an artificial 'smith_2' value.
+    // A real extractor wouldn't produce two such rows — but the merge
+    // operation must still handle whatever the operator finds in the DB.
+    sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES
+        ('person', 'Smith',     'smith'),
+        ('person', 'SMITH',     'smith_2'),
+        ('person', 'Dr. Smith', 'dr smith')")
+        .execute(&pool).await.unwrap();
+    let keep:  i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Smith'").fetch_one(&pool).await.unwrap();
+    let drop_a: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'SMITH'").fetch_one(&pool).await.unwrap();
+    let drop_b: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Dr. Smith'").fetch_one(&pool).await.unwrap();
+
+    // 4 memories. mem1 -> keep only; mem2 -> drop_a + keep (the duplicate);
+    // mem3 -> drop_a only (a unique retarget); mem4 -> drop_b only.
+    let mem1 = insert_memory_at_layer(&pool, "m1", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    let mem2 = insert_memory_at_layer(&pool, "m2", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    let mem3 = insert_memory_at_layer(&pool, "m3", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    let mem4 = insert_memory_at_layer(&pool, "m4", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES
+        ($1, $5), ($2, $5), ($2, $6), ($3, $6), ($4, $7)")
+        .bind(mem1).bind(mem2).bind(mem3).bind(mem4)
+        .bind(keep).bind(drop_a).bind(drop_b)
+        .execute(&pool).await.unwrap();
+
+    let outcome = merge_entities(&pool, keep, &[drop_a, drop_b]).await.unwrap();
+    // mem2 was linked to BOTH drop_a and keep — that's the duplicate.
+    // mem3 was linked only to drop_a — that retargets to keep.
+    // mem4 was linked only to drop_b — that retargets to keep.
+    assert_eq!(outcome.links_retargeted, 2,
+        "expected 2 unique-link retargets (mem3+mem4), got {outcome:?}");
+    assert_eq!(outcome.links_dropped_as_duplicate, 1,
+        "expected 1 duplicate dropped (mem2), got {outcome:?}");
+    assert_eq!(outcome.kept_id, keep);
+    assert_eq!(outcome.kept_kind, "person");
+    assert_eq!(outcome.kept_name, "Smith");
+
+    // drop_a + drop_b rows are gone.
+    let drop_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE id IN ($1, $2)")
+        .bind(drop_a).bind(drop_b).fetch_one(&pool).await.unwrap();
+    assert_eq!(drop_count, 0);
+
+    // keep is linked to mem1, mem2, mem3, mem4 (all distinct).
+    let kept_links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_entities WHERE entity_id = $1")
+        .bind(keep).fetch_one(&pool).await.unwrap();
+    assert_eq!(kept_links, 4);
+
+    pool.close().await;
+}
+
+/// Pins the documented semantic difference between
+/// `links_retargeted` (distinct memories newly visible from keep) and
+/// `links_dropped_as_duplicate` (memory_entities ROWS absorbed by the
+/// ON CONFLICT DO NOTHING). When one memory is linked to BOTH drops
+/// AND to keep, it contributes 2 to `dup_count` (one row per drop)
+/// but 0 to `links_retargeted` (keep already had this memory). The
+/// merge-happy-path test above exercises the 1:1 case where the two
+/// counters coincide; this test exercises the multi-drop overlap that
+/// makes them diverge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_merge_dup_count_sums_rows_across_multiple_drops() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "emd-d",
+        "emd-l",
+        &format!("hhagent-pg-emd-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-merge-dup-rows"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::merge_entities;
+    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+
+    sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES
+        ('person', 'Smith',  'smith'),
+        ('person', 'SMITH',  'smith_2'),
+        ('person', 'smithy', 'smithy')")
+        .execute(&pool).await.unwrap();
+    let keep:   i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Smith'").fetch_one(&pool).await.unwrap();
+    let drop_a: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'SMITH'").fetch_one(&pool).await.unwrap();
+    let drop_b: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'smithy'").fetch_one(&pool).await.unwrap();
+
+    // One memory linked to keep + drop_a + drop_b. The ON CONFLICT will
+    // absorb two rows (drop_a→keep already exists, drop_b→keep already
+    // exists), but the memory is not newly visible from keep — keep
+    // already had the link.
+    let mem = insert_memory_at_layer(&pool, "m", &serde_json::json!({}), None, MemoryLayer::Stable).await.unwrap();
+    sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES ($1, $2), ($1, $3), ($1, $4)")
+        .bind(mem).bind(keep).bind(drop_a).bind(drop_b)
+        .execute(&pool).await.unwrap();
+
+    let outcome = merge_entities(&pool, keep, &[drop_a, drop_b]).await.unwrap();
+    assert_eq!(outcome.links_retargeted, 0,
+        "keep already had this memory — nothing newly visible: {outcome:?}");
+    assert_eq!(outcome.links_dropped_as_duplicate, 2,
+        "memory was linked to both drops; dup_count counts rows, not memories: {outcome:?}");
+
+    // keep retains exactly one link to mem after the merge.
+    let kept_links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_entities WHERE entity_id = $1")
+        .bind(keep).fetch_one(&pool).await.unwrap();
+    assert_eq!(kept_links, 1);
+
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entities_merge_refuses_cross_kind_and_keep_in_drop_list() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "emx-d",
+        "emx-l",
+        &format!("hhagent-pg-emx-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "entities-merge-cross-kind"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    use hhagent_db::entities::{merge_entities, EntitiesError};
+
+    sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES
+        ('person', 'Alice',  'alice'),
+        ('place',  'Sydney', 'sydney')")
+        .execute(&pool).await.unwrap();
+    let alice:  i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Alice'").fetch_one(&pool).await.unwrap();
+    let sydney: i64 = sqlx::query_scalar("SELECT id FROM entities WHERE name = 'Sydney'").fetch_one(&pool).await.unwrap();
+
+    // Cross-kind merge — refuse with KindMismatch.
+    let err = merge_entities(&pool, alice, &[sydney]).await.unwrap_err();
+    match err {
+        EntitiesError::KindMismatch { keep_id, keep_kind, drop_id, drop_kind } => {
+            assert_eq!(keep_id, alice);
+            assert_eq!(keep_kind, "person");
+            assert_eq!(drop_id, sydney);
+            assert_eq!(drop_kind, "place");
+        }
+        other => panic!("expected KindMismatch, got {other:?}"),
+    }
+    // Both entities still exist (rollback worked).
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE id IN ($1, $2)")
+        .bind(alice).bind(sydney).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 2);
+
+    // Keep in drop list — refuse with KeepInDropList (pure-helper path).
+    let err = merge_entities(&pool, alice, &[alice]).await.unwrap_err();
+    assert!(matches!(err, EntitiesError::KeepInDropList(id) if id == alice));
+
+    // Unknown drop id — refuse with NotFound.
+    let err = merge_entities(&pool, alice, &[999_999]).await.unwrap_err();
+    assert!(matches!(err, EntitiesError::NotFound(id) if id == 999_999));
+
+    pool.close().await;
+}
