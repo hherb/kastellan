@@ -3382,3 +3382,300 @@ async fn entities_merge_refuses_cross_kind_and_keep_in_drop_list() {
 
     pool.close().await;
 }
+
+// ─── Migration 0017: relation_kinds + relations.kind FK ────────────────
+//
+// Three tests pin the migration's load-bearing pieces, symmetric to
+// the three migration-0015 / 0016 tests above:
+//
+//   1. Schema check (`migration_0017_seeds_relation_kinds_and_adds_fk`):
+//      the lookup table exists, 17 seed kinds are present, `undefined`
+//      is among them, `relations_kind_fk` is wired, and
+//      `fetch_relation_kinds` returns the same set the cache will use.
+//
+//   2. FK behaviour (`relation_kinds_fk_rejects_unknown_kind_and_sets_default_on_delete`):
+//      INSERT into `relations` with an unknown `kind` is rejected;
+//      deleting a kind that's referenced by a row sets that row's kind
+//      to `'undefined'` (the ON DELETE SET DEFAULT contract). Uses the
+//      superuser channel for the DELETE on `relation_kinds` because
+//      the runtime role's INSERT/UPDATE/DELETE on `relation_kinds` is
+//      revoked (covered by the third test).
+//
+//   3. GRANT/REVOKE shape (`relation_kinds_writes_denied_to_runtime_role`):
+//      runtime role can SELECT but not INSERT/UPDATE/DELETE on
+//      `relation_kinds` — same operator-managed posture as
+//      `entity_kinds` post-0016.
+
+/// 0017 introduces the `relation_kinds` lookup table seeded with 17
+/// starter relations, adds a `relations.kind` FK + `SET DEFAULT
+/// 'undefined'` on delete, and locks the runtime role out of writes.
+/// Mirrors the migration-0015 + migration-0016 contract for
+/// `entity_kinds`. This test pins the *schema* end of that contract;
+/// the FK behaviour and the REVOKE behaviour each have their own
+/// dedicated tests below.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_0017_seeds_relation_kinds_and_adds_fk() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m17-d",
+        "m17-l",
+        &format!("hhagent-pg-m17-shape-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0017-relation-kinds-shape"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // relation_kinds present with 19 seeds (1 fallback + 18 starter).
+    let n_kinds: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relation_kinds")
+        .fetch_one(&pool)
+        .await
+        .expect("count relation_kinds");
+    assert_eq!(n_kinds, 19, "migration seeds 19 default relation kinds");
+
+    // 'undefined' specifically present — load-bearing target of the
+    // FK's ON DELETE SET DEFAULT.
+    let n_undefined: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM relation_kinds WHERE kind = 'undefined'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count undefined");
+    assert_eq!(n_undefined, 1, "'undefined' kind must exist for FK fallback");
+
+    // FK on relations.kind exists.
+    let n_fks: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.table_constraints \
+         WHERE table_name='relations' AND constraint_name='relations_kind_fk' \
+           AND constraint_type='FOREIGN KEY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("query fk");
+    assert_eq!(n_fks, 1, "relations_kind_fk must exist");
+
+    // relations.kind DEFAULT 'undefined' — required so ON DELETE SET
+    // DEFAULT lands on the FK target.
+    let col_default: String = sqlx::query_scalar(
+        "SELECT column_default FROM information_schema.columns \
+         WHERE table_name='relations' AND column_name='kind'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("query relations.kind default");
+    assert!(
+        col_default.contains("'undefined'"),
+        "relations.kind DEFAULT must be 'undefined'; got {col_default}",
+    );
+
+    // `fetch_relation_kinds` is the source-of-truth for the
+    // `RelationKindsCache`. Pin it returns the same 17 seeds the
+    // direct COUNT(*) saw and includes the load-bearing ones.
+    let kinds = hhagent_db::relation_kinds::fetch_relation_kinds(&pool)
+        .await
+        .expect("fetch_relation_kinds");
+    assert_eq!(kinds.len(), 19, "fetch returned {} kinds, want 19", kinds.len());
+    for required in ["undefined", "treats", "located in", "associated with", "owns", "knows"] {
+        assert!(
+            kinds.iter().any(|k| k == required),
+            "kinds must contain {required:?}; got {kinds:?}",
+        );
+    }
+
+    pool.close().await;
+}
+
+/// `relations_kind_fk` is configured `ON DELETE SET DEFAULT` with
+/// default `'undefined'`. Pin both halves: (a) inserting a row with an
+/// unknown kind is rejected, and (b) deleting a referenced kind from
+/// the lookup table rewrites the dependent row to `'undefined'`
+/// instead of cascading or erroring.
+///
+/// The DELETE on `relation_kinds` runs via the cluster's superuser
+/// connection (the runtime role has no DELETE — that contract is
+/// pinned by `relation_kinds_writes_denied_to_runtime_role` below).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_kinds_fk_rejects_unknown_kind_and_sets_default_on_delete() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m17-d",
+        "m17-l",
+        &format!("hhagent-pg-m17-fk-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0017-fk"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // Seed two unquarantined entities so we can form a real edge.
+    let src_id: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('person', 'Alice', 'alice', FALSE) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert src entity");
+    let dst_id: i64 = sqlx::query_scalar(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         VALUES ('disease', 'Asthma', 'asthma', FALSE) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert dst entity");
+
+    // (a) Unknown relation kind must be rejected by the FK.
+    let r = sqlx::query(
+        "INSERT INTO relations (src_id, dst_id, kind) VALUES ($1, $2, 'no_such_kind')",
+    )
+    .bind(src_id)
+    .bind(dst_id)
+    .execute(&pool)
+    .await;
+    let err = format!("{:?}", r.expect_err("unknown kind must violate FK"));
+    assert!(
+        err.to_lowercase().contains("foreign key"),
+        "expected FK-violation error; got: {err}",
+    );
+
+    // Insert a real edge using a seeded kind — should succeed.
+    let rel_id: i64 = sqlx::query_scalar(
+        "INSERT INTO relations (src_id, dst_id, kind) VALUES ($1, $2, 'treats') RETURNING id",
+    )
+    .bind(src_id)
+    .bind(dst_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert relation with seeded kind");
+
+    pool.close().await;
+
+    // (b) Delete the kind via a superuser connection; the dependent
+    // relations row must have its kind rewritten to 'undefined' by
+    // the FK's ON DELETE SET DEFAULT clause.
+    let admin_pool = sqlx::postgres::PgPool::connect_with(cluster.conn_spec.to_pg_connect_options())
+        .await
+        .expect("admin pool");
+    sqlx::query("DELETE FROM relation_kinds WHERE kind = 'treats'")
+        .execute(&admin_pool)
+        .await
+        .expect("admin DELETE on relation_kinds");
+    let after_kind: String =
+        sqlx::query_scalar("SELECT kind FROM relations WHERE id = $1")
+            .bind(rel_id)
+            .fetch_one(&admin_pool)
+            .await
+            .expect("read relation kind after delete");
+    assert_eq!(
+        after_kind, "undefined",
+        "ON DELETE SET DEFAULT must rewrite to 'undefined'; got {after_kind:?}",
+    );
+    admin_pool.close().await;
+}
+
+/// `relation_kinds` is operator-managed, mirroring `entity_kinds`
+/// post-0016: runtime role gets SELECT only. INSERT/UPDATE/DELETE/
+/// TRUNCATE must be refused with `permission denied` so a compromised
+/// extractor cannot widen the vocabulary without operator review.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_kinds_writes_denied_to_runtime_role() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "m17-d",
+        "m17-l",
+        &format!("hhagent-pg-m17-revoke-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "migration-0017-revoke-relation-kinds-writes"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    // SELECT must still work (extractor's RelationKindsCache depends on it).
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relation_kinds")
+        .fetch_one(&pool)
+        .await
+        .expect("runtime SELECT on relation_kinds must succeed");
+    assert!(n >= 19, "0017 seeds at least 19 kinds; got {n}");
+
+    // INSERT must be rejected with permission denied.
+    let r = sqlx::query("INSERT INTO relation_kinds (kind) VALUES ('runtime_should_not_insert')")
+        .execute(&pool)
+        .await;
+    let err = format!("{:?}", r.expect_err("runtime INSERT must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied; got: {err}",
+    );
+
+    // UPDATE must also be rejected.
+    let r = sqlx::query("UPDATE relation_kinds SET description = 'tampered' WHERE kind = 'treats'")
+        .execute(&pool)
+        .await;
+    let err = format!("{:?}", r.expect_err("runtime UPDATE must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied; got: {err}",
+    );
+
+    // DELETE must also be rejected.
+    let r = sqlx::query("DELETE FROM relation_kinds WHERE kind = 'treats'")
+        .execute(&pool)
+        .await;
+    let err = format!("{:?}", r.expect_err("runtime DELETE must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied; got: {err}",
+    );
+
+    pool.close().await;
+}

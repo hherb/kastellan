@@ -37,6 +37,7 @@ pub mod graph;
 pub mod memories;
 pub mod pool;
 pub mod probe;
+pub mod relation_kinds;
 pub mod secrets;
 pub mod tasks;
 pub mod tool_allowlists;
