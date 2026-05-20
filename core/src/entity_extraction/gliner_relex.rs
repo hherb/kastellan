@@ -292,37 +292,111 @@ use crate::entity_extraction::{EntityExtractor, EntityExtractionError, EntitySee
 use crate::workers::gliner_relex::Client;
 use async_trait::async_trait;
 use hhagent_db::entity_kinds::KindsCache;
+use hhagent_db::relation_kinds::RelationKindsCache;
 use std::sync::Arc;
 
 /// Default thresholds (per spike correction #3 — model is noisy below 0.5).
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
 pub const DEFAULT_RELATION_THRESHOLD: f32 = 0.5;
 
+/// How the extractor resolves the relation-label vocabulary it passes
+/// to the GLiNER worker on every chunk.
+///
+/// Production builds use `FromDb` so an operator extending the
+/// `relation_kinds` table propagates automatically (subject to the
+/// 60-second cache TTL). Tests inject a fixed list via `Override` to
+/// keep behaviour deterministic without seeding the DB.
+enum RelationLabelSource {
+    /// Read live from the database via [`RelationKindsCache`]. The
+    /// cache memoises for 60 s; operator-driven INSERTs propagate to
+    /// the running daemon without an explicit invalidation step.
+    FromDb(Arc<RelationKindsCache>),
+    /// Hard-coded vocabulary supplied by the caller (typically a unit
+    /// test). Bypasses the DB lookup entirely so tests can pin
+    /// behaviour against a small, predictable label set without
+    /// running migrations or seeding tables.
+    Override(Vec<String>),
+}
+
 pub struct GlinerRelexExtractor {
     client: Client,
     pool: PgPool,
     kinds_cache: Arc<KindsCache>,
-    /// v2 ships entities-only. A future slice picks the relation
-    /// vocabulary (a `relation_kinds` table mirrors `entity_kinds`).
-    relation_labels: Vec<String>,
+    relation_labels: RelationLabelSource,
 }
 
 impl GlinerRelexExtractor {
+    /// Build the production extractor with both kind caches seeded
+    /// empty. First `extract` call populates each cache via one
+    /// `SELECT kind FROM <table>` query.
     pub fn new(client: Client, pool: PgPool) -> Self {
         Self {
             client,
             pool,
             kinds_cache: Arc::new(KindsCache::new()),
-            relation_labels: Vec::new(),
+            relation_labels: RelationLabelSource::FromDb(Arc::new(RelationKindsCache::new())),
         }
     }
 
-    /// For tests / future slices that want to pass non-empty relation
-    /// labels (triggers triple capture).
+    /// Override the relation-label source with a fixed list. Used by
+    /// unit + mock-tier tests that want determinism without seeding
+    /// the `relation_kinds` table. Each call replaces the previous
+    /// configuration (the field is not append-only).
+    ///
+    /// Production callers should leave this method un-called so the
+    /// extractor reads the live operator-managed vocabulary via
+    /// [`RelationKindsCache`].
     pub fn with_relation_labels(mut self, labels: Vec<String>) -> Self {
-        self.relation_labels = labels;
+        self.relation_labels = RelationLabelSource::Override(labels);
         self
     }
+
+    /// Resolve the relation-label list for the current call. Either
+    /// returns the operator-managed list from the DB-backed cache or
+    /// the test-supplied override.
+    ///
+    /// Cache-fetch failures on the production path *degrade-and-warn*
+    /// rather than abort the whole extraction: an empty list switches
+    /// the worker into entity-only mode for this call. Triples are
+    /// dropped for the call but entity-anchored recall still works.
+    /// The decision mirrors the existing `kinds_cache` failure
+    /// handling earlier in [`extract`](Self::extract): the worker
+    /// failing or the DB being briefly unavailable should not
+    /// silently lose entity-extraction signal too.
+    async fn resolve_relation_labels(&self) -> Vec<String> {
+        match &self.relation_labels {
+            RelationLabelSource::Override(labels) => labels.clone(),
+            RelationLabelSource::FromDb(cache) => match cache.list_kinds(&self.pool).await {
+                Ok(labels) => strip_undefined_label(labels),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "hhagent::entity_extraction",
+                        error = %e,
+                        "relation_kinds cache fetch failed; running entity-only for this call",
+                    );
+                    Vec::new()
+                }
+            },
+        }
+    }
+}
+
+/// Strip the `undefined` FK-fallback label out of a relation-kinds list
+/// before handing it to the worker.
+///
+/// `undefined` is the `ON DELETE SET DEFAULT` target on the
+/// `relations_kind_fk` FK introduced by migration `0017`. It exists so
+/// that deleting a kind from `relation_kinds` does not orphan rows in
+/// `relations`; it is not a label we want GLiNER to consider matching.
+/// Passing it through would invite the model to emit triples with
+/// `relation="undefined"`, which carry no semantic content and clutter
+/// the graph.
+///
+/// Pure helper, deterministic, no I/O — extracted from the live cache
+/// path so the filter contract is unit-testable without spinning up
+/// Postgres.
+pub fn strip_undefined_label(labels: Vec<String>) -> Vec<String> {
+    labels.into_iter().filter(|k| k != "undefined").collect()
 }
 
 #[async_trait]
@@ -336,13 +410,14 @@ impl EntityExtractor for GlinerRelexExtractor {
         }
 
         let labels = self.kinds_cache.list_kinds(&self.pool).await?;
+        let relation_labels = self.resolve_relation_labels().await;
         let mut chunk_responses: Vec<(usize, ExtractResponse)> = Vec::new();
 
         for chunk in &chunks {
             let req = ExtractRequest {
                 text: chunk.text.clone(),
                 entity_labels: labels.clone(),
-                relation_labels: self.relation_labels.clone(),
+                relation_labels: relation_labels.clone(),
                 threshold: Some(DEFAULT_THRESHOLD),
                 relation_threshold: Some(DEFAULT_RELATION_THRESHOLD),
                 max_entities: None,
@@ -529,5 +604,62 @@ mod tests {
         let resp_b = ExtractResponse { entities: vec![], triples: vec![triple_b] };
         let merged = merge_chunks(vec![(0, resp_a), (5000, resp_b)]);
         assert_eq!(merged.triples.len(), 1, "case-insensitive triple dedup");
+    }
+
+    // ─── strip_undefined_label (pure helper for relation-vocab slice) ─
+
+    /// `undefined` is the FK-fallback target on `relations.kind`; it
+    /// must never reach GLiNER. The pure helper drops it regardless of
+    /// position in the list, keeping the rest verbatim.
+    #[test]
+    fn strip_undefined_label_drops_undefined_keeps_rest() {
+        let input = vec![
+            "associated with".to_string(),
+            "treats".to_string(),
+            "undefined".to_string(),
+            "located in".to_string(),
+        ];
+        let out = strip_undefined_label(input);
+        assert_eq!(
+            out,
+            vec![
+                "associated with".to_string(),
+                "treats".to_string(),
+                "located in".to_string(),
+            ],
+        );
+    }
+
+    /// A list without `undefined` must pass through untouched. Pinned
+    /// so a future contributor doesn't accidentally make the filter
+    /// destructive on the common path.
+    #[test]
+    fn strip_undefined_label_is_identity_when_undefined_absent() {
+        let input = vec!["treats".to_string(), "located in".to_string()];
+        let out = strip_undefined_label(input.clone());
+        assert_eq!(out, input);
+    }
+
+    /// An empty list stays empty — defends against an off-by-one
+    /// future regression where the helper accidentally panics or
+    /// inserts a sentinel on empty input.
+    #[test]
+    fn strip_undefined_label_handles_empty_input() {
+        let out = strip_undefined_label(Vec::<String>::new());
+        assert!(out.is_empty());
+    }
+
+    /// Multiple `undefined` entries (shouldn't happen — PK on the
+    /// table prevents it — but defends against future schema or
+    /// migration glitches) are all dropped, not just the first.
+    #[test]
+    fn strip_undefined_label_drops_all_undefined_occurrences() {
+        let input = vec![
+            "undefined".to_string(),
+            "treats".to_string(),
+            "undefined".to_string(),
+        ];
+        let out = strip_undefined_label(input);
+        assert_eq!(out, vec!["treats".to_string()]);
     }
 }
