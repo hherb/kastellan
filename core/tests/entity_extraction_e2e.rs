@@ -253,7 +253,12 @@ async fn upsert_is_idempotent_on_rerun() {
                 end: 14,
                 entity_idx: 1,
             },
-            relation: "relates_to".into(),
+            // Use a seeded relation kind (0017's relation_kinds FK
+            // requires this). Pre-0017 this was the unseeded `relates_to`;
+            // the choice is incidental to what this test pins (idempotent
+            // re-insert), so `associated with` (the catch-all seed) is
+            // a faithful substitute.
+            relation: "associated with".into(),
             score: 0.88,
         }],
     };
