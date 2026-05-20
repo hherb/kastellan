@@ -4,23 +4,22 @@
 
 use std::process::ExitCode;
 
-use crate::common::{multi_thread_runtime, resolve_connect_spec};
+use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_entities(args: &[String]) -> ExitCode {
     if args.is_empty() {
         eprintln!("usage: hhagent-cli entities <list|show|approve|reject|merge> ...");
         return ExitCode::from(2);
     }
-    let rt = match multi_thread_runtime("entities") {
-        Ok(rt) => rt,
-        Err(code) => return code,
-    };
+    // Per-action dispatch. `with_runtime` is called only from the known
+    // arms — an invalid action exits 2 without spawning tokio worker
+    // threads (Issue #97).
     match args[0].as_str() {
-        "list"    => rt.block_on(entities_list(&args[1..])),
-        "show"    => rt.block_on(entities_show(&args[1..])),
-        "approve" => rt.block_on(entities_approve(&args[1..])),
-        "reject"  => rt.block_on(entities_reject(&args[1..])),
-        "merge"   => rt.block_on(entities_merge(&args[1..])),
+        "list"    => with_runtime("entities", entities_list(&args[1..])),
+        "show"    => with_runtime("entities", entities_show(&args[1..])),
+        "approve" => with_runtime("entities", entities_approve(&args[1..])),
+        "reject"  => with_runtime("entities", entities_reject(&args[1..])),
+        "merge"   => with_runtime("entities", entities_merge(&args[1..])),
         other     => {
             eprintln!("entities: unknown action '{other}'; expected: list | show | approve | reject | merge");
             ExitCode::from(2)

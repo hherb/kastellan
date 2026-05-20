@@ -6,7 +6,7 @@
 
 use std::process::ExitCode;
 
-use crate::common::{multi_thread_runtime, resolve_connect_spec};
+use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_tools(args: &[String]) -> ExitCode {
     if args.is_empty() {
@@ -27,14 +27,13 @@ fn run_tools_allowlist(args: &[String]) -> ExitCode {
         eprintln!("usage: hhagent-cli tools allowlist <add|remove|list> ...");
         return ExitCode::from(2);
     }
-    let rt = match multi_thread_runtime("tools allowlist") {
-        Ok(rt) => rt,
-        Err(code) => return code,
-    };
+    // Per-action dispatch. `with_runtime` is called only from the known
+    // arms — an invalid action exits 2 without spawning tokio worker
+    // threads (Issue #97).
     match args[0].as_str() {
-        "add"    => rt.block_on(tools_allowlist_add(&args[1..])),
-        "remove" => rt.block_on(tools_allowlist_remove(&args[1..])),
-        "list"   => rt.block_on(tools_allowlist_list(&args[1..])),
+        "add"    => with_runtime("tools allowlist", tools_allowlist_add(&args[1..])),
+        "remove" => with_runtime("tools allowlist", tools_allowlist_remove(&args[1..])),
+        "list"   => with_runtime("tools allowlist", tools_allowlist_list(&args[1..])),
         other    => {
             eprintln!("tools allowlist: unknown subcommand {other}");
             ExitCode::from(2)
