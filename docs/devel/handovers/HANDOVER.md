@@ -4,13 +4,13 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-20 (Issue #90 — entity-upsert round-trip reduction (Layer A) on branch `feat/issue-90-upsert-roundtrip-layer-a`, 3 implementation commits awaiting PR review; **workspace 881 → 883 (+2)** with 0 failures / 0 warnings).
+**Last updated:** 2026-05-20 (Issue #90 — entity-upsert round-trip reduction (Layer A) **merged to `main` via PR #94 at `3ab94f6`**; **workspace 881 → 883 (+2)** with 0 failures / 0 warnings).
 
-**Last commit on `feat/issue-90-upsert-roundtrip-layer-a`:** `77dfb31` (`perf(entity_extraction): halve upsert round-trips via xmax=0 discriminator (Issue #90)`).
+**Last commit on `main`:** `3ab94f6` (`Merge pull request #94 from hherb/feat/issue-90-upsert-roundtrip-layer-a`).
 
-**Session-end verification:** **Rust workspace: 883 passed / 0 failed / 4 ignored / 0 warnings on Linux** (`cargo test --workspace` on the DGX, branch `feat/issue-90-upsert-roundtrip-layer-a`). 4 `[SKIP]` lines on `--nocapture` are all GLiNER-Relex real-model tests gated on `HHAGENT_GLINER_RELEX_ENABLE=1` (operator-driven skip-as-pass; export the env var to exercise them). No silent sandbox-capability skips.
+**Session-end verification:** **Rust workspace: 883 passed / 0 failed / 4 ignored / 0 warnings on Linux** (`cargo test --workspace` on the DGX, on `main` post-PR-#94-merge). 4 `[SKIP]` lines on `--nocapture` are all GLiNER-Relex real-model tests gated on `HHAGENT_GLINER_RELEX_ENABLE=1` (operator-driven skip-as-pass; export the env var to exercise them). No silent sandbox-capability skips.
 
-## Recently completed (this session, 2026-05-20 — Issue #90 entity-upsert round-trip reduction (Layer A), branch `feat/issue-90-upsert-roundtrip-layer-a`, 3 commits, awaiting PR review)
+## Recently completed (previous session, 2026-05-20 — Issue #90 entity-upsert round-trip reduction (Layer A), **merged to `main` via PR #94 at `3ab94f6`**)
 
 Spec at [`docs/superpowers/specs/2026-05-20-issue-90-upsert-round-trip-reduction-design.md`](../../superpowers/specs/2026-05-20-issue-90-upsert-round-trip-reduction-design.md) (committed `2933224` + revision `44c9581`); plan at [`docs/superpowers/plans/2026-05-20-issue-90-upsert-round-trip-reduction.md`](../../superpowers/plans/2026-05-20-issue-90-upsert-round-trip-reduction.md) (committed `ed73d79`).
 
