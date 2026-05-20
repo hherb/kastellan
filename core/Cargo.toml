@@ -22,7 +22,7 @@ path = "src/main.rs"
 # files are the durable replica written by the mirror task).
 [[bin]]
 name = "hhagent-cli"
-path = "src/bin/hhagent-cli.rs"
+path = "src/bin/hhagent-cli/main.rs"
 
 [dependencies]
 hhagent-sandbox    = { path = "../sandbox" }

@@ -4,11 +4,59 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-20 (Issue #90 — entity-upsert round-trip reduction (Layer A) **merged to `main` via PR #94 at `3ab94f6`**; **workspace 881 → 883 (+2)** with 0 failures / 0 warnings).
+**Last updated:** 2026-05-20 (Issue #66 — `hhagent-cli` per-subcommand-module split on branch `refactor/issue-66-hhagent-cli-split`, 1 implementation commit awaiting PR review; **workspace 883 → 883 (±0)** — pure mechanical refactor, behaviour byte-identical).
 
-**Last commit on `main`:** `3ab94f6` (`Merge pull request #94 from hherb/feat/issue-90-upsert-roundtrip-layer-a`).
+**Last commit on `refactor/issue-66-hhagent-cli-split`:** `b77f4c9` (`refactor(hhagent-cli): split into per-subcommand modules (Issue #66)`).
 
-**Session-end verification:** **Rust workspace: 883 passed / 0 failed / 4 ignored / 0 warnings on Linux** (`cargo test --workspace` on the DGX, on `main` post-PR-#94-merge). 4 `[SKIP]` lines on `--nocapture` are all GLiNER-Relex real-model tests gated on `HHAGENT_GLINER_RELEX_ENABLE=1` (operator-driven skip-as-pass; export the env var to exercise them). No silent sandbox-capability skips.
+**Session-end verification:** **Rust workspace: 883 passed / 0 failed / 4 ignored / 0 warnings on Linux** (`cargo test --workspace` on the DGX, branch `refactor/issue-66-hhagent-cli-split`). 4 `[SKIP]` lines on `--nocapture` are all GLiNER-Relex real-model tests gated on `HHAGENT_GLINER_RELEX_ENABLE=1` (operator-driven skip-as-pass; export the env var to exercise them). No silent sandbox-capability skips. Smoke: `hhagent-cli --help` exit 0; unknown subcommand exit 2; sub-subcommand no-arg exit 2 — all match pre-refactor.
+
+## Recently completed (this session, 2026-05-20 — Issue #66 `hhagent-cli` per-subcommand-module split, branch `refactor/issue-66-hhagent-cli-split`, 1 commit awaiting PR review)
+
+Pure mechanical refactor closing the longest-flagged 500-LOC breach in the codebase. `core/src/bin/hhagent-cli.rs` had grown to **1933 LOC** after five session's worth of subcommand additions (ask, tasks, tools, memory, entities, observation, audit-tail). Original Issue #66 (filed 2026-05-15) scoped this at ~960 LOC; actual was double that — every additional CLI feature slice has been making the file harder to navigate.
+
+**Implementation commit:**
+
+1. **`b77f4c9`** (`refactor(hhagent-cli): split into per-subcommand modules (Issue #66)`) — moved from single-file bin `core/src/bin/hhagent-cli.rs` to directory bin `core/src/bin/hhagent-cli/` with one module per subcommand tree. Cargo.toml `[[bin]] path` updated from `src/bin/hhagent-cli.rs` to `src/bin/hhagent-cli/main.rs` (idiomatic Cargo directory-bin shape; explicit-path declaration preserved to suppress auto-discovery ambiguity).
+
+**New layout (every file under the 500-LOC soft cap):**
+
+| File | LOC | Owns |
+|---|---|---|
+| `main.rs` | 177 | Top-level dispatch + help_text + `mod` declarations. |
+| `common.rs` | 126 | `resolve_connect_spec` + `parse_classification_floor` + the new `multi_thread_runtime(prefix)` helper that deduplicates the 5× copy-pasted runtime-builder + error-print block from the subcommand dispatchers. Pre-existing `parse_classification_floor_tests` (7 cases) moved here verbatim. |
+| `audit_tail.rs` | 96 | `run_audit_tail` — only subcommand that needs no Postgres (works against a crashed daemon via the JSONL mirror files). |
+| `ask.rs` | 325 | `run_ask` + `ask_async` + the pure `resolve_floor_for_submission` builder. Pre-existing `resolve_floor_for_submission_tests` (5 cases) moved here. |
+| `tasks.rs` | 285 | `run_tasks` + `tasks_list` / `tasks_status` / `tasks_cancel` / `tasks_fail` / `tasks_tail` + the pure `line_matches_task` helper. Pre-existing `tasks_tail_tests` (4 cases) moved here. |
+| `tools_allowlist.rs` | 166 | `run_tools` + `run_tools_allowlist` + `tools_allowlist_{add,remove,list}`. |
+| `memory_l1.rs` | 174 | `run_memory` + `run_memory_l1` + `memory_l1_{add,list,remove}`. |
+| `entities.rs` | 479 | `run_entities` + `entities_{list,show,approve,reject,merge}` + the per-flag parsers `parse_entity_state` + `parse_id_list`. Pre-existing `entities_parser_tests` (2 cases) moved here. |
+| `observation_replay.rs` | 159 | `run_observation` + `run_observation_replay` + `default_captures_dir` + `observation_replay_async`. |
+
+The largest file (`entities.rs` at 479) sits right at the cap; a further split into `entities/{types.rs, list_show.rs, review.rs}` is the natural follow-up if the entities CLI grows.
+
+**TDD posture (per CLAUDE.md rule #2):** pure file-shuffle, no behaviour change. The existing test suite IS the regression pin. 18 unit tests (7 + 5 + 4 + 2 across `common` / `ask` / `tasks` / `entities` moved test modules) + every subprocess e2e test (`cli_ask_e2e`, `cli_entities_e2e`) continue to exercise the full wire surface via the freshly-built binary. No new tests written.
+
+**Verification:**
+
+- ✅ `cargo build --workspace`: clean (5.97s).
+- ✅ `cargo test --workspace`: **883 passed / 0 failed / 4 ignored** — byte-identical to pre-refactor on `main` at `3ab94f6`.
+- ✅ Smoke: `hhagent-cli --help` exit 0; `hhagent-cli garbage` exit 2; `hhagent-cli ask` exit 2; `hhagent-cli entities` exit 2 — all match pre-refactor.
+- ✅ `cargo clippy --workspace --bin hhagent-cli`: no new warnings (pre-existing `db/src/probe.rs` doc-comment warnings unrelated to this slice).
+
+**What this slice deliberately does NOT do:**
+
+- **No further split of `entities.rs` (479 LOC).** At-cap but under it; cosmetic split would inflate the diff. Pickup once entities CLI gains a 6th subcommand or the file crosses the cap.
+- **No `clap` introduction.** Issue #66 explicitly said no parser change. Hand-rolled argv parsing stays.
+- **No behaviour changes.** No flag added / dropped, no exit-code change, no audit-row contract change. Operator-visible surface byte-identical.
+- **No CLAUDE.md / README updates.** The binary surface stays the same.
+
+**File-size watch (post-slice):**
+
+- `db/src/entities.rs` at **653 LOC** — pre-flagged in code via FILE-SIZE NOTE. Next-largest open cap-breach in the codebase.
+- `core/src/entity_extraction/gliner_relex.rs` at **533 LOC** — slight breach, called out in Issue #90's HANDOVER entry; natural split is lifting the `#[cfg(test)] mod tests` block.
+- All other source files under cap.
+
+---
 
 ## Recently completed (previous session, 2026-05-20 — Issue #90 entity-upsert round-trip reduction (Layer A), **merged to `main` via PR #94 at `3ab94f6`**)
 
