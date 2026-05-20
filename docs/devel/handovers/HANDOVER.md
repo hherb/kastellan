@@ -4,11 +4,41 @@
 > session (likely a fresh Claude Code) can resume cold. See
 > [`README.md`](README.md) for the convention.
 
-**Last updated:** 2026-05-21 (session-start sync: Issue #66 `hhagent-cli` per-subcommand-module split **merged to `main` via PR #96 at `2704468`** with post-merge review fixup `1b58636` (dedupe `observation_replay` runtime + correct test-count prose); **workspace stays at 883 / 0 / 4** — pure mechanical refactor, behaviour byte-identical. [Issue #97](https://github.com/hherb/hhagent/issues/97) filed during the PR-#96 self-review for a tiny wart carried over from the pre-refactor file: 4 of the new dispatchers build the multi-thread tokio runtime before validating the action arg).
+**Last updated:** 2026-05-21 (Issue #97 — defer hhagent-cli tokio runtime construction until known-action arms on branch `fix/issue-97-defer-tokio-runtime`, 2 commits awaiting PR review; **workspace 883 → 886 (+3)** — 3 new bad-args regression tests + pure refactor of the 4 dispatchers via a new `common::with_runtime` helper. Behaviour byte-identical: same exit codes, same stderr lines for every action path).
 
-**Last commit on `main`:** `2704468` (`Merge pull request #96 from hherb/refactor/issue-66-hhagent-cli-split`).
+**Last commit on `fix/issue-97-defer-tokio-runtime`:** `4c7fb7f` (`refactor(hhagent-cli): defer tokio runtime construction until known-action arms (Issue #97)`).
 
-**Session-end verification:** **Rust workspace: 883 passed / 0 failed / 4 ignored / 0 warnings on Linux** (`cargo test --workspace` on the DGX, `main` at `2704468`). 4 `[SKIP]` lines on `--nocapture` are all GLiNER-Relex real-model tests gated on `HHAGENT_GLINER_RELEX_ENABLE=1` (operator-driven skip-as-pass; export the env var to exercise them). No silent sandbox-capability skips. Smoke: `hhagent-cli --help` exit 0; unknown subcommand exit 2; sub-subcommand no-arg exit 2 — all match pre-refactor.
+**Session-end verification:** **Rust workspace: 886 passed / 0 failed / 4 ignored / 0 warnings on Linux** (`cargo test --workspace` on the DGX, branch `fix/issue-97-defer-tokio-runtime`). 4 `[SKIP]` lines on `--nocapture` are all GLiNER-Relex real-model tests gated on `HHAGENT_GLINER_RELEX_ENABLE=1` (operator-driven skip-as-pass; export the env var to exercise them). No silent sandbox-capability skips. Smoke: `hhagent-cli --help` exit 0; `tasks frobnicate` exit 2 (`tasks: unknown subcommand frobnicate` on stderr); `entities frobnicate` exit 2 (`entities: unknown action 'frobnicate'; ...` on stderr); `memory l1 frobnicate` exit 2; `tools allowlist frobnicate` exit 2; top-level `garbage` exit 2 with full --help on stderr — all match pre-refactor byte-for-byte.
+
+## Recently completed (this session, 2026-05-21 — Issue #97 defer hhagent-cli tokio runtime construction, branch `fix/issue-97-defer-tokio-runtime`, 2 commits awaiting PR review)
+
+Out-of-scope finding from PR #96's self-review. The 4 per-subcommand dispatchers introduced by Issue #66 carried over a pre-refactor wart from the single-file CLI: each built the multi-thread tokio runtime *before* validating the action arg, so a typo (`hhagent-cli tasks frobnicate`) spawned worker threads only to print `tasks: unknown subcommand frobnicate` and exit 2. Harmless but wasteful.
+
+**Implementation commits (TDD-ordered):**
+
+1. **`a1f5a75`** (`test(cli_dispatcher_bad_args_e2e): pin unknown-action exit-2 contract for tasks/memory_l1/tools_allowlist`) — new `core/tests/cli_dispatcher_bad_args_e2e.rs` with 3 `#[test]` cases (one per dispatcher that lacks an existing bad-args test; `entities` is already covered by `cli_entities_bad_args_exit_code_two`). Each subtest pins exit code == 2 + the dispatcher-prefixed `<name>: unknown {subcommand,action}` stderr line. Tests pass on current `main` (the contract being pinned is byte-identical pre/post) and continue to pass post-refactor. Skips cleanly when `target/debug/hhagent-cli` isn't built. **+3 tests (883 → 886).**
+
+2. **`4c7fb7f`** (`refactor(hhagent-cli): defer tokio runtime construction until known-action arms (Issue #97)`) — new `common::with_runtime(prefix, fut) -> ExitCode` helper encapsulating the "build runtime, block_on future, return ExitCode" idiom. Each dispatcher's known-action match arm becomes one line (`"list" => with_runtime("tasks", tasks_list(&args[1..]))`). Critically, `with_runtime` is called only from known arms; the fall-through `other => { eprintln!(...); ExitCode::from(2) }` returns *before* any runtime construction. Sync arms (`tasks tail`) bypass the helper entirely. `multi_thread_runtime(prefix)` is retained as the inner primitive; `ask.rs` + `observation_replay.rs` were already structurally correct (validate args first) so they're left untouched in this slice to keep the diff focused. Net diff: +54 / −35 LOC across 5 files.
+
+**TDD posture (per CLAUDE.md rule #2):** Tests-first commit codifies the observable contract; refactor commit then proves the contract is preserved byte-for-byte. Together the workflow is: (1) confirm the existing observable behaviour with new tests on current main; (2) apply the refactor; (3) re-run the tests — same green count.
+
+**Verification:**
+
+- ✅ `cargo build --bin hhagent-cli`: clean (2.6 s).
+- ✅ `cargo test --workspace`: **886 passed / 0 failed / 4 ignored** (+3 over the pre-slice 883).
+- ✅ `cargo clippy --bin hhagent-cli`: 2 warnings, both pre-existing `print_literal` warts in `entities.rs:163` and `tools_allowlist.rs:159` (carried over verbatim from the pre-refactor single-file CLI; documented in the PR #96 fixup commit `1b58636` and out of scope for this slice).
+- ✅ Smoke: all 4 dispatchers' bad-action stderr lines byte-identical to pre-refactor; exit codes 2. `--help` exit 0; top-level `garbage` exit 2 with full --help on stderr.
+
+**What this slice deliberately does NOT do:**
+
+- **No migration of `ask.rs` + `observation_replay.rs` to `with_runtime`.** Both were already structurally correct (`ask` parses all args before building the runtime; `observation_replay::run_observation_replay` parses flags first and only then calls `multi_thread_runtime`). Migration would be purely cosmetic and out of scope.
+- **No clean-up of the pre-existing `print_literal` clippy warnings.** Carried over from the pre-refactor single-file CLI and explicitly out of scope per PR #96's fixup commit.
+- **No new public API.** `with_runtime` is `pub(crate)` like every other dispatcher helper.
+- **No behaviour changes.** No flag added / dropped, no exit-code change, no audit-row contract change. Operator-visible surface byte-identical.
+
+**File-size watch (post-slice):** every per-subcommand module in `core/src/bin/hhagent-cli/` stays under the 500-LOC cap; `common.rs` 126 → 149 LOC (+23 for the helper + its doc-comment, still well under cap).
+
+---
 
 ## Recently completed (previous session, 2026-05-20 — Issue #66 `hhagent-cli` per-subcommand-module split, **merged to `main` via PR #96 at `2704468`** + post-merge fixup `1b58636`)
 
@@ -2842,7 +2872,7 @@ Full reasoning for these slices lives in [`archive/handover_20260510_pre-prune.m
     8. ~~**[Issue #90](https://github.com/hherb/hhagent/issues/90) — `upsert_entities_and_relations` per-entity round-trip reduction**~~ **SHIPPED 2026-05-20** on branch `feat/issue-90-upsert-roundtrip-layer-a` — Layer A (`xmax = 0` discriminator + no-op `SET name_norm = entities.name_norm` to force RETURNING on conflict). Workspace 881 → **883** (+2). Audit-row contract turned out to need no update — the public `UpsertOutcome` shape stayed byte-identical, so `build_extract_entities_payload`'s 8-key contract was preserved verbatim. Layer B (full-batch unnest) and triple batching deferred per brainstorming. See "Recently completed (this session)" entry above.
     9. **Pattern catalogue lifecycle for `classification_inference`** (engineering, depends on operator recapture in item 4) — once recapture shows under-detection cases, add the missing pattern.
     10. ~~**`hhagent-cli.rs` (1933 LOC) split**~~ **SHIPPED 2026-05-20 (Issue #66), merged via PR #96 at `2704468`** + post-merge fixup `1b58636`. Pure mechanical refactor: single-file bin → directory bin with one module per subcommand tree (`main.rs` 177 LOC, `common.rs` 126, `audit_tail.rs` 96, `ask.rs` 325, `tasks.rs` 285, `tools_allowlist.rs` 166, `memory_l1.rs` 174, `entities.rs` 479, `observation_replay.rs` 159 — every file under the 500-LOC cap). Workspace stays at 883/0/4. See "Recently completed (previous session)" entry at the top.
-    11. **[Issue #97](https://github.com/hherb/hhagent/issues/97) — `hhagent-cli` defer tokio runtime construction until after action validation** (engineering, small) — out-of-scope finding from PR #96 self-review. 4 dispatchers (`tasks` / `entities` / `memory_l1` / `tools_allowlist`) build the multi-thread tokio runtime before `match args[0].as_str()` confirms a valid action; an invalid action (`hhagent-cli tasks frobnicate`) spawns worker threads only to print `unknown subcommand` and exit 2. Pattern carried over verbatim from the pre-refactor single-file CLI; harmless but wasteful. Fix: move `multi_thread_runtime(...)` into each known-action arm. Smoke test: invalid action paths must still exit 2 with identical stderr.
+    11. ~~**[Issue #97](https://github.com/hherb/hhagent/issues/97) — `hhagent-cli` defer tokio runtime construction until after action validation**~~ **SHIPPED 2026-05-21** on branch `fix/issue-97-defer-tokio-runtime` (2 commits, awaiting PR review). New `common::with_runtime(prefix, fut) -> ExitCode` helper called only from known-action arms; the fall-through `unknown {subcommand,action}` arm returns *before* any runtime construction. Sync arms (`tasks tail`) bypass the helper entirely. `ask.rs` + `observation_replay.rs` were already structurally correct; left untouched. Workspace 883 → **886** (+3 bad-args regression tests for the 3 dispatchers that lacked one). See "Recently completed (this session)" entry at the top.
     12. **`core/src/workers/gliner_relex.rs` (~1184 LOC post-v2) test-module lift** (engineering, pure refactor) — second worst 500-LOC breach now that `hhagent-cli.rs` is split. Lift the `#[cfg(test)] mod tests` block into a sibling `workers/gliner_relex/tests.rs`.
     13. **Worker manifest plumbing — design slice** (engineering) — slice 1 ships `Lifecycle` directly on `ToolEntry`. Spec open question 1 (TOML files vs Rust consts) unresolved.
     14. **Relation-label vocabulary slice** (engineering, follow-up to v2) — v2 ships `relation_labels = vec![]`. Add a `relation_kinds` lookup table (symmetric to `entity_kinds`) + plumbing so GLiNER's triple output is captured into `relations` rows. Pairs with item 3 for the full graph payload.
