@@ -390,6 +390,75 @@ async fn upsert_preserves_operator_unquarantine_decision() {
     pool.close().await;
 }
 
+/// Mixed-batch counter pin: existing tests cover all-new
+/// (`upsert_creates_quarantined_entities`) and all-existing
+/// (`upsert_is_idempotent_on_rerun`). This pins the only uncovered
+/// case — one new + one pre-existing in the same upsert call. The
+/// xmax=0 discriminator in Issue #90's SQL rewrite must increment
+/// n_entities_upserted_new on exactly the new row, not both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_counts_new_inserts_correctly_in_mixed_batch() {
+    let Some((_cluster, pool)) = bring_up_pg("mixed").await else {
+        return;
+    };
+
+    // Seed one entity.
+    let seeded = ExtractResponse {
+        entities: vec![Entity {
+            text: "Alpha".into(),
+            label: "concept".into(),
+            start: 0,
+            end: 5,
+            score: 0.9,
+        }],
+        triples: vec![],
+    };
+    let out_seed = upsert_entities_and_relations(&pool, &seeded)
+        .await
+        .expect("seed upsert");
+    let alpha_id = out_seed.entity_ids[0];
+
+    // Now upsert a mixed batch: same Alpha + fresh Beta.
+    let mixed = ExtractResponse {
+        entities: vec![
+            Entity {
+                text: "Alpha".into(),
+                label: "concept".into(),
+                start: 0,
+                end: 5,
+                score: 0.9,
+            },
+            Entity {
+                text: "Beta".into(),
+                label: "concept".into(),
+                start: 10,
+                end: 14,
+                score: 0.9,
+            },
+        ],
+        triples: vec![],
+    };
+    let out_mixed = upsert_entities_and_relations(&pool, &mixed)
+        .await
+        .expect("mixed upsert");
+
+    assert_eq!(out_mixed.entity_ids.len(), 2, "both ids returned");
+    assert_eq!(
+        out_mixed.entity_ids[0], alpha_id,
+        "Alpha keeps its original id (resolved via conflict arm)"
+    );
+    assert_ne!(
+        out_mixed.entity_ids[1], alpha_id,
+        "Beta gets a distinct id"
+    );
+    assert_eq!(
+        out_mixed.n_entities_upserted_new, 1,
+        "exactly one new row created (Beta); Alpha was pre-existing"
+    );
+
+    pool.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extractor_extract_writes_summary_audit_row() {
     let Some((_cluster, pool)) = bring_up_pg("audit").await else {
