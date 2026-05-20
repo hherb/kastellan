@@ -331,6 +331,134 @@ async fn upsert_dedup_works_with_case_variants() {
     pool.close().await;
 }
 
+/// Bug-of-omission regression pin: a future edit that replaces the no-op
+/// `SET name_norm = entities.name_norm` with e.g. `SET quarantine = TRUE`
+/// would silently re-quarantine operator-approved entities on next
+/// re-extraction. This test catches that — Issue #90's load-bearing
+/// invariant for the operator quarantine-review CLI (PR #93).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_preserves_operator_unquarantine_decision() {
+    let Some((_cluster, pool)) = bring_up_pg("preserve-quar").await else {
+        return;
+    };
+
+    // Seed one entity via the production path — it lands quarantined.
+    let merged = ExtractResponse {
+        entities: vec![Entity {
+            text: "Dr Smith".into(),
+            label: "person".into(),
+            start: 0,
+            end: 8,
+            score: 0.99,
+        }],
+        triples: vec![],
+    };
+    let out1 = upsert_entities_and_relations(&pool, &merged)
+        .await
+        .expect("first upsert");
+    assert_eq!(out1.entity_ids.len(), 1);
+    let entity_id = out1.entity_ids[0];
+
+    // Simulate `hhagent-cli entities approve <id>` — operator approves
+    // the entity, flipping quarantine to FALSE.
+    sqlx::query("UPDATE entities SET quarantine = FALSE WHERE id = $1")
+        .bind(entity_id)
+        .execute(&pool)
+        .await
+        .expect("operator approve simulation");
+
+    // Re-extract the same entity. The upsert path hits ON CONFLICT.
+    let out2 = upsert_entities_and_relations(&pool, &merged)
+        .await
+        .expect("second upsert");
+    assert_eq!(out2.n_entities_upserted_new, 0, "no new row created");
+    assert_eq!(out2.entity_ids, vec![entity_id], "same id returned");
+
+    // The load-bearing assertion: the no-op SET must not have
+    // clobbered the operator's approval.
+    let quarantine_after: bool =
+        sqlx::query_scalar("SELECT quarantine FROM entities WHERE id = $1")
+            .bind(entity_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back quarantine");
+    assert!(
+        !quarantine_after,
+        "ON CONFLICT path must preserve operator approval (quarantine=FALSE)"
+    );
+
+    pool.close().await;
+}
+
+/// Mixed-batch counter pin: existing tests cover all-new
+/// (`upsert_creates_quarantined_entities`) and all-existing
+/// (`upsert_is_idempotent_on_rerun`). This pins the only uncovered
+/// case — one new + one pre-existing in the same upsert call. The
+/// xmax=0 discriminator in Issue #90's SQL rewrite must increment
+/// n_entities_upserted_new on exactly the new row, not both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_counts_new_inserts_correctly_in_mixed_batch() {
+    let Some((_cluster, pool)) = bring_up_pg("mixed").await else {
+        return;
+    };
+
+    // Seed one entity.
+    let seeded = ExtractResponse {
+        entities: vec![Entity {
+            text: "Alpha".into(),
+            label: "concept".into(),
+            start: 0,
+            end: 5,
+            score: 0.9,
+        }],
+        triples: vec![],
+    };
+    let out_seed = upsert_entities_and_relations(&pool, &seeded)
+        .await
+        .expect("seed upsert");
+    let alpha_id = out_seed.entity_ids[0];
+
+    // Now upsert a mixed batch: same Alpha + fresh Beta.
+    let mixed = ExtractResponse {
+        entities: vec![
+            Entity {
+                text: "Alpha".into(),
+                label: "concept".into(),
+                start: 0,
+                end: 5,
+                score: 0.9,
+            },
+            Entity {
+                text: "Beta".into(),
+                label: "concept".into(),
+                start: 10,
+                end: 14,
+                score: 0.9,
+            },
+        ],
+        triples: vec![],
+    };
+    let out_mixed = upsert_entities_and_relations(&pool, &mixed)
+        .await
+        .expect("mixed upsert");
+
+    assert_eq!(out_mixed.entity_ids.len(), 2, "both ids returned");
+    assert_eq!(
+        out_mixed.entity_ids[0], alpha_id,
+        "Alpha keeps its original id (resolved via conflict arm)"
+    );
+    assert_ne!(
+        out_mixed.entity_ids[1], alpha_id,
+        "Beta gets a distinct id"
+    );
+    assert_eq!(
+        out_mixed.n_entities_upserted_new, 1,
+        "exactly one new row created (Beta); Alpha was pre-existing"
+    );
+
+    pool.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extractor_extract_writes_summary_audit_row() {
     let Some((_cluster, pool)) = bring_up_pg("audit").await else {

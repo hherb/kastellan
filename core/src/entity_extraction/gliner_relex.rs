@@ -176,43 +176,58 @@ pub async fn upsert_entities_and_relations(
     let mut entity_ids = Vec::with_capacity(merged.entities.len());
     let mut n_new: u32 = 0;
 
-    // Per-entity upsert. Each entity gets one INSERT attempt; on
-    // conflict, we follow up with a SELECT to resolve the existing id.
-    // This is two round-trips for existing entities and one for new
-    // ones — acceptable for v2's typical 5–20 entities per extract.
+    // Per-entity upsert. Each entity gets a single statement:
+    // INSERT ... ON CONFLICT DO UPDATE SET name_norm = entities.name_norm
+    // RETURNING id, (xmax = 0) AS inserted.
+    //
+    // The `SET name_norm = entities.name_norm` self-assignment is the
+    // standard Postgres idiom for "force RETURNING to fire on conflict
+    // without changing the row's logical state." It is load-bearing
+    // that this clause does NOT touch `quarantine` — if the operator
+    // has already approved an entity via the quarantine-review CLI
+    // (PR #93), re-extraction must not silently re-quarantine it.
+    // Pinned by upsert_preserves_operator_unquarantine_decision in
+    // core/tests/entity_extraction_e2e.rs.
+    //
+    // `xmax = 0` is the canonical inserted-vs-existed discriminator:
+    // a fresh row has xmax=0 (no future-deleting transaction); a
+    // conflict-hit row carries the conflict txn's xid. This
+    // eliminates the previous two-statement path (DO NOTHING +
+    // follow-up SELECT) — every entity now costs exactly one
+    // round-trip. (Issue #90; Layer A only — full-batch unnest is
+    // deferred.)
+    //
+    // Concurrency bonus: DO UPDATE acquires a row-level exclusive
+    // lock on the conflict-hit row and atomically returns the
+    // resolved id. The old DO NOTHING + follow-up SELECT did not
+    // lock, so concurrent upserts of the same (kind, name_norm)
+    // had a narrow window where the SELECT could see uncommitted
+    // state. The new path is atomically race-safe; the trade-off
+    // is brief serialization under contention on the same key
+    // (a non-issue at v2's per-task concurrency).
+    //
+    // Side effect of the no-op UPDATE: Postgres advances xmin and
+    // writes a new tuple version even though no column changed.
+    // Acceptable at v2 volume; autovacuum absorbs it without
+    // operator action.
     for ent in &merged.entities {
         let name_norm = normalize_entity_name(&ent.text);
-        // First try INSERT ... ON CONFLICT DO NOTHING RETURNING id.
-        let inserted_id: Option<i64> = sqlx::query_scalar(
+        let (id, inserted): (i64, bool) = sqlx::query_as(
             "INSERT INTO entities (kind, name, name_norm, quarantine) \
              VALUES ($1, $2, $3, TRUE) \
-             ON CONFLICT (kind, name_norm) DO NOTHING \
-             RETURNING id",
+             ON CONFLICT (kind, name_norm) DO UPDATE \
+               SET name_norm = entities.name_norm \
+             RETURNING id, (xmax = 0) AS inserted",
         )
         .bind(&ent.label)
         .bind(&ent.text)
         .bind(&name_norm)
-        .fetch_optional(pool)
+        .fetch_one(pool)
         .await
         .map_err(|e| hhagent_db::DbError::Query(format!("upsert entity: {e}")))?;
-
-        let id = match inserted_id {
-            Some(id) => {
-                n_new += 1;
-                id
-            }
-            None => {
-                // Pre-existing row — resolve via SELECT.
-                sqlx::query_scalar(
-                    "SELECT id FROM entities WHERE kind = $1 AND name_norm = $2",
-                )
-                .bind(&ent.label)
-                .bind(&name_norm)
-                .fetch_one(pool)
-                .await
-                .map_err(|e| hhagent_db::DbError::Query(format!("resolve entity id: {e}")))?
-            }
-        };
+        if inserted {
+            n_new += 1;
+        }
         entity_ids.push(id);
     }
 
