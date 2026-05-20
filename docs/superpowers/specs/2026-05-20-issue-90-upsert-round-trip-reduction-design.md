@@ -114,24 +114,26 @@ Net delta: ~13 LOC dropped, one round-trip per pre-existing entity dropped. Trip
 
 Tests added in TDD order. Integration tests live in [`core/tests/entity_extraction_e2e.rs`](../../../core/tests/entity_extraction_e2e.rs) alongside the existing `upsert_*` tests.
 
-**New (3):**
+The new code path is intentionally observably indistinguishable from the old via `UpsertOutcome`'s shape (preserving the public contract is the point). The existing `upsert_is_idempotent_on_rerun` already pins the conflict-arm counter behaviour and id-stability across reruns — Layer A makes that test exercise the new SQL automatically, so it provides full regression coverage of the "existing row → counter = 0 + same id returned" path without needing a duplicate test.
 
-1. **`upsert_preserves_operator_unquarantine_decision`** — bug-of-omission regression pin. Seed one entity (lands quarantined per the default), manually `UPDATE entities SET quarantine = FALSE WHERE id = $1`, then call `upsert_entities_and_relations` with that same `(kind, name_norm)`. Assert: post-call, the row's `quarantine` column is still `FALSE`. Catches a future edit that changes the no-op `SET` to clobber `quarantine`.
+The NEW tests target two cases the existing suite doesn't cover:
 
-2. **`upsert_uses_xmax_discriminator_for_conflict`** — pin the new single-round-trip path. Seed one entity, then re-upsert the same `(kind, name_norm)` via `upsert_entities_and_relations`. Assert `n_entities_upserted_new = 0` (the `xmax = 0` arm returned `FALSE`) and `entity_ids` still contains the original id. Proves the function correctly resolves the existing-row id without the dropped `SELECT`.
+**New (2):**
 
-3. **`upsert_counts_new_inserts_correctly_in_mixed_batch`** — mixed input. Seed one entity. Call `upsert_entities_and_relations` with two entities: the pre-existing one + one fresh. Assert `entity_ids.len() == 2`, `n_entities_upserted_new == 1` (only the fresh one). Catches an accumulator bug where the discriminator is read but the counter increment goes wrong.
+1. **`upsert_preserves_operator_unquarantine_decision`** — bug-of-omission regression pin. Seed one entity (lands quarantined per the default), manually `UPDATE entities SET quarantine = FALSE WHERE id = $1` (simulating an operator approval via `hhagent-cli entities approve`), then call `upsert_entities_and_relations` with that same `(kind, name_norm)`. Assert: post-call, the row's `quarantine` column is still `FALSE`. Catches a future edit that changes the no-op `SET` to clobber `quarantine` — the load-bearing guarantee that makes the operator quarantine-review CLI's approvals survive re-extraction.
 
-**Preserved unchanged (all four existing `upsert_*` tests stay green byte-for-byte):**
+2. **`upsert_counts_new_inserts_correctly_in_mixed_batch`** — mixed-batch counter pin. Seed one entity. Call `upsert_entities_and_relations` with two entities in the same call: the pre-existing one + one fresh. Assert `entity_ids.len() == 2`, `n_entities_upserted_new == 1` (only the fresh one). Catches an accumulator bug where the `xmax = 0` discriminator is read but the per-iteration counter increment goes wrong. The existing tests cover all-new (`upsert_creates_quarantined_entities`, `upsert_dedup_works_with_case_variants`) and all-existing (`upsert_is_idempotent_on_rerun`); the mixed case is the gap.
 
-- `upsert_creates_quarantined_entities`
-- `upsert_is_idempotent_on_rerun`
-- `upsert_dedup_works_with_case_variants`
-- `extractor_extract_writes_summary_audit_row`
+**Preserved unchanged (all four existing `upsert_*` tests stay green byte-for-byte and now exercise the new SQL):**
+
+- `upsert_creates_quarantined_entities` — all-new path
+- `upsert_is_idempotent_on_rerun` — all-existing path (also pins id stability across rerun)
+- `upsert_dedup_works_with_case_variants` — case-norm dedup
+- `extractor_extract_writes_summary_audit_row` — audit-row contract
 
 Plus all 6 existing mock-tier and real-model tier extractor tests in the same file. The audit-row payload key-set test in `core/src/scheduler/audit.rs::tests_extract_entities::extract_entities_payload_has_exactly_8_keys` also stays green — the payload contract is unchanged.
 
-**Test budget delta: 881 → 884 (+3).**
+**Test budget delta: 881 → 883 (+2).**
 
 ## Verification
 
