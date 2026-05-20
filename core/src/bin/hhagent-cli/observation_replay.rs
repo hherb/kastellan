@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crate::common::multi_thread_runtime;
+
 pub(crate) fn run_observation(args: &[String]) -> ExitCode {
     if args.is_empty() {
         eprintln!("usage: hhagent-cli observation replay [opts]");
@@ -56,15 +58,9 @@ fn run_observation_replay(args: &[String]) -> ExitCode {
 
     let dir = captures_dir.unwrap_or_else(default_captures_dir);
 
-    let rt = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let rt = match multi_thread_runtime("observation replay") {
         Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("observation replay: failed to build tokio runtime: {e}");
-            return ExitCode::from(1);
-        }
+        Err(code) => return code,
     };
 
     rt.block_on(observation_replay_async(&dir, model_filter.as_deref()))

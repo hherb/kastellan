@@ -34,7 +34,7 @@ Pure mechanical refactor closing the longest-flagged 500-LOC breach in the codeb
 
 The largest file (`entities.rs` at 479) sits right at the cap; a further split into `entities/{types.rs, list_show.rs, review.rs}` is the natural follow-up if the entities CLI grows.
 
-**TDD posture (per CLAUDE.md rule #2):** pure file-shuffle, no behaviour change. The existing test suite IS the regression pin. 11 unit tests (across the four moved test modules) + every subprocess e2e test (`cli_ask_e2e`, `cli_entities_e2e`) continue to exercise the full wire surface via the freshly-built binary. No new tests written.
+**TDD posture (per CLAUDE.md rule #2):** pure file-shuffle, no behaviour change. The existing test suite IS the regression pin. 18 unit tests (7 + 5 + 4 + 2 across `common` / `ask` / `tasks` / `entities` moved test modules) + every subprocess e2e test (`cli_ask_e2e`, `cli_entities_e2e`) continue to exercise the full wire surface via the freshly-built binary. No new tests written.
 
 **Verification:**
 
