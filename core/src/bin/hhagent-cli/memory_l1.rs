@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use crate::common::{multi_thread_runtime, resolve_connect_spec};
+use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_memory(args: &[String]) -> ExitCode {
     if args.is_empty() {
@@ -28,14 +28,13 @@ fn run_memory_l1(args: &[String]) -> ExitCode {
         eprintln!("usage: hhagent-cli memory l1 <add|list|remove> ...");
         return ExitCode::from(2);
     }
-    let rt = match multi_thread_runtime("memory l1") {
-        Ok(rt) => rt,
-        Err(code) => return code,
-    };
+    // Per-action dispatch. `with_runtime` is called only from the known
+    // arms — an invalid action exits 2 without spawning tokio worker
+    // threads (Issue #97).
     match args[0].as_str() {
-        "add"    => rt.block_on(memory_l1_add(&args[1..])),
-        "list"   => rt.block_on(memory_l1_list(&args[1..])),
-        "remove" => rt.block_on(memory_l1_remove(&args[1..])),
+        "add"    => with_runtime("memory l1", memory_l1_add(&args[1..])),
+        "list"   => with_runtime("memory l1", memory_l1_list(&args[1..])),
+        "remove" => with_runtime("memory l1", memory_l1_remove(&args[1..])),
         other    => {
             eprintln!("memory l1: unknown action '{other}'; expected: add | list | remove");
             ExitCode::from(2)

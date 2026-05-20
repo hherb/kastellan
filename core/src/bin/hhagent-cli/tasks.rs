@@ -5,22 +5,21 @@ use std::process::ExitCode;
 
 use hhagent_core::audit_mirror;
 
-use crate::common::{multi_thread_runtime, resolve_connect_spec};
+use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_tasks(args: &[String]) -> ExitCode {
     if args.is_empty() {
         eprintln!("usage: hhagent-cli tasks <list|status|cancel|fail|tail> ...");
         return ExitCode::from(2);
     }
-    let rt = match multi_thread_runtime("tasks") {
-        Ok(rt) => rt,
-        Err(code) => return code,
-    };
+    // Per-action dispatch. `with_runtime` is called only from the known
+    // async arms — an invalid action exits 2 without spawning tokio
+    // worker threads (Issue #97).
     match args[0].as_str() {
-        "list"   => rt.block_on(tasks_list(&args[1..])),
-        "status" => rt.block_on(tasks_status(&args[1..])),
-        "cancel" => rt.block_on(tasks_cancel(&args[1..])),
-        "fail"   => rt.block_on(tasks_fail(&args[1..])),
+        "list"   => with_runtime("tasks", tasks_list(&args[1..])),
+        "status" => with_runtime("tasks", tasks_status(&args[1..])),
+        "cancel" => with_runtime("tasks", tasks_cancel(&args[1..])),
+        "fail"   => with_runtime("tasks", tasks_fail(&args[1..])),
         "tail"   => tasks_tail(&args[1..]),
         other    => { eprintln!("tasks: unknown subcommand {other}"); ExitCode::from(2) }
     }
