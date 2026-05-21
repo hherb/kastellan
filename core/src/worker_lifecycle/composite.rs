@@ -29,7 +29,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hhagent_sandbox::SandboxBackend;
 
 use crate::scheduler::ToolEntry;
 use crate::tool_host::ToolHostError;
@@ -53,10 +52,10 @@ pub struct CompositeLifecycle {
 
 impl CompositeLifecycle {
     /// Build with default exponential restart backoff (1 s → 60 s cap).
-    pub fn new(sandbox: Arc<dyn SandboxBackend>) -> Self {
+    pub fn new(sandboxes: Arc<hhagent_sandbox::SandboxBackends>) -> Self {
         Self {
-            single_use: SingleUseLifecycle::new(Arc::clone(&sandbox)),
-            idle_timeout: IdleTimeoutLifecycle::new(sandbox),
+            single_use: SingleUseLifecycle::new(Arc::clone(&sandboxes)),
+            idle_timeout: IdleTimeoutLifecycle::new(sandboxes),
         }
     }
 
@@ -64,12 +63,12 @@ impl CompositeLifecycle {
     /// applies to the idle-timeout side only — `SingleUseLifecycle`
     /// has no warm-cache to back off from.
     pub fn with_backoff(
-        sandbox: Arc<dyn SandboxBackend>,
+        sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
     ) -> Self {
         Self {
-            single_use: SingleUseLifecycle::new(Arc::clone(&sandbox)),
-            idle_timeout: IdleTimeoutLifecycle::with_backoff(sandbox, backoff),
+            single_use: SingleUseLifecycle::new(Arc::clone(&sandboxes)),
+            idle_timeout: IdleTimeoutLifecycle::with_backoff(sandboxes, backoff),
         }
     }
 }
@@ -93,7 +92,7 @@ mod tests {
     use super::*;
 
     use crate::worker_lifecycle::{Contract, IdleTimeoutCaps};
-    use hhagent_sandbox::{SandboxError, SandboxPolicy};
+    use hhagent_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
 
     /// Stub sandbox that always errors on spawn so the tests don't need
     /// a real `bwrap`/Seatbelt environment. We only need to verify the
@@ -148,7 +147,15 @@ mod tests {
 
     #[tokio::test]
     async fn dispatches_single_use_entry_to_single_use_manager() {
-        let composite = CompositeLifecycle::new(Arc::new(NeverSpawnsBackend));
+        let sbs = Arc::new(hhagent_sandbox::SandboxBackends {
+            #[cfg(target_os = "linux")]
+            bwrap: Arc::new(NeverSpawnsBackend),
+            #[cfg(target_os = "macos")]
+            seatbelt: Arc::new(NeverSpawnsBackend),
+            #[cfg(target_os = "macos")]
+            container: Arc::new(NeverSpawnsBackend),
+        });
+        let composite = CompositeLifecycle::new(sbs);
         let entry = dummy_single_use_entry();
         let result = composite.acquire("any", &entry).await;
         // `SingleUseLifecycle::acquire` always calls spawn → SandboxError
@@ -166,7 +173,15 @@ mod tests {
 
     #[tokio::test]
     async fn dispatches_idle_timeout_entry_to_idle_timeout_manager() {
-        let composite = CompositeLifecycle::new(Arc::new(NeverSpawnsBackend));
+        let sbs = Arc::new(hhagent_sandbox::SandboxBackends {
+            #[cfg(target_os = "linux")]
+            bwrap: Arc::new(NeverSpawnsBackend),
+            #[cfg(target_os = "macos")]
+            seatbelt: Arc::new(NeverSpawnsBackend),
+            #[cfg(target_os = "macos")]
+            container: Arc::new(NeverSpawnsBackend),
+        });
+        let composite = CompositeLifecycle::new(sbs);
         let entry = dummy_idle_timeout_entry();
         let result = composite.acquire("gliner-relex-test", &entry).await;
         // `IdleTimeoutLifecycle::acquire_impl` on a cold slot calls
@@ -196,8 +211,16 @@ mod tests {
         // operator-tuned backoff and dispatches identically to `new`.
         // We don't pin specific backoff timing here — that's the
         // idle_timeout::tests's job.
+        let sbs = Arc::new(hhagent_sandbox::SandboxBackends {
+            #[cfg(target_os = "linux")]
+            bwrap: Arc::new(NeverSpawnsBackend),
+            #[cfg(target_os = "macos")]
+            seatbelt: Arc::new(NeverSpawnsBackend),
+            #[cfg(target_os = "macos")]
+            container: Arc::new(NeverSpawnsBackend),
+        });
         let composite = CompositeLifecycle::with_backoff(
-            Arc::new(NeverSpawnsBackend),
+            sbs,
             super::super::idle_timeout::RestartBackoff::default(),
         );
         let entry = dummy_single_use_entry();

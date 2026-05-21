@@ -88,6 +88,23 @@ impl SandboxBackend for CountingSandboxBackend {
     }
 }
 
+/// Build a `SandboxBackends` bundle from a single backend. The same
+/// counting backend is placed in every per-OS slot so any test entry's
+/// `sandbox_backend: None` (the default in this suite) routes to the
+/// counted instance. Tests in this file don't exercise opt-in
+/// per-worker backend selection — that is covered by the
+/// `lifecycle_container_routing_e2e` integration smoke.
+fn sandbox_bundle_from(backend: Arc<dyn SandboxBackend>) -> Arc<hhagent_sandbox::SandboxBackends> {
+    Arc::new(hhagent_sandbox::SandboxBackends {
+        #[cfg(target_os = "linux")]
+        bwrap: backend,
+        #[cfg(target_os = "macos")]
+        seatbelt: Arc::clone(&backend),
+        #[cfg(target_os = "macos")]
+        container: backend,
+    })
+}
+
 /// Build a `ToolEntry` declaring `Lifecycle::IdleTimeout` against the shell-exec
 /// worker. The production `shell_exec_entry()` declares `SingleUse` and stays that
 /// way (slice-1 pin); tests need a fresh entry to opt-in to warm-keeping.
@@ -116,7 +133,7 @@ async fn warm_reuse_three_acquires_yield_one_spawn() {
     }
 
     let (sandbox, spawn_count) = CountingSandboxBackend::new(backend());
-    let lifecycle = IdleTimeoutLifecycle::new(sandbox);
+    let lifecycle = IdleTimeoutLifecycle::new(sandbox_bundle_from(sandbox));
     let entry = idle_timeout_entry(
         worker.clone(),
         IdleTimeoutCaps {
@@ -156,7 +173,7 @@ async fn max_requests_cap_forces_respawn() {
     }
 
     let (sandbox, spawn_count) = CountingSandboxBackend::new(backend());
-    let lifecycle = IdleTimeoutLifecycle::new(sandbox);
+    let lifecycle = IdleTimeoutLifecycle::new(sandbox_bundle_from(sandbox));
     let entry = idle_timeout_entry(
         worker.clone(),
         IdleTimeoutCaps {
@@ -205,7 +222,7 @@ async fn max_age_cap_forces_respawn_when_aged_out() {
     }
 
     let (sandbox, spawn_count) = CountingSandboxBackend::new(backend());
-    let lifecycle = IdleTimeoutLifecycle::new(sandbox);
+    let lifecycle = IdleTimeoutLifecycle::new(sandbox_bundle_from(sandbox));
     let entry = idle_timeout_entry(
         worker.clone(),
         IdleTimeoutCaps {
@@ -251,7 +268,7 @@ async fn idle_seconds_teardown_clears_warm_slot() {
     }
 
     let (sandbox, _spawn_count) = CountingSandboxBackend::new(backend());
-    let lifecycle = IdleTimeoutLifecycle::new(sandbox);
+    let lifecycle = IdleTimeoutLifecycle::new(sandbox_bundle_from(sandbox));
     let entry = idle_timeout_entry(
         worker.clone(),
         IdleTimeoutCaps {
@@ -299,7 +316,7 @@ async fn crash_recovery_bumps_consecutive_restarts_and_clears_slot() {
         cap: Duration::from_millis(100),
     };
     let (sandbox, spawn_count) = CountingSandboxBackend::new(backend());
-    let lifecycle = IdleTimeoutLifecycle::with_backoff(sandbox, backoff);
+    let lifecycle = IdleTimeoutLifecycle::with_backoff(sandbox_bundle_from(sandbox), backoff);
     let entry = idle_timeout_entry(
         worker.clone(),
         IdleTimeoutCaps {
@@ -356,7 +373,7 @@ async fn concurrent_acquires_for_same_tool_serialize() {
     }
 
     let (sandbox, _spawn_count) = CountingSandboxBackend::new(backend());
-    let lifecycle = Arc::new(IdleTimeoutLifecycle::new(sandbox));
+    let lifecycle = Arc::new(IdleTimeoutLifecycle::new(sandbox_bundle_from(sandbox)));
     let entry = idle_timeout_entry(
         worker.clone(),
         IdleTimeoutCaps {

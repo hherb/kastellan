@@ -33,7 +33,7 @@ use hhagent_core::workers::gliner_relex::{
 };
 use hhagent_protocol::client::ClientError;
 use hhagent_tests_common::{
-    backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
+    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, PgCluster,
 };
 
@@ -169,8 +169,8 @@ async fn happy_path_extract_returns_entities_and_triples() {
         return;
     };
 
-    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = Arc::from(backend());
-    let lifecycle = IdleTimeoutLifecycle::new(sandbox);
+    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let lifecycle = IdleTimeoutLifecycle::new(sandboxes);
 
     let mut handle = lifecycle
         .acquire("gliner-relex", &entry)
@@ -240,8 +240,8 @@ async fn warm_reuse_two_calls_keep_one_worker_warm() {
         return;
     };
 
-    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = Arc::from(backend());
-    let lifecycle = IdleTimeoutLifecycle::new(sandbox);
+    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let lifecycle = IdleTimeoutLifecycle::new(sandboxes);
 
     // A small request that won't strain the model — we're testing the
     // warm-cache key, not the inference quality.
@@ -319,8 +319,8 @@ async fn invalid_input_returns_rpc_error_and_worker_stays_alive() {
         return;
     };
 
-    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = Arc::from(backend());
-    let lifecycle = IdleTimeoutLifecycle::new(sandbox);
+    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let lifecycle = IdleTimeoutLifecycle::new(sandboxes);
 
     let mut handle = lifecycle
         .acquire("gliner-relex", &entry)

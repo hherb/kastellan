@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hhagent_sandbox::SandboxBackend;
 
 use crate::scheduler::tool_dispatch::ToolEntry;
 use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
@@ -179,15 +178,21 @@ pub trait WorkerLifecycleManager: Send + Sync {
 
 /// Single-use lifecycle: spawn one worker per acquire, terminate on drop.
 ///
-/// Production impl for slice 1. Behaviour is byte-equivalent to the spawn path that
-/// used to live inline in `scheduler::tool_dispatch::ToolHostStepDispatcher::dispatch_step`.
+/// Production impl for slice 1. Behaviour is byte-equivalent to the spawn
+/// path that used to live inline in
+/// `scheduler::tool_dispatch::ToolHostStepDispatcher::dispatch_step`.
+///
+/// Slice 2 (this slice): holds an `Arc<SandboxBackends>` bundle instead
+/// of a single `Arc<dyn SandboxBackend>`; resolves the entry's
+/// `sandbox_backend` per call. Existing entries default to `None` so
+/// the per-OS default backend keeps being used (byte-equivalent).
 pub struct SingleUseLifecycle {
-    sandbox: Arc<dyn SandboxBackend>,
+    sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
 }
 
 impl SingleUseLifecycle {
-    pub fn new(sandbox: Arc<dyn SandboxBackend>) -> Self {
-        Self { sandbox }
+    pub fn new(sandboxes: Arc<hhagent_sandbox::SandboxBackends>) -> Self {
+        Self { sandboxes }
     }
 }
 
@@ -213,7 +218,11 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
             args: &[],
             wall_clock_ms: entry.wall_clock_ms,
         };
-        let worker = spawn_worker(self.sandbox.as_ref(), &spec)?;
+        // Resolve per call: `entry.sandbox_backend == None` returns the
+        // per-OS default; `Some(K)` returns the matching backend slot.
+        // Resolution is an Arc::clone (refcount bump, nanoseconds).
+        let backend = self.sandboxes.resolve(entry.sandbox_backend);
+        let worker = spawn_worker(backend.as_ref(), &spec)?;
         Ok(WorkerHandle::single_use(worker))
     }
 }
@@ -224,25 +233,30 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
 /// Slice-2 production impl. The runtime (warm cache, idle teardown, crash recovery,
 /// restart backoff) lives in `super::idle_timeout`; this struct is the thin facade
 /// `WorkerLifecycleManager` consumers see.
+///
+/// Slice 2 (per-worker backend selection): holds an `Arc<SandboxBackends>`
+/// bundle and resolves the entry's `sandbox_backend` at slot-fill time.
+/// The warm-cache key remains the tool name, so two tools that select
+/// different backends still get separate warm slots.
 pub struct IdleTimeoutLifecycle {
-    sandbox: Arc<dyn SandboxBackend>,
+    sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
     backoff: super::idle_timeout::RestartBackoff,
     registry: super::idle_timeout::WarmRegistry,
 }
 
 impl IdleTimeoutLifecycle {
     /// Construct with default exponential backoff (1s, 2s, 4s, 8s, …, capped at 60s).
-    pub fn new(sandbox: Arc<dyn SandboxBackend>) -> Self {
-        Self::with_backoff(sandbox, super::idle_timeout::RestartBackoff::default())
+    pub fn new(sandboxes: Arc<hhagent_sandbox::SandboxBackends>) -> Self {
+        Self::with_backoff(sandboxes, super::idle_timeout::RestartBackoff::default())
     }
 
     /// Construct with operator-supplied backoff configuration.
     pub fn with_backoff(
-        sandbox: Arc<dyn SandboxBackend>,
+        sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
     ) -> Self {
         Self {
-            sandbox,
+            sandboxes,
             backoff,
             registry: super::idle_timeout::empty_registry(),
         }
@@ -288,8 +302,13 @@ impl WorkerLifecycleManager for IdleTimeoutLifecycle {
         tool_name: &str,
         entry: &ToolEntry,
     ) -> Result<WorkerHandle, ToolHostError> {
+        // Resolve per-acquire: cold-fill paths pick up the right backend
+        // for the entry. The warm cache below in `acquire_impl` is keyed
+        // by tool name, so a warm worker spawned under one backend isn't
+        // reused for a different tool with a different backend.
+        let backend = self.sandboxes.resolve(entry.sandbox_backend);
         super::idle_timeout::acquire_impl(
-            self.sandbox.as_ref(),
+            backend.as_ref(),
             self.backoff,
             &self.registry,
             tool_name,
@@ -309,8 +328,8 @@ mod tests {
         // The presence of a constructor that compiles is the assertion; the manager's
         // production spawn path is exercised end-to-end by `scheduler_step_dispatch_e2e`
         // (Task 6) and `cli_ask_e2e` after slice 1's wiring lands.
-        let sandbox: Arc<dyn SandboxBackend> = Arc::from(hhagent_sandbox::default_backend());
-        let _mgr = SingleUseLifecycle::new(sandbox);
+        let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+        let _mgr = SingleUseLifecycle::new(sandboxes);
     }
 
     #[tokio::test]
@@ -318,8 +337,8 @@ mod tests {
         // Defensive: an idle-timeout manager called with a single-use entry is a
         // wiring bug. The manager returns an `Io(InvalidInput)` error rather than
         // panicking so the dispatcher's `step.spawn_failed` audit row still fires.
-        let sandbox: Arc<dyn SandboxBackend> = Arc::from(hhagent_sandbox::default_backend());
-        let mgr = IdleTimeoutLifecycle::new(sandbox);
+        let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+        let mgr = IdleTimeoutLifecycle::new(sandboxes);
         let entry = crate::scheduler::tool_dispatch::ToolEntry {
             binary: std::path::PathBuf::from("/nope"),
             policy: hhagent_sandbox::SandboxPolicy::default(),
@@ -339,5 +358,92 @@ mod tests {
         fn _shape_pin(h: &mut WorkerHandle) -> &mut SupervisedWorker {
             h.worker_mut()
         }
+    }
+
+    /// `SingleUseLifecycle::acquire` resolves `entry.sandbox_backend`
+    /// against its `SandboxBackends` bundle and reaches *that* backend,
+    /// not a hardcoded one. We verify by injecting two counter-backends
+    /// and asserting only the per-entry-selected counter ticks.
+    ///
+    /// `SandboxBackends` fields are `pub`, so tests can build a custom
+    /// instance directly with stub backends. No production constructor
+    /// is exposed for this — the field-visible-to-callers shape is
+    /// deliberate.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn single_use_lifecycle_acquire_routes_via_entry_sandbox_backend_kind() {
+        use hhagent_sandbox::{
+            SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxError, SandboxPolicy,
+        };
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingBackend {
+            counter: Arc<AtomicU32>,
+        }
+        impl SandboxBackend for CountingBackend {
+            fn spawn_under_policy(
+                &self,
+                _policy: &SandboxPolicy,
+                _program: &str,
+                _args: &[&str],
+            ) -> Result<std::process::Child, SandboxError> {
+                self.counter.fetch_add(1, Ordering::Relaxed);
+                // Stub: never actually spawn. The routing assertion
+                // fires before any real I/O — we only care which
+                // backend's `spawn_under_policy` was reached.
+                Err(SandboxError::Backend(
+                    "counted, intentionally unspawned".to_string(),
+                ))
+            }
+        }
+
+        let seatbelt_calls = Arc::new(AtomicU32::new(0));
+        let container_calls = Arc::new(AtomicU32::new(0));
+
+        let sbs = Arc::new(SandboxBackends {
+            seatbelt: Arc::new(CountingBackend {
+                counter: Arc::clone(&seatbelt_calls),
+            }),
+            container: Arc::new(CountingBackend {
+                counter: Arc::clone(&container_calls),
+            }),
+        });
+
+        let mgr = SingleUseLifecycle::new(Arc::clone(&sbs));
+
+        let entry_container = crate::scheduler::tool_dispatch::ToolEntry {
+            binary: std::path::PathBuf::from("/dev/null"),
+            policy: SandboxPolicy::default(),
+            wall_clock_ms: None,
+            lifecycle: Lifecycle::SingleUse,
+            sandbox_backend: Some(SandboxBackendKind::Container),
+        };
+        let _ = mgr.acquire("test", &entry_container).await;
+        assert_eq!(
+            container_calls.load(Ordering::Relaxed),
+            1,
+            "container backend should be called when entry opts in"
+        );
+        assert_eq!(
+            seatbelt_calls.load(Ordering::Relaxed),
+            0,
+            "seatbelt backend should be untouched"
+        );
+
+        let entry_default = crate::scheduler::tool_dispatch::ToolEntry {
+            sandbox_backend: None,
+            ..entry_container
+        };
+        let _ = mgr.acquire("test", &entry_default).await;
+        assert_eq!(
+            container_calls.load(Ordering::Relaxed),
+            1,
+            "container backend should not be re-called for default entry"
+        );
+        assert_eq!(
+            seatbelt_calls.load(Ordering::Relaxed),
+            1,
+            "seatbelt backend should be called for sandbox_backend: None"
+        );
     }
 }
