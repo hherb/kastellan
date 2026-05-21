@@ -130,6 +130,29 @@ pub enum SandboxError {
     Backend(String),
 }
 
+/// Operator-facing identifier for selecting a specific sandbox backend
+/// per-worker. Cfg-gated per-OS so cross-OS mis-config (e.g. declaring
+/// `Container` on Linux) is a compile-time error rather than a runtime
+/// surprise.
+///
+/// `None` on a `ToolEntry.sandbox_backend` means "use the per-OS
+/// default" — today darwin → `Seatbelt`, linux → `Bwrap`. Only opt in
+/// here when a worker has a concrete reason to diverge (e.g. needs
+/// memory enforcement on macOS, which `Seatbelt` can't provide).
+///
+/// See `docs/superpowers/specs/2026-05-21-macos-container-slice-2-design.md`
+/// for the rationale behind OS-specific variant names vs an abstract
+/// `MicroVm` category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SandboxBackendKind {
+    #[cfg(target_os = "linux")]
+    Bwrap,
+    #[cfg(target_os = "macos")]
+    Seatbelt,
+    #[cfg(target_os = "macos")]
+    Container,
+}
+
 /// Common backend interface. To be implemented by [`linux_bwrap`], [`macos_seatbelt`],
 /// and [`microvm`] in subsequent phases.
 ///
@@ -222,5 +245,27 @@ mod tests {
     #[test]
     fn profile_default_is_worker_strict() {
         assert_eq!(Profile::default(), Profile::WorkerStrict);
+    }
+
+    /// `SandboxBackendKind` is `Copy + Eq` so it can be threaded through
+    /// per-call dispatch without lifetime gymnastics. Cfg-gating means
+    /// the variant set is OS-specific by design — cross-OS mis-config
+    /// is a compile-time error rather than a runtime surprise.
+    #[test]
+    fn sandbox_backend_kind_is_copy_and_eq() {
+        #[cfg(target_os = "linux")]
+        {
+            let a = SandboxBackendKind::Bwrap;
+            let b = a;
+            assert_eq!(a, b);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let a = SandboxBackendKind::Seatbelt;
+            let b = a;
+            assert_eq!(a, b);
+            let c = SandboxBackendKind::Container;
+            assert_ne!(a, c);
+        }
     }
 }
