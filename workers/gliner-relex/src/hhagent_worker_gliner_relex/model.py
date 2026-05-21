@@ -50,11 +50,14 @@ class GlinerModel:
         `/data/.../weights/multi-v1.0/`); the contents match what
         `hf download <model_id> --local-dir <weights_dir>` produces.
 
-        `device` is one of `cuda`, `cpu` (Linux); `mps` is reserved for
-        the macOS follow-up. The upstream GLiNER library doesn't take
-        `device` in `from_pretrained`, so we call `.to(device)` after
-        load. `auto` resolution (with CUDA memory probe per spike
-        correction #4) happens in `__main__.py`.
+        `device` is one of `cuda` or `cpu` (Linux), `mps` or `cpu`
+        (darwin); see `__main__._resolve_device` for the per-platform
+        rules. The upstream GLiNER library doesn't take `device` in
+        `from_pretrained`, so we call `.to(device)` after load. The
+        post-spike `auto`-resolution logic (CUDA memory probe on
+        Linux; default-to-cpu on darwin per the MPS latency-inversion
+        finding) all lives in `__main__.py` so this wrapper stays a
+        thin shim over the upstream API.
         """
         instance = GLiNER.from_pretrained(
             weights_dir,
