@@ -141,6 +141,19 @@ pub enum SandboxError {
 /// here when a worker has a concrete reason to diverge (e.g. needs
 /// memory enforcement on macOS, which `Seatbelt` can't provide).
 ///
+/// `Serialize + Deserialize` derives are for future operator-config
+/// plumbing (e.g. surfacing `sandbox_backend` in a manifest file or
+/// CLI subcommand). No current call-site serialises this; the derives
+/// are forward-looking so a later config slice doesn't need to revisit
+/// every `ToolEntry` constructor.
+///
+/// `Container` is deliberately bound to the macOS Apple `container`
+/// CLI under `#[cfg(target_os = "macos")]`. A future Linux micro-VM
+/// backend (Firecracker, Kata, gVisor, etc.) would add a
+/// linux-cfg-gated variant with its own name (e.g. `FirecrackerVm`)
+/// rather than overloading `Container` — the cfg-gating prevents
+/// ambiguity today.
+///
 /// See `docs/superpowers/specs/2026-05-21-macos-container-slice-2-design.md`
 /// for the rationale behind OS-specific variant names vs an abstract
 /// `MicroVm` category.

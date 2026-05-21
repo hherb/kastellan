@@ -446,4 +446,100 @@ mod tests {
             "seatbelt backend should be called for sandbox_backend: None"
         );
     }
+
+    /// `IdleTimeoutLifecycle::acquire` resolves `entry.sandbox_backend`
+    /// against its `SandboxBackends` bundle on every cold-spawn path.
+    /// Mirrors the `SingleUseLifecycle` counter-backend pin so a future
+    /// refactor that drops the resolve from one manager but not the
+    /// other trips deliberately. We use distinct tool names per call so
+    /// each acquire takes the cold-spawn path (warm slots are keyed by
+    /// tool name).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn idle_timeout_lifecycle_acquire_routes_via_entry_sandbox_backend_kind() {
+        use crate::worker_lifecycle::{Contract, IdleTimeoutCaps};
+        use hhagent_sandbox::{
+            SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxError, SandboxPolicy,
+        };
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingBackend {
+            counter: Arc<AtomicU32>,
+        }
+        impl SandboxBackend for CountingBackend {
+            fn spawn_under_policy(
+                &self,
+                _policy: &SandboxPolicy,
+                _program: &str,
+                _args: &[&str],
+            ) -> Result<std::process::Child, SandboxError> {
+                self.counter.fetch_add(1, Ordering::Relaxed);
+                Err(SandboxError::Backend(
+                    "counted, intentionally unspawned".to_string(),
+                ))
+            }
+        }
+
+        let seatbelt_calls = Arc::new(AtomicU32::new(0));
+        let container_calls = Arc::new(AtomicU32::new(0));
+
+        let sbs = Arc::new(SandboxBackends {
+            seatbelt: Arc::new(CountingBackend {
+                counter: Arc::clone(&seatbelt_calls),
+            }),
+            container: Arc::new(CountingBackend {
+                counter: Arc::clone(&container_calls),
+            }),
+        });
+
+        let mgr = IdleTimeoutLifecycle::new(Arc::clone(&sbs));
+
+        let caps = IdleTimeoutCaps {
+            idle_seconds: 60,
+            max_requests: 10,
+            max_age_seconds: 3600,
+            grace_period_seconds: 5,
+        };
+        let lifecycle = Lifecycle::idle_timeout(caps, Contract { stateless: true })
+            .expect("valid lifecycle");
+        let entry_container = crate::scheduler::tool_dispatch::ToolEntry {
+            binary: std::path::PathBuf::from("/dev/null"),
+            policy: SandboxPolicy::default(),
+            wall_clock_ms: None,
+            lifecycle,
+            sandbox_backend: Some(SandboxBackendKind::Container),
+        };
+        // Distinct tool name from the default-entry call below — warm
+        // slots are keyed by tool name, so reusing the name would race
+        // the two cold-spawn paths against shared warm-cache state.
+        // Each spawn here returns Err so no warm worker is stashed, but
+        // distinct names make the routing isolation explicit.
+        let _ = mgr.acquire("routing-container", &entry_container).await;
+        assert_eq!(
+            container_calls.load(Ordering::Relaxed),
+            1,
+            "container backend should be called when entry opts in"
+        );
+        assert_eq!(
+            seatbelt_calls.load(Ordering::Relaxed),
+            0,
+            "seatbelt backend should be untouched"
+        );
+
+        let entry_default = crate::scheduler::tool_dispatch::ToolEntry {
+            sandbox_backend: None,
+            ..entry_container
+        };
+        let _ = mgr.acquire("routing-default", &entry_default).await;
+        assert_eq!(
+            container_calls.load(Ordering::Relaxed),
+            1,
+            "container backend should not be re-called for default entry"
+        );
+        assert_eq!(
+            seatbelt_calls.load(Ordering::Relaxed),
+            1,
+            "seatbelt backend should be called for sandbox_backend: None"
+        );
+    }
 }
