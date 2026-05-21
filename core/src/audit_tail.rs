@@ -69,14 +69,40 @@ pub async fn find_audit_files(state_dir: &Path) -> Vec<(time::Date, PathBuf)> {
         Err(_) => return Vec::new(),
     };
     let mut out = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name_os = entry.file_name();
-        let name = match name_os.to_str() {
-            Some(n) => n,
-            None => continue,
-        };
-        if let Some(date) = parse_audit_filename(name) {
-            out.push((date, entry.path()));
+    // Drive the iterator explicitly so a transient `Err(_)` from
+    // `next_entry()` is surfaced (logged) instead of silently
+    // truncating the listing. The previous `while let Ok(Some(...))`
+    // shorthand conflated `Ok(None)` (legitimate EOF) with `Err(_)`
+    // (real iteration error), so a mid-walk failure would yield a
+    // partial list and the caller would have no signal that anything
+    // went wrong. The actual root cause of issue #101's flake turned
+    // out to be a test-harness `tempdir()` collision rather than a
+    // mid-iteration `next_entry()` failure, but this defence-in-depth
+    // change stands on its own: silent truncation of a directory
+    // listing is never the right behaviour for an operator-facing
+    // tail follower.
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                let name_os = entry.file_name();
+                let name = match name_os.to_str() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                if let Some(date) = parse_audit_filename(name) {
+                    out.push((date, entry.path()));
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                tracing::error!(
+                    state_dir = %state_dir.display(),
+                    err = %e,
+                    "find_audit_files: mid-iteration error from next_entry; \
+                     returning partial list",
+                );
+                break;
+            }
         }
     }
     out.sort_by_key(|(d, _)| *d);
@@ -276,17 +302,36 @@ mod tests {
         assert!(files.is_empty());
     }
 
-    /// Small temp-dir helper without a tempfile dep. Using a unique
-    /// per-pid+nanos suffix mirrors the rest of the workspace's
-    /// integration-test conventions.
+    /// Small temp-dir helper without a tempfile dep. Combines
+    /// pid + system-time-nanos + a process-local atomic counter so
+    /// two `#[tokio::test]` cases that race into this function during
+    /// the same microsecond still get distinct directories.
+    ///
+    /// **Why the counter is load-bearing**: the original pid+nanos
+    /// suffix was fine on Linux (nanosecond clock resolution is
+    /// genuine) but flaked on macOS, where `SystemTime::now()` is
+    /// effectively microsecond-resolution. Under tokio's multi-thread
+    /// runtime two parallel test cases routinely collide on the
+    /// pid+nanos pair, end up sharing a temp dir, and one test's
+    /// writes silently overwrite the other's (e.g.
+    /// `find_audit_files_returns_dates_in_ascending_order` writes
+    /// `audit-2026-05-09.jsonl` with `b""` and
+    /// `tail_loop_from_start_replays_then_exits` writes the same
+    /// path with `b"a\nb\n"`; whichever wins the race truncates the
+    /// other). The atomic counter forces process-local uniqueness
+    /// regardless of clock resolution. Closes GitHub issue #101.
     fn tempdir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!(
-            "hhagent-audit-tail-{}-{}",
+            "hhagent-audit-tail-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            n,
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
