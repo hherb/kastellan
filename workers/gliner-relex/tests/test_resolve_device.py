@@ -115,6 +115,35 @@ def test_darwin_explicit_mps_is_rejected_when_torch_reports_unavailable(
     err = capsys.readouterr().err
     assert f'"code": {UNSUPPORTED_DEVICE}' in err
     assert "mps" in err
+    # Pinning the message distinguishes is_available()=False from the
+    # import-failure branch below; operators investigating an MPS reject
+    # need the stderr line to point at the actual failure mode.
+    assert "is_available()" in err
+
+
+def test_darwin_explicit_mps_is_rejected_when_torch_import_fails(
+    monkeypatch, capsys
+):
+    """`device=mps` on darwin with a broken torch venv (partial install,
+    missing wheel) should fail loud with a message that names
+    `import torch` explicitly, NOT the misleading
+    `torch.backends.mps.is_available() is False` line that would point
+    investigation at MPS/macOS-version concerns instead of the venv.
+
+    Forcing `import torch` to raise: setting `sys.modules["torch"] = None`
+    is Python's documented way to make subsequent `import torch`
+    statements raise `ImportError`.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "torch", None)
+    with pytest.raises(SystemExit) as excinfo:
+        _resolve_device("mps")
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert f'"code": {UNSUPPORTED_DEVICE}' in err
+    assert "import torch" in err
+    # Negative: the is_available() line is for the OTHER reject branch.
+    assert "is_available()" not in err
 
 
 def test_darwin_explicit_cpu_is_accepted(monkeypatch):

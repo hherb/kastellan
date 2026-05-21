@@ -12,6 +12,7 @@ maps these to `ClientError::EarlyExit` → "dead".
 import json
 import os
 import sys
+from typing import NoReturn
 
 from .errors import MODEL_LOAD_FAILED, UNSUPPORTED_DEVICE
 from .model import GlinerModel
@@ -25,8 +26,16 @@ from .server import Server
 _MIN_CUDA_FREE_BYTES = 3 * 1024 * 1024 * 1024
 
 
-def _exit_with_error(code: int, message: str, status: int) -> None:
-    """Write a structured stderr line and exit with the given status."""
+def _exit_with_error(code: int, message: str, status: int) -> NoReturn:
+    """Write a structured stderr line and exit with the given status.
+
+    Annotated `NoReturn` because every call site relies on this function
+    terminating the process — `_resolve_device`'s rejection arms in
+    particular fall through to a stderr line + `sys.exit(...)` and have
+    no fallback behaviour. Without the `NoReturn` annotation, type
+    checkers (pyright/mypy) flag the rejection arms as missing a
+    `return` and require an unreachable trailing `return` statement.
+    """
     print(
         json.dumps({"level": "error", "code": code, "message": message}),
         file=sys.stderr,
@@ -116,12 +125,24 @@ def _resolve_device(requested: str) -> str:
                 "set HHAGENT_GLINER_RELEX_DEVICE to auto|cuda|cpu",
                 status=2,
             )
+        # Two rejection-reason states to surface distinctly so the
+        # operator's stderr line points at the actual failure mode:
+        #   - torch import itself raised (broken venv, partial install)
+        #   - torch imported but reports MPS unavailable (Intel Mac,
+        #     macOS < 12.3, PyTorch build without MPS support)
+        # Lumping the two together as "is_available() is False" mis-
+        # directs investigation when the real bug is a venv problem.
         try:
             import torch
-            if torch.backends.mps.is_available():
-                return "mps"
-        except Exception:
-            pass
+        except Exception as e:
+            _exit_with_error(
+                UNSUPPORTED_DEVICE,
+                f"device=mps requested but `import torch` failed ({e!r}); "
+                "fix the worker venv or set HHAGENT_GLINER_RELEX_DEVICE to auto|cpu",
+                status=2,
+            )
+        if torch.backends.mps.is_available():
+            return "mps"
         _exit_with_error(
             UNSUPPORTED_DEVICE,
             "device=mps requested but torch.backends.mps.is_available() is "
@@ -135,8 +156,6 @@ def _resolve_device(requested: str) -> str:
         f"unknown device: {requested}",
         status=2,
     )
-    # Unreachable; keep mypy/pyright happy.
-    return requested
 
 
 def main() -> None:
