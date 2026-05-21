@@ -325,6 +325,7 @@ mod tests {
             policy: hhagent_sandbox::SandboxPolicy::default(),
             wall_clock_ms: None,
             lifecycle: Lifecycle::SingleUse,
+            sandbox_backend: None,
         };
         let r = mgr.acquire("test-tool", &entry).await;
         assert!(r.is_err(), "must return Err on wiring bug");

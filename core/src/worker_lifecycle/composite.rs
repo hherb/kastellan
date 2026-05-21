@@ -124,6 +124,7 @@ mod tests {
             policy: SandboxPolicy::default(),
             wall_clock_ms: None,
             lifecycle: Lifecycle::SingleUse,
+            sandbox_backend: None,
         }
     }
 
@@ -141,6 +142,7 @@ mod tests {
             policy: SandboxPolicy::default(),
             wall_clock_ms: None,
             lifecycle,
+            sandbox_backend: None,
         }
     }
 

@@ -100,6 +100,7 @@ fn idle_timeout_entry(worker: PathBuf, caps: IdleTimeoutCaps) -> ToolEntry {
         policy,
         wall_clock_ms: Some(30_000),
         lifecycle,
+        sandbox_backend: None,
     }
 }
 

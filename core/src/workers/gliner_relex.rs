@@ -223,6 +223,11 @@ pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
         policy,
         wall_clock_ms: None,
         lifecycle,
+        // Slice 2.5 will flip this to Some(Container) on darwin to opt
+        // gliner-relex into memory enforcement (the Seatbelt backend
+        // has no memory primitive). Today it stays on the per-OS
+        // default — Bwrap on Linux, Seatbelt on darwin.
+        sandbox_backend: None,
     }
 }
 
