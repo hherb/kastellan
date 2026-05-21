@@ -225,7 +225,11 @@ pub fn build_container_argv(
 
     // CPU quota: percent-of-one-CPU → fractional vCPUs. 200% → -c 2.0.
     // No default emitted when None (`container` uses its host default).
-    if let Some(pct) = policy.cpu_quota_pct {
+    // Consistent with `mem_mb > 0` posture: `Some(0)` is treated as
+    // "unset" and drops the `-c` flag. Apple `container` rejects `-c 0`
+    // with an opaque error; better to fall through to the host
+    // `--default-cpus` than to surface a confusing failure.
+    if let Some(pct) = policy.cpu_quota_pct.filter(|&p| p > 0) {
         let vcpus = f64::from(pct) / 100.0;
         argv.push("-c".into());
         argv.push(format!("{vcpus}"));
@@ -453,6 +457,23 @@ mod tests {
         );
     }
 
+    /// Direct call with `0` clamps to the floor and flags clamping. The
+    /// only in-tree callsite guards `mem_mb > 0` before calling, so this
+    /// path is unreachable from `build_container_argv` today — pinned to
+    /// match the docstring's documented behaviour for any future direct
+    /// caller (e.g. a different backend reusing the helper).
+    #[test]
+    fn clamp_zero_raises_to_floor_and_flags_clamping() {
+        let out = clamp_memory_to_minimum(0);
+        assert_eq!(
+            out,
+            ClampedMemory {
+                mib: CONTAINER_MEM_MIN_MIB,
+                clamped: true,
+            }
+        );
+    }
+
     /// Exact-floor input is NOT clamped (the boundary is inclusive on the
     /// "above" side). Pinned so a future "fix" to `<=` doesn't silently
     /// log every container spawn at the floor.
@@ -640,6 +661,20 @@ mod tests {
         let argv = build_container_argv(&p, DEFAULT_IMAGE, "/bin/true", &[]);
         let c_idx = argv.iter().position(|s| s == "-c").expect("missing -c");
         assert_eq!(argv[c_idx + 1], "1.5");
+    }
+
+    /// `Some(0)` is treated as "unset" — drops `-c` entirely rather than
+    /// emitting `-c 0` (which `container` rejects with an opaque error).
+    /// Mirrors the `mem_mb == 0` drop-the-flag posture.
+    #[test]
+    fn cpu_quota_pct_zero_drops_c_flag_entirely() {
+        let mut p = strict_policy();
+        p.cpu_quota_pct = Some(0);
+        let argv = build_container_argv(&p, DEFAULT_IMAGE, "/bin/true", &[]);
+        assert!(
+            !argv.iter().any(|s| s == "-c"),
+            "cpu_quota_pct=Some(0) must drop -c; got: {argv:?}"
+        );
     }
 
     #[test]

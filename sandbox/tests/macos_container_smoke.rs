@@ -15,6 +15,13 @@
 //! false green.
 //!
 //! Parallel to `macos_smoke.rs` for the Seatbelt backend.
+//!
+//! Scope note: `SandboxPolicy::cpu_ms` enforcement is deliberately not
+//! exercised here. It flows via `HHAGENT_CPU_MS` + `workers/prelude::rlimit`
+//! inside the container; the smoke tests use opaque commands (`/bin/echo`,
+//! `/bin/cat`, `/bin/sh`) that don't run the worker prelude. End-to-end
+//! validation through a real worker lands in Slice 2.5 alongside the
+//! `gliner-relex` Containerfile.
 
 #![cfg(target_os = "macos")]
 
@@ -241,6 +248,19 @@ fn fs_read_bind_mount_rejects_writes() {
         "write to readonly bind-mount should fail; status={status:?} \
          stdout={stdout:?} stderr={stderr:?}"
     );
+    // The failure must be EROFS (`Read-only file system`), not a
+    // permission error from the strict-profile `--user nobody` running
+    // against an unfavourable host mode. The file is 0o666 + parent
+    // 0o777, so `nobody` (UID 65534) has world-write — if this assertion
+    // ever flips to permission-denied, the bind-mount is probably no
+    // longer being marked readonly. Lowercased so we tolerate `Read-only`
+    // vs `read-only` formatting drift across container/sh versions.
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        combined.contains("read-only"),
+        "expected EROFS-style failure (`Read-only file system`); \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
     // Verify the host file content is unchanged (defense in depth — even
     // if the container reported failure, the host file must still be its
     // original content).
@@ -277,7 +297,11 @@ fn strict_profile_makes_root_fs_readonly() {
     // redirected-write inside should fail. Assertions:
     //   (a) the sh ran (status 0, since the wrapper succeeded)
     //   (b) stdout contains "exit=" with a non-zero value
-    //   (c) stdout or stderr contains a "Read-only file system" hint
+    //   (c) stdout or stderr contains a "Read-only file system" hint —
+    //       pins that the failure is EROFS (i.e. `--read-only` was
+    //       actually applied) rather than e.g. `Permission denied` from
+    //       `--user nobody` (which would also fail but for the wrong
+    //       reason)
     assert!(
         status.success(),
         "wrapper sh should exit 0; status={status:?} stdout={stdout:?} stderr={stderr:?}"
@@ -285,6 +309,12 @@ fn strict_profile_makes_root_fs_readonly() {
     assert!(
         stdout.contains("exit=") && !stdout.contains("exit=0"),
         "expected non-zero exit code from write; stdout={stdout:?} stderr={stderr:?}"
+    );
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        combined.contains("read-only"),
+        "expected `Read-only file system` hint in output; \
+         stdout={stdout:?} stderr={stderr:?}"
     );
 }
 
