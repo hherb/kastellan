@@ -108,6 +108,18 @@ pub struct ToolEntry {
     /// [`Lifecycle::IdleTimeout`]. See
     /// `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`.
     pub lifecycle: crate::worker_lifecycle::Lifecycle,
+    /// Per-worker sandbox-backend opt-in. `None` (current default for
+    /// every shipping tool) uses the per-OS default backend (Seatbelt
+    /// on darwin, Bwrap on linux). `Some(K)` requests a specific
+    /// backend, validated at compile time by the cfg-gated enum.
+    ///
+    /// Slice 2.5 will set `Some(SandboxBackendKind::Container)` on
+    /// the `gliner-relex` manifest to opt that worker into macOS
+    /// memory enforcement (Seatbelt has no memory primitive). All
+    /// other workers stay on `None` until they have a concrete
+    /// reason to diverge. See
+    /// `docs/superpowers/specs/2026-05-21-macos-container-slice-2-design.md`.
+    pub sandbox_backend: Option<hhagent_sandbox::SandboxBackendKind>,
 }
 
 /// Look-up table from logical tool name (as it appears in
@@ -182,6 +194,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         policy,
         wall_clock_ms: Some(30_000),
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
+        sandbox_backend: None,
     }
 }
 
@@ -576,6 +589,7 @@ mod tests {
             },
             wall_clock_ms: Some(5_000),
             lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
+            sandbox_backend: None,
         }
     }
 
@@ -744,5 +758,19 @@ mod tests {
         let expected: std::collections::BTreeSet<&str> =
             ["tool", "method", "req", "err", "ms"].iter().copied().collect();
         assert_eq!(keys, expected, "unexpected keys in payload");
+    }
+
+    /// `shell_exec_entry` defaults `sandbox_backend` to `None` so the
+    /// shell-exec worker stays on the per-OS default backend (Seatbelt
+    /// on darwin, Bwrap on linux). A future explicit opt-in to
+    /// `Some(SandboxBackendKind::Container)` would be a deliberate
+    /// audit-trail change.
+    #[test]
+    fn shell_exec_entry_defaults_sandbox_backend_to_none() {
+        let entry = shell_exec_entry(
+            std::path::PathBuf::from("/usr/bin/true"),
+            &["true".to_string()],
+        );
+        assert_eq!(entry.sandbox_backend, None);
     }
 }

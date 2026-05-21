@@ -18,6 +18,7 @@ pub mod macos_container;
 pub mod macos_seatbelt;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -130,6 +131,42 @@ pub enum SandboxError {
     Backend(String),
 }
 
+/// Operator-facing identifier for selecting a specific sandbox backend
+/// per-worker. Cfg-gated per-OS so cross-OS mis-config (e.g. declaring
+/// `Container` on Linux) is a compile-time error rather than a runtime
+/// surprise.
+///
+/// `None` on a `ToolEntry.sandbox_backend` means "use the per-OS
+/// default" — today darwin → `Seatbelt`, linux → `Bwrap`. Only opt in
+/// here when a worker has a concrete reason to diverge (e.g. needs
+/// memory enforcement on macOS, which `Seatbelt` can't provide).
+///
+/// `Serialize + Deserialize` derives are for future operator-config
+/// plumbing (e.g. surfacing `sandbox_backend` in a manifest file or
+/// CLI subcommand). No current call-site serialises this; the derives
+/// are forward-looking so a later config slice doesn't need to revisit
+/// every `ToolEntry` constructor.
+///
+/// `Container` is deliberately bound to the macOS Apple `container`
+/// CLI under `#[cfg(target_os = "macos")]`. A future Linux micro-VM
+/// backend (Firecracker, Kata, gVisor, etc.) would add a
+/// linux-cfg-gated variant with its own name (e.g. `FirecrackerVm`)
+/// rather than overloading `Container` — the cfg-gating prevents
+/// ambiguity today.
+///
+/// See `docs/superpowers/specs/2026-05-21-macos-container-slice-2-design.md`
+/// for the rationale behind OS-specific variant names vs an abstract
+/// `MicroVm` category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SandboxBackendKind {
+    #[cfg(target_os = "linux")]
+    Bwrap,
+    #[cfg(target_os = "macos")]
+    Seatbelt,
+    #[cfg(target_os = "macos")]
+    Container,
+}
+
 /// Common backend interface. To be implemented by [`linux_bwrap`], [`macos_seatbelt`],
 /// and [`microvm`] in subsequent phases.
 ///
@@ -149,6 +186,12 @@ pub trait SandboxBackend: Send + Sync {
 }
 
 /// Pick the default backend for the current OS.
+///
+/// Kept for direct-spawn callers (e.g. `tests-common::sandbox::backend()`)
+/// that don't need per-entry selection. Daemon-backed call sites
+/// construct [`SandboxBackends::default_for_current_os`] instead — that
+/// bundle supports the per-worker `sandbox_backend` opt-in introduced
+/// by Slice 2.
 pub fn default_backend() -> Box<dyn SandboxBackend> {
     #[cfg(target_os = "linux")]
     {
@@ -161,6 +204,83 @@ pub fn default_backend() -> Box<dyn SandboxBackend> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Box::new(NotYetImplemented)
+    }
+}
+
+/// Per-OS bundle of constructed sandbox backends, used by the lifecycle
+/// managers to resolve a per-worker [`SandboxBackendKind`] to a concrete
+/// `Arc<dyn SandboxBackend>`.
+///
+/// Fields are cfg-gated to match `SandboxBackendKind` — every variant
+/// of the enum that exists at compile time has a backing field, so
+/// [`SandboxBackends::resolve`] is total (no runtime panic path for
+/// "unknown variant").
+///
+/// Constructed once at daemon startup via
+/// [`SandboxBackends::default_for_current_os`] (cheap — backends hold
+/// no mutable state) and threaded through the lifecycle managers as
+/// `Arc<SandboxBackends>`. Tests build a custom instance directly via
+/// struct-literal syntax with their own counter / stub backends.
+///
+/// `Clone` is provided so consumers that thread the bundle through
+/// async boundaries can copy the per-field `Arc`s cheaply.
+#[derive(Clone)]
+pub struct SandboxBackends {
+    #[cfg(target_os = "linux")]
+    pub bwrap: Arc<dyn SandboxBackend>,
+    #[cfg(target_os = "macos")]
+    pub seatbelt: Arc<dyn SandboxBackend>,
+    #[cfg(target_os = "macos")]
+    pub container: Arc<dyn SandboxBackend>,
+}
+
+impl SandboxBackends {
+    /// Construct the per-OS default bundle. On Linux this is a single
+    /// `LinuxBwrap`; on darwin it is `MacosSeatbelt` (the per-OS
+    /// default) plus a `MacosContainer` for opt-in workers. Cheap —
+    /// each backend is a unit-like struct with no I/O at construction.
+    pub fn default_for_current_os() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Self {
+                bwrap: Arc::new(linux_bwrap::LinuxBwrap::new()),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self {
+                seatbelt: Arc::new(macos_seatbelt::MacosSeatbelt::new()),
+                container: Arc::new(macos_container::MacosContainer::new()),
+            }
+        }
+    }
+
+    /// Resolve a per-worker [`SandboxBackendKind`] to a concrete backend.
+    ///
+    /// `None` returns the per-OS default (linux → `bwrap`, darwin →
+    /// `seatbelt`). `Some(K)` returns the matching field. The returned
+    /// `Arc` is a refcount bump; callers hold it for the lifetime of
+    /// one acquire call (single-use lifecycle) or one warm-slot fill
+    /// (idle-timeout lifecycle).
+    pub fn resolve(&self, kind: Option<SandboxBackendKind>) -> Arc<dyn SandboxBackend> {
+        match kind {
+            None => {
+                #[cfg(target_os = "linux")]
+                {
+                    Arc::clone(&self.bwrap)
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    Arc::clone(&self.seatbelt)
+                }
+            }
+            #[cfg(target_os = "linux")]
+            Some(SandboxBackendKind::Bwrap) => Arc::clone(&self.bwrap),
+            #[cfg(target_os = "macos")]
+            Some(SandboxBackendKind::Seatbelt) => Arc::clone(&self.seatbelt),
+            #[cfg(target_os = "macos")]
+            Some(SandboxBackendKind::Container) => Arc::clone(&self.container),
+        }
     }
 }
 
@@ -222,5 +342,65 @@ mod tests {
     #[test]
     fn profile_default_is_worker_strict() {
         assert_eq!(Profile::default(), Profile::WorkerStrict);
+    }
+
+    /// `SandboxBackendKind` is `Copy + Eq` so it can be threaded through
+    /// per-call dispatch without lifetime gymnastics. Cfg-gating means
+    /// the variant set is OS-specific by design — cross-OS mis-config
+    /// is a compile-time error rather than a runtime surprise.
+    #[test]
+    fn sandbox_backend_kind_is_copy_and_eq() {
+        #[cfg(target_os = "linux")]
+        {
+            let a = SandboxBackendKind::Bwrap;
+            let b = a;
+            assert_eq!(a, b);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let a = SandboxBackendKind::Seatbelt;
+            let b = a;
+            assert_eq!(a, b);
+            let c = SandboxBackendKind::Container;
+            assert_ne!(a, c);
+        }
+    }
+
+    /// `resolve(None)` returns the per-OS default backend. The test pins
+    /// pointer identity against the struct's own per-OS default slot —
+    /// if a future refactor swaps the default to a different slot, this
+    /// trips deliberately.
+    #[test]
+    fn sandbox_backends_resolve_none_returns_per_os_default() {
+        let sbs = SandboxBackends::default_for_current_os();
+        let got = sbs.resolve(None);
+        #[cfg(target_os = "linux")]
+        assert!(Arc::ptr_eq(&got, &sbs.bwrap));
+        #[cfg(target_os = "macos")]
+        assert!(Arc::ptr_eq(&got, &sbs.seatbelt));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandbox_backends_resolve_some_seatbelt_on_darwin() {
+        let sbs = SandboxBackends::default_for_current_os();
+        let got = sbs.resolve(Some(SandboxBackendKind::Seatbelt));
+        assert!(Arc::ptr_eq(&got, &sbs.seatbelt));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandbox_backends_resolve_some_container_on_darwin() {
+        let sbs = SandboxBackends::default_for_current_os();
+        let got = sbs.resolve(Some(SandboxBackendKind::Container));
+        assert!(Arc::ptr_eq(&got, &sbs.container));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_backends_resolve_some_bwrap_on_linux() {
+        let sbs = SandboxBackends::default_for_current_os();
+        let got = sbs.resolve(Some(SandboxBackendKind::Bwrap));
+        assert!(Arc::ptr_eq(&got, &sbs.bwrap));
     }
 }

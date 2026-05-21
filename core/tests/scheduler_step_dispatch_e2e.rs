@@ -61,7 +61,6 @@ use hhagent_db::{
     build_initdb_argv, build_postgresql_auto_conf, default_pg_bin_dir_candidates,
     default_socket_dir, find_pg_bin_dir, InitDbOptions, PgConfigOptions,
 };
-use hhagent_sandbox::SandboxBackend;
 use hhagent_supervisor::specs::postgres_service_spec;
 use hhagent_supervisor::{
     default_probe, default_supervisor, ServiceStatus, Supervisor,
@@ -92,14 +91,8 @@ fn skip_if_sandbox_unavailable() -> bool {
     false
 }
 
-#[cfg(target_os = "linux")]
-fn sandbox_arc() -> Arc<dyn SandboxBackend> {
-    Arc::new(hhagent_sandbox::linux_bwrap::LinuxBwrap::new())
-}
-
-#[cfg(target_os = "macos")]
-fn sandbox_arc() -> Arc<dyn SandboxBackend> {
-    Arc::new(hhagent_sandbox::macos_seatbelt::MacosSeatbelt::new())
+fn sandbox_bundle() -> Arc<hhagent_sandbox::SandboxBackends> {
+    Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os())
 }
 
 fn worker_binary() -> PathBuf {
@@ -391,15 +384,16 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
                 },
                 wall_clock_ms: Some(5_000),
                 lifecycle: hhagent_core::worker_lifecycle::Lifecycle::SingleUse,
+                sandbox_backend: None,
             },
         );
         let registry = Arc::new(registry);
         assert_eq!(registry.len(), 2);
 
-        let sandbox = sandbox_arc();
+        let sandboxes = sandbox_bundle();
         let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
             Arc::new(hhagent_core::worker_lifecycle::SingleUseLifecycle::new(
-                sandbox,
+                sandboxes,
             ));
         let dispatcher = ToolHostStepDispatcher::new(
             pool.clone(),

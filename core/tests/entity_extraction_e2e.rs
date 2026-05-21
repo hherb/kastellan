@@ -39,7 +39,7 @@ use hhagent_core::workers::gliner_relex::{
     TripleEntity,
 };
 use hhagent_tests_common::{
-    backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
+    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, PgCluster,
 };
 
@@ -511,9 +511,9 @@ async fn extractor_extract_against_real_worker_returns_seeds() {
         return;
     };
 
-    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = Arc::from(backend());
+    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle: Arc<dyn WorkerLifecycleManager> =
-        Arc::new(CompositeLifecycle::new(sandbox));
+        Arc::new(CompositeLifecycle::new(sandboxes));
 
     let client = Client::new(lifecycle, pool.clone(), entry);
     let extractor = GlinerRelexExtractor::new(client, pool.clone());
@@ -563,9 +563,9 @@ async fn extractor_chunking_path_against_real_worker() {
         return;
     };
 
-    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = Arc::from(backend());
+    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle: Arc<dyn WorkerLifecycleManager> =
-        Arc::new(CompositeLifecycle::new(sandbox));
+        Arc::new(CompositeLifecycle::new(sandboxes));
 
     let client = Client::new(lifecycle, pool.clone(), entry);
     let extractor = GlinerRelexExtractor::new(client, pool.clone());

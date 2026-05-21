@@ -79,8 +79,13 @@ async fn main() -> Result<()> {
     // <l0_meta_rules>/<l1_insights>/<base> before each LLM call. Holds
     // PgPool by value (sqlx wraps connections in an internal Arc so
     // pool.clone() is cheap).
-    // Sandbox backend (cross-platform).
-    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = sandbox_backend();
+    // Sandbox-backend bundle (Slice 2). On darwin holds both Seatbelt
+    // (the per-OS default) and the Container backend so individual
+    // workers can opt in to memory enforcement via
+    // `ToolEntry.sandbox_backend = Some(SandboxBackendKind::Container)`.
+    // On linux holds just `LinuxBwrap`. Cheap to construct; each backend
+    // is a unit-like struct with no I/O at construction.
+    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
 
     // Worker lifecycle (spec
     // `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`).
@@ -101,7 +106,7 @@ async fn main() -> Result<()> {
     // is opt-in via env), behaviour is byte-equivalent to the prior
     // single-use-only wiring.
     let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
-        hhagent_core::worker_lifecycle::CompositeLifecycle::new(sandbox.clone()),
+        hhagent_core::worker_lifecycle::CompositeLifecycle::new(Arc::clone(&sandboxes)),
     );
 
     // Resolve gliner-relex once. The resolver emits its own
@@ -611,22 +616,3 @@ async fn write_l0_seeded_row(
     .map(|_| ())
 }
 
-/// Return the default sandbox backend for the current OS.
-///
-/// Linux uses bubblewrap (`LinuxBwrap`); macOS uses Seatbelt
-/// (`MacosSeatbelt`). The `ToolHostStepDispatcher` owns the resulting
-/// `Arc`.
-#[cfg(target_os = "linux")]
-fn sandbox_backend() -> Arc<dyn hhagent_sandbox::SandboxBackend> {
-    Arc::new(hhagent_sandbox::linux_bwrap::LinuxBwrap::new())
-}
-
-#[cfg(target_os = "macos")]
-fn sandbox_backend() -> Arc<dyn hhagent_sandbox::SandboxBackend> {
-    Arc::new(hhagent_sandbox::macos_seatbelt::MacosSeatbelt::new())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn sandbox_backend() -> Arc<dyn hhagent_sandbox::SandboxBackend> {
-    panic!("no sandbox backend for this OS — only Linux and macOS are supported")
-}
