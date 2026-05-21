@@ -63,6 +63,17 @@ pub fn parse_audit_filename(name: &str) -> Option<time::Date> {
 /// filename shape are skipped. A non-existent or unreadable directory
 /// yields an empty list — the caller treats "no files yet" as a
 /// benign empty stream rather than a hard error.
+///
+/// Error-handling asymmetry (deliberate):
+///   * Initial `read_dir` failure → returns `Vec::new()` (silent).
+///     "No files yet" is the canonical benign startup state; logging
+///     here would spam every poll cycle on a freshly-provisioned host.
+///   * Mid-iteration `next_entry()` failure → returns the partial list
+///     accumulated so far PLUS a `tracing::error!` row. Mid-walk
+///     failure means something real broke during iteration (FS error,
+///     permissions flip, races against rotation); the operator needs
+///     a signal, and a partial list is more useful than nothing for a
+///     tail-follower that can resume on the next poll.
 pub async fn find_audit_files(state_dir: &Path) -> Vec<(time::Date, PathBuf)> {
     let mut entries = match tokio::fs::read_dir(state_dir).await {
         Ok(e) => e,
@@ -323,6 +334,11 @@ mod tests {
     fn tempdir() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
+        // `Relaxed` is sufficient: we only need each `fetch_add` to
+        // return a value distinct from every other call's, not any
+        // happens-before relationship between callers. The atomic's
+        // own modification order guarantees per-call uniqueness; we
+        // don't synchronise any sibling memory off the counter.
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!(
             "hhagent-audit-tail-{}-{}-{}",
