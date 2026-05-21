@@ -73,10 +73,25 @@ pub struct GlinerRelexEnv {
     /// to the worker for its own startup-time logging only — the
     /// worker loads from `weights_dir` directly.
     pub model_id: String,
-    /// `auto` / `cuda` / `cpu`. `auto` lets the worker probe
-    /// `torch.cuda.mem_get_info(0)` for >= 3 GiB free (per spike
-    /// correction #4) and pick CUDA or fall back to CPU silently.
-    /// `mps` is reserved for the macOS follow-up plan.
+    /// One of `auto` / `cpu` / `cuda` / `mps`. Forwarded verbatim
+    /// via `HHAGENT_GLINER_RELEX_DEVICE`; per-platform legality is
+    /// enforced by the Python `__main__._resolve_device` helper, not
+    /// here.
+    ///
+    /// * `auto`:
+    ///   - **Linux**: probe `torch.cuda.mem_get_info(0)` for >= 3 GiB
+    ///     free (per spike correction #4); pick `cuda` if so, else
+    ///     fall back to `cpu` silently.
+    ///   - **darwin**: resolve directly to `cpu`. The macOS MPS spike
+    ///     found MPS regresses ~5x vs CPU on realistic ~600-char
+    ///     paragraph input and worst-case cold dispatch is 4 s. MPS
+    ///     is opt-in only.
+    ///
+    /// * `cpu` / `cuda` / `mps`: explicit overrides. `cuda` is
+    ///   rejected on darwin; `mps` is rejected on non-darwin; both
+    ///   produce a `MODEL_LOAD_FAILED` / `UNSUPPORTED_DEVICE` exit
+    ///   from the worker at startup so the operator sees the
+    ///   misconfig immediately.
     pub device: String,
 }
 
@@ -888,6 +903,41 @@ mod tests {
             env_map.get("TORCHINDUCTOR_CACHE_DIR"),
             Some(&"/tmp/torchinductor")
         );
+    }
+
+    #[test]
+    fn entry_forwards_device_verbatim_regardless_of_value() {
+        // The manifest is the cross-platform layer; per-platform
+        // device-legality enforcement lives in
+        // `workers/gliner-relex/.../__main__._resolve_device`. The
+        // manifest's job is only to forward whatever the operator
+        // (or `auto`-resolution upstream) chose into
+        // `HHAGENT_GLINER_RELEX_DEVICE` so the Python startup path
+        // sees it. Pinning the forwarding of `"mps"` here so a future
+        // refactor that adds platform branches to gliner_relex_entry
+        // — moving validation out of Python — has to update this
+        // test deliberately. (The macOS slice 2026-05-21 explicitly
+        // chose not to add platform branches at the manifest layer
+        // to keep the Rust manifest one-shape across Linux + darwin
+        // and centralise the per-platform device rules in one place.)
+        for device in &["auto", "cpu", "cuda", "mps", "unknown-future-device"] {
+            let env = GlinerRelexEnv {
+                device: device.to_string(),
+                ..test_env()
+            };
+            let entry = gliner_relex_entry(&env);
+            let env_map: std::collections::HashMap<&str, &str> = entry
+                .policy
+                .env
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            assert_eq!(
+                env_map.get("HHAGENT_GLINER_RELEX_DEVICE"),
+                Some(&*device),
+                "manifest must forward device={device:?} verbatim into the env",
+            );
+        }
     }
 
     #[test]
