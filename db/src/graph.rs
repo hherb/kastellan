@@ -59,6 +59,69 @@ fn decode_entity(row: &sqlx::postgres::PgRow) -> Result<Entity, DbError> {
     })
 }
 
+/// Decode a row from the `walk_*_edges` recursive-CTE SELECT into a
+/// [`WalkedEdge`]. The SELECT projects columns in this order:
+///
+/// `(depth, edge_id, src_id, src_kind, src_name, src_quarantine,
+///   dst_id, dst_kind, dst_name, dst_quarantine, kind)`.
+///
+/// `depth` is read as `i32` (Postgres has no native `u8`) and cast down
+/// to `u8`. `max_depth` is capped by [`MAX_WALK_DEPTH`] (asserted in
+/// callers), so `depth <= MAX_WALK_DEPTH <= u8::MAX` always — the cast
+/// is documented as safe rather than checked.
+fn decode_walked_edge(row: &sqlx::postgres::PgRow) -> Result<WalkedEdge, DbError> {
+    let depth_i32: i32 = row
+        .try_get(0)
+        .map_err(|e| DbError::Query(format!("decode walked_edge.depth: {e}")))?;
+    Ok(WalkedEdge {
+        depth: depth_i32 as u8,
+        edge_id: row
+            .try_get(1)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.edge_id: {e}")))?,
+        src_id: row
+            .try_get(2)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.src_id: {e}")))?,
+        src_kind: row
+            .try_get(3)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.src_kind: {e}")))?,
+        src_name: row
+            .try_get(4)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.src_name: {e}")))?,
+        src_quarantine: row
+            .try_get(5)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.src_quarantine: {e}")))?,
+        dst_id: row
+            .try_get(6)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.dst_id: {e}")))?,
+        dst_kind: row
+            .try_get(7)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.dst_kind: {e}")))?,
+        dst_name: row
+            .try_get(8)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.dst_name: {e}")))?,
+        dst_quarantine: row
+            .try_get(9)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.dst_quarantine: {e}")))?,
+        kind: row
+            .try_get(10)
+            .map_err(|e| DbError::Query(format!("decode walked_edge.kind: {e}")))?,
+    })
+}
+
+/// Hard ceiling on `max_depth` accepted by [`Graph::walk_outbound_edges`]
+/// and [`Graph::walk_inbound_edges`]. Matches the budget convention used
+/// by [`Graph::path`] (its `max_hops` is a `u8` callers typically pass
+/// as 5 or below). The cap exists to keep the recursive CTE's worst-case
+/// row count bounded — at depth 5 on a 10-fan-out graph we already see
+/// 10^5 = 100_000 rows before the `LIMIT` clause clips them.
+///
+/// `max_depth` strictly greater than this constant is clamped down by
+/// the impl (with a `tracing::warn!`) rather than rejected; the
+/// operator-facing CLI takes a `u8` from the command line, and a sharp
+/// cap-vs-error boundary in the protocol would force every consumer to
+/// re-implement the same clamping logic.
+pub const MAX_WALK_DEPTH: u8 = 5;
+
 /// A node in the knowledge graph. The `id` is the BIGSERIAL primary
 /// key from `entities`; the `(kind, name)` pair is the natural key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +140,38 @@ pub struct Relation {
     pub dst_id: i64,
     pub kind: String,
     pub attrs: serde_json::Value,
+}
+
+/// One edge walked by [`Graph::walk_outbound_edges`] or
+/// [`Graph::walk_inbound_edges`], carrying *both* endpoints' natural
+/// keys plus the edge kind plus the hop depth.
+///
+/// `depth` is `1` for direct neighbours of the seed (the edge between
+/// the seed and a 1-hop neighbour), `2` for two-hop, etc. It is never
+/// `0` — the seed itself is never returned as an "edge".
+///
+/// `src_quarantine` / `dst_quarantine` carry the `entities.quarantine`
+/// column for each endpoint so the operator-facing `relations show`
+/// command can flag quarantined entities visually (eg. with `[Q]`)
+/// without an extra round-trip.
+///
+/// This struct is deliberately self-contained: it duplicates `kind`/
+/// `name` from the joined `entities` rows so that downstream rendering
+/// is a pure transformation of `Vec<WalkedEdge>` and doesn't need a
+/// secondary lookup table to translate ids to display strings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalkedEdge {
+    pub depth: u8,
+    pub edge_id: i64,
+    pub src_id: i64,
+    pub src_kind: String,
+    pub src_name: String,
+    pub src_quarantine: bool,
+    pub dst_id: i64,
+    pub dst_kind: String,
+    pub dst_name: String,
+    pub dst_quarantine: bool,
+    pub kind: String,
 }
 
 /// Read/write surface for the knowledge graph.
@@ -149,6 +244,59 @@ pub trait Graph {
         dst_id: i64,
         max_hops: u8,
     ) -> impl std::future::Future<Output = Result<Option<Vec<Entity>>, DbError>> + Send;
+
+    /// Walk outbound edges from `src_id` up to `max_depth` hops.
+    ///
+    /// Returns one [`WalkedEdge`] per traversed edge, including
+    /// endpoint kind/name/quarantine on both sides so the caller can
+    /// render the result without a secondary lookup. Rows are sorted by
+    /// `(depth ASC, edge_id ASC)` for deterministic operator-facing
+    /// output.
+    ///
+    /// **Semantics:**
+    /// - `max_depth == 0` returns an empty `Vec` (no edges to walk).
+    /// - `max_depth == 1` returns the seed's direct outbound edges
+    ///   (parallel to [`Graph::neighbors`] but with edge metadata).
+    /// - Cycles are bounded by a visited-set tracked in the recursive
+    ///   CTE: a node already reached on the current path will not be
+    ///   re-entered (`A → B → A` does not diverge).
+    /// - `limit` is honoured SQL-side so a high-fan-out seed cannot
+    ///   exhaust memory. Pass a generous value (e.g. `10_000`) when in
+    ///   doubt; the operator-facing CLI is the typical caller.
+    ///
+    /// **Quarantine:** quarantined entities are **not** filtered. The
+    /// only consumer today is the operator-facing `relations show`
+    /// command, which deliberately surfaces quarantined entities (tagged
+    /// `[Q]` in its output) because they are exactly the rows the
+    /// operator may be about to review. If a future caller needs
+    /// quarantine-filtered output, layer the filter on the returned
+    /// `Vec` rather than threading another flag through this method.
+    fn walk_outbound_edges(
+        &self,
+        src_id: i64,
+        max_depth: u8,
+        limit: i64,
+    ) -> impl std::future::Future<Output = Result<Vec<WalkedEdge>, DbError>> + Send;
+
+    /// Walk inbound edges into `dst_id` up to `max_depth` hops.
+    ///
+    /// Mirror of [`Graph::walk_outbound_edges`] for the reverse
+    /// direction: at depth 1 returns edges that point to the seed; at
+    /// depth 2 returns edges that point to *those* sources; and so on.
+    /// Each [`WalkedEdge`] still records the canonical `(src_id, kind,
+    /// dst_id)` triple in the same orientation as it lives in
+    /// `relations`, so the operator-facing renderer can render every
+    /// edge in the same `src --[kind]--> dst` shape regardless of which
+    /// walk direction surfaced it.
+    ///
+    /// See [`Graph::walk_outbound_edges`] for cycle handling, depth-0
+    /// semantics, the `limit` contract, and quarantine policy.
+    fn walk_inbound_edges(
+        &self,
+        dst_id: i64,
+        max_depth: u8,
+        limit: i64,
+    ) -> impl std::future::Future<Output = Result<Vec<WalkedEdge>, DbError>> + Send;
 }
 
 /// Postgres implementation of [`Graph`]. Holds a borrowed pool/
@@ -366,6 +514,151 @@ impl<'a> Graph for PgGraph<'a> {
             .collect::<Result<Vec<_>, _>>()
             .map(Some)
     }
+
+    async fn walk_outbound_edges(
+        &self,
+        src_id: i64,
+        max_depth: u8,
+        limit: i64,
+    ) -> Result<Vec<WalkedEdge>, DbError> {
+        // Depth-0 has no edges to traverse. Short-circuit before the
+        // CTE so a degenerate caller doesn't pay for a SQL round-trip.
+        if max_depth == 0 {
+            return Ok(Vec::new());
+        }
+        let max_depth = clamp_walk_depth(max_depth);
+        let max_depth_i32: i32 = i32::from(max_depth);
+
+        // Recursive CTE walks edges, not nodes. The base case projects
+        // every edge leaving the seed (depth=1). The recursive case
+        // joins each row's `dst_id` against `relations.src_id` to
+        // expand one level further, accumulating both the visited
+        // *node* set (to refuse re-entering nodes on cycles) and the
+        // hop depth.
+        //
+        // Sorting in the outer SELECT (not the recursive term) is the
+        // only safe place — Postgres treats the recursive term as a
+        // bag with non-deterministic enumeration. `(depth ASC,
+        // edge_id ASC)` keeps the operator-facing output stable across
+        // runs and across PG point releases.
+        let rows = sqlx::query(
+            r#"
+            WITH RECURSIVE walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
+                SELECT r.id, r.src_id, r.dst_id, r.kind, 1,
+                       ARRAY[r.src_id::bigint, r.dst_id::bigint]
+                FROM relations r
+                WHERE r.src_id = $1::bigint
+                UNION ALL
+                SELECT r.id, r.src_id, r.dst_id, r.kind, w.depth + 1,
+                       w.visited || r.dst_id
+                FROM walk w
+                JOIN relations r ON r.src_id = w.dst_id
+                WHERE w.depth < $2
+                  AND NOT (r.dst_id = ANY(w.visited))
+            )
+            SELECT
+                w.depth,
+                w.edge_id,
+                w.src_id, es.kind, es.name, es.quarantine,
+                w.dst_id, ed.kind, ed.name, ed.quarantine,
+                w.kind
+            FROM walk w
+            JOIN entities es ON es.id = w.src_id
+            JOIN entities ed ON ed.id = w.dst_id
+            ORDER BY w.depth ASC, w.edge_id ASC
+            LIMIT $3
+            "#,
+        )
+        .bind(src_id)
+        .bind(max_depth_i32)
+        .bind(limit)
+        .fetch_all(self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        rows.iter().map(decode_walked_edge).collect()
+    }
+
+    async fn walk_inbound_edges(
+        &self,
+        dst_id: i64,
+        max_depth: u8,
+        limit: i64,
+    ) -> Result<Vec<WalkedEdge>, DbError> {
+        if max_depth == 0 {
+            return Ok(Vec::new());
+        }
+        let max_depth = clamp_walk_depth(max_depth);
+        let max_depth_i32: i32 = i32::from(max_depth);
+
+        // Symmetric to `walk_outbound_edges` but walking in the reverse
+        // direction. The base case projects every edge *arriving at*
+        // the seed; the recursive case joins each row's `src_id`
+        // against `relations.dst_id` to expand one level upstream.
+        //
+        // Critical: each emitted `WalkedEdge` still records the
+        // canonical `(src_id, kind, dst_id)` orientation (the same way
+        // the row lives in `relations`). So a `B --[knows]--> A`
+        // edge surfaced by `walk_inbound_edges(A, ...)` is returned as
+        // `WalkedEdge { src=B, kind=knows, dst=A, depth=1 }`, not as
+        // an inverted `A --[knows]--> B`. This means the caller can
+        // mix outbound + inbound results in one rendering loop without
+        // having to track which walk produced each row.
+        let rows = sqlx::query(
+            r#"
+            WITH RECURSIVE walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
+                SELECT r.id, r.src_id, r.dst_id, r.kind, 1,
+                       ARRAY[r.dst_id::bigint, r.src_id::bigint]
+                FROM relations r
+                WHERE r.dst_id = $1::bigint
+                UNION ALL
+                SELECT r.id, r.src_id, r.dst_id, r.kind, w.depth + 1,
+                       w.visited || r.src_id
+                FROM walk w
+                JOIN relations r ON r.dst_id = w.src_id
+                WHERE w.depth < $2
+                  AND NOT (r.src_id = ANY(w.visited))
+            )
+            SELECT
+                w.depth,
+                w.edge_id,
+                w.src_id, es.kind, es.name, es.quarantine,
+                w.dst_id, ed.kind, ed.name, ed.quarantine,
+                w.kind
+            FROM walk w
+            JOIN entities es ON es.id = w.src_id
+            JOIN entities ed ON ed.id = w.dst_id
+            ORDER BY w.depth ASC, w.edge_id ASC
+            LIMIT $3
+            "#,
+        )
+        .bind(dst_id)
+        .bind(max_depth_i32)
+        .bind(limit)
+        .fetch_all(self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        rows.iter().map(decode_walked_edge).collect()
+    }
+}
+
+/// Clamp `max_depth` to [`MAX_WALK_DEPTH`], emitting a `tracing::warn`
+/// on out-of-range input so an operator who passes a huge depth on the
+/// CLI sees a one-line breadcrumb instead of a silent ceiling. Pure
+/// function so the warn-emission is easy to unit-test without touching
+/// the DB.
+fn clamp_walk_depth(requested: u8) -> u8 {
+    if requested > MAX_WALK_DEPTH {
+        tracing::warn!(
+            requested,
+            clamped_to = MAX_WALK_DEPTH,
+            "graph::walk depth exceeds cap; clamping",
+        );
+        MAX_WALK_DEPTH
+    } else {
+        requested
+    }
 }
 
 #[cfg(test)]
@@ -401,5 +694,60 @@ mod tests {
         assert_eq!(r.src_id, 10);
         assert_eq!(r.dst_id, 20);
         assert_eq!(r.kind, "knows");
+    }
+
+    /// Pin every field on `WalkedEdge` so a future rename (e.g. dropping
+    /// `src_quarantine` or renaming `edge_id` to `relation_id`) trips a
+    /// compile error in the test rather than silently breaking the CLI
+    /// renderer's column-projection assumptions.
+    #[test]
+    fn walked_edge_struct_field_shape() {
+        let e = WalkedEdge {
+            depth: 1,
+            edge_id: 42,
+            src_id: 10,
+            src_kind: "person".into(),
+            src_name: "alice".into(),
+            src_quarantine: false,
+            dst_id: 20,
+            dst_kind: "object".into(),
+            dst_name: "cat".into(),
+            dst_quarantine: true,
+            kind: "owns".into(),
+        };
+        assert_eq!(e.depth, 1);
+        assert_eq!(e.edge_id, 42);
+        assert_eq!(e.src_id, 10);
+        assert_eq!(e.src_kind, "person");
+        assert_eq!(e.src_name, "alice");
+        assert!(!e.src_quarantine);
+        assert_eq!(e.dst_id, 20);
+        assert_eq!(e.dst_kind, "object");
+        assert_eq!(e.dst_name, "cat");
+        assert!(e.dst_quarantine);
+        assert_eq!(e.kind, "owns");
+    }
+
+    #[test]
+    fn clamp_walk_depth_leaves_in_range_untouched() {
+        for d in 0..=MAX_WALK_DEPTH {
+            assert_eq!(clamp_walk_depth(d), d, "depth {d} must not be clamped");
+        }
+    }
+
+    #[test]
+    fn clamp_walk_depth_clamps_above_cap() {
+        assert_eq!(clamp_walk_depth(MAX_WALK_DEPTH + 1), MAX_WALK_DEPTH);
+        assert_eq!(clamp_walk_depth(u8::MAX), MAX_WALK_DEPTH);
+    }
+
+    #[test]
+    fn max_walk_depth_constant_pin() {
+        // Pin the *value* — Next-TODO Item 21's design budget is 5, and
+        // a quiet bump to 10 would change the worst-case CTE row count
+        // by a factor of 10^5 on a 10-fan-out graph. If a future need
+        // forces a higher cap, the change should be deliberate and
+        // visible in the diff.
+        assert_eq!(MAX_WALK_DEPTH, 5);
     }
 }
