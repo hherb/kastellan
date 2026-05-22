@@ -103,6 +103,7 @@ use crate::scheduler::audit::{
     ACTION_TOOLS_ALLOWLIST_ADD, ACTION_TOOLS_ALLOWLIST_REMOVE,
     ACTION_ENTITIES_APPROVED, ACTION_ENTITIES_REJECTED, ACTION_ENTITIES_MERGED,
     ACTION_RELATION_KINDS_ADD, ACTION_RELATION_KINDS_REMOVE,
+    ACTION_ENTITY_KINDS_ADD, ACTION_ENTITY_KINDS_REMOVE,
 };
 
 /// Logical `actor` string written into every CLI-emitted audit row.
@@ -456,6 +457,75 @@ pub async fn relation_kinds_remove_and_audit(
                 error = %e,
                 kind = kind,
                 "relation_kinds_remove_and_audit: audit insert failed"
+            );
+        }
+    }
+    Ok(removed)
+}
+
+/// Add one entity-kind row and emit one `actor='cli'
+/// action='entity_kinds.add'` audit row on success.
+///
+/// Mirror of [`relation_kinds_add_and_audit`]: same idempotency
+/// semantics (`Ok(true)` on real INSERT triggers audit; `Ok(false)`
+/// writes no row); same payload shape (`{kind, description}` with
+/// `description: null` when omitted); same admin-pool requirement
+/// (migration 0016 REVOKEs writes from the runtime role).
+pub async fn entity_kinds_add_and_audit(
+    pool: &PgPool,
+    kind: &str,
+    description: Option<&str>,
+) -> Result<bool, hhagent_db::entity_kinds::EntityKindError> {
+    let inserted = hhagent_db::entity_kinds::add(pool, kind, description).await?;
+    if inserted {
+        let payload = serde_json::json!({
+            "kind": kind,
+            "description": description,
+        });
+        if let Err(e) = hhagent_db::audit::insert(
+            pool,
+            CLI_AUDIT_ACTOR,
+            ACTION_ENTITY_KINDS_ADD,
+            payload,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %e,
+                kind = kind,
+                "entity_kinds_add_and_audit: audit insert failed"
+            );
+        }
+    }
+    Ok(inserted)
+}
+
+/// Remove one entity-kind row and emit one `actor='cli'
+/// action='entity_kinds.remove'` audit row on success.
+///
+/// Mirror of [`relation_kinds_remove_and_audit`]. The `'undefined'`
+/// sentinel is rejected up front by `db::entity_kinds::remove` with
+/// `EntityKindError::RemovalOfUndefinedRejected`; on that path no
+/// row is deleted and no audit row is written.
+pub async fn entity_kinds_remove_and_audit(
+    pool: &PgPool,
+    kind: &str,
+) -> Result<bool, hhagent_db::entity_kinds::EntityKindError> {
+    let removed = hhagent_db::entity_kinds::remove(pool, kind).await?;
+    if removed {
+        let payload = serde_json::json!({ "kind": kind });
+        if let Err(e) = hhagent_db::audit::insert(
+            pool,
+            CLI_AUDIT_ACTOR,
+            ACTION_ENTITY_KINDS_REMOVE,
+            payload,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %e,
+                kind = kind,
+                "entity_kinds_remove_and_audit: audit insert failed"
             );
         }
     }
