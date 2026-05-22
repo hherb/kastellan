@@ -138,6 +138,41 @@ fn cli_tools_allowlist_unknown_subcommand_exits_two() {
     );
 }
 
+/// `entities kinds` mirror of the `relations kinds` posture below
+/// (both ride on `connect_admin_pool`). The unknown-action path must
+/// exit 2 *before* runtime construction so a typo doesn't burn tokio
+/// worker threads.
+#[test]
+fn cli_entities_kinds_unknown_action_exits_two() {
+    let bin = cli_binary();
+    if !bin.exists() {
+        eprintln!(
+            "[SKIP] cli_entities_kinds_unknown_action_exits_two: hhagent-cli binary not built at {}",
+            bin.display(),
+        );
+        return;
+    }
+
+    let out = Command::new(&bin)
+        .args(["entities", "kinds", "frobnicate"])
+        .env_clear()
+        .envs(bad_args_env())
+        .output()
+        .expect("spawn cli entities kinds frobnicate");
+
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "`entities kinds frobnicate` must exit 2; got {:?}\nstderr={stderr}",
+        out.status,
+    );
+    assert!(
+        stderr.contains("entities kinds: unknown subcommand"),
+        "stderr must carry the dispatcher-prefixed unknown-subcommand line; got: {stderr}",
+    );
+}
+
 /// `relations kinds` mirrors the with_runtime posture: the unknown-
 /// action path returns from the dispatcher *before* tokio runtime
 /// construction or any DB connection attempt. Pin the early-exit
