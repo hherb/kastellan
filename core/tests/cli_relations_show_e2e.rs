@@ -15,10 +15,12 @@
 //!     is not.
 //!
 //!   * **JSON format.** `--format json` emits NDJSON: one
-//!     `{"seed":...}` header line followed by one `{"direction":...}`
-//!     line per edge. Parsing each line as JSON and pinning canonical
-//!     fields catches a future renderer change that breaks downstream
-//!     `jq` consumers.
+//!     `{"type":"header","seed":...}` line followed by one
+//!     `{"type":"edge","direction":...}` line per edge. The `type`
+//!     discriminant lets `jq` consumers filter cleanly without
+//!     special-casing line position. Parsing each line as JSON and
+//!     pinning canonical fields catches a future renderer change that
+//!     breaks downstream `jq` consumers.
 //!
 //!   * **Depth respected.** `--depth 2` surfaces a depth-2 edge that
 //!     `--depth 1` does not. Sanity-pins the `walk_outbound_edges`
@@ -228,6 +230,10 @@ async fn cli_relations_show_renders_outbound_inbound_walks_and_quarantine_tags()
     assert_eq!(lines.len(), 4, "expected 4 NDJSON lines, got:\n{stdout}");
 
     let header: serde_json::Value = serde_json::from_str(lines[0]).expect("header JSON");
+    assert_eq!(
+        header["type"], "header",
+        "first line must carry type=header for jq filtering",
+    );
     assert_eq!(header["seed"]["id"], dr);
     assert_eq!(header["seed"]["kind"], "person");
     assert_eq!(header["seed"]["name"], "Dr Smith");
@@ -236,12 +242,16 @@ async fn cli_relations_show_renders_outbound_inbound_walks_and_quarantine_tags()
     assert_eq!(header["outbound_count"], 2);
     assert_eq!(header["inbound_count"], 1);
 
-    // Every non-header line must parse, carry a direction in
-    // {outbound, inbound}, and have the canonical
+    // Every non-header line must parse, carry type=edge plus a direction
+    // in {outbound, inbound}, and have the canonical
     // {edge_id, depth, src, dst, kind} fields.
     let mut directions: Vec<String> = Vec::new();
     for line in &lines[1..] {
         let v: serde_json::Value = serde_json::from_str(line).expect("edge JSON");
+        assert_eq!(
+            v["type"], "edge",
+            "non-header lines must carry type=edge: {line}",
+        );
         directions.push(v["direction"].as_str().expect("direction").to_string());
         assert!(v["edge_id"].is_i64(), "edge_id must be int: {line}");
         assert!(v["depth"].is_i64(), "depth must be int: {line}");

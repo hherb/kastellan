@@ -65,16 +65,24 @@ fn decode_entity(row: &sqlx::postgres::PgRow) -> Result<Entity, DbError> {
 /// `(depth, edge_id, src_id, src_kind, src_name, src_quarantine,
 ///   dst_id, dst_kind, dst_name, dst_quarantine, kind)`.
 ///
-/// `depth` is read as `i32` (Postgres has no native `u8`) and cast down
-/// to `u8`. `max_depth` is capped by [`MAX_WALK_DEPTH`] (asserted in
-/// callers), so `depth <= MAX_WALK_DEPTH <= u8::MAX` always — the cast
-/// is documented as safe rather than checked.
+/// `depth` is read as `i32` (Postgres has no native `u8`) and narrowed
+/// via [`u8::try_from`]. `max_depth` is capped by [`MAX_WALK_DEPTH`] in
+/// callers so `depth <= MAX_WALK_DEPTH <= u8::MAX` always — but we
+/// enforce the invariant at the boundary with a checked conversion so a
+/// future direct caller that synthesizes a row with an out-of-range
+/// depth surfaces a typed error instead of silently truncating.
 fn decode_walked_edge(row: &sqlx::postgres::PgRow) -> Result<WalkedEdge, DbError> {
     let depth_i32: i32 = row
         .try_get(0)
         .map_err(|e| DbError::Query(format!("decode walked_edge.depth: {e}")))?;
+    let depth = u8::try_from(depth_i32).map_err(|_| {
+        DbError::Query(format!(
+            "decode walked_edge.depth: value {depth_i32} out of range 0..=255 \
+             (CTE depth counter is bounded by MAX_WALK_DEPTH={MAX_WALK_DEPTH})",
+        ))
+    })?;
     Ok(WalkedEdge {
-        depth: depth_i32 as u8,
+        depth,
         edge_id: row
             .try_get(1)
             .map_err(|e| DbError::Query(format!("decode walked_edge.edge_id: {e}")))?,

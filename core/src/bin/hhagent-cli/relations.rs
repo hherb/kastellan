@@ -255,12 +255,20 @@ async fn relations_kinds_list(args: &[String]) -> ExitCode {
 
 // ─── `relations show <entity-id> [--depth N] [--format plain|json]` ───
 
-/// Per-direction row limit applied SQL-side in
+/// Per-direction OUTPUT row cap applied SQL-side in
 /// [`hhagent_db::graph::Graph::walk_outbound_edges`] /
 /// [`hhagent_db::graph::Graph::walk_inbound_edges`]. 10_000 is generous
 /// enough that an operator inspecting a hub entity sees the full
-/// neighbourhood even at depth 3-5; the cap prevents a runaway query on
-/// a pathologically dense subgraph.
+/// neighbourhood even at depth 3-5.
+///
+/// **What this cap does NOT do:** the recursive CTE is enumerated to
+/// completion *before* `ORDER BY (depth ASC, edge_id ASC) LIMIT N` clips
+/// the output, so this constant bounds the row count we render, not the
+/// row count Postgres traverses. The actual walk-cost bound is
+/// [`hhagent_db::graph::MAX_WALK_DEPTH`] — at depth 5 on a 10-fan-out
+/// graph the CTE can still touch ~100_000 rows before LIMIT applies.
+/// `MAX_WALK_DEPTH` is the safety budget; `SHOW_PER_DIRECTION_LIMIT` is
+/// purely an operator-output ergonomic.
 const SHOW_PER_DIRECTION_LIMIT: i64 = 10_000;
 
 /// Default `--depth N` value. Matches `entities show`'s implicit
@@ -518,18 +526,31 @@ fn render_direction(label: &str, edges: &[hhagent_db::graph::WalkedEdge]) {
 /// One endpoint rendered as `(kind, "name") [Q]?`. The `[Q]` suffix is
 /// applied iff `quarantine == true` so the operator sees at a glance
 /// whether the row would be invisible to production `graph_search`.
+///
+/// `name` may contain `"` (entity names are arbitrary TEXT — no CHECK
+/// constraint on character set), so we escape `\` then `"` inside the
+/// rendered name. This keeps naive downstream regex-parsers of plain
+/// output from miscounting the closing quote. The JSON path uses
+/// `serde_json::json!` and handles escaping itself.
 fn endpoint_str(kind: &str, name: &str, quarantine: bool) -> String {
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
     if quarantine {
-        format!("({kind}, \"{name}\") [Q]")
+        format!("({kind}, \"{escaped}\") [Q]")
     } else {
-        format!("({kind}, \"{name}\")")
+        format!("({kind}, \"{escaped}\")")
     }
 }
 
-/// Render NDJSON: one `{"seed": ...}` header line followed by one
-/// `{"direction": "outbound" | "inbound", ...}` line per edge. Suitable
-/// for piping to `jq`. Fields are deliberately stable and flat so
-/// downstream tooling doesn't have to crawl nested objects.
+/// Render NDJSON: one `{"type": "header", "seed": ...}` header line
+/// followed by one `{"type": "edge", "direction": "outbound" | "inbound", ...}`
+/// line per edge. Suitable for piping to `jq`. Fields are deliberately
+/// stable and flat so downstream tooling doesn't have to crawl nested
+/// objects.
+///
+/// The `"type"` discriminant lets a consumer filter cleanly without
+/// having to special-case "first line is the header":
+/// `jq -c 'select(.type == "edge")'` keeps the edge stream;
+/// `jq -c 'select(.type == "header") | .outbound_count'` reads counts.
 fn render_show_json(
     seed: &SeedSummary,
     depth: u8,
@@ -539,6 +560,7 @@ fn render_show_json(
     println!(
         "{}",
         serde_json::json!({
+            "type": "header",
             "seed": {
                 "id": seed.id,
                 "kind": seed.kind,
@@ -560,6 +582,7 @@ fn render_show_json(
 
 fn edge_to_json(direction: &str, e: &hhagent_db::graph::WalkedEdge) -> String {
     serde_json::json!({
+        "type": "edge",
         "direction": direction,
         "depth": e.depth,
         "edge_id": e.edge_id,
@@ -764,6 +787,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn endpoint_str_escapes_embedded_double_quote() {
+        // Entity names allow arbitrary TEXT (no character-set CHECK), so
+        // a name like `Dr "Bob" Smith` is legal. The plain rendering must
+        // escape the inner quotes so naive regex parsers of the output
+        // don't miscount the closing quote.
+        assert_eq!(
+            endpoint_str("person", r#"Dr "Bob" Smith"#, false),
+            r#"(person, "Dr \"Bob\" Smith")"#,
+        );
+    }
+
+    #[test]
+    fn endpoint_str_escapes_backslash_before_quote() {
+        // Backslashes must be escaped first; otherwise `name\"` would
+        // produce ambiguous-to-parse `name\\"` (escaped backslash + raw
+        // quote vs raw backslash + escaped quote). The two-pass replace
+        // gives the unambiguous result.
+        assert_eq!(
+            endpoint_str("k", r#"a\b"c"#, false),
+            r#"(k, "a\\b\"c")"#,
+        );
+    }
+
     // --- edge_to_json (JSON shape pin) --------------------------------
 
     #[test]
@@ -787,6 +834,7 @@ mod tests {
         // Field-by-field pin so a future renderer change that drops or
         // renames a field trips this test rather than silently breaking
         // downstream `jq` consumers.
+        assert_eq!(v["type"], "edge");
         assert_eq!(v["direction"], "outbound");
         assert_eq!(v["depth"], 2);
         assert_eq!(v["edge_id"], 17);
