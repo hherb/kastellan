@@ -60,6 +60,13 @@ Picked up Next-TODO item 20 immediately after item 16 (`relations kinds`) shippe
 
 **Architectural note worth keeping:** the relations-kinds slice flagged that `connect_admin_pool` should never be wired into the daemon. This slice's grep audit confirms compliance: `connect_admin_pool` appears only in `core/src/bin/hhagent-cli/{entities.rs, relations.rs}` and the doc-comment elsewhere. Daemon bring-up + every other runtime code path stays on `connect_runtime_pool`.
 
+**Follow-up tracking issues filed against the PR-#110 review (2026-05-22):**
+
+- **[#111](https://github.com/hherb/hhagent/issues/111)** — consolidated kinds-CLI tech-debt (admin-pool-for-list / fixed-width truncation / no description size cap). Three items deliberately not fixed in #109 or #110 because doing so unilaterally would break the byte-symmetric mirror contract. Natural shared-lift refactor: a `KindsCli<T>` generic that hosts validate / add / remove / list_all / audit-action-string / `parse_kinds_add_args` for both consumers.
+- **[#112](https://github.com/hherb/hhagent/issues/112)** — split `entities.rs` (723 LOC, over the 500-LOC soft cap) into `entities.rs` + `entities_kinds.rs`. Worth bundling with #111 so the shared lift lands cleanly.
+
+**macOS verification status (2026-05-22):** Linux DGX numbers (939 / 0 / 4) verified end-of-session. Expected macOS count of **947 / 0 / 3** is projected from the cross-platform gating (`#[cfg(any(target_os = "linux", target_os = "macos"))]` on every new test); not yet observed on M3 Max. Recommended check before merging PR #110 to main.
+
 ---
 
 ## Recently completed (this session, 2026-05-22 — Next-TODO Item 16: `hhagent-cli relations kinds {add,remove,list}`, branch `feat/relations-kinds-cli`, PR pending)
