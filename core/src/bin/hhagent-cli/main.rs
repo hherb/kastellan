@@ -104,7 +104,9 @@
 //! * [`tasks`] — `tasks {list,status,cancel,fail,tail}`.
 //! * [`tools_allowlist`] — `tools allowlist {add,remove,list}`.
 //! * [`memory_l1`] — `memory l1 {add,list,remove}`.
-//! * [`entities`] — `entities {list,show,approve,reject,merge,kinds}`.
+//! * [`entities`] — `entities {list,show,approve,reject,merge}`. The
+//!   `kinds` arm delegates to [`entities_kinds`].
+//! * [`entities_kinds`] — `entities kinds {add,remove,list}`.
 //! * [`relations`] — `relations {kinds,show}`.
 //! * [`observation_replay`] — `observation replay`.
 
@@ -115,6 +117,7 @@ mod common;
 mod ask;
 mod audit_tail;
 mod entities;
+mod entities_kinds;
 mod memory_l1;
 mod observation_replay;
 mod relations;

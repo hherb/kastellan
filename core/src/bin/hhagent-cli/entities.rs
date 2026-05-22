@@ -1,12 +1,12 @@
-//! `entities {list,show,approve,reject,merge}` — operator review CLI
-//! for the quarantine-by-default entities table populated by the
-//! GLiNER-Relex extractor.
+//! `entities {list, show, approve, reject, merge}` — operator review
+//! CLI for the quarantine-by-default `entities` table populated by
+//! the GLiNER-Relex extractor.
 //!
-//! `entities kinds {add,remove,list}` — operator-managed vocabulary
-//! for the `entity_kinds` lookup table. Symmetric to
-//! [`super::relations::run_relations`]'s `kinds` substree; both ride
-//! on [`hhagent_db::pool::connect_admin_pool`] because migration 0016
-//! REVOKEs writes from the runtime role.
+//! The `kinds` substree (`entities kinds {add, remove, list}`) lives
+//! in the sibling module [`crate::entities_kinds`]. The `"kinds"` arm
+//! in [`run_entities`] just delegates to it; everything in this file
+//! is about reviewing extracted entities, not managing the kind
+//! vocabulary.
 
 use std::process::ExitCode;
 
@@ -26,196 +26,12 @@ pub(crate) fn run_entities(args: &[String]) -> ExitCode {
         "approve" => with_runtime("entities", entities_approve(&args[1..])),
         "reject"  => with_runtime("entities", entities_reject(&args[1..])),
         "merge"   => with_runtime("entities", entities_merge(&args[1..])),
-        "kinds"   => run_entities_kinds(&args[1..]),
+        "kinds"   => crate::entities_kinds::run(&args[1..]),
         other     => {
             eprintln!("entities: unknown action '{other}'; expected: list | show | approve | reject | merge | kinds");
             ExitCode::from(2)
         }
     }
-}
-
-/// `entities kinds <add|remove|list>` substree. Per Issue #97 posture,
-/// `with_runtime` is called only from known-action arms; unknown
-/// actions exit 2 before any tokio runtime construction.
-fn run_entities_kinds(args: &[String]) -> ExitCode {
-    if args.is_empty() {
-        eprintln!("usage: hhagent-cli entities kinds <add|remove|list> ...");
-        return ExitCode::from(2);
-    }
-    match args[0].as_str() {
-        "add" => with_runtime("entities kinds", entities_kinds_add(&args[1..])),
-        "remove" => with_runtime("entities kinds", entities_kinds_remove(&args[1..])),
-        "list" => with_runtime("entities kinds", entities_kinds_list(&args[1..])),
-        other => {
-            eprintln!("entities kinds: unknown subcommand {other}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-/// Parse `entities kinds add` args:
-///   * `<kind>`                              → (kind, None)
-///   * `<kind> --description "<text>"`       → (kind, Some(text))
-///
-/// Mirror of `relations::parse_add_args`. Returns an `Err` carrying a
-/// printable usage line on shape errors so the caller can fail with
-/// exit-2 + the line on stderr.
-fn parse_kinds_add_args(args: &[String]) -> Result<(String, Option<String>), String> {
-    match args {
-        [kind] => Ok((kind.clone(), None)),
-        [kind, flag, value] if flag == "--description" => {
-            Ok((kind.clone(), Some(value.clone())))
-        }
-        _ => Err(
-            "usage: hhagent-cli entities kinds add <kind> [--description \"<text>\"]"
-                .to_string(),
-        ),
-    }
-}
-
-async fn entities_kinds_add(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entity_kinds_add_and_audit;
-    use hhagent_db::entity_kinds::EntityKindError;
-    use hhagent_db::pool::connect_admin_pool;
-
-    let (kind, description) = match parse_kinds_add_args(args) {
-        Ok(parsed) => parsed,
-        Err(msg) => {
-            eprintln!("{msg}");
-            return ExitCode::from(2);
-        }
-    };
-
-    let spec = match resolve_connect_spec() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
-    };
-    let pool = match connect_admin_pool(&spec).await {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
-    };
-
-    match entity_kinds_add_and_audit(&pool, &kind, description.as_deref()).await {
-        Ok(true) => {
-            println!("added {kind}");
-            ExitCode::from(0)
-        }
-        Ok(false) => {
-            println!("already present");
-            ExitCode::from(0)
-        }
-        Err(e @ (EntityKindError::InvalidKind | EntityKindError::KindHasNul)) => {
-            eprintln!("{e}");
-            ExitCode::from(2)
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-async fn entities_kinds_remove(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entity_kinds_remove_and_audit;
-    use hhagent_db::entity_kinds::EntityKindError;
-    use hhagent_db::pool::connect_admin_pool;
-
-    let kind = match args {
-        [k] => k.clone(),
-        _ => {
-            eprintln!("usage: hhagent-cli entities kinds remove <kind>");
-            return ExitCode::from(2);
-        }
-    };
-
-    let spec = match resolve_connect_spec() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
-    };
-    let pool = match connect_admin_pool(&spec).await {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
-    };
-
-    match entity_kinds_remove_and_audit(&pool, &kind).await {
-        Ok(true) => {
-            println!("removed {kind}");
-            ExitCode::from(0)
-        }
-        Ok(false) => {
-            println!("not present");
-            ExitCode::from(0)
-        }
-        Err(e @ (EntityKindError::InvalidKind | EntityKindError::KindHasNul)) => {
-            eprintln!("{e}");
-            ExitCode::from(2)
-        }
-        Err(e @ EntityKindError::RemovalOfUndefinedRejected) => {
-            eprintln!("{e}");
-            ExitCode::from(2)
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-async fn entities_kinds_list(args: &[String]) -> ExitCode {
-    use hhagent_db::entity_kinds::list_all;
-    use hhagent_db::pool::connect_admin_pool;
-
-    if !args.is_empty() {
-        eprintln!("usage: hhagent-cli entities kinds list");
-        return ExitCode::from(2);
-    }
-
-    let spec = match resolve_connect_spec() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
-    };
-    let pool = match connect_admin_pool(&spec).await {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
-    };
-
-    let entries = match list_all(&pool).await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
-    };
-    // Identical column shape to `relations kinds list` for symmetric
-    // operator UX.
-    println!("{:<24}  {:<24}  {}", "KIND", "CREATED_AT", "DESCRIPTION");
-    for e in entries {
-        println!(
-            "{:<24}  {:<24}  {}",
-            e.kind,
-            e.created_at,
-            e.description.unwrap_or_default(),
-        );
-    }
-    ExitCode::from(0)
 }
 
 /// Parse the `--state` flag value. Case-insensitive.
@@ -642,7 +458,7 @@ async fn entities_merge(args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 mod entities_parser_tests {
-    use super::{parse_entity_state, parse_id_list, parse_kinds_add_args};
+    use super::{parse_entity_state, parse_id_list};
 
     #[test]
     fn parse_entity_state_accepts_canonical_lowercase_and_case_insensitive() {
@@ -667,53 +483,6 @@ mod entities_parser_tests {
         assert!(parse_id_list("1,foo,3").is_err());
     }
 
-    // --- parse_kinds_add_args ----------------------------------------
-    // Mirror of `relations::tests::parse_add_args_*` — kept symmetric
-    // so a future refactor that unifies the two parsers (or notices
-    // they're identical and lifts to a shared `common::parse_kind_add_args`
-    // helper) can confirm both call sites still satisfy the contract.
-
-    #[test]
-    fn parse_kinds_add_args_kind_only_returns_no_description() {
-        let parsed = parse_kinds_add_args(&["person".to_string()]).unwrap();
-        assert_eq!(parsed, ("person".to_string(), None));
-    }
-
-    #[test]
-    fn parse_kinds_add_args_with_description_flag_returns_some() {
-        let args = vec![
-            "person".to_string(),
-            "--description".to_string(),
-            "a named individual".to_string(),
-        ];
-        let parsed = parse_kinds_add_args(&args).unwrap();
-        assert_eq!(
-            parsed,
-            ("person".to_string(), Some("a named individual".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_kinds_add_args_rejects_empty() {
-        let err = parse_kinds_add_args(&[]).unwrap_err();
-        assert!(err.contains("usage"), "expected usage line: {err}");
-    }
-
-    #[test]
-    fn parse_kinds_add_args_rejects_unknown_flag() {
-        let args = vec![
-            "person".to_string(),
-            "--unknown".to_string(),
-            "value".to_string(),
-        ];
-        let err = parse_kinds_add_args(&args).unwrap_err();
-        assert!(err.contains("usage"), "expected usage line: {err}");
-    }
-
-    #[test]
-    fn parse_kinds_add_args_rejects_dangling_description() {
-        let args = vec!["person".to_string(), "--description".to_string()];
-        let err = parse_kinds_add_args(&args).unwrap_err();
-        assert!(err.contains("usage"), "expected usage line: {err}");
-    }
+    // `parse_kinds_add_args` tests live in
+    // `crate::entities_kinds::tests` post-split (Issue #112).
 }
