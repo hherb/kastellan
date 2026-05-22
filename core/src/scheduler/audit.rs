@@ -158,6 +158,22 @@ pub const ACTION_ENTITIES_REJECTED: &str = "entities.rejected";
 /// dropped_ids, links_retargeted, links_dropped_as_duplicate}.
 pub const ACTION_ENTITIES_MERGED: &str = "entities.merged";
 
+/// `actor='cli' action='relation_kinds.add'` — operator added a new
+/// relation-kind label via `hhagent-cli relations kinds add`. Payload:
+/// `{kind, description}` where `description` is `null` when omitted.
+/// Emitted only on a real INSERT (`Ok(true)`); idempotent re-adds and
+/// validation errors write no row. Symmetric to
+/// [`ACTION_TOOLS_ALLOWLIST_ADD`].
+pub const ACTION_RELATION_KINDS_ADD: &str = "relation_kinds.add";
+
+/// `actor='cli' action='relation_kinds.remove'` — operator removed a
+/// relation-kind label via `hhagent-cli relations kinds remove`.
+/// Payload: `{kind}`. Emitted only on a real DELETE (`Ok(true)`);
+/// idempotent no-ops, validation errors, and the explicit
+/// `RemovalOfUndefinedRejected` write no row. Symmetric to
+/// [`ACTION_TOOLS_ALLOWLIST_REMOVE`].
+pub const ACTION_RELATION_KINDS_REMOVE: &str = "relation_kinds.remove";
+
 /// Value of the `provenance` field in a `task.finalize` payload emitted
 /// from the scheduler's runtime path (the lane runner observed the task
 /// end-to-end). Counters are facts; `started_at` is always present.
@@ -949,6 +965,20 @@ mod tests {
     #[test]
     fn action_entities_merged_string_is_pinned() {
         assert_eq!(ACTION_ENTITIES_MERGED, "entities.merged");
+    }
+
+    // --- relation_kinds.{add,remove} ------------------------------------
+
+    /// Wire-stable contract for log-consumers. A rename would silently
+    /// break downstream observability filters.
+    #[test]
+    fn action_relation_kinds_add_string_is_pinned() {
+        assert_eq!(ACTION_RELATION_KINDS_ADD, "relation_kinds.add");
+    }
+
+    #[test]
+    fn action_relation_kinds_remove_string_is_pinned() {
+        assert_eq!(ACTION_RELATION_KINDS_REMOVE, "relation_kinds.remove");
     }
 
     #[test]
