@@ -47,6 +47,12 @@
 //!   superuser) — migration 0017 deliberately REVOKEs writes from the
 //!   runtime role so the daemon cannot widen vocab on its own.
 //!
+//! * `relations show <entity-id> [--depth N] [--format plain|json]` —
+//!   operator-facing graph-edge introspection. Walks outbound + inbound
+//!   edges from the seed up to `--depth N` hops (default 1, hard cap
+//!   `MAX_WALK_DEPTH` = 5). Read-only — uses the runtime pool, emits no
+//!   audit row. Quarantined endpoints are tagged `[Q]`.
+//!
 //! * `observation replay [--captures-dir PATH] [--model SLUG]` — re-run
 //!   captured plans through the production review chain for offline
 //!   rule iteration.
@@ -78,6 +84,7 @@
 //! hhagent-cli relations kinds add    <kind> [--description "<text>"]
 //! hhagent-cli relations kinds remove <kind>
 //! hhagent-cli relations kinds list
+//! hhagent-cli relations show         <entity-id> [--depth N] [--format plain|json]
 //! hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
 //! hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 //! ```
@@ -97,7 +104,8 @@
 //! * [`tasks`] — `tasks {list,status,cancel,fail,tail}`.
 //! * [`tools_allowlist`] — `tools allowlist {add,remove,list}`.
 //! * [`memory_l1`] — `memory l1 {add,list,remove}`.
-//! * [`entities`] — `entities {list,show,approve,reject,merge}`.
+//! * [`entities`] — `entities {list,show,approve,reject,merge,kinds}`.
+//! * [`relations`] — `relations {kinds,show}`.
 //! * [`observation_replay`] — `observation replay`.
 
 use std::process::ExitCode;
@@ -173,6 +181,7 @@ usage:
     hhagent-cli relations kinds add    <kind> [--description \"<text>\"]
     hhagent-cli relations kinds remove <kind>
     hhagent-cli relations kinds list
+    hhagent-cli relations show         <entity-id> [--depth N] [--format plain|json]
     hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
     hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 
