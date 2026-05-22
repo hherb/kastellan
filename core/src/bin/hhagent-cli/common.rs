@@ -3,6 +3,7 @@
 //! Kept deliberately small. If a helper is used by exactly one subcommand
 //! it belongs in that subcommand's module, not here.
 
+use std::fmt::Write;
 use std::process::ExitCode;
 
 /// Build a [`hhagent_db::conn::ConnectSpec`] from `$HHAGENT_DATA_DIR`
@@ -93,6 +94,199 @@ where
         Err(code) => return code,
     };
     rt.block_on(fut)
+}
+
+/// One row of an operator-facing `(kind, created_at, description)`
+/// table. Used by [`format_kinds_table`] to render the shared shape
+/// across `entities kinds list` and `relations kinds list` without
+/// duplicating the column-alignment logic.
+///
+/// Borrowing references rather than owning strings keeps callers from
+/// having to clone the underlying `EntityKindEntry` /
+/// `RelationKindEntry` rows.
+pub(crate) struct KindRow<'a> {
+    pub kind: &'a str,
+    pub created_at_display: &'a str,
+    pub description: Option<&'a str>,
+}
+
+/// Render an aligned `(KIND, CREATED_AT, DESCRIPTION)` table with
+/// dynamically-sized columns. The returned string always ends with a
+/// trailing newline so callers can `print!` it directly.
+///
+/// Column widths are `max(header_width, longest_value_width)` for the
+/// first two columns; `DESCRIPTION` is the last column and not
+/// padded. Replaces the original `{:<24}` fixed-width formatter
+/// flagged as a truncation footgun by
+/// [#111](https://github.com/hherb/hhagent/issues/111) item 2 — with
+/// `MAX_{ENTITY,RELATION}_KIND_LEN = 64`, a 64-byte kind under the
+/// old code crowded the `CREATED_AT` column out of alignment. The
+/// dynamic widths absorb the longest row cleanly.
+///
+/// Empty `rows` still emits the header line — callers that want
+/// no-output-on-empty must check `rows.is_empty()` before calling.
+pub(crate) fn format_kinds_table(rows: &[KindRow<'_>]) -> String {
+    const KIND_H: &str = "KIND";
+    const CREATED_AT_H: &str = "CREATED_AT";
+    const DESCRIPTION_H: &str = "DESCRIPTION";
+
+    let kind_w = rows
+        .iter()
+        .map(|r| r.kind.len())
+        .max()
+        .unwrap_or(0)
+        .max(KIND_H.len());
+    let created_at_w = rows
+        .iter()
+        .map(|r| r.created_at_display.len())
+        .max()
+        .unwrap_or(0)
+        .max(CREATED_AT_H.len());
+
+    let mut out = String::new();
+    // Header.
+    let _ = writeln!(
+        &mut out,
+        "{:<kind_w$}  {:<created_at_w$}  {}",
+        KIND_H, CREATED_AT_H, DESCRIPTION_H,
+        kind_w = kind_w,
+        created_at_w = created_at_w,
+    );
+    // Data rows.
+    for r in rows {
+        let _ = writeln!(
+            &mut out,
+            "{:<kind_w$}  {:<created_at_w$}  {}",
+            r.kind,
+            r.created_at_display,
+            r.description.unwrap_or(""),
+            kind_w = kind_w,
+            created_at_w = created_at_w,
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod format_kinds_table_tests {
+    use super::{format_kinds_table, KindRow};
+
+    #[test]
+    fn empty_input_emits_header_line_only() {
+        let out = format_kinds_table(&[]);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 1, "expected header line only; got: {out:?}");
+        assert!(lines[0].starts_with("KIND"), "header: {:?}", lines[0]);
+        assert!(lines[0].contains("CREATED_AT"), "header: {:?}", lines[0]);
+        assert!(lines[0].contains("DESCRIPTION"), "header: {:?}", lines[0]);
+    }
+
+    #[test]
+    fn short_kinds_align_at_header_width() {
+        // All kinds are <= "KIND" header width — column width should
+        // collapse to the header width (no over-padding).
+        let rows = vec![
+            KindRow {
+                kind: "a",
+                created_at_display: "2026-05-23",
+                description: Some("first"),
+            },
+            KindRow {
+                kind: "ab",
+                created_at_display: "2026-05-23",
+                description: Some("second"),
+            },
+        ];
+        let out = format_kinds_table(&rows);
+        // Header KIND column = max(len("KIND")=4, len("ab")=2) = 4.
+        // Data rows use the same width; "a" + 3 spaces, "ab" + 2 spaces.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 rows");
+        assert!(lines[1].starts_with("a   "), "expected 'a' + 3 trailing spaces; got: {:?}", lines[1]);
+        assert!(lines[2].starts_with("ab  "), "expected 'ab' + 2 trailing spaces; got: {:?}", lines[2]);
+    }
+
+    #[test]
+    fn long_kind_expands_column_without_truncation() {
+        // A 64-byte kind (the MAX_{ENTITY,RELATION}_KIND_LEN cap) must
+        // print in full, and a shorter kind in the same batch must be
+        // padded out to match the long row's width. This is the
+        // headline #111-item-2 regression pin.
+        let long = "a".repeat(64);
+        let rows = vec![
+            KindRow {
+                kind: "short",
+                created_at_display: "ts1",
+                description: None,
+            },
+            KindRow {
+                kind: &long,
+                created_at_display: "ts2",
+                description: Some("desc"),
+            },
+        ];
+        let out = format_kinds_table(&rows);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3);
+        // The long kind must appear in full — no truncation.
+        assert!(
+            lines[2].contains(&long),
+            "long kind must be present verbatim; got: {:?}",
+            lines[2]
+        );
+        // The short row must be padded out to the long row's kind
+        // column width — header column width = max("KIND"=4,
+        // "short"=5, 64) = 64. Both data rows therefore start with a
+        // 64-byte left-padded kind column followed by exactly two
+        // spaces (the column separator).
+        let short_kind_col_with_sep = format!("{:<64}  ", "short");
+        assert!(
+            lines[1].starts_with(&short_kind_col_with_sep),
+            "short row must be padded to 64 chars; got: {:?}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn header_dictates_minimum_width_when_data_is_shorter() {
+        // No data row reaches the "CREATED_AT" header's 10 chars, so
+        // the column width must collapse to the header width — not the
+        // data width.
+        let rows = vec![KindRow {
+            kind: "k",
+            created_at_display: "t",
+            description: None,
+        }];
+        let out = format_kinds_table(&rows);
+        let lines: Vec<&str> = out.lines().collect();
+        // Data row's CREATED_AT cell must be padded to at least
+        // "CREATED_AT".len() = 10.
+        let data_row = lines[1];
+        // After the kind column (4 chars: "k" + 3 padding for "KIND"
+        // header width) and 2 spaces, the next 10 chars are the
+        // padded "t" cell. Then 2 more spaces, then the (empty)
+        // description.
+        assert_eq!(
+            data_row, "k     t           ",
+            "expected dynamic-width padding using header widths as floor; got: {:?}",
+            data_row,
+        );
+    }
+
+    #[test]
+    fn missing_description_renders_as_empty_column() {
+        let rows = vec![KindRow {
+            kind: "kind1",
+            created_at_display: "stamp",
+            description: None,
+        }];
+        let out = format_kinds_table(&rows);
+        let line = out.lines().nth(1).expect("data row");
+        // The DESCRIPTION column is the last column — `None` renders
+        // as the empty string, so the line ends right after the
+        // last column-separator with no description bytes.
+        assert!(line.ends_with("  "), "expected trailing separator; got: {:?}", line);
+    }
 }
 
 #[cfg(test)]

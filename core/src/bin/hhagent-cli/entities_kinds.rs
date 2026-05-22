@@ -211,17 +211,22 @@ async fn entities_kinds_list(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // Identical column shape to `relations kinds list` for symmetric
-    // operator UX.
-    println!("{:<24}  {:<24}  {}", "KIND", "CREATED_AT", "DESCRIPTION");
-    for e in entries {
-        println!(
-            "{:<24}  {:<24}  {}",
-            e.kind,
-            e.created_at,
-            e.description.unwrap_or_default(),
-        );
-    }
+    // Dynamic column widths via the shared `format_kinds_table`
+    // helper — see Issue [#111](https://github.com/hherb/hhagent/issues/111)
+    // item 2 for the truncation footgun the previous `{:<24}`
+    // formatter shipped with. Identical column shape to
+    // `relations kinds list` for symmetric operator UX (same helper).
+    let timestamps: Vec<String> = entries.iter().map(|e| e.created_at.to_string()).collect();
+    let rows: Vec<crate::common::KindRow<'_>> = entries
+        .iter()
+        .zip(timestamps.iter())
+        .map(|(e, ts)| crate::common::KindRow {
+            kind: &e.kind,
+            created_at_display: ts.as_str(),
+            description: e.description.as_deref(),
+        })
+        .collect();
+    print!("{}", crate::common::format_kinds_table(&rows));
     ExitCode::from(0)
 }
 
