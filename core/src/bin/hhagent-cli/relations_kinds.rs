@@ -178,7 +178,7 @@ async fn relations_kinds_remove(args: &[String]) -> ExitCode {
 }
 
 async fn relations_kinds_list(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_admin_pool;
+    use hhagent_db::pool::connect_runtime_pool;
     use hhagent_db::relation_kinds::list_all;
 
     if !args.is_empty() {
@@ -193,7 +193,13 @@ async fn relations_kinds_list(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let pool = match connect_admin_pool(&spec).await {
+    // `list_all` is SELECT-only on `relation_kinds`. The runtime role
+    // has SELECT (migration 0017), so use the runtime pool so this
+    // action works for operators without cluster-superuser peer-auth
+    // (Issue [#111](https://github.com/hherb/hhagent/issues/111) item
+    // 1). `add` / `remove` continue to use `connect_admin_pool`
+    // because 0017 REVOKEs writes from the runtime role.
+    let pool = match connect_runtime_pool(&spec).await {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
