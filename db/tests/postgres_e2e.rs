@@ -4340,3 +4340,369 @@ async fn entity_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
 
     admin_pool.close().await;
 }
+
+// ─── Graph::walk_outbound_edges / walk_inbound_edges (Next-TODO Item 21) ───
+//
+// These tests pin the shape of the new operator-facing graph-walking
+// methods that back `hhagent-cli relations show <entity-id>`. The
+// fixture builds a small clinical-style graph:
+//
+//     dr_smith --[treats]----> asthma --[has_symptom]--> wheezing
+//     dr_smith --[prescribed]-> salbutamol
+//     patient_jane --[consulted]-> dr_smith   (inbound to dr_smith)
+//     dr_smith --[employed by]-> clinic_a
+//     [cycle test] alice --[knows]-> bob --[knows]-> alice
+//
+// Each test re-seeds against its own per-test cluster so they can run
+// in parallel without colliding on a shared PG.
+
+/// Helper: bring up a per-test PG cluster + run probe + return a
+/// runtime-role pool. The 5 walk-tests below share this shape so
+/// extracting it keeps each test focused on the assertion it owns.
+async fn bring_up_pg_for_walk_test(test_label: &str) -> (PgClusterGuard, sqlx::PgPool) {
+    let bin_dir = pg_bin_dir_or_skip().expect("pg bin dir (skip handled by caller)");
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        &format!("{test_label}-d"),
+        &format!("{test_label}-l"),
+        &format!("hhagent-pg-{test_label}-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"test": test_label}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    (cluster, pool)
+}
+
+/// Local re-alias of the cluster type so the helper above has a
+/// concrete return type. The actual struct lives in
+/// `hhagent_tests_common`; we don't move it.
+type PgClusterGuard = hhagent_tests_common::PgCluster;
+
+/// Empty seed (no outbound edges) returns an empty Vec — no
+/// `Option::None` ambiguity, no SQL-level NULL row, no panic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_outbound_edges_empty_seed_returns_empty() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if pg_bin_dir_or_skip().is_none() {
+        return;
+    }
+
+    let (_cluster, pool) = bring_up_pg_for_walk_test("walk-empty").await;
+    let g = hhagent_db::graph::PgGraph::new(&pool);
+
+    use hhagent_db::graph::Graph;
+    let lonely = g
+        .upsert_entity("person", "loner", &serde_json::json!({}))
+        .await
+        .expect("upsert lonely");
+
+    let edges = g
+        .walk_outbound_edges(lonely, 5, 10_000)
+        .await
+        .expect("walk_outbound_edges");
+
+    assert!(
+        edges.is_empty(),
+        "isolated entity has no outbound edges; got {edges:?}",
+    );
+
+    // Same property for inbound — the seed has nothing pointing to it.
+    let edges = g
+        .walk_inbound_edges(lonely, 5, 10_000)
+        .await
+        .expect("walk_inbound_edges");
+    assert!(
+        edges.is_empty(),
+        "isolated entity has no inbound edges; got {edges:?}",
+    );
+
+    pool.close().await;
+}
+
+/// `max_depth == 0` is a degenerate call shape (no edges to walk).
+/// Returns an empty Vec without a DB round-trip — the short-circuit is
+/// load-bearing for callers that thread `max_depth` from `--depth N`
+/// without re-validating zero.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_outbound_edges_max_depth_zero_returns_empty() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if pg_bin_dir_or_skip().is_none() {
+        return;
+    }
+
+    let (_cluster, pool) = bring_up_pg_for_walk_test("walk-d0").await;
+    let g = hhagent_db::graph::PgGraph::new(&pool);
+
+    use hhagent_db::graph::Graph;
+    // Seed a real edge so the test would fail noisily if max_depth=0
+    // *did* somehow surface a row.
+    let a = g.upsert_entity("person", "a", &serde_json::json!({})).await.unwrap();
+    let b = g.upsert_entity("person", "b", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(a, b, "knows", &serde_json::json!({})).await.unwrap();
+
+    assert_eq!(
+        g.walk_outbound_edges(a, 0, 10_000).await.unwrap().len(),
+        0,
+        "max_depth=0 must return empty",
+    );
+    assert_eq!(
+        g.walk_inbound_edges(b, 0, 10_000).await.unwrap().len(),
+        0,
+        "max_depth=0 must return empty (inbound)",
+    );
+
+    pool.close().await;
+}
+
+/// 1-hop outbound walk returns the seed's direct edges with full
+/// endpoint metadata, sorted by edge id (ascending) within the depth=1
+/// band. Cross-checks edge `kind`, both endpoints' `kind`/`name`/
+/// `quarantine` columns, and that the seed (`dr_smith`) is the `src`
+/// of every emitted edge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_outbound_edges_one_hop_returns_direct_edges() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if pg_bin_dir_or_skip().is_none() {
+        return;
+    }
+
+    let (_cluster, pool) = bring_up_pg_for_walk_test("walk-1hop").await;
+    let g = hhagent_db::graph::PgGraph::new(&pool);
+
+    use hhagent_db::graph::Graph;
+    // Seed in deterministic insertion order so edge_id ordering is
+    // predictable.
+    // All kinds used here are pre-seeded vocabulary: `person` /
+    // `disease` / `drug` from 0015's entity_kinds; `treats` /
+    // `prescribed` from 0017's relation_kinds. The FK on
+    // entities.kind + relations.kind would reject anything else.
+    let dr = g
+        .upsert_entity("person", "Dr Smith", &serde_json::json!({}))
+        .await
+        .expect("upsert dr_smith");
+    let asthma = g
+        .upsert_entity("disease", "asthma", &serde_json::json!({}))
+        .await
+        .expect("upsert asthma");
+    let salbutamol = g
+        .upsert_entity("drug", "salbutamol", &serde_json::json!({}))
+        .await
+        .expect("upsert salbutamol");
+
+    // Flip dr_smith out of quarantine so we can pin both states in one test.
+    sqlx::query("UPDATE entities SET quarantine = FALSE WHERE id = $1")
+        .bind(dr)
+        .execute(&pool)
+        .await
+        .expect("approve dr_smith");
+
+    let e1 = g.upsert_relation(dr, asthma, "treats", &serde_json::json!({})).await.unwrap();
+    let e2 = g.upsert_relation(dr, salbutamol, "prescribed", &serde_json::json!({})).await.unwrap();
+    assert!(e1 < e2, "insertion order should give e1 < e2 for stable depth-1 ordering");
+
+    let edges = g
+        .walk_outbound_edges(dr, 1, 10_000)
+        .await
+        .expect("walk_outbound_edges");
+
+    assert_eq!(edges.len(), 2, "two 1-hop outbound edges from dr_smith");
+
+    // First edge: depth=1, src=dr_smith (NOT quarantined), dst=asthma (quarantined), kind=treats.
+    assert_eq!(edges[0].depth, 1);
+    assert_eq!(edges[0].edge_id, e1);
+    assert_eq!(edges[0].src_id, dr);
+    assert_eq!(edges[0].src_kind, "person");
+    assert_eq!(edges[0].src_name, "Dr Smith");
+    assert!(!edges[0].src_quarantine, "dr_smith was approved before the walk");
+    assert_eq!(edges[0].dst_id, asthma);
+    assert_eq!(edges[0].dst_kind, "disease");
+    assert_eq!(edges[0].dst_name, "asthma");
+    assert!(edges[0].dst_quarantine, "asthma was never approved");
+    assert_eq!(edges[0].kind, "treats");
+
+    // Second edge — same shape, different kind/dst.
+    assert_eq!(edges[1].depth, 1);
+    assert_eq!(edges[1].edge_id, e2);
+    assert_eq!(edges[1].dst_id, salbutamol);
+    assert_eq!(edges[1].kind, "prescribed");
+
+    pool.close().await;
+}
+
+/// N-hop walk reaches depth N's edges but stops there — `depth ≤
+/// max_depth` is the contract. Fixture: a chain of 3 edges
+/// (`dr_smith → asthma → wheezing → cough`). With `max_depth=2` we
+/// must see exactly the first two; with `max_depth=3` all three.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_outbound_edges_respects_max_depth_bound() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if pg_bin_dir_or_skip().is_none() {
+        return;
+    }
+
+    let (_cluster, pool) = bring_up_pg_for_walk_test("walk-depth").await;
+    let g = hhagent_db::graph::PgGraph::new(&pool);
+
+    use hhagent_db::graph::Graph;
+    // All entity/relation kinds are pre-seeded vocabulary.
+    let a = g.upsert_entity("person", "Dr Smith", &serde_json::json!({})).await.unwrap();
+    let b = g.upsert_entity("disease", "asthma", &serde_json::json!({})).await.unwrap();
+    let c = g.upsert_entity("symptom", "wheezing", &serde_json::json!({})).await.unwrap();
+    let d = g.upsert_entity("symptom", "cough", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(a, b, "treats", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(b, c, "has symptom", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(c, d, "associated with", &serde_json::json!({})).await.unwrap();
+
+    let d2 = g.walk_outbound_edges(a, 2, 10_000).await.unwrap();
+    assert_eq!(d2.len(), 2, "max_depth=2 returns 2 edges");
+    assert_eq!(d2[0].depth, 1);
+    assert_eq!(d2[1].depth, 2);
+
+    let d3 = g.walk_outbound_edges(a, 3, 10_000).await.unwrap();
+    assert_eq!(d3.len(), 3, "max_depth=3 returns all 3 edges");
+    assert_eq!(d3[2].depth, 3);
+    assert_eq!(d3[2].dst_id, d);
+    assert_eq!(d3[2].kind, "associated with");
+
+    pool.close().await;
+}
+
+/// A cycle in the graph (`alice → bob → alice`) must not diverge the
+/// recursive CTE. The visited-set tracking in the CTE refuses to
+/// re-enter a previously-visited node on the same path; the second
+/// edge (`bob → alice`) is dropped at the recursive step because
+/// `alice` is already in `visited`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_outbound_edges_terminates_on_cycle() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if pg_bin_dir_or_skip().is_none() {
+        return;
+    }
+
+    let (_cluster, pool) = bring_up_pg_for_walk_test("walk-cycle").await;
+    let g = hhagent_db::graph::PgGraph::new(&pool);
+
+    use hhagent_db::graph::Graph;
+    let alice = g.upsert_entity("person", "alice", &serde_json::json!({})).await.unwrap();
+    let bob = g.upsert_entity("person", "bob", &serde_json::json!({})).await.unwrap();
+
+    let e_ab = g.upsert_relation(alice, bob, "knows", &serde_json::json!({})).await.unwrap();
+    let _e_ba = g.upsert_relation(bob, alice, "knows", &serde_json::json!({})).await.unwrap();
+
+    // With max_depth=5 and a 2-node cycle, we expect just the depth=1
+    // outbound edge from alice (alice → bob); the recursive step would
+    // try (bob → alice) but `alice` is already visited so it's
+    // filtered. Without the visited-set guard this would diverge until
+    // LIMIT clipped it.
+    let edges = g.walk_outbound_edges(alice, 5, 10_000).await.unwrap();
+    assert_eq!(edges.len(), 1, "cycle must not produce extra rows");
+    assert_eq!(edges[0].edge_id, e_ab);
+    assert_eq!(edges[0].depth, 1);
+
+    pool.close().await;
+}
+
+/// Inbound walk surfaces edges that *point to* the seed; each
+/// `WalkedEdge` keeps the canonical `(src, kind, dst)` orientation as
+/// it lives in `relations`, so a caller can mix outbound + inbound
+/// results without having to invert orientations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_inbound_edges_preserves_canonical_orientation() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if pg_bin_dir_or_skip().is_none() {
+        return;
+    }
+
+    let (_cluster, pool) = bring_up_pg_for_walk_test("walk-inbound").await;
+    let g = hhagent_db::graph::PgGraph::new(&pool);
+
+    use hhagent_db::graph::Graph;
+    // `associated with` + `refers to` are pre-seeded relation kinds.
+    // `patient` is a pre-seeded entity kind.
+    let dr = g.upsert_entity("person", "Dr Smith", &serde_json::json!({})).await.unwrap();
+    let jane = g.upsert_entity("patient", "Jane Doe", &serde_json::json!({})).await.unwrap();
+    let referrer = g.upsert_entity("person", "Dr Brown", &serde_json::json!({})).await.unwrap();
+
+    // jane --[associated with]-> dr  (clinical consult relation)
+    let e1 = g.upsert_relation(jane, dr, "associated with", &serde_json::json!({})).await.unwrap();
+    // referrer --[refers to]-> jane (depth-2 inbound from dr's POV)
+    let _e2 = g.upsert_relation(referrer, jane, "refers to", &serde_json::json!({})).await.unwrap();
+
+    // 1-hop inbound: just the jane→dr edge.
+    let d1 = g.walk_inbound_edges(dr, 1, 10_000).await.unwrap();
+    assert_eq!(d1.len(), 1);
+    assert_eq!(d1[0].edge_id, e1);
+    assert_eq!(d1[0].depth, 1);
+    assert_eq!(d1[0].src_id, jane, "canonical src is still jane");
+    assert_eq!(d1[0].dst_id, dr, "canonical dst is still dr");
+    assert_eq!(d1[0].kind, "associated with");
+
+    // 2-hop inbound: also referrer→jane (which arrives upstream of dr).
+    let d2 = g.walk_inbound_edges(dr, 2, 10_000).await.unwrap();
+    assert_eq!(d2.len(), 2);
+    assert_eq!(d2[1].depth, 2);
+    assert_eq!(d2[1].src_id, referrer);
+    assert_eq!(d2[1].dst_id, jane);
+    assert_eq!(d2[1].kind, "refers to");
+
+    pool.close().await;
+}
+
+/// `limit` is honoured SQL-side. Fixture: seed entity with 20
+/// outbound edges; pass `limit=5` and confirm exactly 5 rows return.
+/// Defends against a future refactor that accidentally drops the
+/// `LIMIT $3` clause (or moves it to client-side).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_outbound_edges_honours_limit_argument() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if pg_bin_dir_or_skip().is_none() {
+        return;
+    }
+
+    let (_cluster, pool) = bring_up_pg_for_walk_test("walk-limit").await;
+    let g = hhagent_db::graph::PgGraph::new(&pool);
+
+    use hhagent_db::graph::Graph;
+    let hub = g.upsert_entity("person", "hub", &serde_json::json!({})).await.unwrap();
+    for i in 0..20 {
+        let other = g
+            .upsert_entity("person", &format!("p{i:02}"), &serde_json::json!({}))
+            .await
+            .unwrap();
+        g.upsert_relation(hub, other, "knows", &serde_json::json!({})).await.unwrap();
+    }
+
+    let edges = g.walk_outbound_edges(hub, 1, 5).await.unwrap();
+    assert_eq!(edges.len(), 5, "LIMIT 5 must clip to 5 rows");
+
+    let edges = g.walk_outbound_edges(hub, 1, 100).await.unwrap();
+    assert_eq!(edges.len(), 20, "LIMIT >> fan-out returns all rows");
+
+    pool.close().await;
+}

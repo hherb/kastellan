@@ -241,3 +241,37 @@ fn cli_relations_top_level_unknown_subcommand_exits_two() {
         "stderr must carry the dispatcher-prefixed unknown-subcommand line; got: {stderr}",
     );
 }
+
+/// `relations show` (no entity-id) must exit 2 with the usage line
+/// *before* any runtime construction or DB connection attempt — same
+/// Issue #97 posture as the other relations dispatchers.
+#[test]
+fn cli_relations_show_missing_id_exits_two() {
+    let bin = cli_binary();
+    if !bin.exists() {
+        eprintln!(
+            "[SKIP] cli_relations_show_missing_id_exits_two: hhagent-cli binary not built at {}",
+            bin.display(),
+        );
+        return;
+    }
+
+    let out = Command::new(&bin)
+        .args(["relations", "show"])
+        .env_clear()
+        .envs(bad_args_env())
+        .output()
+        .expect("spawn cli relations show");
+
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "`relations show` must exit 2; got {:?}\nstderr={stderr}",
+        out.status,
+    );
+    assert!(
+        stderr.contains("usage: hhagent-cli relations show"),
+        "stderr must carry the show-usage line; got: {stderr}",
+    );
+}
