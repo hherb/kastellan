@@ -32,6 +32,12 @@
 //!   for the quarantine-by-default entities table populated by the
 //!   GLiNER-Relex extractor.
 //!
+//! * `entities kinds add|remove|list` — manage the operator-curated
+//!   entity-kind vocabulary stored in `entity_kinds`. Symmetric to
+//!   `relations kinds`; shares the `connect_admin_pool` plumbing.
+//!   Migration 0016 REVOKEs writes from the runtime role so the
+//!   daemon cannot widen entity vocab on its own.
+//!
 //! * `relations kinds add|remove|list` — manage the operator-curated
 //!   relation-label vocabulary stored in `relation_kinds`. Add/remove
 //!   emit one `actor='cli' action='relation_kinds.{add,remove}'` audit
@@ -66,6 +72,9 @@
 //! hhagent-cli entities approve   <id> [<id>...]
 //! hhagent-cli entities reject    <id> [<id>...]
 //! hhagent-cli entities merge     --keep <id> --drop <id>[,<id>...]
+//! hhagent-cli entities kinds add    <kind> [--description "<text>"]
+//! hhagent-cli entities kinds remove <kind>
+//! hhagent-cli entities kinds list
 //! hhagent-cli relations kinds add    <kind> [--description "<text>"]
 //! hhagent-cli relations kinds remove <kind>
 //! hhagent-cli relations kinds list
@@ -158,6 +167,9 @@ usage:
     hhagent-cli entities approve   <id> [<id>...]
     hhagent-cli entities reject    <id> [<id>...]
     hhagent-cli entities merge     --keep <id> --drop <id>[,<id>...]
+    hhagent-cli entities kinds add    <kind> [--description \"<text>\"]
+    hhagent-cli entities kinds remove <kind>
+    hhagent-cli entities kinds list
     hhagent-cli relations kinds add    <kind> [--description \"<text>\"]
     hhagent-cli relations kinds remove <kind>
     hhagent-cli relations kinds list
