@@ -32,6 +32,15 @@
 //!   for the quarantine-by-default entities table populated by the
 //!   GLiNER-Relex extractor.
 //!
+//! * `relations kinds add|remove|list` — manage the operator-curated
+//!   relation-label vocabulary stored in `relation_kinds`. Add/remove
+//!   emit one `actor='cli' action='relation_kinds.{add,remove}'` audit
+//!   row on a real state change; idempotent no-ops, validation errors,
+//!   and the explicit `'undefined'` sentinel rejection write no audit
+//!   row. Requires admin-pool privileges (peer auth as cluster
+//!   superuser) — migration 0017 deliberately REVOKEs writes from the
+//!   runtime role so the daemon cannot widen vocab on its own.
+//!
 //! * `observation replay [--captures-dir PATH] [--model SLUG]` — re-run
 //!   captured plans through the production review chain for offline
 //!   rule iteration.
@@ -57,6 +66,9 @@
 //! hhagent-cli entities approve   <id> [<id>...]
 //! hhagent-cli entities reject    <id> [<id>...]
 //! hhagent-cli entities merge     --keep <id> --drop <id>[,<id>...]
+//! hhagent-cli relations kinds add    <kind> [--description "<text>"]
+//! hhagent-cli relations kinds remove <kind>
+//! hhagent-cli relations kinds list
 //! hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
 //! hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 //! ```
@@ -88,6 +100,7 @@ mod audit_tail;
 mod entities;
 mod memory_l1;
 mod observation_replay;
+mod relations;
 mod tasks;
 mod tools_allowlist;
 
@@ -110,6 +123,7 @@ fn main() -> ExitCode {
         "tools"       => tools_allowlist::run_tools(&args[2..]),
         "memory"      => memory_l1::run_memory(&args[2..]),
         "entities"    => entities::run_entities(&args[2..]),
+        "relations"   => relations::run_relations(&args[2..]),
         "observation" => observation_replay::run_observation(&args[2..]),
         "--help" | "-h" | "help" => {
             println!("{}", help_text());
@@ -144,6 +158,9 @@ usage:
     hhagent-cli entities approve   <id> [<id>...]
     hhagent-cli entities reject    <id> [<id>...]
     hhagent-cli entities merge     --keep <id> --drop <id>[,<id>...]
+    hhagent-cli relations kinds add    <kind> [--description \"<text>\"]
+    hhagent-cli relations kinds remove <kind>
+    hhagent-cli relations kinds list
     hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
     hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 
