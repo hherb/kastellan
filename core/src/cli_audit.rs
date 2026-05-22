@@ -102,6 +102,7 @@ use crate::scheduler::audit::{
     ACTION_L1_ADDED, ACTION_L1_REMOVED, ACTION_TASK_FINALIZE, ACTION_TASK_SUBMITTED,
     ACTION_TOOLS_ALLOWLIST_ADD, ACTION_TOOLS_ALLOWLIST_REMOVE,
     ACTION_ENTITIES_APPROVED, ACTION_ENTITIES_REJECTED, ACTION_ENTITIES_MERGED,
+    ACTION_RELATION_KINDS_ADD, ACTION_RELATION_KINDS_REMOVE,
 };
 
 /// Logical `actor` string written into every CLI-emitted audit row.
@@ -369,6 +370,92 @@ pub async fn tools_allowlist_remove_and_audit(
                 tool = tool,
                 argv0 = argv0,
                 "tools_allowlist_remove_and_audit: audit insert failed"
+            );
+        }
+    }
+    Ok(removed)
+}
+
+/// Add one relation-kind row and emit one `actor='cli'
+/// action='relation_kinds.add'` audit row on success.
+///
+/// Returns the DB-layer bool: `Ok(true)` means a row was INSERTed (and
+/// an audit row was emitted, best-effort); `Ok(false)` means the kind
+/// was already present and **no audit row is written** (the operator's
+/// state-change intent did not materialise; logging it would confuse
+/// "what was true at time T" reconstructions). Mirror of the posture
+/// in [`tools_allowlist_add_and_audit`].
+///
+/// Audit-insert posture: best-effort. A transient DB failure on the
+/// audit row is logged via `tracing::warn!` and swallowed; the
+/// underlying `db::relation_kinds::add` outcome propagates either way.
+///
+/// **Requires an admin-pool connection** ([`hhagent_db::pool::connect_admin_pool`])
+/// — the runtime role does not have INSERT on `relation_kinds`
+/// (migration 0017 REVOKE). Passing a runtime-role pool yields
+/// `Err(RelationKindError::Db(...))` carrying a Postgres `permission
+/// denied` error.
+pub async fn relation_kinds_add_and_audit(
+    pool: &PgPool,
+    kind: &str,
+    description: Option<&str>,
+) -> Result<bool, hhagent_db::relation_kinds::RelationKindError> {
+    let inserted = hhagent_db::relation_kinds::add(pool, kind, description).await?;
+    if inserted {
+        // `description: null` is the explicit "unset" wire value so a
+        // downstream payload reader can distinguish "operator did not
+        // pass --description" from "field absent due to schema drift".
+        let payload = serde_json::json!({
+            "kind": kind,
+            "description": description,
+        });
+        if let Err(e) = hhagent_db::audit::insert(
+            pool,
+            CLI_AUDIT_ACTOR,
+            ACTION_RELATION_KINDS_ADD,
+            payload,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %e,
+                kind = kind,
+                "relation_kinds_add_and_audit: audit insert failed"
+            );
+        }
+    }
+    Ok(inserted)
+}
+
+/// Remove one relation-kind row and emit one `actor='cli'
+/// action='relation_kinds.remove'` audit row on success.
+///
+/// Returns `Ok(true)` if a row was deleted (and audit row emitted
+/// best-effort); `Ok(false)` if nothing matched (no audit row). The
+/// `'undefined'` sentinel is rejected up front by `db::relation_kinds::remove`
+/// with `RelationKindError::RemovalOfUndefinedRejected`; on that path
+/// no row is deleted and no audit row is written.
+///
+/// **Requires an admin-pool connection** — see [`relation_kinds_add_and_audit`].
+pub async fn relation_kinds_remove_and_audit(
+    pool: &PgPool,
+    kind: &str,
+) -> Result<bool, hhagent_db::relation_kinds::RelationKindError> {
+    let removed = hhagent_db::relation_kinds::remove(pool, kind).await?;
+    if removed {
+        let payload = serde_json::json!({ "kind": kind });
+        if let Err(e) = hhagent_db::audit::insert(
+            pool,
+            CLI_AUDIT_ACTOR,
+            ACTION_RELATION_KINDS_REMOVE,
+            payload,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %e,
+                kind = kind,
+                "relation_kinds_remove_and_audit: audit insert failed"
             );
         }
     }

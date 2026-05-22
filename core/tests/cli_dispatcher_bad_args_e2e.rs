@@ -137,3 +137,72 @@ fn cli_tools_allowlist_unknown_subcommand_exits_two() {
         "stderr must carry the dispatcher-prefixed unknown-subcommand line; got: {stderr}",
     );
 }
+
+/// `relations kinds` mirrors the with_runtime posture: the unknown-
+/// action path returns from the dispatcher *before* tokio runtime
+/// construction or any DB connection attempt. Pin the early-exit
+/// observable contract (exit 2 + the dispatcher-prefixed stderr line)
+/// so a future refactor cannot drift it.
+#[test]
+fn cli_relations_kinds_unknown_action_exits_two() {
+    let bin = cli_binary();
+    if !bin.exists() {
+        eprintln!(
+            "[SKIP] cli_relations_kinds_unknown_action_exits_two: hhagent-cli binary not built at {}",
+            bin.display(),
+        );
+        return;
+    }
+
+    let out = Command::new(&bin)
+        .args(["relations", "kinds", "frobnicate"])
+        .env_clear()
+        .envs(bad_args_env())
+        .output()
+        .expect("spawn cli relations kinds frobnicate");
+
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "`relations kinds frobnicate` must exit 2; got {:?}\nstderr={stderr}",
+        out.status,
+    );
+    assert!(
+        stderr.contains("relations kinds: unknown subcommand"),
+        "stderr must carry the dispatcher-prefixed unknown-subcommand line; got: {stderr}",
+    );
+}
+
+/// Top-level `relations garbage` (one level up from `kinds garbage`)
+/// also must exit 2 before runtime construction.
+#[test]
+fn cli_relations_top_level_unknown_subcommand_exits_two() {
+    let bin = cli_binary();
+    if !bin.exists() {
+        eprintln!(
+            "[SKIP] cli_relations_top_level_unknown_subcommand_exits_two: hhagent-cli binary not built at {}",
+            bin.display(),
+        );
+        return;
+    }
+
+    let out = Command::new(&bin)
+        .args(["relations", "garbage"])
+        .env_clear()
+        .envs(bad_args_env())
+        .output()
+        .expect("spawn cli relations garbage");
+
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "`relations garbage` must exit 2; got {:?}\nstderr={stderr}",
+        out.status,
+    );
+    assert!(
+        stderr.contains("relations: unknown subcommand"),
+        "stderr must carry the dispatcher-prefixed unknown-subcommand line; got: {stderr}",
+    );
+}

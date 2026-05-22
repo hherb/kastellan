@@ -123,3 +123,70 @@ pub async fn connect_runtime_pool_with_max(
         .await
         .map_err(|e| DbError::Connect(format!("runtime pool connect: {e}")))
 }
+
+/// Build a [`PgPool`] for the cluster described by `spec` that does
+/// **NOT** drop privilege to [`crate::conn::RUNTIME_ROLE`] — connections
+/// stay as the OS user (= cluster bootstrap superuser under peer auth).
+///
+/// ## Why this exists
+///
+/// A few tables are deliberately operator-managed: migration
+/// `0017_relation_kinds.sql` (and the symmetric `0016_entity_kinds`
+/// REVOKE) explicitly `REVOKE INSERT, UPDATE, DELETE, TRUNCATE` from the
+/// runtime role so that a compromised daemon, extractor, or model cannot
+/// widen the relation/entity vocabulary on its own. The agent reads the
+/// list via `SELECT` only.
+///
+/// Operator CLIs that legitimately need to add or remove vocabulary
+/// rows therefore need a connection that bypasses the runtime role. Peer
+/// auth as the OS user already gives us the cluster bootstrap superuser
+/// (same identity as `crate::probe::run` uses for `CREATE EXTENSION` /
+/// `CREATE ROLE`), so the simplest and most consistent answer is "a pool
+/// with no `after_connect` SET ROLE hook." No additional role, no
+/// pg_hba.conf changes.
+///
+/// ## When NOT to use this
+///
+/// Only call from `hhagent-cli` operator workflows that mutate a
+/// REVOKE-protected table. **Never** use this from the daemon itself —
+/// it would re-open the privilege escalation that [`crate::conn::RUNTIME_ROLE`]
+/// closes. The runtime pool ([`connect_runtime_pool`]) is the right
+/// shape for every daemon write site.
+pub async fn connect_admin_pool(spec: &ConnectSpec) -> Result<PgPool, DbError> {
+    let opts = spec.to_pg_connect_options();
+    PgPoolOptions::new()
+        // 2 is enough for any operator-CLI call site (one for the write,
+        // one for an audit insert under the same connection lifetime);
+        // we don't want to hold many superuser connections open.
+        .max_connections(2)
+        .acquire_timeout(ACQUIRE_TIMEOUT)
+        .idle_timeout(IDLE_TIMEOUT)
+        // Deliberately NO after_connect hook. The OS user identity is
+        // exactly what we want here.
+        .connect_with(opts)
+        .await
+        .map_err(|e| DbError::Connect(format!("admin pool connect: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    // Note: live-cluster behaviour for `connect_admin_pool` (the
+    // privilege-bypass property — that admin-pool connections can write
+    // to relation_kinds while runtime-pool connections cannot) is
+    // verified in `db/tests/postgres_e2e.rs`:
+    // `admin_pool_can_write_relation_kinds_while_runtime_pool_cannot`.
+    // The single-file pool module has no further pure-CPU surface to
+    // unit-test without spinning a real Postgres up.
+    //
+    // We do pin the structural property that the new helper exists and
+    // is reachable through the public surface, so a rename here would
+    // be a compile-time failure for downstream callers.
+    #[test]
+    fn connect_admin_pool_is_publicly_reachable() {
+        // Symbol-resolution pin: the function must remain reachable
+        // via the public surface. A rename or pub-downgrade here trips
+        // the test at compile time. We don't call it — that would need
+        // a real cluster.
+        let _ = super::connect_admin_pool;
+    }
+}

@@ -3680,3 +3680,339 @@ async fn relation_kinds_writes_denied_to_runtime_role() {
 
     pool.close().await;
 }
+
+// ─── relation_kinds operator CLI surface ───────────────────────────────
+//
+// The next four tests cover the `hhagent-cli relations kinds {add,
+// remove, list}` substrate (`db::relation_kinds::{add, remove, list_all}`
+// + `db::pool::connect_admin_pool`). They pin three load-bearing
+// invariants:
+//
+//   1. Admin pool can write where runtime pool cannot
+//      (`admin_pool_can_write_relation_kinds_while_runtime_pool_cannot`).
+//      The whole point of `connect_admin_pool` is to bypass the runtime
+//      role's REVOKE for vocabulary-management CLIs; this test pins
+//      both halves of that asymmetry against one cluster.
+//   2. `add` is idempotent
+//      (`relation_kinds_add_is_idempotent_and_persists_description`).
+//      The CLI relies on `Ok(true)` vs `Ok(false)` to decide whether to
+//      emit an audit row, and on the description being preserved across
+//      the round-trip.
+//   3. `remove` refuses to delete the FK fallback
+//      (`relation_kinds_remove_rejects_undefined_sentinel`). Deleting
+//      `'undefined'` would break `ON DELETE SET DEFAULT` for every
+//      historical row whose original kind was later removed.
+//   4. `list_all` returns rows in `kind ASC` order
+//      (`relation_kinds_list_all_returns_seeded_rows_ordered_by_kind`).
+//      Stable ordering is part of the operator-facing output contract.
+
+/// Admin pool can write to `relation_kinds`; runtime pool cannot.
+///
+/// Pins the privilege-bypass property that `connect_admin_pool` exists
+/// to deliver. Without this asymmetry the operator-CLI vocabulary slice
+/// would have to either widen the runtime role's GRANT shape (defeating
+/// migration 0017's REVOKE) or introduce a second non-superuser role
+/// (more operational complexity).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_pool_can_write_relation_kinds_while_runtime_pool_cannot() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "rk-ap-d",
+        "rk-ap-l",
+        &format!("hhagent-pg-relation-kinds-admin-pool-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"test": "admin_pool_can_write_relation_kinds"}),
+    )
+    .await
+    .expect("probe");
+
+    // Runtime-role pool: SELECT works, INSERT denied.
+    let runtime_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relation_kinds")
+        .fetch_one(&runtime_pool)
+        .await
+        .expect("runtime SELECT");
+    assert!(n >= 19, "expected at least the 19 seed rows; got {n}");
+
+    let runtime_add = hhagent_db::relation_kinds::add(
+        &runtime_pool,
+        "operator-only-kind",
+        Some("should be denied to runtime role"),
+    )
+    .await;
+    let err = format!("{:?}", runtime_add.expect_err("runtime add must be denied"));
+    assert!(
+        err.to_lowercase().contains("permission denied"),
+        "expected permission-denied from runtime pool; got: {err}",
+    );
+
+    // Admin-pool: same call succeeds.
+    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+        .await
+        .expect("admin pool");
+    let inserted = hhagent_db::relation_kinds::add(
+        &admin_pool,
+        "operator-only-kind",
+        Some("operator-added via admin pool"),
+    )
+    .await
+    .expect("admin add succeeds");
+    assert!(inserted, "first admin add must INSERT one row");
+
+    let still_there: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM relation_kinds WHERE kind = 'operator-only-kind'",
+    )
+    .fetch_one(&admin_pool)
+    .await
+    .expect("verify operator-only-kind present");
+    assert_eq!(still_there, 1, "admin INSERT must have landed exactly one row");
+
+    drop(runtime_pool);
+    admin_pool.close().await;
+}
+
+/// `add` returns `Ok(true)` on first INSERT, `Ok(false)` on a re-add of
+/// the same kind, and preserves the description across the round-trip.
+/// Both `Some(desc)` and `None` (NULL) paths exercised.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_kinds_add_is_idempotent_and_persists_description() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "rk-add-d",
+        "rk-add-l",
+        &format!("hhagent-pg-relation-kinds-add-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"test": "relation_kinds_add_idempotent"}),
+    )
+    .await
+    .expect("probe");
+
+    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+        .await
+        .expect("admin pool");
+
+    // First add — description present.
+    let first = hhagent_db::relation_kinds::add(
+        &admin_pool,
+        "supervises",
+        Some("management relation: subject supervises object"),
+    )
+    .await
+    .expect("first add");
+    assert!(first, "first add must INSERT");
+
+    // Re-add — idempotent: no second INSERT, no description rewrite.
+    let second = hhagent_db::relation_kinds::add(&admin_pool, "supervises", None)
+        .await
+        .expect("idempotent re-add");
+    assert!(!second, "re-add must be a no-op");
+
+    // Description must be the original Some(...), NOT overwritten by
+    // the second call's None.
+    let desc: Option<String> = sqlx::query_scalar(
+        "SELECT description FROM relation_kinds WHERE kind = 'supervises'",
+    )
+    .fetch_one(&admin_pool)
+    .await
+    .expect("read description");
+    assert_eq!(
+        desc.as_deref(),
+        Some("management relation: subject supervises object"),
+        "ON CONFLICT DO NOTHING must preserve the original description"
+    );
+
+    // Add a different kind with no description.
+    let third = hhagent_db::relation_kinds::add(&admin_pool, "tagged_with", None)
+        .await
+        .expect("add nondesc");
+    assert!(third);
+    let desc2: Option<String> = sqlx::query_scalar(
+        "SELECT description FROM relation_kinds WHERE kind = 'tagged_with'",
+    )
+    .fetch_one(&admin_pool)
+    .await
+    .expect("read nondesc");
+    assert_eq!(desc2, None, "None description must persist as SQL NULL");
+
+    admin_pool.close().await;
+}
+
+/// `remove('undefined')` must be rejected up front (not allowed through
+/// to Postgres) because deleting the FK fallback would break
+/// `ON DELETE SET DEFAULT` for any historical row whose kind was later
+/// removed. Belt-and-braces: pin both the typed error AND that the row
+/// is still present in the DB afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_kinds_remove_rejects_undefined_sentinel() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "rk-rm-d",
+        "rk-rm-l",
+        &format!("hhagent-pg-relation-kinds-remove-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"test": "relation_kinds_remove_undefined_reject"}),
+    )
+    .await
+    .expect("probe");
+
+    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+        .await
+        .expect("admin pool");
+
+    let r = hhagent_db::relation_kinds::remove(
+        &admin_pool,
+        hhagent_db::relation_kinds::RELATION_KIND_UNDEFINED,
+    )
+    .await;
+    let err = r.expect_err("undefined removal must be rejected");
+    assert!(
+        matches!(
+            err,
+            hhagent_db::relation_kinds::RelationKindError::RemovalOfUndefinedRejected
+        ),
+        "expected RemovalOfUndefinedRejected; got: {err:?}",
+    );
+
+    let still_there: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM relation_kinds WHERE kind = 'undefined'",
+    )
+    .fetch_one(&admin_pool)
+    .await
+    .expect("verify undefined still present");
+    assert_eq!(
+        still_there, 1,
+        "'undefined' row must still be present after rejected remove",
+    );
+
+    // A legitimate remove of a non-sentinel kind on the same cluster
+    // must still work (proves the rejection is targeted, not a
+    // permission/wiring problem masquerading as a sentinel reject).
+    let inserted =
+        hhagent_db::relation_kinds::add(&admin_pool, "throwaway_kind_for_remove_e2e", None)
+            .await
+            .expect("seed throwaway");
+    assert!(inserted);
+    let removed =
+        hhagent_db::relation_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
+            .await
+            .expect("remove throwaway");
+    assert!(removed, "real remove must succeed");
+    let removed_again =
+        hhagent_db::relation_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
+            .await
+            .expect("idempotent re-remove");
+    assert!(!removed_again, "second remove of same kind must be no-op");
+
+    admin_pool.close().await;
+}
+
+/// `list_all` returns every row ordered by `kind ASC`. The seed list
+/// alone covers the contract (19 rows, deterministic order). One added
+/// row threads in mid-alphabet to prove the ordering is dynamic, not a
+/// hard-coded seed-list result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "rk-ls-d",
+        "rk-ls-l",
+        &format!("hhagent-pg-relation-kinds-list-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"test": "relation_kinds_list_all"}),
+    )
+    .await
+    .expect("probe");
+
+    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+        .await
+        .expect("admin pool");
+
+    // Seed-only baseline: 19 rows.
+    let baseline = hhagent_db::relation_kinds::list_all(&admin_pool)
+        .await
+        .expect("list_all baseline");
+    assert_eq!(baseline.len(), 19, "0017 seeds 19 kinds");
+
+    // Pin ascending order on baseline.
+    for w in baseline.windows(2) {
+        assert!(
+            w[0].kind <= w[1].kind,
+            "kinds must be sorted ascending: {:?} then {:?}",
+            w[0].kind,
+            w[1].kind,
+        );
+    }
+
+    // Add a kind that sorts mid-alphabet so the ordering check is
+    // not a tautology of the static seed list.
+    hhagent_db::relation_kinds::add(&admin_pool, "mentions", Some("test-only marker"))
+        .await
+        .expect("seed marker kind");
+
+    let after = hhagent_db::relation_kinds::list_all(&admin_pool)
+        .await
+        .expect("list_all after");
+    assert_eq!(after.len(), 20, "post-add count must be 20");
+    for w in after.windows(2) {
+        assert!(w[0].kind <= w[1].kind, "still sorted ascending after add");
+    }
+    // The added row must round-trip with its description intact.
+    let marker = after.iter().find(|e| e.kind == "mentions").expect("marker present");
+    assert_eq!(marker.description.as_deref(), Some("test-only marker"));
+
+    admin_pool.close().await;
+}
