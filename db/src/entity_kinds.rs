@@ -30,6 +30,18 @@ pub const KINDS_CACHE_TTL: Duration = Duration::from_secs(60);
 /// should be paired with the other.
 pub const MAX_ENTITY_KIND_LEN: usize = 64;
 
+/// Maximum length (UTF-8 bytes) for an entity-kind `description`.
+/// 2 KiB is long enough for a verbose explanatory paragraph but well
+/// short of inflating audit-row size enough to break grep-driven
+/// operator workflows. Mirror of
+/// [`crate::relation_kinds::MAX_RELATION_KIND_DESCRIPTION_LEN`].
+///
+/// Issue [#111](https://github.com/hherb/hhagent/issues/111) item 3 —
+/// without this cap an operator could store an arbitrarily long
+/// description, which would then land verbatim in
+/// `audit_log.payload->>'description'`.
+pub const MAX_ENTITY_KIND_DESCRIPTION_LEN: usize = 2048;
+
 /// The FK-fallback sentinel kind. Migration 0015's FK on
 /// `entities.kind` has `ON DELETE SET DEFAULT` pointing at this row;
 /// deleting it would break the FK invariant for any historical row
@@ -54,6 +66,12 @@ pub enum EntityKindError {
 
     #[error("entity kind {ENTITY_KIND_UNDEFINED:?} is the FK fallback and cannot be removed by operator action")]
     RemovalOfUndefinedRejected,
+
+    /// Description exceeded [`MAX_ENTITY_KIND_DESCRIPTION_LEN`]. The
+    /// payload carries the offending byte length so the operator sees
+    /// exactly how far over the cap they were.
+    #[error("entity kind description is {len} bytes; cap is {MAX_ENTITY_KIND_DESCRIPTION_LEN}")]
+    DescriptionTooLong { len: usize },
 
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -89,12 +107,39 @@ pub fn validate_entity_kind(kind: &str) -> Result<(), EntityKindError> {
     Ok(())
 }
 
+/// Validate an entity-kind description.
+///
+/// Rules:
+///   * `None` is always valid (operator may add a kind without
+///     describing it),
+///   * `Some(d)` where `d.len() <= MAX_ENTITY_KIND_DESCRIPTION_LEN`
+///     is valid (including empty `""`),
+///   * otherwise returns [`EntityKindError::DescriptionTooLong`]
+///     carrying the offending byte length.
+///
+/// Cap is 2 KiB — see [`MAX_ENTITY_KIND_DESCRIPTION_LEN`] for the
+/// motivation.
+pub fn validate_entity_kind_description(
+    description: Option<&str>,
+) -> Result<(), EntityKindError> {
+    if let Some(d) = description {
+        if d.len() > MAX_ENTITY_KIND_DESCRIPTION_LEN {
+            return Err(EntityKindError::DescriptionTooLong { len: d.len() });
+        }
+    }
+    Ok(())
+}
+
 /// Add one entity-kind row. Idempotent — returns `Ok(true)` if a row
 /// was INSERTed, `Ok(false)` if the kind was already present.
 ///
-/// `description` is stored as `NULL` when `None`. Both fields are
-/// validated against [`validate_entity_kind`] for `kind`; descriptions
-/// are size-limited only by the database (TEXT, no inherent cap).
+/// `description` is stored as `NULL` when `None`. `kind` is validated
+/// against [`validate_entity_kind`]; `description` (if `Some`) is
+/// validated against [`validate_entity_kind_description`] for the
+/// 2 KiB cap — operator-set descriptions land in `audit_log.payload`
+/// so an unbounded length would inflate audit rows beyond
+/// grep-friendly sizes (Issue
+/// [#111](https://github.com/hherb/hhagent/issues/111) item 3).
 ///
 /// **Requires a connection with write privileges on `entity_kinds`**
 /// — that's the [`crate::pool::connect_admin_pool`] shape, not the
@@ -108,6 +153,7 @@ pub async fn add(
     description: Option<&str>,
 ) -> Result<bool, EntityKindError> {
     validate_entity_kind(kind)?;
+    validate_entity_kind_description(description)?;
     let rows = sqlx::query(
         "INSERT INTO entity_kinds (kind, description)
          VALUES ($1, $2)
@@ -308,5 +354,50 @@ mod tests {
     #[test]
     fn max_entity_kind_len_is_64() {
         assert_eq!(MAX_ENTITY_KIND_LEN, 64);
+    }
+
+    /// Mirror of
+    /// [`crate::relation_kinds::tests::max_relation_kind_description_len_is_2048`]
+    /// — see the rationale there. Pin the number so a future widening
+    /// is a deliberate paired edit.
+    #[test]
+    fn max_entity_kind_description_len_is_2048() {
+        assert_eq!(MAX_ENTITY_KIND_DESCRIPTION_LEN, 2048);
+    }
+
+    // --- validate_entity_kind_description ----------------------------
+    // Mirror of `crate::relation_kinds::tests::validate_description_*`.
+
+    #[test]
+    fn validate_description_accepts_none() {
+        validate_entity_kind_description(None).unwrap();
+    }
+
+    #[test]
+    fn validate_description_accepts_empty() {
+        validate_entity_kind_description(Some("")).unwrap();
+    }
+
+    #[test]
+    fn validate_description_accepts_just_under_cap() {
+        let d: String = "a".repeat(MAX_ENTITY_KIND_DESCRIPTION_LEN - 1);
+        validate_entity_kind_description(Some(&d)).unwrap();
+    }
+
+    #[test]
+    fn validate_description_accepts_at_cap() {
+        let d: String = "a".repeat(MAX_ENTITY_KIND_DESCRIPTION_LEN);
+        validate_entity_kind_description(Some(&d)).unwrap();
+    }
+
+    #[test]
+    fn validate_description_rejects_one_byte_over_cap() {
+        let d: String = "a".repeat(MAX_ENTITY_KIND_DESCRIPTION_LEN + 1);
+        match validate_entity_kind_description(Some(&d)) {
+            Err(EntityKindError::DescriptionTooLong { len }) => {
+                assert_eq!(len, MAX_ENTITY_KIND_DESCRIPTION_LEN + 1);
+            }
+            other => panic!("expected DescriptionTooLong; got {other:?}"),
+        }
     }
 }

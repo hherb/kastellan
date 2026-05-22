@@ -269,12 +269,48 @@ async fn cli_relations_kinds_add_remove_list_round_trip_writes_audit_rows() {
         String::from_utf8_lossy(&out_bad.stderr),
     );
 
+    // --- 8b. Validation error: oversize description -------------------
+    // Issue [#111](https://github.com/hherb/hhagent/issues/111) item 3:
+    // a description larger than `MAX_RELATION_KIND_DESCRIPTION_LEN`
+    // (2048 bytes) is rejected at the DB layer and surfaces as exit 2
+    // from the CLI. 2049 bytes is exactly one byte over the cap; the
+    // rejection diagnostic carries the offending byte length.
+    let big_desc = "x".repeat(2049);
+    let out_bad_desc = Command::new(&bin)
+        .args([
+            "relations",
+            "kinds",
+            "add",
+            "valid_kind_with_big_desc",
+            "--description",
+            &big_desc,
+        ])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli add oversize description");
+    assert_eq!(
+        out_bad_desc.status.code(),
+        Some(2),
+        "oversize description must exit 2; stderr: {}",
+        String::from_utf8_lossy(&out_bad_desc.stderr),
+    );
+    let stderr_bad_desc = String::from_utf8_lossy(&out_bad_desc.stderr);
+    assert!(
+        stderr_bad_desc.contains("2049"),
+        "oversize-description stderr must echo the byte count; got: {stderr_bad_desc}",
+    );
+    assert!(
+        stderr_bad_desc.contains("cap is 2048"),
+        "oversize-description stderr must echo the cap; got: {stderr_bad_desc}",
+    );
+
     // --- 9. Audit multiset --------------------------------------------
     // Expected: 2 cli/relation_kinds.add ('supervises' + 'mentions')
     //         + 1 cli/relation_kinds.remove ('supervises').
     // The remove-undefined rejection, idempotent re-add of 'supervises',
-    // idempotent re-remove of 'supervises', and oversize-kind validation
-    // all write NO audit row.
+    // idempotent re-remove of 'supervises', oversize-kind validation,
+    // and oversize-description validation all write NO audit row.
     let audit_rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT actor, action FROM audit_log WHERE actor = 'cli' ORDER BY id",
     )

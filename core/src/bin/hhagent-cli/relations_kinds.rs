@@ -107,8 +107,14 @@ async fn relations_kinds_add(args: &[String]) -> ExitCode {
             ExitCode::from(0)
         }
         // Validation errors exit 2 (operator-correctable input fault),
-        // matching the tools-allowlist posture.
-        Err(e @ (RelationKindError::InvalidKind | RelationKindError::KindHasNul)) => {
+        // matching the tools-allowlist posture. The `DescriptionTooLong`
+        // variant joins the family — Issue
+        // [#111](https://github.com/hherb/hhagent/issues/111) item 3.
+        Err(
+            e @ (RelationKindError::InvalidKind
+            | RelationKindError::KindHasNul
+            | RelationKindError::DescriptionTooLong { .. }),
+        ) => {
             eprintln!("{e}");
             ExitCode::from(2)
         }

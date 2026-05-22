@@ -111,7 +111,14 @@ async fn entities_kinds_add(args: &[String]) -> ExitCode {
             println!("already present");
             ExitCode::from(0)
         }
-        Err(e @ (EntityKindError::InvalidKind | EntityKindError::KindHasNul)) => {
+        // Validation errors exit 2 (operator-correctable input fault).
+        // `DescriptionTooLong` joins the family — Issue
+        // [#111](https://github.com/hherb/hhagent/issues/111) item 3.
+        Err(
+            e @ (EntityKindError::InvalidKind
+            | EntityKindError::KindHasNul
+            | EntityKindError::DescriptionTooLong { .. }),
+        ) => {
             eprintln!("{e}");
             ExitCode::from(2)
         }
