@@ -258,16 +258,21 @@ impl SandboxBackends {
     /// Resolve a per-worker [`SandboxBackendKind`] (+ optional container
     /// image tag) to a concrete backend.
     ///
-    /// * `(None, _)` → per-OS default (linux → `bwrap`, darwin → `seatbelt`).
-    /// * `(Some(Container), None)` → cached default-image container backend
-    ///   (the Slice 1 / smoke-test posture; `alpine:3.20`).
-    /// * `(Some(Container), Some(tag))` → per-call
-    ///   `Arc::new(MacosContainer::with_image(tag))`. Cheap (String + Arc);
-    ///   `MacosContainer::probe()` was called once at construction against
-    ///   the default image, and `probe` is image-independent (it checks
-    ///   `container --version` + `container system status`), so no
-    ///   re-probe needed here.
-    /// * Other `Some(kind)` arms → existing cached slots, `image` ignored.
+    /// Visible arms vary by OS via cfg-gating on the enum variants:
+    ///
+    /// * `(None, _)` — per-OS default. Linux → `bwrap`; darwin → `seatbelt`.
+    /// * `(Some(Bwrap), _)` — Linux only. Cached `bwrap` slot;
+    ///   `image` is ignored (bwrap doesn't use container images).
+    /// * `(Some(Seatbelt), _)` — darwin only. Cached `seatbelt` slot;
+    ///   `image` is ignored (Seatbelt isn't a container backend).
+    /// * `(Some(Container), None)` — darwin only. Cached default-image
+    ///   container backend (the Slice 1 / smoke-test posture; `alpine:3.20`).
+    /// * `(Some(Container), Some(tag))` — darwin only. Per-call
+    ///   `Arc::new(MacosContainer::with_image(tag))`. Cheap (String +
+    ///   Arc); `MacosContainer::probe()` was called once at construction
+    ///   against the default image, and `probe` is image-independent
+    ///   (it checks `container --version` + `container system status`),
+    ///   so no re-probe needed here.
     ///
     /// The returned `Arc` is held for the lifetime of one acquire call
     /// (single-use lifecycle) or one warm-slot fill (idle-timeout
