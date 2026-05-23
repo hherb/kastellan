@@ -299,6 +299,14 @@ pub enum ResolveSkipReason {
 /// - `HHAGENT_GLINER_RELEX_MODEL` — optional; default
 ///   `knowledgator/gliner-relex-multi-v1.0`.
 /// - `HHAGENT_GLINER_RELEX_DEVICE` — optional; default `auto`.
+/// - `HHAGENT_GLINER_RELEX_USE_CONTAINER` — optional; `"1"` (strict,
+///   whitespace-trimmed) opts into container mode. Anything else (unset /
+///   `0` / `true` / `on`) uses host mode (the default). In container mode
+///   the venv-anchor cascade below is skipped — the worker shim lives
+///   inside the container image at `/usr/local/bin/...`.
+/// - `HHAGENT_GLINER_RELEX_IMAGE` — optional container image tag override;
+///   `None` defers to the `CONTAINER_IMAGE_DEFAULT` constant at the
+///   `gliner_relex_entry` callsite (added in Task 6).
 /// - `HHAGENT_GLINER_RELEX_VENV_DIR` — optional; if set, used verbatim.
 /// - `HHAGENT_DATA_DIR` — optional anchor for the venv default
 ///   (`<data>/workers/gliner-relex/.venv`).
@@ -321,6 +329,10 @@ where
     Exists: Fn(&Path) -> bool,
 {
     let enable = env_lookup("HHAGENT_GLINER_RELEX_ENABLE").unwrap_or_default();
+    // `trim` so a stray newline from `echo "1" > envfile` doesn't fail
+    // the opt-in silently. Strict on the value itself: only `"1"`
+    // counts. Inviting `true` / `yes` / `on` would surface the next
+    // operator's dialect debate; the README documents `=1` explicitly.
     if enable.trim() != "1" {
         return Err(ResolveSkipReason::Disabled);
     }
@@ -342,7 +354,10 @@ where
     //   * `HHAGENT_GLINER_RELEX_USE_CONTAINER=1` → container-mode (strict on "1").
     //   * `HHAGENT_GLINER_RELEX_IMAGE=<tag>` → operator-supplied image override.
     let use_container_backend = env_lookup("HHAGENT_GLINER_RELEX_USE_CONTAINER")
-        .map(|v| v.trim() == "1")
+        .map(|v| {
+            // trim() rationale: matches HHAGENT_GLINER_RELEX_ENABLE strictness; see comment above.
+            v.trim() == "1"
+        })
         .unwrap_or(false);
     let container_image = env_lookup("HHAGENT_GLINER_RELEX_IMAGE");
 
@@ -351,6 +366,9 @@ where
     let (venv_dir, script_path) = if use_container_backend {
         (PathBuf::new(), PathBuf::new())
     } else {
+        // Anchor priority: explicit override > data-dir > home. No
+        // `/tmp` fallback — see ResolveSkipReason::VenvDirUnresolvable
+        // for the rationale.
         let venv_dir = if let Some(v) = env_lookup("HHAGENT_GLINER_RELEX_VENV_DIR") {
             PathBuf::from(v)
         } else if let Some(data_dir) = env_lookup("HHAGENT_DATA_DIR") {
