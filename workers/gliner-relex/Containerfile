@@ -1,0 +1,51 @@
+# workers/gliner-relex/Containerfile
+#
+# Build image for the gliner-relex worker, consumed by the macOS
+# `MacosContainer` SandboxBackend (Slice 2.5+). Operator-built via
+# scripts/workers/gliner-relex/build-image.sh; not used on Linux
+# (LinuxBwrap stays the per-OS default there).
+#
+# Image layout decisions worth knowing:
+#   1. Debian-slim base — PyTorch wheels are glibc-only (manylinux2014);
+#      Alpine is OUT (musl libc).
+#   2. `uv pip install --system` — no .venv indirection; console script
+#      lands at /usr/local/bin/hhagent-worker-gliner-relex via
+#      pyproject's [project.scripts] entry.
+#   3. Weights NOT baked in — operator mounts them at runtime via the
+#      policy.fs_read host path (build_container_argv uses
+#      source=<P>,target=<P> convention, so the existing
+#      HHAGENT_GLINER_RELEX_WEIGHTS_DIR env value works verbatim).
+#      Image stays ~3 GB instead of ~4.5 GB; weight refreshes don't
+#      require image rebuild.
+#   4. ENTRYPOINT carries the worker shim. The MacosContainer backend
+#      appends the binary path verbatim, so the manifest's `binary`
+#      field doubles as the in-container `program` argument.
+#   5. uv version pin — paired edit with scripts/workers/gliner-relex/
+#      install.sh's uv-version assumption. Bumping requires updating
+#      both.
+
+FROM python:3.12-slim
+
+# uv is pinned for reproducible image builds.
+RUN pip install --no-cache-dir uv==0.4.30
+
+WORKDIR /build
+
+# Build context is workers/gliner-relex/; pyproject + lockfile + src +
+# README are everything we need.
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
+
+# --system installs into /usr/lib/python3.12/site-packages and creates
+# /usr/local/bin/<console-scripts>. --no-cache keeps the image small;
+# --no-dev skips the [dev] optional deps (pytest, pytest-mock) which
+# tests don't need (tests run against the host venv, not the container).
+RUN uv pip install --system --no-cache --no-dev .
+
+# Defense-in-depth complement to the policy-driven `--user nobody` flag.
+# If a future profile widening drops --user from build_container_argv,
+# the image-baked USER still ensures non-root execution.
+# python:3.12-slim ships with nobody (uid 65534).
+USER nobody
+
+ENTRYPOINT ["hhagent-worker-gliner-relex"]
