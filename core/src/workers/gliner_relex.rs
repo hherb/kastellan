@@ -93,6 +93,24 @@ pub struct GlinerRelexEnv {
     ///   from the worker at startup so the operator sees the
     ///   misconfig immediately.
     pub device: String,
+    /// True when the operator set `HHAGENT_GLINER_RELEX_USE_CONTAINER=1`
+    /// (strict: only `"1"` after trim counts). `gliner_relex_entry`
+    /// branches on this field to emit the container-mode `ToolEntry`
+    /// shape (in-container binary, weights-only `fs_read`,
+    /// `sandbox_backend = Some(Container)`, `container_image` populated)
+    /// instead of the host-mode one.
+    ///
+    /// In container mode `resolve_env` also skips the host-venv
+    /// existence check — the worker shim lives inside the image at
+    /// `/usr/local/bin/hhagent-worker-gliner-relex`, so requiring a
+    /// host venv would be a footgun for container-mode-only operators.
+    pub use_container_backend: bool,
+    /// Operator-supplied container image tag override, read from
+    /// `HHAGENT_GLINER_RELEX_IMAGE`. `None` (default) falls back to
+    /// the `CONTAINER_IMAGE_DEFAULT` constant at the
+    /// `gliner_relex_entry` callsite. Symmetric to
+    /// `HHAGENT_GLINER_RELEX_MODEL` override behaviour.
+    pub container_image: Option<String>,
 }
 
 /// Construct the [`ToolEntry`] for the gliner-relex worker.
@@ -303,10 +321,6 @@ where
     Exists: Fn(&Path) -> bool,
 {
     let enable = env_lookup("HHAGENT_GLINER_RELEX_ENABLE").unwrap_or_default();
-    // `trim` so a stray newline from `echo "1" > envfile` doesn't fail
-    // the opt-in silently. Strict on the value itself: only `"1"`
-    // counts. Inviting `true` / `yes` / `on` would surface the next
-    // operator's dialect debate; the README documents `=1` explicitly.
     if enable.trim() != "1" {
         return Err(ResolveSkipReason::Disabled);
     }
@@ -324,24 +338,35 @@ where
     let device = env_lookup("HHAGENT_GLINER_RELEX_DEVICE")
         .unwrap_or_else(|| "auto".to_string());
 
-    // Anchor priority: explicit override > data-dir > home. No
-    // `/tmp` fallback — see ResolveSkipReason::VenvDirUnresolvable
-    // for the rationale.
-    let venv_dir = if let Some(v) = env_lookup("HHAGENT_GLINER_RELEX_VENV_DIR") {
-        PathBuf::from(v)
-    } else if let Some(data_dir) = env_lookup("HHAGENT_DATA_DIR") {
-        PathBuf::from(data_dir).join("workers/gliner-relex/.venv")
-    } else if let Some(home) = env_lookup("HOME") {
-        PathBuf::from(home)
-            .join(".local/share/hhagent/workers/gliner-relex/.venv")
-    } else {
-        return Err(ResolveSkipReason::VenvDirUnresolvable);
-    };
+    // New env knobs (Slice 2.5):
+    //   * `HHAGENT_GLINER_RELEX_USE_CONTAINER=1` → container-mode (strict on "1").
+    //   * `HHAGENT_GLINER_RELEX_IMAGE=<tag>` → operator-supplied image override.
+    let use_container_backend = env_lookup("HHAGENT_GLINER_RELEX_USE_CONTAINER")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+    let container_image = env_lookup("HHAGENT_GLINER_RELEX_IMAGE");
 
-    let script_path = venv_dir.join("bin").join("hhagent-worker-gliner-relex");
-    if !exists(&script_path) {
-        return Err(ResolveSkipReason::ScriptShimMissing { path: script_path });
-    }
+    // Host venv resolution is skipped in container mode — the worker
+    // shim lives inside the image, so no host venv is required.
+    let (venv_dir, script_path) = if use_container_backend {
+        (PathBuf::new(), PathBuf::new())
+    } else {
+        let venv_dir = if let Some(v) = env_lookup("HHAGENT_GLINER_RELEX_VENV_DIR") {
+            PathBuf::from(v)
+        } else if let Some(data_dir) = env_lookup("HHAGENT_DATA_DIR") {
+            PathBuf::from(data_dir).join("workers/gliner-relex/.venv")
+        } else if let Some(home) = env_lookup("HOME") {
+            PathBuf::from(home)
+                .join(".local/share/hhagent/workers/gliner-relex/.venv")
+        } else {
+            return Err(ResolveSkipReason::VenvDirUnresolvable);
+        };
+        let script_path = venv_dir.join("bin").join("hhagent-worker-gliner-relex");
+        if !exists(&script_path) {
+            return Err(ResolveSkipReason::ScriptShimMissing { path: script_path });
+        }
+        (venv_dir, script_path)
+    };
 
     Ok(GlinerRelexEnv {
         script_path,
@@ -349,6 +374,8 @@ where
         weights_dir,
         model_id,
         device,
+        use_container_backend,
+        container_image,
     })
 }
 
@@ -774,6 +801,8 @@ mod tests {
             weights_dir: PathBuf::from("/tmp/fake/weights/multi-v1.0"),
             model_id: "knowledgator/gliner-relex-multi-v1.0".to_string(),
             device: "auto".to_string(),
+            use_container_backend: false,
+            container_image: None,
         }
     }
 
@@ -1177,6 +1206,92 @@ mod tests {
         assert_eq!(
             r.venv_dir,
             PathBuf::from("/home/op/.local/share/hhagent/workers/gliner-relex/.venv")
+        );
+    }
+
+    #[test]
+    fn resolve_env_sets_use_container_backend_when_env_var_is_one() {
+        let env_map = std::collections::HashMap::from([
+            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+            ("HHAGENT_GLINER_RELEX_USE_CONTAINER", "1"),
+        ]);
+        let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
+        let is_dir = |_: &Path| true;   // pretend /tmp/fake-weights exists
+        let exists = |_: &Path| true;   // pretend any script_path exists
+        let env = resolve_env(env_lookup, is_dir, exists).expect("resolve_env ok");
+        assert!(
+            env.use_container_backend,
+            "HHAGENT_GLINER_RELEX_USE_CONTAINER=1 must set use_container_backend = true"
+        );
+    }
+
+    #[test]
+    fn resolve_env_strict_about_use_container_value() {
+        // Only "1" (after trim) counts — symmetric with HHAGENT_GLINER_RELEX_ENABLE
+        // strictness. Surface dialect debate ("true", "yes", "on") would
+        // creep in over time without this pin.
+        for value in &["true", "yes", "on", "0", " 1 \n"] {
+            let env_map = std::collections::HashMap::from([
+                ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+                ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+                ("HHAGENT_GLINER_RELEX_USE_CONTAINER", *value),
+                // Anchor required so host-mode path can resolve venv dir
+                // (non-"1" values fall through to host mode, which needs
+                // at least one of VENV_DIR / DATA_DIR / HOME set).
+                ("HOME", "/tmp/fake-home"),
+            ]);
+            let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
+            let is_dir = |_: &Path| true;
+            let exists = |_: &Path| true;
+            let env = resolve_env(env_lookup, is_dir, exists).expect("resolve_env ok");
+            // " 1 \n" → trim() == "1" so it DOES count; others don't.
+            let expected = value.trim() == "1";
+            assert_eq!(
+                env.use_container_backend, expected,
+                "value {value:?} should yield use_container_backend = {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_env_skips_venv_existence_check_in_container_mode() {
+        // In container mode the host venv is unused (the worker shim lives
+        // inside the image at /usr/local/bin/...). Don't force operators to
+        // maintain a host venv when they're running container-mode-only.
+        let env_map = std::collections::HashMap::from([
+            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+            ("HHAGENT_GLINER_RELEX_USE_CONTAINER", "1"),
+            ("HHAGENT_DATA_DIR", "/nonexistent/data-dir"),
+        ]);
+        let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
+        let is_dir = |p: &Path| p == Path::new("/tmp/fake-weights");
+        let exists = |_: &Path| false;  // host venv shim DOES NOT exist anywhere
+        let result = resolve_env(env_lookup, is_dir, exists);
+        let env = result.expect("container mode must skip venv check; got ScriptShimMissing");
+        assert!(env.use_container_backend);
+        assert_eq!(env.script_path, PathBuf::new(), "script_path empty in container mode");
+        assert_eq!(env.venv_dir, PathBuf::new(), "venv_dir empty in container mode");
+        assert_eq!(env.weights_dir, PathBuf::from("/tmp/fake-weights"));
+    }
+
+    #[test]
+    fn resolve_env_picks_up_container_image_override() {
+        let env_map = std::collections::HashMap::from([
+            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
+            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+            ("HHAGENT_GLINER_RELEX_USE_CONTAINER", "1"),
+            ("HHAGENT_GLINER_RELEX_IMAGE", "hhagent/gliner-relex:v0.0.1"),
+        ]);
+        let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
+        let is_dir = |_: &Path| true;
+        let exists = |_: &Path| true;
+        let env = resolve_env(env_lookup, is_dir, exists).expect("resolve_env ok");
+        assert_eq!(
+            env.container_image.as_deref(),
+            Some("hhagent/gliner-relex:v0.0.1"),
+            "HHAGENT_GLINER_RELEX_IMAGE override must flow into GlinerRelexEnv.container_image"
         );
     }
 

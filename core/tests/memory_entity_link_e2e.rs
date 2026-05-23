@@ -480,6 +480,8 @@ async fn build_real_extractor(pool: &sqlx::PgPool) -> Option<Arc<dyn EntityExtra
         weights_dir: weights,
         model_id: "knowledgator/gliner-relex-multi-v1.0".to_string(),
         device: "auto".to_string(),
+        use_container_backend: false,
+        container_image: None,
     };
     let entry = gliner_relex_entry(&env);
     let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
