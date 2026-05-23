@@ -20,9 +20,9 @@
 #   4. ENTRYPOINT carries the worker shim. The MacosContainer backend
 #      appends the binary path verbatim, so the manifest's `binary`
 #      field doubles as the in-container `program` argument.
-#   5. uv version pin — paired edit with scripts/workers/gliner-relex/
-#      install.sh's uv-version assumption. Bumping requires updating
-#      both.
+#   5. uv version pin — fixes the uv version inside the image for
+#      reproducible builds. Bump here when a newer uv release is needed.
+#      (install.sh uses whatever uv is on PATH; no pairing required.)
 
 FROM python:3.12-slim
 
@@ -40,7 +40,7 @@ COPY src/ ./src/
 # /usr/local/bin/<console-scripts>. --no-cache keeps the image small;
 # --no-dev skips the [dev] optional deps (pytest, pytest-mock) which
 # tests don't need (tests run against the host venv, not the container).
-RUN uv pip install --system --no-cache --no-dev .
+RUN uv pip install --system --no-cache .
 
 # Defense-in-depth complement to the policy-driven `--user nobody` flag.
 # If a future profile widening drops --user from build_container_argv,
