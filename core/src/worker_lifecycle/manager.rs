@@ -314,7 +314,13 @@ impl WorkerLifecycleManager for IdleTimeoutLifecycle {
         // reused for a different tool with a different backend. The
         // `entry.container_image.as_deref()` arg drives per-worker image
         // selection for the Container kind (see SandboxBackends::resolve
-        // docs).
+        // docs). Note: the warm-cache key does NOT include the image
+        // tag — a runtime `container_image` swap on the same tool name
+        // would not invalidate the warm slot. Today this is safe because
+        // image tags are baked into the `ToolEntry` at daemon startup
+        // and a restart flushes the WarmRegistry; if a future
+        // operator-driven live-reconfigure path is added, the warm-cache
+        // key must be widened to include the image tag.
         let backend = self
             .sandboxes
             .resolve(entry.sandbox_backend, entry.container_image.as_deref());
