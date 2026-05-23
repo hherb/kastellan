@@ -255,16 +255,30 @@ impl SandboxBackends {
         }
     }
 
-    /// Resolve a per-worker [`SandboxBackendKind`] to a concrete backend.
+    /// Resolve a per-worker [`SandboxBackendKind`] (+ optional container
+    /// image tag) to a concrete backend.
     ///
-    /// `None` returns the per-OS default (linux → `bwrap`, darwin →
-    /// `seatbelt`). `Some(K)` returns the matching field. The returned
-    /// `Arc` is a refcount bump; callers hold it for the lifetime of
-    /// one acquire call (single-use lifecycle) or one warm-slot fill
-    /// (idle-timeout lifecycle).
-    pub fn resolve(&self, kind: Option<SandboxBackendKind>) -> Arc<dyn SandboxBackend> {
-        match kind {
-            None => {
+    /// * `(None, _)` → per-OS default (linux → `bwrap`, darwin → `seatbelt`).
+    /// * `(Some(Container), None)` → cached default-image container backend
+    ///   (the Slice 1 / smoke-test posture; `alpine:3.20`).
+    /// * `(Some(Container), Some(tag))` → per-call
+    ///   `Arc::new(MacosContainer::with_image(tag))`. Cheap (String + Arc);
+    ///   `MacosContainer::probe()` was called once at construction against
+    ///   the default image, and `probe` is image-independent (it checks
+    ///   `container --version` + `container system status`), so no
+    ///   re-probe needed here.
+    /// * Other `Some(kind)` arms → existing cached slots, `image` ignored.
+    ///
+    /// The returned `Arc` is held for the lifetime of one acquire call
+    /// (single-use lifecycle) or one warm-slot fill (idle-timeout
+    /// lifecycle).
+    pub fn resolve(
+        &self,
+        kind: Option<SandboxBackendKind>,
+        image: Option<&str>,
+    ) -> Arc<dyn SandboxBackend> {
+        match (kind, image) {
+            (None, _) => {
                 #[cfg(target_os = "linux")]
                 {
                     Arc::clone(&self.bwrap)
@@ -275,11 +289,15 @@ impl SandboxBackends {
                 }
             }
             #[cfg(target_os = "linux")]
-            Some(SandboxBackendKind::Bwrap) => Arc::clone(&self.bwrap),
+            (Some(SandboxBackendKind::Bwrap), _) => Arc::clone(&self.bwrap),
             #[cfg(target_os = "macos")]
-            Some(SandboxBackendKind::Seatbelt) => Arc::clone(&self.seatbelt),
+            (Some(SandboxBackendKind::Seatbelt), _) => Arc::clone(&self.seatbelt),
             #[cfg(target_os = "macos")]
-            Some(SandboxBackendKind::Container) => Arc::clone(&self.container),
+            (Some(SandboxBackendKind::Container), None) => Arc::clone(&self.container),
+            #[cfg(target_os = "macos")]
+            (Some(SandboxBackendKind::Container), Some(tag)) => {
+                Arc::new(macos_container::MacosContainer::with_image(tag))
+            }
         }
     }
 }
@@ -373,7 +391,7 @@ mod tests {
     #[test]
     fn sandbox_backends_resolve_none_returns_per_os_default() {
         let sbs = SandboxBackends::default_for_current_os();
-        let got = sbs.resolve(None);
+        let got = sbs.resolve(None, None);
         #[cfg(target_os = "linux")]
         assert!(Arc::ptr_eq(&got, &sbs.bwrap));
         #[cfg(target_os = "macos")]
@@ -384,7 +402,7 @@ mod tests {
     #[test]
     fn sandbox_backends_resolve_some_seatbelt_on_darwin() {
         let sbs = SandboxBackends::default_for_current_os();
-        let got = sbs.resolve(Some(SandboxBackendKind::Seatbelt));
+        let got = sbs.resolve(Some(SandboxBackendKind::Seatbelt), None);
         assert!(Arc::ptr_eq(&got, &sbs.seatbelt));
     }
 
@@ -392,7 +410,7 @@ mod tests {
     #[test]
     fn sandbox_backends_resolve_some_container_on_darwin() {
         let sbs = SandboxBackends::default_for_current_os();
-        let got = sbs.resolve(Some(SandboxBackendKind::Container));
+        let got = sbs.resolve(Some(SandboxBackendKind::Container), None);
         assert!(Arc::ptr_eq(&got, &sbs.container));
     }
 
@@ -400,7 +418,50 @@ mod tests {
     #[test]
     fn sandbox_backends_resolve_some_bwrap_on_linux() {
         let sbs = SandboxBackends::default_for_current_os();
-        let got = sbs.resolve(Some(SandboxBackendKind::Bwrap));
+        let got = sbs.resolve(Some(SandboxBackendKind::Bwrap), None);
         assert!(Arc::ptr_eq(&got, &sbs.bwrap));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandbox_backends_resolve_with_custom_image_returns_fresh_container() {
+        // When the operator opts a worker into container mode with a custom
+        // image tag (Slice 2.5: gliner-relex flips to hhagent/gliner-relex:dev),
+        // resolve(Some(Container), Some("hhagent/gliner-relex:dev")) must
+        // return a backend whose image() method reports that tag — NOT the
+        // cached default-image backend's tag (DEFAULT_IMAGE = alpine:3.20).
+        let backends = SandboxBackends::default_for_current_os();
+        let backend = backends.resolve(
+            Some(SandboxBackendKind::Container),
+            Some("hhagent/gliner-relex:dev"),
+        );
+        // Downcast via Any is overkill — use the public surface of MacosContainer
+        // by constructing one with the same image and checking the resolver
+        // returned an Arc that holds the right tag.
+        //
+        // Since `dyn SandboxBackend` doesn't expose image(), we test via a
+        // probe: the per-call MacosContainer::with_image(tag) path returns
+        // a fresh Arc that is NOT pointer-equal to the cached default slot.
+        let cached_default = backends.resolve(Some(SandboxBackendKind::Container), None);
+        assert!(
+            !Arc::ptr_eq(&backend, &cached_default),
+            "resolve with custom image must return a fresh backend, not the cached default-image slot"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandbox_backends_resolve_with_none_image_returns_cached_default() {
+        // resolve(Some(Container), None) — the smoke-test / Slice 1 posture —
+        // must return the cached default-image slot (Arc-pointer identity).
+        // Slice 1's tests rely on this: they don't pass a custom image, and
+        // the per-call construction path would be a behaviour change.
+        let backends = SandboxBackends::default_for_current_os();
+        let first = backends.resolve(Some(SandboxBackendKind::Container), None);
+        let second = backends.resolve(Some(SandboxBackendKind::Container), None);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "resolve with image=None must return the cached default-image slot (Arc-pointer identity)"
+        );
     }
 }
