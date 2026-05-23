@@ -196,6 +196,16 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // main` with ModuleNotFoundError. Compute the sibling `src/` from
     // the documented `<worker_dir>/.venv` contract on `venv_dir` and
     // bind it read-only too.
+    //
+    // Path::parent() only returns None when the path is the root `/`
+    // or a single relative component like `foo`. A venv_dir that
+    // resolves to either is a wiring bug in the caller — daemon
+    // startup walks `.venv/bin/<shim>` and the env-resolver always
+    // anchors the venv path under at least one extra directory
+    // (HHAGENT_GLINER_RELEX_VENV_DIR is required to be absolute by
+    // the operator; the HHAGENT_DATA_DIR / HOME fallbacks tack on
+    // `workers/gliner-relex/.venv`). So fail loudly here rather than
+    // silently mounting the wrong path.
     let worker_src_dir = env
         .venv_dir
         .parent()
@@ -254,8 +264,9 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
 
     let image = env
         .container_image
-        .clone()
-        .unwrap_or_else(|| CONTAINER_IMAGE_DEFAULT.to_string());
+        .as_deref()
+        .unwrap_or(CONTAINER_IMAGE_DEFAULT)
+        .to_string();
 
     ToolEntry {
         binary: PathBuf::from(CONTAINER_BINARY),
