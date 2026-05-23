@@ -110,7 +110,7 @@ pub fn clamp_memory_to_minimum(requested_mib: u64) -> ClampedMemory {
 ///
 /// The argv shape is:
 /// ```text
-/// container run --rm -i --progress none [<policy flags...>] <image> <program> <args...>
+/// container run --rm -i --init --progress none [<policy flags...>] <image> <program> <args...>
 /// ```
 ///
 /// Always-on flags:
