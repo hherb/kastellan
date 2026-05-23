@@ -120,6 +120,21 @@ pub struct ToolEntry {
     /// reason to diverge. See
     /// `docs/superpowers/specs/2026-05-21-macos-container-slice-2-design.md`.
     pub sandbox_backend: Option<hhagent_sandbox::SandboxBackendKind>,
+    /// Container image tag for the `MacosContainer` backend. Only
+    /// meaningful when `sandbox_backend == Some(Container)`; ignored
+    /// otherwise. Type is `Option<String>` rather than enum-coupled so
+    /// future container-based backends on other platforms (e.g. a
+    /// hypothetical Linux Firecracker backend) could reuse the same
+    /// shape without enum widening.
+    ///
+    /// * `None` with `sandbox_backend == Some(Container)` →
+    ///   `MacosContainer`'s `DEFAULT_IMAGE` (`alpine:3.20`). Useful for
+    ///   Slice 1-style smoke tests.
+    /// * `Some(tag)` → per-call
+    ///   `Arc::new(MacosContainer::with_image(tag))` via
+    ///   `SandboxBackends::resolve`. Production workers (gliner-relex,
+    ///   future python-exec) populate this with their per-worker image.
+    pub container_image: Option<String>,
 }
 
 /// Look-up table from logical tool name (as it appears in
@@ -195,6 +210,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         wall_clock_ms: Some(30_000),
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
+        container_image: None,
     }
 }
 
@@ -590,6 +606,7 @@ mod tests {
             wall_clock_ms: Some(5_000),
             lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
             sandbox_backend: None,
+            container_image: None,
         }
     }
 
@@ -758,6 +775,23 @@ mod tests {
         let expected: std::collections::BTreeSet<&str> =
             ["tool", "method", "req", "err", "ms"].iter().copied().collect();
         assert_eq!(keys, expected, "unexpected keys in payload");
+    }
+
+    #[test]
+    fn shell_exec_entry_defaults_container_image_to_none() {
+        // Pin the default so a future operator-config plumbing pass that
+        // adds image-tag inheritance for non-container backends has to
+        // update this test deliberately — it must not silently start
+        // populating container_image on workers that don't use container.
+        let entry = shell_exec_entry(
+            PathBuf::from("/usr/bin/true"),
+            &["/usr/bin/true".to_string()],
+        );
+        assert!(
+            entry.container_image.is_none(),
+            "shell_exec_entry must default container_image to None; got {:?}",
+            entry.container_image,
+        );
     }
 
     /// `shell_exec_entry` defaults `sandbox_backend` to `None` so the

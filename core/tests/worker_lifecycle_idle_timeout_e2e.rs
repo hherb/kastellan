@@ -118,6 +118,7 @@ fn idle_timeout_entry(worker: PathBuf, caps: IdleTimeoutCaps) -> ToolEntry {
         wall_clock_ms: Some(30_000),
         lifecycle,
         sandbox_backend: None,
+        container_image: None,
     }
 }
 

@@ -96,6 +96,7 @@ async fn single_use_lifecycle_routes_through_container_when_entry_opts_in() {
         wall_clock_ms: Some(5_000),
         lifecycle: Lifecycle::SingleUse,
         sandbox_backend: Some(SandboxBackendKind::Container),
+        container_image: None,
     };
 
     let result = mgr.acquire("apk-routing-positive", &entry).await;

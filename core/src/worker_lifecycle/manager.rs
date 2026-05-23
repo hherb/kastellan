@@ -345,6 +345,7 @@ mod tests {
             wall_clock_ms: None,
             lifecycle: Lifecycle::SingleUse,
             sandbox_backend: None,
+            container_image: None,
         };
         let r = mgr.acquire("test-tool", &entry).await;
         assert!(r.is_err(), "must return Err on wiring bug");
@@ -417,6 +418,7 @@ mod tests {
             wall_clock_ms: None,
             lifecycle: Lifecycle::SingleUse,
             sandbox_backend: Some(SandboxBackendKind::Container),
+            container_image: None,
         };
         let _ = mgr.acquire("test", &entry_container).await;
         assert_eq!(
@@ -508,6 +510,7 @@ mod tests {
             wall_clock_ms: None,
             lifecycle,
             sandbox_backend: Some(SandboxBackendKind::Container),
+            container_image: None,
         };
         // Distinct tool name from the default-entry call below — warm
         // slots are keyed by tool name, so reusing the name would race

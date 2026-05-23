@@ -228,6 +228,7 @@ pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
         // has no memory primitive). Today it stays on the per-OS
         // default — Bwrap on Linux, Seatbelt on darwin.
         sandbox_backend: None,
+        container_image: None,
     }
 }
 
