@@ -245,6 +245,43 @@ async fn cli_entities_kinds_add_remove_list_round_trip_writes_audit_rows() {
         String::from_utf8_lossy(&out_bad.stderr),
     );
 
+    // --- 8b. Validation error: oversize description -------------------
+    // Issue [#111](https://github.com/hherb/hhagent/issues/111) item 3:
+    // a description larger than `MAX_ENTITY_KIND_DESCRIPTION_LEN` is
+    // rejected at the DB layer and surfaces as exit 2 from the CLI.
+    // 2049 bytes is exactly one byte over the cap; the rejection
+    // diagnostic carries the offending byte length so the operator
+    // sees how far over they were.
+    let big_desc = "x".repeat(2049);
+    let out_bad_desc = Command::new(&bin)
+        .args([
+            "entities",
+            "kinds",
+            "add",
+            "valid_kind_with_big_desc",
+            "--description",
+            &big_desc,
+        ])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli add oversize description");
+    assert_eq!(
+        out_bad_desc.status.code(),
+        Some(2),
+        "oversize description must exit 2; stderr: {}",
+        String::from_utf8_lossy(&out_bad_desc.stderr),
+    );
+    let stderr_bad_desc = String::from_utf8_lossy(&out_bad_desc.stderr);
+    assert!(
+        stderr_bad_desc.contains("2049"),
+        "oversize-description stderr must echo the byte count; got: {stderr_bad_desc}",
+    );
+    assert!(
+        stderr_bad_desc.contains("cap is 2048"),
+        "oversize-description stderr must echo the cap; got: {stderr_bad_desc}",
+    );
+
     // --- 9. Audit multiset --------------------------------------------
     let audit_rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT actor, action FROM audit_log WHERE actor = 'cli' ORDER BY id",

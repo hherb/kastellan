@@ -104,8 +104,13 @@
 //! * [`tasks`] — `tasks {list,status,cancel,fail,tail}`.
 //! * [`tools_allowlist`] — `tools allowlist {add,remove,list}`.
 //! * [`memory_l1`] — `memory l1 {add,list,remove}`.
-//! * [`entities`] — `entities {list,show,approve,reject,merge,kinds}`.
-//! * [`relations`] — `relations {kinds,show}`.
+//! * [`entities`] — `entities {list,show,approve,reject,merge}`. The
+//!   `kinds` arm delegates to [`entities_kinds`].
+//! * [`entities_kinds`] — `entities kinds {add,remove,list}`.
+//! * [`relations`] — `relations {kinds,show}` top-level dispatcher.
+//!   Substrees live in [`relations_kinds`] and [`relations_show`].
+//! * [`relations_kinds`] — `relations kinds {add,remove,list}`.
+//! * [`relations_show`] — `relations show <entity-id> [--depth N] [--format plain|json]`.
 //! * [`observation_replay`] — `observation replay`.
 
 use std::process::ExitCode;
@@ -115,9 +120,12 @@ mod common;
 mod ask;
 mod audit_tail;
 mod entities;
+mod entities_kinds;
 mod memory_l1;
 mod observation_replay;
 mod relations;
+mod relations_kinds;
+mod relations_show;
 mod tasks;
 mod tools_allowlist;
 

@@ -4341,6 +4341,117 @@ async fn entity_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
     admin_pool.close().await;
 }
 
+// ─── kinds `list` runtime-pool path (#111 item 1) ──────────────────────
+//
+// Both `entities kinds list` and `relations kinds list` previously rode
+// on `connect_admin_pool` even though the operation is SELECT-only and
+// the runtime role has SELECT granted (migrations 0015 + 0017).
+// Switching the production code to `connect_runtime_pool` lets the
+// `list` action work for operators without cluster-superuser
+// peer-auth — useful in a future deployment where peer-auth ≠ admin
+// role. These two tests pin the SELECT-via-runtime-pool path as
+// load-bearing now that the production code depends on it.
+//
+// **What these tests do NOT pin:** the original
+// `admin_pool_can_write_*_while_runtime_pool_cannot` tests pin the
+// asymmetric write-privilege shape (admin = full CRUD; runtime =
+// SELECT only). Together with the new tests below the pool privilege
+// surface is fully covered: admin can read+write; runtime can read,
+// cannot write.
+
+/// Runtime-role pool can read the full `relation_kinds` table via
+/// `list_all`. Pins the SELECT-via-runtime-pool path used by
+/// `hhagent-cli relations kinds list` post-#111 item 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_kinds_list_all_via_runtime_pool_returns_seed_rows() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "rk-rl-d",
+        "rk-rl-l",
+        &format!("hhagent-pg-relation-kinds-runtime-list-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"test": "relation_kinds_list_all_via_runtime_pool"}),
+    )
+    .await
+    .expect("probe");
+
+    let runtime_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let entries = hhagent_db::relation_kinds::list_all(&runtime_pool)
+        .await
+        .expect("list_all via runtime pool must succeed (GRANT SELECT covers it)");
+    assert_eq!(entries.len(), 19, "0017 seeds 19 relation kinds");
+    // Spot-check the FK-fallback sentinel is present (a missing
+    // 'undefined' row would break the `relations.kind` FK).
+    assert!(
+        entries.iter().any(|e| e.kind == "undefined"),
+        "the 'undefined' FK fallback must be in the seed set",
+    );
+
+    runtime_pool.close().await;
+}
+
+/// Runtime-role pool can read the full `entity_kinds` table via
+/// `list_all`. Pins the SELECT-via-runtime-pool path used by
+/// `hhagent-cli entities kinds list` post-#111 item 1. Twin of
+/// `relation_kinds_list_all_via_runtime_pool_returns_seed_rows`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entity_kinds_list_all_via_runtime_pool_returns_seed_rows() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ek-rl-d",
+        "ek-rl-l",
+        &format!("hhagent-pg-entity-kinds-runtime-list-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"test": "entity_kinds_list_all_via_runtime_pool"}),
+    )
+    .await
+    .expect("probe");
+
+    let runtime_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let entries = hhagent_db::entity_kinds::list_all(&runtime_pool)
+        .await
+        .expect("list_all via runtime pool must succeed (GRANT SELECT covers it)");
+    assert_eq!(entries.len(), 20, "0015 seeds 20 entity kinds");
+    assert!(
+        entries.iter().any(|e| e.kind == "undefined"),
+        "the 'undefined' fallback must be in the seed set",
+    );
+
+    runtime_pool.close().await;
+}
+
 // ─── Graph::walk_outbound_edges / walk_inbound_edges (Next-TODO Item 21) ───
 //
 // These tests pin the shape of the new operator-facing graph-walking
