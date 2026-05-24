@@ -88,6 +88,82 @@ fn resolve_weights_dir() -> Option<PathBuf> {
     Some(weights)
 }
 
+/// Slice 2.5: gate container-mode e2e on the operator having built the
+/// image. Mirrors the venv-staged `resolve_worker_script` skip pattern.
+#[cfg(target_os = "macos")]
+fn skip_if_container_unavailable() -> bool {
+    if hhagent_sandbox::macos_container::MacosContainer::probe().is_err() {
+        eprintln!(
+            "\n[SKIP] container CLI / system service not available — install via 'brew install container' and 'container system start'\n"
+        );
+        return true;
+    }
+    false
+}
+
+/// Probe whether `image_tag` is present in the local container image
+/// store. Skip-as-pass when it's not — operator has to run
+/// `scripts/workers/gliner-relex/build-image.sh` first.
+#[cfg(target_os = "macos")]
+fn skip_if_image_missing(image_tag: &str) -> bool {
+    use std::process::Command;
+    let output = Command::new("container")
+        .args(["image", "list"])
+        .output();
+    let Ok(out) = output else {
+        eprintln!("\n[SKIP] failed to spawn 'container image list'\n");
+        return true;
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Image-list format prints "REPOSITORY  TAG  ..."; checking for the
+    // "repo  tag" substring is robust to whitespace variations.
+    let (repo, tag) = image_tag.split_once(':').unwrap_or((image_tag, "latest"));
+    let needle_compact = format!("{repo}");
+    let has_repo = stdout.contains(&needle_compact);
+    let has_tag = stdout.contains(tag);
+    if !(has_repo && has_tag) {
+        eprintln!(
+            "\n[SKIP] {image_tag} image not present — run scripts/workers/gliner-relex/build-image.sh\n"
+        );
+        return true;
+    }
+    false
+}
+
+/// Build the gliner-relex container-mode ToolEntry against the operator-
+/// built image. Returns `None` if any precondition (sandbox / supervisor /
+/// container CLI / image / weights) is missing — every caller converts
+/// that into a `[SKIP]` early return.
+#[cfg(target_os = "macos")]
+fn build_test_entry_container() -> Option<ToolEntry> {
+    if skip_if_sandbox_unavailable() {
+        return None;
+    }
+    if skip_if_no_supervisor() {
+        return None;
+    }
+    if skip_if_container_unavailable() {
+        return None;
+    }
+    if skip_if_image_missing("hhagent/gliner-relex:dev") {
+        return None;
+    }
+    let weights = resolve_weights_dir()?;
+    let env = GlinerRelexEnv {
+        // Both paths empty in container mode — the worker shim lives
+        // at /usr/local/bin inside the image; the manifest builder
+        // ignores script_path + venv_dir on the container branch.
+        script_path: PathBuf::new(),
+        venv_dir: PathBuf::new(),
+        weights_dir: weights,
+        model_id: "knowledgator/gliner-relex-multi-v1.0".to_string(),
+        device: "auto".to_string(),
+        use_container_backend: true,
+        container_image: None,  // defaults to CONTAINER_IMAGE_DEFAULT
+    };
+    Some(gliner_relex_entry(&env))
+}
+
 /// Skip-helper smoke test: confirms the resolution helpers compile +
 /// run without panicking on hosts where the venv/weights are absent.
 /// The real assertions land in [`happy_path_extract_returns_entities_and_triples`]
@@ -389,4 +465,78 @@ async fn invalid_input_returns_rpc_error_and_worker_stays_alive() {
     )
     .await
     .expect("dispatch after INVALID_INPUT must still succeed (worker stays alive)");
+}
+
+/// Slice 2.5: end-to-end through the macOS Apple `container` micro-VM
+/// backend. Spawns the real Python worker INSIDE the container,
+/// dispatches one `extract` over JSON-RPC stdio, asserts at least one
+/// entity is returned. Proves the canonical
+/// `Dr Smith --[treats]--> asthma` triple lands through the new
+/// backend.
+///
+/// Skip-as-pass when the operator hasn't built the image (run
+/// `scripts/workers/gliner-relex/build-image.sh`) or container CLI /
+/// system service is missing.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn happy_path_container_extract_returns_entities_and_triples() {
+    let Some(entry) = build_test_entry_container() else {
+        return;
+    };
+    let Some((_cluster, pool)) = bring_up_pg("happy-container").await else {
+        return;
+    };
+
+    // Sanity-check the manifest is in container mode (paranoia: catches
+    // a future refactor that silently regresses build_test_entry_container).
+    assert_eq!(
+        entry.sandbox_backend,
+        Some(hhagent_sandbox::SandboxBackendKind::Container),
+        "build_test_entry_container must produce a Container-backend entry"
+    );
+    assert_eq!(
+        entry.container_image.as_deref(),
+        Some("hhagent/gliner-relex:dev"),
+    );
+
+    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let lifecycle = IdleTimeoutLifecycle::new(sandboxes);
+
+    let mut handle = lifecycle
+        .acquire("gliner-relex", &entry)
+        .await
+        .expect("acquire gliner-relex worker via container backend");
+
+    let req = ExtractRequest {
+        text: "Dr Smith treats asthma in Mosman.".to_string(),
+        entity_labels: vec!["person".into(), "disease".into(), "location".into()],
+        relation_labels: vec!["treats".into(), "located_in".into()],
+        threshold: Some(0.5),
+        relation_threshold: Some(0.5),
+        max_entities: Some(64),
+    };
+    let params = serde_json::to_value(&req).expect("serialise ExtractRequest");
+
+    let result_value = tool_host::dispatch(
+        &pool,
+        handle.worker_mut(),
+        "gliner-relex",
+        "extract",
+        params,
+    )
+    .await
+    .expect("dispatch extract via container backend");
+
+    let response: ExtractResponse =
+        serde_json::from_value(result_value).expect("decode ExtractResponse");
+
+    assert!(
+        !response.entities.is_empty(),
+        "model should find at least one entity in 'Dr Smith treats asthma in Mosman.'"
+    );
+    // If we got triples, sanity-check the nested shape.
+    if let Some(t) = response.triples.first() {
+        assert!(!t.head.r#type.is_empty(), "head.type must be populated");
+        assert!(!t.relation.is_empty(), "triple.relation must be populated");
+    }
 }
