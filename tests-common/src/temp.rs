@@ -23,13 +23,30 @@ pub fn unique_suffix() -> String {
     format!("{}-{}", std::process::id(), nanos)
 }
 
-/// A fresh directory under `std::env::temp_dir()`. The label is the
-/// human-readable middle segment of the path (e.g. `"disp-d"`); keep
-/// it short, because the resulting socket path
-/// `<temp>/<label>-<pid>-<nanos>/data/sockets/.s.PGSQL.5432` must fit
-/// in `sockaddr_un.sun_path` (108 bytes on Linux).
+/// A fresh directory under a short-enough temp root.
+///
+/// **macOS uses `/tmp` unconditionally instead of `std::env::temp_dir()`** —
+/// macOS's default `TMPDIR` (`/var/folders/<hash>/T/`, ~49 chars) leaves
+/// only ~54 bytes for `<label>-<pid>-<nanos>/data/sockets/.s.PGSQL.5432`
+/// before hitting the platform's `sockaddr_un.sun_path` 103-byte cap.
+/// `<pid>` is 5-6 digits, `<nanos>` is 19 digits, the trailing literal is
+/// 27 chars — even a 1-char label overflows. `/tmp` keeps everything safe
+/// and is the convention macOS dev tools (Docker, Postgres.app, etc.)
+/// already use for socket-sensitive work.
+///
+/// Linux uses `std::env::temp_dir()` (typically `/tmp` already; its
+/// `sockaddr_un.sun_path` cap is 108 bytes — slightly more generous).
+///
+/// The label is the human-readable middle segment of the path (e.g.
+/// `"disp-d"`); keep it short anyway as defense in depth — the resulting
+/// socket path `<temp>/<label>-<pid>-<nanos>/data/sockets/.s.PGSQL.5432`
+/// must still fit within the platform's `sockaddr_un.sun_path` cap.
 pub fn unique_temp_root(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("hhagent-{}-{}", label, unique_suffix()))
+    #[cfg(target_os = "macos")]
+    let base = PathBuf::from("/tmp");
+    #[cfg(not(target_os = "macos"))]
+    let base = std::env::temp_dir();
+    base.join(format!("hhagent-{}-{}", label, unique_suffix()))
 }
 
 /// OS username via `$USER` with a `whoami` fallback. Used to name the

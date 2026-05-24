@@ -339,6 +339,19 @@ pub fn build_postgresql_auto_conf(opts: &PgConfigOptions) -> String {
 /// Versions probed: 18 down to 14. Older versions are not interesting —
 /// the project explicitly targets PG 18+ and 14 is the oldest still
 /// receiving upstream community support during 2026.
+///
+/// **Postgres.app is deliberately NOT in this list.** Postgres.app v18
+/// works fine as a runtime database (binaries are launchable; sockets
+/// are created cleanly), but per-test launchd-driven bring-up via the
+/// test fixture's `bring_up_pg_cluster` overshoots the fixture's 15s
+/// status-Active polling window for Postgres.app under macOS launchd
+/// (the postmaster status takes longer to register Active than
+/// Homebrew Postgres does). Adding Postgres.app paths here would mean
+/// `cargo test --workspace` regresses for any macOS dev who has
+/// Postgres.app installed — and they're the majority. Operators who
+/// want to use Postgres.app with the test fixtures should set a
+/// future env-var override (filed as HANDOVER follow-up) or use
+/// Homebrew Postgres for testing.
 pub fn default_pg_bin_dir_candidates() -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(16);
     for ver in [18u32, 17, 16, 15, 14] {

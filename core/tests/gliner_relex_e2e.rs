@@ -491,7 +491,14 @@ async fn happy_path_container_extract_returns_entities_and_triples() {
     let Some(entry) = build_test_entry_container() else {
         return;
     };
-    let Some((_cluster, pool)) = bring_up_pg("happy-container").await else {
+    // `"hc"` (NOT `"happy-container"`) because `bring_up_pg` builds a
+    // temp-dir path embedding the label + pid + nanos, and macOS's
+    // `sockaddr_un.sun_path` limit is 103 bytes (vs. Linux's 108). The
+    // longer label overflowed the limit and crashed postgres with
+    // `Unix-domain socket path "..." is too long`. Existing tests
+    // (`"happy"`, `"warm"`) keep labels at 4-5 chars; this one matches
+    // that convention.
+    let Some((_cluster, pool)) = bring_up_pg("hc").await else {
         return;
     };
 
