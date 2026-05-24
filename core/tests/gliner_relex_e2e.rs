@@ -91,10 +91,10 @@ fn resolve_weights_dir() -> Option<PathBuf> {
 /// Slice 2.5: gate container-mode e2e on the operator having built the
 /// image. Mirrors the venv-staged `resolve_worker_script` skip pattern.
 #[cfg(target_os = "macos")]
-fn skip_if_container_unavailable() -> bool {
-    if hhagent_sandbox::macos_container::MacosContainer::probe().is_err() {
+fn skip_if_no_container() -> bool {
+    if let Err(e) = hhagent_sandbox::macos_container::MacosContainer::probe() {
         eprintln!(
-            "\n[SKIP] container CLI / system service not available — install via 'brew install container' and 'container system start'\n"
+            "\n[SKIP] container CLI / system service unavailable: {e} — install via 'brew install container' and 'container system start'\n"
         );
         return true;
     }
@@ -114,14 +114,22 @@ fn skip_if_image_missing(image_tag: &str) -> bool {
         eprintln!("\n[SKIP] failed to spawn 'container image list'\n");
         return true;
     };
+    if !out.status.success() {
+        eprintln!(
+            "\n[SKIP] 'container image list' exited non-zero: {:?}\n",
+            out.status
+        );
+        return true;
+    }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // Image-list format prints "REPOSITORY  TAG  ..."; checking for the
-    // "repo  tag" substring is robust to whitespace variations.
     let (repo, tag) = image_tag.split_once(':').unwrap_or((image_tag, "latest"));
-    let needle_compact = format!("{repo}");
-    let has_repo = stdout.contains(&needle_compact);
-    let has_tag = stdout.contains(tag);
-    if !(has_repo && has_tag) {
+    // Per-line matching: a row of `container image list` is "repo  tag  digest..."
+    // — match a line whose trimmed start is `repo` AND which contains `tag`.
+    // Avoids false positives like `repo:dev-old` matching `tag=dev` via raw substring.
+    let present = stdout
+        .lines()
+        .any(|l| l.trim().starts_with(repo) && l.contains(tag));
+    if !present {
         eprintln!(
             "\n[SKIP] {image_tag} image not present — run scripts/workers/gliner-relex/build-image.sh\n"
         );
@@ -142,7 +150,7 @@ fn build_test_entry_container() -> Option<ToolEntry> {
     if skip_if_no_supervisor() {
         return None;
     }
-    if skip_if_container_unavailable() {
+    if skip_if_no_container() {
         return None;
     }
     if skip_if_image_missing("hhagent/gliner-relex:dev") {
