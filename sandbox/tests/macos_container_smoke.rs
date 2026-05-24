@@ -380,9 +380,11 @@ fn macos_container_argv_with_init_runs_alpine_cleanly() {
             return;
         }
     };
+    let stderr = read_to_string(&mut child.stderr);
     let status = child.wait().expect("wait on container run");
     assert!(
         status.success(),
-        "container run --init alpine /bin/sh -c 'echo init-ok' must exit 0; got {status:?}"
+        "container run [policy flags] --init alpine:3.20 /bin/sh -c 'echo init-ok' must exit 0; \
+         got {status:?}; stderr={stderr:?}"
     );
 }
