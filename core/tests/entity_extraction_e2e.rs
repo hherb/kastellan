@@ -942,3 +942,62 @@ async fn upsert_batch_relations_inserts_dedups_and_skips_unknown_entities() {
 
     pool.close().await;
 }
+
+/// Layer B relations fallback pin: when a relation kind isn't in
+/// relation_kinds, the batch insert trips FK violation (23503), the
+/// dispatcher falls back to per-row which produces a diagnostic error
+/// naming src/dst/kind. This is the attribution improvement over the
+/// pre-Layer-B per-row code (which wrapped relation errors with just
+/// "insert relation: <sqlx err>" — no per-row identifier).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_falls_back_to_per_row_on_relation_kind_fk_violation() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-fb-rel").await else {
+        return;
+    };
+
+    // Use a relation kind that is NOT in relation_kinds seed (migration
+    // 0017's 19 seed values: undefined, treats, prescribed, diagnosed
+    // with, has symptom, side effect of, contraindicated with, allergic
+    // to, located in, employed by, works at, member of, owns, knows,
+    // identified as, refers to, occurred on, associated with, relative of).
+    // `eats` is not in the seed list.
+    let bogus_kind = "eats";
+
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Dr Smith".into(), label: "person".into(),  start: 0, end: 8, score: 0.99 },
+            Entity { text: "lunch".into(),    label: "concept".into(), start: 0, end: 5, score: 0.99 },
+        ],
+        triples: vec![
+            Triple {
+                head: TripleEntity { text: "Dr Smith".into(), r#type: "person".into(),  start: 0, end: 8, entity_idx: 0 },
+                tail: TripleEntity { text: "lunch".into(),    r#type: "concept".into(), start: 0, end: 5, entity_idx: 1 },
+                relation: bogus_kind.into(),
+                score: 0.88,
+            },
+        ],
+    };
+
+    // Use a match instead of expect_err because UpsertOutcome doesn't
+    // implement Debug (Task 8 made the same adjustment).
+    let err = match upsert_entities_and_relations(&pool, &merged).await {
+        Ok(_) => panic!("expected FK violation from missing relation_kind"),
+        Err(e) => e,
+    };
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&format!("kind='{bogus_kind}'")),
+        "fallback error should identify the failing relation kind '{bogus_kind}': {msg}"
+    );
+    assert!(
+        msg.contains("src=") && msg.contains("dst="),
+        "fallback error should carry src/dst ids: {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("foreign key"),
+        "fallback error should propagate underlying FK violation message: {msg}"
+    );
+
+    pool.close().await;
+}
