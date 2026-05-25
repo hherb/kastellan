@@ -175,6 +175,24 @@ pub(crate) fn empty_registry() -> WarmRegistry {
 
 /// Get or create the slot for `tool_name`. The outer `std` mutex is held very briefly
 /// (just the `HashMap::entry` call) so there's no contention even under load.
+///
+/// # Warm-cache key invariant (issue #121)
+///
+/// The key is `tool_name` only — it does NOT include `ToolEntry.container_image`.
+/// Today's safety relies on daemon-restart-flushes-registry: image tags are baked
+/// into `ToolEntry` at startup and stay fixed for the daemon's lifetime, so two
+/// `acquire` calls under the same tool name necessarily resolve to the same image.
+///
+/// A future live-reconfigure path (e.g. operator hot-reloads a `ToolEntry` with a
+/// new `container_image` tag without restarting) would silently reuse the warm
+/// worker spawned under the stale image tag. That widens the key, so any such
+/// path MUST either:
+///
+/// 1. Widen the key to `(tool_name, container_image)` (and update every call
+///    site of `slot_for`, plus the test `slot_for_key_excludes_container_image`
+///    that pins this invariant), OR
+/// 2. Explicitly evict the warm slot for the tool before serving requests
+///    through the re-registered entry.
 pub(crate) fn slot_for(registry: &WarmRegistry, tool_name: &str) -> Arc<ToolSlot> {
     let mut map = registry.lock().expect("warm-registry mutex poisoned");
     Arc::clone(map.entry(tool_name.to_string()).or_insert_with(|| {
@@ -521,5 +539,43 @@ mod tests {
     #[test]
     fn is_aged_out_zero_max_means_unlimited() {
         assert!(!is_aged_out(Duration::from_secs(u64::MAX / 2), 0));
+    }
+
+    /// Pins the IdleTimeoutLifecycle warm-cache key invariant (issue #121).
+    ///
+    /// The warm-cache key is `tool_name` only; `ToolEntry.container_image` is
+    /// deliberately NOT in the key signature. Two `slot_for` calls under the same
+    /// tool name MUST return the same `Arc<ToolSlot>` regardless of any
+    /// hypothetical image-tag variation in the caller's `ToolEntry`. This is
+    /// safe today because image tags are baked in at daemon startup and a
+    /// restart flushes the registry; a future live-reconfigure path that allows
+    /// the same tool name to swap image tags without a restart would silently
+    /// serve requests through a worker spawned under the stale image.
+    ///
+    /// If this test fires:
+    ///   - You widened `slot_for`'s key signature → either intentional (then
+    ///     update this test + every call site) or accidental (revert).
+    ///   - You introduced a live-reconfigure path → either widen the key as
+    ///     above, OR explicitly evict the warm slot for the tool before
+    ///     serving requests through the re-registered entry.
+    #[test]
+    fn slot_for_key_excludes_container_image() {
+        let registry: WarmRegistry = empty_registry();
+        let slot1 = slot_for(&registry, "twice-name");
+        let slot2 = slot_for(&registry, "twice-name");
+        assert!(
+            Arc::ptr_eq(&slot1, &slot2),
+            "warm-cache widened: second slot_for under same tool_name returned a different Arc. \
+             If this is intentional (live-reconfigure path landed), the warm-cache key MUST \
+             widen to (tool_name, container_image) — see issue #121 and the slot_for doc."
+        );
+        // Sibling tool names get distinct slots (sanity check that the key is
+        // not collapsing everything).
+        let other = slot_for(&registry, "other-tool");
+        assert!(
+            !Arc::ptr_eq(&slot1, &other),
+            "warm-cache collapsed: distinct tool names returned the same slot. \
+             The HashMap<String, Arc<ToolSlot>> shape is violated."
+        );
     }
 }
