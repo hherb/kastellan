@@ -814,3 +814,73 @@ async fn upsert_batch_preserves_operator_unquarantine_decision() {
 
     pool.close().await;
 }
+
+/// Layer B fallback pin: when the batch upsert trips a constraint
+/// violation (SQLSTATE class 23), the dispatcher falls back to per-row
+/// upsert which wraps each error via format_per_row_entity_error
+/// carrying the failing entity's kind + name_norm. This is the
+/// attribution improvement over Layer A (today's per-row loop wraps
+/// errors with just "upsert entity: <sqlx err>" — no per-row identifier).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_falls_back_to_per_row_on_entity_kind_fk_violation() {
+    let Some((cluster, pool)) = bring_up_pg("batch-fb-ent").await else {
+        return;
+    };
+
+    // The schema's seed includes a baseline of entity_kinds rows
+    // (migration 0015). Delete one to force an FK violation when the
+    // upsert tries to insert an entity with that kind.
+    // We use a known-deletable kind — `drug` is in the 0015 seed and
+    // unused by any other test in this file (verified by grep).
+    //
+    // entity_kinds is REVOKE-protected (runtime role cannot mutate it).
+    // Use the admin pool (peer-auth as OS superuser, no SET ROLE) for
+    // the DELETE, exactly as the operator CLI does.
+    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+        .await
+        .expect("connect admin pool");
+    let deleted_kind = "drug";
+    sqlx::query("DELETE FROM entity_kinds WHERE kind = $1")
+        .bind(deleted_kind)
+        .execute(&admin_pool)
+        .await
+        .expect("delete entity_kinds row");
+    admin_pool.close().await;
+
+    // Attempt to upsert two entities: one with a present kind (`person`),
+    // one with the dropped kind (`drug`). The batch should fail with
+    // 23503 foreign_key_violation; the dispatcher falls back to per-row
+    // which produces an error message identifying the failing kind.
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(),   label: "person".into(),       start: 0, end: 5, score: 0.99 },
+            Entity { text: "Aspirin".into(), label: deleted_kind.into(),   start: 0, end: 7, score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let result = upsert_entities_and_relations(&pool, &merged).await;
+    // UpsertOutcome doesn't implement Debug so we can't use expect_err.
+    // Unwrap as Err manually.
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("expected FK violation from missing entity_kind, but upsert succeeded"),
+    };
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&format!("kind='{deleted_kind}'")),
+        "fallback error should identify the failing kind '{deleted_kind}': {msg}"
+    );
+    assert!(
+        msg.contains("name_norm='aspirin'"),
+        "fallback error should carry name_norm of failing entity: {msg}"
+    );
+    // Sanity: the error should also mention foreign key violation
+    // (sqlx propagates the underlying message).
+    assert!(
+        msg.to_lowercase().contains("foreign key"),
+        "fallback error should propagate underlying FK violation message: {msg}"
+    );
+
+    pool.close().await;
+}
