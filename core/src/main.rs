@@ -153,6 +153,11 @@ async fn main() -> Result<()> {
     // dedup logic on Linux runners.
     #[cfg(target_os = "macos")]
     {
+        // The return value is the (image_tag, probe_result) list, kept on
+        // the function signature so integration tests can assert on probe
+        // outcomes directly. Production daemon doesn't need it — the
+        // side-effect contract is the tracing::info!/warn! line per tag
+        // emitted from inside the function. Discard explicitly.
         let _probe_results = hhagent_core::sandbox_health::probe_registered_container_images(
             tool_registry.entries(),
         );

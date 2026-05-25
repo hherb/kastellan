@@ -362,6 +362,20 @@ impl MacosContainer {
     /// the image IS present (the absent-image error path is slightly
     /// slower).
     pub fn probe_image(image_tag: &str) -> Result<(), SandboxError> {
+        // Reject empty tag up-front rather than spawning `container image
+        // inspect ""` and relying on the CLI to error out with an
+        // unspecified diagnostic. A `ToolEntry.container_image =
+        // Some("")` is a caller bug (the resolver substitutes
+        // `DEFAULT_IMAGE` only for `None`, not for `Some("")`); fail loud
+        // with an operator-actionable diagnostic.
+        if image_tag.is_empty() {
+            return Err(SandboxError::Backend(
+                "probe_image: empty image_tag (likely a misconfigured \
+                 ToolEntry.container_image — use None to fall back to DEFAULT_IMAGE \
+                 rather than Some(\"\"))"
+                    .into(),
+            ));
+        }
         let argv = build_image_inspect_argv(image_tag);
         let output = Command::new(&argv[0])
             .args(&argv[1..])
@@ -940,5 +954,30 @@ mod tests {
     fn build_image_inspect_argv_empty_tag_is_passthrough() {
         let argv = build_image_inspect_argv("");
         assert_eq!(argv, vec!["container", "image", "inspect", ""]);
+    }
+
+    // ---------- probe_image guards (post-review fixup) ----------
+
+    /// `probe_image("")` short-circuits before spawning with an operator-
+    /// actionable diagnostic. The pure argv builder still passes empty
+    /// strings through (`build_image_inspect_argv_empty_tag_is_passthrough`);
+    /// the spawn-path is where the guard belongs because that's where
+    /// the failure mode is operator-visible.
+    #[test]
+    fn probe_image_rejects_empty_tag_upfront() {
+        let err =
+            MacosContainer::probe_image("").expect_err("empty tag must error before spawn");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("empty image_tag"),
+            "expected empty-tag diagnostic, got: {msg}"
+        );
+        // Hint at the correct fix — caller should use None rather than
+        // Some(""). The exact wording is allowed to drift; we just
+        // pin the operator-actionable cue.
+        assert!(
+            msg.contains("None"),
+            "expected None-fallback hint in diagnostic, got: {msg}"
+        );
     }
 }

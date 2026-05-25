@@ -127,17 +127,51 @@ pub fn probe_registered_container_images<'a>(
     entries: impl Iterator<Item = (&'a str, &'a ToolEntry)>,
 ) -> Vec<(String, Result<(), hhagent_sandbox::SandboxError>)> {
     let targets = collect_container_image_targets(entries);
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    // Single backend-level probe before the per-tag walk: if Apple
+    // `container` itself isn't installed / its system service isn't
+    // running, every per-tag probe would error with the same spawn
+    // failure — emitting one WARN per registered image clutters the
+    // log with N copies of the same actionable hint. Collapse to one
+    // WARN line and return empty (caller's perspective: no probes
+    // were run, same as if no Container-backed entries were
+    // registered). The downstream worker spawn will still fail
+    // through the normal lifecycle-manager error path on first
+    // dispatch — the operator has been warned at boot regardless.
+    if let Err(e) = hhagent_sandbox::macos_container::MacosContainer::probe() {
+        let affected_tools: Vec<String> = targets
+            .iter()
+            .flat_map(|t| t.tool_names.iter().cloned())
+            .collect();
+        tracing::warn!(
+            target: "hhagent::sandbox_health",
+            error = %e,
+            affected_tools = %affected_tools.join(", "),
+            "Apple `container` unavailable; skipping image health check \
+             (affected workers will fail on first dispatch — install with \
+             `brew install container && container system start \
+             --enable-kernel-install`)",
+        );
+        return Vec::new();
+    }
     let mut results = Vec::with_capacity(targets.len());
     for target in targets {
         let probe = hhagent_sandbox::macos_container::MacosContainer::probe_image(
             &target.image_tag,
         );
+        // Render tools as a comma-joined string rather than Debug
+        // (`["a", "b"]`) for cleaner operator-log lines. The Vec stays
+        // on the returned tuple for test inspection / future
+        // structured-logging consumers.
+        let tools_joined = target.tool_names.join(", ");
         match &probe {
             Ok(()) => {
                 tracing::info!(
                     target: "hhagent::sandbox_health",
                     image_tag = %target.image_tag,
-                    tools = ?target.tool_names,
+                    tools = %tools_joined,
                     "container image present in local store",
                 );
             }
@@ -145,7 +179,7 @@ pub fn probe_registered_container_images<'a>(
                 tracing::warn!(
                     target: "hhagent::sandbox_health",
                     image_tag = %target.image_tag,
-                    tools = ?target.tool_names,
+                    tools = %tools_joined,
                     error = %e,
                     "container image NOT present — affected tools will fail on first dispatch; \
                      build with the worker's `scripts/workers/<worker>/build-image.sh`",
