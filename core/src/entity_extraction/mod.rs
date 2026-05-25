@@ -11,6 +11,7 @@
 //! for case/whitespace/Unicode-insensitive dedup).
 
 pub mod gliner_relex;
+pub mod batch_upsert;
 
 /// Canonical form for entity-name dedup. Re-exported from
 /// `hhagent-db` so the v2 extractor and `PgGraph::upsert_entity`

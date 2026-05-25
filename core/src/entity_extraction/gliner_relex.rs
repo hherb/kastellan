@@ -160,6 +160,10 @@ pub struct UpsertOutcome {
 //   - upsert_creates_quarantined_entities
 //   - upsert_is_idempotent_on_rerun
 //   - upsert_dedup_works_with_case_variants
+//   - upsert_preserves_operator_unquarantine_decision
+//   - upsert_counts_new_inserts_correctly_in_mixed_batch
+//   - upsert_batch_* (Issue #95 Layer B, see batch_upsert.rs)
+
 /// Upsert every entity in `merged.entities` into the `entities` table
 /// (quarantine=TRUE on new rows; conflict by `(kind, name_norm)` →
 /// preserve existing row including its quarantine state). Then for
@@ -169,123 +173,17 @@ pub struct UpsertOutcome {
 ///
 /// Best-effort idempotent: rerunning with the same input produces no
 /// new rows.
+///
+/// Layer B (Issue #95): the public entry point now delegates to
+/// `crate::entity_extraction::batch_upsert::upsert_entities_and_relations`,
+/// which batches the entity upsert via `unnest` for a single round-trip
+/// in the happy path and falls back to a per-row loop with diagnostic
+/// error wrapping on SQLSTATE 23 constraint violations.
 pub async fn upsert_entities_and_relations(
     pool: &PgPool,
     merged: &ExtractResponse,
 ) -> Result<UpsertOutcome, crate::entity_extraction::EntityExtractionError> {
-    let mut entity_ids = Vec::with_capacity(merged.entities.len());
-    let mut n_new: u32 = 0;
-
-    // Per-entity upsert. Each entity gets a single statement:
-    // INSERT ... ON CONFLICT DO UPDATE SET name_norm = entities.name_norm
-    // RETURNING id, (xmax = 0) AS inserted.
-    //
-    // The `SET name_norm = entities.name_norm` self-assignment is the
-    // standard Postgres idiom for "force RETURNING to fire on conflict
-    // without changing the row's logical state." It is load-bearing
-    // that this clause does NOT touch `quarantine` — if the operator
-    // has already approved an entity via the quarantine-review CLI
-    // (PR #93), re-extraction must not silently re-quarantine it.
-    // Pinned by upsert_preserves_operator_unquarantine_decision in
-    // core/tests/entity_extraction_e2e.rs.
-    //
-    // `xmax = 0` is the canonical inserted-vs-existed discriminator:
-    // a fresh row has xmax=0 (no future-deleting transaction); a
-    // conflict-hit row carries the conflict txn's xid. This
-    // eliminates the previous two-statement path (DO NOTHING +
-    // follow-up SELECT) — every entity now costs exactly one
-    // round-trip. (Issue #90; Layer A only — full-batch unnest is
-    // deferred.)
-    //
-    // Concurrency bonus: DO UPDATE acquires a row-level exclusive
-    // lock on the conflict-hit row and atomically returns the
-    // resolved id. The old DO NOTHING + follow-up SELECT did not
-    // lock, so concurrent upserts of the same (kind, name_norm)
-    // had a narrow window where the SELECT could see uncommitted
-    // state. The new path is atomically race-safe; the trade-off
-    // is brief serialization under contention on the same key
-    // (a non-issue at v2's per-task concurrency).
-    //
-    // Side effect of the no-op UPDATE: Postgres advances xmin and
-    // writes a new tuple version even though no column changed.
-    // Acceptable at v2 volume; autovacuum absorbs it without
-    // operator action.
-    for ent in &merged.entities {
-        let name_norm = normalize_entity_name(&ent.text);
-        let (id, inserted): (i64, bool) = sqlx::query_as(
-            "INSERT INTO entities (kind, name, name_norm, quarantine) \
-             VALUES ($1, $2, $3, TRUE) \
-             ON CONFLICT (kind, name_norm) DO UPDATE \
-               SET name_norm = entities.name_norm \
-             RETURNING id, (xmax = 0) AS inserted",
-        )
-        .bind(&ent.label)
-        .bind(&ent.text)
-        .bind(&name_norm)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| hhagent_db::DbError::Query(format!("upsert entity: {e}")))?;
-        if inserted {
-            n_new += 1;
-        }
-        entity_ids.push(id);
-    }
-
-    // Build a (label, name_norm) → id index so we can resolve triple
-    // endpoints without re-querying.
-    let mut by_key: std::collections::HashMap<(String, String), i64> =
-        std::collections::HashMap::new();
-    for (ent, id) in merged.entities.iter().zip(entity_ids.iter()) {
-        by_key.insert(
-            (ent.label.clone(), normalize_entity_name(&ent.text)),
-            *id,
-        );
-    }
-
-    let mut n_relations_inserted: u32 = 0;
-    for tri in &merged.triples {
-        let head_key = (tri.head.r#type.clone(), normalize_entity_name(&tri.head.text));
-        let tail_key = (tri.tail.r#type.clone(), normalize_entity_name(&tri.tail.text));
-        let head_id = match by_key.get(&head_key) {
-            Some(id) => *id,
-            None => continue,  // triple references unknown entity — skip
-        };
-        let tail_id = match by_key.get(&tail_key) {
-            Some(id) => *id,
-            None => continue,
-        };
-        let relation_norm = tri.relation
-            .to_lowercase()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        // Schema allows multi-edges intentionally (0001 comment); we
-        // dedup at the application layer via WHERE NOT EXISTS to make
-        // re-extraction idempotent.
-        let n: u64 = sqlx::query(
-            "INSERT INTO relations (src_id, dst_id, kind, attrs) \
-             SELECT $1, $2, $3, '{}'::jsonb \
-             WHERE NOT EXISTS ( \
-                 SELECT 1 FROM relations \
-                 WHERE src_id = $1 AND dst_id = $2 AND kind = $3 \
-             )",
-        )
-        .bind(head_id)
-        .bind(tail_id)
-        .bind(&relation_norm)
-        .execute(pool)
-        .await
-        .map_err(|e| hhagent_db::DbError::Query(format!("insert relation: {e}")))?
-        .rows_affected();
-        n_relations_inserted += n as u32;
-    }
-
-    Ok(UpsertOutcome {
-        entity_ids,
-        n_entities_upserted_new: n_new,
-        n_relations_inserted,
-    })
+    crate::entity_extraction::batch_upsert::upsert_entities_and_relations(pool, merged).await
 }
 
 use crate::entity_extraction::{EntityExtractor, EntityExtractionError, EntitySeeds, SeedSource};

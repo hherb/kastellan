@@ -626,3 +626,404 @@ async fn extractor_chunking_path_against_real_worker() {
 
     pool.close().await;
 }
+
+/// Layer B happy-path regression pin: a fresh batch of N=5 unique
+/// entities through the batch path produces the same UpsertOutcome
+/// shape as Layer A would have (entity_ids in order, n_new = 5,
+/// n_relations_inserted = 0).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_happy_path_returns_same_outcome_shape_as_layer_a() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-happy").await else {
+        return;
+    };
+
+    // 5 unique entities, no triples — pure entity-batch exercise.
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(),   label: "person".into(),       start: 0, end: 5,  score: 0.99 },
+            Entity { text: "Beta".into(),    label: "organization".into(), start: 0, end: 4,  score: 0.99 },
+            Entity { text: "Gamma".into(),   label: "person".into(),       start: 0, end: 5,  score: 0.99 },
+            Entity { text: "Delta".into(),   label: "place".into(),        start: 0, end: 5,  score: 0.99 },
+            Entity { text: "Epsilon".into(), label: "person".into(),       start: 0, end: 7,  score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let out = upsert_entities_and_relations(&pool, &merged)
+        .await
+        .expect("batch upsert should succeed on fresh batch");
+
+    assert_eq!(out.entity_ids.len(), 5, "one id per input entity");
+    assert_eq!(out.n_entities_upserted_new, 5, "every entity is new");
+    assert_eq!(out.n_relations_inserted, 0, "no triples → no relations");
+
+    // Verify each id round-trips to the expected (kind, name) pair via
+    // a SELECT. This is the load-bearing regression pin for the
+    // dispatcher: if try_batch_upsert returns ids in a different
+    // order than the input, this assertion fails.
+    for (idx, ent) in merged.entities.iter().enumerate() {
+        let (kind, name): (String, String) =
+            sqlx::query_as("SELECT kind, name FROM entities WHERE id = $1")
+                .bind(out.entity_ids[idx])
+                .fetch_one(&pool)
+                .await
+                .expect("SELECT round-trip");
+        assert_eq!(&kind, &ent.label, "entity_ids[{idx}] kind mismatch");
+        assert_eq!(&name, &ent.text, "entity_ids[{idx}] name mismatch");
+    }
+
+    pool.close().await;
+}
+
+/// Pins that entity_ids is returned in the original input order even
+/// though the unnest batch's RETURNING clause may emit rows in arbitrary
+/// order. Layer B's HashMap re-walk preserves order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_preserves_entity_id_order_for_unique_inputs() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-order").await else {
+        return;
+    };
+
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(), label: "person".into(), start: 0, end: 5, score: 0.99 },
+            Entity { text: "Beta".into(),  label: "person".into(), start: 0, end: 4, score: 0.99 },
+            Entity { text: "Gamma".into(), label: "person".into(), start: 0, end: 5, score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let out = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+
+    // Verify each id resolves to the expected name in input order.
+    assert_eq!(out.entity_ids.len(), 3);
+    for (idx, expected_name) in ["Alpha", "Beta", "Gamma"].iter().enumerate() {
+        let name: String =
+            sqlx::query_scalar("SELECT name FROM entities WHERE id = $1")
+                .bind(out.entity_ids[idx])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(&name, expected_name, "entity_ids[{idx}] wrong order");
+    }
+
+    pool.close().await;
+}
+
+/// Pins that input duplicates resolve to the same id and n_new counts
+/// each unique (kind, name_norm) only once, even when the input has
+/// duplicates. Matches Layer A's observable behaviour where each
+/// per-row upsert of a duplicate hits ON CONFLICT and returns the
+/// same id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_dedup_input_returns_same_id_for_duplicates() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-dedup").await else {
+        return;
+    };
+
+    // Input: [Alpha, alpha (same key — dups), Beta]
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(), label: "person".into(), start: 0, end: 5, score: 0.99 },
+            Entity { text: "alpha".into(), label: "person".into(), start: 0, end: 5, score: 0.99 },
+            Entity { text: "Beta".into(),  label: "person".into(), start: 0, end: 4, score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let out = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+
+    assert_eq!(out.entity_ids.len(), 3, "entity_ids has one id per input position");
+    assert_eq!(
+        out.entity_ids[0], out.entity_ids[1],
+        "duplicate inputs (Alpha and alpha) must resolve to the same id"
+    );
+    assert_ne!(
+        out.entity_ids[0], out.entity_ids[2],
+        "distinct inputs (Alpha and Beta) must resolve to different ids"
+    );
+    assert_eq!(
+        out.n_entities_upserted_new, 2,
+        "duplicate should NOT double-count — exactly 2 new (Alpha, Beta)"
+    );
+    assert_eq!(out.n_relations_inserted, 0);
+
+    pool.close().await;
+}
+
+/// Layer B batch path must preserve operator-approved (quarantine=FALSE)
+/// entities just like Layer A. This is the load-bearing invariant the
+/// no-op `SET name_norm = entities.name_norm` clause guarantees: ON
+/// CONFLICT must not touch the quarantine column. Pinned for N=3 with
+/// the approved entity in the middle position (Layer A's existing pin
+/// uses N=1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_preserves_operator_unquarantine_decision() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-quar").await else {
+        return;
+    };
+
+    // First pass: insert 3 entities. All land quarantined.
+    let merged1 = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(),    label: "person".into(), start: 0, end: 5, score: 0.99 },
+            Entity { text: "Dr Smith".into(), label: "person".into(), start: 0, end: 8, score: 0.99 },
+            Entity { text: "Gamma".into(),    label: "person".into(), start: 0, end: 5, score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let out1 = upsert_entities_and_relations(&pool, &merged1).await.unwrap();
+    assert_eq!(out1.entity_ids.len(), 3);
+    let smith_id = out1.entity_ids[1];
+
+    // Operator approves the middle entity via the quarantine-review CLI
+    // (simulated as a direct UPDATE).
+    sqlx::query("UPDATE entities SET quarantine = FALSE WHERE id = $1")
+        .bind(smith_id)
+        .execute(&pool)
+        .await
+        .expect("operator approve simulation");
+
+    // Second pass: re-extract — all three hit ON CONFLICT through the
+    // batch path.
+    let out2 = upsert_entities_and_relations(&pool, &merged1).await.unwrap();
+    assert_eq!(out2.entity_ids, out1.entity_ids, "same ids returned");
+    assert_eq!(out2.n_entities_upserted_new, 0, "no new rows on rerun");
+
+    // Load-bearing assertion: the batch path's ON CONFLICT DO UPDATE
+    // SET name_norm = entities.name_norm must NOT have clobbered the
+    // operator's approval.
+    let quarantine_after: bool =
+        sqlx::query_scalar("SELECT quarantine FROM entities WHERE id = $1")
+            .bind(smith_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back quarantine");
+    assert!(
+        !quarantine_after,
+        "Layer B batch path must preserve operator unquarantine decision (quarantine=FALSE)"
+    );
+
+    // The sibling entities (Alpha, Gamma) should still be quarantined —
+    // operator only approved Smith.
+    for sibling_id in [out1.entity_ids[0], out1.entity_ids[2]] {
+        let q: bool = sqlx::query_scalar("SELECT quarantine FROM entities WHERE id = $1")
+            .bind(sibling_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(q, "sibling entity should remain quarantined (operator only approved Smith)");
+    }
+
+    pool.close().await;
+}
+
+/// Layer B fallback pin: when the batch upsert trips a constraint
+/// violation (SQLSTATE class 23), the dispatcher falls back to per-row
+/// upsert which wraps each error via format_per_row_entity_error
+/// carrying the failing entity's kind + name_norm. This is the
+/// attribution improvement over Layer A (today's per-row loop wraps
+/// errors with just "upsert entity: <sqlx err>" — no per-row identifier).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_falls_back_to_per_row_on_entity_kind_fk_violation() {
+    let Some((cluster, pool)) = bring_up_pg("batch-fb-ent").await else {
+        return;
+    };
+
+    // The schema's seed includes a baseline of entity_kinds rows
+    // (migration 0015). Delete one to force an FK violation when the
+    // upsert tries to insert an entity with that kind.
+    // We use a known-deletable kind — `drug` is in the 0015 seed and
+    // unused by any other test in this file (verified by grep).
+    //
+    // entity_kinds is REVOKE-protected (runtime role cannot mutate it).
+    // Use the admin pool (peer-auth as OS superuser, no SET ROLE) for
+    // the DELETE, exactly as the operator CLI does.
+    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+        .await
+        .expect("connect admin pool");
+    let deleted_kind = "drug";
+    sqlx::query("DELETE FROM entity_kinds WHERE kind = $1")
+        .bind(deleted_kind)
+        .execute(&admin_pool)
+        .await
+        .expect("delete entity_kinds row");
+    admin_pool.close().await;
+
+    // Attempt to upsert two entities: one with a present kind (`person`),
+    // one with the dropped kind (`drug`). The batch should fail with
+    // 23503 foreign_key_violation; the dispatcher falls back to per-row
+    // which produces an error message identifying the failing kind.
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(),   label: "person".into(),       start: 0, end: 5, score: 0.99 },
+            Entity { text: "Aspirin".into(), label: deleted_kind.into(),   start: 0, end: 7, score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let result = upsert_entities_and_relations(&pool, &merged).await;
+    // UpsertOutcome doesn't implement Debug so we can't use expect_err.
+    // Unwrap as Err manually.
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("expected FK violation from missing entity_kind, but upsert succeeded"),
+    };
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&format!("kind='{deleted_kind}'")),
+        "fallback error should identify the failing kind '{deleted_kind}': {msg}"
+    );
+    assert!(
+        msg.contains("name_norm='aspirin'"),
+        "fallback error should carry name_norm of failing entity: {msg}"
+    );
+    // Sanity: the error should also mention foreign key violation
+    // (sqlx propagates the underlying message).
+    assert!(
+        msg.to_lowercase().contains("foreign key"),
+        "fallback error should propagate underlying FK violation message: {msg}"
+    );
+
+    pool.close().await;
+}
+
+/// Layer B relations happy-path pin: triples insert via batch, dedup via
+/// WHERE NOT EXISTS, skip triples whose head or tail references an
+/// entity not in merged.entities. Re-run is idempotent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_relations_inserts_dedups_and_skips_unknown_entities() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-rel-happy").await else {
+        return;
+    };
+
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Dr Smith".into(), label: "person".into(),  start: 0, end: 8, score: 0.99 },
+            Entity { text: "asthma".into(),   label: "disease".into(), start: 0, end: 6, score: 0.99 },
+        ],
+        triples: vec![
+            // Valid triple: both endpoints in merged.entities.
+            Triple {
+                head: TripleEntity { text: "Dr Smith".into(), r#type: "person".into(),  start: 0, end: 8, entity_idx: 0 },
+                tail: TripleEntity { text: "asthma".into(),   r#type: "disease".into(), start: 0, end: 6, entity_idx: 1 },
+                relation: "treats".into(),
+                score: 0.92,
+            },
+            // Triple referencing an unknown entity (tail not in merged.entities)
+            // → should be silently skipped (build_resolved_triples does `continue`
+            // when the by_key lookup misses).
+            Triple {
+                head: TripleEntity { text: "Dr Smith".into(), r#type: "person".into(),   start: 0, end: 8, entity_idx: 0 },
+                tail: TripleEntity { text: "diabetes".into(), r#type: "disease".into(), start: 0, end: 8, entity_idx: 2 },
+                relation: "treats".into(),
+                score: 0.75,
+            },
+        ],
+    };
+    let out1 = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+    assert_eq!(out1.entity_ids.len(), 2, "both entities upserted");
+    assert_eq!(
+        out1.n_relations_inserted, 1,
+        "only the valid triple should insert (unknown-entity triple silently skipped)"
+    );
+
+    // Re-run: WHERE NOT EXISTS makes the relation insert idempotent.
+    let out2 = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+    assert_eq!(out2.n_relations_inserted, 0, "re-run finds the relation present");
+
+    // Verify the relation row landed in the DB with the expected kind.
+    let (src, dst, kind): (i64, i64, String) = sqlx::query_as(
+        "SELECT src_id, dst_id, kind FROM relations WHERE kind = 'treats' LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(src, out1.entity_ids[0]);
+    assert_eq!(dst, out1.entity_ids[1]);
+    assert_eq!(kind, "treats");
+
+    pool.close().await;
+}
+
+/// Layer B relations fallback pin: when a relation kind isn't in
+/// relation_kinds, the batch insert trips FK violation (23503), the
+/// dispatcher falls back to per-row which produces a diagnostic error
+/// naming src/dst/kind. This is the attribution improvement over the
+/// pre-Layer-B per-row code (which wrapped relation errors with just
+/// "insert relation: <sqlx err>" — no per-row identifier).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_falls_back_to_per_row_on_relation_kind_fk_violation() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-fb-rel").await else {
+        return;
+    };
+
+    // Use a relation kind that is NOT in relation_kinds seed (migration
+    // 0017's 19 seed values: undefined, treats, prescribed, diagnosed
+    // with, has symptom, side effect of, contraindicated with, allergic
+    // to, located in, employed by, works at, member of, owns, knows,
+    // identified as, refers to, occurred on, associated with, relative of).
+    // `eats` is not in the seed list.
+    let bogus_kind = "eats";
+
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Dr Smith".into(), label: "person".into(),  start: 0, end: 8, score: 0.99 },
+            Entity { text: "lunch".into(),    label: "concept".into(), start: 0, end: 5, score: 0.99 },
+        ],
+        triples: vec![
+            Triple {
+                head: TripleEntity { text: "Dr Smith".into(), r#type: "person".into(),  start: 0, end: 8, entity_idx: 0 },
+                tail: TripleEntity { text: "lunch".into(),    r#type: "concept".into(), start: 0, end: 5, entity_idx: 1 },
+                relation: bogus_kind.into(),
+                score: 0.88,
+            },
+        ],
+    };
+
+    // Use a match instead of expect_err because UpsertOutcome doesn't
+    // implement Debug (Task 8 made the same adjustment).
+    let err = match upsert_entities_and_relations(&pool, &merged).await {
+        Ok(_) => panic!("expected FK violation from missing relation_kind"),
+        Err(e) => e,
+    };
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&format!("kind='{bogus_kind}'")),
+        "fallback error should identify the failing relation kind '{bogus_kind}': {msg}"
+    );
+    assert!(
+        msg.contains("src=") && msg.contains("dst="),
+        "fallback error should carry src/dst ids: {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("foreign key"),
+        "fallback error should propagate underlying FK violation message: {msg}"
+    );
+
+    pool.close().await;
+}
+
+/// Empty-input pin: dispatcher short-circuits both phase 1 (entities) and
+/// phase 2 (relations) when their respective input slices are empty —
+/// no SQL is issued, the outcome is zero across the board. Pins the
+/// `if deduped.is_empty()` / `if resolved.is_empty()` early-returns in
+/// `try_batch_upsert_entities` / `try_batch_upsert_relations`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_empty_input_returns_zero_outcome() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-empty").await else {
+        return;
+    };
+
+    let merged = ExtractResponse {
+        entities: vec![],
+        triples: vec![],
+    };
+    let out = upsert_entities_and_relations(&pool, &merged)
+        .await
+        .expect("empty input should succeed without issuing any SQL");
+
+    assert!(out.entity_ids.is_empty(), "no entity ids for empty input");
+    assert_eq!(out.n_entities_upserted_new, 0);
+    assert_eq!(out.n_relations_inserted, 0);
+
+    pool.close().await;
+}
