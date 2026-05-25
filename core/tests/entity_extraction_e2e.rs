@@ -673,3 +673,77 @@ async fn upsert_batch_happy_path_returns_same_outcome_shape_as_layer_a() {
 
     pool.close().await;
 }
+
+/// Pins that entity_ids is returned in the original input order even
+/// though the unnest batch's RETURNING clause may emit rows in arbitrary
+/// order. Layer B's HashMap re-walk preserves order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_preserves_entity_id_order_for_unique_inputs() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-order").await else {
+        return;
+    };
+
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(), label: "person".into(), start: 0, end: 5, score: 0.99 },
+            Entity { text: "Beta".into(),  label: "person".into(), start: 0, end: 4, score: 0.99 },
+            Entity { text: "Gamma".into(), label: "person".into(), start: 0, end: 5, score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let out = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+
+    // Verify each id resolves to the expected name in input order.
+    assert_eq!(out.entity_ids.len(), 3);
+    for (idx, expected_name) in ["Alpha", "Beta", "Gamma"].iter().enumerate() {
+        let name: String =
+            sqlx::query_scalar("SELECT name FROM entities WHERE id = $1")
+                .bind(out.entity_ids[idx])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(&name, expected_name, "entity_ids[{idx}] wrong order");
+    }
+
+    pool.close().await;
+}
+
+/// Pins that input duplicates resolve to the same id and n_new counts
+/// each unique (kind, name_norm) only once, even when the input has
+/// duplicates. Matches Layer A's observable behaviour where each
+/// per-row upsert of a duplicate hits ON CONFLICT and returns the
+/// same id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_dedup_input_returns_same_id_for_duplicates() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-dedup").await else {
+        return;
+    };
+
+    // Input: [Alpha, alpha (same key — dups), Beta]
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(), label: "person".into(), start: 0, end: 5, score: 0.99 },
+            Entity { text: "alpha".into(), label: "person".into(), start: 0, end: 5, score: 0.99 },
+            Entity { text: "Beta".into(),  label: "person".into(), start: 0, end: 4, score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let out = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+
+    assert_eq!(out.entity_ids.len(), 3, "entity_ids has one id per input position");
+    assert_eq!(
+        out.entity_ids[0], out.entity_ids[1],
+        "duplicate inputs (Alpha and alpha) must resolve to the same id"
+    );
+    assert_ne!(
+        out.entity_ids[0], out.entity_ids[2],
+        "distinct inputs (Alpha and Beta) must resolve to different ids"
+    );
+    assert_eq!(
+        out.n_entities_upserted_new, 2,
+        "duplicate should NOT double-count — exactly 2 new (Alpha, Beta)"
+    );
+    assert_eq!(out.n_relations_inserted, 0);
+
+    pool.close().await;
+}
