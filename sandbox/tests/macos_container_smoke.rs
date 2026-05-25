@@ -388,3 +388,48 @@ fn macos_container_argv_with_init_runs_alpine_cleanly() {
          got {status:?}; stderr={stderr:?}"
     );
 }
+
+/// `MacosContainer::probe_image` smoke test (issue #120) — verifies the
+/// real-spawn path against `container image inspect <tag>`.
+///
+/// Strategy: probe the same image the other smoke tests rely on
+/// (`alpine:3.20`, cached on the host as a pre-condition of the test
+/// suite). Probing should return `Ok(())`. Then probe a deliberately
+/// non-existent tag and assert the helper returns `Err` with an
+/// operator-actionable message mentioning the missing tag.
+///
+/// Skip-as-pass when Apple `container` is unavailable OR when the
+/// expected reference image (`alpine:3.20`) is not cached on the host.
+#[test]
+fn probe_image_returns_ok_for_cached_image_and_err_for_missing_tag() {
+    if skip_if_no_container() {
+        return;
+    }
+
+    // Happy path: alpine:3.20 must be present (the suite skip-helper
+    // already guaranteed it via `alpine_image_is_cached`).
+    MacosContainer::probe_image(DEFAULT_IMAGE)
+        .expect("probe_image(alpine:3.20) must succeed when the image is cached");
+
+    // Missing path: a fresh nanos-suffixed tag we know we never built.
+    // `container image inspect` exits non-zero on absence; helper maps
+    // that to `Err(SandboxError::Backend(...))` carrying the missing tag.
+    let bogus_tag = format!(
+        "hhagent/definitely-not-built-{}:nonexistent",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let err = MacosContainer::probe_image(&bogus_tag)
+        .expect_err("probe_image on a non-existent tag must error out");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains(&bogus_tag),
+        "error message must surface the missing tag for operator triage; got: {msg}"
+    );
+    assert!(
+        msg.contains("not present"),
+        "error message must say the image is not present; got: {msg}"
+    );
+}

@@ -20,6 +20,7 @@ pub mod memory;
 pub mod observation;
 pub mod prompt_assembly;
 pub mod recall_assembly;
+pub mod sandbox_health;
 pub mod scheduler;
 pub mod tool_host;
 pub mod worker_lifecycle;

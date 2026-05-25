@@ -169,6 +169,15 @@ impl ToolRegistry {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// Borrowed iterator over `(tool_name, entry)` pairs. Stable item type
+    /// so callers (e.g. the daemon-startup container-image health check
+    /// in [`crate::sandbox_health`]) don't depend on `HashMap`'s internal
+    /// iterator type. Iteration order matches `HashMap` (i.e. unordered;
+    /// callers that need a deterministic order must sort).
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &ToolEntry)> {
+        self.entries.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
 
 /// Canonical [`ToolEntry`] for the `shell-exec` worker.
