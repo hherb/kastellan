@@ -124,6 +124,7 @@ mod tests {
             wall_clock_ms: None,
             lifecycle: Lifecycle::SingleUse,
             sandbox_backend: None,
+            container_image: None,
         }
     }
 
@@ -142,6 +143,7 @@ mod tests {
             wall_clock_ms: None,
             lifecycle,
             sandbox_backend: None,
+            container_image: None,
         }
     }
 

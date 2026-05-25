@@ -220,8 +220,14 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
         };
         // Resolve per call: `entry.sandbox_backend == None` returns the
         // per-OS default; `Some(K)` returns the matching backend slot.
-        // Resolution is an Arc::clone (refcount bump, nanoseconds).
-        let backend = self.sandboxes.resolve(entry.sandbox_backend);
+        // For Container kind, `entry.container_image.as_deref()` picks
+        // the per-worker image tag (or `None` → default-image cached slot).
+        // Cost: Arc::clone (refcount bump, nanoseconds) for the cached
+        // paths, or a fresh Arc::new(MacosContainer::with_image) for
+        // per-worker images (still cheap — String + Arc).
+        let backend = self
+            .sandboxes
+            .resolve(entry.sandbox_backend, entry.container_image.as_deref());
         let worker = spawn_worker(backend.as_ref(), &spec)?;
         Ok(WorkerHandle::single_use(worker))
     }
@@ -305,8 +311,19 @@ impl WorkerLifecycleManager for IdleTimeoutLifecycle {
         // Resolve per-acquire: cold-fill paths pick up the right backend
         // for the entry. The warm cache below in `acquire_impl` is keyed
         // by tool name, so a warm worker spawned under one backend isn't
-        // reused for a different tool with a different backend.
-        let backend = self.sandboxes.resolve(entry.sandbox_backend);
+        // reused for a different tool with a different backend. The
+        // `entry.container_image.as_deref()` arg drives per-worker image
+        // selection for the Container kind (see SandboxBackends::resolve
+        // docs). Note: the warm-cache key does NOT include the image
+        // tag — a runtime `container_image` swap on the same tool name
+        // would not invalidate the warm slot. Today this is safe because
+        // image tags are baked into the `ToolEntry` at daemon startup
+        // and a restart flushes the WarmRegistry; if a future
+        // operator-driven live-reconfigure path is added, the warm-cache
+        // key must be widened to include the image tag.
+        let backend = self
+            .sandboxes
+            .resolve(entry.sandbox_backend, entry.container_image.as_deref());
         super::idle_timeout::acquire_impl(
             backend.as_ref(),
             self.backoff,
@@ -345,6 +362,7 @@ mod tests {
             wall_clock_ms: None,
             lifecycle: Lifecycle::SingleUse,
             sandbox_backend: None,
+            container_image: None,
         };
         let r = mgr.acquire("test-tool", &entry).await;
         assert!(r.is_err(), "must return Err on wiring bug");
@@ -417,6 +435,7 @@ mod tests {
             wall_clock_ms: None,
             lifecycle: Lifecycle::SingleUse,
             sandbox_backend: Some(SandboxBackendKind::Container),
+            container_image: None,
         };
         let _ = mgr.acquire("test", &entry_container).await;
         assert_eq!(
@@ -508,6 +527,7 @@ mod tests {
             wall_clock_ms: None,
             lifecycle,
             sandbox_backend: Some(SandboxBackendKind::Container),
+            container_image: None,
         };
         // Distinct tool name from the default-entry call below — warm
         // slots are keyed by tool name, so reusing the name would race

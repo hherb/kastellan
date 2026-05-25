@@ -110,7 +110,7 @@ pub fn clamp_memory_to_minimum(requested_mib: u64) -> ClampedMemory {
 ///
 /// The argv shape is:
 /// ```text
-/// container run --rm -i --progress none [<policy flags...>] <image> <program> <args...>
+/// container run --rm -i --init --progress none [<policy flags...>] <image> <program> <args...>
 /// ```
 ///
 /// Always-on flags:
@@ -118,6 +118,9 @@ pub fn clamp_memory_to_minimum(requested_mib: u64) -> ClampedMemory {
 ///   per-spawn posture).
 /// * `-i` — keep stdin open for JSON-RPC stdio (otherwise `container run`
 ///   closes stdin and any worker speaking JSON-RPC over stdio hangs).
+/// * `--init` — Apple `container`'s init-shim; forwards signals to the
+///   worker process and reaps zombies. Parallel to LinuxBwrap's
+///   unconditional `--as-pid-1`. Closes issue #107.
 /// * `--progress none` — suppress the `[6/6] Starting container [0s]`
 ///   progress lines that `container run` emits on stderr by default.
 ///   They don't corrupt stdout (the JSON-RPC parser only reads stdout) but
@@ -162,6 +165,14 @@ pub fn build_container_argv(
 
     argv.push("--rm".into());
     argv.push("-i".into());
+    // Always-on signal-forwarding + zombie-reaping init shim.
+    // Parallel to LinuxBwrap's unconditional `--as-pid-1` posture. For
+    // short-lived smoke containers the overhead is one extra small init
+    // process (negligible); for long-lived `IdleTimeoutLifecycle`
+    // workers (gliner-relex, future python-exec) this is load-bearing:
+    // without it, the in-VM worker inherits PID 1 and ignores SIGTERM
+    // by default. Closes issue #107.
+    argv.push("--init".into());
     argv.push("--progress".into());
     argv.push("none".into());
 
@@ -511,13 +522,14 @@ mod tests {
     }
 
     /// Always-on flags must appear regardless of policy: `--rm` (auto-remove),
-    /// `-i` (stdin open for JSON-RPC), `--progress none` (suppress noisy
-    /// stderr progress lines).
+    /// `-i` (stdin open for JSON-RPC), `--init` (signal-forwarding + zombie-reap),
+    /// `--progress none` (suppress noisy stderr progress lines).
     #[test]
-    fn argv_always_carries_rm_and_interactive_and_progress_none() {
+    fn argv_always_carries_rm_and_interactive_and_init_and_progress_none() {
         let argv = build_container_argv(&strict_policy(), DEFAULT_IMAGE, "/bin/true", &[]);
         assert!(argv.contains(&"--rm".to_string()), "missing --rm; got: {argv:?}");
         assert!(argv.contains(&"-i".to_string()), "missing -i; got: {argv:?}");
+        assert!(argv.contains(&"--init".to_string()), "missing --init; got: {argv:?}");
         // --progress none must appear as adjacent argv elements (not just both present somewhere).
         let progress_idx = argv
             .iter()
@@ -527,6 +539,20 @@ mod tests {
             argv[progress_idx + 1],
             "none",
             "--progress not followed by `none`; got: {argv:?}"
+        );
+    }
+
+    /// `--init` must appear in every container run argv: it forwards
+    /// signals (so the lifecycle manager's outer-process kill reaches the
+    /// in-VM worker) and reaps zombies (Python's multiprocessing fork). The
+    /// flag is parallel to LinuxBwrap's unconditional `--as-pid-1` posture.
+    /// Pinned by issue #107.
+    #[test]
+    fn argv_carries_init_for_signal_forwarding_and_zombie_reaping() {
+        let argv = build_container_argv(&strict_policy(), DEFAULT_IMAGE, "/bin/true", &[]);
+        assert!(
+            argv.contains(&"--init".to_string()),
+            "missing --init; got: {argv:?}"
         );
     }
 

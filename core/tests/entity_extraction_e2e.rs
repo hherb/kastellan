@@ -162,6 +162,8 @@ fn build_real_model_entry() -> Option<ToolEntry> {
         weights_dir: weights,
         model_id: "knowledgator/gliner-relex-multi-v1.0".to_string(),
         device: "auto".to_string(),
+        use_container_backend: false,
+        container_image: None,
     };
     Some(gliner_relex_entry(&env))
 }

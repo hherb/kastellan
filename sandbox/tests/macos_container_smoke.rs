@@ -31,7 +31,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hhagent_sandbox::macos_container::{MacosContainer, DEFAULT_IMAGE};
-use hhagent_sandbox::{SandboxBackend, SandboxPolicy};
+use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
 /// Skip the test if Apple `container` is unavailable on this host. Prints
 /// to stderr via `eprintln!` so `cargo test -- --nocapture` shows the
@@ -343,4 +343,48 @@ fn strict_profile_allows_writes_to_tmp_scratch() {
          stdout={stdout:?} stderr={stderr:?}"
     );
     assert_eq!(stdout.trim_end(), "greeting");
+}
+
+/// Slice 2.5 (Issue #107 follow-up): `--init` is always-on in
+/// build_container_argv. This smoke verifies that the added flag
+/// doesn't break Apple `container`'s short-lived run envelope. If
+/// `--init` is rejected by an older `container` build, this test
+/// fails loudly instead of letting the broken argv ship.
+#[test]
+fn macos_container_argv_with_init_runs_alpine_cleanly() {
+    if skip_if_no_container() {
+        return;
+    }
+    let backend = MacosContainer::new();  // default image = alpine:3.20
+    let policy = SandboxPolicy {
+        // Minimal policy: just enough so --init has something to wrap
+        // around and the spawn returns quickly.
+        fs_read: vec![],
+        fs_write: vec![],
+        net: Net::Deny,
+        cpu_ms: 0,
+        mem_mb: 256,  // above container's 200 MiB floor; no clamp warn
+        profile: Profile::WorkerStrict,
+        cpu_quota_pct: None,
+        tasks_max: None,
+        env: vec![],
+    };
+    let mut child = match backend.spawn_under_policy(
+        &policy,
+        "/bin/sh",
+        &["-c", "echo init-ok"],
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("\n[SKIP] alpine:3.20 image likely missing: {e}\n");
+            return;
+        }
+    };
+    let stderr = read_to_string(&mut child.stderr);
+    let status = child.wait().expect("wait on container run");
+    assert!(
+        status.success(),
+        "container run [policy flags] --init alpine:3.20 /bin/sh -c 'echo init-ok' must exit 0; \
+         got {status:?}; stderr={stderr:?}"
+    );
 }
