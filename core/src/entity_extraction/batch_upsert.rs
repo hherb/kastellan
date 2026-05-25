@@ -137,6 +137,147 @@ pub(crate) fn build_entity_unnest_arrays<'a>(
     (kinds, names, name_norms, quarantines)
 }
 
+use crate::entity_extraction::EntityExtractionError;
+use crate::workers::gliner_relex::ExtractResponse;
+use hhagent_db::DbError;
+use sqlx::PgPool;
+use std::collections::HashMap;
+
+/// One row's worth of the entity batch's RETURNING clause: the
+/// (kind, name_norm) key plus the resolved id and the xmax=0
+/// inserted-vs-existed discriminator.
+type EntityUpsertResult = (String, String, i64, bool);
+
+/// Batch path: one round-trip via `unnest`. Returns a map from
+/// `(kind, name_norm)` to `(id, inserted)` that the caller re-walks in
+/// original input order to build `entity_ids: Vec<i64>` and count
+/// `n_entities_upserted_new`. Empty input → empty map, no SQL issued.
+async fn try_batch_upsert_entities(
+    pool: &PgPool,
+    deduped: &[DedupedEntity<'_>],
+) -> Result<HashMap<(String, String), (i64, bool)>, sqlx::Error> {
+    if deduped.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (kinds, names, name_norms, quarantines) = build_entity_unnest_arrays(deduped);
+    // unnest($1::text[], $2::text[], $3::text[], $4::bool[]) builds N
+    // rows; ON CONFLICT DO UPDATE SET name_norm = entities.name_norm is
+    // the load-bearing no-op that preserves operator-approved quarantine
+    // state (pinned by upsert_batch_preserves_operator_unquarantine_decision
+    // in Task 7). RETURNING includes kind + name_norm so the caller can
+    // map results back to input position without an ORDINALITY CTE.
+    let rows: Vec<EntityUpsertResult> = sqlx::query_as(
+        "INSERT INTO entities (kind, name, name_norm, quarantine) \
+         SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::bool[]) \
+         ON CONFLICT (kind, name_norm) DO UPDATE \
+           SET name_norm = entities.name_norm \
+         RETURNING kind, name_norm, id, (xmax = 0) AS inserted",
+    )
+    .bind(&kinds)
+    .bind(&names)
+    .bind(&name_norms)
+    .bind(&quarantines)
+    .fetch_all(pool)
+    .await?;
+    let mut map = HashMap::with_capacity(rows.len());
+    for (kind, name_norm, id, inserted) in rows {
+        map.insert((kind, name_norm), (id, inserted));
+    }
+    Ok(map)
+}
+
+/// Per-row fallback: walks deduped entities, runs one Layer A statement
+/// per row, wraps every error via `format_per_row_entity_error` so the
+/// caller's error message identifies the failing entity by kind +
+/// name_norm. First-failure-aborts (same posture as today's Layer A).
+async fn per_row_upsert_entities(
+    pool: &PgPool,
+    deduped: &[DedupedEntity<'_>],
+) -> Result<HashMap<(String, String), (i64, bool)>, EntityExtractionError> {
+    let mut map = HashMap::with_capacity(deduped.len());
+    for d in deduped {
+        let (id, inserted): (i64, bool) = sqlx::query_as(
+            "INSERT INTO entities (kind, name, name_norm, quarantine) \
+             VALUES ($1, $2, $3, TRUE) \
+             ON CONFLICT (kind, name_norm) DO UPDATE \
+               SET name_norm = entities.name_norm \
+             RETURNING id, (xmax = 0) AS inserted",
+        )
+        .bind(d.label)
+        .bind(d.text)
+        .bind(&d.name_norm)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            DbError::Query(format_per_row_entity_error(d.label, &d.name_norm, &e))
+        })?;
+        map.insert((d.label.to_string(), d.name_norm.clone()), (id, inserted));
+    }
+    Ok(map)
+}
+
+/// Public Layer B entry point. Two-phase dispatch:
+///   Phase 1 (entities): try batch, on SQLSTATE 23 fall back to per-row
+///                       attribution; any other error propagates.
+///   Phase 2 (relations): TODO Task 9 — currently delegates to the
+///                       legacy per-row relation loop in
+///                       gliner_relex.rs (lives at module scope via
+///                       crate::entity_extraction::gliner_relex::
+///                       upsert_relations_per_row_legacy).
+///
+/// Re-walks `merged.entities` in original input order to populate
+/// `entity_ids: Vec<i64>` from the phase-1 map. `n_entities_upserted_new`
+/// counts unique-key first-time inserts (a duplicate in input shares an
+/// id with its sibling, so the duplicate does NOT double-count).
+pub async fn upsert_entities_and_relations(
+    pool: &PgPool,
+    merged: &ExtractResponse,
+) -> Result<crate::entity_extraction::gliner_relex::UpsertOutcome, EntityExtractionError> {
+    // Phase 1: entity upsert with fallback.
+    let deduped = dedup_entity_inputs(&merged.entities);
+    let upsert_map = match try_batch_upsert_entities(pool, &deduped).await {
+        Ok(m) => m,
+        Err(e) if is_constraint_violation(&e) => {
+            per_row_upsert_entities(pool, &deduped).await?
+        }
+        Err(e) => {
+            return Err(EntityExtractionError::Db(DbError::Query(format!(
+                "batch upsert entities: {e}"
+            ))));
+        }
+    };
+
+    // Re-walk merged.entities in original input order. Same-key duplicates
+    // resolve to the same id (matches Layer A); the "new" counter only
+    // fires once per unique (kind, name_norm) — pinned by Task 6's
+    // dedup test.
+    let mut entity_ids = Vec::with_capacity(merged.entities.len());
+    let mut counted_new = std::collections::HashSet::<(String, String)>::new();
+    let mut n_new: u32 = 0;
+    for ent in &merged.entities {
+        let key = (ent.label.clone(), normalize_entity_name(&ent.text));
+        let (id, inserted) = upsert_map
+            .get(&key)
+            .copied()
+            .expect("dedup invariant: every input entity is in the upsert_map");
+        entity_ids.push(id);
+        if inserted && counted_new.insert(key) {
+            n_new += 1;
+        }
+    }
+
+    // Phase 2 placeholder: delegate to legacy per-row relation loop for
+    // now. Task 9 replaces this with the batch + fallback path.
+    let n_relations_inserted = crate::entity_extraction::gliner_relex::
+        upsert_relations_per_row_legacy(pool, merged, &upsert_map).await?;
+
+    Ok(crate::entity_extraction::gliner_relex::UpsertOutcome {
+        entity_ids,
+        n_entities_upserted_new: n_new,
+        n_relations_inserted,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -626,3 +626,50 @@ async fn extractor_chunking_path_against_real_worker() {
 
     pool.close().await;
 }
+
+/// Layer B happy-path regression pin: a fresh batch of N=5 unique
+/// entities through the batch path produces the same UpsertOutcome
+/// shape as Layer A would have (entity_ids in order, n_new = 5,
+/// n_relations_inserted = 0).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_happy_path_returns_same_outcome_shape_as_layer_a() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-happy").await else {
+        return;
+    };
+
+    // 5 unique entities, no triples — pure entity-batch exercise.
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(),   label: "person".into(),       start: 0, end: 5,  score: 0.99 },
+            Entity { text: "Beta".into(),    label: "organization".into(), start: 0, end: 4,  score: 0.99 },
+            Entity { text: "Gamma".into(),   label: "person".into(),       start: 0, end: 5,  score: 0.99 },
+            Entity { text: "Delta".into(),   label: "place".into(),        start: 0, end: 5,  score: 0.99 },
+            Entity { text: "Epsilon".into(), label: "person".into(),       start: 0, end: 7,  score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let out = upsert_entities_and_relations(&pool, &merged)
+        .await
+        .expect("batch upsert should succeed on fresh batch");
+
+    assert_eq!(out.entity_ids.len(), 5, "one id per input entity");
+    assert_eq!(out.n_entities_upserted_new, 5, "every entity is new");
+    assert_eq!(out.n_relations_inserted, 0, "no triples → no relations");
+
+    // Verify each id round-trips to the expected (kind, name) pair via
+    // a SELECT. This is the load-bearing regression pin for the
+    // dispatcher: if try_batch_upsert returns ids in a different
+    // order than the input, this assertion fails.
+    for (idx, ent) in merged.entities.iter().enumerate() {
+        let (kind, name): (String, String) =
+            sqlx::query_as("SELECT kind, name FROM entities WHERE id = $1")
+                .bind(out.entity_ids[idx])
+                .fetch_one(&pool)
+                .await
+                .expect("SELECT round-trip");
+        assert_eq!(&kind, &ent.label, "entity_ids[{idx}] kind mismatch");
+        assert_eq!(&name, &ent.text, "entity_ids[{idx}] name mismatch");
+    }
+
+    pool.close().await;
+}
