@@ -288,6 +288,26 @@ pub fn build_container_argv(
     argv
 }
 
+/// Build the argv for `container image inspect <tag>` (issue #120).
+///
+/// Used by [`MacosContainer::probe_image`] to check whether a tag is
+/// present in the local image store. Pure function so the argv shape
+/// can be pinned by unit tests separately from the spawn.
+///
+/// The shape is always exactly `["container", "image", "inspect", <tag>]`
+/// — no flags. `container image inspect` exits non-zero on absent
+/// images, which is the load-bearing signal here; we don't read its
+/// stdout (the verbose image-manifest JSON is irrelevant for a
+/// presence check).
+pub fn build_image_inspect_argv(image_tag: &str) -> Vec<String> {
+    vec![
+        "container".into(),
+        "image".into(),
+        "inspect".into(),
+        image_tag.into(),
+    ]
+}
+
 /// Shell out to Apple `container` for sandboxing. Holds the image tag the
 /// container is run inside; default is [`DEFAULT_IMAGE`] (`alpine:3.20`)
 /// for ad-hoc usage and Slice 1's smoke test, but per-worker callers (Slice
@@ -322,6 +342,61 @@ impl MacosContainer {
     /// Exposed for test assertions and operator-facing diagnostics.
     pub fn image(&self) -> &str {
         &self.image
+    }
+
+    /// Check that a specific image tag is present in the local image store
+    /// (issue #120). Returns `Ok(())` if `container image inspect <tag>`
+    /// exits zero; `Err(SandboxError::Backend)` otherwise — with an
+    /// operator-facing diagnostic suggesting the worker's build-image
+    /// helper.
+    ///
+    /// Mechanism: `container image inspect <tag>` exits non-zero when the
+    /// image is absent. Single targeted call — no `container image list`
+    /// parsing, so the per-line substring-matching footgun (`devbox`
+    /// matching `dev`) is structurally impossible here.
+    ///
+    /// Spawn cost: one short-lived process per call. Intended for one-shot
+    /// callers (e.g. daemon-startup health checks that walk every
+    /// registered `ToolEntry.container_image` once); NOT for hot paths.
+    /// Per-call cost on Apple `container` 0.12.3 measures at ~30 ms when
+    /// the image IS present (the absent-image error path is slightly
+    /// slower).
+    pub fn probe_image(image_tag: &str) -> Result<(), SandboxError> {
+        // Reject empty tag up-front rather than spawning `container image
+        // inspect ""` and relying on the CLI to error out with an
+        // unspecified diagnostic. A `ToolEntry.container_image =
+        // Some("")` is a caller bug (the resolver substitutes
+        // `DEFAULT_IMAGE` only for `None`, not for `Some("")`); fail loud
+        // with an operator-actionable diagnostic.
+        if image_tag.is_empty() {
+            return Err(SandboxError::Backend(
+                "probe_image: empty image_tag (likely a misconfigured \
+                 ToolEntry.container_image — use None to fall back to DEFAULT_IMAGE \
+                 rather than Some(\"\"))"
+                    .into(),
+            ));
+        }
+        let argv = build_image_inspect_argv(image_tag);
+        let output = Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| {
+                SandboxError::Backend(format!(
+                    "could not spawn `container image inspect {image_tag}`: {e}"
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(SandboxError::Backend(format!(
+                "image `{image_tag}` not present in local store \
+                 (build it with the worker's `scripts/workers/<worker>/build-image.sh` \
+                 or pull manually with `container image pull {image_tag}`): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
     }
 
     /// Check that Apple `container` is installed and the system service is
@@ -837,5 +912,72 @@ mod tests {
     fn default_constructor_uses_default_image() {
         let backend = MacosContainer::new();
         assert_eq!(backend.image(), DEFAULT_IMAGE);
+    }
+
+    // ---------- build_image_inspect_argv (issue #120) ----------
+
+    /// Pins the exact argv shape: `["container", "image", "inspect", <tag>]`.
+    /// Any change here is operator-visible (it changes the subprocess we
+    /// spawn), so a deliberate test update is the right friction.
+    #[test]
+    fn build_image_inspect_argv_shape() {
+        let argv = build_image_inspect_argv("hhagent/gliner-relex:dev");
+        assert_eq!(
+            argv,
+            vec!["container", "image", "inspect", "hhagent/gliner-relex:dev"]
+        );
+    }
+
+    /// Tag is passed verbatim — no quoting, no escaping, no munging. The
+    /// shell-injection footgun is structurally impossible because we use
+    /// `Command::args(...)` (not a shell), but pinning the verbatim pass
+    /// keeps the contract obvious.
+    #[test]
+    fn build_image_inspect_argv_passes_tag_verbatim() {
+        for tag in [
+            "alpine:3.20",
+            "ghcr.io/foo/bar:v1.2.3",
+            "tag-with-dashes",
+            "tag_with_underscores",
+            "registry.example.com:5000/myimg:dev",
+        ] {
+            let argv = build_image_inspect_argv(tag);
+            assert_eq!(argv[3], tag, "tag mangled for input {tag:?}");
+            assert_eq!(argv.len(), 4, "argv length drifted for input {tag:?}");
+        }
+    }
+
+    /// Empty tag still produces a 4-element argv (the subprocess will fail
+    /// loudly at the binary level, which is the right place for that
+    /// diagnostic — not here).
+    #[test]
+    fn build_image_inspect_argv_empty_tag_is_passthrough() {
+        let argv = build_image_inspect_argv("");
+        assert_eq!(argv, vec!["container", "image", "inspect", ""]);
+    }
+
+    // ---------- probe_image guards (post-review fixup) ----------
+
+    /// `probe_image("")` short-circuits before spawning with an operator-
+    /// actionable diagnostic. The pure argv builder still passes empty
+    /// strings through (`build_image_inspect_argv_empty_tag_is_passthrough`);
+    /// the spawn-path is where the guard belongs because that's where
+    /// the failure mode is operator-visible.
+    #[test]
+    fn probe_image_rejects_empty_tag_upfront() {
+        let err =
+            MacosContainer::probe_image("").expect_err("empty tag must error before spawn");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("empty image_tag"),
+            "expected empty-tag diagnostic, got: {msg}"
+        );
+        // Hint at the correct fix — caller should use None rather than
+        // Some(""). The exact wording is allowed to drift; we just
+        // pin the operator-actionable cue.
+        assert!(
+            msg.contains("None"),
+            "expected None-fallback hint in diagnostic, got: {msg}"
+        );
     }
 }

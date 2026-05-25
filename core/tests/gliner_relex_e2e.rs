@@ -104,34 +104,20 @@ fn skip_if_no_container() -> bool {
 /// Probe whether `image_tag` is present in the local container image
 /// store. Skip-as-pass when it's not — operator has to run
 /// `scripts/workers/gliner-relex/build-image.sh` first.
+///
+/// Delegates to the production `MacosContainer::probe_image` helper
+/// (issue #122, follow-on to #120). The previous implementation parsed
+/// `container image list` stdout per-line with a substring match that
+/// could false-positive on tag collisions (`devbox` matching `dev`,
+/// `v10` matching `v1`); switching to `container image inspect <tag>`
+/// — a single targeted call with exit-code-driven success — makes that
+/// class of bug structurally impossible.
 #[cfg(target_os = "macos")]
 fn skip_if_image_missing(image_tag: &str) -> bool {
-    use std::process::Command;
-    let output = Command::new("container")
-        .args(["image", "list"])
-        .output();
-    let Ok(out) = output else {
-        eprintln!("\n[SKIP] failed to spawn 'container image list'\n");
-        return true;
-    };
-    if !out.status.success() {
+    use hhagent_sandbox::macos_container::MacosContainer;
+    if let Err(e) = MacosContainer::probe_image(image_tag) {
         eprintln!(
-            "\n[SKIP] 'container image list' exited non-zero: {:?}\n",
-            out.status
-        );
-        return true;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let (repo, tag) = image_tag.split_once(':').unwrap_or((image_tag, "latest"));
-    // Per-line matching: a row of `container image list` is "repo  tag  digest..."
-    // — match a line whose trimmed start is `repo` AND which contains `tag`.
-    // Avoids false positives like `repo:dev-old` matching `tag=dev` via raw substring.
-    let present = stdout
-        .lines()
-        .any(|l| l.trim().starts_with(repo) && l.contains(tag));
-    if !present {
-        eprintln!(
-            "\n[SKIP] {image_tag} image not present — run scripts/workers/gliner-relex/build-image.sh\n"
+            "\n[SKIP] {image_tag} image not present — run scripts/workers/gliner-relex/build-image.sh: {e}\n"
         );
         return true;
     }

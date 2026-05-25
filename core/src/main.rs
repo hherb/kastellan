@@ -133,6 +133,36 @@ async fn main() -> Result<()> {
     // (Phase 3).
     let tool_registry = Arc::new(build_tool_registry(&pool, gliner_relex_entry.clone()).await?);
 
+    // Container-image health check (issue #120). Walks every registered
+    // ToolEntry, collects each distinct `container_image` tag owned by
+    // a Container-backed worker, and probes each tag via `container
+    // image inspect`. A missing image yields one `tracing::warn!` line
+    // per affected tag (naming the affected tools) and the daemon
+    // continues bring-up — the worker's first dispatch will fail via
+    // the normal spawn-error path, but the operator was already
+    // warned at boot with an actionable diagnostic ("run
+    // scripts/workers/<worker>/build-image.sh").
+    //
+    // macOS-only because the `Container` variant of
+    // `SandboxBackendKind` is cfg-gated to darwin; on Linux the walk
+    // is structurally a no-op (cf.
+    // `sandbox_health::collect_container_image_targets` Linux stub).
+    // The bare-feature inversion (cfg on call site, not on module) is
+    // deliberate — the pure target-collection helper compiles
+    // cross-platform so unit tests still exercise the bucket-sort and
+    // dedup logic on Linux runners.
+    #[cfg(target_os = "macos")]
+    {
+        // The return value is the (image_tag, probe_result) list, kept on
+        // the function signature so integration tests can assert on probe
+        // outcomes directly. Production daemon doesn't need it — the
+        // side-effect contract is the tracing::info!/warn! line per tag
+        // emitted from inside the function. Discard explicitly.
+        let _probe_results = hhagent_core::sandbox_health::probe_registered_container_images(
+            tool_registry.entries(),
+        );
+    }
+
     // Entity extractor (v2). When gliner-relex is configured, builds a
     // typed Client over the shared lifecycle Arc + worker manifest and
     // returns GlinerRelexExtractor. When the worker isn't configured
