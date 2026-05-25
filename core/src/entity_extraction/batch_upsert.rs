@@ -52,6 +52,34 @@ pub(crate) fn dedup_entity_inputs<'a>(entities: &'a [Entity]) -> Vec<DedupedEnti
     deduped
 }
 
+/// Build the four parallel arrays the entity-batch unnest SQL expects.
+/// Arrays are returned in the order:
+///   (kinds, names, name_norms, quarantines)
+/// All arrays have length `deduped.len()`. The quarantine array is
+/// uniformly TRUE — new rows land quarantined; the ON CONFLICT no-op
+/// (SET name_norm = entities.name_norm) preserves the operator's prior
+/// approval on conflict-hit rows.
+///
+/// Returns `&'a str` slices into the borrowed DedupedEntity for `kinds`
+/// and `names` (zero-allocation); `name_norms` is owned (already
+/// normalized during dedup); `quarantines` is owned (uniform Vec).
+pub(crate) fn build_entity_unnest_arrays<'a>(
+    deduped: &'a [DedupedEntity<'a>],
+) -> (Vec<&'a str>, Vec<&'a str>, Vec<String>, Vec<bool>) {
+    let n = deduped.len();
+    let mut kinds = Vec::with_capacity(n);
+    let mut names = Vec::with_capacity(n);
+    let mut name_norms = Vec::with_capacity(n);
+    let mut quarantines = Vec::with_capacity(n);
+    for d in deduped {
+        kinds.push(d.label);
+        names.push(d.text);
+        name_norms.push(d.name_norm.clone());
+        quarantines.push(true);
+    }
+    (kinds, names, name_norms, quarantines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +135,36 @@ mod tests {
         let input: Vec<Entity> = Vec::new();
         let deduped = dedup_entity_inputs(&input);
         assert!(deduped.is_empty());
+    }
+
+    #[test]
+    fn build_entity_unnest_arrays_emits_parallel_arrays_of_equal_length() {
+        let input = vec![
+            make_entity("Alpha", "person"),
+            make_entity("Beta", "organization"),
+            make_entity("Gamma", "person"),
+        ];
+        let deduped = dedup_entity_inputs(&input);
+        let (kinds, names, name_norms, quarantines) = build_entity_unnest_arrays(&deduped);
+        assert_eq!(kinds.len(), 3);
+        assert_eq!(names.len(), 3);
+        assert_eq!(name_norms.len(), 3);
+        assert_eq!(quarantines.len(), 3);
+        assert_eq!(kinds, vec!["person", "organization", "person"]);
+        assert_eq!(names, vec!["Alpha", "Beta", "Gamma"]);
+        assert_eq!(name_norms, vec!["alpha", "beta", "gamma"]);
+        // Every new row lands quarantined; ON CONFLICT no-op preserves
+        // operator's prior approval on conflict-hit rows.
+        assert_eq!(quarantines, vec![true, true, true]);
+    }
+
+    #[test]
+    fn build_entity_unnest_arrays_handles_empty_input() {
+        let deduped: Vec<DedupedEntity<'_>> = Vec::new();
+        let (kinds, names, name_norms, quarantines) = build_entity_unnest_arrays(&deduped);
+        assert!(kinds.is_empty());
+        assert!(names.is_empty());
+        assert!(name_norms.is_empty());
+        assert!(quarantines.is_empty());
     }
 }
