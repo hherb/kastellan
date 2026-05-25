@@ -747,3 +747,70 @@ async fn upsert_batch_dedup_input_returns_same_id_for_duplicates() {
 
     pool.close().await;
 }
+
+/// Layer B batch path must preserve operator-approved (quarantine=FALSE)
+/// entities just like Layer A. This is the load-bearing invariant the
+/// no-op `SET name_norm = entities.name_norm` clause guarantees: ON
+/// CONFLICT must not touch the quarantine column. Pinned for N=3 with
+/// the approved entity in the middle position (Layer A's existing pin
+/// uses N=1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_preserves_operator_unquarantine_decision() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-quar").await else {
+        return;
+    };
+
+    // First pass: insert 3 entities. All land quarantined.
+    let merged1 = ExtractResponse {
+        entities: vec![
+            Entity { text: "Alpha".into(),    label: "person".into(), start: 0, end: 5, score: 0.99 },
+            Entity { text: "Dr Smith".into(), label: "person".into(), start: 0, end: 8, score: 0.99 },
+            Entity { text: "Gamma".into(),    label: "person".into(), start: 0, end: 5, score: 0.99 },
+        ],
+        triples: vec![],
+    };
+    let out1 = upsert_entities_and_relations(&pool, &merged1).await.unwrap();
+    assert_eq!(out1.entity_ids.len(), 3);
+    let smith_id = out1.entity_ids[1];
+
+    // Operator approves the middle entity via the quarantine-review CLI
+    // (simulated as a direct UPDATE).
+    sqlx::query("UPDATE entities SET quarantine = FALSE WHERE id = $1")
+        .bind(smith_id)
+        .execute(&pool)
+        .await
+        .expect("operator approve simulation");
+
+    // Second pass: re-extract — all three hit ON CONFLICT through the
+    // batch path.
+    let out2 = upsert_entities_and_relations(&pool, &merged1).await.unwrap();
+    assert_eq!(out2.entity_ids, out1.entity_ids, "same ids returned");
+    assert_eq!(out2.n_entities_upserted_new, 0, "no new rows on rerun");
+
+    // Load-bearing assertion: the batch path's ON CONFLICT DO UPDATE
+    // SET name_norm = entities.name_norm must NOT have clobbered the
+    // operator's approval.
+    let quarantine_after: bool =
+        sqlx::query_scalar("SELECT quarantine FROM entities WHERE id = $1")
+            .bind(smith_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back quarantine");
+    assert!(
+        !quarantine_after,
+        "Layer B batch path must preserve operator unquarantine decision (quarantine=FALSE)"
+    );
+
+    // The sibling entities (Alpha, Gamma) should still be quarantined —
+    // operator only approved Smith.
+    for sibling_id in [out1.entity_ids[0], out1.entity_ids[2]] {
+        let q: bool = sqlx::query_scalar("SELECT quarantine FROM entities WHERE id = $1")
+            .bind(sibling_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(q, "sibling entity should remain quarantined (operator only approved Smith)");
+    }
+
+    pool.close().await;
+}
