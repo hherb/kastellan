@@ -186,7 +186,6 @@ pub async fn upsert_entities_and_relations(
     crate::entity_extraction::batch_upsert::upsert_entities_and_relations(pool, merged).await
 }
 
-
 use crate::entity_extraction::{EntityExtractor, EntityExtractionError, EntitySeeds, SeedSource};
 use crate::workers::gliner_relex::Client;
 use async_trait::async_trait;

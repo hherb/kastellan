@@ -1001,3 +1001,29 @@ async fn upsert_batch_falls_back_to_per_row_on_relation_kind_fk_violation() {
 
     pool.close().await;
 }
+
+/// Empty-input pin: dispatcher short-circuits both phase 1 (entities) and
+/// phase 2 (relations) when their respective input slices are empty —
+/// no SQL is issued, the outcome is zero across the board. Pins the
+/// `if deduped.is_empty()` / `if resolved.is_empty()` early-returns in
+/// `try_batch_upsert_entities` / `try_batch_upsert_relations`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_empty_input_returns_zero_outcome() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-empty").await else {
+        return;
+    };
+
+    let merged = ExtractResponse {
+        entities: vec![],
+        triples: vec![],
+    };
+    let out = upsert_entities_and_relations(&pool, &merged)
+        .await
+        .expect("empty input should succeed without issuing any SQL");
+
+    assert!(out.entity_ids.is_empty(), "no entity ids for empty input");
+    assert_eq!(out.n_entities_upserted_new, 0);
+    assert_eq!(out.n_relations_inserted, 0);
+
+    pool.close().await;
+}

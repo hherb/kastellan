@@ -24,10 +24,13 @@ pub(crate) struct DedupedEntity<'a> {
     pub name_norm: String,
 }
 
-/// Deduplicate input entities on `(label, name_norm)`. Returns the unique
-/// entries in first-seen order (so the display form of the first
-/// occurrence wins, matching the per-row upsert's first-writer-wins on
-/// `entities.name`).
+/// Deduplicate input entities on `(label, name_norm)`. Returns:
+///   - `Vec<DedupedEntity>`: unique entries in first-seen order (so the
+///     display form of the first occurrence wins, matching the per-row
+///     upsert's first-writer-wins on `entities.name`).
+///   - `Vec<String>`: `name_norm` per ORIGINAL input position (parallel
+///     to `entities`). The dispatcher uses this for its post-upsert
+///     re-walk so it doesn't have to normalize each input a second time.
 ///
 /// Required because PostgreSQL's `INSERT ... ON CONFLICT DO UPDATE`
 /// rejects duplicate conflict targets within a single statement with
@@ -35,11 +38,15 @@ pub(crate) struct DedupedEntity<'a> {
 /// row a second time`. Deduping at the Rust layer keeps the SQL simple
 /// and matches the per-row loop's observable behaviour (same id returned
 /// for duplicate inputs).
-pub(crate) fn dedup_entity_inputs<'a>(entities: &'a [Entity]) -> Vec<DedupedEntity<'a>> {
+pub(crate) fn dedup_entity_inputs<'a>(
+    entities: &'a [Entity],
+) -> (Vec<DedupedEntity<'a>>, Vec<String>) {
     let mut seen = std::collections::HashSet::<(String, String)>::new();
     let mut deduped = Vec::with_capacity(entities.len());
+    let mut name_norms_by_input = Vec::with_capacity(entities.len());
     for ent in entities {
         let name_norm = normalize_entity_name(&ent.text);
+        name_norms_by_input.push(name_norm.clone());
         let key = (ent.label.clone(), name_norm.clone());
         if seen.insert(key) {
             deduped.push(DedupedEntity {
@@ -49,7 +56,7 @@ pub(crate) fn dedup_entity_inputs<'a>(entities: &'a [Entity]) -> Vec<DedupedEnti
             });
         }
     }
-    deduped
+    (deduped, name_norms_by_input)
 }
 
 /// True iff the SQLSTATE code names a constraint violation (PostgreSQL
@@ -66,8 +73,11 @@ pub(crate) fn dedup_entity_inputs<'a>(entities: &'a [Entity]) -> Vec<DedupedEnti
 /// path will identify the failing row. Other classes (22 data exception,
 /// 42 syntax, 08 connection failure, etc.) won't benefit from per-row
 /// retry and should propagate immediately.
+///
+/// PostgreSQL SQLSTATE codes are always 5 characters; the length guard
+/// keeps truncated/short codes from accidentally classifying.
 pub(crate) fn is_constraint_violation_code(code: &str) -> bool {
-    code.starts_with("23")
+    code.len() == 5 && code.starts_with("23")
 }
 
 /// True iff `err` is `sqlx::Error::Database` carrying a SQLSTATE class 23
@@ -190,6 +200,11 @@ async fn try_batch_upsert_entities(
 /// per row, wraps every error via `format_per_row_entity_error` so the
 /// caller's error message identifies the failing entity by kind +
 /// name_norm. First-failure-aborts (same posture as today's Layer A).
+///
+/// Commit semantics: each per-row statement auto-commits — earlier rows
+/// in the deduped vec are persisted before a later row's failure
+/// surfaces. Matches Layer A's per-row loop. Idempotent re-runs are
+/// safe because the SQL is ON CONFLICT DO UPDATE on `(kind, name_norm)`.
 async fn per_row_upsert_entities(
     pool: &PgPool,
     deduped: &[DedupedEntity<'_>],
@@ -234,7 +249,10 @@ pub async fn upsert_entities_and_relations(
     merged: &ExtractResponse,
 ) -> Result<crate::entity_extraction::gliner_relex::UpsertOutcome, EntityExtractionError> {
     // Phase 1: entity upsert with fallback.
-    let deduped = dedup_entity_inputs(&merged.entities);
+    // dedup_entity_inputs returns the deduped vec PLUS a Vec<String> of
+    // name_norms parallel to merged.entities — re-used by the post-upsert
+    // re-walk below so we don't normalize each input a second time.
+    let (deduped, name_norms_by_input) = dedup_entity_inputs(&merged.entities);
     let upsert_map = match try_batch_upsert_entities(pool, &deduped).await {
         Ok(m) => m,
         Err(e) if is_constraint_violation(&e) => {
@@ -254,8 +272,8 @@ pub async fn upsert_entities_and_relations(
     let mut entity_ids = Vec::with_capacity(merged.entities.len());
     let mut counted_new = std::collections::HashSet::<(String, String)>::new();
     let mut n_new: u32 = 0;
-    for ent in &merged.entities {
-        let key = (ent.label.clone(), normalize_entity_name(&ent.text));
+    for (ent, name_norm) in merged.entities.iter().zip(name_norms_by_input.iter()) {
+        let key = (ent.label.clone(), name_norm.clone());
         let (id, inserted) = upsert_map
             .get(&key)
             .copied()
@@ -371,6 +389,13 @@ async fn try_batch_upsert_relations(
 /// Layer A WHERE NOT EXISTS SQL per row, wraps each error via
 /// format_per_row_relation_error so the caller's error message
 /// identifies the failing relation by (src_id, dst_id, kind).
+///
+/// Commit semantics: each per-row INSERT auto-commits — earlier rows
+/// in the resolved vec are persisted before a later row's failure
+/// surfaces. Re-runs are safe because the SQL is WHERE NOT EXISTS
+/// (application-level dedup on `(src_id, dst_id, kind)`). Entities
+/// inserted in phase 1 are not rolled back when phase 2 fails — phases
+/// are independent (matches the pre-Layer-B per-row loop).
 async fn per_row_upsert_relations(
     pool: &PgPool,
     resolved: &[ResolvedTriple],
@@ -426,12 +451,15 @@ mod tests {
             make_entity("alpha", "person"),
             make_entity("Beta", "person"),
         ];
-        let deduped = dedup_entity_inputs(&input);
+        let (deduped, name_norms_by_input) = dedup_entity_inputs(&input);
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[0].text, "Alpha");
         assert_eq!(deduped[0].name_norm, "alpha");
         assert_eq!(deduped[1].text, "Beta");
         assert_eq!(deduped[1].name_norm, "beta");
+        // Parallel name_norms vec carries one entry per ORIGINAL input,
+        // even duplicates — the dispatcher's re-walk depends on this.
+        assert_eq!(name_norms_by_input, vec!["alpha", "alpha", "beta"]);
     }
 
     #[test]
@@ -442,7 +470,7 @@ mod tests {
             make_entity("Smith", "person"),
             make_entity("Smith", "organization"),
         ];
-        let deduped = dedup_entity_inputs(&input);
+        let (deduped, _) = dedup_entity_inputs(&input);
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[0].label, "person");
         assert_eq!(deduped[1].label, "organization");
@@ -452,8 +480,9 @@ mod tests {
     fn dedup_entity_inputs_returns_empty_for_empty_input() {
         // Empty input → empty output. No SQL will be issued downstream.
         let input: Vec<Entity> = Vec::new();
-        let deduped = dedup_entity_inputs(&input);
+        let (deduped, name_norms_by_input) = dedup_entity_inputs(&input);
         assert!(deduped.is_empty());
+        assert!(name_norms_by_input.is_empty());
     }
 
     #[test]
@@ -463,7 +492,7 @@ mod tests {
             make_entity("Beta", "organization"),
             make_entity("Gamma", "person"),
         ];
-        let deduped = dedup_entity_inputs(&input);
+        let (deduped, _) = dedup_entity_inputs(&input);
         let (kinds, names, name_norms, quarantines) = build_entity_unnest_arrays(&deduped);
         assert_eq!(kinds.len(), 3);
         assert_eq!(names.len(), 3);
@@ -516,6 +545,19 @@ mod tests {
             assert!(
                 !is_constraint_violation_code(code),
                 "code {code} should NOT classify as constraint violation"
+            );
+        }
+    }
+
+    #[test]
+    fn is_constraint_violation_code_false_for_wrong_length() {
+        // SQLSTATE is always exactly 5 chars. A literal "23" prefix on a
+        // 2- or 4-char string is not a valid SQLSTATE and must not
+        // classify (defends against truncated/synthetic codes).
+        for code in &["23", "230", "2300", "230000", "23X05X"] {
+            assert!(
+                !is_constraint_violation_code(code),
+                "code {code:?} is not a valid 5-char SQLSTATE and should NOT classify"
             );
         }
     }
