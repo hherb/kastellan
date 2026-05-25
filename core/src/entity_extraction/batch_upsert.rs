@@ -82,6 +82,33 @@ pub(crate) fn is_constraint_violation(err: &sqlx::Error) -> bool {
     false
 }
 
+/// Format the per-row entity error message used by the fallback path.
+/// Uses `name_norm` (NFC + lowercase + whitespace-collapsed) rather than
+/// the raw user-supplied name to reduce PII leakage into error logs.
+///
+/// Example: `upsert entity (kind='person', name_norm='dr smith'): foreign key violation on entities_kind_fk`
+pub(crate) fn format_per_row_entity_error(
+    kind: &str,
+    name_norm: &str,
+    err: &sqlx::Error,
+) -> String {
+    format!("upsert entity (kind='{kind}', name_norm='{name_norm}'): {err}")
+}
+
+/// Format the per-row relation error message used by the fallback path.
+/// Uses entity ids (already-resolved BIGINTs, no name leakage) and the
+/// relation kind string.
+///
+/// Example: `insert relation (src=42, dst=43, kind='treats'): foreign key violation on relations_kind_fk`
+pub(crate) fn format_per_row_relation_error(
+    src_id: i64,
+    dst_id: i64,
+    kind: &str,
+    err: &sqlx::Error,
+) -> String {
+    format!("insert relation (src={src_id}, dst={dst_id}, kind='{kind}'): {err}")
+}
+
 /// Build the four parallel arrays the entity-batch unnest SQL expects.
 /// Arrays are returned in the order:
 ///   (kinds, names, name_norms, quarantines)
@@ -229,5 +256,30 @@ mod tests {
                 "code {code} should NOT classify as constraint violation"
             );
         }
+    }
+
+    #[test]
+    fn format_per_row_entity_error_uses_name_norm_not_raw_name() {
+        // sqlx::Error::PoolTimedOut is convenient because it Display's as
+        // a fixed string and needs no DB to construct. The actual sqlx
+        // error variant doesn't matter for this format test.
+        let err = sqlx::Error::PoolTimedOut;
+        let msg = format_per_row_entity_error("person", "dr smith", &err);
+        assert!(msg.contains("kind='person'"), "msg should contain kind: {msg}");
+        assert!(msg.contains("name_norm='dr smith'"), "msg should contain name_norm: {msg}");
+        // The raw form "Dr Smith" must NOT appear — name_norm only.
+        assert!(!msg.contains("'Dr Smith'"), "msg should NOT contain raw name: {msg}");
+        // The underlying sqlx error Display must be appended.
+        assert!(msg.contains("pool"), "msg should contain underlying error: {msg}");
+    }
+
+    #[test]
+    fn format_per_row_relation_error_contains_src_dst_kind() {
+        let err = sqlx::Error::PoolTimedOut;
+        let msg = format_per_row_relation_error(42, 43, "treats", &err);
+        assert!(msg.contains("src=42"), "msg should contain src: {msg}");
+        assert!(msg.contains("dst=43"), "msg should contain dst: {msg}");
+        assert!(msg.contains("kind='treats'"), "msg should contain kind: {msg}");
+        assert!(msg.contains("pool"), "msg should contain underlying error: {msg}");
     }
 }
