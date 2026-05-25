@@ -1,12 +1,9 @@
 //! Unit tests for the `gliner_relex` worker module.
 //!
-//! Lifted from an inline `#[cfg(test)] mod tests` block in `gliner_relex.rs`
-//! to keep the production file smaller (parent file was 1547 LOC, the
-//! second-worst 500-LOC breach in the workspace post-Item-22). The body is
-//! byte-identical to what it was inline; `use super::*` still resolves to
-//! the parent `gliner_relex` module per the Rust 2018 sibling-directory
-//! module pattern. Integration tests that hit a real PG cluster / live
-//! GLiNER worker continue to live in `core/tests/gliner_relex_e2e.rs`.
+//! `use super::*` resolves to the parent `gliner_relex` module per the
+//! Rust 2018 sibling-directory module pattern. Integration tests that hit
+//! a real PG cluster / live GLiNER worker live in
+//! `core/tests/gliner_relex_e2e.rs`.
 
 use super::*;
 
