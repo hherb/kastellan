@@ -266,16 +266,137 @@ pub async fn upsert_entities_and_relations(
         }
     }
 
-    // Phase 2 placeholder: delegate to legacy per-row relation loop for
-    // now. Task 9 replaces this with the batch + fallback path.
-    let n_relations_inserted = crate::entity_extraction::gliner_relex::
-        upsert_relations_per_row_legacy(pool, merged, &upsert_map).await?;
+    // Phase 2: relation upsert with fallback.
+    let resolved = build_resolved_triples(merged, &upsert_map);
+    let n_relations_inserted = match try_batch_upsert_relations(pool, &resolved).await {
+        Ok(n) => n,
+        Err(e) if is_constraint_violation(&e) => {
+            per_row_upsert_relations(pool, &resolved).await?
+        }
+        Err(e) => {
+            return Err(EntityExtractionError::Db(DbError::Query(format!(
+                "batch insert relations: {e}"
+            ))));
+        }
+    };
 
     Ok(crate::entity_extraction::gliner_relex::UpsertOutcome {
         entity_ids,
         n_entities_upserted_new: n_new,
         n_relations_inserted,
     })
+}
+
+/// One row's worth of phase-2 input: resolved (src_id, dst_id) plus the
+/// normalized relation kind. Built from `merged.triples` after looking
+/// up head/tail in the entity upsert map; triples referencing an
+/// unknown entity are silently skipped (matches Layer A behaviour).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedTriple {
+    pub src_id: i64,
+    pub dst_id: i64,
+    pub kind: String,
+}
+
+/// Walk `merged.triples`, look up each triple's head and tail in the
+/// entity-upsert map, normalize the relation kind, and collect surviving
+/// triples into a Vec<ResolvedTriple>. Triples where either endpoint is
+/// missing from the map are silently skipped (matches Layer A's
+/// `continue` posture).
+pub(crate) fn build_resolved_triples(
+    merged: &ExtractResponse,
+    by_key: &HashMap<(String, String), (i64, bool)>,
+) -> Vec<ResolvedTriple> {
+    let mut out = Vec::with_capacity(merged.triples.len());
+    for tri in &merged.triples {
+        let head_key = (tri.head.r#type.clone(), normalize_entity_name(&tri.head.text));
+        let tail_key = (tri.tail.r#type.clone(), normalize_entity_name(&tri.tail.text));
+        let head_id = match by_key.get(&head_key) {
+            Some((id, _)) => *id,
+            None => continue,
+        };
+        let tail_id = match by_key.get(&tail_key) {
+            Some((id, _)) => *id,
+            None => continue,
+        };
+        let kind = tri
+            .relation
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push(ResolvedTriple { src_id: head_id, dst_id: tail_id, kind });
+    }
+    out
+}
+
+/// Batch path for relations: one round-trip via `unnest`. Uses WHERE NOT
+/// EXISTS for application-level dedup (the `relations` table has no
+/// UNIQUE constraint by design — multi-edges with different timestamps
+/// are intentional per the comment in migration 0001_init.sql).
+/// Empty input → 0 rows inserted, no SQL issued.
+async fn try_batch_upsert_relations(
+    pool: &PgPool,
+    resolved: &[ResolvedTriple],
+) -> Result<u32, sqlx::Error> {
+    if resolved.is_empty() {
+        return Ok(0);
+    }
+    let srcs: Vec<i64> = resolved.iter().map(|r| r.src_id).collect();
+    let dsts: Vec<i64> = resolved.iter().map(|r| r.dst_id).collect();
+    let kinds: Vec<&str> = resolved.iter().map(|r| r.kind.as_str()).collect();
+
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "WITH input(src_id, dst_id, kind) AS ( \
+            SELECT * FROM unnest($1::bigint[], $2::bigint[], $3::text[]) \
+         ) \
+         INSERT INTO relations (src_id, dst_id, kind, attrs) \
+         SELECT i.src_id, i.dst_id, i.kind, '{}'::jsonb \
+         FROM input i \
+         WHERE NOT EXISTS ( \
+             SELECT 1 FROM relations r \
+             WHERE r.src_id = i.src_id AND r.dst_id = i.dst_id AND r.kind = i.kind \
+         ) \
+         RETURNING id",
+    )
+    .bind(&srcs)
+    .bind(&dsts)
+    .bind(&kinds)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.len() as u32)
+}
+
+/// Per-row fallback for relations: walks resolved triples, runs today's
+/// Layer A WHERE NOT EXISTS SQL per row, wraps each error via
+/// format_per_row_relation_error so the caller's error message
+/// identifies the failing relation by (src_id, dst_id, kind).
+async fn per_row_upsert_relations(
+    pool: &PgPool,
+    resolved: &[ResolvedTriple],
+) -> Result<u32, EntityExtractionError> {
+    let mut n_inserted: u32 = 0;
+    for r in resolved {
+        let n: u64 = sqlx::query(
+            "INSERT INTO relations (src_id, dst_id, kind, attrs) \
+             SELECT $1, $2, $3, '{}'::jsonb \
+             WHERE NOT EXISTS ( \
+                 SELECT 1 FROM relations \
+                 WHERE src_id = $1 AND dst_id = $2 AND kind = $3 \
+             )",
+        )
+        .bind(r.src_id)
+        .bind(r.dst_id)
+        .bind(&r.kind)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            DbError::Query(format_per_row_relation_error(r.src_id, r.dst_id, &r.kind, &e))
+        })?
+        .rows_affected();
+        n_inserted += n as u32;
+    }
+    Ok(n_inserted)
 }
 
 #[cfg(test)]

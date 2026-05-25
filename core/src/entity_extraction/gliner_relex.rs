@@ -186,60 +186,6 @@ pub async fn upsert_entities_and_relations(
     crate::entity_extraction::batch_upsert::upsert_entities_and_relations(pool, merged).await
 }
 
-/// Per-row relation upsert (Layer A path). Called from
-/// `batch_upsert::upsert_entities_and_relations` while phase-2 (relation
-/// batch) is still TODO — Task 9 will introduce a batch + fallback
-/// counterpart and this function moves into batch_upsert.rs as the
-/// fallback.
-///
-/// Returns the count of newly inserted relation rows (triples that
-/// matched WHERE NOT EXISTS).
-pub(crate) async fn upsert_relations_per_row_legacy(
-    pool: &PgPool,
-    merged: &ExtractResponse,
-    by_key: &std::collections::HashMap<(String, String), (i64, bool)>,
-) -> Result<u32, crate::entity_extraction::EntityExtractionError> {
-    let mut n_relations_inserted: u32 = 0;
-    for tri in &merged.triples {
-        let head_key = (tri.head.r#type.clone(), normalize_entity_name(&tri.head.text));
-        let tail_key = (tri.tail.r#type.clone(), normalize_entity_name(&tri.tail.text));
-        let head_id = match by_key.get(&head_key) {
-            Some((id, _)) => *id,
-            None => continue, // triple references unknown entity — skip
-        };
-        let tail_id = match by_key.get(&tail_key) {
-            Some((id, _)) => *id,
-            None => continue,
-        };
-        let relation_norm = tri
-            .relation
-            .to_lowercase()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        // Schema allows multi-edges intentionally (0001 comment); we
-        // dedup at the application layer via WHERE NOT EXISTS to make
-        // re-extraction idempotent.
-        let n: u64 = sqlx::query(
-            "INSERT INTO relations (src_id, dst_id, kind, attrs) \
-             SELECT $1, $2, $3, '{}'::jsonb \
-             WHERE NOT EXISTS ( \
-                 SELECT 1 FROM relations \
-                 WHERE src_id = $1 AND dst_id = $2 AND kind = $3 \
-             )",
-        )
-        .bind(head_id)
-        .bind(tail_id)
-        .bind(&relation_norm)
-        .execute(pool)
-        .await
-        .map_err(|e| hhagent_db::DbError::Query(format!("insert relation: {e}")))?
-        .rows_affected();
-        n_relations_inserted += n as u32;
-    }
-    Ok(n_relations_inserted)
-}
 
 use crate::entity_extraction::{EntityExtractor, EntityExtractionError, EntitySeeds, SeedSource};
 use crate::workers::gliner_relex::Client;

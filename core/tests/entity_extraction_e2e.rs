@@ -884,3 +884,61 @@ async fn upsert_batch_falls_back_to_per_row_on_entity_kind_fk_violation() {
 
     pool.close().await;
 }
+
+/// Layer B relations happy-path pin: triples insert via batch, dedup via
+/// WHERE NOT EXISTS, skip triples whose head or tail references an
+/// entity not in merged.entities. Re-run is idempotent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_relations_inserts_dedups_and_skips_unknown_entities() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-rel-happy").await else {
+        return;
+    };
+
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Dr Smith".into(), label: "person".into(),  start: 0, end: 8, score: 0.99 },
+            Entity { text: "asthma".into(),   label: "disease".into(), start: 0, end: 6, score: 0.99 },
+        ],
+        triples: vec![
+            // Valid triple: both endpoints in merged.entities.
+            Triple {
+                head: TripleEntity { text: "Dr Smith".into(), r#type: "person".into(),  start: 0, end: 8, entity_idx: 0 },
+                tail: TripleEntity { text: "asthma".into(),   r#type: "disease".into(), start: 0, end: 6, entity_idx: 1 },
+                relation: "treats".into(),
+                score: 0.92,
+            },
+            // Triple referencing an unknown entity (tail not in merged.entities)
+            // → should be silently skipped (build_resolved_triples does `continue`
+            // when the by_key lookup misses).
+            Triple {
+                head: TripleEntity { text: "Dr Smith".into(), r#type: "person".into(),   start: 0, end: 8, entity_idx: 0 },
+                tail: TripleEntity { text: "diabetes".into(), r#type: "disease".into(), start: 0, end: 8, entity_idx: 2 },
+                relation: "treats".into(),
+                score: 0.75,
+            },
+        ],
+    };
+    let out1 = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+    assert_eq!(out1.entity_ids.len(), 2, "both entities upserted");
+    assert_eq!(
+        out1.n_relations_inserted, 1,
+        "only the valid triple should insert (unknown-entity triple silently skipped)"
+    );
+
+    // Re-run: WHERE NOT EXISTS makes the relation insert idempotent.
+    let out2 = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+    assert_eq!(out2.n_relations_inserted, 0, "re-run finds the relation present");
+
+    // Verify the relation row landed in the DB with the expected kind.
+    let (src, dst, kind): (i64, i64, String) = sqlx::query_as(
+        "SELECT src_id, dst_id, kind FROM relations WHERE kind = 'treats' LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(src, out1.entity_ids[0]);
+    assert_eq!(dst, out1.entity_ids[1]);
+    assert_eq!(kind, "treats");
+
+    pool.close().await;
+}
