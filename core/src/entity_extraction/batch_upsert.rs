@@ -52,6 +52,36 @@ pub(crate) fn dedup_entity_inputs<'a>(entities: &'a [Entity]) -> Vec<DedupedEnti
     deduped
 }
 
+/// True iff the SQLSTATE code names a constraint violation (PostgreSQL
+/// class 23). Members:
+///   - 23000: integrity_constraint_violation (generic)
+///   - 23001: restrict_violation
+///   - 23502: not_null_violation
+///   - 23503: foreign_key_violation
+///   - 23505: unique_violation
+///   - 23514: check_violation
+///   - 23P01: exclusion_violation
+///
+/// These all indicate a per-row issue: re-running as per-row attribution
+/// path will identify the failing row. Other classes (22 data exception,
+/// 42 syntax, 08 connection failure, etc.) won't benefit from per-row
+/// retry and should propagate immediately.
+pub(crate) fn is_constraint_violation_code(code: &str) -> bool {
+    code.starts_with("23")
+}
+
+/// True iff `err` is `sqlx::Error::Database` carrying a SQLSTATE class 23
+/// code. Returns false for non-database errors (network, decode, timeout)
+/// and for database errors without a code or with a non-23 code.
+pub(crate) fn is_constraint_violation(err: &sqlx::Error) -> bool {
+    if let sqlx::Error::Database(db_err) = err {
+        if let Some(code) = db_err.code() {
+            return is_constraint_violation_code(&code);
+        }
+    }
+    false
+}
+
 /// Build the four parallel arrays the entity-batch unnest SQL expects.
 /// Arrays are returned in the order:
 ///   (kinds, names, name_norms, quarantines)
@@ -166,5 +196,38 @@ mod tests {
         assert!(names.is_empty());
         assert!(name_norms.is_empty());
         assert!(quarantines.is_empty());
+    }
+
+    #[test]
+    fn is_constraint_violation_code_true_for_each_23xxx_code() {
+        // Every member of the PostgreSQL constraint-violation family.
+        for code in &["23000", "23001", "23502", "23503", "23505", "23514", "23P01"] {
+            assert!(
+                is_constraint_violation_code(code),
+                "code {code} should classify as constraint violation"
+            );
+        }
+    }
+
+    #[test]
+    fn is_constraint_violation_code_false_for_22xxx_data_exception() {
+        // Data exception class — caller can't fix by per-row retry.
+        for code in &["22001", "22003", "22007", "22P02"] {
+            assert!(
+                !is_constraint_violation_code(code),
+                "code {code} should NOT classify as constraint violation"
+            );
+        }
+    }
+
+    #[test]
+    fn is_constraint_violation_code_false_for_other_classes() {
+        // Connection, syntax, transaction-rollback — none benefit from per-row retry.
+        for code in &["08003", "42P01", "40001", "53300", "57014", ""] {
+            assert!(
+                !is_constraint_violation_code(code),
+                "code {code} should NOT classify as constraint violation"
+            );
+        }
     }
 }
