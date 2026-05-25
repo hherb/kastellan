@@ -110,6 +110,14 @@ pub struct GlinerRelexEnv {
     /// the `CONTAINER_IMAGE_DEFAULT` constant at the
     /// `gliner_relex_entry` callsite. Symmetric to
     /// `HHAGENT_GLINER_RELEX_MODEL` override behaviour.
+    ///
+    /// This field is **orthogonal to `use_container_backend`** — the
+    /// env var is read unconditionally so that operators can stage an
+    /// image tag preference ahead of flipping `USE_CONTAINER=1`. In
+    /// host mode the value is carried on the struct but ignored at
+    /// `ToolEntry` construction (only `container_mode_entry` reads it).
+    /// Setting `IMAGE=` alone (without `USE_CONTAINER=1`) does NOT
+    /// switch the worker to container mode.
     pub container_image: Option<String>,
 }
 
@@ -250,6 +258,18 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // weights mount at the SAME host path inside the container — that
     // makes the existing HHAGENT_GLINER_RELEX_WEIGHTS_DIR env value
     // work verbatim without a path rewrite.
+    //
+    // Enforcement parity note (Slice 2.5):
+    //   * `mem_mb: 4_096` — Apple `container` enforces. This is the
+    //     payoff for opting into container mode; Seatbelt has no
+    //     memory primitive so the same value was a silent no-op on
+    //     darwin before Slice 2.5.
+    //   * `cpu_quota_pct: Some(400)` / `tasks_max: Some(64)` —
+    //     Apple `container` does NOT enforce these today (semantic
+    //     gap acknowledged in HANDOVER / sandbox docs). Kept on the
+    //     policy struct for parity with bwrap (Linux DGX) and so a
+    //     future container-CLI version exposing the equivalent
+    //     primitive picks them up without a manifest edit.
     let policy = SandboxPolicy {
         fs_read: vec![env.weights_dir.clone()],
         fs_write: vec![],

@@ -37,9 +37,11 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
 
 # --system installs into /usr/lib/python3.12/site-packages and creates
-# /usr/local/bin/<console-scripts>. --no-cache keeps the image small;
-# --no-dev skips the [dev] optional deps (pytest, pytest-mock) which
-# tests don't need (tests run against the host venv, not the container).
+# /usr/local/bin/<console-scripts>. --no-cache keeps the image small.
+# `uv pip install .` ignores [project.optional-dependencies] by default
+# (dev deps require an explicit `--extra dev`), so pytest + pytest-mock
+# stay out of the image without a flag. Tests run against the host venv,
+# not the container.
 RUN uv pip install --system --no-cache .
 
 # Defense-in-depth complement to the policy-driven `--user nobody` flag.
