@@ -349,9 +349,10 @@ pub fn build_postgresql_auto_conf(opts: &PgConfigOptions) -> String {
 /// Homebrew Postgres does). Adding Postgres.app paths here would mean
 /// `cargo test --workspace` regresses for any macOS dev who has
 /// Postgres.app installed — and they're the majority. Operators who
-/// want to use Postgres.app with the test fixtures should set a
-/// future env-var override (filed as HANDOVER follow-up) or use
-/// Homebrew Postgres for testing.
+/// want to use Postgres.app or any other non-standard install with the
+/// test fixtures should call [`pg_bin_dir_candidates_with_env_override`]
+/// and set the `HHAGENT_PG_BIN_DIR` env var to that install's `bin/`
+/// directory before running the tests.
 pub fn default_pg_bin_dir_candidates() -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(16);
     for ver in [18u32, 17, 16, 15, 14] {
@@ -369,6 +370,56 @@ pub fn default_pg_bin_dir_candidates() -> Vec<PathBuf> {
             let _ = ver;
         }
     }
+    out
+}
+
+/// Name of the env var that prepends a single bin-dir to the search
+/// path returned by [`pg_bin_dir_candidates_with_env_override`].
+///
+/// Defined as a `const` so the literal cannot drift between the
+/// production read site and the unit tests that exercise it.
+pub const PG_BIN_DIR_ENV: &str = "HHAGENT_PG_BIN_DIR";
+
+/// Test-fixture discovery: `HHAGENT_PG_BIN_DIR` (if set and non-blank),
+/// followed by [`default_pg_bin_dir_candidates`].
+///
+/// Intended for test infrastructure (`tests-common::pg_bin_dir_or_skip`
+/// and the per-file local copies in `core/tests/scheduler_*_e2e.rs` /
+/// `core/tests/agent_prompts_e2e.rs`), NOT for production runtime
+/// discovery — production should bind to a known cluster via the
+/// supervisor spec, not auto-probe at startup.
+///
+/// **Semantics:**
+///
+/// - Var unset OR empty string OR whitespace-only → defaults only.
+///   Trim-then-check matches the strict-only-"1" parse style used
+///   elsewhere in the workspace for boolean env knobs and silently
+///   tolerates the common shell-script footgun
+///   `export HHAGENT_PG_BIN_DIR=$(some_failing_lookup)` producing a
+///   blank value.
+/// - Non-blank value → prepended to the defaults so a bogus or
+///   missing override falls through to defaults rather than skipping
+///   tests. The override only "wins" when it actually points at a
+///   directory containing executable `postgres` + `initdb`; see
+///   [`find_pg_bin_dir`].
+///
+/// **Single-path only.** A `:`-separated list would invite shell-PATH
+/// confusion; if a future workflow needs multiple overrides, switch
+/// to a deliberate split-and-parse design rather than overloading
+/// this surface.
+pub fn pg_bin_dir_candidates_with_env_override() -> Vec<PathBuf> {
+    let override_path = std::env::var(PG_BIN_DIR_ENV).ok().and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(trimmed))
+        }
+    });
+    let defaults = default_pg_bin_dir_candidates();
+    let mut out = Vec::with_capacity(defaults.len() + usize::from(override_path.is_some()));
+    out.extend(override_path);
+    out.extend(defaults);
     out
 }
 
@@ -634,6 +685,114 @@ mod tests {
             first.contains("18"),
             "first candidate should be PG 18, got {first}"
         );
+    }
+
+    /// `pg_bin_dir_candidates_with_env_override` MUST behave identically
+    /// to `default_pg_bin_dir_candidates` when the env var is not set.
+    /// This is the load-bearing no-regression guarantee for every existing
+    /// test fixture: switching call sites from the default to the
+    /// override-aware helper must NOT change behaviour for any developer
+    /// who does not set `HHAGENT_PG_BIN_DIR`.
+    #[test]
+    fn pg_bin_dir_candidates_with_env_override_returns_defaults_when_unset() {
+        // Hold `env_lock` so concurrent tests in this crate cannot race
+        // a stale `HHAGENT_PG_BIN_DIR` into our read.
+        let _guard = crate::env_lock();
+        let prior = std::env::var(PG_BIN_DIR_ENV).ok();
+        std::env::remove_var(PG_BIN_DIR_ENV);
+
+        let got = pg_bin_dir_candidates_with_env_override();
+        assert_eq!(
+            got,
+            default_pg_bin_dir_candidates(),
+            "with env unset, override helper must mirror defaults"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var(PG_BIN_DIR_ENV, v),
+            None => std::env::remove_var(PG_BIN_DIR_ENV),
+        }
+    }
+
+    /// A non-blank env value is prepended to the defaults so it wins
+    /// the `find_pg_bin_dir` first-match probe, but the defaults remain
+    /// in the list as a fallback when the override is itself bogus.
+    #[test]
+    fn pg_bin_dir_candidates_with_env_override_prepends_valid_env_path() {
+        let _guard = crate::env_lock();
+        let prior = std::env::var(PG_BIN_DIR_ENV).ok();
+        std::env::set_var(PG_BIN_DIR_ENV, "/custom/pg/bin");
+
+        let got = pg_bin_dir_candidates_with_env_override();
+        let defaults = default_pg_bin_dir_candidates();
+        assert_eq!(
+            got.len(),
+            defaults.len() + 1,
+            "override must add exactly one entry (prepended)"
+        );
+        assert_eq!(
+            got[0],
+            PathBuf::from("/custom/pg/bin"),
+            "override must occupy index 0; got {:?}",
+            got[0]
+        );
+        assert_eq!(
+            &got[1..],
+            defaults.as_slice(),
+            "defaults must remain unchanged after the prepended override"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var(PG_BIN_DIR_ENV, v),
+            None => std::env::remove_var(PG_BIN_DIR_ENV),
+        }
+    }
+
+    /// An empty-string env value is treated as unset — operators can
+    /// disable the override via `export HHAGENT_PG_BIN_DIR=""` without
+    /// having to `unset`. This also tolerates a shell expression like
+    /// `export HHAGENT_PG_BIN_DIR=$(some_lookup)` evaluating to empty
+    /// rather than poisoning every test run with an obviously-bogus
+    /// "" → `PathBuf::from("")` first candidate.
+    #[test]
+    fn pg_bin_dir_candidates_with_env_override_treats_empty_string_as_unset() {
+        let _guard = crate::env_lock();
+        let prior = std::env::var(PG_BIN_DIR_ENV).ok();
+        std::env::set_var(PG_BIN_DIR_ENV, "");
+
+        let got = pg_bin_dir_candidates_with_env_override();
+        assert_eq!(
+            got,
+            default_pg_bin_dir_candidates(),
+            "empty-string override must behave as if unset"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var(PG_BIN_DIR_ENV, v),
+            None => std::env::remove_var(PG_BIN_DIR_ENV),
+        }
+    }
+
+    /// Whitespace-only env value is treated as unset for the same
+    /// reasons as the empty-string case — defensive against shell
+    /// quoting accidents like `export HHAGENT_PG_BIN_DIR=" "`.
+    #[test]
+    fn pg_bin_dir_candidates_with_env_override_treats_whitespace_as_unset() {
+        let _guard = crate::env_lock();
+        let prior = std::env::var(PG_BIN_DIR_ENV).ok();
+        std::env::set_var(PG_BIN_DIR_ENV, "  \t \n");
+
+        let got = pg_bin_dir_candidates_with_env_override();
+        assert_eq!(
+            got,
+            default_pg_bin_dir_candidates(),
+            "whitespace-only override must behave as if unset"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var(PG_BIN_DIR_ENV, v),
+            None => std::env::remove_var(PG_BIN_DIR_ENV),
+        }
     }
 
     /// `find_pg_bin_dir` must be honest: an empty candidate list is
