@@ -408,14 +408,18 @@ pub const PG_BIN_DIR_ENV: &str = "HHAGENT_PG_BIN_DIR";
 /// to a deliberate split-and-parse design rather than overloading
 /// this surface.
 pub fn pg_bin_dir_candidates_with_env_override() -> Vec<PathBuf> {
-    let mut out = Vec::with_capacity(17);
-    if let Ok(raw) = std::env::var(PG_BIN_DIR_ENV) {
+    let override_path = std::env::var(PG_BIN_DIR_ENV).ok().and_then(|raw| {
         let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            out.push(PathBuf::from(trimmed));
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(trimmed))
         }
-    }
-    out.extend(default_pg_bin_dir_candidates());
+    });
+    let defaults = default_pg_bin_dir_candidates();
+    let mut out = Vec::with_capacity(defaults.len() + usize::from(override_path.is_some()));
+    out.extend(override_path);
+    out.extend(defaults);
     out
 }
 
