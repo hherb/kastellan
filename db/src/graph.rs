@@ -116,6 +116,17 @@ fn decode_walked_edge(row: &sqlx::postgres::PgRow) -> Result<WalkedEdge, DbError
     })
 }
 
+/// Column index of the trailing `direction` discriminant column appended
+/// by [`Graph::walk_edges_around`]'s UNION ALL projection. Sits one
+/// column past the 11 columns (0..=10) that [`decode_walked_edge`]
+/// consumes — keep this in sync with both the SQL projection and
+/// `decode_walked_edge`'s column contract. A future change inserting a
+/// column between `kind` (col 10) and `direction` must bump this
+/// constant; on accidental drift, the `try_get::<String, _>` decode
+/// surfaces a typed error rather than silently misreading a `bigint` or
+/// `bool` as a `text` direction value.
+const WALK_EDGES_AROUND_DIRECTION_COL: usize = 11;
+
 /// Hard ceiling on `max_depth` accepted by [`Graph::walk_outbound_edges`]
 /// and [`Graph::walk_inbound_edges`]. Matches the budget convention used
 /// by [`Graph::path`] (its `max_hops` is a `u8` callers typically pass
@@ -180,6 +191,25 @@ pub struct WalkedEdge {
     pub dst_name: String,
     pub dst_quarantine: bool,
     pub kind: String,
+}
+
+/// Return shape for [`Graph::walk_edges_around`]: the seed's outbound
+/// and inbound walks, pre-partitioned. Each field carries
+/// [`WalkedEdge`]s in `(depth ASC, edge_id ASC)` order, with the same
+/// shortest-path-per-unique-edge dedupe semantics as
+/// [`Graph::walk_outbound_edges`] / [`Graph::walk_inbound_edges`].
+///
+/// Returning a pre-partitioned struct (rather than a
+/// `Vec<(Direction, WalkedEdge)>`) means consumers like
+/// `relations show` consume each list directly without an extra
+/// partition step. The trade-off — a future consumer that wants
+/// interleaved ordering across both directions would have to merge
+/// the two `Vec`s itself — is fine: every consumer we have today
+/// renders the two directions as separate output sections.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct EdgesAround {
+    pub outbound: Vec<WalkedEdge>,
+    pub inbound: Vec<WalkedEdge>,
 }
 
 /// Read/write surface for the knowledge graph.
@@ -255,11 +285,18 @@ pub trait Graph {
 
     /// Walk outbound edges from `src_id` up to `max_depth` hops.
     ///
-    /// Returns one [`WalkedEdge`] per traversed edge, including
-    /// endpoint kind/name/quarantine on both sides so the caller can
+    /// Returns one [`WalkedEdge`] per **unique edge** reached from the
+    /// seed, anchored to the **shortest path's depth**. Endpoint
+    /// kind/name/quarantine on both sides is included so the caller can
     /// render the result without a secondary lookup. Rows are sorted by
     /// `(depth ASC, edge_id ASC)` for deterministic operator-facing
     /// output.
+    ///
+    /// **When you want both directions:** prefer
+    /// [`Graph::walk_edges_around`] which issues one UNION ALL round-trip
+    /// instead of two separate queries. This single-direction method
+    /// stays as a stable surface for callers that genuinely need only
+    /// one direction.
     ///
     /// **Semantics:**
     /// - `max_depth == 0` returns an empty `Vec` (no edges to walk).
@@ -268,9 +305,18 @@ pub trait Graph {
     /// - Cycles are bounded by a visited-set tracked in the recursive
     ///   CTE: a node already reached on the current path will not be
     ///   re-entered (`A → B → A` does not diverge).
+    /// - **Diamond dedupe (issue #114):** an edge reachable by multiple
+    ///   paths from the seed appears exactly **once** in the result,
+    ///   carrying the shortest-path depth. On `A→B, A→C, B→C, C→D`
+    ///   walked from `A` at `max_depth=3`, the `C→D` edge surfaces at
+    ///   `depth=2` (via `A-C`), not also at `depth=3` (via `A-B-C`).
+    ///   Implemented via `DISTINCT ON (edge_id) ORDER BY edge_id,
+    ///   depth ASC` in the SQL.
     /// - `limit` is honoured SQL-side so a high-fan-out seed cannot
     ///   exhaust memory. Pass a generous value (e.g. `10_000`) when in
-    ///   doubt; the operator-facing CLI is the typical caller.
+    ///   doubt; the operator-facing CLI is the typical caller. The
+    ///   `LIMIT` applies *after* dedupe, so it bounds the final row
+    ///   count rather than the intermediate traversal-row count.
     ///
     /// **Quarantine:** quarantined entities are **not** filtered. The
     /// only consumer today is the operator-facing `relations show`
@@ -298,13 +344,50 @@ pub trait Graph {
     /// walk direction surfaced it.
     ///
     /// See [`Graph::walk_outbound_edges`] for cycle handling, depth-0
-    /// semantics, the `limit` contract, and quarantine policy.
+    /// semantics, the `limit` contract, quarantine policy, and the
+    /// shortest-path dedupe semantics.
+    ///
+    /// **When you want both directions:** prefer
+    /// [`Graph::walk_edges_around`] which issues one UNION ALL round-trip
+    /// instead of two separate queries.
     fn walk_inbound_edges(
         &self,
         dst_id: i64,
         max_depth: u8,
         limit: i64,
     ) -> impl std::future::Future<Output = Result<Vec<WalkedEdge>, DbError>> + Send;
+
+    /// Walk *both* outbound and inbound edges around `seed_id` in a
+    /// single SQL round-trip via UNION ALL, returning an
+    /// [`EdgesAround`] with the two directions pre-partitioned.
+    ///
+    /// Equivalent to calling [`Graph::walk_outbound_edges`] +
+    /// [`Graph::walk_inbound_edges`] back-to-back, but issues exactly
+    /// one query against the DB instead of two. Used by the operator-
+    /// facing `hhagent-cli relations show` command which always needs
+    /// both directions.
+    ///
+    /// **Semantics:**
+    /// - `per_direction_limit` is honoured *per direction*: an
+    ///   outbound-heavy and inbound-light seed will return up to
+    ///   `per_direction_limit` outbound rows AND up to
+    ///   `per_direction_limit` inbound rows.
+    /// - The same diamond-dedupe (issue #114) applies within each
+    ///   direction: each unique `edge_id` reachable via multiple paths
+    ///   appears exactly once, at its shortest depth.
+    /// - `max_depth == 0` short-circuits to an empty [`EdgesAround`]
+    ///   without a SQL round-trip.
+    /// - Cycle handling, quarantine policy, sorting (`(depth ASC,
+    ///   edge_id ASC)` within each direction) all match the per-
+    ///   direction methods.
+    ///
+    /// Closes [issue #115](https://github.com/hherb/hhagent/issues/115).
+    fn walk_edges_around(
+        &self,
+        seed_id: i64,
+        max_depth: u8,
+        per_direction_limit: i64,
+    ) -> impl std::future::Future<Output = Result<EdgesAround, DbError>> + Send;
 }
 
 /// Postgres implementation of [`Graph`]. Holds a borrowed pool/
@@ -544,11 +627,22 @@ impl<'a> Graph for PgGraph<'a> {
         // *node* set (to refuse re-entering nodes on cycles) and the
         // hop depth.
         //
-        // Sorting in the outer SELECT (not the recursive term) is the
-        // only safe place — Postgres treats the recursive term as a
-        // bag with non-deterministic enumeration. `(depth ASC,
-        // edge_id ASC)` keeps the operator-facing output stable across
-        // runs and across PG point releases.
+        // The recursive term emits one row per *traversal path*, so the
+        // same `edge_id` can be reached via multiple paths on a diamond
+        // topology (`A→B, A→C, B→C, C→D` walked from `A` at depth ≥ 3
+        // surfaces `C→D` twice: once via `A-C` at depth 2 and once via
+        // `A-B-C` at depth 3). The intermediate `deduped` CTE applies
+        // `DISTINCT ON (edge_id) ORDER BY edge_id, depth ASC` to keep
+        // exactly one row per unique edge — the one with the shortest
+        // path. This is the [issue #114] fix.
+        //
+        // The outer SELECT re-applies the operator-facing sort
+        // `(depth ASC, edge_id ASC)` after the dedupe. Sorting only
+        // happens in named SELECTs (never the recursive term) — Postgres
+        // treats the recursive term as a bag with non-deterministic
+        // enumeration.
+        //
+        // [issue #114]: https://github.com/hherb/hhagent/issues/114
         let rows = sqlx::query(
             r#"
             WITH RECURSIVE walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
@@ -563,17 +657,23 @@ impl<'a> Graph for PgGraph<'a> {
                 JOIN relations r ON r.src_id = w.dst_id
                 WHERE w.depth < $2
                   AND NOT (r.dst_id = ANY(w.visited))
+            ),
+            deduped AS (
+                SELECT DISTINCT ON (edge_id)
+                    edge_id, src_id, dst_id, kind, depth
+                FROM walk
+                ORDER BY edge_id, depth ASC
             )
             SELECT
-                w.depth,
-                w.edge_id,
-                w.src_id, es.kind, es.name, es.quarantine,
-                w.dst_id, ed.kind, ed.name, ed.quarantine,
-                w.kind
-            FROM walk w
-            JOIN entities es ON es.id = w.src_id
-            JOIN entities ed ON ed.id = w.dst_id
-            ORDER BY w.depth ASC, w.edge_id ASC
+                d.depth,
+                d.edge_id,
+                d.src_id, es.kind, es.name, es.quarantine,
+                d.dst_id, ed.kind, ed.name, ed.quarantine,
+                d.kind
+            FROM deduped d
+            JOIN entities es ON es.id = d.src_id
+            JOIN entities ed ON ed.id = d.dst_id
+            ORDER BY d.depth ASC, d.edge_id ASC
             LIMIT $3
             "#,
         )
@@ -612,6 +712,12 @@ impl<'a> Graph for PgGraph<'a> {
         // an inverted `A --[knows]--> B`. This means the caller can
         // mix outbound + inbound results in one rendering loop without
         // having to track which walk produced each row.
+        //
+        // Same `DISTINCT ON (edge_id) ORDER BY edge_id, depth ASC`
+        // dedupe as the outbound walk — see that method's body comment
+        // for the [issue #114] rationale.
+        //
+        // [issue #114]: https://github.com/hherb/hhagent/issues/114
         let rows = sqlx::query(
             r#"
             WITH RECURSIVE walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
@@ -626,17 +732,23 @@ impl<'a> Graph for PgGraph<'a> {
                 JOIN relations r ON r.dst_id = w.src_id
                 WHERE w.depth < $2
                   AND NOT (r.src_id = ANY(w.visited))
+            ),
+            deduped AS (
+                SELECT DISTINCT ON (edge_id)
+                    edge_id, src_id, dst_id, kind, depth
+                FROM walk
+                ORDER BY edge_id, depth ASC
             )
             SELECT
-                w.depth,
-                w.edge_id,
-                w.src_id, es.kind, es.name, es.quarantine,
-                w.dst_id, ed.kind, ed.name, ed.quarantine,
-                w.kind
-            FROM walk w
-            JOIN entities es ON es.id = w.src_id
-            JOIN entities ed ON ed.id = w.dst_id
-            ORDER BY w.depth ASC, w.edge_id ASC
+                d.depth,
+                d.edge_id,
+                d.src_id, es.kind, es.name, es.quarantine,
+                d.dst_id, ed.kind, ed.name, ed.quarantine,
+                d.kind
+            FROM deduped d
+            JOIN entities es ON es.id = d.src_id
+            JOIN entities ed ON ed.id = d.dst_id
+            ORDER BY d.depth ASC, d.edge_id ASC
             LIMIT $3
             "#,
         )
@@ -648,6 +760,147 @@ impl<'a> Graph for PgGraph<'a> {
         .map_err(|e| DbError::Query(e.to_string()))?;
 
         rows.iter().map(decode_walked_edge).collect()
+    }
+
+    async fn walk_edges_around(
+        &self,
+        seed_id: i64,
+        max_depth: u8,
+        per_direction_limit: i64,
+    ) -> Result<EdgesAround, DbError> {
+        if max_depth == 0 {
+            return Ok(EdgesAround::default());
+        }
+        let max_depth = clamp_walk_depth(max_depth);
+        let max_depth_i32: i32 = i32::from(max_depth);
+
+        // One round-trip combining both walks via UNION ALL. The
+        // structure mirrors `walk_outbound_edges` and `walk_inbound_edges`
+        // twice over: each direction gets its own recursive walk CTE
+        // and its own DISTINCT ON dedupe + LIMIT + entity-join, then
+        // we UNION ALL the two renderings.
+        //
+        // The trailing `direction` text column is the partition
+        // discriminant the Rust decoder uses to drop each row into
+        // `EdgesAround::{outbound, inbound}`. Outer `ORDER BY direction
+        // ASC, depth ASC, edge_id ASC` keeps rows for the same
+        // direction adjacent and within each direction sorted by
+        // `(depth, edge_id)` — which preserves the per-direction sort
+        // every existing caller expects.
+        //
+        // Note: lexicographically `'inbound' < 'outbound'`, so inbound
+        // rows arrive on the cursor first. This is an incidental
+        // property of the literal strings, NOT an API contract — the
+        // Rust decoder partitions row-by-row via the discriminant, so
+        // consumers must never depend on which direction's `Vec`
+        // populates first. If the literals ever changed (e.g. to a
+        // `direction_enum` with a different sort key), the partition
+        // contract still holds.
+        //
+        // `LIMIT` is applied per-direction (inside each rendered CTE)
+        // rather than across the union, so an outbound-heavy seed
+        // doesn't starve inbound rows out of the result.
+        //
+        // [issue #115]: https://github.com/hherb/hhagent/issues/115
+        let rows = sqlx::query(
+            r#"
+            WITH RECURSIVE outbound_walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
+                SELECT r.id, r.src_id, r.dst_id, r.kind, 1,
+                       ARRAY[r.src_id::bigint, r.dst_id::bigint]
+                FROM relations r
+                WHERE r.src_id = $1::bigint
+                UNION ALL
+                SELECT r.id, r.src_id, r.dst_id, r.kind, w.depth + 1,
+                       w.visited || r.dst_id
+                FROM outbound_walk w
+                JOIN relations r ON r.src_id = w.dst_id
+                WHERE w.depth < $2
+                  AND NOT (r.dst_id = ANY(w.visited))
+            ),
+            inbound_walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
+                SELECT r.id, r.src_id, r.dst_id, r.kind, 1,
+                       ARRAY[r.dst_id::bigint, r.src_id::bigint]
+                FROM relations r
+                WHERE r.dst_id = $1::bigint
+                UNION ALL
+                SELECT r.id, r.src_id, r.dst_id, r.kind, w.depth + 1,
+                       w.visited || r.src_id
+                FROM inbound_walk w
+                JOIN relations r ON r.dst_id = w.src_id
+                WHERE w.depth < $2
+                  AND NOT (r.src_id = ANY(w.visited))
+            ),
+            outbound_deduped AS (
+                SELECT DISTINCT ON (edge_id)
+                    edge_id, src_id, dst_id, kind, depth
+                FROM outbound_walk
+                ORDER BY edge_id, depth ASC
+            ),
+            inbound_deduped AS (
+                SELECT DISTINCT ON (edge_id)
+                    edge_id, src_id, dst_id, kind, depth
+                FROM inbound_walk
+                ORDER BY edge_id, depth ASC
+            ),
+            outbound_rendered AS (
+                SELECT
+                    d.depth,
+                    d.edge_id,
+                    d.src_id, es.kind AS src_kind, es.name AS src_name, es.quarantine AS src_quarantine,
+                    d.dst_id, ed.kind AS dst_kind, ed.name AS dst_name, ed.quarantine AS dst_quarantine,
+                    d.kind,
+                    'outbound'::text AS direction
+                FROM outbound_deduped d
+                JOIN entities es ON es.id = d.src_id
+                JOIN entities ed ON ed.id = d.dst_id
+                ORDER BY d.depth ASC, d.edge_id ASC
+                LIMIT $3
+            ),
+            inbound_rendered AS (
+                SELECT
+                    d.depth,
+                    d.edge_id,
+                    d.src_id, es.kind AS src_kind, es.name AS src_name, es.quarantine AS src_quarantine,
+                    d.dst_id, ed.kind AS dst_kind, ed.name AS dst_name, ed.quarantine AS dst_quarantine,
+                    d.kind,
+                    'inbound'::text AS direction
+                FROM inbound_deduped d
+                JOIN entities es ON es.id = d.src_id
+                JOIN entities ed ON ed.id = d.dst_id
+                ORDER BY d.depth ASC, d.edge_id ASC
+                LIMIT $3
+            )
+            SELECT * FROM outbound_rendered
+            UNION ALL
+            SELECT * FROM inbound_rendered
+            ORDER BY direction ASC, depth ASC, edge_id ASC
+            "#,
+        )
+        .bind(seed_id)
+        .bind(max_depth_i32)
+        .bind(per_direction_limit)
+        .fetch_all(self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let mut around = EdgesAround::default();
+        for row in &rows {
+            let edge = decode_walked_edge(row)?;
+            let direction: String = row
+                .try_get::<String, _>(WALK_EDGES_AROUND_DIRECTION_COL)
+                .map_err(|e| DbError::Query(format!("decode walked_edge_around.direction: {e}")))?;
+            match direction.as_str() {
+                "outbound" => around.outbound.push(edge),
+                "inbound" => around.inbound.push(edge),
+                other => {
+                    return Err(DbError::Query(format!(
+                        "decode walked_edge_around.direction: unexpected value '{other}' \
+                         (expected 'outbound' or 'inbound' — SQL projection drift?)"
+                    )));
+                }
+            }
+        }
+        Ok(around)
     }
 }
 
