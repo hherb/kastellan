@@ -18,10 +18,10 @@ use std::process::ExitCode;
 use crate::common::{resolve_connect_spec, with_runtime};
 
 /// Per-direction OUTPUT row cap applied SQL-side in
-/// [`hhagent_db::graph::Graph::walk_outbound_edges`] /
-/// [`hhagent_db::graph::Graph::walk_inbound_edges`]. 10_000 is generous
-/// enough that an operator inspecting a hub entity sees the full
-/// neighbourhood even at depth 3-5.
+/// [`hhagent_db::graph::Graph::walk_edges_around`] (separate LIMITs on
+/// the outbound and inbound rendered CTEs inside its single UNION ALL
+/// query). 10_000 is generous enough that an operator inspecting a hub
+/// entity sees the full neighbourhood even at depth 3-5.
 ///
 /// **What this cap does NOT do:** the recursive CTE is enumerated to
 /// completion *before* `ORDER BY (depth ASC, edge_id ASC) LIMIT N` clips
@@ -183,31 +183,27 @@ async fn relations_show(args: &[String]) -> ExitCode {
         }
     };
 
+    // Single round-trip combining both directions via UNION ALL — see
+    // [`hhagent_db::graph::Graph::walk_edges_around`] and issue
+    // [#115](https://github.com/hherb/hhagent/issues/115). The
+    // `per_direction_limit` is applied SQL-side inside each rendered
+    // CTE so an outbound-heavy hub cannot starve inbound rows out of
+    // the operator's view.
     let g = PgGraph::new(&pool);
-    let outbound = match g
-        .walk_outbound_edges(id, depth, SHOW_PER_DIRECTION_LIMIT)
+    let around = match g
+        .walk_edges_around(id, depth, SHOW_PER_DIRECTION_LIMIT)
         .await
     {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("relations show: walk_outbound_edges: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let inbound = match g
-        .walk_inbound_edges(id, depth, SHOW_PER_DIRECTION_LIMIT)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("relations show: walk_inbound_edges: {e}");
+            eprintln!("relations show: walk_edges_around: {e}");
             return ExitCode::from(1);
         }
     };
 
     match format {
-        ShowFormat::Plain => render_show_plain(&seed, depth, &outbound, &inbound),
-        ShowFormat::Json => render_show_json(&seed, depth, &outbound, &inbound),
+        ShowFormat::Plain => render_show_plain(&seed, depth, &around.outbound, &around.inbound),
+        ShowFormat::Json => render_show_json(&seed, depth, &around.outbound, &around.inbound),
     };
     ExitCode::from(0)
 }
