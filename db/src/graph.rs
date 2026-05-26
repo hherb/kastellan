@@ -116,6 +116,17 @@ fn decode_walked_edge(row: &sqlx::postgres::PgRow) -> Result<WalkedEdge, DbError
     })
 }
 
+/// Column index of the trailing `direction` discriminant column appended
+/// by [`Graph::walk_edges_around`]'s UNION ALL projection. Sits one
+/// column past the 11 columns (0..=10) that [`decode_walked_edge`]
+/// consumes — keep this in sync with both the SQL projection and
+/// `decode_walked_edge`'s column contract. A future change inserting a
+/// column between `kind` (col 10) and `direction` must bump this
+/// constant; on accidental drift, the `try_get::<String, _>` decode
+/// surfaces a typed error rather than silently misreading a `bigint` or
+/// `bool` as a `text` direction value.
+const WALK_EDGES_AROUND_DIRECTION_COL: usize = 11;
+
 /// Hard ceiling on `max_depth` accepted by [`Graph::walk_outbound_edges`]
 /// and [`Graph::walk_inbound_edges`]. Matches the budget convention used
 /// by [`Graph::path`] (its `max_hops` is a `u8` callers typically pass
@@ -777,6 +788,15 @@ impl<'a> Graph for PgGraph<'a> {
         // `(depth, edge_id)` — which preserves the per-direction sort
         // every existing caller expects.
         //
+        // Note: lexicographically `'inbound' < 'outbound'`, so inbound
+        // rows arrive on the cursor first. This is an incidental
+        // property of the literal strings, NOT an API contract — the
+        // Rust decoder partitions row-by-row via the discriminant, so
+        // consumers must never depend on which direction's `Vec`
+        // populates first. If the literals ever changed (e.g. to a
+        // `direction_enum` with a different sort key), the partition
+        // contract still holds.
+        //
         // `LIMIT` is applied per-direction (inside each rendered CTE)
         // rather than across the union, so an outbound-heavy seed
         // doesn't starve inbound rows out of the result.
@@ -867,7 +887,7 @@ impl<'a> Graph for PgGraph<'a> {
         for row in &rows {
             let edge = decode_walked_edge(row)?;
             let direction: String = row
-                .try_get::<String, _>(11)
+                .try_get::<String, _>(WALK_EDGES_AROUND_DIRECTION_COL)
                 .map_err(|e| DbError::Query(format!("decode walked_edge_around.direction: {e}")))?;
             match direction.as_str() {
                 "outbound" => around.outbound.push(edge),

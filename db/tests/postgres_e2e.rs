@@ -4989,6 +4989,15 @@ async fn walk_edges_around_matches_separate_walks_and_clips_per_direction() {
     g.upsert_relation(b, c, "knows", &serde_json::json!({})).await.unwrap();
 
     // ── 1. Byte-equivalence with separate per-direction calls ──────────
+    //
+    // Contract pin: `walk_edges_around`'s `per_direction_limit` is the
+    // SAME semantics as each per-direction method's `limit`. Passing the
+    // same value (10_000) to all three calls is intentional — it pins
+    // that the per-direction LIMIT inside each rendered CTE behaves
+    // exactly like a standalone `walk_*_edges` LIMIT. If a future change
+    // ever diverges those semantics (e.g. one applies LIMIT before
+    // dedupe and another after), the field-for-field assertions below
+    // would catch it on this fixture.
     let separate_outbound = g.walk_outbound_edges(hub, 3, 10_000).await.unwrap();
     let separate_inbound = g.walk_inbound_edges(hub, 3, 10_000).await.unwrap();
     let combined = g.walk_edges_around(hub, 3, 10_000).await.unwrap();
