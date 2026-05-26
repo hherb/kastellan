@@ -182,6 +182,25 @@ pub struct WalkedEdge {
     pub kind: String,
 }
 
+/// Return shape for [`Graph::walk_edges_around`]: the seed's outbound
+/// and inbound walks, pre-partitioned. Each field carries
+/// [`WalkedEdge`]s in `(depth ASC, edge_id ASC)` order, with the same
+/// shortest-path-per-unique-edge dedupe semantics as
+/// [`Graph::walk_outbound_edges`] / [`Graph::walk_inbound_edges`].
+///
+/// Returning a pre-partitioned struct (rather than a
+/// `Vec<(Direction, WalkedEdge)>`) means consumers like
+/// `relations show` consume each list directly without an extra
+/// partition step. The trade-off — a future consumer that wants
+/// interleaved ordering across both directions would have to merge
+/// the two `Vec`s itself — is fine: every consumer we have today
+/// renders the two directions as separate output sections.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct EdgesAround {
+    pub outbound: Vec<WalkedEdge>,
+    pub inbound: Vec<WalkedEdge>,
+}
+
 /// Read/write surface for the knowledge graph.
 ///
 /// All graph traffic in `core` and downstream workers goes through
@@ -315,6 +334,38 @@ pub trait Graph {
         max_depth: u8,
         limit: i64,
     ) -> impl std::future::Future<Output = Result<Vec<WalkedEdge>, DbError>> + Send;
+
+    /// Walk *both* outbound and inbound edges around `seed_id` in a
+    /// single SQL round-trip via UNION ALL, returning an
+    /// [`EdgesAround`] with the two directions pre-partitioned.
+    ///
+    /// Equivalent to calling [`Graph::walk_outbound_edges`] +
+    /// [`Graph::walk_inbound_edges`] back-to-back, but issues exactly
+    /// one query against the DB instead of two. Used by the operator-
+    /// facing `hhagent-cli relations show` command which always needs
+    /// both directions.
+    ///
+    /// **Semantics:**
+    /// - `per_direction_limit` is honoured *per direction*: an
+    ///   outbound-heavy and inbound-light seed will return up to
+    ///   `per_direction_limit` outbound rows AND up to
+    ///   `per_direction_limit` inbound rows.
+    /// - The same diamond-dedupe (issue #114) applies within each
+    ///   direction: each unique `edge_id` reachable via multiple paths
+    ///   appears exactly once, at its shortest depth.
+    /// - `max_depth == 0` short-circuits to an empty [`EdgesAround`]
+    ///   without a SQL round-trip.
+    /// - Cycle handling, quarantine policy, sorting (`(depth ASC,
+    ///   edge_id ASC)` within each direction) all match the per-
+    ///   direction methods.
+    ///
+    /// Closes [issue #115](https://github.com/hherb/hhagent/issues/115).
+    fn walk_edges_around(
+        &self,
+        seed_id: i64,
+        max_depth: u8,
+        per_direction_limit: i64,
+    ) -> impl std::future::Future<Output = Result<EdgesAround, DbError>> + Send;
 }
 
 /// Postgres implementation of [`Graph`]. Holds a borrowed pool/
@@ -687,6 +738,138 @@ impl<'a> Graph for PgGraph<'a> {
         .map_err(|e| DbError::Query(e.to_string()))?;
 
         rows.iter().map(decode_walked_edge).collect()
+    }
+
+    async fn walk_edges_around(
+        &self,
+        seed_id: i64,
+        max_depth: u8,
+        per_direction_limit: i64,
+    ) -> Result<EdgesAround, DbError> {
+        if max_depth == 0 {
+            return Ok(EdgesAround::default());
+        }
+        let max_depth = clamp_walk_depth(max_depth);
+        let max_depth_i32: i32 = i32::from(max_depth);
+
+        // One round-trip combining both walks via UNION ALL. The
+        // structure mirrors `walk_outbound_edges` and `walk_inbound_edges`
+        // twice over: each direction gets its own recursive walk CTE
+        // and its own DISTINCT ON dedupe + LIMIT + entity-join, then
+        // we UNION ALL the two renderings.
+        //
+        // The trailing `direction` text column is the partition
+        // discriminant the Rust decoder uses to drop each row into
+        // `EdgesAround::{outbound, inbound}`. Outer `ORDER BY direction
+        // ASC, depth ASC, edge_id ASC` keeps rows for the same
+        // direction adjacent and within each direction sorted by
+        // `(depth, edge_id)` — which preserves the per-direction sort
+        // every existing caller expects.
+        //
+        // `LIMIT` is applied per-direction (inside each rendered CTE)
+        // rather than across the union, so an outbound-heavy seed
+        // doesn't starve inbound rows out of the result.
+        //
+        // [issue #115]: https://github.com/hherb/hhagent/issues/115
+        let rows = sqlx::query(
+            r#"
+            WITH RECURSIVE outbound_walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
+                SELECT r.id, r.src_id, r.dst_id, r.kind, 1,
+                       ARRAY[r.src_id::bigint, r.dst_id::bigint]
+                FROM relations r
+                WHERE r.src_id = $1::bigint
+                UNION ALL
+                SELECT r.id, r.src_id, r.dst_id, r.kind, w.depth + 1,
+                       w.visited || r.dst_id
+                FROM outbound_walk w
+                JOIN relations r ON r.src_id = w.dst_id
+                WHERE w.depth < $2
+                  AND NOT (r.dst_id = ANY(w.visited))
+            ),
+            inbound_walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
+                SELECT r.id, r.src_id, r.dst_id, r.kind, 1,
+                       ARRAY[r.dst_id::bigint, r.src_id::bigint]
+                FROM relations r
+                WHERE r.dst_id = $1::bigint
+                UNION ALL
+                SELECT r.id, r.src_id, r.dst_id, r.kind, w.depth + 1,
+                       w.visited || r.src_id
+                FROM inbound_walk w
+                JOIN relations r ON r.dst_id = w.src_id
+                WHERE w.depth < $2
+                  AND NOT (r.src_id = ANY(w.visited))
+            ),
+            outbound_deduped AS (
+                SELECT DISTINCT ON (edge_id)
+                    edge_id, src_id, dst_id, kind, depth
+                FROM outbound_walk
+                ORDER BY edge_id, depth ASC
+            ),
+            inbound_deduped AS (
+                SELECT DISTINCT ON (edge_id)
+                    edge_id, src_id, dst_id, kind, depth
+                FROM inbound_walk
+                ORDER BY edge_id, depth ASC
+            ),
+            outbound_rendered AS (
+                SELECT
+                    d.depth,
+                    d.edge_id,
+                    d.src_id, es.kind AS src_kind, es.name AS src_name, es.quarantine AS src_quarantine,
+                    d.dst_id, ed.kind AS dst_kind, ed.name AS dst_name, ed.quarantine AS dst_quarantine,
+                    d.kind,
+                    'outbound'::text AS direction
+                FROM outbound_deduped d
+                JOIN entities es ON es.id = d.src_id
+                JOIN entities ed ON ed.id = d.dst_id
+                ORDER BY d.depth ASC, d.edge_id ASC
+                LIMIT $3
+            ),
+            inbound_rendered AS (
+                SELECT
+                    d.depth,
+                    d.edge_id,
+                    d.src_id, es.kind AS src_kind, es.name AS src_name, es.quarantine AS src_quarantine,
+                    d.dst_id, ed.kind AS dst_kind, ed.name AS dst_name, ed.quarantine AS dst_quarantine,
+                    d.kind,
+                    'inbound'::text AS direction
+                FROM inbound_deduped d
+                JOIN entities es ON es.id = d.src_id
+                JOIN entities ed ON ed.id = d.dst_id
+                ORDER BY d.depth ASC, d.edge_id ASC
+                LIMIT $3
+            )
+            SELECT * FROM outbound_rendered
+            UNION ALL
+            SELECT * FROM inbound_rendered
+            ORDER BY direction ASC, depth ASC, edge_id ASC
+            "#,
+        )
+        .bind(seed_id)
+        .bind(max_depth_i32)
+        .bind(per_direction_limit)
+        .fetch_all(self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let mut around = EdgesAround::default();
+        for row in &rows {
+            let edge = decode_walked_edge(row)?;
+            let direction: String = row
+                .try_get::<String, _>(11)
+                .map_err(|e| DbError::Query(format!("decode walked_edge_around.direction: {e}")))?;
+            match direction.as_str() {
+                "outbound" => around.outbound.push(edge),
+                "inbound" => around.inbound.push(edge),
+                other => {
+                    return Err(DbError::Query(format!(
+                        "decode walked_edge_around.direction: unexpected value '{other}' \
+                         (expected 'outbound' or 'inbound' — SQL projection drift?)"
+                    )));
+                }
+            }
+        }
+        Ok(around)
     }
 }
 

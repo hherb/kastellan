@@ -4924,3 +4924,112 @@ async fn walk_edges_dedupes_diamond_topology_to_shortest_depth() {
 
     pool.close().await;
 }
+
+/// [Issue #115](https://github.com/hherb/hhagent/issues/115) regression
+/// pin: `Graph::walk_edges_around` issues a single UNION ALL query
+/// that returns the same byte-equivalent content as separate
+/// `walk_outbound_edges` + `walk_inbound_edges` calls.
+///
+/// The pin compares the combined call's `EdgesAround` against the
+/// `Vec<WalkedEdge>` results of the two single-direction calls,
+/// asserting field-for-field equality across an interesting fixture
+/// (the same diamond from #114) at `max_depth=3`. Each direction's
+/// dedupe is exercised; the per-direction limit and ordering are
+/// asserted; the seed-shared base case is asserted (no row-double-
+/// counting between the two walks).
+///
+/// Per-direction limit: also pin that
+/// `per_direction_limit = 2` clips each direction to exactly 2 rows
+/// (rather than 2 across the combined union) — load-bearing for the
+/// CLI which passes its `SHOW_PER_DIRECTION_LIMIT` constant as the
+/// per-direction cap.
+///
+/// `max_depth == 0` short-circuit: empty `EdgesAround` returned
+/// without a SQL round-trip — same guard the single-direction methods
+/// carry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_edges_around_matches_separate_walks_and_clips_per_direction() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if pg_bin_dir_or_skip().is_none() {
+        return;
+    }
+
+    let (_cluster, pool) = bring_up_pg_for_walk_test("walk-arnd").await;
+    let g = hhagent_db::graph::PgGraph::new(&pool);
+
+    use hhagent_db::graph::Graph;
+
+    // Build a fixture with non-trivial structure in both directions
+    // around a single seed (`hub`). Each of `a`, `b`, `c` points at
+    // `hub` (inbound). `hub` points at each of `x`, `y`, `z` (outbound).
+    // Additionally `b → c` (a diamond on the inbound side reached at
+    // depth 2 via `a → b → c → hub`), and `x → y` (a diamond on the
+    // outbound side at depth 2 via `hub → x → y` versus `hub → y`
+    // direct at depth 1).
+    let hub = g.upsert_entity("person", "hub", &serde_json::json!({})).await.unwrap();
+    let a = g.upsert_entity("person", "a", &serde_json::json!({})).await.unwrap();
+    let b = g.upsert_entity("person", "b", &serde_json::json!({})).await.unwrap();
+    let c = g.upsert_entity("person", "c", &serde_json::json!({})).await.unwrap();
+    let x = g.upsert_entity("person", "x", &serde_json::json!({})).await.unwrap();
+    let y = g.upsert_entity("person", "y", &serde_json::json!({})).await.unwrap();
+    let z = g.upsert_entity("person", "z", &serde_json::json!({})).await.unwrap();
+
+    // Outbound from hub: hub→x, hub→y, hub→z, plus diamond x→y.
+    g.upsert_relation(hub, x, "knows", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(hub, y, "knows", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(hub, z, "knows", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(x, y, "knows", &serde_json::json!({})).await.unwrap();
+    // Inbound to hub: a→hub, b→hub, c→hub, plus chain a→b→c→hub.
+    g.upsert_relation(a, hub, "knows", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(b, hub, "knows", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(c, hub, "knows", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(a, b, "knows", &serde_json::json!({})).await.unwrap();
+    g.upsert_relation(b, c, "knows", &serde_json::json!({})).await.unwrap();
+
+    // ── 1. Byte-equivalence with separate per-direction calls ──────────
+    let separate_outbound = g.walk_outbound_edges(hub, 3, 10_000).await.unwrap();
+    let separate_inbound = g.walk_inbound_edges(hub, 3, 10_000).await.unwrap();
+    let combined = g.walk_edges_around(hub, 3, 10_000).await.unwrap();
+
+    assert_eq!(
+        combined.outbound, separate_outbound,
+        "walk_edges_around.outbound must match walk_outbound_edges field-for-field",
+    );
+    assert_eq!(
+        combined.inbound, separate_inbound,
+        "walk_edges_around.inbound must match walk_inbound_edges field-for-field",
+    );
+
+    // ── 2. Per-direction limit clips each direction independently ──────
+    //
+    // separate_outbound has 4 edges, separate_inbound has 5. Passing
+    // per_direction_limit=2 must clip BOTH directions to 2 each (total
+    // 4 rows in the combined call), proving the limit is applied per-
+    // direction (inside each rendered CTE) rather than across the union.
+    let clipped = g.walk_edges_around(hub, 3, 2).await.unwrap();
+    assert_eq!(
+        clipped.outbound.len(),
+        2,
+        "per_direction_limit=2 must clip outbound to 2; got {} edges",
+        clipped.outbound.len(),
+    );
+    assert_eq!(
+        clipped.inbound.len(),
+        2,
+        "per_direction_limit=2 must clip inbound to 2; got {} edges",
+        clipped.inbound.len(),
+    );
+
+    // ── 3. max_depth==0 short-circuit returns empty EdgesAround ────────
+    let zero = g.walk_edges_around(hub, 0, 10_000).await.unwrap();
+    assert!(
+        zero.outbound.is_empty() && zero.inbound.is_empty(),
+        "max_depth=0 must return empty EdgesAround; got out={} in={}",
+        zero.outbound.len(),
+        zero.inbound.len(),
+    );
+
+    pool.close().await;
+}
