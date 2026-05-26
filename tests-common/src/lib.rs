@@ -50,7 +50,7 @@ pub use allowlist::seed_tool_allowlist;
 pub use binaries::{cli_binary, core_binary, shell_exec_worker_binary, workspace_target_binary};
 pub use embedding::text_to_embedding;
 pub use guards::{PathGuard, ServiceGuard};
-pub use pg::{bring_up_pg_cluster, PgCluster};
+pub use pg::{bring_up_pg_cluster, PgCluster, PG_BRING_UP_TIMEOUT_SECS};
 pub use sandbox::{backend, policy_for_shell_exec, skip_if_sandbox_unavailable};
 pub use serial::serial_lock;
 pub use skip::{pg_bin_dir_or_skip, skip_if_no_supervisor};
