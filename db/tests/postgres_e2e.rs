@@ -4817,3 +4817,110 @@ async fn walk_outbound_edges_honours_limit_argument() {
 
     pool.close().await;
 }
+
+/// Diamond-topology regression pin for [issue
+/// #114](https://github.com/hherb/hhagent/issues/114): a unique
+/// `edge_id` reachable by *multiple* paths from the seed must appear
+/// exactly once in the result, anchored to its **shortest-path
+/// depth**.
+///
+/// ### Fixture
+///
+/// ```text
+///   A --[knows]--> B
+///   A --[knows]--> C
+///   B --[knows]--> C   (creates the diamond)
+///   C --[knows]--> D
+/// ```
+///
+/// Walking outbound from `A` at `max_depth = 3`:
+///
+/// - depth 1: `A→B`, `A→C` (one row each — direct neighbours).
+/// - depth 2: from `A→B`'s frontier: `B→C`; from `A→C`'s frontier: `C→D`.
+/// - depth 3: from `A→B→C`'s frontier: `C→D` *again* — same `edge_id`,
+///   reached via the longer A-B-C path. The visited-set blocks cycles
+///   per-path but does NOT prevent the same edge from being surfaced
+///   via two different paths.
+///
+/// **Pre-fix:** the outer SELECT projects one row per traversal, so
+/// `edge_CD` appears twice (depth=2 via A-C, depth=3 via A-B-C).
+///
+/// **Post-fix:** `DISTINCT ON (edge_id) ORDER BY edge_id, depth ASC`
+/// keeps the shortest-depth row per unique `edge_id`. `edge_CD`
+/// appears exactly once with `depth=2`.
+///
+/// Mirrored for inbound from `D` for parity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_edges_dedupes_diamond_topology_to_shortest_depth() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if pg_bin_dir_or_skip().is_none() {
+        return;
+    }
+
+    let (_cluster, pool) = bring_up_pg_for_walk_test("walk-dmnd").await;
+    let g = hhagent_db::graph::PgGraph::new(&pool);
+
+    use hhagent_db::graph::Graph;
+    let a = g.upsert_entity("person", "a", &serde_json::json!({})).await.unwrap();
+    let b = g.upsert_entity("person", "b", &serde_json::json!({})).await.unwrap();
+    let c = g.upsert_entity("person", "c", &serde_json::json!({})).await.unwrap();
+    let d = g.upsert_entity("person", "d", &serde_json::json!({})).await.unwrap();
+    let e_ab = g.upsert_relation(a, b, "knows", &serde_json::json!({})).await.unwrap();
+    let e_ac = g.upsert_relation(a, c, "knows", &serde_json::json!({})).await.unwrap();
+    let e_bc = g.upsert_relation(b, c, "knows", &serde_json::json!({})).await.unwrap();
+    let e_cd = g.upsert_relation(c, d, "knows", &serde_json::json!({})).await.unwrap();
+
+    // Outbound walk from A — 4 unique edges, no duplicates.
+    let outbound = g.walk_outbound_edges(a, 3, 10_000).await.unwrap();
+    let outbound_ids: Vec<i64> = outbound.iter().map(|e| e.edge_id).collect();
+    let mut unique_outbound = outbound_ids.clone();
+    unique_outbound.sort();
+    unique_outbound.dedup();
+    assert_eq!(
+        outbound_ids.len(),
+        unique_outbound.len(),
+        "outbound walk must surface each unique edge_id exactly once; \
+         got duplicates: {outbound_ids:?}",
+    );
+    assert_eq!(outbound.len(), 4, "expected 4 unique edges; got {outbound:?}");
+
+    // The diamond's "bottom" edge C→D is reachable by two paths
+    // (A-C-D shortest, A-B-C-D longest). The kept row must carry the
+    // shortest depth.
+    let cd_rows: Vec<&hhagent_db::graph::WalkedEdge> =
+        outbound.iter().filter(|e| e.edge_id == e_cd).collect();
+    assert_eq!(cd_rows.len(), 1, "edge_CD must appear exactly once");
+    assert_eq!(
+        cd_rows[0].depth, 2,
+        "edge_CD must be anchored to its shortest path depth (A-C-D, depth=2), \
+         not the longer A-B-C-D (depth=3)",
+    );
+
+    // The other three edges are each reached by exactly one path; pin
+    // their depths anyway as a guardrail on the rest of the result.
+    let depth_for = |id: i64| outbound.iter().find(|e| e.edge_id == id).map(|e| e.depth);
+    assert_eq!(depth_for(e_ab), Some(1), "A→B is a direct neighbour");
+    assert_eq!(depth_for(e_ac), Some(1), "A→C is a direct neighbour");
+    assert_eq!(depth_for(e_bc), Some(2), "B→C reached via A-B path");
+
+    // Mirror: walking INBOUND from D should also dedupe — same diamond,
+    // same shortest-depth invariant. C→D is the only incoming edge to D,
+    // and B→C / A→C / A→B all sit upstream. At max_depth=3 the inbound
+    // walk should surface all 4 unique edges, with no duplicates and
+    // C→D anchored at depth=1 (it points directly at D).
+    let inbound = g.walk_inbound_edges(d, 3, 10_000).await.unwrap();
+    let inbound_ids: Vec<i64> = inbound.iter().map(|e| e.edge_id).collect();
+    let mut unique_inbound = inbound_ids.clone();
+    unique_inbound.sort();
+    unique_inbound.dedup();
+    assert_eq!(
+        inbound_ids.len(),
+        unique_inbound.len(),
+        "inbound walk must surface each unique edge_id exactly once; \
+         got duplicates: {inbound_ids:?}",
+    );
+
+    pool.close().await;
+}
