@@ -40,6 +40,25 @@ use crate::guards::{PathGuard, ServiceGuard};
 use crate::temp::{current_username, unique_temp_root};
 use crate::wait::{wait_for_socket, wait_for_status};
 
+/// Polling cap for the per-test Postgres cluster bring-up.
+///
+/// Applied to both `wait_for_status(... Active ...)` and
+/// `wait_for_socket(...)` inside [`bring_up_pg_cluster`]. The 50 ms
+/// poll interval inside both helpers means healthy clusters that come
+/// up in well under a second are unaffected — this is the worst-case
+/// outer bound, not the typical wait.
+///
+/// **30 s, not 15 s:** previously a 15 s cap. Sufficient under
+/// Homebrew Postgres on Linux + macOS, but on macOS launchd's first
+/// per-session bring-up of a Postgres.app-installed `postgres` binary
+/// overshoots 15 s consistently (operator memory
+/// `postgres-app-bin-paths.md` documented 12 expected timeouts when
+/// the `HHAGENT_PG_BIN_DIR` env override was set to Postgres.app's
+/// `bin/`). 30 s leaves ample headroom for the launchd-cold-cache case
+/// without slowing healthy runs (which short-circuit on the first
+/// successful poll).
+pub const PG_BRING_UP_TIMEOUT_SECS: u64 = 30;
+
 /// Handle returned by [`bring_up_pg_cluster`]. All fields needed by
 /// downstream tests are public; the cleanup guards are kept private
 /// so they cannot be dropped early.
@@ -48,6 +67,12 @@ use crate::wait::{wait_for_socket, wait_for_status};
 /// running service) is left intact while the field-level destructors
 /// run — only the trailing `_guards` triple actually performs cleanup,
 /// in tuple order (service stop+uninstall first, then directory wipes).
+//
+// IMPORTANT: do not reorder fields — RAII teardown depends on
+// `_guards` being last so the service stops + data/log dirs wipe
+// strictly after every other field has dropped. Moving `_guards`
+// up would wipe the data dir while `sup` still holds a handle to
+// a running postgres reading from it.
 pub struct PgCluster {
     pub conn_spec: hhagent_db::conn::ConnectSpec,
     pub data_dir: PathBuf,
@@ -79,7 +104,12 @@ pub struct PgCluster {
 /// * `log_label` — short label for the per-test log dir.
 /// * `service_name` — full systemd unit / launchd label, e.g.
 ///   `"hhagent-supervisor-test-pg-dispatch-<suffix>"`. Asserted ≤
-///   200 chars. Caller constructs this with whatever uniqueness suffix
+///   200 chars — comfortably under both the launchd label cap
+///   (255) and the systemd unit-file basename limit, with headroom
+///   for the `.service` suffix and any per-backend wrapping. (This
+///   cap is unrelated to `sun_path`'s 108-byte limit, which
+///   governs the socket directory length, not the service label.)
+///   Caller constructs this with whatever uniqueness suffix
 ///   it likes (typically via [`crate::temp::unique_suffix`]).
 ///
 /// # Panics
@@ -177,11 +207,19 @@ pub fn bring_up_pg_cluster(
         sup.as_ref(),
         &spec.name,
         |s| s == ServiceStatus::Active,
-        Duration::from_secs(15),
+        Duration::from_secs(PG_BRING_UP_TIMEOUT_SECS),
     )
-    .expect("postgres should reach Active within 15s");
-    wait_for_socket(&socket_dir, Duration::from_secs(15))
-        .expect("postgres socket should appear within 15s");
+    .unwrap_or_else(|_| {
+        panic!(
+            "postgres should reach Active within {PG_BRING_UP_TIMEOUT_SECS}s"
+        )
+    });
+    wait_for_socket(&socket_dir, Duration::from_secs(PG_BRING_UP_TIMEOUT_SECS))
+        .unwrap_or_else(|_| {
+            panic!(
+                "postgres socket should appear within {PG_BRING_UP_TIMEOUT_SECS}s"
+            )
+        });
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
         sup.status(&spec.name).expect("pg stable-active recheck"),
