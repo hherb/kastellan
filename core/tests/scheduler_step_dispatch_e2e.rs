@@ -58,8 +58,8 @@ use hhagent_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
 use hhagent_core::scheduler::{shell_exec_entry, ToolEntry, ToolHostStepDispatcher, ToolRegistry};
 use hhagent_sandbox::SandboxPolicy;
 use hhagent_db::{
-    build_initdb_argv, build_postgresql_auto_conf, default_pg_bin_dir_candidates,
-    default_socket_dir, find_pg_bin_dir, InitDbOptions, PgConfigOptions,
+    build_initdb_argv, build_postgresql_auto_conf, default_socket_dir, find_pg_bin_dir,
+    pg_bin_dir_candidates_with_env_override, InitDbOptions, PgConfigOptions,
 };
 use hhagent_supervisor::specs::postgres_service_spec;
 use hhagent_supervisor::{
@@ -114,7 +114,7 @@ fn skip_if_no_supervisor() -> bool {
 }
 
 fn pg_bin_dir_or_skip() -> Option<PathBuf> {
-    match find_pg_bin_dir(&default_pg_bin_dir_candidates()) {
+    match find_pg_bin_dir(&pg_bin_dir_candidates_with_env_override()) {
         Ok(dir) => Some(dir),
         Err(e) => {
             eprintln!("\n[SKIP] no Postgres install found: {e}\n");

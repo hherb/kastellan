@@ -51,7 +51,7 @@ fn skip_if_no_supervisor() -> bool {
 }
 
 fn pg_bin_dir_or_skip() -> Option<PathBuf> {
-    match hhagent_db::find_pg_bin_dir(&hhagent_db::default_pg_bin_dir_candidates()) {
+    match hhagent_db::find_pg_bin_dir(&hhagent_db::pg_bin_dir_candidates_with_env_override()) {
         Ok(dir) => Some(dir),
         Err(e) => {
             eprintln!("\n[SKIP] no Postgres install found: {e}\n");
