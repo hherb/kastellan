@@ -281,6 +281,12 @@ pub trait Graph {
     /// `(depth ASC, edge_id ASC)` for deterministic operator-facing
     /// output.
     ///
+    /// **When you want both directions:** prefer
+    /// [`Graph::walk_edges_around`] which issues one UNION ALL round-trip
+    /// instead of two separate queries. This single-direction method
+    /// stays as a stable surface for callers that genuinely need only
+    /// one direction.
+    ///
     /// **Semantics:**
     /// - `max_depth == 0` returns an empty `Vec` (no edges to walk).
     /// - `max_depth == 1` returns the seed's direct outbound edges
@@ -327,7 +333,12 @@ pub trait Graph {
     /// walk direction surfaced it.
     ///
     /// See [`Graph::walk_outbound_edges`] for cycle handling, depth-0
-    /// semantics, the `limit` contract, and quarantine policy.
+    /// semantics, the `limit` contract, quarantine policy, and the
+    /// shortest-path dedupe semantics.
+    ///
+    /// **When you want both directions:** prefer
+    /// [`Graph::walk_edges_around`] which issues one UNION ALL round-trip
+    /// instead of two separate queries.
     fn walk_inbound_edges(
         &self,
         dst_id: i64,
