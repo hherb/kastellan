@@ -67,6 +67,12 @@ pub const PG_BRING_UP_TIMEOUT_SECS: u64 = 30;
 /// running service) is left intact while the field-level destructors
 /// run — only the trailing `_guards` triple actually performs cleanup,
 /// in tuple order (service stop+uninstall first, then directory wipes).
+//
+// IMPORTANT: do not reorder fields — RAII teardown depends on
+// `_guards` being last so the service stops + data/log dirs wipe
+// strictly after every other field has dropped. Moving `_guards`
+// up would wipe the data dir while `sup` still holds a handle to
+// a running postgres reading from it.
 pub struct PgCluster {
     pub conn_spec: hhagent_db::conn::ConnectSpec,
     pub data_dir: PathBuf,
@@ -98,7 +104,12 @@ pub struct PgCluster {
 /// * `log_label` — short label for the per-test log dir.
 /// * `service_name` — full systemd unit / launchd label, e.g.
 ///   `"hhagent-supervisor-test-pg-dispatch-<suffix>"`. Asserted ≤
-///   200 chars. Caller constructs this with whatever uniqueness suffix
+///   200 chars — comfortably under both the launchd label cap
+///   (255) and the systemd unit-file basename limit, with headroom
+///   for the `.service` suffix and any per-backend wrapping. (This
+///   cap is unrelated to `sun_path`'s 108-byte limit, which
+///   governs the socket directory length, not the service label.)
+///   Caller constructs this with whatever uniqueness suffix
 ///   it likes (typically via [`crate::temp::unique_suffix`]).
 ///
 /// # Panics
