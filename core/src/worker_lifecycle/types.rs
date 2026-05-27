@@ -22,8 +22,30 @@
 /// The supervisor holds a single live process per worker type and re-uses it across
 /// requests; caps are evaluated post-completion only (never mid-flight).
 ///
-/// **Slice 1 ships the `IdleTimeout` variant declarable but inert** —
-/// `IdleTimeoutLifecycle::acquire` panics until slice 2 implements warm-keeping.
+/// # Construction discipline (issue #86)
+///
+/// The `IdleTimeout` variant is `#[non_exhaustive]`, so out-of-crate code (the future
+/// manifest parser in slice 3+, integration tests, other workspace crates) **cannot**
+/// construct it via the struct literal `Lifecycle::IdleTimeout { caps, contract }`.
+/// The validated [`Lifecycle::idle_timeout`] constructor is the only out-of-crate path —
+/// it rejects `Contract { stateless: false }` per spec v1, so any future manifest plumbing
+/// is forced through the validator rather than silently bypassing it. In-crate construction
+/// (production runtime, tests in this file) is unaffected by `#[non_exhaustive]` and uses
+/// either the struct literal or the validated constructor as appropriate.
+///
+/// ```compile_fail,E0639
+/// use hhagent_core::worker_lifecycle::{Lifecycle, IdleTimeoutCaps, Contract};
+/// // Out-of-crate struct literal must NOT compile — pinning the issue #86 contract.
+/// let _ = Lifecycle::IdleTimeout {
+///     caps: IdleTimeoutCaps {
+///         idle_seconds: 60,
+///         max_requests: 100,
+///         max_age_seconds: 3600,
+///         grace_period_seconds: 5,
+///     },
+///     contract: Contract { stateless: true },
+/// };
+/// ```
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum Lifecycle {
     /// Spawn a fresh process per request. Caps don't apply.
@@ -31,6 +53,11 @@ pub enum Lifecycle {
     SingleUse,
     /// Spawn on first request, stay alive, tear down post-completion when any of the
     /// caps fires.
+    ///
+    /// `#[non_exhaustive]` blocks out-of-crate struct-literal construction — see the
+    /// `Lifecycle` enum-level documentation for the rationale (issue #86). Use
+    /// [`Lifecycle::idle_timeout`] from out-of-crate code.
+    #[non_exhaustive]
     IdleTimeout {
         caps: IdleTimeoutCaps,
         contract: Contract,
@@ -45,8 +72,11 @@ impl Lifecycle {
     /// worker needs its own threat review (per spec §"The stateless contract") and
     /// will reach this constructor via a different path.
     ///
-    /// The struct-style variant literal (`Lifecycle::IdleTimeout { caps, contract }`)
-    /// remains accessible for tests that need to plant an invalid value deliberately.
+    /// **Out-of-crate callers MUST use this constructor** — the `IdleTimeout` variant
+    /// is `#[non_exhaustive]`, so the struct literal `Lifecycle::IdleTimeout { caps,
+    /// contract }` only compiles from inside `hhagent-core` (issue #86). In-crate
+    /// tests that need to plant an invalid value deliberately can still use the
+    /// struct literal.
     pub fn idle_timeout(
         caps: IdleTimeoutCaps,
         contract: Contract,
