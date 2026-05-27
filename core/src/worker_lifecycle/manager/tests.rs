@@ -48,6 +48,24 @@ fn worker_handle_exposes_worker_mut() {
     }
 }
 
+/// Issue #84: the queue-depth inspector returns 0 for a tool name that has
+/// never been acquired (slot doesn't exist in the registry yet).
+///
+/// Sync, not async — the read is a plain atomic load and `_test_slot_pending_acquires`
+/// has a sync signature (no tokio mutex involved on the read path). Pin the no-slot
+/// case here; the WITH-slot case is implicitly covered by the `pending_acquire_guard_*`
+/// pure tests + production wiring (see `acquire_impl` in `idle_timeout.rs`).
+#[tokio::test]
+async fn test_slot_pending_acquires_returns_zero_for_absent_tool() {
+    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let mgr = IdleTimeoutLifecycle::new(sandboxes);
+    assert_eq!(
+        mgr._test_slot_pending_acquires("never-acquired"),
+        0,
+        "absent-slot lookup must return 0, not panic or block"
+    );
+}
+
 /// `SingleUseLifecycle::acquire` resolves `entry.sandbox_backend`
 /// against its `SandboxBackends` bundle and reaches *that* backend,
 /// not a hardcoded one. We verify by injecting two counter-backends

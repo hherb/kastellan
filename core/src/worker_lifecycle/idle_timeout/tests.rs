@@ -134,6 +134,170 @@ fn is_aged_out_zero_max_means_unlimited() {
     assert!(!is_aged_out(Duration::from_secs(u64::MAX / 2), 0));
 }
 
+/// Pin the RAII-bracket semantics of `PendingAcquireGuard` (issue #84).
+///
+/// `enter` increments the per-slot pending-acquire counter; `Drop` decrements it.
+/// Nested guards stack (matches the "concurrent same-tool acquires" shape that the
+/// production `acquire_impl` would see) — N nested enters = depth N; N drops = back
+/// to 0. The Drop semantics ensure that even on panic or `?`-style early return the
+/// accounting can't leak.
+#[test]
+fn pending_acquire_guard_increments_on_enter_and_decrements_on_drop() {
+    let counter = std::sync::atomic::AtomicU32::new(0);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+    {
+        let _g1 = PendingAcquireGuard::enter(&counter);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
+        {
+            let _g2 = PendingAcquireGuard::enter(&counter);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 2);
+            let _g3 = PendingAcquireGuard::enter(&counter);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 3);
+        } // _g2 + _g3 drop here
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
+    } // _g1 drops here
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+}
+
+/// Pin that `depth()` reports the post-increment value (i.e. the depth as observed
+/// at `enter` time, including the caller's own slot). This is the contract the
+/// `tracing::warn!` site in `acquire_impl` relies on.
+#[test]
+fn pending_acquire_guard_depth_reports_post_increment_value() {
+    let counter = std::sync::atomic::AtomicU32::new(0);
+    let g1 = PendingAcquireGuard::enter(&counter);
+    assert_eq!(g1.depth(), 1, "first guard sees depth=1 including itself");
+    let g2 = PendingAcquireGuard::enter(&counter);
+    assert_eq!(g2.depth(), 2, "second guard sees depth=2 including itself");
+    let g3 = PendingAcquireGuard::enter(&counter);
+    assert_eq!(g3.depth(), 3);
+    drop(g3);
+    drop(g2);
+    drop(g1);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+}
+
+/// Pin the `tracing::warn!` threshold semantics — the predicate fires AT and
+/// ABOVE the threshold, not just strictly above. This matches the issue #84
+/// AC ("operator notices BEFORE users do" — i.e. fire at the boundary).
+#[test]
+fn pending_acquires_should_warn_fires_at_and_above_threshold() {
+    assert!(!pending_acquires_should_warn(0));
+    assert!(!pending_acquires_should_warn(1));
+    assert!(!pending_acquires_should_warn(
+        PENDING_ACQUIRES_WARN_THRESHOLD - 1
+    ));
+    assert!(pending_acquires_should_warn(PENDING_ACQUIRES_WARN_THRESHOLD));
+    assert!(pending_acquires_should_warn(
+        PENDING_ACQUIRES_WARN_THRESHOLD + 1
+    ));
+    assert!(pending_acquires_should_warn(u32::MAX));
+}
+
+/// Pin the threshold constant — if anyone bumps it, the test fires and forces
+/// a re-review of the operator-visibility tradeoff. The constant is part of the
+/// operator-facing observability contract; flipping it silently would change
+/// when warnings fire across all deployments.
+#[test]
+fn pending_acquires_warn_threshold_is_five() {
+    assert_eq!(
+        PENDING_ACQUIRES_WARN_THRESHOLD, 5,
+        "threshold change requires a re-think of the issue #84 operator-visibility \
+         tradeoff (see the const's doc-comment). Update this test if the change is \
+         intentional."
+    );
+}
+
+/// Pin issue #85's "exactly one idle-teardown task per slot at steady state" invariant.
+///
+/// Before this fix shipped, every successful release path called `tokio::spawn` to
+/// schedule a teardown task and *never aborted* prior ones. Under steady-state high
+/// request rate this accumulated ~`idle_seconds` stale tasks per tool (e.g. one
+/// request per second with `idle_seconds = 60` → ~60 pending sleepers per tool).
+///
+/// `replace_idle_teardown_handle` is the single mutator now; it aborts the prior
+/// handle (if any) before spawning a new one. This test pins the contract:
+///
+///   1. After the first call, the slot holds `Some(handle)`.
+///   2. After a second call, the slot's `JoinHandle` is a NEW task — the prior one
+///      was replaced (the old `JoinHandle` ID is no longer the one stored).
+///   3. `idle_seconds = 0` aborts the prior handle and leaves `None` (disabled).
+///
+/// If this test fires:
+///   - You stopped storing the JoinHandle in `ToolState.idle_teardown_handle` →
+///     issue #85's accumulation regression is back. Restore the storage.
+///   - You forgot to abort the prior handle before spawning a new one → wasted
+///     sleepers. Add the `abort_idle_teardown_handle` call.
+#[tokio::test]
+async fn replace_idle_teardown_handle_aborts_prior_and_stores_new() {
+    // Use `slot.state` directly (via `lock_owned()`) so the `state` argument the
+    // helper mutates and the mutex the spawned task will later try to lock are
+    // the same object — mirrors production wiring in `release_idle_timeout_worker`.
+    let slot: Arc<ToolSlot> = Arc::new(ToolSlot {
+        state: Arc::new(TokioMutex::new(ToolState::fresh())),
+        pending_acquires: std::sync::atomic::AtomicU32::new(0),
+    });
+    let mut state = Arc::clone(&slot.state).lock_owned().await;
+
+    // 1: schedule a handle. idle_seconds=60 keeps the task sleeping well beyond
+    //    the test's runtime, so we never observe it actually firing.
+    replace_idle_teardown_handle(&mut state, Arc::clone(&slot), Instant::now(), 60);
+    let first_id = state
+        .idle_teardown_handle
+        .as_ref()
+        .expect("first call should store a handle")
+        .id();
+
+    // 2: replace. The new handle MUST be a different tokio task (different ID).
+    replace_idle_teardown_handle(&mut state, Arc::clone(&slot), Instant::now(), 60);
+    let second_id = state
+        .idle_teardown_handle
+        .as_ref()
+        .expect("second call should store a handle (still exactly one alive)")
+        .id();
+    assert_ne!(
+        first_id, second_id,
+        "expected the prior handle to be replaced; got the same task ID — \
+         the abort-then-spawn path is broken (issue #85 regression)"
+    );
+
+    // 3: idle_seconds = 0 aborts the prior handle and leaves None.
+    //    Mirrors the disabled-teardown semantics other "0 = unlimited / disabled"
+    //    knobs use elsewhere in the workspace (`max_requests`, `cpu_quota_pct`).
+    replace_idle_teardown_handle(&mut state, Arc::clone(&slot), Instant::now(), 0);
+    assert!(
+        state.idle_teardown_handle.is_none(),
+        "idle_seconds=0 must clear the slot's idle-teardown handle (teardown disabled)"
+    );
+}
+
+/// Pin the steady-state invariant: after N rapid releases, the slot still holds
+/// exactly one teardown handle (not N). This is the load-bearing observable for
+/// issue #85: at any moment the supervisor has at most one pending idle-teardown
+/// task per warm slot, regardless of how fast requests come in.
+#[tokio::test]
+async fn replace_idle_teardown_handle_steady_state_holds_at_most_one_alive_per_slot() {
+    let slot: Arc<ToolSlot> = Arc::new(ToolSlot {
+        state: Arc::new(TokioMutex::new(ToolState::fresh())),
+        pending_acquires: std::sync::atomic::AtomicU32::new(0),
+    });
+    let mut state = Arc::clone(&slot.state).lock_owned().await;
+
+    // Simulate 10 rapid successful releases. Pre-fix this would have spawned 10
+    // tasks all sleeping for `idle_seconds`. Post-fix: each call aborts the
+    // prior and spawns one. At the end, exactly one Some(handle) remains.
+    for _ in 0..10 {
+        replace_idle_teardown_handle(&mut state, Arc::clone(&slot), Instant::now(), 60);
+    }
+    assert!(
+        state.idle_teardown_handle.is_some(),
+        "after N releases, the slot must still hold a handle (the most recent one)"
+    );
+    // The prior 9 handles were aborted by the helper; nothing observable from out
+    // here, but the production single-task-per-slot invariant is held: the slot
+    // carries at most one `Option<JoinHandle<()>>`, structurally.
+}
+
 /// Pins the IdleTimeoutLifecycle warm-cache key invariant (issue #121).
 ///
 /// The warm-cache key is `tool_name` only; `ToolEntry.container_image` is

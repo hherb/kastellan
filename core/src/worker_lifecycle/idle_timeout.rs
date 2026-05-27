@@ -8,6 +8,7 @@
 //! crash detection, exponential restart backoff, and request serialisation.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -125,8 +126,78 @@ pub fn is_aged_out(age: Duration, max_age_seconds: u64) -> bool {
 /// to produce an `OwnedMutexGuard` (the guard `WorkerHandle::IdleTimeout` carries from
 /// `acquire` through `Drop`). The tokio mutex serialises concurrent requests for the
 /// same tool — matches the spec's v1 single-threaded contract.
+///
+/// `pending_acquires` (issue #84) is read OUTSIDE the tokio mutex — an atomic counter
+/// of acquires that are currently queued behind the lock for this tool. Incremented
+/// in `acquire_impl` before `lock_owned().await` via [`PendingAcquireGuard`];
+/// decremented when the guard drops (i.e. once the lock has been acquired). The
+/// counter therefore reflects "depth of the queue" — callers waiting, not callers
+/// in flight. Exposed via `IdleTimeoutLifecycle::_test_slot_pending_acquires` for
+/// tests and the future `hhagent-cli supervisor status` operator surface.
 pub(crate) struct ToolSlot {
     pub(crate) state: Arc<TokioMutex<ToolState>>,
+    pub(crate) pending_acquires: AtomicU32,
+}
+
+/// Threshold at which `acquire` emits a `tracing::warn!` because the per-slot
+/// pending-acquire queue depth has reached operator-visible territory (issue #84).
+///
+/// Picked at 5 by rule-of-thumb: under typical inference-worker latency
+/// (~100-500ms per request), 5 queued requests = ~0.5-2.5s tail latency, which is
+/// the boundary where users start to notice. Tunable later if operators want a
+/// different floor; bumped here as a constant rather than env var because tuning
+/// belongs at code-review time, not at deploy time.
+pub const PENDING_ACQUIRES_WARN_THRESHOLD: u32 = 5;
+
+/// Pure predicate: should an acquirer that just observed a post-increment pending
+/// depth of `depth` emit a queue-depth warning?
+///
+/// Extracted as a named helper so the threshold semantics are unit-testable without
+/// constructing a real `ToolSlot` or driving concurrent acquires.
+pub(crate) fn pending_acquires_should_warn(depth: u32) -> bool {
+    depth >= PENDING_ACQUIRES_WARN_THRESHOLD
+}
+
+/// RAII guard that brackets the queued-acquire interval.
+///
+/// Construction (`enter`) increments `pending_acquires`; `Drop` decrements it. Used
+/// in `acquire_impl` so the counter reflects callers waiting for the slot's tokio
+/// mutex — once the mutex is acquired the guard is dropped explicitly to bound the
+/// "queued" lifetime to lock-wait time only (in-flight callers don't count).
+///
+/// Drop runs even on panic or `?`-style early return — the bracketed accounting
+/// can't leak.
+pub(crate) struct PendingAcquireGuard<'a> {
+    counter: &'a AtomicU32,
+}
+
+impl<'a> PendingAcquireGuard<'a> {
+    /// Increment the per-slot pending counter and produce a guard that decrements
+    /// it on Drop.
+    pub(crate) fn enter(counter: &'a AtomicU32) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self { counter }
+    }
+
+    /// The slot's current pending-acquire depth. Guaranteed to be `>= 1` for the
+    /// lifetime of the guard (this caller's own slot has been counted) and may be
+    /// strictly greater under concurrency (other threads can `fetch_add` between
+    /// our increment and this load). Used by callers to decide whether to emit a
+    /// queue-depth warning, where ">= threshold" is the load-bearing property —
+    /// exact identity with this caller's post-increment value is NOT promised.
+    ///
+    /// `Acquire` is used (not `Relaxed`) only for consistency with the increment
+    /// site; this counter has no synchronizes-with relationship to other state, so
+    /// `Relaxed` would also be sound — kept as `Acquire` for one-knob simplicity.
+    pub(crate) fn depth(&self) -> u32 {
+        self.counter.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for PendingAcquireGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// State the supervisor tracks per warm-keeping tool.
@@ -140,6 +211,22 @@ pub(crate) struct ToolState {
     /// Counter that drives `RestartBackoff::next_delay`. Increments on every crash;
     /// resets to 0 on every successful dispatch.
     pub(crate) consecutive_restarts: u32,
+    /// JoinHandle of the currently-scheduled idle-teardown task, if any.
+    ///
+    /// Issue #85 — the pre-fix shape spawned a fresh teardown task on every release
+    /// without aborting prior ones. Stale tasks no-op'd correctly via the
+    /// `last_completion` mismatch check, but at steady state under high request
+    /// rate ~`idle_seconds` tasks per tool accumulated (e.g. one request per
+    /// second with `idle_seconds = 60` → ~60 pending sleeper tasks per tool).
+    /// Not a leak (they all eventually exited), but inefficient and confusing
+    /// in tokio-console output.
+    ///
+    /// Now: [`replace_idle_teardown_handle`] is the single mutator. It aborts
+    /// the prior handle (if any) before spawning a new one, holding the
+    /// single-task-per-slot invariant at steady state. Calling `.abort()` on a
+    /// JoinHandle whose task has already finished is a no-op (per tokio docs),
+    /// so the self-firing-then-next-release case is fine.
+    pub(crate) idle_teardown_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ToolState {
@@ -148,6 +235,7 @@ impl ToolState {
             warm: None,
             next_spawn_allowed_at: None,
             consecutive_restarts: 0,
+            idle_teardown_handle: None,
         }
     }
 }
@@ -198,6 +286,7 @@ pub(crate) fn slot_for(registry: &WarmRegistry, tool_name: &str) -> Arc<ToolSlot
     Arc::clone(map.entry(tool_name.to_string()).or_insert_with(|| {
         Arc::new(ToolSlot {
             state: Arc::new(TokioMutex::new(ToolState::fresh())),
+            pending_acquires: AtomicU32::new(0),
         })
     }))
 }
@@ -238,7 +327,28 @@ pub(crate) async fn acquire_impl(
     };
 
     let slot = slot_for(registry, tool_name);
+
+    // Issue #84 — bracket the lock-acquisition wait with a pending-acquire guard so
+    // the per-slot atomic counter reflects "depth of the queue" (callers waiting,
+    // not callers in flight). Operator-visible signal in `_test_slot_pending_acquires`
+    // and (when this slot's queue depth crosses the threshold) a `tracing::warn!`.
+    // The pending guard MUST be alive across `lock_owned().await` — that's the
+    // queued interval. We drop it explicitly right after the await so in-flight
+    // dispatch time doesn't inflate the queue-depth metric.
+    let pending_guard = PendingAcquireGuard::enter(&slot.pending_acquires);
+    if pending_acquires_should_warn(pending_guard.depth()) {
+        tracing::warn!(
+            tool = tool_name,
+            pending_acquires = pending_guard.depth(),
+            threshold = PENDING_ACQUIRES_WARN_THRESHOLD,
+            "idle_timeout worker request queue is deep — \
+             requests are stacking up behind a slow or stuck warm worker"
+        );
+    }
     let mut guard = Arc::clone(&slot.state).lock_owned().await;
+    // We hold the lock — caller is no longer "queued", they're in flight. Drop the
+    // pending guard to bound the counter to lock-wait time only.
+    drop(pending_guard);
 
     // Honor restart backoff. If `next_spawn_allowed_at` is in the future, sleep until
     // it elapses. Reset the gate once we've waited so the next caller doesn't re-wait
@@ -328,6 +438,7 @@ pub(crate) fn release_idle_timeout_worker(
     // Crash branch — bump backoff, clear slot.
     if died {
         drop(worker);
+        abort_idle_teardown_handle(&mut guard);
         guard.warm = None;
         let next_count = guard.consecutive_restarts.saturating_add(1);
         let delay = backoff.next_delay(next_count.saturating_sub(1));
@@ -342,6 +453,7 @@ pub(crate) fn release_idle_timeout_worker(
     // §"idle_timeout".
     if is_request_capped(new_count, caps.max_requests) {
         drop(worker);
+        abort_idle_teardown_handle(&mut guard);
         guard.warm = None;
         guard.consecutive_restarts = 0;
         guard.next_spawn_allowed_at = None;
@@ -352,6 +464,7 @@ pub(crate) fn release_idle_timeout_worker(
     // checked after the response was written, never mid-flight.
     if is_aged_out(spawned_at.elapsed(), caps.max_age_seconds) {
         drop(worker);
+        abort_idle_teardown_handle(&mut guard);
         guard.warm = None;
         guard.consecutive_restarts = 0;
         guard.next_spawn_allowed_at = None;
@@ -359,8 +472,11 @@ pub(crate) fn release_idle_timeout_worker(
     }
 
     // Successful return: put the worker back into the slot, refresh `last_completion`,
-    // reset backoff counters. Spawn an idle-teardown task only after the guard drops
-    // so the task doesn't immediately fight us for the mutex.
+    // reset backoff counters, and rebind the idle-teardown task — aborting the prior
+    // one so we keep exactly one pending teardown per slot (issue #85). The newly
+    // spawned task's first await is `sleep(idle_seconds)`, so it does NOT contend
+    // with the guard we still hold: by the time the task tries to lock the slot's
+    // state, the guard is long since dropped at function exit.
     let last_completion = Instant::now();
     let idle_seconds = caps.idle_seconds;
     guard.warm = Some(WarmWorker {
@@ -371,30 +487,71 @@ pub(crate) fn release_idle_timeout_worker(
     });
     guard.consecutive_restarts = 0;
     guard.next_spawn_allowed_at = None;
-    drop(guard);
 
     if let Some(slot) = slot {
-        schedule_idle_teardown(slot, last_completion, idle_seconds);
+        replace_idle_teardown_handle(&mut guard, slot, last_completion, idle_seconds);
+    } else {
+        // Defensive: current production callers always thread `Some(slot)` through
+        // (`WorkerHandle::idle_timeout` constructs the handle with `Some`; the Drop
+        // path that calls us takes that `Some` exactly once). But the function
+        // signature accepts `Option<Arc<ToolSlot>>`, so a future caller passing
+        // `None` would silently skip the abort and revert this branch to the pre-#85
+        // accumulation pattern (the prior teardown task continues to sleep). Keep
+        // every release path symmetric: crash/cap branches above also unconditionally
+        // abort. Without `slot` we cannot spawn a replacement task, but the warm
+        // slot's `last_completion` was just refreshed so no teardown would be due yet.
+        abort_idle_teardown_handle(&mut guard);
     }
 }
 
-/// Spawn a one-shot teardown task that fires `idle_seconds` after `for_last_completion`.
+/// Abort the slot's pending idle-teardown task (if any) and clear its handle.
 ///
-/// The task re-acquires the slot's mutex, compares `state.warm`'s `last_completion`
-/// against the captured value; if they match the worker has been idle since this
-/// release and is torn down (drop terminates the inner `SupervisedWorker`). If they
-/// differ, a newer request bumped the timestamp and this task is a no-op.
+/// Cap-driven release paths (crash / max_requests / max_age) call this so the pending
+/// teardown task — which would otherwise sit sleeping for `idle_seconds` and then
+/// no-op via the `last_completion` check — is dropped immediately. Calling `.abort()`
+/// on an already-finished JoinHandle is a no-op per tokio docs, so this is safe even
+/// if the task happened to fire concurrently.
+fn abort_idle_teardown_handle(state: &mut ToolState) {
+    if let Some(handle) = state.idle_teardown_handle.take() {
+        handle.abort();
+    }
+}
+
+/// Abort any pending idle-teardown task and schedule a fresh one — the load-bearing
+/// helper for issue #85.
 ///
-/// Multiple stale teardown tasks coexist harmlessly: only the newest one's captured
-/// `last_completion` matches the current slot state.
-fn schedule_idle_teardown(slot: Arc<ToolSlot>, for_last_completion: Instant, idle_seconds: u64) {
+/// Before this helper existed, every successful release path called `tokio::spawn` to
+/// schedule a teardown task and *never aborted* prior ones. Under steady-state high
+/// request rate this accumulated ~`idle_seconds` stale tasks per tool (e.g. one
+/// request per second with `idle_seconds = 60` → ~60 sleepers per tool). They all
+/// no-op'd correctly via the `last_completion` mismatch check, but the accumulation
+/// was inefficient and confusing in tokio-console output.
+///
+/// Behaviour:
+///   - If `idle_seconds == 0`, idle teardown is disabled; aborts any prior handle
+///     and leaves `state.idle_teardown_handle` as `None`.
+///   - Otherwise, aborts the prior handle (if any) and spawns a fresh teardown task
+///     that sleeps for `idle_seconds`, then re-acquires the slot mutex and tears
+///     down the warm worker iff its `last_completion` still matches the captured
+///     value. The new JoinHandle is stored in `state.idle_teardown_handle` so the
+///     next release can abort it.
+///
+/// The single-task-per-slot invariant — and its pin test in this module's `tests.rs`
+/// — is the regression guarantee for issue #85.
+fn replace_idle_teardown_handle(
+    state: &mut ToolState,
+    slot: Arc<ToolSlot>,
+    for_last_completion: Instant,
+    idle_seconds: u64,
+) {
+    abort_idle_teardown_handle(state);
     if idle_seconds == 0 {
         // 0 = idle teardown disabled; spec uses non-zero `idle_seconds` as the
         // canonical opt-in.
         return;
     }
     let delay = Duration::from_secs(idle_seconds);
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         sleep(delay).await;
         let mut state = slot.state.lock().await;
         // NOTE: state's `MutexGuard` derefs to `&mut ToolState`; `if let Some(warm) =
@@ -404,11 +561,15 @@ fn schedule_idle_teardown(slot: Arc<ToolSlot>, for_last_completion: Instant, idl
             if warm.last_completion == for_last_completion {
                 // Take + drop the warm worker. `SupervisedWorker`'s own Drop closes
                 // stdio + cancels the watchdog; the OS reaps the zombie on next
-                // spawn cycle.
+                // spawn cycle. Also self-clear the handle — best-effort hygiene; a
+                // subsequent release would overwrite it anyway, but keeping the slot
+                // accurate while idle helps any future operator-visible inspector.
                 state.warm = None;
+                state.idle_teardown_handle = None;
             }
         }
     });
+    state.idle_teardown_handle = Some(handle);
 }
 
 #[cfg(test)]
