@@ -247,16 +247,10 @@ pub fn bring_up_pg_cluster_with_timeout(
         timeout,
     )
     .unwrap_or_else(|_| {
-        panic!(
-            "postgres should reach Active within {}s",
-            timeout.as_secs()
-        )
+        panic!("postgres should reach Active within {timeout:?}")
     });
     wait_for_socket(&socket_dir, timeout).unwrap_or_else(|_| {
-        panic!(
-            "postgres socket should appear within {}s",
-            timeout.as_secs()
-        )
+        panic!("postgres socket should appear within {timeout:?}")
     });
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
