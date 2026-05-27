@@ -299,6 +299,28 @@ impl IdleTimeoutLifecycle {
         let state = slot.state.lock().await;
         state.consecutive_restarts
     }
+
+    /// Test-only inspector: returns the slot's current `pending_acquires` depth.
+    ///
+    /// Closes the observability half of issue #84. The atomic counter is incremented
+    /// in `acquire_impl` before `lock_owned().await` (via `PendingAcquireGuard`) and
+    /// decremented once the lock is acquired, so the returned depth reflects
+    /// "callers waiting for the slot's tokio mutex" (queued), not "callers
+    /// dispatching" (in flight).
+    ///
+    /// Sync, not async — the read is a plain atomic load, no tokio mutex involved.
+    /// Returns 0 if the slot doesn't exist yet (no acquire has hit this tool name).
+    /// Stable shape that the future `hhagent-cli supervisor status` surface can
+    /// adopt without changing the underlying mechanism.
+    #[doc(hidden)]
+    pub fn _test_slot_pending_acquires(&self, tool_name: &str) -> u32 {
+        let map = self.registry.lock().expect("warm-registry mutex poisoned");
+        let Some(slot) = map.get(tool_name) else {
+            return 0;
+        };
+        slot.pending_acquires
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 #[async_trait]

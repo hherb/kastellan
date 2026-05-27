@@ -8,6 +8,7 @@
 //! crash detection, exponential restart backoff, and request serialisation.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -125,8 +126,73 @@ pub fn is_aged_out(age: Duration, max_age_seconds: u64) -> bool {
 /// to produce an `OwnedMutexGuard` (the guard `WorkerHandle::IdleTimeout` carries from
 /// `acquire` through `Drop`). The tokio mutex serialises concurrent requests for the
 /// same tool — matches the spec's v1 single-threaded contract.
+///
+/// `pending_acquires` (issue #84) is read OUTSIDE the tokio mutex — an atomic counter
+/// of acquires that are currently queued behind the lock for this tool. Incremented
+/// in `acquire_impl` before `lock_owned().await` via [`PendingAcquireGuard`];
+/// decremented when the guard drops (i.e. once the lock has been acquired). The
+/// counter therefore reflects "depth of the queue" — callers waiting, not callers
+/// in flight. Exposed via `IdleTimeoutLifecycle::_test_slot_pending_acquires` for
+/// tests and the future `hhagent-cli supervisor status` operator surface.
 pub(crate) struct ToolSlot {
     pub(crate) state: Arc<TokioMutex<ToolState>>,
+    pub(crate) pending_acquires: AtomicU32,
+}
+
+/// Threshold at which `acquire` emits a `tracing::warn!` because the per-slot
+/// pending-acquire queue depth has reached operator-visible territory (issue #84).
+///
+/// Picked at 5 by rule-of-thumb: under typical inference-worker latency
+/// (~100-500ms per request), 5 queued requests = ~0.5-2.5s tail latency, which is
+/// the boundary where users start to notice. Tunable later if operators want a
+/// different floor; bumped here as a constant rather than env var because tuning
+/// belongs at code-review time, not at deploy time.
+pub const PENDING_ACQUIRES_WARN_THRESHOLD: u32 = 5;
+
+/// Pure predicate: should an acquirer that just observed a post-increment pending
+/// depth of `depth` emit a queue-depth warning?
+///
+/// Extracted as a named helper so the threshold semantics are unit-testable without
+/// constructing a real `ToolSlot` or driving concurrent acquires.
+pub(crate) fn pending_acquires_should_warn(depth: u32) -> bool {
+    depth >= PENDING_ACQUIRES_WARN_THRESHOLD
+}
+
+/// RAII guard that brackets the queued-acquire interval.
+///
+/// Construction (`enter`) increments `pending_acquires`; `Drop` decrements it. Used
+/// in `acquire_impl` so the counter reflects callers waiting for the slot's tokio
+/// mutex — once the mutex is acquired the guard is dropped explicitly to bound the
+/// "queued" lifetime to lock-wait time only (in-flight callers don't count).
+///
+/// Drop runs even on panic or `?`-style early return — the bracketed accounting
+/// can't leak.
+pub(crate) struct PendingAcquireGuard<'a> {
+    counter: &'a AtomicU32,
+}
+
+impl<'a> PendingAcquireGuard<'a> {
+    /// Increment the per-slot pending counter and produce a guard that decrements
+    /// it on Drop.
+    pub(crate) fn enter(counter: &'a AtomicU32) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self { counter }
+    }
+
+    /// The post-increment depth observed at `enter` time. Used by callers to decide
+    /// whether to emit a queue-depth warning.
+    pub(crate) fn depth(&self) -> u32 {
+        // Load after-the-fact rather than capturing `fetch_add`'s return value
+        // (which is the pre-increment value) so the caller sees the value *as
+        // of* the increment they performed, not the prior state.
+        self.counter.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for PendingAcquireGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// State the supervisor tracks per warm-keeping tool.
@@ -215,6 +281,7 @@ pub(crate) fn slot_for(registry: &WarmRegistry, tool_name: &str) -> Arc<ToolSlot
     Arc::clone(map.entry(tool_name.to_string()).or_insert_with(|| {
         Arc::new(ToolSlot {
             state: Arc::new(TokioMutex::new(ToolState::fresh())),
+            pending_acquires: AtomicU32::new(0),
         })
     }))
 }
@@ -255,7 +322,28 @@ pub(crate) async fn acquire_impl(
     };
 
     let slot = slot_for(registry, tool_name);
+
+    // Issue #84 — bracket the lock-acquisition wait with a pending-acquire guard so
+    // the per-slot atomic counter reflects "depth of the queue" (callers waiting,
+    // not callers in flight). Operator-visible signal in `_test_slot_pending_acquires`
+    // and (when this slot's queue depth crosses the threshold) a `tracing::warn!`.
+    // The pending guard MUST be alive across `lock_owned().await` — that's the
+    // queued interval. We drop it explicitly right after the await so in-flight
+    // dispatch time doesn't inflate the queue-depth metric.
+    let pending_guard = PendingAcquireGuard::enter(&slot.pending_acquires);
+    if pending_acquires_should_warn(pending_guard.depth()) {
+        tracing::warn!(
+            tool = tool_name,
+            pending_acquires = pending_guard.depth(),
+            threshold = PENDING_ACQUIRES_WARN_THRESHOLD,
+            "idle_timeout worker request queue is deep — \
+             requests are stacking up behind a slow or stuck warm worker"
+        );
+    }
     let mut guard = Arc::clone(&slot.state).lock_owned().await;
+    // We hold the lock — caller is no longer "queued", they're in flight. Drop the
+    // pending guard to bound the counter to lock-wait time only.
+    drop(pending_guard);
 
     // Honor restart backoff. If `next_spawn_allowed_at` is in the future, sleep until
     // it elapses. Reset the gate once we've waited so the next caller doesn't re-wait

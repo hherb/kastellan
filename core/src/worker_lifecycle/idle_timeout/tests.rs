@@ -134,6 +134,80 @@ fn is_aged_out_zero_max_means_unlimited() {
     assert!(!is_aged_out(Duration::from_secs(u64::MAX / 2), 0));
 }
 
+/// Pin the RAII-bracket semantics of `PendingAcquireGuard` (issue #84).
+///
+/// `enter` increments the per-slot pending-acquire counter; `Drop` decrements it.
+/// Nested guards stack (matches the "concurrent same-tool acquires" shape that the
+/// production `acquire_impl` would see) — N nested enters = depth N; N drops = back
+/// to 0. The Drop semantics ensure that even on panic or `?`-style early return the
+/// accounting can't leak.
+#[test]
+fn pending_acquire_guard_increments_on_enter_and_decrements_on_drop() {
+    let counter = std::sync::atomic::AtomicU32::new(0);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+    {
+        let _g1 = PendingAcquireGuard::enter(&counter);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
+        {
+            let _g2 = PendingAcquireGuard::enter(&counter);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 2);
+            let _g3 = PendingAcquireGuard::enter(&counter);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 3);
+        } // _g2 + _g3 drop here
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
+    } // _g1 drops here
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+}
+
+/// Pin that `depth()` reports the post-increment value (i.e. the depth as observed
+/// at `enter` time, including the caller's own slot). This is the contract the
+/// `tracing::warn!` site in `acquire_impl` relies on.
+#[test]
+fn pending_acquire_guard_depth_reports_post_increment_value() {
+    let counter = std::sync::atomic::AtomicU32::new(0);
+    let g1 = PendingAcquireGuard::enter(&counter);
+    assert_eq!(g1.depth(), 1, "first guard sees depth=1 including itself");
+    let g2 = PendingAcquireGuard::enter(&counter);
+    assert_eq!(g2.depth(), 2, "second guard sees depth=2 including itself");
+    let g3 = PendingAcquireGuard::enter(&counter);
+    assert_eq!(g3.depth(), 3);
+    drop(g3);
+    drop(g2);
+    drop(g1);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+}
+
+/// Pin the `tracing::warn!` threshold semantics — the predicate fires AT and
+/// ABOVE the threshold, not just strictly above. This matches the issue #84
+/// AC ("operator notices BEFORE users do" — i.e. fire at the boundary).
+#[test]
+fn pending_acquires_should_warn_fires_at_and_above_threshold() {
+    assert!(!pending_acquires_should_warn(0));
+    assert!(!pending_acquires_should_warn(1));
+    assert!(!pending_acquires_should_warn(
+        PENDING_ACQUIRES_WARN_THRESHOLD - 1
+    ));
+    assert!(pending_acquires_should_warn(PENDING_ACQUIRES_WARN_THRESHOLD));
+    assert!(pending_acquires_should_warn(
+        PENDING_ACQUIRES_WARN_THRESHOLD + 1
+    ));
+    assert!(pending_acquires_should_warn(u32::MAX));
+}
+
+/// Pin the threshold constant — if anyone bumps it, the test fires and forces
+/// a re-review of the operator-visibility tradeoff. The constant is part of the
+/// operator-facing observability contract; flipping it silently would change
+/// when warnings fire across all deployments.
+#[test]
+fn pending_acquires_warn_threshold_is_five() {
+    assert_eq!(
+        PENDING_ACQUIRES_WARN_THRESHOLD, 5,
+        "threshold change requires a re-think of the issue #84 operator-visibility \
+         tradeoff (see the const's doc-comment). Update this test if the change is \
+         intentional."
+    );
+}
+
 /// Pin issue #85's "exactly one idle-teardown task per slot at steady state" invariant.
 ///
 /// Before this fix shipped, every successful release path called `tokio::spawn` to
@@ -158,6 +232,7 @@ fn is_aged_out_zero_max_means_unlimited() {
 async fn replace_idle_teardown_handle_aborts_prior_and_stores_new() {
     let slot: Arc<ToolSlot> = Arc::new(ToolSlot {
         state: Arc::new(TokioMutex::new(ToolState::fresh())),
+        pending_acquires: std::sync::atomic::AtomicU32::new(0),
     });
     let mut state = ToolState::fresh();
 
@@ -201,6 +276,7 @@ async fn replace_idle_teardown_handle_aborts_prior_and_stores_new() {
 async fn replace_idle_teardown_handle_steady_state_holds_at_most_one_alive_per_slot() {
     let slot: Arc<ToolSlot> = Arc::new(ToolSlot {
         state: Arc::new(TokioMutex::new(ToolState::fresh())),
+        pending_acquires: std::sync::atomic::AtomicU32::new(0),
     });
     let mut state = ToolState::fresh();
 
