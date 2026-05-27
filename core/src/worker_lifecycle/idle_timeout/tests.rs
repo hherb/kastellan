@@ -208,6 +208,134 @@ fn pending_acquires_warn_threshold_is_five() {
     );
 }
 
+// --- Issue #136: queue-depth warn debounce ---------------------------------
+
+/// Pin the cooldown constant — same defensive pattern as
+/// `pending_acquires_warn_threshold_is_five`. Bumping the cooldown changes
+/// operator log volume noticeably (longer windows = sparser warns; shorter
+/// windows = noisier under sustained queue depth), so the change should go
+/// through code review.
+#[test]
+fn pending_acquires_warn_cooldown_is_thirty_seconds() {
+    assert_eq!(
+        PENDING_ACQUIRES_WARN_COOLDOWN,
+        Duration::from_secs(30),
+        "cooldown change requires a re-think of the issue #136 operator-visibility \
+         tradeoff (see the const's doc-comment). Update this test if the change is \
+         intentional."
+    );
+}
+
+/// First warn ever (`last_warn_nanos == 0`): the gate collapses to
+/// `now >= cooldown`. In production this is trivially true because
+/// `SystemTime::now()` is decades past epoch (~`1.78e18` ns in 2026,
+/// vastly larger than any sensible cooldown). The load-bearing
+/// "first crossing into the warn band fires immediately" property
+/// therefore holds in practice — pinned here with a realistic `now`
+/// rather than a fabricated tiny one so the assertion matches reality.
+///
+/// Note: the predicate does NOT short-circuit on `last == 0`. A
+/// freshly-constructed slot whose first warn happened to fire in the
+/// first 30 ns after the unix epoch (impossible in practice) would
+/// suppress for the cooldown — same shape as any other warn. Avoids
+/// a special case in the production path.
+#[test]
+fn debounce_warn_fires_when_no_prior_warn() {
+    let cooldown = Duration::from_secs(30);
+    let realistic_now_nanos: i64 = 1_700_000_000_000_000_000; // ~2023-11
+    assert!(debounce_warn(0, realistic_now_nanos, cooldown));
+    // Boundary case for completeness: `now == cooldown` (≈30 s after epoch).
+    // Inclusive at the boundary by design — fires.
+    assert!(debounce_warn(0, cooldown.as_nanos() as i64, cooldown));
+}
+
+/// Within-cooldown: suppress. This is the whole point of the debounce — under
+/// sustained queue depth the predicate must return false at request rate.
+#[test]
+fn debounce_warn_suppresses_within_cooldown() {
+    let cooldown = Duration::from_secs(30);
+    let last = 1_700_000_000_000_000_000; // arbitrary plausible 2023-era ns
+    // 1 ns after last warn — squarely inside the cooldown.
+    assert!(!debounce_warn(last, last + 1, cooldown));
+    // 29 s after — still inside.
+    assert!(!debounce_warn(
+        last,
+        last + 29 * 1_000_000_000,
+        cooldown
+    ));
+    // 30 s minus 1 ns — still strictly inside (boundary is inclusive at 30 s).
+    assert!(!debounce_warn(
+        last,
+        last + 30 * 1_000_000_000 - 1,
+        cooldown
+    ));
+}
+
+/// At the cooldown boundary (now - last == cooldown) the predicate fires. The
+/// `>= cooldown` form ensures the cooldown is the *minimum* time between warns,
+/// not a strict-greater bound — a one-nanosecond rounding lower would only hurt.
+#[test]
+fn debounce_warn_fires_at_cooldown_boundary_inclusive() {
+    let cooldown = Duration::from_secs(30);
+    let last = 1_700_000_000_000_000_000;
+    assert!(debounce_warn(
+        last,
+        last + cooldown.as_nanos() as i64,
+        cooldown
+    ));
+}
+
+/// Past the cooldown: fires. The natural case for the operator — episode of
+/// queue depth resolved, queue empties, queue refills > 30 s later, fresh warn.
+#[test]
+fn debounce_warn_fires_after_cooldown_elapsed() {
+    let cooldown = Duration::from_secs(30);
+    let last = 1_700_000_000_000_000_000;
+    assert!(debounce_warn(
+        last,
+        last + 31 * 1_000_000_000,
+        cooldown
+    ));
+    // Hours later — still fires; the gate is monotonic.
+    assert!(debounce_warn(
+        last,
+        last + 3600 * 1_000_000_000,
+        cooldown
+    ));
+}
+
+/// Clock-skew backward (NTP correction stepping the wall clock into the past):
+/// suppress. The `saturating_sub` makes `now - last` negative, which is always
+/// less than the positive cooldown — predicate returns false. We choose to
+/// under-warn during clock drift rather than over-warn; in practice NTP
+/// corrections are tiny and rare, so the worst case is the next warn waiting
+/// until the apparent clock catches back up to `last + cooldown`.
+#[test]
+fn debounce_warn_suppresses_on_clock_skew_backward() {
+    let cooldown = Duration::from_secs(30);
+    let last = 2_000_000_000_000_000_000;
+    let now = 1_000_000_000_000_000_000; // 31+ years earlier — extreme skew
+    assert!(!debounce_warn(last, now, cooldown));
+    // Even 1 ns of backward skew suppresses (correct: any "negative elapsed"
+    // is not "cooldown elapsed").
+    assert!(!debounce_warn(last, last - 1, cooldown));
+}
+
+/// Fresh slots from `slot_for` start with `last_warn_unix_nanos == 0` so the
+/// first warn fires immediately — pinned here because the initial value is the
+/// load-bearing input to `debounce_warn` on the cold path.
+#[test]
+fn slot_for_initializes_last_warn_unix_nanos_to_zero() {
+    let registry: WarmRegistry = empty_registry();
+    let slot = slot_for(&registry, "fresh-tool-for-debounce-init-pin");
+    assert_eq!(
+        slot.last_warn_unix_nanos.load(Ordering::Acquire),
+        0,
+        "fresh slots must start at 0 so the very first queue-depth crossing \
+         emits a warn immediately (issue #136 cold-path contract)"
+    );
+}
+
 /// Pin issue #85's "exactly one idle-teardown task per slot at steady state" invariant.
 ///
 /// Before this fix shipped, every successful release path called `tokio::spawn` to
@@ -236,6 +364,7 @@ async fn replace_idle_teardown_handle_aborts_prior_and_stores_new() {
     let slot: Arc<ToolSlot> = Arc::new(ToolSlot {
         state: Arc::new(TokioMutex::new(ToolState::fresh())),
         pending_acquires: std::sync::atomic::AtomicU32::new(0),
+        last_warn_unix_nanos: std::sync::atomic::AtomicI64::new(0),
     });
     let mut state = Arc::clone(&slot.state).lock_owned().await;
 
@@ -280,6 +409,7 @@ async fn replace_idle_teardown_handle_steady_state_holds_at_most_one_alive_per_s
     let slot: Arc<ToolSlot> = Arc::new(ToolSlot {
         state: Arc::new(TokioMutex::new(ToolState::fresh())),
         pending_acquires: std::sync::atomic::AtomicU32::new(0),
+        last_warn_unix_nanos: std::sync::atomic::AtomicI64::new(0),
     });
     let mut state = Arc::clone(&slot.state).lock_owned().await;
 
