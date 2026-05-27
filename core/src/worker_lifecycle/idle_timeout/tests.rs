@@ -7,6 +7,11 @@
 //! module pattern.
 
 use super::*;
+// `replace_idle_teardown_handle` moved into the sibling `release` submodule when
+// `idle_timeout.rs` grew past the 500-LOC cap. Tests reach into it directly here
+// rather than via a `#[cfg(test)]` re-export on the parent so the structural
+// home of the helper is explicit at the import site.
+use super::release::replace_idle_teardown_handle;
 use hhagent_protocol::RpcError;
 use std::io;
 
