@@ -230,11 +230,14 @@ fn pending_acquires_warn_threshold_is_five() {
 ///     sleepers. Add the `abort_idle_teardown_handle` call.
 #[tokio::test]
 async fn replace_idle_teardown_handle_aborts_prior_and_stores_new() {
+    // Use `slot.state` directly (via `lock_owned()`) so the `state` argument the
+    // helper mutates and the mutex the spawned task will later try to lock are
+    // the same object — mirrors production wiring in `release_idle_timeout_worker`.
     let slot: Arc<ToolSlot> = Arc::new(ToolSlot {
         state: Arc::new(TokioMutex::new(ToolState::fresh())),
         pending_acquires: std::sync::atomic::AtomicU32::new(0),
     });
-    let mut state = ToolState::fresh();
+    let mut state = Arc::clone(&slot.state).lock_owned().await;
 
     // 1: schedule a handle. idle_seconds=60 keeps the task sleeping well beyond
     //    the test's runtime, so we never observe it actually firing.
@@ -278,7 +281,7 @@ async fn replace_idle_teardown_handle_steady_state_holds_at_most_one_alive_per_s
         state: Arc::new(TokioMutex::new(ToolState::fresh())),
         pending_acquires: std::sync::atomic::AtomicU32::new(0),
     });
-    let mut state = ToolState::fresh();
+    let mut state = Arc::clone(&slot.state).lock_owned().await;
 
     // Simulate 10 rapid successful releases. Pre-fix this would have spawned 10
     // tasks all sleeping for `idle_seconds`. Post-fix: each call aborts the

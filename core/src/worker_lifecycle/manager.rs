@@ -310,8 +310,13 @@ impl IdleTimeoutLifecycle {
     ///
     /// Sync, not async — the read is a plain atomic load, no tokio mutex involved.
     /// Returns 0 if the slot doesn't exist yet (no acquire has hit this tool name).
-    /// Stable shape that the future `hhagent-cli supervisor status` surface can
-    /// adopt without changing the underlying mechanism.
+    ///
+    /// **Not the production CLI surface.** Matches the `_test_slot_*` naming
+    /// convention of its sibling inspectors above; the future
+    /// `hhagent-cli supervisor status` plumbing will add a parallel `pub fn
+    /// slot_pending_acquires` (or equivalent) wrapping the same atomic load.
+    /// Inlining the production accessor here would have meant either renaming
+    /// all three inspectors at once or breaking convention for just this one.
     #[doc(hidden)]
     pub fn _test_slot_pending_acquires(&self, tool_name: &str) -> u32 {
         let map = self.registry.lock().expect("warm-registry mutex poisoned");

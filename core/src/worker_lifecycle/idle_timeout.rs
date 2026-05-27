@@ -179,12 +179,17 @@ impl<'a> PendingAcquireGuard<'a> {
         Self { counter }
     }
 
-    /// The post-increment depth observed at `enter` time. Used by callers to decide
-    /// whether to emit a queue-depth warning.
+    /// The slot's current pending-acquire depth. Guaranteed to be `>= 1` for the
+    /// lifetime of the guard (this caller's own slot has been counted) and may be
+    /// strictly greater under concurrency (other threads can `fetch_add` between
+    /// our increment and this load). Used by callers to decide whether to emit a
+    /// queue-depth warning, where ">= threshold" is the load-bearing property —
+    /// exact identity with this caller's post-increment value is NOT promised.
+    ///
+    /// `Acquire` is used (not `Relaxed`) only for consistency with the increment
+    /// site; this counter has no synchronizes-with relationship to other state, so
+    /// `Relaxed` would also be sound — kept as `Acquire` for one-knob simplicity.
     pub(crate) fn depth(&self) -> u32 {
-        // Load after-the-fact rather than capturing `fetch_add`'s return value
-        // (which is the pre-increment value) so the caller sees the value *as
-        // of* the increment they performed, not the prior state.
         self.counter.load(Ordering::Acquire)
     }
 }
@@ -485,6 +490,17 @@ pub(crate) fn release_idle_timeout_worker(
 
     if let Some(slot) = slot {
         replace_idle_teardown_handle(&mut guard, slot, last_completion, idle_seconds);
+    } else {
+        // Defensive: current production callers always thread `Some(slot)` through
+        // (`WorkerHandle::idle_timeout` constructs the handle with `Some`; the Drop
+        // path that calls us takes that `Some` exactly once). But the function
+        // signature accepts `Option<Arc<ToolSlot>>`, so a future caller passing
+        // `None` would silently skip the abort and revert this branch to the pre-#85
+        // accumulation pattern (the prior teardown task continues to sleep). Keep
+        // every release path symmetric: crash/cap branches above also unconditionally
+        // abort. Without `slot` we cannot spawn a replacement task, but the warm
+        // slot's `last_completion` was just refreshed so no teardown would be due yet.
+        abort_idle_teardown_handle(&mut guard);
     }
 }
 
