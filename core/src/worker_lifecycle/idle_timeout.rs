@@ -140,6 +140,22 @@ pub(crate) struct ToolState {
     /// Counter that drives `RestartBackoff::next_delay`. Increments on every crash;
     /// resets to 0 on every successful dispatch.
     pub(crate) consecutive_restarts: u32,
+    /// JoinHandle of the currently-scheduled idle-teardown task, if any.
+    ///
+    /// Issue #85 — the pre-fix shape spawned a fresh teardown task on every release
+    /// without aborting prior ones. Stale tasks no-op'd correctly via the
+    /// `last_completion` mismatch check, but at steady state under high request
+    /// rate ~`idle_seconds` tasks per tool accumulated (e.g. one request per
+    /// second with `idle_seconds = 60` → ~60 pending sleeper tasks per tool).
+    /// Not a leak (they all eventually exited), but inefficient and confusing
+    /// in tokio-console output.
+    ///
+    /// Now: [`replace_idle_teardown_handle`] is the single mutator. It aborts
+    /// the prior handle (if any) before spawning a new one, holding the
+    /// single-task-per-slot invariant at steady state. Calling `.abort()` on a
+    /// JoinHandle whose task has already finished is a no-op (per tokio docs),
+    /// so the self-firing-then-next-release case is fine.
+    pub(crate) idle_teardown_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ToolState {
@@ -148,6 +164,7 @@ impl ToolState {
             warm: None,
             next_spawn_allowed_at: None,
             consecutive_restarts: 0,
+            idle_teardown_handle: None,
         }
     }
 }
@@ -328,6 +345,7 @@ pub(crate) fn release_idle_timeout_worker(
     // Crash branch — bump backoff, clear slot.
     if died {
         drop(worker);
+        abort_idle_teardown_handle(&mut guard);
         guard.warm = None;
         let next_count = guard.consecutive_restarts.saturating_add(1);
         let delay = backoff.next_delay(next_count.saturating_sub(1));
@@ -342,6 +360,7 @@ pub(crate) fn release_idle_timeout_worker(
     // §"idle_timeout".
     if is_request_capped(new_count, caps.max_requests) {
         drop(worker);
+        abort_idle_teardown_handle(&mut guard);
         guard.warm = None;
         guard.consecutive_restarts = 0;
         guard.next_spawn_allowed_at = None;
@@ -352,6 +371,7 @@ pub(crate) fn release_idle_timeout_worker(
     // checked after the response was written, never mid-flight.
     if is_aged_out(spawned_at.elapsed(), caps.max_age_seconds) {
         drop(worker);
+        abort_idle_teardown_handle(&mut guard);
         guard.warm = None;
         guard.consecutive_restarts = 0;
         guard.next_spawn_allowed_at = None;
@@ -359,8 +379,11 @@ pub(crate) fn release_idle_timeout_worker(
     }
 
     // Successful return: put the worker back into the slot, refresh `last_completion`,
-    // reset backoff counters. Spawn an idle-teardown task only after the guard drops
-    // so the task doesn't immediately fight us for the mutex.
+    // reset backoff counters, and rebind the idle-teardown task — aborting the prior
+    // one so we keep exactly one pending teardown per slot (issue #85). The newly
+    // spawned task's first await is `sleep(idle_seconds)`, so it does NOT contend
+    // with the guard we still hold: by the time the task tries to lock the slot's
+    // state, the guard is long since dropped at function exit.
     let last_completion = Instant::now();
     let idle_seconds = caps.idle_seconds;
     guard.warm = Some(WarmWorker {
@@ -371,30 +394,60 @@ pub(crate) fn release_idle_timeout_worker(
     });
     guard.consecutive_restarts = 0;
     guard.next_spawn_allowed_at = None;
-    drop(guard);
 
     if let Some(slot) = slot {
-        schedule_idle_teardown(slot, last_completion, idle_seconds);
+        replace_idle_teardown_handle(&mut guard, slot, last_completion, idle_seconds);
     }
 }
 
-/// Spawn a one-shot teardown task that fires `idle_seconds` after `for_last_completion`.
+/// Abort the slot's pending idle-teardown task (if any) and clear its handle.
 ///
-/// The task re-acquires the slot's mutex, compares `state.warm`'s `last_completion`
-/// against the captured value; if they match the worker has been idle since this
-/// release and is torn down (drop terminates the inner `SupervisedWorker`). If they
-/// differ, a newer request bumped the timestamp and this task is a no-op.
+/// Cap-driven release paths (crash / max_requests / max_age) call this so the pending
+/// teardown task — which would otherwise sit sleeping for `idle_seconds` and then
+/// no-op via the `last_completion` check — is dropped immediately. Calling `.abort()`
+/// on an already-finished JoinHandle is a no-op per tokio docs, so this is safe even
+/// if the task happened to fire concurrently.
+fn abort_idle_teardown_handle(state: &mut ToolState) {
+    if let Some(handle) = state.idle_teardown_handle.take() {
+        handle.abort();
+    }
+}
+
+/// Abort any pending idle-teardown task and schedule a fresh one — the load-bearing
+/// helper for issue #85.
 ///
-/// Multiple stale teardown tasks coexist harmlessly: only the newest one's captured
-/// `last_completion` matches the current slot state.
-fn schedule_idle_teardown(slot: Arc<ToolSlot>, for_last_completion: Instant, idle_seconds: u64) {
+/// Before this helper existed, every successful release path called `tokio::spawn` to
+/// schedule a teardown task and *never aborted* prior ones. Under steady-state high
+/// request rate this accumulated ~`idle_seconds` stale tasks per tool (e.g. one
+/// request per second with `idle_seconds = 60` → ~60 sleepers per tool). They all
+/// no-op'd correctly via the `last_completion` mismatch check, but the accumulation
+/// was inefficient and confusing in tokio-console output.
+///
+/// Behaviour:
+///   - If `idle_seconds == 0`, idle teardown is disabled; aborts any prior handle
+///     and leaves `state.idle_teardown_handle` as `None`.
+///   - Otherwise, aborts the prior handle (if any) and spawns a fresh teardown task
+///     that sleeps for `idle_seconds`, then re-acquires the slot mutex and tears
+///     down the warm worker iff its `last_completion` still matches the captured
+///     value. The new JoinHandle is stored in `state.idle_teardown_handle` so the
+///     next release can abort it.
+///
+/// The single-task-per-slot invariant — and its pin test in this module's `tests.rs`
+/// — is the regression guarantee for issue #85.
+fn replace_idle_teardown_handle(
+    state: &mut ToolState,
+    slot: Arc<ToolSlot>,
+    for_last_completion: Instant,
+    idle_seconds: u64,
+) {
+    abort_idle_teardown_handle(state);
     if idle_seconds == 0 {
         // 0 = idle teardown disabled; spec uses non-zero `idle_seconds` as the
         // canonical opt-in.
         return;
     }
     let delay = Duration::from_secs(idle_seconds);
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         sleep(delay).await;
         let mut state = slot.state.lock().await;
         // NOTE: state's `MutexGuard` derefs to `&mut ToolState`; `if let Some(warm) =
@@ -404,11 +457,15 @@ fn schedule_idle_teardown(slot: Arc<ToolSlot>, for_last_completion: Instant, idl
             if warm.last_completion == for_last_completion {
                 // Take + drop the warm worker. `SupervisedWorker`'s own Drop closes
                 // stdio + cancels the watchdog; the OS reaps the zombie on next
-                // spawn cycle.
+                // spawn cycle. Also self-clear the handle — best-effort hygiene; a
+                // subsequent release would overwrite it anyway, but keeping the slot
+                // accurate while idle helps any future operator-visible inspector.
                 state.warm = None;
+                state.idle_teardown_handle = None;
             }
         }
     });
+    state.idle_teardown_handle = Some(handle);
 }
 
 #[cfg(test)]
