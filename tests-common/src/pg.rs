@@ -82,13 +82,38 @@ pub struct PgCluster {
     _guards: (ServiceGuard, PathGuard, PathGuard),
 }
 
-/// Bring up a per-test Postgres cluster end-to-end:
+/// Bring up a per-test Postgres cluster end-to-end with the default
+/// [`PG_BRING_UP_TIMEOUT_SECS`] polling cap.
+///
+/// Thin wrapper around [`bring_up_pg_cluster_with_timeout`] — see that
+/// function for the full bring-up sequence and parameter docs. Use the
+/// `_with_timeout` variant directly when you need a tighter cap (e.g.
+/// known-Homebrew CI runners that fail faster) or a wider cap (e.g.
+/// known-cold-cache launchd hosts).
+pub fn bring_up_pg_cluster(
+    bin_dir: &Path,
+    data_label: &str,
+    log_label: &str,
+    service_name: &str,
+) -> PgCluster {
+    bring_up_pg_cluster_with_timeout(
+        bin_dir,
+        data_label,
+        log_label,
+        service_name,
+        Duration::from_secs(PG_BRING_UP_TIMEOUT_SECS),
+    )
+}
+
+/// Bring up a per-test Postgres cluster end-to-end with an explicit
+/// polling cap:
 ///
 ///   1. `initdb` a temp data dir under `std::env::temp_dir()`.
 ///   2. Create the socket dir with mode 0700.
 ///   3. Write `postgresql.auto.conf` to lock the cluster to UDS only.
 ///   4. Install + start the supervisor service.
-///   5. Wait for `Active` then for the listening socket.
+///   5. Wait for `Active` then for the listening socket (both bounded
+///      by `timeout`).
 ///   6. 500 ms hold + re-check to rule out a `Restart=on-failure`
 ///      flap masking a config error.
 ///
@@ -111,17 +136,29 @@ pub struct PgCluster {
 ///   governs the socket directory length, not the service label.)
 ///   Caller constructs this with whatever uniqueness suffix
 ///   it likes (typically via [`crate::temp::unique_suffix`]).
+/// * `timeout` — polling cap applied to **both** the supervisor
+///   `Active`-status wait and the UDS-socket-appears wait. The
+///   common-case caller wants [`bring_up_pg_cluster`] which forwards
+///   `Duration::from_secs(PG_BRING_UP_TIMEOUT_SECS)` (30 s). Pass a
+///   tighter `Duration` (e.g. `Duration::from_secs(10)`) on hosts
+///   where you know the bring-up is fast and you want a quicker
+///   failure signal; pass a wider `Duration` on hosts with known
+///   launchd cold-cache overshoot (operator memory
+///   `postgres-app-bin-paths.md` documents the Postgres.app
+///   case). 50 ms poll interval inside both waits means healthy
+///   clusters short-circuit well under a second regardless of `timeout`.
 ///
 /// # Panics
 ///
 /// Panics with a descriptive message on any failure in the bring-up
 /// sequence (the test would have failed anyway, and a panic stops
 /// the test from racing further on a half-up cluster).
-pub fn bring_up_pg_cluster(
+pub fn bring_up_pg_cluster_with_timeout(
     bin_dir: &Path,
     data_label: &str,
     log_label: &str,
     service_name: &str,
+    timeout: Duration,
 ) -> PgCluster {
     assert!(
         service_name.len() <= 200,
@@ -207,19 +244,14 @@ pub fn bring_up_pg_cluster(
         sup.as_ref(),
         &spec.name,
         |s| s == ServiceStatus::Active,
-        Duration::from_secs(PG_BRING_UP_TIMEOUT_SECS),
+        timeout,
     )
     .unwrap_or_else(|_| {
-        panic!(
-            "postgres should reach Active within {PG_BRING_UP_TIMEOUT_SECS}s"
-        )
+        panic!("postgres should reach Active within {timeout:?}")
     });
-    wait_for_socket(&socket_dir, Duration::from_secs(PG_BRING_UP_TIMEOUT_SECS))
-        .unwrap_or_else(|_| {
-            panic!(
-                "postgres socket should appear within {PG_BRING_UP_TIMEOUT_SECS}s"
-            )
-        });
+    wait_for_socket(&socket_dir, timeout).unwrap_or_else(|_| {
+        panic!("postgres socket should appear within {timeout:?}")
+    });
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
         sup.status(&spec.name).expect("pg stable-active recheck"),
@@ -241,5 +273,45 @@ pub fn bring_up_pg_cluster(
         sup,
         service_name: spec.name,
         _guards: (service_guard, data_guard, log_guard),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Compile-time signature pins for [`super::bring_up_pg_cluster`]
+    //! and [`super::bring_up_pg_cluster_with_timeout`].
+    //!
+    //! The functions themselves do real I/O (initdb / launchd-or-systemd
+    //! register / postgres start), so end-to-end coverage lives in the
+    //! integration tests under `core/tests/*_e2e.rs`, `db/tests/*_e2e.rs`,
+    //! and `tool_host/tests/*_smoke.rs` that already call them. These
+    //! tests are the byte-equivalence regression pin for the default
+    //! 30 s cap path.
+    //!
+    //! What's pinned here:
+    //!
+    //! 1. The new sibling [`super::bring_up_pg_cluster_with_timeout`]
+    //!    exposes the documented `Duration`-typed `timeout` parameter
+    //!    at the end of the argument list — a future refactor that
+    //!    drops, renames, or moves the parameter will fail compilation.
+    //! 2. The 4-arg [`super::bring_up_pg_cluster`] wrapper keeps the
+    //!    pre-Issue-#131 signature (no parameter additions) so all 50+
+    //!    existing test sites continue to compile unchanged. Issue #131
+    //!    explicitly preferred the sibling-function shape over an
+    //!    `Option<Duration>` parameter on the existing function for
+    //!    exactly this reason.
+    use super::{bring_up_pg_cluster, bring_up_pg_cluster_with_timeout, PgCluster};
+    use std::path::Path;
+    use std::time::Duration;
+
+    #[test]
+    fn bring_up_pg_cluster_with_timeout_has_documented_signature() {
+        let _signature_pin: fn(&Path, &str, &str, &str, Duration) -> PgCluster =
+            bring_up_pg_cluster_with_timeout;
+    }
+
+    #[test]
+    fn bring_up_pg_cluster_wrapper_keeps_pre_issue_131_signature() {
+        let _signature_pin: fn(&Path, &str, &str, &str) -> PgCluster = bring_up_pg_cluster;
     }
 }
