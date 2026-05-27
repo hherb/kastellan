@@ -8,9 +8,9 @@
 //! crash detection, exponential restart backoff, and request serialisation.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hhagent_protocol::client::ClientError;
 use hhagent_sandbox::SandboxBackend;
@@ -134,9 +134,18 @@ pub fn is_aged_out(age: Duration, max_age_seconds: u64) -> bool {
 /// counter therefore reflects "depth of the queue" — callers waiting, not callers
 /// in flight. Exposed via `IdleTimeoutLifecycle::_test_slot_pending_acquires` for
 /// tests and the future `hhagent-cli supervisor status` operator surface.
+///
+/// `last_warn_unix_nanos` (issue #136) is the unix-nanos timestamp of the most
+/// recent queue-depth warn for this slot. Reads + CAS happen on the hot path in
+/// `acquire_impl` (no mutex). The first acquirer to observe `depth >= threshold`
+/// AND `(now - last) >= cooldown` wins the CAS and emits the warn; concurrent
+/// losers stay silent until the next cooldown window. Initial value is 0 so the
+/// very first crossing into the warn band fires immediately. See [`debounce_warn`]
+/// for the pure predicate and [`PENDING_ACQUIRES_WARN_COOLDOWN`] for the window.
 pub(crate) struct ToolSlot {
     pub(crate) state: Arc<TokioMutex<ToolState>>,
     pub(crate) pending_acquires: AtomicU32,
+    pub(crate) last_warn_unix_nanos: AtomicI64,
 }
 
 /// Threshold at which `acquire` emits a `tracing::warn!` because the per-slot
@@ -149,6 +158,21 @@ pub(crate) struct ToolSlot {
 /// belongs at code-review time, not at deploy time.
 pub const PENDING_ACQUIRES_WARN_THRESHOLD: u32 = 5;
 
+/// Cooldown between consecutive queue-depth warns for the same slot (issue #136).
+///
+/// Without debouncing, every acquirer that lands while `depth >= threshold` emits a
+/// warn — that's the request-rate (potentially many per second) under exactly the
+/// scenario the warn is designed to surface. Operators would filter the line out,
+/// defeating its purpose. With a 30 s cooldown, sustained backpressure logs ~twice
+/// per minute per slot — enough to stay visible, sparse enough to avoid log-spam.
+///
+/// 30 s is a rule-of-thumb pick: long enough to dedupe steady-state spam, short
+/// enough that an operator paging on the metric still sees the next warn within
+/// half a minute of the original episode resolving and re-emerging. Pinned by
+/// `pending_acquires_warn_cooldown_is_thirty_seconds` — bumping it changes
+/// operator log volume noticeably and should go through code review.
+pub const PENDING_ACQUIRES_WARN_COOLDOWN: Duration = Duration::from_secs(30);
+
 /// Pure predicate: should an acquirer that just observed a post-increment pending
 /// depth of `depth` emit a queue-depth warning?
 ///
@@ -156,6 +180,31 @@ pub const PENDING_ACQUIRES_WARN_THRESHOLD: u32 = 5;
 /// constructing a real `ToolSlot` or driving concurrent acquires.
 pub(crate) fn pending_acquires_should_warn(depth: u32) -> bool {
     depth >= PENDING_ACQUIRES_WARN_THRESHOLD
+}
+
+/// Pure predicate: given the slot's last-warn timestamp and the current time
+/// (both unix-nanos), should an acquirer that already passed
+/// [`pending_acquires_should_warn`] go on to emit a warn, or has another acquirer
+/// warned recently enough to dedupe this one?
+///
+/// Returns `true` iff `now_nanos - last_warn_nanos >= cooldown` (cooldown-elapsed,
+/// inclusive). `saturating_sub` over `i64` handles the "clock stepped backward"
+/// case (e.g. NTP correction) by returning a negative or zero delta, which is
+/// always less than the positive cooldown — so the predicate suppresses warns
+/// during clock drift rather than firing extra ones. Both kinds of inaccuracy
+/// (over- and under-warning) are acceptable for a 30 s window in practice.
+///
+/// `last_warn_nanos == 0` (initial, no warn has ever fired) trivially returns
+/// `true` against any reasonable post-epoch `now_nanos` — the first warn fires
+/// immediately as intended.
+///
+/// Caller pattern (in `acquire_impl`): after this predicate returns `true`,
+/// claim the warn slot via `compare_exchange(last_nanos, now_nanos)` — only the
+/// CAS winner actually emits the warn, so concurrent acquirers that all see the
+/// debounce gate open still get at most one warn per cooldown window.
+pub(crate) fn debounce_warn(last_warn_nanos: i64, now_nanos: i64, cooldown: Duration) -> bool {
+    let cooldown_nanos = cooldown.as_nanos() as i64;
+    now_nanos.saturating_sub(last_warn_nanos) >= cooldown_nanos
 }
 
 /// RAII guard that brackets the queued-acquire interval.
@@ -287,6 +336,7 @@ pub(crate) fn slot_for(registry: &WarmRegistry, tool_name: &str) -> Arc<ToolSlot
         Arc::new(ToolSlot {
             state: Arc::new(TokioMutex::new(ToolState::fresh())),
             pending_acquires: AtomicU32::new(0),
+            last_warn_unix_nanos: AtomicI64::new(0),
         })
     }))
 }
@@ -337,13 +387,34 @@ pub(crate) async fn acquire_impl(
     // dispatch time doesn't inflate the queue-depth metric.
     let pending_guard = PendingAcquireGuard::enter(&slot.pending_acquires);
     if pending_acquires_should_warn(pending_guard.depth()) {
-        tracing::warn!(
-            tool = tool_name,
-            pending_acquires = pending_guard.depth(),
-            threshold = PENDING_ACQUIRES_WARN_THRESHOLD,
-            "idle_timeout worker request queue is deep — \
-             requests are stacking up behind a slow or stuck warm worker"
-        );
+        // Issue #136 — debounce so sustained queue depth doesn't log at request rate.
+        // Two-phase: (1) check the elapsed-since-last-warn gate via the pure
+        // `debounce_warn` predicate; (2) on pass, CAS to claim the warn slot so
+        // exactly one concurrent acquirer wins per cooldown window. Losers stay
+        // silent until the next window. `now_nanos` falls back to 0 on the
+        // (impossible in practice) pre-1970 clock — the predicate handles that
+        // gracefully by suppressing.
+        let now_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let last_nanos = slot.last_warn_unix_nanos.load(Ordering::Relaxed);
+        if debounce_warn(last_nanos, now_nanos, PENDING_ACQUIRES_WARN_COOLDOWN)
+            && slot
+                .last_warn_unix_nanos
+                .compare_exchange(last_nanos, now_nanos, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::warn!(
+                tool = tool_name,
+                pending_acquires = pending_guard.depth(),
+                threshold = PENDING_ACQUIRES_WARN_THRESHOLD,
+                cooldown_secs = PENDING_ACQUIRES_WARN_COOLDOWN.as_secs(),
+                "idle_timeout worker request queue is deep — \
+                 requests are stacking up behind a slow or stuck warm worker \
+                 (next warn for this slot suppressed for the cooldown window)"
+            );
+        }
     }
     let mut guard = Arc::clone(&slot.state).lock_owned().await;
     // We hold the lock — caller is no longer "queued", they're in flight. Drop the
