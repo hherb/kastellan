@@ -160,7 +160,10 @@ fn abort_idle_teardown_handle(state: &mut ToolState) {
 ///
 /// The single-task-per-slot invariant — and its pin test in the parent module's
 /// `tests.rs` — is the regression guarantee for issue #85.
-pub(crate) fn replace_idle_teardown_handle(
+///
+/// Visibility: `pub(super)` because the only out-of-module caller is the parent
+/// module's `tests.rs`. Widening to `pub(crate)` would be unnecessary.
+pub(super) fn replace_idle_teardown_handle(
     state: &mut ToolState,
     slot: Arc<ToolSlot>,
     for_last_completion: Instant,

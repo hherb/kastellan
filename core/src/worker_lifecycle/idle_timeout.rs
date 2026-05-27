@@ -474,15 +474,11 @@ pub(crate) async fn acquire_impl(
     ))
 }
 
-// --- Release path (slice-2 tasks 5 + 6 + 7) ---------------------------------
-//
-// Lifted into a sibling submodule to keep this file under the 500-LOC soft cap;
-// see `release.rs` for the implementation and its module doc-comment explaining
-// the split. `release_idle_timeout_worker` is re-exported below so external
-// callers (notably `manager::WorkerHandle::Drop` via
-// `super::idle_timeout::release_idle_timeout_worker`) continue to resolve
-// unchanged.
-
+// Release path lives in the sibling `release` submodule (lifted to keep this
+// file under the 500-LOC soft cap; see its module doc-comment for the split).
+// `release_idle_timeout_worker` is re-exported so external callers — notably
+// `manager::WorkerHandle::Drop` via `super::idle_timeout::release_idle_timeout_worker`
+// — continue to resolve unchanged.
 mod release;
 pub(crate) use release::release_idle_timeout_worker;
 
