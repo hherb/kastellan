@@ -63,10 +63,16 @@ The core calls it via the `llm-router` crate. Workers never call it.
 ```
 tick
   → claim next task from DB (FOR UPDATE SKIP LOCKED)
-  → formulate plan (LLM call)
-  → CASSANDRA chain: Stage -1 (constitutional) → Stage 0 (deterministic) → …
+  → formulate plan (LLM call via llm-router)
+  → CASSANDRA pre-spawn review:
+       Stage -1 constitutional → Stage 0 deterministic → …
   → if approved: dispatch each step via tool_host::dispatch()
-  → if blocked: mark task failed, write reason to audit log
+       inside dispatch: spawn under SandboxPolicy
+                     → worker.call()
+                     → injection_guard::screen(result)   ← post-call check
+                     → on Block: redacted placeholder + audit row
+                     → on Allow: hand result back to scheduler
+  → if blocked at any stage: mark task failed, write reason to audit log
   → advance task state → loop
 ```
 
@@ -94,16 +100,28 @@ the existing helper types.
 
 ## Memory and recall
 
-The agent stores every memory as a Postgres row with three retrieval paths:
+Memories live in two tiers under `core::memory`:
 
-1. **Semantic** — pgvector ANN search on the 1024-dimension embedding.
+- **L0 — raw observations.** Every incoming channel event, every tool
+  result the scheduler decides to remember, is seeded into L0 by
+  `memory::l0_seed`.
+- **L1 — promoted memories.** `memory::l1_promote` distills L0 rows into
+  longer-lived L1 memories with embeddings + tsvector + entity links.
+  Recall queries hit L1.
+
+L1 memories are addressable via three lanes:
+
+1. **Semantic** — pgvector ANN search on the 1024-dimension embedding
+   produced by `memory::embed_query` (which itself routes through
+   `llm-router`).
 2. **Lexical** — native Postgres `tsvector` full-text search with `ts_rank`.
-3. **Graph** — 1-hop outbound neighbour walk over the `entities`/`relations`
-   tables.
+3. **Graph** — entity-keyed neighbour walk over the `entities`/`relations`
+   tables, seeded from entities mentioned in the query.
 
-`core::memory::recall()` runs all three, then fuses the ranked lists with
-Reciprocal Rank Fusion (RRF) to produce a single ordered set of relevant
-memories.
+`core::memory::recall()` runs the requested lanes, then fuses the ranked
+lists with Reciprocal Rank Fusion (RRF) to produce a single ordered set
+of relevant memories. See [chapter 12](./12-memory-and-recall.md) for the
+fusion algorithm and lane-specific tuning knobs.
 
 ---
 
@@ -120,13 +138,37 @@ directly without a running daemon.
 
 ---
 
+## CASSANDRA — two screens, not one
+
+CASSANDRA has historically been described as a pre-spawn review of agent
+plans. As of the worker-output prompt-injection guard slice
+(`core::cassandra::injection_guard`, shipped May 2026) it now operates at
+**two points** in the dispatcher chokepoint:
+
+1. **Pre-spawn (plan review)** — the constitutional and deterministic
+   stages inspect each `PlannedStep` before a worker is spawned. A
+   `Verdict::Block` short-circuits the task.
+2. **Post-call (output screen)** — after `worker.call()` returns Ok,
+   `injection_guard::screen` runs a substring catalogue over the result
+   body. A score ≥ `BLOCK_THRESHOLD` (0.70) replaces the result with a
+   redacted placeholder and writes a second audit row with the SHA-256
+   of the scanned body — never the raw bytes.
+
+Both screens live inside `tool_host::dispatch()`. There is no path that
+skips them. See [chapter 11](./11-cassandra-pipeline.md) for the full
+pipeline.
+
+---
+
 ## Where to add a new feature
 
 | Type of feature | Where to start |
 |-----------------|---------------|
-| New tool worker | New crate under `workers/`; add entry to `core/src/scheduler/tool_dispatch.rs` |
+| New tool worker (Rust) | New crate under `workers/`; add to `[workspace.members]`; spawn from `core/src/tool_host.rs` |
 | New CLI subcommand | New file under `core/src/bin/hhagent-cli/`; register in `main.rs` |
 | New DB table | New migration in `db/migrations/`; new helpers in `db/src/` |
-| New CASSANDRA rule | New function in `core/src/cassandra/constitutional.rs` or `deterministic.rs` |
-| New recall lane | New lane in `core/src/memory/` and wire into `recall()` |
+| New CASSANDRA pre-spawn rule | Extend `core/src/cassandra/constitutional.rs` or `deterministic.rs` |
+| New injection pattern | Add an entry to the catalogue in `core/src/cassandra/injection_guard.rs` |
+| New recall lane | New lane in `core/src/memory/recall.rs` and wire into `recall()` |
+| New LLM backend | Implement in `llm-router/src/backend.rs`; gate selection in `policy.rs` |
 | New channel adapter | New crate under `adapters/`; connect via JSON-RPC to core |

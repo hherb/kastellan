@@ -101,14 +101,12 @@ cargo test --workspace -- --nocapture
 ```
 
 Some integration tests spin up a real Postgres cluster per test. They are
-slow (30–60 s total) but reliable. A healthy result looks like:
-
-```
-test result: ok. 998 passed; 0 failed; 3 ignored
-```
-
-The 3 ignored tests require hardware or services not present in a standard dev
-setup (real GLiNER model, Apple `container` CLI).
+slow (30–60 s total) but reliable. A healthy result is `0 failed` across
+every crate; the total count grows commit by commit (well over a thousand
+today — see the latest `HANDOVER.md` for the current number). A small
+number of tests are marked `ignored`: they require hardware or services
+not present in a standard dev setup (a real GLiNER model, the Apple
+`container` CLI, a frontier LLM endpoint).
 
 ---
 

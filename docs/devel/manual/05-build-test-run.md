@@ -48,7 +48,7 @@ cargo test -p hhagent-sandbox --test linux_smoke
 cargo test -p hhagent-sandbox argv_starts_with_bwrap
 ```
 
-### What "3 ignored" means
+### What "ignored" means
 
 The test suite typically reports a small number of ignored tests. These are
 tests that require hardware or services that may not be present:
@@ -58,7 +58,8 @@ tests that require hardware or services that may not be present:
 - A real frontier LLM endpoint
 
 Ignored tests are not failures. They skip gracefully and do not affect the
-green/red status of a CI run.
+green/red status of a CI run. The total pass count grows over time; check
+`HANDOVER.md` for the current target rather than memorising a fixed number.
 
 ### What `[SKIP]` lines mean
 
@@ -114,7 +115,8 @@ The CLI for interacting with a running daemon:
 
 ## Python worker tests
 
-The `gliner-relex` worker is Python. Its tests use `uv` (a fast Python package manager):
+The `gliner-relex` worker is Python and lives outside the Cargo workspace.
+Its tests use `uv` (a fast Python package manager):
 
 ```sh
 cd workers/gliner-relex
@@ -122,4 +124,6 @@ uv run pytest
 ```
 
 These tests are independent of the Rust test suite. They run against the
-Python source directly without spawning a Rust process.
+Python source directly without spawning a Rust process. End-to-end tests
+that drive `gliner-relex` from `core` live in `core/tests/` and are gated
+behind `#[ignore]` so they only run when the model is installed.

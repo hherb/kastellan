@@ -21,6 +21,8 @@ before writing your first line of code.
 
 ## Table of contents
 
+### Onboarding (read in order)
+
 | # | File | What you will learn |
 |---|------|---------------------|
 | 1 | [What is hhagent?](./01-what-is-hhagent.md) | Goals, current status, why it exists |
@@ -34,23 +36,34 @@ before writing your first line of code.
 | 9 | [Rust patterns used here](./09-rust-patterns.md) | The handful of patterns you will see everywhere |
 | 10 | [Your first contribution](./10-first-contribution.md) | Branch, code, test, PR — step by step |
 
+### Subsystem deep dives (read when you touch one)
+
+| # | File | When to read |
+|---|------|--------------|
+| 11 | [CASSANDRA review pipeline](./11-cassandra-pipeline.md) | Adding a rule, debugging a block, working on the injection guard |
+| 12 | [Memory and recall](./12-memory-and-recall.md) | Adding a recall lane, changing promotion, debugging RRF results |
+| 13 | [LLM router](./13-llm-router.md) | Adding a backend, changing the wire shape, working on Phase 5 frontier escalation |
+
 ---
 
 ## Recommended reading paths
 
 **If you are new to both Rust and security engineering:**
 Read every file in order, 1 → 10. Skim the code examples; understanding intent
-matters more than syntax at this stage.
+matters more than syntax at this stage. Come back to 11–13 when you start
+touching CASSANDRA, memory, or LLM calls.
 
 **If you know Rust but are new to OS sandboxing:**
 Start with 1, then 4 → 5 → 6 → 7 → 8 → 10. Skip 9.
 
 **If you are an experienced security engineer picking up Rust:**
 Read 1 → 4 → 8. Then jump to 7 (the sandbox chapter is where most of the
-interesting design choices live). Then 9 → 10.
+interesting design choices live). Then 9 → 10. Subsystem chapters 11–13 are
+useful when you reach those areas.
 
 **If you just want to fix a bug and open a PR quickly:**
-Read 4, 5, 8 (the hard constraints — non-optional), then 10.
+Read 4, 5, 8 (the hard constraints — non-optional), then 10. Pull in the
+matching subsystem chapter (11/12/13) only if the bug is in that area.
 
 ---
 
