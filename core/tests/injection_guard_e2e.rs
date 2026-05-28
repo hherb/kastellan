@@ -203,10 +203,16 @@ async fn policy_audit_row_contains_no_substring_of_blocked_body() -> std::io::Re
     });
     let _ = dispatch(&pool, &mut worker, "shell-exec", "shell.exec", params).await;
 
-    // Scope: only the policy row carries the privacy promise. The tool row's
-    // payload.req field legitimately contains the input argv (which echoes back
-    // as worker output via printf in this test), so scanning the tool row would
-    // produce a false positive that the spec doesn't actually disallow.
+    // Threat model: the novel privacy-sensitive content is the *worker output*
+    // (which may carry an injection attempt the operator never composed). The
+    // input argv was operator-supplied before dispatch, so the tool row's
+    // payload.req field legitimately containing it (and, in this printf-based
+    // test, the worker echoing it back so the same string appears in
+    // payload.result before the Block swap) is not a leak — the operator
+    // already knew that text. The novel content is what would have flowed into
+    // the next LLM turn, and that path goes through the placeholder swap. So
+    // only the policy row carries the "no raw scanned body" promise; scanning
+    // the tool row for the marker would be a false-positive scope error.
     let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
         "SELECT actor, action, payload FROM audit_log WHERE actor='policy' AND action='injection.blocked'",
     )
