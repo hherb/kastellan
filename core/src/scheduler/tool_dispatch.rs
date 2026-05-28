@@ -74,6 +74,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::secrets::Vault;
+
 use hhagent_protocol::{client::ClientError, codes};
 use hhagent_sandbox::{Net, Profile, SandboxPolicy};
 use sqlx::PgPool;
@@ -286,6 +288,10 @@ pub fn map_dispatch_result(
             code: "PROTOCOL_ERROR".into(),
             detail: other.to_string(),
         },
+        Err(ToolHostError::SecretRedemptionFailed(_)) => StepOutcome::Err {
+            code: "POLICY_DENIED".to_string(),
+            detail: "secret redemption failed before worker call".to_string(),
+        },
     }
 }
 
@@ -353,6 +359,7 @@ fn build_scheduler_step_failure_payload(
 /// `dispatch_step` directly on it.
 pub struct ToolHostStepDispatcher {
     pool: PgPool,
+    vault: Arc<Vault>,                    // NEW — Item 31
     lifecycle: Arc<dyn crate::worker_lifecycle::WorkerLifecycleManager>,
     registry: Arc<ToolRegistry>,
 }
@@ -360,10 +367,11 @@ pub struct ToolHostStepDispatcher {
 impl ToolHostStepDispatcher {
     pub fn new(
         pool: PgPool,
+        vault: Arc<Vault>,               // NEW — Item 31 (insert after `pool`)
         lifecycle: Arc<dyn crate::worker_lifecycle::WorkerLifecycleManager>,
         registry: Arc<ToolRegistry>,
     ) -> Self {
-        Self { pool, lifecycle, registry }
+        Self { pool, vault, lifecycle, registry }
     }
 }
 
@@ -469,6 +477,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
 
         let result = dispatch(
             &self.pool,
+            &self.vault,             // NEW — Item 31
             handle.worker_mut(),
             &step.tool,
             &step.method,

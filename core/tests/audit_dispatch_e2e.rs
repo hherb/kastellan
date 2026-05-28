@@ -20,6 +20,7 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+use hhagent_core::secrets::Vault;
 use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
 use hhagent_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, policy_for_shell_exec,
@@ -97,6 +98,7 @@ fn dispatch_writes_audit_row_for_success_and_failure() {
         // ---------- success path ----------
         let result = dispatch(
             &pool,
+            &Vault::new(),
             &mut sworker,
             "shell-exec",
             "shell.exec",
@@ -113,6 +115,7 @@ fn dispatch_writes_audit_row_for_success_and_failure() {
         // still be written.
         let err = dispatch(
             &pool,
+            &Vault::new(),
             &mut sworker,
             "shell-exec",
             "shell.exec",

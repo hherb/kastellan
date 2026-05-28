@@ -19,6 +19,7 @@ use hhagent_protocol::client::{Client, ClientError};
 use hhagent_sandbox::{Profile, SandboxBackend, SandboxError, SandboxPolicy};
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]   // NEW — Item 31. First variant addition since Option M (2026-05-10).
 pub enum ToolHostError {
     #[error("sandbox: {0}")]
     Sandbox(#[from] SandboxError),
@@ -26,6 +27,14 @@ pub enum ToolHostError {
     Io(#[from] std::io::Error),
     #[error("protocol: {0}")]
     Protocol(#[from] ClientError),
+
+    /// NEW — Item 31. Substitution failed before the worker call.
+    /// The dispatch's audit-row side-effect
+    /// (`policy / secret.redemption_failed`) happened before this
+    /// error was returned. Scheduler should treat this like
+    /// POLICY_DENIED — task step fails fast, no retry budget burned.
+    #[error("tool_host: secret redemption failed: {0}")]
+    SecretRedemptionFailed(#[from] crate::secrets::SubstituteError),
 }
 
 /// A sealed JSON-RPC request shape. The fields and constructor are
@@ -102,11 +111,20 @@ impl WorkerCommand {
 ///
 /// ## Audit-log shape
 ///
-/// One or two rows per call. The `'tool:<name>'` row is always written.
-/// A second `'policy / injection.blocked'` row is also written when the
-/// prompt-injection guard blocks a worker result (see
-/// `core::cassandra::injection_guard`); that second row carries SHA-256 +
-/// length + score + class codes — never the raw scanned body.
+/// **One to many rows per call.** The standard happy path writes one
+/// `'tool:<name>'` row. Two additional row kinds are possible:
+///
+/// * `policy / secret.redeemed` — emitted once per `secret://<8-hex>`
+///   ref that was substituted from `params` (Item 31). Carries
+///   `{tool, method, ref_hash, ms}`; never the plaintext.
+/// * `policy / injection.blocked` — emitted when the prompt-injection
+///   guard blocks a worker result (Item 30). Carries SHA-256 + length
+///   + score + class codes; never the raw scanned body.
+///
+/// On a substitution miss the chokepoint writes exactly one row,
+/// `policy / secret.redemption_failed`, and returns
+/// `ToolHostError::SecretRedemptionFailed`. The tool row is NOT
+/// written (the worker was not called).
 ///
 /// * `actor`  = `"tool:<tool>"` — caller-supplied logical name (e.g.
 ///   `"shell-exec"`, `"web-fetch"`). The worker binary path may be
@@ -119,6 +137,13 @@ impl WorkerCommand {
 ///   `{"req": <params>, "err": "<error string>", "ms": <duration>}`
 ///   on failure. Payloads larger than 4 KiB are replaced inside
 ///   [`hhagent_db::audit::insert`] with a SHA-256 envelope.
+///
+/// **IMPORTANT — tool row's `payload.req` carries plaintext after
+/// substitution.** The privacy invariant (no plaintext in any
+/// `actor='policy'` row) is scoped to policy rows only; the tool
+/// row legitimately receives the substituted params (the worker
+/// will receive them too). See spec §6.2 and the precedent at
+/// commit `45627fd`.
 ///
 /// ## Why the audit insert is *best-effort*
 ///
@@ -155,16 +180,74 @@ impl WorkerCommand {
 /// runtime; the daemon's `#[tokio::main]` already does.
 pub async fn dispatch(
     pool: &sqlx::PgPool,
+    vault: &crate::secrets::Vault,        // NEW — Item 31
     worker: &mut SupervisedWorker,
     tool: &str,
     method: &str,
-    params: serde_json::Value,
+    mut params: serde_json::Value,        // NOTE: now `mut`
 ) -> Result<serde_json::Value, ToolHostError> {
-    // Snapshot the request before the worker takes it — `worker.call`
-    // moves the `params` value into the JSON-RPC envelope, so we
-    // wouldn't be able to log it after the call.
-    let req_for_audit = params.clone();
     let started = Instant::now();
+
+    // ── Secret-ref substitution (Item 31, slice 1). ──
+    //
+    // Walk `params` and substitute every exact-match `secret://<8-hex>`
+    // string with the redeemed plaintext. Fail-closed: any miss or
+    // UTF-8 failure stops the dispatch before `worker.call` and
+    // emits `policy / secret.redemption_failed`; the worker is not
+    // called and no `tool:<n>` row is written.
+    //
+    // Redemption events are saved for emission AFTER `worker.call`
+    // (so the elapsed_ms field is the dispatch elapsed time, not the
+    // pre-call elapsed time).
+    let redemption_events = match crate::secrets::substitute_refs_in_params(&mut params, vault) {
+        Ok(events) => events,
+        Err(e) => {
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let (ref_hash, reason) = match &e {
+                crate::secrets::SubstituteError::MissingRef { ref_hash, reason } => {
+                    (ref_hash.clone(), reason.as_str())
+                }
+                crate::secrets::SubstituteError::PlaintextNotUtf8 { ref_hash } => {
+                    (ref_hash.clone(), "plaintext_not_utf8")
+                }
+            };
+            let payload = serde_json::json!({
+                "tool":     tool,
+                "method":   method,
+                "ref_hash": ref_hash,
+                "reason":   reason,
+                "ms":       elapsed_ms,
+            });
+            // Best-effort audit insert. The dispatch is already going to
+            // fail-closed below with `SecretRedemptionFailed`; if the
+            // audit row insert ALSO fails, masking the original error
+            // (which the scheduler maps to `POLICY_DENIED`) with a
+            // database error would be strictly worse than losing the
+            // forensic row. We log via `tracing` so the failure isn't
+            // silent. Asymmetry with materialize-time audit (hard-fail
+            // per spec §5.4) is intentional: materialize must not yield
+            // a ref the audit log doesn't know about, but this path
+            // never yielded a ref at all.
+            if let Err(audit_err) =
+                hhagent_db::audit::insert(pool, "policy", "secret.redemption_failed", payload).await
+            {
+                tracing::error!(
+                    tool = %tool,
+                    method = %method,
+                    error = %audit_err,
+                    "secret.redemption_failed audit insert failed"
+                );
+            }
+            return Err(ToolHostError::SecretRedemptionFailed(e));
+        }
+    };
+
+    // Snapshot the (now-substituted) request for the tool row.
+    // IMPORTANT: this snapshot contains plaintext. The tool row's
+    // `payload.req` field is allowed to carry it (precedent set by
+    // injection-guard slice 1 commit 45627fd: the privacy invariant
+    // is scoped to `actor='policy'` rows only).
+    let req_for_audit = params.clone();
 
     // Sealed command: `WorkerCommand` is the only argument shape
     // `SupervisedWorker::call` accepts, and both its constructor and
@@ -214,6 +297,33 @@ pub async fn dispatch(
             "ms":  elapsed_ms,
         }),
     };
+    // ── Emit `secret.redeemed` audit rows (one per substitution). ──
+    //
+    // Best-effort: a transient audit insert failure is logged but
+    // does not propagate. The plaintext is already substituted into
+    // params and the worker already ran; turning the dispatch into
+    // an error because the audit log was unreachable would be worse
+    // than missing rows. (Materialize-time audit IS hard-fail; see
+    // Vault::materialize and spec §5.4 for the asymmetry rationale.)
+    for event in &redemption_events {
+        let payload = serde_json::json!({
+            "tool":     tool,
+            "method":   method,
+            "ref_hash": event.ref_hash,
+            "ms":       elapsed_ms,
+        });
+        if let Err(e) =
+            hhagent_db::audit::insert(pool, "policy", "secret.redeemed", payload).await
+        {
+            tracing::error!(
+                tool = %tool,
+                ref_hash = %event.ref_hash,
+                error = %e,
+                "secret.redeemed audit insert failed"
+            );
+        }
+    }
+
     if let Err(audit_err) =
         hhagent_db::audit::insert(pool, &actor, method, audit_payload).await
     {

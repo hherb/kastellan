@@ -29,7 +29,7 @@
 //!   rationale.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use hhagent_protocol::client::ClientError as ProtocolClientError;
 use hhagent_sandbox::{Net, Profile, SandboxPolicy};
@@ -719,8 +719,14 @@ impl Client {
             .await
             .map_err(|e| ClientError::WorkerSpawnFailed(e.to_string()))?;
 
+        // gliner-relex calls never carry secret refs in params
+        // (the extraction request is a plain string, not an agent
+        // tool call). Pass a process-wide shared empty vault so the
+        // substitution walk is a no-op but the API contract is
+        // satisfied — and we don't pay a HashMap allocation per call.
         let result = tool_host::dispatch(
             &self.pool,
+            empty_vault(),
             handle.worker_mut(),
             self.tool_name,
             "extract",
@@ -761,6 +767,17 @@ impl Client {
             Err(e) => Err(ClientError::WorkerDead(e.to_string())),
         }
     }
+}
+
+/// Process-wide shared empty Vault for gliner-relex dispatches. The
+/// `tool_host::dispatch` API takes `&Vault` mandatorily, but gliner-
+/// relex requests never carry `secret://` refs — the extraction input
+/// is a plain string. Sharing one immutable Vault across all calls
+/// avoids the per-dispatch `HashMap` allocation a fresh `Vault::new()`
+/// would pay.
+fn empty_vault() -> &'static crate::secrets::Vault {
+    static EMPTY: OnceLock<crate::secrets::Vault> = OnceLock::new();
+    EMPTY.get_or_init(crate::secrets::Vault::new)
 }
 
 /// Errors returned by [`Client::extract`].
