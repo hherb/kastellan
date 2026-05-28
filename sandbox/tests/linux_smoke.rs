@@ -210,6 +210,94 @@ fn worker_with_low_mem_max_is_oom_killed() {
 }
 
 #[test]
+fn tmp_is_per_spawn_ephemeral_tmpfs_under_worker_strict() {
+    // Regression pin for issue #89: bwrap's `--tmpfs /tmp` (see
+    // `linux_bwrap::build_argv`) is load-bearing for every Python worker
+    // that uses /tmp — HF cache, Python `tempfile`, NumPy mmap, and the
+    // `TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor` set by the GLiNER-Relex
+    // worker in `core/src/workers/gliner_relex.rs`. The comment there says
+    // "/tmp is tmpfs inside the sandbox so this is ephemeral per-spawn";
+    // until this test, that invariant was only asserted by comments + the
+    // bwrap argv shape, with no positive runtime pin.
+    //
+    // If a future refactor switches `--tmpfs /tmp` to `--bind /tmp /tmp`
+    // (e.g. to expose host caches for performance), two concurrent
+    // workers would race on `/tmp/torchinductor` — the symptom would be
+    // intermittent cache corruption, hard to attribute and harder to
+    // bisect. This test catches that drift.
+    //
+    // Three properties asserted in one spawn pair:
+    //   1. A marker written in spawn A is **not** visible in spawn B
+    //      (ephemerality / per-spawn isolation).
+    //   2. Spawn B can also write under /tmp (writability — guards
+    //      against an over-correction that mounts /tmp read-only).
+    //   3. Spawn B's own freshly-written marker IS in its own /tmp
+    //      listing (sanity check that the listing is real and not
+    //      silently empty — without this, a future bug where /tmp
+    //      rejected reads could masquerade as "ephemerality holds").
+    if skip_if_no_userns() {
+        return;
+    }
+    let backend = LinuxBwrap::new();
+
+    // Unique marker so concurrent test runs don't collide on a fake
+    // "leak" hit if /tmp ever did become shared. PID + nanos is overkill
+    // for the local case but cheap insurance against parallel CI lanes
+    // sharing a host /tmp namespace if the invariant ever broke.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let spawn_a_marker = format!("probe-spawn-a-{}-{nanos}", std::process::id());
+    let spawn_b_marker = format!("probe-spawn-b-{}-{nanos}", std::process::id());
+
+    // Spawn A: write the spawn-A marker, exit. `/bin/sh` resolves
+    // through the `--symlink usr/bin /bin` mapping the backend
+    // already injects (see `linux_bwrap::build_argv`), so this
+    // works whether or not the host has `/usr/bin/sh` directly.
+    let mut child_a = backend
+        .spawn_under_policy(
+            &strict_policy(),
+            "/bin/sh",
+            &["-c", &format!("touch /tmp/{spawn_a_marker}")],
+        )
+        .expect("bwrap should spawn /bin/sh for spawn A");
+    let status_a = child_a.wait().expect("wait for spawn A");
+    assert!(
+        status_a.success(),
+        "spawn A (touch /tmp/{spawn_a_marker}) failed: {status_a:?}, stderr={}",
+        read_to_string(&mut child_a.stderr)
+    );
+
+    // Spawn B: write a different marker AND list /tmp.
+    // - exit 0  => writability of /tmp under WorkerStrict (no EROFS).
+    // - stdout MUST NOT contain spawn_a_marker  => ephemerality.
+    // - stdout MUST contain spawn_b_marker      => listing is real.
+    let cmd_b = format!("touch /tmp/{spawn_b_marker} && ls /tmp");
+    let mut child_b = backend
+        .spawn_under_policy(&strict_policy(), "/bin/sh", &["-c", &cmd_b])
+        .expect("bwrap should spawn /bin/sh for spawn B");
+    let status_b = child_b.wait().expect("wait for spawn B");
+    let stdout_b = read_to_string(&mut child_b.stdout);
+    let stderr_b = read_to_string(&mut child_b.stderr);
+    assert!(
+        status_b.success(),
+        "spawn B ({cmd_b}) failed: {status_b:?}, stdout={stdout_b:?} stderr={stderr_b:?} \
+         — /tmp may have been mounted read-only (EROFS)?",
+    );
+    assert!(
+        !stdout_b.contains(&spawn_a_marker),
+        "/tmp leaked across spawns! spawn A wrote {spawn_a_marker:?} and spawn B saw it. \
+         ls /tmp from spawn B = {stdout_b:?}",
+    );
+    assert!(
+        stdout_b.contains(&spawn_b_marker),
+        "spawn B's own marker missing from its own /tmp listing — listing may be empty or /tmp \
+         may be read-only. spawn_b_marker={spawn_b_marker:?}, ls /tmp = {stdout_b:?}",
+    );
+}
+
+#[test]
 fn relative_policy_paths_are_rejected() {
     let backend = LinuxBwrap::new();
     let mut policy = strict_policy();
