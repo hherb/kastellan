@@ -106,6 +106,10 @@ aes-gcm = { version = "0.10", features = ["zeroize"] }
 # transitively by `aes-gcm` for key/cipher state. Apache-2.0 OR MIT.
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
+# Cryptographic RNG used by Vault::materialize to generate fresh
+# secret:// refs via OsRng. MIT OR Apache-2.0 — AGPL-compatible.
+rand = { version = "0.8", features = ["std", "std_rng"] }
+
 # `keyring` (cross-platform OS keyring shim) is NOT declared as a
 # workspace dep because feature selection is per-target. See the
 # per-target stanzas at the bottom of `db/Cargo.toml` for the

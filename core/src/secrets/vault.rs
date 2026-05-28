@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use rand::RngCore;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use zeroize::Zeroizing;
@@ -39,8 +41,6 @@ impl SecretRef {
     /// `pub(crate)` constructor — only called from inside this module
     /// (and from `pub(crate)` test helpers). Keeps the only public path
     /// through [`Vault::materialize`].
-    // Used by Vault::materialize (Task 2) and FakeVault tests (Task 3); pre-emptively allowed during the Task 1 stub phase.
-    #[allow(dead_code)]
     pub(crate) fn from_raw(s: String) -> Self {
         SecretRef(s)
     }
@@ -50,13 +50,12 @@ impl SecretRef {
 /// [`crate::tool_host::dispatch`] as `&Vault` (the daemon owns an
 /// `Arc<Vault>` and shares it across the scheduler).
 pub struct Vault {
-    _ttl: Duration,
-    _map: RwLock<HashMap<SecretRef, Entry>>,
+    ttl: Duration,
+    map: RwLock<HashMap<SecretRef, Entry>>,
 }
 
 /// Internal storage entry. Drop walks the Zeroizing and zeroes the
 /// plaintext bytes automatically.
-#[allow(dead_code)] // wired up in Task 2
 struct Entry {
     plaintext: Zeroizing<Vec<u8>>,
     expires_at: Instant,
@@ -77,6 +76,11 @@ pub enum VaultError {
 
     /// Hard-fail on audit write — see spec §5.4. Wraps the existing
     /// `hhagent_db::DbError` returned by `audit::insert`.
+    ///
+    /// **No `#[from]` on purpose:** `DbError` is the crate-wide error
+    /// type for `hhagent_db`; a blanket `From` would silently swallow
+    /// any DbError from a future method on Vault. Callers map
+    /// explicitly via `.map_err(VaultError::Audit)`.
     #[error("vault: audit row insert failed during materialize: {0}")]
     Audit(hhagent_db::DbError),
 
@@ -93,8 +97,8 @@ impl Vault {
     /// Construct with a custom TTL (for tests).
     pub fn with_ttl(ttl: Duration) -> Self {
         Vault {
-            _ttl: ttl,
-            _map: RwLock::new(HashMap::new()),
+            ttl,
+            map: RwLock::new(HashMap::new()),
         }
     }
 
@@ -103,18 +107,100 @@ impl Vault {
     /// row, and return the ref.
     pub async fn materialize(
         &self,
-        _pool: &PgPool,
-        _key_provider: &dyn KeyProvider,
-        _name: &str,
-        _actor: &str,
+        pool: &PgPool,
+        key_provider: &dyn KeyProvider,
+        name: &str,
+        actor: &str,
     ) -> Result<SecretRef, VaultError> {
-        unimplemented!("Vault::materialize — filled in Task 2")
+        // 1. Decrypt the secret at the host boundary.
+        let plaintext: Zeroizing<Vec<u8>> =
+            hhagent_db::secrets::get(pool, key_provider, name, None).await?;
+
+        if plaintext.is_empty() {
+            return Err(VaultError::EmptyPlaintext);
+        }
+
+        // 2. Generate the ref: 4 random bytes via OsRng → `secret://{:08x}`.
+        //    OsRng is the cryptographic RNG; collision probability is
+        //    negligible at any expected workload (see spec §2).
+        let mut rng = rand::rngs::OsRng;
+        let mut tail = [0u8; 4];
+        rng.fill_bytes(&mut tail);
+        let secret_ref = SecretRef::from_raw(format!(
+            "{}{:02x}{:02x}{:02x}{:02x}",
+            REF_PREFIX, tail[0], tail[1], tail[2], tail[3]
+        ));
+
+        debug_assert_eq!(
+            secret_ref.as_str().len(),
+            REF_PREFIX.len() + REF_HEX_LEN,
+            // Belt-and-braces — the {:02x} format width over 4 bytes
+            // mathematically guarantees 8 hex chars, but this catches any
+            // future format-string typo at debug-mode test time.
+            "freshly-built ref must satisfy the well-formed-ref length invariant"
+        );
+
+        // 3. Write the audit row FIRST. On failure we return Err without
+        //    inserting into the vault — the spec's hard-fail-on-materialize-
+        //    audit posture (§5.4) means no materialized-but-unaudited ref
+        //    ever exists. Subsequent crash between this and the vault
+        //    insert is acceptable: the audit row is the source of truth.
+        let ref_hash = secret_ref.ref_hash();
+        let ttl_secs = self.ttl.as_secs();
+        let payload = json!({
+            "name":     name,
+            "ref_hash": ref_hash,
+            "ttl_secs": ttl_secs,
+            "actor":    actor,
+        });
+        hhagent_db::audit::insert(pool, "policy", "secret.materialized", payload)
+            .await
+            .map_err(VaultError::Audit)?;
+
+        // 4. Insert into vault under the brief sync write lock. The
+        //    Zeroizing<Vec<u8>> moves into the entry; on Vault::Drop or
+        //    on TTL eviction, Zeroizing::Drop zeroes the plaintext bytes.
+        let entry = Entry {
+            plaintext,
+            expires_at: Instant::now() + self.ttl,
+        };
+        {
+            let mut map = self.map.write().expect("vault map poisoned");
+            map.insert(secret_ref.clone(), entry);
+        }
+
+        Ok(secret_ref)
     }
 
     /// Sync redemption. Returns the discrimination between Hit / Expired
     /// / NotFound. Expired entries are lazily dropped on this call.
-    pub fn redeem(&self, _r: &SecretRef) -> RedeemResult {
-        unimplemented!("Vault::redeem — filled in Task 2")
+    pub fn redeem(&self, r: &SecretRef) -> RedeemResult {
+        let now = Instant::now();
+
+        // Fast path: read lock, check expiry, clone on Hit.
+        {
+            let map = self.map.read().expect("vault map poisoned");
+            match map.get(r) {
+                None => return RedeemResult::NotFound,
+                Some(entry) if now < entry.expires_at => {
+                    return RedeemResult::Hit(Zeroizing::new(entry.plaintext.to_vec()));
+                }
+                Some(_expired) => {
+                    // Fall through to slow path below.
+                }
+            }
+        }
+
+        // Slow path: expired — release read lock (already done by scope exit),
+        // acquire write lock, remove entry. The remove zeros the Zeroizing<Vec<u8>>
+        // via Drop. Subsequent redeems return NotFound.
+        {
+            let mut map = self.map.write().expect("vault map poisoned");
+            // Re-check under write lock in case another caller already GC'd
+            // this ref in the meantime — defensive, not load-bearing.
+            map.remove(r);
+        }
+        RedeemResult::Expired
     }
 }
 

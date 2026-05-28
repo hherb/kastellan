@@ -864,6 +864,7 @@ dependencies = [
  "hhagent-supervisor",
  "hhagent-tests-common",
  "libc",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "sha2",
