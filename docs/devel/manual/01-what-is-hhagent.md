@@ -49,15 +49,26 @@ record to the wrong person". CASSANDRA reviews each *plan*, not each syscall.
 
 The project is in active development. As of mid-2026:
 
-- The full sandbox stack is working on both Linux and macOS.
-- The scheduler, memory store, CASSANDRA review pipeline, CLI, and a growing
-  set of DB management commands are all functional.
-- Workers being actively developed: `shell-exec`, `gliner-relex` (entity
-  extraction), `python-exec`, `web-fetch`, `browser-driver`, `mail`.
-- The egress proxy (per-worker outbound allowlist enforcement) is the next
-  major infrastructure piece.
+- The full parent-side sandbox stack is working on both Linux (bwrap +
+  cgroup v2) and macOS (Seatbelt). Worker-side defence-in-depth on Linux
+  (Landlock + seccomp) is shipped.
+- The scheduler, memory store (semantic + lexical + graph lanes with RRF
+  fusion), CASSANDRA review pipeline (constitutional + deterministic
+  stages + a worker-output prompt-injection guard), audit log + JSONL
+  mirror, LLM router (Phase 0 local-only egress), and a growing CLI are
+  all functional.
+- **Workers in the workspace today:** `prelude` (shared init), `shell-exec`
+  (allow-listed argv, no shell interpretation). Both ship and are
+  integration-tested end-to-end.
+- **Workers scaffolded on disk but not yet in the workspace build:**
+  `gliner-relex` (Python entity extraction), `python-exec`, `web-fetch`,
+  `browser-driver`, `mail`. These are in-progress directories — they are
+  excluded from `[workspace.members]` until they're ready to compile.
+- The egress proxy (per-worker outbound allowlist enforcement) is the
+  next major infrastructure piece.
 
-See `docs/devel/ROADMAP.md` for the phased feature list.
+See `docs/devel/ROADMAP.md` for the phased feature list and the latest
+`docs/devel/handovers/HANDOVER.md` for what shipped this week.
 
 ---
 

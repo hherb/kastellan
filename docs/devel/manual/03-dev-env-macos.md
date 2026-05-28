@@ -86,14 +86,11 @@ First build takes 2–5 minutes. Subsequent incremental builds are fast.
 cargo test --workspace -- --nocapture
 ```
 
-Healthy output on macOS:
-
-```
-test result: ok. 998 passed; 0 failed; 3 ignored
-```
-
-The 3 ignored tests require the Apple `container` CLI (macOS Tahoe+) or a
-real GLiNER model; neither is needed for normal development.
+Healthy output on macOS is `0 failed` across every crate, with a small
+number of `ignored` tests. The exact pass count grows commit by commit
+(see the latest `HANDOVER.md`). Ignored tests need the Apple `container`
+CLI (macOS Tahoe+) or a real GLiNER model; neither is required for
+normal development.
 
 ---
 
