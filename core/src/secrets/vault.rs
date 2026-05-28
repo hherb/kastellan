@@ -210,6 +210,12 @@ impl Default for Vault {
     }
 }
 
+impl super::substitute::RedeemFromVault for Vault {
+    fn redeem(&self, r: &SecretRef) -> RedeemResult {
+        Vault::redeem(self, r)
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
