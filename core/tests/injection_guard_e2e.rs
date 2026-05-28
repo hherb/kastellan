@@ -203,12 +203,16 @@ async fn policy_audit_row_contains_no_substring_of_blocked_body() -> std::io::Re
     });
     let _ = dispatch(&pool, &mut worker, "shell-exec", "shell.exec", params).await;
 
+    // Scope: only the policy row carries the privacy promise. The tool row's
+    // payload.req field legitimately contains the input argv (which echoes back
+    // as worker output via printf in this test), so scanning the tool row would
+    // produce a false positive that the spec doesn't actually disallow.
     let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT actor, action, payload FROM audit_log",
+        "SELECT actor, action, payload FROM audit_log WHERE actor='policy' AND action='injection.blocked'",
     )
     .fetch_all(&pool)
     .await
-    .expect("audit log query");
+    .expect("policy row query");
     for (actor, action, payload) in &rows {
         let serialized = format!("{}|{}|{}", actor, action, payload);
         assert!(
@@ -218,6 +222,7 @@ async fn policy_audit_row_contains_no_substring_of_blocked_body() -> std::io::Re
             action,
         );
     }
+    assert!(!rows.is_empty(), "expected at least one policy row (worker output did contain a catalogue phrase)");
 
     let _ = worker.close();
     pool.close().await;
