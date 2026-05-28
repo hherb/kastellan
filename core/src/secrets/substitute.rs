@@ -70,8 +70,24 @@ fn is_well_formed_ref(s: &str) -> bool {
 /// are exactly a well-formed `secret://<8-hex>` ref with the redeemed
 /// plaintext. Returns one [`RedemptionEvent`] per substitution.
 ///
-/// Fails closed at the first miss / UTF-8 error — `value` is left in
-/// an unspecified state; callers must drop it on `Err`.
+/// Fails closed at the first miss / UTF-8 error.
+///
+/// ### Behaviour on `Err`
+///
+/// The walk does not roll back. Any substitutions that completed
+/// before the failing ref remain visible in `value`; the failing
+/// node is unchanged; later nodes are not walked. Callers MUST NOT
+/// forward `value` to the worker on `Err` — it now mixes redeemed
+/// plaintext with an unresolved opaque ref, which is the worst of
+/// both worlds. The contract is: on `Err`, drop `value`.
+///
+/// This deliberately leaves partial state observable rather than
+/// reverting on failure: reverting would require either deep-cloning
+/// `value` up front (extra allocation for every call) or tracking a
+/// per-node undo log (extra complexity for a path the caller already
+/// must drop). The integration tests rely on `params` being dropped
+/// before the worker is called, and the dispatch chokepoint does
+/// exactly that via early-return.
 pub fn substitute_refs_in_params(
     value: &mut serde_json::Value,
     vault: &dyn RedeemFromVault,
@@ -107,11 +123,21 @@ fn walk(
                             ref_hash: ref_hash.clone(),
                         }
                     })?;
+                    // TODO(secrets-slice-2): plaintext fanout. After
+                    // this assignment three independent plaintext copies
+                    // exist: (1) the vault's `Zeroizing<Vec<u8>>` entry,
+                    // (2) the cloned `Zeroizing<Vec<u8>>` `pt` (zeroed
+                    // on drop below), and (3) `*s`, a regular `String`
+                    // inside `serde_json::Value` — NOT zeroizing. `*s`
+                    // is then cloned again into `req_for_audit` in
+                    // `tool_host::dispatch`, so a fourth (also
+                    // non-zeroizing) copy lives until the audit insert
+                    // completes. Slice 2 candidate: zeroizing JSON
+                    // wrapper, or substitute-back-to-ref in the audit
+                    // snapshot using `redemption_events`. See spec §9
+                    // limitation 1 (known and accepted for slice 1).
                     *s = plaintext;
                     events.push(RedemptionEvent { ref_hash });
-                    // pt drops here (Zeroizing zeroes its bytes); the
-                    // new `s` is a regular String — see spec §9
-                    // limitation 1 (known and accepted).
                     Ok(())
                 }
                 RedeemResult::Expired => Err(SubstituteError::MissingRef {

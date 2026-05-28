@@ -176,29 +176,39 @@ fn expired_ref_returns_missing_ref_with_expired_reason() {
 }
 
 #[test]
-fn first_sub_ok_second_miss_leaves_value_in_unspecified_state() {
-    // Walker contract: on error, `value` is in an unspecified state.
-    // Concretely: substitutions that happened before the error
-    // remain visible. Callers (chokepoint) MUST drop `value` on
-    // error — never forward it to the worker. This test pins the
-    // observable "unspecified" behaviour so a future refactor that
-    // accidentally rolls back partial work would trip here.
+fn first_sub_ok_second_miss_pins_partial_walk_contract() {
+    // Walker contract (per `substitute_refs_in_params` doc): on
+    // error, substitutions that completed BEFORE the failing ref
+    // remain visible; the failing ref is unchanged; later refs are
+    // not walked. Callers (the `tool_host::dispatch` chokepoint)
+    // MUST drop `value` on error — never forward it to the worker,
+    // because `value` now mixes redeemed plaintext with an
+    // unresolved opaque ref. This test pins both halves of that
+    // contract so a future refactor that either (a) rolls back
+    // partial work or (b) keeps walking past the first error trips
+    // here.
     let a = make_ref("11111111");
-    // b is intentionally NOT staged in the vault
+    // b is intentionally NOT staged in the vault.
     let vault = FakeVault::new().with(a, b"PT-a");
 
     let mut v = json!({"first": "secret://11111111", "second": "secret://22222222"});
 
-    // Note: serde_json::Map orders keys lexically by default, so
-    // "first" is walked before "second".
+    // Note: `serde_json::Map` orders keys lexically by default
+    // (BTreeMap-backed when the `preserve_order` feature is off),
+    // so "first" is walked before "second".
     let err = substitute_refs_in_params(&mut v, &vault).expect_err("must fail closed");
     match err {
         SubstituteError::MissingRef { reason: MissingReason::NotFound, .. } => (),
         other => panic!("expected MissingRef(NotFound), got {other:?}"),
     }
-    // After the error, the first substitution is observable in `v`.
-    assert_eq!(v["first"], json!("PT-a"), "first substitution visible after error");
-    assert_eq!(v["second"], json!("secret://22222222"), "second ref unchanged (walk stopped)");
+    assert_eq!(
+        v["first"], json!("PT-a"),
+        "substitutions before the failing ref must remain visible",
+    );
+    assert_eq!(
+        v["second"], json!("secret://22222222"),
+        "refs after the failing one must not be walked",
+    );
 }
 
 #[test]
@@ -237,7 +247,9 @@ fn empty_array_is_no_op() {
 #[test]
 fn null_number_bool_are_no_ops() {
     let vault = FakeVault::new();
-    for mut v in [json!(null), json!(42), json!(3.14), json!(true), json!(false)] {
+    // Use `2.5` rather than `3.14` to avoid `clippy::approx_constant`
+    // — the test only cares about exercising `Value::Number(f64)`.
+    for mut v in [json!(null), json!(42), json!(2.5), json!(true), json!(false)] {
         let events = substitute_refs_in_params(&mut v, &vault).expect("substitute Ok");
         assert_eq!(events.len(), 0);
     }

@@ -48,3 +48,21 @@ fn secret_ref_hash_distinguishes_refs() {
     let b = SecretRef::from_raw("secret://aabbccde".to_string());
     assert_ne!(a.ref_hash(), b.ref_hash());
 }
+
+#[test]
+fn secret_ref_debug_never_leaks_ref_string() {
+    // Privacy invariant: {:?} on a SecretRef must NEVER print the
+    // underlying `secret://<8-hex>` string — only the ref_hash. This
+    // defends against careless `tracing::error!(?ref, ...)`, derived
+    // Debug on enclosing structs, `assert!(... "{r:?}")`, etc.
+    let r = SecretRef::from_raw("secret://aabbccdd".to_string());
+    let dbg = format!("{r:?}");
+    assert!(
+        !dbg.contains("secret://aabbccdd"),
+        "Debug must not contain the ref string itself, got {dbg:?}"
+    );
+    assert!(
+        dbg.contains(&r.ref_hash()),
+        "Debug must contain the ref_hash, got {dbg:?}"
+    );
+}

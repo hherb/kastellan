@@ -1,4 +1,4 @@
-//! Vault lifecycle tests. PG-free; uses a `pub(crate)` test helper to
+//! Vault lifecycle tests. PG-free; uses an inline test helper to
 //! insert entries without going through the async `materialize` path.
 
 use std::time::Duration;
@@ -8,11 +8,7 @@ use super::*;
 /// Pure test-only insert. Constructs an `Entry` with the given
 /// plaintext and `now + ttl` expiry, stores under `r`. Mirrors the
 /// `_test_*` inspector pattern from `worker_lifecycle::idle_timeout`.
-///
-/// Safe to be `pub(crate)` because this function lives inside a
-/// `#[cfg(test)]` module, so it is never compiled into the production
-/// binary regardless of the visibility modifier.
-pub(crate) fn _test_insert(vault: &Vault, r: SecretRef, plaintext: Vec<u8>) {
+fn _test_insert(vault: &Vault, r: SecretRef, plaintext: Vec<u8>) {
     let entry = Entry {
         plaintext: Zeroizing::new(plaintext),
         expires_at: Instant::now() + vault.ttl,

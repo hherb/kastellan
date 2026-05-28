@@ -97,6 +97,18 @@ The chokepoint pattern mirrors the injection guard (HANDOVER Item 30): substitut
 - **Revocation (Slice 3).** No explicit revoke path today; TTL expiry is the only cleanup. Slice 3 adds `vault.revoke(name)` + `cli secrets revoke`.
 - **Binary secrets (separate).** Today `substitute_refs_in_params` only handles UTF-8 strings. Binary secrets (TLS certs, raw keys) need a separate API surface.
 - **`tool_host.rs` sibling-lift:** 867 LOC (367 over cap); should bundle Items 30 + 31 in a single refactor slice.
+- **Issue [#147](https://github.com/hherb/hhagent/issues/147) — `tool:` audit row carries substituted plaintext.** The chokepoint snapshots `req_for_audit` AFTER substitution, so the tool row's `payload.req` contains the redeemed plaintext. Slice 2 should substitute plaintext back to `secret://<8-hex>` in the audit snapshot using the `redemption_events` vector we already collect.
+- **Issue [#148](https://github.com/hherb/hhagent/issues/148) — audit-insert failure paths are untested.** Both best-effort paths (`secret.redeemed` loop, `secret.redemption_failed` early-return) log-and-swallow on audit insert failure. Forcing the failure requires an `AuditSink` trait seam in `hhagent_db::audit`; deferred.
+- **Issue [#149](https://github.com/hherb/hhagent/issues/149) — `Vault::materialize` ref-collision branch untested.** The forward-compat polish replaced `HashMap::insert` with `Entry::Vacant`-or-`RefCollision`; the `Occupied` arm needs RNG injection (or a `_test_materialize_at_ref` seam) to exercise.
+
+**Post-review polish (applied this session, follow-up commit after `5885e26`):**
+
+- Manual `Debug` impl for `SecretRef` — prints `SecretRef(ref_hash=<sha256>)` only, never the underlying `secret://<8-hex>` string. Defends against careless `{:?}` formatting (`tracing::error!(?secret_ref, ...)`, derived `Debug` on enclosing structs, `assert!(... "{r:?}")`). New unit test `secret_ref_debug_never_leaks_ref_string` pins the property.
+- `Vault::materialize` collision-safety: replaced `map.insert()` (silent overwrite) with `Entry::Vacant`-or-`VaultError::RefCollision`. New `RefCollision` variant on `#[non_exhaustive]` `VaultError`; callers may retry. Test debt tracked in #149.
+- `gliner-relex::Client::extract` no longer allocates a fresh `Vault` per call; shared `OnceLock<Vault>` static.
+- `substitute_refs_in_params` doc-comment tightened: the partial-walk behaviour is now contract, not "unspecified state". Test renamed `first_sub_ok_second_miss_pins_partial_walk_contract` to match.
+- `_test_insert` in `vault/tests.rs` dropped from `pub(crate)` to `fn` (only used inside the file).
+- TODO comments added at the two known-and-accepted limitations: plaintext fanout in the walker, and the best-effort/hard-fail asymmetry rationale on the `redemption_failed` audit-insert path.
 
 ---
 

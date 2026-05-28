@@ -19,8 +19,26 @@ use super::{DEFAULT_TTL, REF_HEX_LEN, REF_PREFIX};
 /// Opaque pointer into the in-process [`Vault`]. Constructed only by
 /// [`Vault::materialize`]. Safe to embed in audit logs and (eventually)
 /// in transcripts: reveals nothing without an active Vault.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// `Debug` is implemented manually and prints only [`Self::ref_hash`],
+/// never the underlying `secret://<8-hex>` string. This defends against
+/// careless `{:?}` formatting in `tracing::error!(?ref, ...)`,
+/// `assert!(... "{r:?}")`, derived `Debug` on enclosing structs, etc.
+/// The audit log's privacy promise is that ONLY the `ref_hash` ever
+/// appears in observable contexts; this impl makes that the default.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SecretRef(String);
+
+impl std::fmt::Debug for SecretRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Print only the hash so {:?} on a SecretRef can never leak the
+        // ref string itself. Callers that genuinely need the ref string
+        // for substitution call `as_str()` explicitly.
+        f.debug_tuple("SecretRef")
+            .field(&format_args!("ref_hash={}", self.ref_hash()))
+            .finish()
+    }
+}
 
 impl SecretRef {
     /// The full `secret://<8-hex>` string.
@@ -87,6 +105,16 @@ pub enum VaultError {
 
     #[error("vault: materialized plaintext is empty")]
     EmptyPlaintext,
+
+    /// Two `materialize` calls minted the same `secret://<8-hex>` ref.
+    /// With OsRng over a 2^32 namespace this is astronomically rare,
+    /// but if it ever does happen we MUST NOT silently overwrite the
+    /// existing entry — that would re-bind the original `SecretRef` to
+    /// a different plaintext on its next `redeem`, a real correctness
+    /// hazard. We fail loud instead. The caller can retry; on retry a
+    /// fresh ref is generated.
+    #[error("vault: ref collision during materialize (rare; safe to retry)")]
+    RefCollision,
 }
 
 impl Vault {
@@ -161,13 +189,27 @@ impl Vault {
         // 4. Insert into vault under the brief sync write lock. The
         //    Zeroizing<Vec<u8>> moves into the entry; on Vault::Drop or
         //    on TTL eviction, Zeroizing::Drop zeroes the plaintext bytes.
+        //
+        //    Use `Entry::Vacant` rather than `HashMap::insert` so a
+        //    ref collision (vanishingly rare under OsRng over the 2^32
+        //    namespace) returns `VaultError::RefCollision` instead of
+        //    silently rebinding the existing `SecretRef` to a new
+        //    plaintext. An orphan `secret.materialized` audit row may
+        //    remain (spec §5.4 — audited-but-not-inserted is the
+        //    acceptable side of the asymmetry).
         let entry = Entry {
             plaintext,
             expires_at: Instant::now() + self.ttl,
         };
         {
+            use std::collections::hash_map::Entry as MapEntry;
             let mut map = self.map.write().expect("vault map poisoned");
-            map.insert(secret_ref.clone(), entry);
+            match map.entry(secret_ref.clone()) {
+                MapEntry::Vacant(v) => {
+                    v.insert(entry);
+                }
+                MapEntry::Occupied(_) => return Err(VaultError::RefCollision),
+            }
         }
 
         Ok(secret_ref)

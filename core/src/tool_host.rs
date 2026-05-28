@@ -218,6 +218,16 @@ pub async fn dispatch(
                 "reason":   reason,
                 "ms":       elapsed_ms,
             });
+            // Best-effort audit insert. The dispatch is already going to
+            // fail-closed below with `SecretRedemptionFailed`; if the
+            // audit row insert ALSO fails, masking the original error
+            // (which the scheduler maps to `POLICY_DENIED`) with a
+            // database error would be strictly worse than losing the
+            // forensic row. We log via `tracing` so the failure isn't
+            // silent. Asymmetry with materialize-time audit (hard-fail
+            // per spec §5.4) is intentional: materialize must not yield
+            // a ref the audit log doesn't know about, but this path
+            // never yielded a ref at all.
             if let Err(audit_err) =
                 hhagent_db::audit::insert(pool, "policy", "secret.redemption_failed", payload).await
             {
