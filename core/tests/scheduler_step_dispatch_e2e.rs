@@ -54,6 +54,7 @@ use std::sync::Arc;
 use hhagent_core::cassandra::types::{DataClass, PlannedStep};
 use hhagent_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
 use hhagent_core::scheduler::{shell_exec_entry, ToolEntry, ToolHostStepDispatcher, ToolRegistry};
+use hhagent_core::secrets::Vault;
 use hhagent_sandbox::SandboxPolicy;
 use hhagent_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
@@ -194,6 +195,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
             ));
         let dispatcher = ToolHostStepDispatcher::new(
             pool.clone(),
+            Arc::new(Vault::new()),
             lifecycle,
             registry,
         );

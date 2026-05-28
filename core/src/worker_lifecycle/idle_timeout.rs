@@ -99,6 +99,9 @@ pub fn dispatch_indicates_worker_dead<T>(result: &Result<T, ToolHostError>) -> b
         Err(ToolHostError::Protocol(ClientError::Decode(_))) => true,
         Err(ToolHostError::Protocol(ClientError::EarlyExit)) => true,
         Err(ToolHostError::Protocol(ClientError::IdMismatch { .. })) => true,
+        // SecretRedemptionFailed fires before the worker is called —
+        // the worker process was never contacted, so it is not dead.
+        Err(ToolHostError::SecretRedemptionFailed(_)) => false,
     }
 }
 

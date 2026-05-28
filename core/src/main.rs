@@ -259,10 +259,36 @@ async fn main() -> Result<()> {
             entity_extractor.clone(),
         ));
 
+    // ── Bootstrap secret materialization vault (Item 31, slice 1). ──
+    //
+    // HHAGENT_BOOTSTRAP_SECRETS = "name1,name2,name3" — comma-separated
+    // names that must each exist in the `secrets` table. Missing names
+    // fail bring-up (fail-closed: a configured-but-missing secret is
+    // operator error). The ref string itself is NOT logged — only the
+    // ref_hash. Test fixtures reconstruct refs via their own
+    // Vault::materialize calls.
+    let vault = std::sync::Arc::new(hhagent_core::secrets::Vault::new());
+    if let Ok(names_csv) = std::env::var("HHAGENT_BOOTSTRAP_SECRETS") {
+        let key_provider = hhagent_db::secrets::OsKeyringProvider::ensure_initialized()
+            .context("HHAGENT_BOOTSTRAP_SECRETS: failed to initialize OS keyring provider")?;
+        for name in names_csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let secret_ref = vault
+                .materialize(&pool, &key_provider, name, "core:bootstrap")
+                .await
+                .with_context(|| format!("HHAGENT_BOOTSTRAP_SECRETS: materialize({name:?}) failed"))?;
+            tracing::info!(
+                name = %name,
+                ref_hash = %secret_ref.ref_hash(),
+                "secret materialized at bootstrap"
+            );
+        }
+    }
+
     let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
             hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
                 pool.clone(),
+                vault.clone(),
                 lifecycle,
                 tool_registry,
             ),

@@ -102,6 +102,23 @@ fn dispatch_classifier_early_exit_is_dead() {
 }
 
 #[test]
+fn dispatch_classifier_secret_redemption_failed_is_not_a_crash() {
+    // Item 31 — SecretRedemptionFailed surfaces from the substitution
+    // chokepoint BEFORE worker.call is invoked. The worker is never
+    // contacted, so this MUST NOT be classified as a worker crash —
+    // otherwise the lifecycle backoff counter would tick incorrectly
+    // on a planner-side error and degrade the warm-worker hit rate.
+    use crate::secrets::{MissingReason, SubstituteError};
+    use crate::tool_host::ToolHostError;
+
+    let err = ToolHostError::SecretRedemptionFailed(SubstituteError::MissingRef {
+        ref_hash: "test-hash".to_string(),
+        reason: MissingReason::NotFound,
+    });
+    assert!(!dispatch_indicates_worker_dead(&Err::<(), _>(err)));
+}
+
+#[test]
 fn dispatch_classifier_sandbox_is_not_a_warm_worker_crash() {
     // Sandbox errors come from a failed spawn — no worker existed; this is the
     // SPAWN_FAILED path, not a warm-worker crash. The classifier returns false so

@@ -719,8 +719,14 @@ impl Client {
             .await
             .map_err(|e| ClientError::WorkerSpawnFailed(e.to_string()))?;
 
+        // gliner-relex calls never carry secret refs in params
+        // (the extraction request is a plain string, not an agent
+        // tool call). Pass an empty vault so the substitution walk
+        // is a no-op but the API contract is satisfied.
+        let empty_vault = crate::secrets::Vault::new();
         let result = tool_host::dispatch(
             &self.pool,
+            &empty_vault,
             handle.worker_mut(),
             self.tool_name,
             "extract",
