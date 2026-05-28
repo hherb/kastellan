@@ -64,6 +64,10 @@ the best containment available without entitlements.
 
 The two sandbox rows together implement the "parent denies + child denies again" double containment: a kernel bug in either layer alone does not breach the worker's threat boundary. The worker-side layer is enforced from inside the worker process *after* dynamic-linker resolution but *before* serving any JSON-RPC request, via `hhagent_worker_prelude::serve_stdio`.
 
+### Secrets in the audit log
+
+Redeemed secret plaintext never appears in the request snapshot (`payload.req` of any `tool:<name>` row, snapshotted *before* `secret://<8-hex>` substitution — issue #147) nor in any `actor='policy'` row (issue #146 / Item 31). It does **not** follow that the audit log is free of secrets: a worker that is legitimately handed a secret may echo it into its own output, which lands in `payload.result`. That field is the worker's response, not the request, and is out of scope of the redaction invariant — the worker is the authorized consumer, so an operator with `audit_log` read access can recover any secret a worker chose to emit. Containing worker-emitted plaintext is the egress proxy's and the injection guard's job, not the audit redactor's.
+
 ## Negative tests (CI-enforced as backends land)
 
 - `python-exec` attempts `socket.connect` → blocked.
