@@ -1,6 +1,7 @@
 //! CASSANDRA — semantic oversight layer. Reviews agent-formulated
 //! plans before they execute, in the dispatcher chokepoint's
-//! pre-spawn position.
+//! pre-spawn position. Also screens worker outputs returning through
+//! the same chokepoint — see `injection_guard`.
 //!
 //! In the scope of this work the stages are stubs (always Approve)
 //! so the agent loop's baseline performance can be measured before
@@ -14,9 +15,14 @@
 
 pub mod constitutional;
 pub mod deterministic;
+pub mod injection_guard;
 pub mod review;
 pub mod types;
 
+pub use injection_guard::{
+    extract_scannable_text, screen, InjectionDecision, InjectionVerdict, BLOCK_THRESHOLD,
+    SCAN_BYTE_CAP,
+};
 pub use review::{
     ChainReviewStage, ConstitutionalGuard, DeterministicPolicy, NoopReviewStage,
     ReviewStage, ReviewStageContext,
