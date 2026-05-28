@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
+
 use hhagent_protocol::client::{Client, ClientError};
 use hhagent_sandbox::{Profile, SandboxBackend, SandboxError, SandboxPolicy};
 
@@ -100,7 +102,12 @@ impl WorkerCommand {
 ///
 /// ## Audit-log shape
 ///
-/// One row per call, regardless of success or failure:
+/// One or two rows per call. The `'tool:<name>'` row is always written.
+/// A second `'policy / injection.blocked'` row is also written when the
+/// prompt-injection guard blocks a worker result (see
+/// `core::cassandra::injection_guard`); that second row carries SHA-256 +
+/// length + score + class codes — never the raw scanned body.
+///
 /// * `actor`  = `"tool:<tool>"` — caller-supplied logical name (e.g.
 ///   `"shell-exec"`, `"web-fetch"`). The worker binary path may be
 ///   long and host-specific; the logical name is what operators
@@ -161,15 +168,41 @@ pub async fn dispatch(
 
     // Sealed command: `WorkerCommand` is the only argument shape
     // `SupervisedWorker::call` accepts, and both its constructor and
-    // `call` itself are module-private (see issue #16). So this is
-    // the only path by which any caller — in-crate or out-of-crate —
-    // can land a JSON-RPC request on a sandboxed worker.
+    // `call` itself are module-private (see issue #16).
     let cmd = WorkerCommand::new(method, params);
     let call_result = tokio::task::block_in_place(|| worker.call(cmd));
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
+    // Prompt-injection screen on successful results. Errors are not
+    // text-channel content (the planner sees them as failure codes,
+    // not as text), so they can't carry injection — skip.
+    let (final_result, blocked_meta) = match call_result {
+        Ok(v) => {
+            let (body, truncated) = crate::cassandra::injection_guard::extract_scannable_text(
+                &v,
+                crate::cassandra::injection_guard::SCAN_BYTE_CAP,
+            );
+            let verdict = crate::cassandra::injection_guard::screen(&body);
+            match verdict.decision {
+                crate::cassandra::injection_guard::InjectionDecision::Allow => {
+                    (Ok(v), None)
+                }
+                crate::cassandra::injection_guard::InjectionDecision::Block => {
+                    let placeholder = serde_json::json!({
+                        "injection_blocked": true,
+                        "score":             verdict.score,
+                        "reason_codes":      verdict.reason_codes,
+                    });
+                    (Ok(placeholder), Some((verdict, body, truncated)))
+                }
+            }
+        }
+        Err(e) => (Err(e), None),
+    };
+
+    // Tool audit row (existing) — now carrying the placeholder on Block.
     let actor = format!("tool:{tool}");
-    let audit_payload = match &call_result {
+    let audit_payload = match &final_result {
         Ok(v) => serde_json::json!({
             "req":    req_for_audit,
             "result": v,
@@ -181,14 +214,9 @@ pub async fn dispatch(
             "ms":  elapsed_ms,
         }),
     };
-
     if let Err(audit_err) =
         hhagent_db::audit::insert(pool, &actor, method, audit_payload).await
     {
-        // Operator-visible: every dropped audit row is a gap in the
-        // append-only record. We don't escalate to an error return
-        // because that would mask the worker's actual result; see the
-        // function-level doc for the rationale.
         tracing::error!(
             tool = %tool,
             method = %method,
@@ -197,7 +225,38 @@ pub async fn dispatch(
         );
     }
 
-    Ok(call_result?)
+    // Forensic policy row on Block. SHA-256 of the body that was
+    // scanned (which may have been truncated at SCAN_BYTE_CAP).
+    // The raw body is never written to any audit column — only the
+    // hash, byte length, score, and class codes are stored.
+    if let Some((verdict, body, truncated)) = blocked_meta {
+        let mut hasher = Sha256::new();
+        hasher.update(body.as_bytes());
+        let body_sha256 = format!("{:x}", hasher.finalize());
+        let body_byte_len = body.len();
+        let policy_payload = serde_json::json!({
+            "tool":                    tool,
+            "method":                  method,
+            "score":                   verdict.score,
+            "decision":                "block",
+            "reason_codes":            verdict.reason_codes,
+            "body_sha256":             body_sha256,
+            "body_byte_len":           body_byte_len,
+            "body_truncated_at_64kib": truncated,
+        });
+        if let Err(e) =
+            hhagent_db::audit::insert(pool, "policy", "injection.blocked", policy_payload).await
+        {
+            tracing::error!(
+                tool = %tool,
+                method = %method,
+                error = %e,
+                "policy audit insert failed"
+            );
+        }
+    }
+
+    Ok(final_result?)
 }
 
 /// What to launch and how to jail it.
