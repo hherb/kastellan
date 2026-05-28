@@ -22,6 +22,8 @@ pub mod prompt_assembly;
 pub mod recall_assembly;
 pub mod sandbox_health;
 pub mod scheduler;
+// NEW — Item 31 (HANDOVER) opaque secret refs slice 1
+pub mod secrets;
 pub mod tool_host;
 pub mod worker_lifecycle;
 pub mod workers;
