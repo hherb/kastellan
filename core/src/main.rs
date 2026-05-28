@@ -269,18 +269,21 @@ async fn main() -> Result<()> {
     // Vault::materialize calls.
     let vault = std::sync::Arc::new(hhagent_core::secrets::Vault::new());
     if let Ok(names_csv) = std::env::var("HHAGENT_BOOTSTRAP_SECRETS") {
-        let key_provider = hhagent_db::secrets::OsKeyringProvider::ensure_initialized()
-            .context("HHAGENT_BOOTSTRAP_SECRETS: failed to initialize OS keyring provider")?;
-        for name in names_csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            let secret_ref = vault
-                .materialize(&pool, &key_provider, name, "core:bootstrap")
-                .await
-                .with_context(|| format!("HHAGENT_BOOTSTRAP_SECRETS: materialize({name:?}) failed"))?;
-            tracing::info!(
-                name = %name,
-                ref_hash = %secret_ref.ref_hash(),
-                "secret materialized at bootstrap"
-            );
+        let names = parse_bootstrap_secrets_csv(&names_csv);
+        if !names.is_empty() {
+            let key_provider = hhagent_db::secrets::OsKeyringProvider::ensure_initialized()
+                .context("HHAGENT_BOOTSTRAP_SECRETS: failed to initialize OS keyring provider")?;
+            for name in names {
+                let secret_ref = vault
+                    .materialize(&pool, &key_provider, name, "core:bootstrap")
+                    .await
+                    .with_context(|| format!("HHAGENT_BOOTSTRAP_SECRETS: materialize({name:?}) failed"))?;
+                tracing::info!(
+                    name = %name,
+                    ref_hash = %secret_ref.ref_hash(),
+                    "secret materialized at bootstrap"
+                );
+            }
         }
     }
 
@@ -670,5 +673,57 @@ async fn write_l0_seeded_row(
     )
     .await
     .map(|_| ())
+}
+
+/// Parses the `HHAGENT_BOOTSTRAP_SECRETS` CSV value into a list of
+/// trimmed, non-empty secret names. Handles leading/trailing commas,
+/// internal whitespace, and all-whitespace entries.
+///
+/// Pure function — no I/O, no side effects.
+fn parse_bootstrap_secrets_csv(csv: &str) -> Vec<&str> {
+    csv.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bootstrap_secrets_csv;
+
+    #[test]
+    fn parse_empty_string_yields_empty_list() {
+        assert!(parse_bootstrap_secrets_csv("").is_empty());
+    }
+
+    #[test]
+    fn parse_only_whitespace_yields_empty_list() {
+        assert!(parse_bootstrap_secrets_csv("   ").is_empty());
+        assert!(parse_bootstrap_secrets_csv(" \t \n ").is_empty());
+    }
+
+    #[test]
+    fn parse_single_name_works() {
+        let names = parse_bootstrap_secrets_csv("openai-api-key");
+        assert_eq!(names, vec!["openai-api-key"]);
+    }
+
+    #[test]
+    fn parse_handles_trailing_comma() {
+        let names = parse_bootstrap_secrets_csv("a,b,");
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_handles_leading_comma_and_whitespace() {
+        let names = parse_bootstrap_secrets_csv(", , a , b ,, c , ");
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parse_preserves_internal_dashes_and_dots() {
+        let names = parse_bootstrap_secrets_csv("openai.api.key, github-token");
+        assert_eq!(names, vec!["openai.api.key", "github-token"]);
+    }
 }
 

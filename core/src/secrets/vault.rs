@@ -69,6 +69,7 @@ pub enum RedeemResult {
     NotFound,
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
     #[error("vault: secret lookup failed: {0}")]

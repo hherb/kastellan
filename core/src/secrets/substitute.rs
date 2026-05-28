@@ -37,6 +37,7 @@ impl MissingReason {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SubstituteError {
     #[error("substitute: ref {ref_hash} missing from vault (reason: {})", reason.as_str())]
