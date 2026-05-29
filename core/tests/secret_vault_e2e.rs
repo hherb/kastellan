@@ -13,8 +13,9 @@ use std::time::Duration;
 use hhagent_core::secrets::{
     MissingReason, RedeemFromVault, SubstituteError, Vault, VaultError,
 };
-use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use hhagent_core::tool_host::{AuditSink, dispatch, dispatch_with_sink, spawn_worker, WorkerSpec};
 use hhagent_db::secrets::{MapKeyProvider, SecretsError, KEY_LEN};
+use hhagent_db::DbError;
 use hhagent_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, policy_for_shell_exec,
     shell_exec_worker_binary, skip_if_no_supervisor, skip_if_sandbox_unavailable, unique_suffix,
@@ -608,4 +609,205 @@ async fn tool_row_req_shows_opaque_ref_not_plaintext() {
 
     let _ = worker.close();
     pool.close().await;
+}
+
+// ── Tests 10 + 11: audit-insert fault injection (issue #148) ──────────────────
+//
+// The two secret-ref audit rows (`secret.redeemed`, `secret.redemption_failed`)
+// are written best-effort: a failed insert is logged via `tracing` and
+// swallowed so a transient `audit_log` outage cannot turn a successful (or
+// already-failing) dispatch into a different outcome. That swallow path is
+// unreachable with a real Postgres pool, so we drive `dispatch_with_sink` with
+// a `MockAuditSink` that fails the targeted insert and records every attempt.
+
+/// Test `AuditSink` that records each `(actor, action)` it is asked to write
+/// and, optionally, fails the insert for one chosen action (returning a
+/// `DbError` exactly as a real audit outage would). Records the attempt
+/// *before* failing, so a test can assert the row was attempted even on the
+/// failure path.
+struct MockAuditSink {
+    fail_on_action: Option<String>,
+    calls: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl MockAuditSink {
+    fn new(fail_on_action: Option<&str>) -> Self {
+        MockAuditSink {
+            fail_on_action: fail_on_action.map(str::to_owned),
+            calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// True iff an insert was attempted for this exact `(actor, action)`.
+    fn attempted(&self, actor: &str, action: &str) -> bool {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(ac, an)| ac == actor && an == action)
+    }
+}
+
+#[async_trait::async_trait]
+impl AuditSink for MockAuditSink {
+    async fn insert(
+        &self,
+        actor: &str,
+        action: &str,
+        _payload: serde_json::Value,
+    ) -> Result<i64, DbError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((actor.to_owned(), action.to_owned()));
+        if self.fail_on_action.as_deref() == Some(action) {
+            return Err(DbError::Query(format!("forced audit failure on action={action}")));
+        }
+        Ok(1)
+    }
+}
+
+// ── Test 10: a failing `secret.redeemed` insert is swallowed ──────────────────
+//
+// Acceptance (#148): dispatch still returns Ok(worker result), the tool row is
+// still written, no panic.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatch_swallows_redeemed_audit_insert_failure() {
+    if skip_if_no_supervisor() { return; }
+    if skip_if_sandbox_unavailable() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+    let worker_bin = shell_exec_worker_binary();
+    if !worker_bin.exists() {
+        eprintln!("\n[SKIP] worker binary not built; run cargo build --workspace\n");
+        return;
+    }
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        &format!("svault-10-{suffix}"),
+        &format!("svault-10-{suffix}-log"),
+        &format!("hhagent-test-svault-10-{suffix}"),
+    );
+    // PG is needed only to materialize a real ref (which the empty-vault
+    // path of test 11 avoids). Dispatch's own audit goes through the mock.
+    let pool = probe_and_pool(&cluster.conn_spec).await;
+    let kp = test_key_provider();
+
+    let marker = "REDEEMED_SWALLOW_MARKER_148a";
+    hhagent_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None)
+        .await
+        .unwrap();
+    let vault = Arc::new(Vault::new());
+    let secret_ref = vault
+        .materialize(&pool, &kp, "marker-secret", "test")
+        .await
+        .unwrap();
+
+    let worker_str = worker_bin.to_string_lossy().into_owned();
+    let policy = policy_for_shell_exec(&worker_bin, &[PRINTF_PATH]);
+    let backend = backend();
+    let spec = WorkerSpec {
+        policy: &policy,
+        program: &worker_str,
+        args: &[],
+        wall_clock_ms: Some(15_000),
+    };
+    let mut worker = spawn_worker(&*backend, &spec).expect("spawn shell-exec");
+
+    let params = json!({ "argv": [PRINTF_PATH, "%s\n", secret_ref.as_str()] });
+
+    // Sink fails the `secret.redeemed` insert; every other insert succeeds.
+    let sink = MockAuditSink::new(Some("secret.redeemed"));
+    let result =
+        dispatch_with_sink(&sink, &vault, &mut worker, "shell-exec", "shell.exec", params)
+            .await
+            .expect("dispatch must still return Ok despite the redeemed-row audit failure");
+
+    // The worker still ran and received the substituted plaintext.
+    let stdout = result["stdout"].as_str().expect("stdout");
+    assert!(
+        stdout.contains(marker),
+        "worker stdout should contain the substituted plaintext: got {stdout:?}"
+    );
+
+    // The failing redeemed insert was attempted (then swallowed)...
+    assert!(
+        sink.attempted("policy", "secret.redeemed"),
+        "the redeemed-row insert should have been attempted"
+    );
+    // ...and the tool row was still written afterwards.
+    assert!(
+        sink.attempted("tool:shell-exec", "shell.exec"),
+        "the tool row must still be written after a swallowed redeemed-row failure"
+    );
+
+    let _ = worker.close();
+    pool.close().await;
+}
+
+// ── Test 11: a failing `secret.redemption_failed` insert is swallowed ─────────
+//
+// Acceptance (#148): dispatch still returns Err(SecretRedemptionFailed), the
+// worker is not called, and the tool row is not written. Needs no PG — the
+// empty vault makes substitution fail before any pool use, and all of
+// dispatch's audit writes go through the mock. (It still spawns a real worker
+// to satisfy the `&mut SupervisedWorker` argument, so it shares the
+// sandbox/supervisor/worker-binary skip guards above; that worker is never
+// called — substitution fails first.)
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatch_swallows_redemption_failed_audit_insert_failure() {
+    if skip_if_no_supervisor() { return; }
+    if skip_if_sandbox_unavailable() { return; }
+    let worker_bin = shell_exec_worker_binary();
+    if !worker_bin.exists() {
+        eprintln!("\n[SKIP] worker binary not built; run cargo build --workspace\n");
+        return;
+    }
+
+    // Empty vault — the synthetic ref is unknown, so substitution fails
+    // *before* `worker.call` and before any pool access.
+    let vault = Arc::new(Vault::new());
+
+    let worker_str = worker_bin.to_string_lossy().into_owned();
+    let policy = policy_for_shell_exec(&worker_bin, &[PRINTF_PATH]);
+    let backend = backend();
+    let spec = WorkerSpec {
+        policy: &policy,
+        program: &worker_str,
+        args: &[],
+        wall_clock_ms: Some(15_000),
+    };
+    let mut worker = spawn_worker(&*backend, &spec).expect("spawn shell-exec");
+
+    let synthetic_ref = "secret://00000000";
+    let params = json!({ "argv": [PRINTF_PATH, "%s\n", synthetic_ref] });
+
+    // Sink fails the `secret.redemption_failed` insert.
+    let sink = MockAuditSink::new(Some("secret.redemption_failed"));
+    let err = dispatch_with_sink(&sink, &vault, &mut worker, "shell-exec", "shell.exec", params)
+        .await
+        .expect_err("dispatch must fail closed even though the audit row insert also failed");
+
+    // The original substitution error is preserved — not masked by the
+    // swallowed audit failure (the scheduler maps this to POLICY_DENIED).
+    match err {
+        hhagent_core::tool_host::ToolHostError::SecretRedemptionFailed(_) => (),
+        other => panic!("expected SecretRedemptionFailed, got {other:?}"),
+    }
+
+    // The failing redemption_failed insert was attempted (then swallowed).
+    assert!(
+        sink.attempted("policy", "secret.redemption_failed"),
+        "the redemption_failed-row insert should have been attempted"
+    );
+    // The worker was never called → no tool row was ever written.
+    assert!(
+        !sink.attempted("tool:shell-exec", "shell.exec"),
+        "no tool row may be written when substitution fails before worker.call"
+    );
+
+    let _ = worker.close();
 }
