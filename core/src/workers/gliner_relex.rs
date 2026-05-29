@@ -125,12 +125,21 @@ pub struct GlinerRelexEnv {
 /// can override via `HHAGENT_GLINER_RELEX_IMAGE` env var (read by
 /// `resolve_env`). Bumping this default is a paired edit with
 /// `scripts/workers/gliner-relex/build-image.sh`.
+///
+/// macOS-only: the Apple `container` micro-VM backend doesn't exist on
+/// Linux (`SandboxBackendKind::Container` is `#[cfg(target_os = "macos")]`),
+/// so gating the const avoids a dead-code warning on the Linux build
+/// (issue #144).
+#[cfg(target_os = "macos")]
 const CONTAINER_IMAGE_DEFAULT: &str = "hhagent/gliner-relex:dev";
 
 /// In-container path to the worker shim. Containerfile uses
 /// `uv pip install --system .` which places the console-script from
 /// pyproject's `[project.scripts]` at `/usr/local/bin/<name>`. Bumping
 /// is a paired edit with the Containerfile's package install path.
+///
+/// macOS-only for the same reason as [`CONTAINER_IMAGE_DEFAULT`].
+#[cfg(target_os = "macos")]
 const CONTAINER_BINARY: &str = "/usr/local/bin/hhagent-worker-gliner-relex";
 
 /// Construct the [`ToolEntry`] for the gliner-relex worker.
@@ -185,11 +194,18 @@ const CONTAINER_BINARY: &str = "/usr/local/bin/hhagent-worker-gliner-relex";
 ///   with headroom. Operators picking `large-v0.5` (~4-5 GB) need
 ///   to bump this; flagged in the README's env-var table.
 pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
+    // The container branch is macOS-only: it constructs an entry tagged
+    // `SandboxBackendKind::Container`, a variant that doesn't exist on
+    // Linux. On Linux `env.use_container_backend` is forced `false` by
+    // `resolve_env` (compile-time), so host mode is the only reachable
+    // path and the macOS-only `container_mode_entry` is never referenced
+    // — keeping the Linux build green (issue #144). bwrap is the Linux
+    // containment layer; Apple `container` is the macOS opt-in.
+    #[cfg(target_os = "macos")]
     if env.use_container_backend {
-        container_mode_entry(env)
-    } else {
-        host_mode_entry(env)
+        return container_mode_entry(env);
     }
+    host_mode_entry(env)
 }
 
 /// Host-mode entry: the existing pre-Slice-2.5 shape. Worker runs from
@@ -252,6 +268,13 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
 /// from the host; venv + src are baked into the image. The image is
 /// per-call constructed via `SandboxBackends::resolve(Some(Container),
 /// Some(<image>))`.
+///
+/// macOS-only: emits an entry tagged `SandboxBackendKind::Container`,
+/// which is `#[cfg(target_os = "macos")]`-gated in `hhagent-sandbox`.
+/// Compiling this on Linux is what broke the core build before issue
+/// #144 — Linux drives `use_container_backend` to a compile-time
+/// `false`, so this function is never reached there and need not exist.
+#[cfg(target_os = "macos")]
 fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // Container-mode policy: fs_read mounts host weights only.
     // build_container_argv uses source=<P>,target=<P> convention, so the
@@ -458,12 +481,22 @@ where
     // New env knobs (Slice 2.5):
     //   * `HHAGENT_GLINER_RELEX_USE_CONTAINER=1` → container-mode (strict on "1").
     //   * `HHAGENT_GLINER_RELEX_IMAGE=<tag>` → operator-supplied image override.
+    //
+    // Container mode is macOS-only — the Apple `container` micro-VM
+    // backend (`SandboxBackendKind::Container`) doesn't exist on Linux.
+    // On non-macOS targets the flag is forced `false` at compile time so
+    // the build never references the macOS-only variant (issue #144); an
+    // operator who sets `HHAGENT_GLINER_RELEX_USE_CONTAINER=1` on Linux
+    // gets host-mode + bwrap silently (the env var isn't even read).
+    #[cfg(target_os = "macos")]
     let use_container_backend = env_lookup("HHAGENT_GLINER_RELEX_USE_CONTAINER")
         .map(|v| {
             // trim() rationale: matches HHAGENT_GLINER_RELEX_ENABLE strictness; see comment above.
             v.trim() == "1"
         })
         .unwrap_or(false);
+    #[cfg(not(target_os = "macos"))]
+    let use_container_backend = false;
     let container_image = env_lookup("HHAGENT_GLINER_RELEX_IMAGE");
 
     // Host venv resolution is skipped in container mode — the worker

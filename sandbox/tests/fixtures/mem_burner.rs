@@ -37,14 +37,13 @@ fn main() {
     });
 
     let bytes = mb * MB;
-    let mut buf: Vec<u8> = Vec::with_capacity(bytes);
-    // SAFETY: we set the length we just reserved; we then write to every
-    // page before reading anything, so observers never see uninitialised
-    // memory through this Vec. Using `resize` would do the same work but
-    // walk every byte; this loop only walks one byte per page.
-    unsafe {
-        buf.set_len(bytes);
-    }
+    // Allocate N MiB. `vec![0u8; bytes]` may hand back demand-zero pages
+    // that don't count against `memory.max` until they're written, so the
+    // loop below still touches one byte per page to force every page
+    // resident. We deliberately avoid `Vec::set_len` over uninitialised
+    // capacity here — `clippy::uninit_vec` is deny-by-default and would
+    // break `cargo clippy --all-targets` (issue #150).
+    let mut buf: Vec<u8> = vec![0u8; bytes];
 
     let mut i = 0usize;
     while i < bytes {
