@@ -101,6 +101,16 @@ pub const BLOCK_THRESHOLD: f32 = 0.70;
 /// returning 10 MB of HTML) from burning CPU in the substring scan.
 pub const SCAN_BYTE_CAP: usize = 64 * 1024;
 
+/// Max container-nesting depth [`walk`] descends before bailing.
+/// `serde_json`'s parser caps nesting at 128 by default (the
+/// `unbounded_depth` feature, which would raise it, is not enabled),
+/// so any worker-parsed `Value` stays well under this; 256 gives 2x
+/// headroom while bounding the recursion far below the dispatcher
+/// thread's stack-overflow threshold. Defense-in-depth against a
+/// future removal of the upstream parser/protocol limits — see
+/// issue #143.
+pub const MAX_WALK_DEPTH: usize = 256;
+
 /// English-substring catalogue. Each entry contributes its `weight`
 /// to the total `score` if its `pattern` (post-`normalize`) appears
 /// as a substring of the input. The `class` is the deduped reason
@@ -213,25 +223,42 @@ pub fn screen(text: &str) -> InjectionVerdict {
 /// null, JSON keys, structural punctuation) are skipped so the
 /// catalogue cannot fire on JSON shape itself.
 ///
-/// Returns `(body, truncated)` where `truncated == true` iff the
-/// concatenation reached `byte_cap` before all string nodes were
-/// emitted. Forensic SHA-256 is computed over the **returned** body,
-/// truncated or not — so the audit row's `body_byte_len` field and
-/// the SHA are always self-consistent.
+/// Returns `(body, truncated)` where `truncated == true` iff the walk
+/// stopped early — either because the concatenation reached `byte_cap`
+/// before all string nodes were emitted, **or** because the nesting
+/// reached [`MAX_WALK_DEPTH`] (issue #143). Forensic SHA-256 is
+/// computed over the **returned** body, truncated or not — so the
+/// audit row's `body_byte_len` field and the SHA are always
+/// self-consistent.
 pub fn extract_scannable_text(value: &Value, byte_cap: usize) -> (String, bool) {
     let mut out = String::new();
-    let truncated = walk(value, &mut out, byte_cap);
+    let truncated = walk(value, &mut out, byte_cap, 0);
     (out, truncated)
 }
 
 /// Recursive helper for [`extract_scannable_text`]. Returns `true`
-/// iff the cap was hit during this subtree.
+/// iff the walk stopped early during this subtree — either the byte
+/// `byte_cap` was hit or the nesting reached [`MAX_WALK_DEPTH`].
+///
+/// `depth` is the current container-nesting level (0 at the top-level
+/// call, incremented on each descent into an array or object). When it
+/// reaches [`MAX_WALK_DEPTH`] the walk bails immediately and signals
+/// truncation — this caps the recursion so a pathologically deep
+/// `Value` cannot overflow the dispatcher thread's stack (issue #143).
+/// Hitting the depth cap requires adversarial input (`serde_json`
+/// rejects nesting past 128 at parse time), so reusing the existing
+/// truncation channel — which aborts the rest of the walk — is the
+/// right forensic posture: an audit row marked truncated, no
+/// stack-overflow crash.
 ///
 /// Strings get a leading `'\n'` separator iff `out` is non-empty,
 /// so consecutive emitted values are newline-separated but the body
 /// has no leading newline. The truncation check happens **before**
 /// appending so we never overshoot the cap.
-fn walk(value: &Value, out: &mut String, byte_cap: usize) -> bool {
+fn walk(value: &Value, out: &mut String, byte_cap: usize, depth: usize) -> bool {
+    if depth >= MAX_WALK_DEPTH {
+        return true;
+    }
     match value {
         Value::String(s) => {
             if s.is_empty() {
@@ -266,7 +293,7 @@ fn walk(value: &Value, out: &mut String, byte_cap: usize) -> bool {
         }
         Value::Array(items) => {
             for item in items {
-                if walk(item, out, byte_cap) {
+                if walk(item, out, byte_cap, depth + 1) {
                     return true;
                 }
             }
@@ -274,7 +301,7 @@ fn walk(value: &Value, out: &mut String, byte_cap: usize) -> bool {
         }
         Value::Object(map) => {
             for (_k, v) in map.iter() {
-                if walk(v, out, byte_cap) {
+                if walk(v, out, byte_cap, depth + 1) {
                     return true;
                 }
             }
@@ -374,6 +401,67 @@ mod tests {
         let (body, truncated) = extract_scannable_text(&v, 1024);
         assert_eq!(body, "hello\nworld");
         assert!(!truncated);
+    }
+
+    // ----- recursion-depth guard tests (issue #143) -----
+
+    /// Build `depth` levels of `{"a": ...}` object nesting around a
+    /// single string leaf. The leaf string is reached at recursion
+    /// depth == `depth`.
+    fn deeply_nested(depth: usize, leaf: &str) -> Value {
+        let mut v = Value::String(leaf.to_string());
+        for _ in 0..depth {
+            let mut map = serde_json::Map::new();
+            map.insert("a".to_string(), v);
+            v = Value::Object(map);
+        }
+        v
+    }
+
+    #[test]
+    fn walk_stops_at_max_depth() {
+        // A leaf nested 300 levels deep is past MAX_WALK_DEPTH (256):
+        // the walk must bail before reaching it, leaving the leaf
+        // unscanned and signalling truncation. The byte cap is huge
+        // here so only the depth guard can trigger.
+        let v = deeply_nested(300, "DEEPMARKER");
+        let (body, truncated) = extract_scannable_text(&v, 1024 * 1024);
+        assert!(truncated, "depth past MAX_WALK_DEPTH must report truncated");
+        assert!(
+            !body.contains("DEEPMARKER"),
+            "leaf past the depth cap must not be scanned, got {body:?}"
+        );
+    }
+
+    #[test]
+    fn walk_captures_content_below_max_depth() {
+        // A leaf nested 100 levels deep is well under MAX_WALK_DEPTH:
+        // it must be scanned in full, not truncated.
+        let v = deeply_nested(100, "SHALLOWMARKER");
+        let (body, truncated) = extract_scannable_text(&v, 1024 * 1024);
+        assert!(!truncated, "depth under the cap must not report truncated");
+        assert_eq!(body, "SHALLOWMARKER");
+    }
+
+    // Note: there is deliberately no test that feeds a *very* deep
+    // (e.g. 100k-level) Value to prove "walk does not overflow". The
+    // depth guard bounds walk's recursion to <= MAX_WALK_DEPTH frames
+    // by construction, so overflow-safety is a corollary of
+    // `walk_stops_at_max_depth` above. A literal deep-Value test is
+    // also impossible to write cleanly: any Value deep enough to
+    // overflow walk also overflows Rust's *recursive Drop glue* when
+    // the test frees it at teardown (serde_json::Value has no
+    // iterative Drop), and such a Value can never reach walk in
+    // production anyway — serde_json's parser rejects nesting past 128
+    // at parse time. The realistic worst case is therefore ~128 deep,
+    // comfortably under the 256 cap.
+
+    #[test]
+    fn max_walk_depth_is_256() {
+        // Pin the depth cap against silent drift. serde_json's parser
+        // caps nesting at 128 by default, so any worker-parsed Value
+        // stays well under this; 256 is 2x headroom.
+        assert_eq!(MAX_WALK_DEPTH, 256);
     }
 
     // ----- screen tests -----
