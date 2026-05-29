@@ -37,8 +37,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hhagent_core::cassandra::types::DataClass;
+use hhagent_core::entity_extraction::{SeedSource, StaticEntityExtractor};
 use hhagent_core::prompt_assembly::StaticSystemPromptBuilder;
-use hhagent_core::recall_assembly::StaticRecallBuilder;
+use hhagent_core::recall_assembly::{
+    RecallBuilder, RecallError, RecalledContext, StaticRecallBuilder,
+};
 use hhagent_core::scheduler::agent::{AgentError, PlanFormulator, RouterAgent};
 use hhagent_core::scheduler::inner_loop::TaskContext;
 use hhagent_core::scheduler::prompts::{PromptCache, PromptEntry};
@@ -248,6 +251,41 @@ fn envelope_for(plan_json_string: &str) -> String {
     .to_string()
 }
 
+/// Shared slot holding the `(query, seeds)` a [`CapturingRecallBuilder`]
+/// observed. Named alias rather than the inline `Arc<Mutex<Option<…>>>`
+/// to stay under `clippy::type_complexity` (the `-D warnings` gate).
+type CapturedCall = Arc<std::sync::Mutex<Option<(String, Vec<i64>)>>>;
+
+/// A [`RecallBuilder`] that records the `(query, seeds)` it was called
+/// with so a test can assert what `RouterAgent::formulate_plan` passed
+/// into [`RecallBuilder::build_with_seeds`].
+///
+/// The production [`StaticRecallBuilder`] deliberately *discards* its
+/// `seeds` argument (it returns a fixed context regardless of input), so
+/// it cannot pin the seed-threading. This double exists purely to
+/// capture that argument; the returned context is always empty because
+/// the recall *content* is irrelevant to the seed-threading pin.
+#[derive(Clone, Default)]
+struct CapturingRecallBuilder {
+    /// `Some((query, seeds))` after the first `build_with_seeds` call.
+    /// `Arc<Mutex<_>>` so the test holds a clone and can read what the
+    /// agent passed once `formulate_plan` returns.
+    captured: CapturedCall,
+}
+
+#[async_trait::async_trait]
+impl RecallBuilder for CapturingRecallBuilder {
+    async fn build_with_seeds(
+        &self,
+        query: &str,
+        seeds: &[i64],
+    ) -> Result<RecalledContext, RecallError> {
+        *self.captured.lock().expect("captured mutex poisoned") =
+            Some((query.to_string(), seeds.to_vec()));
+        Ok(RecalledContext::empty())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -326,6 +364,98 @@ async fn happy_path_decodes_plan_and_populates_meta() {
         "system prompt missing from wire: {}",
         served.body
     );
+}
+
+/// Pins the graph-lane production wiring: the entity extractor's seed
+/// ids flow through `formulate_plan` into **both**
+/// [`RecallBuilder::build_with_seeds`] (so the recall graph lane is
+/// actually seeded) and [`FormulationMeta`]'s `graph_seed_*` fields (so
+/// the `plan.formulate` audit row records what seeded the lane).
+///
+/// Every other `RouterAgent` test wires `NoOpEntityExtractor` (seeds =
+/// `[]`), so without this test a refactor could silently drop
+/// `&seeds.ids` from the recall call or the meta and every
+/// RouterAgent-layer test would stay green. This is regression coverage
+/// of behaviour that already ships (the wiring landed in the 2026-05-19
+/// entity-extraction-v2 / "Slice F" arc); its value was confirmed by
+/// mutation — replacing the seed argument with `&[]` in
+/// `agent.rs::formulate_plan` turns assertion (1) RED.
+#[tokio::test]
+async fn formulate_plan_threads_extracted_seeds_into_recall_and_meta() {
+    // Same terminal plan as the happy path — the plan content is
+    // irrelevant here; we only exercise the seed thread.
+    let plan_json = serde_json::json!({
+        "context":    "ping handler",
+        "decision":   "task_complete",
+        "rationale":  "trivial",
+        "steps":      [],
+        "result":     {"kind": "text", "body": "pong"},
+        "data_ceiling": "Public",
+    })
+    .to_string();
+
+    let (base_url, served_rx, _mock_join) =
+        spawn_one_shot_mock(CannedResponse::ok_json(envelope_for(&plan_json))).await;
+
+    let router = router_pointing_at(&base_url);
+    let prompts = prompts_with_agent_planner();
+
+    // Capturing recall builder: record the seeds the agent passes in.
+    let recall = CapturingRecallBuilder::default();
+    let captured = recall.captured.clone();
+
+    // Seed-producing extractor: three ids, SeedSource::GlinerRelex,
+    // model_version "test" (see StaticEntityExtractor::with_ids).
+    let seed_ids = vec![101_i64, 202, 303];
+    let extractor = StaticEntityExtractor::with_ids(seed_ids.clone());
+
+    let agent = RouterAgent::new(
+        router,
+        prompts,
+        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
+        Arc::new(recall),
+        Arc::new(extractor),
+    );
+
+    let task = ctx();
+    let (_plan, meta) = agent.formulate_plan(&task).await.expect("happy path");
+
+    // (1) The extracted seeds reached the recall builder verbatim, with
+    // the task instruction as the query text. This IS the graph-lane
+    // seed thread — drop it and the recall graph lane is a no-op.
+    let (seen_query, seen_seeds) = captured
+        .lock()
+        .expect("captured mutex poisoned")
+        .clone()
+        .expect("recall builder must have been called");
+    assert_eq!(
+        seen_query, task.instruction,
+        "build_with_seeds must receive the task instruction as the query",
+    );
+    assert_eq!(
+        seen_seeds, seed_ids,
+        "build_with_seeds must receive the extractor's seed ids verbatim",
+    );
+
+    // (2) The same seeds populate FormulationMeta so the plan.formulate
+    // audit row records what seeded the graph lane.
+    assert_eq!(
+        meta.graph_seed_entity_ids, seed_ids,
+        "graph_seed_entity_ids must mirror the extracted seeds",
+    );
+    assert_eq!(
+        meta.graph_seed_count,
+        seed_ids.len() as u32,
+        "graph_seed_count must equal the seed id count",
+    );
+    assert!(
+        matches!(meta.graph_seed_source, SeedSource::GlinerRelex),
+        "graph_seed_source must reflect the extractor's source; got {:?}",
+        meta.graph_seed_source,
+    );
+
+    // Drain the mock so the spawned task exits cleanly.
+    let _served = served_rx.await.expect("mock served the request");
 }
 
 #[tokio::test]
