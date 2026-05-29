@@ -251,6 +251,10 @@ pub fn extract_scannable_text(value: &Value, byte_cap: usize) -> (String, bool) 
 /// right forensic posture: an audit row marked truncated, no
 /// stack-overflow crash.
 ///
+/// Note: aborting on the first truncating child means later siblings
+/// go unscanned (true for the byte cap too). Only a concern if the
+/// upstream parse limit is ever removed — tracked in issue #156.
+///
 /// Strings get a leading `'\n'` separator iff `out` is non-empty,
 /// so consecutive emitted values are newline-separated but the body
 /// has no leading newline. The truncation check happens **before**

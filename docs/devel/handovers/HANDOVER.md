@@ -319,6 +319,7 @@ Only currently-open issues are listed; closed-issue detail lives in the archive 
 - [#148](https://github.com/hherb/hhagent/issues/148) — secrets: cover audit-insert failure paths with fault injection (see Next-TODO item 3).
 - [#149](https://github.com/hherb/hhagent/issues/149) — secrets: `Vault::materialize` ref-collision branch is untested (see Next-TODO item 3).
 - [#150](https://github.com/hherb/hhagent/issues/150) — `mem_burner` `clippy::uninit_vec` now deny-level, breaks `cargo clippy --all-targets` (see Next-TODO item 2).
+- [#156](https://github.com/hherb/hhagent/issues/156) — injection_guard: `walk()` truncation (depth **or** byte cap) aborts the whole walk, skipping later siblings — theoretical injection-evasion vector if the upstream serde_json parse limit is ever removed (filed from PR #155 review).
 
 ---
 
