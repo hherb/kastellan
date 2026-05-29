@@ -181,9 +181,9 @@ fn probe_mount() -> ExitCode {
     // c-string literals so they remain valid for the duration of the call.
     let rc = unsafe {
         libc::mount(
-            b"none\0".as_ptr() as *const _,
-            b"/tmp/__hhagent_probe_mount\0".as_ptr() as *const _,
-            b"tmpfs\0".as_ptr() as *const _,
+            c"none".as_ptr(),
+            c"/tmp/__hhagent_probe_mount".as_ptr(),
+            c"tmpfs".as_ptr(),
             0,
             std::ptr::null(),
         )
