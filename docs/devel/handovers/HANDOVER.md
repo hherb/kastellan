@@ -6,7 +6,7 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-05-29 (Issue [#143](https://github.com/hherb/hhagent/issues/143) — `injection_guard::walk()` recursion-depth guard. Branch `fix/issue-143-walk-recursion-depth-guard`, **not yet merged**. Also reconciled the stale header after PR [#152](https://github.com/hherb/hhagent/pull/152)'s merge.)
+**Last updated:** 2026-05-29 (Issue [#143](https://github.com/hherb/hhagent/issues/143) — `injection_guard::walk()` recursion-depth guard. Branch `fix/issue-143-walk-recursion-depth-guard`, PR [#155](https://github.com/hherb/hhagent/pull/155), **not yet merged**. Also reconciled the stale header after PR [#152](https://github.com/hherb/hhagent/pull/152)'s merge.)
 
 **Last commit on `main`:** `560d845` (Merge pull request #152 from hherb/fix/issue-144-150-linux-build-clippy-gate). Confirm with `git log --oneline -1`. The #143 fix below lives on branch `fix/issue-143-walk-recursion-depth-guard` pending review/merge.
 
@@ -83,7 +83,7 @@ cargo test --workspace           # all green on macOS
 
 ---
 
-## Recently completed (this session, 2026-05-29 — Issue [#143](https://github.com/hherb/hhagent/issues/143): `injection_guard::walk()` recursion-depth guard, branch `fix/issue-143-walk-recursion-depth-guard`, **NOT yet merged**)
+## Recently completed (this session, 2026-05-29 — Issue [#143](https://github.com/hherb/hhagent/issues/143): `injection_guard::walk()` recursion-depth guard, branch `fix/issue-143-walk-recursion-depth-guard`, PR [#155](https://github.com/hherb/hhagent/pull/155), **NOT yet merged**)
 
 Picked from the Next-TODO "injection-guard limits" bucket (item 4). The operator chose to **defer [#142](https://github.com/hherb/hhagent/issues/142)** (chat-template false-positives) per its author's own recommendation — that decision needs real data from a `web-fetch`/`mcp` worker that doesn't exist yet — and ship **#143 only** this session.
 
