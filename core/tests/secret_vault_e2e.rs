@@ -13,7 +13,7 @@ use std::time::Duration;
 use hhagent_core::secrets::{
     MissingReason, RedeemFromVault, SubstituteError, Vault, VaultError,
 };
-use hhagent_core::tool_host::{dispatch, dispatch_with_sink, AuditSink, spawn_worker, WorkerSpec};
+use hhagent_core::tool_host::{AuditSink, dispatch, dispatch_with_sink, spawn_worker, WorkerSpec};
 use hhagent_db::secrets::{MapKeyProvider, SecretsError, KEY_LEN};
 use hhagent_db::DbError;
 use hhagent_tests_common::{
@@ -752,7 +752,10 @@ async fn dispatch_swallows_redeemed_audit_insert_failure() {
 // Acceptance (#148): dispatch still returns Err(SecretRedemptionFailed), the
 // worker is not called, and the tool row is not written. Needs no PG — the
 // empty vault makes substitution fail before any pool use, and all of
-// dispatch's audit writes go through the mock.
+// dispatch's audit writes go through the mock. (It still spawns a real worker
+// to satisfy the `&mut SupervisedWorker` argument, so it shares the
+// sandbox/supervisor/worker-binary skip guards above; that worker is never
+// called — substitution fails first.)
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatch_swallows_redemption_failed_audit_insert_failure() {
