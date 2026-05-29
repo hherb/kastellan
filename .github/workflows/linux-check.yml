@@ -19,6 +19,10 @@
 #     carries pre-existing warnings); only compile errors / deny-level
 #     lints do.
 #
+# Both invocations pass `--locked`: Cargo.lock is committed, so the gate
+# must build the exact pinned dependency graph and fail (not silently
+# rewrite the lockfile) if it has drifted out of sync with the manifests.
+#
 # What this does NOT do: run the test suite. Integration tests need a live
 # Postgres cluster and the bwrap AppArmor profile; the full
 # `cargo test --workspace` run stays operator/DGX-driven (see HANDOVER).
@@ -51,7 +55,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo check (workspace, all targets)
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked
 
       - name: cargo clippy (workspace, all targets)
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked
