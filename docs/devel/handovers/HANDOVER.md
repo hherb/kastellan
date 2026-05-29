@@ -6,15 +6,15 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-05-29 (Bug fixes [#150](https://github.com/hherb/hhagent/issues/150) + [#144](https://github.com/hherb/hhagent/issues/144) — clippy `--all-targets` gate unblocked + `hhagent-core` Linux build restored. Branch `fix/issue-144-150-linux-build-clippy-gate`, not yet merged.)
+**Last updated:** 2026-05-29 (Bug fixes [#150](https://github.com/hherb/hhagent/issues/150) + [#144](https://github.com/hherb/hhagent/issues/144) — clippy `--all-targets` gate unblocked + `hhagent-core` Linux build restored. **Merged to `main` via PR [#152](https://github.com/hherb/hhagent/pull/152) at `560d845`**; both issues closed.)
 
-**Last commit on `main`:** `207b474` (docs(handover): prune older sessions, archive pre-prune snapshot). Confirm with `git log --oneline -1`. The two bug fixes below live on branch `fix/issue-144-150-linux-build-clippy-gate` pending review/merge.
+**Last commit on `main`:** `560d845` (Merge pull request #152 from hherb/fix/issue-144-150-linux-build-clippy-gate). Confirm with `git log --oneline -1`.
 
-**Currently on:** `fix/issue-144-150-linux-build-clippy-gate` (off `main` at `207b474`). Two bug fixes committed locally; not pushed/merged yet.
+**Currently on:** `main` at `560d845`, clean working tree (one untracked, unrelated `docs/essay-medium-draft.md`). PR #152 merged; `linux-check` CI green; issues #144 + #150 closed.
 
-**Session-end verification:** `cargo test --workspace` on macOS (M3 Max, on the fix branch): **1145 passed / 0 failed / 3 ignored** (unchanged from `main` — skip-as-pass posture without `HHAGENT_PG_BIN_DIR`; with PG live ~640 passed + 2 pre-existing `embedding_recall_e2e`/`gliner_relex_e2e` PG-race flakes identical on `main`). `cargo clippy --workspace --all-targets`: **0 errors** (pre-existing warnings remain; #150's deny-level `uninit_vec` is fixed). **Linux:** **CONFIRMED GREEN via CI** — the new `.github/workflows/linux-check.yml` job on PR [#152](https://github.com/hherb/hhagent/pull/152) ran `cargo check --workspace --all-targets` + `cargo clippy --workspace --all-targets` on `ubuntu-latest` and passed (1m17s). This is the real Linux verification for #144 and confirms there was no *other* Linux-only breakage beyond the `Container` variant. (Full `cargo test --workspace` on the DGX still pending — CI is compile-only; the last DGX test run was `990` at `1abb061`.) **Build gaps now fixed:** [#144](https://github.com/hherb/hhagent/issues/144) (Linux build — `container_mode_entry` macOS-gated) and [#150](https://github.com/hherb/hhagent/issues/150) (`clippy::uninit_vec` in `mem_burner`). Note: #144 was **NOT verifiable on the dev Mac** (cross `cargo check` dies in a C dep needing `aarch64-linux-gnu-gcc`) — hence the CI job.
+**Session-end verification:** `cargo test --workspace` on macOS (M3 Max, on `main` post-merge of PR #152): **1145 passed / 0 failed / 3 ignored** (unchanged from `main` — skip-as-pass posture without `HHAGENT_PG_BIN_DIR`; with PG live ~640 passed + 2 pre-existing `embedding_recall_e2e`/`gliner_relex_e2e` PG-race flakes identical on `main`). `cargo clippy --workspace --all-targets`: **0 errors** (pre-existing warnings remain; #150's deny-level `uninit_vec` is fixed). **Linux:** **CONFIRMED GREEN via CI** — the new `.github/workflows/linux-check.yml` job on PR [#152](https://github.com/hherb/hhagent/pull/152) ran `cargo check --workspace --all-targets` + `cargo clippy --workspace --all-targets` on `ubuntu-latest` and passed (1m17s). This is the real Linux verification for #144 and confirms there was no *other* Linux-only breakage beyond the `Container` variant. (Full `cargo test --workspace` on the DGX still pending — CI is compile-only; the last DGX test run was `990` at `1abb061`.) **Build gaps now fixed:** [#144](https://github.com/hherb/hhagent/issues/144) (Linux build — `container_mode_entry` macOS-gated) and [#150](https://github.com/hherb/hhagent/issues/150) (`clippy::uninit_vec` in `mem_burner`). Note: #144 was **NOT verifiable on the dev Mac** (cross `cargo check` dies in a C dep needing `aarch64-linux-gnu-gcc`) — hence the CI job.
 
-**Recently merged branches — safe to delete locally** (`git branch -d <name>`): `fix/issue-147-redact-tool-req-plaintext` (PR #151, already deleted this session), `feat/opaque-secret-refs-slice-1` (PR #146), `feat/injection-guard-slice-1` (PR #141), `fix/issue-89-tmpfs-per-spawn-invariant-test` (PR #139), `refactor/idle-timeout-release-sibling-lift` (PR #138). Older merged branches are listed in the archive snapshots.
+**Recently merged branches — safe to delete locally** (`git branch -d <name>`): `fix/issue-144-150-linux-build-clippy-gate` (PR #152, just merged), `fix/issue-147-redact-tool-req-plaintext` (PR #151), `feat/opaque-secret-refs-slice-1` (PR #146), `feat/injection-guard-slice-1` (PR #141), `fix/issue-89-tmpfs-per-spawn-invariant-test` (PR #139), `refactor/idle-timeout-release-sibling-lift` (PR #138). Older merged branches are listed in the archive snapshots.
 
 ---
 
@@ -83,7 +83,7 @@ cargo test --workspace           # all green on macOS
 
 ---
 
-## Recently completed (this session, 2026-05-29 — Bugs [#150](https://github.com/hherb/hhagent/issues/150) + [#144](https://github.com/hherb/hhagent/issues/144): clippy gate + Linux build, branch `fix/issue-144-150-linux-build-clippy-gate`, **NOT yet merged**)
+## Recently completed (this session, 2026-05-29 — Bugs [#150](https://github.com/hherb/hhagent/issues/150) + [#144](https://github.com/hherb/hhagent/issues/144): clippy gate + Linux build, branch `fix/issue-144-150-linux-build-clippy-gate`, **merged to `main` via PR [#152](https://github.com/hherb/hhagent/pull/152) at `560d845`**)
 
 Both were the "real errors, not enhancements" entries at the top of the previous Next-TODO (rule 5 — fix breakage before features). Picked together because both are small and both unblock a broken gate.
 
@@ -224,9 +224,7 @@ One bullet per session. Full reasoning lives in the archive snapshots: sessions 
 
 Phase 0 is complete; Phase 1 (memory recall + scheduler loop + end-to-end step dispatch) is on `main` and pinned by `cli_ask_e2e`. The recent slices closed the two openhuman-imported security items (Item 30 injection guard, Item 31 opaque secret references). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**First — merge PR [#152](https://github.com/hherb/hhagent/pull/152) (this session's #144 + #150 fixes; Linux CI green):**
-
-0. **Merge the open PR.** Branch `fix/issue-144-150-linux-build-clippy-gate`, PR [#152](https://github.com/hherb/hhagent/pull/152). `linux-check` CI is green (compile + clippy on `ubuntu-latest`); macOS `cargo test --workspace` 1145/0/3. Once merged, #144 + #150 close. **Then** bump this HANDOVER's header ("Last commit on `main`", "Currently on") to the merge commit. Optional but worth it: a full `cargo test --workspace` on the DGX (CI is compile-only) to refresh the stale `990`-at-`1abb061` Linux test baseline.
+**Done since last session:** PR [#152](https://github.com/hherb/hhagent/pull/152) (#144 + #150 fixes) merged to `main` at `560d845`; `linux-check` CI green; both issues closed. Still optional/worthwhile (operator action, no code): a full `cargo test --workspace` on the DGX — CI is compile-only, so the Linux *test* baseline is still the stale `990`-at-`1abb061`.
 
 **Secrets / injection-guard follow-ups (continue the Item 30/31 arc):**
 
