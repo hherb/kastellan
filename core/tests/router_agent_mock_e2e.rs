@@ -251,6 +251,11 @@ fn envelope_for(plan_json_string: &str) -> String {
     .to_string()
 }
 
+/// Shared slot holding the `(query, seeds)` a [`CapturingRecallBuilder`]
+/// observed. Named alias rather than the inline `Arc<Mutex<Option<…>>>`
+/// to stay under `clippy::type_complexity` (the `-D warnings` gate).
+type CapturedCall = Arc<std::sync::Mutex<Option<(String, Vec<i64>)>>>;
+
 /// A [`RecallBuilder`] that records the `(query, seeds)` it was called
 /// with so a test can assert what `RouterAgent::formulate_plan` passed
 /// into [`RecallBuilder::build_with_seeds`].
@@ -265,7 +270,7 @@ struct CapturingRecallBuilder {
     /// `Some((query, seeds))` after the first `build_with_seeds` call.
     /// `Arc<Mutex<_>>` so the test holds a clone and can read what the
     /// agent passed once `formulate_plan` returns.
-    captured: Arc<std::sync::Mutex<Option<(String, Vec<i64>)>>>,
+    captured: CapturedCall,
 }
 
 #[async_trait::async_trait]
