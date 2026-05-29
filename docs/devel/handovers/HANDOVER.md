@@ -6,9 +6,9 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-05-29 (Issues [#148](https://github.com/hherb/hhagent/issues/148) + [#149](https://github.com/hherb/hhagent/issues/149) — secret-vault test gaps. Branch `fix/issue-148-149-secret-vault-test-gaps`, code commit `7517169`, **not yet pushed/merged**. Also reconciled the stale header after PR [#155](https://github.com/hherb/hhagent/pull/155)'s merge in the prior commit `91c8c4f`.)
+**Last updated:** 2026-05-29 (Issues [#148](https://github.com/hherb/hhagent/issues/148) + [#149](https://github.com/hherb/hhagent/issues/149) — secret-vault test gaps. Branch `fix/issue-148-149-secret-vault-test-gaps`, code commit `7517169`, PR [#157](https://github.com/hherb/hhagent/pull/157), **not yet merged**. Also reconciled the stale header after PR [#155](https://github.com/hherb/hhagent/pull/155)'s merge in the prior commit `91c8c4f`.)
 
-**Last commit on `main`:** `6e82252` (Merge pull request #155 from hherb/fix/issue-143-walk-recursion-depth-guard). Confirm with `git log --oneline -1`. The #148/#149 work below lives on branch `fix/issue-148-149-secret-vault-test-gaps` (one docs-reconcile commit `91c8c4f` + the fix `7517169`), pending review/merge.
+**Last commit on `main`:** `6e82252` (Merge pull request #155 from hherb/fix/issue-143-walk-recursion-depth-guard). Confirm with `git log --oneline -1`. The #148/#149 work below lives on branch `fix/issue-148-149-secret-vault-test-gaps` (docs-reconcile `91c8c4f` + fix `7517169` + this docs commit), PR [#157](https://github.com/hherb/hhagent/pull/157), pending review/merge.
 
 **Currently on:** `fix/issue-148-149-secret-vault-test-gaps` (off `main` at `6e82252`). `main` itself is clean at `6e82252` (one untracked, unrelated `docs/essay-medium-draft.md`).
 
@@ -83,7 +83,7 @@ cargo test --workspace           # all green on macOS
 
 ---
 
-## Recently completed (this session, 2026-05-29 — Issues [#148](https://github.com/hherb/hhagent/issues/148) + [#149](https://github.com/hherb/hhagent/issues/149): secret-vault test gaps, branch `fix/issue-148-149-secret-vault-test-gaps`, code commit `7517169`, **NOT yet pushed/merged**)
+## Recently completed (this session, 2026-05-29 — Issues [#148](https://github.com/hherb/hhagent/issues/148) + [#149](https://github.com/hherb/hhagent/issues/149): secret-vault test gaps, branch `fix/issue-148-149-secret-vault-test-gaps`, code commit `7517169`, PR [#157](https://github.com/hherb/hhagent/pull/157), **NOT yet merged**)
 
 Picked the Next-TODO item 3 (secret/injection-guard follow-ups). Both gaps were surfaced by `/code-review` on PR [#146](https://github.com/hherb/hhagent/pull/146) (Item 31) and deferred for want of a fault-injection seam. Operator approved a refined plan over the issues' literal suggestions: lower call-site churn for #148, a PG-free unit test for #149.
 
@@ -262,7 +262,7 @@ One bullet per session. Full reasoning lives in the archive snapshots: sessions 
 
 Phase 0 is complete; Phase 1 (memory recall + scheduler loop + end-to-end step dispatch) is on `main` and pinned by `cli_ask_e2e`. The recent slices closed the two openhuman-imported security items (Item 30 injection guard, Item 31 opaque secret references). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**Done this session (on branch `fix/issue-148-149-secret-vault-test-gaps`, commit `7517169`, pending push/merge):** Issues [#148](https://github.com/hherb/hhagent/issues/148) + [#149](https://github.com/hherb/hhagent/issues/149) — secret-vault test gaps closed (see Recently-completed). **Done earlier:** PR [#155](https://github.com/hherb/hhagent/pull/155) (#143 `walk()` depth guard) merged to `main` at `6e82252`; #143 closed; that merge filed [#156](https://github.com/hherb/hhagent/issues/156) (still OPEN). PR [#152](https://github.com/hherb/hhagent/pull/152) (#144 + #150) merged at `560d845`; `linux-check` CI green. Still optional (operator action, no code): a full `cargo test --workspace` on the DGX — CI is compile-only, so the Linux *test* baseline is still the stale `990`-at-`1abb061`.
+**Done this session (on branch `fix/issue-148-149-secret-vault-test-gaps`, commit `7517169`, PR [#157](https://github.com/hherb/hhagent/pull/157), pending merge):** Issues [#148](https://github.com/hherb/hhagent/issues/148) + [#149](https://github.com/hherb/hhagent/issues/149) — secret-vault test gaps closed (see Recently-completed). **Done earlier:** PR [#155](https://github.com/hherb/hhagent/pull/155) (#143 `walk()` depth guard) merged to `main` at `6e82252`; #143 closed; that merge filed [#156](https://github.com/hherb/hhagent/issues/156) (still OPEN). PR [#152](https://github.com/hherb/hhagent/pull/152) (#144 + #150) merged at `560d845`; `linux-check` CI green. Still optional (operator action, no code): a full `cargo test --workspace` on the DGX — CI is compile-only, so the Linux *test* baseline is still the stale `990`-at-`1abb061`.
 
 **Secrets / injection-guard follow-ups (continue the Item 30/31 arc):**
 
