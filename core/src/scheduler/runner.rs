@@ -72,6 +72,12 @@ pub fn spawn_scheduler(
     SchedulerHandle { shutdown: tx, fast, long }
 }
 
+// Five of the nine params are the shared scheduler dependencies
+// (pool + the four stage handles); the rest are the per-lane tuning
+// constants. They are genuinely distinct inputs to the loop, so the
+// arg-count heuristic is suppressed rather than papered over with a
+// dependency-bundle struct that would only move the list to the call site.
+#[allow(clippy::too_many_arguments)]
 async fn lane_loop(
     pool: PgPool,
     formulator: Arc<dyn PlanFormulator>,
@@ -135,6 +141,10 @@ async fn lane_loop(
 /// Pulled out of `lane_loop` so the same body runs both in the initial
 /// startup pass and on each NOTIFY/heartbeat wake. Honours `shutdown`
 /// between every claim.
+// Same nine-input shape as `lane_loop` (it forwards them straight
+// through); see the note there for why the arg-count heuristic is
+// suppressed instead of bundled.
+#[allow(clippy::too_many_arguments)]
 async fn drain_lane(
     pool: &PgPool,
     formulator: Arc<dyn PlanFormulator>,

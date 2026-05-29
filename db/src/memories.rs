@@ -877,6 +877,10 @@ mod tests {
     /// caller construct an "empty modes" recall that returns nothing
     /// without an obvious cause — we'd rather force the explicit
     /// passing of `k = 0` if someone genuinely wants that.
+    // `DEFAULT_RECALL_K` is a const, so the comparison is const-foldable
+    // — intentional: this is a drift pin that trips if the default is
+    // ever changed to zero.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn default_recall_k_is_at_least_one() {
         assert!(DEFAULT_RECALL_K >= 1);

@@ -35,10 +35,10 @@ impl Client {
     /// configured as `Stdio::piped()` by the spawner.
     pub fn from_child(mut child: Child) -> io::Result<Self> {
         let stdin = child.stdin.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "child stdin not piped")
+            io::Error::other("child stdin not piped")
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "child stdout not piped")
+            io::Error::other("child stdout not piped")
         })?;
         Ok(Self {
             child,

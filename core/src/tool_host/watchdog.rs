@@ -97,7 +97,7 @@ fn watchdog_loop(pid: u32, deadline: Instant, cancel: Arc<AtomicBool>, kill: fn(
 /// `kill(2)` treats certain `pid_t` values as broadcast operations:
 ///   - `0`  → signal every process in the caller's process group
 ///   - `-1` → signal every process the caller has permission to signal
-///            (excluding init and the caller itself)
+///     (excluding init and the caller itself)
 ///
 /// The Rust API here takes a `u32`; `pid as libc::pid_t` (an `i32` on
 /// both Linux and macOS) collapses any value `> i32::MAX` to a negative
@@ -125,6 +125,7 @@ fn is_valid_target_pid(pid: u32) -> bool {
 ///      anything that would cast to a negative `pid_t` are rejected),
 ///   2. an injected killer in [`watchdog_loop`] so tests never reach
 ///      `kill(2)` at all.
+///
 /// Do not remove either layer.
 fn send_sigkill(pid: u32) {
     if !is_valid_target_pid(pid) {

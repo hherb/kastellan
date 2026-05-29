@@ -288,7 +288,7 @@ fn entry_forwards_device_verbatim_regardless_of_value() {
             .collect();
         assert_eq!(
             env_map.get("HHAGENT_GLINER_RELEX_DEVICE"),
-            Some(&*device),
+            Some(device),
             "manifest must forward device={device:?} verbatim into the env",
         );
     }
@@ -455,7 +455,7 @@ fn resolve_env_trims_whitespace_on_enable() {
     ]);
     let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
     assert!(
-        matches!(r, Ok(_)),
+        r.is_ok(),
         "trimmed \" 1\\n\" must be accepted, got {r:?}"
     );
 }

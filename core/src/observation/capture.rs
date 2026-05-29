@@ -145,7 +145,7 @@ pub fn parse_fixture_prompt(md: &str) -> Result<(String, String), ParseError> {
 
     // Remainder is the body. Skip leading blank lines.
     let body: String = lines.collect::<Vec<_>>().join("\n");
-    let body = body.trim_start_matches(|c: char| c == '\n' || c == ' ' || c == '\t' || c == '\r');
+    let body = body.trim_start_matches(['\n', ' ', '\t', '\r']);
     let body = body.trim();
     if body.is_empty() {
         return Err(ParseError::EmptyBody);
@@ -209,6 +209,7 @@ pub fn capture_filename(date_yyyy_mm_dd: &str, model_slug: &str) -> String {
 ///      object with the `{_truncated, sha256, len}` envelope — `plan`
 ///      was nuked along with every other key.
 ///   3. A genuine writer regression dropped the key.
+///
 /// Slice B's harness should treat (2) specifically by checking the
 /// raw row payload for `_truncated == true` before falling through.
 pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedPlan> {

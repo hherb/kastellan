@@ -268,19 +268,34 @@ impl IdleTimeoutLifecycle {
         }
     }
 
+    /// Look up an existing warm slot by name without creating one, cloning
+    /// the `Arc<ToolSlot>` out from under the registry's std-mutex.
+    ///
+    /// This is a *synchronous* helper on purpose: the guard lives and dies
+    /// entirely within this call, so a caller can `.await` on the returned
+    /// slot's per-slot tokio mutex without holding the outer std-mutex
+    /// across the await. (The inline form used an explicit `drop(map)` to
+    /// the same effect, but `clippy::await_holding_lock` is not flow-
+    /// sensitive to that drop and flagged it anyway; factoring the locked
+    /// section into a non-async fn silences the lint legitimately.)
+    fn lookup_slot(&self, tool_name: &str) -> Option<Arc<super::idle_timeout::ToolSlot>> {
+        self.registry
+            .lock()
+            .expect("warm-registry mutex poisoned")
+            .get(tool_name)
+            .map(Arc::clone)
+    }
+
     /// Test-only inspector: returns whether the slot for `tool_name` has a warm worker.
     /// Used by `worker_lifecycle_idle_timeout_e2e.rs` to pin idle teardown + crash
     /// recovery semantics without depending on PID introspection. The lookup is
-    /// async-friendly: it briefly takes the outer std-mutex on the registry, then
-    /// takes the per-slot tokio mutex.
+    /// async-friendly: it briefly takes the outer std-mutex on the registry (via
+    /// [`Self::lookup_slot`]), then takes the per-slot tokio mutex.
     #[doc(hidden)]
     pub async fn _test_slot_has_warm(&self, tool_name: &str) -> bool {
-        let map = self.registry.lock().expect("warm-registry mutex poisoned");
-        let Some(slot) = map.get(tool_name) else {
+        let Some(slot) = self.lookup_slot(tool_name) else {
             return false;
         };
-        let slot = Arc::clone(slot);
-        drop(map);
         let state = slot.state.lock().await;
         state.warm.is_some()
     }
@@ -290,12 +305,9 @@ impl IdleTimeoutLifecycle {
     /// the restart-backoff bookkeeping. Returns 0 if the slot is absent.
     #[doc(hidden)]
     pub async fn _test_slot_consecutive_restarts(&self, tool_name: &str) -> u32 {
-        let map = self.registry.lock().expect("warm-registry mutex poisoned");
-        let Some(slot) = map.get(tool_name) else {
+        let Some(slot) = self.lookup_slot(tool_name) else {
             return 0;
         };
-        let slot = Arc::clone(slot);
-        drop(map);
         let state = slot.state.lock().await;
         state.consecutive_restarts
     }

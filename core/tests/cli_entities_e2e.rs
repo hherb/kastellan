@@ -530,7 +530,7 @@ async fn cli_entities_merge_writes_audit_row() {
     let dropped_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM entities WHERE id = ANY($1::BIGINT[])",
     )
-    .bind(&[drop_a, drop_b])
+    .bind([drop_a, drop_b])
     .fetch_one(&pool)
     .await
     .expect("count remaining dropped entity rows");

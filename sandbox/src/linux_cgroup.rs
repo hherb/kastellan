@@ -331,7 +331,7 @@ mod tests {
         // it must not bake in any knowledge of bwrap or the worker.
         let argv = build_systemd_run_argv(&policy_with_mem(64));
         assert!(!argv.contains(&"bwrap".into()));
-        assert!(!argv.iter().any(|s| s.starts_with("/")));
+        assert!(!argv.iter().any(|s| s.starts_with('/')));
     }
 
     #[test]

@@ -20,7 +20,7 @@
 //!     **outside** `bwrap` here so the cgroup is in place before the
 //!     unshare-all namespace is created.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 use crate::{Net, SandboxBackend, SandboxError, SandboxPolicy};
@@ -202,7 +202,7 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
     argv
 }
 
-fn push_bind(argv: &mut Vec<String>, flag: &str, path: &PathBuf) {
+fn push_bind(argv: &mut Vec<String>, flag: &str, path: &Path) {
     let s = path.display().to_string();
     argv.push(flag.into());
     argv.push(s.clone());
@@ -212,6 +212,7 @@ fn push_bind(argv: &mut Vec<String>, flag: &str, path: &PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn strict_policy() -> SandboxPolicy {
         SandboxPolicy::default()

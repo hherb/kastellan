@@ -1,13 +1,13 @@
 //! Subprocess-level pin for `hhagent-cli relations kinds {add,remove,list}`.
 //!
 //! Each subtest runs the real CLI binary against a per-test PG cluster,
-//! asserts the DB row state, the audit-row shape, and the CLI exit code
-//! + stdout/stderr contract. Mirrors the shape of
+//! asserts the DB row state, the audit-row shape, and the CLI exit
+//! code + stdout/stderr contract. Mirrors the shape of
 //! [`cli_tools_allowlist_e2e`].
 //!
 //! Key invariants pinned end-to-end:
-//!   * `add` happy-path: exit 0 + "added <kind>" stdout + DB row landed
-//!     + one `cli/relation_kinds.add` audit row with `{kind, description}`
+//!   * `add` happy-path: exit 0 + "added <kind>" stdout + DB row landed,
+//!     plus one `cli/relation_kinds.add` audit row with `{kind, description}`
 //!     payload (`description: null` when omitted).
 //!   * `add` idempotency: re-add prints "already present" and writes
 //!     no new audit row (the operator intent did not materialise).

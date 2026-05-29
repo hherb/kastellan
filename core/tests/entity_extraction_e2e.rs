@@ -2,8 +2,8 @@
 //!
 //! Two tiers:
 //!   - **Mock-client tier** (always runs when PG is available): exercises
-//!     [`upsert_entities_and_relations`] + [`build_extract_entities_payload`]
-//!     + [`hhagent_db::audit::insert`] directly, without spawning a real
+//!     [`upsert_entities_and_relations`], [`build_extract_entities_payload`],
+//!     and [`hhagent_db::audit::insert`] directly, without spawning a real
 //!     worker. Pins the quarantine + idempotency + case-dedup behaviour
 //!     against the live Postgres schema.
 //!   - **Real-model tier** (skip-as-pass when worker preconditions
