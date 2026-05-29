@@ -341,6 +341,11 @@ fn entry_host_mode_container_image_is_none() {
 /// Container-mode entry emits the in-container binary path, mounts
 /// only `weights_dir` (venv + src baked into image), and populates
 /// sandbox_backend + container_image.
+///
+/// macOS-only: container mode is gated to macOS (issue #144) — the
+/// `SandboxBackendKind::Container` variant and `gliner_relex_entry`'s
+/// container branch don't exist on Linux.
+#[cfg(target_os = "macos")]
 #[test]
 fn entry_container_mode_emits_in_container_binary_and_weights_only_fs_read() {
     let env = GlinerRelexEnv {
@@ -372,6 +377,9 @@ fn entry_container_mode_emits_in_container_binary_and_weights_only_fs_read() {
 
 /// Operator-supplied image tag (HHAGENT_GLINER_RELEX_IMAGE) flows
 /// through GlinerRelexEnv.container_image into the entry.
+///
+/// macOS-only: see issue #144 — container mode is gated to macOS.
+#[cfg(target_os = "macos")]
 #[test]
 fn entry_container_mode_honours_custom_image_tag() {
     let env = GlinerRelexEnv {
@@ -598,6 +606,10 @@ fn resolve_env_happy_path_home_fallback_when_no_data_dir() {
     );
 }
 
+// macOS-only: on Linux `resolve_env` forces `use_container_backend`
+// to a compile-time `false` (issue #144), so this assertion only holds
+// on macOS where the env var is actually read.
+#[cfg(target_os = "macos")]
 #[test]
 fn resolve_env_sets_use_container_backend_when_env_var_is_one() {
     let env_map = std::collections::HashMap::from([
@@ -615,6 +627,9 @@ fn resolve_env_sets_use_container_backend_when_env_var_is_one() {
     );
 }
 
+// macOS-only: the strict-"1" parsing of HHAGENT_GLINER_RELEX_USE_CONTAINER
+// only runs on macOS; on Linux the flag is compile-time `false` (issue #144).
+#[cfg(target_os = "macos")]
 #[test]
 fn resolve_env_strict_about_use_container_value() {
     // Only "1" (after trim) counts — symmetric with HHAGENT_GLINER_RELEX_ENABLE
@@ -643,6 +658,9 @@ fn resolve_env_strict_about_use_container_value() {
     }
 }
 
+// macOS-only: container mode (and thus the venv-check skip) only exists
+// on macOS (issue #144); on Linux the same env always resolves host mode.
+#[cfg(target_os = "macos")]
 #[test]
 fn resolve_env_skips_venv_existence_check_in_container_mode() {
     // In container mode the host venv is unused (the worker shim lives
@@ -665,6 +683,10 @@ fn resolve_env_skips_venv_existence_check_in_container_mode() {
     assert_eq!(env.weights_dir, PathBuf::from("/tmp/fake-weights"));
 }
 
+// macOS-only: the scenario sets USE_CONTAINER=1 and expects the
+// container path; on Linux that env resolves to host mode and (lacking a
+// venv anchor) would return VenvDirUnresolvable. Gated per issue #144.
+#[cfg(target_os = "macos")]
 #[test]
 fn resolve_env_picks_up_container_image_override() {
     let env_map = std::collections::HashMap::from([

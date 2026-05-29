@@ -1,0 +1,61 @@
+# Linux build smoke — the regression guard for issue #144.
+#
+# The dev machine is an Apple Silicon Mac; the DGX (the primary host) is
+# the only routine Linux box. That left a gap: `hhagent-core` stopped
+# compiling on Linux (issue #144 — `gliner_relex::container_mode_entry`
+# referenced the macOS-only `SandboxBackendKind::Container` variant
+# unconditionally) and nothing caught it until an operator built on the
+# DGX. This workflow closes that gap by type-checking the whole workspace
+# on a real Linux runner on every push/PR.
+#
+# Scope is deliberately compile-only:
+#   * `cargo check --workspace --all-targets` — type-checks library,
+#     binaries, AND test targets. `--all-targets` is what catches a
+#     cfg-gating regression in `#[cfg(test)]` code (e.g. a container test
+#     that references the macOS-only variant without a macOS gate).
+#   * `cargo clippy --workspace --all-targets` — catches deny-by-default
+#     lints that hard-error the build (e.g. issue #150's
+#     `clippy::uninit_vec`). Warnings do NOT fail the job (the tree still
+#     carries pre-existing warnings); only compile errors / deny-level
+#     lints do.
+#
+# Both invocations pass `--locked`: Cargo.lock is committed, so the gate
+# must build the exact pinned dependency graph and fail (not silently
+# rewrite the lockfile) if it has drifted out of sync with the manifests.
+#
+# What this does NOT do: run the test suite. Integration tests need a live
+# Postgres cluster and the bwrap AppArmor profile; the full
+# `cargo test --workspace` run stays operator/DGX-driven (see HANDOVER).
+# This job only proves the code *builds* on Linux.
+#
+# x86_64 is sufficient: the #144 break was `target_os`-conditional, not
+# arch-conditional, so an x86_64 Linux check catches it just as well as
+# the DGX's aarch64 — and x86_64 runners are the cheap default.
+
+name: linux-check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: cargo check + clippy (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (workspace, all targets)
+        run: cargo check --workspace --all-targets --locked
+
+      - name: cargo clippy (workspace, all targets)
+        run: cargo clippy --workspace --all-targets --locked
