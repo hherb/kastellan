@@ -109,6 +109,39 @@ fn vault_drop_zeroes_plaintext() {
 }
 
 #[test]
+fn insert_fresh_rejects_ref_collision_without_overwriting() {
+    // #149: exercises the `Entry::Occupied` arm of `materialize` step 4,
+    // extracted into `insert_fresh` so it's reachable without a live PG pool.
+    // A second insert at an already-bound ref must return `RefCollision` and
+    // leave the original plaintext intact — a silent rebind would re-point the
+    // `SecretRef` at a different secret on its next `redeem`.
+    let v = Vault::with_ttl(Duration::from_secs(60));
+    let r = SecretRef::from_raw("secret://deadbeef".to_string());
+
+    let original = Entry {
+        plaintext: Zeroizing::new(b"original-plaintext".to_vec()),
+        expires_at: Instant::now() + v.ttl,
+    };
+    v.insert_fresh(r.clone(), original)
+        .expect("first insert hits the Vacant arm");
+
+    let attacker = Entry {
+        plaintext: Zeroizing::new(b"attacker-plaintext".to_vec()),
+        expires_at: Instant::now() + v.ttl,
+    };
+    match v.insert_fresh(r.clone(), attacker) {
+        Err(VaultError::RefCollision) => (),
+        other => panic!("expected RefCollision on the Occupied arm, got {other:?}"),
+    }
+
+    // The original entry must be untouched — no silent overwrite.
+    match v.redeem(&r) {
+        RedeemResult::Hit(z) => assert_eq!(z.as_slice(), b"original-plaintext"),
+        other => panic!("expected the original plaintext on redeem, got {other:?}"),
+    }
+}
+
+#[test]
 fn vault_redeem_concurrent_readers_dont_block_each_other() {
     // Spawn 4 threads each redeeming the same ref 100 times. No panic,
     // no deadlock, all return Hit. Light smoke for the RwLock fast path.

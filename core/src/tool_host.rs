@@ -18,6 +18,9 @@ use sha2::{Digest, Sha256};
 use hhagent_protocol::client::{Client, ClientError};
 use hhagent_sandbox::{Profile, SandboxBackend, SandboxError, SandboxPolicy};
 
+mod audit_sink;
+pub use audit_sink::{AuditSink, PgAuditSink};
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]   // NEW — Item 31. First variant addition since Option M (2026-05-10).
 pub enum ToolHostError {
@@ -189,7 +192,28 @@ pub async fn dispatch(
     worker: &mut SupervisedWorker,
     tool: &str,
     method: &str,
-    mut params: serde_json::Value,        // NOTE: now `mut`
+    params: serde_json::Value,
+) -> Result<serde_json::Value, ToolHostError> {
+    // Production always routes through PgAuditSink. The sink seam
+    // ([`dispatch_with_sink`]) exists for fault-injection tests (issue #148),
+    // not as a production audit-policy knob — see the `audit_sink` module docs.
+    dispatch_with_sink(&PgAuditSink::new(pool), vault, worker, tool, method, params).await
+}
+
+/// Fault-injectable core of [`dispatch`]. Behaviourally identical, but audit
+/// rows are written through `sink` rather than a hard-wired pool, so a test
+/// can force an individual `audit_log` insert to fail and assert the
+/// best-effort *swallow-and-continue* paths around secret redemption (issue
+/// #148). **Production code calls [`dispatch`]**, which pins `sink` to a real
+/// [`PgAuditSink`]; this entry point is `pub` only because the fault-injection
+/// tests live in the separate integration-test crate.
+pub async fn dispatch_with_sink(
+    sink: &dyn AuditSink,
+    vault: &crate::secrets::Vault,
+    worker: &mut SupervisedWorker,
+    tool: &str,
+    method: &str,
+    mut params: serde_json::Value,        // NOTE: `mut` — substitution rewrites refs in place
 ) -> Result<serde_json::Value, ToolHostError> {
     let started = Instant::now();
 
@@ -248,7 +272,7 @@ pub async fn dispatch(
             // a ref the audit log doesn't know about, but this path
             // never yielded a ref at all.
             if let Err(audit_err) =
-                hhagent_db::audit::insert(pool, "policy", "secret.redemption_failed", payload).await
+                sink.insert("policy", "secret.redemption_failed", payload).await
             {
                 tracing::error!(
                     tool = %tool,
@@ -328,9 +352,7 @@ pub async fn dispatch(
             "ref_hash": event.ref_hash,
             "ms":       elapsed_ms,
         });
-        if let Err(e) =
-            hhagent_db::audit::insert(pool, "policy", "secret.redeemed", payload).await
-        {
+        if let Err(e) = sink.insert("policy", "secret.redeemed", payload).await {
             tracing::error!(
                 tool = %tool,
                 ref_hash = %event.ref_hash,
@@ -340,9 +362,7 @@ pub async fn dispatch(
         }
     }
 
-    if let Err(audit_err) =
-        hhagent_db::audit::insert(pool, &actor, method, audit_payload).await
-    {
+    if let Err(audit_err) = sink.insert(&actor, method, audit_payload).await {
         tracing::error!(
             tool = %tool,
             method = %method,
@@ -370,9 +390,7 @@ pub async fn dispatch(
             "body_byte_len":           body_byte_len,
             "body_truncated_at_64kib": truncated,
         });
-        if let Err(e) =
-            hhagent_db::audit::insert(pool, "policy", "injection.blocked", policy_payload).await
-        {
+        if let Err(e) = sink.insert("policy", "injection.blocked", policy_payload).await {
             tracing::error!(
                 tool = %tool,
                 method = %method,

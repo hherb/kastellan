@@ -189,30 +189,41 @@ impl Vault {
         // 4. Insert into vault under the brief sync write lock. The
         //    Zeroizing<Vec<u8>> moves into the entry; on Vault::Drop or
         //    on TTL eviction, Zeroizing::Drop zeroes the plaintext bytes.
-        //
-        //    Use `Entry::Vacant` rather than `HashMap::insert` so a
-        //    ref collision (vanishingly rare under OsRng over the 2^32
-        //    namespace) returns `VaultError::RefCollision` instead of
-        //    silently rebinding the existing `SecretRef` to a new
-        //    plaintext. An orphan `secret.materialized` audit row may
-        //    remain (spec §5.4 — audited-but-not-inserted is the
+        //    An orphan `secret.materialized` audit row may remain on the
+        //    collision path (spec §5.4 — audited-but-not-inserted is the
         //    acceptable side of the asymmetry).
         let entry = Entry {
             plaintext,
             expires_at: Instant::now() + self.ttl,
         };
-        {
-            use std::collections::hash_map::Entry as MapEntry;
-            let mut map = self.map.write().expect("vault map poisoned");
-            match map.entry(secret_ref.clone()) {
-                MapEntry::Vacant(v) => {
-                    v.insert(entry);
-                }
-                MapEntry::Occupied(_) => return Err(VaultError::RefCollision),
-            }
-        }
+        self.insert_fresh(secret_ref, entry)
+    }
 
-        Ok(secret_ref)
+    /// Insert `entry` at `secret_ref` under the write lock, returning the ref
+    /// on success and [`VaultError::RefCollision`] (rather than overwriting)
+    /// if the ref is already bound.
+    ///
+    /// Uses `Entry::Vacant` so the type system guarantees no silent rebind:
+    /// a ref collision (vanishingly rare under OsRng over the 2^32 namespace)
+    /// must NOT re-point an existing `SecretRef` at a different plaintext —
+    /// that would make the ref's next `redeem` yield the wrong secret, a real
+    /// correctness hazard. We fail loud; the caller can retry (a retry mints a
+    /// fresh ref).
+    ///
+    /// Extracted from [`Self::materialize`] step 4 so the `Occupied` arm is
+    /// unit-testable without a live PG pool (issue #149): a test calls this
+    /// twice with the same ref and asserts the second returns `RefCollision`
+    /// and leaves the original plaintext intact.
+    fn insert_fresh(&self, secret_ref: SecretRef, entry: Entry) -> Result<SecretRef, VaultError> {
+        use std::collections::hash_map::Entry as MapEntry;
+        let mut map = self.map.write().expect("vault map poisoned");
+        match map.entry(secret_ref.clone()) {
+            MapEntry::Vacant(v) => {
+                v.insert(entry);
+                Ok(secret_ref)
+            }
+            MapEntry::Occupied(_) => Err(VaultError::RefCollision),
+        }
     }
 
     /// Sync redemption. Returns the discrimination between Hit / Expired
