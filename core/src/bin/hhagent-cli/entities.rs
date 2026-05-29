@@ -165,8 +165,8 @@ async fn entities_list(args: &[String]) -> ExitCode {
     };
 
     println!(
-        "{:<8}  {:<12}  {:<30}  {:<10}  {:>8}  {}",
-        "ID", "KIND", "NAME", "QUARANTINE", "MENTIONS", "CREATED_AT"
+        "{:<8}  {:<12}  {:<30}  {:<10}  {:>8}  CREATED_AT",
+        "ID", "KIND", "NAME", "QUARANTINE", "MENTIONS"
     );
     for r in rows {
         let name_display = if r.name.chars().count() > 30 {

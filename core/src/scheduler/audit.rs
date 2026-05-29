@@ -1055,6 +1055,10 @@ mod tests {
 pub const ACTION_EXTRACT_ENTITIES: &str = "extract_entities";
 
 /// Build the `extractor:gliner-relex` audit row payload. 8 keys.
+// One parameter per payload key — a flat builder, so the arg-count
+// heuristic is suppressed rather than bundled into a struct that would
+// duplicate the key list.
+#[allow(clippy::too_many_arguments)]
 pub fn build_extract_entities_payload(
     n_chars_in: usize,
     n_chunks: usize,

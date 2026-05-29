@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn collect_skips_non_container_backends() {
         // shell-exec-shaped entry: sandbox_backend = None (per-OS default).
-        let entries = vec![("shell-exec", make_entry(None, Some("ignored:dev")))];
+        let entries = [("shell-exec", make_entry(None, Some("ignored:dev")))];
         let targets = collect_container_image_targets(
             entries.iter().map(|(n, e)| (*n, e)),
         );
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn collect_includes_container_backend_with_image() {
-        let entries = vec![(
+        let entries = [(
             "gliner-relex",
             make_entry(
                 Some(SandboxBackendKind::Container),
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn collect_skips_container_backend_with_no_image_tag() {
-        let entries = vec![(
+        let entries = [(
             "smoke-tool",
             make_entry(Some(SandboxBackendKind::Container), None),
         )];
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn collect_deduplicates_distinct_tools_sharing_an_image() {
-        let entries = vec![
+        let entries = [
             (
                 "z-tool",
                 make_entry(
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn collect_returns_one_target_per_distinct_image_sorted() {
-        let entries = vec![
+        let entries = [
             (
                 "tool-z",
                 make_entry(

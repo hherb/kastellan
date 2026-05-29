@@ -550,6 +550,10 @@ mod tests {
     /// `RecallModes::ALL` now includes the graph lane (third lane
     /// added in Option P). If a future fourth lane lands without
     /// updating `ALL`, this trips loudly.
+    // `ALL.*` are associated consts, so these assertions are
+    // const-foldable — that is exactly the point: a runtime drift pin
+    // that fails the moment `ALL` stops enabling a lane.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn recall_modes_all_includes_graph() {
         assert!(RecallModes::ALL.graph);

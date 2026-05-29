@@ -13,11 +13,13 @@
 #     binaries, AND test targets. `--all-targets` is what catches a
 #     cfg-gating regression in `#[cfg(test)]` code (e.g. a container test
 #     that references the macOS-only variant without a macOS gate).
-#   * `cargo clippy --workspace --all-targets` — catches deny-by-default
-#     lints that hard-error the build (e.g. issue #150's
-#     `clippy::uninit_vec`). Warnings do NOT fail the job (the tree still
-#     carries pre-existing warnings); only compile errors / deny-level
-#     lints do.
+#   * `cargo clippy --workspace --all-targets -- -D warnings` — promotes
+#     every clippy warning to a hard error, so the job fails on any new
+#     lint, not just deny-by-default ones (e.g. issue #150's
+#     `clippy::uninit_vec`). The tree was made warning-clean in issue
+#     #153; this `-D warnings` gate keeps it that way. A genuinely
+#     unavoidable lint must be suppressed at the site with a justified
+#     `#[allow(...)]`, which is reviewable in the diff.
 #
 # Both invocations pass `--locked`: Cargo.lock is committed, so the gate
 # must build the exact pinned dependency graph and fail (not silently
@@ -57,5 +59,5 @@ jobs:
       - name: cargo check (workspace, all targets)
         run: cargo check --workspace --all-targets --locked
 
-      - name: cargo clippy (workspace, all targets)
-        run: cargo clippy --workspace --all-targets --locked
+      - name: cargo clippy (workspace, all targets, deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

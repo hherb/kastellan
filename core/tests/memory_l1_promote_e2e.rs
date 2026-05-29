@@ -319,9 +319,8 @@ fn operator_remove_deletes_and_audits() {
             memory_id,
             "audit payload memory_id mismatch"
         );
-        assert_eq!(
+        assert!(
             payload["deleted"].as_bool().expect("deleted bool"),
-            true,
             "audit payload deleted must be true"
         );
 
@@ -404,9 +403,8 @@ fn operator_remove_refuses_wrong_layer() {
             payload["memory_id"].as_i64().expect("memory_id"),
             stable_id,
         );
-        assert_eq!(
-            payload["deleted"].as_bool().expect("deleted bool"),
-            false,
+        assert!(
+            !payload["deleted"].as_bool().expect("deleted bool"),
             "audit payload deleted must be false for wrong-layer row"
         );
 

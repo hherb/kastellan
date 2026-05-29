@@ -14,8 +14,8 @@
 //!   1. Connect to the maintenance DB (`postgres`) using peer auth.
 //!   2. Check `pg_database` for the application DB. CREATE if absent.
 //!   3. Disconnect from `postgres`; connect to the application DB.
-//!   4. Run [`crate::MIGRATOR`] (the embedded `migrations/0001_init.sql`
-//!      + `0002_runtime_role.sql` + any future siblings) as the OS user
+//!   4. Run [`crate::MIGRATOR`] (the embedded `migrations/0001_init.sql`,
+//!      `0002_runtime_role.sql`, and any future siblings) as the OS user
 //!      / cluster superuser — required for `CREATE EXTENSION`,
 //!      `CREATE ROLE`, and any future migration that touches a
 //!      superuser-only catalog.

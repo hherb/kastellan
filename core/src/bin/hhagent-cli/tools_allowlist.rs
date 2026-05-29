@@ -155,8 +155,8 @@ async fn tools_allowlist_list(args: &[String]) -> ExitCode {
             Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
         },
     };
-    println!("{:<16}  {:<48}  {:<24}  {}",
-        "TOOL", "ARGV0", "CREATED_AT", "CREATED_BY");
+    println!("{:<16}  {:<48}  {:<24}  CREATED_BY",
+        "TOOL", "ARGV0", "CREATED_AT");
     for e in entries {
         println!("{:<16}  {:<48}  {:<24}  {}",
             e.tool, e.argv0, e.created_at, e.created_by);

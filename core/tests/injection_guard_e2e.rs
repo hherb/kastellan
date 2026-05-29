@@ -31,10 +31,7 @@ fn bootstrap(label: &str) -> Option<TestRig> {
     if skip_if_sandbox_unavailable() {
         return None;
     }
-    let bin_dir = match pg_bin_dir_or_skip() {
-        Some(d) => d,
-        None => return None,
-    };
+    let bin_dir = pg_bin_dir_or_skip()?;
     let worker_bin = shell_exec_worker_binary();
     if !worker_bin.exists() {
         eprintln!("\n[SKIP] worker binary not built; run cargo build --workspace\n");

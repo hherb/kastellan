@@ -142,7 +142,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
     rt.block_on(async {
         // Probe applies migrations and writes the bring-up audit row.
         hhagent_db::probe::run(
-            &conn_spec,
+            conn_spec,
             "core",
             "startup",
             serde_json::json!({"version": "test", "purpose": "scheduler-step-dispatch"}),
@@ -150,7 +150,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&conn_spec)
+        let pool = hhagent_db::pool::connect_runtime_pool(conn_spec)
             .await
             .expect("connect runtime pool");
 

@@ -353,6 +353,9 @@ fn dump_daemon_log(label: &str, path: &Path) {
 
 /// Submit one prompt via `hhagent-cli ask`, then capture the audit-log
 /// stream for the resulting task. Returns the constructed CaptureJson.
+// Test helper that threads the full capture context (pool, paths, user,
+// fixture, backend, …) into one call; the arg-count heuristic is moot here.
+#[allow(clippy::too_many_arguments)]
 async fn capture_one_fixture(
     pool: &sqlx::PgPool,
     data_dir: &Path,
@@ -456,6 +459,11 @@ fn dry_run_report(fixtures: &[FixtureMeta]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "operator-run: needs real local LLM at HHAGENT_LLM_LOCAL_URL"]
+// The macOS `serial_lock()` guard is deliberately held for the whole test
+// body — including its awaits — to serialise this launchd-touching capture
+// run against sibling tests. Holding it across awaits is the intent, so the
+// await-holding-lock lint is suppressed here.
+#[cfg_attr(target_os = "macos", allow(clippy::await_holding_lock))]
 async fn capture_all_fixtures_against_live_llm() {
     #[cfg(target_os = "macos")]
     let _serial = serial_lock();

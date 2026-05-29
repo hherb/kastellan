@@ -334,7 +334,7 @@ async fn warm_reuse_two_calls_keep_one_worker_warm() {
             .acquire("gliner-relex", &entry)
             .await
             .expect("acquire 1 (cold spawn)");
-        let params = serde_json::to_value(&request()).unwrap();
+        let params = serde_json::to_value(request()).unwrap();
         tool_host::dispatch(&pool, &Vault::new(), handle.worker_mut(), "gliner-relex", "extract", params)
             .await
             .expect("dispatch 1");
@@ -356,7 +356,7 @@ async fn warm_reuse_two_calls_keep_one_worker_warm() {
             .acquire("gliner-relex", &entry)
             .await
             .expect("acquire 2 (warm reuse)");
-        let params = serde_json::to_value(&request()).unwrap();
+        let params = serde_json::to_value(request()).unwrap();
         tool_host::dispatch(&pool, &Vault::new(), handle.worker_mut(), "gliner-relex", "extract", params)
             .await
             .expect("dispatch 2");

@@ -242,7 +242,7 @@ async fn happy_path_one_plan_returns_completed() {
     let payload = &plan_rows[0].payload;
     assert_eq!(payload["decision_kind"], "task_complete");
     assert!(
-        payload.get("refused").map_or(false, |v| v.is_null()),
+        payload.get("refused").is_some_and(|v| v.is_null()),
         "refused key must be present with JSON null on non-refusal rows; got payload = {payload:#?}"
     );
 

@@ -284,7 +284,6 @@ async fn cli_memory_l1_remove_deletes_specified_id() {
     // Parse `inserted id=N` → i64
     let id: i64 = stdout_add
         .trim_start_matches("inserted id=")
-        .trim()
         .split_whitespace()
         .next()
         .unwrap_or("")

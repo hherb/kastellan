@@ -155,8 +155,7 @@ mod tests {
         // counts the iteration as a failed plan.
         let raw = "I cannot do this.";
         let err = parse_plan_lenient(raw)
-            .err()
-            .expect("must error when no JSON present");
+            .expect_err("must error when no JSON present");
         // We don't pin the exact wording (serde_json is free to evolve
         // it across versions); we just confirm it's a parse error.
         assert!(err.to_string().to_ascii_lowercase().contains("expected"));
@@ -169,7 +168,7 @@ mod tests {
         // path's* error — not the lenient path's — so callers see a
         // stable diagnostic regardless of which path was tried.
         let raw = "```json\n{not actually JSON}\n```";
-        let err = parse_plan_lenient(raw).err().expect("must error");
+        let err = parse_plan_lenient(raw).expect_err("must error");
         // serde's strict error for non-JSON content starts with
         // "expected value at line 1 column 1" — the lenient path's
         // error (had we surfaced it) would have started at a deeper
@@ -185,7 +184,7 @@ mod tests {
     #[test]
     fn whitespace_only_input_returns_decode_error() {
         let raw = "   \n\t  ";
-        let err = parse_plan_lenient(raw).err().expect("must error");
+        let err = parse_plan_lenient(raw).expect_err("must error");
         // Pinned: parse fails. We don't care about the exact wording.
         let _ = err;
     }
@@ -208,8 +207,7 @@ mod tests {
             canonical_plan_json()
         );
         let err = parse_plan_lenient(&raw)
-            .err()
-            .expect("must error: earlier `{` in prose poisons the lenient anchor");
+            .expect_err("must error: earlier `{` in prose poisons the lenient anchor");
         // Strict-path error position confirms the strict-path error
         // was re-emitted (not the lenient path's deeper position).
         let msg = err.to_string();
