@@ -138,12 +138,17 @@ impl WorkerCommand {
 ///   on failure. Payloads larger than 4 KiB are replaced inside
 ///   [`hhagent_db::audit::insert`] with a SHA-256 envelope.
 ///
-/// **IMPORTANT — tool row's `payload.req` carries plaintext after
-/// substitution.** The privacy invariant (no plaintext in any
-/// `actor='policy'` row) is scoped to policy rows only; the tool
-/// row legitimately receives the substituted params (the worker
-/// will receive them too). See spec §6.2 and the precedent at
-/// commit `45627fd`.
+/// **Secret refs are redacted in `payload.req` (issue #147).** The
+/// `req` snapshot is taken BEFORE secret-ref substitution, so the
+/// tool row records the opaque `secret://<8-hex>` refs exactly as the
+/// planner issued them — never the redeemed plaintext. The worker
+/// still receives the substituted plaintext (it is the authorised
+/// consumer); only the audit snapshot is pre-substitution. The
+/// privacy invariant (no redeemed plaintext in `audit_log`) therefore
+/// now covers the tool row's `req` as well as every `actor='policy'`
+/// row. Note the worker's *output* may still echo a secret it was
+/// legitimately given — that lands in `payload.result`, which is the
+/// worker's own response, not the request.
 ///
 /// ## Why the audit insert is *best-effort*
 ///
@@ -187,6 +192,20 @@ pub async fn dispatch(
     mut params: serde_json::Value,        // NOTE: now `mut`
 ) -> Result<serde_json::Value, ToolHostError> {
     let started = Instant::now();
+
+    // Snapshot the request for the tool audit row BEFORE secret-ref
+    // substitution (issue #147). At this point `params` still carries
+    // the opaque `secret://<8-hex>` refs exactly as the planner issued
+    // them, so the redeemed plaintext never reaches the `audit_log`.
+    // The worker still receives the real plaintext via the mutated
+    // `params` passed to `WorkerCommand::new` below — only the audit
+    // snapshot is taken pre-substitution. This faithfully records the
+    // request-as-issued and removes the audit-log secret-recovery path
+    // that slice 1 left open (the privacy invariant is no longer scoped
+    // to `actor='policy'` rows only — the tool row's `req` is redacted
+    // too). On the fail-closed error path below this snapshot is simply
+    // unused (no tool row is written).
+    let req_for_audit = params.clone();
 
     // ── Secret-ref substitution (Item 31, slice 1). ──
     //
@@ -242,13 +261,10 @@ pub async fn dispatch(
         }
     };
 
-    // Snapshot the (now-substituted) request for the tool row.
-    // IMPORTANT: this snapshot contains plaintext. The tool row's
-    // `payload.req` field is allowed to carry it (precedent set by
-    // injection-guard slice 1 commit 45627fd: the privacy invariant
-    // is scoped to `actor='policy'` rows only).
-    let req_for_audit = params.clone();
-
+    // `req_for_audit` was snapshotted above, pre-substitution (issue
+    // #147), so the tool row's `payload.req` carries the opaque refs,
+    // not the redeemed plaintext.
+    //
     // Sealed command: `WorkerCommand` is the only argument shape
     // `SupervisedWorker::call` accepts, and both its constructor and
     // `call` itself are module-private (see issue #16).

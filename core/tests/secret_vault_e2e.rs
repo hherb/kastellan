@@ -446,6 +446,34 @@ async fn policy_rows_contain_no_substring_of_redeemed_plaintext() {
         );
     }
 
+    // ── Tool-row `req` redaction (issue #147). ──
+    //
+    // The `tool:<name>` row's `payload.req` is the snapshot of the
+    // request. Before #147 it was snapshotted AFTER substitution, so it
+    // carried the redeemed plaintext — meaning anyone with read access
+    // to `audit_log` could recover every materialized secret from the
+    // tool row. The fix snapshots `req` BEFORE substitution, so it shows
+    // the opaque `secret://<8-hex>` ref instead.
+    //
+    // Scope matters: this `printf %s` worker echoes its argv to stdout,
+    // so `payload.result` legitimately contains the plaintext (the
+    // worker is the authorised consumer). The invariant is scoped to the
+    // `req` subfield only — never the whole tool-row payload.
+    let tool_rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
+        "SELECT payload FROM audit_log WHERE actor='tool:shell-exec'",
+    ).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        tool_rows.len(),
+        1,
+        "exactly one tool:shell-exec row expected for a single successful dispatch"
+    );
+    let tool_payload: serde_json::Value = tool_rows[0].try_get("payload").unwrap();
+    let req_str = serde_json::to_string(&tool_payload["req"]).unwrap();
+    assert!(
+        !req_str.contains(marker),
+        "issue #147 — tool row's payload.req contains the redeemed plaintext: {req_str}"
+    );
+
     let _ = worker.close();
     pool.close().await;
 }
@@ -503,6 +531,80 @@ async fn dispatch_substitutes_multiple_refs_in_one_params() {
         "SELECT COUNT(*) FROM audit_log WHERE actor='policy' AND action='secret.redeemed'",
     ).fetch_one(&pool).await.unwrap();
     assert_eq!(redeemed_count, 2, "exactly two secret.redeemed rows for two distinct refs");
+
+    let _ = worker.close();
+    pool.close().await;
+}
+
+// ── Test 9: tool row's `req` shows the opaque ref, not the plaintext ───────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_row_req_shows_opaque_ref_not_plaintext() {
+    // Issue #147, positive pin. Complements test 7's negative assertion:
+    // not only must the redeemed plaintext be ABSENT from the tool row's
+    // `payload.req`, the opaque `secret://<8-hex>` ref must be PRESENT —
+    // proving the snapshot is taken before substitution and faithfully
+    // records the request as the planner issued it. The worker still
+    // receives the real plaintext (asserted via stdout).
+    if skip_if_no_supervisor() { return; }
+    if skip_if_sandbox_unavailable() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+    let worker_bin = shell_exec_worker_binary();
+    if !worker_bin.exists() {
+        eprintln!("\n[SKIP] worker binary not built; run cargo build --workspace\n");
+        return;
+    }
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        &format!("svault-9-{suffix}"),
+        &format!("svault-9-{suffix}-log"),
+        &format!("hhagent-test-svault-9-{suffix}"),
+    );
+    let pool = probe_and_pool(&cluster.conn_spec).await;
+    let kp = test_key_provider();
+
+    let marker = "SECRET_REQ_MARKER_qrs456";
+    hhagent_db::secrets::put(&pool, &kp, "req-secret", marker.as_bytes(), None).await.unwrap();
+
+    let vault = Arc::new(Vault::new());
+    let secret_ref = vault.materialize(&pool, &kp, "req-secret", "test").await.unwrap();
+
+    let worker_str = worker_bin.to_string_lossy().into_owned();
+    let policy = policy_for_shell_exec(&worker_bin, &[PRINTF_PATH]);
+    let backend_obj = backend();
+    let spec = WorkerSpec {
+        policy: &policy,
+        program: &worker_str,
+        args: &[],
+        wall_clock_ms: Some(15_000),
+    };
+    let mut worker = spawn_worker(&*backend_obj, &spec).unwrap();
+
+    let params = json!({"argv": [PRINTF_PATH, "%s\n", secret_ref.as_str()]});
+    let result = dispatch(&pool, &vault, &mut worker, "shell-exec", "shell.exec", params)
+        .await
+        .expect("dispatch");
+
+    // The worker received the real plaintext (substitution happened).
+    let stdout = result["stdout"].as_str().expect("stdout");
+    assert!(stdout.contains(marker), "worker should receive plaintext; got stdout: {stdout:?}");
+
+    let tool_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM audit_log WHERE actor='tool:shell-exec'",
+    ).fetch_one(&pool).await.unwrap();
+
+    let req_str = serde_json::to_string(&tool_payload["req"]).unwrap();
+    assert!(
+        !req_str.contains(marker),
+        "issue #147 — tool row payload.req must not contain the plaintext: {req_str}"
+    );
+    assert!(
+        req_str.contains(secret_ref.as_str()),
+        "issue #147 — tool row payload.req should carry the opaque ref {}: {req_str}",
+        secret_ref.as_str()
+    );
 
     let _ = worker.close();
     pool.close().await;
