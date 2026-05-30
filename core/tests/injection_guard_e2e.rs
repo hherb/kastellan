@@ -38,10 +38,17 @@ fn bootstrap(label: &str) -> Option<TestRig> {
         return None;
     }
     let suffix = unique_suffix();
+    // Data/log labels must stay short: `unique_temp_root` already appends
+    // `-<pid>-<nanos>`, and the socket path `/tmp/hhagent-<label>-<pid>-<nanos>
+    // /data/sockets/.s.PGSQL.5432` must fit macOS's 104-byte `sun_path`.
+    // The previous `ig-{label}-{suffix}-data` form (with the suffix embedded
+    // a second time) overflowed it for labels ≥ 6 chars, so postgres could
+    // not bind its socket and bring-up timed out. The longer `service_name`
+    // is fine — it is bounded only by the 200-char launchd-label cap.
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("ig-{label}-{suffix}-data"),
-        &format!("ig-{label}-{suffix}-log"),
+        &format!("ig-{label}-d"),
+        &format!("ig-{label}-l"),
         &format!("hhagent-supervisor-test-pg-ig-{label}-{suffix}"),
     );
     Some(TestRig { cluster, worker_bin })

@@ -59,6 +59,37 @@ use crate::wait::{wait_for_socket, wait_for_status};
 /// successful poll).
 pub const PG_BRING_UP_TIMEOUT_SECS: u64 = 30;
 
+/// Maximum bytes available in `sockaddr_un.sun_path`, including the NUL
+/// terminator: **104 on macOS, 108 on Linux**. The UDS socket postgres
+/// binds is `<socket_dir>/.s.PGSQL.5432`; if its absolute path does not
+/// fit, postgres silently fails to create the socket and the bring-up
+/// only surfaces as a `wait_for_socket`/`wait_for_status` timeout after
+/// the full cap. The per-OS value matters: a 106-byte path is fatal on
+/// macOS but fine on Linux, so we predict the failure for *this* host.
+const SUN_PATH_MAX: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
+
+/// Returns `Err` if the postgres UDS socket path would overflow
+/// [`SUN_PATH_MAX`] on this platform.
+///
+/// Pure (no I/O) so it is unit-testable with crafted paths. Callers
+/// (`bring_up_pg_cluster_with_timeout`) turn the `Err` into an immediate,
+/// explanatory panic — converting an opaque 30 s bring-up timeout into a
+/// clear "your data_label is too long" message at the point of the bug.
+fn check_socket_path_fits(socket_dir: &Path) -> Result<(), String> {
+    let socket_file = socket_dir.join(".s.PGSQL.5432");
+    // +1 for the NUL terminator the kernel stores in sun_path.
+    let needed = socket_file.as_os_str().len() + 1;
+    if needed > SUN_PATH_MAX {
+        return Err(format!(
+            "postgres socket path needs {needed} bytes (incl. NUL) but \
+             sockaddr_un.sun_path holds only {SUN_PATH_MAX} on this platform; \
+             shorten the data_label passed to bring_up_pg_cluster. Path: {}",
+            socket_file.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Handle returned by [`bring_up_pg_cluster`]. All fields needed by
 /// downstream tests are public; the cleanup guards are kept private
 /// so they cannot be dropped early.
@@ -116,6 +147,15 @@ pub fn bring_up_pg_cluster(
 ///      by `timeout`).
 ///   6. 500 ms hold + re-check to rule out a `Restart=on-failure`
 ///      flap masking a config error.
+///
+/// # Concurrency (macOS)
+///
+/// Steps 4–6 hold the process-global [`crate::serial::serial_lock`] so
+/// the launchd `gui/<uid>` registration window is serialized against
+/// every other daemon-spawning test in this process (issue #130). The
+/// lock is reentrant, so a caller that already holds it does not
+/// self-deadlock. On Linux this is a no-op. `initdb` (steps 1–3) runs
+/// outside the lock so independent bring-ups still overlap there.
 ///
 /// # Parameters
 ///
@@ -175,6 +215,12 @@ pub fn bring_up_pg_cluster_with_timeout(
     let data_guard = PathGuard { path: data_root.clone() };
     let data_dir = data_root.join("data");
     let socket_dir = default_socket_dir(&data_dir);
+
+    // Fail fast with a clear message if the data_label makes the UDS socket
+    // path overflow sun_path — otherwise postgres silently never binds the
+    // socket and the only symptom is a 30 s bring-up timeout.
+    check_socket_path_fits(&socket_dir)
+        .unwrap_or_else(|e| panic!("{e}"));
 
     let log_dir = unique_temp_root(log_label);
     std::fs::create_dir_all(&log_dir).expect("create pg log dir");
@@ -237,6 +283,21 @@ pub fn bring_up_pg_cluster_with_timeout(
         sup: default_supervisor(),
         name: spec.name.clone(),
     };
+
+    // Serialize the launchd gui/<uid> registration window against every
+    // other daemon-spawning test in this process (issue #130). When the
+    // full workspace runs under `HHAGENT_PG_BIN_DIR`, parallel `#[test]`
+    // threads racing to `bootstrap` distinct service labels can exceed even
+    // the 30 s cap once the domain is churn-degraded; holding the shared
+    // serial lock from `install` through the readiness waits caps peak
+    // concurrent registration at one. The lock is reentrant, so callers
+    // that already hold it (`supervisor_e2e`, `observation_capture`) do not
+    // self-deadlock here. cfg-gated to macOS so Linux binds no unit value
+    // (clippy-clean under `-D warnings`) and pulls in no import; released as
+    // the handle returns, leaving `initdb` and the test body free to overlap.
+    #[cfg(target_os = "macos")]
+    let _serial = crate::serial::serial_lock();
+
     sup.install(&spec).expect("install postgres service");
     sup.start(&spec.name).expect("start postgres service");
 
@@ -300,8 +361,11 @@ mod tests {
     //!    explicitly preferred the sibling-function shape over an
     //!    `Option<Duration>` parameter on the existing function for
     //!    exactly this reason.
-    use super::{bring_up_pg_cluster, bring_up_pg_cluster_with_timeout, PgCluster};
-    use std::path::Path;
+    use super::{
+        bring_up_pg_cluster, bring_up_pg_cluster_with_timeout, check_socket_path_fits, PgCluster,
+        SUN_PATH_MAX,
+    };
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     #[test]
@@ -313,5 +377,30 @@ mod tests {
     #[test]
     fn bring_up_pg_cluster_wrapper_keeps_pre_issue_131_signature() {
         let _signature_pin: fn(&Path, &str, &str, &str) -> PgCluster = bring_up_pg_cluster;
+    }
+
+    /// A socket directory long enough that `<dir>/.s.PGSQL.5432` overflows
+    /// `sun_path` must be rejected — this is the guard that turns the
+    /// silent over-long-`data_label` bring-up timeout into a clear panic.
+    #[test]
+    fn check_socket_path_fits_rejects_overlong_path() {
+        // A directory at least `SUN_PATH_MAX` bytes guarantees the child
+        // socket file overflows regardless of platform.
+        let dir = PathBuf::from(format!("/tmp/{}", "a".repeat(SUN_PATH_MAX)));
+        assert!(
+            check_socket_path_fits(&dir).is_err(),
+            "an over-long socket path must be rejected"
+        );
+    }
+
+    /// A short, realistic socket directory must pass — the guard must not
+    /// false-positive on the common case.
+    #[test]
+    fn check_socket_path_fits_accepts_short_path() {
+        let dir = PathBuf::from("/tmp/hhagent-ig-x-d-12345-1780000000000000000/data/sockets");
+        assert!(
+            check_socket_path_fits(&dir).is_ok(),
+            "a short socket path must be accepted"
+        );
     }
 }
