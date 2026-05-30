@@ -80,6 +80,7 @@ where
     row.try_get::<i64, _>(0)
         .map_err(|e| DbError::Query(format!("decode memory.id: {e}")))
 }
+
 /// Link a memory to a set of entities. Idempotent: re-linking the same
 /// pair is a no-op via ON CONFLICT DO NOTHING.
 ///
@@ -118,6 +119,7 @@ where
 
     Ok(result.rows_affected())
 }
+
 /// Insert a memory row tagged with an explicit layer.
 ///
 /// [`insert_memory`] is the shorthand for the L2 (Stable) case; callers

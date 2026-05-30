@@ -186,6 +186,7 @@ where
     }
     Ok(out)
 }
+
 /// Graph lane: rank memories by how many of the supplied entity ids
 /// they're linked to.
 ///
@@ -236,12 +237,12 @@ where
 
     rows.into_iter()
         .map(|r| {
-            use sqlx::Row;
             r.try_get::<i64, _>(0)
                 .map_err(|e| DbError::Query(format!("decode memory_id: {e}")))
         })
         .collect()
 }
+
 /// Load up to `cap` rows at the specified layer, newest first.
 ///
 /// Returns rows in `(created_at DESC, id DESC)` order. The `id DESC`
@@ -371,7 +372,6 @@ where
 
     let mut out: Vec<Memory> = Vec::with_capacity(rows.len());
     for row in rows {
-        use sqlx::Row;
         let id: i64 = row
             .try_get("id")
             .map_err(|e| DbError::Query(format!("decode id: {e}")))?;
