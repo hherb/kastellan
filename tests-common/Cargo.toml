@@ -28,3 +28,8 @@ hhagent-sandbox    = { path = "../sandbox" }
 serde_json         = { workspace = true }
 sha2               = { workspace = true }
 sqlx               = { workspace = true }
+# Reentrant launchd serial lock (macOS, issue #130). std::sync::ReentrantLock
+# is still unstable on 1.96, so we use parking_lot's stable ReentrantMutex.
+# Already present transitively in the build graph (MIT/Apache-2.0,
+# AGPL-compatible); only referenced on macOS in `serial.rs`.
+parking_lot        = "0.12"

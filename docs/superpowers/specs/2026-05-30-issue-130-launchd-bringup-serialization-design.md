@@ -117,6 +117,32 @@ hang under live PG if `bring_up`'s lock were not reentrant.
   to confirm the flake is gone (and the `--test-threads=1` workaround is no
   longer required).
 
+## Implementation amendments (2026-05-30, post-design)
+
+Two deviations surfaced during implementation; both operator-approved:
+
+1. **Mechanism: `parking_lot::ReentrantMutex`, not `std::sync::ReentrantLock`.**
+   The std type is still unstable on the 1.96 toolchain (feature
+   `reentrant_lock`). `parking_lot` 0.12 is already in the build graph
+   (MIT/Apache-2.0), has a stable `ReentrantMutex`, and was added as a direct
+   dev-dependency of `tests-common`. Same semantics (reentrant, no poison).
+
+2. **Bundled fix for a separate bug found during live validation
+   ([#163](https://github.com/hherb/hhagent/issues/163)).** Validating live
+   against Postgres.app v18 revealed `injection_guard_e2e` could never come up
+   live — but the cause was *not* #130 contention (it reproduces with
+   `--test-threads=1`). Its fixture built an over-long data label, overflowing
+   macOS's 104-byte `sun_path`, so postgres silently failed to bind the socket
+   and bring-up timed out. Bundled here (same theme — macOS PG bring-up
+   reliability under the override):
+   - `injection_guard_e2e`: shortened labels (`ig-{label}-d` / `-l`).
+   - `bring_up_pg_cluster`: new pure `check_socket_path_fits` guard
+     (per-OS `SUN_PATH_MAX` = 104 macOS / 108 Linux) that fails fast with a
+     clear message instead of a 30 s timeout. TDD: stub → RED → implement.
+
+   Live result after the fix: `injection_guard_e2e` 6/6, `secret_vault_e2e`
+   11/11, `postgres_e2e` 57/57, zero bring-up timeouts.
+
 ## Out of scope
 
 - Cross-process serialization of source (2) — `cargo` already runs binaries

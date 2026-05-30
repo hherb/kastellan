@@ -948,6 +948,7 @@ dependencies = [
  "hhagent-db",
  "hhagent-sandbox",
  "hhagent-supervisor",
+ "parking_lot",
  "serde_json",
  "sha2",
  "sqlx",
