@@ -4,7 +4,7 @@
 
 use std::process::ExitCode;
 
-use crate::common::{multi_thread_runtime, parse_classification_floor, resolve_connect_spec};
+use crate::common::{parse_classification_floor, resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_ask(args: &[String]) -> ExitCode {
     let mut lane = hhagent_db::tasks::Lane::Fast;
@@ -48,14 +48,12 @@ pub(crate) fn run_ask(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     };
 
-    // Use a multi-thread runtime so `block_in_place` is available if
-    // any sqlx internals need it; PgListener::recv does not require it
-    // today but the shape is consistent with the rest of the DB code.
-    let rt = match multi_thread_runtime("ask") {
-        Ok(rt) => rt,
-        Err(code) => return code,
-    };
-    rt.block_on(ask_async(lane, instruction, floor))
+    // `with_runtime` builds a multi-thread runtime so `block_in_place`
+    // is available if any sqlx internals need it; PgListener::recv does
+    // not require it today but the shape is consistent with the rest of
+    // the DB code. Deferred until here so an arg parse/validation error
+    // above never pays for a runtime it won't use (Issue #97 posture).
+    with_runtime("ask", ask_async(lane, instruction, floor))
 }
 
 /// Pure builder for the producer-side classification-floor decision.
