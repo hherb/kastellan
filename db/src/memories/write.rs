@@ -189,6 +189,33 @@ where
     Ok(rows.rows_affected() == 1)
 }
 
+/// Flip a layer-3 (`MemoryLayer::Skill`) row's metadata `trust` field via
+/// `jsonb_set` (other metadata keys untouched). Layer-guarded so an
+/// L0/L1/L2 id — or a non-existent id — is a no-op. Returns `true` iff a
+/// row was updated. Takes a `&str` trust value: the `db` crate sits below
+/// `core` and cannot depend on the `core`-owned `SkillTrust` enum.
+pub async fn set_skill_trust<'e, E>(
+    executor: E,
+    id: i64,
+    trust: &str,
+) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let rows = sqlx::query(
+        "UPDATE memories \
+         SET metadata = jsonb_set(metadata, '{trust}', to_jsonb($2::text), true) \
+         WHERE id = $1 AND layer = $3",
+    )
+    .bind(id)
+    .bind(trust)
+    .bind(MemoryLayer::Skill.as_db())
+    .execute(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("set_skill_trust id={id}: {e}")))?;
+    Ok(rows.rows_affected() == 1)
+}
+
 /// Insert an L0 (meta-rule) memory row.
 ///
 /// Separate from [`insert_memory_at_layer`] on purpose: L0 rows are

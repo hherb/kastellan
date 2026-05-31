@@ -5042,3 +5042,93 @@ async fn walk_edges_around_matches_separate_walks_and_clips_per_direction() {
 
     pool.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_skill_trust_flips_and_is_layer_guarded() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "sst-d",
+        "sst-l",
+        &format!("hhagent-pg-sst-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "set-skill-trust"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    // Seed one L3 row (trust starts "untrusted") and one L1 row.
+    let meta = serde_json::json!({ "trust": "untrusted", "template": {"name": "s"} });
+    let l3_id = hhagent_db::memories::insert_memory_at_layer(
+        &pool,
+        "body",
+        &meta,
+        None,
+        hhagent_db::memories::MemoryLayer::Skill,
+    )
+    .await
+    .expect("insert L3");
+    let l1_id = hhagent_db::memories::insert_memory_at_layer(
+        &pool,
+        "idxbody",
+        &serde_json::json!({"trust": "untrusted"}),
+        None,
+        hhagent_db::memories::MemoryLayer::Index,
+    )
+    .await
+    .expect("insert L1");
+
+    // Flip the L3 row → returns true, metadata.trust becomes user_approved,
+    // and the rest of metadata is preserved.
+    let updated = hhagent_db::memories::set_skill_trust(&pool, l3_id, "user_approved")
+        .await
+        .expect("set_skill_trust");
+    assert!(updated, "existing L3 row must report updated=true");
+
+    let row: serde_json::Value = sqlx::query_scalar("SELECT metadata FROM memories WHERE id = $1")
+        .bind(l3_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch metadata");
+    assert_eq!(row.get("trust").and_then(|v| v.as_str()), Some("user_approved"));
+    assert_eq!(
+        row.get("template")
+            .and_then(|t| t.get("name"))
+            .and_then(|v| v.as_str()),
+        Some("s"),
+        "set_skill_trust must preserve other metadata keys"
+    );
+
+    // Layer guard: the same id on the wrong layer (L1) is a no-op.
+    let l1_updated = hhagent_db::memories::set_skill_trust(&pool, l1_id, "user_approved")
+        .await
+        .expect("set_skill_trust L1");
+    assert!(
+        !l1_updated,
+        "an L1 id must NOT be updated by the layer-3-guarded helper"
+    );
+
+    // Non-existent id → false.
+    let ghost = hhagent_db::memories::set_skill_trust(&pool, 999_999, "user_approved")
+        .await
+        .expect("set_skill_trust ghost");
+    assert!(!ghost);
+
+    pool.close().await;
+}
