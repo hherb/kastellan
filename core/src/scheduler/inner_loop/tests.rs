@@ -230,6 +230,7 @@ fn inner_loop_result_terminal_l1_insight_default_is_none() {
         plan_count: 0,
         dispatch_count: 0,
         terminal_l1_insight: None,
+        terminal_l3_skill: None,
     };
     assert!(result.terminal_l1_insight.is_none());
 }

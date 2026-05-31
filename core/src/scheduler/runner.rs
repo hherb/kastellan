@@ -431,6 +431,7 @@ fn failed_result(detail: String) -> InnerLoopResult {
         plan_count: 0,
         dispatch_count: 0,
         terminal_l1_insight: None,
+        terminal_l3_skill: None,
     }
 }
 
