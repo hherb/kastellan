@@ -598,3 +598,38 @@ fn build_l3_write_payload_skipped_duplicate() {
     assert_eq!(p.get("action").unwrap(), "skipped_duplicate");
     assert_eq!(p.get("memory_id").unwrap(), 9);
 }
+
+// --- l3 approve / revoke payload builders ---------------------------
+
+#[test]
+fn l3_approved_payload_shape() {
+    let p = build_l3_approved_payload(7, "summarise_repo_readme", "abcd", &["shell-exec".to_string()]);
+    assert_eq!(p["memory_id"], 7);
+    assert_eq!(p["skill_name"], "summarise_repo_readme");
+    assert_eq!(p["body_sha256"], "abcd");
+    assert_eq!(p["tools"][0], "shell-exec");
+}
+
+#[test]
+fn l3_approve_rejected_payload_includes_reasons_and_optionals() {
+    let p = build_l3_approve_rejected_payload(
+        9, Some("leaky"), Some("ff00"), &["tool 'x' is not registered".to_string()],
+    );
+    assert_eq!(p["memory_id"], 9);
+    assert_eq!(p["skill_name"], "leaky");
+    assert_eq!(p["body_sha256"], "ff00");
+    assert_eq!(p["reasons"][0], "tool 'x' is not registered");
+
+    // Optionals omitted when None.
+    let p2 = build_l3_approve_rejected_payload(9, None, None, &["x".to_string()]);
+    assert!(p2.get("skill_name").is_none());
+    assert!(p2.get("body_sha256").is_none());
+    assert_eq!(p2["reasons"][0], "x");
+}
+
+#[test]
+fn l3_revoked_payload_shape() {
+    let p = build_l3_revoked_payload(3, true);
+    assert_eq!(p["memory_id"], 3);
+    assert_eq!(p["updated"], true);
+}

@@ -58,6 +58,39 @@ fn valid_skill() -> L3SkillCandidate {
     }
 }
 
+/// A structurally-valid skill that ALSO carries a baked-in secret ref —
+/// the writer accepts it (no secret scan); the approval gate must reject.
+fn skill_with_secret_ref() -> L3SkillCandidate {
+    L3SkillCandidate {
+        name: "leaky_skill".into(),
+        description: "carries a secret ref".into(),
+        parameters: vec![L3Param { name: "repo_path".into(), description: "abs path".into() }],
+        steps: vec![L3TemplateStep {
+            tool: "shell-exec".into(),
+            method: "shell.exec".into(),
+            parameters: serde_json::json!({
+                "argv": ["cat", "{{repo_path}}"],
+                "token": "secret://abc12345"
+            }),
+        }],
+    }
+}
+
+/// Seed a `registry.loaded` audit row naming `tool_names` so the CLI's
+/// approval gate can verify tool existence.
+async fn seed_registry_loaded(pool: &sqlx::PgPool, tool_names: &[&str]) {
+    let tools: Vec<serde_json::Value> =
+        tool_names.iter().map(|n| serde_json::json!({ "name": n })).collect();
+    hhagent_db::audit::insert(
+        pool,
+        "core",
+        hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED,
+        serde_json::json!({ "tools": tools }),
+    )
+    .await
+    .expect("seed registry.loaded");
+}
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -394,4 +427,180 @@ async fn cli_memory_l3_remove_bad_arg() {
     );
 
     drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 5 — approve happy path
+// ---------------------------------------------------------------------------
+
+/// Seed a valid skill + a registry.loaded row naming its tool; approve
+/// exits 0 and a follow-up list shows `user_approved`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_memory_l3_approve_happy() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "cml3-app-d", "cml3-app-l",
+        &format!("hhagent-postgres-cli-memory-l3-approve-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "cli_memory_l3_approve_happy"})).await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    let outcome = crystallise_l3(&pool, &valid_skill(), L3Source::AgentRaised { task_id: 1 })
+        .await.expect("crystallise_l3");
+    let id = outcome.memory_id();
+    seed_registry_loaded(&pool, &["shell-exec"]).await;
+
+    let bin = cli_binary();
+    let env = cli_env(&cluster.data_dir);
+
+    let out = Command::new(&bin)
+        .args(["memory", "l3", "approve", &id.to_string()])
+        .env_clear().envs(env.clone()).output().expect("spawn approve");
+    let so = String::from_utf8_lossy(&out.stdout).into_owned();
+    let se = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "approve must exit 0; stdout={so}\nstderr={se}");
+    assert!(so.contains("user_approved"), "approve stdout must confirm; got {so}");
+
+    let list = Command::new(&bin).args(["memory", "l3", "list"])
+        .env_clear().envs(env).output().expect("spawn list");
+    let lo = String::from_utf8_lossy(&list.stdout).into_owned();
+    assert!(lo.contains("user_approved"), "list must show user_approved; got {lo}");
+
+    drop(pool); drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 6 — approve rejected on a baked-in secret ref
+// ---------------------------------------------------------------------------
+
+/// A skill carrying a `secret://` ref is rejected: non-zero exit, trust
+/// stays `untrusted`, an `l3.approve_rejected` audit row exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_memory_l3_approve_rejects_secret_ref() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "cml3-sec-d", "cml3-sec-l",
+        &format!("hhagent-postgres-cli-memory-l3-secret-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "cli_memory_l3_approve_rejects_secret_ref"})).await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    let outcome = crystallise_l3(&pool, &skill_with_secret_ref(), L3Source::AgentRaised { task_id: 1 })
+        .await.expect("crystallise_l3");
+    let id = outcome.memory_id();
+    seed_registry_loaded(&pool, &["shell-exec"]).await; // tool IS known → only reason is the secret ref
+
+    let bin = cli_binary();
+    let env = cli_env(&cluster.data_dir);
+
+    let out = Command::new(&bin)
+        .args(["memory", "l3", "approve", &id.to_string()])
+        .env_clear().envs(env).output().expect("spawn approve");
+    let se = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "approve must exit non-zero on a secret ref");
+    assert!(se.contains("secret"), "stderr must explain the secret-ref reason; got {se}");
+
+    // trust unchanged
+    let trust: String = sqlx::query_scalar("SELECT metadata->>'trust' FROM memories WHERE id = $1")
+        .bind(id).fetch_one(&pool).await.expect("fetch trust");
+    assert_eq!(trust, "untrusted", "trust must NOT change on a rejected approval");
+
+    // a rejection audit row exists
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE actor='cli' AND action='l3.approve_rejected'")
+        .fetch_one(&pool).await.expect("count rejected rows");
+    assert!(n >= 1, "expected an l3.approve_rejected audit row");
+
+    drop(pool); drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 7 — fail-closed when no registry snapshot
+// ---------------------------------------------------------------------------
+
+/// With NO registry.loaded row, approve fails closed (NoRegistrySnapshot)
+/// and trust stays untrusted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_memory_l3_approve_fail_closed_no_snapshot() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "cml3-noc-d", "cml3-noc-l",
+        &format!("hhagent-postgres-cli-memory-l3-nosnap-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "cli_memory_l3_approve_fail_closed_no_snapshot"})).await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    let outcome = crystallise_l3(&pool, &valid_skill(), L3Source::AgentRaised { task_id: 1 })
+        .await.expect("crystallise_l3");
+    let id = outcome.memory_id();
+    // NOTE: deliberately NOT seeding registry.loaded.
+
+    let out = Command::new(cli_binary())
+        .args(["memory", "l3", "approve", &id.to_string()])
+        .env_clear().envs(cli_env(&cluster.data_dir)).output().expect("spawn approve");
+    let se = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "approve must fail closed with no snapshot");
+    assert!(se.contains("registry"), "stderr must mention the missing registry snapshot; got {se}");
+
+    let trust: String = sqlx::query_scalar("SELECT metadata->>'trust' FROM memories WHERE id = $1")
+        .bind(id).fetch_one(&pool).await.expect("fetch trust");
+    assert_eq!(trust, "untrusted");
+
+    drop(pool); drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8 — revoke after approve
+// ---------------------------------------------------------------------------
+
+/// Approve then revoke: trust goes untrusted → user_approved → untrusted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_memory_l3_revoke_after_approve() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "cml3-rev-d", "cml3-rev-l",
+        &format!("hhagent-postgres-cli-memory-l3-revoke-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "cli_memory_l3_revoke_after_approve"})).await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    let outcome = crystallise_l3(&pool, &valid_skill(), L3Source::AgentRaised { task_id: 1 })
+        .await.expect("crystallise_l3");
+    let id = outcome.memory_id();
+    seed_registry_loaded(&pool, &["shell-exec"]).await;
+
+    let env = cli_env(&cluster.data_dir);
+    let approve = Command::new(cli_binary())
+        .args(["memory", "l3", "approve", &id.to_string()])
+        .env_clear().envs(env.clone()).output().expect("spawn approve");
+    assert!(approve.status.success(), "approve must succeed first");
+
+    let revoke = Command::new(cli_binary())
+        .args(["memory", "l3", "revoke", &id.to_string()])
+        .env_clear().envs(env).output().expect("spawn revoke");
+    let so = String::from_utf8_lossy(&revoke.stdout).into_owned();
+    assert!(revoke.status.success(), "revoke must exit 0");
+    assert!(so.contains("untrusted"), "revoke stdout must confirm; got {so}");
+
+    let trust: String = sqlx::query_scalar("SELECT metadata->>'trust' FROM memories WHERE id = $1")
+        .bind(id).fetch_one(&pool).await.expect("fetch trust");
+    assert_eq!(trust, "untrusted");
+
+    drop(pool); drop(cluster);
 }

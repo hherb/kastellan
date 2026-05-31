@@ -104,6 +104,8 @@ use crate::scheduler::audit::{
     ACTION_ENTITIES_APPROVED, ACTION_ENTITIES_REJECTED, ACTION_ENTITIES_MERGED,
     ACTION_RELATION_KINDS_ADD, ACTION_RELATION_KINDS_REMOVE,
     ACTION_ENTITY_KINDS_ADD, ACTION_ENTITY_KINDS_REMOVE,
+    ACTION_L3_APPROVED, ACTION_L3_APPROVE_REJECTED, ACTION_L3_REVOKED,
+    build_l3_approved_payload, build_l3_approve_rejected_payload, build_l3_revoked_payload,
 };
 
 /// Logical `actor` string written into every CLI-emitted audit row.
@@ -619,6 +621,78 @@ pub async fn l3_remove_and_audit(
     };
 
     Ok((deleted, audit_id))
+}
+
+/// Flip an L3 row to `user_approved` and emit one `actor='cli'
+/// action='l3.approved'` row. The gate decision is made by the caller
+/// ([`crate::memory::l3_approval::evaluate_approval`]); this helper only
+/// composes the trust flip with its audit row. Best-effort audit.
+pub async fn l3_approve_and_audit(
+    pool: &PgPool,
+    memory_id: i64,
+    skill_name: &str,
+    body_sha256: &str,
+    tools: &[String],
+) -> Result<i64, hhagent_db::DbError> {
+    use crate::memory::l3_approval::SkillTrust;
+
+    hhagent_db::memories::set_skill_trust(pool, memory_id, SkillTrust::UserApproved.as_str()).await?;
+    let payload = build_l3_approved_payload(memory_id, skill_name, body_sha256, tools);
+    let audit_id = match hhagent_db::audit::insert(
+        pool, CLI_AUDIT_ACTOR, ACTION_L3_APPROVED, payload,
+    ).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "l3.approved audit insert failed (best-effort)");
+            0
+        }
+    };
+    Ok(audit_id)
+}
+
+/// Emit one `actor='cli' action='l3.approve_rejected'` row. NO trust
+/// change — the gate refused. Best-effort audit. Returns the audit id.
+pub async fn l3_approve_rejected_audit(
+    pool: &PgPool,
+    memory_id: i64,
+    skill_name: Option<&str>,
+    body_sha256: Option<&str>,
+    reasons: &[String],
+) -> Result<i64, hhagent_db::DbError> {
+    let payload = build_l3_approve_rejected_payload(memory_id, skill_name, body_sha256, reasons);
+    let audit_id = match hhagent_db::audit::insert(
+        pool, CLI_AUDIT_ACTOR, ACTION_L3_APPROVE_REJECTED, payload,
+    ).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "l3.approve_rejected audit insert failed (best-effort)");
+            0
+        }
+    };
+    Ok(audit_id)
+}
+
+/// Flip an L3 row to `untrusted` (a downgrade — no gate) and emit one
+/// `actor='cli' action='l3.revoked'` row. Returns `(updated, audit_id)`,
+/// mirroring [`l3_remove_and_audit`]. Best-effort audit.
+pub async fn l3_revoke_and_audit(
+    pool: &PgPool,
+    memory_id: i64,
+) -> Result<(bool, i64), hhagent_db::DbError> {
+    use crate::memory::l3_approval::SkillTrust;
+
+    let updated = hhagent_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Untrusted.as_str()).await?;
+    let payload = build_l3_revoked_payload(memory_id, updated);
+    let audit_id = match hhagent_db::audit::insert(
+        pool, CLI_AUDIT_ACTOR, ACTION_L3_REVOKED, payload,
+    ).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "l3.revoked audit insert failed (best-effort)");
+            0
+        }
+    };
+    Ok((updated, audit_id))
 }
 
 /// Compose `hhagent_db::entities::approve_entity` with one
