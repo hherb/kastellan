@@ -68,6 +68,7 @@
 //! not produce divergence.)
 
 use crate::memory::l1_promote::{L1Source, L1WriteOutcome};
+use crate::memory::l3_crystallise::{L3Source, L3WriteOutcome};
 use hhagent_db::tasks::Lane;
 use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
@@ -108,6 +109,12 @@ pub const ACTION_L1_REMOVED: &str = "l1.removed";
 /// carried `l1_insight` and the inner loop reached `Outcome::Completed`.
 /// The payload is built by [`build_l1_write_payload`].
 pub const ACTION_L1_PROMOTED: &str = "l1.promoted";
+
+/// Action verb for the agent-raised L3 crystallisation row written by
+/// `runner::drain_lane`. Payload built by [`build_l3_write_payload`].
+pub const ACTION_L3_CRYSTALLISED: &str = "l3.crystallised";
+/// Action verb for the operator `memory l3 remove` audit row.
+pub const ACTION_L3_REMOVED: &str = "l3.removed";
 
 /// `action` value written when the lane runner claims a `pending` task
 /// and transitions it to `running`. Fires exactly once per `claim_one`
@@ -419,6 +426,32 @@ pub fn build_l1_write_payload(
         "body_sha256".into(),
         Value::String(body_sha256.into()),
     );
+    Value::Object(obj)
+}
+
+/// Build the payload for the `l3.crystallised` audit row. Shape:
+/// `{source: "agent_raised", task_id, skill_name, action, memory_id, body_sha256}` (6 keys).
+pub fn build_l3_write_payload(
+    outcome: &L3WriteOutcome,
+    source: &L3Source,
+    skill_name: &str,
+    body_sha256: &str,
+) -> Value {
+    let mut obj = serde_json::Map::new();
+    match source {
+        L3Source::AgentRaised { task_id } => {
+            obj.insert("source".into(), Value::String("agent_raised".into()));
+            obj.insert("task_id".into(), Value::Number(serde_json::Number::from(*task_id)));
+        }
+    }
+    let (action_str, memory_id) = match outcome {
+        L3WriteOutcome::Inserted { memory_id } => ("inserted", *memory_id),
+        L3WriteOutcome::SkippedDuplicate { memory_id } => ("skipped_duplicate", *memory_id),
+    };
+    obj.insert("skill_name".into(), Value::String(skill_name.into()));
+    obj.insert("action".into(), Value::String(action_str.into()));
+    obj.insert("memory_id".into(), Value::Number(serde_json::Number::from(memory_id)));
+    obj.insert("body_sha256".into(), Value::String(body_sha256.into()));
     Value::Object(obj)
 }
 

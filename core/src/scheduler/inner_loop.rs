@@ -129,6 +129,12 @@ pub struct InnerLoopResult {
     /// other outcome (Failed / Cancelled — Refused / Blocked are
     /// also not Outcome::Completed).
     pub terminal_l1_insight: Option<String>,
+    /// `l3_skill` from the terminal plan, captured only when the inner
+    /// loop reaches `Outcome::Completed` AND the task executed >= 1 tool
+    /// step (`dispatch_count >= 1`). The lane runner reads this in
+    /// `drain_lane` and writes one `actor='scheduler'
+    /// action='l3.crystallised'` audit row if `Some`. `None` otherwise.
+    pub terminal_l3_skill: Option<crate::cassandra::types::L3SkillCandidate>,
 }
 
 /// Terminal result of the inner loop. The lane runner translates
@@ -212,20 +218,23 @@ pub async fn run_to_terminal(
 
     /// Local helper: wrap an `Outcome` with the counters captured so
     /// far. Cuts the boilerplate at every early-return point.
-    /// `$insight` is the `terminal_l1_insight` value — `None` for all
-    /// non-Completed outcomes; the Completed arm passes `captured_l1_insight`.
+    /// `$insight` is the `terminal_l1_insight` value and `$skill` is
+    /// the `terminal_l3_skill` value — both `None` for all
+    /// non-Completed outcomes; the Completed arm passes
+    /// `captured_l1_insight` and `captured_l3_skill`.
     macro_rules! finish {
-        ($outcome:expr, $insight:expr) => {
+        ($outcome:expr, $insight:expr, $skill:expr) => {
             Ok(InnerLoopResult {
                 outcome: $outcome,
                 plan_count: ctx.plan_count,
                 dispatch_count,
                 terminal_l1_insight: $insight,
+                terminal_l3_skill: $skill,
             })
         };
-        // Convenience form for all non-Completed arms: insight is always None.
+        // Convenience form for all non-Completed arms: both None.
         ($outcome:expr) => {
-            finish!($outcome, None)
+            finish!($outcome, None, None)
         };
     }
 
@@ -383,7 +392,17 @@ pub async fn run_to_terminal(
             // Outcome::Completed will fire. We use plan.completion_insight()
             // which encapsulates the gate (is_terminal && l1_insight.is_some()).
             let captured_l1_insight: Option<String> = plan.completion_insight().map(|s| s.to_string());
-            return finish!(Outcome::Completed(result), captured_l1_insight);
+            // Grounding gate: only crystallise a skill if the task
+            // actually executed >= 1 tool step (dispatch_count is the
+            // running per-task counter). A pure-text-answer task
+            // (terminal on plan 1, zero dispatches) emits no skill.
+            let captured_l3_skill: Option<crate::cassandra::types::L3SkillCandidate> =
+                if dispatch_count >= 1 {
+                    plan.completion_skill().cloned()
+                } else {
+                    None
+                };
+            return finish!(Outcome::Completed(result), captured_l1_insight, captured_l3_skill);
         }
 
         // 4. Execute steps

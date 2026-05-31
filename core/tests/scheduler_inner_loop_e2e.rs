@@ -156,6 +156,7 @@ fn task_complete_plan(body: &str) -> Plan {
         refused: None,
         floor_request: None,
         l1_insight: None,
+        l3_skill: None,
     }
 }
 
@@ -177,6 +178,7 @@ fn one_step_plan(tool: &str, method: &str) -> Plan {
         refused: None,
         floor_request: None,
         l1_insight: None,
+        l3_skill: None,
     }
 }
 
@@ -297,6 +299,12 @@ async fn happy_path_one_plan_returns_completed() {
         payload.get("l1_insight").unwrap().is_null(),
         "ScriptedFormulator emits no l1_insight; payload should be JSON null"
     );
+
+    // l3_skill key: present as explicit null when the plan didn't emit one.
+    assert!(payload.as_object().unwrap().contains_key("l3_skill"),
+        "plan.formulate payload must include l3_skill key (got payload: {payload:?})");
+    assert_eq!(payload["l3_skill"], serde_json::Value::Null,
+        "ScriptedFormulator emits no l3_skill; payload should be JSON null");
 }
 
 /// (b) Plan 1 dispatches a step that fails (no entry in dispatcher
@@ -528,6 +536,7 @@ async fn refusal_plan_terminates_with_state_refused() {
         }),
         floor_request: None,
         l1_insight: None,
+        l3_skill: None,
     };
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
@@ -648,6 +657,7 @@ async fn reviewer_constitutional_block_wins_over_agent_refusal() {
         }),
         floor_request: None,
         l1_insight: None,
+        l3_skill: None,
     };
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
@@ -711,6 +721,7 @@ async fn verdict_block_on_refusal_plan_does_not_loop() {
         }),
         floor_request: None,
         l1_insight: None,
+        l3_skill: None,
     };
 
     // Only one plan is queued. If the loop incorrectly `continue`s on
@@ -803,6 +814,7 @@ async fn agent_floor_raise_chain_blocks_low_classification_step() {
         refused: None,
         floor_request: Some(DataClass::ClinicalConfidential),  // RAISE!
         l1_insight: None,
+        l3_skill: None,
     };
     // The inner loop will loop until the plan cap; queue plan1 enough
     // times to exhaust the cap, then the outcome is Failed("plan cap").

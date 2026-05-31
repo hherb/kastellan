@@ -47,6 +47,7 @@ mod embed;
 pub mod entity_link;
 pub mod l0_seed;
 pub mod l1_promote;
+pub mod l3_crystallise;
 pub mod layers;
 mod recall;
 

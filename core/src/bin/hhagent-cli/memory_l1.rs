@@ -11,13 +11,14 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_memory(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli memory l1 <add|list|remove> ...");
+        eprintln!("usage: hhagent-cli memory <l1|l3> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
         "l1"  => run_memory_l1(&args[1..]),
+        "l3"  => crate::memory_l3::run_memory_l3(&args[1..]),
         other => {
-            eprintln!("memory: unknown subgroup '{other}'; expected: l1");
+            eprintln!("memory: unknown subgroup '{other}'; expected: l1 | l3");
             ExitCode::from(2)
         }
     }

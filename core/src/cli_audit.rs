@@ -99,7 +99,7 @@ use crate::scheduler::audit::{
     build_producer_cancel_finalize_payload,
     build_entities_approved_payload, build_entities_rejected_payload,
     build_entities_merged_payload,
-    ACTION_L1_ADDED, ACTION_L1_REMOVED, ACTION_TASK_FINALIZE, ACTION_TASK_SUBMITTED,
+    ACTION_L1_ADDED, ACTION_L1_REMOVED, ACTION_L3_REMOVED, ACTION_TASK_FINALIZE, ACTION_TASK_SUBMITTED,
     ACTION_TOOLS_ALLOWLIST_ADD, ACTION_TOOLS_ALLOWLIST_REMOVE,
     ACTION_ENTITIES_APPROVED, ACTION_ENTITIES_REJECTED, ACTION_ENTITIES_MERGED,
     ACTION_RELATION_KINDS_ADD, ACTION_RELATION_KINDS_REMOVE,
@@ -596,6 +596,31 @@ pub async fn l1_remove_and_audit(
     Ok((deleted, audit_id))
 }
 
+/// Compose `memory::l3_crystallise::remove_l3` with one `actor='cli'
+/// action='l3.removed'` audit row. The row is written even when
+/// `deleted = false` (records the operator intent + missing-id outcome).
+pub async fn l3_remove_and_audit(
+    pool: &PgPool,
+    memory_id: i64,
+) -> Result<(bool, i64), hhagent_db::DbError> {
+    use crate::memory::l3_crystallise::remove_l3;
+
+    let deleted = remove_l3(pool, memory_id).await?;
+    let payload = serde_json::json!({"memory_id": memory_id, "deleted": deleted});
+
+    let audit_id = match hhagent_db::audit::insert(
+        pool, CLI_AUDIT_ACTOR, ACTION_L3_REMOVED, payload,
+    ).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "l3.removed audit insert failed (best-effort)");
+            0
+        }
+    };
+
+    Ok((deleted, audit_id))
+}
+
 /// Compose `hhagent_db::entities::approve_entity` with one
 /// `actor='cli' action='entities.approved'` audit row. The audit row is
 /// emitted ONLY on the `Approved` variant (state-changing path);
@@ -750,6 +775,15 @@ mod tests {
             entities_reject_and_audit(pool, id)
         }
         let _ = _signature_pin;
+    }
+
+    #[test]
+    fn l3_remove_and_audit_signature_compile_pin() {
+        fn _pin<'a>(pool: &'a sqlx::PgPool, id: i64)
+            -> impl std::future::Future<Output = Result<(bool, i64), hhagent_db::DbError>> + 'a {
+            super::l3_remove_and_audit(pool, id)
+        }
+        let _ = _pin;
     }
 
     #[test]

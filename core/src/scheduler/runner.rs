@@ -21,8 +21,8 @@ use crate::cassandra::types::DataClass;
 use super::agent::PlanFormulator;
 use super::audit::{
     action_task_terminal, build_finalize_payload, build_lifecycle_payload, build_l1_write_payload,
-    compute_duration_ms, TaskFinalizeStats, ACTION_L1_PROMOTED, ACTION_TASK_FINALIZE,
-    ACTION_TASK_RUNNING, SCHEDULER_AUDIT_ACTOR,
+    build_l3_write_payload, compute_duration_ms, TaskFinalizeStats, ACTION_L1_PROMOTED,
+    ACTION_L3_CRYSTALLISED, ACTION_TASK_FINALIZE, ACTION_TASK_RUNNING, SCHEDULER_AUDIT_ACTOR,
 };
 use super::inner_loop::{
     run_to_terminal, ClassificationFloorSource, InnerLoopResult, Outcome, StepDispatcher,
@@ -238,6 +238,14 @@ async fn drain_lane(
         if let Some(insight) = result.terminal_l1_insight.as_deref() {
             write_l1_promoted_row(pool, &*entity_extractor, claimed.id, insight).await;
         }
+
+        // Agent-raised L3 skill crystallisation. Best-effort, same
+        // posture as the L1 hook. terminal_l3_skill is Some only on
+        // Outcome::Completed + dispatch_count >= 1 (the grounding gate);
+        // all other outcomes leave it None, so this is a no-op for them.
+        if let Some(skill) = result.terminal_l3_skill.as_ref() {
+            write_l3_crystallised_row(pool, claimed.id, skill).await;
+        }
     }
 }
 
@@ -339,6 +347,60 @@ async fn write_l1_promoted_row(pool: &PgPool, extractor: &dyn EntityExtractor, t
     }
 }
 
+/// Crystallise the agent-raised L3 skill + emit one `actor='scheduler'
+/// action='l3.crystallised'` audit row. Best-effort: errors (validation
+/// or DB) are logged at WARN and swallowed — the task is already
+/// finalized; the L3 row + audit row are observability aids, not
+/// correctness signals.
+async fn write_l3_crystallised_row(
+    pool: &PgPool,
+    task_id: i64,
+    skill: &crate::cassandra::types::L3SkillCandidate,
+) {
+    use crate::memory::l3_crystallise::{
+        compute_template_sha256, crystallise_l3, validate_l3_skill, L3Error, L3Source,
+    };
+
+    let source = L3Source::AgentRaised { task_id };
+    let outcome = match crystallise_l3(pool, skill, source.clone()).await {
+        Ok(o) => o,
+        Err(L3Error::Validation(msg)) => {
+            tracing::warn!(
+                task_id, error = %msg,
+                "agent-raised L3 crystallisation rejected on validation (skipping audit row)"
+            );
+            return;
+        }
+        Err(L3Error::Db(e)) => {
+            tracing::warn!(
+                task_id, error = %e,
+                "agent-raised L3 crystallisation DB error (skipping audit row)"
+            );
+            return;
+        }
+    };
+
+    // Recompute over the SAME normalised candidate the writer stored, so
+    // the audited body_sha256 + skill_name match the stored row exactly.
+    // crystallise_l3 already validated successfully above, so this
+    // re-validation cannot fail; the Err arm is defensive/unreachable.
+    let normalised = match validate_l3_skill(skill) {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    let body_sha256 = compute_template_sha256(&normalised);
+    let payload = build_l3_write_payload(&outcome, &source, &normalised.name, &body_sha256);
+
+    if let Err(e) = hhagent_db::audit::insert(
+        pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_CRYSTALLISED, payload,
+    ).await {
+        tracing::warn!(
+            task_id, error = %e,
+            "audit insert for scheduler l3.crystallised row failed (best-effort)"
+        );
+    }
+}
+
 async fn run_one(
     pool: &PgPool,
     formulator: Arc<dyn PlanFormulator>,
@@ -431,6 +493,7 @@ fn failed_result(detail: String) -> InnerLoopResult {
         plan_count: 0,
         dispatch_count: 0,
         terminal_l1_insight: None,
+        terminal_l3_skill: None,
     }
 }
 

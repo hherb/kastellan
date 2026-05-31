@@ -153,6 +153,7 @@ fn task_complete_plan(body: &str) -> Plan {
         refused: None,
         floor_request: None,
         l1_insight: None,
+        l3_skill: None,
     }
 }
 
@@ -174,6 +175,7 @@ fn one_step_plan(tool: &str, method: &str) -> Plan {
         refused: None,
         floor_request: None,
         l1_insight: None,
+        l3_skill: None,
     }
 }
 

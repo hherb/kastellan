@@ -28,6 +28,11 @@
 //!   `skipped_duplicate`); `list` prints the in-prompt slice by
 //!   default, or every L1 row with `--all`.
 //!
+//! * `memory l3 list|remove` — operator-facing inspection + pruning of
+//!   layer-3 (crystallised skill) memories. Skills are agent-crystallised,
+//!   never operator-authored, so there is no `add`. `remove` emits one
+//!   `actor='cli' action='l3.removed'` audit row.
+//!
 //! * `entities list|show|approve|reject|merge` — operator review CLI
 //!   for the quarantine-by-default entities table populated by the
 //!   GLiNER-Relex extractor.
@@ -72,6 +77,8 @@
 //! hhagent-cli memory l1 add    <body>
 //! hhagent-cli memory l1 list   [--all]
 //! hhagent-cli memory l1 remove <id>
+//! hhagent-cli memory l3 list
+//! hhagent-cli memory l3 remove <id>
 //! hhagent-cli entities list      [--kind K] [--state quarantined|approved|any]
 //!                                [--limit N] [--since RFC3339] [--min-mentions N]
 //! hhagent-cli entities show      <id>
@@ -104,6 +111,7 @@
 //! * [`tasks`] — `tasks {list,status,cancel,fail,tail}`.
 //! * [`tools_allowlist`] — `tools allowlist {add,remove,list}`.
 //! * [`memory_l1`] — `memory l1 {add,list,remove}`.
+//! * [`memory_l3`] — `memory l3 {list,remove}`.
 //! * [`entities`] — `entities {list,show,approve,reject,merge}`. The
 //!   `kinds` arm delegates to [`entities_kinds`].
 //! * [`entities_kinds`] — `entities kinds {add,remove,list}`.
@@ -122,6 +130,7 @@ mod audit_tail;
 mod entities;
 mod entities_kinds;
 mod memory_l1;
+mod memory_l3;
 mod observation_replay;
 mod relations;
 mod relations_kinds;
@@ -177,6 +186,8 @@ usage:
     hhagent-cli memory l1 add    <body>
     hhagent-cli memory l1 list   [--all]
     hhagent-cli memory l1 remove <id>
+    hhagent-cli memory l3 list
+    hhagent-cli memory l3 remove <id>
     hhagent-cli entities list      [--kind K] [--state quarantined|approved|any]
                                    [--limit N] [--since RFC3339] [--min-mentions N]
     hhagent-cli entities show      <id>

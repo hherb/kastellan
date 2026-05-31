@@ -565,3 +565,36 @@ fn build_entities_merged_payload_has_exact_six_keys() {
     assert_eq!(v["links_retargeted"], 4);
     assert_eq!(v["links_dropped_as_duplicate"], 1);
 }
+
+// --- build_l3_write_payload -----------------------------------------
+
+#[test]
+fn build_l3_write_payload_inserted_agent_raised() {
+    use crate::memory::l3_crystallise::{L3Source, L3WriteOutcome};
+    let p = build_l3_write_payload(
+        &L3WriteOutcome::Inserted { memory_id: 11 },
+        &L3Source::AgentRaised { task_id: 42 },
+        "summarise_repo_readme",
+        "abc123",
+    );
+    let o = p.as_object().expect("object");
+    assert_eq!(o.get("source").unwrap(), "agent_raised");
+    assert_eq!(o.get("task_id").unwrap(), 42);
+    assert_eq!(o.get("skill_name").unwrap(), "summarise_repo_readme");
+    assert_eq!(o.get("action").unwrap(), "inserted");
+    assert_eq!(o.get("memory_id").unwrap(), 11);
+    assert_eq!(o.get("body_sha256").unwrap(), "abc123");
+    assert_eq!(o.len(), 6, "exactly 6 payload keys");
+}
+
+#[test]
+fn build_l3_write_payload_skipped_duplicate() {
+    use crate::memory::l3_crystallise::{L3Source, L3WriteOutcome};
+    let p = build_l3_write_payload(
+        &L3WriteOutcome::SkippedDuplicate { memory_id: 9 },
+        &L3Source::AgentRaised { task_id: 1 },
+        "n", "s",
+    );
+    assert_eq!(p.get("action").unwrap(), "skipped_duplicate");
+    assert_eq!(p.get("memory_id").unwrap(), 9);
+}
