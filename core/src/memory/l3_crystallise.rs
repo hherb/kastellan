@@ -22,8 +22,13 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 use crate::cassandra::types::L3SkillCandidate;
+use hhagent_db::memories::{insert_memory_at_layer, load_layer, Memory, MemoryLayer};
+use hhagent_db::DbError;
 
 /// Max bytes for the skill `name` (a stable identifier).
 pub const L3_MAX_NAME_BYTES: usize = 64;
@@ -349,8 +354,7 @@ pub fn compute_template_sha256(c: &L3SkillCandidate) -> String {
 /// `L3Source`'s serde `rename_all = "snake_case"` output. Cross-pinned
 /// by `build_l3_metadata_serde_agrees_with_l3_source`.
 ///
-/// Called by Task 4's `crystallise_l3` async writer (not yet in tree).
-#[allow(dead_code)]
+/// Called by [`crystallise_l3`].
 pub(crate) fn build_l3_metadata(
     source: &L3Source,
     candidate: &L3SkillCandidate,
@@ -387,6 +391,70 @@ pub(crate) fn build_l3_metadata(
         serde_json::to_value(candidate).expect("candidate serialises"),
     );
     serde_json::Value::Object(obj)
+}
+
+/// Crystallise a single L3 skill. Validates, computes the canonical
+/// SHA-256, EXISTS-checks against `layer = 3` rows by
+/// `metadata->>'body_sha256'`, inserts on miss with `body = description`
+/// and `trust: "untrusted"`. Idempotent on the template SHA.
+///
+/// **No entity auto-link** (unlike `promote_l1`): a skill's description
+/// is not an entity-bearing insight, and recall surfacing is out of
+/// scope this slice.
+pub async fn crystallise_l3(
+    pool: &PgPool,
+    candidate: &L3SkillCandidate,
+    source: L3Source,
+) -> Result<L3WriteOutcome, L3Error> {
+    let normalised = validate_l3_skill(candidate)?;
+    let body_sha256 = compute_template_sha256(&normalised);
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM memories \
+         WHERE layer = $1 AND metadata->>'body_sha256' = $2 \
+         LIMIT 1",
+    )
+    .bind(MemoryLayer::Skill.as_db())
+    .bind(&body_sha256)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        L3Error::Db(hhagent_db::DbError::Query(format!(
+            "crystallise_l3 EXISTS-check body_sha256={body_sha256}: {e}"
+        )))
+    })?;
+
+    if let Some(existing_id) = existing {
+        return Ok(L3WriteOutcome::SkippedDuplicate { memory_id: existing_id });
+    }
+
+    let created_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .expect("rfc3339 format");
+    let metadata = build_l3_metadata(&source, &normalised, &body_sha256, &created_at);
+
+    let new_id = insert_memory_at_layer(
+        pool,
+        &normalised.description, // the body is the human description
+        &metadata,
+        None, // no embedding for L3 v1
+        MemoryLayer::Skill,
+    )
+    .await?;
+
+    Ok(L3WriteOutcome::Inserted { memory_id: new_id })
+}
+
+/// Operator-facing list view: every row at `layer = 3`, newest-first.
+pub async fn list_l3(pool: &PgPool) -> Result<Vec<Memory>, DbError> {
+    load_layer(pool, MemoryLayer::Skill, usize::MAX).await
+}
+
+/// Operator-facing remove, layer-guarded via
+/// `hhagent_db::memories::delete_memory_at_layer` (cannot delete an
+/// L0/L1/L2 row even on a typoed id). Returns `true` iff a row was deleted.
+pub async fn remove_l3(pool: &PgPool, id: i64) -> Result<bool, DbError> {
+    hhagent_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Skill).await
 }
 
 #[cfg(test)]
@@ -577,5 +645,26 @@ mod tests {
             "2026-05-31T00:00:00Z",
         );
         assert_eq!(m.get("source").unwrap().as_str().unwrap(), "agent_raised");
+    }
+
+    #[test]
+    fn crystallise_l3_signature_compile_pin() {
+        fn _pin<'a>(
+            pool: &'a sqlx::PgPool,
+            c: &'a L3SkillCandidate,
+            source: L3Source,
+        ) -> impl std::future::Future<Output = Result<L3WriteOutcome, L3Error>> + 'a {
+            crystallise_l3(pool, c, source)
+        }
+        let _ = _pin;
+    }
+
+    #[test]
+    fn list_remove_signature_compile_pins() {
+        fn _list<'a>(p: &'a sqlx::PgPool)
+            -> impl std::future::Future<Output = Result<Vec<Memory>, DbError>> + 'a { list_l3(p) }
+        fn _remove<'a>(p: &'a sqlx::PgPool, id: i64)
+            -> impl std::future::Future<Output = Result<bool, DbError>> + 'a { remove_l3(p, id) }
+        let _ = (_list, _remove);
     }
 }
