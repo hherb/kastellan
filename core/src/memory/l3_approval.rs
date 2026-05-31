@@ -12,6 +12,9 @@
 
 use std::collections::BTreeSet;
 
+use crate::cassandra::types::L3SkillCandidate;
+use crate::memory::l3_crystallise::validate_l3_skill;
+
 /// Trust level of a crystallised L3 skill, stored as the metadata
 /// `trust` string. Forward-compat: `Pinned` is defined but no command
 /// produces it in the gate slice.
@@ -49,9 +52,6 @@ impl SkillTrust {
 /// prefix (`secret://`). Walks objects + arrays but NOT object keys —
 /// only *values* can carry a baked-in secret. Mirrors the writer's
 /// `collect_placeholders` walker shape.
-// Used by `evaluate_approval` (Task 3); only the tests reference it until
-// the gate lands, so suppress the transient dead-code warning.
-#[cfg_attr(not(test), allow(dead_code))]
 fn scan_secret_refs(v: &serde_json::Value, out: &mut Vec<String>) {
     match v {
         serde_json::Value::String(s) => {
@@ -87,6 +87,103 @@ pub fn extract_tool_names(payload: &serde_json::Value) -> BTreeSet<String> {
         }
     }
     set
+}
+
+/// A single reason an approval was refused.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RejectReason {
+    /// The stored template failed `validate_l3_skill` re-validation
+    /// (e.g. hand-edited in SQL, or written by an older validator).
+    StructuralInvalid(String),
+    /// A step's parameters embed a baked-in `secret://` reference.
+    SecretRefPresent { step: usize, found: String },
+    /// A step names a tool the running daemon did not register.
+    UnknownTool { tool: String },
+    /// No `registry.loaded` snapshot exists, so tool existence could not
+    /// be established. Constructed by the CLI orchestration, NOT by
+    /// `evaluate_approval` (which only sees a `known_tools` set).
+    NoRegistrySnapshot,
+}
+
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectReason::StructuralInvalid(m) => {
+                write!(f, "structural validation failed: {m}")
+            }
+            RejectReason::SecretRefPresent { step, found } => write!(
+                f,
+                "step {step} embeds a secret reference '{found}' \
+                 (skills must not carry baked-in secrets)"
+            ),
+            RejectReason::UnknownTool { tool } => {
+                write!(f, "tool '{tool}' is not registered by the running daemon")
+            }
+            RejectReason::NoRegistrySnapshot => write!(
+                f,
+                "no registry.loaded snapshot found; start the daemon once \
+                 so the tool registry is recorded"
+            ),
+        }
+    }
+}
+
+/// The gate's verdict.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApprovalDecision {
+    Approve,
+    Reject { reasons: Vec<RejectReason> },
+}
+
+impl ApprovalDecision {
+    pub fn is_approve(&self) -> bool {
+        matches!(self, ApprovalDecision::Approve)
+    }
+}
+
+/// Decide whether a stored skill template may be promoted to
+/// `UserApproved`. **PURE** — no I/O. `known_tools` is the set of tool
+/// names the live daemon registered (from the latest `registry.loaded`
+/// snapshot); an empty set is fail-closed (every step tool is unknown).
+///
+/// Checks, collecting ALL reasons so the operator sees every problem:
+/// 1. structural re-validation (short-circuits — later checks assume a
+///    well-formed template);
+/// 2. baked-in `secret://` refs in step parameters (one reason per
+///    occurrence, with the step index);
+/// 3. tool existence (one reason per distinct unknown tool).
+pub fn evaluate_approval(
+    template: &L3SkillCandidate,
+    known_tools: &BTreeSet<String>,
+) -> ApprovalDecision {
+    if let Err(e) = validate_l3_skill(template) {
+        return ApprovalDecision::Reject {
+            reasons: vec![RejectReason::StructuralInvalid(e.to_string())],
+        };
+    }
+
+    let mut reasons = Vec::new();
+
+    for (i, step) in template.steps.iter().enumerate() {
+        let mut found = Vec::new();
+        scan_secret_refs(&step.parameters, &mut found);
+        for f in found {
+            reasons.push(RejectReason::SecretRefPresent { step: i, found: f });
+        }
+    }
+
+    let mut unknown_seen: BTreeSet<&str> = BTreeSet::new();
+    for step in &template.steps {
+        if !known_tools.contains(&step.tool) && unknown_seen.insert(step.tool.as_str()) {
+            reasons.push(RejectReason::UnknownTool { tool: step.tool.clone() });
+        }
+    }
+
+    if reasons.is_empty() {
+        ApprovalDecision::Approve
+    } else {
+        ApprovalDecision::Reject { reasons }
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +241,112 @@ mod tests {
         assert!(extract_tool_names(&serde_json::json!({})).is_empty());
         assert!(extract_tool_names(&serde_json::json!({"tools": "notarray"})).is_empty());
         assert!(extract_tool_names(&serde_json::json!({"tools": [{"binary": "/x"}]})).is_empty());
+    }
+
+    fn valid_template() -> L3SkillCandidate {
+        use crate::cassandra::types::{L3Param, L3TemplateStep};
+        L3SkillCandidate {
+            name: "summarise_repo_readme".into(),
+            description: "Read a repo README and summarise".into(),
+            parameters: vec![L3Param { name: "repo_path".into(), description: "abs path".into() }],
+            steps: vec![L3TemplateStep {
+                tool: "shell-exec".into(),
+                method: "shell.exec".into(),
+                parameters: serde_json::json!({ "argv": ["cat", "{{repo_path}}/README.md"] }),
+            }],
+        }
+    }
+
+    fn tools(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn gate_approves_clean_skill_with_known_tool() {
+        let d = evaluate_approval(&valid_template(), &tools(&["shell-exec"]));
+        assert_eq!(d, ApprovalDecision::Approve);
+    }
+
+    #[test]
+    fn gate_rejects_unknown_tool() {
+        let d = evaluate_approval(&valid_template(), &tools(&["gliner-relex"]));
+        assert_eq!(
+            d,
+            ApprovalDecision::Reject { reasons: vec![RejectReason::UnknownTool { tool: "shell-exec".into() }] }
+        );
+    }
+
+    #[test]
+    fn gate_empty_known_tools_rejects_every_tool() {
+        let d = evaluate_approval(&valid_template(), &BTreeSet::new());
+        assert!(matches!(d, ApprovalDecision::Reject { .. }));
+    }
+
+    #[test]
+    fn gate_rejects_baked_in_secret_ref() {
+        use crate::cassandra::types::{L3Param, L3TemplateStep};
+        let t = L3SkillCandidate {
+            name: "leaky".into(),
+            description: "carries a secret".into(),
+            parameters: vec![L3Param { name: "repo_path".into(), description: "p".into() }],
+            steps: vec![L3TemplateStep {
+                tool: "shell-exec".into(),
+                method: "shell.exec".into(),
+                parameters: serde_json::json!({ "argv": ["cat", "{{repo_path}}"], "tok": "secret://abc12345" }),
+            }],
+        };
+        let d = evaluate_approval(&t, &tools(&["shell-exec"]));
+        assert_eq!(
+            d,
+            ApprovalDecision::Reject {
+                reasons: vec![RejectReason::SecretRefPresent { step: 0, found: "secret://abc12345".into() }]
+            }
+        );
+    }
+
+    #[test]
+    fn gate_accumulates_secret_and_unknown_tool() {
+        use crate::cassandra::types::{L3Param, L3TemplateStep};
+        let t = L3SkillCandidate {
+            name: "leaky_unknown".into(),
+            description: "both problems".into(),
+            parameters: vec![L3Param { name: "p".into(), description: "d".into() }],
+            steps: vec![L3TemplateStep {
+                tool: "ghost-tool".into(),
+                method: "m.x".into(),
+                parameters: serde_json::json!({ "a": "{{p}}", "tok": "secret://deadbeef" }),
+            }],
+        };
+        let d = evaluate_approval(&t, &tools(&["shell-exec"]));
+        match d {
+            ApprovalDecision::Reject { reasons } => {
+                assert!(reasons.contains(&RejectReason::SecretRefPresent { step: 0, found: "secret://deadbeef".into() }));
+                assert!(reasons.contains(&RejectReason::UnknownTool { tool: "ghost-tool".into() }));
+                assert_eq!(reasons.len(), 2);
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gate_structurally_invalid_short_circuits() {
+        // A template the writer's validator rejects (empty name) → exactly
+        // one StructuralInvalid reason, no secret/tool reasons appended.
+        let mut t = valid_template();
+        t.name = "".into();
+        let d = evaluate_approval(&t, &BTreeSet::new());
+        match d {
+            ApprovalDecision::Reject { reasons } => {
+                assert_eq!(reasons.len(), 1);
+                assert!(matches!(reasons[0], RejectReason::StructuralInvalid(_)));
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reject_reason_renders_human_readable() {
+        assert!(RejectReason::NoRegistrySnapshot.to_string().contains("registry"));
+        assert!(RejectReason::UnknownTool { tool: "x".into() }.to_string().contains("not registered"));
     }
 }
