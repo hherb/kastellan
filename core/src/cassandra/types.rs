@@ -89,6 +89,42 @@ pub struct RefusedReason {
     pub reason:    String,
 }
 
+/// One declared parameter of an [`L3SkillCandidate`]. The skill's
+/// step `parameters` abstract task-specific values behind `{{name}}`
+/// placeholders that reference these.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct L3Param {
+    pub name: String,
+    pub description: String,
+}
+
+/// One step of an [`L3SkillCandidate`] template — a parameterised
+/// JSON-RPC tool call. `parameters` is a JSON object that may embed
+/// `{{param_name}}` placeholders.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct L3TemplateStep {
+    pub tool: String,
+    pub method: String,
+    pub parameters: serde_json::Value,
+}
+
+/// Agent-emitted candidate for an L3 (skill-layer) memory. The agent
+/// emits this on a TERMINAL plan, abstracting the multi-step trajectory
+/// it just executed into a reusable, parameterised tool-call template.
+///
+/// Validation rules + caps live in [`crate::memory::l3_crystallise`];
+/// a candidate that fails validation causes the crystallise write to be
+/// skipped (a `tracing::warn!` is emitted by
+/// `runner::write_l3_crystallised_row` but no audit row is written).
+/// Stored skills are non-executable in this slice (no invocation path).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct L3SkillCandidate {
+    pub name: String,
+    pub description: String,
+    pub parameters: Vec<L3Param>,
+    pub steps: Vec<L3TemplateStep>,
+}
+
 /// One agent-formulated plan, reviewed as a unit.
 ///
 /// The terminal signal: `decision == "task_complete"` AND
@@ -141,6 +177,18 @@ pub struct Plan {
     /// `runner::write_l1_promoted_row` but no audit row is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l1_insight: Option<String>,
+    /// Agent-raised L3 skill candidate. Only honoured on terminal
+    /// plans that reach `Outcome::Completed` AND whose task executed
+    /// >= 1 tool step (grounding gate in `scheduler::inner_loop`).
+    ///
+    /// Captured into `InnerLoopResult.terminal_l3_skill`.
+    /// Written to `MemoryLayer::Skill` by `runner::drain_lane` with
+    /// provenance `L3Source::AgentRaised { task_id }`, trust `"untrusted"`.
+    ///
+    /// Round-trips through serde with `skip_serializing_if = Option::is_none`
+    /// so existing fixtures stay byte-stable when the agent doesn't emit one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l3_skill: Option<L3SkillCandidate>,
 }
 
 // Invariant (enforced by Stage 0 / `DeterministicPolicy`, see
@@ -180,6 +228,18 @@ impl Plan {
     pub fn completion_insight(&self) -> Option<&str> {
         if self.is_terminal() {
             self.l1_insight.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Returns `Some(candidate)` iff this plan would produce
+    /// `Outcome::Completed` AND carries an `l3_skill`. The inner loop
+    /// ANDs in the `dispatch_count >= 1` grounding gate at the call
+    /// site. Mirrors [`Plan::completion_insight`].
+    pub fn completion_skill(&self) -> Option<&L3SkillCandidate> {
+        if self.is_terminal() {
+            self.l3_skill.as_ref()
         } else {
             None
         }
@@ -243,6 +303,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         assert!(p.is_terminal(), "all three present");
 
@@ -277,6 +338,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
 
@@ -311,6 +373,7 @@ mod tests {
             }),
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let p2: Plan = serde_json::from_str(&s).unwrap();
@@ -329,6 +392,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -356,6 +420,7 @@ mod tests {
             refused:       None,
             floor_request: None,
             l1_insight:    None,
+            l3_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(
@@ -378,6 +443,7 @@ mod tests {
             refused:       None,
             floor_request: Some(DataClass::ClinicalConfidential),
             l1_insight:    None,
+            l3_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(
@@ -401,6 +467,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
 
         // Neither
@@ -452,6 +519,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: Some("shell-exec /bin/ls works for dirs".into()),
+            l3_skill: None,
         };
         assert_eq!(plan.completion_insight(), Some("shell-exec /bin/ls works for dirs"));
     }
@@ -468,6 +536,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: Some("foo".into()),
+            l3_skill: None,
         };
         assert!(plan.completion_insight().is_none());
     }
@@ -484,6 +553,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         assert!(plan.completion_insight().is_none());
     }
@@ -500,6 +570,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let s = serde_json::to_string(&plan).expect("serialize");
         assert!(!s.contains("l1_insight"), "None should be omitted via skip_serializing_if; got: {s}");
@@ -521,6 +592,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: Some("a useful insight".into()),
+            l3_skill: None,
         };
         let s = serde_json::to_string(&plan).expect("serialize");
         assert!(s.contains("\"l1_insight\":\"a useful insight\""), "Some value should serialize; got: {s}");
@@ -541,7 +613,107 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: Some("insight".into()),
+            l3_skill: None,
         };
         assert!(plan.completion_insight().is_none());
+    }
+
+    // ── L3 helpers ────────────────────────────────────────────────────────────
+
+    /// Build a minimal terminal `Plan` (decision == DECISION_TERMINAL,
+    /// empty steps, result present). Used by L3 tests below.
+    fn make_terminal_plan() -> Plan {
+        Plan {
+            context: "ctx".into(),
+            decision: DECISION_TERMINAL.into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": "done"})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+            l3_skill: None,
+        }
+    }
+
+    /// Build a non-terminal `Plan` (decision != DECISION_TERMINAL, has steps, no result). Used by L3 tests.
+    fn make_action_plan() -> Plan {
+        Plan {
+            context: "ctx".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![PlannedStep {
+                tool: "shell-exec".into(),
+                method: "shell.exec".into(),
+                parameters: serde_json::json!({}),
+                returns: "stdout".into(),
+                done_when: "exit 0".into(),
+                classification: DataClass::Public,
+            }],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+            l3_skill: None,
+        }
+    }
+
+    // ── L3SkillCandidate / completion_skill() tests ────────────────────────
+
+    #[test]
+    fn completion_skill_some_on_terminal_with_skill() {
+        let mut plan = make_terminal_plan();
+        plan.l3_skill = Some(L3SkillCandidate {
+            name: "summarise_repo_readme".into(),
+            description: "Read a repo README and summarise".into(),
+            parameters: vec![L3Param { name: "repo_path".into(), description: "abs path".into() }],
+            steps: vec![L3TemplateStep {
+                tool: "shell-exec".into(),
+                method: "shell.exec".into(),
+                parameters: serde_json::json!({ "argv": ["cat", "{{repo_path}}/README.md"] }),
+            }],
+        });
+        let skill = plan.completion_skill().expect("should be Some on terminal");
+        assert_eq!(skill.name, "summarise_repo_readme");
+        assert_eq!(skill.steps.len(), 1);
+    }
+
+    #[test]
+    fn completion_skill_none_when_not_terminal() {
+        let mut plan = make_action_plan();
+        plan.l3_skill = Some(L3SkillCandidate {
+            name: "x".into(), description: "y".into(), parameters: vec![], steps: vec![],
+        });
+        assert!(plan.completion_skill().is_none());
+    }
+
+    #[test]
+    fn completion_skill_none_when_unset() {
+        let plan = make_terminal_plan();
+        assert!(plan.completion_skill().is_none());
+    }
+
+    #[test]
+    fn l3_skill_none_is_omitted_from_wire_form() {
+        let plan = make_terminal_plan(); // l3_skill: None
+        let v = serde_json::to_value(&plan).expect("serialize");
+        assert!(v.get("l3_skill").is_none(), "skip_serializing_if must omit None");
+    }
+
+    #[test]
+    fn l3_skill_candidate_round_trips_through_serde() {
+        let c = L3SkillCandidate {
+            name: "n".into(), description: "d".into(),
+            parameters: vec![L3Param { name: "p".into(), description: "pd".into() }],
+            steps: vec![L3TemplateStep {
+                tool: "shell-exec".into(), method: "shell.exec".into(),
+                parameters: serde_json::json!({ "argv": ["echo", "{{p}}"] }),
+            }],
+        };
+        let v = serde_json::to_value(&c).expect("ser");
+        let back: L3SkillCandidate = serde_json::from_value(v).expect("de");
+        assert_eq!(c, back);
     }
 }

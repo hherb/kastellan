@@ -267,6 +267,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         }
     }
 
@@ -311,6 +312,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let meta = FormulationMeta {
             prompt_sha256: "deadbeef".into(),

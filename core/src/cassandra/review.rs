@@ -177,6 +177,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         }
     }
 
@@ -288,6 +289,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let v = dp.review(&plan, &ctx("anything")).await;
         assert_eq!(v, Verdict::Approve);
@@ -307,6 +309,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let ctx = ReviewStageContext {
             task_id: 1,
@@ -347,6 +350,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let ctx = ReviewStageContext {
             task_id: 1,
@@ -392,6 +396,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let mk_ctx = |floor| ReviewStageContext {
             task_id: 1,
@@ -458,6 +463,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         };
         let v = dp.review(&plan, &ctx("anything")).await; // floor=Public (default from ctx helper)
         match v {

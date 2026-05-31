@@ -255,6 +255,7 @@ mod tests {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         }
     }
 

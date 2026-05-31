@@ -118,6 +118,7 @@ fn agent_floor_request_higher_than_producer_elevates_ctx() {
         data_ceiling: DataClass::ClinicalConfidential, refused: None,
         floor_request: Some(DataClass::ClinicalConfidential),
         l1_insight: None,
+        l3_skill: None,
     };
     let raised = apply_floor_raise(&mut c, &plan);
     assert!(raised);
@@ -139,6 +140,7 @@ fn agent_floor_request_lower_than_producer_is_ignored() {
         // floor_request below current floor — must NOT lower:
         floor_request: Some(DataClass::Public),
         l1_insight: None,
+        l3_skill: None,
     };
     let raised = apply_floor_raise(&mut c, &plan);
     assert!(!raised, "lower floor_request must be ignored");
@@ -159,6 +161,7 @@ fn agent_floor_request_equal_to_producer_is_no_op() {
         data_ceiling: DataClass::Personal, refused: None,
         floor_request: Some(DataClass::Personal),
         l1_insight: None,
+        l3_skill: None,
     };
     let raised = apply_floor_raise(&mut c, &plan);
     assert!(!raised, "equal-rank floor_request must be a no-op");
@@ -180,6 +183,7 @@ fn agent_floor_request_none_is_no_op() {
         data_ceiling: DataClass::Public, refused: None,
         floor_request: None,
         l1_insight: None,
+        l3_skill: None,
     };
     let raised = apply_floor_raise(&mut c, &plan);
     assert!(!raised);
@@ -202,6 +206,7 @@ fn task_context_plans_so_far_summary_is_compact() {
             refused: None,
             floor_request: None,
             l1_insight: None,
+            l3_skill: None,
         },
         vec![StepOutcome::Ok(serde_json::json!("x")), StepOutcome::Err {
             code: "POLICY_DENIED".into(), detail: "no".into(),
