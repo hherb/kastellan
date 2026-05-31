@@ -141,12 +141,6 @@ pub enum ApprovalDecision {
     Reject { reasons: Vec<RejectReason> },
 }
 
-impl ApprovalDecision {
-    pub fn is_approve(&self) -> bool {
-        matches!(self, ApprovalDecision::Approve)
-    }
-}
-
 /// Decide whether a stored skill template may be promoted to
 /// `UserApproved`. **PURE** — no I/O. `known_tools` is the set of tool
 /// names the live daemon registered (from the latest `registry.loaded`
