@@ -115,6 +115,14 @@ pub const ACTION_L1_PROMOTED: &str = "l1.promoted";
 pub const ACTION_L3_CRYSTALLISED: &str = "l3.crystallised";
 /// Action verb for the operator `memory l3 remove` audit row.
 pub const ACTION_L3_REMOVED: &str = "l3.removed";
+/// Action verb for the operator `memory l3 approve` success row.
+pub const ACTION_L3_APPROVED: &str = "l3.approved";
+/// Action verb for the operator `memory l3 approve` rejection row (the
+/// gate refused). Audited because an operator attempting to approve a
+/// skill carrying a `secret://` ref is a security-relevant event.
+pub const ACTION_L3_APPROVE_REJECTED: &str = "l3.approve_rejected";
+/// Action verb for the operator `memory l3 revoke` row (trust → untrusted).
+pub const ACTION_L3_REVOKED: &str = "l3.revoked";
 
 /// `action` value written when the lane runner claims a `pending` task
 /// and transitions it to `running`. Fires exactly once per `claim_one`
@@ -453,6 +461,50 @@ pub fn build_l3_write_payload(
     obj.insert("memory_id".into(), Value::Number(serde_json::Number::from(memory_id)));
     obj.insert("body_sha256".into(), Value::String(body_sha256.into()));
     Value::Object(obj)
+}
+
+/// Payload for an `l3.approved` row. `tools` is the template's distinct
+/// step tools the gate verified against the registry snapshot.
+pub fn build_l3_approved_payload(
+    memory_id: i64,
+    skill_name: &str,
+    body_sha256: &str,
+    tools: &[String],
+) -> Value {
+    serde_json::json!({
+        "memory_id": memory_id,
+        "skill_name": skill_name,
+        "body_sha256": body_sha256,
+        "tools": tools,
+    })
+}
+
+/// Payload for an `l3.approve_rejected` row. `skill_name`/`body_sha256`
+/// are omitted when the row/template could not be parsed.
+pub fn build_l3_approve_rejected_payload(
+    memory_id: i64,
+    skill_name: Option<&str>,
+    body_sha256: Option<&str>,
+    reasons: &[String],
+) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("memory_id".into(), Value::Number(serde_json::Number::from(memory_id)));
+    if let Some(n) = skill_name {
+        obj.insert("skill_name".into(), Value::String(n.into()));
+    }
+    if let Some(s) = body_sha256 {
+        obj.insert("body_sha256".into(), Value::String(s.into()));
+    }
+    obj.insert(
+        "reasons".into(),
+        Value::Array(reasons.iter().map(|r| Value::String(r.clone())).collect()),
+    );
+    Value::Object(obj)
+}
+
+/// Payload for an `l3.revoked` row.
+pub fn build_l3_revoked_payload(memory_id: i64, updated: bool) -> Value {
+    serde_json::json!({ "memory_id": memory_id, "updated": updated })
 }
 
 /// Build the wire-stable payload for `actor='cli' action='entities.approved'`.
