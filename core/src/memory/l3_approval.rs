@@ -52,6 +52,12 @@ impl SkillTrust {
 /// prefix (`secret://`). Walks objects + arrays but NOT object keys —
 /// only *values* can carry a baked-in secret. Mirrors the writer's
 /// `collect_placeholders` walker shape.
+///
+/// The prefix match is intentionally looser than
+/// [`crate::secrets::substitute`]'s strict `secret://<8-hex>` validation: a
+/// *gate* must flag ANY `secret://`-prefixed leaf as suspicious regardless
+/// of hex validity. Do NOT tighten this to the strict form — doing so would
+/// let a malformed-but-secret-shaped ref slip past the gate (a bypass).
 fn scan_secret_refs(v: &serde_json::Value, out: &mut Vec<String>) {
     match v {
         serde_json::Value::String(s) => {
@@ -156,11 +162,14 @@ pub fn evaluate_approval(
     template: &L3SkillCandidate,
     known_tools: &BTreeSet<String>,
 ) -> ApprovalDecision {
-    if let Err(e) = validate_l3_skill(template) {
-        return ApprovalDecision::Reject {
-            reasons: vec![RejectReason::StructuralInvalid(e.to_string())],
-        };
-    }
+    let template = match validate_l3_skill(template) {
+        Ok(norm) => norm,
+        Err(e) => {
+            return ApprovalDecision::Reject {
+                reasons: vec![RejectReason::StructuralInvalid(e.to_string())],
+            }
+        }
+    };
 
     let mut reasons = Vec::new();
 
@@ -215,6 +224,14 @@ mod tests {
         scan_secret_refs(&v, &mut out);
         out.sort();
         assert_eq!(out, vec!["secret://abc12345".to_string(), "secret://deadbeef".to_string()]);
+    }
+
+    #[test]
+    fn scan_secret_refs_finds_ref_in_array_of_objects() {
+        let v = serde_json::json!({ "items": [{ "tok": "secret://abcd1234" }] });
+        let mut out = Vec::new();
+        scan_secret_refs(&v, &mut out);
+        assert_eq!(out, vec!["secret://abcd1234".to_string()]);
     }
 
     #[test]
@@ -326,6 +343,40 @@ mod tests {
             }
             other => panic!("expected Reject, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn gate_unknown_tool_in_multiple_steps_yields_one_reason() {
+        use crate::cassandra::types::{L3Param, L3TemplateStep};
+        // One declared param `p` referenced as `{{p}}` in BOTH steps keeps
+        // the closed-world structural check happy; both steps name the same
+        // unknown tool, so the gate must dedupe to ONE UnknownTool reason.
+        let t = L3SkillCandidate {
+            name: "double_ghost".into(),
+            description: "same unknown tool twice".into(),
+            parameters: vec![L3Param { name: "p".into(), description: "d".into() }],
+            steps: vec![
+                L3TemplateStep {
+                    tool: "ghost-tool".into(),
+                    method: "m.a".into(),
+                    parameters: serde_json::json!({ "a": "{{p}}" }),
+                },
+                L3TemplateStep {
+                    tool: "ghost-tool".into(),
+                    method: "m.b".into(),
+                    parameters: serde_json::json!({ "b": "{{p}}" }),
+                },
+            ],
+        };
+        // Sanity: structurally valid so we exercise the UnknownTool path.
+        assert!(validate_l3_skill(&t).is_ok());
+        let d = evaluate_approval(&t, &tools(&["shell-exec"]));
+        assert_eq!(
+            d,
+            ApprovalDecision::Reject {
+                reasons: vec![RejectReason::UnknownTool { tool: "ghost-tool".into() }]
+            }
+        );
     }
 
     #[test]
