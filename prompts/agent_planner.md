@@ -52,6 +52,7 @@ A plan is a JSON object with these fields, in order:
     "result":         null,
     "refused":        null,
     "l1_insight":     null,
+    "l3_skill":       null,
     "floor_request":  null,
     "data_ceiling":   "<Public | Personal | ClinicalConfidential | Secret>"
 }
@@ -71,6 +72,31 @@ TOUCHES). `floor_request` is the agent's view of how strictly the
 OUTPUTS should be governed.
 
 **Optional: `l1_insight`.** On a *terminal* plan (`decision: "task_complete"` with `steps: []`) you may include `l1_insight` as a single short bullet (≤ 300 characters, no newlines) capturing a **generalizable lesson** learned across this task — something useful for *future* tasks, not a summary of *this* task. Examples: "shell-exec /usr/bin/ls reliably enumerates dir contents", "tasks needing /etc/shadow access always POLICY_DENIED — escalate via human approval first". Omit the field if no generalizable lesson exists; false positives bloat the always-in-context insight block and degrade later planning. The field is dropped if the reviewer Blocks, Escalates, or if you self-refuse.
+
+**Optional: `l3_skill` (crystallise a reusable skill).** On a TERMINAL plan (`decision: "task_complete"`) that completed a **multi-step** task you expect to recur, you MAY emit an `l3_skill` object that abstracts the tool-call sequence you just ran into a reusable, parameterised template. Omit it (or set `null`) for trivial, one-off, or pure-text-answer tasks.
+
+Shape:
+
+- `name`: a snake_case identifier (`[a-z][a-z0-9_]*`, ≤ 64 chars), e.g. `summarise_repo_readme`.
+- `description`: one line (≤ 512 chars, no newlines) describing what the skill does.
+- `parameters`: the task-specific values you abstracted, each `{name, description}`. `name` is snake_case. Declare every value that would change between runs.
+- `steps`: the tool-call sequence (1–32 steps), each `{tool, method, parameters}`. In `parameters`, write `{{param_name}}` wherever a declared parameter's value belongs. Every `{{placeholder}}` must reference a declared parameter, and every declared parameter must be used at least once.
+
+Example:
+
+```json
+"l3_skill": {
+  "name": "summarise_repo_readme",
+  "description": "Read a repo's README and return a short summary",
+  "parameters": [{"name": "repo_path", "description": "absolute path to the repo"}],
+  "steps": [
+    {"tool": "shell-exec", "method": "shell.exec",
+     "parameters": {"argv": ["cat", "{{repo_path}}/README.md"]}}
+  ]
+}
+```
+
+Crystallised skills are stored for later operator review; they are NOT executed automatically. Emit at most one `l3_skill` per task.
 
 ## Terminating a task
 
