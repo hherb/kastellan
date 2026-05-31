@@ -299,6 +299,12 @@ async fn happy_path_one_plan_returns_completed() {
         payload.get("l1_insight").unwrap().is_null(),
         "ScriptedFormulator emits no l1_insight; payload should be JSON null"
     );
+
+    // l3_skill key: present as explicit null when the plan didn't emit one.
+    assert!(payload.as_object().unwrap().contains_key("l3_skill"),
+        "plan.formulate payload must include l3_skill key (got payload: {payload:?})");
+    assert_eq!(payload["l3_skill"], serde_json::Value::Null,
+        "ScriptedFormulator emits no l3_skill; payload should be JSON null");
 }
 
 /// (b) Plan 1 dispatches a step that fails (no entry in dispatcher
