@@ -350,6 +350,12 @@ pub fn compute_template_sha256(c: &L3SkillCandidate) -> String {
 /// `template` is the full normalised candidate (name/parameters/steps;
 /// the `description` is duplicated there + as the memory `body`).
 ///
+/// **`body_sha256` naming note:** unlike L1 (where it hashes the body),
+/// this is the *canonical-template* digest from
+/// [`compute_template_sha256`] — `sha256(canonical_json(candidate))`,
+/// NOT `sha256(body)`. The L1 key name is reused so the dedup
+/// EXISTS-check (`metadata->>'body_sha256'`) is layer-agnostic.
+///
 /// **Coupling note:** the literal `"agent_raised"` MUST match
 /// `L3Source`'s serde `rename_all = "snake_case"` output. Cross-pinned
 /// by `build_l3_metadata_serde_agrees_with_l3_source`.
