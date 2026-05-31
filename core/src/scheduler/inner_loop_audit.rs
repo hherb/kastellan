@@ -33,7 +33,7 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// Extracted from `write_audit_plan_formulate` so the wire shape is
 /// unit-testable without a live Postgres pool. The shape pins
 /// (in this file's `tests` module) defend against accidental drift —
-/// 24 keys for non-`CliInferred` sources, 25 when `CliInferred` carries
+/// 25 keys for non-`CliInferred` sources, 26 when `CliInferred` carries
 /// matched signals.
 ///
 /// Slice A (2026-05-15) added `plan` (full serialised Plan) +
@@ -64,6 +64,13 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// and `graph_seed_source` so the observation phase can audit which
 /// entity ids the gliner-relex extractor resolved for the graph lane
 /// and which extraction path produced them.
+///
+/// Slice G (2026-05-31) added `l3_skill` (compact `{name, step_count,
+/// param_count}` summary of the agent-raised L3 skill candidate on the
+/// terminal plan, or explicit JSON `null` when absent — mirrors the
+/// `l1_insight` / `refused` precedent). The full template lives in the
+/// crystallised memories row, not here. This brings the default-source
+/// key count to 25, and `CliInferred`+signals to 26.
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
@@ -123,6 +130,22 @@ pub(crate) fn build_plan_formulate_payload(
         "l1_insight".into(),
         match &plan.l1_insight {
             Some(s) => serde_json::Value::String(s.clone()),
+            None => serde_json::Value::Null,
+        },
+    );
+    // Slice G (l3-skill-crystallisation, 2026-05-31): compact summary of
+    // the agent-raised L3 skill candidate on the terminal plan. Explicit
+    // JSON null (not key-absent) so `WHERE payload ? 'l3_skill'` finds
+    // every row — mirrors the `l1_insight` / `refused` precedent. The
+    // full template lives in the crystallised memories row, not here.
+    obj.insert(
+        "l3_skill".into(),
+        match &plan.l3_skill {
+            Some(s) => serde_json::json!({
+                "name": s.name,
+                "step_count": s.steps.len(),
+                "param_count": s.parameters.len(),
+            }),
             None => serde_json::Value::Null,
         },
     );
@@ -352,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_pins_twenty_four_keys_for_default_source() {
+    fn build_plan_formulate_payload_pins_twenty_five_keys_for_default_source() {
         // Slice D (2026-05-17, recall-lane wiring) bumped the
         // default-source key count from 17 to 20 by adding
         // recalled_memory_ids, recall_count, recall_query_sha256.
@@ -360,6 +383,8 @@ mod tests {
         // adding l1_insight.
         // Slice F (2026-05-19, entity-extraction v2) bumps to 24 by
         // adding graph_seed_entity_ids, graph_seed_count, graph_seed_source.
+        // Slice G (2026-05-31, l3-skill-crystallisation) bumps to 25 by
+        // adding l3_skill.
         let meta = FormulationMeta {
             recalled_memory_ids: vec![100, 200],
             recall_count: 2,
@@ -380,11 +405,11 @@ mod tests {
             "plan", "classification_floor", "classification_floor_source",
             "system_prompt_sha256", "l0_count", "l1_count",
             "recalled_memory_ids", "recall_count", "recall_query_sha256",
-            "l1_insight",
+            "l1_insight", "l3_skill",
             "graph_seed_entity_ids", "graph_seed_count", "graph_seed_source",
         ].into_iter().collect();
         assert_eq!(got, expected,
-            "default-source payload must carry exactly 24 keys; diff:\n\
+            "default-source payload must carry exactly 25 keys; diff:\n\
              missing = {:?}\nextra = {:?}",
             expected.difference(&got).collect::<Vec<_>>(),
             got.difference(&expected).collect::<Vec<_>>(),
@@ -392,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_cli_inferred_source_has_25_keys_with_signals() {
+    fn build_plan_formulate_payload_cli_inferred_source_has_26_keys_with_signals() {
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::ClinicalConfidential,
             ClassificationFloorSource::CliInferred,
@@ -400,8 +425,8 @@ mod tests {
             &make_text_plan(), &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload object");
-        assert_eq!(obj.len(), 25,
-            "cli_inferred + signals must carry 25 keys (24 default + signals); got {} keys: {:?}",
+        assert_eq!(obj.len(), 26,
+            "cli_inferred + signals must carry 26 keys (25 default + signals); got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -483,7 +508,7 @@ mod tests {
             &[], &make_text_plan(), &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 24);
+        assert_eq!(obj.len(), 25);
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
         assert!(obj.get("classification_floor_signals").is_none(),
             "signals key must be ABSENT when source is not cli_inferred");
@@ -505,8 +530,8 @@ mod tests {
             &plan, &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 24,
-            "agent_raised should have 24 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj.len(), 25,
+            "agent_raised should have 25 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
         assert!(obj.get("classification_floor_signals").is_none());
     }
@@ -539,5 +564,35 @@ mod tests {
             payload.get("l1_insight").expect("l1_insight key must be present even when None"),
             &serde_json::Value::Null,
         );
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_l3_skill_compact_shape() {
+        use crate::cassandra::types::{L3Param, L3SkillCandidate, L3TemplateStep};
+        let mut plan = make_text_plan();
+        plan.l3_skill = Some(L3SkillCandidate {
+            name: "summarise_repo_readme".into(),
+            description: "d".into(),
+            parameters: vec![L3Param { name: "repo_path".into(), description: "p".into() }],
+            steps: vec![L3TemplateStep {
+                tool: "shell-exec".into(), method: "shell.exec".into(),
+                parameters: serde_json::json!({ "argv": ["cat", "{{repo_path}}"] }),
+            }],
+        });
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public, ClassificationFloorSource::Default,
+            &[], &plan, &make_default_meta(),
+        );
+        assert_eq!(payload["l3_skill"], serde_json::json!({
+            "name": "summarise_repo_readme", "step_count": 1, "param_count": 1
+        }));
+
+        // None case: explicit JSON null, not key-absent.
+        let none_payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public, ClassificationFloorSource::Default,
+            &[], &make_text_plan(), &make_default_meta(),
+        );
+        assert_eq!(none_payload["l3_skill"], serde_json::Value::Null);
+        assert!(none_payload.as_object().unwrap().contains_key("l3_skill"));
     }
 }
