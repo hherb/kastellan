@@ -61,6 +61,87 @@ pub fn is_surfaceable(trust: SkillTrust) -> bool {
     matches!(trust, SkillTrust::UserApproved | SkillTrust::Pinned)
 }
 
+/// Default upper bound on the number of L3 skills surfaced into a
+/// prompt. Tighter than L1's 32 because approved skills are
+/// operator-gated and therefore few; a smaller list keeps the
+/// `<skills>` block scannable.
+pub const L3_SKILLS_CAP_ROWS: usize = 16;
+
+/// Default upper bound on the cumulative *rendered* byte length of the
+/// surfaced skills. Matches L1's 4 KiB "fits in context unconditionally"
+/// budget. Bounds actual prompt bytes because the accumulator measures
+/// [`render_skill_entry`] output, which is exactly what the assembler
+/// emits.
+pub const L3_SKILLS_CAP_BYTES: usize = 4096;
+
+/// Render a single skill into its `<skills>`-block lines:
+///
+/// ```text
+/// - <name>: <description>
+///   params: <p0.name> (<p0.description>), <p1.name> (<p1.description>)
+/// ```
+///
+/// The `params:` line is omitted entirely for a zero-parameter skill.
+/// PURE; the cap accumulator and the assembler both call this so the
+/// byte budget and the emitted prompt never diverge.
+pub fn render_skill_entry(skill: &SurfacedSkill) -> String {
+    let mut out = String::new();
+    out.push_str("- ");
+    out.push_str(&skill.name);
+    out.push_str(": ");
+    out.push_str(&skill.description);
+    out.push('\n');
+    if !skill.params.is_empty() {
+        out.push_str("  params: ");
+        let rendered: Vec<String> = skill
+            .params
+            .iter()
+            .map(|p| format!("{} ({})", p.name, p.description))
+            .collect();
+        out.push_str(&rendered.join(", "));
+        out.push('\n');
+    }
+    out
+}
+
+/// Apply the row + rendered-byte caps to a trust-filtered, parsed skill
+/// list (newest-first on input). PURE.
+///
+/// Row cap first, then a byte-accumulate loop over [`render_skill_entry`]
+/// length: pushing the next entry stops once it would make the
+/// cumulative rendered length *strictly exceed* `cap_bytes` (inclusive
+/// boundary — an entry that fills the budget exactly still fits), mirroring
+/// [`crate::memory::layers::load_l1`]. `cap_rows == 0` or `cap_bytes == 0`
+/// returns empty.
+pub fn cap_surfaced(
+    skills: Vec<SurfacedSkill>,
+    cap_rows: usize,
+    cap_bytes: usize,
+) -> Vec<SurfacedSkill> {
+    if cap_rows == 0 || cap_bytes == 0 {
+        return Vec::new();
+    }
+    let mut acc: Vec<SurfacedSkill> = Vec::with_capacity(cap_rows.min(skills.len()));
+    let mut bytes_used: usize = 0;
+    for skill in skills {
+        // `>=` (not `==`) keeps this a guard even if the loop body is
+        // ever reordered — it can never overshoot the row cap.
+        if acc.len() >= cap_rows {
+            break;
+        }
+        let entry_bytes = render_skill_entry(&skill).len();
+        // saturating_add: if a (future, pathological) entry length wrapped
+        // usize on accumulation, the sum saturates to "definitely over the
+        // cap" — the safe direction (mirrors `layers::load_l1`).
+        if bytes_used.saturating_add(entry_bytes) > cap_bytes {
+            break;
+        }
+        bytes_used += entry_bytes;
+        acc.push(skill);
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +211,69 @@ mod tests {
         assert!(is_surfaceable(SkillTrust::UserApproved));
         assert!(is_surfaceable(SkillTrust::Pinned));
         assert!(!is_surfaceable(SkillTrust::Untrusted));
+    }
+
+    fn skill(name: &str, desc: &str, params: &[(&str, &str)]) -> SurfacedSkill {
+        SurfacedSkill {
+            name: name.into(),
+            description: desc.into(),
+            params: params
+                .iter()
+                .map(|(n, d)| L3Param { name: (*n).into(), description: (*d).into() })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn render_entry_with_params() {
+        let s = skill("foo", "does foo.", &[("x", "the x"), ("y", "the y")]);
+        assert_eq!(render_skill_entry(&s), "- foo: does foo.\n  params: x (the x), y (the y)\n");
+    }
+
+    #[test]
+    fn render_entry_zero_params_omits_params_line() {
+        let s = skill("bar", "does bar.", &[]);
+        assert_eq!(render_skill_entry(&s), "- bar: does bar.\n");
+    }
+
+    #[test]
+    fn cap_surfaced_honours_row_cap() {
+        let skills = vec![skill("a", "a.", &[]), skill("b", "b.", &[]), skill("c", "c.", &[])];
+        let capped = cap_surfaced(skills, 2, 4096);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].name, "a");
+        assert_eq!(capped[1].name, "b");
+    }
+
+    #[test]
+    fn cap_surfaced_honours_byte_cap() {
+        // cap_bytes set to exactly one entry's rendered length admits one.
+        let one = render_skill_entry(&skill("a", "a.", &[])).len();
+        let skills = vec![skill("a", "a.", &[]), skill("b", "b.", &[])];
+        let capped = cap_surfaced(skills, 16, one);
+        assert_eq!(capped.len(), 1);
+    }
+
+    #[test]
+    fn cap_surfaced_single_oversized_entry_returns_empty() {
+        // The first (and only) entry already exceeds the byte budget alone:
+        // bytes_used(0) + entry_bytes > cap_bytes ⇒ break before any push.
+        let s = skill("a", "a.", &[]);
+        let entry_len = render_skill_entry(&s).len();
+        let capped = cap_surfaced(vec![s], 16, entry_len - 1);
+        assert!(capped.is_empty(), "over-budget single entry must not sneak in");
+    }
+
+    #[test]
+    fn cap_surfaced_zero_caps_return_empty() {
+        let skills = vec![skill("a", "a.", &[])];
+        assert!(cap_surfaced(skills.clone(), 0, 4096).is_empty());
+        assert!(cap_surfaced(skills, 16, 0).is_empty());
+    }
+
+    #[test]
+    fn caps_pinned_to_documented_defaults() {
+        assert_eq!(L3_SKILLS_CAP_ROWS, 16);
+        assert_eq!(L3_SKILLS_CAP_BYTES, 4096);
     }
 }
