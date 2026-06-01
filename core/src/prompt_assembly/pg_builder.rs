@@ -55,7 +55,7 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
         // through here. See https://github.com/hherb/hhagent/issues/78.
         let l0 = load_l0_active_default(&self.pool).await?;
         let l1 = load_l1_default(&self.pool).await?;
-        let system_prompt = assemble_system_prompt(&l0, &l1, recalled, base);
+        let system_prompt = assemble_system_prompt(&l0, &l1, &[], recalled, base);
         Ok(AssembledPrompt {
             system_prompt,
             l0_count: l0.len(),
