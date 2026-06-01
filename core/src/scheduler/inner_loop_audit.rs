@@ -33,7 +33,7 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// Extracted from `write_audit_plan_formulate` so the wire shape is
 /// unit-testable without a live Postgres pool. The shape pins
 /// (in this file's `tests` module) defend against accidental drift —
-/// 25 keys for non-`CliInferred` sources, 26 when `CliInferred` carries
+/// 26 keys for non-`CliInferred` sources, 27 when `CliInferred` carries
 /// matched signals.
 ///
 /// Slice A (2026-05-15) added `plan` (full serialised Plan) +
@@ -69,8 +69,13 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// param_count}` summary of the agent-raised L3 skill candidate on the
 /// terminal plan, or explicit JSON `null` when absent — mirrors the
 /// `l1_insight` / `refused` precedent). The full template lives in the
-/// crystallised memories row, not here. This brings the default-source
+/// crystallised memories row, not here. This brought the default-source
 /// key count to 25, and `CliInferred`+signals to 26.
+///
+/// Slice H (2026-06-01) added `skill_count` (the number of L3 skill rows
+/// surfaced into the assembled prompt's `<skills>` block), mirroring
+/// `l0_count`/`l1_count`. This brings the default-source key count to 26,
+/// and `CliInferred`+signals to 27.
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
@@ -167,6 +172,10 @@ pub(crate) fn build_plan_formulate_payload(
     );
     obj.insert("l0_count".into(), serde_json::json!(meta.l0_count));
     obj.insert("l1_count".into(), serde_json::json!(meta.l1_count));
+    // Slice H (l3-skill-recall-surfacing, 2026-06-01): the count of L3
+    // skill rows surfaced into the `<skills>` block. Emitted alongside
+    // l0/l1_count so operators can audit skill surfacing the same way.
+    obj.insert("skill_count".into(), serde_json::json!(meta.skill_count));
     // Slice D (recall-lane wiring, 2026-05-17): the recall lane's
     // contribution to this iteration. recalled_memory_ids is the
     // RRF-fused id list capped by L_RECALL_CAP_BYTES; recall_count is
@@ -307,6 +316,7 @@ mod tests {
             assembled_prompt_sha256: "ax".into(),
             l0_count: 0,
             l1_count: 0,
+            skill_count: 0,
             recalled_memory_ids: Vec::new(),
             recall_count: 0,
             recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
@@ -344,6 +354,7 @@ mod tests {
             assembled_prompt_sha256: "cafebabe".into(),
             l0_count: 7,
             l1_count: 3,
+            skill_count: 5,
             ..make_default_meta()
         };
         let payload = build_plan_formulate_payload(
@@ -372,10 +383,11 @@ mod tests {
         assert_eq!(payload["system_prompt_sha256"], "cafebabe");
         assert_eq!(payload["l0_count"], 7u64);
         assert_eq!(payload["l1_count"], 3u64);
+        assert_eq!(payload["skill_count"], 5u64);
     }
 
     #[test]
-    fn build_plan_formulate_payload_pins_twenty_five_keys_for_default_source() {
+    fn build_plan_formulate_payload_pins_twenty_six_keys_for_default_source() {
         // Slice D (2026-05-17, recall-lane wiring) bumped the
         // default-source key count from 17 to 20 by adding
         // recalled_memory_ids, recall_count, recall_query_sha256.
@@ -385,6 +397,8 @@ mod tests {
         // adding graph_seed_entity_ids, graph_seed_count, graph_seed_source.
         // Slice G (2026-05-31, l3-skill-crystallisation) bumps to 25 by
         // adding l3_skill.
+        // Slice H (2026-06-01, l3-skill-recall-surfacing) bumps to 26 by
+        // adding skill_count.
         let meta = FormulationMeta {
             recalled_memory_ids: vec![100, 200],
             recall_count: 2,
@@ -403,13 +417,13 @@ mod tests {
             "llm_model", "llm_backend", "latency_ms", "retry_count",
             "plan_step_count", "decision_kind", "refused",
             "plan", "classification_floor", "classification_floor_source",
-            "system_prompt_sha256", "l0_count", "l1_count",
+            "system_prompt_sha256", "l0_count", "l1_count", "skill_count",
             "recalled_memory_ids", "recall_count", "recall_query_sha256",
             "l1_insight", "l3_skill",
             "graph_seed_entity_ids", "graph_seed_count", "graph_seed_source",
         ].into_iter().collect();
         assert_eq!(got, expected,
-            "default-source payload must carry exactly 25 keys; diff:\n\
+            "default-source payload must carry exactly 26 keys; diff:\n\
              missing = {:?}\nextra = {:?}",
             expected.difference(&got).collect::<Vec<_>>(),
             got.difference(&expected).collect::<Vec<_>>(),
@@ -417,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_cli_inferred_source_has_26_keys_with_signals() {
+    fn build_plan_formulate_payload_cli_inferred_source_has_27_keys_with_signals() {
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::ClinicalConfidential,
             ClassificationFloorSource::CliInferred,
@@ -425,8 +439,8 @@ mod tests {
             &make_text_plan(), &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload object");
-        assert_eq!(obj.len(), 26,
-            "cli_inferred + signals must carry 26 keys (25 default + signals); got {} keys: {:?}",
+        assert_eq!(obj.len(), 27,
+            "cli_inferred + signals must carry 27 keys (26 default + signals); got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -508,7 +522,7 @@ mod tests {
             &[], &make_text_plan(), &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 25);
+        assert_eq!(obj.len(), 26);
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
         assert!(obj.get("classification_floor_signals").is_none(),
             "signals key must be ABSENT when source is not cli_inferred");
@@ -530,8 +544,8 @@ mod tests {
             &plan, &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 25,
-            "agent_raised should have 25 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj.len(), 26,
+            "agent_raised should have 26 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
         assert!(obj.get("classification_floor_signals").is_none());
     }

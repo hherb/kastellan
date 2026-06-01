@@ -288,24 +288,87 @@ where
     .map_err(|e| DbError::Query(format!("load_layer {layer:?}: {e}")))?;
 
     let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        let id: i64 = r
-            .try_get(0)
-            .map_err(|e| DbError::Query(format!("decode memory.id: {e}")))?;
-        let body: String = r
-            .try_get(1)
-            .map_err(|e| DbError::Query(format!("decode memory.body: {e}")))?;
-        let metadata: serde_json::Value = r
-            .try_get(2)
-            .map_err(|e| DbError::Query(format!("decode memory.metadata: {e}")))?;
-        let layer_raw: i16 = r
-            .try_get(3)
-            .map_err(|e| DbError::Query(format!("decode memory.layer: {e}")))?;
-        let layer = MemoryLayer::from_db(layer_raw)?;
-        let created_at: time::OffsetDateTime = r
-            .try_get(4)
-            .map_err(|e| DbError::Query(format!("decode memory.created_at: {e}")))?;
-        out.push(Memory { id, body, metadata, layer, created_at });
+    for r in &rows {
+        out.push(row_to_memory(r)?);
+    }
+    Ok(out)
+}
+
+/// Decode one `(id, body, metadata, layer, created_at)` row — in that
+/// column order — into a [`Memory`]. Shared by the layer loaders so the
+/// column order and decode-error shape stay identical across them.
+fn row_to_memory(r: &sqlx::postgres::PgRow) -> Result<Memory, DbError> {
+    let id: i64 = r
+        .try_get(0)
+        .map_err(|e| DbError::Query(format!("decode memory.id: {e}")))?;
+    let body: String = r
+        .try_get(1)
+        .map_err(|e| DbError::Query(format!("decode memory.body: {e}")))?;
+    let metadata: serde_json::Value = r
+        .try_get(2)
+        .map_err(|e| DbError::Query(format!("decode memory.metadata: {e}")))?;
+    let layer_raw: i16 = r
+        .try_get(3)
+        .map_err(|e| DbError::Query(format!("decode memory.layer: {e}")))?;
+    let layer = MemoryLayer::from_db(layer_raw)?;
+    let created_at: time::OffsetDateTime = r
+        .try_get(4)
+        .map_err(|e| DbError::Query(format!("decode memory.created_at: {e}")))?;
+    Ok(Memory { id, body, metadata, layer, created_at })
+}
+
+/// Load rows at `layer` whose `metadata->>'trust'` matches one of
+/// `trusts`, newest-first (`created_at DESC, id DESC`), capped at `cap`.
+///
+/// The trust filter runs **in SQL**, so the result set — and the work
+/// this does — is bounded by the number of *matching* rows, not the
+/// whole layer. This matters for [`MemoryLayer::Skill`]: the L3
+/// crystallisation writer appends a `trust:"untrusted"` row on every
+/// completed multi-step task, so that layer grows with task history,
+/// yet only the handful of operator-approved/pinned rows ever surface to
+/// the planner. The `WHERE layer = $1 AND metadata->>'trust' = ANY($2)`
+/// push-down keeps prompt assembly off that growth curve — the caller no
+/// longer fetches (and JSON-decodes) the entire layer on every plan
+/// formulation just to discard nearly all of it.
+///
+/// Trust matching is exact and case-sensitive, mirroring the Rust gate
+/// (`SkillTrust::from_metadata_str`): a row with an absent, null,
+/// non-string, or unrecognised `trust` marker yields a `metadata->>'trust'`
+/// that is NULL or outside `trusts`, so `= ANY` excludes it — the same
+/// fail-safe "unknown ⇒ not surfaced" posture, enforced in the query.
+///
+/// `cap == 0` or an empty `trusts` is a fast-path no-op (no SQL issued).
+pub async fn load_layer_by_trust<'e, E>(
+    executor: E,
+    layer: MemoryLayer,
+    trusts: &[&str],
+    cap: usize,
+) -> Result<Vec<Memory>, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if cap == 0 || trusts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let trust_list: Vec<String> = trusts.iter().map(|s| s.to_string()).collect();
+    let rows = sqlx::query(
+        "SELECT id, body, metadata, layer, created_at \
+         FROM memories \
+         WHERE layer = $1 AND metadata->>'trust' = ANY($2) \
+         ORDER BY created_at DESC, id DESC \
+         LIMIT $3",
+    )
+    .bind(layer.as_db())
+    .bind(&trust_list)
+    .bind(limit_as_i64(cap))
+    .fetch_all(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("load_layer_by_trust {layer:?}: {e}")))?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        out.push(row_to_memory(r)?);
     }
     Ok(out)
 }

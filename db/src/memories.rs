@@ -64,7 +64,8 @@ mod search;
 mod write;
 
 pub use search::{
-    fetch_by_ids, graph_search, lexical_search, load_active_l0, load_layer, semantic_search,
+    fetch_by_ids, graph_search, lexical_search, load_active_l0, load_layer, load_layer_by_trust,
+    semantic_search,
 };
 pub use write::{
     delete_memory_at_layer, insert_memory, insert_memory_at_layer, link_memory_to_entities,

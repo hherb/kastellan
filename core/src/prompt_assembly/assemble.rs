@@ -1,6 +1,6 @@
 //! Pure prompt assembler. No I/O, no async, no errors.
 //!
-//! Output framing (always L0 → L1 → recalled → base in this order):
+//! Output framing (always L0 → L1 → skills → recalled → base in this order):
 //!
 //! ```text
 //! <l0_meta_rules>
@@ -11,6 +11,11 @@
 //! <l1_insights>
 //! - {body of L1 row, newest-first}
 //! </l1_insights>
+//!
+//! <skills>
+//! - {name}: {description}
+//!   params: {p0.name} ({p0.description}), ...
+//! </skills>
 //!
 //! <recalled>
 //! - {body of recall row #1 (RRF-ranked-first)}
@@ -45,6 +50,13 @@
 //!    contract before merging). Threat-model reference:
 //!    `docs/threat-model.md` (LLM-compromise scenario).
 //!
+//!    **Note for `<skills>` bodies:** Surfaced skills are
+//!    operator-approved (`user_approved` / `pinned` trust marker
+//!    required — see [`crate::memory::l3_surface::is_surfaceable`]).
+//!    Because they are operator-gated they sit with the curated layers
+//!    (L0/L1), before the unverified `recalled` output. The
+//!    `<skills>` block is omitted entirely when the slice is empty.
+//!
 //!    **Note for `<recalled>` bodies:** Unlike L0/L1, recall bodies are
 //!    *not* operator-curated — any process with `INSERT` privilege on
 //!    `memories` writes them, and recall surfaces whatever the lanes
@@ -59,22 +71,26 @@
 //!    [`RecalledContext`] is empty (the
 //!    failure-degraded state). Recall is enrichment, not policy —
 //!    this asymmetry is deliberate.
-//! 6. Deterministic: same `(l0, l1, recalled, base)` produces the
-//!    same bytes.
+//! 6. Deterministic: same `(l0, l1, skills, recalled, base)` produces
+//!    the same bytes.
 
+use crate::memory::l3_surface::{render_skill_entry, SurfacedSkill};
 use crate::recall_assembly::RecalledContext;
 use hhagent_db::memories::Memory;
 
-/// Render the supplied memory slices, recall context, and base prompt
-/// into a single LLM-ready system message.
+/// Render the supplied memory slices, surfaced skills, recall context, and
+/// base prompt into a single LLM-ready system message.
 ///
-/// See the module-level docstring for the framing rules. The
-/// `recalled` argument follows L1 and precedes `base`; an empty
-/// [`RecalledContext`] omits the `<recalled>` tag entirely so the
-/// output is byte-identical to the v1 (no-recall) assembler.
+/// See the module-level docstring for the framing rules. Surfaced skills are
+/// operator-approved (high-trust) so the `<skills>` block sits after L1 and
+/// before the unverified `recalled` output; an empty `skills` slice omits
+/// the block entirely. An empty [`RecalledContext`] omits the `<recalled>`
+/// tag entirely so the output is byte-identical to the v1 (no-recall)
+/// assembler when both `skills` and `recalled` are empty.
 pub fn assemble_system_prompt(
     l0: &[Memory],
     l1: &[Memory],
+    skills: &[SurfacedSkill],
     recalled: &RecalledContext,
     base: &str,
 ) -> String {
@@ -98,6 +114,14 @@ pub fn assemble_system_prompt(
             out.push('\n');
         }
         out.push_str("</l1_insights>\n\n");
+    }
+
+    if !skills.is_empty() {
+        out.push_str("<skills>\n");
+        for skill in skills {
+            out.push_str(&render_skill_entry(skill));
+        }
+        out.push_str("</skills>\n\n");
     }
 
     if !recalled.is_empty() {
@@ -147,6 +171,7 @@ mod tests {
         let out = assemble_system_prompt(
             &[],
             &[],
+            &[],
             &RecalledContext::empty(),
             "BASE BODY",
         );
@@ -167,6 +192,7 @@ mod tests {
         let out = assemble_system_prompt(
             &l0,
             &l1,
+            &[],
             &RecalledContext::empty(),
             "BASE BODY",
         );
@@ -185,7 +211,7 @@ mod tests {
             vec!["RECALL ONE".into(), "RECALL TWO".into()],
             "f".repeat(64),
         );
-        let out = assemble_system_prompt(&l0, &l1, &recalled, "BASE");
+        let out = assemble_system_prompt(&l0, &l1, &[], &recalled, "BASE");
 
         // Positional ordering pin.
         let l0_end = out.find("</l0_meta_rules>").expect("L0 end tag");
@@ -216,7 +242,7 @@ mod tests {
             vec!["body with <closing> tag".into()],
             "0".repeat(64),
         );
-        let out = assemble_system_prompt(&[], &[], &recalled, "BASE");
+        let out = assemble_system_prompt(&[], &[], &[], &recalled, "BASE");
         assert!(out.contains("- body with <closing> tag\n"),
                 "body must pass through verbatim; got:\n{out}");
     }
@@ -224,7 +250,7 @@ mod tests {
     #[test]
     fn l0_only_skips_l1_section() {
         let l0 = vec![mem(1, "rule one", MemoryLayer::Meta)];
-        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &[], &RecalledContext::empty(), "BASE");
         assert!(out.starts_with("<l0_meta_rules>\n"), "L0 section first; got:\n{out}");
         assert!(!out.contains("<l1_insights>"), "L1 must be skipped when empty; got:\n{out}");
         assert!(out.contains("<base>\nBASE\n</base>\n"), "base must be present; got:\n{out}");
@@ -233,7 +259,7 @@ mod tests {
     #[test]
     fn l1_only_skips_l0_section() {
         let l1 = vec![mem(1, "insight one", MemoryLayer::Index)];
-        let out = assemble_system_prompt(&[], &l1, &RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&[], &l1, &[], &RecalledContext::empty(), "BASE");
         assert!(!out.contains("<l0_meta_rules>"), "L0 must be skipped when empty; got:\n{out}");
         assert!(out.contains("<l1_insights>\n- insight one\n</l1_insights>"),
                 "L1 section present; got:\n{out}");
@@ -243,7 +269,7 @@ mod tests {
     fn both_layers_assembled_in_order_with_blank_separators() {
         let l0 = vec![mem(1, "rule one", MemoryLayer::Meta)];
         let l1 = vec![mem(2, "insight one", MemoryLayer::Index)];
-        let out = assemble_system_prompt(&l0, &l1, &RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &l1, &[], &RecalledContext::empty(), "BASE");
         let expected = concat!(
             "<l0_meta_rules>\n",
             "- rule one\n",
@@ -267,7 +293,7 @@ mod tests {
             mem(2, "second", MemoryLayer::Meta),
             mem(3, "third", MemoryLayer::Meta),
         ];
-        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &[], &RecalledContext::empty(), "BASE");
         for needle in ["- first\n", "- second\n", "- third\n"] {
             assert!(out.contains(needle), "missing {needle:?} in {out}");
         }
@@ -280,7 +306,7 @@ mod tests {
         // — a future refactor that tries to indent continuation lines
         // would break this test deliberately.
         let l0 = vec![mem(1, "line one\nline two", MemoryLayer::Meta)];
-        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &[], &RecalledContext::empty(), "BASE");
         assert!(out.contains("- line one\nline two\n"),
                 "multi-line body must pass through verbatim; got:\n{out}");
     }
@@ -291,7 +317,7 @@ mod tests {
         // refactor that adds HTML escaping would break this test
         // deliberately so the team can re-evaluate the trust posture.
         let l0 = vec![mem(1, "guard <secret> and </tag>", MemoryLayer::Meta)];
-        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &[], &RecalledContext::empty(), "BASE");
         assert!(out.contains("- guard <secret> and </tag>\n"),
                 "XML chars must pass through; got:\n{out}");
     }
@@ -300,8 +326,8 @@ mod tests {
     fn output_is_deterministic_for_same_inputs() {
         let l0 = vec![mem(1, "rule one", MemoryLayer::Meta)];
         let l1 = vec![mem(2, "insight", MemoryLayer::Index)];
-        let a = assemble_system_prompt(&l0, &l1, &RecalledContext::empty(), "BASE");
-        let b = assemble_system_prompt(&l0, &l1, &RecalledContext::empty(), "BASE");
+        let a = assemble_system_prompt(&l0, &l1, &[], &RecalledContext::empty(), "BASE");
+        let b = assemble_system_prompt(&l0, &l1, &[], &RecalledContext::empty(), "BASE");
         assert_eq!(a, b, "same inputs must yield same bytes");
     }
 
@@ -314,7 +340,7 @@ mod tests {
             mem(2, "second-newest", MemoryLayer::Meta),
             mem(1, "oldest", MemoryLayer::Meta),
         ];
-        let out = assemble_system_prompt(&l0, &[], &RecalledContext::empty(), "BASE");
+        let out = assemble_system_prompt(&l0, &[], &[], &RecalledContext::empty(), "BASE");
         let idx_a = out.find("- third-newest").expect("first row present");
         let idx_b = out.find("- second-newest").expect("second row present");
         let idx_c = out.find("- oldest").expect("third row present");
@@ -330,10 +356,10 @@ mod tests {
         // no blank line in front of it, regardless of how the prompt
         // file ends. This keeps the output deterministic across
         // editor / prompt-file conventions.
-        let out_no_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "no trailing nl");
-        let out_one_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "with trailing nl\n");
-        let out_two_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "with two trailing nl\n\n");
-        let out_many_nl = assemble_system_prompt(&[], &[], &RecalledContext::empty(), "many trailing nls\n\n\n\n");
+        let out_no_nl = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "no trailing nl");
+        let out_one_nl = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "with trailing nl\n");
+        let out_two_nl = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "with two trailing nl\n\n");
+        let out_many_nl = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "many trailing nls\n\n\n\n");
         assert_eq!(
             out_no_nl, "<base>\nno trailing nl\n</base>\n",
             "no-trailing-newline input must be normalized; got {out_no_nl:?}"
@@ -350,5 +376,44 @@ mod tests {
             out_many_nl, "<base>\nmany trailing nls\n</base>\n",
             "many trailing newlines must collapse to one; got {out_many_nl:?}"
         );
+    }
+
+    fn surfaced(name: &str, desc: &str) -> SurfacedSkill {
+        SurfacedSkill { name: name.into(), description: desc.into(), params: vec![] }
+    }
+
+    #[test]
+    fn skills_block_present_with_one_skill() {
+        let skills = vec![surfaced("foo", "does foo.")];
+        let out = assemble_system_prompt(&[], &[], &skills, &RecalledContext::empty(), "BASE");
+        assert!(
+            out.contains("<skills>\n- foo: does foo.\n</skills>\n\n"),
+            "skills block rendered; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn skills_block_absent_when_empty_is_byte_identical() {
+        let out = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE");
+        assert!(!out.contains("<skills>"), "no skills → no <skills> tag; got:\n{out}");
+        assert_eq!(out, "<base>\nBASE\n</base>\n",
+            "empty everything must be byte-identical to base-only; got:\n{out}");
+    }
+
+    #[test]
+    fn skills_render_after_l1_and_before_recalled() {
+        let l1 = vec![mem(2, "L1 INSIGHT", MemoryLayer::Index)];
+        let recalled = RecalledContext::new(
+            vec![100],
+            vec!["RECALL ONE".into()],
+            "f".repeat(64),
+        );
+        let skills = vec![surfaced("skillname", "skill desc.")];
+        let out = assemble_system_prompt(&[], &l1, &skills, &recalled, "BASE");
+        let l1_end = out.find("</l1_insights>").expect("l1 end tag");
+        let skills_start = out.find("<skills>").expect("skills start tag");
+        let recalled_start = out.find("<recalled>").expect("recalled start tag");
+        assert!(l1_end < skills_start, "skills must come after l1; got:\n{out}");
+        assert!(skills_start < recalled_start, "skills must come before recalled; got:\n{out}");
     }
 }

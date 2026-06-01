@@ -233,6 +233,29 @@ pub fn validate_l3_skill(c: &L3SkillCandidate) -> Result<L3SkillCandidate, L3Err
                 "parameter '{pn}' has empty description"
             )));
         }
+        // Param descriptions are surfaced verbatim into the `<skills>`
+        // prompt block (`l3_surface::render_skill_entry`), exactly like the
+        // skill description. They must therefore carry the same anti-breakout
+        // guards: no newline/control chars (would corrupt the bullet layout)
+        // and no reserved `<skills>`/`</skills>` tag substring (would let an
+        // agent-authored param description escape the block into model-trusted
+        // framing). Mirrors the `description` guards above and the L1 `body`
+        // guard in `l1_promote`.
+        if pd.contains('\n') || pd.contains('\r') {
+            return Err(L3Error::Validation(format!(
+                "parameter '{pn}' description contains newline"
+            )));
+        }
+        if pd.bytes().any(|b| b < 0x20) {
+            return Err(L3Error::Validation(format!(
+                "parameter '{pn}' description contains control character"
+            )));
+        }
+        if pd.contains(RESERVED_TAG_OPEN) || pd.contains(RESERVED_TAG_CLOSE) {
+            return Err(L3Error::Validation(format!(
+                "parameter '{pn}' description contains reserved tag substring"
+            )));
+        }
         if pd.len() > L3_MAX_PARAM_DESC_BYTES {
             return Err(L3Error::Validation(format!(
                 "parameter '{pn}' description exceeds {L3_MAX_PARAM_DESC_BYTES} bytes"

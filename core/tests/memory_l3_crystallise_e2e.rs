@@ -130,6 +130,7 @@ impl PlanFormulator for ScriptedFormulator {
                         .into(),
                 l0_count: 0,
                 l1_count: 0,
+                skill_count: 0,
                 recalled_memory_ids: Vec::new(),
                 recall_count: 0,
                 recall_query_sha256:

@@ -55,11 +55,13 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
         // through here. See https://github.com/hherb/hhagent/issues/78.
         let l0 = load_l0_active_default(&self.pool).await?;
         let l1 = load_l1_default(&self.pool).await?;
-        let system_prompt = assemble_system_prompt(&l0, &l1, recalled, base);
+        let skills = crate::memory::l3_surface::load_l3_skills_default(&self.pool).await?;
+        let system_prompt = assemble_system_prompt(&l0, &l1, &skills, recalled, base);
         Ok(AssembledPrompt {
             system_prompt,
             l0_count: l0.len(),
             l1_count: l1.len(),
+            skill_count: skills.len(),
             // Source from RecalledContext::len() (bodies.len()) — what
             // the assembler actually rendered — rather than ids.len(),
             // so any future divergence fails towards the rendered truth.
@@ -105,6 +107,7 @@ impl SystemPromptBuilder for StaticSystemPromptBuilder {
             system_prompt: self.fixed.clone(),
             l0_count: 0,
             l1_count: 0,
+            skill_count: 0,
             recalled_count: recalled.len(),
         })
     }
