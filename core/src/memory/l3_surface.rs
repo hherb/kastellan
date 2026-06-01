@@ -21,7 +21,7 @@
 
 use crate::cassandra::types::{L3Param, L3SkillCandidate};
 use crate::memory::l3_approval::SkillTrust;
-use hhagent_db::memories::{load_layer, MemoryLayer};
+use hhagent_db::memories::{load_layer_by_trust, MemoryLayer};
 use hhagent_db::DbError;
 use sqlx::PgPool;
 
@@ -62,6 +62,19 @@ pub fn parse_surfaced_skill(metadata: &serde_json::Value) -> Option<SurfacedSkil
 /// unknown/absent marker reads `Untrusted` ⇒ never surfaced.
 pub fn is_surfaceable(trust: SkillTrust) -> bool {
     matches!(trust, SkillTrust::UserApproved | SkillTrust::Pinned)
+}
+
+/// The set of `trust` metadata markers that surface — the SQL-projection
+/// of [`is_surfaceable`]. This is the single vocabulary source the loader
+/// pushes into `load_layer_by_trust`'s `WHERE metadata->>'trust' = ANY(..)`
+/// so the database filter and the Rust gate predicate can never drift:
+/// every marker here MUST satisfy `is_surfaceable`, and `Untrusted` MUST
+/// be absent (pinned by `surfaceable_markers_match_is_surfaceable`).
+///
+/// Derived from [`SkillTrust::as_str`] rather than spelled inline so the
+/// canonical wire strings live in exactly one place (the enum).
+pub fn surfaceable_trust_markers() -> [&'static str; 2] {
+    [SkillTrust::UserApproved.as_str(), SkillTrust::Pinned.as_str()]
 }
 
 /// Default upper bound on the number of L3 skills surfaced into a
@@ -152,14 +165,26 @@ pub fn cap_surfaced(
 
 /// Load operator-approved/pinned L3 skills for the planner prompt.
 ///
-/// Fetches every L3 row (newest-first, same as
-/// [`crate::memory::l3_crystallise::list_l3`]), drops any whose trust is
-/// not surfaceable, parses each surviving row's `metadata.template`
+/// Fetches only the surfaceable rows ([`surfaceable_trust_markers`]),
+/// newest-first, **already trust-filtered in SQL** and capped at
+/// `cap_rows` by `load_layer_by_trust` — so the work is bounded by the
+/// number of *approved* rows, never the whole L3 layer. (The L3
+/// crystallisation writer appends a `trust:"untrusted"` row on every
+/// completed task, so the layer grows with task history; fetching it all
+/// and discarding the untrusted majority on every plan formulation was a
+/// scaling cliff.) Each surviving row's `metadata.template` is parsed
 /// (malformed rows skipped fail-safe via [`parse_surfaced_skill`]), then
-/// applies the row + rendered-byte caps. Fetch-all-then-filter is correct
-/// here: the trust filter runs after the fetch, so a capped fetch could
-/// starve the row cap when newer rows are untrusted; operator-gated volume
-/// is low, so this is cheap.
+/// the row + rendered-byte caps are applied.
+///
+/// Fetching `cap_rows` rows is sufficient, not lossy: [`cap_surfaced`]
+/// never keeps more than `cap_rows`, and it walks newest-first stopping
+/// at the row *or* byte cap, so any rows beyond `cap_rows` could never
+/// have surfaced anyway.
+///
+/// A defensive Rust re-check via [`is_surfaceable`] runs over the
+/// (now tiny) result set: the SQL `WHERE` is authoritative, but keeping
+/// the gate predicate on the live path means it can't silently rot, and
+/// the cost is filtering at most `cap_rows` rows.
 ///
 /// Returns `Ok(vec![])` when no approved skill exists — the expected state
 /// until an operator approves one. Not an error.
@@ -171,10 +196,14 @@ pub async fn load_l3_skills_for_prompt(
     if cap_rows == 0 || cap_bytes == 0 {
         return Ok(Vec::new());
     }
-    let rows = load_layer(pool, MemoryLayer::Skill, usize::MAX).await?;
+    let trusts = surfaceable_trust_markers();
+    let rows = load_layer_by_trust(pool, MemoryLayer::Skill, &trusts, cap_rows).await?;
     let surfaced: Vec<SurfacedSkill> = rows
         .into_iter()
         .filter(|row| {
+            // Defense-in-depth: the SQL filter already excluded every
+            // non-surfaceable trust, but re-assert through the same gate
+            // predicate so a future divergence fails safe (drops the row).
             let trust = row
                 .metadata
                 .get("trust")
@@ -262,6 +291,25 @@ mod tests {
         assert!(is_surfaceable(SkillTrust::UserApproved));
         assert!(is_surfaceable(SkillTrust::Pinned));
         assert!(!is_surfaceable(SkillTrust::Untrusted));
+    }
+
+    #[test]
+    fn surfaceable_markers_match_is_surfaceable() {
+        // The SQL push-down list and the Rust gate predicate MUST agree:
+        // every marker the loader asks the DB for must be surfaceable, and
+        // the untrusted marker must never appear in it. Pins the two in
+        // sync so the perf-fix SQL filter can't drift from `is_surfaceable`.
+        let markers = surfaceable_trust_markers();
+        for m in markers {
+            assert!(
+                is_surfaceable(SkillTrust::from_metadata_str(m)),
+                "marker {m:?} pushed to SQL but not surfaceable in Rust"
+            );
+        }
+        assert!(
+            !markers.contains(&SkillTrust::Untrusted.as_str()),
+            "untrusted marker must never be in the surfaceable SQL filter"
+        );
     }
 
     fn skill(name: &str, desc: &str, params: &[(&str, &str)]) -> SurfacedSkill {

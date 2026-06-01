@@ -1,7 +1,8 @@
 //! Live-PG e2e for L3 skill recall surfacing (`load_l3_skills_*`).
 //!
 //! Verifies the trust gate (only user_approved/pinned surface), fail-safe
-//! skip of a malformed-template row, the row cap, and that
+//! skip of a malformed-template row, the row cap, that a large pile of
+//! untrusted rows surfaces nothing (the SQL trust push-down), and that
 //! `PgSystemPromptBuilder::build_with_recalled` emits a `<skills>` block
 //! and populates `skill_count` — against a real Postgres cluster.
 //! Skips-as-pass without a usable PG (`[SKIP]`).
@@ -151,6 +152,41 @@ async fn build_with_recalled_emits_skills_block_and_counts() {
     assert!(assembled.system_prompt.contains("<skills>"), "skills block present");
     assert!(assembled.system_prompt.contains("approved_skill"), "approved skill rendered");
     assert_eq!(assembled.skill_count, 1, "skill_count counts surfaced skills");
+
+    drop(pool);
+    drop(cluster);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_untrusted_pile_surfaces_nothing() {
+    // The L3 crystallisation writer appends a `trust:"untrusted"` row on
+    // every completed task, so the Skill layer grows with task history.
+    // The loader's SQL trust push-down (`load_layer_by_trust`) must keep
+    // surfacing bounded to the *approved* rows — a pile of untrusted rows,
+    // however large, surfaces nothing and never reaches the planner.
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "l3s-pile-d", "l3s-pile-l",
+        &format!("hhagent-postgres-l3-surface-pile-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        json!({"test": "l3_surface_untrusted_pile"})).await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    for i in 0..40 {
+        seed_l3(&pool, &format!("untrusted_{i}"), "untrusted", "shell-exec").await;
+    }
+
+    let surfaced = load_l3_skills_default(&pool).await.expect("load surfaced");
+    assert!(surfaced.is_empty(), "an all-untrusted layer must surface nothing; got {surfaced:?}");
+
+    // And one approved row among the pile still surfaces — exactly one.
+    seed_l3(&pool, "the_one_approved", "user_approved", "shell-exec").await;
+    let surfaced = load_l3_skills_default(&pool).await.expect("load surfaced");
+    assert_eq!(surfaced.len(), 1, "only the single approved row surfaces");
+    assert_eq!(surfaced[0].name, "the_one_approved");
 
     drop(pool);
     drop(cluster);
