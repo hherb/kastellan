@@ -61,6 +61,9 @@ pub struct FormulationMeta {
     /// Number of L1 rows the assembler folded in. Stays 0 in
     /// production until an L1 promotion writer lands.
     pub l1_count: usize,
+    /// Number of L3 skill rows surfaced into the `<skills>` block. Stays
+    /// 0 in production until an operator approves a crystallised skill.
+    pub skill_count: usize,
     /// Memory ids the recall lane surfaced for this iteration's
     /// instruction (RRF-fused order, capped at `L_RECALL_CAP_BYTES`).
     /// Empty when recall returned nothing or degraded due to error.
@@ -216,6 +219,7 @@ impl PlanFormulator for RouterAgent {
             assembled_prompt_sha256,
             l0_count: assembled.l0_count,
             l1_count: assembled.l1_count,
+            skill_count: assembled.skill_count,
             recalled_memory_ids: recalled.ids,
             recall_count,
             recall_query_sha256: recalled.query_sha256,

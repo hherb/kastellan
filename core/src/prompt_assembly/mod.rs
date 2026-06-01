@@ -69,6 +69,10 @@ pub struct AssembledPrompt {
     pub l0_count: usize,
     /// Number of L1 (insight-index) rows that fed into the assembly.
     pub l1_count: usize,
+    /// Number of L3 skill rows the assembler folded into the `<skills>`
+    /// block. Stays 0 until an operator approves a crystallised skill.
+    /// RouterAgent records this into `FormulationMeta::skill_count`.
+    pub skill_count: usize,
     /// Number of recalled-memory rows that fed into the assembly.
     /// `0` for callers that don't run recall (e.g. tests using
     /// `StaticSystemPromptBuilder::empty()` without calling

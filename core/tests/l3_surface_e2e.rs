@@ -1,14 +1,18 @@
 //! Live-PG e2e for L3 skill recall surfacing (`load_l3_skills_*`).
 //!
 //! Verifies the trust gate (only user_approved/pinned surface), fail-safe
-//! skip of a malformed-template row, and the row cap — against a real
-//! Postgres cluster. Skips-as-pass without a usable PG (`[SKIP]`).
+//! skip of a malformed-template row, the row cap, and that
+//! `PgSystemPromptBuilder::build_with_recalled` emits a `<skills>` block
+//! and populates `skill_count` — against a real Postgres cluster.
+//! Skips-as-pass without a usable PG (`[SKIP]`).
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use hhagent_core::memory::l3_surface::{
     load_l3_skills_default, load_l3_skills_for_prompt, L3_SKILLS_CAP_BYTES,
 };
+use hhagent_core::prompt_assembly::{PgSystemPromptBuilder, SystemPromptBuilder};
+use hhagent_core::recall_assembly::RecalledContext;
 use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
 use hhagent_db::pool::connect_runtime_pool;
 use hhagent_db::probe::run as probe_run;
@@ -120,6 +124,33 @@ async fn row_cap_is_honoured() {
     // first cap_rows, so the newest seeded skill must lead — anchors the
     // newest-first ordering contract, not just the count.
     assert_eq!(surfaced[0].name, "skill_4", "newest-first ordering preserved");
+
+    drop(pool);
+    drop(cluster);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn build_with_recalled_emits_skills_block_and_counts() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "l3s-e2e-d", "l3s-e2e-l",
+        &format!("hhagent-postgres-l3-surface-build-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "l3_surface_build"})).await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    seed_l3(&pool, "approved_skill", "user_approved", "shell-exec").await;
+
+    let builder = PgSystemPromptBuilder::new(pool.clone());
+    let recalled = RecalledContext::empty();
+    let assembled = builder.build_with_recalled("BASE", &recalled).await.expect("assemble");
+
+    assert!(assembled.system_prompt.contains("<skills>"), "skills block present");
+    assert!(assembled.system_prompt.contains("approved_skill"), "approved skill rendered");
+    assert_eq!(assembled.skill_count, 1, "skill_count counts surfaced skills");
 
     drop(pool);
     drop(cluster);
