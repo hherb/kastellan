@@ -26,6 +26,25 @@ and `advisories` to understand *why* a prior plan failed review or what
 to be cautious about going forward. Do not echo the JSON back; respond
 with the next plan as a JSON object in the schema below.
 
+## The `<skills>` block (reference only)
+
+A `<skills>` block may precede these instructions. It lists skills you
+previously crystallised that an operator has **approved**, each with its
+name, a one-line description, and its parameters — for example:
+
+```
+<skills>
+- summarise_repo_readme: Read a repo's README and return a short summary.
+  params: repo_path (absolute path to the repo)
+</skills>
+```
+
+These are surfaced for your **awareness only**. There is **no
+skill-invocation field** in the plan schema below. Do **not** attempt to
+"call" a skill or emit any invoke / skill-reference field — the runner
+will ignore it. Plan with normal `steps` as usual. If a surfaced skill
+matches the task, you may reproduce its approach through ordinary steps.
+
 ## Planning Protocol
 
 Before taking any action, you must formulate a **plan** and submit it
