@@ -21,6 +21,9 @@
 
 use crate::cassandra::types::{L3Param, L3SkillCandidate};
 use crate::memory::l3_approval::SkillTrust;
+use hhagent_db::memories::{load_layer, MemoryLayer};
+use hhagent_db::DbError;
+use sqlx::PgPool;
 
 /// A trust-gated L3 skill projected to exactly what the planner sees:
 /// name, description, and the parameter manifest.
@@ -113,6 +116,11 @@ pub fn render_skill_entry(skill: &SurfacedSkill) -> String {
 /// boundary — an entry that fills the budget exactly still fits), mirroring
 /// [`crate::memory::layers::load_l1`]. `cap_rows == 0` or `cap_bytes == 0`
 /// returns empty.
+///
+/// Unlike `load_l1`, a single over-budget entry is dropped *silently* (no
+/// `tracing::warn!`): L3 skills are operator-gated, so an oversized
+/// name+description is caught at approval time, not surfacing time — and
+/// this stays a pure function with no logging dependency.
 pub fn cap_surfaced(
     skills: Vec<SurfacedSkill>,
     cap_rows: usize,
@@ -140,6 +148,49 @@ pub fn cap_surfaced(
         acc.push(skill);
     }
     acc
+}
+
+/// Load operator-approved/pinned L3 skills for the planner prompt.
+///
+/// Fetches every L3 row (newest-first, same as
+/// [`crate::memory::l3_crystallise::list_l3`]), drops any whose trust is
+/// not surfaceable, parses each surviving row's `metadata.template`
+/// (malformed rows skipped fail-safe via [`parse_surfaced_skill`]), then
+/// applies the row + rendered-byte caps. Fetch-all-then-filter is correct
+/// here: the trust filter runs after the fetch, so a capped fetch could
+/// starve the row cap when newer rows are untrusted; operator-gated volume
+/// is low, so this is cheap.
+///
+/// Returns `Ok(vec![])` when no approved skill exists — the expected state
+/// until an operator approves one. Not an error.
+pub async fn load_l3_skills_for_prompt(
+    pool: &PgPool,
+    cap_rows: usize,
+    cap_bytes: usize,
+) -> Result<Vec<SurfacedSkill>, DbError> {
+    if cap_rows == 0 || cap_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    let rows = load_layer(pool, MemoryLayer::Skill, usize::MAX).await?;
+    let surfaced: Vec<SurfacedSkill> = rows
+        .into_iter()
+        .filter(|row| {
+            let trust = row
+                .metadata
+                .get("trust")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            is_surfaceable(SkillTrust::from_metadata_str(trust))
+        })
+        .filter_map(|row| parse_surfaced_skill(&row.metadata))
+        .collect();
+    Ok(cap_surfaced(surfaced, cap_rows, cap_bytes))
+}
+
+/// Convenience wrapper pinning the published caps. Prefer this from the
+/// prompt assembler (mirrors [`crate::memory::layers::load_l1_default`]).
+pub async fn load_l3_skills_default(pool: &PgPool) -> Result<Vec<SurfacedSkill>, DbError> {
+    load_l3_skills_for_prompt(pool, L3_SKILLS_CAP_ROWS, L3_SKILLS_CAP_BYTES).await
 }
 
 #[cfg(test)]
