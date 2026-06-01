@@ -49,6 +49,7 @@ pub mod l0_seed;
 pub mod l1_promote;
 pub mod l3_approval;
 pub mod l3_crystallise;
+pub mod l3_surface;
 pub mod layers;
 mod recall;
 
