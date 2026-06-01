@@ -39,9 +39,10 @@ pub struct SurfacedSkill {
 /// Project a stored L3 row's `metadata.template` into a [`SurfacedSkill`].
 ///
 /// PURE + fail-safe: a row whose `metadata` lacks a `template` key, or
-/// whose `template` does not deserialise into an [`L3SkillCandidate`],
-/// yields `None` and is silently skipped by the loader. A malformed
-/// skill must never crash prompt assembly or surface garbage.
+/// whose `template` is `null` or otherwise does not deserialise into an
+/// [`L3SkillCandidate`], yields `None` and is silently skipped by the
+/// loader. A malformed skill must never crash prompt assembly or
+/// surface garbage.
 pub fn parse_surfaced_skill(metadata: &serde_json::Value) -> Option<SurfacedSkill> {
     let template = metadata.get("template")?;
     let cand: L3SkillCandidate = serde_json::from_value(template.clone()).ok()?;
@@ -105,6 +106,13 @@ mod tests {
     #[test]
     fn parse_missing_template_key_is_none() {
         let meta = json!({ "trust": "user_approved", "source": "agent_raised" });
+        assert!(parse_surfaced_skill(&meta).is_none());
+    }
+
+    #[test]
+    fn parse_template_null_is_none() {
+        // `template` key present but null — a state direct SQL could produce.
+        let meta = json!({ "trust": "user_approved", "template": null });
         assert!(parse_surfaced_skill(&meta).is_none());
     }
 
