@@ -123,6 +123,17 @@ pub const ACTION_L3_APPROVED: &str = "l3.approved";
 pub const ACTION_L3_APPROVE_REJECTED: &str = "l3.approve_rejected";
 /// Action verb for the operator `memory l3 revoke` row (trust → untrusted).
 pub const ACTION_L3_REVOKED: &str = "l3.revoked";
+/// Action verb for the start-of-execution row written by `memory l3 run
+/// --execute`. Payload built by [`build_l3_invoked_payload`].
+pub const ACTION_L3_INVOKED: &str = "l3.invoked";
+/// Action verb for the end-of-execution summary row. Payload built by
+/// [`build_l3_invoke_outcome_payload`].
+pub const ACTION_L3_INVOKE_OUTCOME: &str = "l3.invoke_outcome";
+/// Action verb for a refused run attempt (trust gate or live re-validation
+/// rejected), written before any dispatch. Audited because attempting to
+/// run a non-runnable / now-invalid skill is a security-relevant event.
+/// Payload built by [`build_l3_invoke_rejected_payload`].
+pub const ACTION_L3_INVOKE_REJECTED: &str = "l3.invoke_rejected";
 
 /// `action` value written when the lane runner claims a `pending` task
 /// and transitions it to `running`. Fires exactly once per `claim_one`
@@ -505,6 +516,66 @@ pub fn build_l3_approve_rejected_payload(
 /// Payload for an `l3.revoked` row.
 pub fn build_l3_revoked_payload(memory_id: i64, updated: bool) -> Value {
     serde_json::json!({ "memory_id": memory_id, "updated": updated })
+}
+
+/// Payload for the `l3.invoked` row. Carries arg *names* only (not
+/// values); substituted values land in the per-step chokepoint rows where
+/// secret-refs stay opaque.
+pub fn build_l3_invoked_payload(
+    memory_id: i64,
+    skill_name: &str,
+    body_sha256: &str,
+    arg_names: &[String],
+    step_count: usize,
+) -> Value {
+    serde_json::json!({
+        "memory_id": memory_id,
+        "skill_name": skill_name,
+        "body_sha256": body_sha256,
+        "arg_names": arg_names,
+        "step_count": step_count,
+    })
+}
+
+/// Payload for the `l3.invoke_outcome` row. Mirrors `plan.outcome`.
+pub fn build_l3_invoke_outcome_payload(
+    memory_id: i64,
+    skill_name: &str,
+    steps_executed: usize,
+    steps_total: usize,
+    any_err: bool,
+) -> Value {
+    serde_json::json!({
+        "memory_id": memory_id,
+        "skill_name": skill_name,
+        "steps_executed": steps_executed,
+        "steps_total": steps_total,
+        "any_err": any_err,
+    })
+}
+
+/// Payload for the `l3.invoke_rejected` row. `skill_name` / `body_sha256`
+/// are optional (a row whose template would not parse has neither).
+/// Mirrors `build_l3_approve_rejected_payload`.
+pub fn build_l3_invoke_rejected_payload(
+    memory_id: i64,
+    skill_name: Option<&str>,
+    body_sha256: Option<&str>,
+    reasons: &[String],
+) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("memory_id".into(), Value::Number(serde_json::Number::from(memory_id)));
+    if let Some(n) = skill_name {
+        obj.insert("skill_name".into(), Value::String(n.into()));
+    }
+    if let Some(s) = body_sha256 {
+        obj.insert("body_sha256".into(), Value::String(s.into()));
+    }
+    obj.insert(
+        "reasons".into(),
+        Value::Array(reasons.iter().map(|r| Value::String(r.clone())).collect()),
+    );
+    Value::Object(obj)
 }
 
 /// Build the wire-stable payload for `actor='cli' action='entities.approved'`.

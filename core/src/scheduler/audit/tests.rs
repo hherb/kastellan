@@ -633,3 +633,42 @@ fn l3_revoked_payload_shape() {
     assert_eq!(p["memory_id"], 3);
     assert_eq!(p["updated"], true);
 }
+
+// --- l3 invocation payload builders ----------------------------------
+
+#[test]
+fn build_l3_invoked_payload_shape() {
+    let p = build_l3_invoked_payload(7, "summarise_repo", "abc123", &["repo_path".into()], 2);
+    assert_eq!(p["memory_id"], 7);
+    assert_eq!(p["skill_name"], "summarise_repo");
+    assert_eq!(p["body_sha256"], "abc123");
+    assert_eq!(p["arg_names"][0], "repo_path");
+    assert_eq!(p["step_count"], 2);
+}
+
+#[test]
+fn build_l3_invoke_outcome_payload_shape() {
+    let p = build_l3_invoke_outcome_payload(7, "summarise_repo", 1, 2, true);
+    assert_eq!(p["memory_id"], 7);
+    assert_eq!(p["skill_name"], "summarise_repo");
+    assert_eq!(p["steps_executed"], 1);
+    assert_eq!(p["steps_total"], 2);
+    assert_eq!(p["any_err"], true);
+}
+
+#[test]
+fn build_l3_invoke_rejected_payload_shape() {
+    let p = build_l3_invoke_rejected_payload(7, Some("leaky"), Some("sha9"), &["bad tool".into()]);
+    assert_eq!(p["memory_id"], 7);
+    assert_eq!(p["skill_name"], "leaky");
+    assert_eq!(p["body_sha256"], "sha9");
+    assert_eq!(p["reasons"][0], "bad tool");
+}
+
+#[test]
+fn build_l3_invoke_rejected_payload_omits_optional_when_none() {
+    let p = build_l3_invoke_rejected_payload(7, None, None, &["r".into()]);
+    assert!(p.get("skill_name").is_none());
+    assert!(p.get("body_sha256").is_none());
+    assert_eq!(p["memory_id"], 7);
+}
