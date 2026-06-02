@@ -26,6 +26,8 @@ pub struct LoadedToolRecord {
 }
 
 /// SHA-256 of the canonical-form (sorted, newline-joined) argv0 allowlist.
+/// A trailing newline follows each entry including the last; an empty list
+/// hashes the empty string (zero bytes fed to the hasher).
 pub fn sha256_argv0_list(argv0s: &[String]) -> String {
     use sha2::{Digest, Sha256};
     let mut sorted: Vec<&String> = argv0s.iter().collect();
@@ -66,13 +68,24 @@ fn log_gliner_relex_skip(reason: &crate::workers::gliner_relex::ResolveSkipReaso
     use crate::workers::gliner_relex::ResolveSkipReason as R;
     match reason {
         R::Disabled => tracing::info!(
-            tool = crate::workers::gliner_relex::Client::TOOL_NAME,
-            "gliner-relex disabled (HHAGENT_GLINER_RELEX_ENABLE != 1); not registered"
+            "gliner-relex: HHAGENT_GLINER_RELEX_ENABLE != \"1\"; skip registering"
         ),
-        other => tracing::error!(
-            tool = crate::workers::gliner_relex::Client::TOOL_NAME,
-            reason = ?other,
-            "gliner-relex enabled but misconfigured; not registered"
+        R::WeightsDirEnvMissing => tracing::error!(
+            "gliner-relex enabled but HHAGENT_GLINER_RELEX_WEIGHTS_DIR unset; \
+             skip registering"
+        ),
+        R::WeightsDirNotADir { path } => tracing::error!(
+            weights_dir = %path.display(),
+            "gliner-relex enabled but weights dir missing on disk; skip registering"
+        ),
+        R::VenvDirUnresolvable => tracing::error!(
+            "gliner-relex enabled but venv dir unresolvable \
+             (HHAGENT_GLINER_RELEX_VENV_DIR, HHAGENT_DATA_DIR, and HOME all unset); \
+             skip registering"
+        ),
+        R::ScriptShimMissing { path } => tracing::error!(
+            script_path = %path.display(),
+            "gliner-relex enabled but venv shim missing; skip registering"
         ),
     }
 }
