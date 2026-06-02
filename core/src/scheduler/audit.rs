@@ -537,7 +537,8 @@ pub fn build_l3_invoked_payload(
     })
 }
 
-/// Payload for the `l3.invoke_outcome` row. Mirrors `plan.outcome`.
+/// Payload for the `l3.invoke_outcome` row (mirrors `plan.outcome`).
+/// Shape: `{memory_id, skill_name, steps_executed, steps_total, any_err}`.
 pub fn build_l3_invoke_outcome_payload(
     memory_id: i64,
     skill_name: &str,
@@ -554,28 +555,24 @@ pub fn build_l3_invoke_outcome_payload(
     })
 }
 
-/// Payload for the `l3.invoke_rejected` row. `skill_name` / `body_sha256`
-/// are optional (a row whose template would not parse has neither).
-/// Mirrors `build_l3_approve_rejected_payload`.
+/// Payload for the `l3.invoke_rejected` row. Written by `invoke_l3` after
+/// a trust-gate or live-re-validation refusal, before any dispatch. The
+/// only caller always holds a successfully-parsed template (→ `skill_name`)
+/// and the stored row's `body_sha256`, so both are **required** here
+/// (unlike `build_l3_approve_rejected_payload`, whose no-parse path can
+/// have neither). Shape: `{memory_id, skill_name, body_sha256, reasons}`.
 pub fn build_l3_invoke_rejected_payload(
     memory_id: i64,
-    skill_name: Option<&str>,
-    body_sha256: Option<&str>,
+    skill_name: &str,
+    body_sha256: &str,
     reasons: &[String],
 ) -> Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert("memory_id".into(), Value::Number(serde_json::Number::from(memory_id)));
-    if let Some(n) = skill_name {
-        obj.insert("skill_name".into(), Value::String(n.into()));
-    }
-    if let Some(s) = body_sha256 {
-        obj.insert("body_sha256".into(), Value::String(s.into()));
-    }
-    obj.insert(
-        "reasons".into(),
-        Value::Array(reasons.iter().map(|r| Value::String(r.clone())).collect()),
-    );
-    Value::Object(obj)
+    serde_json::json!({
+        "memory_id": memory_id,
+        "skill_name": skill_name,
+        "body_sha256": body_sha256,
+        "reasons": reasons,
+    })
 }
 
 /// Build the wire-stable payload for `actor='cli' action='entities.approved'`.
