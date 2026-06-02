@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cassandra::types::{DataClass, L3SkillCandidate, L3TemplateStep, PlannedStep};
 use crate::memory::l3_approval::{evaluate_approval, ApprovalDecision, SkillTrust};
+use crate::scheduler::inner_loop::{StepDispatcher, StepOutcome};
 
 /// Max bytes for a single operator-supplied argument value. A value is
 /// just a tool argument (shell-exec does no shell interpretation and
@@ -278,6 +279,28 @@ pub fn prepare_invocation(
     substitute_template(template, args).map_err(|e| InvokeRefusal { reasons: vec![e.to_string()] })
 }
 
+/// Dispatch each concrete step through the injected [`StepDispatcher`],
+/// collecting outcomes and stopping at the first [`StepOutcome::Err`]
+/// (mirrors `inner_loop::run_to_terminal`). No audit / DB here — the
+/// per-step chokepoint rows are written inside `dispatch_step`; the
+/// envelope rows are the caller's job.
+pub async fn run_steps(
+    dispatcher: &dyn StepDispatcher,
+    steps: &[L3TemplateStep],
+) -> Vec<StepOutcome> {
+    let mut outcomes = Vec::with_capacity(steps.len());
+    for step in steps {
+        let ps = planned_step_from_l3(step);
+        let outcome = dispatcher.dispatch_step(&ps).await;
+        let is_err = outcome.is_err();
+        outcomes.push(outcome);
+        if is_err {
+            break;
+        }
+    }
+    outcomes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +480,59 @@ mod tests {
         assert_eq!(ps.tool, "shell-exec");
         assert_eq!(ps.method, "shell.exec");
         assert_eq!(ps.parameters["argv"][1], "hi");
+    }
+
+    use crate::scheduler::inner_loop::{StepDispatcher, StepOutcome};
+    use crate::cassandra::types::PlannedStep as PS;
+
+    struct ScriptedDispatcher {
+        // outcomes returned in order; calls record the tool seen
+        outcomes: std::sync::Mutex<std::collections::VecDeque<StepOutcome>>,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StepDispatcher for ScriptedDispatcher {
+        async fn dispatch_step(&self, step: &PS) -> StepOutcome {
+            self.seen.lock().unwrap().push(step.tool.clone());
+            self.outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(StepOutcome::Ok(serde_json::json!(null)))
+        }
+    }
+
+    fn two_steps() -> Vec<L3TemplateStep> {
+        vec![
+            L3TemplateStep { tool: "a".into(), method: "m".into(), parameters: serde_json::json!({}) },
+            L3TemplateStep { tool: "b".into(), method: "m".into(), parameters: serde_json::json!({}) },
+        ]
+    }
+
+    #[tokio::test]
+    async fn run_steps_executes_all_when_ok() {
+        let d = ScriptedDispatcher {
+            outcomes: std::sync::Mutex::new(
+                vec![StepOutcome::Ok(serde_json::json!(1)), StepOutcome::Ok(serde_json::json!(2))].into(),
+            ),
+            seen: std::sync::Mutex::new(vec![]),
+        };
+        let outcomes = run_steps(&d, &two_steps()).await;
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(*d.seen.lock().unwrap(), vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn run_steps_stops_at_first_error() {
+        let d = ScriptedDispatcher {
+            outcomes: std::sync::Mutex::new(
+                vec![StepOutcome::Err { code: "X".into(), detail: "boom".into() }].into(),
+            ),
+            seen: std::sync::Mutex::new(vec![]),
+        };
+        let outcomes = run_steps(&d, &two_steps()).await;
+        assert_eq!(outcomes.len(), 1, "must stop after the failing first step");
+        assert_eq!(*d.seen.lock().unwrap(), vec!["a"], "second step never dispatched");
     }
 }
