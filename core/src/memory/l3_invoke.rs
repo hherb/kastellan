@@ -14,7 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cassandra::types::{L3SkillCandidate, L3TemplateStep};
+use crate::cassandra::types::{DataClass, L3SkillCandidate, L3TemplateStep, PlannedStep};
+use crate::memory::l3_approval::{evaluate_approval, ApprovalDecision, SkillTrust};
 
 /// Max bytes for a single operator-supplied argument value. A value is
 /// just a tool argument (shell-exec does no shell interpretation and
@@ -203,6 +204,80 @@ pub fn substitute_template(
     Ok(out)
 }
 
+/// A refusal to invoke, carrying every human-readable reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvokeRefusal {
+    pub reasons: Vec<String>,
+}
+
+/// PURE trust gate: only `user_approved` / `pinned` skills run. Identical
+/// membership to [`crate::memory::l3_surface::is_surfaceable`] (pinned in
+/// sync by a test) — a skill the planner may *see* is exactly a skill the
+/// operator may *run*.
+pub fn is_runnable(trust: SkillTrust) -> bool {
+    matches!(trust, SkillTrust::UserApproved | SkillTrust::Pinned)
+}
+
+/// Synthesize a [`PlannedStep`] from a concrete (substituted) template
+/// step. `returns` / `done_when` are empty and `classification` is set to
+/// the most conservative class — all three are UNUSED on the operator-run
+/// path: `ToolHostStepDispatcher::dispatch_step` reads only
+/// `tool` / `method` / `parameters`. The conservative `classification`
+/// is defensive in case a future reader inspects it.
+pub fn planned_step_from_l3(step: &L3TemplateStep) -> PlannedStep {
+    PlannedStep {
+        tool: step.tool.clone(),
+        method: step.method.clone(),
+        parameters: step.parameters.clone(),
+        returns: String::new(),
+        done_when: String::new(),
+        classification: DataClass::Secret,
+    }
+}
+
+/// PURE decision: may this stored skill run with these args against this
+/// live tool set, and if so, what are the concrete steps?
+///
+/// 1. trust must be runnable ([`is_runnable`]);
+/// 2. re-run the approval gate ([`evaluate_approval`]) against `live_tools`
+///    — the TOCTOU close (structural re-validation + `secret://` re-scan +
+///    every tool must exist in the registry as it is now);
+/// 3. substitute args into the template ([`substitute_template`]).
+///
+/// On any failure returns an [`InvokeRefusal`] collecting the reason(s).
+pub fn prepare_invocation(
+    template: &L3SkillCandidate,
+    stored_trust: SkillTrust,
+    args: &BTreeMap<String, String>,
+    live_tools: &BTreeSet<String>,
+) -> Result<Vec<L3TemplateStep>, InvokeRefusal> {
+    if !is_runnable(stored_trust) {
+        return Err(InvokeRefusal {
+            reasons: vec![format!(
+                "skill trust '{}' is not runnable (only user_approved / pinned)",
+                stored_trust.as_str()
+            )],
+        });
+    }
+
+    // Re-validate the STORED template against the live registry first
+    // (structural + secret-ref + tool existence). This guards against a
+    // skill approved against a now-stale snapshot, and short-circuits on a
+    // structurally broken template before substitution.
+    match evaluate_approval(template, live_tools) {
+        ApprovalDecision::Approve => {}
+        ApprovalDecision::Reject { reasons } => {
+            return Err(InvokeRefusal {
+                reasons: reasons.iter().map(|r| r.to_string()).collect(),
+            });
+        }
+    }
+
+    // Substitution can still fail on operator-arg problems (missing /
+    // unknown / bad value) — surface those as refusal reasons too.
+    substitute_template(template, args).map_err(|e| InvokeRefusal { reasons: vec![e.to_string()] })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +385,77 @@ mod tests {
             parse_args(&["a=1".into(), "a=2".into()]),
             Err(InvokeError::DuplicateArg("a".into()))
         );
+    }
+
+    use crate::memory::l3_approval::SkillTrust;
+    use crate::memory::l3_surface::is_surfaceable;
+
+    #[test]
+    fn is_runnable_only_approved_and_pinned() {
+        assert!(is_runnable(SkillTrust::UserApproved));
+        assert!(is_runnable(SkillTrust::Pinned));
+        assert!(!is_runnable(SkillTrust::Untrusted));
+    }
+
+    #[test]
+    fn is_runnable_matches_is_surfaceable() {
+        // The two gates have identical membership; pin them in sync so a future
+        // change to one is caught.
+        for t in [SkillTrust::Untrusted, SkillTrust::UserApproved, SkillTrust::Pinned] {
+            assert_eq!(is_runnable(t), is_surfaceable(t));
+        }
+    }
+
+    fn tools(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn prepare_rejects_untrusted_trust() {
+        let args = parse_args(&["repo_path=/x".into()]).unwrap();
+        let r = prepare_invocation(&skill_one_param(), SkillTrust::Untrusted, &args, &tools(&["shell-exec"]));
+        match r {
+            Err(InvokeRefusal { reasons }) => assert!(reasons.iter().any(|s| s.contains("trust"))),
+            Ok(_) => panic!("untrusted must refuse"),
+        }
+    }
+
+    #[test]
+    fn prepare_rejects_unknown_tool_via_live_gate() {
+        let args = parse_args(&["repo_path=/x".into()]).unwrap();
+        // approved trust, but the live registry lacks shell-exec
+        let r = prepare_invocation(&skill_one_param(), SkillTrust::UserApproved, &args, &tools(&["gliner-relex"]));
+        match r {
+            Err(InvokeRefusal { reasons }) => assert!(reasons.iter().any(|s| s.contains("shell-exec"))),
+            Ok(_) => panic!("unknown tool must refuse"),
+        }
+    }
+
+    #[test]
+    fn prepare_happy_returns_concrete_steps() {
+        let args = parse_args(&["repo_path=/tmp/r".into()]).unwrap();
+        let steps = prepare_invocation(&skill_one_param(), SkillTrust::UserApproved, &args, &tools(&["shell-exec"]))
+            .expect("clean approved skill with known tool");
+        assert_eq!(steps[0].parameters["argv"][1], "/tmp/r/README.md");
+    }
+
+    #[test]
+    fn prepare_propagates_substitution_error_as_refusal() {
+        // missing arg → refusal (not a panic)
+        let r = prepare_invocation(&skill_one_param(), SkillTrust::UserApproved, &BTreeMap::new(), &tools(&["shell-exec"]));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn planned_step_from_l3_carries_tool_method_params() {
+        let ts = L3TemplateStep {
+            tool: "shell-exec".into(),
+            method: "shell.exec".into(),
+            parameters: serde_json::json!({ "argv": ["echo", "hi"] }),
+        };
+        let ps = planned_step_from_l3(&ts);
+        assert_eq!(ps.tool, "shell-exec");
+        assert_eq!(ps.method, "shell.exec");
+        assert_eq!(ps.parameters["argv"][1], "hi");
     }
 }
