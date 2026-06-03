@@ -267,7 +267,7 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
     use hhagent_core::cassandra::types::L3SkillCandidate;
     use hhagent_core::memory::l3_approval::SkillTrust;
     use hhagent_core::memory::l3_invoke::{invoke_l3, parse_args, InvokeReport};
-    use hhagent_core::scheduler::inner_loop::StepDispatcher;
+    use hhagent_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
     use hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher;
     use hhagent_db::memories::{fetch_by_ids, MemoryLayer};
     use hhagent_db::pool::connect_runtime_pool;
@@ -290,6 +290,10 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
                     }
                 }
             }
+            s if s.starts_with("--arg=") => {
+                // GNU-style equals form: --arg=name=value
+                arg_tokens.push(s["--arg=".len()..].to_string());
+            }
             s if id_str.is_none() && !s.starts_with("--") => id_str = Some(&args[i]),
             other => {
                 eprintln!("memory l3 run: unexpected argument '{other}'");
@@ -298,12 +302,18 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
         }
         i += 1;
     }
-    let id: i64 = match id_str.map(|s| s.parse()) {
-        Some(Ok(n)) => n,
-        _ => {
-            eprintln!("usage: hhagent-cli memory l3 run <id> [--arg name=value]… [--execute]");
+    let id: i64 = match id_str {
+        None => {
+            eprintln!("usage: hhagent-cli memory l3 run <id> [--arg name=value]… [--execute | --yes]");
             return ExitCode::from(2);
         }
+        Some(s) => match s.parse() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("memory l3 run: invalid id '{s}': {e}");
+                return ExitCode::from(2);
+            }
+        },
     };
     let args_map = match parse_args(&arg_tokens) {
         Ok(m) => m,
@@ -396,9 +406,9 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
             println!("executed skill '{}' (#{id}): {}/{} step(s)", template.name, outcomes.len(), steps_total);
             for (n, o) in outcomes.iter().enumerate() {
                 match o {
-                    hhagent_core::scheduler::inner_loop::StepOutcome::Ok(v) =>
+                    StepOutcome::Ok(v) =>
                         println!("  [{n}] ok: {v}"),
-                    hhagent_core::scheduler::inner_loop::StepOutcome::Err { code, detail } =>
+                    StepOutcome::Err { code, detail } =>
                         println!("  [{n}] ERR {code}: {detail}"),
                 }
             }
