@@ -1,3 +1,5 @@
+//! Unit tests for the pure L3-invocation engine ([`l3_invoke`](super)).
+
 use super::*;
 use crate::cassandra::types::L3Param;
 use crate::memory::l3_surface::is_surfaceable;

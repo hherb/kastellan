@@ -332,9 +332,11 @@ pub enum InvokeReport {
 ///
 /// `template` / `stored_trust` / `body_sha256` come from the stored L3
 /// row's metadata; `live_tools` from the freshly-rebuilt registry's tool
-/// names; `args` from `parse_args`. `execute == false` ⇒ dry-run (no audit,
-/// no dispatch). Audit writes are best-effort (warn-on-failure), matching
-/// the chokepoint posture.
+/// names; `args` from `parse_args`. `execute == false` ⇒ dry-run: no
+/// dispatch and no `l3.invoked` / `l3.invoke_outcome` rows — but a refusal
+/// is **always** audited (`l3.invoke_rejected`) regardless of `execute`,
+/// because a refused run attempt is a security event worth a trail. Audit
+/// writes are best-effort (warn-on-failure), matching the chokepoint posture.
 #[allow(clippy::too_many_arguments)]
 pub async fn invoke_l3(
     pool: &PgPool,
