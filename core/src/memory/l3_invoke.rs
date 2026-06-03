@@ -330,8 +330,9 @@ pub enum InvokeReport {
 
 /// Orchestrate operator-triggered invocation of an approved skill.
 ///
-/// `template` / `stored_trust` / `body_sha256` come from the stored L3
-/// row's metadata; `live_tools` from the freshly-rebuilt registry's tool
+/// `memory_id` / `template` / `stored_trust` / `body_sha256` come from the
+/// stored L3 row (`memory_id` is threaded into the audit-row payloads);
+/// `live_tools` from the freshly-rebuilt registry's tool
 /// names; `args` from `parse_args`. `execute == false` ⇒ dry-run: no
 /// dispatch and no `l3.invoked` / `l3.invoke_outcome` rows — but a refusal
 /// is **always** audited (`l3.invoke_rejected`) regardless of `execute`,
