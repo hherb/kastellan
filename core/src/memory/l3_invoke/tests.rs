@@ -243,3 +243,86 @@ async fn run_steps_stops_at_first_error() {
     assert_eq!(outcomes.len(), 1, "must stop after the failing first step");
     assert_eq!(*d.seen.lock().unwrap(), vec!["a"], "second step never dispatched");
 }
+
+// --- issue #179: registry-divergence diagnostic --------------------------
+
+fn set(items: &[&str]) -> std::collections::BTreeSet<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn diagnose_missing_in_snapshot_is_env_hint() {
+    // needed shell-exec is absent from the live rebuild but present in the
+    // daemon snapshot => classic "env var unset" cliff.
+    let needed = set(&["shell-exec"]);
+    let live = set(&[]); // operator shell lacked HHAGENT_SHELL_EXEC_BIN
+    let snapshot = set(&["shell-exec"]);
+    let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
+    assert_eq!(
+        got,
+        vec![super::RegistryDivergence::MissingLocallyButInSnapshot { tool: "shell-exec".into() }]
+    );
+}
+
+#[test]
+fn diagnose_unknown_everywhere() {
+    let needed = set(&["ghost-tool"]);
+    let live = set(&["shell-exec"]);
+    let snapshot = set(&["shell-exec"]);
+    let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
+    assert_eq!(
+        got,
+        vec![super::RegistryDivergence::UnknownEverywhere { tool: "ghost-tool".into() }]
+    );
+}
+
+#[test]
+fn diagnose_no_snapshot() {
+    let needed = set(&["shell-exec"]);
+    let live = set(&[]);
+    let got = super::diagnose_registry_divergence(&needed, &live, None);
+    assert_eq!(
+        got,
+        vec![super::RegistryDivergence::MissingLocallyNoSnapshot { tool: "shell-exec".into() }]
+    );
+}
+
+#[test]
+fn diagnose_all_present_is_empty() {
+    let needed = set(&["shell-exec", "gliner-relex"]);
+    let live = set(&["shell-exec", "gliner-relex"]);
+    let snapshot = set(&["shell-exec"]);
+    let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
+    assert!(got.is_empty());
+}
+
+#[test]
+fn diagnose_multiple_tools_deterministic_order() {
+    // two missing tools of different classes; output follows sorted needed
+    // iteration order (BTreeSet) regardless of insertion.
+    let needed = set(&["zeta-tool", "alpha-tool"]);
+    let live = set(&[]);
+    let snapshot = set(&["alpha-tool"]); // alpha in snapshot, zeta nowhere
+    let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
+    assert_eq!(
+        got,
+        vec![
+            super::RegistryDivergence::MissingLocallyButInSnapshot { tool: "alpha-tool".into() },
+            super::RegistryDivergence::UnknownEverywhere { tool: "zeta-tool".into() },
+        ]
+    );
+}
+
+#[test]
+fn display_renders_actionable_hint_naming_the_tool() {
+    let variants = [
+        super::RegistryDivergence::MissingLocallyButInSnapshot { tool: "shell-exec".into() },
+        super::RegistryDivergence::MissingLocallyNoSnapshot { tool: "shell-exec".into() },
+        super::RegistryDivergence::UnknownEverywhere { tool: "shell-exec".into() },
+    ];
+    for v in &variants {
+        let rendered = v.to_string();
+        assert!(!rendered.is_empty());
+        assert!(rendered.contains("shell-exec"), "hint must name the tool: {rendered}");
+    }
+}
