@@ -33,7 +33,7 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// Extracted from `write_audit_plan_formulate` so the wire shape is
 /// unit-testable without a live Postgres pool. The shape pins
 /// (in this file's `tests` module) defend against accidental drift —
-/// 26 keys for non-`CliInferred` sources, 27 when `CliInferred` carries
+/// 27 keys for non-`CliInferred` sources, 28 when `CliInferred` carries
 /// matched signals.
 ///
 /// Slice A (2026-05-15) added `plan` (full serialised Plan) +
