@@ -197,6 +197,16 @@ pub enum InnerLoopError {
 #[async_trait::async_trait]
 pub trait StepDispatcher: Send + Sync {
     async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome;
+
+    /// Live tool-name set this dispatcher can reach. Used by the agent
+    /// L3-invoke path to re-validate a skill against the registry as it is
+    /// *now* (the TOCTOU close). Default: empty — only the production
+    /// [`crate::scheduler::tool_dispatch::ToolHostStepDispatcher`] holds a
+    /// registry; non-loop / test doubles that never expand an invoke can
+    /// keep the empty default.
+    fn known_tools(&self) -> std::collections::BTreeSet<String> {
+        std::collections::BTreeSet::new()
+    }
 }
 
 /// Run the inner loop until terminal. Returns an [`InnerLoopResult`]

@@ -176,6 +176,19 @@ fn tool_registry_insert_replaces_existing_entry() {
     );
 }
 
+#[test]
+fn tool_names_returns_registered_names_sorted() {
+    let mut reg = ToolRegistry::new();
+    reg.insert("web-fetch", fake_entry());
+    reg.insert("shell-exec", fake_entry());
+    let names = reg.tool_names();
+    assert!(names.contains("shell-exec"));
+    assert!(names.contains("web-fetch"));
+    assert_eq!(names.len(), 2);
+    // BTreeSet is sorted: first element is the lexicographically smallest.
+    assert_eq!(names.iter().next().map(String::as_str), Some("shell-exec"));
+}
+
 // ----- shell_exec_entry -----
 
 #[test]

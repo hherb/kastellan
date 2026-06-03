@@ -179,6 +179,12 @@ impl ToolRegistry {
     pub fn entries(&self) -> impl Iterator<Item = (&str, &ToolEntry)> {
         self.entries.iter().map(|(k, v)| (k.as_str(), v))
     }
+
+    /// The set of registered tool names (deterministic, sorted). Used by
+    /// the agent L3-invoke live re-validation.
+    pub fn tool_names(&self) -> std::collections::BTreeSet<String> {
+        self.entries.keys().cloned().collect()
+    }
 }
 
 /// Canonical [`ToolEntry`] for the `shell-exec` worker.
@@ -315,6 +321,10 @@ impl ToolHostStepDispatcher {
 
 #[async_trait::async_trait]
 impl StepDispatcher for ToolHostStepDispatcher {
+    fn known_tools(&self) -> std::collections::BTreeSet<String> {
+        self.registry.tool_names()
+    }
+
     async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome {
         // Measured from dispatcher entry, not from worker spawn — so
         // `ms` on a `step.unknown_tool` row is essentially zero (just
