@@ -379,7 +379,7 @@ mod tests {
     }
 
     fn surfaced(name: &str, desc: &str) -> SurfacedSkill {
-        SurfacedSkill { name: name.into(), description: desc.into(), params: vec![] }
+        SurfacedSkill { name: name.into(), description: desc.into(), params: vec![], invocable: false }
     }
 
     #[test]
