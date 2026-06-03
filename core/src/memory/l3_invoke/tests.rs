@@ -246,17 +246,13 @@ async fn run_steps_stops_at_first_error() {
 
 // --- issue #179: registry-divergence diagnostic --------------------------
 
-fn set(items: &[&str]) -> std::collections::BTreeSet<String> {
-    items.iter().map(|s| s.to_string()).collect()
-}
-
 #[test]
 fn diagnose_missing_in_snapshot_is_env_hint() {
     // needed shell-exec is absent from the live rebuild but present in the
     // daemon snapshot => classic "env var unset" cliff.
-    let needed = set(&["shell-exec"]);
-    let live = set(&[]); // operator shell lacked HHAGENT_SHELL_EXEC_BIN
-    let snapshot = set(&["shell-exec"]);
+    let needed = tools(&["shell-exec"]);
+    let live = tools(&[]); // operator shell lacked HHAGENT_SHELL_EXEC_BIN
+    let snapshot = tools(&["shell-exec"]);
     let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
     assert_eq!(
         got,
@@ -266,9 +262,9 @@ fn diagnose_missing_in_snapshot_is_env_hint() {
 
 #[test]
 fn diagnose_unknown_everywhere() {
-    let needed = set(&["ghost-tool"]);
-    let live = set(&["shell-exec"]);
-    let snapshot = set(&["shell-exec"]);
+    let needed = tools(&["ghost-tool"]);
+    let live = tools(&["shell-exec"]);
+    let snapshot = tools(&["shell-exec"]);
     let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
     assert_eq!(
         got,
@@ -278,8 +274,8 @@ fn diagnose_unknown_everywhere() {
 
 #[test]
 fn diagnose_no_snapshot() {
-    let needed = set(&["shell-exec"]);
-    let live = set(&[]);
+    let needed = tools(&["shell-exec"]);
+    let live = tools(&[]);
     let got = super::diagnose_registry_divergence(&needed, &live, None);
     assert_eq!(
         got,
@@ -289,9 +285,12 @@ fn diagnose_no_snapshot() {
 
 #[test]
 fn diagnose_all_present_is_empty() {
-    let needed = set(&["shell-exec", "gliner-relex"]);
-    let live = set(&["shell-exec", "gliner-relex"]);
-    let snapshot = set(&["shell-exec"]);
+    let needed = tools(&["shell-exec", "gliner-relex"]);
+    let live = tools(&["shell-exec", "gliner-relex"]);
+    // Snapshot is intentionally incomplete: only tools missing from `live` are
+    // ever classified, so snapshot content is irrelevant when all needed tools
+    // are present locally.
+    let snapshot = tools(&["shell-exec"]);
     let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
     assert!(got.is_empty());
 }
@@ -300,9 +299,9 @@ fn diagnose_all_present_is_empty() {
 fn diagnose_multiple_tools_deterministic_order() {
     // two missing tools of different classes; output follows sorted needed
     // iteration order (BTreeSet) regardless of insertion.
-    let needed = set(&["zeta-tool", "alpha-tool"]);
-    let live = set(&[]);
-    let snapshot = set(&["alpha-tool"]); // alpha in snapshot, zeta nowhere
+    let needed = tools(&["zeta-tool", "alpha-tool"]);
+    let live = tools(&[]);
+    let snapshot = tools(&["alpha-tool"]); // alpha in snapshot, zeta nowhere
     let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
     assert_eq!(
         got,
@@ -315,14 +314,23 @@ fn diagnose_multiple_tools_deterministic_order() {
 
 #[test]
 fn display_renders_actionable_hint_naming_the_tool() {
-    let variants = [
-        super::RegistryDivergence::MissingLocallyButInSnapshot { tool: "shell-exec".into() },
-        super::RegistryDivergence::MissingLocallyNoSnapshot { tool: "shell-exec".into() },
-        super::RegistryDivergence::UnknownEverywhere { tool: "shell-exec".into() },
+    let cases = [
+        (
+            super::RegistryDivergence::MissingLocallyButInSnapshot { tool: "shell-exec".into() },
+            "registered by the daemon",
+        ),
+        (
+            super::RegistryDivergence::MissingLocallyNoSnapshot { tool: "shell-exec".into() },
+            "no daemon registry",
+        ),
+        (
+            super::RegistryDivergence::UnknownEverywhere { tool: "shell-exec".into() },
+            "unknown to both",
+        ),
     ];
-    for v in &variants {
-        let rendered = v.to_string();
-        assert!(!rendered.is_empty());
+    for (variant, distinctive) in &cases {
+        let rendered = variant.to_string();
         assert!(rendered.contains("shell-exec"), "hint must name the tool: {rendered}");
+        assert!(rendered.contains(distinctive), "hint must contain '{distinctive}': {rendered}");
     }
 }
