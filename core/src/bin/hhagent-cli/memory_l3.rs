@@ -1,7 +1,9 @@
-//! `memory l3 {list,remove}` — operator-facing inspection + pruning of
-//! layer-3 (crystallised skill) memories. Skills are agent-crystallised,
-//! never operator-authored, so there is no `add`. `remove` emits one
-//! `actor='cli' action='l3.removed'` audit row.
+//! `memory l3 {list,approve,revoke,remove,run}` — operator-facing
+//! inspection, trust management, pruning, and execution of layer-3
+//! (crystallised skill) memories. Skills are agent-crystallised, never
+//! operator-authored, so there is no `add`. `approve`/`revoke`/`remove`/`run`
+//! each emit their own `actor='cli'` audit row(s); `run` (operator-triggered
+//! invocation) is dry-run by default and only dispatches under `--execute`.
 
 use std::process::ExitCode;
 
@@ -258,8 +260,10 @@ async fn memory_l3_revoke(args: &[String]) -> ExitCode {
 ///
 /// Default (no `--execute`): DRY-RUN — substitute + live-registry
 /// re-validate, then print the concrete steps that WOULD dispatch. Spawns
-/// nothing, writes no audit row. `--execute` runs the steps through the
-/// sandbox, stopping at the first error.
+/// nothing; a successful dry-run writes no audit row, but a *refused* run
+/// is always audited (`l3.invoke_rejected`) even in dry-run mode — a
+/// refused run attempt is a security event worth a trail (see `invoke_l3`).
+/// `--execute` runs the steps through the sandbox, stopping at the first error.
 async fn memory_l3_run(args: &[String]) -> ExitCode {
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -408,8 +412,10 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
                 match o {
                     StepOutcome::Ok(v) =>
                         println!("  [{n}] ok: {v}"),
+                    // Step errors are diagnostics → stderr (consistent with how
+                    // Refused reasons are printed).
                     StepOutcome::Err { code, detail } =>
-                        println!("  [{n}] ERR {code}: {detail}"),
+                        eprintln!("  [{n}] ERR {code}: {detail}"),
                 }
             }
             if any_err { ExitCode::from(1) } else { ExitCode::from(0) }
