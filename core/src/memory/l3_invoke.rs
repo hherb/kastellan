@@ -526,8 +526,11 @@ pub async fn load_pinned_skill_by_name(
     pool: &PgPool,
     name: &str,
 ) -> Result<Option<PinnedSkill>, hhagent_db::DbError> {
-    // Cap: a generous bound on how many pinned skills could share a name.
-    // Newest-first, so the first name match is the newest.
+    // Caps the TOTAL pinned rows scanned (newest-first), not same-name
+    // collisions: a pinned skill older than the 64 newest pinned rows
+    // would not resolve and would surface to the agent as "unknown skill".
+    // Acceptable — pinning is a deliberate, rare human action; 64 distinct
+    // pinned skills is a generous ceiling.
     const SCAN_CAP: usize = 64;
     let rows = load_layer_by_trust(pool, MemoryLayer::Skill, &["pinned"], SCAN_CAP).await?;
     for row in rows {
