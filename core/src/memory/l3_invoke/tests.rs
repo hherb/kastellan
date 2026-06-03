@@ -422,5 +422,8 @@ fn expand_for_agent_refuses_tool_absent_from_live_registry() {
     let live: BTreeSet<String> = ["shell-exec".to_string()].into_iter().collect();
     let err = expand_for_agent(&template, SkillTrust::Pinned, &BTreeMap::new(),
         &live, DataClass::Public).unwrap_err();
-    assert!(!err.reasons.is_empty());
+    assert!(
+        err.reasons.iter().any(|r| r.contains("web-fetch")),
+        "refusal should name the unregistered tool: {:?}", err.reasons
+    );
 }

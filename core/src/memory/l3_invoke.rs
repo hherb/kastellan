@@ -339,8 +339,8 @@ pub fn expand_for_agent(
     }
     let concrete = prepare_invocation(template, stored_trust, args, live_tools)?;
     Ok(concrete
-        .iter()
-        .map(|s| planned_step_from_l3_with_class(s, data_ceiling))
+        .into_iter()
+        .map(|s| planned_step_from_l3_with_class(&s, data_ceiling))
         .collect())
 }
 
