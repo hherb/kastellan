@@ -558,6 +558,26 @@ async fn d_unknown_tool_refuses_via_live_revalidation() {
         .expect("l3.invoke_rejected payload.reasons must be an array");
     assert!(!rej_reasons.is_empty(), "l3.invoke_rejected payload.reasons must be non-empty; payload={rej_payload}");
 
+    // Issue #179: the refusal is caused by a tool missing from the live registry,
+    // so diagnose_registry_divergence must emit at least one hint.  The CLI
+    // prints each hint as "  hint: {divergence}" on stderr; here we exercise the
+    // same code path directly and assert the rendered lines carry the prefix.
+    {
+        use std::collections::BTreeSet;
+        use hhagent_core::memory::l3_invoke::diagnose_registry_divergence;
+
+        let needed: BTreeSet<String> =
+            ghost_skill.steps.iter().map(|s| s.tool.clone()).collect();
+        // No registry.loaded snapshot in this fresh DB (daemon never ran).
+        let hints = diagnose_registry_divergence(&needed, &live_tools, None);
+        // Render exactly as the CLI does: each line becomes "  hint: {h}".
+        let stderr: String = hints.iter().map(|h| format!("  hint: {h}\n")).collect();
+        assert!(
+            stderr.contains("hint:"),
+            "expected a registry-divergence hint on the refusal; stderr was:\n{stderr}"
+        );
+    }
+
     pool.close().await;
 }
 
