@@ -1,7 +1,7 @@
 //! Operator-triggered execution of an approved L3 skill (the invocation
 //! "DOOR"). Pure parsing + substitution + a pure decision
 //! ([`prepare_invocation`]) reusing the approval gate against the *live*
-//! tool set, plus the async [`invoke_l3`] orchestration that drives the
+//! tool set, plus the async `invoke_l3` orchestration that drives the
 //! existing [`crate::scheduler::tool_dispatch::ToolHostStepDispatcher`].
 //!
 //! Only `user_approved` / `pinned` skills run ([`is_runnable`]); dry-run is
@@ -37,7 +37,7 @@ pub enum InvokeError {
     MissingArgs(String),
     #[error("unknown argument(s) not declared by the skill: {0}")]
     UnknownArgs(String),
-    #[error("argument '{name}' value contains a newline or control character")]
+    #[error("argument '{name}' value contains a newline, control character, or '{{{{' / '}}}}' sequence")]
     BadArgValue { name: String },
     #[error("argument '{name}' value exceeds {max} bytes ({got})")]
     ArgValueTooLong { name: String, max: usize, got: usize },
@@ -128,7 +128,9 @@ fn interpolate_value(v: &serde_json::Value, args: &BTreeMap<String, String>) -> 
     }
 }
 
-/// `true` iff any `{{ident}}` placeholder remains in a string leaf.
+/// Returns the name of the first `{{name}}` placeholder still present in any
+/// string leaf, or `None` if none remain. (A degenerate `{{}}` yields
+/// `Some("")`, but empty names are impossible in a validated template.)
 fn has_placeholder(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::String(s) => {
@@ -159,8 +161,9 @@ fn has_placeholder(v: &serde_json::Value) -> Option<String> {
 /// producing concrete (placeholder-free) steps.
 ///
 /// Closed-world: the supplied arg names must EXACTLY equal the declared
-/// parameter names. Each value must be free of newlines/control chars and
-/// within [`L3_ARG_MAX_VALUE_BYTES`]. Asserts no `{{…}}` survives.
+/// parameter names. Each value must be free of newlines/control chars, must
+/// not contain the `{{`/`}}` template-brace sequences, and must be within
+/// [`L3_ARG_MAX_VALUE_BYTES`]. Asserts no `{{…}}` survives.
 pub fn substitute_template(
     template: &L3SkillCandidate,
     args: &BTreeMap<String, String>,
@@ -185,7 +188,13 @@ pub fn substitute_template(
                 got: value.len(),
             });
         }
-        if value.bytes().any(|b| b < 0x20) {
+        // Reject control chars AND the template-brace sequences `{{`/`}}`.
+        // The brace check is load-bearing: without it, a value that legitimately
+        // contained `{{x}}` would, after interpolation, look like a surviving
+        // placeholder and trip the spurious `UnsubstitutedPlaceholder` post-condition
+        // below. Rejecting only the two-char sequences (not single braces) keeps
+        // single-brace values like `{"json":true}` valid.
+        if value.bytes().any(|b| b < 0x20) || value.contains("{{") || value.contains("}}") {
             return Err(InvokeError::BadArgValue { name: name.clone() });
         }
     }
@@ -304,7 +313,7 @@ pub async fn run_steps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cassandra::types::{L3Param, L3TemplateStep};
+    use crate::cassandra::types::L3Param;
 
     fn skill_one_param() -> L3SkillCandidate {
         L3SkillCandidate {
@@ -374,6 +383,17 @@ mod tests {
     }
 
     #[test]
+    fn substitute_rejects_value_containing_brace_sequence() {
+        // A value legally containing `{{x}}` must be rejected up front (BadArgValue),
+        // NOT silently interpolated and then mis-flagged as an unsubstituted
+        // placeholder. Single-brace values stay valid (covered by the happy tests).
+        let mut args = BTreeMap::new();
+        args.insert("repo_path".into(), "/data/{{x}}/out".into());
+        let err = substitute_template(&skill_one_param(), &args).unwrap_err();
+        assert_eq!(err, InvokeError::BadArgValue { name: "repo_path".into() });
+    }
+
+    #[test]
     fn parse_args_happy_multi() {
         let got = parse_args(&["repo_path=/tmp/x".into(), "depth=2".into()]).unwrap();
         assert_eq!(got["repo_path"], "/tmp/x");
@@ -410,7 +430,6 @@ mod tests {
         );
     }
 
-    use crate::memory::l3_approval::SkillTrust;
     use crate::memory::l3_surface::is_surfaceable;
 
     #[test]
@@ -464,9 +483,13 @@ mod tests {
 
     #[test]
     fn prepare_propagates_substitution_error_as_refusal() {
-        // missing arg → refusal (not a panic)
-        let r = prepare_invocation(&skill_one_param(), SkillTrust::UserApproved, &BTreeMap::new(), &tools(&["shell-exec"]));
-        assert!(r.is_err());
+        // missing arg → refusal (not a panic); refusal must name the missing param
+        let refusal = prepare_invocation(&skill_one_param(), SkillTrust::UserApproved, &BTreeMap::new(), &tools(&["shell-exec"]))
+            .unwrap_err();
+        assert!(
+            refusal.reasons.iter().any(|s| s.contains("repo_path")),
+            "refusal should name the missing arg; got {:?}", refusal.reasons
+        );
     }
 
     #[test]
@@ -482,7 +505,6 @@ mod tests {
         assert_eq!(ps.parameters["argv"][1], "hi");
     }
 
-    use crate::scheduler::inner_loop::{StepDispatcher, StepOutcome};
     use crate::cassandra::types::PlannedStep as PS;
 
     struct ScriptedDispatcher {
