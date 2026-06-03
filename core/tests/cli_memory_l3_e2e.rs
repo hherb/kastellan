@@ -1,8 +1,8 @@
-//! Subprocess-level pin for `hhagent-cli memory l3 {list,remove,approve,revoke,run}`.
+//! Subprocess-level pin for `hhagent-cli memory l3 {list,remove,approve,pin,revoke,run}`.
 //!
 //! ## What this file pins
 //!
-//! Nine independent scenarios, each bringing up its own per-test PG cluster
+//! Eleven independent scenarios, each bringing up its own per-test PG cluster
 //! and spawning the real `hhagent-cli` binary as a subprocess:
 //!
 //! 1. **`cli_memory_l3_list_empty_then_populated`** — `memory l3 list` against
@@ -32,6 +32,14 @@
 //!
 //! 8. **`cli_memory_l3_revoke_after_approve`** — approve then revoke: trust
 //!    cycles untrusted → user_approved → untrusted.
+//!
+//! 8b. **`cli_memory_l3_pin_happy`** — seed a valid skill + a `registry.loaded`
+//!    row; approve it, then pin it: exit 0, stdout `pinned`, `metadata.trust ==
+//!    "pinned"`, and an `l3.pinned` audit row exists.
+//!
+//! 8c. **`cli_memory_l3_pin_rejects_not_approved`** — seed a skill left
+//!    `untrusted` (NOT approved); pin refuses (non-zero exit), trust stays
+//!    `untrusted`, and an `l3.pin_rejected` audit row exists.
 //!
 //! 9. **`cli_memory_l3_run_refusal_prints_registry_divergence_hint`** — seed a
 //!    shell-exec skill + a `registry.loaded` snapshot naming it; approve it
@@ -621,6 +629,115 @@ async fn cli_memory_l3_revoke_after_approve() {
     let trust: String = sqlx::query_scalar("SELECT metadata->>'trust' FROM memories WHERE id = $1")
         .bind(id).fetch_one(&pool).await.expect("fetch trust");
     assert_eq!(trust, "untrusted");
+
+    drop(pool); drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8b — pin happy path (user_approved → pinned)
+// ---------------------------------------------------------------------------
+
+/// Seed a valid skill + a registry.loaded row naming its tool; approve it
+/// (trust → user_approved); then pin it. Pin must exit 0, stdout contains
+/// `pinned`, the row's `metadata.trust == "pinned"`, and an `l3.pinned`
+/// audit row exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_memory_l3_pin_happy() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "cml3-pin-d", "cml3-pin-l",
+        &format!("hhagent-postgres-cli-memory-l3-pin-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "cli_memory_l3_pin_happy"})).await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    let outcome = crystallise_l3(&pool, &valid_skill(), L3Source::AgentRaised { task_id: 1 })
+        .await.expect("crystallise_l3");
+    let id = outcome.memory_id();
+    seed_registry_loaded(&pool, &["shell-exec"]).await;
+
+    let bin = cli_binary();
+    let env = cli_env(&cluster.data_dir);
+
+    // --- approve first (precondition for pin) ----------------------------
+    let approve = Command::new(&bin)
+        .args(["memory", "l3", "approve", &id.to_string()])
+        .env_clear().envs(env.clone()).output().expect("spawn approve");
+    assert!(approve.status.success(), "approve must succeed first; stderr={}",
+        String::from_utf8_lossy(&approve.stderr));
+
+    // --- pin -------------------------------------------------------------
+    let out = Command::new(&bin)
+        .args(["memory", "l3", "pin", &id.to_string()])
+        .env_clear().envs(env.clone()).output().expect("spawn pin");
+    let so = String::from_utf8_lossy(&out.stdout).into_owned();
+    let se = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "pin must exit 0; stdout={so}\nstderr={se}");
+    assert!(so.contains("pinned"), "pin stdout must confirm 'pinned'; got {so}");
+
+    // trust flipped to pinned
+    let trust: String = sqlx::query_scalar("SELECT metadata->>'trust' FROM memories WHERE id = $1")
+        .bind(id).fetch_one(&pool).await.expect("fetch trust");
+    assert_eq!(trust, "pinned", "trust must be pinned after a successful pin");
+
+    // an l3.pinned audit row exists
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE actor='cli' AND action='l3.pinned'")
+        .fetch_one(&pool).await.expect("count pinned rows");
+    assert!(n >= 1, "expected an l3.pinned audit row");
+
+    drop(pool); drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8c — pin rejected: not user_approved (ladder enforcement)
+// ---------------------------------------------------------------------------
+
+/// Seed a skill but leave it `untrusted` (NOT approved); pin must refuse:
+/// non-zero exit, trust unchanged (still `untrusted`), and an
+/// `l3.pin_rejected` audit row exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_memory_l3_pin_rejects_not_approved() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "cml3-pnr-d", "cml3-pnr-l",
+        &format!("hhagent-postgres-cli-memory-l3-pin-reject-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "cli_memory_l3_pin_rejects_not_approved"})).await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    let outcome = crystallise_l3(&pool, &valid_skill(), L3Source::AgentRaised { task_id: 1 })
+        .await.expect("crystallise_l3");
+    let id = outcome.memory_id();
+    // NOTE: deliberately NOT approving — the skill stays `untrusted`.
+
+    let bin = cli_binary();
+    let env = cli_env(&cluster.data_dir);
+
+    let out = Command::new(&bin)
+        .args(["memory", "l3", "pin", &id.to_string()])
+        .env_clear().envs(env).output().expect("spawn pin");
+    let se = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "pin must refuse a non-approved skill; stderr={se}");
+
+    // trust unchanged
+    let trust: String = sqlx::query_scalar("SELECT metadata->>'trust' FROM memories WHERE id = $1")
+        .bind(id).fetch_one(&pool).await.expect("fetch trust");
+    assert_eq!(trust, "untrusted", "trust must NOT change on a rejected pin");
+
+    // an l3.pin_rejected audit row exists
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE actor='cli' AND action='l3.pin_rejected'")
+        .fetch_one(&pool).await.expect("count pin_rejected rows");
+    assert!(n >= 1, "expected an l3.pin_rejected audit row");
 
     drop(pool); drop(cluster);
 }
