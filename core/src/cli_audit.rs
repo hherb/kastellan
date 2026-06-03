@@ -106,6 +106,8 @@ use crate::scheduler::audit::{
     ACTION_ENTITY_KINDS_ADD, ACTION_ENTITY_KINDS_REMOVE,
     ACTION_L3_APPROVED, ACTION_L3_APPROVE_REJECTED, ACTION_L3_REVOKED,
     build_l3_approved_payload, build_l3_approve_rejected_payload, build_l3_revoked_payload,
+    ACTION_L3_PINNED, ACTION_L3_PIN_REJECTED,
+    build_l3_pinned_payload, build_l3_pin_rejected_payload,
 };
 
 /// Logical `actor` string written into every CLI-emitted audit row.
@@ -693,6 +695,51 @@ pub async fn l3_revoke_and_audit(
         }
     };
     Ok((updated, audit_id))
+}
+
+/// Flip an already-`user_approved` L3 row to `pinned` and emit one
+/// `actor='cli' action='l3.pinned'` row. The gate (must currently be
+/// `user_approved` + pass `evaluate_approval`) is enforced by the caller
+/// (`memory_l3_pin`); this helper only composes the trust flip with its
+/// audit row. Returns the audit row id (0 on best-effort audit failure).
+pub async fn l3_pin_and_audit(
+    pool: &PgPool,
+    memory_id: i64,
+    skill_name: &str,
+    body_sha256: &str,
+) -> Result<i64, hhagent_db::DbError> {
+    use crate::memory::l3_approval::SkillTrust;
+
+    hhagent_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Pinned.as_str()).await?;
+    let payload = build_l3_pinned_payload(memory_id, skill_name, body_sha256);
+    let audit_id = match hhagent_db::audit::insert(
+        pool, CLI_AUDIT_ACTOR, ACTION_L3_PINNED, payload,
+    ).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "l3.pinned audit insert failed (best-effort)");
+            0
+        }
+    };
+    Ok(audit_id)
+}
+
+/// Emit one `actor='cli' action='l3.pin_rejected'` row WITHOUT changing
+/// trust (a refused pin leaves the row as-is). Best-effort audit.
+pub async fn l3_pin_rejected_audit(
+    pool: &PgPool,
+    memory_id: i64,
+    skill_name: Option<&str>,
+    reasons: &[String],
+) -> i64 {
+    let payload = build_l3_pin_rejected_payload(memory_id, skill_name, reasons);
+    match hhagent_db::audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_L3_PIN_REJECTED, payload).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "l3.pin_rejected audit insert failed (best-effort)");
+            0
+        }
+    }
 }
 
 /// Compose `hhagent_db::entities::approve_entity` with one
