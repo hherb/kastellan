@@ -633,3 +633,49 @@ fn l3_revoked_payload_shape() {
     assert_eq!(p["memory_id"], 3);
     assert_eq!(p["updated"], true);
 }
+
+// --- l3 invocation payload builders ----------------------------------
+
+#[test]
+fn build_l3_invoked_payload_shape() {
+    let p = build_l3_invoked_payload(7, "summarise_repo", "abc123", &["repo_path".into()], 2);
+    assert_eq!(p["memory_id"], 7);
+    assert_eq!(p["skill_name"], "summarise_repo");
+    assert_eq!(p["body_sha256"], "abc123");
+    assert_eq!(p["arg_names"][0], "repo_path");
+    assert_eq!(p["step_count"], 2);
+    assert_eq!(
+        keys(&p),
+        ["arg_names", "body_sha256", "memory_id", "skill_name", "step_count"]
+            .iter().map(|s| s.to_string()).collect::<BTreeSet<_>>()
+    );
+}
+
+#[test]
+fn build_l3_invoke_outcome_payload_shape() {
+    let p = build_l3_invoke_outcome_payload(7, "summarise_repo", 1, 2, true);
+    assert_eq!(p["memory_id"], 7);
+    assert_eq!(p["skill_name"], "summarise_repo");
+    assert_eq!(p["steps_executed"], 1);
+    assert_eq!(p["steps_total"], 2);
+    assert_eq!(p["any_err"], true);
+    assert_eq!(
+        keys(&p),
+        ["any_err", "memory_id", "skill_name", "steps_executed", "steps_total"]
+            .iter().map(|s| s.to_string()).collect::<BTreeSet<_>>()
+    );
+}
+
+#[test]
+fn build_l3_invoke_rejected_payload_shape() {
+    let p = build_l3_invoke_rejected_payload(7, "leaky", "sha9", &["bad tool".into()]);
+    assert_eq!(p["memory_id"], 7);
+    assert_eq!(p["skill_name"], "leaky");
+    assert_eq!(p["body_sha256"], "sha9");
+    assert_eq!(p["reasons"][0], "bad tool");
+    assert_eq!(
+        keys(&p),
+        ["body_sha256", "memory_id", "reasons", "skill_name"]
+            .iter().map(|s| s.to_string()).collect::<BTreeSet<_>>()
+    );
+}

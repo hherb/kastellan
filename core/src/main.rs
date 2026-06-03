@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
     // and the extractor construction (so `RouterAgent::formulate_plan`
     // gets a real extractor). `ToolEntry` is `Clone`; the duplication
     // is intentional and load-bearing per the v2 design spec.
-    let gliner_relex_entry = build_gliner_relex_entry();
+    let gliner_relex_entry = hhagent_core::registry_build::build_gliner_relex_entry();
 
     // Tool registry: each tool the scheduler may dispatch is opted in
     // here. The registry is the host-side allowlist of *which* tools
@@ -131,7 +131,15 @@ async fn main() -> Result<()> {
     // to use it, and the inner loop replans accordingly. This is the
     // same deny-by-default posture used in the egress proxy plan
     // (Phase 3).
-    let tool_registry = Arc::new(build_tool_registry(&pool, gliner_relex_entry.clone()).await?);
+    let (registry, loaded_tool_records) =
+        hhagent_core::registry_build::build_tool_registry(&pool, gliner_relex_entry.clone())
+            .await?;
+    let tool_registry = Arc::new(registry);
+    // Best-effort audit row (was previously written inside build_tool_registry;
+    // moved here now that the builder is side-effect-free).
+    if let Err(e) = write_registry_loaded_row(&pool, &loaded_tool_records).await {
+        tracing::warn!(error = %e, "registry.loaded audit row insert failed");
+    }
 
     // Container-image health check (issue #120). Walks every registered
     // ToolEntry, collects each distinct `container_image` tag owned by
@@ -434,214 +442,11 @@ async fn wait_for_shutdown() -> Result<()> {
     Ok(())
 }
 
-/// Build the registry of tools the scheduler may dispatch.
-///
-/// Reads the shell-exec argv allowlist from the `tool_allowlists` DB
-/// table (migration `0009`). `HHAGENT_SHELL_EXEC_ALLOWLIST` is no
-/// longer honored — a WARN is emitted if it is still set so operators
-/// know to migrate.
-///
-/// If `HHAGENT_SHELL_EXEC_BIN` is unset or the path does not exist,
-/// shell-exec is simply not registered. A plan that tries to use it
-/// will surface `UNKNOWN_TOOL` from the dispatcher.
-///
-/// Emits one `actor='core' action='registry.loaded'` audit row carrying
-/// a per-tool summary (name, binary path, allowlist length, SHA-256 of
-/// the canonical-form allowlist). DB error during the load aborts
-/// bring-up; error during the audit row insert is best-effort only (a
-/// WARN is logged and bring-up continues).
-async fn build_tool_registry(
-    pool: &sqlx::PgPool,
-    gliner_relex_entry: Option<hhagent_core::scheduler::tool_dispatch::ToolEntry>,
-) -> anyhow::Result<hhagent_core::scheduler::ToolRegistry> {
-    use anyhow::Context as _;
-    let mut reg = hhagent_core::scheduler::ToolRegistry::new();
-    let mut loaded: Vec<LoadedToolRecord> = Vec::new();
-
-    if let Some(bin_os) = std::env::var_os("HHAGENT_SHELL_EXEC_BIN") {
-        let binary = std::path::PathBuf::from(&bin_os);
-        if binary.is_file() {
-            let allowlist = hhagent_db::tool_allowlists::list_for_tool(pool, "shell-exec")
-                .await
-                .context("loading shell-exec allowlist from DB")?;
-            let entry = hhagent_core::scheduler::shell_exec_entry(binary.clone(), &allowlist);
-            info!(
-                tool = "shell-exec",
-                binary = %binary.display(),
-                allowlist_len = allowlist.len(),
-                "registering tool"
-            );
-            loaded.push(LoadedToolRecord {
-                name: "shell-exec".to_string(),
-                binary: binary.display().to_string(),
-                allowlist_len: allowlist.len(),
-                allowlist_sha256: sha256_argv0_list(&allowlist),
-            });
-            reg.insert("shell-exec", entry);
-        } else {
-            tracing::warn!(
-                binary = %binary.display(),
-                "HHAGENT_SHELL_EXEC_BIN does not point to an existing file; \
-                 shell-exec NOT registered"
-            );
-        }
-    }
-
-    // Deprecation warning — does not block bring-up.
-    if std::env::var_os("HHAGENT_SHELL_EXEC_ALLOWLIST").is_some() {
-        tracing::warn!(
-            "HHAGENT_SHELL_EXEC_ALLOWLIST is no longer honored; \
-             use 'hhagent-cli tools allowlist add <tool> <argv0>' to populate the DB"
-        );
-    }
-
-    // gliner-relex (opt-in: env-gated). Skip-register by default so
-    // existing deployments are byte-equivalent to pre-slice main. The
-    // entry is resolved once at `main()` startup and threaded in via
-    // the parameter so the skip-reason log line fires exactly once per
-    // bring-up.
-    if let Some(entry) = gliner_relex_entry {
-        info!(
-            tool = hhagent_core::workers::gliner_relex::Client::TOOL_NAME,
-            binary = %entry.binary.display(),
-            "registering tool"
-        );
-        // No allowlist concept for gliner-relex (it has one method,
-        // `extract`; no argv-style command surface). The
-        // `LoadedToolRecord` shape requires `allowlist_*` fields so
-        // the audit-row schema stays uniform; populate them with the
-        // empty-list canonical form.
-        loaded.push(LoadedToolRecord {
-            name: hhagent_core::workers::gliner_relex::Client::TOOL_NAME.to_string(),
-            binary: entry.binary.display().to_string(),
-            allowlist_len: 0,
-            allowlist_sha256: sha256_argv0_list(&[]),
-        });
-        reg.insert(hhagent_core::workers::gliner_relex::Client::TOOL_NAME, entry);
-    }
-
-    // Best-effort audit row: a transient DB failure here must not
-    // block daemon bring-up. The allowlist itself has already been
-    // loaded successfully.
-    if let Err(e) = write_registry_loaded_row(pool, &loaded).await {
-        tracing::warn!(error = %e, "registry.loaded audit row insert failed");
-    }
-
-    Ok(reg)
-}
-
-/// Build the GLiNER-Relex tool entry from environment variables.
-///
-/// Thin daemon-startup wrapper around
-/// [`hhagent_core::workers::gliner_relex::resolve_env`]: passes the
-/// real `std::env::var` + [`std::path::Path::is_dir`] /
-/// [`std::path::Path::exists`] predicates, then converts the typed
-/// [`hhagent_core::workers::gliner_relex::ResolveSkipReason`] into a
-/// structured `tracing::info!` / `tracing::error!` line. Returns `None`
-/// on every skip path so the daemon boots without the worker. Fail-closed
-/// per the design spec — the daemon continues but the operator log says
-/// exactly why the worker isn't reachable.
-///
-/// Env vars consulted (full list documented on `resolve_env`):
-///
-/// - `HHAGENT_GLINER_RELEX_ENABLE` — must be `"1"` (trimmed). Default
-///   skip-register.
-/// - `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` — required; absolute path.
-/// - `HHAGENT_GLINER_RELEX_MODEL` (default `multi-v1.0`).
-/// - `HHAGENT_GLINER_RELEX_DEVICE` (default `auto`).
-/// - `HHAGENT_GLINER_RELEX_VENV_DIR` (default
-///   `$HHAGENT_DATA_DIR/workers/gliner-relex/.venv`, last-resort
-///   `$HOME/.local/share/hhagent/...`).
-fn build_gliner_relex_entry()
--> Option<hhagent_core::scheduler::tool_dispatch::ToolEntry> {
-    use hhagent_core::workers::gliner_relex::{gliner_relex_entry, resolve_env};
-
-    match resolve_env(
-        |k| std::env::var(k).ok(),
-        |p| p.is_dir(),
-        |p| p.exists(),
-    ) {
-        Ok(env) => Some(gliner_relex_entry(&env)),
-        Err(reason) => {
-            log_gliner_relex_skip(&reason);
-            None
-        }
-    }
-}
-
-/// Convert a typed [`hhagent_core::workers::gliner_relex::ResolveSkipReason`]
-/// into the appropriate `tracing` line. Kept separate from
-/// `build_gliner_relex_entry` so the resolver-result branches stay
-/// trivially reviewable.
-fn log_gliner_relex_skip(
-    reason: &hhagent_core::workers::gliner_relex::ResolveSkipReason,
-) {
-    use hhagent_core::workers::gliner_relex::ResolveSkipReason as R;
-    match reason {
-        R::Disabled => tracing::info!(
-            "gliner-relex: HHAGENT_GLINER_RELEX_ENABLE != \"1\"; skip registering"
-        ),
-        R::WeightsDirEnvMissing => tracing::error!(
-            "gliner-relex enabled but HHAGENT_GLINER_RELEX_WEIGHTS_DIR unset; \
-             skip registering"
-        ),
-        R::WeightsDirNotADir { path } => tracing::error!(
-            weights_dir = %path.display(),
-            "gliner-relex enabled but weights dir missing on disk; skip registering"
-        ),
-        R::VenvDirUnresolvable => tracing::error!(
-            "gliner-relex enabled but venv dir unresolvable \
-             (HHAGENT_GLINER_RELEX_VENV_DIR, HHAGENT_DATA_DIR, and HOME all unset); \
-             skip registering"
-        ),
-        R::ScriptShimMissing { path } => tracing::error!(
-            script_path = %path.display(),
-            "gliner-relex enabled but venv shim missing; skip registering"
-        ),
-    }
-}
-
-/// One per-tool record carried in the `registry.loaded` audit-row
-/// payload.
-#[derive(serde::Serialize)]
-struct LoadedToolRecord {
-    name: String,
-    binary: String,
-    allowlist_len: usize,
-    /// SHA-256 of the canonical-form allowlist:
-    /// `argv0_1 || '\n' || argv0_2 || '\n' || …` where the list is
-    /// lexicographically sorted and a trailing newline follows the
-    /// last entry. Empty list → SHA-256 of the empty string.
-    allowlist_sha256: String,
-}
-
-fn sha256_argv0_list(argv0s: &[String]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut sorted: Vec<&String> = argv0s.iter().collect();
-    sorted.sort();
-    let mut hasher = Sha256::new();
-    for argv0 in sorted {
-        hasher.update(argv0.as_bytes());
-        hasher.update(b"\n");
-    }
-    let bytes = hasher.finalize();
-    hex_encode(&bytes)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{:02x}", b);
-    }
-    s
-}
-
 async fn write_registry_loaded_row(
     pool: &sqlx::PgPool,
-    tools: &[LoadedToolRecord],
+    tools: &[hhagent_core::registry_build::LoadedToolRecord],
 ) -> Result<(), hhagent_db::DbError> {
-    let payload = serde_json::json!({ "tools": tools });
+    let payload = hhagent_core::registry_build::build_registry_loaded_payload(tools);
     hhagent_db::audit::insert(
         pool,
         "core",

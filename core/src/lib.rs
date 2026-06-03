@@ -20,6 +20,7 @@ pub mod memory;
 pub mod observation;
 pub mod prompt_assembly;
 pub mod recall_assembly;
+pub mod registry_build;
 pub mod sandbox_health;
 pub mod scheduler;
 // NEW — Item 31 (HANDOVER) opaque secret refs slice 1
