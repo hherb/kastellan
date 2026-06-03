@@ -9,7 +9,7 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_memory_l3(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli memory l3 <list|approve|revoke|remove> ...");
+        eprintln!("usage: hhagent-cli memory l3 <list|approve|revoke|remove|run> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -17,8 +17,9 @@ pub(crate) fn run_memory_l3(args: &[String]) -> ExitCode {
         "approve" => with_runtime("memory l3", memory_l3_approve(&args[1..])),
         "revoke"  => with_runtime("memory l3", memory_l3_revoke(&args[1..])),
         "remove"  => with_runtime("memory l3", memory_l3_remove(&args[1..])),
+        "run"     => with_runtime("memory l3", memory_l3_run(&args[1..])),
         other     => {
-            eprintln!("memory l3: unknown action '{other}'; expected: list | approve | revoke | remove");
+            eprintln!("memory l3: unknown action '{other}'; expected: list | approve | revoke | remove | run");
             ExitCode::from(2)
         }
     }
@@ -250,5 +251,158 @@ async fn memory_l3_revoke(args: &[String]) -> ExitCode {
             ExitCode::from(0)
         }
         Err(e) => { eprintln!("memory l3 revoke: {e}"); ExitCode::from(1) }
+    }
+}
+
+/// `memory l3 run <id> [--arg name=value]… [--execute]`
+///
+/// Default (no `--execute`): DRY-RUN — substitute + live-registry
+/// re-validate, then print the concrete steps that WOULD dispatch. Spawns
+/// nothing, writes no audit row. `--execute` runs the steps through the
+/// sandbox, stopping at the first error.
+async fn memory_l3_run(args: &[String]) -> ExitCode {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use hhagent_core::cassandra::types::L3SkillCandidate;
+    use hhagent_core::memory::l3_approval::SkillTrust;
+    use hhagent_core::memory::l3_invoke::{invoke_l3, parse_args, InvokeReport};
+    use hhagent_core::scheduler::inner_loop::StepDispatcher;
+    use hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher;
+    use hhagent_db::memories::{fetch_by_ids, MemoryLayer};
+    use hhagent_db::pool::connect_runtime_pool;
+
+    // --- parse argv: <id> then --arg k=v … and --execute ---------------
+    let mut id_str: Option<&String> = None;
+    let mut arg_tokens: Vec<String> = Vec::new();
+    let mut execute = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--execute" | "--yes" => execute = true,
+            "--arg" => {
+                i += 1;
+                match args.get(i) {
+                    Some(kv) => arg_tokens.push(kv.clone()),
+                    None => {
+                        eprintln!("memory l3 run: --arg requires a name=value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            s if id_str.is_none() && !s.starts_with("--") => id_str = Some(&args[i]),
+            other => {
+                eprintln!("memory l3 run: unexpected argument '{other}'");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+    let id: i64 = match id_str.map(|s| s.parse()) {
+        Some(Ok(n)) => n,
+        _ => {
+            eprintln!("usage: hhagent-cli memory l3 run <id> [--arg name=value]… [--execute]");
+            return ExitCode::from(2);
+        }
+    };
+    let args_map = match parse_args(&arg_tokens) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("memory l3 run: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    // --- connect ------------------------------------------------------
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+
+    // --- load + layer-guard the row ----------------------------------
+    let row = match fetch_by_ids(&pool, &[id]).await {
+        Ok(mut v) => v.pop(),
+        Err(e) => { eprintln!("memory l3 run: {e}"); return ExitCode::from(1); }
+    };
+    let row = match row {
+        Some(r) if r.layer == MemoryLayer::Skill => r,
+        _ => {
+            eprintln!("memory l3 run: no layer-3 skill with id={id}");
+            return ExitCode::from(1);
+        }
+    };
+    let template: L3SkillCandidate = match row
+        .metadata.get("template").cloned().and_then(|t| serde_json::from_value(t).ok())
+    {
+        Some(t) => t,
+        None => {
+            eprintln!("memory l3 run: id={id} has no parseable template");
+            return ExitCode::from(1);
+        }
+    };
+    let trust = SkillTrust::from_metadata_str(
+        row.metadata.get("trust").and_then(|v| v.as_str()).unwrap_or(""),
+    );
+    let body_sha256 = row.metadata.get("body_sha256").and_then(|v| v.as_str()).unwrap_or("");
+
+    // --- rebuild the live registry in-process (no registry.loaded write) ---
+    let gliner = hhagent_core::registry_build::build_gliner_relex_entry();
+    let (registry, _records) =
+        match hhagent_core::registry_build::build_tool_registry(&pool, gliner).await {
+            Ok(x) => x,
+            Err(e) => { eprintln!("memory l3 run: building registry: {e}"); return ExitCode::from(1); }
+        };
+    let live_tools: BTreeSet<String> =
+        registry.entries().map(|(name, _)| name.to_string()).collect();
+
+    // --- build the dispatcher (same machinery as the daemon) ----------
+    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
+        Arc::new(hhagent_core::worker_lifecycle::CompositeLifecycle::new(Arc::clone(&sandboxes)));
+    let vault = Arc::new(hhagent_core::secrets::Vault::new());
+    let dispatcher: Arc<dyn StepDispatcher> = Arc::new(ToolHostStepDispatcher::new(
+        pool.clone(),
+        vault,
+        lifecycle,
+        Arc::new(registry),
+    ));
+
+    // --- invoke -------------------------------------------------------
+    let report = invoke_l3(
+        &pool, id, dispatcher.as_ref(), &template, trust, body_sha256, &args_map, &live_tools, execute,
+    )
+    .await;
+
+    match report {
+        InvokeReport::Refused { reasons } => {
+            eprintln!("REFUSED to run skill '{}' (#{id}):", template.name);
+            for r in &reasons { eprintln!("  - {r}"); }
+            ExitCode::from(1)
+        }
+        InvokeReport::DryRun { steps } => {
+            println!("dry-run: skill '{}' (#{id}) would dispatch {} step(s):", template.name, steps.len());
+            for (n, s) in steps.iter().enumerate() {
+                println!("  [{n}] {}/{} {}", s.tool, s.method, s.parameters);
+            }
+            println!("(re-run with --execute to dispatch)");
+            ExitCode::from(0)
+        }
+        InvokeReport::Executed { outcomes, steps_total } => {
+            let any_err = outcomes.iter().any(|o| o.is_err());
+            println!("executed skill '{}' (#{id}): {}/{} step(s)", template.name, outcomes.len(), steps_total);
+            for (n, o) in outcomes.iter().enumerate() {
+                match o {
+                    hhagent_core::scheduler::inner_loop::StepOutcome::Ok(v) =>
+                        println!("  [{n}] ok: {v}"),
+                    hhagent_core::scheduler::inner_loop::StepOutcome::Err { code, detail } =>
+                        println!("  [{n}] ERR {code}: {detail}"),
+                }
+            }
+            if any_err { ExitCode::from(1) } else { ExitCode::from(0) }
+        }
     }
 }
