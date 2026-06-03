@@ -323,8 +323,11 @@ fn parse_run_argv(args: &[String]) -> Result<RunArgv, String> {
 /// ("tool … not in registry"). This is fail-safe (refuse, and `--execute`'s
 /// own sandbox still contains anything that does run), but it means the
 /// operator must invoke `run` with the same tool-registry env the daemon uses.
-/// Parity with the snapshot used by `approve` is tracked in issue #179 (the
-/// daemon-snapshot-vs-live tradeoff is a deliberate design question).
+/// When this bites, the refusal now prints a `hint:` line (via
+/// `diagnose_registry_divergence`) distinguishing an unset-env cliff from a
+/// genuinely unknown tool. The structural fix — moving execution into the
+/// daemon so there is a single registry (issue #179, Opt 3) — is folded into
+/// the autonomous-invocation slice (ROADMAP line 165), which builds that path.
 async fn memory_l3_run(args: &[String]) -> ExitCode {
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -430,6 +433,21 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
         InvokeReport::Refused { reasons } => {
             eprintln!("REFUSED to run skill '{}' (#{id}):", template.name);
             for r in &reasons { eprintln!("  - {r}"); }
+
+            // Issue #179: when a refusal is (partly) about a tool missing from
+            // this CLI's in-process registry rebuild, explain *why* the local
+            // view differs from the daemon's. The snapshot read is best-effort
+            // — a diagnostic-only DB error must never change the exit path.
+            let needed: BTreeSet<String> =
+                template.steps.iter().map(|s| s.tool.clone()).collect();
+            let snapshot = latest_registry_tools(&pool).await.ok().flatten();
+            let hints = hhagent_core::memory::l3_invoke::diagnose_registry_divergence(
+                &needed, &live_tools, snapshot.as_ref(),
+            );
+            for h in &hints {
+                eprintln!("  hint: {h}");
+            }
+
             ExitCode::from(1)
         }
         InvokeReport::DryRun { steps } => {
