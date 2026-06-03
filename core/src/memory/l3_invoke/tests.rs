@@ -1,5 +1,7 @@
 use super::*;
 use crate::cassandra::types::L3Param;
+use crate::memory::l3_surface::is_surfaceable;
+use crate::cassandra::types::PlannedStep as PS;
 
 fn skill_one_param() -> L3SkillCandidate {
     L3SkillCandidate {
@@ -116,8 +118,6 @@ fn parse_args_rejects_duplicate() {
     );
 }
 
-use crate::memory::l3_surface::is_surfaceable;
-
 #[test]
 fn is_runnable_only_approved_and_pinned() {
     assert!(is_runnable(SkillTrust::UserApproved));
@@ -190,8 +190,6 @@ fn planned_step_from_l3_carries_tool_method_params() {
     assert_eq!(ps.method, "shell.exec");
     assert_eq!(ps.parameters["argv"][1], "hi");
 }
-
-use crate::cassandra::types::PlannedStep as PS;
 
 struct ScriptedDispatcher {
     // outcomes returned in order; calls record the tool seen

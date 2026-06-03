@@ -347,13 +347,11 @@ pub async fn invoke_l3(
     live_tools: &BTreeSet<String>,
     execute: bool,
 ) -> InvokeReport {
-    let skill_name = template.name.clone();
-
     let steps = match prepare_invocation(template, stored_trust, args, live_tools) {
         Ok(steps) => steps,
         Err(InvokeRefusal { reasons }) => {
             let payload =
-                build_l3_invoke_rejected_payload(memory_id, &skill_name, body_sha256, &reasons);
+                build_l3_invoke_rejected_payload(memory_id, &template.name, body_sha256, &reasons);
             best_effort_audit(pool, ACTION_L3_INVOKE_REJECTED, payload).await;
             return InvokeReport::Refused { reasons };
         }
@@ -365,14 +363,14 @@ pub async fn invoke_l3(
 
     let arg_names: Vec<String> = args.keys().cloned().collect();
     let invoked =
-        build_l3_invoked_payload(memory_id, &skill_name, body_sha256, &arg_names, steps.len());
+        build_l3_invoked_payload(memory_id, &template.name, body_sha256, &arg_names, steps.len());
     best_effort_audit(pool, ACTION_L3_INVOKED, invoked).await;
 
     let steps_total = steps.len();
     let outcomes = run_steps(dispatcher, &steps).await;
     let any_err = outcomes.iter().any(|o| o.is_err());
     let outcome_payload = build_l3_invoke_outcome_payload(
-        memory_id, &skill_name, outcomes.len(), steps_total, any_err,
+        memory_id, &template.name, outcomes.len(), steps_total, any_err,
     );
     best_effort_audit(pool, ACTION_L3_INVOKE_OUTCOME, outcome_payload).await;
 
