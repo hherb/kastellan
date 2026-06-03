@@ -130,8 +130,8 @@ pub struct L3SkillCandidate {
 /// Sibling to [`Plan::l3_skill`]: where `l3_skill` *crystallises* a new
 /// skill on a terminal plan, `invoke_skill` *runs* an already-pinned one
 /// on a non-terminal plan. The inner loop expands it into concrete
-/// [`PlannedStep`]s before review; only `pinned` skills are invocable
-/// (see `crate::memory::l3_invoke::is_autonomously_invocable`).
+/// [`PlannedStep`]s before review; only operator-pinned skills are
+/// autonomously invocable by the agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InvokeDirective {
     /// snake_case skill name, exactly as surfaced in the `<skills>` block.
@@ -862,6 +862,25 @@ mod tests {
             invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
         };
         assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasL3Skill)));
+    }
+
+    #[test]
+    fn validate_invoke_precedence_has_steps_wins_over_terminal() {
+        // A plan that is BOTH terminal and carries steps must report HasSteps
+        // (the first check), pinning the documented precedence order.
+        let plan = Plan {
+            context: "c".into(), decision: "task_complete".into(), rationale: "r".into(),
+            steps: vec![PlannedStep {
+                tool: "shell-exec".into(), method: "shell.exec".into(),
+                parameters: serde_json::json!({}), returns: String::new(),
+                done_when: String::new(), classification: DataClass::Public,
+            }],
+            result: Some(serde_json::json!({"body":"x"})),
+            data_ceiling: DataClass::Public, refused: None, floor_request: None,
+            l1_insight: None, l3_skill: None,
+            invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        };
+        assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasSteps)));
     }
 
     #[test]
