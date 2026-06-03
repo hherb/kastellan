@@ -8,7 +8,7 @@
 //!  A. **Dry-run** — `execute=false` returns `DryRun{steps}` with substituted
 //!     args; NO audit rows for l3.invoked / l3.invoke_outcome / tool:shell-exec.
 //!
-//!  B. **Execute happy path** — `execute=true`, approved skill, `/bin/echo`
+//!  B. **Execute happy path** — `execute=true`, approved skill, `ECHO_PATH`
 //!     allowlisted → `Executed{outcomes, steps_total:1}`, single `Ok`, correct
 //!     audit trail (l3.invoked + tool:shell-exec/shell.exec + l3.invoke_outcome).
 //!
@@ -19,8 +19,8 @@
 //!     step names `ghost-tool`, absent from the registry → `Refused` with the
 //!     tool name in a reason; one `l3.invoke_rejected` row; NO l3.invoked rows.
 //!
-//!  E. **Stop at first error** — two-step approved skill, step-1 `/bin/cat`
-//!     not allowlisted (→ POLICY_DENIED), step-2 `/bin/echo` allowlisted.
+//!  E. **Stop at first error** — two-step approved skill, step-1 `CAT_PATH`
+//!     not allowlisted (→ POLICY_DENIED), step-2 `ECHO_PATH` allowlisted.
 //!     Registry has shell-exec (gate passes), dispatch fails on step-1.
 //!     Assert: `Executed{outcomes len=1, steps_total=2}`, `any_err=true`; the
 //!     `l3.invoke_outcome` audit payload shows `steps_executed=1 steps_total=2
@@ -107,7 +107,7 @@ async fn bring_up_for_scenario(
         serde_json::json!({"test": service_suffix}),
     )
     .await
-    .ok()?;
+    .expect("probe_run: migration or DB probe failed");
 
     let pool = connect_runtime_pool(&cluster.conn_spec).await.ok()?;
     Some((pool, cluster))
@@ -236,7 +236,7 @@ async fn a_dry_run_preview_spawns_nothing_writes_no_audit_row() {
 // Scenario B — execute: round-trips through the real sandbox
 // ---------------------------------------------------------------------------
 
-/// `execute=true` with an approved `/bin/echo` skill must:
+/// `execute=true` with an approved `ECHO_PATH` skill must:
 ///   * return `InvokeReport::Executed` with one `Ok` outcome;
 ///   * write exactly one `cli/l3.invoked`, one `tool:shell-exec/shell.exec`,
 ///     and one `cli/l3.invoke_outcome` row.
@@ -465,7 +465,7 @@ async fn c_untrusted_skill_refuses() {
 ///   * write NO `l3.invoked` / `tool:*` rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn d_unknown_tool_refuses_via_live_revalidation() {
-    let Some((pool, _cluster)) = bring_up_for_scenario("l3r-d-d", "l3r-d-l", "d-noool").await
+    let Some((pool, _cluster)) = bring_up_for_scenario("l3r-d-d", "l3r-d-l", "d-notool").await
     else {
         return;
     };
@@ -565,8 +565,8 @@ async fn d_unknown_tool_refuses_via_live_revalidation() {
 // Scenario E — stop at first error
 // ---------------------------------------------------------------------------
 
-/// Two-step skill: step-1 `/bin/cat` (NOT allowlisted → POLICY_DENIED),
-/// step-2 `/bin/echo` (allowlisted). Must:
+/// Two-step skill: step-1 `CAT_PATH` (NOT allowlisted → POLICY_DENIED),
+/// step-2 `ECHO_PATH` (allowlisted). Must:
 ///   * return `Executed{outcomes len=1, steps_total=2}`;
 ///   * the single outcome is `Err` with `POLICY_DENIED`;
 ///   * `l3.invoke_outcome` audit payload: `steps_executed=1`, `steps_total=2`,
@@ -579,7 +579,7 @@ async fn e_stop_at_first_error() {
         return;
     };
 
-    // Two-step skill: step-1 uses /bin/cat (not allowlisted), step-2 uses echo.
+    // Two-step skill: step-1 uses CAT_PATH (not allowlisted), step-2 uses ECHO_PATH.
     let two_step_skill = L3SkillCandidate {
         name: "two_step_skill".into(),
         description: "Two steps; first should fail".into(),
@@ -588,13 +588,13 @@ async fn e_stop_at_first_error() {
             L3TemplateStep {
                 tool: "shell-exec".into(),
                 method: "shell.exec".into(),
-                // /bin/cat with p — NOT in the allowlist → POLICY_DENIED at dispatch
+                // CAT_PATH with p — NOT in the allowlist → POLICY_DENIED at dispatch
                 parameters: serde_json::json!({ "argv": [CAT_PATH, "{{p}}"] }),
             },
             L3TemplateStep {
                 tool: "shell-exec".into(),
                 method: "shell.exec".into(),
-                // /bin/echo with p — allowlisted, but step-2 must never run
+                // ECHO_PATH with p — allowlisted, but step-2 must never run
                 parameters: serde_json::json!({ "argv": [ECHO_PATH, "{{p}}"] }),
             },
         ],
@@ -611,7 +611,7 @@ async fn e_stop_at_first_error() {
         .await
         .expect("set_skill_trust");
 
-    // Registry: only /bin/echo is allowlisted — /bin/cat will be POLICY_DENIED.
+    // Registry: only ECHO_PATH is allowlisted — CAT_PATH will be POLICY_DENIED.
     // Both steps use shell-exec (→ passes the live gate); the allowlist is a
     // dispatch-time check inside the worker, not a pre-dispatch gate check.
     let dispatcher = make_dispatcher(pool.clone(), &[ECHO_PATH.to_string()]);
