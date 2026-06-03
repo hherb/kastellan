@@ -1010,3 +1010,85 @@ async fn agent_invoke_unknown_skill_refuses_then_replans() {
     assert!(rows.iter().any(|r| r.actor == "scheduler" && r.action == "l3.invoke_rejected"),
         "refusal audited");
 }
+
+/// (k) Loop-level TOCTOU close: a PINNED skill whose tool is ABSENT from
+///     the dispatcher's `known_tools` is refused at expand time (live
+///     re-validation), nothing dispatches, and the `l3.invoke_rejected`
+///     row carries a non-null `memory_id` (a row WAS loaded before the
+///     gate refused).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_invoke_pinned_skill_with_unregistered_tool_refuses() {
+    let Some((pool, _cluster)) = bring_up_pg("invtoctou").await else { return; };
+    let id = insert_pending(&pool, Lane::Fast, serde_json::json!({})).await.unwrap();
+    let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
+
+    // pinned skill needs "web-fetch", but the dispatcher only knows "shell-exec"
+    seed_pinned_skill(&pool, "fetch_thing", "web-fetch", "fetch").await;
+
+    let formulator = Arc::new(ScriptedFormulator::new(vec![
+        invoke_plan("fetch_thing", "p", "v"),
+        task_complete_plan("recovered"),
+    ]));
+    let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
+    let dispatcher = Arc::new(ScriptedDispatcher {
+        table: Default::default(),
+        tools: ["shell-exec".to_string()].into_iter().collect(), // web-fetch absent
+    });
+
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 4))
+        .await.unwrap();
+    match result.outcome {
+        Outcome::Completed(v) => assert_eq!(v["body"], "recovered"),
+        o => panic!("expected Completed after replan, got {:?}", o),
+    }
+    assert_eq!(result.dispatch_count, 0, "live re-validation refused; nothing dispatched");
+    let rows = hhagent_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
+    let rejected: Vec<_> = rows.iter()
+        .filter(|r| r.actor == "scheduler" && r.action == "l3.invoke_rejected")
+        .collect();
+    assert!(!rejected.is_empty(), "expand refusal audited");
+    // memory_id is non-null for the gate-refusal path (a row WAS loaded)
+    assert!(rejected.iter().any(|r| r.payload.get("memory_id").map(|v| !v.is_null()).unwrap_or(false)),
+        "gate-refusal row carries the loaded memory_id");
+}
+
+/// (l) Re-crystallisation suppression: when a task invokes a skill and
+///     then reaches a terminal plan that ALSO carries an `l3_skill`
+///     candidate, the `terminal_l3_skill` is suppressed (because
+///     `invoke_used`) — forecloses a crystallise → pin → invoke →
+///     re-crystallise cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invoke_driven_task_suppresses_recrystallisation() {
+    let Some((pool, _cluster)) = bring_up_pg("invsupp").await else { return; };
+    let id = insert_pending(&pool, Lane::Fast, serde_json::json!({})).await.unwrap();
+    let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
+    seed_pinned_skill(&pool, "do_thing", "shell-exec", "shell.exec").await;
+
+    // plan 1 invokes; plan 2 is terminal AND carries an l3_skill candidate.
+    let mut terminal = task_complete_plan("done");
+    terminal.l3_skill = Some(hhagent_core::cassandra::types::L3SkillCandidate {
+        name: "newly_learned".into(), description: "d".into(),
+        parameters: vec![],
+        steps: vec![hhagent_core::cassandra::types::L3TemplateStep {
+            tool: "shell-exec".into(), method: "shell.exec".into(),
+            parameters: serde_json::json!({}),
+        }],
+    });
+    let formulator = Arc::new(ScriptedFormulator::new(vec![
+        invoke_plan("do_thing", "p", "v"),
+        terminal,
+    ]));
+    let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
+    let mut table = std::collections::HashMap::new();
+    table.insert(("shell-exec".into(), "shell.exec".into()), StepOutcome::Ok(serde_json::json!("ok")));
+    let dispatcher = Arc::new(ScriptedDispatcher {
+        table,
+        tools: ["shell-exec".to_string()].into_iter().collect(),
+    });
+
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 4))
+        .await.unwrap();
+    assert!(matches!(result.outcome, Outcome::Completed(_)));
+    assert!(result.terminal_l3_skill.is_none(),
+        "invoke-driven task must NOT re-crystallise a skill");
+}

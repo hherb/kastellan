@@ -327,12 +327,9 @@ pub async fn run_to_terminal(
                     let payload = build_l3_invoke_rejected_agent_payload(
                         $name, $mem, $sha, &reasons_v,
                     );
-                    if let Err(e) = hhagent_db::audit::insert(
+                    hhagent_db::audit::insert(
                         pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKE_REJECTED, payload,
-                    ).await {
-                        tracing::warn!(task_id = ctx.task_id, error = %e,
-                            "l3.invoke_rejected audit insert failed (best-effort)");
-                    }
+                    ).await?;
                     for r in &reasons_v { ctx.blocks.push(format!("invoke_rejected: {r}")); }
                     continue;
                 }};
@@ -379,12 +376,9 @@ pub async fn run_to_terminal(
                                     pinned.memory_id, &name, &pinned.body_sha256,
                                     &arg_names, steps.len(),
                                 );
-                                if let Err(e) = hhagent_db::audit::insert(
+                                hhagent_db::audit::insert(
                                     pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
-                                ).await {
-                                    tracing::warn!(task_id = ctx.task_id, error = %e,
-                                        "l3.invoked audit insert failed (best-effort)");
-                                }
+                                ).await?;
                                 plan.steps = steps;
                                 invoke_used = true;
                                 current_invoke = Some((pinned.memory_id, name));
@@ -535,12 +529,9 @@ pub async fn run_to_terminal(
             let payload = build_l3_invoke_outcome_payload(
                 *memory_id, skill_name, steps_executed, steps_total, any_err,
             );
-            if let Err(e) = hhagent_db::audit::insert(
+            hhagent_db::audit::insert(
                 pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKE_OUTCOME, payload,
-            ).await {
-                tracing::warn!(task_id = ctx.task_id, error = %e,
-                    "l3.invoke_outcome audit insert failed (best-effort)");
-            }
+            ).await?;
         }
 
         ctx.plans.push((plan, outcomes));
