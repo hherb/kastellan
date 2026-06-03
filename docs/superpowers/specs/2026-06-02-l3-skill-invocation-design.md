@@ -294,13 +294,14 @@ Notes:
 ## 8. CLI surface
 
 ```
-hhagent-cli memory l3 run <id> [--arg name=value]… [--execute]
+hhagent-cli memory l3 run <id> [--arg name=value]… [--execute | --yes]
 ```
 
 - Default (no `--execute`): **dry-run** — load + layer-guard the row, rebuild
   the registry, substitute + re-validate, and print the concrete steps that
-  *would* dispatch (tool/method/parameters). Spawns nothing, writes nothing.
-- `--execute`: run the steps (§5.4 step 5).
+  *would* dispatch (tool/method/parameters). Spawns nothing, writes nothing
+  (a *refusal* is still audited — see §7).
+- `--execute` (alias `--yes`): run the steps (§5.4 step 5).
 - The CLI builds: `pool` + an empty `Vault::new()` + `SandboxBackends::
   default_for_current_os()` + `CompositeLifecycle::new(sandboxes)` + the
   rebuilt registry → a `ToolHostStepDispatcher`. It loads the row via
