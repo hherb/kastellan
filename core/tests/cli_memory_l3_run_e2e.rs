@@ -135,8 +135,9 @@ fn make_dispatcher(
     ToolHostStepDispatcher::new(pool, vault, lifecycle, registry)
 }
 
-/// Collect the tool names from a dispatcher built with a given registry.
-fn live_tools_from_allowlist() -> BTreeSet<String> {
+/// The live tool-name set for these tests: only shell-exec is registered.
+/// Must stay in sync with the registry built in make_dispatcher.
+fn shell_exec_live_tools() -> BTreeSet<String> {
     let mut s = BTreeSet::new();
     s.insert("shell-exec".to_string());
     s
@@ -187,7 +188,7 @@ async fn a_dry_run_preview_spawns_nothing_writes_no_audit_row() {
         .expect("set_skill_trust");
 
     let dispatcher = make_dispatcher(pool.clone(), &[ECHO_PATH.to_string()]);
-    let live_tools = live_tools_from_allowlist();
+    let live_tools = shell_exec_live_tools();
     let mut args = BTreeMap::new();
     args.insert("msg".to_string(), "hello".to_string());
 
@@ -214,10 +215,10 @@ async fn a_dry_run_preview_spawns_nothing_writes_no_audit_row() {
     assert_eq!(argv[0], ECHO_PATH, "argv[0] must be echo path");
     assert_eq!(argv[1], "hello", "argv[1] must be substituted value");
 
-    // No l3.invoked / l3.invoke_outcome / tool:shell-exec rows (dry-run writes none).
+    // No l3.* / tool:* rows (approved dry-run writes none of them).
     let disallowed_rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT actor, action FROM audit_log
-         WHERE action IN ('l3.invoked', 'l3.invoke_outcome')
+         WHERE action LIKE 'l3.%'
             OR actor LIKE 'tool:%'",
     )
     .fetch_all(&pool)
@@ -225,7 +226,7 @@ async fn a_dry_run_preview_spawns_nothing_writes_no_audit_row() {
     .expect("fetch disallowed rows");
     assert!(
         disallowed_rows.is_empty(),
-        "dry-run must not write invoked/outcome/tool rows; found: {disallowed_rows:?}",
+        "dry-run must not write l3.*/tool rows; found: {disallowed_rows:?}",
     );
 
     pool.close().await;
@@ -255,7 +256,7 @@ async fn b_execute_round_trips_through_real_sandbox() {
         .expect("set_skill_trust");
 
     let dispatcher = make_dispatcher(pool.clone(), &[ECHO_PATH.to_string()]);
-    let live_tools = live_tools_from_allowlist();
+    let live_tools = shell_exec_live_tools();
     let mut args = BTreeMap::new();
     args.insert("msg".to_string(), "sandbox-test".to_string());
 
@@ -306,6 +307,60 @@ async fn b_execute_round_trips_through_real_sandbox() {
     assert_eq!(tool_count, 1, "must have exactly 1 tool:shell-exec/shell.exec row; rows={rows:?}");
     assert_eq!(outcome_count, 1, "must have exactly 1 cli/l3.invoke_outcome row; rows={rows:?}");
 
+    // Payload assertions: fetch the rows that carry l3 envelope payloads.
+    let payload_rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT actor, action, payload FROM audit_log
+         WHERE action IN ('l3.invoked', 'l3.invoke_outcome')
+         ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("fetch payload rows for scenario B");
+
+    // l3.invoked row.
+    let invoked_row = payload_rows
+        .iter()
+        .find(|(_, act, _)| act == "l3.invoked")
+        .expect("l3.invoked row must exist");
+    let invoked_payload = &invoked_row.2;
+    assert_eq!(
+        invoked_payload["memory_id"].as_i64(),
+        Some(memory_id as i64),
+        "l3.invoked payload.memory_id must match seeded skill; payload={invoked_payload}",
+    );
+    assert_eq!(
+        invoked_payload["step_count"].as_i64(),
+        Some(1),
+        "l3.invoked payload.step_count must be 1; payload={invoked_payload}",
+    );
+
+    // l3.invoke_outcome row.
+    let outcome_row = payload_rows
+        .iter()
+        .find(|(_, act, _)| act == "l3.invoke_outcome")
+        .expect("l3.invoke_outcome row must exist");
+    let outcome_payload = &outcome_row.2;
+    assert_eq!(
+        outcome_payload["memory_id"].as_i64(),
+        Some(memory_id as i64),
+        "l3.invoke_outcome payload.memory_id must match seeded skill; payload={outcome_payload}",
+    );
+    assert_eq!(
+        outcome_payload["steps_executed"].as_i64(),
+        Some(1),
+        "l3.invoke_outcome payload.steps_executed must be 1; payload={outcome_payload}",
+    );
+    assert_eq!(
+        outcome_payload["steps_total"].as_i64(),
+        Some(1),
+        "l3.invoke_outcome payload.steps_total must be 1; payload={outcome_payload}",
+    );
+    assert_eq!(
+        outcome_payload["any_err"].as_bool(),
+        Some(false),
+        "l3.invoke_outcome payload.any_err must be false; payload={outcome_payload}",
+    );
+
     pool.close().await;
 }
 
@@ -332,7 +387,7 @@ async fn c_untrusted_skill_refuses() {
     // Deliberately left untrusted.
 
     let dispatcher = make_dispatcher(pool.clone(), &[ECHO_PATH.to_string()]);
-    let live_tools = live_tools_from_allowlist();
+    let live_tools = shell_exec_live_tools();
     let mut args = BTreeMap::new();
     args.insert("msg".to_string(), "should-not-run".to_string());
 
@@ -374,6 +429,27 @@ async fn c_untrusted_skill_refuses() {
     assert_eq!(rejected_count, 1, "must have exactly 1 l3.invoke_rejected row; rows={rows:?}");
     assert_eq!(invoked_count, 0, "must have 0 l3.invoked rows; rows={rows:?}");
     assert_eq!(tool_count, 0, "must have 0 tool:* rows; rows={rows:?}");
+
+    // Payload assertions on the rejected row.
+    let rejected_payload_rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT actor, action, payload FROM audit_log
+         WHERE action = 'l3.invoke_rejected'
+         ORDER BY id
+         LIMIT 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("fetch rejected payload row for scenario C");
+    assert_eq!(rejected_payload_rows.len(), 1, "expected one l3.invoke_rejected payload row");
+    let rej_payload = &rejected_payload_rows[0].2;
+    assert_eq!(
+        rej_payload["memory_id"].as_i64(),
+        Some(memory_id as i64),
+        "l3.invoke_rejected payload.memory_id must match seeded skill; payload={rej_payload}",
+    );
+    let rej_reasons = rej_payload["reasons"].as_array()
+        .expect("l3.invoke_rejected payload.reasons must be an array");
+    assert!(!rej_reasons.is_empty(), "l3.invoke_rejected payload.reasons must be non-empty; payload={rej_payload}");
 
     pool.close().await;
 }
@@ -417,7 +493,7 @@ async fn d_unknown_tool_refuses_via_live_revalidation() {
     // Registry has ONLY shell-exec — ghost-tool is absent.
     let dispatcher = make_dispatcher(pool.clone(), &[ECHO_PATH.to_string()]);
     // live_tools only contains shell-exec; ghost-tool is not present.
-    let live_tools = live_tools_from_allowlist();
+    let live_tools = shell_exec_live_tools();
 
     let mut args = BTreeMap::new();
     args.insert("x".to_string(), "test".to_string());
@@ -460,6 +536,27 @@ async fn d_unknown_tool_refuses_via_live_revalidation() {
     assert_eq!(rejected_count, 1, "must have exactly 1 l3.invoke_rejected row; rows={rows:?}");
     assert_eq!(invoked_count, 0, "must have 0 l3.invoked rows; rows={rows:?}");
     assert_eq!(tool_count, 0, "must have 0 tool:* rows; rows={rows:?}");
+
+    // Payload assertions on the rejected row.
+    let rejected_payload_rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT actor, action, payload FROM audit_log
+         WHERE action = 'l3.invoke_rejected'
+         ORDER BY id
+         LIMIT 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("fetch rejected payload row for scenario D");
+    assert_eq!(rejected_payload_rows.len(), 1, "expected one l3.invoke_rejected payload row");
+    let rej_payload = &rejected_payload_rows[0].2;
+    assert_eq!(
+        rej_payload["memory_id"].as_i64(),
+        Some(memory_id as i64),
+        "l3.invoke_rejected payload.memory_id must match seeded skill; payload={rej_payload}",
+    );
+    let rej_reasons = rej_payload["reasons"].as_array()
+        .expect("l3.invoke_rejected payload.reasons must be an array");
+    assert!(!rej_reasons.is_empty(), "l3.invoke_rejected payload.reasons must be non-empty; payload={rej_payload}");
 
     pool.close().await;
 }
@@ -518,7 +615,7 @@ async fn e_stop_at_first_error() {
     // Both steps use shell-exec (→ passes the live gate); the allowlist is a
     // dispatch-time check inside the worker, not a pre-dispatch gate check.
     let dispatcher = make_dispatcher(pool.clone(), &[ECHO_PATH.to_string()]);
-    let live_tools = live_tools_from_allowlist();
+    let live_tools = shell_exec_live_tools();
 
     let mut args = BTreeMap::new();
     args.insert("p".to_string(), "/tmp/test-file".to_string());
