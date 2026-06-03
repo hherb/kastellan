@@ -127,6 +127,7 @@ impl PlanFormulator for ScriptedFormulator {
 /// `POLICY_DENIED`-shaped error so unscripted calls are loud.
 struct ScriptedDispatcher {
     table: std::collections::HashMap<(String, String), StepOutcome>,
+    tools: std::collections::BTreeSet<String>,
 }
 
 #[async_trait]
@@ -139,6 +140,9 @@ impl StepDispatcher for ScriptedDispatcher {
                 code: "POLICY_DENIED".into(),
                 detail: format!("no script for {}::{}", step.tool, step.method),
             })
+    }
+    fn known_tools(&self) -> std::collections::BTreeSet<String> {
+        self.tools.clone()
     }
 }
 
@@ -201,6 +205,36 @@ fn make_ctx(task_id: i64, max_plans: u32) -> TaskContext {
     }
 }
 
+use hhagent_core::cassandra::types::InvokeDirective;
+
+/// Insert a `pinned` L3 skill row directly. Returns its memory id.
+async fn seed_pinned_skill(pool: &sqlx::PgPool, name: &str, tool: &str, method: &str) -> i64 {
+    use hhagent_db::memories::{insert_memory_at_layer, set_skill_trust, MemoryLayer};
+    let template = serde_json::json!({
+        "name": name, "description": "d",
+        "parameters": [{"name":"p","description":"d"}],
+        "steps": [{"tool": tool, "method": method, "parameters": {"v":"{{p}}"}}]
+    });
+    let metadata = serde_json::json!({
+        "template": template, "trust": "pinned", "body_sha256": "deadbeef"
+    });
+    let id = insert_memory_at_layer(pool, "skill body", &metadata, None, MemoryLayer::Skill)
+        .await.unwrap();
+    set_skill_trust(pool, id, "pinned").await.unwrap();
+    id
+}
+
+fn invoke_plan(name: &str, arg_key: &str, arg_val: &str) -> Plan {
+    let mut args = std::collections::BTreeMap::new();
+    args.insert(arg_key.to_string(), arg_val.to_string());
+    Plan {
+        context: "c".into(), decision: "act".into(), rationale: "r".into(),
+        steps: vec![], result: None, data_ceiling: DataClass::Public, refused: None,
+        floor_request: None, l1_insight: None, l3_skill: None,
+        invoke_skill: Some(InvokeDirective { name: name.into(), args }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -220,7 +254,7 @@ async fn happy_path_one_plan_returns_completed() {
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![task_complete_plan("pong")]));
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
-    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default(), tools: Default::default() });
 
     let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
@@ -329,7 +363,7 @@ async fn tool_fail_then_recover_returns_completed() {
         task_complete_plan("recovered"),
     ]));
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
-    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default(), tools: Default::default() });
 
     let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
@@ -367,7 +401,7 @@ async fn plan_iteration_cap_exhausted_returns_failed() {
         one_step_plan("never", "a"),
     ]));
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
-    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default(), tools: Default::default() });
 
     let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
@@ -545,7 +579,7 @@ async fn refusal_plan_terminates_with_state_refused() {
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
-    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default(), tools: Default::default() });
 
     let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
@@ -671,7 +705,7 @@ async fn reviewer_constitutional_block_wins_over_agent_refusal() {
         principle: 3,
         reason: "irreversible_action_no_HITL".into(),
     })]));
-    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default(), tools: Default::default() });
 
     let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
@@ -738,7 +772,7 @@ async fn verdict_block_on_refusal_plan_does_not_loop() {
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(ScriptedBlockStage {
         reason: "reviewer flagged; refusal still stands".into(),
     })]));
-    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default(), tools: Default::default() });
 
     let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
@@ -836,7 +870,7 @@ async fn agent_floor_raise_chain_blocks_low_classification_step() {
     let review = Arc::new(ChainReviewStage::new(vec![
         Arc::new(hhagent_core::cassandra::review::DeterministicPolicy),
     ]));
-    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default() });
+    let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default(), tools: Default::default() });
 
     let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 3))
         .await
@@ -908,4 +942,71 @@ async fn agent_floor_raise_chain_blocks_low_classification_step() {
             "verdict {i}: detail must reference DP I2 reason_tag; got: {detail}"
         );
     }
+}
+
+/// (i) Agent emits an `invoke_skill` directive naming a pinned skill;
+///     the inner loop resolves + expands the template's concrete steps
+///     before review, dispatches them, and writes l3.invoked +
+///     l3.invoke_outcome audit rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_invoke_pinned_skill_expands_and_dispatches() {
+    let Some((pool, _cluster)) = bring_up_pg("inv").await else { return; };
+    let id = insert_pending(&pool, Lane::Fast, serde_json::json!({})).await.unwrap();
+    let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
+
+    seed_pinned_skill(&pool, "do_thing", "shell-exec", "shell.exec").await;
+
+    let formulator = Arc::new(ScriptedFormulator::new(vec![
+        invoke_plan("do_thing", "p", "value-1"),
+        task_complete_plan("done"),
+    ]));
+    let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
+    let mut table = std::collections::HashMap::new();
+    table.insert(("shell-exec".into(), "shell.exec".into()), StepOutcome::Ok(serde_json::json!("ok")));
+    let dispatcher = Arc::new(ScriptedDispatcher {
+        table,
+        tools: ["shell-exec".to_string()].into_iter().collect(),
+    });
+
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 4))
+        .await.unwrap();
+    assert!(matches!(result.outcome, Outcome::Completed(_)), "got {:?}", result.outcome);
+    assert_eq!(result.dispatch_count, 1, "the expanded template's single step dispatched");
+
+    let rows = hhagent_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
+    let has = |actor: &str, action: &str| rows.iter().any(|r| r.actor == actor && r.action == action);
+    assert!(has("scheduler", "l3.invoked"), "l3.invoked row (scheduler) present");
+    assert!(has("scheduler", "l3.invoke_outcome"), "l3.invoke_outcome row present");
+}
+
+/// (j) Agent emits an `invoke_skill` directive naming a skill that does
+///     not exist (or is not pinned). The loop refuses, audits
+///     l3.invoke_rejected, feeds the refusal back as a block, and the
+///     agent replans to a clean task_complete — no dispatch happens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_invoke_unknown_skill_refuses_then_replans() {
+    let Some((pool, _cluster)) = bring_up_pg("invref").await else { return; };
+    let id = insert_pending(&pool, Lane::Fast, serde_json::json!({})).await.unwrap();
+    let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
+
+    let formulator = Arc::new(ScriptedFormulator::new(vec![
+        invoke_plan("ghost", "p", "v"),
+        task_complete_plan("recovered"),
+    ]));
+    let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
+    let dispatcher = Arc::new(ScriptedDispatcher {
+        table: Default::default(),
+        tools: ["shell-exec".to_string()].into_iter().collect(),
+    });
+
+    let result = run_to_terminal(&pool, formulator, review, dispatcher, make_ctx(id, 4))
+        .await.unwrap();
+    match result.outcome {
+        Outcome::Completed(v) => assert_eq!(v["body"], "recovered"),
+        o => panic!("expected Completed after replan, got {:?}", o),
+    }
+    assert_eq!(result.dispatch_count, 0, "refused invoke dispatched nothing");
+    let rows = hhagent_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
+    assert!(rows.iter().any(|r| r.actor == "scheduler" && r.action == "l3.invoke_rejected"),
+        "refusal audited");
 }
