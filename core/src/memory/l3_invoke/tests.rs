@@ -334,3 +334,93 @@ fn display_renders_actionable_hint_naming_the_tool() {
         assert!(rendered.contains(distinctive), "hint must contain '{distinctive}': {rendered}");
     }
 }
+
+#[test]
+fn is_autonomously_invocable_only_pinned() {
+    use crate::memory::l3_approval::SkillTrust;
+    assert!(is_autonomously_invocable(SkillTrust::Pinned));
+    assert!(!is_autonomously_invocable(SkillTrust::UserApproved));
+    assert!(!is_autonomously_invocable(SkillTrust::Untrusted));
+}
+
+#[test]
+fn autonomy_ladder_is_subset_of_runnable_and_surfaceable() {
+    use crate::memory::l3_approval::SkillTrust;
+    use crate::memory::l3_surface::is_surfaceable;
+    for t in [SkillTrust::Untrusted, SkillTrust::UserApproved, SkillTrust::Pinned] {
+        if is_autonomously_invocable(t) {
+            assert!(is_runnable(t), "autonomous ⊆ runnable for {t:?}");
+            assert!(is_surfaceable(t), "autonomous ⊆ surfaceable for {t:?}");
+        }
+    }
+}
+
+#[test]
+fn planned_step_from_l3_with_class_sets_classification() {
+    use crate::cassandra::types::{DataClass, L3TemplateStep};
+    let step = L3TemplateStep {
+        tool: "shell-exec".into(), method: "shell.exec".into(),
+        parameters: serde_json::json!({"argv":["echo","hi"]}),
+    };
+    let ps = planned_step_from_l3_with_class(&step, DataClass::ClinicalConfidential);
+    assert_eq!(ps.classification, DataClass::ClinicalConfidential);
+    assert_eq!(ps.tool, "shell-exec");
+    assert_eq!(planned_step_from_l3(&step).classification, DataClass::Secret);
+}
+
+#[test]
+fn expand_for_agent_happy_sets_data_ceiling_classification() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use crate::cassandra::types::{DataClass, L3Param, L3SkillCandidate, L3TemplateStep};
+    use crate::memory::l3_approval::SkillTrust;
+
+    let template = L3SkillCandidate {
+        name: "summarise_repo_readme".into(),
+        description: "d".into(),
+        parameters: vec![L3Param { name: "repo_path".into(), description: "p".into() }],
+        steps: vec![L3TemplateStep {
+            tool: "shell-exec".into(), method: "shell.exec".into(),
+            parameters: serde_json::json!({"argv":["cat","{{repo_path}}/README.md"]}),
+        }],
+    };
+    let mut args = BTreeMap::new();
+    args.insert("repo_path".into(), "/tmp/x".into());
+    let live: BTreeSet<String> = ["shell-exec".to_string()].into_iter().collect();
+
+    let steps = expand_for_agent(&template, SkillTrust::Pinned, &args, &live, DataClass::Personal)
+        .expect("pinned + tool present + valid args");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].classification, DataClass::Personal);
+    assert_eq!(steps[0].parameters["argv"][1], "/tmp/x/README.md");
+}
+
+#[test]
+fn expand_for_agent_refuses_non_pinned() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use crate::cassandra::types::{DataClass, L3SkillCandidate};
+    use crate::memory::l3_approval::SkillTrust;
+    let template = L3SkillCandidate {
+        name: "s".into(), description: "d".into(), parameters: vec![], steps: vec![],
+    };
+    let err = expand_for_agent(&template, SkillTrust::UserApproved, &BTreeMap::new(),
+        &BTreeSet::new(), DataClass::Public).unwrap_err();
+    assert!(err.reasons.iter().any(|r| r.contains("not autonomously invocable")));
+}
+
+#[test]
+fn expand_for_agent_refuses_tool_absent_from_live_registry() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use crate::cassandra::types::{DataClass, L3SkillCandidate, L3TemplateStep};
+    use crate::memory::l3_approval::SkillTrust;
+    let template = L3SkillCandidate {
+        name: "s".into(), description: "d".into(), parameters: vec![],
+        steps: vec![L3TemplateStep {
+            tool: "web-fetch".into(), method: "fetch".into(),
+            parameters: serde_json::json!({}),
+        }],
+    };
+    let live: BTreeSet<String> = ["shell-exec".to_string()].into_iter().collect();
+    let err = expand_for_agent(&template, SkillTrust::Pinned, &BTreeMap::new(),
+        &live, DataClass::Public).unwrap_err();
+    assert!(!err.reasons.is_empty());
+}

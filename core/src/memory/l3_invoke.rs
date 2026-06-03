@@ -235,21 +235,38 @@ pub fn is_runnable(trust: SkillTrust) -> bool {
     matches!(trust, SkillTrust::UserApproved | SkillTrust::Pinned)
 }
 
-/// Synthesize a [`PlannedStep`] from a concrete (substituted) template
-/// step. `returns` / `done_when` are empty and `classification` is set to
-/// the most conservative class — all three are UNUSED on the operator-run
-/// path: `ToolHostStepDispatcher::dispatch_step` reads only
-/// `tool` / `method` / `parameters`. The conservative `classification`
-/// is defensive in case a future reader inspects it.
-pub fn planned_step_from_l3(step: &L3TemplateStep) -> PlannedStep {
+/// PURE stricter gate for AGENT-autonomous invocation: only `pinned`
+/// skills may be invoked by the agent itself. A strict subset of
+/// [`is_runnable`] (the operator-CLI gate, which also allows
+/// `user_approved`) and of
+/// [`crate::memory::l3_surface::is_surfaceable`]. Granting autonomy is a
+/// distinct human action (`memory l3 pin`) gated on a prior `approve`;
+/// pinned-in-sync by `autonomy_ladder_is_subset_of_runnable_and_surfaceable`.
+pub fn is_autonomously_invocable(trust: SkillTrust) -> bool {
+    matches!(trust, SkillTrust::Pinned)
+}
+
+/// Synthesize a [`PlannedStep`] from a concrete template step, with an
+/// explicit `classification`. `returns` / `done_when` are empty (unused
+/// by `dispatch_step`). The agent path passes `plan.data_ceiling` so the
+/// deterministic policy's I2/I3 invariants hold automatically.
+pub fn planned_step_from_l3_with_class(step: &L3TemplateStep, class: DataClass) -> PlannedStep {
     PlannedStep {
         tool: step.tool.clone(),
         method: step.method.clone(),
         parameters: step.parameters.clone(),
         returns: String::new(),
         done_when: String::new(),
-        classification: DataClass::Secret,
+        classification: class,
     }
+}
+
+/// Operator-path mapper: `classification` is the most conservative class
+/// (`Secret`) and is UNUSED on that path (`dispatch_step` reads only
+/// `tool` / `method` / `parameters`). Delegates to
+/// [`planned_step_from_l3_with_class`].
+pub fn planned_step_from_l3(step: &L3TemplateStep) -> PlannedStep {
+    planned_step_from_l3_with_class(step, DataClass::Secret)
 }
 
 /// PURE decision: may this stored skill run with these args against this
@@ -293,6 +310,38 @@ pub fn prepare_invocation(
     // Substitution can still fail on operator-arg problems (missing /
     // unknown / bad value) — surface those as refusal reasons too.
     substitute_template(template, args).map_err(|e| InvokeRefusal { reasons: vec![e.to_string()] })
+}
+
+/// PURE agent-path expansion: gate on the stricter
+/// [`is_autonomously_invocable`] (pinned only), re-validate + substitute
+/// via [`prepare_invocation`] against the daemon's live tool set, and
+/// synthesize concrete [`PlannedStep`]s whose `classification` is the
+/// invoking plan's `data_ceiling` (so deterministic-policy I2/I3 hold and
+/// governance reduces to the I1 check on the plan the agent declared).
+///
+/// On any failure returns an [`InvokeRefusal`] collecting the reason(s) —
+/// the inner loop audits it (`l3.invoke_rejected`) and feeds it back so
+/// the agent replans.
+pub fn expand_for_agent(
+    template: &L3SkillCandidate,
+    stored_trust: SkillTrust,
+    args: &BTreeMap<String, String>,
+    live_tools: &BTreeSet<String>,
+    data_ceiling: DataClass,
+) -> Result<Vec<PlannedStep>, InvokeRefusal> {
+    if !is_autonomously_invocable(stored_trust) {
+        return Err(InvokeRefusal {
+            reasons: vec![format!(
+                "skill trust '{}' is not autonomously invocable (agent may invoke only pinned skills)",
+                stored_trust.as_str()
+            )],
+        });
+    }
+    let concrete = prepare_invocation(template, stored_trust, args, live_tools)?;
+    Ok(concrete
+        .iter()
+        .map(|s| planned_step_from_l3_with_class(s, data_ceiling))
+        .collect())
 }
 
 /// Why a tool a skill needs is absent from the live in-process registry,
