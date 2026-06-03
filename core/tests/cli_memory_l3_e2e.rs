@@ -1,8 +1,8 @@
-//! Subprocess-level pin for `hhagent-cli memory l3 {list,remove}`.
+//! Subprocess-level pin for `hhagent-cli memory l3 {list,remove,approve,revoke,run}`.
 //!
 //! ## What this file pins
 //!
-//! Four independent scenarios, each bringing up its own per-test PG cluster
+//! Nine independent scenarios, each bringing up its own per-test PG cluster
 //! and spawning the real `hhagent-cli` binary as a subprocess:
 //!
 //! 1. **`cli_memory_l3_list_empty_then_populated`** — `memory l3 list` against
@@ -19,6 +19,26 @@
 //!
 //! 4. **`cli_memory_l3_remove_bad_arg`** — `memory l3 remove notanumber` exits
 //!    2 and stderr contains `invalid id`.
+//!
+//! 5. **`cli_memory_l3_approve_happy`** — seed a valid skill + a
+//!    `registry.loaded` row naming its tool; approve exits 0 and a follow-up
+//!    list shows `user_approved`.
+//!
+//! 6. **`cli_memory_l3_approve_rejects_secret_ref`** — a skill carrying a
+//!    `secret://` ref is rejected: non-zero exit, trust stays `untrusted`.
+//!
+//! 7. **`cli_memory_l3_approve_fail_closed_no_snapshot`** — with no
+//!    `registry.loaded` row, approve fails closed.
+//!
+//! 8. **`cli_memory_l3_revoke_after_approve`** — approve then revoke: trust
+//!    cycles untrusted → user_approved → untrusted.
+//!
+//! 9. **`cli_memory_l3_run_refusal_prints_registry_divergence_hint`** — seed a
+//!    shell-exec skill + a `registry.loaded` snapshot naming it; approve it
+//!    (trust → user_approved); then `memory l3 run <id>` in an env WITHOUT
+//!    `HHAGENT_SHELL_EXEC_BIN`. The live rebuild lacks shell-exec while the
+//!    snapshot has it → MissingLocallyButInSnapshot refusal → stderr carries
+//!    `hint:` and `registered by the daemon`.
 //!
 //! ## Skip semantics
 //!
@@ -601,6 +621,94 @@ async fn cli_memory_l3_revoke_after_approve() {
     let trust: String = sqlx::query_scalar("SELECT metadata->>'trust' FROM memories WHERE id = $1")
         .bind(id).fetch_one(&pool).await.expect("fetch trust");
     assert_eq!(trust, "untrusted");
+
+    drop(pool); drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 9 — `memory l3 run` refusal prints the registry-divergence hint
+// ---------------------------------------------------------------------------
+
+/// Seed a shell-exec skill + a `registry.loaded` snapshot naming `shell-exec`;
+/// approve (trust → user_approved); then invoke `hhagent-cli memory l3 run <id>`
+/// in an env that does NOT contain `HHAGENT_SHELL_EXEC_BIN`.
+///
+/// The CLI rebuilds the live registry in-process from env: without
+/// `HHAGENT_SHELL_EXEC_BIN`, shell-exec is absent from the live registry while
+/// the snapshot (seeded above) names it.  `prepare_invocation` refuses
+/// (MissingLocallyButInSnapshot), and the CLI's `InvokeReport::Refused` arm
+/// calls `diagnose_registry_divergence` and prints each hint to stderr as
+/// `"  hint: ..."`.
+///
+/// This is the marquee #179 scenario: the only path that exercises the full
+/// CLI wiring end-to-end (subprocess binary + real PG) for the divergence hint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_memory_l3_run_refusal_prints_registry_divergence_hint() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "cml3-rhd-d", "cml3-rhd-l",
+        &format!("hhagent-postgres-cli-memory-l3-run-hint-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "cli_memory_l3_run_refusal_prints_registry_divergence_hint"}))
+        .await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    // Seed a valid shell-exec skill.
+    let outcome = crystallise_l3(&pool, &valid_skill(), L3Source::AgentRaised { task_id: 1 })
+        .await.expect("crystallise_l3");
+    let id = outcome.memory_id();
+
+    // Seed a registry.loaded snapshot that names shell-exec (daemon view).
+    seed_registry_loaded(&pool, &["shell-exec"]).await;
+
+    let bin = cli_binary();
+    let env = cli_env(&cluster.data_dir);
+    // Confirm: env does NOT contain HHAGENT_SHELL_EXEC_BIN (it never has in
+    // cli_env, but be explicit so a future change is caught here).
+    assert!(
+        !env.iter().any(|(k, _)| k == "HHAGENT_SHELL_EXEC_BIN"),
+        "cli_env must not set HHAGENT_SHELL_EXEC_BIN (precondition for this test)"
+    );
+
+    // --- Step 1: approve the skill (uses the registry.loaded snapshot) ----
+    let approve_out = Command::new(&bin)
+        .args(["memory", "l3", "approve", &id.to_string()])
+        .env_clear().envs(env.clone()).output().expect("spawn approve");
+    let approve_so = String::from_utf8_lossy(&approve_out.stdout).into_owned();
+    let approve_se = String::from_utf8_lossy(&approve_out.stderr).into_owned();
+    assert!(
+        approve_out.status.success(),
+        "approve must exit 0 (precondition); stdout={approve_so}\nstderr={approve_se}"
+    );
+    assert!(
+        approve_so.contains("user_approved"),
+        "approve must confirm user_approved; got {approve_so}"
+    );
+
+    // --- Step 2: run without HHAGENT_SHELL_EXEC_BIN (dry-run default) -----
+    // env does not contain HHAGENT_SHELL_EXEC_BIN → live rebuild lacks shell-exec
+    // → MissingLocallyButInSnapshot → CLI prints "  hint: ..." to stderr.
+    let run_out = Command::new(&bin)
+        .args(["memory", "l3", "run", &id.to_string()])
+        .env_clear().envs(env.clone()).output().expect("spawn run");
+    let se = String::from_utf8_lossy(&run_out.stderr).into_owned();
+
+    assert!(
+        !run_out.status.success(),
+        "run must refuse (non-zero exit) because shell-exec is missing from env; stderr=\n{se}"
+    );
+    assert!(
+        se.contains("hint:"),
+        "stderr must carry a registry-divergence hint line; stderr=\n{se}"
+    );
+    assert!(
+        se.contains("registered by the daemon"),
+        "hint must describe the MissingLocallyButInSnapshot case; stderr=\n{se}"
+    );
 
     drop(pool); drop(cluster);
 }

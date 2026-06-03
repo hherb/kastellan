@@ -295,6 +295,75 @@ pub fn prepare_invocation(
     substitute_template(template, args).map_err(|e| InvokeRefusal { reasons: vec![e.to_string()] })
 }
 
+/// Why a tool a skill needs is absent from the live in-process registry,
+/// classified by comparing the live set against the daemon's recorded
+/// `registry.loaded` snapshot. Drives the operator-facing hint on the
+/// `memory l3 run` refusal path (issue #179). Advisory only — it changes
+/// nothing about what is or isn't runnable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryDivergence {
+    /// In the daemon's snapshot but missing from the live rebuild — almost
+    /// always an unset env var (e.g. `HHAGENT_SHELL_EXEC_BIN`) in the
+    /// operator's shell. THIS is the #179 usability cliff.
+    MissingLocallyButInSnapshot { tool: String },
+    /// Missing locally and no daemon snapshot exists to compare against —
+    /// likely an env problem, but unconfirmable (has the daemon ever run?).
+    MissingLocallyNoSnapshot { tool: String },
+    /// In neither the live registry nor the snapshot — a genuinely unknown
+    /// tool, not an environment problem (the legitimate refusal).
+    UnknownEverywhere { tool: String },
+}
+
+impl std::fmt::Display for RegistryDivergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegistryDivergence::MissingLocallyButInSnapshot { tool } => write!(
+                f,
+                "'{tool}' is registered by the daemon but missing from your \
+                 environment — is the tool's env var (e.g. HHAGENT_SHELL_EXEC_BIN) \
+                 set? Run with the same environment the daemon uses."
+            ),
+            RegistryDivergence::MissingLocallyNoSnapshot { tool } => write!(
+                f,
+                "'{tool}' is missing from your environment and no daemon registry \
+                 snapshot exists to compare against (has the daemon run at least once?)."
+            ),
+            RegistryDivergence::UnknownEverywhere { tool } => write!(
+                f,
+                "'{tool}' is unknown to both your environment and the daemon's last \
+                 snapshot — the skill references a tool that is no longer registered."
+            ),
+        }
+    }
+}
+
+/// Classify every tool the skill NEEDS that is absent from the live registry,
+/// using the daemon's recorded `registry.loaded` snapshot to distinguish an
+/// unset-env cliff from a genuinely unknown tool (issue #179).
+///
+/// Returns empty when every needed tool is present locally — so the caller
+/// stays silent on refusals that are not about missing tools (trust,
+/// `secret://`, arg errors). `snapshot_tools == None` means the daemon has
+/// never recorded a snapshot. Output order is deterministic (sorted, by the
+/// `BTreeSet` iteration of `needed_tools`).
+pub fn diagnose_registry_divergence(
+    needed_tools: &BTreeSet<String>,
+    live_tools: &BTreeSet<String>,
+    snapshot_tools: Option<&BTreeSet<String>>,
+) -> Vec<RegistryDivergence> {
+    needed_tools
+        .iter()
+        .filter(|t| !live_tools.contains(*t))
+        .map(|tool| match snapshot_tools {
+            Some(snap) if snap.contains(tool) => {
+                RegistryDivergence::MissingLocallyButInSnapshot { tool: tool.clone() }
+            }
+            Some(_) => RegistryDivergence::UnknownEverywhere { tool: tool.clone() },
+            None => RegistryDivergence::MissingLocallyNoSnapshot { tool: tool.clone() },
+        })
+        .collect()
+}
+
 /// Dispatch each concrete step through the injected [`StepDispatcher`],
 /// collecting outcomes and stopping at the first [`StepOutcome::Err`]
 /// (mirrors `inner_loop::run_to_terminal`). No audit / DB here — the
