@@ -631,4 +631,25 @@ mod tests {
         assert_eq!(none_payload["l3_skill"], serde_json::Value::Null);
         assert!(none_payload.as_object().unwrap().contains_key("l3_skill"));
     }
+
+    #[test]
+    fn build_plan_formulate_payload_invoke_skill_compact_shape() {
+        // The present-case projection: invoke_skill => {name, arg_count}.
+        use crate::cassandra::types::InvokeDirective;
+        use std::collections::BTreeMap;
+        let mut args = BTreeMap::new();
+        args.insert("repo_path".to_string(), "/tmp/repo".to_string());
+        args.insert("max_lines".to_string(), "40".to_string());
+        let mut plan = make_text_plan();
+        plan.invoke_skill = Some(InvokeDirective {
+            name: "summarise_repo_readme".into(),
+            args,
+        });
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public, ClassificationFloorSource::Default,
+            &[], &plan, &make_default_meta(),
+        );
+        assert_eq!(payload["invoke_skill"]["name"], "summarise_repo_readme");
+        assert_eq!(payload["invoke_skill"]["arg_count"], 2);
+    }
 }
