@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::PgPool;
 
+use hhagent_db::memories::{load_layer_by_trust, MemoryLayer};
+
 use crate::cassandra::types::{DataClass, L3SkillCandidate, L3TemplateStep, PlannedStep};
 use crate::cli_audit::CLI_AUDIT_ACTOR;
 use crate::memory::l3_approval::{evaluate_approval, ApprovalDecision, SkillTrust};
@@ -502,6 +504,62 @@ async fn best_effort_audit(pool: &PgPool, action: &str, payload: serde_json::Val
     if let Err(e) = hhagent_db::audit::insert(pool, CLI_AUDIT_ACTOR, action, payload).await {
         tracing::warn!(error = %e, action, "l3 invoke audit insert failed (best-effort)");
     }
+}
+
+/// A pinned L3 skill resolved by name, ready for agent-path expansion.
+#[derive(Debug, Clone)]
+pub struct PinnedSkill {
+    pub memory_id: i64,
+    pub template: L3SkillCandidate,
+    pub body_sha256: String,
+}
+
+/// Load the newest `pinned` L3 skill whose `template.name == name`.
+///
+/// Trust is filtered in SQL (`load_layer_by_trust(Skill, ["pinned"], …)`);
+/// a defensive [`is_autonomously_invocable`] re-check runs over the result
+/// so a future SQL/Rust divergence fails safe. Newest-wins resolves the
+/// unlikely same-name case (matches surfacing's newest-first order).
+/// `Ok(None)` when no pinned skill of that name exists — the inner loop
+/// turns that into an "unknown or non-pinned skill" refusal.
+pub async fn load_pinned_skill_by_name(
+    pool: &PgPool,
+    name: &str,
+) -> Result<Option<PinnedSkill>, hhagent_db::DbError> {
+    // Cap: a generous bound on how many pinned skills could share a name.
+    // Newest-first, so the first name match is the newest.
+    const SCAN_CAP: usize = 64;
+    let rows = load_layer_by_trust(pool, MemoryLayer::Skill, &["pinned"], SCAN_CAP).await?;
+    for row in rows {
+        let trust = row
+            .metadata
+            .get("trust")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !is_autonomously_invocable(SkillTrust::from_metadata_str(trust)) {
+            continue; // defense-in-depth; SQL already excluded these
+        }
+        let template: L3SkillCandidate = match row
+            .metadata
+            .get("template")
+            .cloned()
+            .and_then(|t| serde_json::from_value(t).ok())
+        {
+            Some(t) => t,
+            None => continue, // unparseable template — skip fail-safe
+        };
+        if template.name != name {
+            continue;
+        }
+        let body_sha256 = row
+            .metadata
+            .get("body_sha256")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Ok(Some(PinnedSkill { memory_id: row.id, template, body_sha256 }));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
