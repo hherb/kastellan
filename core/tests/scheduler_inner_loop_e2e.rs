@@ -158,6 +158,7 @@ fn task_complete_plan(body: &str) -> Plan {
         floor_request: None,
         l1_insight: None,
         l3_skill: None,
+        invoke_skill: None,
     }
 }
 
@@ -180,6 +181,7 @@ fn one_step_plan(tool: &str, method: &str) -> Plan {
         floor_request: None,
         l1_insight: None,
         l3_skill: None,
+        invoke_skill: None,
     }
 }
 
@@ -538,6 +540,7 @@ async fn refusal_plan_terminates_with_state_refused() {
         floor_request: None,
         l1_insight: None,
         l3_skill: None,
+        invoke_skill: None,
     };
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
@@ -659,6 +662,7 @@ async fn reviewer_constitutional_block_wins_over_agent_refusal() {
         floor_request: None,
         l1_insight: None,
         l3_skill: None,
+        invoke_skill: None,
     };
 
     let formulator = Arc::new(ScriptedFormulator::new(vec![plan]));
@@ -723,6 +727,7 @@ async fn verdict_block_on_refusal_plan_does_not_loop() {
         floor_request: None,
         l1_insight: None,
         l3_skill: None,
+        invoke_skill: None,
     };
 
     // Only one plan is queued. If the loop incorrectly `continue`s on
@@ -816,6 +821,7 @@ async fn agent_floor_raise_chain_blocks_low_classification_step() {
         floor_request: Some(DataClass::ClinicalConfidential),  // RAISE!
         l1_insight: None,
         l3_skill: None,
+        invoke_skill: None,
     };
     // The inner loop will loop until the plan cap; queue plan1 enough
     // times to exhaust the cap, then the outcome is Failed("plan cap").

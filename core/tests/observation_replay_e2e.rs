@@ -26,6 +26,7 @@ fn approve_baseline_capture() -> CaptureJson {
         floor_request: None,
         l1_insight: None,
         l3_skill: None,
+        invoke_skill: None,
     };
     let plan_value = serde_json::to_value(&plan).unwrap();
     CaptureJson {
