@@ -353,21 +353,26 @@ fn build_l3_invoke_outcome_payload_shape() {
 
 #[test]
 fn build_l3_invoke_rejected_payload_shape() {
-    let p = build_l3_invoke_rejected_payload(7, Some("leaky"), Some("sha9"), &["bad tool".into()]);
+    let p = build_l3_invoke_rejected_payload(7, "leaky", "sha9", &["bad tool".into()]);
     assert_eq!(p["memory_id"], 7);
     assert_eq!(p["skill_name"], "leaky");
     assert_eq!(p["body_sha256"], "sha9");
     assert_eq!(p["reasons"][0], "bad tool");
-}
-
-#[test]
-fn build_l3_invoke_rejected_payload_omits_optional_when_none() {
-    let p = build_l3_invoke_rejected_payload(7, None, None, &["r".into()]);
-    assert!(p.get("skill_name").is_none());
-    assert!(p.get("body_sha256").is_none());
-    assert_eq!(p["memory_id"], 7);
+    // Pin the exact key set (module convention: every multi-key builder has a
+    // keys() pin so a future added key breaks a test).
+    assert_eq!(
+        keys(&p),
+        ["body_sha256", "memory_id", "reasons", "skill_name"]
+            .iter().map(|s| s.to_string()).collect::<std::collections::BTreeSet<_>>()
+    );
 }
 ```
+
+> Add a `keys(&p)` key-set pin to `build_l3_invoked_payload_shape` and
+> `build_l3_invoke_outcome_payload_shape` too (module convention — the audit
+> test file already has a `fn keys(v: &Value) -> BTreeSet<String>` helper).
+> And enumerate the five field names in `build_l3_invoke_outcome_payload`'s
+> doc comment instead of only "Mirrors `plan.outcome`."
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -433,25 +438,24 @@ pub fn build_l3_invoke_outcome_payload(
     })
 }
 
-/// Payload for the `l3.invoke_rejected` row. `skill_name` / `body_sha256`
-/// are optional (a row whose template would not parse has neither).
-/// Mirrors `build_l3_approve_rejected_payload`.
+/// Payload for the `l3.invoke_rejected` row. Written by `invoke_l3` after
+/// a trust-gate or live-re-validation refusal, before any dispatch. The
+/// only caller always holds a successfully-parsed template (→ `skill_name`)
+/// and the stored row's `body_sha256`, so both are **required** here
+/// (unlike `build_l3_approve_rejected_payload`, whose no-parse path can
+/// have neither). Shape: `{memory_id, skill_name, body_sha256, reasons}`.
 pub fn build_l3_invoke_rejected_payload(
     memory_id: i64,
-    skill_name: Option<&str>,
-    body_sha256: Option<&str>,
+    skill_name: &str,
+    body_sha256: &str,
     reasons: &[String],
 ) -> Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert("memory_id".into(), serde_json::json!(memory_id));
-    if let Some(n) = skill_name {
-        obj.insert("skill_name".into(), serde_json::json!(n));
-    }
-    if let Some(s) = body_sha256 {
-        obj.insert("body_sha256".into(), serde_json::json!(s));
-    }
-    obj.insert("reasons".into(), serde_json::json!(reasons));
-    Value::Object(obj)
+    serde_json::json!({
+        "memory_id": memory_id,
+        "skill_name": skill_name,
+        "body_sha256": body_sha256,
+        "reasons": reasons,
+    })
 }
 ```
 
@@ -525,7 +529,7 @@ pub enum InvokeError {
     MissingArgs(String),
     #[error("unknown argument(s) not declared by the skill: {0}")]
     UnknownArgs(String),
-    #[error("argument '{name}' value contains a newline or control character")]
+    #[error("argument '{name}' value contains a newline, control character, or '{{{{'/'}}}}' sequence")]
     BadArgValue { name: String },
     #[error("argument '{name}' value exceeds {max} bytes ({got})")]
     ArgValueTooLong { name: String, max: usize, got: usize },
@@ -703,6 +707,17 @@ fn substitute_rejects_oversized_value() {
     let err = substitute_template(&skill_one_param(), &args).unwrap_err();
     assert!(matches!(err, InvokeError::ArgValueTooLong { .. }));
 }
+
+#[test]
+fn substitute_rejects_value_containing_brace_sequence() {
+    // A value legally containing `{{x}}` must be rejected up front (BadArgValue),
+    // NOT silently interpolated and then mis-flagged as an unsubstituted
+    // placeholder. Single-brace values stay valid (covered by the happy tests).
+    let mut args = BTreeMap::new();
+    args.insert("repo_path".into(), "/data/{{x}}/out".into());
+    let err = substitute_template(&skill_one_param(), &args).unwrap_err();
+    assert_eq!(err, InvokeError::BadArgValue { name: "repo_path".into() });
+}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -798,8 +813,9 @@ fn has_placeholder(v: &serde_json::Value) -> Option<String> {
 /// producing concrete (placeholder-free) steps.
 ///
 /// Closed-world: the supplied arg names must EXACTLY equal the declared
-/// parameter names. Each value must be free of newlines/control chars and
-/// within [`L3_ARG_MAX_VALUE_BYTES`]. Asserts no `{{…}}` survives.
+/// parameter names. Each value must be free of newlines/control chars, must
+/// not contain the `{{`/`}}` template-brace sequences, and must be within
+/// [`L3_ARG_MAX_VALUE_BYTES`]. Asserts no `{{…}}` survives.
 pub fn substitute_template(
     template: &L3SkillCandidate,
     args: &BTreeMap<String, String>,
@@ -824,7 +840,13 @@ pub fn substitute_template(
                 got: value.len(),
             });
         }
-        if value.bytes().any(|b| b < 0x20) {
+        // Reject control chars AND the template-brace sequences `{{`/`}}`.
+        // The brace check is load-bearing: without it, a value that legitimately
+        // contained `{{x}}` would, after interpolation, look like a surviving
+        // placeholder and trip the spurious `UnsubstitutedPlaceholder` post-condition
+        // below. Rejecting only the two-char sequences (not single braces) keeps
+        // single-brace values like `{"json":true}` valid.
+        if value.bytes().any(|b| b < 0x20) || value.contains("{{") || value.contains("}}") {
             return Err(InvokeError::BadArgValue { name: name.clone() });
         }
     }
@@ -1225,9 +1247,9 @@ pub async fn invoke_l3(
         Ok(steps) => steps,
         Err(InvokeRefusal { reasons }) => {
             let payload = build_l3_invoke_rejected_payload(
-                0, // memory_id is filled by the CLI layer; see note below
-                Some(&skill_name),
-                Some(body_sha256),
+                0, // replaced by `memory_id` per the correction note below
+                &skill_name,
+                body_sha256,
                 &reasons,
             );
             best_effort_audit(pool, ACTION_L3_INVOKE_REJECTED, payload).await;

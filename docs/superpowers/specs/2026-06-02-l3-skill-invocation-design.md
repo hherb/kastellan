@@ -152,11 +152,17 @@ substitute_template(
   guarantees declared == referenced, so this also guarantees every `{{…}}` has
   a value and no value is wasted.)
 - **Per-value guards:** each value must be free of newlines and ASCII control
-  characters (`b < 0x20`) and within a byte cap (`L3_ARG_MAX_VALUE_BYTES`,
+  characters (`b < 0x20`), must not contain the template-brace sequences `{{`
+  or `}}`, and must be within a byte cap (`L3_ARG_MAX_VALUE_BYTES`,
   proposed 1024). A supplied value is just a tool argument — shell-exec does no
   shell interpretation and `argv[0]` stays operator-allowlisted — but keeping
   values clean and bounded mirrors the template guards and avoids a value
-  smuggling a newline into an argument vector.
+  smuggling a newline into an argument vector. **The `{{`/`}}` rejection is
+  load-bearing for the post-condition (below):** without it, a value that
+  legitimately contained `{{x}}` would, after interpolation, look like a
+  surviving placeholder and trip a spurious `UnsubstitutedPlaceholder` error.
+  Rejecting only the two-char *sequences* (not single braces) keeps
+  single-brace values like `{"json":true}` valid.
 - **Substitution:** walk each step's `parameters` JSON; in every **string
   leaf**, replace each `{{name}}` occurrence with `args[name]`
   (string-interpolation, so embedded forms like `"{{repo_path}}/README.md"`
@@ -263,7 +269,7 @@ each clearly and picks an exit code.
 |---|---|---|---|
 | `cli` | `l3.invoked` | `{memory_id, skill_name, body_sha256, arg_names:[…], step_count}` | start of `--execute` |
 | `cli` | `l3.invoke_outcome` | `{memory_id, skill_name, steps_executed, steps_total, any_err}` | end of `--execute` |
-| `cli` | `l3.invoke_rejected` | `{memory_id, skill_name?, reasons:[…]}` | re-validation refusal, before any dispatch |
+| `cli` | `l3.invoke_rejected` | `{memory_id, skill_name, body_sha256, reasons:[…]}` | re-validation refusal, before any dispatch |
 | `tool:<name>` | `<method>` | existing `{req, result\|err, ms}` | one per executed step (the chokepoint) |
 
 Notes:
@@ -273,6 +279,12 @@ Notes:
   `secret://` ref opaque. This mirrors the `l3.approved` payload's
   redaction-aware shape.
 - **Dry-run writes no audit rows** (pure preview).
+- `l3.invoke_rejected` carries **required** `skill_name` + `body_sha256` (not
+  optional, unlike `l3.approve_rejected`): the only writer is `invoke_l3`,
+  which always holds a successfully-parsed template (→ `skill_name`) and the
+  stored row's `body_sha256`. The CLI handles the no-parse case *before*
+  calling `invoke_l3` and writes no row, so a row with a missing name/sha
+  cannot occur on this path.
 - New audit-action constants live beside the existing `l3.*` constants;
   payload builders are pure functions (unit-tested for shape), following the
   approval slice's `build_l3_*_payload` precedent.
