@@ -49,7 +49,7 @@ pub async fn run_steps(
 }
 
 /// Result of an [`invoke_l3`] call.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum InvokeReport {
     /// Trust gate or live re-validation refused; nothing dispatched.
     Refused { reasons: Vec<String> },

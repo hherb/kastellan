@@ -429,3 +429,19 @@ fn expand_for_agent_refuses_tool_absent_from_live_registry() {
         "refusal should name the unregistered tool: {:?}", err.reasons
     );
 }
+
+#[test]
+fn invoke_report_serde_round_trips_each_variant() {
+    let refused = InvokeReport::Refused { reasons: vec!["nope".into()] };
+    let dry = InvokeReport::DryRun { steps: vec![] };
+    let exec = InvokeReport::Executed {
+        outcomes: vec![StepOutcome::Ok(serde_json::json!({"ok": true}))],
+        steps_total: 1,
+    };
+    for report in [refused, dry, exec] {
+        let v = serde_json::to_value(&report).expect("serialize");
+        let back: InvokeReport = serde_json::from_value(v).expect("deserialize");
+        // Compare via Debug strings (InvokeReport has no PartialEq).
+        assert_eq!(format!("{report:?}"), format!("{back:?}"));
+    }
+}
