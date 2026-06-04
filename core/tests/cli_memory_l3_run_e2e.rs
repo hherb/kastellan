@@ -31,6 +31,13 @@
 //! Every scenario short-circuits with a `[SKIP]` print when the host lacks
 //! `pg_ctl`, a reachable supervisor, the worker binary, or a sandbox backend.
 //! Cross-platform (Linux + macOS).
+//!
+//! NOTE (post-#179): the operator CLI no longer calls `invoke_l3` in-process —
+//! `memory l3 run` submits an `l3_run` task that the daemon executes via the
+//! same `invoke_l3` entry point. These scenarios therefore exercise the
+//! **daemon-side** execution machinery directly (no CLI subprocess). The
+//! end-to-end CLI→daemon path (including the #179 divergence fix) is covered by
+//! `cli_memory_l3_run_daemon_e2e.rs`.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
