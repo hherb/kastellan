@@ -33,7 +33,7 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// Extracted from `write_audit_plan_formulate` so the wire shape is
 /// unit-testable without a live Postgres pool. The shape pins
 /// (in this file's `tests` module) defend against accidental drift —
-/// 26 keys for non-`CliInferred` sources, 27 when `CliInferred` carries
+/// 27 keys for non-`CliInferred` sources, 28 when `CliInferred` carries
 /// matched signals.
 ///
 /// Slice A (2026-05-15) added `plan` (full serialised Plan) +
@@ -76,6 +76,12 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// surfaced into the assembled prompt's `<skills>` block), mirroring
 /// `l0_count`/`l1_count`. This brings the default-source key count to 26,
 /// and `CliInferred`+signals to 27.
+///
+/// L3 autonomous-door (2026-06-04) added `invoke_skill` (compact `{name,
+/// arg_count}` projection of the agent-emitted invoke directive on the
+/// plan, or explicit JSON `null` when absent — mirrors the `l1_insight` /
+/// `l3_skill` precedent). This brings the default-source key count to 27,
+/// and `CliInferred`+signals to 28.
 pub(crate) fn build_plan_formulate_payload(
     task_id: i64,
     plan_count: u32,
@@ -151,6 +157,19 @@ pub(crate) fn build_plan_formulate_payload(
                 "step_count": s.steps.len(),
                 "param_count": s.parameters.len(),
             }),
+            None => serde_json::Value::Null,
+        },
+    );
+    // Compact `invoke_skill` projection — `{name, arg_count}` when the
+    // agent emitted an invoke directive, explicit JSON null otherwise so
+    // `WHERE payload ? 'invoke_skill'` finds every row (mirrors the
+    // `l1_insight` / `l3_skill` precedent). The full directive (incl. arg
+    // values) is NOT embedded here; arg names/values surface in the
+    // separate `l3.invoked` envelope + per-step chokepoint rows.
+    obj.insert(
+        "invoke_skill".into(),
+        match &plan.invoke_skill {
+            Some(d) => serde_json::json!({ "name": d.name, "arg_count": d.args.len() }),
             None => serde_json::Value::Null,
         },
     );
@@ -300,6 +319,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         }
     }
 
@@ -346,6 +366,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         };
         let meta = FormulationMeta {
             prompt_sha256: "deadbeef".into(),
@@ -387,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_pins_twenty_six_keys_for_default_source() {
+    fn build_plan_formulate_payload_pins_twenty_seven_keys_for_default_source() {
         // Slice D (2026-05-17, recall-lane wiring) bumped the
         // default-source key count from 17 to 20 by adding
         // recalled_memory_ids, recall_count, recall_query_sha256.
@@ -399,6 +420,7 @@ mod tests {
         // adding l3_skill.
         // Slice H (2026-06-01, l3-skill-recall-surfacing) bumps to 26 by
         // adding skill_count.
+        // L3 autonomous-door (2026-06-04) bumps to 27 by adding invoke_skill.
         let meta = FormulationMeta {
             recalled_memory_ids: vec![100, 200],
             recall_count: 2,
@@ -419,11 +441,11 @@ mod tests {
             "plan", "classification_floor", "classification_floor_source",
             "system_prompt_sha256", "l0_count", "l1_count", "skill_count",
             "recalled_memory_ids", "recall_count", "recall_query_sha256",
-            "l1_insight", "l3_skill",
+            "l1_insight", "l3_skill", "invoke_skill",
             "graph_seed_entity_ids", "graph_seed_count", "graph_seed_source",
         ].into_iter().collect();
         assert_eq!(got, expected,
-            "default-source payload must carry exactly 26 keys; diff:\n\
+            "default-source payload must carry exactly 27 keys; diff:\n\
              missing = {:?}\nextra = {:?}",
             expected.difference(&got).collect::<Vec<_>>(),
             got.difference(&expected).collect::<Vec<_>>(),
@@ -431,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_formulate_payload_cli_inferred_source_has_27_keys_with_signals() {
+    fn build_plan_formulate_payload_cli_inferred_source_has_28_keys_with_signals() {
         let payload = build_plan_formulate_payload(
             1, 1, DataClass::ClinicalConfidential,
             ClassificationFloorSource::CliInferred,
@@ -439,8 +461,8 @@ mod tests {
             &make_text_plan(), &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload object");
-        assert_eq!(obj.len(), 27,
-            "cli_inferred + signals must carry 27 keys (26 default + signals); got {} keys: {:?}",
+        assert_eq!(obj.len(), 28,
+            "cli_inferred + signals must carry 28 keys (27 default + signals); got {} keys: {:?}",
             obj.len(), obj.keys().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -522,7 +544,7 @@ mod tests {
             &[], &make_text_plan(), &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 26);
+        assert_eq!(obj.len(), 27);
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
         assert!(obj.get("classification_floor_signals").is_none(),
             "signals key must be ABSENT when source is not cli_inferred");
@@ -544,8 +566,8 @@ mod tests {
             &plan, &make_default_meta(),
         );
         let obj = payload.as_object().expect("payload is an object");
-        assert_eq!(obj.len(), 26,
-            "agent_raised should have 26 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj.len(), 27,
+            "agent_raised should have 27 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
         assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
         assert!(obj.get("classification_floor_signals").is_none());
     }
@@ -608,5 +630,26 @@ mod tests {
         );
         assert_eq!(none_payload["l3_skill"], serde_json::Value::Null);
         assert!(none_payload.as_object().unwrap().contains_key("l3_skill"));
+    }
+
+    #[test]
+    fn build_plan_formulate_payload_invoke_skill_compact_shape() {
+        // The present-case projection: invoke_skill => {name, arg_count}.
+        use crate::cassandra::types::InvokeDirective;
+        use std::collections::BTreeMap;
+        let mut args = BTreeMap::new();
+        args.insert("repo_path".to_string(), "/tmp/repo".to_string());
+        args.insert("max_lines".to_string(), "40".to_string());
+        let mut plan = make_text_plan();
+        plan.invoke_skill = Some(InvokeDirective {
+            name: "summarise_repo_readme".into(),
+            args,
+        });
+        let payload = build_plan_formulate_payload(
+            1, 1, DataClass::Public, ClassificationFloorSource::Default,
+            &[], &plan, &make_default_meta(),
+        );
+        assert_eq!(payload["invoke_skill"]["name"], "summarise_repo_readme");
+        assert_eq!(payload["invoke_skill"]["arg_count"], 2);
     }
 }

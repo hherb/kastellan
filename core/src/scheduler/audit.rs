@@ -134,6 +134,13 @@ pub const ACTION_L3_INVOKE_OUTCOME: &str = "l3.invoke_outcome";
 /// run a non-runnable / now-invalid skill is a security-relevant event.
 /// Payload built by [`build_l3_invoke_rejected_payload`].
 pub const ACTION_L3_INVOKE_REJECTED: &str = "l3.invoke_rejected";
+/// Action verb for the operator `memory l3 pin` success row (trust
+/// `user_approved` → `pinned`, granting agent-autonomous invocability).
+pub const ACTION_L3_PINNED: &str = "l3.pinned";
+/// Action verb for a refused `memory l3 pin` (not yet approved / gate
+/// rejected / no registry snapshot). Trust unchanged; audited as a
+/// security-relevant attempt.
+pub const ACTION_L3_PIN_REJECTED: &str = "l3.pin_rejected";
 
 /// `action` value written when the lane runner claims a `pending` task
 /// and transitions it to `running`. Fires exactly once per `claim_one`
@@ -565,6 +572,47 @@ pub fn build_l3_invoke_rejected_payload(
     memory_id: i64,
     skill_name: &str,
     body_sha256: &str,
+    reasons: &[String],
+) -> Value {
+    serde_json::json!({
+        "memory_id": memory_id,
+        "skill_name": skill_name,
+        "body_sha256": body_sha256,
+        "reasons": reasons,
+    })
+}
+
+/// Payload for the `l3.pinned` row (operator pinned an approved skill).
+pub fn build_l3_pinned_payload(memory_id: i64, skill_name: &str, body_sha256: &str) -> Value {
+    serde_json::json!({
+        "memory_id": memory_id,
+        "skill_name": skill_name,
+        "body_sha256": body_sha256,
+    })
+}
+
+/// Payload for the `l3.pin_rejected` row. `skill_name` is `None` when the
+/// stored template did not parse (the only no-name pin-reject path).
+pub fn build_l3_pin_rejected_payload(
+    memory_id: i64,
+    skill_name: Option<&str>,
+    reasons: &[String],
+) -> Value {
+    serde_json::json!({
+        "memory_id": memory_id,
+        "skill_name": skill_name,
+        "reasons": reasons,
+    })
+}
+
+/// Agent-path variant of [`build_l3_invoke_rejected_payload`]: `memory_id`
+/// and `body_sha256` are `Option` because an unknown / non-pinned skill
+/// name refusal happens before any row is loaded. `skill_name` (the
+/// directive's requested name) is always known.
+pub fn build_l3_invoke_rejected_agent_payload(
+    skill_name: &str,
+    memory_id: Option<i64>,
+    body_sha256: Option<&str>,
     reasons: &[String],
 ) -> Value {
     serde_json::json!({

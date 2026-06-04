@@ -679,3 +679,35 @@ fn build_l3_invoke_rejected_payload_shape() {
             .iter().map(|s| s.to_string()).collect::<BTreeSet<_>>()
     );
 }
+
+#[test]
+fn build_l3_pinned_payload_shape() {
+    let p = build_l3_pinned_payload(7, "summarise_repo_readme", "abc123");
+    assert_eq!(p["memory_id"], 7);
+    assert_eq!(p["skill_name"], "summarise_repo_readme");
+    assert_eq!(p["body_sha256"], "abc123");
+}
+
+#[test]
+fn build_l3_pin_rejected_payload_shape() {
+    let reasons = vec!["no registry snapshot".to_string()];
+    let p = build_l3_pin_rejected_payload(7, Some("s"), &reasons);
+    assert_eq!(p["memory_id"], 7);
+    assert_eq!(p["skill_name"], "s");
+    assert_eq!(p["reasons"][0], "no registry snapshot");
+    let p2 = build_l3_pin_rejected_payload(7, None, &reasons);
+    assert!(p2["skill_name"].is_null());
+}
+
+#[test]
+fn build_l3_invoke_rejected_agent_payload_allows_null_ids() {
+    let reasons = vec!["unknown or non-pinned skill".to_string()];
+    let p = build_l3_invoke_rejected_agent_payload("ghost", None, None, &reasons);
+    assert_eq!(p["skill_name"], "ghost");
+    assert!(p["memory_id"].is_null());
+    assert!(p["body_sha256"].is_null());
+    assert_eq!(p["reasons"][0], "unknown or non-pinned skill");
+    let p2 = build_l3_invoke_rejected_agent_payload("s", Some(7), Some("sha"), &reasons);
+    assert_eq!(p2["memory_id"], 7);
+    assert_eq!(p2["body_sha256"], "sha");
+}

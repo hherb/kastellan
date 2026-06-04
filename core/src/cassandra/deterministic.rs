@@ -256,6 +256,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         }
     }
 

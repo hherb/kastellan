@@ -1,6 +1,7 @@
 //! Data types for plan review.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Decision sentinel emitted by the planner to signal task completion.
 /// The inner loop matches on this exact string in `Plan::is_terminal`;
@@ -125,6 +126,47 @@ pub struct L3SkillCandidate {
     pub steps: Vec<L3TemplateStep>,
 }
 
+/// Agent-emitted directive to autonomously invoke a pinned L3 skill.
+/// Sibling to [`Plan::l3_skill`]: where `l3_skill` *crystallises* a new
+/// skill on a terminal plan, `invoke_skill` *runs* an already-pinned one
+/// on a non-terminal plan. The inner loop expands it into concrete
+/// [`PlannedStep`]s before review; only operator-pinned skills are
+/// autonomously invocable by the agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InvokeDirective {
+    /// snake_case skill name, exactly as surfaced in the `<skills>` block.
+    pub name: String,
+    /// Agent-supplied parameter values (param name → literal value). Must
+    /// supply exactly the skill's declared parameters; values are guarded
+    /// by `substitute_template` (no newline/control/`{{`/`}}`/over-cap).
+    #[serde(default)]
+    pub args: BTreeMap<String, String>,
+}
+
+/// Why a plan carrying an `invoke_skill` directive is structurally
+/// malformed. A malformed directive is a refusal (the agent replans);
+/// it is NEVER a silent fall-through to dispatching co-supplied steps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MalformedInvoke {
+    /// `invoke_skill` present alongside non-empty `steps`.
+    HasSteps,
+    /// `invoke_skill` present on a terminal plan (`decision == "task_complete"`).
+    Terminal,
+    /// `invoke_skill` present alongside an `l3_skill` crystallisation candidate.
+    HasL3Skill,
+}
+
+impl std::fmt::Display for MalformedInvoke {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            MalformedInvoke::HasSteps => "invoke_skill may not be combined with hand-written steps",
+            MalformedInvoke::Terminal => "invoke_skill may not appear on a terminal (task_complete) plan",
+            MalformedInvoke::HasL3Skill => "invoke_skill may not be combined with an l3_skill crystallisation",
+        };
+        f.write_str(s)
+    }
+}
+
 /// One agent-formulated plan, reviewed as a unit.
 ///
 /// The terminal signal: `decision == "task_complete"` AND
@@ -189,6 +231,14 @@ pub struct Plan {
     /// so existing fixtures stay byte-stable when the agent doesn't emit one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l3_skill: Option<L3SkillCandidate>,
+    /// Agent-emitted directive to autonomously invoke a pinned L3 skill
+    /// (mutually exclusive with `steps` / `l3_skill` / terminal — see
+    /// [`Plan::validate_invoke`]). The inner loop expands it into concrete
+    /// `steps` before the CASSANDRA review. Round-trips with
+    /// `skip_serializing_if = Option::is_none` so non-invoking plans stay
+    /// byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoke_skill: Option<InvokeDirective>,
 }
 
 // Invariant (enforced by Stage 0 / `DeterministicPolicy`, see
@@ -243,6 +293,30 @@ impl Plan {
         } else {
             None
         }
+    }
+
+    /// Validate a plan that carries an `invoke_skill` directive. Returns
+    /// the directive when the mutual-exclusivity preconditions hold
+    /// (`steps == []`, not terminal, no `l3_skill`); otherwise the
+    /// specific [`MalformedInvoke`] reason. Callers branch on
+    /// `self.invoke_skill.is_some()` FIRST — presence triggers the invoke
+    /// path; this method never lets a malformed directive fall through to
+    /// normal step dispatch.
+    pub fn validate_invoke(&self) -> Result<&InvokeDirective, MalformedInvoke> {
+        let dir = self
+            .invoke_skill
+            .as_ref()
+            .expect("validate_invoke called with no invoke_skill");
+        if !self.steps.is_empty() {
+            return Err(MalformedInvoke::HasSteps);
+        }
+        if self.decision == DECISION_TERMINAL {
+            return Err(MalformedInvoke::Terminal);
+        }
+        if self.l3_skill.is_some() {
+            return Err(MalformedInvoke::HasL3Skill);
+        }
+        Ok(dir)
     }
 }
 
@@ -304,6 +378,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         };
         assert!(p.is_terminal(), "all three present");
 
@@ -339,6 +414,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
 
@@ -374,6 +450,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let p2: Plan = serde_json::from_str(&s).unwrap();
@@ -393,6 +470,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -421,6 +499,7 @@ mod tests {
             floor_request: None,
             l1_insight:    None,
             l3_skill: None,
+            invoke_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(
@@ -444,6 +523,7 @@ mod tests {
             floor_request: Some(DataClass::ClinicalConfidential),
             l1_insight:    None,
             l3_skill: None,
+            invoke_skill: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(
@@ -468,6 +548,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         };
 
         // Neither
@@ -520,6 +601,7 @@ mod tests {
             floor_request: None,
             l1_insight: Some("shell-exec /bin/ls works for dirs".into()),
             l3_skill: None,
+            invoke_skill: None,
         };
         assert_eq!(plan.completion_insight(), Some("shell-exec /bin/ls works for dirs"));
     }
@@ -537,6 +619,7 @@ mod tests {
             floor_request: None,
             l1_insight: Some("foo".into()),
             l3_skill: None,
+            invoke_skill: None,
         };
         assert!(plan.completion_insight().is_none());
     }
@@ -554,6 +637,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         };
         assert!(plan.completion_insight().is_none());
     }
@@ -571,6 +655,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         };
         let s = serde_json::to_string(&plan).expect("serialize");
         assert!(!s.contains("l1_insight"), "None should be omitted via skip_serializing_if; got: {s}");
@@ -593,6 +678,7 @@ mod tests {
             floor_request: None,
             l1_insight: Some("a useful insight".into()),
             l3_skill: None,
+            invoke_skill: None,
         };
         let s = serde_json::to_string(&plan).expect("serialize");
         assert!(s.contains("\"l1_insight\":\"a useful insight\""), "Some value should serialize; got: {s}");
@@ -614,6 +700,7 @@ mod tests {
             floor_request: None,
             l1_insight: Some("insight".into()),
             l3_skill: None,
+            invoke_skill: None,
         };
         assert!(plan.completion_insight().is_none());
     }
@@ -634,6 +721,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         }
     }
 
@@ -657,6 +745,7 @@ mod tests {
             floor_request: None,
             l1_insight: None,
             l3_skill: None,
+            invoke_skill: None,
         }
     }
 
@@ -715,5 +804,94 @@ mod tests {
         let v = serde_json::to_value(&c).expect("ser");
         let back: L3SkillCandidate = serde_json::from_value(v).expect("de");
         assert_eq!(c, back);
+    }
+
+    // ── invoke_skill / validate_invoke() tests ─────────────────────────────
+
+    #[test]
+    fn invoke_directive_deserializes_from_plan_json() {
+        let json = r#"{
+            "context":"c","decision":"act","rationale":"r","steps":[],
+            "data_ceiling":"Public",
+            "invoke_skill":{"name":"summarise_repo_readme","args":{"repo_path":"/tmp/x"}}
+        }"#;
+        let plan: Plan = serde_json::from_str(json).unwrap();
+        let dir = plan.validate_invoke().expect("well-formed invoke");
+        assert_eq!(dir.name, "summarise_repo_readme");
+        assert_eq!(dir.args.get("repo_path").map(String::as_str), Some("/tmp/x"));
+    }
+
+    #[test]
+    fn validate_invoke_rejects_invoke_with_nonempty_steps() {
+        let plan = Plan {
+            context: "c".into(), decision: "act".into(), rationale: "r".into(),
+            steps: vec![PlannedStep {
+                tool: "shell-exec".into(), method: "shell.exec".into(),
+                parameters: serde_json::json!({}), returns: String::new(),
+                done_when: String::new(), classification: DataClass::Public,
+            }],
+            result: None, data_ceiling: DataClass::Public, refused: None,
+            floor_request: None, l1_insight: None, l3_skill: None,
+            invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        };
+        assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasSteps)));
+    }
+
+    #[test]
+    fn validate_invoke_rejects_invoke_on_terminal_plan() {
+        let plan = Plan {
+            context: "c".into(), decision: "task_complete".into(), rationale: "r".into(),
+            steps: vec![], result: Some(serde_json::json!({"body":"x"})),
+            data_ceiling: DataClass::Public, refused: None, floor_request: None,
+            l1_insight: None, l3_skill: None,
+            invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        };
+        assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::Terminal)));
+    }
+
+    #[test]
+    fn validate_invoke_rejects_invoke_with_l3_skill() {
+        let plan = Plan {
+            context: "c".into(), decision: "act".into(), rationale: "r".into(),
+            steps: vec![], result: None, data_ceiling: DataClass::Public, refused: None,
+            floor_request: None, l1_insight: None,
+            l3_skill: Some(L3SkillCandidate {
+                name: "s".into(), description: "d".into(),
+                parameters: vec![], steps: vec![],
+            }),
+            invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        };
+        assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasL3Skill)));
+    }
+
+    #[test]
+    fn validate_invoke_precedence_has_steps_wins_over_terminal() {
+        // A plan that is BOTH terminal and carries steps must report HasSteps
+        // (the first check), pinning the documented precedence order.
+        let plan = Plan {
+            context: "c".into(), decision: "task_complete".into(), rationale: "r".into(),
+            steps: vec![PlannedStep {
+                tool: "shell-exec".into(), method: "shell.exec".into(),
+                parameters: serde_json::json!({}), returns: String::new(),
+                done_when: String::new(), classification: DataClass::Public,
+            }],
+            result: Some(serde_json::json!({"body":"x"})),
+            data_ceiling: DataClass::Public, refused: None, floor_request: None,
+            l1_insight: None, l3_skill: None,
+            invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        };
+        assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasSteps)));
+    }
+
+    #[test]
+    fn plan_without_invoke_skill_round_trips_without_the_key() {
+        // skip_serializing_if keeps existing fixtures byte-stable.
+        let plan = Plan {
+            context: "c".into(), decision: "act".into(), rationale: "r".into(),
+            steps: vec![], result: None, data_ceiling: DataClass::Public, refused: None,
+            floor_request: None, l1_insight: None, l3_skill: None, invoke_skill: None,
+        };
+        let s = serde_json::to_string(&plan).unwrap();
+        assert!(!s.contains("invoke_skill"), "absent directive must not serialize a key");
     }
 }

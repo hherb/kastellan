@@ -328,6 +328,7 @@ fn terminal_plan() -> Plan {
         floor_request: None,
         l1_insight: None,
         l3_skill: None,
+        invoke_skill: None,
     }
 }
 

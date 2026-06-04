@@ -21,6 +21,7 @@
 
 use crate::cassandra::types::{L3Param, L3SkillCandidate};
 use crate::memory::l3_approval::SkillTrust;
+use crate::memory::l3_invoke::is_autonomously_invocable;
 use hhagent_db::memories::{load_layer_by_trust, MemoryLayer};
 use hhagent_db::DbError;
 use sqlx::PgPool;
@@ -37,6 +38,10 @@ pub struct SurfacedSkill {
     pub name: String,
     pub description: String,
     pub params: Vec<L3Param>,
+    /// True iff this skill is `pinned` (agent-autonomously invocable). The
+    /// planner may emit `invoke_skill` ONLY for invocable skills; the rest
+    /// are reference-only.
+    pub invocable: bool,
 }
 
 /// Project a stored L3 row's `metadata.template` into a [`SurfacedSkill`].
@@ -49,10 +54,13 @@ pub struct SurfacedSkill {
 pub fn parse_surfaced_skill(metadata: &serde_json::Value) -> Option<SurfacedSkill> {
     let template = metadata.get("template")?;
     let cand: L3SkillCandidate = serde_json::from_value(template.clone()).ok()?;
+    let trust = metadata.get("trust").and_then(|v| v.as_str()).unwrap_or("");
+    let invocable = is_autonomously_invocable(SkillTrust::from_metadata_str(trust));
     Some(SurfacedSkill {
         name: cand.name,
         description: cand.description,
         params: cand.parameters,
+        invocable,
     })
 }
 
@@ -104,6 +112,9 @@ pub fn render_skill_entry(skill: &SurfacedSkill) -> String {
     let mut out = String::new();
     out.push_str("- ");
     out.push_str(&skill.name);
+    if skill.invocable {
+        out.push_str(" [invocable]");
+    }
     out.push_str(": ");
     out.push_str(&skill.description);
     out.push('\n');
@@ -320,7 +331,45 @@ mod tests {
                 .iter()
                 .map(|(n, d)| L3Param { name: (*n).into(), description: (*d).into() })
                 .collect(),
+            invocable: false,
         }
+    }
+
+    #[test]
+    fn render_skill_entry_tags_invocable_pinned_skill() {
+        let skill = SurfacedSkill {
+            name: "do_thing".into(),
+            description: "d".into(),
+            params: vec![],
+            invocable: true,
+        };
+        let out = render_skill_entry(&skill);
+        assert!(out.contains("[invocable]"), "pinned skill is tagged: {out}");
+    }
+
+    #[test]
+    fn render_skill_entry_no_tag_for_reference_only() {
+        let skill = SurfacedSkill {
+            name: "ref_only".into(),
+            description: "d".into(),
+            params: vec![],
+            invocable: false,
+        };
+        assert!(!render_skill_entry(&skill).contains("[invocable]"));
+    }
+
+    #[test]
+    fn parse_surfaced_skill_marks_invocable_from_pinned_trust() {
+        let md = serde_json::json!({
+            "trust": "pinned",
+            "template": {"name":"s","description":"d","parameters":[],"steps":[]}
+        });
+        assert!(parse_surfaced_skill(&md).unwrap().invocable);
+        let md2 = serde_json::json!({
+            "trust": "user_approved",
+            "template": {"name":"s","description":"d","parameters":[],"steps":[]}
+        });
+        assert!(!parse_surfaced_skill(&md2).unwrap().invocable);
     }
 
     #[test]

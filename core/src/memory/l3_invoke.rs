@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::PgPool;
 
+use hhagent_db::memories::{load_layer_by_trust, MemoryLayer};
+
 use crate::cassandra::types::{DataClass, L3SkillCandidate, L3TemplateStep, PlannedStep};
 use crate::cli_audit::CLI_AUDIT_ACTOR;
 use crate::memory::l3_approval::{evaluate_approval, ApprovalDecision, SkillTrust};
@@ -235,21 +237,38 @@ pub fn is_runnable(trust: SkillTrust) -> bool {
     matches!(trust, SkillTrust::UserApproved | SkillTrust::Pinned)
 }
 
-/// Synthesize a [`PlannedStep`] from a concrete (substituted) template
-/// step. `returns` / `done_when` are empty and `classification` is set to
-/// the most conservative class — all three are UNUSED on the operator-run
-/// path: `ToolHostStepDispatcher::dispatch_step` reads only
-/// `tool` / `method` / `parameters`. The conservative `classification`
-/// is defensive in case a future reader inspects it.
-pub fn planned_step_from_l3(step: &L3TemplateStep) -> PlannedStep {
+/// PURE stricter gate for AGENT-autonomous invocation: only `pinned`
+/// skills may be invoked by the agent itself. A strict subset of
+/// [`is_runnable`] (the operator-CLI gate, which also allows
+/// `user_approved`) and of
+/// [`crate::memory::l3_surface::is_surfaceable`]. Granting autonomy is a
+/// distinct human action (`memory l3 pin`) gated on a prior `approve`;
+/// pinned-in-sync by `autonomy_ladder_is_subset_of_runnable_and_surfaceable`.
+pub fn is_autonomously_invocable(trust: SkillTrust) -> bool {
+    matches!(trust, SkillTrust::Pinned)
+}
+
+/// Synthesize a [`PlannedStep`] from a concrete template step, with an
+/// explicit `classification`. `returns` / `done_when` are empty (unused
+/// by `dispatch_step`). The agent path passes `plan.data_ceiling` so the
+/// deterministic policy's I2/I3 invariants hold automatically.
+pub fn planned_step_from_l3_with_class(step: &L3TemplateStep, class: DataClass) -> PlannedStep {
     PlannedStep {
         tool: step.tool.clone(),
         method: step.method.clone(),
         parameters: step.parameters.clone(),
         returns: String::new(),
         done_when: String::new(),
-        classification: DataClass::Secret,
+        classification: class,
     }
+}
+
+/// Operator-path mapper: `classification` is the most conservative class
+/// (`Secret`) and is UNUSED on that path (`dispatch_step` reads only
+/// `tool` / `method` / `parameters`). Delegates to
+/// [`planned_step_from_l3_with_class`].
+pub fn planned_step_from_l3(step: &L3TemplateStep) -> PlannedStep {
+    planned_step_from_l3_with_class(step, DataClass::Secret)
 }
 
 /// PURE decision: may this stored skill run with these args against this
@@ -293,6 +312,38 @@ pub fn prepare_invocation(
     // Substitution can still fail on operator-arg problems (missing /
     // unknown / bad value) — surface those as refusal reasons too.
     substitute_template(template, args).map_err(|e| InvokeRefusal { reasons: vec![e.to_string()] })
+}
+
+/// PURE agent-path expansion: gate on the stricter
+/// [`is_autonomously_invocable`] (pinned only), re-validate + substitute
+/// via [`prepare_invocation`] against the daemon's live tool set, and
+/// synthesize concrete [`PlannedStep`]s whose `classification` is the
+/// invoking plan's `data_ceiling` (so deterministic-policy I2/I3 hold and
+/// governance reduces to the I1 check on the plan the agent declared).
+///
+/// On any failure returns an [`InvokeRefusal`] collecting the reason(s) —
+/// the inner loop audits it (`l3.invoke_rejected`) and feeds it back so
+/// the agent replans.
+pub fn expand_for_agent(
+    template: &L3SkillCandidate,
+    stored_trust: SkillTrust,
+    args: &BTreeMap<String, String>,
+    live_tools: &BTreeSet<String>,
+    data_ceiling: DataClass,
+) -> Result<Vec<PlannedStep>, InvokeRefusal> {
+    if !is_autonomously_invocable(stored_trust) {
+        return Err(InvokeRefusal {
+            reasons: vec![format!(
+                "skill trust '{}' is not autonomously invocable (agent may invoke only pinned skills)",
+                stored_trust.as_str()
+            )],
+        });
+    }
+    let concrete = prepare_invocation(template, stored_trust, args, live_tools)?;
+    Ok(concrete
+        .into_iter()
+        .map(|s| planned_step_from_l3_with_class(&s, data_ceiling))
+        .collect())
 }
 
 /// Why a tool a skill needs is absent from the live in-process registry,
@@ -453,6 +504,65 @@ async fn best_effort_audit(pool: &PgPool, action: &str, payload: serde_json::Val
     if let Err(e) = hhagent_db::audit::insert(pool, CLI_AUDIT_ACTOR, action, payload).await {
         tracing::warn!(error = %e, action, "l3 invoke audit insert failed (best-effort)");
     }
+}
+
+/// A pinned L3 skill resolved by name, ready for agent-path expansion.
+#[derive(Debug, Clone)]
+pub struct PinnedSkill {
+    pub memory_id: i64,
+    pub template: L3SkillCandidate,
+    pub body_sha256: String,
+}
+
+/// Load the newest `pinned` L3 skill whose `template.name == name`.
+///
+/// Trust is filtered in SQL (`load_layer_by_trust(Skill, ["pinned"], …)`);
+/// a defensive [`is_autonomously_invocable`] re-check runs over the result
+/// so a future SQL/Rust divergence fails safe. Newest-wins resolves the
+/// unlikely same-name case (matches surfacing's newest-first order).
+/// `Ok(None)` when no pinned skill of that name exists — the inner loop
+/// turns that into an "unknown or non-pinned skill" refusal.
+pub async fn load_pinned_skill_by_name(
+    pool: &PgPool,
+    name: &str,
+) -> Result<Option<PinnedSkill>, hhagent_db::DbError> {
+    // Caps the TOTAL pinned rows scanned (newest-first), not same-name
+    // collisions: a pinned skill older than the 64 newest pinned rows
+    // would not resolve and would surface to the agent as "unknown skill".
+    // Acceptable — pinning is a deliberate, rare human action; 64 distinct
+    // pinned skills is a generous ceiling.
+    const SCAN_CAP: usize = 64;
+    let rows = load_layer_by_trust(pool, MemoryLayer::Skill, &["pinned"], SCAN_CAP).await?;
+    for row in rows {
+        let trust = row
+            .metadata
+            .get("trust")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !is_autonomously_invocable(SkillTrust::from_metadata_str(trust)) {
+            continue; // defense-in-depth; SQL already excluded these
+        }
+        let template: L3SkillCandidate = match row
+            .metadata
+            .get("template")
+            .cloned()
+            .and_then(|t| serde_json::from_value(t).ok())
+        {
+            Some(t) => t,
+            None => continue, // unparseable template — skip fail-safe
+        };
+        if template.name != name {
+            continue;
+        }
+        let body_sha256 = row
+            .metadata
+            .get("body_sha256")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Ok(Some(PinnedSkill { memory_id: row.id, template, body_sha256 }));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

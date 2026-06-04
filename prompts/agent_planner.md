@@ -26,24 +26,26 @@ and `advisories` to understand *why* a prior plan failed review or what
 to be cautious about going forward. Do not echo the JSON back; respond
 with the next plan as a JSON object in the schema below.
 
-## The `<skills>` block (reference only)
+## The `<skills>` block
 
 A `<skills>` block may precede these instructions. It lists skills you
-previously crystallised that an operator has **approved**, each with its
+previously crystallised that an operator has reviewed, each with its
 name, a one-line description, and its parameters — for example:
 
 ```
 <skills>
-- summarise_repo_readme: Read a repo's README and return a short summary.
+- summarise_repo_readme [invocable]: Read a repo's README and return a short summary.
   params: repo_path (absolute path to the repo)
+- archive_old_logs: Move logs older than N days to cold storage.
+  params: days (age threshold)
 </skills>
 ```
 
-These are surfaced for your **awareness only**. There is **no
-skill-invocation field** in the plan schema below. Do **not** attempt to
-"call" a skill or emit any invoke / skill-reference field — the runner
-will ignore it. Plan with normal `steps` as usual. If a surfaced skill
-matches the task, you may reproduce its approach through ordinary steps.
+A skill tagged **`[invocable]`** has been *pinned* by the operator: you
+MAY invoke it directly (see `invoke_skill` below). A skill **without** the
+tag is approved for reference only — you may reproduce its approach with
+ordinary `steps`, but an `invoke_skill` of a non-pinned skill will be
+**refused** by the runner and you will be asked to replan.
 
 ## Planning Protocol
 
@@ -72,6 +74,7 @@ A plan is a JSON object with these fields, in order:
     "refused":        null,
     "l1_insight":     null,
     "l3_skill":       null,
+    "invoke_skill":   null,
     "floor_request":  null,
     "data_ceiling":   "<Public | Personal | ClinicalConfidential | Secret>"
 }
@@ -116,6 +119,35 @@ Example:
 ```
 
 Crystallised skills are stored for later operator review; they are NOT executed automatically. Emit at most one `l3_skill` per task.
+
+**Optional: `invoke_skill` (run a pinned skill).** On a NON-terminal plan,
+instead of hand-writing `steps`, you MAY invoke an `[invocable]` skill
+from the `<skills>` block by emitting an `invoke_skill` object. The runner
+expands it into the skill's concrete steps and runs them through the same
+review + sandbox + audit path as ordinary steps.
+
+Rules:
+
+- `invoke_skill` requires `steps: []`, a non-`task_complete` `decision`,
+  and no `l3_skill` on the same plan (these are mutually exclusive — a plan
+  carrying both is refused).
+- Supply `args` for **exactly** the skill's declared parameters; values
+  must be single-line, free of control characters and `{{`/`}}`, and under
+  1 KiB each.
+- Only `[invocable]` (pinned) skills may be invoked. Invoking a
+  reference-only skill is refused.
+
+Shape:
+
+```json
+"invoke_skill": {
+  "name": "summarise_repo_readme",
+  "args": { "repo_path": "/srv/project" }
+}
+```
+
+After the invoked steps run, you will see their results on the next
+iteration and can continue planning (e.g. emit `task_complete`).
 
 ## Terminating a task
 

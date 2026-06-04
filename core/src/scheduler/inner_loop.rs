@@ -12,6 +12,13 @@ use thiserror::Error;
 
 use crate::cassandra::review::{ChainReviewStage, ReviewStage, ReviewStageContext};
 use crate::cassandra::types::{DataClass, Plan, PlannedStep, Verdict};
+use crate::memory::l3_approval::SkillTrust;
+use crate::memory::l3_invoke::{expand_for_agent, load_pinned_skill_by_name};
+use crate::scheduler::audit::{
+    build_l3_invoke_outcome_payload, build_l3_invoke_rejected_agent_payload,
+    build_l3_invoked_payload, ACTION_L3_INVOKED, ACTION_L3_INVOKE_OUTCOME,
+    ACTION_L3_INVOKE_REJECTED, SCHEDULER_AUDIT_ACTOR,
+};
 
 use super::agent::{AgentError, PlanFormulator};
 use super::inner_loop_audit::{
@@ -197,6 +204,16 @@ pub enum InnerLoopError {
 #[async_trait::async_trait]
 pub trait StepDispatcher: Send + Sync {
     async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome;
+
+    /// Live tool-name set this dispatcher can reach. Used by the agent
+    /// L3-invoke path to re-validate a skill against the registry as it is
+    /// *now* (the TOCTOU close). Default: empty — only the production
+    /// [`crate::scheduler::tool_dispatch::ToolHostStepDispatcher`] holds a
+    /// registry; non-loop / test doubles that never expand an invoke can
+    /// keep the empty default.
+    fn known_tools(&self) -> std::collections::BTreeSet<String> {
+        std::collections::BTreeSet::new()
+    }
 }
 
 /// Run the inner loop until terminal. Returns an [`InnerLoopResult`]
@@ -215,6 +232,12 @@ pub async fn run_to_terminal(
     // (success or failure). Reported back in `InnerLoopResult` for the
     // spec §7 `task.finalize` summary row.
     let mut dispatch_count: u32 = 0;
+
+    // Set true once any iteration expands an `invoke_skill` directive.
+    // ANDed into the terminal `l3_skill` capture so an invoke-driven task
+    // never re-crystallises the skill it just ran (forecloses a
+    // crystallise → pin → invoke → re-crystallise cycle).
+    let mut invoke_used = false;
 
     /// Local helper: wrap an `Outcome` with the counters captured so
     /// far. Cuts the boilerplate at every early-return point.
@@ -256,7 +279,7 @@ pub async fn run_to_terminal(
         // sees the prior failure on the next iteration, bounded by
         // `max_plans`). A transient HTTP/transport error that escapes
         // the formulator's own retry is therefore terminal here.
-        let (plan, meta) = match formulator.formulate_plan(&ctx).await {
+        let (mut plan, meta) = match formulator.formulate_plan(&ctx).await {
             Ok(x) => x,
             Err(e) => return finish!(Outcome::Failed(format!("llm: {e}"))),
         };
@@ -288,6 +311,83 @@ pub async fn run_to_terminal(
         }
 
         write_audit_plan_formulate(pool, &ctx, &plan, &meta).await?;
+
+        // 1b. L3 autonomous invoke expansion (before review, so the
+        // reviewer governs the concrete steps). Presence of `invoke_skill`
+        // triggers this branch; a malformed directive or a refused gate is
+        // audited + fed back as a block so the agent replans — never a
+        // silent fall-through to dispatching co-supplied steps. `plan` is
+        // `mut`; we resolve the directive to OWNED data first so the borrow
+        // from `validate_invoke` ends before we assign `plan.steps`.
+        let mut current_invoke: Option<(i64, String)> = None;
+        if plan.invoke_skill.is_some() {
+            macro_rules! refuse_invoke {
+                ($name:expr, $mem:expr, $sha:expr, $reasons:expr) => {{
+                    let reasons_v: Vec<String> = $reasons;
+                    let payload = build_l3_invoke_rejected_agent_payload(
+                        $name, $mem, $sha, &reasons_v,
+                    );
+                    hhagent_db::audit::insert(
+                        pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKE_REJECTED, payload,
+                    ).await?;
+                    for r in &reasons_v { ctx.blocks.push(format!("invoke_rejected: {r}")); }
+                    continue;
+                }};
+            }
+
+            let validated = plan
+                .validate_invoke()
+                .map(|d| (d.name.clone(), d.args.clone()));
+
+            match validated {
+                Err(malformed) => {
+                    let name = plan
+                        .invoke_skill
+                        .as_ref()
+                        .map(|d| d.name.clone())
+                        .unwrap_or_default();
+                    refuse_invoke!(&name, None, None, vec![malformed.to_string()]);
+                }
+                Ok((name, args)) => match load_pinned_skill_by_name(pool, &name).await? {
+                    None => {
+                        refuse_invoke!(&name, None, None,
+                            vec![format!("unknown or non-pinned skill: {name}")]);
+                    }
+                    Some(pinned) => {
+                        let live_tools = dispatcher.known_tools();
+                        match expand_for_agent(
+                            &pinned.template,
+                            SkillTrust::Pinned,
+                            &args,
+                            &live_tools,
+                            plan.data_ceiling,
+                        ) {
+                            Err(refusal) => {
+                                refuse_invoke!(
+                                    &name,
+                                    Some(pinned.memory_id),
+                                    Some(pinned.body_sha256.as_str()),
+                                    refusal.reasons
+                                );
+                            }
+                            Ok(steps) => {
+                                let arg_names: Vec<String> = args.keys().cloned().collect();
+                                let payload = build_l3_invoked_payload(
+                                    pinned.memory_id, &name, &pinned.body_sha256,
+                                    &arg_names, steps.len(),
+                                );
+                                hhagent_db::audit::insert(
+                                    pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
+                                ).await?;
+                                plan.steps = steps;
+                                invoke_used = true;
+                                current_invoke = Some((pinned.memory_id, name));
+                            }
+                        }
+                    }
+                },
+            }
+        }
 
         // 2. CASSANDRA review
         let rctx = ReviewStageContext {
@@ -397,7 +497,7 @@ pub async fn run_to_terminal(
             // running per-task counter). A pure-text-answer task
             // (terminal on plan 1, zero dispatches) emits no skill.
             let captured_l3_skill: Option<crate::cassandra::types::L3SkillCandidate> =
-                if dispatch_count >= 1 {
+                if dispatch_count >= 1 && !invoke_used {
                     plan.completion_skill().cloned()
                 } else {
                     None
@@ -424,6 +524,15 @@ pub async fn run_to_terminal(
         write_audit_plan_outcome(
             pool, &ctx, steps_executed, steps_total, any_err,
         ).await?;
+
+        if let Some((memory_id, skill_name)) = &current_invoke {
+            let payload = build_l3_invoke_outcome_payload(
+                *memory_id, skill_name, steps_executed, steps_total, any_err,
+            );
+            hhagent_db::audit::insert(
+                pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKE_OUTCOME, payload,
+            ).await?;
+        }
 
         ctx.plans.push((plan, outcomes));
         // loop back: agent reflects on the outcomes for the next plan
