@@ -57,8 +57,8 @@ async fn materialize_writes_audit_row_and_returns_ref() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-1-{suffix}"),
-        &format!("svault-1-{suffix}-log"),
+        "svault-1",
+        "svault-1-log",
         &format!("hhagent-test-svault-1-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
@@ -113,8 +113,8 @@ async fn materialize_fails_when_secret_missing() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-2-{suffix}"),
-        &format!("svault-2-{suffix}-log"),
+        "svault-2",
+        "svault-2-log",
         &format!("hhagent-test-svault-2-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
@@ -154,8 +154,8 @@ async fn redeem_returns_plaintext_within_ttl() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-3-{suffix}"),
-        &format!("svault-3-{suffix}-log"),
+        "svault-3",
+        "svault-3-log",
         &format!("hhagent-test-svault-3-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
@@ -185,8 +185,8 @@ async fn redeem_returns_expired_past_ttl() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-4-{suffix}"),
-        &format!("svault-4-{suffix}-log"),
+        "svault-4",
+        "svault-4-log",
         &format!("hhagent-test-svault-4-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
@@ -227,8 +227,8 @@ async fn dispatch_substitutes_and_writes_redeemed_row() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-5-{suffix}"),
-        &format!("svault-5-{suffix}-log"),
+        "svault-5",
+        "svault-5-log",
         &format!("hhagent-test-svault-5-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
@@ -315,8 +315,8 @@ async fn dispatch_fails_closed_on_missing_ref() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-6-{suffix}"),
-        &format!("svault-6-{suffix}-log"),
+        "svault-6",
+        "svault-6-log",
         &format!("hhagent-test-svault-6-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
@@ -394,8 +394,8 @@ async fn policy_rows_contain_no_substring_of_redeemed_plaintext() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-7-{suffix}"),
-        &format!("svault-7-{suffix}-log"),
+        "svault-7",
+        "svault-7-log",
         &format!("hhagent-test-svault-7-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
@@ -495,8 +495,8 @@ async fn dispatch_substitutes_multiple_refs_in_one_params() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-8-{suffix}"),
-        &format!("svault-8-{suffix}-log"),
+        "svault-8",
+        "svault-8-log",
         &format!("hhagent-test-svault-8-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
@@ -559,8 +559,8 @@ async fn tool_row_req_shows_opaque_ref_not_plaintext() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-9-{suffix}"),
-        &format!("svault-9-{suffix}-log"),
+        "svault-9",
+        "svault-9-log",
         &format!("hhagent-test-svault-9-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
@@ -686,8 +686,8 @@ async fn dispatch_swallows_redeemed_audit_insert_failure() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("svault-10-{suffix}"),
-        &format!("svault-10-{suffix}-log"),
+        "svault-10",
+        "svault-10-log",
         &format!("hhagent-test-svault-10-{suffix}"),
     );
     // PG is needed only to materialize a real ref (which the empty-vault
