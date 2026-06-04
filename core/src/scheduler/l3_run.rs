@@ -176,4 +176,10 @@ mod tests {
         let p = serde_json::json!({"kind": "ask", "memory_id": 1});
         assert!(parse_l3_run_payload(&p).is_err());
     }
+
+    #[test]
+    fn rejects_non_object_args() {
+        let p = serde_json::json!({"kind": "l3_run", "memory_id": 1, "args": "flat"});
+        assert!(parse_l3_run_payload(&p).unwrap_err().contains("not an object"));
+    }
 }

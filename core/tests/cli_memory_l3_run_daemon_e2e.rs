@@ -374,6 +374,9 @@ async fn run_succeeds_against_daemon_registry_without_operator_env() {
         .env("USER", &user)
         .env("HHAGENT_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
         .env("HHAGENT_L3_RUN_GRACE_SECS", "30")
+        // Bound Phase-2 (execution-wait) so a daemon that claims the task but
+        // never NOTIFYs can't hang the suite for the 1800s default.
+        .env("HHAGENT_L3_RUN_TIMEOUT_SECS", "120")
         .output()
         .expect("spawn hhagent-cli memory l3 run --execute");
 
