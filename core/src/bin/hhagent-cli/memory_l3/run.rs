@@ -225,7 +225,12 @@ pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let (text, code) = render_invoke_report(id, "<skill>", &report);
+    // Resolve the skill's display name for the header (best-effort, output-only
+    // — a lookup miss never changes the exit path; it just falls back to a
+    // placeholder). This is a memory-row read, NOT a tool-registry rebuild, so
+    // it re-introduces none of the #179 env coupling.
+    let skill_name = resolve_skill_name(&pool, id).await;
+    let (text, code) = render_invoke_report(id, &skill_name, &report);
     if code == 0 { println!("{text}"); } else { eprintln!("{text}"); }
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
@@ -233,6 +238,26 @@ pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
 /// Parse a u64 seconds env var with a default; non-numeric => default.
 fn env_secs(key: &str, default: u64) -> u64 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Best-effort lookup of an L3 skill's display name by id, for operator output
+/// only. Reads the stored memory row's `metadata.template.name`; any miss
+/// (DB error, absent row, no name) falls back to `"<skill>"`. Never affects
+/// control flow.
+async fn resolve_skill_name(pool: &sqlx::PgPool, id: i64) -> String {
+    use hhagent_db::memories::fetch_by_ids;
+    fetch_by_ids(pool, &[id])
+        .await
+        .ok()
+        .and_then(|mut rows| rows.pop())
+        .and_then(|row| {
+            row.metadata
+                .get("template")
+                .and_then(|t| t.get("name"))
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "<skill>".to_string())
 }
 
 /// Phase-1 wait: return `Ok(())` once the task is observed in a non-`pending`
