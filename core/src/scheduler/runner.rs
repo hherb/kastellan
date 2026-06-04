@@ -186,6 +186,36 @@ async fn drain_lane(
             claimed.plan_count,
         ).await;
 
+        // Operator-submitted L3 skill run (issue #179): execute in-daemon
+        // against the live registry, then finalize. A refusal still finalizes
+        // `completed` — it is a valid outcome the CLI renders, not a crash.
+        if crate::scheduler::l3_run::is_l3_run_payload(&claimed.payload) {
+            let report = crate::scheduler::l3_run::run_l3_run_task(
+                pool,
+                dispatcher.as_ref(),
+                &claimed.payload,
+            )
+            .await;
+            let result_payload = serde_json::to_value(&report).ok();
+            if let Err(e) =
+                tasks::finalize(pool, claimed.id, "completed", result_payload).await
+            {
+                tracing::warn!(
+                    lane = lane.as_sql(), task_id = claimed.id, error = %e,
+                    "l3_run finalize UPDATE failed"
+                );
+            }
+            write_lifecycle_row(
+                pool,
+                &action_task_terminal("completed"),
+                claimed.id,
+                claimed.lane,
+                0,
+            )
+            .await;
+            continue;
+        }
+
         let result = run_one(
             pool, formulator.clone(), review.clone(), dispatcher.clone(),
             &claimed, max_plans,
