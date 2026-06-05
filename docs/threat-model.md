@@ -36,6 +36,25 @@ Nothing else.
 - Model weight extraction.
 - Defending the user's wider machine from the user themselves.
 
+## Worker-binary discovery trust assumption
+
+The daemon locates plain compiled workers as **siblings of its own binary**
+(`current_exe()`-relative `<exe_dir>/<worker-name>`; see
+[`core::worker_manifest::discover_binary`](../core/src/worker_manifest.rs)), so a
+flat install resolves with no env vars. This introduces one trust assumption
+worth stating explicitly: **the install directory containing `hhagent` and its
+worker binaries must not be writable by the agent's own OS user.** The invariant
+above grants a worst-case compromise the agent's own user account — so if
+`<exe_dir>` were user-writable, a compromised process could drop a malicious
+`hhagent-worker-<name>` next to the daemon and have it registered as a tool on
+the next start. Production deployment therefore installs the daemon + workers
+into a root-owned bindir (the systemd/launchd unit's install path); the
+user-writable cargo `target/debug` tree is a dev convenience, not a production
+trust boundary. The `HHAGENT_*_BIN` override is authoritative and **fails
+closed** (a set-but-invalid override is rejected, never silently substituted by
+the sibling), so it cannot be used to widen discovery beyond the operator's
+explicit intent.
+
 ## Asymmetric platform note
 
 The macOS sandbox (`sandbox-exec` / Seatbelt) is partially private API and less audited than the Linux stack (bubblewrap + Landlock + seccomp-bpf, battle-tested via Flatpak). The *weaker* of the two platform backends sets the real bar. We accept this asymmetry openly here rather than implying the two are identical. Where higher assurance is required on macOS, opt the relevant worker into the micro-VM backend (Apple `container` CLI on Tahoe+).

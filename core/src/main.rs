@@ -109,31 +109,22 @@ async fn main() -> Result<()> {
         hhagent_core::worker_lifecycle::CompositeLifecycle::new(Arc::clone(&sandboxes)),
     );
 
-    // Resolve gliner-relex once. The resolver emits its own
-    // info!/error! line on each skip-reason; calling it twice (as an
-    // earlier wiring did) would double up that signal in the operator
-    // log. The `Option<ToolEntry>` flows into BOTH the registry insert
-    // (so `PlannedStep`-routed callers can reach the same warm slot)
-    // and the extractor construction (so `RouterAgent::formulate_plan`
-    // gets a real extractor). `ToolEntry` is `Clone`; the duplication
-    // is intentional and load-bearing per the v2 design spec.
-    let gliner_relex_entry = hhagent_core::registry_build::build_gliner_relex_entry();
+    // Directory of the running `hhagent` binary — seeds exe-relative sibling
+    // discovery so plain workers (e.g. shell-exec) are found in a flat install
+    // with no HHAGENT_*_BIN env set. None (rare current_exe() failure) ⇒
+    // override-env-only discovery.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
-    // Tool registry: each tool the scheduler may dispatch is opted in
-    // here. The registry is the host-side allowlist of *which* tools
-    // exist (separate from the per-tool argv allowlist, which lives
-    // in the `tool_allowlists` DB table).
-    //
-    // Operators control which tools are reachable via the DB. An
-    // absent / empty `HHAGENT_SHELL_EXEC_BIN` (e.g. the worker binary
-    // wasn't installed) means shell-exec is simply not registered —
-    // `dispatch_step` then returns `UNKNOWN_TOOL` for any plan trying
-    // to use it, and the inner loop replans accordingly. This is the
-    // same deny-by-default posture used in the egress proxy plan
-    // (Phase 3).
+    // Tool registry: each tool the scheduler may dispatch is opted in via its
+    // WorkerManifest (see hhagent_core::registry_build::WORKER_MANIFESTS). The
+    // registry is the host-side allowlist of *which* tools exist (separate from
+    // the per-tool argv allowlist, which lives in the `tool_allowlists` DB
+    // table). A worker whose binary/preconditions are absent is simply not
+    // registered — `dispatch_step` then returns `UNKNOWN_TOOL`.
     let (registry, loaded_tool_records) =
-        hhagent_core::registry_build::build_tool_registry(&pool, gliner_relex_entry.clone())
-            .await?;
+        hhagent_core::registry_build::build_tool_registry(&pool, exe_dir).await?;
     let tool_registry = Arc::new(registry);
     // Best-effort audit row (was previously written inside build_tool_registry;
     // moved here now that the builder is side-effect-free).
@@ -176,11 +167,13 @@ async fn main() -> Result<()> {
     // returns GlinerRelexExtractor. When the worker isn't configured
     // (HHAGENT_GLINER_RELEX_ENABLE=0 or preconditions failed), falls
     // back to NoOpEntityExtractor — daemon stays up; graph lane stays
-    // empty. The skip-reason log was already emitted by
-    // `build_gliner_relex_entry` above; this branch only logs the
-    // post-resolution wiring outcome.
+    // empty. Reads the resolved entry back from the registry — single
+    // resolution, registry as source of truth.
     let entity_extractor: Arc<dyn hhagent_core::entity_extraction::EntityExtractor> =
-        match gliner_relex_entry {
+        match tool_registry
+            .lookup(hhagent_core::workers::gliner_relex::Client::TOOL_NAME)
+            .cloned()
+        {
             Some(entry) => {
                 tracing::info!(
                     target: "hhagent::main",

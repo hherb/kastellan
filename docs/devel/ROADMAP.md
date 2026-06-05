@@ -103,7 +103,8 @@ items unlock later ones.
 - [x] **Recall-lane wiring** — `RecallBuilder` composes `embed_query` + `recall` into the assembled prompt (degrade-and-warn); first production consumer of `Router::embed` + `recall` — PR #79 (`7553404`), 2026-05-17
 - [x] **L1 promotion writer** — operator `memory l1 {add,list,remove}` + agent `Plan.l1_insight`; validator + source-agnostic dedup — PR #82 (`eb6b8a8`), 2026-05-18
 - [x] **Worker lifecycle policy** — `Lifecycle::{SingleUse, IdleTimeout}` (warm-keep, post-completion-only caps, `stateless` contract); `WorkerLifecycleManager` trait + Single/Idle/Composite managers; passive crash detection + restart backoff — spec + slices 1–2, PR #83 (`b7dba3a`), 2026-05-18 (hardening #84/#85/#86 followed)
-  - [ ] **Slice 3 (operator surface + SIGTERM grace)** — `hhagent-cli supervisor status` for warm workers + cap state; formal SIGTERM-grace-then-SIGKILL teardown via `grace_period_seconds`; proactive SIGCHLD crash detection; worker manifest plumbing (spec open question 1 — TOML vs Rust consts). Low priority until a worker needs one of these.
+  - [x] **Worker manifest plumbing** (item 11; resolves lifecycle spec open question 1 — Rust consts, not on-disk TOML) — `WorkerManifest` trait + per-worker impl (`ShellExecManifest`/`GlinerRelexManifest`) + static `WORKER_MANIFESTS` driving a pure `assemble_registry`; `build_tool_registry` reduced to allowlist-prefetch + `ResolveCtx`; `current_exe()`-relative sibling binary discovery (env override wins, gliner exempt). Behaviour-preserving — `feat/worker-manifest-plumbing`, 2026-06-05
+  - [ ] **Slice 3 (operator surface + SIGTERM grace)** — `hhagent-cli supervisor status` for warm workers + cap state; formal SIGTERM-grace-then-SIGKILL teardown via `grace_period_seconds`; proactive SIGCHLD crash detection. Low priority until a worker needs one of these.
 - [x] **GLiNER-Relex worker** (first `IdleTimeout` consumer) — Python package + Rust manifest/typed client; CPU/CUDA/MPS device resolution; Apple-`container` backend variant — slices 1–2.5 + macOS slice, PRs #88/#103/#118, 2026-05-18 → 2026-05-25
   - [ ] **operator-CLI macOS validation** (operator action): install Postgres locally (`brew install postgresql@17 && brew services start postgresql@17`) and rerun `HHAGENT_GLINER_RELEX_ENABLE=1 cargo test -p hhagent-core --test gliner_relex_e2e -- --nocapture` to exercise the full PG-backed lifecycle path on darwin. Python `_resolve_device` is already cross-validated; this is the lifecycle-manager validation. Half-hour once PG is installed.
 - [x] **Entity extraction v2** — single-pass GLiNER-Relex call; `EntityExtractor` trait, quarantine-by-default (`entities.quarantine`/`name_norm`, migrations 0015/0016), extraction runs before recall — PR #91 (`f12b460`), 2026-05-19. (v1 `HybridEntityExtractor` was superseded; design preserved at `docs/superpowers/specs/2026-05-18-entity-extraction-graph-lane-design.md`.)
@@ -139,7 +140,7 @@ items unlock later ones.
 
 - [ ] Egress proxy (per-worker host allowlist, TLS pinning, audit logging)
 - [ ] **Credential-leak scanner co-located in the egress proxy** — every outbound request body and inbound response body scanned for the SHA-256 prefix of every secret currently materialized for the calling worker; hits are blocked and audited. Scanning happens at the trust boundary, not inside the worker (which may itself be compromised). (Pattern: IronClaw `safety::leak_detector`, ZeroClaw `security/leak_detector.rs`.)
-- [ ] Telegram outbound; Signal in/out (presage)
+- [ ] Telegram outbound; Signal in/out (presage) 
 - [ ] SMTP outbound in mail worker
 - [ ] `web-fetch` worker: HTTPS-only, host allowlist, body cap, redirect cap
 - [ ] `web-search` worker (SearxNG default)

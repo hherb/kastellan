@@ -26,6 +26,7 @@ pub mod scheduler;
 // NEW — Item 31 (HANDOVER) opaque secret refs slice 1
 pub mod secrets;
 pub mod tool_host;
+pub mod worker_manifest;
 pub mod worker_lifecycle;
 pub mod workers;
 pub mod workspace;

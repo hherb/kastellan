@@ -76,7 +76,7 @@ use std::time::Instant;
 
 use crate::secrets::Vault;
 
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use hhagent_sandbox::SandboxPolicy;
 use sqlx::PgPool;
 
 use crate::cassandra::types::PlannedStep;
@@ -187,48 +187,11 @@ impl ToolRegistry {
     }
 }
 
-/// Canonical [`ToolEntry`] for the `shell-exec` worker.
-///
-/// `allowlist` is the JSON-encoded list of permitted argv\[0\] values
-/// the worker will accept (delivered via the `HHAGENT_SHELL_ALLOWLIST`
-/// env var; see `workers/shell-exec/src/main.rs`). The daemon
-/// administrator controls this list; the LLM-supplied
-/// `step.parameters` cannot widen it.
-///
-/// Defaults baked in here:
-///   * `net = Net::Deny` — shell-exec has no business reaching the
-///     network; if a future variant needs it, build a separate entry.
-///   * `profile = WorkerStrict` — no `socket(2)` allowed (the seccomp
-///     filter kills the syscall).
-///   * `cpu_ms = 5_000` / `mem_mb = 256` / `wall_clock_ms = Some(30_000)`
-///     — small, defensible defaults that match the integration-test
-///     fixture in `audit_dispatch_e2e.rs`. Tunable per-tool when a
-///     concrete workload demands more.
-pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
-    // serde_json on a `&[String]` is infallible — the only ways it
-    // could fail (non-string keys, NaN floats) are absent here.
-    let allow_json = serde_json::to_string(allowlist)
-        .expect("serializing Vec<String> never fails");
-    let policy = SandboxPolicy {
-        fs_read: vec![binary.clone()],
-        fs_write: vec![],
-        net: Net::Deny,
-        cpu_ms: 5_000,
-        mem_mb: 256,
-        profile: Profile::WorkerStrict,
-        env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
-        cpu_quota_pct: None,
-        tasks_max: None,
-    };
-    ToolEntry {
-        binary,
-        policy,
-        wall_clock_ms: Some(30_000),
-        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
-        sandbox_backend: None,
-        container_image: None,
-    }
-}
+// `shell_exec_entry` now lives in `crate::workers::shell_exec` (the worker
+// owns its own manifest + constructor). Re-exported here so the existing
+// `scheduler::tool_dispatch::shell_exec_entry` / `scheduler::shell_exec_entry`
+// paths are unchanged for callers.
+pub use crate::workers::shell_exec::shell_exec_entry;
 
 // Pure result-mapping helpers (`rpc_code_name`, `map_dispatch_result`)
 // live in the `result_mapping` sibling so this file stays under the

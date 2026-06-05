@@ -42,9 +42,9 @@ use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle, WorkerLifecy
 
 /// Resolved paths + config for the GLiNER-Relex worker.
 ///
-/// Populated by the daemon's startup code from environment variables
-/// (see `core/src/main.rs::build_gliner_relex_entry`) and passed into
-/// [`gliner_relex_entry`] to build the manifest.
+/// Populated by `GlinerRelexManifest::resolve` from environment variables
+/// (via [`resolve_env`]) and passed into [`gliner_relex_entry`] to build the
+/// manifest's [`crate::scheduler::ToolEntry`].
 ///
 /// Production callers should construct this via the daemon helper;
 /// tests build it directly to pin manifest shape without touching the
@@ -378,6 +378,66 @@ fn build_idle_timeout_lifecycle() -> Lifecycle {
     .expect("manifest declares stateless = true; validator must accept")
 }
 
+/// gliner-relex's host-side manifest. Wraps the existing pure `resolve_env`
+/// (env → `GlinerRelexEnv`) + `gliner_relex_entry` (env → `ToolEntry`),
+/// mapping its typed skip reasons onto the uniform [`Resolution`] outcomes.
+pub struct GlinerRelexManifest;
+
+impl crate::worker_manifest::WorkerManifest for GlinerRelexManifest {
+    fn name(&self) -> &'static str {
+        Client::TOOL_NAME
+    }
+
+    // No argv allowlist: gliner-relex is a single stateless inference service,
+    // not an argv-dispatch worker. (allowlist_tool defaults to None.)
+
+    fn resolve(
+        &self,
+        ctx: &crate::worker_manifest::ResolveCtx<'_>,
+    ) -> crate::worker_manifest::Resolution {
+        use crate::worker_manifest::Resolution;
+        match resolve_env(
+            |k| (ctx.get_env)(k),
+            |p| (ctx.is_dir)(p),
+            |p| (ctx.exists)(p),
+        ) {
+            Ok(env) => Resolution::Register(gliner_relex_entry(&env)),
+            Err(ResolveSkipReason::Disabled) => Resolution::Disabled {
+                detail: "HHAGENT_GLINER_RELEX_ENABLE != \"1\"".to_string(),
+            },
+            Err(other) => Resolution::Misconfigured {
+                detail: gliner_skip_detail(&other),
+            },
+        }
+    }
+}
+
+/// Human-readable detail for a non-`Disabled` skip reason. Mirrors the
+/// messages the deleted `registry_build::log_gliner_relex_skip` emitted, so
+/// the operator log wording is unchanged.
+fn gliner_skip_detail(reason: &ResolveSkipReason) -> String {
+    match reason {
+        ResolveSkipReason::Disabled => {
+            // Handled by the Disabled arm above; included for exhaustiveness.
+            "HHAGENT_GLINER_RELEX_ENABLE != \"1\"".to_string()
+        }
+        ResolveSkipReason::WeightsDirEnvMissing => {
+            "HHAGENT_GLINER_RELEX_WEIGHTS_DIR unset".to_string()
+        }
+        ResolveSkipReason::WeightsDirNotADir { path } => {
+            format!("weights dir missing on disk: {}", path.display())
+        }
+        ResolveSkipReason::VenvDirUnresolvable => {
+            "venv dir unresolvable (HHAGENT_GLINER_RELEX_VENV_DIR, \
+             HHAGENT_DATA_DIR, and HOME all unset)"
+                .to_string()
+        }
+        ResolveSkipReason::ScriptShimMissing { path } => {
+            format!("venv shim missing: {}", path.display())
+        }
+    }
+}
+
 /// Reason the daemon's [`GlinerRelexEnv`] resolver returned no entry.
 ///
 /// `resolve_env` either yields a populated [`GlinerRelexEnv`] or one of
@@ -412,7 +472,7 @@ pub enum ResolveSkipReason {
 /// Resolve a [`GlinerRelexEnv`] from a generic env lookup + filesystem
 /// predicates.
 ///
-/// This is the pure core of `core::main::build_gliner_relex_entry`. The
+/// This is the pure core wrapped by `GlinerRelexManifest::resolve`. The
 /// daemon passes [`std::env::var`] + [`Path::is_dir`] + [`Path::exists`];
 /// tests pass in-memory fakes to exercise each skip-register branch
 /// without touching the process environment or filesystem.
@@ -695,7 +755,7 @@ pub struct Client {
 
 impl Client {
     /// Logical tool name registered for the gliner-relex worker. This
-    /// is the same string `core::main::build_gliner_relex_entry` uses
+    /// is the same string [`GlinerRelexManifest`] reports from `name()`
     /// when registering the entry in the [`ToolRegistry`][reg], so the
     /// warm-cache key in [`IdleTimeoutLifecycle`][itl] matches whether
     /// the call originates from the step dispatcher or this client.

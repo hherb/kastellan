@@ -16,6 +16,7 @@ use super::*;
 // reached via `use super::*`).
 use crate::tool_host::ToolHostError;
 use hhagent_protocol::{client::ClientError, codes, RpcError};
+use hhagent_sandbox::{Net, Profile};
 use std::io;
 use std::path::PathBuf;
 
