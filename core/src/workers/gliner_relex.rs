@@ -42,9 +42,9 @@ use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle, WorkerLifecy
 
 /// Resolved paths + config for the GLiNER-Relex worker.
 ///
-/// Populated by the daemon's startup code from environment variables
-/// (see `core/src/main.rs::build_gliner_relex_entry`) and passed into
-/// [`gliner_relex_entry`] to build the manifest.
+/// Populated by `GlinerRelexManifest::resolve` from environment variables
+/// (via [`resolve_env`]) and passed into [`gliner_relex_entry`] to build the
+/// manifest's [`crate::scheduler::ToolEntry`].
 ///
 /// Production callers should construct this via the daemon helper;
 /// tests build it directly to pin manifest shape without touching the
@@ -472,7 +472,7 @@ pub enum ResolveSkipReason {
 /// Resolve a [`GlinerRelexEnv`] from a generic env lookup + filesystem
 /// predicates.
 ///
-/// This is the pure core of `core::main::build_gliner_relex_entry`. The
+/// This is the pure core wrapped by `GlinerRelexManifest::resolve`. The
 /// daemon passes [`std::env::var`] + [`Path::is_dir`] + [`Path::exists`];
 /// tests pass in-memory fakes to exercise each skip-register branch
 /// without touching the process environment or filesystem.
@@ -755,7 +755,7 @@ pub struct Client {
 
 impl Client {
     /// Logical tool name registered for the gliner-relex worker. This
-    /// is the same string `core::main::build_gliner_relex_entry` uses
+    /// is the same string [`GlinerRelexManifest`] reports from `name()`
     /// when registering the entry in the [`ToolRegistry`][reg], so the
     /// warm-cache key in [`IdleTimeoutLifecycle`][itl] matches whether
     /// the call originates from the step dispatcher or this client.

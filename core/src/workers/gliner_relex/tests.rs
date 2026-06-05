@@ -397,7 +397,7 @@ fn entry_container_mode_honours_custom_image_tag() {
 
 // ---- resolve_env unit tests --------------------------------------
 //
-// The resolver is the pure core of `core::main::build_gliner_relex_entry`.
+// The resolver is the pure core wrapped by `GlinerRelexManifest::resolve`.
 // Tests pass in-memory env-var + filesystem fakes so every skip-register
 // branch is reachable without touching the process environment or the
 // real filesystem. Production behaviour is exercised by the e2e tests
