@@ -6,42 +6,47 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-05.
+**Last updated:** 2026-06-05 (reconcile: #187 merged).
 
-**Current state.** `main` is at `1f9a353` (ROADMAP prune). This session shipped
-**worker manifest plumbing (item 11)** — branch `feat/worker-manifest-plumbing`,
-**OPEN, not yet merged**, tip `b40462e` + the handover/roadmap commit. It
-introduces a uniform `WorkerManifest` trait so each tool-worker declares itself
-behind one interface, replacing the hardcoded per-worker branches in
-`registry_build.rs`, and adds a `current_exe()`-relative binary-discovery
-convention. Resolves worker-lifecycle **open question 1** (Rust consts, not
-on-disk TOML) and advances **open question 6** (production binary discovery).
-Behaviour-preserving for the two existing workers; every per-task spec+quality
-review APPROVED. See "Recently completed" for the full slice. PR not yet opened
-at the time of writing (open it at session end).
+**Current state.** `main` is at `2e3d0c5` — **worker manifest plumbing (item 11)
+is MERGED** (PR [#187](https://github.com/hherb/hhagent/pull/187), merge commit
+`2e3d0c5`; branch tip `39d6cf3` "set-but-invalid override fails closed", preceded
+by the directory-override fix `b5af648`/`e9268af`). It introduced a uniform
+`WorkerManifest` trait so each tool-worker declares itself behind one interface,
+replacing the hardcoded per-worker branches in `registry_build.rs`, plus a
+`current_exe()`-relative binary-discovery convention. Resolves worker-lifecycle
+**open question 1** (Rust consts, not on-disk TOML) and advances **open
+question 6** (production binary discovery). Behaviour-preserving for the two
+existing workers. See "Recently completed" for the full slice.
 
 **The entire L3 invocation arc (crystallise → approve → pin → autonomous invoke →
 operator run, all daemon-side) remains COMPLETE end-to-end on `main`** (PR #186,
-#179 CLOSED — prior session).
+#179 CLOSED).
 
-**Next-session reconcile:** **PR for `feat/worker-manifest-plumbing` is OPEN /
-unmerged** — verify CI green and merge, then `git branch -d`. **Prior-session
-cleanup RESOLVED:** the orphan skills commit `930231c "skills updated to keep
-handover documentation more concise"` was **cherry-picked into `main` at
-`3ef74a3`** (pushed) at the user's request. The branch
-`fix/issue-179-l3-run-daemon-reroute` is now fully redundant (all its content is
-in `main`) and can be deleted — use `git branch -D` (cherry-pick means `-d`
-won't auto-detect it as merged).
+**This session also shipped a clean test-lift (item 9b):**
+`core/src/memory/recall.rs` (622 LOC) — its inline `#[cfg(test)] mod tests`
+block (L405–622) moved verbatim into a new sibling
+[`core/src/memory/recall/tests.rs`](../../../core/src/memory/recall/tests.rs)
+(de-indented one level; parent declares `#[cfg(test)] mod tests;`). Parent
+**622 → 406 LOC** (under the 500-LOC cap); production region (L1–404)
+**byte-identical** to HEAD. 18 `memory::recall` unit tests are the regression
+pin. Branch `refactor/recall-test-module-lift` (this session's branch; PR to
+open at session end).
 
-**Session-end verification (this session, DGX Spark, native Linux, rustc 1.96.0,
-on `feat/worker-manifest-plumbing`):** `cargo test --workspace` **1311 / 0 / 4**
-(zero `[SKIP]`; was 1297 at `1f9a353` — +14 new units: 6 `discover_binary`
-[incl. directory-override + set-but-missing-override fail-closed], 2
-`ShellExecManifest`, 2 `assemble_registry`, 3 `GlinerRelexManifest`, 1 zero-env
-discovery); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit
-0; PG-backed pin `cli_ask_e2e` **7/7** (proves the `registry.loaded` audit row +
-dispatch chain unchanged). `docs/essay-medium-draft.md` stays untracked (not
-present on this host).
+**Next-session reconcile — DONE this session.** PR #187 was merged before this
+session opened; the stale "OPEN/unmerged" header has been corrected. Both
+now-redundant branches were deleted: `feat/worker-manifest-plumbing` (`-d`,
+fully merged) and `fix/issue-179-l3-run-daemon-reroute` (`-D`; its only unique
+commit `930231c` — a skills-doc edit — was cherry-picked into `main` at
+`3ef74a3`, verified byte-identical). No outstanding branch cleanup.
+
+**Session-end verification (DGX Spark, native Linux, rustc 1.96.0, on
+`refactor/recall-test-module-lift`):** `cargo test --workspace` **1311 / 0 / 4**
+(unchanged from `main` at `2e3d0c5` — behaviour-preserving; 4 `[SKIP]` = the
+documented GLiNER-Relex real-model gating on `HHAGENT_GLINER_RELEX_ENABLE=1`;
+**no sandbox-containment skips** — bwrap integration tests ran for real, so this
+is a genuine green); `cargo clippy --workspace --all-targets --locked -- -D
+warnings` exit 0.
 
 **Recently merged (safe to `git branch -d` if still local; but see the
 `fix/issue-179-...` caveat above — it has an unmerged skills commit):**
@@ -133,7 +138,7 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 
 ---
 
-## Recently completed (this session, 2026-06-05 — worker manifest plumbing, item 11, branch `feat/worker-manifest-plumbing`, OPEN/unmerged, on the DGX Spark)
+## Recently completed (2026-06-05 — worker manifest plumbing, item 11, PR [#187](https://github.com/hherb/hhagent/pull/187) MERGED to `main` at `2e3d0c5`, on the DGX Spark)
 
 **What & why.** Before this slice the daemon's `ToolRegistry` was assembled by
 hand: each worker had a bespoke `*_entry(env)` constructor and
@@ -269,11 +274,11 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 (memory recall + scheduler loop + end-to-end step dispatch) is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED — prior session). **This session shipped worker manifest plumbing (item 11)** on the OPEN branch `feat/worker-manifest-plumbing` (merge it first). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 (memory recall + scheduler loop + end-to-end step dispatch) is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) is MERGED** (PR #187 at `2e3d0c5`). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
 **Refactor bucket — over-cap file splits (item 9b).** A full census of every over-cap production file splits into two buckets (re-census the exact split before picking):
 
-- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): `core/src/memory/recall.rs` (622), `sandbox/src/macos_seatbelt.rs` (604). (`l0_seed.rs`, `capture.rs`, `inner_loop.rs`, `replay.rs` already done — see Earlier history.)
+- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): `sandbox/src/macos_seatbelt.rs` (604) — the last clean one remaining. (`recall.rs`, `l0_seed.rs`, `capture.rs`, `inner_loop.rs`, `replay.rs` already done — see Earlier history.)
 - **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/scheduler/runner.rs` (765, grew this session), `db/secrets.rs` (848), `core/src/cli_audit.rs` (771), `core/src/main.rs` (729, almost no inline tests), `core/src/workers/gliner_relex.rs` (921, grew this session via the GlinerRelexManifest add; tests already lifted — now the largest clean prod-split candidate), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `supervisor/systemd_user.rs` (798, ~502 prod — basically at cap).
 
 **Engineering pickups (need a spec/design first):**
