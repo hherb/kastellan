@@ -731,6 +731,84 @@ fn client_error_display_pins_format() {
     assert_eq!(e.to_string(), "decode error: not an ExtractResponse");
 }
 
+// ---- GlinerRelexManifest unit tests --------------------------------
+//
+// Tests for the WorkerManifest impl: disabled, misconfigured, and happy-
+// path (register) outcomes. Uses the same in-memory env-var + fs fakes
+// as the resolve_env tests above.
+
+use crate::worker_manifest::{ResolveCtx, Resolution, WorkerManifest};
+
+/// Build a ResolveCtx whose env is a closure over a fixed map. fs probes
+/// are supplied per-test; allowlist is unused for gliner (returns empty).
+fn gliner_ctx<'a>(
+    get_env: &'a dyn Fn(&str) -> Option<String>,
+    is_dir: &'a dyn Fn(&Path) -> bool,
+    exists: &'a dyn Fn(&Path) -> bool,
+) -> ResolveCtx<'a> {
+    ResolveCtx {
+        get_env,
+        exists,
+        is_dir,
+        exe_dir: None,
+        allowlist: &|_t| Vec::new(),
+    }
+}
+
+#[test]
+fn manifest_disabled_when_enable_flag_absent() {
+    let get_env = |_k: &str| None;
+    let is_dir = |_p: &Path| false;
+    let exists = |_p: &Path| false;
+    let c = gliner_ctx(&get_env, &is_dir, &exists);
+    match GlinerRelexManifest.resolve(&c) {
+        Resolution::Disabled { .. } => {}
+        _ => panic!("expected Disabled when HHAGENT_GLINER_RELEX_ENABLE unset"),
+    }
+}
+
+#[test]
+fn manifest_misconfigured_when_weights_dir_env_missing() {
+    let get_env =
+        |k: &str| (k == "HHAGENT_GLINER_RELEX_ENABLE").then(|| "1".to_string());
+    let is_dir = |_p: &Path| false;
+    let exists = |_p: &Path| false;
+    let c = gliner_ctx(&get_env, &is_dir, &exists);
+    match GlinerRelexManifest.resolve(&c) {
+        Resolution::Misconfigured { detail } => {
+            assert!(detail.contains("HHAGENT_GLINER_RELEX_WEIGHTS_DIR"), "detail: {detail}");
+        }
+        _ => panic!("expected Misconfigured when weights dir env missing"),
+    }
+}
+
+#[test]
+fn manifest_registers_on_happy_path() {
+    // enable=1, weights dir is a dir, explicit venv dir, shim exists.
+    let get_env = |k: &str| match k {
+        "HHAGENT_GLINER_RELEX_ENABLE" => Some("1".to_string()),
+        "HHAGENT_GLINER_RELEX_WEIGHTS_DIR" => Some("/weights".to_string()),
+        "HHAGENT_GLINER_RELEX_VENV_DIR" => Some("/data/.venv".to_string()),
+        _ => None,
+    };
+    let is_dir = |p: &Path| p == Path::new("/weights");
+    // resolve_env checks the shim path `<venv>/bin/hhagent-worker-gliner-relex`.
+    // Confirmed: line 520 of gliner_relex.rs builds
+    // `venv_dir.join("bin").join("hhagent-worker-gliner-relex")`,
+    // so for venv `/data/.venv` → `/data/.venv/bin/hhagent-worker-gliner-relex`.
+    let exists = |p: &Path| p == Path::new("/data/.venv/bin/hhagent-worker-gliner-relex");
+    let c = gliner_ctx(&get_env, &is_dir, &exists);
+    match GlinerRelexManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert!(
+                matches!(entry.lifecycle, crate::worker_lifecycle::Lifecycle::IdleTimeout { .. }),
+                "gliner must register IdleTimeout"
+            );
+        }
+        _ => panic!("expected Register on the happy path"),
+    }
+}
+
 #[test]
 fn client_error_variants_are_distinct() {
     // Compile-time exhaustiveness pin: every variant must be
