@@ -33,9 +33,15 @@ pub trait WorkerManifest: Sync {
 
 /// The three outcomes every worker produces, unified so the builder logs each
 /// at one consistent severity.
+///
+/// `clippy::large_enum_variant` is allowed deliberately: a `Resolution` is
+/// constructed and immediately matched inside the registry-build loop — it is
+/// never stored in a collection — so boxing the (large) `ToolEntry` would only
+/// add ceremony at every call site for no real stack-size benefit.
+#[allow(clippy::large_enum_variant)]
 pub enum Resolution {
     /// Resolved → insert this entry into the registry.
-    Register(Box<ToolEntry>),
+    Register(ToolEntry),
     /// Intentionally absent (e.g. feature flag off). Logged at INFO.
     Disabled { detail: String },
     /// Wanted to register but its environment is broken (missing binary,
