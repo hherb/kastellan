@@ -7,6 +7,15 @@
 
 use super::*;
 
+// These were previously in scope via the monolithic module's private
+// `use` imports (glob-inherited through `use super::*`). After the
+// production split the parent is a thin re-export facade that doesn't
+// import them, so the test module declares its own dependencies.
+use std::path::{Path, PathBuf};
+
+use crate::worker_lifecycle::Lifecycle;
+use hhagent_sandbox::{Net, Profile};
+
 #[test]
 fn extract_request_serialises_with_expected_keys() {
     let req = ExtractRequest {
