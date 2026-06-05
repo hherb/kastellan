@@ -186,6 +186,61 @@ async fn drain_lane(
             claimed.plan_count,
         ).await;
 
+        // Operator-submitted L3 skill run (issue #179): execute in-daemon
+        // against the live registry, then finalize. A refusal still finalizes
+        // `completed` — it is a valid outcome the CLI renders, not a crash. The
+        // task *state* deliberately does not encode refused-vs-ran: the
+        // task ran to a well-defined conclusion, and the refused/dry-run/executed
+        // distinction lives in `tasks.result` as the serialized
+        // `InvokeReport` variant (`Refused` / `DryRun` / `Executed`). The
+        // separate trust trail is the `l3.invoke_rejected` audit row
+        // `invoke_l3` writes for every refusal (a security event worth its own
+        // row), so a refused run is fully observable without overloading the
+        // task lifecycle state.
+        // Skips `run_one` and the agent-task post-run hooks below (the
+        // finalize-summary row, L1/L3 crystallisation) — an operator skill run
+        // is not an agent task; its audit trail is the running/terminal
+        // lifecycle rows here plus the `l3.invoked` / `l3.invoke_outcome` /
+        // `l3.invoke_rejected` rows that `invoke_l3` writes.
+        if crate::scheduler::l3_run::is_l3_run_payload(&claimed.payload) {
+            let report = crate::scheduler::l3_run::run_l3_run_task(
+                pool,
+                dispatcher.as_ref(),
+                &claimed.payload,
+            )
+            .await;
+            // Serialization of a plain-serde InvokeReport is effectively
+            // infallible; warn (rather than silently NULL the result) so a
+            // future non-serializable variant can't fail invisibly.
+            let result_payload = match serde_json::to_value(&report) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = claimed.id, error = %e,
+                        "l3_run: could not serialize InvokeReport (result_payload will be NULL)"
+                    );
+                    None
+                }
+            };
+            if let Err(e) =
+                tasks::finalize(pool, claimed.id, "completed", result_payload).await
+            {
+                tracing::warn!(
+                    lane = lane.as_sql(), task_id = claimed.id, error = %e,
+                    "l3_run finalize UPDATE failed"
+                );
+            }
+            write_lifecycle_row(
+                pool,
+                &action_task_terminal("completed"),
+                claimed.id,
+                claimed.lane,
+                0,  // l3_run runs no agent plans; 0 is the correct terminal count
+            )
+            .await;
+            continue;
+        }
+
         let result = run_one(
             pool, formulator.clone(), review.clone(), dispatcher.clone(),
             &claimed, max_plans,

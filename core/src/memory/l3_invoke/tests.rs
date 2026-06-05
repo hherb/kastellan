@@ -246,97 +246,6 @@ async fn run_steps_stops_at_first_error() {
     assert_eq!(*d.seen.lock().unwrap(), vec!["a"], "second step never dispatched");
 }
 
-// --- issue #179: registry-divergence diagnostic --------------------------
-
-#[test]
-fn diagnose_missing_in_snapshot_is_env_hint() {
-    // needed shell-exec is absent from the live rebuild but present in the
-    // daemon snapshot => classic "env var unset" cliff.
-    let needed = tools(&["shell-exec"]);
-    let live = tools(&[]); // operator shell lacked HHAGENT_SHELL_EXEC_BIN
-    let snapshot = tools(&["shell-exec"]);
-    let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
-    assert_eq!(
-        got,
-        vec![super::RegistryDivergence::MissingLocallyButInSnapshot { tool: "shell-exec".into() }]
-    );
-}
-
-#[test]
-fn diagnose_unknown_everywhere() {
-    let needed = tools(&["ghost-tool"]);
-    let live = tools(&["shell-exec"]);
-    let snapshot = tools(&["shell-exec"]);
-    let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
-    assert_eq!(
-        got,
-        vec![super::RegistryDivergence::UnknownEverywhere { tool: "ghost-tool".into() }]
-    );
-}
-
-#[test]
-fn diagnose_no_snapshot() {
-    let needed = tools(&["shell-exec"]);
-    let live = tools(&[]);
-    let got = super::diagnose_registry_divergence(&needed, &live, None);
-    assert_eq!(
-        got,
-        vec![super::RegistryDivergence::MissingLocallyNoSnapshot { tool: "shell-exec".into() }]
-    );
-}
-
-#[test]
-fn diagnose_all_present_is_empty() {
-    let needed = tools(&["shell-exec", "gliner-relex"]);
-    let live = tools(&["shell-exec", "gliner-relex"]);
-    // Snapshot is intentionally incomplete: only tools missing from `live` are
-    // ever classified, so snapshot content is irrelevant when all needed tools
-    // are present locally.
-    let snapshot = tools(&["shell-exec"]);
-    let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
-    assert!(got.is_empty());
-}
-
-#[test]
-fn diagnose_multiple_tools_deterministic_order() {
-    // two missing tools of different classes; output follows sorted needed
-    // iteration order (BTreeSet) regardless of insertion.
-    let needed = tools(&["zeta-tool", "alpha-tool"]);
-    let live = tools(&[]);
-    let snapshot = tools(&["alpha-tool"]); // alpha in snapshot, zeta nowhere
-    let got = super::diagnose_registry_divergence(&needed, &live, Some(&snapshot));
-    assert_eq!(
-        got,
-        vec![
-            super::RegistryDivergence::MissingLocallyButInSnapshot { tool: "alpha-tool".into() },
-            super::RegistryDivergence::UnknownEverywhere { tool: "zeta-tool".into() },
-        ]
-    );
-}
-
-#[test]
-fn display_renders_actionable_hint_naming_the_tool() {
-    let cases = [
-        (
-            super::RegistryDivergence::MissingLocallyButInSnapshot { tool: "shell-exec".into() },
-            "registered by the daemon",
-        ),
-        (
-            super::RegistryDivergence::MissingLocallyNoSnapshot { tool: "shell-exec".into() },
-            "no daemon registry",
-        ),
-        (
-            super::RegistryDivergence::UnknownEverywhere { tool: "shell-exec".into() },
-            "unknown to both",
-        ),
-    ];
-    for (variant, distinctive) in &cases {
-        let rendered = variant.to_string();
-        assert!(rendered.contains("shell-exec"), "hint must name the tool: {rendered}");
-        assert!(rendered.contains(distinctive), "hint must contain '{distinctive}': {rendered}");
-    }
-}
-
 #[test]
 fn is_autonomously_invocable_only_pinned() {
     use crate::memory::l3_approval::SkillTrust;
@@ -428,4 +337,20 @@ fn expand_for_agent_refuses_tool_absent_from_live_registry() {
         err.reasons.iter().any(|r| r.contains("web-fetch")),
         "refusal should name the unregistered tool: {:?}", err.reasons
     );
+}
+
+#[test]
+fn invoke_report_serde_round_trips_each_variant() {
+    let refused = InvokeReport::Refused { reasons: vec!["nope".into()] };
+    let dry = InvokeReport::DryRun { steps: vec![] };
+    let exec = InvokeReport::Executed {
+        outcomes: vec![StepOutcome::Ok(serde_json::json!({"ok": true}))],
+        steps_total: 1,
+    };
+    for report in [refused, dry, exec] {
+        let v = serde_json::to_value(&report).expect("serialize");
+        let back: InvokeReport = serde_json::from_value(v).expect("deserialize");
+        // Compare via Debug strings (InvokeReport has no PartialEq).
+        assert_eq!(format!("{report:?}"), format!("{back:?}"));
+    }
 }

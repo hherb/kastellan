@@ -2,8 +2,8 @@
 //! three seams, kept under the 500-LOC soft cap:
 //!
 //! - [`pure`] — argument parsing, template substitution, the trust gates,
-//!   the [`prepare_invocation`] decision, and the issue-#179 registry-
-//!   divergence classifier. No I/O; deterministic and unit-testable.
+//!   and the [`prepare_invocation`] decision. No I/O; deterministic and
+//!   unit-testable.
 //! - [`operator`] — the operator-CLI async orchestration ([`invoke_l3`]):
 //!   dry-run by default, no CASSANDRA review (an operator running their own
 //!   approved skill is authorised). Drives the existing sandboxed dispatcher.

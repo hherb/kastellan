@@ -257,6 +257,56 @@ pub async fn mark_cancelled(pool: &PgPool, task_id: i64) -> Result<Option<Task>,
     row.as_ref().map(decode_task_row).transpose()
 }
 
+/// Cancel a task **only if it is still `pending`** (never claimed).
+///
+/// Unlike [`mark_cancelled`] (which also cancels a `running` task), this
+/// no-ops on a task the daemon has already claimed. That distinction is
+/// the safety property the `memory l3 run` no-daemon path relies on: if
+/// the daemon claims the task in the race window between the liveness
+/// check and the cancel, this returns `None` and the CLI waits for the
+/// real result instead of orphaning a `--execute` it believed it had
+/// stopped (issue #179 follow-up). Returns the cancelled row (for the
+/// downstream audit emitter) or `None` if the task was not `pending`.
+pub async fn mark_cancelled_if_pending(
+    pool: &PgPool,
+    task_id: i64,
+) -> Result<Option<Task>, DbError> {
+    let row = sqlx::query(
+        "UPDATE tasks \
+         SET state = 'cancelled', \
+             finished_at = now(), \
+             updated_at = now() \
+         WHERE id = $1 AND state = 'pending' \
+         RETURNING id, state, lane, created_at, updated_at, started_at, \
+                   finished_at, lease_expires_at, plan_count, payload, result",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| DbError::Query(format!("tasks mark_cancelled_if_pending: {e}")))?;
+    row.as_ref().map(decode_task_row).transpose()
+}
+
+/// True iff at least one task is currently `running` with an **unexpired**
+/// lease — a proxy for "a daemon is alive and consuming a lane".
+///
+/// Used by `memory l3 run` to tell a *busy* daemon (something else is
+/// running; keep waiting) apart from an *absent* one (nothing running;
+/// cancel + error) when its submitted task lingers `pending` past the
+/// grace window. The lease bound excludes a crashed daemon's stale
+/// `running` rows (their `lease_expires_at` is in the past until the next
+/// startup sweep reclaims them).
+pub async fn any_live_worker(pool: &PgPool) -> Result<bool, DbError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM tasks \
+         WHERE state = 'running' AND lease_expires_at > now())",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| DbError::Query(format!("tasks any_live_worker: {e}")))?;
+    Ok(exists)
+}
+
 /// Operator-side escape hatch: forcibly mark a `running` task as
 /// crashed before its lease elapses. Mirrors the startup sweep but
 /// scoped to one row, used by `hhagent-cli tasks fail <id>`. Returns
