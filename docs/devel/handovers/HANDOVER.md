@@ -8,31 +8,39 @@
 
 **Last updated:** 2026-06-05.
 
-**Current state.** `main` is at `67bc474` (Merge PR #186). This session shipped
-the [#179](https://github.com/hherb/hhagent/issues/179) **Opt-3 daemon reroute of
-`memory l3 run`** — branch `fix/issue-179-l3-run-daemon-reroute`, [PR #186](https://github.com/hherb/hhagent/pull/186)
-**MERGED to `main` at `67bc474`** (2026-06-05T03:19:25Z), **issue #179 CLOSED**.
-Final opus review: all 7 security invariants PASS, zero Critical/Important. See
-"Recently completed" for the full slice. (Local `main` is 1 commit ahead of
-`origin/main` — this docs-prune commit — push at session end.)
+**Current state.** `main` is at `1f9a353` (ROADMAP prune). This session shipped
+**worker manifest plumbing (item 11)** — branch `feat/worker-manifest-plumbing`,
+**OPEN, not yet merged**, tip `b40462e` + the handover/roadmap commit. It
+introduces a uniform `WorkerManifest` trait so each tool-worker declares itself
+behind one interface, replacing the hardcoded per-worker branches in
+`registry_build.rs`, and adds a `current_exe()`-relative binary-discovery
+convention. Resolves worker-lifecycle **open question 1** (Rust consts, not
+on-disk TOML) and advances **open question 6** (production binary discovery).
+Behaviour-preserving for the two existing workers; every per-task spec+quality
+review APPROVED. See "Recently completed" for the full slice. PR not yet opened
+at the time of writing (open it at session end).
 
 **The entire L3 invocation arc (crystallise → approve → pin → autonomous invoke →
-operator run, all daemon-side) is now COMPLETE end-to-end on `main`** with no
-L3-adjacent remainder.
+operator run, all daemon-side) remains COMPLETE end-to-end on `main`** (PR #186,
+#179 CLOSED — prior session).
 
-**Next-session reconcile:** none pending — pick a Next-TODO item. **Note:** the
-local branch `fix/issue-179-l3-run-daemon-reroute` is NOT safe to `git branch -d`
-yet — although its #179 work is fully in `main`, it carries one *unmerged*
-commit `930231c "skills updated to keep handover documentation more concise"`
-(edits to `.claude/skills/{fixall,nextsession}/SKILL.md`). Decide whether to
-land or drop that commit before deleting the branch.
+**Next-session reconcile:** **PR for `feat/worker-manifest-plumbing` is OPEN /
+unmerged** — verify CI green and merge, then `git branch -d`. **Also still
+pending from the prior session:** the local branch
+`fix/issue-179-l3-run-daemon-reroute` is NOT safe to `git branch -d` — although
+its #179 work is fully in `main`, it carries one *unmerged* commit `930231c
+"skills updated to keep handover documentation more concise"` (edits to
+`.claude/skills/{fixall,nextsession}/SKILL.md`). Decide whether to land or drop
+that commit before deleting the branch.
 
 **Session-end verification (this session, DGX Spark, native Linux, rustc 1.96.0,
-on the merged branch = now `main`):** `cargo test --workspace` **1297 / 0 / 4**
-(zero `[SKIP]`; was 1290 at `ef01ae3`); `cargo clippy --workspace --all-targets
---locked -- -D warnings` exit 0; live-PG + real-daemon e2e
-`cli_memory_l3_run_daemon_e2e` **2/2**. `docs/essay-medium-draft.md` stays
-untracked (not present on this host).
+on `feat/worker-manifest-plumbing`):** `cargo test --workspace` **1309 / 0 / 4**
+(zero `[SKIP]`; was 1297 at `1f9a353` — +12 new units: 4 `discover_binary`, 2
+`ShellExecManifest`, 2 `assemble_registry`, 3 `GlinerRelexManifest`, 1 zero-env
+discovery); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit
+0; PG-backed pin `cli_ask_e2e` **7/7** (proves the `registry.loaded` audit row +
+dispatch chain unchanged). `docs/essay-medium-draft.md` stays untracked (not
+present on this host).
 
 **Recently merged (safe to `git branch -d` if still local; but see the
 `fix/issue-179-...` caveat above — it has an unmerged skills commit):**
@@ -70,7 +78,7 @@ The current native-Linux test baseline is **1297 / 0 / 4** at `a8cef41` (was
 
 ```
 hhagent (Rust workspace, 9 crates, AGPL-3.0)
-├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue + screen + extract_scannable_text), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), workers/ (gliner_relex.rs host+container entries)
+├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue + screen + extract_scannable_text), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; gliner_relex.rs GlinerRelexManifest + host+container entries), registry_build (static WORKER_MANIFESTS + pure assemble_registry + async build_tool_registry(pool, exe_dir))
 ├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads HHAGENT_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
 ├── sandbox            hhagent-sandbox: SandboxPolicy + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
@@ -124,7 +132,32 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 
 ---
 
-## Recently completed (this session, 2026-06-05 — #179 Opt-3 daemon reroute of `memory l3 run`, branch `fix/issue-179-l3-run-daemon-reroute`, PR [#186](https://github.com/hherb/hhagent/pull/186) MERGED to `main` at `67bc474`, #179 CLOSED, on the DGX Spark)
+## Recently completed (this session, 2026-06-05 — worker manifest plumbing, item 11, branch `feat/worker-manifest-plumbing`, OPEN/unmerged, on the DGX Spark)
+
+**What & why.** Before this slice the daemon's `ToolRegistry` was assembled by
+hand: each worker had a bespoke `*_entry(env)` constructor and
+`registry_build.rs` had hardcoded `if HHAGENT_SHELL_EXEC_BIN {…}` / gliner
+fold-in branches. With more workers (with diverse inputs) coming, that's a
+friction + inconsistency cliff. This introduces one declarative way each worker
+declares itself, and a production binary-discovery convention. Brainstorm → spec
+([`docs/superpowers/specs/2026-06-05-worker-manifest-plumbing-design.md`](../../superpowers/specs/2026-06-05-worker-manifest-plumbing-design.md))
+→ plan ([`docs/superpowers/plans/2026-06-05-worker-manifest-plumbing.md`](../../superpowers/plans/2026-06-05-worker-manifest-plumbing.md))
+→ 6-task subagent-driven development (each task spec+quality reviewed = APPROVED).
+
+**What shipped:**
+- **New [`core/src/worker_manifest.rs`](../../../core/src/worker_manifest.rs):** `trait WorkerManifest { name(); allowlist_tool() -> Option<&'static str>; resolve(&ResolveCtx) -> Resolution }`; `enum Resolution { Register(ToolEntry), Disabled{detail}, Misconfigured{detail} }` (built+matched in-loop, never collected → `#[allow(clippy::large_enum_variant)]` rather than boxing); `struct ResolveCtx` (minimal, universal: injected `get_env`/`exists`/`is_dir` closures + `exe_dir` + pre-fetched `allowlist` closure — diverse worker inputs arrive via `get_env`, never new ctx fields); pure `discover_binary(ctx, override_env, default_name)` (override-env-if-exists wins, else `<exe_dir>/<default_name>` if exists, else None).
+- **Per-worker impls own their host-side module:** new [`core/src/workers/shell_exec.rs`](../../../core/src/workers/shell_exec.rs) (`ShellExecManifest` + the **relocated** `shell_exec_entry`, re-exported from `tool_dispatch.rs` so `scheduler::shell_exec_entry` paths are unchanged); `GlinerRelexManifest` added to `workers/gliner_relex.rs` as a thin adapter over the existing `resolve_env` + `gliner_relex_entry` (its 5 `ResolveSkipReason`s map onto `Disabled` [the flag-off case] vs `Misconfigured` [the 4 broken-env cases]).
+- **`registry_build.rs` rewrite:** static `WORKER_MANIFESTS: &[&dyn WorkerManifest]`; pure `assemble_registry(manifests, ctx) -> (ToolRegistry, Vec<LoadedToolRecord>)` (Register→insert+record+INFO, Disabled→INFO, Misconfigured→ERROR, all fail-soft); async `build_tool_registry(pool, exe_dir: Option<PathBuf>)` reduced to (allowlist prefetch loop → build real `ResolveCtx` over `std::env`+live fs → `assemble_registry`). Deleted `build_gliner_relex_entry` + `log_gliner_relex_skip`. `sha256_argv0_list`/`LoadedToolRecord`/`build_registry_loaded_payload` and the `registry.loaded` audit row are **unchanged**.
+- **`main.rs`:** drops the gliner pre-call; computes `exe_dir = current_exe().ok().and_then(parent)`; calls `build_tool_registry(&pool, exe_dir)`; the entity extractor now reads the gliner entry **back from the registry** (`tool_registry.lookup("gliner-relex").cloned()`) — single resolution, registry as source of truth (extractor still built iff gliner registered; arm bodies byte-identical).
+- **Discovery convention:** a plain compiled worker is found as a **sibling of the `hhagent` binary** (`<exe_dir>/<worker-name>`), so a flat install + the cargo `target/debug` tree both resolve with **no env vars**; `HHAGENT_*_BIN` overrides still win. gliner is **exempt** (keeps its venv/weights env-driven resolution). FHS `libexec` layout noted as a future packaging refinement.
+
+**Security/behaviour invariants (review-confirmed):** every produced `ToolEntry` byte-identical; containment shape (`SandboxPolicy`+`Lifecycle`) stays compiled-in (no file-mutable manifest — threat-model: a compromise reaches the agent's own user, so an on-disk manifest would be an escalation surface); operational argv allowlist stays in the DB (audited, separate from the manifest); `registry.loaded` snapshot the L3 approval gate reads is unchanged.
+
+**Verification (DGX, native Linux, rustc 1.96.0):** `cargo test --workspace` **1309 / 0 / 4** (zero `[SKIP]`; +12 over the 1297 baseline); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; PG-backed `cli_ask_e2e` **7/7**. **File-size flag:** `gliner_relex.rs` grew ~861 → **921 LOC** (pre-existing over-cap; this slice added ~60 — still a future test-lift/prod-split candidate, see refactor bucket). **Deferred (noted, not blocking):** libexec install layout; operator-tunable resource limits via config (env-var overrides cover the known case today); richer per-worker trait methods (the trait leaves room).
+
+---
+
+## Recently completed (prior session, 2026-06-05 — #179 Opt-3 daemon reroute of `memory l3 run`, branch `fix/issue-179-l3-run-daemon-reroute`, PR [#186](https://github.com/hherb/hhagent/pull/186) MERGED to `main` at `67bc474`, #179 CLOSED, on the DGX Spark)
 
 **Issue [#179](https://github.com/hherb/hhagent/issues/179) — the operator `run` CLI → daemon reroute (Opt-3 structural fix).** Brainstorm → spec → plan → 6-task subagent-driven development (each task spec+quality reviewed = APPROVED) → final whole-branch review (opus) = **MERGE-READY** (all 7 security invariants PASS; zero Critical/Important).
 
@@ -235,16 +268,15 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 (memory recall + scheduler loop + end-to-end step dispatch) is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186 merged this session, #179 CLOSED). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 (memory recall + scheduler loop + end-to-end step dispatch) is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED — prior session). **This session shipped worker manifest plumbing (item 11)** on the OPEN branch `feat/worker-manifest-plumbing` (merge it first). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
 **Refactor bucket — over-cap file splits (item 9b).** A full census of every over-cap production file splits into two buckets (re-census the exact split before picking):
 
 - **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): `core/src/memory/recall.rs` (622), `sandbox/src/macos_seatbelt.rs` (604). (`l0_seed.rs`, `capture.rs`, `inner_loop.rs`, `replay.rs` already done — see Earlier history.)
-- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/scheduler/runner.rs` (765, grew this session), `db/secrets.rs` (848), `core/src/cli_audit.rs` (771), `core/src/main.rs` (729, almost no inline tests), `core/workers/gliner_relex.rs` (861, tests already lifted), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `supervisor/systemd_user.rs` (798, ~502 prod — basically at cap).
+- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/scheduler/runner.rs` (765, grew this session), `db/secrets.rs` (848), `core/src/cli_audit.rs` (771), `core/src/main.rs` (729, almost no inline tests), `core/src/workers/gliner_relex.rs` (921, grew this session via the GlinerRelexManifest add; tests already lifted — now the largest clean prod-split candidate), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `supervisor/systemd_user.rs` (798, ~502 prod — basically at cap).
 
 **Engineering pickups (need a spec/design first):**
 
-- **Worker manifest plumbing — design slice (item 11).** Spec open question 1 (TOML files vs Rust consts) is unresolved; slices today ship `Lifecycle` directly on `ToolEntry`.
 - **[#142](https://github.com/hherb/hhagent/issues/142) — injection-guard chat-template false-positives.** Deferred per the issue author: chat-template tokens (`<|im_start|>`) will false-positive on technical docs once `web-fetch`/MCP workers land — pick a fix *with real data* once such a worker exists, not before.
 
 **Test-infra / smaller picks:**
@@ -310,7 +342,7 @@ Only currently-open issues are listed; closed-issue detail lives in the archive 
 3. ~~Egress proxy as separate worker vs in-process in `tool_host`~~ **Resolved 2026-05-06:** separate worker, with the credential-leak scanner co-located.
 4. Skill review workflow for *named* agent-authored Python (Phase 4) — see Phase 4 line items: trust enum + per-level capability ceiling. *(The L3 skill arc — crystallise → approve → pin → invoke — is the first concrete implementation of this for templated tool-call skills.)*
 5. Worker keep-alive vs spawn-per-call (idle-timeout lifecycle shipped for GLiNER-Relex; revisit for other workers when latency matters).
-6. Worker binary discovery in production (currently `target/debug/...` for tests; need a stable install location convention).
+6. ~~Worker binary discovery in production~~ **Advanced 2026-06-05 (item 11):** plain compiled workers default to a sibling of the `hhagent` binary (`current_exe()`-relative; `HHAGENT_*_BIN` override wins; gliner exempt — keeps venv/weights env resolution). Residual: FHS `libexec` layout if/when packaging wants it.
 
 ## Inspirations / things to read before each milestone
 
