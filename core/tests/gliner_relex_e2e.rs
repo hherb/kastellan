@@ -41,8 +41,8 @@ use hhagent_tests_common::{
 /// Resolve the venv shim path relative to the workspace root.
 ///
 /// Returns `None` (with a `[SKIP]` print on stderr) when the path
-/// doesn't exist. Mirrors the resolution `core/src/main.rs::
-/// build_gliner_relex_entry` does in production except that this
+/// doesn't exist. Mirrors the resolution `resolve_env` (wrapped by
+/// `GlinerRelexManifest::resolve`) does in production except that this
 /// helper never honours the daemon's `HHAGENT_GLINER_RELEX_VENV_DIR`
 /// override — tests always run against the in-tree
 /// `workers/gliner-relex/.venv/`.
@@ -67,8 +67,8 @@ fn resolve_worker_script() -> Option<PathBuf> {
 /// Resolve the weights snapshot dir for `multi-v1.0`.
 ///
 /// Honours `HHAGENT_DATA_DIR` first, falls back to
-/// `$HOME/.local/share/hhagent` (mirrors `build_gliner_relex_entry`'s
-/// resolution). Skip-as-pass when the dir is missing on disk.
+/// `$HOME/.local/share/hhagent` (mirrors `resolve_env`'s resolution).
+/// Skip-as-pass when the dir is missing on disk.
 fn resolve_weights_dir() -> Option<PathBuf> {
     let data_dir = std::env::var("HHAGENT_DATA_DIR")
         .ok()

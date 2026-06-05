@@ -73,9 +73,14 @@ pub struct ResolveCtx<'a> {
 
 /// Locate a worker binary. Precedence:
 ///   1. the explicit override env var (e.g. `"HHAGENT_SHELL_EXEC_BIN"`) if it
-///      names an existing file — preserves every current deployment/test;
+///      names an existing **file** — preserves every current deployment/test;
 ///   2. else the exe-relative sibling default `<exe_dir>/<default_name>`, if
-///      it exists.
+///      it is an existing file.
+///
+/// "Existing file" means a path that exists and is *not* a directory — this
+/// matches the prior `binary.is_file()` gate (a directory override is rejected
+/// at startup rather than silently registered and failing at spawn). We express
+/// it as `exists && !is_dir` so [`ResolveCtx`] stays minimal (no extra probe).
 ///
 /// Returns `None` when neither yields an existing file (the caller maps that
 /// to [`Resolution::Misconfigured`]).
@@ -84,17 +89,22 @@ pub fn discover_binary(
     override_env: &str,
     default_name: &str,
 ) -> Option<PathBuf> {
+    // A path is "runnable" if it exists and is not a directory. Mirrors the
+    // pre-manifest `Path::is_file()` posture using the two probes already on
+    // the ctx.
+    let is_runnable_file = |p: &Path| (ctx.exists)(p) && !(ctx.is_dir)(p);
+
     if let Some(raw) = (ctx.get_env)(override_env) {
         let p = PathBuf::from(raw);
-        if (ctx.exists)(&p) {
+        if is_runnable_file(&p) {
             return Some(p);
         }
-        // Override set but missing: fall through to the sibling default
-        // rather than hard-failing (design §4 precedence).
+        // Override set but missing (or a directory): fall through to the
+        // sibling default rather than hard-failing (design §4 precedence).
     }
     if let Some(dir) = ctx.exe_dir {
         let p = dir.join(default_name);
-        if (ctx.exists)(&p) {
+        if is_runnable_file(&p) {
             return Some(p);
         }
     }
@@ -132,6 +142,30 @@ mod tests {
         assert_eq!(
             discover_binary(&c, "OVERRIDE", "worker"),
             Some(PathBuf::from("/opt/custom/worker"))
+        );
+    }
+
+    #[test]
+    fn override_pointing_at_a_directory_is_rejected_and_falls_through() {
+        // Override is set and the path exists, but it's a directory — the old
+        // `is_file()` posture rejected this; we must too. With no valid sibling
+        // it falls through to None (would map to Misconfigured).
+        let get_env = |k: &str| (k == "OVERRIDE").then(|| "/some/dir".to_string());
+        let exists = |_p: &Path| true; // everything "exists"
+        let is_dir = |p: &Path| p == Path::new("/some/dir"); // …but the override is a dir
+        let exe = PathBuf::from("/usr/bin");
+        let c = ResolveCtx {
+            get_env: &get_env,
+            exists: &exists,
+            is_dir: &is_dir,
+            exe_dir: Some(exe.as_path()),
+            allowlist: &|_t| Vec::new(),
+        };
+        // The sibling /usr/bin/worker "exists" and is not a dir → chosen.
+        assert_eq!(
+            discover_binary(&c, "OVERRIDE", "worker"),
+            Some(PathBuf::from("/usr/bin/worker")),
+            "a directory override must be rejected, falling through to the sibling"
         );
     }
 
