@@ -188,7 +188,15 @@ async fn drain_lane(
 
         // Operator-submitted L3 skill run (issue #179): execute in-daemon
         // against the live registry, then finalize. A refusal still finalizes
-        // `completed` — it is a valid outcome the CLI renders, not a crash.
+        // `completed` — it is a valid outcome the CLI renders, not a crash. The
+        // task *state* deliberately does not encode refused-vs-ran: the
+        // task ran to a well-defined conclusion, and the refused/dry-run/executed
+        // distinction lives in `tasks.result` as the serialized
+        // `InvokeReport` variant (`Refused` / `DryRun` / `Executed`). The
+        // separate trust trail is the `l3.invoke_rejected` audit row
+        // `invoke_l3` writes for every refusal (a security event worth its own
+        // row), so a refused run is fully observable without overloading the
+        // task lifecycle state.
         // Skips `run_one` and the agent-task post-run hooks below (the
         // finalize-summary row, L1/L3 crystallisation) — an operator skill run
         // is not an agent task; its audit trail is the running/terminal

@@ -89,7 +89,7 @@
 //! treat the audit-row count as a lower bound, not a total.
 
 use hhagent_db::audit;
-use hhagent_db::tasks::{insert_pending, mark_cancelled, Lane, Task};
+use hhagent_db::tasks::{insert_pending, mark_cancelled, mark_cancelled_if_pending, Lane, Task};
 use hhagent_db::DbError;
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -175,28 +175,60 @@ pub async fn cancel_and_audit(pool: &PgPool, task_id: i64) -> Result<CancelOutco
     let Some(task) = mark_cancelled(pool, task_id).await? else {
         return Ok(CancelOutcome::NotCancellable);
     };
+    emit_cancel_audit_rows(pool, &task).await;
+    Ok(CancelOutcome::Cancelled(task))
+}
 
-    // 1. Lifecycle row — always.
+/// Like [`cancel_and_audit`], but cancels **only if the task is still
+/// `pending`** (via [`mark_cancelled_if_pending`]).
+///
+/// Returns `NotCancellable` when the task is anything but `pending` —
+/// crucially including `running`, i.e. a task the daemon has just
+/// claimed. The `memory l3 run` no-daemon path uses this so a daemon that
+/// wins the race against the liveness check keeps its claim (the CLI then
+/// waits for the real result) instead of having a live `--execute`
+/// cancelled out from under it (issue #179 follow-up). Audit-row emission
+/// is identical to `cancel_and_audit` — a pending-only cancel is by
+/// definition never-claimed, so both the lifecycle and the producer
+/// `task.finalize` rows fire.
+pub async fn cancel_if_pending_and_audit(
+    pool: &PgPool,
+    task_id: i64,
+) -> Result<CancelOutcome, DbError> {
+    let Some(task) = mark_cancelled_if_pending(pool, task_id).await? else {
+        return Ok(CancelOutcome::NotCancellable);
+    };
+    emit_cancel_audit_rows(pool, &task).await;
+    Ok(CancelOutcome::Cancelled(task))
+}
+
+/// Emit the producer audit rows for a cancelled task. Shared by
+/// [`cancel_and_audit`] and [`cancel_if_pending_and_audit`]; the `task`
+/// passed in is the already-cancelled row returned by the `mark_*` UPDATE.
+///
+/// 1. **Always** one `actor='cli' action='task.cancelled'` lifecycle row.
+/// 2. **Only when the task was never claimed** (`started_at.is_none()`) one
+///    producer `task.finalize` summary row — the scheduler emits its own
+///    `task.finalize` for any task it observed (the inner-loop
+///    `observe_state` poll catches the cancel of a running task), so
+///    emitting one here too would inflate the finalize stream.
+///
+/// Both inserts are best-effort (chokepoint posture): a DB error is logged
+/// via `tracing::warn!` and swallowed so a transient audit failure cannot
+/// mask the successful SQL UPDATE.
+async fn emit_cancel_audit_rows(pool: &PgPool, task: &Task) {
     let action = action_task_terminal("cancelled");
     let payload = build_lifecycle_payload(task.id, task.lane, task.plan_count);
     if let Err(e) = audit::insert(pool, CLI_AUDIT_ACTOR, &action, payload).await {
         tracing::warn!(
-            task_id,
+            task_id = task.id,
             error = %e,
-            "cli_audit::cancel_and_audit: lifecycle audit insert failed (cancel itself succeeded)",
+            "cli_audit::emit_cancel_audit_rows: lifecycle audit insert failed (cancel itself succeeded)",
         );
     }
-
-    // 2. Finalize summary row — only when the task was never claimed.
-    //    The scheduler will emit its own `task.finalize` for any task it
-    //    observed (the inner-loop `observe_state` poll catches the cancel
-    //    of a running task), so emitting one here would inflate the
-    //    finalize stream.
     if task.started_at.is_none() {
-        emit_producer_cancel_finalize(pool, &task).await;
+        emit_producer_cancel_finalize(pool, task).await;
     }
-
-    Ok(CancelOutcome::Cancelled(task))
 }
 
 /// Insert one `actor='cli' action='task.finalize'` row for a

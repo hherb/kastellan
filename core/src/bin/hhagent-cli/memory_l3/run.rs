@@ -120,8 +120,10 @@ pub(super) fn render_invoke_report(
 /// approved skill against the daemon's live tool registry (issue #179, Opt 3 —
 /// the in-process registry rebuild and its env-divergence cliff are retired).
 /// Dry-run by default (no `--execute`): the daemon validates + returns the
-/// concrete steps without dispatching. Requires a running daemon; if none is
-/// consuming the lane, the submit is cancelled and an error is printed.
+/// concrete steps without dispatching. Requires a running daemon; if a live
+/// daemon is merely busy the CLI keeps waiting, but if no daemon is running at
+/// all the submit is cancelled (pending-only) and an error is printed — see
+/// [`wait_until_claimed_or_no_daemon`].
 pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
     use std::time::Duration;
 
@@ -174,6 +176,15 @@ pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
     };
     eprintln!("memory l3 run: submitted task {task_id} (lane=long); waiting for the daemon…");
 
+    // `grace`: how long a freshly-submitted task may sit `pending` before we
+    // probe for a live daemon (5s comfortably covers claim latency for an idle
+    // daemon; a *busy* daemon is handled by the liveness probe, not by raising
+    // this). `overall`: the Phase-2 ceiling on the whole execution wait. It is
+    // generous (30 min) because a legitimate `--execute` can run a long step
+    // list; it exists only so a daemon that claims the task but never NOTIFYs
+    // (a hang) cannot block the operator's terminal forever. Both are
+    // env-overridable — lower `HHAGENT_L3_RUN_TIMEOUT_SECS` for snappier
+    // dry-runs, raise it for known-slow skills.
     let grace = Duration::from_secs(env_secs("HHAGENT_L3_RUN_GRACE_SECS", 5));
     let overall = Duration::from_secs(env_secs("HHAGENT_L3_RUN_TIMEOUT_SECS", 1800));
 
@@ -260,17 +271,41 @@ async fn resolve_skill_name(pool: &sqlx::PgPool, id: i64) -> String {
         .unwrap_or_else(|| "<skill>".to_string())
 }
 
-/// Phase-1 wait: return `Ok(())` once the task is observed in a non-`pending`
-/// state (daemon claimed it). If it is still `pending` after `grace`, print a
-/// "daemon not running" error, cancel the task, and return `Err(exit_code)`.
+/// Phase-1 wait. Blocks until either the daemon claims the task (it leaves
+/// `pending`) or we can soundly conclude no daemon will. Returns:
+///
+/// - `Ok(())` — proceed to the Phase-2 result wait. The task is claimed
+///   (`running`), already terminal, OR a live-but-busy daemon exists. In the
+///   busy case the daemon will claim the task once it frees up; the bounded
+///   Phase-2 timeout still caps the total wait, so we do not block forever.
+/// - `Err(code)` — no live daemon, and the still-`pending` task was cancelled,
+///   so a `--execute` directive cannot be silently run later by a daemon that
+///   starts after the CLI has given up.
+///
+/// ## Why a liveness probe, not just "still pending after grace"
+///
+/// Lanes are drained sequentially within a lane, so an `l3_run` task submitted
+/// while the long lane is busy with another long task legitimately sits
+/// `pending` for that task's whole duration — far longer than `grace`. Treating
+/// "still pending" alone as "no daemon" would cancel a valid submission under
+/// load (the original #179 review finding). [`any_live_worker`] distinguishes a
+/// *busy* daemon (something is `running` on an unexpired lease → keep waiting)
+/// from an *absent* one (nothing running → cancel + error).
+///
+/// ## Why the cancel is pending-only
+///
+/// In the no-live-worker branch the daemon could still claim the task in the
+/// tiny window between the liveness probe and the cancel. [`cancel_if_pending_and_audit`]
+/// only cancels a `pending` row, so if that happens the cancel no-ops, we
+/// detect the claim, and we wait for the real result instead of orphaning a
+/// live `--execute` we believed we had stopped.
 async fn wait_until_claimed_or_no_daemon(
     pool: &sqlx::PgPool,
     listener: &mut sqlx::postgres::PgListener,
     task_id: i64,
     grace: std::time::Duration,
 ) -> Result<(), std::process::ExitCode> {
-    use hhagent_core::cli_audit::cancel_and_audit;
-    use hhagent_db::tasks::get;
+    use hhagent_db::tasks::{any_live_worker, get};
 
     // A NOTIFY may arrive during the grace window if the task completes very
     // fast; we don't rely on it — we authoritatively re-check state below.
@@ -284,19 +319,80 @@ async fn wait_until_claimed_or_no_daemon(
     })
     .await;
 
-    match get(pool, task_id).await {
-        Ok(Some(t)) if t.state == "pending" => {
-            eprintln!(
-                "memory l3 run: the daemon does not appear to be running \
-                 (task {task_id} still pending after {}s). Cancelling.",
-                grace.as_secs()
-            );
-            let _ = cancel_and_audit(pool, task_id).await;
-            Err(std::process::ExitCode::from(1))
+    // Authoritative state re-check.
+    let state = match get(pool, task_id).await {
+        Ok(Some(t)) => t.state,
+        Ok(None) => {
+            eprintln!("memory l3 run: task {task_id} disappeared");
+            return Err(std::process::ExitCode::from(1));
         }
-        Ok(_) => Ok(()), // running or already terminal — proceed
         Err(e) => {
             eprintln!("memory l3 run: get failed: {e}");
+            return Err(std::process::ExitCode::from(1));
+        }
+    };
+    if state != "pending" {
+        return Ok(()); // claimed (running) or already terminal — proceed.
+    }
+
+    // Still pending after grace. Is a daemon alive but busy, or absent?
+    match any_live_worker(pool).await {
+        Ok(true) => {
+            eprintln!(
+                "memory l3 run: task {task_id} still queued (a daemon is busy on another \
+                 task); waiting…"
+            );
+            Ok(())
+        }
+        Ok(false) => {
+            cancel_pending_or_proceed(
+                pool,
+                task_id,
+                &format!(
+                    "the daemon does not appear to be running (task {task_id} still pending \
+                     after {}s, and no worker is running)",
+                    grace.as_secs()
+                ),
+            )
+            .await
+        }
+        Err(e) => {
+            // Liveness probe failed: fail safe — try to cancel (pending-only)
+            // rather than wait blindly on a daemon we cannot confirm exists.
+            cancel_pending_or_proceed(
+                pool,
+                task_id,
+                &format!("could not verify a running daemon (liveness check failed: {e})"),
+            )
+            .await
+        }
+    }
+}
+
+/// Cancel the task **only if it is still `pending`**, or proceed if the daemon
+/// claimed it in the race window. `reason` is the operator-facing explanation
+/// printed when the cancel succeeds. Returns `Err(1)` when the task was
+/// cancelled (or the cancel itself errored), `Ok(())` when the daemon had
+/// already claimed it (so the caller waits for the real result).
+async fn cancel_pending_or_proceed(
+    pool: &sqlx::PgPool,
+    task_id: i64,
+    reason: &str,
+) -> Result<(), std::process::ExitCode> {
+    use hhagent_core::cli_audit::{cancel_if_pending_and_audit, CancelOutcome};
+
+    match cancel_if_pending_and_audit(pool, task_id).await {
+        Ok(CancelOutcome::Cancelled(_)) => {
+            eprintln!("memory l3 run: {reason}. Cancelled task {task_id}.");
+            Err(std::process::ExitCode::from(1))
+        }
+        Ok(CancelOutcome::NotCancellable) => {
+            // The daemon claimed it between the probe and the cancel.
+            eprintln!("memory l3 run: task {task_id} was claimed by the daemon; waiting…");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("memory l3 run: cancel failed: {e}");
             Err(std::process::ExitCode::from(1))
         }
     }

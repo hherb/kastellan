@@ -602,6 +602,9 @@ fn audit_helpers_pool_and_notify_round_trip() {
 ///   4. `sweep_crashed` + idempotency — a running task whose lease is
 ///      forcibly back-dated is picked up by the sweep; a second sweep
 ///      returns 0.
+///   5. `mark_cancelled_if_pending` (pending-only, no-ops on running) and
+///      `any_live_worker` (sees an unexpired running lease, ignores an
+///      expired one) — the issue-#179 follow-up liveness/cancel helpers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tasks_lifecycle_e2e() {
     if skip_if_no_supervisor() {
@@ -635,8 +638,8 @@ async fn tasks_lifecycle_e2e() {
         .expect("connect runtime pool");
 
     use hhagent_db::tasks::{
-        claim_one, finalize, get, insert_pending, mark_cancelled, observe_state, sweep_crashed,
-        Lane,
+        any_live_worker, claim_one, finalize, get, insert_pending, mark_cancelled,
+        mark_cancelled_if_pending, observe_state, sweep_crashed, Lane,
     };
 
     // ── 1. Subscribe to listeners BEFORE inserting (race-safe) ──────
@@ -795,6 +798,60 @@ async fn tasks_lifecycle_e2e() {
             .expect("sweep_crashed idempotent")
             .is_empty(),
         "second sweep_crashed must find nothing"
+    );
+
+    // ── 6. mark_cancelled_if_pending + any_live_worker (issue #179 follow-up) ─
+    // 6a. Pending-only cancel flips a fresh pending row.
+    let id4 = insert_pending(&pool, Lane::Long, serde_json::json!({"kind": "l3_run"}))
+        .await
+        .expect("insert_pending id4");
+    let c4 = mark_cancelled_if_pending(&pool, id4)
+        .await
+        .expect("mark_cancelled_if_pending id4")
+        .expect("must return Some(task) for a pending row");
+    assert_eq!(c4.id, id4);
+    assert_eq!(c4.state, "cancelled", "pending row flips to cancelled");
+    assert!(c4.started_at.is_none(), "a never-claimed cancel has started_at = NULL");
+
+    // 6b. Pending-only cancel is a NO-OP on a running row — the safety property
+    // the `memory l3 run` no-daemon path depends on (a claimed `--execute`
+    // must not be cancelled out from under the daemon).
+    let id5 = insert_pending(&pool, Lane::Long, serde_json::json!({"kind": "l3_run"}))
+        .await
+        .expect("insert_pending id5");
+    let _ = claim_one(&pool, Lane::Long, 60)
+        .await
+        .expect("claim_one id5")
+        .expect("claim_one returned None for id5");
+    assert!(
+        mark_cancelled_if_pending(&pool, id5)
+            .await
+            .expect("mark_cancelled_if_pending on running")
+            .is_none(),
+        "mark_cancelled_if_pending must NOT cancel a running (claimed) task"
+    );
+    assert_eq!(
+        observe_state(&pool, id5).await.expect("observe_state id5"),
+        "running",
+        "the running task must remain running after a pending-only cancel"
+    );
+
+    // 6c. any_live_worker sees id5's unexpired running lease as a live daemon.
+    assert!(
+        any_live_worker(&pool).await.expect("any_live_worker (busy)"),
+        "a running task with an unexpired lease must register as a live worker"
+    );
+
+    // 6d. Back-date id5's lease: with no unexpired running lease left, the
+    // liveness proxy reports no live worker (the absent-daemon case).
+    sqlx::query("UPDATE tasks SET lease_expires_at = now() - interval '1 second' WHERE id = $1")
+        .bind(id5)
+        .execute(&pool)
+        .await
+        .expect("back-date id5 lease");
+    assert!(
+        !any_live_worker(&pool).await.expect("any_live_worker (idle)"),
+        "an expired running lease must NOT register as a live worker"
     );
 
     drop(inserted_listener);
