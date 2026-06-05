@@ -287,4 +287,35 @@ mod tests {
         assert_eq!(v["tools"][0]["name"], "shell-exec");
         assert_eq!(v["tools"][0]["allowlist_len"], 1);
     }
+
+    #[test]
+    fn shell_exec_registers_with_no_override_env_via_exe_sibling() {
+        let exe_dir = PathBuf::from("/install/bin");
+        let sibling = exe_dir.join("hhagent-worker-shell-exec");
+        // No HHAGENT_SHELL_EXEC_BIN; only the sibling exists.
+        let get_env = |_k: &str| None;
+        let exists = {
+            let sibling = sibling.clone();
+            move |p: &Path| p == sibling.as_path()
+        };
+        let allowlist = |_t: &str| Vec::new();
+        let ctx = ResolveCtx {
+            get_env: &get_env,
+            exists: &exists,
+            is_dir: &|_p: &Path| false,
+            exe_dir: Some(exe_dir.as_path()),
+            allowlist: &allowlist,
+        };
+
+        // Real manifest list. gliner is Disabled (no enable flag) and skipped.
+        let (reg, loaded) = assemble_registry(WORKER_MANIFESTS, &ctx);
+
+        let entry = reg
+            .lookup("shell-exec")
+            .expect("shell-exec must register from the exe-relative sibling with no env override");
+        assert_eq!(entry.binary, sibling);
+        assert!(reg.lookup("gliner-relex").is_none(), "gliner disabled → not registered");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "shell-exec");
+    }
 }
