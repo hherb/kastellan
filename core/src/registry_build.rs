@@ -12,6 +12,7 @@
 
 use crate::scheduler::tool_dispatch::ToolEntry;
 use crate::scheduler::ToolRegistry;
+use crate::worker_manifest::{ResolveCtx, Resolution, WorkerManifest};
 
 /// One per-tool record carried in the `registry.loaded` audit-row payload.
 #[derive(serde::Serialize)]
@@ -164,9 +165,149 @@ pub fn build_registry_loaded_payload(tools: &[LoadedToolRecord]) -> serde_json::
     serde_json::json!({ "tools": tools })
 }
 
+/// Pure assembly: iterate a worker-manifest list against a fully-built
+/// [`ResolveCtx`] and produce the registry + the per-tool records for the
+/// `registry.loaded` audit row. No async, no DB — unit-testable with fakes.
+///
+/// `Register` ⇒ insert + record + INFO log; `Disabled` ⇒ INFO log only;
+/// `Misconfigured` ⇒ ERROR log only (the daemon still starts — fail-soft).
+pub fn assemble_registry(
+    manifests: &[&dyn WorkerManifest],
+    ctx: &ResolveCtx<'_>,
+) -> (ToolRegistry, Vec<LoadedToolRecord>) {
+    let mut reg = ToolRegistry::new();
+    let mut loaded: Vec<LoadedToolRecord> = Vec::new();
+    for m in manifests {
+        match m.resolve(ctx) {
+            Resolution::Register(entry) => {
+                let name = m.name();
+                let allowlist = (ctx.allowlist)(name);
+                tracing::info!(
+                    tool = name,
+                    binary = %entry.binary.display(),
+                    allowlist_len = allowlist.len(),
+                    "registering tool"
+                );
+                loaded.push(LoadedToolRecord {
+                    name: name.to_string(),
+                    binary: entry.binary.display().to_string(),
+                    allowlist_len: allowlist.len(),
+                    allowlist_sha256: sha256_argv0_list(&allowlist),
+                });
+                reg.insert(name, entry);
+            }
+            Resolution::Disabled { detail } => {
+                tracing::info!(tool = m.name(), %detail, "worker disabled; skipping");
+            }
+            Resolution::Misconfigured { detail } => {
+                tracing::error!(tool = m.name(), %detail, "worker misconfigured; skipping");
+            }
+        }
+    }
+    (reg, loaded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker_manifest::{ResolveCtx, Resolution, WorkerManifest};
+    use std::path::{Path, PathBuf};
+
+    /// A fake worker for assembly tests. `outcome` selects which arm
+    /// `resolve` returns; `allowlist_name` (if Some) is reported from
+    /// `allowlist_tool()` so the prefetch-keying path is exercised.
+    struct FakeManifest {
+        name: &'static str,
+        outcome: FakeOutcome,
+        allowlist_name: Option<&'static str>,
+    }
+    enum FakeOutcome {
+        Register,
+        Disabled,
+        Misconfigured,
+    }
+    impl WorkerManifest for FakeManifest {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn allowlist_tool(&self) -> Option<&'static str> {
+            self.allowlist_name
+        }
+        fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
+            match self.outcome {
+                FakeOutcome::Register => Resolution::Register(
+                    crate::workers::shell_exec::shell_exec_entry(
+                        PathBuf::from(format!("/fake/{}", self.name)),
+                        &(ctx.allowlist)(self.name),
+                    ),
+                ),
+                FakeOutcome::Disabled => Resolution::Disabled { detail: "off".into() },
+                FakeOutcome::Misconfigured => {
+                    Resolution::Misconfigured { detail: "broken".into() }
+                }
+            }
+        }
+    }
+
+    fn test_ctx<'a>(allowlist: &'a dyn Fn(&str) -> Vec<String>) -> ResolveCtx<'a> {
+        ResolveCtx {
+            get_env: &|_k| None,
+            exists: &|_p: &Path| false,
+            is_dir: &|_p: &Path| false,
+            exe_dir: None,
+            allowlist,
+        }
+    }
+
+    #[test]
+    fn assemble_inserts_registered_and_records_allowlist_hash() {
+        let allowlist = |t: &str| {
+            if t == "alpha" {
+                vec!["ls".to_string()]
+            } else {
+                Vec::new()
+            }
+        };
+        let ctx = test_ctx(&allowlist);
+        let m_alpha = FakeManifest {
+            name: "alpha",
+            outcome: FakeOutcome::Register,
+            allowlist_name: Some("alpha"),
+        };
+        let manifests: &[&dyn WorkerManifest] = &[&m_alpha];
+
+        let (reg, loaded) = assemble_registry(manifests, &ctx);
+
+        assert!(reg.lookup("alpha").is_some(), "alpha should be registered");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "alpha");
+        assert_eq!(loaded[0].allowlist_len, 1);
+        assert_eq!(loaded[0].allowlist_sha256, sha256_argv0_list(&["ls".to_string()]));
+        assert_eq!(loaded[0].binary, "/fake/alpha");
+    }
+
+    #[test]
+    fn assemble_skips_disabled_and_misconfigured_without_recording() {
+        let allowlist = |_t: &str| Vec::new();
+        let ctx = test_ctx(&allowlist);
+        let m_off = FakeManifest {
+            name: "off",
+            outcome: FakeOutcome::Disabled,
+            allowlist_name: None,
+        };
+        let m_bad = FakeManifest {
+            name: "bad",
+            outcome: FakeOutcome::Misconfigured,
+            allowlist_name: None,
+        };
+        let manifests: &[&dyn WorkerManifest] = &[&m_off, &m_bad];
+
+        let (reg, loaded) = assemble_registry(manifests, &ctx);
+
+        assert!(reg.lookup("off").is_none());
+        assert!(reg.lookup("bad").is_none());
+        assert!(loaded.is_empty(), "skipped workers produce no records");
+    }
 
     #[test]
     fn sha256_argv0_list_is_order_independent_and_empty_is_empty_string_sha() {
