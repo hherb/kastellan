@@ -34,10 +34,11 @@ its #179 work is fully in `main`, it carries one *unmerged* commit `930231c
 that commit before deleting the branch.
 
 **Session-end verification (this session, DGX Spark, native Linux, rustc 1.96.0,
-on `feat/worker-manifest-plumbing`):** `cargo test --workspace` **1309 / 0 / 4**
-(zero `[SKIP]`; was 1297 at `1f9a353` — +12 new units: 4 `discover_binary`, 2
-`ShellExecManifest`, 2 `assemble_registry`, 3 `GlinerRelexManifest`, 1 zero-env
-discovery); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit
+on `feat/worker-manifest-plumbing`):** `cargo test --workspace` **1310 / 0 / 4**
+(zero `[SKIP]`; was 1297 at `1f9a353` — +13 new units: 5 `discover_binary`
+[incl. directory-override rejection], 2 `ShellExecManifest`, 2
+`assemble_registry`, 3 `GlinerRelexManifest`, 1 zero-env discovery); `cargo
+clippy --workspace --all-targets --locked -- -D warnings` exit
 0; PG-backed pin `cli_ask_e2e` **7/7** (proves the `registry.loaded` audit row +
 dispatch chain unchanged). `docs/essay-medium-draft.md` stays untracked (not
 present on this host).
@@ -153,7 +154,7 @@ declares itself, and a production binary-discovery convention. Brainstorm → sp
 
 **Security/behaviour invariants (review-confirmed):** every produced `ToolEntry` byte-identical; containment shape (`SandboxPolicy`+`Lifecycle`) stays compiled-in (no file-mutable manifest — threat-model: a compromise reaches the agent's own user, so an on-disk manifest would be an escalation surface); operational argv allowlist stays in the DB (audited, separate from the manifest); `registry.loaded` snapshot the L3 approval gate reads is unchanged.
 
-**Verification (DGX, native Linux, rustc 1.96.0):** `cargo test --workspace` **1309 / 0 / 4** (zero `[SKIP]`; +12 over the 1297 baseline); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; PG-backed `cli_ask_e2e` **7/7**. **File-size flag:** `gliner_relex.rs` grew ~861 → **921 LOC** (pre-existing over-cap; this slice added ~60 — still a future test-lift/prod-split candidate, see refactor bucket). **Deferred (noted, not blocking):** libexec install layout; operator-tunable resource limits via config (env-var overrides cover the known case today); richer per-worker trait methods (the trait leaves room).
+**Verification (DGX, native Linux, rustc 1.96.0):** `cargo test --workspace` **1310 / 0 / 4** (zero `[SKIP]`; +13 over the 1297 baseline); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; PG-backed `cli_ask_e2e` **7/7**; `shell_exec_e2e` **4/4** (relocated `shell_exec_entry` round-trip). Final whole-branch review (opus) = **READY TO MERGE** (behaviour byte-identical, all 4 security points pass); its one substantive Minor — `discover_binary` gating on `exists()` vs the prior `is_file()` — was fixed (now `exists && !is_dir`, with a directory-override regression test). **File-size flag:** `gliner_relex.rs` grew ~861 → **921 LOC** (pre-existing over-cap; this slice added ~60 — still a future test-lift/prod-split candidate, see refactor bucket). **Deferred (noted, not blocking):** libexec install layout; operator-tunable resource limits via config (env-var overrides cover the known case today); richer per-worker trait methods (the trait leaves room).
 
 ---
 
