@@ -34,11 +34,11 @@ in `main`) and can be deleted — use `git branch -D` (cherry-pick means `-d`
 won't auto-detect it as merged).
 
 **Session-end verification (this session, DGX Spark, native Linux, rustc 1.96.0,
-on `feat/worker-manifest-plumbing`):** `cargo test --workspace` **1310 / 0 / 4**
-(zero `[SKIP]`; was 1297 at `1f9a353` — +13 new units: 5 `discover_binary`
-[incl. directory-override rejection], 2 `ShellExecManifest`, 2
-`assemble_registry`, 3 `GlinerRelexManifest`, 1 zero-env discovery); `cargo
-clippy --workspace --all-targets --locked -- -D warnings` exit
+on `feat/worker-manifest-plumbing`):** `cargo test --workspace` **1311 / 0 / 4**
+(zero `[SKIP]`; was 1297 at `1f9a353` — +14 new units: 6 `discover_binary`
+[incl. directory-override + set-but-missing-override fail-closed], 2
+`ShellExecManifest`, 2 `assemble_registry`, 3 `GlinerRelexManifest`, 1 zero-env
+discovery); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit
 0; PG-backed pin `cli_ask_e2e` **7/7** (proves the `registry.loaded` audit row +
 dispatch chain unchanged). `docs/essay-medium-draft.md` stays untracked (not
 present on this host).
@@ -154,7 +154,7 @@ declares itself, and a production binary-discovery convention. Brainstorm → sp
 
 **Security/behaviour invariants (review-confirmed):** every produced `ToolEntry` byte-identical; containment shape (`SandboxPolicy`+`Lifecycle`) stays compiled-in (no file-mutable manifest — threat-model: a compromise reaches the agent's own user, so an on-disk manifest would be an escalation surface); operational argv allowlist stays in the DB (audited, separate from the manifest); `registry.loaded` snapshot the L3 approval gate reads is unchanged.
 
-**Verification (DGX, native Linux, rustc 1.96.0):** `cargo test --workspace` **1310 / 0 / 4** (zero `[SKIP]`; +13 over the 1297 baseline); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; PG-backed `cli_ask_e2e` **7/7**; `shell_exec_e2e` **4/4** (relocated `shell_exec_entry` round-trip). Final whole-branch review (opus) = **READY TO MERGE** (behaviour byte-identical, all 4 security points pass); its one substantive Minor — `discover_binary` gating on `exists()` vs the prior `is_file()` — was fixed (now `exists && !is_dir`, with a directory-override regression test). **File-size flag:** `gliner_relex.rs` grew ~861 → **921 LOC** (pre-existing over-cap; this slice added ~60 — still a future test-lift/prod-split candidate, see refactor bucket). **Deferred (noted, not blocking):** libexec install layout; operator-tunable resource limits via config (env-var overrides cover the known case today); richer per-worker trait methods (the trait leaves room).
+**Verification (DGX, native Linux, rustc 1.96.0):** `cargo test --workspace` **1311 / 0 / 4** (zero `[SKIP]`; +14 over the 1297 baseline); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; PG-backed `cli_ask_e2e` **7/7**; `shell_exec_e2e` **4/4** (relocated `shell_exec_entry` round-trip). Final whole-branch review (opus) = **READY TO MERGE** (behaviour byte-identical, all 4 security points pass); its one substantive Minor — `discover_binary` gating on `exists()` vs the prior `is_file()` — was fixed (now `exists && !is_dir`, with a directory-override regression test). **Post-review fix (PR #187 review):** a *set-but-invalid* `HHAGENT_SHELL_EXEC_BIN` override now **fails closed** (→ `Misconfigured`) instead of silently falling through to the exe-relative sibling — an explicit override is authoritative; running a *different* binary than the operator named is a security footgun. Restores exact parity with the pre-manifest "set but not a file ⇒ not registered" posture; sibling default applies only when the override is unset. Added a worker-binary-discovery trust note to `docs/threat-model.md` (install dir must not be agent-user-writable). **File-size flag:** `gliner_relex.rs` grew ~861 → **921 LOC** (pre-existing over-cap; this slice added ~60 — still a future test-lift/prod-split candidate, see refactor bucket). **Deferred (noted, not blocking):** libexec install layout; operator-tunable resource limits via config (env-var overrides cover the known case today); richer per-worker trait methods (the trait leaves room).
 
 ---
 

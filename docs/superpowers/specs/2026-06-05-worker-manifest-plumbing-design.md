@@ -176,6 +176,16 @@ pub fn discover_binary(
 ) -> Option<PathBuf>;
 ```
 
+> **Post-review correction (2026-06-05, PR #187).** The first sketch had a
+> set-but-invalid override *fall through* to the sibling default. That was wrong:
+> in a security-first daemon an explicit override is a statement of intent, and
+> silently running a *different* binary than the operator named is a footgun. The
+> shipped semantics make a set override **authoritative** — honoured iff it names
+> a runnable file, else **fail closed** (`None` → `Misconfigured`); the sibling
+> default applies *only* when the override is unset. This also restores exact
+> parity with the pre-manifest behaviour (`HHAGENT_SHELL_EXEC_BIN` set but not a
+> file ⇒ not registered).
+
 **The convention: a plain compiled worker lives as a *sibling of the `hhagent`
 binary* (`<exe_dir>/<worker-name>`), discoverable with no env vars set.**
 

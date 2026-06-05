@@ -44,8 +44,10 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
     }
 }
 
-/// shell-exec's manifest. Discovery: `HHAGENT_SHELL_EXEC_BIN` override wins,
-/// else the exe-relative sibling `hhagent-worker-shell-exec`.
+/// shell-exec's manifest. Discovery: a set `HHAGENT_SHELL_EXEC_BIN` override is
+/// authoritative (honoured iff it names a runnable file, else fails closed);
+/// only when it is unset do we fall back to the exe-relative sibling
+/// `hhagent-worker-shell-exec`. See [`discover_binary`].
 pub struct ShellExecManifest;
 
 impl WorkerManifest for ShellExecManifest {
@@ -63,7 +65,8 @@ impl WorkerManifest for ShellExecManifest {
             None => {
                 return Resolution::Misconfigured {
                     detail: format!(
-                        "{BIN_ENV} unset/missing and no sibling {DEFAULT_BIN_NAME} found"
+                        "could not resolve worker binary: {BIN_ENV} set but not a \
+                         runnable file, or unset with no sibling {DEFAULT_BIN_NAME} found"
                     ),
                 };
             }
