@@ -25,13 +25,13 @@ operator run, all daemon-side) remains COMPLETE end-to-end on `main`** (PR #186,
 #179 CLOSED — prior session).
 
 **Next-session reconcile:** **PR for `feat/worker-manifest-plumbing` is OPEN /
-unmerged** — verify CI green and merge, then `git branch -d`. **Also still
-pending from the prior session:** the local branch
-`fix/issue-179-l3-run-daemon-reroute` is NOT safe to `git branch -d` — although
-its #179 work is fully in `main`, it carries one *unmerged* commit `930231c
-"skills updated to keep handover documentation more concise"` (edits to
-`.claude/skills/{fixall,nextsession}/SKILL.md`). Decide whether to land or drop
-that commit before deleting the branch.
+unmerged** — verify CI green and merge, then `git branch -d`. **Prior-session
+cleanup RESOLVED:** the orphan skills commit `930231c "skills updated to keep
+handover documentation more concise"` was **cherry-picked into `main` at
+`3ef74a3`** (pushed) at the user's request. The branch
+`fix/issue-179-l3-run-daemon-reroute` is now fully redundant (all its content is
+in `main`) and can be deleted — use `git branch -D` (cherry-pick means `-d`
+won't auto-detect it as merged).
 
 **Session-end verification (this session, DGX Spark, native Linux, rustc 1.96.0,
 on `feat/worker-manifest-plumbing`):** `cargo test --workspace` **1310 / 0 / 4**
