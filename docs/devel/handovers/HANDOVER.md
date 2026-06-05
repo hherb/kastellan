@@ -6,43 +6,52 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-05 (reconcile: #187 merged).
+**Last updated:** 2026-06-06 (gliner_relex prod-split; reconcile: #188 merged).
 
-**Current state.** `main` is at `2e3d0c5` — **worker manifest plumbing (item 11)
-is MERGED** (PR [#187](https://github.com/hherb/hhagent/pull/187), merge commit
-`2e3d0c5`; branch tip `39d6cf3` "set-but-invalid override fails closed", preceded
-by the directory-override fix `b5af648`/`e9268af`). It introduced a uniform
-`WorkerManifest` trait so each tool-worker declares itself behind one interface,
-replacing the hardcoded per-worker branches in `registry_build.rs`, plus a
-`current_exe()`-relative binary-discovery convention. Resolves worker-lifecycle
-**open question 1** (Rust consts, not on-disk TOML) and advances **open
-question 6** (production binary discovery). Behaviour-preserving for the two
-existing workers. See "Recently completed" for the full slice.
+**Current state.** `main` is at `50f7fde` — the **`memory/recall.rs` test-lift
+is MERGED** (PR [#188](https://github.com/hherb/hhagent/pull/188); recall.rs
+622 → 406 LOC, behaviour-preserving) and **worker manifest plumbing (item 11)
+is MERGED** (PR [#187](https://github.com/hherb/hhagent/pull/187), `2e3d0c5`).
+The L3 invocation arc (crystallise → approve → pin → autonomous invoke →
+operator run, all daemon-side) **remains COMPLETE end-to-end on `main`**
+(PR #186, #179 CLOSED).
 
-**The entire L3 invocation arc (crystallise → approve → pin → autonomous invoke →
-operator run, all daemon-side) remains COMPLETE end-to-end on `main`** (PR #186,
-#179 CLOSED).
+**This session shipped a production file-split (item 9b):**
+`core/src/workers/gliner_relex.rs` (921 LOC, over cap — tests already lifted,
+so a clean test-lift no longer suffices) split into a thin re-export **facade
+(51 LOC)** plus five cohesive siblings, all under cap:
+[`wire.rs`](../../../core/src/workers/gliner_relex/wire.rs) (120, serde
+shapes + `MAX_*`),
+[`resolve.rs`](../../../core/src/workers/gliner_relex/resolve.rs) (250,
+`GlinerRelexEnv` + `resolve_env` + `ResolveSkipReason`),
+[`entry.rs`](../../../core/src/workers/gliner_relex/entry.rs) (278,
+`gliner_relex_entry` + host/container builders + env/lifecycle helpers),
+[`client.rs`](../../../core/src/workers/gliner_relex/client.rs) (234,
+`Client` + `ClientError`),
+[`manifest.rs`](../../../core/src/workers/gliner_relex/manifest.rs) (76,
+`GlinerRelexManifest` + `gliner_skip_detail`).
+**Behaviour-preserving:** public API byte-identical (every `pub` item
+re-exported from the facade, so all external
+`crate::workers::gliner_relex::<Name>` paths are unchanged); private helpers
+stay private to their siblings. `tests.rs` gained three explicit imports
+(`std::path::{Path,PathBuf}`, `worker_lifecycle::Lifecycle`,
+`hhagent_sandbox::{Net,Profile}`) that were previously glob-inherited from the
+monolith's private `use` lines; `entry.rs` gates `use std::path::PathBuf` to
+macOS (only `container_mode_entry` names it) for a warning-free Linux build.
+Branch `refactor/gliner-relex-prod-split` (this session; PR to open at session
+end). **File-size residual:** `gliner_relex/tests.rs` is 851 LOC (was 842;
++9 imports) — a separate over-cap *test* file split candidate, untouched here
+to keep the PR focused.
 
-**This session also shipped a clean test-lift (item 9b):**
-`core/src/memory/recall.rs` (622 LOC) — its inline `#[cfg(test)] mod tests`
-block (L405–622) moved verbatim into a new sibling
-[`core/src/memory/recall/tests.rs`](../../../core/src/memory/recall/tests.rs)
-(de-indented one level; parent declares `#[cfg(test)] mod tests;`). Parent
-**622 → 406 LOC** (under the 500-LOC cap); production region (L1–404)
-**byte-identical** to HEAD. 18 `memory::recall` unit tests are the regression
-pin. Branch `refactor/recall-test-module-lift` (this session's branch; PR to
-open at session end).
-
-**Next-session reconcile — DONE this session.** PR #187 was merged before this
-session opened; the stale "OPEN/unmerged" header has been corrected. Both
-now-redundant branches were deleted: `feat/worker-manifest-plumbing` (`-d`,
-fully merged) and `fix/issue-179-l3-run-daemon-reroute` (`-D`; its only unique
-commit `930231c` — a skills-doc edit — was cherry-picked into `main` at
-`3ef74a3`, verified byte-identical). No outstanding branch cleanup.
+**Next-session reconcile — DONE this session.** PR #188 (recall test-lift) was
+merged before this session opened; the stale "main at `2e3d0c5` / recall PR to
+open" header has been corrected to `50f7fde`. No outstanding branch cleanup
+(a stale ~3-week-old worktree `chore/issues-batch-2026-05-14` was noted but
+left as-is — unmerged exploratory work, not this session's concern).
 
 **Session-end verification (DGX Spark, native Linux, rustc 1.96.0, on
-`refactor/recall-test-module-lift`):** `cargo test --workspace` **1311 / 0 / 4**
-(unchanged from `main` at `2e3d0c5` — behaviour-preserving; 4 `[SKIP]` = the
+`refactor/gliner-relex-prod-split`):** `cargo test --workspace` **1311 / 0 / 4**
+(unchanged from `main` at `50f7fde` — behaviour-preserving; 4 `[SKIP]` = the
 documented GLiNER-Relex real-model gating on `HHAGENT_GLINER_RELEX_ENABLE=1`;
 **no sandbox-containment skips** — bwrap integration tests ran for real, so this
 is a genuine green); `cargo clippy --workspace --all-targets --locked -- -D
@@ -66,8 +75,8 @@ CI-verified, and the `linux-check` CI is **compile + clippy only** (no
 `cargo test`). On the **DGX Spark** (aarch64), `core` compiles/tests/clippies
 **natively**, so a full native-Linux `cargo test --workspace` +
 `cargo clippy --workspace --all-targets -D warnings` are both runnable there.
-The current native-Linux test baseline is **1297 / 0 / 4** at `a8cef41` (was
-1290 at `ef01ae3` on `main`).
+The current native-Linux test baseline is **1311 / 0 / 4** (`50f7fde`; was
+1297 at `a8cef41`).
 
 ---
 
@@ -84,7 +93,7 @@ The current native-Linux test baseline is **1297 / 0 / 4** at `a8cef41` (was
 
 ```
 hhagent (Rust workspace, 9 crates, AGPL-3.0)
-├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue + screen + extract_scannable_text), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; gliner_relex.rs GlinerRelexManifest + host+container entries), registry_build (static WORKER_MANIFESTS + pure assemble_registry + async build_tool_registry(pool, exe_dir))
+├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue + screen + extract_scannable_text), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS + pure assemble_registry + async build_tool_registry(pool, exe_dir))
 ├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads HHAGENT_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
 ├── sandbox            hhagent-sandbox: SandboxPolicy + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
@@ -95,8 +104,8 @@ hhagent (Rust workspace, 9 crates, AGPL-3.0)
 └── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**Test baselines.** Native-Linux (DGX, PG 18.4 live, rustc 1.96.0): **1297 / 0 / 4**
-at `a8cef41` (this session's branch; was 1290 / 0 / 4 on `main` at `ef01ae3`).
+**Test baselines.** Native-Linux (DGX, PG 18.4 live, rustc 1.96.0): **1311 / 0 / 4**
+at `50f7fde` (`main`; unchanged on this session's behaviour-preserving branch).
 macOS skip-as-pass posture (no `HHAGENT_PG_BIN_DIR`): **1319 / 0 / 3** on `main`
 at `f695a46` (L3 over-cap-split baseline). 3–4 ignored = explicit doctest markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
@@ -135,6 +144,24 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 ```
 
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile that lets `bwrap` create unprivileged user namespaces is already installed on the user's DGX Spark. Other Linux hosts may need `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses `sandbox-exec` (no setup needed).
+
+---
+
+## Recently completed (2026-06-06 — `gliner_relex.rs` production split, item 9b, branch `refactor/gliner-relex-prod-split`, PR to open, on the DGX Spark)
+
+Full detail in the header block above. In brief: the 921-LOC monolith (tests
+already lifted, so a clean test-lift no longer landed it under cap) became a
+51-LOC re-export facade + five cohesive siblings (`wire`/`resolve`/`entry`/
+`client`/`manifest`, all under cap). Public API byte-identical via the facade's
+`pub use` re-exports — no external call-site touched. `tests.rs` gained three
+explicit imports (previously glob-inherited from the monolith's private `use`s);
+`entry.rs` cfg-gates `use std::path::PathBuf` to macOS. Verification: workspace
+**1311 / 0 / 4** (unchanged baseline), clippy `-D warnings` exit 0. Residual:
+`gliner_relex/tests.rs` 851 LOC — a future over-cap *test* split candidate.
+
+Also merged before this session opened (reconciled here): the
+`memory/recall.rs` clean test-lift, **PR [#188](https://github.com/hherb/hhagent/pull/188)**
+(recall.rs 622 → 406 LOC, behaviour-preserving; 18 unit tests pin it).
 
 ---
 
@@ -276,10 +303,11 @@ sessions 2026-05-06 → 2026-05-09 in
 
 Phase 0 is complete; Phase 1 (memory recall + scheduler loop + end-to-end step dispatch) is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) is MERGED** (PR #187 at `2e3d0c5`). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**Refactor bucket — over-cap file splits (item 9b).** A full census of every over-cap production file splits into two buckets (re-census the exact split before picking):
+**Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
-- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): `sandbox/src/macos_seatbelt.rs` (604) — the last clean one remaining. (`recall.rs`, `l0_seed.rs`, `capture.rs`, `inner_loop.rs`, `replay.rs` already done — see Earlier history.)
-- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/scheduler/runner.rs` (765, grew this session), `db/secrets.rs` (848), `core/src/cli_audit.rs` (771), `core/src/main.rs` (729, almost no inline tests), `core/src/workers/gliner_relex.rs` (921, grew this session via the GlinerRelexManifest add; tests already lifted — now the largest clean prod-split candidate), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `supervisor/systemd_user.rs` (798, ~502 prod — basically at cap).
+- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): `sandbox/src/macos_seatbelt.rs` (604, test mod at L331) — the last clean one remaining. (`recall.rs`, `l0_seed.rs`, `capture.rs`, `inner_loop.rs`, `replay.rs` already done — see Earlier history.)
+- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (**958** — now the largest), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `db/secrets.rs` (848), `supervisor/systemd_user.rs` (798, ~502 prod — basically at cap), `core/src/scheduler/runner.rs` (773), `core/src/main.rs` (527, just over; almost no inline tests). (`gliner_relex.rs` done this session — split into facade + 5 siblings, PR pending.)
+- **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851).
 
 **Engineering pickups (need a spec/design first):**
 
