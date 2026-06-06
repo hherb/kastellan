@@ -154,10 +154,10 @@ pub fn postgres_service_spec(
 /// Pure: no I/O, same call → same value.
 pub fn hhagent_target_spec() -> TargetSpec {
     TargetSpec {
-        name: HHAGENT_TARGET_NAME.to_string(),
+        name: HHAGENT_TARGET_NAME.into(),
         members: vec![
-            POSTGRES_SERVICE_NAME.to_string(),
-            CORE_SERVICE_NAME.to_string(),
+            POSTGRES_SERVICE_NAME.into(),
+            CORE_SERVICE_NAME.into(),
         ],
     }
 }
@@ -376,6 +376,8 @@ mod tests {
     #[test]
     fn canonical_service_names_are_distinct() {
         assert_ne!(CORE_SERVICE_NAME, POSTGRES_SERVICE_NAME);
+        assert_ne!(HHAGENT_TARGET_NAME, CORE_SERVICE_NAME);
+        assert_ne!(HHAGENT_TARGET_NAME, POSTGRES_SERVICE_NAME);
     }
 
     #[test]
