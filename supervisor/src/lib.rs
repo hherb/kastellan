@@ -58,14 +58,16 @@ pub struct ServiceSpec {
     pub stdout_log: Option<PathBuf>,
     /// Optional file to append stderr to. Parent dir must exist.
     pub stderr_log: Option<PathBuf>,
-    /// Names of services that must start *before* this one. Maps to a
-    /// systemd `After=<name>.service` line per entry. **Ignored on
-    /// launchd** — launchd has no inter-agent ordering, so on macOS the
-    /// equivalent guarantee comes from each service's own readiness
-    /// behaviour (core fail-closed-restarts until Postgres is reachable).
-    /// Default empty: a spec that sets nothing here emits exactly today's
-    /// unit file — `build_unit_file` only adds ordering directives when
-    /// this is non-empty.
+    /// Names of services that must start *before* this one. Each entry is a
+    /// bare service name (no suffix); systemd formats it as an
+    /// `After=<name>.service` line — so dependencies must be `.service`
+    /// units, not sockets/timers/targets. **Ignored on launchd** — launchd
+    /// has no inter-agent ordering, so on macOS the equivalent guarantee
+    /// comes from each service's own readiness behaviour (core
+    /// fail-closed-restarts until Postgres is reachable). Default empty: a
+    /// spec that sets nothing here emits exactly today's unit file —
+    /// `build_unit_file` only adds ordering directives when this is
+    /// non-empty.
     #[serde(default)]
     pub after: Vec<String>,
     /// The target bundle this service belongs to, if any. When `Some`,

@@ -338,60 +338,7 @@ impl Default for SystemdUser {
 
 impl Supervisor for SystemdUser {
     fn install(&self, spec: &ServiceSpec) -> Result<(), SupervisorError> {
-        validate_service_name(&spec.name)?;
-        // Ordering fields are formatted into unit-file directives, so they
-        // must pass the same name validation as the unit name — otherwise a
-        // crafted value (e.g. containing a newline) could inject directives.
-        for dep in &spec.after {
-            validate_service_name(dep)?;
-        }
-        if let Some(target) = &spec.part_of {
-            validate_service_name(target)?;
-        }
-        // Working dir / log paths must be absolute or systemd refuses
-        // them at unit-load time. Catch this at the host boundary so
-        // we get a structured error instead of a parse failure on
-        // daemon-reload.
-        if let Some(d) = &spec.working_dir {
-            if !d.is_absolute() {
-                return Err(SupervisorError::Io(format!(
-                    "working_dir must be absolute, got {}",
-                    d.display()
-                )));
-            }
-        }
-        if let Some(d) = &spec.stdout_log {
-            if !d.is_absolute() {
-                return Err(SupervisorError::Io(format!(
-                    "stdout_log must be absolute, got {}",
-                    d.display()
-                )));
-            }
-        }
-        if let Some(d) = &spec.stderr_log {
-            if !d.is_absolute() {
-                return Err(SupervisorError::Io(format!(
-                    "stderr_log must be absolute, got {}",
-                    d.display()
-                )));
-            }
-        }
-        // program must be absolute too — systemd refuses relative
-        // ExecStart paths.
-        if !spec.program.is_absolute() {
-            return Err(SupervisorError::Io(format!(
-                "program must be absolute, got {}",
-                spec.program.display()
-            )));
-        }
-
-        fs::create_dir_all(&self.units_dir)
-            .map_err(|e| SupervisorError::Io(format!("create {}: {e}", self.units_dir.display())))?;
-
-        let path = self.unit_path(&spec.name);
-        let body = build_unit_file(spec);
-        write_atomic(&path, body.as_bytes())?;
-
+        self.write_unit_file(spec)?;
         // Only run daemon-reload when we're writing into the real
         // user units dir — pointless otherwise (the live manager
         // doesn't scan custom dirs anyway), and it lets unit tests
@@ -465,8 +412,9 @@ impl Supervisor for SystemdUser {
     /// Install the target the systemd-native way: write each member unit,
     /// then a `hhagent.target` unit that `Wants=` them.
     ///
-    /// Overrides the generic-bundle default. Members install in order via
-    /// [`Supervisor::install`] (inheriting absolute-path validation);
+    /// Overrides the generic-bundle default. Member unit files are written
+    /// in order (inheriting the same name/absolute-path validation as
+    /// [`Supervisor::install`]) with a single `daemon-reload` at the end;
     /// fail-fast with no rollback — on a mid-loop error, already-written
     /// member units remain and the `.target` unit is not written.
     fn install_target(
@@ -481,13 +429,17 @@ impl Supervisor for SystemdUser {
         for member in &target.members {
             validate_service_name(member)?;
         }
-        // Member units first (reuses install's absolute-path validation).
+        // Member units first. `write_unit_file` applies the same
+        // name/absolute-path validation as `install` but skips the per-unit
+        // daemon-reload; we reload once at the end so a multi-member target
+        // costs a single reload, not one per member.
         for spec in members {
-            self.install(spec)?;
+            self.write_unit_file(spec)?;
         }
         // Then the .target unit that Wants= them.
         // Ensure the units dir exists even when `members` is empty (the
-        // member loop, which also creates it via `install`, ran zero times).
+        // member loop, which also creates it via `write_unit_file`, ran zero
+        // times).
         fs::create_dir_all(&self.units_dir).map_err(|e| {
             SupervisorError::Io(format!("create {}: {e}", self.units_dir.display()))
         })?;
@@ -541,6 +493,66 @@ impl Supervisor for SystemdUser {
 }
 
 impl SystemdUser {
+    /// Validate a spec and write its `<name>.service` unit file, **without**
+    /// running `daemon-reload`. Callers that write several units in one
+    /// batch (e.g. [`Supervisor::install_target`]) reload once at the end
+    /// instead of once per unit.
+    fn write_unit_file(&self, spec: &ServiceSpec) -> Result<(), SupervisorError> {
+        validate_service_name(&spec.name)?;
+        // Ordering fields are formatted into unit-file directives, so they
+        // must pass the same name validation as the unit name — otherwise a
+        // crafted value (e.g. containing a newline) could inject directives.
+        for dep in &spec.after {
+            validate_service_name(dep)?;
+        }
+        if let Some(target) = &spec.part_of {
+            validate_service_name(target)?;
+        }
+        // Working dir / log paths must be absolute or systemd refuses
+        // them at unit-load time. Catch this at the host boundary so
+        // we get a structured error instead of a parse failure on
+        // daemon-reload.
+        if let Some(d) = &spec.working_dir {
+            if !d.is_absolute() {
+                return Err(SupervisorError::Io(format!(
+                    "working_dir must be absolute, got {}",
+                    d.display()
+                )));
+            }
+        }
+        if let Some(d) = &spec.stdout_log {
+            if !d.is_absolute() {
+                return Err(SupervisorError::Io(format!(
+                    "stdout_log must be absolute, got {}",
+                    d.display()
+                )));
+            }
+        }
+        if let Some(d) = &spec.stderr_log {
+            if !d.is_absolute() {
+                return Err(SupervisorError::Io(format!(
+                    "stderr_log must be absolute, got {}",
+                    d.display()
+                )));
+            }
+        }
+        // program must be absolute too — systemd refuses relative
+        // ExecStart paths.
+        if !spec.program.is_absolute() {
+            return Err(SupervisorError::Io(format!(
+                "program must be absolute, got {}",
+                spec.program.display()
+            )));
+        }
+
+        fs::create_dir_all(&self.units_dir)
+            .map_err(|e| SupervisorError::Io(format!("create {}: {e}", self.units_dir.display())))?;
+
+        let path = self.unit_path(&spec.name);
+        let body = build_unit_file(spec);
+        write_atomic(&path, body.as_bytes())
+    }
+
     /// True iff the driver writes into the canonical
     /// `~/.config/systemd/user/` location. Used to decide whether
     /// `daemon-reload` makes sense — for custom dirs (tests) it
