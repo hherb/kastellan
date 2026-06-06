@@ -58,6 +58,38 @@ pub struct ServiceSpec {
     pub stdout_log: Option<PathBuf>,
     /// Optional file to append stderr to. Parent dir must exist.
     pub stderr_log: Option<PathBuf>,
+    /// Names of services that must start *before* this one. Maps to a
+    /// systemd `After=<name>.service` line per entry. **Ignored on
+    /// launchd** — launchd has no inter-agent ordering, so on macOS the
+    /// equivalent guarantee comes from each service's own readiness
+    /// behaviour (core fail-closed-restarts until Postgres is reachable).
+    /// Default empty: a spec that sets nothing here emits exactly today's
+    /// unit file (see `build_unit_file`'s behaviour-preserving test).
+    #[serde(default)]
+    pub after: Vec<String>,
+    /// The target bundle this service belongs to, if any. When `Some`,
+    /// systemd emits `PartOf=<target>.target` (so stopping the target
+    /// stops this service) and switches the `[Install] WantedBy=` to
+    /// `<target>.target`. **Ignored on launchd.** Default `None`.
+    #[serde(default)]
+    pub part_of: Option<String>,
+}
+
+/// A named bundle of services brought up and torn down together.
+///
+/// `members` are service names listed in **start order** (dependencies
+/// first); teardown reverses the order. On systemd this compiles to a
+/// real `hhagent.target` unit; on launchd (which has no target concept)
+/// the [`Supervisor`] default methods install and start the members in
+/// this order, relying on each service's own readiness behaviour for
+/// correctness.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TargetSpec {
+    /// Bundle name. Becomes `<name>.target` on systemd; on launchd it is
+    /// only an identifier for the member set (no file is written for it).
+    pub name: String,
+    /// Member service names, in start order (dependencies first).
+    pub members: Vec<String>,
 }
 
 /// Coarse runtime state of a service, normalized across backends.
@@ -179,5 +211,38 @@ impl Supervisor for NotYetImplemented {
     }
     fn status(&self, _: &str) -> Result<ServiceStatus, SupervisorError> {
         Err(SupervisorError::NotImplemented("status — Phase 0 work item"))
+    }
+}
+
+#[cfg(test)]
+mod target_spec_tests {
+    use super::*;
+
+    #[test]
+    fn target_spec_holds_name_and_ordered_members() {
+        let t = TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        };
+        assert_eq!(t.name, "hhagent");
+        assert_eq!(t.members, vec!["hhagent-postgres", "hhagent-core"]);
+    }
+
+    #[test]
+    fn service_spec_ordering_fields_default_empty() {
+        let s = ServiceSpec {
+            name: "svc".into(),
+            program: std::path::PathBuf::from("/bin/true"),
+            args: vec![],
+            env: vec![],
+            working_dir: None,
+            keep_alive: false,
+            stdout_log: None,
+            stderr_log: None,
+            after: vec![],
+            part_of: None,
+        };
+        assert!(s.after.is_empty());
+        assert!(s.part_of.is_none());
     }
 }

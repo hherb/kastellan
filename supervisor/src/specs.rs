@@ -73,6 +73,8 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
         keep_alive: true,
         stdout_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.out"))),
         stderr_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.err"))),
+        after: vec![],
+        part_of: None,
     }
 }
 
@@ -130,6 +132,8 @@ pub fn postgres_service_spec(
         keep_alive: true,
         stdout_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.out"))),
         stderr_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.err"))),
+        after: vec![],
+        part_of: None,
     }
 }
 

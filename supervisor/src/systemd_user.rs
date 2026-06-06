@@ -515,6 +515,8 @@ mod tests {
             keep_alive: false,
             stdout_log: None,
             stderr_log: None,
+            after: vec![],
+            part_of: None,
         }
     }
 

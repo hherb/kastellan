@@ -246,6 +246,8 @@ mod tests {
             keep_alive: false,
             stdout_log: None,
             stderr_log: None,
+            after: vec![],
+            part_of: None,
         }
     }
 
@@ -402,6 +404,8 @@ mod tests {
             keep_alive: false,
             stdout_log: None,
             stderr_log: None,
+            after: vec![],
+            part_of: None,
         };
         let s = build_plist(&spec);
         assert!(s.contains("<string>a&amp;b&lt;c</string>"), "{s}");
