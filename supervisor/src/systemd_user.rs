@@ -318,6 +318,11 @@ impl SystemdUser {
         self.units_dir.join(format!("{name}.service"))
     }
 
+    /// Path the driver would write `<name>.target` to.
+    pub fn target_path(&self, name: &str) -> PathBuf {
+        self.units_dir.join(format!("{name}.target"))
+    }
+
     /// Run `systemctl --user daemon-reload`, returning a structured
     /// error on non-zero exit.
     fn daemon_reload(&self) -> Result<(), SupervisorError> {
@@ -446,6 +451,60 @@ impl Supervisor for SystemdUser {
             // poll a transient state forever.
             _ => ServiceStatus::Inactive,
         })
+    }
+
+    fn install_target(
+        &self,
+        target: &TargetSpec,
+        members: &[ServiceSpec],
+    ) -> Result<(), SupervisorError> {
+        validate_service_name(&target.name)?;
+        // Member units first (reuses install's absolute-path validation).
+        for spec in members {
+            self.install(spec)?;
+        }
+        // Then the .target unit that Wants= them.
+        fs::create_dir_all(&self.units_dir).map_err(|e| {
+            SupervisorError::Io(format!("create {}: {e}", self.units_dir.display()))
+        })?;
+        let path = self.target_path(&target.name);
+        write_atomic(&path, build_target_unit(target).as_bytes())?;
+        if self.is_default_units_dir() {
+            self.daemon_reload()?;
+        }
+        Ok(())
+    }
+
+    fn start_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
+        validate_service_name(&target.name)?;
+        // systemd resolves member ordering from each member's After=.
+        run_systemctl_user(&["start", &format!("{}.target", target.name)]).map(|_| ())
+    }
+
+    fn stop_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
+        validate_service_name(&target.name)?;
+        // PartOf= on members propagates the stop to them.
+        run_systemctl_user(&["stop", &format!("{}.target", target.name)]).map(|_| ())
+    }
+
+    fn uninstall_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
+        validate_service_name(&target.name)?;
+        // Stop the target (propagates to members via PartOf=), then
+        // remove every member unit and the target unit file.
+        let _ = run_systemctl_user(&["stop", &format!("{}.target", target.name)]);
+        for name in target.members.iter().rev() {
+            let _ = self.uninstall(name);
+        }
+        let path = self.target_path(&target.name);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| {
+                SupervisorError::Io(format!("remove {}: {e}", path.display()))
+            })?;
+        }
+        if self.is_default_units_dir() {
+            self.daemon_reload()?;
+        }
+        Ok(())
     }
 }
 
@@ -878,5 +937,47 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("[Install]\nWantedBy=default.target\n"), "{body}");
+    }
+
+    #[test]
+    fn install_target_writes_target_unit_and_members_into_units_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "hhagent-target-unit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sup = SystemdUser::with_units_dir(dir.clone());
+
+        let mut pg = minimal_spec("hhagent-postgres");
+        pg.program = std::path::PathBuf::from("/usr/lib/postgresql/18/bin/postgres");
+        pg.part_of = Some("hhagent".into());
+        let mut core = minimal_spec("hhagent-core");
+        core.program = std::path::PathBuf::from("/opt/hhagent/hhagent");
+        core.after = vec!["hhagent-postgres".into()];
+        core.part_of = Some("hhagent".into());
+
+        let target = TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        };
+        sup.install_target(&target, &[pg, core]).expect("install_target");
+
+        // Target unit written with Wants= of both members.
+        let target_body =
+            std::fs::read_to_string(dir.join("hhagent.target")).expect("target file");
+        assert!(
+            target_body.contains("Wants=hhagent-postgres.service hhagent-core.service\n"),
+            "{target_body}"
+        );
+        // Member units written, core ordered After= postgres.
+        assert!(dir.join("hhagent-postgres.service").exists());
+        let core_body =
+            std::fs::read_to_string(dir.join("hhagent-core.service")).expect("core file");
+        assert!(core_body.contains("After=hhagent-postgres.service\n"), "{core_body}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
