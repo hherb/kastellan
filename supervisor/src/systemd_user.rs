@@ -339,6 +339,15 @@ impl Default for SystemdUser {
 impl Supervisor for SystemdUser {
     fn install(&self, spec: &ServiceSpec) -> Result<(), SupervisorError> {
         validate_service_name(&spec.name)?;
+        // Ordering fields are formatted into unit-file directives, so they
+        // must pass the same name validation as the unit name — otherwise a
+        // crafted value (e.g. containing a newline) could inject directives.
+        for dep in &spec.after {
+            validate_service_name(dep)?;
+        }
+        if let Some(target) = &spec.part_of {
+            validate_service_name(target)?;
+        }
         // Working dir / log paths must be absolute or systemd refuses
         // them at unit-load time. Catch this at the host boundary so
         // we get a structured error instead of a parse failure on
@@ -466,6 +475,12 @@ impl Supervisor for SystemdUser {
         members: &[ServiceSpec],
     ) -> Result<(), SupervisorError> {
         validate_service_name(&target.name)?;
+        // Member names are formatted into the Wants= directive of the target
+        // unit; validate them before writing anything so a crafted name cannot
+        // inject directives.
+        for member in &target.members {
+            validate_service_name(member)?;
+        }
         // Member units first (reuses install's absolute-path validation).
         for spec in members {
             self.install(spec)?;
@@ -954,6 +969,48 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("[Install]\nWantedBy=default.target\n"), "{body}");
+    }
+
+    // ---------- ordering-field injection rejection tests ----------
+
+    #[test]
+    fn install_rejects_after_entry_with_injection() {
+        let dir = TestRoot::new("inject-after");
+        let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+        let mut spec = minimal_spec("hhagent-core");
+        spec.program = std::path::PathBuf::from("/bin/true");
+        spec.after = vec!["pg\n[Service]\nExecStart=/bin/evil".into()];
+        let err = sup.install(&spec).unwrap_err();
+        assert!(matches!(err, SupervisorError::InvalidName(_)), "{err:?}");
+        // No unit file should have been written.
+        assert!(!dir.path().join("hhagent-core.service").exists());
+    }
+
+    #[test]
+    fn install_rejects_part_of_with_injection() {
+        let dir = TestRoot::new("inject-partof");
+        let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+        let mut spec = minimal_spec("hhagent-core");
+        spec.program = std::path::PathBuf::from("/bin/true");
+        spec.part_of = Some("hhagent\nWantedBy=evil.target".into());
+        let err = sup.install(&spec).unwrap_err();
+        assert!(matches!(err, SupervisorError::InvalidName(_)), "{err:?}");
+        assert!(!dir.path().join("hhagent-core.service").exists());
+    }
+
+    #[test]
+    fn install_target_rejects_member_with_injection() {
+        let dir = TestRoot::new("inject-member");
+        let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+        let target = TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["pg\nExecStart=/bin/evil".into()],
+        };
+        // members slice can be empty here — the target-name/members validation
+        // must fire before any member install.
+        let err = sup.install_target(&target, &[]).unwrap_err();
+        assert!(matches!(err, SupervisorError::InvalidName(_)), "{err:?}");
+        assert!(!dir.path().join("hhagent.target").exists());
     }
 
     #[test]
