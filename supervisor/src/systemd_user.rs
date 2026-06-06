@@ -164,6 +164,34 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
     out
 }
 
+/// Build the systemd `.target` unit body for a [`TargetSpec`].
+///
+/// The target `Wants=` all its members, so `systemctl --user start
+/// <name>.target` pulls them in; per-member `After=` lines (emitted by
+/// [`build_unit_file`] from each member's `ServiceSpec.after`) order the
+/// start. We use `Wants=` (soft) rather than `Requires=` so a single
+/// member failing does not tear the whole target down — the agent is
+/// still useful if, say, an optional future member is absent.
+///
+/// Pure: no I/O. Same `TargetSpec` → same body.
+pub fn build_target_unit(target: &crate::TargetSpec) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str("[Unit]\n");
+    out.push_str(&format!("Description=hhagent service bundle: {}\n", target.name));
+    if !target.members.is_empty() {
+        let wants: Vec<String> = target
+            .members
+            .iter()
+            .map(|m| format!("{m}.service"))
+            .collect();
+        out.push_str(&format!("Wants={}\n", wants.join(" ")));
+    }
+    out.push('\n');
+    out.push_str("[Install]\n");
+    out.push_str("WantedBy=default.target\n");
+    out
+}
+
 /// Quote a token for systemd unit-file syntax when it contains
 /// whitespace, quotes, backslashes, or is empty.
 ///
@@ -835,5 +863,20 @@ mod tests {
         assert!(!body.contains("After="), "{body}");
         assert!(!body.contains("PartOf="), "{body}");
         assert!(body.contains("WantedBy=default.target\n"), "{body}");
+    }
+
+    #[test]
+    fn target_unit_wants_all_members() {
+        let t = crate::TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        };
+        let body = build_target_unit(&t);
+        assert!(body.starts_with("[Unit]\n"), "{body}");
+        assert!(
+            body.contains("Wants=hhagent-postgres.service hhagent-core.service\n"),
+            "{body}"
+        );
+        assert!(body.contains("[Install]\nWantedBy=default.target\n"), "{body}");
     }
 }
