@@ -145,6 +145,11 @@ pub trait Supervisor {
     /// systemd backend overrides this to additionally write a native
     /// `.target` unit. The macOS/launchd backend uses this default —
     /// there is no target file on launchd.
+    ///
+    /// Callers must pass `members` corresponding 1-to-1, in the same order,
+    /// with `target.members`. The default body ignores `_target` and iterates
+    /// `members` directly; that divergence is deliberate (the systemd override
+    /// uses `target` for the `.target` unit name).
     fn install_target(
         &self,
         _target: &TargetSpec,
@@ -173,6 +178,11 @@ pub trait Supervisor {
     }
 
     /// Stop every member in **reverse** `target.members` order.
+    ///
+    /// On error, returns immediately; members already stopped remain stopped
+    /// (fail-fast, no rollback).
+    ///
+    /// The systemd backend overrides this to drive the native `.target` unit.
     fn stop_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         for name in target.members.iter().rev() {
             self.stop(name)?;
@@ -181,6 +191,11 @@ pub trait Supervisor {
     }
 
     /// Uninstall every member in **reverse** order.
+    ///
+    /// On error, returns immediately; members already uninstalled remain
+    /// uninstalled (fail-fast, no rollback).
+    ///
+    /// The systemd backend overrides this to drive the native `.target` unit.
     fn uninstall_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         for name in target.members.iter().rev() {
             self.uninstall(name)?;
@@ -343,6 +358,20 @@ mod default_target_tests {
         assert_eq!(
             sup.calls.borrow().clone(),
             vec!["stop:hhagent-core", "stop:hhagent-postgres"]
+        );
+    }
+
+    #[test]
+    fn default_bundle_uninstalls_in_reverse_member_order() {
+        let sup = RecordingSupervisor::default();
+        let target = TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        };
+        sup.uninstall_target(&target).unwrap();
+        assert_eq!(
+            sup.calls.borrow().clone(),
+            vec!["uninstall:hhagent-core", "uninstall:hhagent-postgres"]
         );
     }
 }
