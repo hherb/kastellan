@@ -6,14 +6,22 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-06 (Phase-0 `hhagent.target` bring-up shipped; PR to open).
+**Last updated:** 2026-06-06 (`systemd_user.rs` prod-split, item 9b-b; PR to open).
 
-**Current state.** `main` is at `cdadea1`. This session shipped the **Phase-0
-`hhagent.target` service bring-up** on branch **`feat/hhagent-target-bring-up`**
-(PR to open) — ROADMAP.md:60 ticked. The L3 invocation arc remains COMPLETE on
-`main` (PR #186, #179 CLOSED); worker manifest plumbing (item 11) MERGED (PR
-#187); `gliner_relex.rs` prod-split MERGED (PR #189); `recall.rs` test-lift
-MERGED (PR #188).
+**Current state.** `main` is at `478d025`. This session shipped the
+**`systemd_user.rs` production split** (item 9b-b) on branch
+**`refactor/systemd-user-prod-split`** (PR to open) — the 1069-LOC file (the most
+over-cap in the tree after the `hhagent.target` slice) became a 427-LOC driver
+parent + sibling `systemd_user/builder.rs` (478, pure builders + their tests) +
+`systemd_user/tests.rs` (216, driver tests), mirroring the `launchd_agents.rs`
+precedent exactly. Behaviour-preserving (workspace **1327 / 0 / 4** unchanged).
+The **Phase-0 `hhagent.target` service bring-up** is **MERGED** via
+**PR [#190](https://github.com/hherb/hhagent/pull/190)** — ROADMAP.md:60 ticked
+(two post-merge polish commits: `d32a281` dedup daemon-reload in `install_target`
+via a private `write_unit_file`; `2c277c7` Cargo.lock sync). The L3 invocation
+arc remains COMPLETE on `main` (PR #186, #179 CLOSED); worker manifest plumbing
+(item 11) MERGED (PR #187); `gliner_relex.rs` prod-split MERGED (PR #189);
+`recall.rs` test-lift MERGED (PR #188).
 
 **This session shipped `hhagent.target` (Phase-0 service supervisor, ROADMAP:60):**
 one orchestrating handle that brings up **Postgres → core** as a unit,
@@ -55,11 +63,11 @@ inference stays an **external** health-checked dependency (no inference spec);
   target round-trip, clean teardown. macOS path drives the launchd bundle
   (skip-as-pass off-platform).
 
-**File-size flag:** `supervisor/src/systemd_user.rs` grew **798 → ~1000 LOC**
-(this slice added ~200: ordering directives + `build_target_unit` + 4 overrides
-+ tests + validation). It was already over the 500 cap; the split is now a
-**higher-priority** refactor-bucket follow-up (see Next TODO), deliberately NOT
-bundled here to keep the PR focused.
+**File-size flag (RESOLVED):** the `hhagent.target` slice grew
+`supervisor/src/systemd_user.rs` to ~1000 LOC; the **next session
+(`refactor/systemd-user-prod-split`) split it** into a 427-LOC driver parent +
+`systemd_user/builder.rs` + `systemd_user/tests.rs` — all under cap. See the
+Recently-completed entry below.
 
 **Session-end verification (DGX Spark, native Linux, rustc 1.96.0, on
 `feat/hhagent-target-bring-up`):** `cargo test --workspace` **1327 / 0 / 4**
@@ -112,7 +120,7 @@ hhagent (Rust workspace, 9 crates, AGPL-3.0)
 ├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads HHAGENT_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
 ├── sandbox            hhagent-sandbox: SandboxPolicy + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
-├── supervisor         hhagent-supervisor: SystemdUser (Linux) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, hhagent_target_spec} + default_probe. ServiceSpec carries after/part_of ordering; TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native hhagent.target unit). Names screened by validate_service_name before unit-file write
+├── supervisor         hhagent-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, hhagent_target_spec} + default_probe. ServiceSpec carries after/part_of ordering; TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native hhagent.target unit). Names screened by validate_service_name before unit-file write
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── tests-common       hhagent-tests-common: shared dev-dep crate (publish = false) — PgCluster + bring_up_pg_cluster(+_with_timeout), RAII guards, skip helpers, sandbox factory, binary discovery, macOS launchd serial lock (reentrant), deterministic SHA-256-seeded embedding seed. Consumed only from [dev-dependencies]; never linked into a runtime binary.
 ├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS) + cross-platform setrlimit(RLIMIT_CPU)
@@ -162,7 +170,44 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 
 ---
 
-## Recently completed (2026-06-06 — `gliner_relex.rs` production split, item 9b, branch `refactor/gliner-relex-prod-split`, PR to open, on the DGX Spark)
+## Recently completed (2026-06-06 — `systemd_user.rs` production split, item 9b-b, branch `refactor/systemd-user-prod-split`, PR to open, on the DGX Spark)
+
+**What & why.** `supervisor/src/systemd_user.rs` was the most over-cap file in
+the tree (**1069 LOC** — the `hhagent.target` slice added ~200). A test-lift
+alone would not land the parent under the 500-LOC cap, so this is a real prod
+split, mirroring the **exact** `launchd_agents.rs` precedent (parent driver +
+`builders.rs` + `tests.rs`). Behaviour-preserving: zero production logic change,
+public paths unchanged.
+
+**What shipped (3 files, all under cap):**
+- **`systemd_user.rs` (parent, 1069 → 427 LOC):** the `systemctl --user` driver
+  only — `SystemdUser` struct/impls, the `Supervisor` impl (install/start/stop/
+  uninstall/status + the 4 `*_target` overrides), private `write_unit_file` /
+  `is_default_units_dir` / `daemon_reload`, `probe`, `write_atomic`,
+  `run_systemctl_user`. Declares `mod builder;` + `mod tests;` and
+  **re-exports `pub use builder::{build_target_unit, build_unit_file,
+  validate_service_name};`** so `systemd_user::build_unit_file` etc. keep their
+  public paths (consumed by `specs`/`lib.rs` and the smoke tests).
+- **New [`supervisor/src/systemd_user/builder.rs`](../../../supervisor/src/systemd_user/builder.rs) (478 LOC):**
+  the pure functions (`build_unit_file`, `build_target_unit`, private
+  `quote_if_needed`, `validate_service_name`) + the 3 consts they use
+  (`DEFAULT_TIMEOUT_STOP_SEC`/`DEFAULT_RESTART_SEC`/`MAX_NAME_LEN`) + their inline
+  `#[cfg(test)] mod tests` (23 builder/validator tests, incl. the
+  `unit_file_unchanged_when_ordering_unset` byte-identity pin).
+- **New [`supervisor/src/systemd_user/tests.rs`](../../../supervisor/src/systemd_user/tests.rs) (216 LOC):**
+  the 11 driver tests (install/uninstall/status round-trips against a custom
+  units dir + the 3 ordering-field injection-rejection tests). `minimal_spec` is
+  duplicated here (same convention the launchd split used — the helper is tiny).
+
+**Verification (DGX, native Linux, rustc 1.96.0):** `cargo test --workspace`
+**1327 / 0 / 4** (identical to the `478d025` baseline; zero `[SKIP]` — bwrap
+integration tests ran for real); supervisor lib 59 unit tests pass;
+`systemd_user_smoke` + `target_smoke` (native systemd) green;
+`cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0.
+
+---
+
+## Recently completed (2026-06-06 — `gliner_relex.rs` production split, item 9b, branch `refactor/gliner-relex-prod-split`, PR [#189](https://github.com/hherb/hhagent/pull/189) MERGED, on the DGX Spark)
 
 Full detail in the header block above. In brief: the 921-LOC monolith (tests
 already lifted, so a clean test-lift no longer landed it under cap) became a
@@ -316,12 +361,12 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) shipped this session** (branch `feat/hhagent-target-bring-up`, PR to open). The next Phase-0 supervisor line is **Option K — cross-platform exponential restart backoff** (ROADMAP:61; design note below); the `ServiceSpec.after`/`part_of` precedent shows the additive-field pattern it would follow. The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190, `main` at `478d025`). The next Phase-0 supervisor line is **Option K — cross-platform exponential restart backoff** (ROADMAP:61; design note below); the `ServiceSpec.after`/`part_of` precedent shows the additive-field pattern it would follow. The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
 - **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): `sandbox/src/macos_seatbelt.rs` (604, test mod at L331) — the last clean one remaining. (`recall.rs`, `l0_seed.rs`, `capture.rs`, `inner_loop.rs`, `replay.rs` already done — see Earlier history.)
-- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `supervisor/src/systemd_user.rs` (**~1000** — grew +200 this session adding the native-target path; now the most over-cap and a clean prod-split candidate: lift `build_unit_file`/`build_target_unit`/`quote_if_needed` + their tests into `systemd_user/builder.rs`, keep the driver in the parent), `core/src/cli_audit.rs` (958), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `db/secrets.rs` (848), `core/src/scheduler/runner.rs` (773), `core/src/main.rs` (527, just over; almost no inline tests). (`gliner_relex.rs` done — MERGED PR #189.)
+- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, now the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `db/secrets.rs` (848, a clean prod-split candidate), `core/src/scheduler/runner.rs` (773), `core/src/main.rs` (527, just over; almost no inline tests). (`systemd_user.rs` done — see Recently completed; `gliner_relex.rs` done — MERGED PR #189.)
 - **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851).
 
 **Engineering pickups (need a spec/design first):**
