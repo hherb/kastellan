@@ -13,12 +13,12 @@
 use std::sync::{Arc, OnceLock};
 
 use hhagent_protocol::client::ClientError as ProtocolClientError;
+use sqlx::PgPool;
 
 use super::wire::{ExtractRequest, ExtractResponse};
 use crate::scheduler::ToolEntry;
 use crate::tool_host::{self, ToolHostError};
 use crate::worker_lifecycle::WorkerLifecycleManager;
-use sqlx::PgPool;
 
 /// Typed client wrapping [`crate::tool_host::dispatch`] for the
 /// gliner-relex worker's `extract` method.
