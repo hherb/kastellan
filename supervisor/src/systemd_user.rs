@@ -91,6 +91,16 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
     // [Unit] section.
     out.push_str("[Unit]\n");
     out.push_str(&format!("Description=hhagent service: {}\n", spec.name));
+    // Ordering: one After= per dependency. systemd only *orders* against
+    // units present in the same start transaction — harmless if absent.
+    for dep in &spec.after {
+        out.push_str(&format!("After={dep}.service\n"));
+    }
+    // PartOf binds this unit's stop/restart to the target's: `systemctl
+    // stop <target>.target` propagates to PartOf members.
+    if let Some(target) = &spec.part_of {
+        out.push_str(&format!("PartOf={target}.target\n"));
+    }
     out.push('\n');
 
     // [Service] section.
@@ -142,7 +152,12 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
     // ever wants it. We don't enable by default — that's a separate
     // policy decision.
     out.push_str("[Install]\n");
-    out.push_str("WantedBy=default.target\n");
+    // A target member is wanted by its target; a standalone service is
+    // wanted by default.target so `enable` starts it at login.
+    match &spec.part_of {
+        Some(target) => out.push_str(&format!("WantedBy={target}.target\n")),
+        None => out.push_str("WantedBy=default.target\n"),
+    }
 
     out
 }
@@ -796,5 +811,27 @@ mod tests {
         let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
         let s = sup.status("never-installed").expect("status");
         assert_eq!(s, ServiceStatus::NotInstalled);
+    }
+
+    #[test]
+    fn unit_file_emits_after_and_part_of_when_set() {
+        let mut spec = minimal_spec("hhagent-core");
+        spec.after = vec!["hhagent-postgres".into()];
+        spec.part_of = Some("hhagent".into());
+        let body = build_unit_file(&spec);
+        assert!(body.contains("After=hhagent-postgres.service\n"), "{body}");
+        assert!(body.contains("PartOf=hhagent.target\n"), "{body}");
+        assert!(body.contains("WantedBy=hhagent.target\n"), "{body}");
+        assert!(!body.contains("WantedBy=default.target\n"), "target member must not target default.target: {body}");
+    }
+
+    #[test]
+    fn unit_file_unchanged_when_ordering_unset() {
+        // The behaviour-preserving pin: a spec with no ordering emits
+        // neither After= nor PartOf=, and keeps WantedBy=default.target.
+        let body = build_unit_file(&minimal_spec("svc"));
+        assert!(!body.contains("After="), "{body}");
+        assert!(!body.contains("PartOf="), "{body}");
+        assert!(body.contains("WantedBy=default.target\n"), "{body}");
     }
 }
