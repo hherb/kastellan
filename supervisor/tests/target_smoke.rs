@@ -43,7 +43,6 @@ const SLEEP_BIN: &str = "/usr/bin/sleep";
 #[cfg(target_os = "macos")]
 const SLEEP_BIN: &str = "/bin/sleep";
 
-#[allow(dead_code)]
 fn wait_for(
     sup: &dyn Supervisor,
     name: &str,
@@ -118,6 +117,7 @@ mod linux {
 
         sup.stop_target(&target).expect("stop_target");
         wait_for(&sup, &core, ServiceStatus::Inactive, Duration::from_secs(5)).expect("core inactive");
+        wait_for(&sup, &pg, ServiceStatus::Inactive, Duration::from_secs(5)).expect("pg inactive");
 
         sup.uninstall_target(&target).expect("uninstall_target");
         assert_eq!(sup.status(&pg).unwrap(), ServiceStatus::NotInstalled);
@@ -169,6 +169,8 @@ mod macos {
         wait_for(&sup, &core, ServiceStatus::Active, Duration::from_secs(5)).expect("core active");
 
         sup.stop_target(&target).expect("stop_target");
+        // launchctl bootout is synchronous, so no wait_for poll is needed
+        // here (unlike the systemd path, where stop returns asynchronously).
         sup.uninstall_target(&target).expect("uninstall_target");
         assert_eq!(sup.status(&pg).unwrap(), ServiceStatus::NotInstalled);
         assert_eq!(sup.status(&core).unwrap(), ServiceStatus::NotInstalled);
