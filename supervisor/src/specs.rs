@@ -9,12 +9,13 @@
 //! trivially unit-testable and means a test can synthesize a spec
 //! without filesystem side effects.
 //!
-//! Today this module ships the agent-core daemon spec only. More will
-//! land here as services are added (Postgres, inference router, etc.).
+//! Today this module ships the agent-core and Postgres daemon specs, plus the
+//! `hhagent_target_spec` bundle that ties the canonical services together.
+//! More will land here as services are added (inference router, etc.).
 
 use std::path::Path;
 
-use crate::ServiceSpec;
+use crate::{ServiceSpec, TargetSpec};
 
 /// Canonical name used for the agent-core daemon's unit/agent file.
 ///
@@ -30,6 +31,11 @@ pub const CORE_SERVICE_NAME: &str = "hhagent-core";
 /// Canonical name used for the per-user Postgres daemon's unit/agent
 /// file. Same shape rationale as [`CORE_SERVICE_NAME`].
 pub const POSTGRES_SERVICE_NAME: &str = "hhagent-postgres";
+
+/// Canonical name of the service bundle that brings up the whole agent.
+/// Becomes `hhagent.target` on systemd; on launchd it names the member
+/// set only. Same string on both OSes (see [`CORE_SERVICE_NAME`]).
+pub const HHAGENT_TARGET_NAME: &str = "hhagent";
 
 /// Build a [`ServiceSpec`] for the agent-core daemon (`hhagent`
 /// binary, see `core/src/main.rs`).
@@ -73,6 +79,8 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
         keep_alive: true,
         stdout_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.out"))),
         stderr_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.err"))),
+        after: vec![POSTGRES_SERVICE_NAME.to_string()],
+        part_of: Some(HHAGENT_TARGET_NAME.to_string()),
     }
 }
 
@@ -130,6 +138,27 @@ pub fn postgres_service_spec(
         keep_alive: true,
         stdout_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.out"))),
         stderr_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.err"))),
+        after: vec![],
+        part_of: Some(HHAGENT_TARGET_NAME.to_string()),
+    }
+}
+
+/// Build the canonical [`TargetSpec`] that brings up the whole agent.
+///
+/// Members in **start order**: Postgres first (the dependency leaf),
+/// then core (which must start after Postgres). Inference is **not** a
+/// member — it is an operator-managed external dependency that core's
+/// startup probe health-checks. Workers are **not** members either —
+/// `tool_host` spawns them on demand inside sandboxes when core runs.
+///
+/// Pure: no I/O, same call → same value.
+pub fn hhagent_target_spec() -> TargetSpec {
+    TargetSpec {
+        name: HHAGENT_TARGET_NAME.into(),
+        members: vec![
+            POSTGRES_SERVICE_NAME.into(),
+            CORE_SERVICE_NAME.into(),
+        ],
     }
 }
 
@@ -347,5 +376,36 @@ mod tests {
     #[test]
     fn canonical_service_names_are_distinct() {
         assert_ne!(CORE_SERVICE_NAME, POSTGRES_SERVICE_NAME);
+        assert_ne!(HHAGENT_TARGET_NAME, CORE_SERVICE_NAME);
+        assert_ne!(HHAGENT_TARGET_NAME, POSTGRES_SERVICE_NAME);
+    }
+
+    #[test]
+    fn postgres_spec_belongs_to_target_with_no_dependency() {
+        let spec = postgres_service_spec(
+            Path::new("/usr/lib/postgresql/18/bin/postgres"),
+            Path::new("/var/lib/hhagent/pgdata"),
+            Path::new("/tmp/logs"),
+        );
+        assert!(spec.after.is_empty(), "postgres is the dependency leaf");
+        assert_eq!(spec.part_of.as_deref(), Some(HHAGENT_TARGET_NAME));
+    }
+
+    #[test]
+    fn core_spec_starts_after_postgres_and_belongs_to_target() {
+        let spec = core_service_spec(Path::new("/opt/hhagent/hhagent"), Path::new("/tmp/logs"));
+        assert_eq!(spec.after, vec![POSTGRES_SERVICE_NAME.to_string()]);
+        assert_eq!(spec.part_of.as_deref(), Some(HHAGENT_TARGET_NAME));
+    }
+
+    #[test]
+    fn hhagent_target_lists_postgres_then_core_in_order() {
+        let t = hhagent_target_spec();
+        assert_eq!(t.name, HHAGENT_TARGET_NAME);
+        assert_eq!(
+            t.members,
+            vec![POSTGRES_SERVICE_NAME.to_string(), CORE_SERVICE_NAME.to_string()],
+            "Postgres must precede core (start order)"
+        );
     }
 }

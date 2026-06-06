@@ -79,6 +79,16 @@
 //! both, so a `stop` followed by a `start` re-runs the program from
 //! the persisted plist on disk. This is consistent with the Linux
 //! semantic of "stop preserves the unit file, start re-activates it".
+//!
+//! ### No native ordering — readiness-based bundles
+//!
+//! launchd has no inter-agent ordering and no target/aggregation
+//! concept. The [`crate::Supervisor`] default `*_target` methods install
+//! and start members in declared order, but launchd may still race their
+//! startup. hhagent tolerates this because core fail-closed-restarts
+//! until Postgres is reachable (`KeepAlive=true`), so the bundle
+//! converges regardless of launchd start order. `ServiceSpec.after` and
+//! `ServiceSpec.part_of` are therefore **ignored** by `build_plist`.
 
 use std::fs;
 use std::io::Write;

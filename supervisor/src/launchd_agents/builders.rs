@@ -246,6 +246,8 @@ mod tests {
             keep_alive: false,
             stdout_log: None,
             stderr_log: None,
+            after: vec![],
+            part_of: None,
         }
     }
 
@@ -402,6 +404,8 @@ mod tests {
             keep_alive: false,
             stdout_log: None,
             stderr_log: None,
+            after: vec![],
+            part_of: None,
         };
         let s = build_plist(&spec);
         assert!(s.contains("<string>a&amp;b&lt;c</string>"), "{s}");
@@ -458,6 +462,18 @@ mod tests {
             let err = validate_service_name(n).expect_err(n);
             assert!(matches!(err, SupervisorError::InvalidName(_)), "{n}: {err}");
         }
+    }
+
+    #[test]
+    fn build_plist_ignores_after_and_part_of() {
+        // launchd has no ordering / target concept: setting these fields
+        // must not change the emitted plist. This pins the documented
+        // "ignored on launchd" contract.
+        let base = minimal_spec("hhagent-core");
+        let mut with_ordering = minimal_spec("hhagent-core");
+        with_ordering.after = vec!["hhagent-postgres".into()];
+        with_ordering.part_of = Some("hhagent".into());
+        assert_eq!(build_plist(&base), build_plist(&with_ordering));
     }
 
     // ---------- xml_escape tests ----------

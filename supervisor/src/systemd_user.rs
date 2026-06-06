@@ -27,6 +27,8 @@
 //! ```ini
 //! [Unit]
 //! Description=hhagent service: <name>
+//! After=<dep>.service                   # one line per spec.after entry (omitted when empty)
+//! PartOf=<target>.target                # only when spec.part_of is set
 //!
 //! [Service]
 //! Type=simple
@@ -40,7 +42,7 @@
 //! TimeoutStopSec=10
 //!
 //! [Install]
-//! WantedBy=default.target
+//! WantedBy=<target>.target              # spec.part_of.target when set, else default.target
 //! ```
 //!
 //! Each section's directives are emitted in a deterministic order so the
@@ -51,7 +53,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError};
+use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError, TargetSpec};
 
 /// Default seconds before SIGKILL after SIGTERM on stop.
 ///
@@ -91,6 +93,16 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
     // [Unit] section.
     out.push_str("[Unit]\n");
     out.push_str(&format!("Description=hhagent service: {}\n", spec.name));
+    // Ordering: one After= per dependency. systemd only *orders* against
+    // units present in the same start transaction — harmless if absent.
+    for dep in &spec.after {
+        out.push_str(&format!("After={dep}.service\n"));
+    }
+    // PartOf binds this unit's stop/restart to the target's: `systemctl
+    // stop <target>.target` propagates to PartOf members.
+    if let Some(target) = &spec.part_of {
+        out.push_str(&format!("PartOf={target}.target\n"));
+    }
     out.push('\n');
 
     // [Service] section.
@@ -142,8 +154,41 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
     // ever wants it. We don't enable by default — that's a separate
     // policy decision.
     out.push_str("[Install]\n");
-    out.push_str("WantedBy=default.target\n");
+    // A target member is wanted by its target; a standalone service is
+    // wanted by default.target so `enable` starts it at login.
+    match &spec.part_of {
+        Some(target) => out.push_str(&format!("WantedBy={target}.target\n")),
+        None => out.push_str("WantedBy=default.target\n"),
+    }
 
+    out
+}
+
+/// Build the systemd `.target` unit body for a [`TargetSpec`].
+///
+/// The target `Wants=` all its members, so `systemctl --user start
+/// <name>.target` pulls them in; per-member `After=` lines (emitted by
+/// [`build_unit_file`] from each member's `ServiceSpec.after`) order the
+/// start. We use `Wants=` (soft) rather than `Requires=` so a single
+/// member failing does not tear the whole target down — the agent is
+/// still useful if, say, an optional future member is absent.
+///
+/// Pure: no I/O. Same `TargetSpec` → same body.
+pub fn build_target_unit(target: &TargetSpec) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str("[Unit]\n");
+    out.push_str(&format!("Description=hhagent service bundle: {}\n", target.name));
+    if !target.members.is_empty() {
+        let wants: Vec<String> = target
+            .members
+            .iter()
+            .map(|m| format!("{m}.service"))
+            .collect();
+        out.push_str(&format!("Wants={}\n", wants.join(" ")));
+    }
+    out.push('\n');
+    out.push_str("[Install]\n");
+    out.push_str("WantedBy=default.target\n");
     out
 }
 
@@ -273,6 +318,11 @@ impl SystemdUser {
         self.units_dir.join(format!("{name}.service"))
     }
 
+    /// Path the driver would write `<name>.target` to.
+    pub fn target_path(&self, name: &str) -> PathBuf {
+        self.units_dir.join(format!("{name}.target"))
+    }
+
     /// Run `systemctl --user daemon-reload`, returning a structured
     /// error on non-zero exit.
     fn daemon_reload(&self) -> Result<(), SupervisorError> {
@@ -288,51 +338,7 @@ impl Default for SystemdUser {
 
 impl Supervisor for SystemdUser {
     fn install(&self, spec: &ServiceSpec) -> Result<(), SupervisorError> {
-        validate_service_name(&spec.name)?;
-        // Working dir / log paths must be absolute or systemd refuses
-        // them at unit-load time. Catch this at the host boundary so
-        // we get a structured error instead of a parse failure on
-        // daemon-reload.
-        if let Some(d) = &spec.working_dir {
-            if !d.is_absolute() {
-                return Err(SupervisorError::Io(format!(
-                    "working_dir must be absolute, got {}",
-                    d.display()
-                )));
-            }
-        }
-        if let Some(d) = &spec.stdout_log {
-            if !d.is_absolute() {
-                return Err(SupervisorError::Io(format!(
-                    "stdout_log must be absolute, got {}",
-                    d.display()
-                )));
-            }
-        }
-        if let Some(d) = &spec.stderr_log {
-            if !d.is_absolute() {
-                return Err(SupervisorError::Io(format!(
-                    "stderr_log must be absolute, got {}",
-                    d.display()
-                )));
-            }
-        }
-        // program must be absolute too — systemd refuses relative
-        // ExecStart paths.
-        if !spec.program.is_absolute() {
-            return Err(SupervisorError::Io(format!(
-                "program must be absolute, got {}",
-                spec.program.display()
-            )));
-        }
-
-        fs::create_dir_all(&self.units_dir)
-            .map_err(|e| SupervisorError::Io(format!("create {}: {e}", self.units_dir.display())))?;
-
-        let path = self.unit_path(&spec.name);
-        let body = build_unit_file(spec);
-        write_atomic(&path, body.as_bytes())?;
-
+        self.write_unit_file(spec)?;
         // Only run daemon-reload when we're writing into the real
         // user units dir — pointless otherwise (the live manager
         // doesn't scan custom dirs anyway), and it lets unit tests
@@ -402,9 +408,151 @@ impl Supervisor for SystemdUser {
             _ => ServiceStatus::Inactive,
         })
     }
+
+    /// Install the target the systemd-native way: write each member unit,
+    /// then a `hhagent.target` unit that `Wants=` them.
+    ///
+    /// Overrides the generic-bundle default. Member unit files are written
+    /// in order (inheriting the same name/absolute-path validation as
+    /// [`Supervisor::install`]) with a single `daemon-reload` at the end;
+    /// fail-fast with no rollback — on a mid-loop error, already-written
+    /// member units remain and the `.target` unit is not written.
+    fn install_target(
+        &self,
+        target: &TargetSpec,
+        members: &[ServiceSpec],
+    ) -> Result<(), SupervisorError> {
+        validate_service_name(&target.name)?;
+        // Member names are formatted into the Wants= directive of the target
+        // unit; validate them before writing anything so a crafted name cannot
+        // inject directives.
+        for member in &target.members {
+            validate_service_name(member)?;
+        }
+        // Member units first. `write_unit_file` applies the same
+        // name/absolute-path validation as `install` but skips the per-unit
+        // daemon-reload; we reload once at the end so a multi-member target
+        // costs a single reload, not one per member.
+        for spec in members {
+            self.write_unit_file(spec)?;
+        }
+        // Then the .target unit that Wants= them.
+        // Ensure the units dir exists even when `members` is empty (the
+        // member loop, which also creates it via `write_unit_file`, ran zero
+        // times).
+        fs::create_dir_all(&self.units_dir).map_err(|e| {
+            SupervisorError::Io(format!("create {}: {e}", self.units_dir.display()))
+        })?;
+        let path = self.target_path(&target.name);
+        write_atomic(&path, build_target_unit(target).as_bytes())?;
+        if self.is_default_units_dir() {
+            self.daemon_reload()?;
+        }
+        Ok(())
+    }
+
+    /// Start the native `hhagent.target`; systemd resolves member start
+    /// order from each member unit's `After=`.
+    fn start_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
+        validate_service_name(&target.name)?;
+        // systemd resolves member ordering from each member's After=.
+        run_systemctl_user(&["start", &format!("{}.target", target.name)]).map(|_| ())
+    }
+
+    /// Stop the native `hhagent.target`; the stop propagates to members
+    /// via their `PartOf=`.
+    fn stop_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
+        validate_service_name(&target.name)?;
+        // PartOf= on members propagates the stop to them.
+        run_systemctl_user(&["stop", &format!("{}.target", target.name)]).map(|_| ())
+    }
+
+    /// Tear down the native target: best-effort stop, uninstall members in
+    /// reverse, then remove the `.target` unit file.
+    fn uninstall_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
+        validate_service_name(&target.name)?;
+        // Stop the target (propagates to members via PartOf=), then
+        // remove every member unit and the target unit file.
+        let _ = run_systemctl_user(&["stop", &format!("{}.target", target.name)]);
+        for name in target.members.iter().rev() {
+            // Best-effort: keep tearing down remaining members even if one
+            // member's uninstall errors (e.g. its unit file is already gone).
+            let _ = self.uninstall(name);
+        }
+        let path = self.target_path(&target.name);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| {
+                SupervisorError::Io(format!("remove {}: {e}", path.display()))
+            })?;
+        }
+        if self.is_default_units_dir() {
+            self.daemon_reload()?;
+        }
+        Ok(())
+    }
 }
 
 impl SystemdUser {
+    /// Validate a spec and write its `<name>.service` unit file, **without**
+    /// running `daemon-reload`. Callers that write several units in one
+    /// batch (e.g. [`Supervisor::install_target`]) reload once at the end
+    /// instead of once per unit.
+    fn write_unit_file(&self, spec: &ServiceSpec) -> Result<(), SupervisorError> {
+        validate_service_name(&spec.name)?;
+        // Ordering fields are formatted into unit-file directives, so they
+        // must pass the same name validation as the unit name — otherwise a
+        // crafted value (e.g. containing a newline) could inject directives.
+        for dep in &spec.after {
+            validate_service_name(dep)?;
+        }
+        if let Some(target) = &spec.part_of {
+            validate_service_name(target)?;
+        }
+        // Working dir / log paths must be absolute or systemd refuses
+        // them at unit-load time. Catch this at the host boundary so
+        // we get a structured error instead of a parse failure on
+        // daemon-reload.
+        if let Some(d) = &spec.working_dir {
+            if !d.is_absolute() {
+                return Err(SupervisorError::Io(format!(
+                    "working_dir must be absolute, got {}",
+                    d.display()
+                )));
+            }
+        }
+        if let Some(d) = &spec.stdout_log {
+            if !d.is_absolute() {
+                return Err(SupervisorError::Io(format!(
+                    "stdout_log must be absolute, got {}",
+                    d.display()
+                )));
+            }
+        }
+        if let Some(d) = &spec.stderr_log {
+            if !d.is_absolute() {
+                return Err(SupervisorError::Io(format!(
+                    "stderr_log must be absolute, got {}",
+                    d.display()
+                )));
+            }
+        }
+        // program must be absolute too — systemd refuses relative
+        // ExecStart paths.
+        if !spec.program.is_absolute() {
+            return Err(SupervisorError::Io(format!(
+                "program must be absolute, got {}",
+                spec.program.display()
+            )));
+        }
+
+        fs::create_dir_all(&self.units_dir)
+            .map_err(|e| SupervisorError::Io(format!("create {}: {e}", self.units_dir.display())))?;
+
+        let path = self.unit_path(&spec.name);
+        let body = build_unit_file(spec);
+        write_atomic(&path, body.as_bytes())
+    }
+
     /// True iff the driver writes into the canonical
     /// `~/.config/systemd/user/` location. Used to decide whether
     /// `daemon-reload` makes sense — for custom dirs (tests) it
@@ -515,6 +663,8 @@ mod tests {
             keep_alive: false,
             stdout_log: None,
             stderr_log: None,
+            after: vec![],
+            part_of: None,
         }
     }
 
@@ -794,5 +944,126 @@ mod tests {
         let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
         let s = sup.status("never-installed").expect("status");
         assert_eq!(s, ServiceStatus::NotInstalled);
+    }
+
+    #[test]
+    fn unit_file_emits_after_and_part_of_when_set() {
+        let mut spec = minimal_spec("hhagent-core");
+        spec.after = vec!["hhagent-postgres".into()];
+        spec.part_of = Some("hhagent".into());
+        let body = build_unit_file(&spec);
+        assert!(body.contains("After=hhagent-postgres.service\n"), "{body}");
+        assert!(body.contains("PartOf=hhagent.target\n"), "{body}");
+        assert!(body.contains("WantedBy=hhagent.target\n"), "{body}");
+        assert!(!body.contains("WantedBy=default.target\n"), "target member must not target default.target: {body}");
+    }
+
+    #[test]
+    fn unit_file_unchanged_when_ordering_unset() {
+        // The behaviour-preserving pin: a spec with no ordering emits
+        // neither After= nor PartOf=, and keeps WantedBy=default.target.
+        let body = build_unit_file(&minimal_spec("svc"));
+        assert!(!body.contains("After="), "{body}");
+        assert!(!body.contains("PartOf="), "{body}");
+        assert!(body.contains("WantedBy=default.target\n"), "{body}");
+    }
+
+    #[test]
+    fn target_unit_wants_all_members() {
+        let t = TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        };
+        let body = build_target_unit(&t);
+        assert!(body.starts_with("[Unit]\n"), "{body}");
+        assert!(
+            body.contains("Wants=hhagent-postgres.service hhagent-core.service\n"),
+            "{body}"
+        );
+        assert!(body.contains("[Install]\nWantedBy=default.target\n"), "{body}");
+    }
+
+    // ---------- ordering-field injection rejection tests ----------
+
+    #[test]
+    fn install_rejects_after_entry_with_injection() {
+        let dir = TestRoot::new("inject-after");
+        let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+        let mut spec = minimal_spec("hhagent-core");
+        spec.program = std::path::PathBuf::from("/bin/true");
+        spec.after = vec!["pg\n[Service]\nExecStart=/bin/evil".into()];
+        let err = sup.install(&spec).unwrap_err();
+        assert!(matches!(err, SupervisorError::InvalidName(_)), "{err:?}");
+        // No unit file should have been written.
+        assert!(!dir.path().join("hhagent-core.service").exists());
+    }
+
+    #[test]
+    fn install_rejects_part_of_with_injection() {
+        let dir = TestRoot::new("inject-partof");
+        let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+        let mut spec = minimal_spec("hhagent-core");
+        spec.program = std::path::PathBuf::from("/bin/true");
+        spec.part_of = Some("hhagent\nWantedBy=evil.target".into());
+        let err = sup.install(&spec).unwrap_err();
+        assert!(matches!(err, SupervisorError::InvalidName(_)), "{err:?}");
+        assert!(!dir.path().join("hhagent-core.service").exists());
+    }
+
+    #[test]
+    fn install_target_rejects_member_with_injection() {
+        let dir = TestRoot::new("inject-member");
+        let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+        let target = TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["pg\nExecStart=/bin/evil".into()],
+        };
+        // members slice can be empty here — the target-name/members validation
+        // must fire before any member install.
+        let err = sup.install_target(&target, &[]).unwrap_err();
+        assert!(matches!(err, SupervisorError::InvalidName(_)), "{err:?}");
+        assert!(!dir.path().join("hhagent.target").exists());
+    }
+
+    #[test]
+    fn install_target_writes_target_unit_and_members_into_units_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "hhagent-target-unit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sup = SystemdUser::with_units_dir(dir.clone());
+
+        let mut pg = minimal_spec("hhagent-postgres");
+        pg.program = std::path::PathBuf::from("/usr/lib/postgresql/18/bin/postgres");
+        pg.part_of = Some("hhagent".into());
+        let mut core = minimal_spec("hhagent-core");
+        core.program = std::path::PathBuf::from("/opt/hhagent/hhagent");
+        core.after = vec!["hhagent-postgres".into()];
+        core.part_of = Some("hhagent".into());
+
+        let target = TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        };
+        sup.install_target(&target, &[pg, core]).expect("install_target");
+
+        // Target unit written with Wants= of both members.
+        let target_body =
+            std::fs::read_to_string(dir.join("hhagent.target")).expect("target file");
+        assert!(
+            target_body.contains("Wants=hhagent-postgres.service hhagent-core.service\n"),
+            "{target_body}"
+        );
+        // Member units written, core ordered After= postgres.
+        assert!(dir.join("hhagent-postgres.service").exists());
+        let core_body =
+            std::fs::read_to_string(dir.join("hhagent-core.service")).expect("core file");
+        assert!(core_body.contains("After=hhagent-postgres.service\n"), "{core_body}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
