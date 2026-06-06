@@ -6,11 +6,11 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-06 (`systemd_user.rs` prod-split, item 9b-b; PR to open).
+**Last updated:** 2026-06-06 (`systemd_user.rs` prod-split, item 9b-b; PR [#191](https://github.com/hherb/hhagent/pull/191)).
 
 **Current state.** `main` is at `478d025`. This session shipped the
 **`systemd_user.rs` production split** (item 9b-b) on branch
-**`refactor/systemd-user-prod-split`** (PR to open) — the 1069-LOC file (the most
+**`refactor/systemd-user-prod-split`** (PR [#191](https://github.com/hherb/hhagent/pull/191)) — the 1069-LOC file (the most
 over-cap in the tree after the `hhagent.target` slice) became a 427-LOC driver
 parent + sibling `systemd_user/builder.rs` (478, pure builders + their tests) +
 `systemd_user/tests.rs` (216, driver tests), mirroring the `launchd_agents.rs`
@@ -170,7 +170,7 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 
 ---
 
-## Recently completed (2026-06-06 — `systemd_user.rs` production split, item 9b-b, branch `refactor/systemd-user-prod-split`, PR to open, on the DGX Spark)
+## Recently completed (2026-06-06 — `systemd_user.rs` production split, item 9b-b, branch `refactor/systemd-user-prod-split`, PR [#191](https://github.com/hherb/hhagent/pull/191), on the DGX Spark)
 
 **What & why.** `supervisor/src/systemd_user.rs` was the most over-cap file in
 the tree (**1069 LOC** — the `hhagent.target` slice added ~200). A test-lift
