@@ -6,9 +6,11 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-06 (gliner_relex prod-split; reconcile: #188 merged).
+**Last updated:** 2026-06-06 (gliner_relex prod-split MERGED as PR #189; reconcile).
 
-**Current state.** `main` is at `50f7fde` — the **`memory/recall.rs` test-lift
+**Current state.** `main` is at `cdadea1` — the **`gliner_relex.rs`
+production-split is MERGED** (PR [#189](https://github.com/hherb/hhagent/pull/189);
+facade + 5 siblings, behaviour-preserving), the **`memory/recall.rs` test-lift
 is MERGED** (PR [#188](https://github.com/hherb/hhagent/pull/188); recall.rs
 622 → 406 LOC, behaviour-preserving) and **worker manifest plumbing (item 11)
 is MERGED** (PR [#187](https://github.com/hherb/hhagent/pull/187), `2e3d0c5`).
@@ -16,7 +18,7 @@ The L3 invocation arc (crystallise → approve → pin → autonomous invoke →
 operator run, all daemon-side) **remains COMPLETE end-to-end on `main`**
 (PR #186, #179 CLOSED).
 
-**This session shipped a production file-split (item 9b):**
+**The gliner_relex production file-split (item 9b) — MERGED as PR #189:**
 `core/src/workers/gliner_relex.rs` (921 LOC, over cap — tests already lifted,
 so a clean test-lift no longer suffices) split into a thin re-export **facade
 (51 LOC)** plus five cohesive siblings, all under cap:
@@ -41,17 +43,20 @@ macOS (only `container_mode_entry` names it) for a warning-free Linux build.
 Branch `refactor/gliner-relex-prod-split` (this session; PR to open at session
 end). **File-size residual:** `gliner_relex/tests.rs` is 851 LOC (was 842;
 +9 imports) — a separate over-cap *test* file split candidate, untouched here
-to keep the PR focused.
+to keep the PR focused. Branch `refactor/gliner-relex-prod-split` is merged and
+safe to `git branch -d`.
 
-**Next-session reconcile — DONE this session.** PR #188 (recall test-lift) was
-merged before this session opened; the stale "main at `2e3d0c5` / recall PR to
-open" header has been corrected to `50f7fde`. No outstanding branch cleanup
-(a stale ~3-week-old worktree `chore/issues-batch-2026-05-14` was noted but
-left as-is — unmerged exploratory work, not this session's concern).
+**Next-session reconcile — DONE.** PR #189 (gliner_relex prod-split) was merged
+(`cdadea1`) before this session opened; the stale "main at `50f7fde` / PR to
+open at session end" header has been corrected to `cdadea1` / MERGED. No
+outstanding branch cleanup (a stale ~3-week-old worktree
+`chore/issues-batch-2026-05-14` was noted but left as-is — unmerged exploratory
+work, not this session's concern).
 
 **Session-end verification (DGX Spark, native Linux, rustc 1.96.0, on
-`refactor/gliner-relex-prod-split`):** `cargo test --workspace` **1311 / 0 / 4**
-(unchanged from `main` at `50f7fde` — behaviour-preserving; 4 `[SKIP]` = the
+`refactor/gliner-relex-prod-split` pre-merge):** `cargo test --workspace`
+**1311 / 0 / 4** (unchanged from `main` at `50f7fde` — behaviour-preserving;
+4 `[SKIP]` = the
 documented GLiNER-Relex real-model gating on `HHAGENT_GLINER_RELEX_ENABLE=1`;
 **no sandbox-containment skips** — bwrap integration tests ran for real, so this
 is a genuine green); `cargo clippy --workspace --all-targets --locked -- -D
