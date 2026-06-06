@@ -64,7 +64,8 @@ pub struct ServiceSpec {
     /// equivalent guarantee comes from each service's own readiness
     /// behaviour (core fail-closed-restarts until Postgres is reachable).
     /// Default empty: a spec that sets nothing here emits exactly today's
-    /// unit file (see `build_unit_file`'s behaviour-preserving test).
+    /// unit file — `build_unit_file` only adds ordering directives when
+    /// this is non-empty.
     #[serde(default)]
     pub after: Vec<String>,
     /// The target bundle this service belongs to, if any. When `Some`,
@@ -215,7 +216,7 @@ impl Supervisor for NotYetImplemented {
 }
 
 #[cfg(test)]
-mod target_spec_tests {
+mod spec_ordering_tests {
     use super::*;
 
     #[test]
@@ -229,19 +230,20 @@ mod target_spec_tests {
     }
 
     #[test]
-    fn service_spec_ordering_fields_default_empty() {
-        let s = ServiceSpec {
-            name: "svc".into(),
-            program: std::path::PathBuf::from("/bin/true"),
-            args: vec![],
-            env: vec![],
-            working_dir: None,
-            keep_alive: false,
-            stdout_log: None,
-            stderr_log: None,
-            after: vec![],
-            part_of: None,
-        };
+    fn service_spec_ordering_fields_default_when_absent() {
+        // Proves #[serde(default)] supplies empty/None when the JSON omits
+        // the new ordering fields — i.e. an old serialised spec still loads.
+        let json = r#"{
+            "name": "svc",
+            "program": "/bin/true",
+            "args": [],
+            "env": [],
+            "working_dir": null,
+            "keep_alive": false,
+            "stdout_log": null,
+            "stderr_log": null
+        }"#;
+        let s: ServiceSpec = serde_json::from_str(json).expect("deserialize without ordering fields");
         assert!(s.after.is_empty());
         assert!(s.part_of.is_none());
     }
