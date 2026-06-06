@@ -53,7 +53,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError};
+use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError, TargetSpec};
 
 /// Default seconds before SIGKILL after SIGTERM on stop.
 ///
@@ -174,7 +174,7 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
 /// still useful if, say, an optional future member is absent.
 ///
 /// Pure: no I/O. Same `TargetSpec` → same body.
-pub fn build_target_unit(target: &crate::TargetSpec) -> String {
+pub fn build_target_unit(target: &TargetSpec) -> String {
     let mut out = String::with_capacity(256);
     out.push_str("[Unit]\n");
     out.push_str(&format!("Description=hhagent service bundle: {}\n", target.name));
@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn target_unit_wants_all_members() {
-        let t = crate::TargetSpec {
+        let t = TargetSpec {
             name: "hhagent".into(),
             members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
         };
