@@ -57,7 +57,7 @@ items unlock later ones.
 - [x] Linux `systemd --user` unit generator + `systemctl --user` driver (`supervisor/src/systemd_user.rs`) — 2026-05-10
 - [x] macOS LaunchAgent plist generator + `launchctl bootstrap` driver (`supervisor/src/launchd_agents.rs`) — 2026-05-08
 - [x] Core daemon `ServiceSpec` (`specs::core_service_spec`) + cross-OS `default_probe()` + e2e against the real binary — 2026-05-09
-- [ ] `hhagent.target` that brings up Postgres, inference, core, workers
+- [x] `hhagent.target` that brings up Postgres + core — native systemd `.target` (Linux) / readiness-based bundle (macOS); inference is an external health-checked dependency, workers are core-owned (spawned on demand). `TargetSpec` + `Supervisor::{install,start,stop,uninstall}_target` + `specs::hhagent_target_spec()`; `ServiceSpec.after`/`part_of` ordering fields; gated `target_smoke` e2e ran live against `systemctl --user` — branch `feat/hhagent-target-bring-up`, 2026-06-06
 - [ ] Auto-restart with backoff on worker crash. **Partial:** `keep_alive=true` → `Restart=on-failure RestartSec=5` (constant) / `KeepAlive=true`; daemon blocks on SIGTERM/SIGINT. **Still TODO:** cross-platform exponential backoff (systemd 252+ `RestartSteps`/`RestartMaxDelaySec`; macOS launchd `KeepAlive` has no operator-controllable throttle, so this needs a per-OS shape).
 
 ## Phase 0 cont. — Postgres bring-up
