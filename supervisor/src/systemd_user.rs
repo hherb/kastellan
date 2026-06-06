@@ -453,6 +453,13 @@ impl Supervisor for SystemdUser {
         })
     }
 
+    /// Install the target the systemd-native way: write each member unit,
+    /// then a `hhagent.target` unit that `Wants=` them.
+    ///
+    /// Overrides the generic-bundle default. Members install in order via
+    /// [`Supervisor::install`] (inheriting absolute-path validation);
+    /// fail-fast with no rollback — on a mid-loop error, already-written
+    /// member units remain and the `.target` unit is not written.
     fn install_target(
         &self,
         target: &TargetSpec,
@@ -464,6 +471,8 @@ impl Supervisor for SystemdUser {
             self.install(spec)?;
         }
         // Then the .target unit that Wants= them.
+        // Ensure the units dir exists even when `members` is empty (the
+        // member loop, which also creates it via `install`, ran zero times).
         fs::create_dir_all(&self.units_dir).map_err(|e| {
             SupervisorError::Io(format!("create {}: {e}", self.units_dir.display()))
         })?;
@@ -475,24 +484,32 @@ impl Supervisor for SystemdUser {
         Ok(())
     }
 
+    /// Start the native `hhagent.target`; systemd resolves member start
+    /// order from each member unit's `After=`.
     fn start_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         validate_service_name(&target.name)?;
         // systemd resolves member ordering from each member's After=.
         run_systemctl_user(&["start", &format!("{}.target", target.name)]).map(|_| ())
     }
 
+    /// Stop the native `hhagent.target`; the stop propagates to members
+    /// via their `PartOf=`.
     fn stop_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         validate_service_name(&target.name)?;
         // PartOf= on members propagates the stop to them.
         run_systemctl_user(&["stop", &format!("{}.target", target.name)]).map(|_| ())
     }
 
+    /// Tear down the native target: best-effort stop, uninstall members in
+    /// reverse, then remove the `.target` unit file.
     fn uninstall_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         validate_service_name(&target.name)?;
         // Stop the target (propagates to members via PartOf=), then
         // remove every member unit and the target unit file.
         let _ = run_systemctl_user(&["stop", &format!("{}.target", target.name)]);
         for name in target.members.iter().rev() {
+            // Best-effort: keep tearing down remaining members even if one
+            // member's uninstall errors (e.g. its unit file is already gone).
             let _ = self.uninstall(name);
         }
         let path = self.target_path(&target.name);
