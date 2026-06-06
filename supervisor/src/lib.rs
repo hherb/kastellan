@@ -138,6 +138,55 @@ pub trait Supervisor {
     fn stop(&self, name: &str) -> Result<(), SupervisorError>;
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError>;
     fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError>;
+
+    /// Install every member of a [`TargetSpec`] (the generic bundle).
+    ///
+    /// Default implementation installs each member spec in order. The
+    /// systemd backend overrides this to additionally write a native
+    /// `.target` unit. The macOS/launchd backend uses this default —
+    /// there is no target file on launchd.
+    fn install_target(
+        &self,
+        _target: &TargetSpec,
+        members: &[ServiceSpec],
+    ) -> Result<(), SupervisorError> {
+        for spec in members {
+            self.install(spec)?;
+        }
+        Ok(())
+    }
+
+    /// Start every member in `target.members` order (dependencies first).
+    ///
+    /// Default implementation starts each member sequentially. There is
+    /// **no explicit readiness wait** — on launchd, inter-service
+    /// ordering is not enforced and correctness relies on each service's
+    /// own readiness behaviour (core fail-closed-restarts until Postgres
+    /// is reachable). The systemd backend overrides this to `systemctl
+    /// start <name>.target`, letting systemd resolve ordering from
+    /// `After=`.
+    fn start_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
+        for name in &target.members {
+            self.start(name)?;
+        }
+        Ok(())
+    }
+
+    /// Stop every member in **reverse** `target.members` order.
+    fn stop_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
+        for name in target.members.iter().rev() {
+            self.stop(name)?;
+        }
+        Ok(())
+    }
+
+    /// Uninstall every member in **reverse** order.
+    fn uninstall_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
+        for name in target.members.iter().rev() {
+            self.uninstall(name)?;
+        }
+        Ok(())
+    }
 }
 
 /// Pick the default supervisor for the current OS.
@@ -212,6 +261,89 @@ impl Supervisor for NotYetImplemented {
     }
     fn status(&self, _: &str) -> Result<ServiceStatus, SupervisorError> {
         Err(SupervisorError::NotImplemented("status — Phase 0 work item"))
+    }
+}
+
+#[cfg(test)]
+mod default_target_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordingSupervisor {
+        calls: RefCell<Vec<String>>,
+    }
+    impl Supervisor for RecordingSupervisor {
+        fn install(&self, spec: &ServiceSpec) -> Result<(), SupervisorError> {
+            self.calls.borrow_mut().push(format!("install:{}", spec.name));
+            Ok(())
+        }
+        fn start(&self, name: &str) -> Result<(), SupervisorError> {
+            self.calls.borrow_mut().push(format!("start:{name}"));
+            Ok(())
+        }
+        fn stop(&self, name: &str) -> Result<(), SupervisorError> {
+            self.calls.borrow_mut().push(format!("stop:{name}"));
+            Ok(())
+        }
+        fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
+            self.calls.borrow_mut().push(format!("uninstall:{name}"));
+            Ok(())
+        }
+        fn status(&self, _name: &str) -> Result<ServiceStatus, SupervisorError> {
+            Ok(ServiceStatus::Active)
+        }
+    }
+
+    fn spec(name: &str) -> ServiceSpec {
+        ServiceSpec {
+            name: name.into(),
+            program: std::path::PathBuf::from("/bin/true"),
+            args: vec![],
+            env: vec![],
+            working_dir: None,
+            keep_alive: true,
+            stdout_log: None,
+            stderr_log: None,
+            after: vec![],
+            part_of: Some("hhagent".into()),
+        }
+    }
+
+    #[test]
+    fn default_bundle_installs_then_starts_in_member_order() {
+        let sup = RecordingSupervisor::default();
+        let target = TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        };
+        let members = [spec("hhagent-postgres"), spec("hhagent-core")];
+        sup.install_target(&target, &members).unwrap();
+        sup.start_target(&target).unwrap();
+        let calls = sup.calls.borrow().clone();
+        assert_eq!(
+            calls,
+            vec![
+                "install:hhagent-postgres",
+                "install:hhagent-core",
+                "start:hhagent-postgres",
+                "start:hhagent-core",
+            ]
+        );
+    }
+
+    #[test]
+    fn default_bundle_stops_in_reverse_member_order() {
+        let sup = RecordingSupervisor::default();
+        let target = TargetSpec {
+            name: "hhagent".into(),
+            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        };
+        sup.stop_target(&target).unwrap();
+        assert_eq!(
+            sup.calls.borrow().clone(),
+            vec!["stop:hhagent-core", "stop:hhagent-postgres"]
+        );
     }
 }
 
