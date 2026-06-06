@@ -27,6 +27,8 @@
 //! ```ini
 //! [Unit]
 //! Description=hhagent service: <name>
+//! After=<dep>.service                   # one line per spec.after entry (omitted when empty)
+//! PartOf=<target>.target                # only when spec.part_of is set
 //!
 //! [Service]
 //! Type=simple
@@ -40,7 +42,7 @@
 //! TimeoutStopSec=10
 //!
 //! [Install]
-//! WantedBy=default.target
+//! WantedBy=<target>.target              # spec.part_of.target when set, else default.target
 //! ```
 //!
 //! Each section's directives are emitted in a deterministic order so the
