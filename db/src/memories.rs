@@ -68,8 +68,8 @@ pub use search::{
     semantic_search,
 };
 pub use write::{
-    delete_memory_at_layer, insert_memory, insert_memory_at_layer, link_memory_to_entities,
-    seed_meta_memory, set_skill_trust,
+    delete_memory_at_layer, insert_memory, insert_memory_at_layer, insert_memory_light,
+    link_memory_to_entities, seed_meta_memory, set_skill_trust,
 };
 
 /// Required dimensionality of every embedding written to `memories`.

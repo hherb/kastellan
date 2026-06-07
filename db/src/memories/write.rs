@@ -160,6 +160,51 @@ where
     insert_row_at_layer_unchecked(executor, body, metadata, embedding, layer).await
 }
 
+/// Insert a memory row **without** an embedding — the "light" write path
+/// for high-frequency, ephemeral data (channel inbound, browser
+/// observations, screen capture) that would never be a useful
+/// semantic-search target. Skipping the embed call is the whole point;
+/// there is deliberately no `embedding` parameter.
+///
+/// A thin named delegate to [`insert_memory_at_layer`] with
+/// `embedding = None` — so it inherits the same single insert chokepoint
+/// and the same **L0 ([`MemoryLayer::Meta`]) rejection**
+/// ([`DbError::PolicyViolation`]; L0 writes must go through
+/// [`seed_meta_memory`]). The value-add is the intent-signalling name,
+/// exactly like [`seed_meta_memory`] is a named pass-through.
+///
+/// # Recall degradation contract
+///
+/// A light-written row has `embedding IS NULL` and (by caller contract)
+/// no `memory_entities` links — entity extraction is a `core`-side step
+/// the light path skips. Therefore:
+///
+/// - **Lexical lane** (full-text on `body`) — works normally; never
+///   touches `embedding`.
+/// - **`metadata @>` containment** — works normally; embedding-free.
+/// - **Semantic lane** — silently skips the row: `semantic_search`
+///   filters `WHERE embedding IS NOT NULL`, so a NULL-embedding row
+///   degrades gracefully rather than erroring.
+/// - **Graph lane** — never surfaces it: with no `memory_entities`
+///   links, the 1-hop entity expansion finds nothing.
+///
+/// This is graceful degradation, not breakage: the row stays retrievable
+/// by the two embedding-free lanes.
+///
+/// `executor` is generic over `sqlx::Executor` so the same helper works
+/// against `&PgPool` (production) and `&mut PgConnection` (test setup).
+pub async fn insert_memory_light<'e, E>(
+    executor: E,
+    body: &str,
+    metadata: &serde_json::Value,
+    layer: MemoryLayer,
+) -> Result<i64, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    insert_memory_at_layer(executor, body, metadata, None, layer).await
+}
+
 /// Delete one row from `memories` by id, but **only** if its layer
 /// matches `layer`. Returns `true` if a row was deleted; `false` if
 /// no row matched (id absent or layer mismatch).
@@ -285,4 +330,44 @@ where
     .map_err(|e| DbError::Query(format!("insert memory at layer {layer:?}: {e}")))?;
     row.try_get::<i64, _>(0)
         .map_err(|e| DbError::Query(format!("decode memory.id: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `insert_memory_light` rejects L0 (`MemoryLayer::Meta`) with the
+    /// same `PolicyViolation` as the chokepoint it delegates to. The guard
+    /// short-circuits **before any SQL**, so this needs no live database:
+    /// a lazily-constructed pool that never opens a connection is enough.
+    /// This pins the policy guard on every dev machine — the PG-required
+    /// e2e test only runs where `HHAGENT_PG_BIN_DIR` is configured (the
+    /// macOS skip-as-pass posture skips it), and the guard is the one
+    /// security-relevant behaviour of the light path.
+    #[tokio::test]
+    async fn insert_memory_light_rejects_l0_without_pg() {
+        // `connect_lazy` parses the URL but opens no connection until the
+        // first query — which the L0 guard short-circuits past, keeping
+        // this test genuinely PG-free.
+        let pool = sqlx::postgres::PgPool::connect_lazy(
+            "postgres://invalid:invalid@127.0.0.1:1/nonexistent",
+        )
+        .expect("lazy pool construction does not connect");
+
+        let rejected = insert_memory_light(
+            &pool,
+            "l0 via light path (forbidden)",
+            &serde_json::json!({}),
+            MemoryLayer::Meta,
+        )
+        .await;
+
+        match rejected {
+            Err(DbError::PolicyViolation(msg)) => assert!(
+                msg.contains("L0") && msg.contains("seed_meta_memory"),
+                "PolicyViolation must name L0 and the admin path; got: {msg}"
+            ),
+            other => panic!("expected DbError::PolicyViolation, got {other:?}"),
+        }
+    }
 }

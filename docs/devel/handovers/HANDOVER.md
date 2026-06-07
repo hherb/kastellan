@@ -6,12 +6,33 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-07 (Option K — cross-platform exponential restart backoff, ROADMAP:61, branch `feat/restart-backoff`, PR [#194](https://github.com/hherb/hhagent/pull/194); on macOS).
+**Last updated:** 2026-06-07 (Memory two-tier write path — `insert_memory_light`, ROADMAP:130, branch `feat/memory-light-write-path`, PR [#195](https://github.com/hherb/hhagent/pull/195) **OPEN**; on macOS).
 
-**Current state.** `main` is at `5efae52` (PR [#193](https://github.com/hherb/hhagent/pull/193) three clean test-lifts **MERGED**; PR [#192](https://github.com/hherb/hhagent/pull/192) `macos_seatbelt.rs` test-lift **MERGED**). This session is on
-branch **`feat/restart-backoff`** at `ee9099f`, PR [#194](https://github.com/hherb/hhagent/pull/194) **OPEN**. Dev box on **macOS**.
-This session shipped **Option K — cross-platform exponential restart backoff**
-(ROADMAP:61, ticked):
+**Current state.** `main` is at `3c9f70d` (PR [#194](https://github.com/hherb/hhagent/pull/194) Option K restart
+backoff **MERGED**; PR [#193](https://github.com/hherb/hhagent/pull/193) three clean test-lifts **MERGED**).
+This session is on branch **`feat/memory-light-write-path`** at the docs commit below, PR
+[#195](https://github.com/hherb/hhagent/pull/195) **OPEN**. Dev box on **macOS**. This session shipped
+**ROADMAP:130 — `insert_memory_light`**, the "light" half of the two-tier memory write path:
+- `db::memories::insert_memory_light(executor, body, metadata, layer)` — a thin named delegate to
+  `insert_memory_at_layer` with `embedding = None`; no new SQL, no migration. Inherits the L0
+  (`MemoryLayer::Meta`) `PolicyViolation` guard for free.
+- Documents the recall **degradation contract**: lexical lane + `metadata @>` containment work
+  normally; semantic lane silently skips the row (`semantic_search` filters `WHERE embedding IS NOT
+  NULL`); graph lane never surfaces it (no `memory_entities` links).
+- Two PG-required tests (round-trip + L0 rejection; cross-lane degradation pin) verified **passing
+  against live PG** (Postgres.app v18).
+- **Review-fix:** added a PG-free unit test (`insert_memory_light_rejects_l0_without_pg`, in
+  `write.rs`) pinning the L0 `PolicyViolation` guard via a lazy pool that never connects — the guard
+  short-circuits before any SQL, so it now has coverage on every dev machine, not only where live PG
+  is configured.
+
+**Deferred (per spec):** core-side caller wiring; per-namespace caps + oldest-eviction. Graph-lane
+degradation is asserted by construction but not yet exercised in a test (heavier — needs
+`link_memory_to_entities` + `graph_search`); tracked as
+[#196](https://github.com/hherb/hhagent/issues/196).
+
+**Prior session shipped** Option K — cross-platform exponential restart backoff
+(ROADMAP:61, ticked, PR #194 MERGED):
 - New `ServiceSpec.restart_backoff: Option<RestartBackoff { max_delay_sec, steps }>`
   in `hhagent-supervisor` — additive, `#[serde(default)]`, `None` reproduces today's
   constant-`RestartSec=5` output byte-for-byte (same precedent as `after`/`part_of`).
@@ -32,14 +53,19 @@ Recent merged history: three clean test-lifts (PR #193); `macos_seatbelt.rs` tes
 (PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker manifest plumbing
 item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
-**Session-end verification (macOS, on `feat/restart-backoff` at `ee9099f`):**
-`cargo test --workspace` **all suites `ok`, 0 failed** (macOS skip-as-pass; supervisor
-unit 65, +7 new restart-backoff tests over baseline); `cargo clippy --workspace
---all-targets --locked -- -D warnings` exit 0. The Linux-gated systemd builder code +
-its lifted tests were verified to **compile + clippy-clean** via the
-`aarch64-unknown-linux-gnu` cross-target (the pure-Rust supervisor crate cross-`check`s
-on the Mac without a linker — unlike `core`); the systemd tests themselves only *run*
-on Linux (DGX/CI).
+**Session-end verification (macOS, on `feat/memory-light-write-path`):**
+`cargo clippy -p hhagent-db --all-targets --locked -- -D warnings` exit 0;
+`db/src/memories/write.rs` 373 LOC (under cap, +40 for the review-fix unit-test module). All
+three light-path tests run **against live PG** (Postgres.app v18 via session-local
+`HHAGENT_PG_BIN_DIR=/Applications/Postgres 2.app/...`): the new PG-free
+`insert_memory_light_rejects_l0_without_pg` unit test passes, and the two e2e tests
+(`insert_memory_light_round_trip_and_rejects_l0`,
+`insert_memory_light_degrades_gracefully_across_lanes`) pass in 2.11s of real cluster bring-up. **Known macOS test-infra gotcha (not a
+regression):** a *full-workspace* run under `HHAGENT_PG_BIN_DIR` flakes 4 tests in
+`core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs:249/314`) —
+parallel `initdb`/launchd churn (issue #130 territory); they pass single-threaded and in
+isolation. Use skip-as-pass for the whole workspace on the Mac; run live-PG suites
+individually or on the DGX.
 
 **Recently merged (safe to `git branch -d` if still local):**
 `refactor/gliner-relex-prod-split` (PR #189), `refactor/recall-test-module-lift`
@@ -82,7 +108,7 @@ The current native-Linux test baseline is **1327 / 0 / 4**
 ```
 hhagent (Rust workspace, 9 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue + screen + extract_scannable_text), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS + pure assemble_registry + async build_tool_registry(pool, exe_dir))
-├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
+├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, insert_memory_at_layer, insert_memory_light (embedding-skipping light write path), semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads HHAGENT_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
 ├── sandbox            hhagent-sandbox: SandboxPolicy + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
 ├── supervisor         hhagent-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, hhagent_target_spec} + default_probe. ServiceSpec carries after/part_of ordering + optional restart_backoff (RestartBackoff{max_delay_sec,steps}: systemd → RestartSteps/RestartMaxDelaySec, launchd → warn-and-ignore); TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native hhagent.target unit). Names screened by validate_service_name before unit-file write
@@ -132,6 +158,50 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 ```
 
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile that lets `bwrap` create unprivileged user namespaces is already installed on the user's DGX Spark. Other Linux hosts may need `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses `sandbox-exec` (no setup needed).
+
+---
+
+## Recently completed (2026-06-07 — `insert_memory_light`, ROADMAP:130, branch `feat/memory-light-write-path`, PR [#195](https://github.com/hherb/hhagent/pull/195) OPEN, on macOS)
+
+**What & why.** The "light" half of openhuman's two-tier memory write path
+(`put_doc` vs `put_doc_light`). Today every `memories` row is written with a
+caller-computed embedding; for *future* high-frequency ephemeral writers
+(channel inbound, browser observations, screen capture) that would never be
+useful semantic-search targets, embedding every row wastes the expensive embed
+call. This adds the deliberately-named embedding-skipping writer.
+Design + plan: [`docs/devel/specs/2026-06-07-memory-light-write-path-design.md`](../specs/2026-06-07-memory-light-write-path-design.md),
+[`docs/devel/plans/2026-06-07-memory-light-write-path.md`](../plans/2026-06-07-memory-light-write-path.md).
+
+**What shipped (3 code commits `39a036a`..`6e7eb13`, all in `hhagent-db`):**
+- **`db::memories::insert_memory_light(executor, body, metadata, layer)`**
+  (`write.rs`) — a thin named delegate to `insert_memory_at_layer` with
+  `embedding = None`. No `embedding` parameter (skipping it is the point); no new
+  SQL, no migration. Inherits the L0 (`MemoryLayer::Meta`) `PolicyViolation` guard
+  for free, preserving the "grep `seed_meta_memory` = every L0 write" invariant.
+  Re-exported from the parent `memories` module.
+- **Documented degradation contract** on the function: lexical lane + `metadata @>`
+  containment work normally; semantic lane silently skips the row (`semantic_search`
+  filters `WHERE embedding IS NOT NULL`); graph lane never surfaces it (no
+  `memory_entities` links). Graceful degradation, not breakage.
+- **Two PG-required tests** (`db/tests/postgres_e2e.rs`):
+  `insert_memory_light_round_trip_and_rejects_l0` (NULL embedding + correct layer;
+  L0 rejected; no L0 leak) and `insert_memory_light_degrades_gracefully_across_lanes`
+  (light row absent from `semantic_search`, present via lexical + `metadata @>`, with
+  an embedded control row proving the semantic lane is live). Verified **passing
+  against live PG**.
+- **One PG-free unit test** (`write.rs`, review-fix): `insert_memory_light_rejects_l0_without_pg`
+  pins the L0 `PolicyViolation` guard with a lazy pool that never connects — the guard
+  short-circuits before any SQL, so the policy now has coverage on every dev machine.
+
+**Reviews:** spec-compliance ✅ (exact signature, thin body, 3 files, no scope creep);
+code-quality "approved with minor fixes" — applied the test-cluster-label rename
+(`mlight-*`/`mdegrad-*`, commit `6e7eb13`) for readability; kept the degradation-contract
+rustdoc (deliberate, spec-mandated API doc). **`/review` follow-up:** added the PG-free L0
+unit test above (review flagged the guard had no coverage under macOS skip-as-pass); graph-lane
+test gap lodged as [#196](https://github.com/hherb/hhagent/issues/196).
+
+**Deferred (per spec):** core-side caller wiring; per-namespace caps + oldest-eviction;
+a graph-lane degradation test.
 
 ---
 
@@ -296,7 +366,9 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190). **Option K — restart backoff (ROADMAP:61) shipped** this session (branch `feat/restart-backoff`, PR [#194](https://github.com/hherb/hhagent/pull/194)). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190). **Option K — restart backoff (ROADMAP:61) MERGED** (PR #194). **Memory two-tier write path (ROADMAP:130 — `insert_memory_light`) shipped** this session (branch `feat/memory-light-write-path`, PR [#195](https://github.com/hherb/hhagent/pull/195)). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+
+**Natural follow-ups to this session (ROADMAP:130):** core-side caller wiring for `insert_memory_light` (lands when the first high-frequency writer does — Phase 2 channels / Phase 3 browser); per-namespace caps + oldest-eviction on `memories.metadata` (no schema change); a graph-lane degradation test (`link_memory_to_entities` + `graph_search` to exercise the now-documented-but-untested graph degradation — tracked as [#196](https://github.com/hherb/hhagent/issues/196)).
 
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 

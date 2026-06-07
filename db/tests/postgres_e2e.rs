@@ -1798,6 +1798,210 @@ async fn insert_memory_at_layer_round_trip() {
     pool.close().await;
 }
 
+/// `insert_memory_light` persists a row with a NULL embedding at the
+/// requested non-L0 layer, and inherits the L0 (Meta) PolicyViolation
+/// guard from `insert_memory_at_layer`. The rejection short-circuits
+/// before any SQL, so it is exercised on the same pool to avoid a
+/// second cluster — same pattern as `insert_memory_at_layer_round_trip`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn insert_memory_light_round_trip_and_rejects_l0() {
+    use hhagent_db::memories::{insert_memory_light, MemoryLayer};
+    use hhagent_tests_common::{
+        bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
+    };
+
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "mlight-d",
+        "mlight-l",
+        &format!("hhagent-pg-mlight-round-trip-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "memory-light-round-trip"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    // Happy path: light insert at L2 (Stable) returns an id; the row has
+    // a NULL embedding and the requested layer.
+    let id = insert_memory_light(
+        &pool,
+        "light ephemeral row",
+        &serde_json::json!({"ns": "observations"}),
+        MemoryLayer::Stable,
+    )
+    .await
+    .expect("insert_memory_light");
+
+    // `layer` is a SMALLINT column, so decode it as i16 (not i32).
+    let (embedding_is_null, layer): (bool, i16) =
+        sqlx::query_as("SELECT embedding IS NULL, layer FROM memories WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch light row");
+    assert!(
+        embedding_is_null,
+        "insert_memory_light must persist a NULL embedding"
+    );
+    assert_eq!(layer, 2, "light row must land at the requested layer (L2)");
+
+    // Policy: L0 (Meta) is rejected, inherited from insert_memory_at_layer.
+    let rejected = insert_memory_light(
+        &pool,
+        "l0 via light path (forbidden)",
+        &serde_json::json!({}),
+        MemoryLayer::Meta,
+    )
+    .await;
+    match rejected {
+        Err(hhagent_db::DbError::PolicyViolation(msg)) => {
+            assert!(
+                msg.contains("L0") && msg.contains("seed_meta_memory"),
+                "PolicyViolation must name L0 and the admin path; got: {msg}"
+            );
+        }
+        Err(other) => panic!("expected DbError::PolicyViolation, got {other:?}"),
+        Ok(leaked) => panic!("L0 light write must be rejected; got id {leaked}"),
+    }
+
+    let l0_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE layer = 0")
+        .fetch_one(&pool)
+        .await
+        .expect("count L0 rows");
+    assert_eq!(
+        l0_count, 0,
+        "rejected L0 light write must not leak a row into memories"
+    );
+
+    pool.close().await;
+}
+
+/// Degradation contract: a light-written (NULL-embedding) row is absent
+/// from `semantic_search` results yet present via the lexical lane and a
+/// `metadata @>` containment query. Pins the spec's degradation table on
+/// real rows. An embedded control row proves the semantic lane is
+/// actually returning results (so the light row's absence is meaningful,
+/// not an empty query).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn insert_memory_light_degrades_gracefully_across_lanes() {
+    use hhagent_db::memories::{
+        insert_memory_at_layer, insert_memory_light, lexical_search, semantic_search,
+        MemoryLayer, EMBEDDING_DIM,
+    };
+    use hhagent_tests_common::{
+        bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
+    };
+
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "mdegrad-d",
+        "mdegrad-l",
+        &format!("hhagent-pg-mlight-degrade-{suffix}"),
+    );
+
+    hhagent_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "memory-light-degrade"}),
+    )
+    .await
+    .expect("probe");
+
+    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("pool");
+
+    // A full-dimension query/control vector, reused for the embedded
+    // control row and the semantic query. `.as_slice()` is explicit so
+    // the `Option<&[f32]>` / `&[f32]` parameter types are unambiguous.
+    let query_vec = vec![0.1f32; EMBEDDING_DIM];
+
+    // An embedded control row (so semantic_search returns something).
+    let embedded_id = insert_memory_at_layer(
+        &pool,
+        "embedded control row",
+        &serde_json::json!({"ns": "control"}),
+        Some(query_vec.as_slice()),
+        MemoryLayer::Stable,
+    )
+    .await
+    .expect("insert embedded control");
+
+    // The light row carries a distinctive lexeme + namespace metadata.
+    let light_id = insert_memory_light(
+        &pool,
+        "zqxwv distinctive lexeme payload",
+        &serde_json::json!({"ns": "observations"}),
+        MemoryLayer::Stable,
+    )
+    .await
+    .expect("insert_memory_light");
+
+    // Semantic lane: light row never appears (NULL embedding filtered);
+    // the embedded control row does.
+    let semantic = semantic_search(&pool, query_vec.as_slice(), 10)
+        .await
+        .expect("semantic_search");
+    assert!(
+        !semantic.contains(&light_id),
+        "NULL-embedding light row must not appear in semantic_search"
+    );
+    assert!(
+        semantic.contains(&embedded_id),
+        "embedded control row must appear in semantic_search (lane is live)"
+    );
+
+    // Lexical lane: the distinctive lexeme surfaces the light row.
+    let lexical = lexical_search(&pool, "zqxwv", 10)
+        .await
+        .expect("lexical_search");
+    assert!(
+        lexical.contains(&light_id),
+        "light row must be retrievable via the lexical lane"
+    );
+
+    // metadata @> containment: the namespace selector surfaces it.
+    let meta_hits: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM memories WHERE metadata @> $1::jsonb",
+    )
+    .bind(serde_json::json!({"ns": "observations"}))
+    .fetch_all(&pool)
+    .await
+    .expect("metadata containment query");
+    assert!(
+        meta_hits.contains(&light_id),
+        "light row must be retrievable via a metadata @> containment query"
+    );
+
+    pool.close().await;
+}
+
 /// The deleted_memories AFTER DELETE trigger (migrations 0008 + 0014)
 /// must carry the `layer` column into the audit row so post-deletion
 /// forensics can tell whether a deleted row was a load-bearing L1
