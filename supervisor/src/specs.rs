@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use crate::{ServiceSpec, TargetSpec};
+use crate::{RestartBackoff, ServiceSpec, TargetSpec};
 
 /// Canonical name used for the agent-core daemon's unit/agent file.
 ///
@@ -69,6 +69,12 @@ pub const HHAGENT_TARGET_NAME: &str = "hhagent";
 ///   `stop` still ends the process for good). The regression test
 ///   ([`tests::core_service_spec_keep_alive_is_true`]) pins today's
 ///   value so a regression can't sneak in unnoticed.
+/// - `restart_backoff` is `Some({ max_delay_sec: 300, steps: 8 })`: on
+///   systemd a crash-looping daemon ramps the restart delay
+///   `RestartSec=5` → `RestartMaxDelaySec=300` over `RestartSteps=8`
+///   instead of hammering every 5 s; on launchd this is warned-and-ignored
+///   (no equivalent knob). Pinned by
+///   [`tests::core_service_spec_carries_expected_backoff_curve`].
 pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
     ServiceSpec {
         name: CORE_SERVICE_NAME.into(),
@@ -81,7 +87,7 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
         stderr_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.err"))),
         after: vec![POSTGRES_SERVICE_NAME.to_string()],
         part_of: Some(HHAGENT_TARGET_NAME.to_string()),
-        restart_backoff: None,
+        restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
     }
 }
 
@@ -123,6 +129,11 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
 ///   we restart, a clean stop via SIGTERM does not). On launchd this
 ///   is `KeepAlive=true` (same intent; `bootout` removes the agent
 ///   from the domain entirely so `stop` still ends the process).
+/// - **`restart_backoff = Some({ max_delay_sec: 300, steps: 8 })`** — on
+///   systemd a crash-looping cluster ramps `RestartSec=5` →
+///   `RestartMaxDelaySec=300` over `RestartSteps=8` rather than respawning
+///   every 5 s; on launchd this is warned-and-ignored (no equivalent knob).
+///   Pinned by [`tests::postgres_service_spec_carries_expected_backoff_curve`].
 ///
 /// Pure: no I/O, no env probing. Same call → same spec every time.
 pub fn postgres_service_spec(
@@ -141,7 +152,7 @@ pub fn postgres_service_spec(
         stderr_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.err"))),
         after: vec![],
         part_of: Some(HHAGENT_TARGET_NAME.to_string()),
-        restart_backoff: None,
+        restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
     }
 }
 
@@ -408,6 +419,31 @@ mod tests {
             t.members,
             vec![POSTGRES_SERVICE_NAME.to_string(), CORE_SERVICE_NAME.to_string()],
             "Postgres must precede core (start order)"
+        );
+    }
+
+    #[test]
+    fn core_service_spec_carries_expected_backoff_curve() {
+        let spec = core_service_spec(
+            Path::new("/usr/local/bin/hhagent"),
+            Path::new("/tmp"),
+        );
+        assert_eq!(
+            spec.restart_backoff,
+            Some(RestartBackoff { max_delay_sec: 300, steps: 8 })
+        );
+    }
+
+    #[test]
+    fn postgres_service_spec_carries_expected_backoff_curve() {
+        let spec = postgres_service_spec(
+            Path::new("/usr/lib/postgresql/18/bin/postgres"),
+            Path::new("/d"),
+            Path::new("/tmp"),
+        );
+        assert_eq!(
+            spec.restart_backoff,
+            Some(RestartBackoff { max_delay_sec: 300, steps: 8 })
         );
     }
 }
