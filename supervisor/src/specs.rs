@@ -81,6 +81,7 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
         stderr_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.err"))),
         after: vec![POSTGRES_SERVICE_NAME.to_string()],
         part_of: Some(HHAGENT_TARGET_NAME.to_string()),
+        restart_backoff: None,
     }
 }
 
@@ -140,6 +141,7 @@ pub fn postgres_service_spec(
         stderr_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.err"))),
         after: vec![],
         part_of: Some(HHAGENT_TARGET_NAME.to_string()),
+        restart_backoff: None,
     }
 }
 

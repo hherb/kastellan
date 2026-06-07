@@ -264,6 +264,7 @@ mod tests {
             stderr_log: None,
             after: vec![],
             part_of: None,
+            restart_backoff: None,
         }
     }
 

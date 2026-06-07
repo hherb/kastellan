@@ -120,6 +120,7 @@ fn install_start_status_stop_uninstall_round_trip() {
         stderr_log: None,
         after: vec![],
         part_of: None,
+        restart_backoff: None,
     };
 
     sup.install(&spec).expect("install");

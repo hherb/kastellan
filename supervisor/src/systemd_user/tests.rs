@@ -28,6 +28,7 @@ fn minimal_spec(name: &str) -> ServiceSpec {
         stderr_log: None,
         after: vec![],
         part_of: None,
+        restart_backoff: None,
     }
 }
 

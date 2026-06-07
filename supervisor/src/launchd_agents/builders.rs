@@ -248,6 +248,7 @@ mod tests {
             stderr_log: None,
             after: vec![],
             part_of: None,
+            restart_backoff: None,
         }
     }
 
@@ -406,6 +407,7 @@ mod tests {
             stderr_log: None,
             after: vec![],
             part_of: None,
+            restart_backoff: None,
         };
         let s = build_plist(&spec);
         assert!(s.contains("<string>a&amp;b&lt;c</string>"), "{s}");
