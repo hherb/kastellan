@@ -467,6 +467,20 @@ mod tests {
     }
 
     #[test]
+    fn build_plist_identical_with_and_without_backoff() {
+        let mut spec = minimal_spec("svc");
+        spec.keep_alive = true;
+        let without = build_plist(&spec);
+        spec.restart_backoff =
+            Some(crate::RestartBackoff { max_delay_sec: 300, steps: 8 });
+        let with = build_plist(&spec);
+        assert_eq!(
+            without, with,
+            "launchd plist must not change when restart_backoff is set"
+        );
+    }
+
+    #[test]
     fn build_plist_ignores_after_and_part_of() {
         // launchd has no ordering / target concept: setting these fields
         // must not change the emitted plist. This pins the documented
