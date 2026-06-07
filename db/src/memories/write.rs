@@ -331,3 +331,43 @@ where
     row.try_get::<i64, _>(0)
         .map_err(|e| DbError::Query(format!("decode memory.id: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `insert_memory_light` rejects L0 (`MemoryLayer::Meta`) with the
+    /// same `PolicyViolation` as the chokepoint it delegates to. The guard
+    /// short-circuits **before any SQL**, so this needs no live database:
+    /// a lazily-constructed pool that never opens a connection is enough.
+    /// This pins the policy guard on every dev machine — the PG-required
+    /// e2e test only runs where `HHAGENT_PG_BIN_DIR` is configured (the
+    /// macOS skip-as-pass posture skips it), and the guard is the one
+    /// security-relevant behaviour of the light path.
+    #[tokio::test]
+    async fn insert_memory_light_rejects_l0_without_pg() {
+        // `connect_lazy` parses the URL but opens no connection until the
+        // first query — which the L0 guard short-circuits past, keeping
+        // this test genuinely PG-free.
+        let pool = sqlx::postgres::PgPool::connect_lazy(
+            "postgres://invalid:invalid@127.0.0.1:1/nonexistent",
+        )
+        .expect("lazy pool construction does not connect");
+
+        let rejected = insert_memory_light(
+            &pool,
+            "l0 via light path (forbidden)",
+            &serde_json::json!({}),
+            MemoryLayer::Meta,
+        )
+        .await;
+
+        match rejected {
+            Err(DbError::PolicyViolation(msg)) => assert!(
+                msg.contains("L0") && msg.contains("seed_meta_memory"),
+                "PolicyViolation must name L0 and the admin path; got: {msg}"
+            ),
+            other => panic!("expected DbError::PolicyViolation, got {other:?}"),
+        }
+    }
+}

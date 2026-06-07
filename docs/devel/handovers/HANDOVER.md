@@ -20,11 +20,16 @@ This session is on branch **`feat/memory-light-write-path`** at the docs commit 
   normally; semantic lane silently skips the row (`semantic_search` filters `WHERE embedding IS NOT
   NULL`); graph lane never surfaces it (no `memory_entities` links).
 - Two PG-required tests (round-trip + L0 rejection; cross-lane degradation pin) verified **passing
-  against live PG**.
+  against live PG** (Postgres.app v18).
+- **Review-fix:** added a PG-free unit test (`insert_memory_light_rejects_l0_without_pg`, in
+  `write.rs`) pinning the L0 `PolicyViolation` guard via a lazy pool that never connects — the guard
+  short-circuits before any SQL, so it now has coverage on every dev machine, not only where live PG
+  is configured.
 
 **Deferred (per spec):** core-side caller wiring; per-namespace caps + oldest-eviction. Graph-lane
 degradation is asserted by construction but not yet exercised in a test (heavier — needs
-`link_memory_to_entities` + `graph_search`).
+`link_memory_to_entities` + `graph_search`); tracked as
+[#196](https://github.com/hherb/hhagent/issues/196).
 
 **Prior session shipped** Option K — cross-platform exponential restart backoff
 (ROADMAP:61, ticked, PR #194 MERGED):
@@ -49,11 +54,13 @@ Recent merged history: three clean test-lifts (PR #193); `macos_seatbelt.rs` tes
 item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
 **Session-end verification (macOS, on `feat/memory-light-write-path`):**
-`cargo test --workspace` **1356 passed / 0 failed / 3 ignored** (skip-as-pass posture, no
-`HHAGENT_PG_BIN_DIR`); `cargo clippy --workspace --all-targets --locked -- -D warnings`
-exit 0; `db/src/memories/write.rs` 333 LOC (under cap). The two new PG-required tests were
-additionally run **against live PG** (Postgres.app v18 via session-local
-`HHAGENT_PG_BIN_DIR`) and pass in isolation. **Known macOS test-infra gotcha (not a
+`cargo clippy -p hhagent-db --all-targets --locked -- -D warnings` exit 0;
+`db/src/memories/write.rs` 373 LOC (under cap, +40 for the review-fix unit-test module). All
+three light-path tests run **against live PG** (Postgres.app v18 via session-local
+`HHAGENT_PG_BIN_DIR=/Applications/Postgres 2.app/...`): the new PG-free
+`insert_memory_light_rejects_l0_without_pg` unit test passes, and the two e2e tests
+(`insert_memory_light_round_trip_and_rejects_l0`,
+`insert_memory_light_degrades_gracefully_across_lanes`) pass in 2.11s of real cluster bring-up. **Known macOS test-infra gotcha (not a
 regression):** a *full-workspace* run under `HHAGENT_PG_BIN_DIR` flakes 4 tests in
 `core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs:249/314`) —
 parallel `initdb`/launchd churn (issue #130 territory); they pass single-threaded and in
@@ -182,11 +189,16 @@ Design + plan: [`docs/devel/specs/2026-06-07-memory-light-write-path-design.md`]
   (light row absent from `semantic_search`, present via lexical + `metadata @>`, with
   an embedded control row proving the semantic lane is live). Verified **passing
   against live PG**.
+- **One PG-free unit test** (`write.rs`, review-fix): `insert_memory_light_rejects_l0_without_pg`
+  pins the L0 `PolicyViolation` guard with a lazy pool that never connects — the guard
+  short-circuits before any SQL, so the policy now has coverage on every dev machine.
 
 **Reviews:** spec-compliance ✅ (exact signature, thin body, 3 files, no scope creep);
 code-quality "approved with minor fixes" — applied the test-cluster-label rename
 (`mlight-*`/`mdegrad-*`, commit `6e7eb13`) for readability; kept the degradation-contract
-rustdoc (deliberate, spec-mandated API doc); graph-lane test gap noted as a follow-up.
+rustdoc (deliberate, spec-mandated API doc). **`/review` follow-up:** added the PG-free L0
+unit test above (review flagged the guard had no coverage under macOS skip-as-pass); graph-lane
+test gap lodged as [#196](https://github.com/hherb/hhagent/issues/196).
 
 **Deferred (per spec):** core-side caller wiring; per-namespace caps + oldest-eviction;
 a graph-lane degradation test.
@@ -356,7 +368,7 @@ sessions 2026-05-06 → 2026-05-09 in
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190). **Option K — restart backoff (ROADMAP:61) MERGED** (PR #194). **Memory two-tier write path (ROADMAP:130 — `insert_memory_light`) shipped** this session (branch `feat/memory-light-write-path`, PR [#195](https://github.com/hherb/hhagent/pull/195)). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**Natural follow-ups to this session (ROADMAP:130):** core-side caller wiring for `insert_memory_light` (lands when the first high-frequency writer does — Phase 2 channels / Phase 3 browser); per-namespace caps + oldest-eviction on `memories.metadata` (no schema change); a graph-lane degradation test (`link_memory_to_entities` + `graph_search` to exercise the now-documented-but-untested graph degradation).
+**Natural follow-ups to this session (ROADMAP:130):** core-side caller wiring for `insert_memory_light` (lands when the first high-frequency writer does — Phase 2 channels / Phase 3 browser); per-namespace caps + oldest-eviction on `memories.metadata` (no schema change); a graph-lane degradation test (`link_memory_to_entities` + `graph_search` to exercise the now-documented-but-untested graph degradation — tracked as [#196](https://github.com/hherb/hhagent/issues/196)).
 
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
