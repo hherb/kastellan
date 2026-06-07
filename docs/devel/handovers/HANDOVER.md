@@ -6,11 +6,20 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-06 (`systemd_user.rs` prod-split, item 9b-b; PR [#191](https://github.com/hherb/hhagent/pull/191)).
+**Last updated:** 2026-06-07 (`macos_seatbelt.rs` test-lift, item 9b-a, branch `refactor/macos-seatbelt-test-lift`; back on macOS).
 
-**Current state.** `main` is at `478d025`. This session shipped the
-**`systemd_user.rs` production split** (item 9b-b) on branch
-**`refactor/systemd-user-prod-split`** (PR [#191](https://github.com/hherb/hhagent/pull/191)) — the 1069-LOC file (the most
+**Current state.** `main` is at `7ea967c`; this session is on branch
+**`refactor/macos-seatbelt-test-lift`** at `9513cda`. Dev box switched back to
+**macOS**. This session shipped the **`macos_seatbelt.rs` test-lift** — the last
+clean over-cap test-lift (item 9b-a): the inline `#[cfg(test)] mod tests` block
+moved verbatim into a new sibling `sandbox/src/macos_seatbelt/tests.rs` (281 LOC,
+one-level de-indent); the parent declares `#[cfg(test)] mod tests;` and drops
+**604 → 332 LOC** (under cap). Production region byte-identical to HEAD;
+behaviour-preserving. macOS skip-as-pass baseline **1350 / 0 / 3** (unchanged;
+real `macos_smoke`/`macos_container_smoke` integration suites ran live). The
+prior session's **`systemd_user.rs` production split** (item 9b-b,
+PR [#191](https://github.com/hherb/hhagent/pull/191)) is **MERGED**. The
+systemd_user split — the 1069-LOC file (the most
 over-cap in the tree after the `hhagent.target` slice) became a 427-LOC driver
 parent + sibling `systemd_user/builder.rs` (478, pure builders + their tests) +
 `systemd_user/tests.rs` (216, driver tests), mirroring the `launchd_agents.rs`
@@ -170,6 +179,30 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 
 ---
 
+## Recently completed (2026-06-07 — `macos_seatbelt.rs` test-lift, item 9b-a, branch `refactor/macos-seatbelt-test-lift`, on macOS)
+
+**What & why.** The **last clean over-cap test-lift** in the tree (item 9b-a):
+`sandbox/src/macos_seatbelt.rs` was 604 LOC with its inline `#[cfg(test)] mod
+tests` block at L331. Lifting it alone lands the parent under the 500-LOC cap.
+Mirrors the `capture.rs` / `recall.rs` / `l0_seed.rs` precedent exactly.
+
+**What shipped (2 files):**
+- **`sandbox/src/macos_seatbelt.rs` (604 → 332 LOC):** production region L1-329
+  **byte-identical to HEAD**; the inline test block replaced by `#[cfg(test)]
+  mod tests;`.
+- **New [`sandbox/src/macos_seatbelt/tests.rs`](../../../sandbox/src/macos_seatbelt/tests.rs) (281 LOC):**
+  the 16 unit tests lifted verbatim, de-indented one level, with a `//!` header.
+  `use super::*;` resolves identically (child module sees the parent's private
+  `canonicalize_policy_paths` + the `use crate::{...}` imports).
+
+**Verification (macOS, sandbox-exec live):** `cargo test --workspace` **1350 / 0
+/ 3** (unchanged baseline); sandbox crate 57 unit tests + 10 real `macos_smoke`
++ 9 `macos_container_smoke` all green; `cargo clippy -p hhagent-sandbox
+--all-targets --locked -- -D warnings` exit 0. Body/production byte-fidelity
+confirmed via `diff` against HEAD.
+
+---
+
 ## Recently completed (2026-06-06 — `systemd_user.rs` production split, item 9b-b, branch `refactor/systemd-user-prod-split`, PR [#191](https://github.com/hherb/hhagent/pull/191), on the DGX Spark)
 
 **What & why.** `supervisor/src/systemd_user.rs` was the most over-cap file in
@@ -250,39 +283,6 @@ declares itself, and a production binary-discovery convention. Brainstorm → sp
 
 ---
 
-## Recently completed (prior session, 2026-06-05 — #179 Opt-3 daemon reroute of `memory l3 run`, branch `fix/issue-179-l3-run-daemon-reroute`, PR [#186](https://github.com/hherb/hhagent/pull/186) MERGED to `main` at `67bc474`, #179 CLOSED, on the DGX Spark)
-
-**Issue [#179](https://github.com/hherb/hhagent/issues/179) — the operator `run` CLI → daemon reroute (Opt-3 structural fix).** Brainstorm → spec → plan → 6-task subagent-driven development (each task spec+quality reviewed = APPROVED) → final whole-branch review (opus) = **MERGE-READY** (all 7 security invariants PASS; zero Critical/Important).
-
-**The problem:** `memory l3 run` rebuilt the tool registry **in-process from the operator's env**; a shell lacking the daemon's `HHAGENT_SHELL_EXEC_BIN` refused a validly-approved skill ("tool 'shell-exec' not in registry"). Fail-safe, but a usability cliff. The env-dependence is intrinsic to the CLI-spawns-in-process model — only daemon-side execution removes it.
-
-**The fix (Opt-3):** `run` now enqueues an `l3_run` task and the daemon executes it against its single live `ToolRegistry`. **Key reframe:** the "daemon command channel" the deferral imagined need not be a new IPC socket — the existing Postgres `tasks` queue + `LISTEN/NOTIFY` (the channel `ask` already uses) IS the operator→daemon command channel, so `run` is just its second user, zero new infrastructure.
-
-**What shipped:**
-- **`InvokeReport` is serde-able** ([`l3_invoke/operator.rs`](../../../core/src/memory/l3_invoke/operator.rs)) — written into `tasks.result` by the daemon, read back by the CLI (no parallel DTO).
-- **New module [`core/src/scheduler/l3_run.rs`](../../../core/src/scheduler/l3_run.rs)** (185 LOC): pure `is_l3_run_payload`/`parse_l3_run_payload` + async `run_l3_run_task(pool, dispatcher, payload)` which loads the L3 row (layer-guard, trust/template/body_sha256 extraction mirroring the old CLI path) and calls the **existing** `invoke_l3` with `dispatcher.known_tools()` as the live tool set — the TOCTOU close now against the daemon's authoritative registry.
-- **`drain_lane` routing** ([`scheduler/runner.rs`](../../../core/src/scheduler/runner.rs)): after the running lifecycle row, `kind=="l3_run"` ⇒ run the handler → `finalize(completed, serialized InvokeReport)` → terminal lifecycle row → `continue` (skips `run_one` + the agent-task hooks: finalize-summary, L1/L3 crystallisation — by design; an operator skill run is not an agent task).
-- **CLI rewrite** ([`memory_l3/run.rs`](../../../core/src/bin/hhagent-cli/memory_l3/run.rs)): keeps `parse_run_argv`; submits the task (`submit_and_audit`, long lane, `actor='cli' task.submitted`); waits via `LISTEN tasks_completed` (LISTEN-before-submit; a Phase-1 grace window detects a missing daemon → cancels the task + errors; a fast-path skips Phase 2 if already terminal; Phase 2 bounded by `HHAGENT_L3_RUN_TIMEOUT_SECS`); reads `task.result` → `InvokeReport` → pure `render_invoke_report` → stdout/stderr + exit code. **Deleted** `DryRunNeverDispatches` + all in-process registry/dispatcher/sandbox construction.
-- **Post-review hardening (`/review` → `/fixall`):** the no-daemon detection no longer treats "still `pending` past grace" as "no daemon" — lanes drain sequentially, so an `l3_run` submitted while the long lane is busy legitimately waits. New DB helper `tasks::any_live_worker` (running task with an *unexpired* lease) distinguishes a *busy* daemon (keep waiting, bounded by the Phase-2 ceiling) from an *absent* one (cancel + error). The no-daemon cancel is now **pending-only** (`tasks::mark_cancelled_if_pending` + `cli_audit::cancel_if_pending_and_audit`): if the daemon claims the task in the probe→cancel race window the cancel no-ops and the CLI waits for the real result instead of orphaning a live `--execute` (closes the cancel-vs-claim TOCTOU).
-- **Deleted the obsolete interim diagnostic** `diagnose_registry_divergence`/`RegistryDivergence` (PR #180) — the divergence case it classified can no longer arise. `registry_build.rs` stays (the daemon uses it).
-- **Audit provenance preserved:** `invoke_l3` still audits `l3.invoked`/`l3.invoke_outcome`/`l3.invoke_rejected` with `actor='cli'` even though steps physically dispatch in the daemon.
-
-**Security invariants (final-review-confirmed, all PASS):** trust gate unchanged (`prepare_invocation`/`invoke_l3` byte-identical — only `user_approved`/`pinned` run, fail-safe trust parse); TOCTOU re-validation now against the live registry (strictly stronger than the old rebuild); `secret://`/arg-value guards intact; `l3_run` is operator-submitted (same DB-write trust boundary as `ask`, no new capability); no-daemon path cancels so a `--execute` directive can't be silently run later; audit trail intact.
-
-**Verification (DGX, native Linux, rustc 1.96.0):** `cargo test --workspace` **1297 / 0 / 4** (zero `[SKIP]`; was 1290 on `main` at `ef01ae3`); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; live-PG + real-daemon e2e [`cli_memory_l3_run_daemon_e2e`](../../../core/tests/cli_memory_l3_run_daemon_e2e.rs) **2/2** + extended `tasks_lifecycle_e2e` §6 (`any_live_worker` + pending-only-cancel mechanics) 1/1; regression `cli_memory_l3_run_e2e` 5/5 + `cli_memory_l3_e2e` 10/10 (was 11; −1 = the deleted divergence scenario). Spec: [`docs/superpowers/specs/2026-06-04-l3-run-daemon-reroute-design.md`](../../superpowers/specs/2026-06-04-l3-run-daemon-reroute-design.md); plan: [`docs/superpowers/plans/2026-06-04-l3-run-daemon-reroute.md`](../../superpowers/plans/2026-06-04-l3-run-daemon-reroute.md). **File-size flag:** `runner.rs` 765 LOC (pre-existing over-cap; this branch added ~47 lines — a future test-lift candidate). **Deferred (noted, not blocking):** Ctrl-C cancel parity with `ask.rs` on the `--execute` wait.
-
----
-
-## Recently completed (prior session, 2026-06-04 — `core/src/observation/capture.rs` over-cap test-module lift + bundled `secret_vault_e2e` `sun_path` fix, branch `refactor/capture-test-module-lift`, PR [#185](https://github.com/hherb/hhagent/pull/185) MERGED to `main` at `ef01ae3`)
-
-Item-9b refactor bucket; operator picked the largest remaining **clean over-cap test-lift**, `capture.rs` (715 LOC). The inline `#[cfg(test)] mod tests` block (L372–715) moved verbatim into a new sibling [`core/src/observation/capture/tests.rs`](../../../core/src/observation/capture/tests.rs) (351 LOC), de-indented one level; the parent declares `#[cfg(test)] mod tests;`. Production region (L1–371) **byte-identical** to HEAD; parent **715 → 373 LOC** (under cap). 27 `observation::capture` unit tests are the regression pin.
-
-**First full native-Linux verification on the DGX in a long while** (prior baselines were macOS): toolchain bumped 1.95.0 → **1.96.0** to match CI; `cargo test --workspace --no-fail-fast` (TMPDIR=/tmp, PG 18.4) = **1290 / 0 / 4**; clippy `--workspace --all-targets -D warnings` exit 0; doc-links **23 = clean-`main` Linux/1.96 baseline** (the macOS figure of 21 differs only by cfg-gated platform modules; `#[cfg(test)]` modules aren't doc-built).
-
-**Bundled fix — `secret_vault_e2e` `sun_path` overflow under the harness `TMPDIR`** (NOT caused by this lift; proven on clean `main`): the Claude harness sets `TMPDIR=/tmp/claude-1000/`; combined with the **doubled** `pid-nanos-pid-nanos` temp-root suffix (open issue [#104](https://github.com/hherb/hhagent/issues/104)) the PG socket path exceeded the 108-byte `sun_path` limit and the `check_socket_path_fits` guard (added in #163) panicked. Root cause: each scenario passed `unique_suffix()` **into** the `data_label`, but `unique_temp_root` already appends its own. Fix (mirrors #163): dropped the redundant `{suffix}` from the data/log labels in [`core/tests/secret_vault_e2e.rs`](../../../core/tests/secret_vault_e2e.rs); now **11/11 under the harness default `TMPDIR`**. #104 (the systemic de-doubling across all callers) stays open.
-
----
-
 ## Earlier history (summary)
 
 One bullet per session, newest first. Full reasoning lives in the archive snapshots:
@@ -293,6 +293,8 @@ sessions 2026-05-10 → 2026-05-29 in
 sessions 2026-05-06 → 2026-05-09 in
 [`archive/handover_20260510_pre-prune.md`](archive/handover_20260510_pre-prune.md).
 
+- **2026-06-05 — #179 Opt-3 daemon reroute of `memory l3 run` (PR [#186](https://github.com/hherb/hhagent/pull/186) at `67bc474`, #179 CLOSED):** `run` now enqueues an `l3_run` task the daemon executes against its single live `ToolRegistry` (the Postgres `tasks` queue + `LISTEN/NOTIFY` IS the operator→daemon command channel — `ask`'s second user, zero new IPC). New `scheduler/l3_run.rs`; `drain_lane` routing; CLI rewrite waits on `tasks_completed` with busy-vs-absent daemon detection (`tasks::any_live_worker`, pending-only cancel). Deleted the interim `diagnose_registry_divergence` (PR #180). TOCTOU re-validation now strictly stronger (live registry); all 7 security invariants PASS. Workspace 1297/0/4.
+- **2026-06-04 — `capture.rs` test-lift + `secret_vault_e2e` `sun_path` fix (PR [#185](https://github.com/hherb/hhagent/pull/185) at `ef01ae3`):** clean over-cap test-lift → `observation/capture/tests.rs`; parent 715 → 373 LOC, production L1–371 byte-identical. Bundled: dropped the redundant doubled `{suffix}` from `secret_vault_e2e` data/log labels (108-byte `sun_path` overflow under the harness `TMPDIR`; #104 systemic sweep stays open). First DGX native-Linux verification in a while; toolchain bumped 1.95→1.96 to match CI; workspace 1290/0/4.
 - **2026-06-04 — `l0_seed.rs` test-lift (PR [#183](https://github.com/hherb/hhagent/pull/183) at `305b927`):** clean over-cap test-lift → `l0_seed/tests.rs`; parent 730 → 462 LOC, behaviour-preserving (production L1–459 byte-identical; 19 unit tests pass from new location).
 - **2026-06-04 — L3 over-cap file splits, the #181 follow-up (PR [#182](https://github.com/hherb/hhagent/pull/182) at `f695a46`):** production-split `l3_invoke.rs` (569 → 38-line facade + `pure`/`operator`/`agent` siblings) and `memory_l3.rs` (692 → 52-line dispatcher + per-subcommand siblings + `shared.rs` approve/pin DRY); all L3 files under the 500-LOC cap, behaviour-preserving (workspace 1319/0/3 unchanged; live PG L3 suites green).
 - **2026-06-03 — #179 interim diagnostic, Approach C (PR [#180](https://github.com/hherb/hhagent/pull/180) at `fdfd0a8`):** pure `diagnose_registry_divergence` classifier + actionable CLI `hint:` for the `Refused` arm (since DELETED by this session's Opt-3 reroute). #179 re-scoped to the Opt-3 structural fix.
@@ -365,7 +367,7 @@ Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 
 
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
-- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): `sandbox/src/macos_seatbelt.rs` (604, test mod at L331) — the last clean one remaining. (`recall.rs`, `l0_seed.rs`, `capture.rs`, `inner_loop.rs`, `replay.rs` already done — see Earlier history.)
+- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none remaining** — `macos_seatbelt.rs` was the last (done 2026-06-07, see Recently completed; `recall.rs`, `l0_seed.rs`, `capture.rs`, `inner_loop.rs`, `replay.rs` already done — see Earlier history). All further over-cap production files now need bucket (b).
 - **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, now the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `db/secrets.rs` (848, a clean prod-split candidate), `core/src/scheduler/runner.rs` (773), `core/src/main.rs` (527, just over; almost no inline tests). (`systemd_user.rs` done — see Recently completed; `gliner_relex.rs` done — MERGED PR #189.)
 - **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851).
 
