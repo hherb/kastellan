@@ -217,6 +217,19 @@ impl Supervisor for LaunchAgents {
             )));
         }
 
+        // launchd has no operator-controllable exponential restart backoff
+        // (its only knob, ThrottleInterval, is a constant floor, not a ramp).
+        // Honour the field by surfacing it, then fall back to KeepAlive's
+        // default — same "degrade with a visible warning" posture as the
+        // `after`/`part_of` fields, which launchd also cannot express.
+        if spec.restart_backoff.is_some() {
+            tracing::warn!(
+                service = %spec.name,
+                "restart_backoff requested but launchd has no equivalent; \
+                 falling back to KeepAlive default"
+            );
+        }
+
         fs::create_dir_all(&self.agents_dir)
             .map_err(|e| SupervisorError::Io(format!("create {}: {e}", self.agents_dir.display())))?;
 

@@ -6,34 +6,40 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-07 (three clean test-lifts batch, item 9b-a, branch `refactor/clean-test-lifts-batch`; on macOS).
+**Last updated:** 2026-06-07 (Option K — cross-platform exponential restart backoff, ROADMAP:61, branch `feat/restart-backoff`, PR [#194](https://github.com/hherb/hhagent/pull/194); on macOS).
 
-**Current state.** `main` is at `a97d137` (PR [#192](https://github.com/hherb/hhagent/pull/192) `macos_seatbelt.rs` test-lift **MERGED**). This session is on
-branch **`refactor/clean-test-lifts-batch`** at `92dcfa1`, PR [#193](https://github.com/hherb/hhagent/pull/193) **OPEN**. Dev box
-on **macOS**. This session shipped **three clean over-cap test-lifts** the
-prior census had missed (item 9b-a): the inline `#[cfg(test)] mod tests` block
-of each file moved verbatim into a new sibling `<stem>/tests.rs` (one-level
-de-indent, `//!` header); the parent declares `#[cfg(test)] mod tests;`.
-Production regions **byte-identical to HEAD** (round-trip re-indent reproduces
-the original bytes); behaviour-preserving.
-- `core/src/cassandra/types.rs` **897 → 336** (lift 560 test LOC)
-- `core/src/scheduler/inner_loop_audit.rs` **655 → 304** (lift 350)
-- `core/src/entity_extraction/gliner_relex.rs` **570 → 386** (lift 183)
+**Current state.** `main` is at `5efae52` (PR [#193](https://github.com/hherb/hhagent/pull/193) three clean test-lifts **MERGED**; PR [#192](https://github.com/hherb/hhagent/pull/192) `macos_seatbelt.rs` test-lift **MERGED**). This session is on
+branch **`feat/restart-backoff`** at `ee9099f`, PR [#194](https://github.com/hherb/hhagent/pull/194) **OPEN**. Dev box on **macOS**.
+This session shipped **Option K — cross-platform exponential restart backoff**
+(ROADMAP:61, ticked):
+- New `ServiceSpec.restart_backoff: Option<RestartBackoff { max_delay_sec, steps }>`
+  in `hhagent-supervisor` — additive, `#[serde(default)]`, `None` reproduces today's
+  constant-`RestartSec=5` output byte-for-byte (same precedent as `after`/`part_of`).
+- **systemd** backend emits `RestartSteps`/`RestartMaxDelaySec` (252+; older systemd
+  warns-but-loads) inside the `keep_alive` block only.
+- **macOS launchd** warns-and-ignores at install (`tracing::warn!`) — launchd has no
+  operator-controllable backoff; `build_plist` unchanged, pinned by a regression guard.
+- `core_service_spec` + `postgres_service_spec` wired with a **5s→300s/8-step** curve.
+- Two builder test modules lifted to siblings to stay under the 500-LOC cap
+  (`systemd_user/builder.rs` 524→259; `launchd_agents/builders.rs` 508→234).
 
-All three parents now under the 500-LOC cap. **Residual (bucket-c):**
-`core/src/cassandra/types/tests.rs` is 568 LOC (a future over-cap *test* split).
+**Residual (deferred per the documented ≤27-over policy):**
+`supervisor/src/launchd_agents.rs` is **508 LOC** (+8; tests already external, so a
+fix needs a real prod-split — disproportionate for 8 lines).
 
-Recent merged history: `macos_seatbelt.rs` test-lift (PR #192); `systemd_user.rs`
-prod-split (PR #191); Phase-0 `hhagent.target` bring-up (PR #190, ROADMAP:60
-ticked); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker manifest
-plumbing item 11 (PR #187); `gliner_relex.rs` prod-split (PR #189); `recall.rs`
-test-lift (PR #188). Full detail in Earlier history + archive snapshots.
+Recent merged history: three clean test-lifts (PR #193); `macos_seatbelt.rs` test-lift
+(PR #192); `systemd_user.rs` prod-split (PR #191); Phase-0 `hhagent.target` bring-up
+(PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker manifest plumbing
+item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
-**Session-end verification (macOS, sandbox-exec live, on
-`refactor/clean-test-lifts-batch`):** `cargo test --workspace` **1350 / 0 / 3**
-(unchanged baseline — real `macos_smoke`/`macos_container_smoke` ran live);
-`cargo clippy -p hhagent-core --all-targets --locked -- -D warnings` exit 0
-(all three files live in `hhagent-core`).
+**Session-end verification (macOS, on `feat/restart-backoff` at `ee9099f`):**
+`cargo test --workspace` **all suites `ok`, 0 failed** (macOS skip-as-pass; supervisor
+unit 65, +7 new restart-backoff tests over baseline); `cargo clippy --workspace
+--all-targets --locked -- -D warnings` exit 0. The Linux-gated systemd builder code +
+its lifted tests were verified to **compile + clippy-clean** via the
+`aarch64-unknown-linux-gnu` cross-target (the pure-Rust supervisor crate cross-`check`s
+on the Mac without a linker — unlike `core`); the systemd tests themselves only *run*
+on Linux (DGX/CI).
 
 **Recently merged (safe to `git branch -d` if still local):**
 `refactor/gliner-relex-prod-split` (PR #189), `refactor/recall-test-module-lift`
@@ -79,7 +85,7 @@ hhagent (Rust workspace, 9 crates, AGPL-3.0)
 ├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads HHAGENT_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
 ├── sandbox            hhagent-sandbox: SandboxPolicy + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
-├── supervisor         hhagent-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, hhagent_target_spec} + default_probe. ServiceSpec carries after/part_of ordering; TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native hhagent.target unit). Names screened by validate_service_name before unit-file write
+├── supervisor         hhagent-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, hhagent_target_spec} + default_probe. ServiceSpec carries after/part_of ordering + optional restart_backoff (RestartBackoff{max_delay_sec,steps}: systemd → RestartSteps/RestartMaxDelaySec, launchd → warn-and-ignore); TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native hhagent.target unit). Names screened by validate_service_name before unit-file write
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── tests-common       hhagent-tests-common: shared dev-dep crate (publish = false) — PgCluster + bring_up_pg_cluster(+_with_timeout), RAII guards, skip helpers, sandbox factory, binary discovery, macOS launchd serial lock (reentrant), deterministic SHA-256-seeded embedding seed. Consumed only from [dev-dependencies]; never linked into a runtime binary.
 ├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS) + cross-platform setrlimit(RLIMIT_CPU)
@@ -129,7 +135,54 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 
 ---
 
-## Recently completed (2026-06-07 — three clean test-lifts batch, item 9b-a, branch `refactor/clean-test-lifts-batch`, on macOS)
+## Recently completed (2026-06-07 — Option K: cross-platform exponential restart backoff, ROADMAP:61, branch `feat/restart-backoff`, on macOS)
+
+**What & why.** Until now every keep-alive `ServiceSpec` restarted on a constant
+5 s (`Restart=on-failure RestartSec=5` / `KeepAlive=true`); a crash-looping daemon
+hammered the host forever. Option K adds an optional exponential ramp, wired
+honestly across both OSes. Design + plan: [`docs/devel/specs/2026-06-07-restart-backoff-design.md`](../specs/2026-06-07-restart-backoff-design.md), [`docs/devel/plans/2026-06-07-restart-backoff.md`](../plans/2026-06-07-restart-backoff.md).
+
+**What shipped (6 commits, `03b54b5`..`ee9099f`, all in `hhagent-supervisor`):**
+- **`RestartBackoff { max_delay_sec: u32, steps: u32 }`** + `ServiceSpec.restart_backoff:
+  Option<RestartBackoff>` (`#[serde(default)]`). `None` reproduces today's output
+  byte-for-byte — additive, exactly like the `after`/`part_of` precedent. (`lib.rs`)
+- **systemd** (`systemd_user/builder.rs`): inside the `keep_alive` block only, when
+  `Some`, emits `RestartSteps=<steps>` + `RestartMaxDelaySec=<max>`. Needs systemd
+  252+; older systemd logs an "unknown directive" warning but still loads (safe degrade).
+- **launchd** (`launchd_agents.rs`): launchd has no operator-controllable backoff
+  (`ThrottleInterval` is a constant floor, not a ramp), so `install` emits one
+  `tracing::warn!` and writes today's plist **unchanged** — pinned by a
+  `build_plist_identical_with_and_without_backoff` regression guard. Same
+  "degrade-with-a-visible-warning" posture as `after`/`part_of` on launchd.
+- **Canonical specs** (`specs.rs`): `core_service_spec` + `postgres_service_spec` carry
+  `RestartBackoff { max_delay_sec: 300, steps: 8 }` — a crash loop ramps 5 s → ~5 min.
+- **Cap hygiene:** the two builder test modules were lifted to siblings
+  (`systemd_user/builder/tests.rs`, `launchd_agents/builders/tests.rs`); parents
+  524→259 and 508→234, production regions byte-identical (modulo one doc-align nit).
+
+**Residual (deferred, documented ≤27-over policy):** `launchd_agents.rs` is 508 LOC
+(+8); tests are already external so a fix needs a real prod-split — disproportionate now.
+
+**Verification (macOS, `ee9099f`):** `cargo test --workspace` all `ok` / 0 failed
+(skip-as-pass; supervisor 65 unit + the new tests); `cargo clippy --workspace
+--all-targets --locked -- -D warnings` exit 0. Linux-gated systemd code + its lifted
+tests **compile + clippy-clean** under `--target aarch64-unknown-linux-gnu` (pure-Rust
+crate cross-`check`s on the Mac); the systemd tests only *run* on Linux (DGX/CI).
+Final holistic review: **ready to merge**.
+
+**Post-review polish (PR #194, same session):** addressed three minor `/review`
+findings — all non-behavioural. (1) `RestartBackoff` doc now states the value
+constraints (`steps ≥ 1` or systemd disables the ramp; `max_delay_sec` should
+exceed the 5s `RestartSec` floor) — left unenforced since specs are
+code-constructed, flagged for any future external/JSON source. (2) the design
+doc's launchd warn example reconciled to the actual structured-field form.
+(3) import-style nit in `launchd_agents/builders/tests.rs` (`use crate::RestartBackoff;`
+to match the systemd sibling). Supervisor 65 unit + smoke green; clippy native +
+`aarch64-unknown-linux-gnu` cross-target both exit 0.
+
+---
+
+## Recently completed (2026-06-07 — three clean test-lifts batch, item 9b-a, branch `refactor/clean-test-lifts-batch`, PR [#193](https://github.com/hherb/hhagent/pull/193) MERGED, on macOS)
 
 **What & why.** A fresh `wc -l` census found **three clean over-cap test-lifts
 the prior handover's bucket-(a) had never tracked** (it had declared clean
@@ -157,28 +210,6 @@ exit 0; `git diff` confirms each parent hunk removes only the test body and adds
 
 ---
 
-## Recently completed (2026-06-07 — `macos_seatbelt.rs` test-lift, item 9b-a, branch `refactor/macos-seatbelt-test-lift`, PR [#192](https://github.com/hherb/hhagent/pull/192) MERGED, on macOS)
-
-**What & why.** The **last clean over-cap test-lift** in the tree (item 9b-a):
-`sandbox/src/macos_seatbelt.rs` was 604 LOC with its inline `#[cfg(test)] mod
-tests` block at L331. Lifting it alone lands the parent under the 500-LOC cap.
-Mirrors the `capture.rs` / `recall.rs` / `l0_seed.rs` precedent exactly.
-
-**What shipped (2 files):**
-- **`sandbox/src/macos_seatbelt.rs` (604 → 332 LOC):** production region L1-329
-  **byte-identical to HEAD**; the inline test block replaced by `#[cfg(test)]
-  mod tests;`.
-- **New [`sandbox/src/macos_seatbelt/tests.rs`](../../../sandbox/src/macos_seatbelt/tests.rs) (281 LOC):**
-  the 16 unit tests lifted verbatim, de-indented one level, with a `//!` header.
-  `use super::*;` resolves identically (child module sees the parent's private
-  `canonicalize_policy_paths` + the `use crate::{...}` imports).
-
-**Verification (macOS, sandbox-exec live):** `cargo test --workspace` **1350 / 0
-/ 3** (unchanged baseline); sandbox crate 57 unit tests + 10 real `macos_smoke`
-+ 9 `macos_container_smoke` all green; `cargo clippy -p hhagent-sandbox
---all-targets --locked -- -D warnings` exit 0. Body/production byte-fidelity
-confirmed via `diff` against HEAD.
-
 ---
 
 ## Earlier history (summary)
@@ -191,6 +222,7 @@ sessions 2026-05-10 → 2026-05-29 in
 sessions 2026-05-06 → 2026-05-09 in
 [`archive/handover_20260510_pre-prune.md`](archive/handover_20260510_pre-prune.md).
 
+- **2026-06-07 — `macos_seatbelt.rs` test-lift (item 9b-a, PR [#192](https://github.com/hherb/hhagent/pull/192) MERGED):** inline `#[cfg(test)] mod tests` → sibling `macos_seatbelt/tests.rs`; parent 604 → 332 LOC, production byte-identical, 16 unit tests pass from the new location.
 - **2026-06-06 — `systemd_user.rs` production split (item 9b-b, PR [#191](https://github.com/hherb/hhagent/pull/191) MERGED):** the most over-cap file (1069 LOC after the `hhagent.target` slice) → 427-LOC `systemctl --user` driver parent + `systemd_user/builder.rs` (478, pure builders+tests, re-exported via `pub use`) + `systemd_user/tests.rs` (216, driver tests); mirrors the `launchd_agents.rs` precedent. Behaviour-preserving (workspace 1327/0/4).
 - **2026-06-06 — `gliner_relex.rs` production split (item 9b, PR [#189](https://github.com/hherb/hhagent/pull/189) MERGED):** 921-LOC monolith → 51-LOC re-export facade + five cohesive siblings (`wire`/`resolve`/`entry`/`client`/`manifest`, all under cap); public API byte-identical via `pub use`. Reconciled same session: `recall.rs` test-lift (PR [#188](https://github.com/hherb/hhagent/pull/188), 622→406). Residual: `workers/gliner_relex/tests.rs` 851 (bucket-c).
 - **2026-06-05 — worker manifest plumbing (item 11, PR [#187](https://github.com/hherb/hhagent/pull/187) MERGED at `2e3d0c5`):** `trait WorkerManifest` + `Resolution` enum + `ResolveCtx` + pure `discover_binary` — each worker self-describes; `registry_build.rs` reduced to `assemble_registry(manifests, ctx)`. Plain workers resolve as a sibling of the `hhagent` binary (`current_exe()`-relative; `HHAGENT_*_BIN` override wins, fail-closed if set-but-invalid; gliner exempt). Every produced `ToolEntry` byte-identical; containment shape stays compiled-in. Workspace 1311/0/4.
@@ -264,13 +296,14 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190, `main` at `478d025`). The next Phase-0 supervisor line is **Option K — cross-platform exponential restart backoff** (ROADMAP:61; design note below); the `ServiceSpec.after`/`part_of` precedent shows the additive-field pattern it would follow. The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190). **Option K — restart backoff (ROADMAP:61) shipped** this session (branch `feat/restart-backoff`, PR [#194](https://github.com/hherb/hhagent/pull/194)). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
 - **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none meaningfully remaining.** The substantial ones are done — `cassandra/types.rs`, `inner_loop_audit.rs`, `entity_extraction/gliner_relex.rs` (2026-06-07 batch); `macos_seatbelt.rs` (PR #192); `recall.rs`/`l0_seed.rs`/`capture.rs`/`inner_loop.rs`/`replay.rs` (Earlier history). A fresh census shows only files sitting **1–27 LOC over cap** still carry a liftable block (`core/src/main.rs` 527, `db/src/lib.rs` 525, `core/src/bin/hhagent-cli/memory_l3/run.rs` 519, `core/src/tool_host.rs` 519, `core/src/cassandra/constitutional.rs` 502, `core/src/memory/l1_promote.rs` 501) — a lift would save little; defer unless one grows.
 - **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `db/secrets.rs` (848, a clean prod-split candidate), `core/src/scheduler/runner.rs` (773), `core/src/scheduler/audit.rs` (701, tests already lifted), `db/src/entities.rs` (653), `workers/prelude/src/seccomp_lock.rs` (650), `core/src/scheduler/inner_loop.rs` (566, tests already lifted). (`systemd_user.rs`/`gliner_relex.rs` done — see history.)
-- **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851), `core/src/cassandra/types/tests.rs` (568, new this session).
+  Also `supervisor/src/launchd_agents.rs` (508, +8) — pushed over by Option K's install-time warn; tests already external, so a fix needs a real prod-split (disproportionate for 8 lines; deferred per this same policy).
+- **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851), `core/src/cassandra/types/tests.rs` (568).
 
 **Engineering pickups (need a spec/design first):**
 
@@ -291,10 +324,6 @@ Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 
 ### Option P — entity↔memory linkage + graph lane (Phase 1 cont.)
 
 The `memory_entities` join table (P1) shipped; the graph lane is wired into `recall` and the **production caller wiring is DONE** (2026-05-19 Slice F, PR #91): `RouterAgent::formulate_plan` populates `seed_entity_ids` from `entity_extractor.extract(&ctx.instruction)` each iteration; `main.rs` wires the real `GlinerRelexExtractor`. For a query carrying `seed_entity_ids`, the lane traverses outbound 1-hop then `SELECT memory_id FROM memory_entities WHERE entity_id = ANY($1)` ranked by neighbour count. **Remaining parked work is the quarantine review gate, not the wiring:** freshly-extracted entities default `quarantine=TRUE` and `graph_search` filters `quarantine=FALSE`, so seed entities surface no memories until an operator un-quarantines them ([#40](https://github.com/hherb/hhagent/issues/40) tracks the graph-default policy question). Secondary deferral: `entities.embedding` is NULL for all entities; a populated column would seed an entity-similarity lane (the `vector(1024)` column already exists).
-
-### Option K — cross-platform exponential restart backoff
-
-Currently `Restart=on-failure RestartSec=5` is a constant 5 s. systemd 252+ supports `RestartSteps`/`RestartMaxDelaySec`; macOS launchd's `KeepAlive=true` has no operator-controllable throttle. Cross-platform shape: extend `ServiceSpec` with `restart_backoff: Option<RestartBackoff>` (max delay + step count); the systemd backend wires it into the unit file, the macOS backend logs a warning at install time and falls back to launchd's default. Filed but parked; no immediate need.
 
 ---
 

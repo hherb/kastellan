@@ -35,6 +35,7 @@ fn dummy_spec(name: &str, target: &str, after: Vec<String>) -> ServiceSpec {
         stderr_log: None,
         after,
         part_of: Some(target.into()),
+        restart_backoff: None,
     }
 }
 

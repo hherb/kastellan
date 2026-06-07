@@ -28,6 +28,33 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Operator-tunable exponential restart backoff for a keep-alive service.
+///
+/// Only meaningful when [`ServiceSpec::keep_alive`] is `true`. The ramp
+/// starts from the existing initial delay (systemd `RestartSec=5`) and grows
+/// geometrically to `max_delay_sec` over `steps` steps. Ignored-with-warning
+/// on launchd, which has no equivalent knob (see
+/// [`launchd_agents::LaunchAgents::install`] on macOS).
+///
+/// **Value constraints** (not enforced here — specs are code-constructed, so
+/// these are the caller's contract; if this type is ever fed from external
+/// JSON/CLI, validate first):
+/// - `steps` must be **≥ 1** to take effect. systemd treats `RestartSteps=0`
+///   as *disabled* and silently falls back to a constant `RestartSec` ramp.
+/// - `max_delay_sec` should **exceed the 5s initial `RestartSec`**; a value
+///   below it is semantically meaningless (the ramp can't climb below its
+///   floor).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartBackoff {
+    /// Maximum delay (seconds) the ramp climbs to. systemd `RestartMaxDelaySec=`.
+    /// Should exceed the 5s initial `RestartSec` (see the type-level note).
+    pub max_delay_sec: u32,
+    /// Number of steps over which the delay grows from the initial `RestartSec`
+    /// to `max_delay_sec`. systemd `RestartSteps=`. Must be ≥ 1 to take effect
+    /// (`0` disables the ramp — see the type-level note).
+    pub steps: u32,
+}
+
 /// Declarative description of one supervised service.
 ///
 /// Backend-neutral: every field has an obvious mapping to both a systemd
@@ -76,6 +103,13 @@ pub struct ServiceSpec {
     /// `<target>.target`. **Ignored on launchd.** Default `None`.
     #[serde(default)]
     pub part_of: Option<String>,
+    /// Optional exponential restart backoff. `None` (the default) preserves
+    /// today's constant-`RestartSec=5` behaviour byte-for-byte. Only honoured
+    /// when `keep_alive == true`. The systemd backend ramps `RestartSec` →
+    /// `max_delay_sec` over `steps`; **launchd ignores it with an install-time
+    /// warning** (no equivalent knob).
+    #[serde(default)]
+    pub restart_backoff: Option<RestartBackoff>,
 }
 
 /// A named bundle of services brought up and torn down together.
@@ -324,6 +358,7 @@ mod default_target_tests {
             stderr_log: None,
             after: vec![],
             part_of: Some("hhagent".into()),
+            restart_backoff: None,
         }
     }
 
@@ -409,5 +444,29 @@ mod spec_ordering_tests {
         let s: ServiceSpec = serde_json::from_str(json).expect("deserialize without ordering fields");
         assert!(s.after.is_empty());
         assert!(s.part_of.is_none());
+        assert!(s.restart_backoff.is_none());
+    }
+
+    #[test]
+    fn service_spec_restart_backoff_round_trips() {
+        let s = ServiceSpec {
+            name: "svc".into(),
+            program: std::path::PathBuf::from("/bin/true"),
+            args: vec![],
+            env: vec![],
+            working_dir: None,
+            keep_alive: true,
+            stdout_log: None,
+            stderr_log: None,
+            after: vec![],
+            part_of: None,
+            restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
+        };
+        let json = serde_json::to_string(&s).expect("serialize");
+        let back: ServiceSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.restart_backoff,
+            Some(RestartBackoff { max_delay_sec: 300, steps: 8 })
+        );
     }
 }
