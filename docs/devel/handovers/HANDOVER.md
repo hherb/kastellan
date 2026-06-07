@@ -6,84 +6,34 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-07 (`macos_seatbelt.rs` test-lift, item 9b-a, PR [#192](https://github.com/hherb/hhagent/pull/192); back on macOS).
+**Last updated:** 2026-06-07 (three clean test-lifts batch, item 9b-a, branch `refactor/clean-test-lifts-batch`; on macOS).
 
-**Current state.** `main` is at `7ea967c`; this session is on branch
-**`refactor/macos-seatbelt-test-lift`** at `9513cda`, PR [#192](https://github.com/hherb/hhagent/pull/192) **OPEN**. Dev box switched back to
-**macOS**. This session shipped the **`macos_seatbelt.rs` test-lift** — the last
-clean over-cap test-lift (item 9b-a): the inline `#[cfg(test)] mod tests` block
-moved verbatim into a new sibling `sandbox/src/macos_seatbelt/tests.rs` (281 LOC,
-one-level de-indent); the parent declares `#[cfg(test)] mod tests;` and drops
-**604 → 332 LOC** (under cap). Production region byte-identical to HEAD;
-behaviour-preserving. macOS skip-as-pass baseline **1350 / 0 / 3** (unchanged;
-real `macos_smoke`/`macos_container_smoke` integration suites ran live). The
-prior session's **`systemd_user.rs` production split** (item 9b-b,
-PR [#191](https://github.com/hherb/hhagent/pull/191)) is **MERGED**. The
-systemd_user split — the 1069-LOC file (the most
-over-cap in the tree after the `hhagent.target` slice) became a 427-LOC driver
-parent + sibling `systemd_user/builder.rs` (478, pure builders + their tests) +
-`systemd_user/tests.rs` (216, driver tests), mirroring the `launchd_agents.rs`
-precedent exactly. Behaviour-preserving (workspace **1327 / 0 / 4** unchanged).
-The **Phase-0 `hhagent.target` service bring-up** is **MERGED** via
-**PR [#190](https://github.com/hherb/hhagent/pull/190)** — ROADMAP.md:60 ticked
-(two post-merge polish commits: `d32a281` dedup daemon-reload in `install_target`
-via a private `write_unit_file`; `2c277c7` Cargo.lock sync). The L3 invocation
-arc remains COMPLETE on `main` (PR #186, #179 CLOSED); worker manifest plumbing
-(item 11) MERGED (PR #187); `gliner_relex.rs` prod-split MERGED (PR #189);
-`recall.rs` test-lift MERGED (PR #188).
+**Current state.** `main` is at `a97d137` (PR [#192](https://github.com/hherb/hhagent/pull/192) `macos_seatbelt.rs` test-lift **MERGED**). This session is on
+branch **`refactor/clean-test-lifts-batch`** at `92dcfa1`, PR [#193](https://github.com/hherb/hhagent/pull/193) **OPEN**. Dev box
+on **macOS**. This session shipped **three clean over-cap test-lifts** the
+prior census had missed (item 9b-a): the inline `#[cfg(test)] mod tests` block
+of each file moved verbatim into a new sibling `<stem>/tests.rs` (one-level
+de-indent, `//!` header); the parent declares `#[cfg(test)] mod tests;`.
+Production regions **byte-identical to HEAD** (round-trip re-indent reproduces
+the original bytes); behaviour-preserving.
+- `core/src/cassandra/types.rs` **897 → 336** (lift 560 test LOC)
+- `core/src/scheduler/inner_loop_audit.rs` **655 → 304** (lift 350)
+- `core/src/entity_extraction/gliner_relex.rs` **570 → 386** (lift 183)
 
-**This session shipped `hhagent.target` (Phase-0 service supervisor, ROADMAP:60):**
-one orchestrating handle that brings up **Postgres → core** as a unit,
-cross-platform. Brainstorm → spec
-([`docs/superpowers/specs/2026-06-06-hhagent-target-bring-up-design.md`](../../superpowers/specs/2026-06-06-hhagent-target-bring-up-design.md))
-→ plan
-([`docs/superpowers/plans/2026-06-06-hhagent-target-bring-up.md`](../../superpowers/plans/2026-06-06-hhagent-target-bring-up.md))
-→ 9-task subagent-driven development (each task spec+quality reviewed; final
-whole-branch review = MERGE-WITH-MINORS, minors addressed). **Scope decisions:**
-inference stays an **external** health-checked dependency (no inference spec);
-**workers drop out** of the target (core spawns them on demand in sandboxes).
-**Mechanics (Approach A — honest per-OS):**
-- **`ServiceSpec` gains `after: Vec<String>` + `part_of: Option<String>`**
-  (both `#[serde(default)]` — old specs deserialize; behaviour-preserving: a
-  spec setting neither emits byte-identical systemd output, pinned by
-  `unit_file_unchanged_when_ordering_unset`).
-- **New `TargetSpec { name, members }`** + pure `specs::hhagent_target_spec()`
-  (`[postgres, core]` in start order) + `HHAGENT_TARGET_NAME = "hhagent"`;
-  `core_service_spec`/`postgres_service_spec` now opt into the target (emit
-  `PartOf=`/`After=`; only test callers exist, so safe).
-- **`Supervisor` gains 4 dyn-safe default methods** `{install,start,stop,uninstall}_target`
-  = the generic readiness-based bundle (install/start in member order,
-  stop/uninstall reverse). **macOS/launchd uses these defaults** — launchd has
-  no native ordering; correctness leans on core's fail-closed-restart-until-
-  Postgres-ready loop (documented). `build_plist` IGNORES `after`/`part_of`
-  (pinned).
-- **`SystemdUser` OVERRIDES the 4** with a native `hhagent.target` unit:
-  `build_target_unit` emits `Wants=` of members; `build_unit_file` emits
-  `After=`/`PartOf=`/`WantedBy=<target>.target` for members; `systemctl --user
-  start hhagent.target` brings up pg→core in order via `After=`, stop/uninstall
-  propagate via `PartOf=`.
-- **Security:** `validate_service_name` now also screens `spec.after`,
-  `spec.part_of`, and `target.members` before they reach the unit-file
-  formatters (closes a latent directive-injection surface flagged in final
-  review; 3 reject tests).
-- **Gated e2e** [`supervisor/tests/target_smoke.rs`](../../../supervisor/tests/target_smoke.rs):
-  installs/starts/stops/uninstalls a 2-member dummy-`sleep` target;
-  **RAN LIVE against `systemctl --user`** on the DGX (not skipped) — real native
-  target round-trip, clean teardown. macOS path drives the launchd bundle
-  (skip-as-pass off-platform).
+All three parents now under the 500-LOC cap. **Residual (bucket-c):**
+`core/src/cassandra/types/tests.rs` is 568 LOC (a future over-cap *test* split).
 
-**File-size flag (RESOLVED):** the `hhagent.target` slice grew
-`supervisor/src/systemd_user.rs` to ~1000 LOC; the **next session
-(`refactor/systemd-user-prod-split`) split it** into a 427-LOC driver parent +
-`systemd_user/builder.rs` + `systemd_user/tests.rs` — all under cap. See the
-Recently-completed entry below.
+Recent merged history: `macos_seatbelt.rs` test-lift (PR #192); `systemd_user.rs`
+prod-split (PR #191); Phase-0 `hhagent.target` bring-up (PR #190, ROADMAP:60
+ticked); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker manifest
+plumbing item 11 (PR #187); `gliner_relex.rs` prod-split (PR #189); `recall.rs`
+test-lift (PR #188). Full detail in Earlier history + archive snapshots.
 
-**Session-end verification (DGX Spark, native Linux, rustc 1.96.0, on
-`feat/hhagent-target-bring-up`):** `cargo test --workspace` **1327 / 0 / 4**
-(+16 over the `cdadea1` baseline of 1311; 4 `[SKIP]` = documented GLiNER-Relex
-real-model gating; **no sandbox-containment skips** — bwrap integration tests
-ran for real); `cargo clippy --workspace --all-targets --locked -- -D warnings`
-exit 0; `target_smoke` native e2e ran live (PASS, not skip).
+**Session-end verification (macOS, sandbox-exec live, on
+`refactor/clean-test-lifts-batch`):** `cargo test --workspace` **1350 / 0 / 3**
+(unchanged baseline — real `macos_smoke`/`macos_container_smoke` ran live);
+`cargo clippy -p hhagent-core --all-targets --locked -- -D warnings` exit 0
+(all three files live in `hhagent-core`).
 
 **Recently merged (safe to `git branch -d` if still local):**
 `refactor/gliner-relex-prod-split` (PR #189), `refactor/recall-test-module-lift`
@@ -179,7 +129,35 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 
 ---
 
-## Recently completed (2026-06-07 — `macos_seatbelt.rs` test-lift, item 9b-a, branch `refactor/macos-seatbelt-test-lift`, on macOS)
+## Recently completed (2026-06-07 — three clean test-lifts batch, item 9b-a, branch `refactor/clean-test-lifts-batch`, on macOS)
+
+**What & why.** A fresh `wc -l` census found **three clean over-cap test-lifts
+the prior handover's bucket-(a) had never tracked** (it had declared clean
+test-lifts exhausted). Same precedent as `macos_seatbelt.rs`: lift the inline
+`#[cfg(test)] mod tests` block alone and the parent lands under the 500-LOC cap.
+
+**What shipped (3 parents edited, 3 new siblings; commit `92dcfa1`):** for each
+file the inline test block moved verbatim into a new sibling `<stem>/tests.rs`
+(de-indented one level, `//!` header); the parent declares `#[cfg(test)] mod
+tests;`. A scripted lift with a **round-trip byte-identity assertion**
+(re-indenting the lifted body must reproduce the original file exactly) ran
+before any write, so production regions are guaranteed byte-identical to HEAD.
+- `core/src/cassandra/types.rs` **897 → 336** + new `cassandra/types/tests.rs` (568)
+- `core/src/scheduler/inner_loop_audit.rs` **655 → 304** + new `inner_loop_audit/tests.rs` (357)
+- `core/src/entity_extraction/gliner_relex.rs` **570 → 386** + new `gliner_relex/tests.rs` (190)
+
+**Residual flagged:** `cassandra/types/tests.rs` (568) is now an over-cap
+**test** file (bucket-c, lower priority).
+
+**Verification (macOS, sandbox-exec live):** `cargo test --workspace`
+**1350 / 0 / 3** (unchanged baseline; real `macos_smoke`/`macos_container_smoke`
+ran live); `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings`
+exit 0; `git diff` confirms each parent hunk removes only the test body and adds
+`mod tests;` (production context lines unchanged).
+
+---
+
+## Recently completed (2026-06-07 — `macos_seatbelt.rs` test-lift, item 9b-a, branch `refactor/macos-seatbelt-test-lift`, PR [#192](https://github.com/hherb/hhagent/pull/192) MERGED, on macOS)
 
 **What & why.** The **last clean over-cap test-lift** in the tree (item 9b-a):
 `sandbox/src/macos_seatbelt.rs` was 604 LOC with its inline `#[cfg(test)] mod
@@ -203,86 +181,6 @@ confirmed via `diff` against HEAD.
 
 ---
 
-## Recently completed (2026-06-06 — `systemd_user.rs` production split, item 9b-b, branch `refactor/systemd-user-prod-split`, PR [#191](https://github.com/hherb/hhagent/pull/191), on the DGX Spark)
-
-**What & why.** `supervisor/src/systemd_user.rs` was the most over-cap file in
-the tree (**1069 LOC** — the `hhagent.target` slice added ~200). A test-lift
-alone would not land the parent under the 500-LOC cap, so this is a real prod
-split, mirroring the **exact** `launchd_agents.rs` precedent (parent driver +
-`builders.rs` + `tests.rs`). Behaviour-preserving: zero production logic change,
-public paths unchanged.
-
-**What shipped (3 files, all under cap):**
-- **`systemd_user.rs` (parent, 1069 → 427 LOC):** the `systemctl --user` driver
-  only — `SystemdUser` struct/impls, the `Supervisor` impl (install/start/stop/
-  uninstall/status + the 4 `*_target` overrides), private `write_unit_file` /
-  `is_default_units_dir` / `daemon_reload`, `probe`, `write_atomic`,
-  `run_systemctl_user`. Declares `mod builder;` + `mod tests;` and
-  **re-exports `pub use builder::{build_target_unit, build_unit_file,
-  validate_service_name};`** so `systemd_user::build_unit_file` etc. keep their
-  public paths (consumed by `specs`/`lib.rs` and the smoke tests).
-- **New [`supervisor/src/systemd_user/builder.rs`](../../../supervisor/src/systemd_user/builder.rs) (478 LOC):**
-  the pure functions (`build_unit_file`, `build_target_unit`, private
-  `quote_if_needed`, `validate_service_name`) + the 3 consts they use
-  (`DEFAULT_TIMEOUT_STOP_SEC`/`DEFAULT_RESTART_SEC`/`MAX_NAME_LEN`) + their inline
-  `#[cfg(test)] mod tests` (23 builder/validator tests, incl. the
-  `unit_file_unchanged_when_ordering_unset` byte-identity pin).
-- **New [`supervisor/src/systemd_user/tests.rs`](../../../supervisor/src/systemd_user/tests.rs) (216 LOC):**
-  the 11 driver tests (install/uninstall/status round-trips against a custom
-  units dir + the 3 ordering-field injection-rejection tests). `minimal_spec` is
-  duplicated here (same convention the launchd split used — the helper is tiny).
-
-**Verification (DGX, native Linux, rustc 1.96.0):** `cargo test --workspace`
-**1327 / 0 / 4** (identical to the `478d025` baseline; zero `[SKIP]` — bwrap
-integration tests ran for real); supervisor lib 59 unit tests pass;
-`systemd_user_smoke` + `target_smoke` (native systemd) green;
-`cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0.
-
----
-
-## Recently completed (2026-06-06 — `gliner_relex.rs` production split, item 9b, branch `refactor/gliner-relex-prod-split`, PR [#189](https://github.com/hherb/hhagent/pull/189) MERGED, on the DGX Spark)
-
-Full detail in the header block above. In brief: the 921-LOC monolith (tests
-already lifted, so a clean test-lift no longer landed it under cap) became a
-51-LOC re-export facade + five cohesive siblings (`wire`/`resolve`/`entry`/
-`client`/`manifest`, all under cap). Public API byte-identical via the facade's
-`pub use` re-exports — no external call-site touched. `tests.rs` gained three
-explicit imports (previously glob-inherited from the monolith's private `use`s);
-`entry.rs` cfg-gates `use std::path::PathBuf` to macOS. Verification: workspace
-**1311 / 0 / 4** (unchanged baseline), clippy `-D warnings` exit 0. Residual:
-`gliner_relex/tests.rs` 851 LOC — a future over-cap *test* split candidate.
-
-Also merged before this session opened (reconciled here): the
-`memory/recall.rs` clean test-lift, **PR [#188](https://github.com/hherb/hhagent/pull/188)**
-(recall.rs 622 → 406 LOC, behaviour-preserving; 18 unit tests pin it).
-
----
-
-## Recently completed (2026-06-05 — worker manifest plumbing, item 11, PR [#187](https://github.com/hherb/hhagent/pull/187) MERGED to `main` at `2e3d0c5`, on the DGX Spark)
-
-**What & why.** Before this slice the daemon's `ToolRegistry` was assembled by
-hand: each worker had a bespoke `*_entry(env)` constructor and
-`registry_build.rs` had hardcoded `if HHAGENT_SHELL_EXEC_BIN {…}` / gliner
-fold-in branches. With more workers (with diverse inputs) coming, that's a
-friction + inconsistency cliff. This introduces one declarative way each worker
-declares itself, and a production binary-discovery convention. Brainstorm → spec
-([`docs/superpowers/specs/2026-06-05-worker-manifest-plumbing-design.md`](../../superpowers/specs/2026-06-05-worker-manifest-plumbing-design.md))
-→ plan ([`docs/superpowers/plans/2026-06-05-worker-manifest-plumbing.md`](../../superpowers/plans/2026-06-05-worker-manifest-plumbing.md))
-→ 6-task subagent-driven development (each task spec+quality reviewed = APPROVED).
-
-**What shipped:**
-- **New [`core/src/worker_manifest.rs`](../../../core/src/worker_manifest.rs):** `trait WorkerManifest { name(); allowlist_tool() -> Option<&'static str>; resolve(&ResolveCtx) -> Resolution }`; `enum Resolution { Register(ToolEntry), Disabled{detail}, Misconfigured{detail} }` (built+matched in-loop, never collected → `#[allow(clippy::large_enum_variant)]` rather than boxing); `struct ResolveCtx` (minimal, universal: injected `get_env`/`exists`/`is_dir` closures + `exe_dir` + pre-fetched `allowlist` closure — diverse worker inputs arrive via `get_env`, never new ctx fields); pure `discover_binary(ctx, override_env, default_name)` (override-env-if-exists wins, else `<exe_dir>/<default_name>` if exists, else None).
-- **Per-worker impls own their host-side module:** new [`core/src/workers/shell_exec.rs`](../../../core/src/workers/shell_exec.rs) (`ShellExecManifest` + the **relocated** `shell_exec_entry`, re-exported from `tool_dispatch.rs` so `scheduler::shell_exec_entry` paths are unchanged); `GlinerRelexManifest` added to `workers/gliner_relex.rs` as a thin adapter over the existing `resolve_env` + `gliner_relex_entry` (its 5 `ResolveSkipReason`s map onto `Disabled` [the flag-off case] vs `Misconfigured` [the 4 broken-env cases]).
-- **`registry_build.rs` rewrite:** static `WORKER_MANIFESTS: &[&dyn WorkerManifest]`; pure `assemble_registry(manifests, ctx) -> (ToolRegistry, Vec<LoadedToolRecord>)` (Register→insert+record+INFO, Disabled→INFO, Misconfigured→ERROR, all fail-soft); async `build_tool_registry(pool, exe_dir: Option<PathBuf>)` reduced to (allowlist prefetch loop → build real `ResolveCtx` over `std::env`+live fs → `assemble_registry`). Deleted `build_gliner_relex_entry` + `log_gliner_relex_skip`. `sha256_argv0_list`/`LoadedToolRecord`/`build_registry_loaded_payload` and the `registry.loaded` audit row are **unchanged**.
-- **`main.rs`:** drops the gliner pre-call; computes `exe_dir = current_exe().ok().and_then(parent)`; calls `build_tool_registry(&pool, exe_dir)`; the entity extractor now reads the gliner entry **back from the registry** (`tool_registry.lookup("gliner-relex").cloned()`) — single resolution, registry as source of truth (extractor still built iff gliner registered; arm bodies byte-identical).
-- **Discovery convention:** a plain compiled worker is found as a **sibling of the `hhagent` binary** (`<exe_dir>/<worker-name>`), so a flat install + the cargo `target/debug` tree both resolve with **no env vars**; `HHAGENT_*_BIN` overrides still win. gliner is **exempt** (keeps its venv/weights env-driven resolution). FHS `libexec` layout noted as a future packaging refinement.
-
-**Security/behaviour invariants (review-confirmed):** every produced `ToolEntry` byte-identical; containment shape (`SandboxPolicy`+`Lifecycle`) stays compiled-in (no file-mutable manifest — threat-model: a compromise reaches the agent's own user, so an on-disk manifest would be an escalation surface); operational argv allowlist stays in the DB (audited, separate from the manifest); `registry.loaded` snapshot the L3 approval gate reads is unchanged.
-
-**Verification (DGX, native Linux, rustc 1.96.0):** `cargo test --workspace` **1311 / 0 / 4** (zero `[SKIP]`; +14 over the 1297 baseline); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; PG-backed `cli_ask_e2e` **7/7**; `shell_exec_e2e` **4/4** (relocated `shell_exec_entry` round-trip). Final whole-branch review (opus) = **READY TO MERGE** (behaviour byte-identical, all 4 security points pass); its one substantive Minor — `discover_binary` gating on `exists()` vs the prior `is_file()` — was fixed (now `exists && !is_dir`, with a directory-override regression test). **Post-review fix (PR #187 review):** a *set-but-invalid* `HHAGENT_SHELL_EXEC_BIN` override now **fails closed** (→ `Misconfigured`) instead of silently falling through to the exe-relative sibling — an explicit override is authoritative; running a *different* binary than the operator named is a security footgun. Restores exact parity with the pre-manifest "set but not a file ⇒ not registered" posture; sibling default applies only when the override is unset. Added a worker-binary-discovery trust note to `docs/threat-model.md` (install dir must not be agent-user-writable). **File-size flag:** `gliner_relex.rs` grew ~861 → **921 LOC** (pre-existing over-cap; this slice added ~60 — still a future test-lift/prod-split candidate, see refactor bucket). **Deferred (noted, not blocking):** libexec install layout; operator-tunable resource limits via config (env-var overrides cover the known case today); richer per-worker trait methods (the trait leaves room).
-
----
-
 ## Earlier history (summary)
 
 One bullet per session, newest first. Full reasoning lives in the archive snapshots:
@@ -293,6 +191,9 @@ sessions 2026-05-10 → 2026-05-29 in
 sessions 2026-05-06 → 2026-05-09 in
 [`archive/handover_20260510_pre-prune.md`](archive/handover_20260510_pre-prune.md).
 
+- **2026-06-06 — `systemd_user.rs` production split (item 9b-b, PR [#191](https://github.com/hherb/hhagent/pull/191) MERGED):** the most over-cap file (1069 LOC after the `hhagent.target` slice) → 427-LOC `systemctl --user` driver parent + `systemd_user/builder.rs` (478, pure builders+tests, re-exported via `pub use`) + `systemd_user/tests.rs` (216, driver tests); mirrors the `launchd_agents.rs` precedent. Behaviour-preserving (workspace 1327/0/4).
+- **2026-06-06 — `gliner_relex.rs` production split (item 9b, PR [#189](https://github.com/hherb/hhagent/pull/189) MERGED):** 921-LOC monolith → 51-LOC re-export facade + five cohesive siblings (`wire`/`resolve`/`entry`/`client`/`manifest`, all under cap); public API byte-identical via `pub use`. Reconciled same session: `recall.rs` test-lift (PR [#188](https://github.com/hherb/hhagent/pull/188), 622→406). Residual: `workers/gliner_relex/tests.rs` 851 (bucket-c).
+- **2026-06-05 — worker manifest plumbing (item 11, PR [#187](https://github.com/hherb/hhagent/pull/187) MERGED at `2e3d0c5`):** `trait WorkerManifest` + `Resolution` enum + `ResolveCtx` + pure `discover_binary` — each worker self-describes; `registry_build.rs` reduced to `assemble_registry(manifests, ctx)`. Plain workers resolve as a sibling of the `hhagent` binary (`current_exe()`-relative; `HHAGENT_*_BIN` override wins, fail-closed if set-but-invalid; gliner exempt). Every produced `ToolEntry` byte-identical; containment shape stays compiled-in. Workspace 1311/0/4.
 - **2026-06-05 — #179 Opt-3 daemon reroute of `memory l3 run` (PR [#186](https://github.com/hherb/hhagent/pull/186) at `67bc474`, #179 CLOSED):** `run` now enqueues an `l3_run` task the daemon executes against its single live `ToolRegistry` (the Postgres `tasks` queue + `LISTEN/NOTIFY` IS the operator→daemon command channel — `ask`'s second user, zero new IPC). New `scheduler/l3_run.rs`; `drain_lane` routing; CLI rewrite waits on `tasks_completed` with busy-vs-absent daemon detection (`tasks::any_live_worker`, pending-only cancel). Deleted the interim `diagnose_registry_divergence` (PR #180). TOCTOU re-validation now strictly stronger (live registry); all 7 security invariants PASS. Workspace 1297/0/4.
 - **2026-06-04 — `capture.rs` test-lift + `secret_vault_e2e` `sun_path` fix (PR [#185](https://github.com/hherb/hhagent/pull/185) at `ef01ae3`):** clean over-cap test-lift → `observation/capture/tests.rs`; parent 715 → 373 LOC, production L1–371 byte-identical. Bundled: dropped the redundant doubled `{suffix}` from `secret_vault_e2e` data/log labels (108-byte `sun_path` overflow under the harness `TMPDIR`; #104 systemic sweep stays open). First DGX native-Linux verification in a while; toolchain bumped 1.95→1.96 to match CI; workspace 1290/0/4.
 - **2026-06-04 — `l0_seed.rs` test-lift (PR [#183](https://github.com/hherb/hhagent/pull/183) at `305b927`):** clean over-cap test-lift → `l0_seed/tests.rs`; parent 730 → 462 LOC, behaviour-preserving (production L1–459 byte-identical; 19 unit tests pass from new location).
@@ -367,9 +268,9 @@ Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 
 
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
-- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none remaining** — `macos_seatbelt.rs` was the last (done 2026-06-07, see Recently completed; `recall.rs`, `l0_seed.rs`, `capture.rs`, `inner_loop.rs`, `replay.rs` already done — see Earlier history). All further over-cap production files now need bucket (b).
-- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, now the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `db/secrets.rs` (848, a clean prod-split candidate), `core/src/scheduler/runner.rs` (773), `core/src/main.rs` (527, just over; almost no inline tests). (`systemd_user.rs` done — see Recently completed; `gliner_relex.rs` done — MERGED PR #189.)
-- **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851).
+- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none meaningfully remaining.** The substantial ones are done — `cassandra/types.rs`, `inner_loop_audit.rs`, `entity_extraction/gliner_relex.rs` (2026-06-07 batch); `macos_seatbelt.rs` (PR #192); `recall.rs`/`l0_seed.rs`/`capture.rs`/`inner_loop.rs`/`replay.rs` (Earlier history). A fresh census shows only files sitting **1–27 LOC over cap** still carry a liftable block (`core/src/main.rs` 527, `db/src/lib.rs` 525, `core/src/bin/hhagent-cli/memory_l3/run.rs` 519, `core/src/tool_host.rs` 519, `core/src/cassandra/constitutional.rs` 502, `core/src/memory/l1_promote.rs` 501) — a lift would save little; defer unless one grows.
+- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `db/secrets.rs` (848, a clean prod-split candidate), `core/src/scheduler/runner.rs` (773), `core/src/scheduler/audit.rs` (701, tests already lifted), `db/src/entities.rs` (653), `workers/prelude/src/seccomp_lock.rs` (650), `core/src/scheduler/inner_loop.rs` (566, tests already lifted). (`systemd_user.rs`/`gliner_relex.rs` done — see history.)
+- **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851), `core/src/cassandra/types/tests.rs` (568, new this session).
 
 **Engineering pickups (need a spec/design first):**
 
