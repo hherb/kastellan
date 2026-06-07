@@ -1820,8 +1820,8 @@ async fn insert_memory_light_round_trip_and_rejects_l0() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        "ml-d",
-        "ml-l",
+        "mlight-d",
+        "mlight-l",
         &format!("hhagent-pg-mlight-round-trip-{suffix}"),
     );
 
@@ -1919,8 +1919,8 @@ async fn insert_memory_light_degrades_gracefully_across_lanes() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        "md-d",
-        "md-l",
+        "mdegrad-d",
+        "mdegrad-l",
         &format!("hhagent-pg-mlight-degrade-{suffix}"),
     );
 
