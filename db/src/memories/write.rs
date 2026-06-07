@@ -160,6 +160,51 @@ where
     insert_row_at_layer_unchecked(executor, body, metadata, embedding, layer).await
 }
 
+/// Insert a memory row **without** an embedding — the "light" write path
+/// for high-frequency, ephemeral data (channel inbound, browser
+/// observations, screen capture) that would never be a useful
+/// semantic-search target. Skipping the embed call is the whole point;
+/// there is deliberately no `embedding` parameter.
+///
+/// A thin named delegate to [`insert_memory_at_layer`] with
+/// `embedding = None` — so it inherits the same single insert chokepoint
+/// and the same **L0 ([`MemoryLayer::Meta`]) rejection**
+/// ([`DbError::PolicyViolation`]; L0 writes must go through
+/// [`seed_meta_memory`]). The value-add is the intent-signalling name,
+/// exactly like [`seed_meta_memory`] is a named pass-through.
+///
+/// # Recall degradation contract
+///
+/// A light-written row has `embedding IS NULL` and (by caller contract)
+/// no `memory_entities` links — entity extraction is a `core`-side step
+/// the light path skips. Therefore:
+///
+/// - **Lexical lane** (full-text on `body`) — works normally; never
+///   touches `embedding`.
+/// - **`metadata @>` containment** — works normally; embedding-free.
+/// - **Semantic lane** — silently skips the row: `semantic_search`
+///   filters `WHERE embedding IS NOT NULL`, so a NULL-embedding row
+///   degrades gracefully rather than erroring.
+/// - **Graph lane** — never surfaces it: with no `memory_entities`
+///   links, the 1-hop entity expansion finds nothing.
+///
+/// This is graceful degradation, not breakage: the row stays retrievable
+/// by the two embedding-free lanes.
+///
+/// `executor` is generic over `sqlx::Executor` so the same helper works
+/// against `&PgPool` (production) and `&mut PgConnection` (test setup).
+pub async fn insert_memory_light<'e, E>(
+    executor: E,
+    body: &str,
+    metadata: &serde_json::Value,
+    layer: MemoryLayer,
+) -> Result<i64, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    insert_memory_at_layer(executor, body, metadata, None, layer).await
+}
+
 /// Delete one row from `memories` by id, but **only** if its layer
 /// matches `layer`. Returns `true` if a row was deleted; `false` if
 /// no row matched (id absent or layer mismatch).
