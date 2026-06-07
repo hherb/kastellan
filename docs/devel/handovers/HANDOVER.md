@@ -170,6 +170,16 @@ tests **compile + clippy-clean** under `--target aarch64-unknown-linux-gnu` (pur
 crate cross-`check`s on the Mac); the systemd tests only *run* on Linux (DGX/CI).
 Final holistic review: **ready to merge**.
 
+**Post-review polish (PR #194, same session):** addressed three minor `/review`
+findings — all non-behavioural. (1) `RestartBackoff` doc now states the value
+constraints (`steps ≥ 1` or systemd disables the ramp; `max_delay_sec` should
+exceed the 5s `RestartSec` floor) — left unenforced since specs are
+code-constructed, flagged for any future external/JSON source. (2) the design
+doc's launchd warn example reconciled to the actual structured-field form.
+(3) import-style nit in `launchd_agents/builders/tests.rs` (`use crate::RestartBackoff;`
+to match the systemd sibling). Supervisor 65 unit + smoke green; clippy native +
+`aarch64-unknown-linux-gnu` cross-target both exit 0.
+
 ---
 
 ## Recently completed (2026-06-07 — three clean test-lifts batch, item 9b-a, branch `refactor/clean-test-lifts-batch`, PR [#193](https://github.com/hherb/hhagent/pull/193) MERGED, on macOS)

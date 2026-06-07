@@ -35,12 +35,23 @@ use thiserror::Error;
 /// geometrically to `max_delay_sec` over `steps` steps. Ignored-with-warning
 /// on launchd, which has no equivalent knob (see
 /// [`launchd_agents::LaunchAgents::install`] on macOS).
+///
+/// **Value constraints** (not enforced here — specs are code-constructed, so
+/// these are the caller's contract; if this type is ever fed from external
+/// JSON/CLI, validate first):
+/// - `steps` must be **≥ 1** to take effect. systemd treats `RestartSteps=0`
+///   as *disabled* and silently falls back to a constant `RestartSec` ramp.
+/// - `max_delay_sec` should **exceed the 5s initial `RestartSec`**; a value
+///   below it is semantically meaningless (the ramp can't climb below its
+///   floor).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestartBackoff {
     /// Maximum delay (seconds) the ramp climbs to. systemd `RestartMaxDelaySec=`.
+    /// Should exceed the 5s initial `RestartSec` (see the type-level note).
     pub max_delay_sec: u32,
     /// Number of steps over which the delay grows from the initial `RestartSec`
-    /// to `max_delay_sec`. systemd `RestartSteps=`.
+    /// to `max_delay_sec`. systemd `RestartSteps=`. Must be ≥ 1 to take effect
+    /// (`0` disables the ramp — see the type-level note).
     pub steps: u32,
 }
 

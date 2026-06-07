@@ -83,11 +83,11 @@ RestartMaxDelaySec=<b.max_delay_sec>
 ### macOS backend (`supervisor/src/launchd_agents.rs::install`)
 
 launchd has no operator-controllable exponential backoff. When
-`spec.restart_backoff.is_some()`, emit exactly one
-`tracing::warn!` at install time:
+`spec.restart_backoff.is_some()`, emit exactly one `tracing::warn!` at install
+time, carrying the service name as a structured field:
 
-> exponential restart backoff requested for service `<name>` but launchd has no
-> equivalent; falling back to KeepAlive default
+> `service = <name>` — restart_backoff requested but launchd has no equivalent;
+> falling back to KeepAlive default
 
 The plist is written **unchanged** — `build_plist` is not modified. This mirrors
 the existing "`after` / `part_of` ignored on launchd" precedent: the field is

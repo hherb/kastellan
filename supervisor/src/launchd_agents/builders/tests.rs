@@ -3,6 +3,7 @@
 //! resolves to the parent `builders` module (the builders + its imports).
 
 use super::*;
+use crate::RestartBackoff;
 use std::path::PathBuf;
 
 /// Minimal spec used as a starting point in builder tests.
@@ -241,8 +242,7 @@ fn build_plist_identical_with_and_without_backoff() {
     let mut spec = minimal_spec("svc");
     spec.keep_alive = true;
     let without = build_plist(&spec);
-    spec.restart_backoff =
-        Some(crate::RestartBackoff { max_delay_sec: 300, steps: 8 });
+    spec.restart_backoff = Some(RestartBackoff { max_delay_sec: 300, steps: 8 });
     let with = build_plist(&spec);
     assert_eq!(
         without, with,
