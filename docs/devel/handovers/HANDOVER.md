@@ -6,10 +6,10 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-07 (`macos_seatbelt.rs` test-lift, item 9b-a, branch `refactor/macos-seatbelt-test-lift`; back on macOS).
+**Last updated:** 2026-06-07 (`macos_seatbelt.rs` test-lift, item 9b-a, PR [#192](https://github.com/hherb/hhagent/pull/192); back on macOS).
 
 **Current state.** `main` is at `7ea967c`; this session is on branch
-**`refactor/macos-seatbelt-test-lift`** at `9513cda`. Dev box switched back to
+**`refactor/macos-seatbelt-test-lift`** at `9513cda`, PR [#192](https://github.com/hherb/hhagent/pull/192) **OPEN**. Dev box switched back to
 **macOS**. This session shipped the **`macos_seatbelt.rs` test-lift** — the last
 clean over-cap test-lift (item 9b-a): the inline `#[cfg(test)] mod tests` block
 moved verbatim into a new sibling `sandbox/src/macos_seatbelt/tests.rs` (281 LOC,
