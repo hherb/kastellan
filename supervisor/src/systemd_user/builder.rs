@@ -26,6 +26,8 @@
 //! StandardError=append:/abs/log/err
 //! Restart=on-failure                    # only when keep_alive=true
 //! RestartSec=5
+//! RestartSteps=8                        # only when restart_backoff is set
+//! RestartMaxDelaySec=300                 # only when restart_backoff is set
 //! TimeoutStopSec=10
 //!
 //! [Install]
@@ -127,6 +129,13 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
     if spec.keep_alive {
         out.push_str("Restart=on-failure\n");
         out.push_str(&format!("RestartSec={}\n", DEFAULT_RESTART_SEC));
+        // Optional exponential ramp. RestartSteps/RestartMaxDelaySec need
+        // systemd 252+; older systemd logs an "unknown directive" warning at
+        // load but still starts the unit, so emitting them is a safe degrade.
+        if let Some(b) = &spec.restart_backoff {
+            out.push_str(&format!("RestartSteps={}\n", b.steps));
+            out.push_str(&format!("RestartMaxDelaySec={}\n", b.max_delay_sec));
+        }
     }
 
     out.push_str(&format!("TimeoutStopSec={}\n", DEFAULT_TIMEOUT_STOP_SEC));
@@ -249,6 +258,7 @@ pub fn validate_service_name(name: &str) -> Result<(), SupervisorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RestartBackoff;
     use std::path::PathBuf;
 
     /// Minimal spec used as a starting point in builder tests.
@@ -377,6 +387,41 @@ mod tests {
     fn build_unit_file_no_keep_alive_omits_restart() {
         let s = build_unit_file(&minimal_spec("svc"));
         assert!(!s.contains("Restart="), "no Restart when keep_alive=false, got:\n{s}");
+    }
+
+    #[test]
+    fn build_unit_file_keep_alive_with_backoff_emits_steps_and_max_delay() {
+        let mut spec = minimal_spec("svc");
+        spec.keep_alive = true;
+        spec.restart_backoff = Some(RestartBackoff { max_delay_sec: 300, steps: 8 });
+        let s = build_unit_file(&spec);
+        assert!(s.contains("RestartSteps=8"), "{s}");
+        assert!(s.contains("RestartMaxDelaySec=300"), "{s}");
+        // RestartSec must precede the ramp directives.
+        let sec = s.find("RestartSec=").expect("RestartSec present");
+        let steps = s.find("RestartSteps=").expect("RestartSteps present");
+        let maxd = s.find("RestartMaxDelaySec=").expect("RestartMaxDelaySec present");
+        assert!(sec < steps && steps < maxd, "directive order wrong:\n{s}");
+    }
+
+    #[test]
+    fn build_unit_file_keep_alive_without_backoff_omits_steps_and_max_delay() {
+        let mut spec = minimal_spec("svc");
+        spec.keep_alive = true;
+        spec.restart_backoff = None;
+        let s = build_unit_file(&spec);
+        assert!(!s.contains("RestartSteps="), "{s}");
+        assert!(!s.contains("RestartMaxDelaySec="), "{s}");
+    }
+
+    #[test]
+    fn build_unit_file_backoff_inert_without_keep_alive() {
+        let mut spec = minimal_spec("svc");
+        spec.keep_alive = false;
+        spec.restart_backoff = Some(RestartBackoff { max_delay_sec: 300, steps: 8 });
+        let s = build_unit_file(&spec);
+        assert!(!s.contains("Restart="), "no restart directives without keep_alive:\n{s}");
+        assert!(!s.contains("RestartSteps="), "{s}");
     }
 
     #[test]
