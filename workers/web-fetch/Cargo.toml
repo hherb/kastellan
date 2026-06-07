@@ -1,0 +1,25 @@
+[package]
+name        = "hhagent-worker-web-fetch"
+description = "Tool worker: fetch a URL (HTTPS-only, host allowlist) and return extracted readable text. GET-only."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+[[bin]]
+name = "hhagent-worker-web-fetch"
+path = "src/main.rs"
+
+[dependencies]
+hhagent-protocol       = { path = "../../protocol" }
+hhagent-worker-prelude = { path = "../prelude" }
+serde                  = { workspace = true }
+serde_json             = { workspace = true }
+anyhow                 = { workspace = true }
+reqwest                = { workspace = true, features = ["blocking"] } # blocking: deliberate synchronous transport for this stdio worker (see web-fetch design spec)
+url                    = { workspace = true }
+pdf-extract            = { workspace = true }
+readable_html          = { workspace = true }

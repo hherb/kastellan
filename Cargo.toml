@@ -10,6 +10,7 @@ members = [
     "tests-common",
     "workers/prelude",
     "workers/shell-exec",
+    "workers/web-fetch",
 ]
 
 [workspace.package]
@@ -133,6 +134,18 @@ rand = { version = "0.8", features = ["std", "std_rng"] }
 #   - "stream" is *not* enabled — Phase-0 stub returns a single
 #     completion; SSE streaming is a Phase-1+ concern.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# URL parsing used by the web-fetch worker's allowlist gate.
+# MIT OR Apache-2.0 — AGPL-compatible.
+url = "2"
+
+# PDF text extraction for the web-fetch worker. MIT — AGPL-compatible.
+pdf-extract = "0.10"
+
+# HTML readability extraction (Mozilla Readability port) for the web-fetch
+# worker. Imported as `readable_html` for call-site clarity; underlying crate
+# is `dom_smoothie`. MIT — AGPL-compatible.
+readable_html = { package = "dom_smoothie", version = "0.18" }
 
 # Profile tweaks
 [profile.release]
