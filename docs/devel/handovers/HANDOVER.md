@@ -6,10 +6,10 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-07 (Option K — cross-platform exponential restart backoff, ROADMAP:61, branch `feat/restart-backoff`, PR pending; on macOS).
+**Last updated:** 2026-06-07 (Option K — cross-platform exponential restart backoff, ROADMAP:61, branch `feat/restart-backoff`, PR [#194](https://github.com/hherb/hhagent/pull/194); on macOS).
 
 **Current state.** `main` is at `5efae52` (PR [#193](https://github.com/hherb/hhagent/pull/193) three clean test-lifts **MERGED**; PR [#192](https://github.com/hherb/hhagent/pull/192) `macos_seatbelt.rs` test-lift **MERGED**). This session is on
-branch **`feat/restart-backoff`** at `ee9099f`, **PR pending**. Dev box on **macOS**.
+branch **`feat/restart-backoff`** at `ee9099f`, PR [#194](https://github.com/hherb/hhagent/pull/194) **OPEN**. Dev box on **macOS**.
 This session shipped **Option K — cross-platform exponential restart backoff**
 (ROADMAP:61, ticked):
 - New `ServiceSpec.restart_backoff: Option<RestartBackoff { max_delay_sec, steps }>`
@@ -286,7 +286,7 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190). **Option K — restart backoff (ROADMAP:61) shipped** this session (branch `feat/restart-backoff`, PR pending). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190). **Option K — restart backoff (ROADMAP:61) shipped** this session (branch `feat/restart-backoff`, PR [#194](https://github.com/hherb/hhagent/pull/194)). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
