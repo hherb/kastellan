@@ -3,6 +3,8 @@
 //! headers/body. Design:
 //! docs/superpowers/specs/2026-06-08-web-fetch-worker-design.md
 
+mod allowlist;
+
 fn main() -> anyhow::Result<()> {
     Ok(())
 }
