@@ -204,4 +204,36 @@ mod tests {
         assert!(cache.get_slice(2, &r, 0, 10).is_none()); // wrong task
         assert!(cache.get_slice(1, &HandoffRef::of(b"absent"), 0, 10).is_none());
     }
+
+    #[test]
+    fn per_task_budget_evicts_oldest_first() {
+        let cache = HandoffCache::new();
+        // Two bodies that together exceed the budget; the second eviction
+        // round must drop the first-inserted one.
+        let big = vec![b'a'; PER_TASK_BYTE_BUDGET - 1];
+        let r_old = cache.put(9, &big);
+        // Adding a second body pushes total over budget → r_old evicted.
+        let r_new = cache.put(9, b"second body that tips us over the budget");
+        assert!(cache.get_slice(9, &r_old, 0, 1).is_none(), "oldest must be evicted");
+        assert!(cache.get_slice(9, &r_new, 0, 1).is_some(), "newest must survive");
+    }
+
+    #[test]
+    fn body_larger_than_budget_is_still_stored() {
+        let cache = HandoffCache::new();
+        let huge = vec![b'z'; PER_TASK_BYTE_BUDGET + 10];
+        let r = cache.put(4, &huge);
+        let s = cache.get_slice(4, &r, 0, 16).expect("stored despite exceeding budget");
+        assert_eq!(s.bytes.len(), 16);
+    }
+
+    #[test]
+    fn purge_task_removes_only_that_task() {
+        let cache = HandoffCache::new();
+        let ra = cache.put(1, b"task-1 body");
+        let rb = cache.put(2, b"task-2 body");
+        cache.purge_task(1);
+        assert!(cache.get_slice(1, &ra, 0, 4).is_none(), "purged task gone");
+        assert!(cache.get_slice(2, &rb, 0, 4).is_some(), "other task intact");
+    }
 }
