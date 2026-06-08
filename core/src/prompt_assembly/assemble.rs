@@ -80,6 +80,7 @@
 //! 6. Deterministic: same `(l0, l1, skills, recalled, base)` produces
 //!    the same bytes.
 
+use crate::handoff::{MAX_FETCH_BYTES, SUMMARY_HEAD_BYTES};
 use crate::memory::l3_surface::{render_skill_entry, SurfacedSkill};
 use crate::recall_assembly::RecalledContext;
 use crate::scheduler::tool_dispatch::{HANDOFF_METHOD_FETCH, HANDOFF_TOOL};
@@ -90,22 +91,27 @@ use hhagent_db::memories::Memory;
 /// Teaches the planner the `fetch_handoff` protocol: how to recognise the
 /// placeholder the dispatcher leaves in place of an oversized tool result, and
 /// how to pull the full body back in slices. Compiled-in next to the mechanism
-/// ([`crate::handoff`] / [`crate::scheduler::tool_dispatch`]); the tool and
-/// method names come from their source-of-truth constants so the instruction
+/// ([`crate::handoff`] / [`crate::scheduler::tool_dispatch`]); the tool/method
+/// names *and* the byte sizes are interpolated from their source-of-truth
+/// constants ([`SUMMARY_HEAD_BYTES`], [`MAX_FETCH_BYTES`]) so the instruction
 /// cannot drift from the code that serves it. Constant text — no empty state —
 /// so unlike the memory-layer blocks it is emitted unconditionally.
 fn render_handoff_block() -> String {
+    // Express the byte caps in KiB straight from their constants, so a retuned
+    // cap rewrites the prose instead of leaving the planner a stale number.
+    let head_kib = SUMMARY_HEAD_BYTES / 1024;
+    let max_fetch_kib = MAX_FETCH_BYTES / 1024;
     format!(
         "<handoff>\n\
          Some tool results are too large for the context window. When a tool \
          result is the placeholder object {{handoff_ref, byte_len, summary_head, \
          truncated: true}}, the full output was stashed and only summary_head — \
-         the readable first ~1 KiB — is shown inline. That head is often enough \
-         to proceed without fetching anything more.\n\
+         the readable first ~{head_kib} KiB — is shown inline. That head is often \
+         enough to proceed without fetching anything more.\n\
          To read more of the body, emit a step with tool=\"{tool}\" \
          method=\"{method}\" and parameters={{handoff_ref, offset?, len?}} \
-         (offset defaults to 0; len defaults to 256 KiB and is clamped to that \
-         maximum). The \
+         (offset defaults to 0; len defaults to {max_fetch_kib} KiB and is clamped \
+         to that maximum). The \
          step returns {{handoff_ref, offset, len, data, encoding, eof}}, where \
          len is the number of bytes actually returned. To read the whole body, \
          repeat the fetch with offset increased by len until eof is true.\n\

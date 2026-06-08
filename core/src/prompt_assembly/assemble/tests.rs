@@ -306,10 +306,13 @@
     #[test]
     fn handoff_block_names_the_real_protocol_tokens() {
         // Drift guard: the instruction must reference the actual built-in
-        // tool/method constants and every field the mechanism emits, so a
-        // change to those shapes fails this test instead of silently leaving
-        // the planner with a stale protocol description.
-        use crate::handoff::{build_handoff_placeholder, HandoffRef};
+        // tool/method constants, every field the mechanism emits, and the byte
+        // caps it enforces, so a change to those shapes fails this test instead
+        // of silently leaving the planner with a stale protocol description.
+        use crate::handoff::{
+            build_handoff_placeholder, FetchResult, HandoffCache, HandoffRef, MAX_FETCH_BYTES,
+            SUMMARY_HEAD_BYTES,
+        };
         use crate::scheduler::tool_dispatch::{HANDOFF_METHOD_FETCH, HANDOFF_TOOL};
 
         let out = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE");
@@ -341,6 +344,38 @@
                 "handoff block must name fetch param {param:?}; got:\n{out}"
             );
         }
+
+        // Every field a real `fetch` response carries must be named, so a
+        // renamed return key (e.g. `data` -> `bytes`) fails here rather than
+        // misinforming the planner about the shape it gets back.
+        let cache = HandoffCache::new();
+        let value = serde_json::json!({ "k": "v".repeat(100) });
+        let stashed = cache.stash_if_oversized(1, &value, 8).expect("stashed (cap=8)");
+        let params = serde_json::json!({
+            "handoff_ref": stashed.handoff_ref.as_str(), "offset": 0, "len": 1_000_000,
+        });
+        match cache.fetch(1, &params) {
+            FetchResult::Ok(resp) => {
+                for key in resp.as_object().expect("fetch response is a JSON object").keys() {
+                    assert!(
+                        out.contains(key.as_str()),
+                        "handoff block must name fetch return field {key:?}; got:\n{out}"
+                    );
+                }
+            }
+            other => panic!("expected Ok fetch, got {other:?}"),
+        }
+
+        // Byte caps are interpolated from their constants (in KiB), not typed by
+        // hand — a retuned cap rewrites the prose and this assertion follows it.
+        assert!(
+            out.contains(&format!("{} KiB", SUMMARY_HEAD_BYTES / 1024)),
+            "block must show the summary-head size from SUMMARY_HEAD_BYTES; got:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("{} KiB", MAX_FETCH_BYTES / 1024)),
+            "block must show the fetch cap from MAX_FETCH_BYTES; got:\n{out}"
+        );
     }
 
     #[test]

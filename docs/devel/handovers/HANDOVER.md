@@ -23,11 +23,13 @@ the planner that the `{handoff_ref, byte_len, summary_head, truncated}` placehol
 now emits an **always-present `<handoff>` block** (order: L0 → L1 → skills → recalled → **handoff** → base; base
 stays terminal) describing the placeholder shape and the `fetch` step protocol. Drift-proofed: a pure helper
 `render_handoff_block()` interpolates the source-of-truth `HANDOFF_TOOL`/`HANDOFF_METHOD_FETCH` constants from
-`scheduler::tool_dispatch`, and a unit test cross-checks the block names every field a real
-`build_handoff_placeholder(...)` emits + the `offset`/`len` fetch params, so a shape change fails the test
-instead of leaving a stale prompt. Four pre-existing byte-exact pins (which asserted "empty everything → bare
+`scheduler::tool_dispatch` **and the byte caps `SUMMARY_HEAD_BYTES`/`MAX_FETCH_BYTES`** (in KiB) from
+`crate::handoff`, and a unit test cross-checks the block names every placeholder field, every field a real
+`fetch(...)` response carries, the `offset`/`len` fetch params, and both byte caps — so any shape/cap change
+fails the test instead of leaving a stale prompt (review follow-up: extended past the placeholder-only guard).
+Four pre-existing byte-exact pins (which asserted "empty everything → bare
 `<base>`") were updated deliberately; the test module was lifted to a sibling `assemble/tests.rs` (parent 543 →
-193 LOC, under the 500 cap). Pure-function change — no PG/sandbox/worker, no `agent_planner.md` edit.
+199 LOC, under the 500 cap). Pure-function change — no PG/sandbox/worker, no `agent_planner.md` edit.
 Design + plan:
 [`docs/superpowers/specs/2026-06-09-teach-planner-fetch-handoff-design.md`](../../superpowers/specs/2026-06-09-teach-planner-fetch-handoff-design.md),
 [`docs/superpowers/plans/2026-06-09-teach-planner-fetch-handoff.md`](../../superpowers/plans/2026-06-09-teach-planner-fetch-handoff.md).
@@ -92,7 +94,7 @@ manifest plumbing item 11 (PR #187). Full detail in Earlier history + archive sn
 `cargo build --workspace` clean (10 crates). `cargo test -p hhagent-core --lib` **719 / 0 / 0**
 (was 715 on `main`; +4 `<handoff>`-block prompt tests — the four updated byte-exact pins are modified in
 place, not added). `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings` exit 0.
-`prompt_assembly/assemble.rs` **193 LOC** + sibling `assemble/tests.rs` **351 LOC** (test module lifted
+`prompt_assembly/assemble.rs` **199 LOC** + sibling `assemble/tests.rs` **386 LOC** (test module lifted
 this session, both under the 500 cap). Pure-function change — no PG/sandbox/worker touched.
 **Standing macOS test-infra gotcha (not a regression):**
 a *full-workspace* run under `HHAGENT_PG_BIN_DIR` flakes ~4 tests in
