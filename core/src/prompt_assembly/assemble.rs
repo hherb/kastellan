@@ -121,9 +121,10 @@ fn render_handoff_block() -> String {
 /// See the module-level docstring for the framing rules. Surfaced skills are
 /// operator-approved (high-trust) so the `<skills>` block sits after L1 and
 /// before the unverified `recalled` output; an empty `skills` slice omits
-/// the block entirely. An empty [`RecalledContext`] omits the `<recalled>`
-/// tag entirely so the output is byte-identical to the v1 (no-recall)
-/// assembler when both `skills` and `recalled` are empty.
+/// the block entirely, as does an empty [`RecalledContext`] for `<recalled>`.
+/// The `<handoff>` and `<base>` blocks are always emitted, so even with every
+/// memory slice empty the output is `<handoff>…</handoff>` followed by
+/// `<base>…</base>` (not the bare `<base>` block of the pre-handoff assembler).
 pub fn assemble_system_prompt(
     l0: &[Memory],
     l1: &[Memory],
