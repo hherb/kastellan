@@ -6,43 +6,57 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-07 (Memory two-tier write path — `insert_memory_light`, ROADMAP:130, branch `feat/memory-light-write-path`, PR [#195](https://github.com/hherb/hhagent/pull/195) **OPEN**; on macOS).
+**Last updated:** 2026-06-08 (web-fetch worker — first network-egress tool, ROADMAP Phase 3, branch `feat/web-fetch-worker`, PR [#197](https://github.com/hherb/hhagent/pull/197) **OPEN — ready to merge**; on macOS, DGX-verified).
 
-**Current state.** `main` is at `3c9f70d` (PR [#194](https://github.com/hherb/hhagent/pull/194) Option K restart
-backoff **MERGED**; PR [#193](https://github.com/hherb/hhagent/pull/193) three clean test-lifts **MERGED**).
-This session is on branch **`feat/memory-light-write-path`** at the docs commit below, PR
-[#195](https://github.com/hherb/hhagent/pull/195) **OPEN**. Dev box on **macOS**. This session shipped
-**ROADMAP:130 — `insert_memory_light`**, the "light" half of the two-tier memory write path:
-- `db::memories::insert_memory_light(executor, body, metadata, layer)` — a thin named delegate to
-  `insert_memory_at_layer` with `embedding = None`; no new SQL, no migration. Inherits the L0
-  (`MemoryLayer::Meta`) `PolicyViolation` guard for free.
-- Documents the recall **degradation contract**: lexical lane + `metadata @>` containment work
-  normally; semantic lane silently skips the row (`semantic_search` filters `WHERE embedding IS NOT
-  NULL`); graph lane never surfaces it (no `memory_entities` links).
-- Two PG-required tests (round-trip + L0 rejection; cross-lane degradation pin) verified **passing
-  against live PG** (Postgres.app v18).
-- **Review-fix:** added a PG-free unit test (`insert_memory_light_rejects_l0_without_pg`, in
-  `write.rs`) pinning the L0 `PolicyViolation` guard via a lazy pool that never connects — the guard
-  short-circuits before any SQL, so it now has coverage on every dev machine, not only where live PG
-  is configured.
+**Current state.** `main` is at `4918b60` (PR [#195](https://github.com/hherb/hhagent/pull/195)
+`insert_memory_light` **MERGED**; PR [#194](https://github.com/hherb/hhagent/pull/194) Option K restart
+backoff **MERGED**). This session is on branch **`feat/web-fetch-worker`** at `dbf992e`, PR
+[#197](https://github.com/hherb/hhagent/pull/197) **OPEN — green on both platforms, ready to merge**.
+Dev box on **macOS**; the one Linux-only gate ran on the **DGX**. This session shipped the **`web-fetch`
+worker** (ROADMAP Phase 3), the first network-egress worker and the future egress proxy's intended
+consumer:
+- `workers/web-fetch/` — new `hhagent-worker-web-fetch` crate exposing JSON-RPC `web.fetch`
+  (`{url}`, GET-only) → `{final_url, status, content_type, title, text, truncated}`. **HTTPS-only**;
+  host allowlist **self-enforced on the initial request and re-checked on every redirect hop**
+  (redirects driven manually with `Policy::none()`). Readable-text extraction: HTML readability
+  (`dom_smoothie`, aliased `readable_html`, MIT), PDF (`pdf-extract`, MIT), `text/*` + `application/json`
+  + missing/empty Content-Type passthrough; other types rejected. 5 MiB body cap (`Read::take`),
+  100 KiB char-boundary text cap, 5-redirect cap, 20s timeout. `reqwest::blocking` + rustls. Four
+  modules (allowlist / extract / fetch / handler) + a shared `#[cfg(test)] mod test_transport`.
+- `core/src/workers/web_fetch.rs` — host-side `WebFetchManifest` + `web_fetch_entry()`, registered in
+  `WORKER_MANIFESTS`. `Profile::WorkerNetClient` + `Net::Allowlist`, `SingleUse`, cpu/mem/wall caps,
+  resolver files (`/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`) in `fs_read` for in-jail DNS.
+  The allowlist has **one source** (`tool_allowlists` DB rows, keyed `"web-fetch"`) in two
+  representations: verbatim JSON env for the worker's per-hop check (wildcard `.domain` preserved) and
+  `host:443` for `Net::Allowlist` (for the egress proxy). The LLM-supplied `step.parameters` cannot
+  widen it.
+- **fix(sandbox):** new `HHAGENT_LANDLOCK_RO` env propagates `SandboxPolicy.fs_read` to the worker-side
+  **Landlock** layer (mirrors the existing RW plumbing). Without it bwrap bind-mounts `fs_read` paths
+  but Landlock EACCESes reads to them after `lock_down()` — breaking DNS (`/etc/resolv.conf`) in the
+  jail on Linux. Generalizes for every future net worker.
+- **`/review` follow-ups (`dbf992e`):** documented the interim self-enforced-allowlist
+  **SSRF/DNS-rebinding caveat** in `threat-model.md` (host-name match ≠ IP containment until the egress
+  proxy lands); missing/empty `Content-Type` treated as text instead of rejected; commented the
+  `300..400` redirect range + the intentional double URL validation; noted `pdf-extract`
+  panic-containment; deduped the `FakeGet` test transport into the shared `test_transport` module.
 
-**Deferred (per spec):** core-side caller wiring; per-namespace caps + oldest-eviction. Graph-lane
-degradation is asserted by construction but not yet exercised in a test (heavier — needs
-`link_memory_to_entities` + `graph_search`); tracked as
-[#196](https://github.com/hherb/hhagent/issues/196).
+**Interim containment note.** `Net::Allowlist` is **not yet enforced at the network layer** (no egress
+proxy). Containment is the worker's self-enforced allowlist — real, but worker-trust-dependent; it
+becomes defense-in-depth layer 2 once the proxy enforces at the boundary. Crucially the allowlist
+matches host **names, not resolved IPs**, so it does not contain SSRF / DNS-rebinding to internal
+addresses; closing that gap (private/loopback reject + resolved-IP pinning) is the egress proxy's job.
+See `threat-model.md` "Network egress".
 
-**Prior session shipped** Option K — cross-platform exponential restart backoff
-(ROADMAP:61, ticked, PR #194 MERGED):
-- New `ServiceSpec.restart_backoff: Option<RestartBackoff { max_delay_sec, steps }>`
-  in `hhagent-supervisor` — additive, `#[serde(default)]`, `None` reproduces today's
-  constant-`RestartSec=5` output byte-for-byte (same precedent as `after`/`part_of`).
-- **systemd** backend emits `RestartSteps`/`RestartMaxDelaySec` (252+; older systemd
-  warns-but-loads) inside the `keep_alive` block only.
-- **macOS launchd** warns-and-ignores at install (`tracing::warn!`) — launchd has no
-  operator-controllable backoff; `build_plist` unchanged, pinned by a regression guard.
-- `core_service_spec` + `postgres_service_spec` wired with a **5s→300s/8-step** curve.
-- Two builder test modules lifted to siblings to stay under the 500-LOC cap
-  (`systemd_user/builder.rs` 524→259; `launchd_agents/builders.rs` 508→234).
+**Deferred (tracked):** egress-proxy enforcement of the allowlist at the trust boundary (this worker is
+its consumer); hermetic localhost-HTTPS happy-path e2e (waits on the egress-proxy test CA); `web-search`
+worker + wiring web-fetch into the agent tool surface + a local-LLM demo.
+
+**Prior session shipped** ROADMAP:130 — `insert_memory_light` (PR #195 MERGED): a thin
+`embedding = None` delegate to `insert_memory_at_layer` (no new SQL/migration; inherits the L0
+`PolicyViolation` guard), documenting the recall **degradation contract** (lexical + `metadata @>`
+work; semantic lane skips the row; graph lane never surfaces it). PG-required round-trip + cross-lane
+degradation tests pass against live PG, plus a PG-free L0-rejection unit test. Deferred (issue #196):
+core-side caller wiring, per-namespace caps + oldest-eviction, graph-lane degradation test.
 
 **Residual (deferred per the documented ≤27-over policy):**
 `supervisor/src/launchd_agents.rs` is **508 LOC** (+8; tests already external, so a
@@ -53,23 +67,29 @@ Recent merged history: three clean test-lifts (PR #193); `macos_seatbelt.rs` tes
 (PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker manifest plumbing
 item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
-**Session-end verification (macOS, on `feat/memory-light-write-path`):**
-`cargo clippy -p hhagent-db --all-targets --locked -- -D warnings` exit 0;
-`db/src/memories/write.rs` 373 LOC (under cap, +40 for the review-fix unit-test module). All
-three light-path tests run **against live PG** (Postgres.app v18 via session-local
-`HHAGENT_PG_BIN_DIR=/Applications/Postgres 2.app/...`): the new PG-free
-`insert_memory_light_rejects_l0_without_pg` unit test passes, and the two e2e tests
-(`insert_memory_light_round_trip_and_rejects_l0`,
-`insert_memory_light_degrades_gracefully_across_lanes`) pass in 2.11s of real cluster bring-up. **Known macOS test-infra gotcha (not a
-regression):** a *full-workspace* run under `HHAGENT_PG_BIN_DIR` flakes 4 tests in
-`core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs:249/314`) —
-parallel `initdb`/launchd churn (issue #130 territory); they pass single-threaded and in
-isolation. Use skip-as-pass for the whole workspace on the Mac; run live-PG suites
-individually or on the DGX.
+**Session-end verification:**
+- **macOS** (Seatbelt, on `feat/web-fetch-worker` @ `dbf992e`):
+  `cargo clippy -p hhagent-worker-web-fetch -p hhagent-core --all-targets -- -D warnings` exit 0;
+  **29** web-fetch unit tests + **695** core lib tests pass; hermetic sandbox e2e
+  `host_outside_allowlist_is_denied` passes **under real Seatbelt + live PG** (non-allowlisted host →
+  `POLICY_DENIED`).
+- **DGX (Linux, aarch64, real bwrap + Landlock):**
+  `cargo test -p hhagent-core --test web_fetch_e2e -- --ignored --nocapture` →
+  `real_fetch_extracts_readable_text ... ok` (2.39s). This is the gate the final review flagged: it
+  proves **DNS + TLS work inside the `--unshare-all` bwrap jail** with the new `HHAGENT_LANDLOCK_RO`
+  fix — i.e. the fix works at runtime, not just by construction. **PR #197 is now green on both
+  platforms.**
+
+**Known macOS test-infra gotcha (standing, not a regression):** a *full-workspace* run under
+`HHAGENT_PG_BIN_DIR` flakes 4 tests in `core/tests/embedding_recall_e2e.rs` at PG bring-up
+(`tests-common/src/pg.rs:249/314`) — parallel `initdb`/launchd churn (issue #130 territory); they pass
+single-threaded and in isolation. Use skip-as-pass for the whole workspace on the Mac; run live-PG
+suites individually or on the DGX.
 
 **Recently merged (safe to `git branch -d` if still local):**
-`refactor/gliner-relex-prod-split` (PR #189), `refactor/recall-test-module-lift`
-(PR #188), `feat/worker-manifest-plumbing` (PR #187).
+`feat/memory-light-write-path` (PR #195), `feat/option-k-restart-backoff` (PR #194),
+test-lifts (PR #193), `refactor/gliner-relex-prod-split` (PR #189),
+`refactor/recall-test-module-lift` (PR #188), `feat/worker-manifest-plumbing` (PR #187).
 
 **Recently merged (safe to `git branch -d` if still local; but see the
 `fix/issue-179-...` caveat above — it has an unmerged skills commit):**
@@ -106,7 +126,7 @@ The current native-Linux test baseline is **1327 / 0 / 4**
 ## Working state (what's green right now)
 
 ```
-hhagent (Rust workspace, 9 crates, AGPL-3.0)
+hhagent (Rust workspace, 10 crates, AGPL-3.0)
 ├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue + screen + extract_scannable_text), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS + pure assemble_registry + async build_tool_registry(pool, exe_dir))
 ├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, insert_memory_at_layer, insert_memory_light (embedding-skipping light write path), semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads HHAGENT_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
@@ -114,8 +134,9 @@ hhagent (Rust workspace, 9 crates, AGPL-3.0)
 ├── supervisor         hhagent-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, hhagent_target_spec} + default_probe. ServiceSpec carries after/part_of ordering + optional restart_backoff (RestartBackoff{max_delay_sec,steps}: systemd → RestartSteps/RestartMaxDelaySec, launchd → warn-and-ignore); TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native hhagent.target unit). Names screened by validate_service_name before unit-file write
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── tests-common       hhagent-tests-common: shared dev-dep crate (publish = false) — PgCluster + bring_up_pg_cluster(+_with_timeout), RAII guards, skip helpers, sandbox factory, binary discovery, macOS launchd serial lock (reentrant), deterministic SHA-256-seeded embedding seed. Consumed only from [dev-dependencies]; never linked into a runtime binary.
-├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS) + cross-platform setrlimit(RLIMIT_CPU)
-└── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
+├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS) + cross-platform setrlimit(RLIMIT_CPU). Landlock now reads HHAGENT_LANDLOCK_RW (scratch) + HHAGENT_LANDLOCK_RO (fs_read paths, e.g. /etc/resolv.conf)
+├── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
+└── workers/web-fetch    hhagent-worker-web-fetch: first net-egress worker — web.fetch (HTTPS-only, host allowlist self-enforced per-hop, readable-text extraction). reqwest::blocking+rustls. allowlist/extract/fetch/handler + test_transport
 ```
 
 **Test baselines.** Native-Linux (DGX, PG 18.4 live, rustc 1.96.0): **1327 / 0 / 4**
@@ -135,7 +156,9 @@ archive snapshots; the suite table below lists what each integration suite verif
 | `sandbox` integration (`macos_smoke`) | 10 | **real** sandbox-exec: jailed echo, fs invisibility, fs_read readable, net deny, fresh session leader (#2), no appleevents bootstrap (#1) |
 | `sandbox` integration (`macos_container_smoke`) | 7+ | **real** Apple `container`: argv shape, alpine smoke under `--init`, bind-mount-readonly, strict profile, probe skip |
 | `core` unit | 60+ | lockdown-env, watchdog, workspace RAII, audit parsers, dispatch-result mapping, ToolRegistry, injection_guard catalogue, secrets Vault + SecretRef, L3 crystallise/approval/invoke/surface units (see archive for full breakdown) |
+| `web-fetch` worker unit | 29 | allowlist matching (exact/suffix/case/lookalike), content extraction (HTML/PDF/text/JSON/empty-CT/char-boundary cap), redirect drive loop (per-hop https+allowlist re-check, cap, missing-Location), handler RPC-code mapping |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → sandbox → shell-exec round-trip; every call routes through `tool_host::dispatch` |
+| `core` integration (`web_fetch_e2e`) | 1 (+1 ignored) | **real** core → sandbox → web-fetch: hermetic non-allowlisted host → `POLICY_DENIED` (Seatbelt + live PG); `--ignored` happy path proves DNS+TLS inside the bwrap jail (DGX, validates `HHAGENT_LANDLOCK_RO`) |
 | `core` integration (`memory_recall_e2e`) | 1 | **real** Phase-1 entry: all three lanes + 1-hop entity expansion + fused RRF + empty-seed degrade |
 | `core` integration (`cli_ask_e2e`) | 2 | **real** full prod chain (CLI → PG → scheduler → LLM → CASSANDRA → dispatch → finalize) against a queued mock LLM |
 | `core` integration (`injection_guard_e2e`) | 6 | **PG-required**: placeholder shape, one policy row, privacy invariant, SHA shape, benign passthrough, error-path bypass |
