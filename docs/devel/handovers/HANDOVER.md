@@ -6,14 +6,52 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-08 (Reconciliation: `web-fetch` worker shipped & **MERGED** as PR [#197](https://github.com/hherb/hhagent/pull/197); the prior session updated ROADMAP but not this handover. On macOS).
+**Last updated:** 2026-06-08 (Large-tool-result handoff cache, ROADMAP:129, branch `feat/handoff-cache`, PR **about to open**; on macOS).
 
 **Current state.** `main` is at `f5b5544` (PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**;
-PR [#195](https://github.com/hherb/hhagent/pull/195) `insert_memory_light` **MERGED** at `4918b60`;
-PR [#194](https://github.com/hherb/hhagent/pull/194) Option K restart backoff **MERGED**). Working tree
-clean except untracked `docs/essay-medium-draft.md` (intentionally never committed — see memory note).
-Dev box on **macOS**. **No feature work this session yet** — this was a handover reconciliation. Pick a
-"Next TODO" below.
+PR [#195](https://github.com/hherb/hhagent/pull/195) `insert_memory_light` **MERGED**;
+PR [#194](https://github.com/hherb/hhagent/pull/194) Option K **MERGED**). This session is on branch
+**`feat/handoff-cache`** (13 commits on top of `main`), PR **about to open**. Working tree clean except
+untracked `docs/essay-medium-draft.md` (intentionally never committed — see memory note). Dev box on
+**macOS**. This session: (1) reconciled the stale handover with `main` (web-fetch PR #197 was merged but
+undocumented), then (2) shipped **ROADMAP:129 — the large-tool-result handoff cache** (design → plan →
+8-task TDD via subagent-driven development).
+
+**This session shipped — large-tool-result handoff cache (Phase 1 cont., ROADMAP:129).**
+Caps what a single tool result injects into the planner's context. New module
+[`core/src/handoff.rs`](../../../core/src/handoff.rs) (492 LOC — near the cap, lift tests if it grows):
+in-memory, per-task, content-addressed `HandoffCache`.
+- **Stash (dispatcher layer).** `ToolHostStepDispatcher::dispatch_step`, *after* `tool_host::dispatch`
+  returns (the sealed chokepoint is untouched): an `Ok(v)` whose serialized JSON exceeds
+  `DEFAULT_RESULT_BYTE_CAP` (64 KiB) and `task_id > 0` is stashed and replaced with a
+  `{handoff_ref, byte_len, summary_head}` placeholder (`summary_head` via `injection_guard::extract_scannable_text`).
+  Best-effort `policy/handoff.stashed` audit row.
+- **Retrieve (reserved built-in).** A `handoff`/`fetch` step is intercepted at the **top** of
+  `dispatch_step`, before the registry lookup — served in-core from the per-task cache (no worker
+  spawn), `len` clamped to `MAX_FETCH_BYTES` (256 KiB), `policy/handoff.fetched` audit row. The
+  `"handoff"` name is **reserved** in `registry_build::assemble_registry` (no manifest can shadow it).
+- **Lifecycle.** `task_id` threaded through the `StepDispatcher` trait; `purge_task` default-noop +
+  production override; the lane runner purges at every task terminal (Ok + Err). Per-task byte budget
+  (`PER_TASK_BYTE_BUDGET` 64 MiB, oldest-evict) + global `MAX_TRACKED_TASKS` (4096) backstop bound memory.
+- **Security (all three invariants verified by the final review):** injection-blocked outputs are
+  never stashed (they arrive as the tiny `injection_blocked` placeholder, under cap); no cross-task
+  leakage (keyed `(task_id, ref)`); the reserved name can't be diverted into a sandbox. Operator
+  `memory l3 run` path passes `task_id = 0` → passthrough verbatim (it feeds a human with no fetch loop).
+- **Storage decision:** in-memory, NOT the per-task `Workspace` scratch ROADMAP:129 named — `Workspace`
+  is implemented/tested but **never constructed in the live scheduler flow** (only a doc-comment
+  reference), so disk storage would need that wiring first. In-memory matches openhuman's actual
+  `ResultHandoffCache` and is self-contained. Design + plan:
+  [`docs/superpowers/specs/2026-06-08-handoff-cache-design.md`](../../superpowers/specs/2026-06-08-handoff-cache-design.md),
+  [`docs/superpowers/plans/2026-06-08-handoff-cache.md`](../../superpowers/plans/2026-06-08-handoff-cache.md).
+
+**Deferred (filed/tracked):** per-tool `result_byte_cap` override (YAGNI — would touch ~14 `ToolEntry`
+sites for a value that's `None` everywhere today); on-disk Workspace-backed store; **teaching the
+planner to actually call `fetch_handoff`** (a prompt-assembly follow-up — this slice makes the
+mechanism exist + tested, not used); stash-branch real-worker e2e ([#198](https://github.com/hherb/hhagent/issues/198)).
+
+**Prior reconciliation (same session):** the handover header/working-state/suite-table were brought to
+`main` truth — the previous session shipped the `web-fetch` worker (PR #197) and updated ROADMAP but
+not this handover. See the web-fetch "Recently completed" section below.
 
 **Most recently shipped — `web-fetch` worker (Phase 3, ROADMAP:145, PR [#197](https://github.com/hherb/hhagent/pull/197) MERGED).**
 First net-egress worker and the first consumer of the `Net::Allowlist` policy data. New crate
@@ -56,12 +94,15 @@ Recent merged history: Option K restart backoff (PR #194); three clean test-lift
 `hhagent.target` bring-up (PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker
 manifest plumbing item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
-**Session-end verification (macOS, reconciliation on `main` at `f5b5544`):**
-`cargo build --workspace` clean (10 crates). `cargo test -p hhagent-worker-web-fetch`
-**29 / 0 / 0**; `cargo test -p hhagent-core --test web_fetch_e2e` **1 passed / 1 ignored**
-(`host_outside_allowlist_is_denied` is the hermetic deny-path pin; `real_fetch_extracts_readable_text`
-is `#[ignore]` — hits the real network, validates DNS+TLS inside the jail). No full-workspace live-PG
-run this session (doc-only reconciliation). **Standing macOS test-infra gotcha (not a regression):**
+**Session-end verification (macOS, `feat/handoff-cache`):**
+`cargo build --workspace` clean (10 crates). `cargo test -p hhagent-core --lib` **715 / 0 / 0**
+(was 695 on `main` pre-handoff; +20 handoff unit tests). `cargo test -p hhagent-core --test
+handoff_dispatch_e2e` **3 / 0 / 0** (hermetic — no PG/sandbox/worker). `cargo clippy -p hhagent-core
+--all-targets --locked -- -D warnings` exit 0. `handoff.rs` **492 LOC** (under the 500 cap but close —
+lift its `#[cfg(test)] mod tests` to a sibling if it grows). No full-workspace live-PG run this session
+(macOS skip-as-pass; the touched scheduler integration suites — `scheduler_step_dispatch_e2e`,
+`cli_memory_l3_run_e2e`, `scheduler_inner_loop_e2e`, `scheduler_lanes_e2e`,
+`memory_l3_crystallise_e2e` — compiled + passed during the run). **Standing macOS test-infra gotcha (not a regression):**
 a *full-workspace* run under `HHAGENT_PG_BIN_DIR` flakes ~4 tests in
 `core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs`) — parallel
 `initdb`/launchd churn (issue #130 territory); they pass single-threaded and in isolation. Use
@@ -109,7 +150,7 @@ The current native-Linux test baseline is **1327 / 0 / 4**
 
 ```
 hhagent (Rust workspace, 10 crates, AGPL-3.0)
-├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue + screen + extract_scannable_text), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS [shell-exec, web-fetch, gliner-relex] + pure assemble_registry + async build_tool_registry(pool, exe_dir))
+├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue + screen + extract_scannable_text), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS [shell-exec, web-fetch, gliner-relex] + pure assemble_registry [skips the reserved `handoff` name] + async build_tool_registry(pool, exe_dir)), handoff (in-memory per-task content-addressed HandoffCache: stash_if_oversized → placeholder, fetch → clamped slice, per-task byte budget + MAX_TRACKED_TASKS backstop, purge_task at terminal; wired into ToolHostStepDispatcher after dispatch returns + the `handoff`/`fetch` built-in intercept)
 ├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, insert_memory_at_layer, insert_memory_light (embedding-skipping light write path), semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads HHAGENT_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
 ├── sandbox            hhagent-sandbox: SandboxPolicy + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
@@ -141,6 +182,9 @@ archive snapshots; the suite table below lists what each integration suite verif
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → sandbox → shell-exec round-trip; every call routes through `tool_host::dispatch` |
 | `web-fetch` unit | 29 | allowlist matcher (exact/wildcard/case), extract (HTML/PDF/text/JSON/char-boundary cap/unsupported), fetch redirect-drive (cap, non-allowlisted/non-HTTPS refusal, no-Location), handler (happy path, policy-denied arms, method-not-found, invalid-params) |
 | `core` integration (`web_fetch_e2e`) | 1 (+1 ignored) | **real** sandbox deny-path: host outside allowlist is denied (hermetic); `real_fetch_extracts_readable_text` `#[ignore]` (real network, validates DNS+TLS in-jail) |
+| `core` unit (`handoff`) | 19 | HandoffRef parse, put/get_slice round-trip + offset/len/eof, per-task budget eviction, global MAX_TRACKED_TASKS backstop, purge isolation, placeholder fields, stash passthrough/over-cap/exact-cap, fetch utf8/clamp/not-found/invalid/cross-task |
+| `core` integration (`handoff_dispatch_e2e`) | 3 | **hermetic** (lazy pool, fake lifecycle) dispatcher-level `fetch_handoff` intercept: stashed slice returned, unknown-ref → HANDOFF_NOT_FOUND, missing param → INVALID_PARAMS |
+| `core` unit (`registry_build`) | 6 | assemble_registry Register/Disabled/Misconfigured + the reserved-`handoff`-name skip |
 | `core` integration (`memory_recall_e2e`) | 1 | **real** Phase-1 entry: all three lanes + 1-hop entity expansion + fused RRF + empty-seed degrade |
 | `core` integration (`cli_ask_e2e`) | 2 | **real** full prod chain (CLI → PG → scheduler → LLM → CASSANDRA → dispatch → finalize) against a queued mock LLM |
 | `core` integration (`injection_guard_e2e`) | 6 | **PG-required**: placeholder shape, one policy row, privacy invariant, SHA shape, benign passthrough, error-path bypass |
@@ -216,50 +260,6 @@ web-shaped worker can return large bodies.
 
 ---
 
-## Recently completed (2026-06-07 — `insert_memory_light`, ROADMAP:130, branch `feat/memory-light-write-path`, PR [#195](https://github.com/hherb/hhagent/pull/195) MERGED at `4918b60`, on macOS)
-
-**What & why.** The "light" half of openhuman's two-tier memory write path
-(`put_doc` vs `put_doc_light`). Today every `memories` row is written with a
-caller-computed embedding; for *future* high-frequency ephemeral writers
-(channel inbound, browser observations, screen capture) that would never be
-useful semantic-search targets, embedding every row wastes the expensive embed
-call. This adds the deliberately-named embedding-skipping writer.
-Design + plan: [`docs/devel/specs/2026-06-07-memory-light-write-path-design.md`](../specs/2026-06-07-memory-light-write-path-design.md),
-[`docs/devel/plans/2026-06-07-memory-light-write-path.md`](../plans/2026-06-07-memory-light-write-path.md).
-
-**What shipped (3 code commits `39a036a`..`6e7eb13`, all in `hhagent-db`):**
-- **`db::memories::insert_memory_light(executor, body, metadata, layer)`**
-  (`write.rs`) — a thin named delegate to `insert_memory_at_layer` with
-  `embedding = None`. No `embedding` parameter (skipping it is the point); no new
-  SQL, no migration. Inherits the L0 (`MemoryLayer::Meta`) `PolicyViolation` guard
-  for free, preserving the "grep `seed_meta_memory` = every L0 write" invariant.
-  Re-exported from the parent `memories` module.
-- **Documented degradation contract** on the function: lexical lane + `metadata @>`
-  containment work normally; semantic lane silently skips the row (`semantic_search`
-  filters `WHERE embedding IS NOT NULL`); graph lane never surfaces it (no
-  `memory_entities` links). Graceful degradation, not breakage.
-- **Two PG-required tests** (`db/tests/postgres_e2e.rs`):
-  `insert_memory_light_round_trip_and_rejects_l0` (NULL embedding + correct layer;
-  L0 rejected; no L0 leak) and `insert_memory_light_degrades_gracefully_across_lanes`
-  (light row absent from `semantic_search`, present via lexical + `metadata @>`, with
-  an embedded control row proving the semantic lane is live). Verified **passing
-  against live PG**.
-- **One PG-free unit test** (`write.rs`, review-fix): `insert_memory_light_rejects_l0_without_pg`
-  pins the L0 `PolicyViolation` guard with a lazy pool that never connects — the guard
-  short-circuits before any SQL, so the policy now has coverage on every dev machine.
-
-**Reviews:** spec-compliance ✅ (exact signature, thin body, 3 files, no scope creep);
-code-quality "approved with minor fixes" — applied the test-cluster-label rename
-(`mlight-*`/`mdegrad-*`, commit `6e7eb13`) for readability; kept the degradation-contract
-rustdoc (deliberate, spec-mandated API doc). **`/review` follow-up:** added the PG-free L0
-unit test above (review flagged the guard had no coverage under macOS skip-as-pass); graph-lane
-test gap lodged as [#196](https://github.com/hherb/hhagent/issues/196).
-
-**Deferred (per spec):** core-side caller wiring; per-namespace caps + oldest-eviction;
-a graph-lane degradation test.
-
----
-
 ---
 
 ## Earlier history (summary)
@@ -272,6 +272,7 @@ sessions 2026-05-10 → 2026-05-29 in
 sessions 2026-05-06 → 2026-05-09 in
 [`archive/handover_20260510_pre-prune.md`](archive/handover_20260510_pre-prune.md).
 
+- **2026-06-07 — `insert_memory_light` two-tier write path (ROADMAP:130, PR [#195](https://github.com/hherb/hhagent/pull/195) MERGED at `4918b60`):** `db::memories::insert_memory_light(executor, body, metadata, layer)` — thin delegate to `insert_memory_at_layer` with `embedding = None`, no new SQL/migration, inherits the L0 `PolicyViolation` guard. Degradation contract: lexical + `metadata @>` work; semantic skips (`WHERE embedding IS NOT NULL`); graph never surfaces it. 2 PG e2e + 1 PG-free L0-guard unit test. Deferred: caller wiring; per-namespace caps; graph-lane degradation test ([#196](https://github.com/hherb/hhagent/issues/196)).
 - **2026-06-07 — Option K: cross-platform exponential restart backoff (ROADMAP:61, PR [#194](https://github.com/hherb/hhagent/pull/194) MERGED):** `ServiceSpec.restart_backoff: Option<RestartBackoff{max_delay_sec,steps}>` (additive, `#[serde(default)]`, `None`=old constant-`RestartSec=5`). systemd emits `RestartSteps`/`RestartMaxDelaySec` (252+; older warns-but-loads); macOS launchd warns-and-ignores (no equivalent knob). core+postgres specs wired 5s→300s/8-step. Builder test modules lifted to siblings to stay under cap. Residual: `launchd_agents.rs` 508 LOC (+8, deferred per ≤27-over policy).
 - **2026-06-07 — three clean test-lifts batch (item 9b-a, PR [#193](https://github.com/hherb/hhagent/pull/193) MERGED):** scripted byte-identity lifts of inline `mod tests` blocks — `cassandra/types.rs` 897→336, `scheduler/inner_loop_audit.rs` 655→304, `entity_extraction/gliner_relex.rs` 570→386. Residual: `cassandra/types/tests.rs` 568 (over-cap test file, bucket-c).
 - **2026-06-07 — `macos_seatbelt.rs` test-lift (item 9b-a, PR [#192](https://github.com/hherb/hhagent/pull/192) MERGED):** inline `#[cfg(test)] mod tests` → sibling `macos_seatbelt/tests.rs`; parent 604 → 332 LOC, production byte-identical, 16 unit tests pass from the new location.
@@ -350,9 +351,17 @@ sessions 2026-05-06 → 2026-05-09 in
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190). **Option K — restart backoff (ROADMAP:61) MERGED** (PR #194). **Memory two-tier write path (ROADMAP:130 — `insert_memory_light`) MERGED** (PR #195). **`web-fetch` worker (Phase 3, ROADMAP:145) MERGED** (PR #197). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**Natural follow-ups now that `web-fetch` shipped (Phase 3):**
-- **Large-tool-result handoff cache (ROADMAP:129)** — now the most natural next pick: a web fetch can return a body that dwarfs the planner's remaining context. `tool_host::dispatch` currently returns the worker result verbatim. Adopt openhuman's `ResultHandoffCache` pattern: over a per-tool byte cap, stash the full body in the per-task `Workspace` scratch (`handoff/<sha256>.bin`), return a placeholder `{handoff_ref, byte_len, summary_head}`, expose a core-side `fetch_handoff(ref)` tool. Co-locate the redaction with the injection-guard block path. The chokepoint + `Workspace::Drop` cleanup already exist.
-- **[#142](https://github.com/hherb/hhagent/issues/142) — injection-guard chat-template false-positives**, now *actionable*: a `web-fetch` worker exists, so the real data the issue author wanted is now obtainable — fetch a technical doc containing `<|im_start|>`-style tokens and tune the catalogue against it.
+**Direct follow-ups to this session's handoff cache (ROADMAP:129, shipped on `feat/handoff-cache`):**
+- **Teach the planner to *call* `fetch_handoff`** — this slice made the mechanism exist + tested but the
+  planner doesn't yet know it can call `tool:"handoff" method:"fetch"`. A prompt-assembly follow-up:
+  surface the built-in (and the placeholder shape) in the assembled system prompt so the agent expands
+  a stashed result on demand. Small, self-contained.
+- **[#198](https://github.com/hherb/hhagent/issues/198)** — stash-branch dispatcher e2e through a real worker emitting >64 KiB (PG+sandbox gated; the fetch-intercept side is already covered hermetically).
+- **On-disk Workspace-backed store** — only once a per-task `Workspace` is actually wired into the live
+  scheduler flow (it isn't today); the `HandoffCache` surface can take a disk impl behind it then.
+
+**Other Phase-3 natural picks:**
+- **[#142](https://github.com/hherb/hhagent/issues/142) — injection-guard chat-template false-positives**, now *actionable*: a `web-fetch` worker exists, so fetch a technical doc containing `<|im_start|>`-style tokens and tune the catalogue against real data.
 - **Egress proxy (ROADMAP:141)** — `web-fetch` is its first consumer and the SSRF/DNS-rebinding gap (host-name not IP) is documented in `threat-model.md`; the proxy owns IP-level containment + the co-located credential-leak scanner (ROADMAP:142). Larger than one session — needs a spec first.
 - **`web-search` worker (ROADMAP:146)** — SearxNG default; builds directly on the `web-fetch` allowlist + extraction modules.
 
@@ -362,7 +371,7 @@ Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 
 
 - **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none meaningfully remaining.** The substantial ones are done — `cassandra/types.rs`, `inner_loop_audit.rs`, `entity_extraction/gliner_relex.rs` (2026-06-07 batch); `macos_seatbelt.rs` (PR #192); `recall.rs`/`l0_seed.rs`/`capture.rs`/`inner_loop.rs`/`replay.rs` (Earlier history). A fresh census shows only files sitting **1–27 LOC over cap** still carry a liftable block (`core/src/main.rs` 527, `db/src/lib.rs` 525, `core/src/bin/hhagent-cli/memory_l3/run.rs` 519, `core/src/tool_host.rs` 519, `core/src/cassandra/constitutional.rs` 502, `core/src/memory/l1_promote.rs` 501) — a lift would save little; defer unless one grows.
 - **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `db/secrets.rs` (848, a clean prod-split candidate), `core/src/scheduler/runner.rs` (773), `core/src/scheduler/audit.rs` (701, tests already lifted), `db/src/entities.rs` (653), `workers/prelude/src/seccomp_lock.rs` (650), `core/src/scheduler/inner_loop.rs` (566, tests already lifted). (`systemd_user.rs`/`gliner_relex.rs` done — see history.)
-  Also `supervisor/src/launchd_agents.rs` (508, +8) — pushed over by Option K's install-time warn; tests already external, so a fix needs a real prod-split (disproportionate for 8 lines; deferred per this same policy).
+  Also `supervisor/src/launchd_agents.rs` (508, +8) — pushed over by Option K's install-time warn; tests already external, so a fix needs a real prod-split (disproportionate for 8 lines; deferred per this same policy). And `core/src/scheduler/tool_dispatch.rs` (507, +7) — pushed over by the handoff stash + `fetch_handoff` intercept; tests already external (`tool_dispatch/tests.rs`), so deferred per the same ≤27-over policy (a clean split would lift the `fetch_handoff` intercept + stash path into a `handoff_dispatch.rs` sibling if it grows).
 - **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851), `core/src/cassandra/types/tests.rs` (568).
 
 **Engineering pickups (need a spec/design first):**
