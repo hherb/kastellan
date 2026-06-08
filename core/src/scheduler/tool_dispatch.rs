@@ -316,6 +316,12 @@ impl StepDispatcher for ToolHostStepDispatcher {
         // handoff cache. Intercepted *before* the registry lookup, so no worker
         // spawns and the sandbox is never entered. `"handoff"` is a reserved
         // name (registry assembly refuses any manifest claiming it).
+        //
+        // Unlike the stash branch below, this fires for *any* `task_id`,
+        // including the operator `task_id <= 0` path. That is deliberate and
+        // safe: nothing is ever stashed under a non-positive task id, so a
+        // fetch there simply finds nothing and returns `HANDOFF_NOT_FOUND`.
+        // Gating it would only trade one not-found arm for another.
         if step.tool == HANDOFF_TOOL && step.method == HANDOFF_METHOD_FETCH {
             let fetched = self.handoff.fetch(task_id, &step.parameters);
             let elapsed_ms = started.elapsed().as_millis() as u64;

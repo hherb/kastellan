@@ -6,7 +6,7 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-08 (Large-tool-result handoff cache, ROADMAP:129, branch `feat/handoff-cache`, PR [#199](https://github.com/hherb/hhagent/pull/199) **OPEN**; on macOS).
+**Last updated:** 2026-06-09 (Large-tool-result handoff cache + review follow-ups, ROADMAP:129, branch `feat/handoff-cache`, PR [#199](https://github.com/hherb/hhagent/pull/199) **OPEN**; on macOS).
 
 **Current state.** `main` is at `f5b5544` (PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**;
 PR [#195](https://github.com/hherb/hhagent/pull/195) `insert_memory_light` **MERGED**;
@@ -44,10 +44,23 @@ in-memory, per-task, content-addressed `HandoffCache`.
   [`docs/superpowers/specs/2026-06-08-handoff-cache-design.md`](../../superpowers/specs/2026-06-08-handoff-cache-design.md),
   [`docs/superpowers/plans/2026-06-08-handoff-cache.md`](../../superpowers/plans/2026-06-08-handoff-cache.md).
 
+**Review follow-ups (2026-06-09, this session, on PR #199).** Addressed the three findings from the
+code review of the branch:
+- **Stash-branch dispatcher coverage (closes [#198](https://github.com/hherb/hhagent/issues/198)).** New
+  `scheduler_step_dispatch_e2e::dispatcher_stashes_oversized_ok_result_only_for_positive_task_id`
+  (PG + sandbox + real worker, skip-as-pass): a `shell-exec` echo emitting > 64 KiB asserts the
+  placeholder shape, the cache round-trip + cross-task isolation, `purge_task`, the `handoff.stashed`
+  audit row, **and** the `task_id = 0` passthrough — pinning the security-load-bearing `task_id > 0`
+  gate the unit tests couldn't reach (the stashed body comes from a live `tool_host::dispatch`).
+- **Global backstop is no longer silent** — `HandoffCache::put` `warn!`s when the `MAX_TRACKED_TASKS`
+  backstop evicts a (possibly still-active) bucket, so a missed `purge_task` is auditable.
+- **Fetch intercept asymmetry documented** — a comment explains why `fetch` fires for any `task_id`
+  (incl. the operator `<= 0` path) while stash is gated on `task_id > 0`.
+
 **Deferred (filed/tracked):** per-tool `result_byte_cap` override (YAGNI — would touch ~14 `ToolEntry`
 sites for a value that's `None` everywhere today); on-disk Workspace-backed store; **teaching the
 planner to actually call `fetch_handoff`** (a prompt-assembly follow-up — this slice makes the
-mechanism exist + tested, not used); stash-branch real-worker e2e ([#198](https://github.com/hherb/hhagent/issues/198)).
+mechanism exist + tested, not used).
 
 **Prior reconciliation (same session):** the handover header/working-state/suite-table were brought to
 `main` truth — the previous session shipped the `web-fetch` worker (PR #197) and updated ROADMAP but

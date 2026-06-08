@@ -188,6 +188,19 @@ impl HandoffCache {
             while guard.order.len() > MAX_TRACKED_TASKS {
                 if let Some(victim) = guard.order.pop_front() {
                     guard.buckets.remove(&victim);
+                    // The backstop should never fire in normal operation
+                    // (purge_task drops each bucket at task terminal, well
+                    // before MAX_TRACKED_TASKS accumulates). If it does, the
+                    // victim may be a still-active task whose planner will then
+                    // see HANDOFF_NOT_FOUND — surface it so the assumption is
+                    // auditable rather than silently wrong.
+                    tracing::warn!(
+                        evicted_task = victim,
+                        tracked = MAX_TRACKED_TASKS,
+                        "handoff cache global backstop evicted a task bucket \
+                         wholesale; a missed purge_task or unexpectedly high \
+                         concurrent-task count is implied"
+                    );
                 }
             }
         }
