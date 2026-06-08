@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_l0_l1_recalled_emits_base_block_only() {
+    fn empty_l0_l1_recalled_emits_handoff_then_base() {
         let out = assemble_system_prompt(
             &[],
             &[],
@@ -218,8 +218,8 @@ mod tests {
         );
         assert_eq!(
             out,
-            "<base>\nBASE BODY\n</base>\n",
-            "no L0/L1/recalled → base block alone; got:\n{out}"
+            format!("{}<base>\nBASE BODY\n</base>\n", render_handoff_block()),
+            "no L0/L1/recalled → handoff block then base; got:\n{out}"
         );
     }
 
@@ -311,18 +311,22 @@ mod tests {
         let l0 = vec![mem(1, "rule one", MemoryLayer::Meta)];
         let l1 = vec![mem(2, "insight one", MemoryLayer::Index)];
         let out = assemble_system_prompt(&l0, &l1, &[], &RecalledContext::empty(), "BASE");
-        let expected = concat!(
-            "<l0_meta_rules>\n",
-            "- rule one\n",
-            "</l0_meta_rules>\n",
-            "\n",
-            "<l1_insights>\n",
-            "- insight one\n",
-            "</l1_insights>\n",
-            "\n",
-            "<base>\n",
-            "BASE\n",
-            "</base>\n",
+        let expected = format!(
+            concat!(
+                "<l0_meta_rules>\n",
+                "- rule one\n",
+                "</l0_meta_rules>\n",
+                "\n",
+                "<l1_insights>\n",
+                "- insight one\n",
+                "</l1_insights>\n",
+                "\n",
+                "{handoff}",
+                "<base>\n",
+                "BASE\n",
+                "</base>\n",
+            ),
+            handoff = render_handoff_block(),
         );
         assert_eq!(out, expected, "full shape pin");
     }
@@ -402,19 +406,23 @@ mod tests {
         let out_two_nl = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "with two trailing nl\n\n");
         let out_many_nl = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "many trailing nls\n\n\n\n");
         assert_eq!(
-            out_no_nl, "<base>\nno trailing nl\n</base>\n",
+            out_no_nl,
+            format!("{}<base>\nno trailing nl\n</base>\n", render_handoff_block()),
             "no-trailing-newline input must be normalized; got {out_no_nl:?}"
         );
         assert_eq!(
-            out_one_nl, "<base>\nwith trailing nl\n</base>\n",
+            out_one_nl,
+            format!("{}<base>\nwith trailing nl\n</base>\n", render_handoff_block()),
             "single-trailing-newline input passes through; got {out_one_nl:?}"
         );
         assert_eq!(
-            out_two_nl, "<base>\nwith two trailing nl\n</base>\n",
+            out_two_nl,
+            format!("{}<base>\nwith two trailing nl\n</base>\n", render_handoff_block()),
             "two trailing newlines must collapse to one (no blank line before close tag); got {out_two_nl:?}"
         );
         assert_eq!(
-            out_many_nl, "<base>\nmany trailing nls\n</base>\n",
+            out_many_nl,
+            format!("{}<base>\nmany trailing nls\n</base>\n", render_handoff_block()),
             "many trailing newlines must collapse to one; got {out_many_nl:?}"
         );
     }
@@ -434,11 +442,14 @@ mod tests {
     }
 
     #[test]
-    fn skills_block_absent_when_empty_is_byte_identical() {
+    fn skills_block_absent_when_empty() {
         let out = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE");
         assert!(!out.contains("<skills>"), "no skills → no <skills> tag; got:\n{out}");
-        assert_eq!(out, "<base>\nBASE\n</base>\n",
-            "empty everything must be byte-identical to base-only; got:\n{out}");
+        assert_eq!(
+            out,
+            format!("{}<base>\nBASE\n</base>\n", render_handoff_block()),
+            "empty everything → handoff block then base; got:\n{out}"
+        );
     }
 
     #[test]
