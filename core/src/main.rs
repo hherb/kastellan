@@ -288,6 +288,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    let handoff_cache = std::sync::Arc::new(hhagent_core::handoff::HandoffCache::new());
     let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
             hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
@@ -295,6 +296,7 @@ async fn main() -> Result<()> {
                 vault.clone(),
                 lifecycle,
                 tool_registry,
+                handoff_cache,
             ),
         );
 

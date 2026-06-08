@@ -74,6 +74,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::handoff::{HandoffCache, DEFAULT_RESULT_BYTE_CAP};
 use crate::secrets::Vault;
 
 use hhagent_sandbox::SandboxPolicy;
@@ -220,6 +221,14 @@ const ACTION_STEP_UNKNOWN_TOOL: &str = "step.unknown_tool";
 /// rejected (bad policy, OS error, etc.).
 const ACTION_STEP_SPAWN_FAILED: &str = "step.spawn_failed";
 
+/// Reserved built-in tool name intercepted before registry lookup; no worker
+/// manifest may claim it (enforced in `registry_build::assemble_registry`).
+pub const HANDOFF_TOOL: &str = "handoff";
+/// Method on [`HANDOFF_TOOL`] that returns a slice of a stashed body.
+pub const HANDOFF_METHOD_FETCH: &str = "fetch";
+/// `action` for the audit row written when an oversized result is stashed.
+const ACTION_HANDOFF_STASHED: &str = "handoff.stashed";
+
 /// Build the JSON payload for a `scheduler/step.<kind>` audit row.
 ///
 /// Pure helper — no I/O, no clock, no global state — so the wire shape
@@ -269,6 +278,7 @@ pub struct ToolHostStepDispatcher {
     vault: Arc<Vault>,                    // NEW — Item 31
     lifecycle: Arc<dyn crate::worker_lifecycle::WorkerLifecycleManager>,
     registry: Arc<ToolRegistry>,
+    handoff: Arc<HandoffCache>,
 }
 
 impl ToolHostStepDispatcher {
@@ -277,8 +287,9 @@ impl ToolHostStepDispatcher {
         vault: Arc<Vault>,               // NEW — Item 31 (insert after `pool`)
         lifecycle: Arc<dyn crate::worker_lifecycle::WorkerLifecycleManager>,
         registry: Arc<ToolRegistry>,
+        handoff: Arc<HandoffCache>,
     ) -> Self {
-        Self { pool, vault, lifecycle, registry }
+        Self { pool, vault, lifecycle, registry, handoff }
     }
 }
 
@@ -288,8 +299,11 @@ impl StepDispatcher for ToolHostStepDispatcher {
         self.registry.tool_names()
     }
 
+    fn purge_task(&self, task_id: i64) {
+        self.handoff.purge_task(task_id);
+    }
+
     async fn dispatch_step(&self, task_id: i64, step: &PlannedStep) -> StepOutcome {
-        let _ = task_id; // used by Task 5/6; discarded here to keep -D warnings clean
         // Measured from dispatcher entry, not from worker spawn — so
         // `ms` on a `step.unknown_tool` row is essentially zero (just
         // the registry lookup) and `ms` on `step.spawn_failed`
@@ -407,6 +421,44 @@ impl StepDispatcher for ToolHostStepDispatcher {
         // Drop runs the lifecycle-appropriate teardown: terminate (single-use) or
         // return-to-slot + schedule idle-teardown (idle-timeout).
         drop(handle);
+
+        // Cap what reaches the planner: an oversized Ok result is stashed in
+        // the per-task handoff cache and replaced with a small placeholder.
+        // (Errors and the small injection-blocked placeholder pass through
+        // untouched — blocked content is never stashed, so never retrievable.)
+        //
+        // Sentinel: `task_id <= 0` means "no task-scoped handoff" — the
+        // operator `memory l3 run` path (l3_invoke::run_steps) passes 0 and
+        // feeds a human with no fetch_handoff retrieval loop, so stashing there
+        // would only hide content. Real scheduler tasks are bigserial ids >= 1,
+        // so this never collides with a planner task. Such calls pass through
+        // verbatim.
+        let result = match result {
+            Ok(v) if task_id > 0 => match self.handoff.stash_if_oversized(task_id, &v, DEFAULT_RESULT_BYTE_CAP) {
+                Some(stash) => {
+                    let payload = serde_json::json!({
+                        "task_id": task_id,
+                        "tool": step.tool,
+                        "method": step.method,
+                        "handoff_ref": stash.handoff_ref.as_str(),
+                        "byte_len": stash.byte_len,
+                    });
+                    if let Err(e) = hhagent_db::audit::insert(
+                        &self.pool, "policy", ACTION_HANDOFF_STASHED, payload,
+                    ).await {
+                        tracing::error!(
+                            tool = %step.tool, method = %step.method, error = %e,
+                            "handoff.stashed audit insert failed; placeholder still returned"
+                        );
+                    }
+                    Ok(stash.placeholder)
+                }
+                None => Ok(v),
+            },
+            // Errors, the injection-blocked placeholder, and (task_id <= 0)
+            // operator-path results all pass through unchanged.
+            passthrough => passthrough,
+        };
 
         map_dispatch_result(result)
     }

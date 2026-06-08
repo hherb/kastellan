@@ -198,6 +198,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
             Arc::new(Vault::new()),
             lifecycle,
             registry,
+            std::sync::Arc::new(hhagent_core::handoff::HandoffCache::new()),
         );
 
         // ---------- (1) Happy path ----------
