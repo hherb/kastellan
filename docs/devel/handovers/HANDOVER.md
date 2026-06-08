@@ -6,16 +6,16 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-09 (Large-tool-result handoff cache + review follow-ups, ROADMAP:129, branch `feat/handoff-cache`, PR [#199](https://github.com/hherb/hhagent/pull/199) **OPEN**; on macOS).
+**Last updated:** 2026-06-09 (Large-tool-result handoff cache + review follow-ups, ROADMAP:129, PR [#199](https://github.com/hherb/hhagent/pull/199) **MERGED**; on macOS).
 
-**Current state.** `main` is at `f5b5544` (PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**;
+**Current state.** `main` is at `d442d55` (PR [#199](https://github.com/hherb/hhagent/pull/199) **handoff cache MERGED**;
+PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**;
 PR [#195](https://github.com/hherb/hhagent/pull/195) `insert_memory_light` **MERGED**;
-PR [#194](https://github.com/hherb/hhagent/pull/194) Option K **MERGED**). This session is on branch
-**`feat/handoff-cache`** (13 commits on top of `main`), PR [#199](https://github.com/hherb/hhagent/pull/199) **OPEN**. Working tree clean except
+PR [#194](https://github.com/hherb/hhagent/pull/194) Option K **MERGED**). Working tree clean except
 untracked `docs/essay-medium-draft.md` (intentionally never committed — see memory note). Dev box on
-**macOS**. This session: (1) reconciled the stale handover with `main` (web-fetch PR #197 was merged but
+**macOS**. The previous session: (1) reconciled the stale handover with `main` (web-fetch PR #197 was merged but
 undocumented), then (2) shipped **ROADMAP:129 — the large-tool-result handoff cache** (design → plan →
-8-task TDD via subagent-driven development).
+8-task TDD via subagent-driven development), now merged via PR #199.
 
 **This session shipped — large-tool-result handoff cache (Phase 1 cont., ROADMAP:129).**
 Caps what a single tool result injects into the planner's context. New module
