@@ -5,6 +5,7 @@
 
 mod allowlist;
 mod extract;
+mod fetch;
 
 fn main() -> anyhow::Result<()> {
     Ok(())
