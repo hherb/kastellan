@@ -6,7 +6,12 @@
 mod allowlist;
 mod extract;
 mod fetch;
+mod handler;
+
+use hhagent_worker_prelude::serve_stdio;
 
 fn main() -> anyhow::Result<()> {
+    let mut handler = handler::WebFetchHandler::from_env()?;
+    serve_stdio(&mut handler)?;
     Ok(())
 }
