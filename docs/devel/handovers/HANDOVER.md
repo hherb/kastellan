@@ -6,12 +6,12 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-08 (Large-tool-result handoff cache, ROADMAP:129, branch `feat/handoff-cache`, PR **about to open**; on macOS).
+**Last updated:** 2026-06-08 (Large-tool-result handoff cache, ROADMAP:129, branch `feat/handoff-cache`, PR [#199](https://github.com/hherb/hhagent/pull/199) **OPEN**; on macOS).
 
 **Current state.** `main` is at `f5b5544` (PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**;
 PR [#195](https://github.com/hherb/hhagent/pull/195) `insert_memory_light` **MERGED**;
 PR [#194](https://github.com/hherb/hhagent/pull/194) Option K **MERGED**). This session is on branch
-**`feat/handoff-cache`** (13 commits on top of `main`), PR **about to open**. Working tree clean except
+**`feat/handoff-cache`** (13 commits on top of `main`), PR [#199](https://github.com/hherb/hhagent/pull/199) **OPEN**. Working tree clean except
 untracked `docs/essay-medium-draft.md` (intentionally never committed — see memory note). Dev box on
 **macOS**. This session: (1) reconciled the stale handover with `main` (web-fetch PR #197 was merged but
 undocumented), then (2) shipped **ROADMAP:129 — the large-tool-result handoff cache** (design → plan →
