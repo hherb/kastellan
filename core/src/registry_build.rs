@@ -10,6 +10,7 @@
 //! NOT (writing a spurious row would corrupt the snapshot the approval gate
 //! reads).
 
+use crate::scheduler::tool_dispatch::HANDOFF_TOOL;
 use crate::scheduler::ToolRegistry;
 use crate::worker_manifest::{ResolveCtx, Resolution, WorkerManifest};
 
@@ -133,6 +134,13 @@ pub fn assemble_registry(
     let mut reg = ToolRegistry::new();
     let mut loaded: Vec<LoadedToolRecord> = Vec::new();
     for m in manifests {
+        if m.name() == HANDOFF_TOOL {
+            tracing::warn!(
+                tool = m.name(),
+                "worker manifest claims the reserved built-in name; skipping"
+            );
+            continue;
+        }
         match m.resolve(ctx) {
             Resolution::Register(entry) => {
                 let name = m.name();
@@ -287,6 +295,20 @@ mod tests {
         let v = build_registry_loaded_payload(&recs);
         assert_eq!(v["tools"][0]["name"], "shell-exec");
         assert_eq!(v["tools"][0]["allowlist_len"], 1);
+    }
+
+    #[test]
+    fn manifest_claiming_reserved_handoff_name_is_skipped() {
+        let allow = |_t: &str| Vec::<String>::new();
+        let ctx = test_ctx(&allow);
+        let reserved = FakeManifest {
+            name: "handoff",
+            outcome: FakeOutcome::Register,
+            allowlist_name: None,
+        };
+        let (reg, loaded) = assemble_registry(&[&reserved], &ctx);
+        assert!(reg.lookup("handoff").is_none(), "reserved name must not register");
+        assert!(loaded.is_empty(), "reserved name must not appear in loaded records");
     }
 
     #[test]
