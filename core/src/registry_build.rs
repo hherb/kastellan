@@ -19,6 +19,7 @@ use crate::worker_manifest::{ResolveCtx, Resolution, WorkerManifest};
 pub static WORKER_MANIFESTS: &[&dyn WorkerManifest] = &[
     &crate::workers::shell_exec::ShellExecManifest,
     &crate::workers::gliner_relex::GlinerRelexManifest,
+    &crate::workers::web_fetch::WebFetchManifest,
 ];
 
 /// One per-tool record carried in the `registry.loaded` audit-row payload.
