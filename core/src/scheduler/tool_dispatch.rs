@@ -74,7 +74,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::handoff::{HandoffCache, DEFAULT_RESULT_BYTE_CAP};
+use crate::handoff::{FetchResult, HandoffCache, DEFAULT_RESULT_BYTE_CAP};
 use crate::secrets::Vault;
 
 use hhagent_sandbox::SandboxPolicy;
@@ -228,6 +228,8 @@ pub const HANDOFF_TOOL: &str = "handoff";
 pub const HANDOFF_METHOD_FETCH: &str = "fetch";
 /// `action` for the audit row written when an oversized result is stashed.
 const ACTION_HANDOFF_STASHED: &str = "handoff.stashed";
+/// `action` for the audit row written on a `fetch_handoff` call.
+const ACTION_HANDOFF_FETCHED: &str = "handoff.fetched";
 
 /// Build the JSON payload for a `scheduler/step.<kind>` audit row.
 ///
@@ -309,6 +311,43 @@ impl StepDispatcher for ToolHostStepDispatcher {
         // the registry lookup) and `ms` on `step.spawn_failed`
         // captures the time the failed spawn cost.
         let started = Instant::now();
+
+        // Reserved built-in: serve a slice of a stashed body from the per-task
+        // handoff cache. Intercepted *before* the registry lookup, so no worker
+        // spawns and the sandbox is never entered. `"handoff"` is a reserved
+        // name (registry assembly refuses any manifest claiming it).
+        if step.tool == HANDOFF_TOOL && step.method == HANDOFF_METHOD_FETCH {
+            let fetched = self.handoff.fetch(task_id, &step.parameters);
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let (outcome_label, step_outcome) = match fetched {
+                FetchResult::Ok(v) => ("ok", StepOutcome::Ok(v)),
+                FetchResult::NotFound(detail) => (
+                    "not_found",
+                    StepOutcome::Err { code: "HANDOFF_NOT_FOUND".into(), detail },
+                ),
+                FetchResult::InvalidParams(detail) => (
+                    "invalid_params",
+                    StepOutcome::Err { code: "INVALID_PARAMS".into(), detail },
+                ),
+            };
+            let payload = serde_json::json!({
+                "task_id": task_id,
+                "handoff_ref": step.parameters.get("handoff_ref"),
+                "offset": step.parameters.get("offset"),
+                "len": step.parameters.get("len"),
+                "outcome": outcome_label,
+                "ms": elapsed_ms,
+            });
+            if let Err(e) = hhagent_db::audit::insert(
+                &self.pool, "policy", ACTION_HANDOFF_FETCHED, payload,
+            ).await {
+                tracing::error!(
+                    error = %e,
+                    "handoff.fetched audit insert failed; outcome still propagated"
+                );
+            }
+            return step_outcome;
+        }
 
         let Some(entry) = self.registry.lookup(&step.tool) else {
             // Tool not in registry — surfaced loudly so the operator
