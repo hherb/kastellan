@@ -116,11 +116,15 @@ Eviction is strictly an availability concern: an evicted ref resolves to
 `None`, surfaced to the planner as an explicit `HANDOFF_NOT_FOUND` error (it can
 re-run the tool or replan), never a panic.
 
-### Per-tool cap + reserved name (`scheduler/tool_dispatch.rs`)
+### Cap + reserved name (`scheduler/tool_dispatch.rs`)
 
-- `ToolEntry` gains `result_byte_cap: Option<usize>`. `None` → the global
-  `DEFAULT_RESULT_BYTE_CAP` (64 KiB). A manifest may override per worker later
-  (e.g. web-fetch); no manifest needs to today.
+- The cap is the global const `DEFAULT_RESULT_BYTE_CAP` (64 KiB) applied
+  uniformly to every tool result this slice. **Deferred (YAGNI):** a per-tool
+  `ToolEntry.result_byte_cap: Option<usize>` override — no worker needs a
+  divergent cap today, and adding the struct field would touch ~14 `ToolEntry`
+  construction sites for a value that would be `None` at every one. Add it when
+  the first worker genuinely needs a different cap (likely `web-search` /
+  `browser-driver`).
 - The reserved built-in tool name `"handoff"` must not be shadowable by a
   worker manifest. `registry_build::assemble_registry` **skips** any manifest
   claiming that name (does not register it) and emits a loud `tracing::warn!`,
@@ -291,9 +295,9 @@ the behaviour with scripted doubles.
 
 - **new** `core/src/handoff.rs` (+ `core/src/handoff/tests.rs` if it grows past
   the 500-LOC soft cap).
-- `core/src/scheduler/tool_dispatch.rs` — `ToolEntry.result_byte_cap`; the
-  cap/stash/placeholder path; the `fetch_handoff` intercept; `purge_task`
-  override; cache field on `ToolHostStepDispatcher`.
+- `core/src/scheduler/tool_dispatch.rs` — the cap/stash/placeholder path (using
+  the global `DEFAULT_RESULT_BYTE_CAP`); the `fetch_handoff` intercept;
+  `purge_task` override; cache field on `ToolHostStepDispatcher`.
 - `core/src/scheduler/inner_loop.rs` — `StepDispatcher` trait sig (`task_id`) +
   `purge_task` default; pass `ctx.task_id`; terminal purge call.
 - `core/src/registry_build.rs` — reserve/refuse the `"handoff"` name.
