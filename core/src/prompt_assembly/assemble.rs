@@ -1,6 +1,6 @@
 //! Pure prompt assembler. No I/O, no async, no errors.
 //!
-//! Output framing (always L0 → L1 → skills → recalled → base in this order):
+//! Output framing (always L0 → L1 → skills → recalled → handoff → base in this order):
 //!
 //! ```text
 //! <l0_meta_rules>
@@ -22,6 +22,11 @@
 //! - {body of recall row #2}
 //! </recalled>
 //!
+//! <handoff>
+//! {protocol for expanding a stashed oversized tool result via the
+//!  reserved `handoff`/`fetch` built-in — always present}
+//! </handoff>
+//!
 //! <base>
 //! {agent_planner.md verbatim}
 //! </base>
@@ -30,7 +35,8 @@
 //! Rules:
 //!
 //! 1. Empty layers omit their entire tag block — no `<l1_insights>`
-//!    when L1 has zero rows. The `<base>` block is always present.
+//!    when L1 has zero rows. The `<handoff>` and `<base>` blocks are
+//!    always present (`<handoff>` is constant compiled-in text).
 //! 2. One blank line between sections.
 //! 3. Each row renders as `- {body}` (one row per line).
 //! 4. Bodies pass through verbatim (no HTML-style escaping of `<` `>`).
@@ -76,6 +82,7 @@
 
 use crate::memory::l3_surface::{render_skill_entry, SurfacedSkill};
 use crate::recall_assembly::RecalledContext;
+use crate::scheduler::tool_dispatch::{HANDOFF_METHOD_FETCH, HANDOFF_TOOL};
 use hhagent_db::memories::Memory;
 
 /// Render the supplied memory slices, surfaced skills, recall context, and
@@ -87,6 +94,35 @@ use hhagent_db::memories::Memory;
 /// the block entirely. An empty [`RecalledContext`] omits the `<recalled>`
 /// tag entirely so the output is byte-identical to the v1 (no-recall)
 /// assembler when both `skills` and `recalled` are empty.
+/// Render the always-present `<handoff>` block.
+///
+/// Teaches the planner the `fetch_handoff` protocol: how to recognise the
+/// placeholder the dispatcher leaves in place of an oversized tool result, and
+/// how to pull the full body back in slices. Compiled-in next to the mechanism
+/// ([`crate::handoff`] / [`crate::scheduler::tool_dispatch`]); the tool and
+/// method names come from their source-of-truth constants so the instruction
+/// cannot drift from the code that serves it. Constant text — no empty state —
+/// so unlike the memory-layer blocks it is emitted unconditionally.
+fn render_handoff_block() -> String {
+    format!(
+        "<handoff>\n\
+         Some tool results are too large for the context window. When a tool \
+         result is the placeholder object {{handoff_ref, byte_len, summary_head, \
+         truncated: true}}, the full output was stashed and only summary_head — \
+         the readable first ~1 KiB — is shown inline. That head is often enough \
+         to proceed without fetching anything more.\n\
+         To read more of the body, emit a step with tool=\"{tool}\" \
+         method=\"{method}\" and parameters={{handoff_ref, offset?, len?}} \
+         (offset defaults to 0; len defaults to and is clamped at 256 KiB). The \
+         step returns {{handoff_ref, offset, len, data, encoding, eof}}, where \
+         len is the number of bytes actually returned. To read the whole body, \
+         repeat the fetch with offset increased by len until eof is true.\n\
+         </handoff>\n\n",
+        tool = HANDOFF_TOOL,
+        method = HANDOFF_METHOD_FETCH,
+    )
+}
+
 pub fn assemble_system_prompt(
     l0: &[Memory],
     l1: &[Memory],
@@ -133,6 +169,11 @@ pub fn assemble_system_prompt(
         }
         out.push_str("</recalled>\n\n");
     }
+
+    // Always-present capability instruction for the reserved `handoff` built-in.
+    // Compiled-in trusted text; sits flush before the base operating prompt so
+    // `<base>` stays the terminal block.
+    out.push_str(&render_handoff_block());
 
     out.push_str("<base>\n");
     // Collapse 0..N trailing newlines on `base` to exactly one. The
