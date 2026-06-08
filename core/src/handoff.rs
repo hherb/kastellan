@@ -33,6 +33,14 @@ pub const MAX_FETCH_BYTES: usize = 256 * 1024;
 /// Per-task cache budget; the oldest entries for a task are evicted past it.
 pub const PER_TASK_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 
+/// Backstop on the number of distinct task buckets retained. Past this, the
+/// oldest-inserted task bucket is evicted wholesale. Guards against a missed
+/// [`HandoffCache::purge_task`] (defence-in-depth — normal operation purges at
+/// every task terminal, and the cache is process-local so it cannot accumulate
+/// across a daemon restart). 4096 concurrent-ish tasks is far above any real
+/// scheduler fan-out.
+pub const MAX_TRACKED_TASKS: usize = 4096;
+
 /// `"sha256:<64-lowercase-hex>"`. The only way to name a stashed body;
 /// opaque to the planner. Content-addressed, so identical bodies share a ref.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -123,10 +131,20 @@ struct TaskBucket {
     total: usize,
 }
 
+/// Internal cache state behind a single mutex: the per-task buckets plus the
+/// task-id insertion order used by the global backstop ([`MAX_TRACKED_TASKS`]).
+#[derive(Default)]
+struct Inner {
+    buckets: HashMap<i64, TaskBucket>,
+    /// Task ids in insertion order, oldest at the front. Used only to pick a
+    /// victim when the bucket count exceeds [`MAX_TRACKED_TASKS`].
+    order: VecDeque<i64>,
+}
+
 /// In-memory cache shared (behind `Arc`) by the production dispatcher.
 #[derive(Default)]
 pub struct HandoffCache {
-    inner: Mutex<HashMap<i64, TaskBucket>>,
+    inner: Mutex<Inner>,
 }
 
 impl HandoffCache {
@@ -142,19 +160,35 @@ impl HandoffCache {
     pub fn put(&self, task_id: i64, body: &[u8]) -> HandoffRef {
         let r = HandoffRef::of(body);
         let mut guard = self.inner.lock().expect("handoff cache mutex poisoned");
-        let bucket = guard.entry(task_id).or_default();
-        if bucket.map.contains_key(&r) {
-            return r;
+        let is_new_task = !guard.buckets.contains_key(&task_id);
+        {
+            let bucket = guard.buckets.entry(task_id).or_default();
+            if bucket.map.contains_key(&r) {
+                // Idempotent: identical body already stashed for this task.
+                // (A pre-existing task is never `is_new_task`, so `order` is
+                // untouched on this early return.)
+                return r;
+            }
+            bucket.map.insert(r.clone(), body.to_vec());
+            bucket.order.push_back(r.clone());
+            bucket.total += body.len();
+            // Per-task budget: evict this task's oldest bodies, never the one
+            // just inserted (it is last in `order`; loop stops at len 1).
+            while bucket.total > PER_TASK_BYTE_BUDGET && bucket.order.len() > 1 {
+                let oldest = bucket.order.pop_front().expect("order non-empty while len > 1");
+                if let Some(b) = bucket.map.remove(&oldest) {
+                    bucket.total -= b.len();
+                }
+            }
         }
-        bucket.map.insert(r.clone(), body.to_vec());
-        bucket.order.push_back(r.clone());
-        bucket.total += body.len();
-        // Evict oldest-first, but never the entry we just inserted (it is last
-        // in `order`, and the loop stops once a single entry remains).
-        while bucket.total > PER_TASK_BYTE_BUDGET && bucket.order.len() > 1 {
-            let oldest = bucket.order.pop_front().expect("order non-empty while len > 1");
-            if let Some(b) = bucket.map.remove(&oldest) {
-                bucket.total -= b.len();
+        // Global backstop: a brand-new task bucket extends `order`; evict the
+        // oldest-inserted task(s) wholesale if we exceed MAX_TRACKED_TASKS.
+        if is_new_task {
+            guard.order.push_back(task_id);
+            while guard.order.len() > MAX_TRACKED_TASKS {
+                if let Some(victim) = guard.order.pop_front() {
+                    guard.buckets.remove(&victim);
+                }
             }
         }
         r
@@ -165,7 +199,7 @@ impl HandoffCache {
     /// [`MAX_FETCH_BYTES`] before calling.
     pub fn get_slice(&self, task_id: i64, r: &HandoffRef, offset: usize, len: usize) -> Option<Slice> {
         let guard = self.inner.lock().expect("handoff cache mutex poisoned");
-        let body = guard.get(&task_id)?.map.get(r)?;
+        let body = guard.buckets.get(&task_id)?.map.get(r)?;
         let start = offset.min(body.len());
         let end = offset.saturating_add(len).min(body.len());
         let bytes = body[start..end].to_vec();
@@ -175,7 +209,9 @@ impl HandoffCache {
 
     /// Drop every entry for `task_id`. Called at task terminal.
     pub fn purge_task(&self, task_id: i64) {
-        self.inner.lock().expect("handoff cache mutex poisoned").remove(&task_id);
+        let mut guard = self.inner.lock().expect("handoff cache mutex poisoned");
+        guard.buckets.remove(&task_id);
+        guard.order.retain(|&t| t != task_id);
     }
 
     /// If `value`'s serialized JSON exceeds `cap`, stash it and return the
@@ -436,5 +472,21 @@ mod tests {
         let exact = serde_json::to_vec(&value).unwrap().len();
         assert!(cache.stash_if_oversized(1, &value, exact).is_none(), "== cap must pass through");
         assert!(cache.stash_if_oversized(1, &value, exact - 1).is_some(), "cap-1 must stash");
+    }
+
+    #[test]
+    fn global_backstop_evicts_oldest_task_past_cap() {
+        let cache = HandoffCache::new();
+        // Insert MAX_TRACKED_TASKS + 1 distinct tasks with a small body each.
+        for t in 1..=(MAX_TRACKED_TASKS as i64 + 1) {
+            cache.put(t, format!("body-{t}").as_bytes());
+        }
+        // The oldest task (1) was evicted wholesale by the backstop...
+        let r_old = HandoffRef::of(b"body-1");
+        assert!(cache.get_slice(1, &r_old, 0, 1).is_none(), "oldest task evicted by backstop");
+        // ...while the newest survives.
+        let last = MAX_TRACKED_TASKS as i64 + 1;
+        let r_new = HandoffRef::of(format!("body-{last}").as_bytes());
+        assert!(cache.get_slice(last, &r_new, 0, 1).is_some(), "newest task retained");
     }
 }
