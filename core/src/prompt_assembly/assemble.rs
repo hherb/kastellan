@@ -416,4 +416,76 @@ mod tests {
         assert!(l1_end < skills_start, "skills must come after l1; got:\n{out}");
         assert!(skills_start < recalled_start, "skills must come before recalled; got:\n{out}");
     }
+
+    #[test]
+    fn handoff_block_present_even_when_all_layers_empty() {
+        let out = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE");
+        assert!(
+            out.contains("<handoff>\n") && out.contains("</handoff>\n\n"),
+            "handoff block must always be present; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn handoff_block_sits_after_recalled_and_before_base() {
+        let recalled = RecalledContext::new(
+            vec![100],
+            vec!["RECALL ONE".into()],
+            "f".repeat(64),
+        );
+        let out = assemble_system_prompt(&[], &[], &[], &recalled, "BASE");
+        let recalled_end = out.find("</recalled>").expect("recalled end tag");
+        let handoff_start = out.find("<handoff>").expect("handoff start tag");
+        let handoff_end = out.find("</handoff>").expect("handoff end tag");
+        let base_start = out.find("<base>").expect("base start tag");
+        assert!(recalled_end < handoff_start, "handoff must follow recalled; got:\n{out}");
+        assert!(handoff_end < base_start, "handoff must precede base; got:\n{out}");
+    }
+
+    #[test]
+    fn handoff_block_names_the_real_protocol_tokens() {
+        // Drift guard: the instruction must reference the actual built-in
+        // tool/method constants and every field the mechanism emits, so a
+        // change to those shapes fails this test instead of silently leaving
+        // the planner with a stale protocol description.
+        use crate::handoff::{build_handoff_placeholder, HandoffRef};
+        use crate::scheduler::tool_dispatch::{HANDOFF_METHOD_FETCH, HANDOFF_TOOL};
+
+        let out = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE");
+
+        // Tool + method come from their source-of-truth constants.
+        assert!(
+            out.contains(&format!("tool=\"{HANDOFF_TOOL}\"")),
+            "block must show the real step form tool=\"{HANDOFF_TOOL}\"; got:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("method=\"{HANDOFF_METHOD_FETCH}\"")),
+            "block must show the real step form method=\"{HANDOFF_METHOD_FETCH}\"; got:\n{out}"
+        );
+
+        // Every field the placeholder actually carries must be named.
+        let placeholder =
+            build_handoff_placeholder(&serde_json::json!({ "k": "v" }), &HandoffRef::of(b"x"), 99);
+        for key in placeholder.as_object().expect("placeholder is a JSON object").keys() {
+            assert!(
+                out.contains(key.as_str()),
+                "handoff block must name placeholder field {key:?}; got:\n{out}"
+            );
+        }
+
+        // Fetch params the planner can set.
+        for param in ["offset", "len"] {
+            assert!(
+                out.contains(param),
+                "handoff block must name fetch param {param:?}; got:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn handoff_block_is_deterministic() {
+        let a = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE");
+        let b = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE");
+        assert_eq!(a, b, "same inputs must yield identical bytes");
+    }
 }
