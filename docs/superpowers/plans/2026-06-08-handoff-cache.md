@@ -781,8 +781,15 @@ with:
         // the per-task handoff cache and replaced with a small placeholder.
         // (Errors and the small injection-blocked placeholder pass through
         // untouched — blocked content is never stashed, so never retrievable.)
+        //
+        // Sentinel: `task_id <= 0` means "no task-scoped handoff" — the
+        // operator `memory l3 run` path (l3_invoke::run_steps) passes 0 and
+        // feeds a human with no fetch_handoff retrieval loop, so stashing there
+        // would only hide content. Real scheduler tasks are bigserial ids ≥ 1,
+        // so this never collides with a planner task. Such calls pass through
+        // verbatim.
         let result = match result {
-            Ok(v) => match self.handoff.stash_if_oversized(task_id, &v, DEFAULT_RESULT_BYTE_CAP) {
+            Ok(v) if task_id > 0 => match self.handoff.stash_if_oversized(task_id, &v, DEFAULT_RESULT_BYTE_CAP) {
                 Some(stash) => {
                     let payload = serde_json::json!({
                         "tool": step.tool,
@@ -802,11 +809,15 @@ with:
                 }
                 None => Ok(v),
             },
-            err => err,
+            // Errors, the injection-blocked placeholder, and (task_id <= 0)
+            // operator-path results all pass through unchanged.
+            passthrough => passthrough,
         };
 
         map_dispatch_result(result)
 ```
+
+Note: the `Ok(v) if task_id > 0` guard means the catch-all also matches `Ok(v)` when `task_id <= 0`, returning it verbatim — that is the operator-path passthrough.
 
 - [ ] **Step 3: Update `main.rs` construction**
 

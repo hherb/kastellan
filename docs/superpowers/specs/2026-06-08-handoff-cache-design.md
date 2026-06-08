@@ -262,6 +262,12 @@ planner → PlannedStep{tool:"web-fetch", …}
 - **No cross-task leakage.** The cache is keyed by `(task_id, ref)`;
   `get_slice` for task A can never read task B's body even with a guessed ref
   (and sha256 refs aren't guessable anyway).
+- **Operator-path passthrough (`task_id <= 0` sentinel).** The operator
+  `memory l3 run` path (`l3_invoke::run_steps`) dispatches with `task_id = 0`
+  and feeds a human directly — there is no planner loop and no `fetch_handoff`
+  retrieval, so stashing would only hide content. The stash guard is
+  `task_id > 0`; real scheduler tasks are bigserial ids ≥ 1, so the sentinel
+  never collides. Operator-path results therefore pass through verbatim.
 - **Reserved name.** `"handoff"` cannot be claimed by a worker manifest, so the
   built-in intercept can't be shadowed into a sandbox round-trip.
 - **Audit fidelity preserved.** The full body is still hashed into the
