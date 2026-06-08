@@ -16,6 +16,8 @@ use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
+use crate::cassandra::injection_guard::extract_scannable_text;
+
 /// Result larger than this (bytes of its serialized JSON) is stashed and
 /// replaced with a placeholder. 64 KiB ≈ 16k tokens — generous for one
 /// document, below web-fetch's 100 KiB `MAX_TEXT_BYTES`.
@@ -68,11 +70,49 @@ impl HandoffRef {
     }
 }
 
+/// Build the placeholder the planner sees in place of a stashed oversized
+/// result. `summary_head` is the readable head of the result (char-boundary
+/// safe, via the injection-guard text extractor), so the planner often needs
+/// no fetch at all.
+pub fn build_handoff_placeholder(
+    value: &serde_json::Value,
+    r: &HandoffRef,
+    byte_len: usize,
+) -> serde_json::Value {
+    // `_truncated` reports whether the *head* hit SUMMARY_HEAD_BYTES; we don't
+    // surface it. The placeholder's `truncated: true` means the *body* was
+    // stashed (always true on this path), a different fact.
+    let (head, _truncated) = extract_scannable_text(value, SUMMARY_HEAD_BYTES);
+    serde_json::json!({
+        "handoff_ref": r.as_str(),
+        "byte_len": byte_len,
+        "summary_head": head,
+        "truncated": true,
+    })
+}
+
 /// A byte slice plus whether it reached the end of the stashed body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slice {
     pub bytes: Vec<u8>,
     pub eof: bool,
+}
+
+/// Returned by [`HandoffCache::stash_if_oversized`] when a result is stashed.
+#[derive(Clone, Debug)]
+pub struct StashOutcome {
+    pub placeholder: serde_json::Value,
+    pub handoff_ref: HandoffRef,
+    pub byte_len: usize,
+}
+
+/// Outcome of a `fetch_handoff` call. The dispatcher maps each arm to a
+/// `StepOutcome` and writes a `policy/handoff.fetched` audit row.
+#[derive(Clone, Debug)]
+pub enum FetchResult {
+    Ok(serde_json::Value),
+    NotFound(String),
+    InvalidParams(String),
 }
 
 /// One task's stashed bodies, in insertion order for oldest-first eviction.
@@ -136,6 +176,66 @@ impl HandoffCache {
     /// Drop every entry for `task_id`. Called at task terminal.
     pub fn purge_task(&self, task_id: i64) {
         self.inner.lock().expect("handoff cache mutex poisoned").remove(&task_id);
+    }
+
+    /// If `value`'s serialized JSON exceeds `cap`, stash it and return the
+    /// placeholder + ref + byte length. `None` when within cap (the caller
+    /// passes `value` through unchanged). The stashed body is the serialized
+    /// JSON, so it is always valid UTF-8 (slices may split a multibyte char at
+    /// the edges — [`fetch`](Self::fetch) handles that lossily).
+    pub fn stash_if_oversized(
+        &self,
+        task_id: i64,
+        value: &serde_json::Value,
+        cap: usize,
+    ) -> Option<StashOutcome> {
+        let body = serde_json::to_vec(value).unwrap_or_default();
+        if body.len() <= cap {
+            return None;
+        }
+        let handoff_ref = self.put(task_id, &body);
+        let placeholder = build_handoff_placeholder(value, &handoff_ref, body.len());
+        Some(StashOutcome { placeholder, handoff_ref, byte_len: body.len() })
+    }
+
+    /// Serve a `fetch_handoff` request: `params = {handoff_ref, offset?, len?}`.
+    /// `len` is clamped to [`MAX_FETCH_BYTES`]. The stashed body is serialized
+    /// JSON (UTF-8); a slice split mid-char is rendered with
+    /// `from_utf8_lossy`, so `data` is always a string and `encoding` is
+    /// always `"utf8"`.
+    /// In the returned JSON, `len` is the count of bytes actually returned
+    /// (≤ the requested `len`).
+    pub fn fetch(&self, task_id: i64, params: &serde_json::Value) -> FetchResult {
+        let Some(ref_str) = params.get("handoff_ref").and_then(|v| v.as_str()) else {
+            return FetchResult::InvalidParams("missing 'handoff_ref'".into());
+        };
+        let Some(r) = HandoffRef::parse(ref_str) else {
+            return FetchResult::InvalidParams(format!("malformed handoff_ref: {ref_str}"));
+        };
+        let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let len = params
+            .get("len")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(MAX_FETCH_BYTES)
+            .min(MAX_FETCH_BYTES);
+        match self.get_slice(task_id, &r, offset, len) {
+            Some(slice) => {
+                let data = String::from_utf8_lossy(&slice.bytes).into_owned();
+                FetchResult::Ok(serde_json::json!({
+                    "handoff_ref": r.as_str(),
+                    "offset": offset,
+                    "len": slice.bytes.len(),
+                    "data": data,
+                    "encoding": "utf8",
+                    "eof": slice.eof,
+                }))
+            }
+            None => FetchResult::NotFound(format!(
+                "no stashed body for {} in this task (unknown or evicted)",
+                r.as_str()
+            )),
+        }
     }
 }
 
@@ -235,5 +335,106 @@ mod tests {
         cache.purge_task(1);
         assert!(cache.get_slice(1, &ra, 0, 4).is_none(), "purged task gone");
         assert!(cache.get_slice(2, &rb, 0, 4).is_some(), "other task intact");
+    }
+
+    #[test]
+    fn placeholder_has_ref_len_head_and_truncated_flag() {
+        let value = serde_json::json!({"text": "the quick brown fox jumps over the lazy dog"});
+        let r = HandoffRef::of(b"whatever");
+        let p = build_handoff_placeholder(&value, &r, 123_456);
+        assert_eq!(p["handoff_ref"], r.as_str());
+        assert_eq!(p["byte_len"], 123_456);
+        assert_eq!(p["truncated"], true);
+        assert!(p["summary_head"].as_str().unwrap().contains("quick brown fox"));
+    }
+
+    #[test]
+    fn stash_if_oversized_passes_through_under_cap() {
+        let cache = HandoffCache::new();
+        let small = serde_json::json!({"ok": true});
+        assert!(cache.stash_if_oversized(1, &small, DEFAULT_RESULT_BYTE_CAP).is_none());
+    }
+
+    #[test]
+    fn stash_if_oversized_stashes_over_cap() {
+        let cache = HandoffCache::new();
+        let big = serde_json::json!({"blob": "x".repeat(DEFAULT_RESULT_BYTE_CAP + 10)});
+        let out = cache.stash_if_oversized(2, &big, DEFAULT_RESULT_BYTE_CAP).expect("stashed");
+        assert!(out.byte_len > DEFAULT_RESULT_BYTE_CAP);
+        // The body is retrievable by the ref the placeholder advertises.
+        let r = HandoffRef::parse(out.placeholder["handoff_ref"].as_str().unwrap()).unwrap();
+        assert_eq!(r, out.handoff_ref);
+        assert!(cache.get_slice(2, &r, 0, 8).is_some());
+    }
+
+    #[test]
+    fn fetch_returns_utf8_slice_with_eof() {
+        let cache = HandoffCache::new();
+        let value = serde_json::json!({"k": "v".repeat(100)});
+        let out = cache.stash_if_oversized(5, &value, 8).expect("stashed (cap=8)");
+        let params = serde_json::json!({"handoff_ref": out.handoff_ref.as_str(), "offset": 0, "len": 1_000_000});
+        match cache.fetch(5, &params) {
+            FetchResult::Ok(v) => {
+                assert_eq!(v["encoding"], "utf8");
+                assert_eq!(v["eof"], true);
+                assert!(v["data"].as_str().unwrap().contains("vvv"));
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_clamps_len_to_max() {
+        let cache = HandoffCache::new();
+        let value = serde_json::json!({"k": "y".repeat(MAX_FETCH_BYTES * 2)});
+        let out = cache.stash_if_oversized(6, &value, 8).unwrap();
+        let params = serde_json::json!({"handoff_ref": out.handoff_ref.as_str(), "offset": 0, "len": u64::MAX});
+        match cache.fetch(6, &params) {
+            FetchResult::Ok(v) => {
+                assert_eq!(v["len"].as_u64().unwrap() as usize, MAX_FETCH_BYTES);
+                assert_eq!(v["eof"], false);
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_unknown_ref_is_not_found() {
+        let cache = HandoffCache::new();
+        let params = serde_json::json!({"handoff_ref": HandoffRef::of(b"absent").as_str()});
+        assert!(matches!(cache.fetch(1, &params), FetchResult::NotFound(_)));
+    }
+
+    #[test]
+    fn fetch_malformed_params_is_invalid() {
+        let cache = HandoffCache::new();
+        assert!(matches!(cache.fetch(1, &serde_json::json!({})), FetchResult::InvalidParams(_)));
+        assert!(matches!(
+            cache.fetch(1, &serde_json::json!({"handoff_ref": "bogus"})),
+            FetchResult::InvalidParams(_)
+        ));
+    }
+
+    #[test]
+    fn fetch_cannot_cross_task_boundary() {
+        let cache = HandoffCache::new();
+        let value = serde_json::json!({"k": "v".repeat(100)});
+        let out = cache.stash_if_oversized(10, &value, 8).expect("stashed under task 10");
+        // Task 11 supplies task 10's ref — must NOT resolve.
+        let params = serde_json::json!({"handoff_ref": out.handoff_ref.as_str()});
+        assert!(matches!(cache.fetch(11, &params), FetchResult::NotFound(_)));
+        // Sanity: the owning task still resolves it.
+        assert!(matches!(cache.fetch(10, &params), FetchResult::Ok(_)));
+    }
+
+    #[test]
+    fn stash_if_oversized_passes_through_at_exactly_cap() {
+        let cache = HandoffCache::new();
+        // Serialize a value, measure it, and use its exact length as the cap:
+        // a body whose length == cap must pass through (None), not stash.
+        let value = serde_json::json!({"k": "z".repeat(50)});
+        let exact = serde_json::to_vec(&value).unwrap().len();
+        assert!(cache.stash_if_oversized(1, &value, exact).is_none(), "== cap must pass through");
+        assert!(cache.stash_if_oversized(1, &value, exact - 1).is_some(), "cap-1 must stash");
     }
 }
