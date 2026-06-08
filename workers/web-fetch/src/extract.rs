@@ -2,7 +2,8 @@
 //!
 //!   - `text/html`        → readability main-content extraction (+ <title>).
 //!   - `application/pdf`  → PDF text extraction.
-//!   - `text/*`, `application/json` → decoded as-is (UTF-8 lossy).
+//!   - `text/*`, `application/json`, or a missing/empty Content-Type
+//!     → decoded as-is (UTF-8 lossy).
 //!   - anything else      → error (caller maps to OPERATION_FAILED).
 //!
 //! The extracted text is capped at [`MAX_TEXT_BYTES`]; `truncated` records
@@ -37,12 +38,20 @@ pub fn extract(content_type: &str, body: &[u8]) -> anyhow::Result<Extracted> {
     match mt.as_str() {
         "text/html" => extract_html(body),
         "application/pdf" => {
+            // `pdf-extract` can panic (not just `Err`) on some malformed PDFs.
+            // The body is attacker-influenced, but a panic is contained: the
+            // worker is single-use, sandboxed, and cpu/wall-clock-capped, so it
+            // aborts this process and surfaces as a worker error — no fallback,
+            // no leak. Hardening to catch_unwind is deferred to the egress slice.
             let raw = pdf_extract::extract_text_from_mem(body)
                 .map_err(|e| anyhow::anyhow!("pdf text extraction failed: {e}"))?;
             let (text, truncated) = cap_text(raw);
             Ok(Extracted { title: None, text, truncated })
         }
-        _ if mt.starts_with("text/") || mt == "application/json" => {
+        // An empty `mt` means the server sent no (or a blank) Content-Type.
+        // Many plain-text endpoints omit it; treat the body as text rather
+        // than rejecting an otherwise-valid response.
+        _ if mt.is_empty() || mt.starts_with("text/") || mt == "application/json" => {
             let raw = String::from_utf8_lossy(body).into_owned();
             let (text, truncated) = cap_text(raw);
             Ok(Extracted { title: None, text, truncated })
@@ -133,6 +142,19 @@ mod tests {
         let e = extract("application/pdf", bytes).unwrap();
         assert_eq!(e.title, None);
         assert!(e.text.contains("Hello"), "pdf text: {:?}", e.text);
+    }
+
+    #[test]
+    fn empty_content_type_is_treated_as_text() {
+        // A server that omits Content-Type (or sends a blank one) must not
+        // turn an otherwise-valid text body into an error.
+        let e = extract("", b"body with no content type").unwrap();
+        assert_eq!(e.title, None);
+        assert_eq!(e.text, "body with no content type");
+        assert!(!e.truncated);
+        // A bare `;`-led param with no type behaves the same.
+        let e2 = extract("; charset=utf-8", b"still text").unwrap();
+        assert_eq!(e2.text, "still text");
     }
 
     #[test]

@@ -124,6 +124,12 @@ impl<T: HttpGet> Handler for WebFetchHandler<T> {
         let p: FetchParams = serde_json::from_value(params)
             .map_err(|e| RpcError::new(codes::INVALID_PARAMS, format!("bad params: {e}")))?;
 
+        // `check_url` validates the *initial* URL up front so we can return the
+        // precise INVALID_PARAMS vs POLICY_DENIED distinction (bad-url vs
+        // denied-host). `drive` then re-validates https+allowlist on every hop,
+        // including this first one — the overlap is intentional defense in
+        // depth: `drive` is safe to call with any URL, never trusting that its
+        // caller pre-checked.
         let url = check_url(&p.url, &self.allowlist).map_err(check_err_to_rpc)?;
         let outcome = drive(&self.transport, &self.allowlist, url).map_err(fetch_err_to_rpc)?;
         let extracted = extract(&outcome.content_type, &outcome.body).map_err(|e| {
@@ -145,30 +151,7 @@ impl<T: HttpGet> Handler for WebFetchHandler<T> {
 mod tests {
     use super::*;
     use crate::fetch::RawResponse;
-    use std::cell::RefCell;
-    use std::collections::VecDeque;
-
-    struct FakeGet {
-        responses: RefCell<VecDeque<RawResponse>>,
-    }
-    impl FakeGet {
-        fn new(responses: Vec<RawResponse>) -> Self {
-            Self { responses: RefCell::new(responses.into_iter().collect()) }
-        }
-    }
-    impl HttpGet for FakeGet {
-        fn get(&self, _url: &Url) -> Result<RawResponse, String> {
-            self.responses
-                .borrow_mut()
-                .pop_front()
-                .ok_or_else(|| "no more canned responses".to_string())
-        }
-    }
-
-    fn al(entries: &[&str]) -> HostAllowlist {
-        let json = serde_json::to_string(entries).unwrap();
-        HostAllowlist::from_env_json(&json).unwrap()
-    }
+    use crate::test_transport::{al, FakeGet};
 
     fn handler(entries: &[&str], responses: Vec<RawResponse>) -> WebFetchHandler<FakeGet> {
         WebFetchHandler::with_parts(al(entries), FakeGet::new(responses))

@@ -7,6 +7,8 @@ mod allowlist;
 mod extract;
 mod fetch;
 mod handler;
+#[cfg(test)]
+mod test_transport;
 
 use hhagent_worker_prelude::serve_stdio;
 

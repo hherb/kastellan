@@ -73,6 +73,11 @@ pub fn drive<T: HttpGet>(
 
         let resp = transport.get(&url).map_err(FetchError::Transport)?;
 
+        // Any 3xx is treated as a redirect requiring a `Location`. In practice
+        // only 301/302/303/307/308 carry one; we send no conditional or
+        // negotiation headers, so a bodyless 300/304/305/306 shouldn't occur.
+        // If one does, it has no `Location` and fails closed as MissingLocation
+        // rather than being mishandled as content.
         if (300..400).contains(&resp.status) {
             let loc = resp.location.ok_or(FetchError::MissingLocation)?;
             url = url
@@ -142,49 +147,7 @@ impl HttpGet for ReqwestGet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::collections::VecDeque;
-
-    /// Fake transport returning canned responses in order.
-    struct FakeGet {
-        responses: RefCell<VecDeque<RawResponse>>,
-    }
-    impl FakeGet {
-        fn new(responses: Vec<RawResponse>) -> Self {
-            Self { responses: RefCell::new(responses.into_iter().collect()) }
-        }
-    }
-    impl HttpGet for FakeGet {
-        fn get(&self, _url: &Url) -> Result<RawResponse, String> {
-            self.responses
-                .borrow_mut()
-                .pop_front()
-                .ok_or_else(|| "no more canned responses".to_string())
-        }
-    }
-
-    fn al(entries: &[&str]) -> HostAllowlist {
-        let json = serde_json::to_string(entries).unwrap();
-        HostAllowlist::from_env_json(&json).unwrap()
-    }
-
-    fn ok_resp(body: &str) -> RawResponse {
-        RawResponse {
-            status: 200,
-            location: None,
-            content_type: "text/plain".to_string(),
-            body: body.as_bytes().to_vec(),
-        }
-    }
-
-    fn redirect_to(loc: &str) -> RawResponse {
-        RawResponse {
-            status: 302,
-            location: Some(loc.to_string()),
-            content_type: String::new(),
-            body: Vec::new(),
-        }
-    }
+    use crate::test_transport::{al, ok_resp, redirect_to, FakeGet};
 
     #[test]
     fn terminal_response_is_returned() {

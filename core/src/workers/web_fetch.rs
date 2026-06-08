@@ -1,4 +1,10 @@
 //! Host-side manifest + `ToolEntry` constructor for the web-fetch worker.
+//!
+//! Containment caveat: until the egress proxy lands, the host allowlist is
+//! enforced *inside* the worker and matches host **names**, not resolved IPs —
+//! it does not contain SSRF / DNS-rebinding to internal addresses. The
+//! `Net::Allowlist` data built here is populated for the future proxy, which
+//! owns IP-level containment. See `docs/threat-model.md` ("Network egress").
 
 use std::path::PathBuf;
 

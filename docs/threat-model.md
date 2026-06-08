@@ -87,6 +87,29 @@ The two sandbox rows together implement the "parent denies + child denies again"
 
 Redeemed secret plaintext never appears in the request snapshot (`payload.req` of any `tool:<name>` row, snapshotted *before* `secret://<8-hex>` substitution — issue #147) nor in any `actor='policy'` row (issue #146 / Item 31). It does **not** follow that the audit log is free of secrets: a worker that is legitimately handed a secret may echo it into its own output, which lands in `payload.result`. That field is the worker's response, not the request, and is out of scope of the redaction invariant — the worker is the authorized consumer, so an operator with `audit_log` read access can recover any secret a worker chose to emit. Containing worker-emitted plaintext is the egress proxy's and the injection guard's job, not the audit redactor's.
 
+### Network egress: interim containment and the SSRF/DNS caveat
+
+The `web-fetch` worker is the first network-egress tool, but the **egress proxy
+(the row above) is not yet built**. Until it lands, containment for `web-fetch`
+is the worker's *self-enforced* host allowlist: it requires `https`, matches the
+request host (and every redirect hop) against the admin-controlled allowlist
+sourced from `tool_allowlists`, and refuses anything off-list with
+`POLICY_DENIED`. This is real (a compromised LLM cannot widen the list — it is
+injected by the host-side manifest, not from `step.parameters`) but
+**worker-trust-dependent**: it holds only as long as the worker binary itself is
+not compromised. It becomes defense-in-depth layer 2 once the egress proxy
+enforces the same allowlist at the boundary.
+
+Crucially, the allowlist matches **host *names*, not resolved IPs.** DNS
+resolution happens inside the jail, so an allowlisted name that resolves to a
+private/internal address — or an attacker performing DNS rebinding on a record
+they control — would still be connected to. **Host-allowlist ≠ IP-level
+containment.** Closing the SSRF gap (rejecting private/link-local/loopback
+targets, and pinning the resolved IP across the TLS connection) is the egress
+proxy's job; do not treat the current self-enforced allowlist as protection
+against egress to internal network ranges. `Net::Allowlist` policy data is
+populated now precisely so the proxy slice can enforce it later.
+
 ## Negative tests (CI-enforced as backends land)
 
 - `python-exec` attempts `socket.connect` → blocked.
@@ -107,5 +130,6 @@ Already shipped (Phase 0 + Phase 0 hardening stage 1):
 ## Open items
 
 - Choice of egress-proxy TLS-pinning approach (cert pinning vs CA pinning vs SPKI pinning).
+- Egress proxy must close the `web-fetch` SSRF/DNS-rebinding gap: reject private/link-local/loopback resolved IPs and pin the resolved address across the connection (see "Network egress" above). The host-name allowlist alone does not contain egress to internal IP ranges.
 - Whether `python-exec` should default to micro-VM rather than seccomp/Seatbelt-only.
 - Concrete `setrlimit` budgets per worker class.
