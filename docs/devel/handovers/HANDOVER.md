@@ -6,65 +6,46 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-09 (Large-tool-result handoff cache + review follow-ups, ROADMAP:129, PR [#199](https://github.com/hherb/hhagent/pull/199) **MERGED**; on macOS).
+**Last updated:** 2026-06-09 (Planner `fetch_handoff` surfacing — ROADMAP:129 follow-up, branch `feat/teach-planner-fetch-handoff`, PR [#200](https://github.com/hherb/hhagent/pull/200) **OPEN**; on macOS).
 
 **Current state.** `main` is at `d442d55` (PR [#199](https://github.com/hherb/hhagent/pull/199) **handoff cache MERGED**;
 PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**;
 PR [#195](https://github.com/hherb/hhagent/pull/195) `insert_memory_light` **MERGED**;
-PR [#194](https://github.com/hherb/hhagent/pull/194) Option K **MERGED**). Working tree clean except
-untracked `docs/essay-medium-draft.md` (intentionally never committed — see memory note). Dev box on
-**macOS**. The previous session: (1) reconciled the stale handover with `main` (web-fetch PR #197 was merged but
-undocumented), then (2) shipped **ROADMAP:129 — the large-tool-result handoff cache** (design → plan →
-8-task TDD via subagent-driven development), now merged via PR #199.
+PR [#194](https://github.com/hherb/hhagent/pull/194) Option K **MERGED**). This session is on branch
+**`feat/teach-planner-fetch-handoff`** (spec + plan + 5 code/doc commits on top of `main`), PR [#200](https://github.com/hherb/hhagent/pull/200) **OPEN**.
+Working tree clean except untracked `docs/essay-medium-draft.md` (intentionally never committed — see memory
+note). Dev box on **macOS**.
 
-**This session shipped — large-tool-result handoff cache (Phase 1 cont., ROADMAP:129).**
-Caps what a single tool result injects into the planner's context. New module
-[`core/src/handoff.rs`](../../../core/src/handoff.rs) (492 LOC — near the cap, lift tests if it grows):
-in-memory, per-task, content-addressed `HandoffCache`.
-- **Stash (dispatcher layer).** `ToolHostStepDispatcher::dispatch_step`, *after* `tool_host::dispatch`
-  returns (the sealed chokepoint is untouched): an `Ok(v)` whose serialized JSON exceeds
-  `DEFAULT_RESULT_BYTE_CAP` (64 KiB) and `task_id > 0` is stashed and replaced with a
-  `{handoff_ref, byte_len, summary_head}` placeholder (`summary_head` via `injection_guard::extract_scannable_text`).
-  Best-effort `policy/handoff.stashed` audit row.
-- **Retrieve (reserved built-in).** A `handoff`/`fetch` step is intercepted at the **top** of
-  `dispatch_step`, before the registry lookup — served in-core from the per-task cache (no worker
-  spawn), `len` clamped to `MAX_FETCH_BYTES` (256 KiB), `policy/handoff.fetched` audit row. The
-  `"handoff"` name is **reserved** in `registry_build::assemble_registry` (no manifest can shadow it).
-- **Lifecycle.** `task_id` threaded through the `StepDispatcher` trait; `purge_task` default-noop +
-  production override; the lane runner purges at every task terminal (Ok + Err). Per-task byte budget
-  (`PER_TASK_BYTE_BUDGET` 64 MiB, oldest-evict) + global `MAX_TRACKED_TASKS` (4096) backstop bound memory.
-- **Security (all three invariants verified by the final review):** injection-blocked outputs are
-  never stashed (they arrive as the tiny `injection_blocked` placeholder, under cap); no cross-task
-  leakage (keyed `(task_id, ref)`); the reserved name can't be diverted into a sandbox. Operator
-  `memory l3 run` path passes `task_id = 0` → passthrough verbatim (it feeds a human with no fetch loop).
-- **Storage decision:** in-memory, NOT the per-task `Workspace` scratch ROADMAP:129 named — `Workspace`
-  is implemented/tested but **never constructed in the live scheduler flow** (only a doc-comment
-  reference), so disk storage would need that wiring first. In-memory matches openhuman's actual
-  `ResultHandoffCache` and is self-contained. Design + plan:
-  [`docs/superpowers/specs/2026-06-08-handoff-cache-design.md`](../../superpowers/specs/2026-06-08-handoff-cache-design.md),
-  [`docs/superpowers/plans/2026-06-08-handoff-cache.md`](../../superpowers/plans/2026-06-08-handoff-cache.md).
+**This session shipped — planner `fetch_handoff` surfacing (ROADMAP:129 follow-up).** The handoff cache
+(PR #199) made the stash → placeholder → `fetch` built-in *exist + tested*, but it was **inert**: nothing told
+the planner that the `{handoff_ref, byte_len, summary_head, truncated}` placeholder could be expanded.
+`assemble_system_prompt` ([`core/src/prompt_assembly/assemble.rs`](../../../core/src/prompt_assembly/assemble.rs))
+now emits an **always-present `<handoff>` block** (order: L0 → L1 → skills → recalled → **handoff** → base; base
+stays terminal) describing the placeholder shape and the `fetch` step protocol. Drift-proofed: a pure helper
+`render_handoff_block()` interpolates the source-of-truth `HANDOFF_TOOL`/`HANDOFF_METHOD_FETCH` constants from
+`scheduler::tool_dispatch`, and a unit test cross-checks the block names every field a real
+`build_handoff_placeholder(...)` emits + the `offset`/`len` fetch params, so a shape change fails the test
+instead of leaving a stale prompt. Four pre-existing byte-exact pins (which asserted "empty everything → bare
+`<base>`") were updated deliberately; the test module was lifted to a sibling `assemble/tests.rs` (parent 543 →
+193 LOC, under the 500 cap). Pure-function change — no PG/sandbox/worker, no `agent_planner.md` edit.
+Design + plan:
+[`docs/superpowers/specs/2026-06-09-teach-planner-fetch-handoff-design.md`](../../superpowers/specs/2026-06-09-teach-planner-fetch-handoff-design.md),
+[`docs/superpowers/plans/2026-06-09-teach-planner-fetch-handoff.md`](../../superpowers/plans/2026-06-09-teach-planner-fetch-handoff.md).
+**Deferred (unchanged):** per-tool `result_byte_cap` override (YAGNI); on-disk Workspace-backed store.
 
-**Review follow-ups (2026-06-09, this session, on PR #199).** Addressed the three findings from the
-code review of the branch:
-- **Stash-branch dispatcher coverage (closes [#198](https://github.com/hherb/hhagent/issues/198)).** New
-  `scheduler_step_dispatch_e2e::dispatcher_stashes_oversized_ok_result_only_for_positive_task_id`
-  (PG + sandbox + real worker, skip-as-pass): a `shell-exec` echo emitting > 64 KiB asserts the
-  placeholder shape, the cache round-trip + cross-task isolation, `purge_task`, the `handoff.stashed`
-  audit row, **and** the `task_id = 0` passthrough — pinning the security-load-bearing `task_id > 0`
-  gate the unit tests couldn't reach (the stashed body comes from a live `tool_host::dispatch`).
-- **Global backstop is no longer silent** — `HandoffCache::put` `warn!`s when the `MAX_TRACKED_TASKS`
-  backstop evicts a (possibly still-active) bucket, so a missed `purge_task` is auditable.
-- **Fetch intercept asymmetry documented** — a comment explains why `fetch` fires for any `task_id`
-  (incl. the operator `<= 0` path) while stash is gated on `task_id > 0`.
-
-**Deferred (filed/tracked):** per-tool `result_byte_cap` override (YAGNI — would touch ~14 `ToolEntry`
-sites for a value that's `None` everywhere today); on-disk Workspace-backed store; **teaching the
-planner to actually call `fetch_handoff`** (a prompt-assembly follow-up — this slice makes the
-mechanism exist + tested, not used).
-
-**Prior reconciliation (same session):** the handover header/working-state/suite-table were brought to
-`main` truth — the previous session shipped the `web-fetch` worker (PR #197) and updated ROADMAP but
-not this handover. See the web-fetch "Recently completed" section below.
+**Prior session — large-tool-result handoff cache (ROADMAP:129, PR #199 MERGED).** Built the mechanism this
+session's work now surfaces: [`core/src/handoff.rs`](../../../core/src/handoff.rs) — in-memory, per-task,
+content-addressed `HandoffCache`. `ToolHostStepDispatcher::dispatch_step` (after `tool_host::dispatch`
+returns; sealed chokepoint untouched) stashes any `Ok(v)` whose serialized JSON exceeds
+`DEFAULT_RESULT_BYTE_CAP` (64 KiB) with `task_id > 0`, replacing it with the `{handoff_ref, byte_len,
+summary_head, truncated}` placeholder + a `handoff.stashed` audit row; a reserved `handoff`/`fetch` step
+(intercepted before registry lookup, no worker spawn) returns slices clamped to `MAX_FETCH_BYTES` (256 KiB).
+`task_id` threaded through `StepDispatcher`; lane runner purges at every task terminal; per-task byte budget +
+`MAX_TRACKED_TASKS` backstop. Security invariants (injection-blocked outputs never stashed; no cross-task leak;
+reserved name unshadowable; operator `task_id <= 0` passthrough) verified by review. In-memory (the per-task
+`Workspace` scratch is unwired in the live scheduler). Review follow-ups (PR #199): real-worker dispatcher
+coverage closing [#198](https://github.com/hherb/hhagent/issues/198); backstop now `warn!`s on eviction; fetch
+intercept asymmetry documented. Full detail in ROADMAP:129.
 
 **Most recently shipped — `web-fetch` worker (Phase 3, ROADMAP:145, PR [#197](https://github.com/hherb/hhagent/pull/197) MERGED).**
 First net-egress worker and the first consumer of the `Net::Allowlist` policy data. New crate
@@ -107,15 +88,13 @@ Recent merged history: Option K restart backoff (PR #194); three clean test-lift
 `hhagent.target` bring-up (PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker
 manifest plumbing item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
-**Session-end verification (macOS, `feat/handoff-cache`):**
-`cargo build --workspace` clean (10 crates). `cargo test -p hhagent-core --lib` **715 / 0 / 0**
-(was 695 on `main` pre-handoff; +20 handoff unit tests). `cargo test -p hhagent-core --test
-handoff_dispatch_e2e` **3 / 0 / 0** (hermetic — no PG/sandbox/worker). `cargo clippy -p hhagent-core
---all-targets --locked -- -D warnings` exit 0. `handoff.rs` **492 LOC** (under the 500 cap but close —
-lift its `#[cfg(test)] mod tests` to a sibling if it grows). No full-workspace live-PG run this session
-(macOS skip-as-pass; the touched scheduler integration suites — `scheduler_step_dispatch_e2e`,
-`cli_memory_l3_run_e2e`, `scheduler_inner_loop_e2e`, `scheduler_lanes_e2e`,
-`memory_l3_crystallise_e2e` — compiled + passed during the run). **Standing macOS test-infra gotcha (not a regression):**
+**Session-end verification (macOS, `feat/teach-planner-fetch-handoff`):**
+`cargo build --workspace` clean (10 crates). `cargo test -p hhagent-core --lib` **719 / 0 / 0**
+(was 715 on `main`; +4 `<handoff>`-block prompt tests — the four updated byte-exact pins are modified in
+place, not added). `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings` exit 0.
+`prompt_assembly/assemble.rs` **193 LOC** + sibling `assemble/tests.rs` **351 LOC** (test module lifted
+this session, both under the 500 cap). Pure-function change — no PG/sandbox/worker touched.
+**Standing macOS test-infra gotcha (not a regression):**
 a *full-workspace* run under `HHAGENT_PG_BIN_DIR` flakes ~4 tests in
 `core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs`) — parallel
 `initdb`/launchd churn (issue #130 territory); they pass single-threaded and in isolation. Use
@@ -364,14 +343,13 @@ sessions 2026-05-06 → 2026-05-09 in
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **Worker manifest plumbing (item 11) MERGED** (PR #187). **`hhagent.target` bring-up (ROADMAP:60) MERGED** (PR #190). **Option K — restart backoff (ROADMAP:61) MERGED** (PR #194). **Memory two-tier write path (ROADMAP:130 — `insert_memory_light`) MERGED** (PR #195). **`web-fetch` worker (Phase 3, ROADMAP:145) MERGED** (PR #197). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**Direct follow-ups to this session's handoff cache (ROADMAP:129, shipped on `feat/handoff-cache`):**
-- **Teach the planner to *call* `fetch_handoff`** — this slice made the mechanism exist + tested but the
-  planner doesn't yet know it can call `tool:"handoff" method:"fetch"`. A prompt-assembly follow-up:
-  surface the built-in (and the placeholder shape) in the assembled system prompt so the agent expands
-  a stashed result on demand. Small, self-contained.
-- **[#198](https://github.com/hherb/hhagent/issues/198)** — stash-branch dispatcher e2e through a real worker emitting >64 KiB (PG+sandbox gated; the fetch-intercept side is already covered hermetically).
+**Remaining handoff-cache follow-ups (ROADMAP:129)** — the cache (PR #199) and the planner-surfacing
+(PR #200, this session) are both done; the mechanism is now live and known to the planner. Still open:
 - **On-disk Workspace-backed store** — only once a per-task `Workspace` is actually wired into the live
   scheduler flow (it isn't today); the `HandoffCache` surface can take a disk impl behind it then.
+- **Observe it in practice** — once a worker reliably returns >64 KiB (e.g. `web-fetch` on a large page),
+  confirm the planner expands a stash via the `<handoff>` instruction in a real `cli_ask`-style run; if the
+  prompt wording needs tuning, that's a cheap iteration on `render_handoff_block()`. (Optional / on demand.)
 
 **Other Phase-3 natural picks:**
 - **[#142](https://github.com/hherb/hhagent/issues/142) — injection-guard chat-template false-positives**, now *actionable*: a `web-fetch` worker exists, so fetch a technical doc containing `<|im_start|>`-style tokens and tune the catalogue against real data.
