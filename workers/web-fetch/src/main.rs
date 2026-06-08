@@ -4,6 +4,7 @@
 //! docs/superpowers/specs/2026-06-08-web-fetch-worker-design.md
 
 mod allowlist;
+mod extract;
 
 fn main() -> anyhow::Result<()> {
     Ok(())
