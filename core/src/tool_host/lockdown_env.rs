@@ -19,6 +19,12 @@ use hhagent_sandbox::{Profile, SandboxPolicy};
 /// JSON-encoded list of writable scratch paths. Workers using
 /// `prelude::serve_stdio` get a Landlock filter built from this.
 pub const ENV_LANDLOCK_RW: &str = "HHAGENT_LANDLOCK_RW";
+/// Env var name read by `hhagent-worker-prelude::landlock_lock` for the
+/// JSON-encoded list of read-only paths derived from `SandboxPolicy.fs_read`.
+/// These are bind-mounted read-only by bwrap and must also be granted
+/// Landlock read rights so the worker can actually access them after
+/// `lock_down()` completes (e.g. `/etc/resolv.conf` for DNS in web-fetch).
+pub const ENV_LANDLOCK_RO: &str = "HHAGENT_LANDLOCK_RO";
 /// Env var name read by `hhagent-worker-prelude::seccomp_lock` for the
 /// per-worker seccomp profile selector.
 pub const ENV_SECCOMP_PROFILE: &str = "HHAGENT_SECCOMP_PROFILE";
@@ -39,6 +45,7 @@ pub const ENV_CPU_MS: &str = "HHAGENT_CPU_MS";
 pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
     let mut out = policy.clone();
     let has_landlock = out.env.iter().any(|(k, _)| k == ENV_LANDLOCK_RW);
+    let has_landlock_ro = out.env.iter().any(|(k, _)| k == ENV_LANDLOCK_RO);
     let has_seccomp = out.env.iter().any(|(k, _)| k == ENV_SECCOMP_PROFILE);
     let has_cpu_ms = out.env.iter().any(|(k, _)| k == ENV_CPU_MS);
 
@@ -51,6 +58,16 @@ pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
         // serde_json on a Vec<String> is infallible — `unwrap` is safe here.
         let json = serde_json::to_string(&rw_paths).unwrap();
         out.env.push((ENV_LANDLOCK_RW.into(), json));
+    }
+    if !has_landlock_ro {
+        let ro_paths: Vec<String> = out
+            .fs_read
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        // serde_json on a Vec<String> is infallible — `unwrap` is safe here.
+        let json = serde_json::to_string(&ro_paths).unwrap();
+        out.env.push((ENV_LANDLOCK_RO.into(), json));
     }
     if !has_seccomp {
         let value = match out.profile {
@@ -160,5 +177,61 @@ mod tests {
             "ENV_CPU_MS must be omitted when policy.cpu_ms == 0; env was {:?}",
             derived.env
         );
+    }
+
+    #[test]
+    fn derive_serialises_fs_read_into_landlock_ro_env() {
+        let mut p = base_policy();
+        p.fs_read = vec![
+            PathBuf::from("/etc/resolv.conf"),
+            PathBuf::from("/etc/ssl/certs"),
+        ];
+        let derived = derive_lockdown_env(&p);
+        let landlock_ro = derived
+            .env
+            .iter()
+            .find(|(k, _)| k == ENV_LANDLOCK_RO)
+            .expect("HHAGENT_LANDLOCK_RO must be derived from fs_read");
+        // Exact-string assertion is OK because serde_json on a Vec<String>
+        // is deterministic.
+        assert_eq!(
+            landlock_ro.1,
+            r#"["/etc/resolv.conf","/etc/ssl/certs"]"#
+        );
+    }
+
+    #[test]
+    fn derive_landlock_ro_empty_when_fs_read_empty() {
+        // When policy.fs_read is empty, HHAGENT_LANDLOCK_RO should be
+        // derived as "[]" (an empty JSON array) rather than omitted —
+        // the worker prelude parses this as an empty Vec, which is fine.
+        let p = base_policy();
+        let derived = derive_lockdown_env(&p);
+        let landlock_ro = derived
+            .env
+            .iter()
+            .find(|(k, _)| k == ENV_LANDLOCK_RO)
+            .expect("HHAGENT_LANDLOCK_RO must always be derived (even when empty)");
+        assert_eq!(landlock_ro.1, "[]");
+    }
+
+    #[test]
+    fn derive_does_not_overwrite_caller_supplied_landlock_ro() {
+        let mut p = base_policy();
+        // Caller pre-supplies a custom RO path; derive must leave it alone.
+        p.env.push((ENV_LANDLOCK_RO.into(), r#"["/custom/ro"]"#.into()));
+        p.fs_read = vec![PathBuf::from("/etc/resolv.conf")];
+        let derived = derive_lockdown_env(&p);
+        let ro_entries: Vec<_> = derived
+            .env
+            .iter()
+            .filter(|(k, _)| k == ENV_LANDLOCK_RO)
+            .collect();
+        assert_eq!(
+            ro_entries.len(),
+            1,
+            "caller-supplied HHAGENT_LANDLOCK_RO must not be duplicated"
+        );
+        assert_eq!(ro_entries[0].1, r#"["/custom/ro"]"#);
     }
 }
