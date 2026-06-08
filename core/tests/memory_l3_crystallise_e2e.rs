@@ -149,7 +149,7 @@ struct OkDispatcher;
 
 #[async_trait]
 impl StepDispatcher for OkDispatcher {
-    async fn dispatch_step(&self, _step: &PlannedStep) -> StepOutcome {
+    async fn dispatch_step(&self, _task_id: i64, _step: &PlannedStep) -> StepOutcome {
         StepOutcome::Ok(serde_json::json!("ok"))
     }
 }

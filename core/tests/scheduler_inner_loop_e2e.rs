@@ -132,7 +132,7 @@ struct ScriptedDispatcher {
 
 #[async_trait]
 impl StepDispatcher for ScriptedDispatcher {
-    async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome {
+    async fn dispatch_step(&self, _task_id: i64, step: &PlannedStep) -> StepOutcome {
         self.table
             .get(&(step.tool.clone(), step.method.clone()))
             .cloned()
@@ -494,7 +494,7 @@ struct BarrierDispatcher {
 
 #[async_trait]
 impl StepDispatcher for BarrierDispatcher {
-    async fn dispatch_step(&self, _step: &PlannedStep) -> StepOutcome {
+    async fn dispatch_step(&self, _task_id: i64, _step: &PlannedStep) -> StepOutcome {
         self.entered.notify_one();
         self.release.notified().await;
         StepOutcome::Ok(serde_json::json!("step-ok"))

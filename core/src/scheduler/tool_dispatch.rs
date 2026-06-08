@@ -288,7 +288,8 @@ impl StepDispatcher for ToolHostStepDispatcher {
         self.registry.tool_names()
     }
 
-    async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome {
+    async fn dispatch_step(&self, task_id: i64, step: &PlannedStep) -> StepOutcome {
+        let _ = task_id; // used by Task 5/6; discarded here to keep -D warnings clean
         // Measured from dispatcher entry, not from worker spawn — so
         // `ms` on a `step.unknown_tool` row is essentially zero (just
         // the registry lookup) and `ms` on `step.spawn_failed`

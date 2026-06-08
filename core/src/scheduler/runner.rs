@@ -532,10 +532,14 @@ async fn run_one(
         max_plans: max_plans_override,
     };
 
-    match run_to_terminal(pool, formulator, review, dispatcher, ctx).await {
+    let task_id = ctx.task_id;
+    let dispatcher_for_purge = std::sync::Arc::clone(&dispatcher);
+    let result = match run_to_terminal(pool, formulator, review, dispatcher, ctx).await {
         Ok(r) => r,
         Err(e) => failed_result(format!("inner_loop: {e}")),
-    }
+    };
+    dispatcher_for_purge.purge_task(task_id);
+    result
 }
 
 /// Build an `InnerLoopResult` representing a `Failed` outcome with

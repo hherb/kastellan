@@ -206,7 +206,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
             "shell.exec",
             serde_json::json!({"argv": [ECHO_PATH, "step-ok"]}),
         );
-        let outcome = dispatcher.dispatch_step(&ok_step).await;
+        let outcome = dispatcher.dispatch_step(0, &ok_step).await;
         let StepOutcome::Ok(value) = &outcome else {
             panic!("expected Ok, got {outcome:?}");
         };
@@ -222,7 +222,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
             "shell.exec",
             serde_json::json!({"argv": ["/bin/cat", "/etc/passwd"]}),
         );
-        let outcome = dispatcher.dispatch_step(&denied_step).await;
+        let outcome = dispatcher.dispatch_step(0, &denied_step).await;
         let StepOutcome::Err { code, detail } = &outcome else {
             panic!("expected Err, got {outcome:?}");
         };
@@ -239,7 +239,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
             "fetch",
             serde_json::json!({"url": "https://example.com"}),
         );
-        let outcome = dispatcher.dispatch_step(&unknown_step).await;
+        let outcome = dispatcher.dispatch_step(0, &unknown_step).await;
         let StepOutcome::Err { code, detail } = &outcome else {
             panic!("expected Err, got {outcome:?}");
         };
@@ -259,7 +259,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
             "shell.exec",
             serde_json::json!({"argv": [ECHO_PATH, "never-runs"]}),
         );
-        let outcome = dispatcher.dispatch_step(&spawn_fail_step).await;
+        let outcome = dispatcher.dispatch_step(0, &spawn_fail_step).await;
         let StepOutcome::Err { code, detail } = &outcome else {
             panic!("expected Err, got {outcome:?}");
         };

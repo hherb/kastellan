@@ -203,7 +203,7 @@ pub enum InnerLoopError {
 /// returns scripted `StepOutcome`s.
 #[async_trait::async_trait]
 pub trait StepDispatcher: Send + Sync {
-    async fn dispatch_step(&self, step: &PlannedStep) -> StepOutcome;
+    async fn dispatch_step(&self, task_id: i64, step: &PlannedStep) -> StepOutcome;
 
     /// Live tool-name set this dispatcher can reach. Used by the agent
     /// L3-invoke path to re-validate a skill against the registry as it is
@@ -214,6 +214,12 @@ pub trait StepDispatcher: Send + Sync {
     fn known_tools(&self) -> std::collections::BTreeSet<String> {
         std::collections::BTreeSet::new()
     }
+
+    /// Drop any per-task state this dispatcher holds (e.g. the handoff
+    /// cache) once the task reaches a terminal state. Default no-op; the
+    /// production dispatcher overrides it. Called once per task by the lane
+    /// runner after [`run_to_terminal`].
+    fn purge_task(&self, _task_id: i64) {}
 }
 
 /// Run the inner loop until terminal. Returns an [`InnerLoopResult`]
@@ -511,7 +517,7 @@ pub async fn run_to_terminal(
             if tasks::observe_state(pool, ctx.task_id).await? == "cancelled" {
                 return finish!(Outcome::Cancelled);
             }
-            let outcome = dispatcher.dispatch_step(step).await;
+            let outcome = dispatcher.dispatch_step(ctx.task_id, step).await;
             dispatch_count = dispatch_count.saturating_add(1);
             let is_err = outcome.is_err();
             outcomes.push(outcome);
