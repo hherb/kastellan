@@ -8,14 +8,17 @@ A personal, always-on agentic system designed from the ground up for security an
 
 ## What it is
 
-A long-running personal AI agent that:
+A long-running personal AI agent designed to:
 
-- talks to you over secure messaging (Telegram, Signal) and email (its own IMAP/SMTP account)
-- remote-controls a web browser, performs web searches and page fetches
-- executes Python in a strict sandbox
-- maintains persistent memory in Postgres with hybrid retrieval (pgvector + BM25 + graph)
-- reviews its own plans through **CASSANDRA**, a semantic oversight layer with hard-coded constitutional constraints, before any tool runs
-- runs continuously, periodically resetting its context window from memories and a persistent task list
+- talk to you over secure messaging (Telegram, Signal) and email (its own IMAP/SMTP account)
+- remote-control a web browser, perform web searches and page fetches
+- execute Python in a strict sandbox
+- maintain persistent memory in Postgres with hybrid retrieval (pgvector + lexical + graph)
+- review its own plans through **CASSANDRA**, a semantic oversight layer with hard-coded constitutional constraints, before any tool runs
+- run continuously, periodically resetting its context window from memories and a persistent task list
+
+Not all of this is built yet — see [Status](#status) for what works today versus
+what's still on the roadmap.
 
 ## Design priorities (in order)
 
@@ -129,20 +132,78 @@ expected to refuse PRs that violate them.
 
 ## Status
 
-Early scaffold. See [`docs/architecture.md`](docs/architecture.md) and [`docs/threat-model.md`](docs/threat-model.md). Phased build plan is tracked in the design plan file outside this repo.
+**Past scaffold. Phase 1 (Memory & Loop) is essentially complete and Phase 3
+web egress has begun.** The project is a Rust workspace of 10 crates with a
+working agent loop, real cross-platform sandboxing, persistent memory, and the
+first net-egress worker.
+
+What works today:
+
+- **Sandboxing — double-contained, cross-platform.** `bubblewrap` + Landlock +
+  seccomp-bpf on Linux (wrapped in a `systemd-run --scope` cgroup for CPU/memory
+  caps); `sandbox-exec` (Seatbelt) plus an opt-in Apple `container` micro-VM
+  backend on macOS. One OS process and one kernel sandbox per worker, all driven
+  from a single `SandboxPolicy`, with negative tests asserting that denials deny.
+- **Agent loop + scheduler.** A Postgres-backed task queue (`LISTEN/NOTIFY`,
+  leased claims) running the LLM plan → **CASSANDRA** review → dispatcher
+  chokepoint → sandboxed-step loop, with append-only audit rows at every
+  lifecycle transition and a crash-recovery sweep.
+- **CASSANDRA oversight.** Constitutional and deterministic (data-classification)
+  policy stages with an offline replay/iteration harness; a worker-output
+  prompt-injection guard that redacts and audits blocked content.
+- **Memory.** Three-lane recall (pgvector semantic + `tsvector` lexical + graph)
+  fused with Reciprocal Rank Fusion; layered prompt assembly (L0 meta-rules, L1
+  always-in-context index, L3 approved skills); entity/relation extraction with a
+  quarantine-review CLI; a large-tool-result handoff cache.
+- **L3 skill arc.** Crystallise a successful trajectory → operator approve/pin →
+  recall-surface → re-invoke, with trust tiers and live re-validation at dispatch.
+- **Workers.** `shell-exec` (argv-allowlisted execve), `web-fetch` (HTTPS-only,
+  host-allowlisted, redirect/size-capped readable-text extraction — the first
+  `Net::Allowlist` consumer), and `gliner-relex` (Python entity/relation
+  extraction under the sandbox).
+- **Supporting infrastructure.** OS-native supervisor units (`systemd --user` /
+  launchd) including an `hhagent.target`; AES-256-GCM secrets at rest with opaque
+  `secret://` references; an OpenAI-compatible, local-first LLM router; a
+  `hhagent-cli audit tail` viewer.
+
+Not built yet (see the roadmap): channel adapters (Telegram/Signal/email),
+outbound messaging, the browser worker, `python-exec`, the egress proxy + its
+credential-leak scanner, and the Phase-5 frontier-escalation policy gate.
+
+Day-to-day state — what's green and the next task — lives in
+[`docs/devel/handovers/HANDOVER.md`](docs/devel/handovers/HANDOVER.md); the
+sequenced build plan is [`docs/devel/ROADMAP.md`](docs/devel/ROADMAP.md). See also
+[`docs/architecture.md`](docs/architecture.md) and
+[`docs/threat-model.md`](docs/threat-model.md).
 
 ## Layout
 
+Rust workspace, 10 crates:
+
 ```
-core/          Rust agent core (scheduler, memory, policy, LLM router, audit, IPC)
-sandbox/       Cross-platform sandbox crate (bwrap+Landlock on Linux, Seatbelt on macOS)
-supervisor/    Service-supervisor abstraction (systemd --user / launchd LaunchAgents)
-workers/       Tool workers, each its own sandboxed process
-adapters/      Channel adapters (Telegram, Signal)
-db/migrations/ Postgres schema (pgvector, pg_search, Apache AGE)
-config/        Runtime policy and per-worker sandbox profiles
-docs/          Architecture & threat-model docs
+core/                 hhagent-core: agent loop, scheduler, memory, CASSANDRA, audit,
+                      tool-host chokepoint, handoff cache; `hhagent` daemon + `hhagent-cli`
+db/                   hhagent-db: Postgres helpers + embedded migrations (pgvector +
+                      tsvector/GIN + relational graph), secrets-at-rest, audit writer
+llm-router/           hhagent-llm-router: sole egress for LLM calls (OpenAI-compatible HTTP)
+sandbox/              hhagent-sandbox: SandboxPolicy + per-OS backends
+                      (bwrap / Seatbelt / Apple container)
+supervisor/           hhagent-supervisor: systemd --user / launchd unit generation + drivers
+protocol/             hhagent-protocol: JSON-RPC 2.0 over stdio (MCP-stdio compatible)
+tests-common/         hhagent-tests-common: shared dev-dep test harness (Pg cluster, fixtures)
+workers/prelude/      Landlock + seccomp lock-down prelude (worker-side `serve_stdio`)
+workers/shell-exec/   argv-allowlisted execve worker
+workers/web-fetch/    HTTPS-only, host-allowlisted fetch + readable-text extraction
+workers/gliner-relex/ Python entity/relation extraction worker (sandboxed)
+
+adapters/             channel adapters (Telegram, Signal) — placeholders, Phase 2
+config/               example runtime policy + per-worker sandbox profiles
+seeds/                L0 memory meta-rule seed data
+scripts/              host setup (AppArmor profile, Postgres install)
+docs/                 architecture, threat-model, CASSANDRA design, roadmap, handovers
 ```
+
+(`workers/{browser-driver,mail,python-exec}` exist as placeholders for later phases.)
 
 ## Setup
 
