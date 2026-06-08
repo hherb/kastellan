@@ -133,7 +133,7 @@ struct SleepyDispatcher {
 
 #[async_trait]
 impl StepDispatcher for SleepyDispatcher {
-    async fn dispatch_step(&self, _step: &PlannedStep) -> StepOutcome {
+    async fn dispatch_step(&self, _task_id: i64, _step: &PlannedStep) -> StepOutcome {
         tokio::time::sleep(self.delay).await;
         StepOutcome::Ok(serde_json::json!("done"))
     }

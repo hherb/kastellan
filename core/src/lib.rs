@@ -16,6 +16,7 @@ pub mod cassandra;
 pub mod classification_inference;
 pub mod cli_audit;
 pub mod entity_extraction;
+pub mod handoff;
 pub mod memory;
 pub mod observation;
 pub mod prompt_assembly;

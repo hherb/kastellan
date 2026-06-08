@@ -139,7 +139,9 @@ fn make_dispatcher(
         Arc::new(CompositeLifecycle::new(Arc::clone(&sandboxes)));
     let vault = Arc::new(Vault::new());
 
-    ToolHostStepDispatcher::new(pool, vault, lifecycle, registry)
+    ToolHostStepDispatcher::new(pool, vault, lifecycle, registry,
+        std::sync::Arc::new(hhagent_core::handoff::HandoffCache::new()),
+    )
 }
 
 /// The live tool-name set for these tests: only shell-exec is registered.

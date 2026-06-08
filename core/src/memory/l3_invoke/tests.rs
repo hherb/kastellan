@@ -203,7 +203,7 @@ struct ScriptedDispatcher {
 
 #[async_trait::async_trait]
 impl StepDispatcher for ScriptedDispatcher {
-    async fn dispatch_step(&self, step: &PS) -> StepOutcome {
+    async fn dispatch_step(&self, _task_id: i64, step: &PS) -> StepOutcome {
         self.seen.lock().unwrap().push(step.tool.clone());
         self.outcomes
             .lock()

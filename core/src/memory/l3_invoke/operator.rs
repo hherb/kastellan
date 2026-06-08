@@ -38,7 +38,7 @@ pub async fn run_steps(
     let mut outcomes = Vec::with_capacity(steps.len());
     for step in steps {
         let ps = planned_step_from_l3(step);
-        let outcome = dispatcher.dispatch_step(&ps).await;
+        let outcome = dispatcher.dispatch_step(0, &ps).await;
         let is_err = outcome.is_err();
         outcomes.push(outcome);
         if is_err {
