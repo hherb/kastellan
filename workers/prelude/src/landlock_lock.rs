@@ -99,11 +99,12 @@ const DEFAULT_RO_EXEC_ROOTS: &[&str] = &[
     "/proc",
 ];
 
-/// Read [`HHAGENT_LANDLOCK_RW`] from the environment and apply the ruleset.
-/// Used by [`crate::lock_down`].
+/// Read [`HHAGENT_LANDLOCK_RW`] and [`HHAGENT_LANDLOCK_RO`] from the
+/// environment and apply the ruleset. Used by [`crate::lock_down`].
 pub fn apply_from_env() -> Result<LandlockReport, LockdownError> {
     let rw_paths = parse_rw_env_var()?;
-    apply(&rw_paths)
+    let ro_paths = parse_ro_env_var()?;
+    apply(&rw_paths, &ro_paths)
 }
 
 /// Pure parser for the `HHAGENT_LANDLOCK_RW` env var. Exposed for testing.
@@ -139,17 +140,59 @@ pub fn parse_rw_string(raw: &str) -> Result<Vec<PathBuf>, LockdownError> {
     Ok(out)
 }
 
-/// Install the Landlock ruleset. `rw_paths` is the worker's writable
-/// scratch list (typically just one entry).
-pub fn apply(rw_paths: &[PathBuf]) -> Result<LandlockReport, LockdownError> {
+/// Pure parser for the `HHAGENT_LANDLOCK_RO` env var. Exposed for testing.
+///
+/// Accepted: missing, empty, or a JSON array of absolute path strings.
+/// Returns an error on malformed JSON or relative paths.
+pub fn parse_ro_env_var() -> Result<Vec<PathBuf>, LockdownError> {
+    let raw = match std::env::var("HHAGENT_LANDLOCK_RO") {
+        Ok(s) if !s.is_empty() => s,
+        _ => return Ok(Vec::new()),
+    };
+    parse_ro_string(&raw)
+}
+
+/// Pure parser used by [`parse_ro_env_var`]. Split out so tests can drive
+/// it without mucking with process env state.
+pub fn parse_ro_string(raw: &str) -> Result<Vec<PathBuf>, LockdownError> {
+    let parsed: Vec<String> = serde_json::from_str(raw).map_err(|e| {
+        LockdownError::Env(format!(
+            "HHAGENT_LANDLOCK_RO must be a JSON array of strings: {e}"
+        ))
+    })?;
+    let mut out = Vec::with_capacity(parsed.len());
+    for p in parsed {
+        let pb = PathBuf::from(&p);
+        if !pb.is_absolute() {
+            return Err(LockdownError::Env(format!(
+                "HHAGENT_LANDLOCK_RO path {p:?} must be absolute"
+            )));
+        }
+        out.push(pb);
+    }
+    Ok(out)
+}
+
+/// Install the Landlock ruleset.
+///
+/// `rw_paths` is the worker's writable scratch list (typically just one
+/// entry, from `HHAGENT_LANDLOCK_RW`).
+///
+/// `ro_paths` is the list of additional read-only paths derived from
+/// `SandboxPolicy.fs_read` (from `HHAGENT_LANDLOCK_RO`). These are
+/// bind-mounted read-only by bwrap; Landlock must also grant read rights
+/// so the worker can access them after `lock_down()`. For example,
+/// `/etc/resolv.conf` for DNS in the web-fetch worker.
+pub fn apply(rw_paths: &[PathBuf], ro_paths: &[PathBuf]) -> Result<LandlockReport, LockdownError> {
     // Full read+write+rename+truncate+ioctl access — granted only to the
     // worker's RW scratch dirs.
     let access_all = AccessFs::from_all(TARGET_ABI);
 
     // Read+exec only — granted to the dynamic-linker / shared-library
-    // roots. `from_read(V6)` already includes `Execute` (see
-    // landlock::AccessFs::from_read), so the bitflag union is just
-    // explicit-readability; the kernel sees the same set either way.
+    // roots and to additional fs_read paths. `from_read(V6)` already
+    // includes `Execute` (see landlock::AccessFs::from_read), so the
+    // bitflag union is just explicit-readability; the kernel sees the
+    // same set either way.
     let access_read_exec = AccessFs::from_read(TARGET_ABI);
 
     // Same as `access_read_exec` plus `IoctlDev` — granted only to
@@ -191,6 +234,13 @@ pub fn apply(rw_paths: &[PathBuf]) -> Result<LandlockReport, LockdownError> {
     }
     for p in rw_paths {
         ruleset = add_path_rule(ruleset, p, access_all)?;
+    }
+    // Additional read-only paths from SandboxPolicy.fs_read (e.g.
+    // /etc/resolv.conf for DNS). Uses the same best-effort/skip-if-missing
+    // helper as DEFAULT_RO_EXEC_ROOTS — nonexistent paths are silently
+    // skipped so a stale policy entry doesn't kill the worker.
+    for p in ro_paths {
+        ruleset = add_path_rule(ruleset, p, access_read_exec)?;
     }
 
     let status = ruleset
@@ -267,6 +317,34 @@ mod tests {
     #[test]
     fn parse_rw_string_rejects_bad_json() {
         let err = parse_rw_string("not-json").unwrap_err();
+        assert!(matches!(err, LockdownError::Env(_)));
+    }
+
+    // ── parse_ro_string tests (mirror the RW suite) ──────────────────────
+
+    #[test]
+    fn parse_ro_string_empty_array_yields_empty_vec() {
+        assert!(parse_ro_string("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_ro_string_accepts_absolute_paths() {
+        let v =
+            parse_ro_string(r#"["/etc/resolv.conf","/etc/ssl/certs"]"#).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0], PathBuf::from("/etc/resolv.conf"));
+        assert_eq!(v[1], PathBuf::from("/etc/ssl/certs"));
+    }
+
+    #[test]
+    fn parse_ro_string_rejects_relative_paths() {
+        let err = parse_ro_string(r#"["etc/resolv.conf"]"#).unwrap_err();
+        assert!(matches!(err, LockdownError::Env(_)));
+    }
+
+    #[test]
+    fn parse_ro_string_rejects_bad_json() {
+        let err = parse_ro_string("not-json").unwrap_err();
         assert!(matches!(err, LockdownError::Env(_)));
     }
 }

@@ -8,3 +8,4 @@
 
 pub mod gliner_relex;
 pub mod shell_exec;
+pub mod web_fetch;
