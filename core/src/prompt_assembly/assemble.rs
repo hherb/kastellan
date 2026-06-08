@@ -85,15 +85,6 @@ use crate::recall_assembly::RecalledContext;
 use crate::scheduler::tool_dispatch::{HANDOFF_METHOD_FETCH, HANDOFF_TOOL};
 use hhagent_db::memories::Memory;
 
-/// Render the supplied memory slices, surfaced skills, recall context, and
-/// base prompt into a single LLM-ready system message.
-///
-/// See the module-level docstring for the framing rules. Surfaced skills are
-/// operator-approved (high-trust) so the `<skills>` block sits after L1 and
-/// before the unverified `recalled` output; an empty `skills` slice omits
-/// the block entirely. An empty [`RecalledContext`] omits the `<recalled>`
-/// tag entirely so the output is byte-identical to the v1 (no-recall)
-/// assembler when both `skills` and `recalled` are empty.
 /// Render the always-present `<handoff>` block.
 ///
 /// Teaches the planner the `fetch_handoff` protocol: how to recognise the
@@ -113,7 +104,8 @@ fn render_handoff_block() -> String {
          to proceed without fetching anything more.\n\
          To read more of the body, emit a step with tool=\"{tool}\" \
          method=\"{method}\" and parameters={{handoff_ref, offset?, len?}} \
-         (offset defaults to 0; len defaults to and is clamped at 256 KiB). The \
+         (offset defaults to 0; len defaults to 256 KiB and is clamped to that \
+         maximum). The \
          step returns {{handoff_ref, offset, len, data, encoding, eof}}, where \
          len is the number of bytes actually returned. To read the whole body, \
          repeat the fetch with offset increased by len until eof is true.\n\
@@ -123,6 +115,15 @@ fn render_handoff_block() -> String {
     )
 }
 
+/// Render the supplied memory slices, surfaced skills, recall context, and
+/// base prompt into a single LLM-ready system message.
+///
+/// See the module-level docstring for the framing rules. Surfaced skills are
+/// operator-approved (high-trust) so the `<skills>` block sits after L1 and
+/// before the unverified `recalled` output; an empty `skills` slice omits
+/// the block entirely. An empty [`RecalledContext`] omits the `<recalled>`
+/// tag entirely so the output is byte-identical to the v1 (no-recall)
+/// assembler when both `skills` and `recalled` are empty.
 pub fn assemble_system_prompt(
     l0: &[Memory],
     l1: &[Memory],
