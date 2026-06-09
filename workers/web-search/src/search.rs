@@ -74,6 +74,12 @@ pub fn validate_endpoint(raw: &str, allowlist: &HostAllowlist) -> Result<Url, Se
 
 /// Build the SearxNG request URL from the validated endpoint: replace the query
 /// string with `q=<query>&format=json`, preserving scheme/host/port/path.
+///
+/// Note: this `clear()`s any query string the operator put on the configured
+/// endpoint — pre-pinned params like `?engines=google` on
+/// `HHAGENT_WEB_SEARCH_ENDPOINT` are dropped, not merged. Per-call engine/
+/// language tuning is deferred (see the design spec); configure those in
+/// SearxNG's own `settings.yml` rather than on the endpoint URL.
 pub fn build_query_url(endpoint: &Url, query: &str) -> Url {
     let mut url = endpoint.clone();
     url.query_pairs_mut()

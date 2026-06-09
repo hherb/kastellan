@@ -75,7 +75,7 @@ impl WebSearchHandler<ReqwestGet> {
         let allowlist = HostAllowlist::from_env_json(&allow_raw)?;
         let endpoint = validate_endpoint(&endpoint_raw, &allowlist)
             .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
-        let transport = ReqwestGet::new()?;
+        let transport = ReqwestGet::new("hhagent-web-search/0")?;
         Ok(Self { endpoint, allowlist, transport })
     }
 }

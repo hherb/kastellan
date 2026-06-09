@@ -99,7 +99,7 @@ impl WebFetchHandler<ReqwestGet> {
     pub fn from_env() -> anyhow::Result<Self> {
         let raw = std::env::var("HHAGENT_WEB_FETCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
         let allowlist = HostAllowlist::from_env_json(&raw)?;
-        let transport = ReqwestGet::new()?;
+        let transport = ReqwestGet::new("hhagent-web-fetch/0")?;
         Ok(Self { allowlist, transport })
     }
 }

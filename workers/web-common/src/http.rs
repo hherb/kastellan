@@ -34,11 +34,15 @@ pub struct ReqwestGet {
 }
 
 impl ReqwestGet {
-    pub fn new() -> anyhow::Result<Self> {
+    /// Build the transport with a caller-supplied `User-Agent`. Each worker
+    /// passes its own (`hhagent-web-fetch/0`, `hhagent-web-search/0`, …) so the
+    /// UA on the wire stays attributable per worker and unchanged by the shared
+    /// crate move.
+    pub fn new(user_agent: &str) -> anyhow::Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .user_agent("hhagent/0")
+            .user_agent(user_agent)
             .build()?;
         Ok(Self { client })
     }
