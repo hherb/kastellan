@@ -277,10 +277,10 @@ fn screen_each_attack_class_has_at_least_one_block_capable_phrase() {
     // accidental class-dropouts during catalogue edits.
     let mut max_by_class: std::collections::BTreeMap<&'static str, f32> =
         std::collections::BTreeMap::new();
-    for &(weight, _pattern, class) in CATALOGUE {
-        let entry = max_by_class.entry(class).or_insert(0.0);
-        if weight > *entry {
-            *entry = weight;
+    for rule in CATALOGUE {
+        let entry = max_by_class.entry(rule.class).or_insert(0.0);
+        if rule.weight > *entry {
+            *entry = rule.weight;
         }
     }
     for class in ["instruction_override", "role_hijack", "secret_exfiltration", "unsafe_tool_coercion"] {
