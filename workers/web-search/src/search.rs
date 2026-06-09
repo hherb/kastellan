@@ -146,8 +146,7 @@ mod tests {
     fn http_remote_endpoint_is_scheme_denied() {
         let a = al(&["searx.example.org"]);
         let err = validate_endpoint("http://searx.example.org/search", &a)
-            .err()
-            .expect("must deny");
+            .expect_err("must deny");
         assert!(matches!(err, SearchError::SchemeDenied(s) if s == "http"));
     }
 
@@ -155,15 +154,14 @@ mod tests {
     fn endpoint_host_not_on_allowlist_is_denied() {
         let a = al(&["searx.example.org"]);
         let err = validate_endpoint("https://evil.test/search", &a)
-            .err()
-            .expect("must deny");
+            .expect_err("must deny");
         assert!(matches!(err, SearchError::HostDenied(h) if h == "evil.test"));
     }
 
     #[test]
     fn unparseable_endpoint_is_bad_endpoint() {
         let a = al(&["x"]);
-        let err = validate_endpoint("not a url", &a).err().expect("must error");
+        let err = validate_endpoint("not a url", &a).expect_err("must error");
         assert!(matches!(err, SearchError::BadEndpoint(_)));
     }
 
@@ -231,8 +229,7 @@ mod tests {
         let t = FakeGet::new(vec![]);
         let a = al(&["searx.example.org"]);
         let err = search(&t, &endpoint(), &a, "   ", DEFAULT_COUNT)
-            .err()
-            .expect("must reject");
+            .expect_err("must reject");
         assert!(matches!(err, SearchError::EmptyQuery));
     }
 
@@ -246,8 +243,7 @@ mod tests {
         }]);
         let a = al(&["searx.example.org"]);
         let err = search(&t, &endpoint(), &a, "q", DEFAULT_COUNT)
-            .err()
-            .expect("must error");
+            .expect_err("must error");
         assert!(matches!(err, SearchError::BadStatus(503)));
     }
 
@@ -256,8 +252,7 @@ mod tests {
         let t = FakeGet::new(vec![redirect_to("https://elsewhere.test/")]);
         let a = al(&["searx.example.org"]);
         let err = search(&t, &endpoint(), &a, "q", DEFAULT_COUNT)
-            .err()
-            .expect("must error");
+            .expect_err("must error");
         assert!(matches!(err, SearchError::Redirected));
     }
 }
