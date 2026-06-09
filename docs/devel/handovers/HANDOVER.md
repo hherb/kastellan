@@ -6,15 +6,15 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-09 (Planner `fetch_handoff` surfacing — ROADMAP:129 follow-up, branch `feat/teach-planner-fetch-handoff`, PR [#200](https://github.com/hherb/hhagent/pull/200) **OPEN**; on macOS).
+**Last updated:** 2026-06-09 (Planner `fetch_handoff` surfacing — ROADMAP:129 follow-up, PR [#200](https://github.com/hherb/hhagent/pull/200) **MERGED**; on macOS).
 
-**Current state.** `main` is at `d442d55` (PR [#199](https://github.com/hherb/hhagent/pull/199) **handoff cache MERGED**;
+**Current state.** `main` is at `f4f00d7` (PR [#200](https://github.com/hherb/hhagent/pull/200) **planner fetch_handoff surfacing MERGED**;
+PR [#199](https://github.com/hherb/hhagent/pull/199) **handoff cache MERGED**;
 PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**;
 PR [#195](https://github.com/hherb/hhagent/pull/195) `insert_memory_light` **MERGED**;
-PR [#194](https://github.com/hherb/hhagent/pull/194) Option K **MERGED**). This session is on branch
-**`feat/teach-planner-fetch-handoff`** (spec + plan + 5 code/doc commits on top of `main`), PR [#200](https://github.com/hherb/hhagent/pull/200) **OPEN**.
-Working tree clean except untracked `docs/essay-medium-draft.md` (intentionally never committed — see memory
-note). Dev box on **macOS**.
+PR [#194](https://github.com/hherb/hhagent/pull/194) Option K **MERGED**). Currently on `main` with a clean
+working tree (a fresh session, no feature branch yet), except untracked `docs/essay-medium-draft.md`
+(intentionally never committed — see memory note). Dev box on **macOS**.
 
 **This session shipped — planner `fetch_handoff` surfacing (ROADMAP:129 follow-up).** The handoff cache
 (PR #199) made the stash → placeholder → `fetch` built-in *exist + tested*, but it was **inert**: nothing told
