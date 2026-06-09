@@ -3,6 +3,7 @@
 //! docs/superpowers/specs/2026-06-09-web-search-worker-design.md
 
 mod parse;
+mod search;
 
 fn main() -> anyhow::Result<()> {
     Ok(())
