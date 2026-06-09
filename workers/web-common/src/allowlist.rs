@@ -1,8 +1,9 @@
-//! Host allowlist matching for web-fetch.
+//! Host allowlist matching for net-egress workers.
 //!
-//! Entries come from the `HHAGENT_WEB_FETCH_ALLOWLIST` env (a JSON array of
-//! strings), injected by the host-side manifest from the `tool_allowlists` DB
-//! table. Two forms:
+//! Entries come from the worker's allowlist env (a JSON array of strings —
+//! `HHAGENT_WEB_FETCH_ALLOWLIST`, `HHAGENT_WEB_SEARCH_ALLOWLIST`, etc.),
+//! injected by the host-side manifest from the `tool_allowlists` DB table.
+//! Two forms:
 //!   - `"en.wikipedia.org"` — exact host match only.
 //!   - `".example.com"`     — the domain itself AND any subdomain.
 //!
@@ -25,7 +26,7 @@ impl HostAllowlist {
     /// Parse from the JSON-array env string. Empty/blank entries are skipped.
     pub fn from_env_json(raw: &str) -> anyhow::Result<Self> {
         let entries: Vec<String> = serde_json::from_str(raw).map_err(|e| {
-            anyhow::anyhow!("HHAGENT_WEB_FETCH_ALLOWLIST is not a JSON array of strings: {e}")
+            anyhow::anyhow!("allowlist env is not a JSON array of strings: {e}")
         })?;
         let mut rules = Vec::new();
         for entry in entries {

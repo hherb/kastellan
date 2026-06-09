@@ -14,12 +14,15 @@ name = "hhagent-worker-web-fetch"
 path = "src/main.rs"
 
 [dependencies]
-hhagent-protocol       = { path = "../../protocol" }
-hhagent-worker-prelude = { path = "../prelude" }
-serde                  = { workspace = true }
-serde_json             = { workspace = true }
-anyhow                 = { workspace = true }
-reqwest                = { workspace = true, features = ["blocking"] } # blocking: deliberate synchronous transport for this stdio worker (see web-fetch design spec)
-url                    = { workspace = true }
-pdf-extract            = { workspace = true }
-readable_html          = { workspace = true }
+hhagent-protocol         = { path = "../../protocol" }
+hhagent-worker-prelude   = { path = "../prelude" }
+hhagent-worker-web-common = { path = "../web-common" }
+serde                    = { workspace = true }
+serde_json               = { workspace = true }
+anyhow                   = { workspace = true }
+url                      = { workspace = true }
+pdf-extract              = { workspace = true }
+readable_html            = { workspace = true }
+
+[dev-dependencies]
+hhagent-worker-web-common = { path = "../web-common", features = ["testing"] }

@@ -1,6 +1,6 @@
 //! Shared unit-test helpers: a fake [`HttpGet`] transport plus small
-//! allowlist/response builders, used by the `fetch` and `handler` test modules
-//! so the canned-response transport lives in exactly one place.
+//! allowlist/response builders, behind the `testing` cargo feature so each
+//! worker's unit suite shares one canned-response transport.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use url::Url;
 
 use crate::allowlist::HostAllowlist;
-use crate::fetch::{HttpGet, RawResponse};
+use crate::http::{HttpGet, RawResponse};
 
 /// Fake transport returning canned responses in FIFO order.
 pub struct FakeGet {
@@ -53,5 +53,15 @@ pub fn redirect_to(loc: &str) -> RawResponse {
         location: Some(loc.to_string()),
         content_type: String::new(),
         body: Vec::new(),
+    }
+}
+
+/// A `200 application/json` response carrying `json` (for search-style workers).
+pub fn json_resp(json: &str) -> RawResponse {
+    RawResponse {
+        status: 200,
+        location: None,
+        content_type: "application/json".to_string(),
+        body: json.as_bytes().to_vec(),
     }
 }

@@ -10,9 +10,11 @@ use hhagent_protocol::{codes, server::Handler, RpcError};
 use serde::Deserialize;
 use url::Url;
 
-use crate::allowlist::HostAllowlist;
+use hhagent_worker_web_common::allowlist::HostAllowlist;
+use hhagent_worker_web_common::http::{HttpGet, ReqwestGet};
+
 use crate::extract::{extract, main_type};
-use crate::fetch::{drive, FetchError, HttpGet, ReqwestGet};
+use crate::fetch::{drive, FetchError};
 
 #[derive(Deserialize)]
 struct FetchParams {
@@ -97,7 +99,7 @@ impl WebFetchHandler<ReqwestGet> {
     pub fn from_env() -> anyhow::Result<Self> {
         let raw = std::env::var("HHAGENT_WEB_FETCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
         let allowlist = HostAllowlist::from_env_json(&raw)?;
-        let transport = ReqwestGet::new()?;
+        let transport = ReqwestGet::new("hhagent-web-fetch/0")?;
         Ok(Self { allowlist, transport })
     }
 }
@@ -150,8 +152,8 @@ impl<T: HttpGet> Handler for WebFetchHandler<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fetch::RawResponse;
-    use crate::test_transport::{al, FakeGet};
+    use hhagent_worker_web_common::http::RawResponse;
+    use hhagent_worker_web_common::testing::{al, FakeGet};
 
     fn handler(entries: &[&str], responses: Vec<RawResponse>) -> WebFetchHandler<FakeGet> {
         WebFetchHandler::with_parts(al(entries), FakeGet::new(responses))

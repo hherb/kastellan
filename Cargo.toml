@@ -10,7 +10,9 @@ members = [
     "tests-common",
     "workers/prelude",
     "workers/shell-exec",
+    "workers/web-common",
     "workers/web-fetch",
+    "workers/web-search",
 ]
 
 [workspace.package]

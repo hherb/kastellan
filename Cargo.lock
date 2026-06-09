@@ -1075,6 +1075,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "zeroize",
 ]
 
@@ -1179,6 +1180,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hhagent-worker-web-common"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "hhagent-worker-web-fetch"
 version = "0.0.0"
 dependencies = [
@@ -1186,8 +1198,21 @@ dependencies = [
  "dom_smoothie",
  "hhagent-protocol",
  "hhagent-worker-prelude",
+ "hhagent-worker-web-common",
  "pdf-extract",
- "reqwest",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "hhagent-worker-web-search"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hhagent-protocol",
+ "hhagent-worker-prelude",
+ "hhagent-worker-web-common",
  "serde",
  "serde_json",
  "url",
