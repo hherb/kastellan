@@ -6,13 +6,13 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-09 (injection-guard per-tool profiles — [#142](https://github.com/hherb/hhagent/issues/142), branch `feat/injection-guard-per-tool-profiles`, PR pending; on macOS).
+**Last updated:** 2026-06-09 (injection-guard per-tool profiles — [#142](https://github.com/hherb/hhagent/issues/142), PR [#239](https://github.com/hherb/hhagent/pull/239) **MERGED** to `main` at `bd6d7a9`; on macOS).
 
-**Current state.** `main` is at `98a3de9` (PR [#238](https://github.com/hherb/hhagent/pull/238) **web-search worker + `web-common` crate MERGED**;
+**Current state.** `main` is at `bd6d7a9` (PR [#239](https://github.com/hherb/hhagent/pull/239) **injection-guard per-tool profiles MERGED**;
+PR [#238](https://github.com/hherb/hhagent/pull/238) **web-search worker + `web-common` crate MERGED**;
 PR [#200](https://github.com/hherb/hhagent/pull/200) **planner fetch_handoff surfacing MERGED**;
 PR [#199](https://github.com/hherb/hhagent/pull/199) **handoff cache MERGED**;
-PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**). This session is on branch
-**`feat/injection-guard-per-tool-profiles`** (spec + plan + 8 code/test commits on top of `main`), PR pending.
+PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**). No branch work in flight.
 Working tree clean except untracked `docs/essay-medium-draft.md`
 (intentionally never committed — see memory note). Dev box on **macOS**.
 
