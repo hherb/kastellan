@@ -315,7 +315,14 @@ pub async fn dispatch_with_sink(
                 &v,
                 crate::cassandra::injection_guard::SCAN_BYTE_CAP,
             );
-            let verdict = crate::cassandra::injection_guard::screen(&body);
+            // Per-tool sensitivity (issue #142): doc-fetching net workers
+            // use the Relaxed profile so quoted chat-template tokens in
+            // fetched documentation do not auto-Block; every other worker
+            // (incl. shell-exec and any unknown) stays Strict, fail-closed.
+            let verdict = crate::cassandra::injection_guard::screen_with_profile(
+                &body,
+                crate::cassandra::injection_guard::GuardProfile::for_tool(tool),
+            );
             match verdict.decision {
                 crate::cassandra::injection_guard::InjectionDecision::Allow => {
                     (Ok(v), None)
