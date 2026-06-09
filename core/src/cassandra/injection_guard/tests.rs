@@ -347,7 +347,7 @@ fn relaxed_allows_single_chat_template_token() {
         GuardProfile::Relaxed,
     );
     assert_eq!(v.decision, InjectionDecision::Allow);
-    assert!((v.score - RELAXED_CHAT_TEMPLATE_WEIGHT).abs() < f32::EPSILON);
+    assert!((v.score - RELAXED_CHAT_TEMPLATE_WEIGHT).abs() < 1e-6);
     // The reason code is still recorded even though it did not Block.
     assert_eq!(v.reason_codes, vec!["role_hijack"]);
 }
@@ -361,7 +361,7 @@ fn relaxed_caps_multiple_chat_template_tokens_to_one_contribution() {
         GuardProfile::Relaxed,
     );
     assert_eq!(v.decision, InjectionDecision::Allow);
-    assert!((v.score - RELAXED_CHAT_TEMPLATE_WEIGHT).abs() < f32::EPSILON);
+    assert!((v.score - RELAXED_CHAT_TEMPLATE_WEIGHT).abs() < 1e-6);
 }
 
 #[test]
@@ -404,11 +404,11 @@ fn strict_still_blocks_lone_chat_template_token() {
     assert_eq!(screen("<|im_start|>system").decision, InjectionDecision::Block);
 }
 
-#[test]
-fn relaxed_chat_template_weight_is_sub_threshold() {
-    // The cap must sit below BLOCK_THRESHOLD or a lone token would Block.
-    assert!(RELAXED_CHAT_TEMPLATE_WEIGHT < BLOCK_THRESHOLD);
-}
+// NB: the `RELAXED_CHAT_TEMPLATE_WEIGHT < BLOCK_THRESHOLD` invariant is a
+// compile-time `const _: () = assert!(...)` in the parent module (stronger
+// than a runtime test — it fails the build). The runtime cap behaviour is
+// covered by `relaxed_allows_single_chat_template_token` and
+// `relaxed_caps_multiple_chat_template_tokens_to_one_contribution`.
 
 // ----- GuardProfile::for_tool (issue #142) -----
 

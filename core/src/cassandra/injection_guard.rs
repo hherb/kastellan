@@ -27,6 +27,13 @@
 //! - Two-tier verdict (`Allow` / `Block`). A future Review tier slots
 //!   in via the `#[non_exhaustive]` enum.
 //! - Per-rule weights summed (cap 1.0); threshold `BLOCK_THRESHOLD`.
+//!   The sum is profile-dependent (issue #142, [`GuardProfile`]): under
+//!   [`GuardProfile::Strict`] (the default) every matching rule's weight
+//!   is summed; under [`GuardProfile::Relaxed`] all matching
+//!   `chat_template` rules instead contribute a single capped
+//!   [`RELAXED_CHAT_TEMPLATE_WEIGHT`] added once after the scan, so
+//!   chat-template tokens alone can never reach the threshold. The
+//!   per-tool profile is chosen by [`GuardProfile::for_tool`].
 //!
 //! ## Known evasion surfaces (Slice 1 limitations)
 //!
@@ -43,9 +50,11 @@
 //! - **Leetspeak / letter substitution** (`1gnore`, `pr0mpt`) is not
 //!   folded.
 //! - **Non-English equivalents** are absent from the catalogue.
-//! - **Scoring property**: two 0.40 patterns sum to 0.80 ≥ threshold.
-//!   An attacker who knows the catalogue can craft inputs that score
-//!   exactly 0.40 indefinitely.
+//! - **Scoring property** (Strict profile): two 0.40 patterns sum to
+//!   0.80 ≥ threshold. An attacker who knows the catalogue can craft
+//!   inputs that score exactly 0.40 indefinitely. (Under the Relaxed
+//!   profile the `chat_template` rules do *not* stack — they share one
+//!   capped contribution — but the non-chat-template rules still do.)
 //!
 //! A Slice 2 candidate is a heuristic / combinatorial layer that
 //! folds whitespace, leetspeak, and combining-character permutations
@@ -131,6 +140,15 @@ pub const BLOCK_THRESHOLD: f32 = 0.70;
 /// so any number of chat-template tokens, alone, Allow; corroboration by
 /// another rule is required to reach a Block.
 pub const RELAXED_CHAT_TEMPLATE_WEIGHT: f32 = 0.40;
+
+// Compile-time invariant: the capped chat-template contribution must stay
+// below the Block threshold. If a future edit raised it to/above the
+// threshold, a lone chat-template token would Block even under Relaxed —
+// defeating the whole point of issue #142. A `const` assertion fails the
+// build (not merely a test) if that ever happens. The *runtime* application
+// of the cap (that N matching chat-template rules still total one
+// RELAXED_CHAT_TEMPLATE_WEIGHT) is pinned by the `relaxed_*` unit tests.
+const _: () = assert!(RELAXED_CHAT_TEMPLATE_WEIGHT < BLOCK_THRESHOLD);
 
 /// Byte cap on the body [`extract_scannable_text`] returns. Prevents
 /// pathological-size worker outputs (e.g. a future `web-fetch`
