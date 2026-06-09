@@ -1,36 +1,17 @@
-//! HTTP transport seam + the redirect-following drive loop.
+//! The redirect-following drive loop for web-fetch.
 //!
-//! `drive()` is pure over the [`HttpGet`] trait so the redirect cap and the
+//! `drive()` is pure over the [`HttpGet`] seam so the redirect cap and the
 //! per-hop allowlist + https re-check (the security-critical bit: a 3xx to a
 //! non-allowlisted or non-https target is refused) are unit-tested with a fake
-//! transport. [`ReqwestGet`] is the real `reqwest::blocking` implementation.
-
-use std::time::Duration;
+//! transport. The transport itself lives in `hhagent_worker_web_common::http`.
 
 use url::Url;
 
-use crate::allowlist::HostAllowlist;
+use hhagent_worker_web_common::allowlist::HostAllowlist;
+use hhagent_worker_web_common::http::HttpGet;
 
 /// Max redirect hops followed before giving up.
 pub const MAX_REDIRECTS: usize = 5;
-/// Per-request timeout.
-pub const TIMEOUT_SECS: u64 = 20;
-/// Response body byte cap (5 MiB).
-pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
-
-/// A single raw HTTP response, transport-agnostic.
-pub struct RawResponse {
-    pub status: u16,
-    pub location: Option<String>,
-    pub content_type: String,
-    pub body: Vec<u8>,
-}
-
-/// The transport seam. One GET, no redirect following (the caller drives
-/// redirects so it can re-check the allowlist per hop).
-pub trait HttpGet {
-    fn get(&self, url: &Url) -> Result<RawResponse, String>;
-}
 
 /// Terminal outcome of a successful drive.
 pub struct FetchOutcome {
@@ -73,11 +54,8 @@ pub fn drive<T: HttpGet>(
 
         let resp = transport.get(&url).map_err(FetchError::Transport)?;
 
-        // Any 3xx is treated as a redirect requiring a `Location`. In practice
-        // only 301/302/303/307/308 carry one; we send no conditional or
-        // negotiation headers, so a bodyless 300/304/305/306 shouldn't occur.
-        // If one does, it has no `Location` and fails closed as MissingLocation
-        // rather than being mishandled as content.
+        // Any 3xx is treated as a redirect requiring a `Location`. A bodyless
+        // 3xx without `Location` fails closed as MissingLocation.
         if (300..400).contains(&resp.status) {
             let loc = resp.location.ok_or(FetchError::MissingLocation)?;
             url = url
@@ -96,58 +74,11 @@ pub fn drive<T: HttpGet>(
     Err(FetchError::TooManyRedirects)
 }
 
-/// Real transport over `reqwest::blocking` + rustls. Redirects disabled
-/// (driven by [`drive`]); body capped while reading via `Read::take`.
-pub struct ReqwestGet {
-    client: reqwest::blocking::Client,
-}
-
-impl ReqwestGet {
-    pub fn new() -> anyhow::Result<Self> {
-        let client = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .user_agent("hhagent-web-fetch/0")
-            .build()?;
-        Ok(Self { client })
-    }
-}
-
-impl HttpGet for ReqwestGet {
-    fn get(&self, url: &Url) -> Result<RawResponse, String> {
-        use std::io::Read;
-
-        let resp = self
-            .client
-            .get(url.clone())
-            .send()
-            .map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let header = |name: reqwest::header::HeaderName| -> Option<String> {
-            resp.headers()
-                .get(&name)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-        };
-        let location = header(reqwest::header::LOCATION);
-        let content_type = header(reqwest::header::CONTENT_TYPE).unwrap_or_default();
-
-        let mut body = Vec::new();
-        resp.take((MAX_BODY_BYTES as u64) + 1)
-            .read_to_end(&mut body)
-            .map_err(|e| e.to_string())?;
-        if body.len() > MAX_BODY_BYTES {
-            return Err(format!("response body exceeds {MAX_BODY_BYTES} bytes"));
-        }
-
-        Ok(RawResponse { status, location, content_type, body })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_transport::{al, ok_resp, redirect_to, FakeGet};
+    use hhagent_worker_web_common::http::RawResponse;
+    use hhagent_worker_web_common::testing::{al, ok_resp, redirect_to, FakeGet};
 
     #[test]
     fn terminal_response_is_returned() {
@@ -191,7 +122,6 @@ mod tests {
 
     #[test]
     fn redirect_loop_hits_the_cap() {
-        // Always redirect back to the same allowlisted host → exceed the cap.
         let resps: Vec<RawResponse> =
             (0..MAX_REDIRECTS + 2).map(|_| redirect_to("https://example.com/next")).collect();
         let t = FakeGet::new(resps);
