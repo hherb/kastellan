@@ -6,13 +6,13 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-09 (`web-search` worker + shared `web-common` crate — ROADMAP:146, branch `feat/web-search-worker`, PR **pending**; on macOS).
+**Last updated:** 2026-06-09 (`web-search` worker + shared `web-common` crate — ROADMAP:146, branch `feat/web-search-worker`, PR [#238](https://github.com/hherb/hhagent/pull/238) **OPEN**; on macOS).
 
 **Current state.** `main` is at `f4f00d7` (PR [#200](https://github.com/hherb/hhagent/pull/200) **planner fetch_handoff surfacing MERGED**;
 PR [#199](https://github.com/hherb/hhagent/pull/199) **handoff cache MERGED**;
 PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**). This session is on branch
 **`feat/web-search-worker`** (spec + plan + 12 code/doc commits + 1 review-fix commit on top of `main`),
-PR **to be opened**. Working tree clean except untracked `docs/essay-medium-draft.md`
+PR [#238](https://github.com/hherb/hhagent/pull/238) **OPEN**. Working tree clean except untracked `docs/essay-medium-draft.md`
 (intentionally never committed — see memory note). Dev box on **macOS**.
 
 **This session shipped — `web-search` worker + shared `web-common` crate (ROADMAP:146).** Second net-egress
