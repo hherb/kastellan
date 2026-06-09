@@ -5,3 +5,4 @@
 //! - [`testing`] (feature `testing`) — a fake transport + builders for unit tests.
 
 pub mod allowlist;
+pub mod http;
