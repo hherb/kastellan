@@ -76,6 +76,41 @@ pub fn build_query_url(endpoint: &Url, query: &str) -> Url {
     url
 }
 
+/// Run one search: validate the host against the allowlist (defense in depth —
+/// the endpoint was validated at startup, but re-check), reject an empty query,
+/// GET the request URL once, reject redirects and non-200s, parse, and slice to
+/// `count` (clamped to `1..=MAX_COUNT`).
+pub fn search<T: HttpGet>(
+    transport: &T,
+    endpoint: &Url,
+    allowlist: &HostAllowlist,
+    query: &str,
+    count: usize,
+) -> Result<Vec<Hit>, SearchError> {
+    if query.trim().is_empty() {
+        return Err(SearchError::EmptyQuery);
+    }
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| SearchError::BadEndpoint("endpoint has no host".to_string()))?;
+    if !allowlist.is_allowed(host) {
+        return Err(SearchError::HostDenied(host.to_string()));
+    }
+
+    let req = build_query_url(endpoint, query);
+    let resp = transport.get(&req).map_err(SearchError::Transport)?;
+    if (300..400).contains(&resp.status) {
+        return Err(SearchError::Redirected);
+    }
+    if resp.status != 200 {
+        return Err(SearchError::BadStatus(resp.status));
+    }
+
+    let mut hits = parse_results(&resp.body).map_err(|e| SearchError::Parse(e.to_string()))?;
+    hits.truncate(count.clamp(1, MAX_COUNT));
+    Ok(hits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +178,86 @@ mod tests {
             .collect();
         assert!(pairs.contains(&("q".into(), "rust lifetimes".into())));
         assert!(pairs.contains(&("format".into(), "json".into())));
+    }
+
+    use hhagent_worker_web_common::http::RawResponse;
+    use hhagent_worker_web_common::testing::{json_resp, redirect_to, FakeGet};
+
+    fn endpoint() -> Url {
+        Url::parse("https://searx.example.org/search").unwrap()
+    }
+
+    #[test]
+    fn search_returns_parsed_hits() {
+        let json = r#"{"results":[
+            {"title":"A","url":"https://a.test","content":"x","engine":"e"},
+            {"title":"B","url":"https://b.test","content":"y","engine":"e"}
+        ]}"#;
+        let t = FakeGet::new(vec![json_resp(json)]);
+        let a = al(&["searx.example.org"]);
+        let hits = search(&t, &endpoint(), &a, "q", DEFAULT_COUNT).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].url, "https://a.test");
+    }
+
+    #[test]
+    fn search_truncates_to_count() {
+        let results: String = (0..5)
+            .map(|i| format!(r#"{{"url":"https://h{i}.test"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(r#"{{"results":[{results}]}}"#);
+        let t = FakeGet::new(vec![json_resp(&json)]);
+        let a = al(&["searx.example.org"]);
+        let hits = search(&t, &endpoint(), &a, "q", 3).unwrap();
+        assert_eq!(hits.len(), 3);
+    }
+
+    #[test]
+    fn search_clamps_count_to_max() {
+        let results: String = (0..30)
+            .map(|i| format!(r#"{{"url":"https://h{i}.test"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(r#"{{"results":[{results}]}}"#);
+        let t = FakeGet::new(vec![json_resp(&json)]);
+        let a = al(&["searx.example.org"]);
+        let hits = search(&t, &endpoint(), &a, "q", 999).unwrap();
+        assert_eq!(hits.len(), MAX_COUNT);
+    }
+
+    #[test]
+    fn empty_query_is_rejected() {
+        let t = FakeGet::new(vec![]);
+        let a = al(&["searx.example.org"]);
+        let err = search(&t, &endpoint(), &a, "   ", DEFAULT_COUNT)
+            .err()
+            .expect("must reject");
+        assert!(matches!(err, SearchError::EmptyQuery));
+    }
+
+    #[test]
+    fn non_200_status_is_bad_status() {
+        let t = FakeGet::new(vec![RawResponse {
+            status: 503,
+            location: None,
+            content_type: "text/plain".into(),
+            body: Vec::new(),
+        }]);
+        let a = al(&["searx.example.org"]);
+        let err = search(&t, &endpoint(), &a, "q", DEFAULT_COUNT)
+            .err()
+            .expect("must error");
+        assert!(matches!(err, SearchError::BadStatus(503)));
+    }
+
+    #[test]
+    fn redirect_from_endpoint_is_rejected() {
+        let t = FakeGet::new(vec![redirect_to("https://elsewhere.test/")]);
+        let a = al(&["searx.example.org"]);
+        let err = search(&t, &endpoint(), &a, "q", DEFAULT_COUNT)
+            .err()
+            .expect("must error");
+        assert!(matches!(err, SearchError::Redirected));
     }
 }
