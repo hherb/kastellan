@@ -170,3 +170,60 @@ fn real_fetch_extracts_readable_text() {
         pool.close().await;
     });
 }
+
+/// Live spot-check for issue #142: a real HuggingFace model file carrying
+/// ChatML control tokens (`<|im_start|>`) must NOT be injection-blocked
+/// when fetched through `web-fetch`, because the dispatch chokepoint uses
+/// the Relaxed guard profile for that worker. Confirms the committed
+/// fixtures in `injection_guard_fixtures.rs` match real-world content.
+/// Run manually with `--ignored`.
+#[test]
+#[ignore = "hits the real network; validates the Relaxed profile against a real model card"]
+fn real_modelcard_with_chat_template_is_not_blocked() {
+    let env = match ready_or_skip(&["huggingface.co"]) {
+        Some(e) => e,
+        None => return,
+    };
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        let policy = web_fetch_entry(env.worker_path.clone(), &env.allowlist).policy;
+        let backend = backend();
+        let worker_str = env.worker_path.to_string_lossy().into_owned();
+        let spec = WorkerSpec {
+            policy: &policy,
+            program: &worker_str,
+            args: &[],
+            wall_clock_ms: None,
+        };
+        let mut sworker = spawn_worker(&*backend, &spec).expect("spawn web-fetch under sandbox");
+
+        // A raw tokenizer config reliably contains `<|im_start|>`.
+        let result = dispatch(
+            &pool,
+            &Vault::new(),
+            &mut sworker,
+            "web-fetch",
+            "web.fetch",
+            serde_json::json!({
+                "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/raw/main/tokenizer_config.json"
+            }),
+        )
+        .await
+        .expect("web.fetch round trip (network + DNS in jail)");
+
+        // Relaxed profile: the result is the real body, NOT the redacted
+        // injection placeholder.
+        assert!(
+            result.get("injection_blocked").is_none(),
+            "Relaxed profile must not block a real model card; got: {result}"
+        );
+        let text = result["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("<|im_start|>"),
+            "expected the fetched config to carry the ChatML token, got: {text}"
+        );
+
+        let _ = sworker.close();
+        pool.close().await;
+    });
+}
