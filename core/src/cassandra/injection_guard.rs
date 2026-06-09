@@ -124,6 +124,14 @@ impl GuardProfile {
     /// the `Relaxed` arm is the whole change needed when (e.g.)
     /// `browser-driver` or an `mcp` worker ships; forgetting to is safe
     /// (it over-blocks, never under-blocks).
+    ///
+    /// Residual risk: `Relaxed` lets a lone chat-template token through, so
+    /// an attacker who delivers a payload via fetched content using only
+    /// chat-template framing and *no* catalogue phrase evades the guard
+    /// here. That is the Slice-1 catalogue-completeness limitation (a
+    /// catalogue miss is always an Allow under *both* profiles — see the
+    /// module-level "evasion surfaces" note), surfaced more on the doc-
+    /// fetching workers because they carry an arbitrary-content channel.
     pub fn for_tool(tool: &str) -> GuardProfile {
         match tool {
             "web-fetch" | "web-search" => GuardProfile::Relaxed,

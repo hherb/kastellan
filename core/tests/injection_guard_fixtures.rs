@@ -8,7 +8,7 @@
 //! match reality lives in `web_fetch_e2e.rs` (an `#[ignore]` real fetch).
 
 use hhagent_core::cassandra::injection_guard::{
-    screen_with_profile, GuardProfile, InjectionDecision,
+    extract_scannable_text, screen_with_profile, GuardProfile, InjectionDecision, SCAN_BYTE_CAP,
 };
 use std::path::PathBuf;
 
@@ -72,4 +72,32 @@ fn corroborated_attacks_block_under_both_profiles() {
             );
         }
     }
+}
+
+#[test]
+fn extract_then_relaxed_allows_web_fetch_shaped_tokenizer_config() {
+    // The other tests scan the raw fixture bytes directly. Production runs
+    // two steps: `extract_scannable_text` walks the worker's JSON-RPC value
+    // and concatenates its string leaves, then `screen_with_profile` scans
+    // that. This pins the FULL production pipeline on the Relaxed path
+    // against a realistic web-fetch response shape, so a future change to
+    // `extract_scannable_text` cannot silently reintroduce the #142
+    // false-positive without failing a test.
+    let body_text = fixture("benign_tokenizer_config.json");
+    let response = serde_json::json!({
+        "status": 200,
+        "final_url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/raw/main/tokenizer_config.json",
+        "content_type": "application/json",
+        "text": body_text,
+        "truncated": false,
+    });
+    let (body, _truncated) = extract_scannable_text(&response, SCAN_BYTE_CAP);
+    let v = screen_with_profile(&body, GuardProfile::Relaxed);
+    assert_eq!(
+        v.decision,
+        InjectionDecision::Allow,
+        "web-fetch-shaped tokenizer config must Allow under Relaxed; score={} codes={:?}",
+        v.score,
+        v.reason_codes,
+    );
 }
