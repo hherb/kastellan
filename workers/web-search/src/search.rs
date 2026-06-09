@@ -40,7 +40,14 @@ pub enum SearchError {
 /// True if `host` is loopback: a loopback IP (covers `127.0.0.0/8` and `::1`)
 /// or the literal `localhost`.
 pub fn is_loopback(host: &str) -> bool {
-    match host.parse::<IpAddr>() {
+    // `url::Url::host_str` returns IPv6 literals wrapped in brackets (`"[::1]"`),
+    // which `IpAddr::from_str` rejects — strip them before parsing so a
+    // bracketed loopback like `[::1]` is recognised (the spec advertises `::1`).
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    match bare.parse::<IpAddr>() {
         Ok(ip) => ip.is_loopback(),
         Err(_) => host.eq_ignore_ascii_case("localhost"),
     }
@@ -123,6 +130,7 @@ mod tests {
         assert!(is_loopback("127.0.0.1"));
         assert!(is_loopback("127.0.0.5"));
         assert!(is_loopback("::1"));
+        assert!(is_loopback("[::1]")); // url::Url::host_str brackets IPv6 literals
         assert!(!is_loopback("example.org"));
         assert!(!is_loopback("10.0.0.1"));
         assert!(!is_loopback("8.8.8.8"));
