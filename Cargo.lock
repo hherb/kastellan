@@ -1205,6 +1205,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hhagent-worker-web-search"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hhagent-protocol",
+ "hhagent-worker-prelude",
+ "hhagent-worker-web-common",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
