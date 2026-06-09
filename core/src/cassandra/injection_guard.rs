@@ -126,6 +126,12 @@ impl GuardProfile {
 /// Score `>=` this triggers `InjectionDecision::Block`.
 pub const BLOCK_THRESHOLD: f32 = 0.70;
 
+/// Capped contribution of the entire chat-template family under
+/// [`GuardProfile::Relaxed`] (issue #142). Sits below [`BLOCK_THRESHOLD`]
+/// so any number of chat-template tokens, alone, Allow; corroboration by
+/// another rule is required to reach a Block.
+pub const RELAXED_CHAT_TEMPLATE_WEIGHT: f32 = 0.40;
+
 /// Byte cap on the body [`extract_scannable_text`] returns. Prevents
 /// pathological-size worker outputs (e.g. a future `web-fetch`
 /// returning 10 MB of HTML) from burning CPU in the substring scan.
@@ -222,9 +228,10 @@ fn normalize(text: &str) -> String {
         .collect()
 }
 
-/// Catalogue scan over `text`. Returns an [`InjectionVerdict`] whose
-/// `score` is the sum of per-rule weights that fired (cap 1.0) and
-/// whose `decision` is `Block` iff `score >= BLOCK_THRESHOLD`.
+/// Catalogue scan over `text` using [`GuardProfile::Strict`]. Returns an
+/// [`InjectionVerdict`] whose `score` is the sum of per-rule weights that
+/// fired (cap 1.0) and whose `decision` is `Block` iff
+/// `score >= BLOCK_THRESHOLD`. Delegates to [`screen_with_profile`].
 ///
 /// The match is **case-insensitive** and **zero-width-stripped**: the
 /// helper lowercases the input and removes invisible code points
@@ -232,14 +239,40 @@ fn normalize(text: &str) -> String {
 /// HYPHEN) once at the top so callers don't have to. See [`normalize`]
 /// for the full strip list and what is deliberately *not* stripped.
 pub fn screen(text: &str) -> InjectionVerdict {
+    screen_with_profile(text, GuardProfile::Strict)
+}
+
+/// Profile-aware catalogue scan. `screen(t) == screen_with_profile(t,
+/// GuardProfile::Strict)`.
+///
+/// Under [`GuardProfile::Strict`] every matching rule's `weight` is summed
+/// (cap 1.0) — the Slice-1 algorithm. Under [`GuardProfile::Relaxed`] the
+/// non-chat-template rules score identically, but **all** matching
+/// chat-template rules together contribute a single
+/// [`RELAXED_CHAT_TEMPLATE_WEIGHT`] (added once, after the scan), so
+/// chat-template content alone can never Block (issue #142). Matching is
+/// case-insensitive and zero-width-stripped via [`normalize`].
+pub fn screen_with_profile(text: &str, profile: GuardProfile) -> InjectionVerdict {
     let normalized = normalize(text);
     let mut score = 0.0_f32;
     let mut classes: BTreeSet<&'static str> = BTreeSet::new();
+    let mut chat_template_hit = false;
     for rule in CATALOGUE {
-        if normalized.contains(rule.pattern) {
-            score = (score + rule.weight).min(1.0);
-            classes.insert(rule.class);
+        if !normalized.contains(rule.pattern) {
+            continue;
         }
+        // The reason code is recorded for every match, even a Relaxed
+        // chat-template one that is capped below the threshold.
+        classes.insert(rule.class);
+        if profile == GuardProfile::Relaxed && rule.chat_template {
+            // Capped once, below — never summed per token.
+            chat_template_hit = true;
+        } else {
+            score = (score + rule.weight).min(1.0);
+        }
+    }
+    if chat_template_hit {
+        score = (score + RELAXED_CHAT_TEMPLATE_WEIGHT).min(1.0);
     }
     let decision = if score >= BLOCK_THRESHOLD {
         InjectionDecision::Block
