@@ -1179,6 +1179,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hhagent-worker-web-common"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "hhagent-worker-web-fetch"
 version = "0.0.0"
 dependencies = [

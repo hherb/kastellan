@@ -1,0 +1,22 @@
+[package]
+name        = "hhagent-worker-web-common"
+description = "Shared building blocks for net-egress tool workers: host allowlist matcher + capped HTTP transport seam."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+[features]
+# Pulls in the FakeGet test transport + helpers. Enable from a consumer's
+# [dev-dependencies] so unit tests across workers share one fake.
+testing = []
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+reqwest    = { workspace = true, features = ["blocking"] } # blocking: synchronous transport for stdio workers
+url        = { workspace = true }
