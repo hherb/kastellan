@@ -55,4 +55,9 @@ url                = { workspace = true }
 # deterministic embedding seed, macOS launchd serial lock. dev-only.
 hhagent-tests-common = { path = "../tests-common" }
 
+# Integration-test crates do not inherit the library's normal [dependencies];
+# the e2e tests name `url::Url` directly (web_search_e2e.rs), so url must be a
+# dev-dependency too.
+url = { workspace = true }
+
 tempfile = "3"
