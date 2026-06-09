@@ -93,6 +93,36 @@ pub enum InjectionDecision {
     Block,
 }
 
+/// Selects how strictly chat-template tokens are scored, per the worker
+/// that produced the output (issue #142). `#[non_exhaustive]` so a future
+/// profile — or the deferred Review tier — does not break callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GuardProfile {
+    /// Chat-template tokens are never benign here, so a single one Blocks.
+    /// The default and the fail-closed fallback for unknown workers.
+    Strict,
+    /// Doc-fetching net workers (`web-fetch`/`web-search`): chat-template
+    /// tokens are expected, quoted content, so they cannot Block on their
+    /// own — only when corroborated by another attack signal.
+    Relaxed,
+}
+
+impl GuardProfile {
+    /// Fail-closed mapping from a worker name to its guard profile. Only
+    /// the doc-fetching net workers relax; `shell-exec` and every
+    /// unrecognised tool stay [`GuardProfile::Strict`]. Adding a worker to
+    /// the `Relaxed` arm is the whole change needed when (e.g.)
+    /// `browser-driver` or an `mcp` worker ships; forgetting to is safe
+    /// (it over-blocks, never under-blocks).
+    pub fn for_tool(tool: &str) -> GuardProfile {
+        match tool {
+            "web-fetch" | "web-search" => GuardProfile::Relaxed,
+            _ => GuardProfile::Strict,
+        }
+    }
+}
+
 /// Score `>=` this triggers `InjectionDecision::Block`.
 pub const BLOCK_THRESHOLD: f32 = 0.70;
 
