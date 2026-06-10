@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace      = true
 authors.workspace      = true
 repository.workspace   = true
-readme.workspace       = true
+readme      = "../README.md"
 
 [lib]
 path = "src/lib.rs"
@@ -25,11 +25,11 @@ name = "kastellan-cli"
 path = "src/bin/kastellan-cli/main.rs"
 
 [dependencies]
-kastellan-sandbox    = { path = "../sandbox" }
-kastellan-supervisor = { path = "../supervisor" }
-kastellan-protocol   = { path = "../protocol" }
-kastellan-db         = { path = "../db" }
-kastellan-llm-router = { path = "../llm-router" }
+kastellan-sandbox    = { path = "../sandbox", version = "0.1.0" }
+kastellan-supervisor = { path = "../supervisor", version = "0.1.0" }
+kastellan-protocol   = { path = "../protocol", version = "0.1.0" }
+kastellan-db         = { path = "../db", version = "0.1.0" }
+kastellan-llm-router = { path = "../llm-router", version = "0.1.0" }
 
 tokio              = { workspace = true }
 async-trait        = { workspace = true }

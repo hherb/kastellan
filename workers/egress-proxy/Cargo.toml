@@ -7,15 +7,15 @@ rust-version.workspace = true
 license.workspace      = true
 authors.workspace      = true
 repository.workspace   = true
-readme.workspace       = true
+readme      = "../../README.md"
 
 [[bin]]
 name = "kastellan-worker-egress-proxy"
 path = "src/main.rs"
 
 [dependencies]
-kastellan-worker-prelude    = { path = "../prelude" }
-kastellan-worker-web-common = { path = "../web-common" }
+kastellan-worker-prelude    = { path = "../prelude", version = "0.1.0" }
+kastellan-worker-web-common = { path = "../web-common", version = "0.1.0" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
