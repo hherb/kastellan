@@ -6,7 +6,16 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-10 (egress proxy **slice #1** — ROADMAP:141, branch `feat/egress-proxy-boundary`, PR pending; on macOS).
+**Last updated:** 2026-06-10 (project rename **hhagent → kastellan**, branch `claude/blissful-brahmagupta-a32136`, PR pending; on macOS).
+
+**Rename session (2026-06-10).** The whole workspace was mechanically renamed hhagent → kastellan
+(crates `kastellan-*`, Rust paths `kastellan_*`, env vars `KASTELLAN_*`, file/dir renames incl.
+`core/src/bin/kastellan-cli/`; 389 files, 1491 tests green). **Operational fallout for existing hosts**
+(one-time migration or re-init needed): default PG db/role is now `kastellan`, keychain service name
+`kastellan`, state dirs `~/.kastellan` + `~/.local/{share,state}/kastellan`, `/etc/kastellan/env`,
+systemd unit `kastellan-core`. After merge: rename the GitHub repo to `hherb/kastellan` (old URLs
+redirect), update local checkout dir + remote, and move the Claude memory dir
+(`~/.claude/projects/-home-hherb-src-hhagent` → `…-kastellan`; same for the Mac path).
 
 **Current state.** `main` is at `bd6d7a9` (PR [#239](https://github.com/hherb/kastellan/pull/239) **injection-guard per-tool profiles MERGED**;
 PR [#238](https://github.com/hherb/kastellan/pull/238) **web-search worker + `web-common` crate MERGED**;
