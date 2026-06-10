@@ -1,0 +1,787 @@
+/* ==========================================================================
+   kastellan.dev — shared stylesheet
+   Design direction: "B1 Pure Clean" — light, airy, borders carry structure.
+   One dark navy band tells the security story. No build step; plain CSS.
+   ========================================================================== */
+
+/* ---- Design tokens (locked — checked by scripts/site/check-site.sh) ----- */
+
+:root {
+  --bg: #fafbfd;          /* page background */
+  --surface: #ffffff;     /* cards, nav */
+  --border: #e2e8f0;
+  --ink: #0f172a;         /* headings */
+  --body: #475569;        /* body text */
+  --muted: #64748b;
+  --faint: #94a3b8;
+  --accent: #4f46e5;      /* indigo */
+  --dark: #0f172a;        /* landing security band */
+  --dark-surface: #1e293b;
+  --dark-accent: #818cf8;
+  --ok: #16a34a;          /* shipped */
+  --warn: #d97706;        /* in progress */
+
+  /* derived, non-contract helpers */
+  --accent-strong: #4338ca;            /* hover state of --accent */
+  --tint: #f1f5f9;                     /* light gray fill (chips, notes) */
+  --dark-body: #cbd5e1;                /* body text on dark surfaces */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 16px;
+}
+
+/* ---- Base ---------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--body);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4 {
+  color: var(--ink);
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  margin: 0 0 0.6em;
+}
+
+h2 { font-size: clamp(1.5rem, 3vw, 2rem); }
+h3 { font-size: 1.2rem; }
+
+p {
+  margin: 0 0 1em;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+code, kbd, pre {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: rgba(79, 70, 229, 0.15);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ---- Layout primitives --------------------------------------------------- */
+
+.wrap {
+  max-width: 1080px;
+  margin-inline: auto;
+  padding-inline: clamp(1.25rem, 4vw, 2rem);
+}
+
+.section {
+  padding-block: clamp(3rem, 7vw, 5rem);
+}
+
+.center {
+  text-align: center;
+}
+
+/* ---- Navigation ---------------------------------------------------------- */
+
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(255, 255, 255, 0.92);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav .wrap {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  min-height: 4rem;
+}
+
+.nav-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+  margin-right: auto;
+}
+
+.nav-logo:hover {
+  text-decoration: none;
+  color: var(--accent);
+}
+
+.nav-logo img {
+  height: 28px;
+  width: auto;
+}
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+}
+
+.nav-links a {
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 500;
+  transition: color 0.15s ease;
+}
+
+.nav-links a:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.nav-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 1.05rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.nav-cta:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.nav-toggle {
+  display: none;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.nav-toggle:hover {
+  border-color: var(--faint);
+}
+
+/* ---- Hero ---------------------------------------------------------------- */
+
+.hero {
+  display: flex;
+  align-items: center;
+  gap: clamp(2rem, 5vw, 4rem);
+  padding-block: clamp(3.5rem, 8vw, 6.5rem);
+  background:
+    radial-gradient(1100px 480px at 85% -20%, rgba(79, 70, 229, 0.06), transparent 60%);
+}
+
+.hero > :first-child {
+  flex: 1.5;
+  min-width: 0;
+}
+
+.hero > :last-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.hero h1 {
+  font-size: clamp(2rem, 5vw, 3.25rem);
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  margin-bottom: 0.5em;
+}
+
+.hero h1 .accent {
+  color: var(--accent);
+}
+
+.hero p {
+  font-size: clamp(1.05rem, 1.6vw, 1.2rem);
+  max-width: 34em;
+}
+
+.hero blockquote {
+  margin: 1.5rem 0;
+  padding-left: 1rem;
+  border-left: 3px solid var(--border);
+  font-style: italic;
+  color: var(--muted);
+}
+
+.hero blockquote p {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.hero img {
+  margin-inline: auto;
+}
+
+/* ---- Buttons ------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.5rem;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #ffffff;
+  text-decoration: none;
+}
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.1rem;
+  border-radius: 10px;
+  color: var(--accent);
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.btn-ghost:hover {
+  background: rgba(79, 70, 229, 0.07);
+  text-decoration: none;
+}
+
+/* ---- Chips (mono one-liners and code blocks) ------------------------------ */
+
+.chip {
+  display: inline-block;
+  padding: 0.6rem 1rem;
+  background: var(--tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--ink);
+}
+
+pre.chip {
+  display: block;
+  margin: 1.25rem 0;
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+  white-space: pre;
+  text-align: left;
+}
+
+.chip-comment {
+  color: var(--faint);
+}
+
+/* ---- Pills --------------------------------------------------------------- */
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1.25rem 0;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.9rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--body);
+  white-space: nowrap;
+}
+
+/* ---- Dark band (landing security story) ----------------------------------- */
+
+.band {
+  background: var(--dark);
+  color: var(--dark-body);
+  padding-block: clamp(3.5rem, 7vw, 5.5rem);
+}
+
+.band-label {
+  display: block;
+  margin-bottom: 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dark-accent);
+}
+
+.band-title {
+  color: #ffffff;
+  font-size: clamp(1.5rem, 3vw, 2.1rem);
+  font-weight: 700;
+  margin-bottom: 1.5rem;
+}
+
+.band-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin-block: 2rem;
+}
+
+.band-card {
+  flex: 1 1 240px;
+  padding: 1.5rem;
+  background: var(--dark-surface);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: var(--radius-m);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.band-card p {
+  margin: 0;
+}
+
+.band-card-title {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--dark-accent);
+}
+
+.band-link {
+  color: var(--faint);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.band-link:hover {
+  color: var(--dark-body);
+}
+
+.band :focus-visible {
+  outline-color: var(--dark-accent);
+}
+
+/* ---- Card grids ----------------------------------------------------------- */
+
+.grid-3,
+.grid-2 {
+  display: grid;
+  gap: 1.25rem;
+  margin-block: 2rem;
+}
+
+.grid-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.grid-2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.card {
+  padding: 1.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  transition: border-color 0.15s ease;
+}
+
+.card:hover {
+  border-color: var(--faint);
+}
+
+.card-title {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+  font-size: 1.02rem;
+  color: var(--ink);
+}
+
+.card-text {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+/* ---- Status badges --------------------------------------------------------- */
+
+.badge-done,
+.badge-wip,
+.badge-plan {
+  display: inline-block;
+  padding: 0.18rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.badge-done {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.badge-wip {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.badge-plan {
+  background: var(--tint);
+  color: var(--muted);
+}
+
+/* ---- Stats row -------------------------------------------------------------- */
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: clamp(2rem, 5vw, 4rem);
+  margin-block: 2rem;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.stat > :first-child {
+  font-size: clamp(1.7rem, 3vw, 2.2rem);
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+.stat > :last-child {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* ---- Timeline (roadmap) ------------------------------------------------------ */
+
+.timeline {
+  list-style: none;
+  margin: 2rem 0;
+  padding: 0.25rem 0 0.25rem 1.75rem;
+  border-left: 2px solid var(--border);
+}
+
+.timeline-item {
+  position: relative;
+  margin-bottom: 2.25rem;
+}
+
+.timeline-item:last-child {
+  margin-bottom: 0;
+}
+
+.dot-done,
+.dot-wip,
+.dot-plan {
+  position: absolute;
+  left: -35px;
+  top: 0.35em;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px var(--bg);
+}
+
+.dot-done { background: var(--ok); }
+.dot-wip  { background: var(--warn); }
+.dot-plan { background: var(--faint); }
+
+.timeline-title {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-weight: 600;
+  font-size: 1.02rem;
+  color: var(--ink);
+}
+
+.timeline-title .badge-done,
+.timeline-title .badge-wip,
+.timeline-title .badge-plan {
+  margin-left: 0.5rem;
+}
+
+.timeline-text {
+  margin: 0;
+  font-size: 0.92rem;
+  color: var(--body);
+}
+
+/* ---- Callout (dark box) ------------------------------------------------------- */
+
+.callout {
+  margin-block: 2rem;
+  padding: clamp(1.5rem, 3vw, 2.25rem);
+  background: var(--dark);
+  border-radius: var(--radius-l);
+  color: var(--dark-body);
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.callout-label {
+  display: block;
+  margin-bottom: 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dark-accent);
+}
+
+.callout p:last-child {
+  margin-bottom: 0;
+}
+
+.callout a {
+  color: var(--dark-accent);
+}
+
+.callout :focus-visible {
+  outline-color: var(--dark-accent);
+}
+
+/* ---- Note (light info box) ------------------------------------------------------ */
+
+.note {
+  margin-block: 1.5rem;
+  padding: 1rem 1.25rem;
+  background: var(--tint);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--body);
+}
+
+.note p:last-child {
+  margin-bottom: 0;
+}
+
+.note a {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* ---- Subpage header --------------------------------------------------------------- */
+
+.page-head {
+  padding-block: clamp(2.5rem, 6vw, 4rem) 0;
+}
+
+.page-head h1 {
+  font-size: clamp(1.9rem, 4vw, 2.6rem);
+  letter-spacing: -0.02em;
+  margin-bottom: 0.3em;
+}
+
+.page-head .subtitle {
+  font-size: 1.1rem;
+  color: var(--muted);
+  max-width: 42em;
+}
+
+/* ---- Diagram figures ----------------------------------------------------------------- */
+
+figure.diagram {
+  margin: 2.5rem auto;
+  text-align: center;
+}
+
+figure.diagram img {
+  margin-inline: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface);
+}
+
+figure.diagram figcaption {
+  margin-top: 0.85rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* ---- Footer ------------------------------------------------------------------------ */
+
+.footer {
+  margin-top: clamp(3rem, 7vw, 5rem);
+  border-top: 1px solid var(--border);
+}
+
+.footer .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 2rem;
+  padding-block: 2rem;
+  font-size: 0.85rem;
+  color: var(--faint);
+}
+
+.footer a {
+  color: var(--muted);
+}
+
+.footer a:hover {
+  color: var(--ink);
+}
+
+/* ---- Responsive: single 960px tweak + the 720px breakpoint --------------------------- */
+
+@media (max-width: 960px) {
+  .grid-3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 719.98px) {
+  .nav-toggle {
+    display: inline-flex;
+  }
+
+  .nav-links {
+    display: none;
+  }
+
+  .nav-links.open {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 12px 24px -16px rgba(15, 23, 42, 0.25);
+    padding: 0.5rem 0;
+  }
+
+  .nav-links.open a {
+    padding: 0.85rem clamp(1.25rem, 4vw, 2rem);
+  }
+
+  .nav-links.open a:hover {
+    background: var(--tint);
+  }
+
+  .hero {
+    flex-direction: column;
+    align-items: stretch;
+    text-align: left;
+  }
+
+  .hero > :last-child {
+    order: 2;
+    max-width: 320px;
+    margin-inline: auto;
+  }
+
+  .grid-3,
+  .grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .stats {
+    gap: 1.5rem 2.5rem;
+  }
+
+  .band-cards {
+    flex-direction: column;
+  }
+}
+
+/* ---- Reduced motion -------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
