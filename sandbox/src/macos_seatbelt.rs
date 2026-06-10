@@ -318,11 +318,25 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
         ));
     }
 
-    if matches!(policy.net, crate::Net::Allowlist(_) | crate::Net::ProxyEgress) {
-        // The host allowlist itself is enforced by the future egress proxy
-        // (see docs/architecture.md invariant 5), not by Seatbelt — same
-        // split as bwrap's --share-net.
-        out.push_str("(allow network*)\n");
+    match (&policy.net, &policy.proxy_uds) {
+        (crate::Net::Allowlist(_), Some(uds)) => {
+            // Force-routed: deny all outbound, then re-allow ONLY the proxy UDS.
+            // The host-level allowlist is enforced by the egress proxy itself;
+            // Seatbelt's job here is to make the netns-less routing unbypassable
+            // by closing every AF_INET/AF_INET6 socket call.
+            out.push_str("(deny network-outbound)\n");
+            out.push_str(&format!(
+                "(allow network-outbound (remote unix-socket (path-literal {:?})))\n",
+                uds.display().to_string()
+            ));
+        }
+        (crate::Net::Allowlist(_), None) | (crate::Net::ProxyEgress, _) => {
+            // The host allowlist itself is enforced by the future egress proxy
+            // (see docs/architecture.md invariant 5), not by Seatbelt — same
+            // split as bwrap's --share-net.
+            out.push_str("(allow network*)\n");
+        }
+        (crate::Net::Deny, _) => { /* no network rules */ }
     }
 
     out

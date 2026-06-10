@@ -203,6 +203,37 @@ fn policy_paths_with_tinyscheme_specials_are_rejected_by_spawn() {
     );
 }
 
+/// Force-routed profile (`Net::Allowlist` + `proxy_uds`): must deny all
+/// outbound then re-allow only the proxy UDS, and must NOT emit the broad
+/// `(allow network*)` rule that would bypass the force-routing.
+#[test]
+fn allowlist_with_proxy_uds_denies_outbound_except_uds() {
+    let p = SandboxPolicy {
+        net: crate::Net::Allowlist(vec!["api.example.com:443".into()]),
+        proxy_uds: Some(std::path::PathBuf::from("/scratch/egress.sock")),
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(prof.contains("(deny network-outbound)"),
+        "force-routed worker must deny outbound; got:\n{prof}");
+    assert!(prof.contains("(allow network-outbound (remote unix-socket (path-literal \"/scratch/egress.sock\")))"),
+        "must allow only the proxy UDS; got:\n{prof}");
+    assert!(!prof.contains("(allow network*)"),
+        "must NOT broadly allow network; got:\n{prof}");
+}
+
+/// Legacy `Net::Allowlist` without a proxy UDS keeps the old broad
+/// `(allow network*)` rule — no regression on the slice #1 posture.
+#[test]
+fn allowlist_without_proxy_uds_keeps_legacy_allow_network() {
+    let p = SandboxPolicy {
+        net: crate::Net::Allowlist(vec!["api.example.com:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(prof.contains("(allow network*)"));
+}
+
 // This test runs a real sandbox-exec invocation. It only meaningfully runs
 // on macOS hosts; the parent module is cfg(target_os = "macos") so this
 // file isn't compiled elsewhere. Print a [SKIP] line on probe failure
