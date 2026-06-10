@@ -6,42 +6,55 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-09 (injection-guard per-tool profiles — [#142](https://github.com/hherb/hhagent/issues/142), PR [#239](https://github.com/hherb/hhagent/pull/239) **MERGED** to `main` at `bd6d7a9`; on macOS).
+**Last updated:** 2026-06-10 (egress proxy **slice #1** — ROADMAP:141, branch `feat/egress-proxy-boundary`, PR pending; on macOS).
 
 **Current state.** `main` is at `bd6d7a9` (PR [#239](https://github.com/hherb/hhagent/pull/239) **injection-guard per-tool profiles MERGED**;
 PR [#238](https://github.com/hherb/hhagent/pull/238) **web-search worker + `web-common` crate MERGED**;
 PR [#200](https://github.com/hherb/hhagent/pull/200) **planner fetch_handoff surfacing MERGED**;
 PR [#199](https://github.com/hherb/hhagent/pull/199) **handoff cache MERGED**;
-PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**). No branch work in flight.
+PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**). This session is on branch
+**`feat/egress-proxy-boundary`** (spec + plan + 14 code/test commits `df51c5c`..`29240eb` on top of `main`), PR pending.
 Working tree clean except untracked `docs/essay-medium-draft.md`
 (intentionally never committed — see memory note). Dev box on **macOS**.
 
-**This session shipped — injection-guard per-tool profiles ([#142](https://github.com/hherb/hhagent/issues/142)).**
-Chat-template tokens (`<|im_start|>`, `<|system|>`) no longer false-positive the worker-output prompt-injection
-guard on legitimate fetched documentation (model cards, tokenizer configs, chat-templating tutorials). Now that
-`web-fetch`/`web-search` exist the concern is reachable: a single chat-template token (weight 0.75) cleared the
-0.70 Block threshold, so any such fetch was silently blocked. New pure API in
-[`core/src/cassandra/injection_guard.rs`](../../../core/src/cassandra/injection_guard.rs): `GuardProfile { Strict
-| Relaxed }` (`#[non_exhaustive]`) + `GuardProfile::for_tool(&str)` (fail-closed: only `web-fetch`/`web-search`
-relax; `shell-exec` + every unknown worker stay Strict) + `screen_with_profile(text, profile)` (`screen` is now a
-Strict delegate, so all Slice-1 pins are byte-for-byte stable). The catalogue tuple became a `Rule` struct with a
-`chat_template: bool` flag. **Strict is the unchanged Slice-1 algorithm**; **Relaxed** sums non-chat-template
-rules normally but collapses **all** chat-template matches into a single capped `RELAXED_CHAT_TEMPLATE_WEIGHT`
-(0.40, a compile-time `const _: () = assert!(< BLOCK_THRESHOLD)`) added once — so a lone *or* multi-token doc
-Allows (handles the two-template-tutorial case the naive weight-drop would miss) but any corroboration (another
-class, or a second role_hijack phrase) still Blocks. Wired at the dispatch chokepoint
-([`core/src/tool_host.rs`](../../../core/src/tool_host.rs) ~L318): `screen_with_profile(&body,
-GuardProfile::for_tool(tool))`. Committed fixtures (`core/tests/fixtures/injection_guard/` — benign ChatML card /
-tokenizer config / two-token tutorial + two corroborated attacks) drive
-[`core/tests/injection_guard_fixtures.rs`](../../../core/tests/injection_guard_fixtures.rs), incl. one test
-through the full `extract_scannable_text`→`screen_with_profile` production pipeline; an `#[ignore]` live HuggingFace
-spot-check rides `web_fetch_e2e.rs`. Final review: **ready to merge**, no Critical; two Important follow-ups
-applied (pipeline test + `for_tool` residual-risk doc). Design + plan:
-[`docs/superpowers/specs/2026-06-09-injection-guard-per-tool-profiles-design.md`](../../superpowers/specs/2026-06-09-injection-guard-per-tool-profiles-design.md),
-[`docs/superpowers/plans/2026-06-09-injection-guard-per-tool-profiles.md`](../../superpowers/plans/2026-06-09-injection-guard-per-tool-profiles.md).
-**Deferred (per spec):** the Review tier (enum is `#[non_exhaustive]` for it); manifest-declared profiles
-(name-based mapping is the interim); the catalogue-completeness evasion (a lone chat-template token with no
-catalogue phrase still Allows under both profiles — Slice-1 limitation, now documented at `for_tool`).
+**This session shipped — egress proxy SLICE #1: boundary host-allowlist enforcement + SSRF/IP defense (ROADMAP:141).**
+The ROADMAP:141 "egress proxy" line was decomposed into **4 independent subsystems**; this session built the first.
+New crate [`workers/egress-proxy`](../../../workers/egress-proxy/) (`hhagent-worker-egress-proxy`): a **sandboxed,
+per-worker** CONNECT proxy that listens on a per-worker UDS and, per `CONNECT host:port`, (1) checks the worker's
+host allowlist at the boundary reusing `web-common::HostAllowlist` (single source of truth — not re-implemented),
+(2) **resolves DNS itself**, rejects private/loopback/link-local/ULA/CGNAT/multicast resolved IPs — with a
+**literal-IP carve-out** so an operator-allowlisted literal address (e.g. local SearxNG `127.0.0.1`) is honored
+while a public name rebinding to a private IP is always blocked — (3) **pins** the surviving IP and dials it,
+(4) tunnels (TLS stays end-to-end worker↔origin), and (5) emits one decision JSON line per request to stdout.
+Pure modules: `ssrf.rs` (`is_denied_range`, exhaustive v4/v6 + IPv4-mapped + IPv4-compatible fail-closed),
+`request_line.rs` (CONNECT parse incl. bracketed IPv6), `report.rs` (`Decision`/`Verdict` snake_case wire form),
+`proxy.rs` (`decide` + `handle_conn`, request-head read capped at 8 KiB). New sandbox variant
+**`Net::ProxyEgress`** across all 3 backends (bwrap `--share-net` / Seatbelt `(allow network*)` / container
+`--network default`; behaviorally identical to `Allowlist` today but names the proxy-vs-worker split slice #2 needs;
+additive, no migration). Host side [`core/src/egress/`](../../../core/src/egress/): `spawn.rs` (`spawn_sidecar`
+builds the `Net::ProxyEgress`+`WorkerNetClient` policy, spawns the sandboxed proxy via `SandboxBackend`, bounded-waits
+for the UDS; `SidecarHandle`) + `audit.rs` (pure `decision_to_audit`: proxy stdout line → `audit_log` row,
+`actor='egress_proxy'`, `action='egress.{allowed,blocked.allowlist,blocked.ssrf}'`). **The proxy never touches
+Postgres** (core-only-DB invariant) — decisions flow proxy→core stdout-ingest→PG. Proven by
+[`core/tests/egress_proxy_e2e.rs`](../../../core/tests/egress_proxy_e2e.rs): a test `CONNECT` client drives the
+**real sandboxed** sidecar (allowed literal-loopback round-trip + off-allowlist 403 + audit mapping), plus an
+`#[ignore]` real-network round-trip and a PG-gated `audit_log` persistence test (skip-as-pass on the Mac).
+**Final security review: APPROVED** — no allowlist bypass, no SSRF bypass found (probed userinfo-injection,
+trailing-dot, bracketed-IPv6, rebinding, IPv4-mapped/compatible). Design + plan:
+[`docs/superpowers/specs/2026-06-10-egress-proxy-boundary-enforcement-design.md`](../../superpowers/specs/2026-06-10-egress-proxy-boundary-enforcement-design.md),
+[`docs/superpowers/plans/2026-06-10-egress-proxy-boundary-enforcement.md`](../../superpowers/plans/2026-06-10-egress-proxy-boundary-enforcement.md).
+**Crucial scope caveat — mechanism only, NOT live:** slice #1 does **not** route the real `web-fetch`/`web-search`
+workers through the proxy and does **not** modify `tool_host`. The worker→proxy transport (a `web-common`
+CONNECT-over-UDS connector, hyper+tokio-rustls) and the **unbypassable force-routing** (private netns + the
+`tool_host` auto-spawn hookup) that make a *compromised* worker actually unable to bypass it are **slice #2** — see
+Next TODO. Until #2, live containment for net workers is unchanged (the worker's self-enforced allowlist).
+
+**Prior session — injection-guard per-tool profiles ([#142](https://github.com/hherb/hhagent/issues/142), PR [#239](https://github.com/hherb/hhagent/pull/239) MERGED).**
+`GuardProfile { Strict | Relaxed }` (`#[non_exhaustive]`) + `GuardProfile::for_tool` (fail-closed: only
+`web-fetch`/`web-search` relax) + `screen_with_profile` in `core/src/cassandra/injection_guard.rs`. Relaxed collapses
+all chat-template matches (`<|im_start|>` etc.) into one capped 0.40 sub-threshold contribution so legit model-card
+fetches Allow but corroborated attacks still Block; wired at the `tool_host` dispatch chokepoint. Deferred: Review
+tier; manifest-declared profiles; the catalogue-completeness evasion (Slice-1 limitation, documented).
 
 **Prior session — `web-search` worker + shared `web-common` crate (ROADMAP:146, PR [#238](https://github.com/hherb/hhagent/pull/238) MERGED).**
 Second net-egress worker (`web.search` finds, `web-fetch` reads). New crate `workers/web-search` exposes
@@ -126,15 +139,21 @@ Recent merged history: Option K restart backoff (PR #194); three clean test-lift
 `hhagent.target` bring-up (PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker
 manifest plumbing item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
-**Session-end verification (macOS, `feat/injection-guard-per-tool-profiles`):**
-`cargo build --workspace` clean (12 crates); `cargo clippy --workspace --all-targets --locked -- -D warnings`
-exit 0; `cargo test --workspace` green (skip-as-pass, no PG — 0 failed across all suites). Changed/new suites:
-**`core --lib` 730/0/0** (was 722 on `main`; +8 injection-guard: 2 `for_tool` + 6 relaxed-scoring; the
-sub-threshold pin became a compile-time `const` assertion), **`core --test injection_guard_fixtures` 4/0/0**
-(benign-Allow-under-Relaxed, benign-Block-under-Strict, attacks-Block-under-both, full extract→screen pipeline),
-**`core --test injection_guard_e2e` 6/0/0** (unchanged; exercises the new call site), `core --test web_fetch_e2e`
-compiles + lists the new `#[ignore]` `real_modelcard_with_chat_template_is_not_blocked` (real network, not run here).
-`injection_guard.rs` 425 LOC (< 500 cap). Final code review: ready to merge, no Critical.
+**Session-end verification (macOS, `feat/egress-proxy-boundary`):**
+`cargo build --workspace` clean (**13 crates** — `egress-proxy` is new); `cargo clippy --workspace --all-targets
+--locked -- -D warnings` exit 0; `cargo test --workspace` green (skip-as-pass, no PG — **0 failed across all
+suites**). Changed/new suites: **`core --lib` 734/0/0** (was 730 on `main`+injection-guard; +4: 3 `egress::audit`
++ 1 `egress::spawn`), **`hhagent-worker-egress-proxy` unit 23/0/0** (ssrf 7, request_line 7, report 3, proxy 6 —
+incl. 2 real-UDS `handle_conn` round-trips), **`core --test egress_proxy_e2e` 2 passed / 1 ignored**
+(allowed-round-trip+off-allowlist-block via real sandboxed sidecar; `decision_row_persists_to_audit_log` PG-gated
+[SKIP]; `real_host_round_trips_through_sidecar` `#[ignore]` real-net), **`hhagent-sandbox` 59/0/0** (+3
+`Net::ProxyEgress` builder-shape tests across bwrap/seatbelt/container; bwrap arm cross-clippy'd for
+`aarch64-unknown-linux-gnu`). All egress-proxy files < 500 LOC. Final whole-implementation security review: APPROVED,
+no Critical, no allowlist/SSRF bypass found.
+**Linux verification still owed (run on the DGX):** the proxy is a UDS *server* + outbound *client*; confirm the
+`net_client` seccomp profile (`workers/prelude/src/seccomp_lock.rs`) permits AF_UNIX `bind`/`listen`/`accept` (it
+was authored for an outbound-only HTTP client) — flagged in `egress-proxy/src/main.rs`; widen + pin if `accept` is
+killed. Also confirm host↔jail path identity for the bind-mounted `<scratch>/egress.sock` under bwrap.
 **Standing macOS test-infra gotcha (not a regression):**
 a *full-workspace* run under `HHAGENT_PG_BIN_DIR` flakes ~4 tests in
 `core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs`) — parallel
@@ -182,11 +201,11 @@ The current native-Linux test baseline is **1327 / 0 / 4**
 ## Working state (what's green right now)
 
 ```
-hhagent (Rust workspace, 12 crates, AGPL-3.0)
-├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue as `Rule`s + per-tool `GuardProfile` Strict/Relaxed via `for_tool` + `screen`/`screen_with_profile` + extract_scannable_text; Relaxed caps the chat-template family at one sub-threshold contribution — #142), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; web_search.rs WebSearchManifest + web_search_entry [Net::Allowlist derived from the endpoint host:port; injects HHAGENT_WEB_SEARCH_ENDPOINT + allowlist]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS [shell-exec, web-fetch, web-search, gliner-relex] + pure assemble_registry [skips the reserved `handoff` name] + async build_tool_registry(pool, exe_dir)), handoff (in-memory per-task content-addressed HandoffCache: stash_if_oversized → placeholder, fetch → clamped slice, per-task byte budget + MAX_TRACKED_TASKS backstop, purge_task at terminal; wired into ToolHostStepDispatcher after dispatch returns + the `handoff`/`fetch` built-in intercept)
+hhagent (Rust workspace, 13 crates, AGPL-3.0)
+├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue as `Rule`s + per-tool `GuardProfile` Strict/Relaxed via `for_tool` + `screen`/`screen_with_profile` + extract_scannable_text; Relaxed caps the chat-template family at one sub-threshold contribution — #142), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; web_search.rs WebSearchManifest + web_search_entry [Net::Allowlist derived from the endpoint host:port; injects HHAGENT_WEB_SEARCH_ENDPOINT + allowlist]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS [shell-exec, web-fetch, web-search, gliner-relex] + pure assemble_registry [skips the reserved `handoff` name] + async build_tool_registry(pool, exe_dir)), handoff (in-memory per-task content-addressed HandoffCache: stash_if_oversized → placeholder, fetch → clamped slice, per-task byte budget + MAX_TRACKED_TASKS backstop, purge_task at terminal; wired into ToolHostStepDispatcher after dispatch returns + the `handoff`/`fetch` built-in intercept), egress/ (host-side egress-proxy integration, NOT yet wired into tool_host — slice #2: spawn.rs `spawn_sidecar`/`SidecarHandle`/`proxy_policy` [Net::ProxyEgress + WorkerNetClient, bounded UDS wait] + audit.rs pure `decision_to_audit` proxy-stdout-line → audit_log row)
 ├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, insert_memory_at_layer, insert_memory_light (embedding-skipping light write path), semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
 ├── llm-router         hhagent-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads HHAGENT_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
-├── sandbox            hhagent-sandbox: SandboxPolicy + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
+├── sandbox            hhagent-sandbox: SandboxPolicy + `Net` enum {Deny | Allowlist(hosts) | ProxyEgress (the egress proxy's own policy — real netns, self-enforcing; #141 slice #1)} + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
 ├── supervisor         hhagent-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, hhagent_target_spec} + default_probe. ServiceSpec carries after/part_of ordering + optional restart_backoff (RestartBackoff{max_delay_sec,steps}: systemd → RestartSteps/RestartMaxDelaySec, launchd → warn-and-ignore); TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native hhagent.target unit). Names screened by validate_service_name before unit-file write
 ├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
 ├── tests-common       hhagent-tests-common: shared dev-dep crate (publish = false) — PgCluster + bring_up_pg_cluster(+_with_timeout), RAII guards, skip helpers, sandbox factory, binary discovery, macOS launchd serial lock (reentrant), deterministic SHA-256-seeded embedding seed. Consumed only from [dev-dependencies]; never linked into a runtime binary.
@@ -194,7 +213,8 @@ hhagent (Rust workspace, 12 crates, AGPL-3.0)
 ├── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
 ├── workers/web-common   hhagent-worker-web-common: shared lib for net-egress workers. allowlist.rs (HostAllowlist: exact + .domain wildcard host matcher, case-insensitive — single source of truth) + http.rs (HttpGet seam + RawResponse + ReqwestGet: redirect-disabled reqwest::blocking+rustls, 5 MiB body cap, caller-supplied per-worker UA — `hhagent-web-fetch/0` / `hhagent-web-search/0`) + testing.rs (FakeGet + al/ok_resp/redirect_to/json_resp, behind the `testing` feature). Consumed by web-fetch + web-search.
 ├── workers/web-fetch    hhagent-worker-web-fetch: first net-egress worker. HTTPS-only web.fetch JSON-RPC method. Consumes HostAllowlist + the HttpGet transport from web-common. extract.rs (HTML readability via dom_smoothie / PDF via pdf-extract / text+JSON, char-boundary text cap) + fetch.rs (the drive() redirect-follow loop — strict https-only per hop, 5-redirect cap) + handler.rs (web.fetch dispatch). Host-side manifest in core/src/workers/web_fetch.rs
-└── workers/web-search   hhagent-worker-web-search: second net-egress worker. web.search JSON-RPC method (query → ranked {title,url,snippet,engine} hits from a SearxNG /search?format=json endpoint). Consumes HostAllowlist + transport from web-common. parse.rs (lenient SearxNG-JSON → Vec<Hit>) + search.rs (validate_endpoint [https everywhere, http loopback-only via is_loopback] + build_query_url + one-GET search() drive, count.clamp(1,20)) + handler.rs (dispatch + fail-closed from_env). Operator-configured HHAGENT_WEB_SEARCH_ENDPOINT; LLM supplies only the query. Host-side manifest in core/src/workers/web_search.rs. Dev setup: scripts/web-search/setup-searxng.sh
+├── workers/web-search   hhagent-worker-web-search: second net-egress worker. web.search JSON-RPC method (query → ranked {title,url,snippet,engine} hits from a SearxNG /search?format=json endpoint). Consumes HostAllowlist + transport from web-common. parse.rs (lenient SearxNG-JSON → Vec<Hit>) + search.rs (validate_endpoint [https everywhere, http loopback-only via is_loopback] + build_query_url + one-GET search() drive, count.clamp(1,20)) + handler.rs (dispatch + fail-closed from_env). Operator-configured HHAGENT_WEB_SEARCH_ENDPOINT; LLM supplies only the query. Host-side manifest in core/src/workers/web_search.rs. Dev setup: scripts/web-search/setup-searxng.sh
+└── workers/egress-proxy hhagent-worker-egress-proxy: per-worker egress boundary (ROADMAP:141 slice #1). Sandboxed CONNECT proxy on a per-worker UDS; per CONNECT: HostAllowlist check (reuses web-common) → resolve DNS itself → ssrf.rs is_denied_range (reject private/loopback/link-local/ULA/CGNAT/multicast, IPv4-mapped+compatible unwrapped; literal-IP carve-out for an allowlisted address) → pin+dial surviving IP → tunnel. Modules: ssrf.rs, request_line.rs (CONNECT parse incl. bracketed IPv6), report.rs (Decision/Verdict snake_case → stdout JSON line), proxy.rs (decide + handle_conn, 8 KiB request-head cap), main.rs (env parse HHAGENT_EGRESS_PROXY_{UDS,ALLOWLIST,WORKER}, UDS bind, prelude::lock_down, accept loop). NOT routed by real workers yet (slice #2). Host side = core/src/egress
 ```
 
 **Test baselines.** Native-Linux (DGX, PG 18.4 live, rustc 1.96.0): **1327 / 0 / 4**
@@ -221,6 +241,9 @@ archive snapshots; the suite table below lists what each integration suite verif
 | `web-search` unit | 24 | parse (SearxNG-JSON happy/url-less-skip/defaults/empty/missing-key/malformed), search (parsed hits, count truncate+clamp, empty-query, non-200, redirect, loopback truth table incl. `[::1]`, scheme rule https/http-loopback/http-remote-denied, host-not-allowlisted, request-URL build), handler (method-not-found, missing/empty query, happy path, operation-failed) |
 | `core` integration (`web_search_e2e`) | 1 (+1 ignored) | **real** sandbox fail-closed deny-path: endpoint host off allowlist → worker refuses at startup (hermetic); `real_search_against_searxng` `#[ignore]` (live SearxNG, DNS/TLS/loopback in-jail) |
 | `core` unit (`web_search` manifest) | 3 | resolve registers `WorkerNetClient` + endpoint-derived `Net::Allowlist` (loopback `:8888` + https `:443`); `Misconfigured` when no binary |
+| `egress-proxy` unit | 23 | ssrf (every denied range v4/v6 + mapped + compatible) 7, request_line (CONNECT + bracketed IPv6 + malformed) 7, report (JSON line shape) 3, proxy (`decide` carve-out/pin/block 4 + real-UDS `handle_conn` round-trip+403 2) 6 |
+| `core` integration (`egress_proxy_e2e`) | 2 (+1 ignored) | **real** sandboxed sidecar via `spawn_sidecar` + test CONNECT client: allowed literal-loopback round-trip + off-allowlist 403 + `decision_to_audit` mapping; PG-gated `audit_log` persistence (skip-as-pass); `#[ignore]` real-net round-trip |
+| `core` unit (`egress::audit`/`egress::spawn`) | 4 | `decision_to_audit` verdict→action mapping + garbage-None (3); `proxy_policy` Net::ProxyEgress+WorkerNetClient+env-keys (1) |
 | `core` unit (`handoff`) | 19 | HandoffRef parse, put/get_slice round-trip + offset/len/eof, per-task budget eviction, global MAX_TRACKED_TASKS backstop, purge isolation, placeholder fields, stash passthrough/over-cap/exact-cap, fetch utf8/clamp/not-found/invalid/cross-task |
 | `core` integration (`handoff_dispatch_e2e`) | 3 | **hermetic** (lazy pool, fake lifecycle) dispatcher-level `fetch_handoff` intercept: stashed slice returned, unknown-ref → HANDOFF_NOT_FOUND, missing param → INVALID_PARAMS |
 | `core` unit (`registry_build`) | 6 | assemble_registry Register/Disabled/Misconfigured + the reserved-`handoff`-name skip |
@@ -250,57 +273,6 @@ cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live
 
 ---
 
-## Recently completed (2026-06-08 — `web-fetch` worker, Phase 3, ROADMAP:145, branch `feat/web-fetch-worker`, PR [#197](https://github.com/hherb/hhagent/pull/197) MERGED, on macOS)
-
-**What & why.** The first net-egress worker and the first real consumer of the
-`Net::Allowlist` sandbox policy. Gives the agent a contained way to fetch a URL and
-get back extracted readable text — HTTPS-only, host-allowlisted, size/redirect-capped.
-Design + plan: [`docs/superpowers/specs/2026-06-08-web-fetch-worker-design.md`](../../superpowers/specs/2026-06-08-web-fetch-worker-design.md),
-[`docs/superpowers/plans/2026-06-08-web-fetch-worker.md`](../../superpowers/plans/2026-06-08-web-fetch-worker.md).
-
-**What shipped (commits `191af71`..`dbf992e`, new crate `workers/web-fetch` + host wiring):**
-- **`workers/web-fetch`** — the worker crate, built TDD across four cohesive modules:
-  `allowlist.rs` (exact + `.domain` subdomain-wildcard, case-insensitive matcher;
-  rejected lookalikes pinned), `extract.rs` (HTML readability via `dom_smoothie`, PDF via
-  `pdf-extract`, text/JSON passthrough, char-boundary-safe text cap), `fetch.rs`
-  (`reqwest::blocking`+rustls redirect-drive loop — 5-redirect cap, per-hop allowlist +
-  HTTPS recheck, no-`Location` error), `handler.rs` (`web.fetch` JSON-RPC dispatch +
-  invalid-params / method-not-found / policy-denied arms). `test_transport.rs` is a
-  hermetic mock so the unit suite needs no network. **29 unit tests.**
-- **Host-side manifest** `core/src/workers/web_fetch.rs` (`WebFetchManifest` +
-  `web_fetch_entry`) registered in `WORKER_MANIFESTS`: `Net::Allowlist` (`host:443`,
-  wildcard→bare host, port-80 deliberately excluded), `Profile::WorkerNetClient`,
-  `cpu_ms=10_000`, `mem_mb=512`, `wall_clock_ms=30_000`, `SingleUse`. The same admin
-  allowlist is represented twice from one source — verbatim `HHAGENT_WEB_FETCH_ALLOWLIST`
-  env JSON for the worker's per-hop check, and `host:443` `Net::Allowlist` entries for the
-  future egress proxy. `fs_read` carries `/etc/{resolv.conf,hosts,nsswitch.conf}` for DNS.
-- **Cross-cutting Landlock fix (`5c3359d`):** bwrap binds `fs_read` paths read-only, but
-  the worker-side Landlock layer was derived only from `fs_write` — so reads to `fs_read`
-  paths (`/etc/resolv.conf`) were `EACCES`'d after `lock_down()`, breaking DNS-in-jail.
-  Mirrored the RW plumbing: `tool_host/lockdown_env.rs` derives `HHAGENT_LANDLOCK_RO` from
-  `fs_read`; `workers/prelude/src/landlock_lock.rs` adds read-only rules. Generalizes for
-  every future net worker.
-- **threat-model.md** "Network egress" note: the allowlist matches host **names, not
-  resolved IPs**, so it does **not** contain SSRF / DNS-rebinding to internal addresses
-  until the egress proxy lands (the proxy owns IP-level containment). Same caveat in the
-  `web_fetch.rs` rustdoc.
-
-**Reviews / `/review` follow-up (`dbf992e`):** SSRF-caveat wording, empty-`content-type`
-handling, and test dedup addressed.
-
-**Verification (macOS, `f5b5544`):** `cargo build --workspace` clean (10 crates);
-`cargo test -p hhagent-worker-web-fetch` **29 / 0 / 0**; `cargo test -p hhagent-core --test
-web_fetch_e2e` **1 passed / 1 ignored** (`host_outside_allowlist_is_denied` hermetic deny-path;
-`real_fetch_extracts_readable_text` `#[ignore]` real-network).
-
-**Deferred (per spec):** egress-proxy enforcement (ROADMAP:141 — its consumer is now this
-worker); `web-search` (ROADMAP:146); a hermetic TLS happy-path e2e (waits on the proxy
-test-CA). The large-tool-result handoff cache (ROADMAP:129) becomes more pressing now that a
-web-shaped worker can return large bodies.
-
----
-
----
 
 ## Earlier history (summary)
 
@@ -312,6 +284,9 @@ sessions 2026-05-10 → 2026-05-29 in
 sessions 2026-05-06 → 2026-05-09 in
 [`archive/handover_20260510_pre-prune.md`](archive/handover_20260510_pre-prune.md).
 
+- **2026-06-09 — injection-guard per-tool profiles (#142, PR [#239](https://github.com/hherb/hhagent/pull/239) MERGED):** `GuardProfile{Strict|Relaxed}` + `for_tool` (only web-fetch/web-search relax) + `screen_with_profile`; Relaxed caps the chat-template family at one 0.40 sub-threshold contribution so legit model-card fetches Allow but corroborated attacks Block. (Detailed in this session's header "Prior session".)
+- **2026-06-09 — `web-search` worker + shared `web-common` crate (ROADMAP:146, PR [#238](https://github.com/hherb/hhagent/pull/238) MERGED):** second net worker (`web.search` → SearxNG JSON hits; operator-set `HHAGENT_WEB_SEARCH_ENDPOINT`, http loopback-only). Extracted `workers/web-common` (`HostAllowlist` + `HttpGet`/`ReqwestGet`) as the single source of truth; web-fetch re-pointed byte-preserved.
+- **2026-06-08 — `web-fetch` worker (ROADMAP:145, PR [#197](https://github.com/hherb/hhagent/pull/197) MERGED):** first net-egress worker (`web.fetch`, HTTPS-only, host-allowlisted self-enforced per redirect hop, `dom_smoothie`/`pdf-extract` extraction, 5 MiB/5-redirect caps). Host manifest `Net::Allowlist`+`WorkerNetClient`. Cross-cutting Landlock-RO fix (`HHAGENT_LANDLOCK_RO` from `fs_read`) so DNS works in-jail. Full detail in `archive/`.
 - **2026-06-07 — `insert_memory_light` two-tier write path (ROADMAP:130, PR [#195](https://github.com/hherb/hhagent/pull/195) MERGED at `4918b60`):** `db::memories::insert_memory_light(executor, body, metadata, layer)` — thin delegate to `insert_memory_at_layer` with `embedding = None`, no new SQL/migration, inherits the L0 `PolicyViolation` guard. Degradation contract: lexical + `metadata @>` work; semantic skips (`WHERE embedding IS NOT NULL`); graph never surfaces it. 2 PG e2e + 1 PG-free L0-guard unit test. Deferred: caller wiring; per-namespace caps; graph-lane degradation test ([#196](https://github.com/hherb/hhagent/issues/196)).
 - **2026-06-07 — Option K: cross-platform exponential restart backoff (ROADMAP:61, PR [#194](https://github.com/hherb/hhagent/pull/194) MERGED):** `ServiceSpec.restart_backoff: Option<RestartBackoff{max_delay_sec,steps}>` (additive, `#[serde(default)]`, `None`=old constant-`RestartSec=5`). systemd emits `RestartSteps`/`RestartMaxDelaySec` (252+; older warns-but-loads); macOS launchd warns-and-ignores (no equivalent knob). core+postgres specs wired 5s→300s/8-step. Builder test modules lifted to siblings to stay under cap. Residual: `launchd_agents.rs` 508 LOC (+8, deferred per ≤27-over policy).
 - **2026-06-07 — three clean test-lifts batch (item 9b-a, PR [#193](https://github.com/hherb/hhagent/pull/193) MERGED):** scripted byte-identity lifts of inline `mod tests` blocks — `cassandra/types.rs` 897→336, `scheduler/inner_loop_audit.rs` 655→304, `entity_extraction/gliner_relex.rs` 570→386. Residual: `cassandra/types/tests.rs` 568 (over-cap test file, bucket-c).
@@ -389,7 +364,24 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` worker (Phase 3, ROADMAP:145) MERGED** (PR #197). **Planner `fetch_handoff` surfacing (ROADMAP:129) MERGED** (PR #200). **`web-search` worker + shared `web-common` crate (Phase 3, ROADMAP:146) — this session, branch `feat/web-search-worker`, PR pending.** The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy SLICE #1 (ROADMAP:141, boundary allowlist + SSRF/IP defense) — this session, branch `feat/egress-proxy-boundary`, PR pending.** The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+
+**★ TOP PICK — egress proxy SLICE #2: unbypassable force-routing + live worker transport (ROADMAP:141).** Slice #1
+built the proxy *mechanism* but nothing routes through it yet. Slice #2 makes it real and is what actually delivers
+the threat-model win (a compromised worker can no longer reach off-allowlist endpoints). Three pieces that land
+together because each is inert without the others:
+- **`web-common` CONNECT-over-UDS connector** (`workers/web-common/src/http.rs`): a custom connector enabled when
+  `HHAGENT_EGRESS_PROXY_UDS` is set — dials the UDS, issues `CONNECT host:port` (for BOTH https and the loopback-http
+  SearxNG case), reads `200`, hands the stream to rustls (https) / uses it directly (http). hyper + tokio-rustls are
+  already in the lock graph; ~150 LOC. Both net workers inherit it via `ReqwestGet` — zero change in either worker crate.
+- **`tool_host` auto-spawn hookup**: when bringing up a `Net::Allowlist` worker, call `core::egress::spawn_sidecar`
+  (already built), inject `HHAGENT_EGRESS_PROXY_UDS=<scratch>/egress.sock` into the worker's `policy.env`, tie the
+  sidecar to worker-terminal teardown, and ingest its stdout decision stream into `audit_log` via `decision_to_audit`.
+- **Unbypassable routing**: give the worker a **private** netns whose only egress route is the bind-mounted proxy UDS
+  (Linux: needs a new bwrap path — `Net::Allowlist` → private netns, `Net::ProxyEgress` → real netns; macOS: pf/Seatbelt
+  story, likely weaker — design it honestly). This is the cross-platform-divergent hard part; **needs its own spec
+  first.** Verification: a real `web.fetch` round-trips through the spawned sidecar and an off-allowlist host is
+  refused even when the worker tries to bypass. (Slices #3 TLS-intercept leak-scanner / #4 TLS-pinning follow.)
 
 **Natural web-search follow-ups** (cheap, on demand): stand up a local SearxNG with `scripts/web-search/setup-searxng.sh`, set `HHAGENT_WEB_SEARCH_ENDPOINT` + the `web-search` `tool_allowlists` row, and run the `#[ignore]` `core/tests/web_search_e2e.rs::real_search_against_searxng` to validate the real round-trip end to end. If/when a caller needs them: category/language/engine params or pagination on `web.search` (deferred per spec).
 
@@ -402,7 +394,7 @@ Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 
   prompt wording needs tuning, that's a cheap iteration on `render_handoff_block()`. (Optional / on demand.)
 
 **Other Phase-3 natural picks:**
-- **Egress proxy (ROADMAP:141)** — `web-fetch` + `web-search` are now both its consumers and the SSRF/DNS-rebinding gap (host-name not IP) is documented in `threat-model.md`; the proxy owns IP-level containment + the co-located credential-leak scanner (ROADMAP:142). Larger than one session — needs a spec first.
+- **Egress proxy — slice #1 DONE this session** (see TOP PICK above for slice #2). Slices #3 (TLS-intercept + co-located credential-leak scanner, ROADMAP:142 — needs MITM with a per-instance CA the workers trust) and #4 (TLS pinning for the frontier path) follow #2; each needs its own spec.
 - **`browser-driver` worker (ROADMAP:147)** — Playwright headless, dedicated profile, scratch FS. The next Phase-3 worker after web-fetch/web-search; could reuse the `web-common` allowlist + `Net::Allowlist` manifest pattern.
 
 **Older follow-ups (ROADMAP:130, still open):** core-side caller wiring for `insert_memory_light` (lands with the first high-frequency writer — Phase 2 channels / Phase 3 browser); per-namespace caps + oldest-eviction on `memories.metadata` (no schema change); a graph-lane degradation test ([#196](https://github.com/hherb/hhagent/issues/196)).

@@ -77,7 +77,7 @@ the best containment available without entitlements.
 | Parent-side sandbox (bwrap / Seatbelt) | Namespace isolation, FS bind-mount, network unshare. Applied by `core::tool_host`. |
 | Worker-side sandbox (Landlock + seccomp-bpf) | Second, finer kernel filter installed by the worker on itself via [`hhagent-worker-prelude`](../workers/prelude/). One-way: cannot be relaxed once `restrict_self`/`apply_filter` returns. |
 | Resource caps (Linux: cgroup v2 via `systemd-run --user --scope`) | Hard `MemoryMax` + `MemorySwapMax=0` from `policy.mem_mb`; defense-in-depth `CPUQuota=200%` and `TasksMax=64` defaults. Wraps `bwrap` so the cgroup is in place before the worker namespace is created. Applied by [`sandbox::linux_cgroup`](../sandbox/src/linux_cgroup.rs). |
-| Egress proxy       | Per-worker host allowlist, TLS pinning, audit-log every request |
+| Egress proxy       | Per-worker host allowlist, SSRF/IP-pinning, TLS pinning, audit-log every request. **Slice #1 built** (boundary allowlist + SSRF/IP defense, `workers/egress-proxy`); not yet live-wired — see "Network egress" below. Force-routing + TLS-intercept leak-scanner + TLS-pinning are slices #2–4. |
 | Postgres role isolation | Workers cannot reach Postgres at all; only the core has the DB connection |
 | Append-only audit log   | Every tool call, LLM call, channel message, memory write |
 
@@ -100,15 +100,29 @@ injected by the host-side manifest, not from `step.parameters`) but
 not compromised. It becomes defense-in-depth layer 2 once the egress proxy
 enforces the same allowlist at the boundary.
 
-Crucially, the allowlist matches **host *names*, not resolved IPs.** DNS
-resolution happens inside the jail, so an allowlisted name that resolves to a
-private/internal address — or an attacker performing DNS rebinding on a record
-they control — would still be connected to. **Host-allowlist ≠ IP-level
-containment.** Closing the SSRF gap (rejecting private/link-local/loopback
-targets, and pinning the resolved IP across the TLS connection) is the egress
-proxy's job; do not treat the current self-enforced allowlist as protection
-against egress to internal network ranges. `Net::Allowlist` policy data is
-populated now precisely so the proxy slice can enforce it later.
+Crucially, the worker's self-enforced allowlist matches **host *names*, not
+resolved IPs.** DNS resolution happens inside the jail, so an allowlisted name
+that resolves to a private/internal address — or an attacker performing DNS
+rebinding on a record they control — would still be connected to.
+**Host-allowlist ≠ IP-level containment.**
+
+**Egress-proxy slice #1 (2026-06-10) builds the mechanism that closes this gap**
+([`workers/egress-proxy`](../workers/egress-proxy/), branch
+`feat/egress-proxy-boundary`): a sandboxed per-worker CONNECT proxy that resolves
+DNS *itself*, rejects private/loopback/link-local/ULA/CGNAT/multicast resolved
+IPs (with a literal-IP carve-out for an operator-allowlisted address such as a
+local SearxNG `127.0.0.1`), **pins** the surviving IP, dials it, and audits every
+decision. So the SSRF/IP-pinning + boundary-allowlist logic now *exists and is
+tested* (e2e via a test CONNECT client). **It is not yet live**, however: slice
+#1 does not route the real `web-fetch`/`web-search` workers through the proxy and
+does not modify `tool_host`. The worker→proxy transport (a `web-common`
+CONNECT-over-UDS connector) and the **unbypassable force-routing** (a private
+netns whose only route out is the proxy UDS) that make a *compromised* worker
+actually unable to bypass it are **slice #2**. Until #2, the live containment for
+`web-fetch`/`web-search` remains the worker's self-enforced allowlist — so do not
+yet treat the proxy as protection against egress to internal IP ranges from a
+compromised worker. `Net::ProxyEgress` is the policy variant the proxy runs under;
+`Net::Allowlist` workers keep real netns until #2 moves them to a private one.
 
 ## Negative tests (CI-enforced as backends land)
 
@@ -130,6 +144,6 @@ Already shipped (Phase 0 + Phase 0 hardening stage 1):
 ## Open items
 
 - Choice of egress-proxy TLS-pinning approach (cert pinning vs CA pinning vs SPKI pinning).
-- Egress proxy must close the `web-fetch` SSRF/DNS-rebinding gap: reject private/link-local/loopback resolved IPs and pin the resolved address across the connection (see "Network egress" above). The host-name allowlist alone does not contain egress to internal IP ranges.
+- Egress proxy must close the `web-fetch` SSRF/DNS-rebinding gap: reject private/link-local/loopback resolved IPs and pin the resolved address across the connection (see "Network egress" above). The host-name allowlist alone does not contain egress to internal IP ranges. **Slice #1 implements this logic** (`workers/egress-proxy`), but it is not yet enforcing on live workers — slice #2's force-routing wires it in.
 - Whether `python-exec` should default to micro-VM rather than seccomp/Seatbelt-only.
 - Concrete `setrlimit` budgets per worker class.
