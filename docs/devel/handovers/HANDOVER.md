@@ -6,6 +6,19 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
+**Last updated:** 2026-06-10 (rename merged as PR #244; **crates.io 0.1.0 release published**, tag `v0.1.0`; on macOS).
+
+**crates.io release (2026-06-10, same day, after the rename below).** All **12 publishable crates are
+live on crates.io at v0.1.0** (`kastellan-{core,db,llm-router,sandbox,supervisor,protocol}` +
+`kastellan-worker-{prelude,shell-exec,web-common,web-fetch,web-search,egress-proxy}`;
+`kastellan-tests-common` stays `publish = false`). Metadata PR
+[#245](https://github.com/hherb/kastellan/pull/245) MERGED (version 0.1.0, internal dep `version`
+requirements — path-only dev-deps deliberately version-less so cargo strips them on publish —
+per-crate `readme`). Tag `v0.1.0` = `6f6f741` pushed. Publishing notes for next release: crates.io
+throttles **new** crate names (burst ~5, then 1/10 min; 429s sometimes surface as Varnish HTML pages
+or HTTP/2 stream resets) — *version updates* have a much higher limit (burst 30, 1/min), so future
+releases won't crawl. Publish in dep order: protocol/supervisor/sandbox/llm-router/web-common →
+db/prelude → workers → core.
 **Last updated:** 2026-06-10 (egress proxy **slice #2 DESIGN** — spec + implementation plan only, no code; branch `feat/egress-proxy-slice2-force-routing`, PR pending; on macOS).
 
 **Rename session (2026-06-10).** The whole workspace was mechanically renamed hhagent → kastellan
