@@ -26,9 +26,8 @@ boundary-enforcement and SSRF/IP-defense half.
 
 ## Goals (slice #1)
 
-1. A proxy process, **one per net-worker**, that every outbound request from that worker is
-   routed through — over a **per-worker UDS** bind-mounted into the worker's scratch (see
-   "Non-goals" for the bypassability caveat: slice #1 doesn't yet *force* the worker to use it).
+1. A proxy **binary** that listens on a **per-worker UDS** and, per `CONNECT`, enforces the
+   worker's host allowlist + SSRF/IP defense and tunnels to the pinned IP.
 2. The proxy enforces the worker's **host allowlist at the boundary** (defense-in-depth layer 2
    behind the worker's existing self-enforcement), reusing the *same* matcher the workers use.
 3. The proxy **resolves DNS itself**, rejects private/loopback/link-local/etc. resolved IPs
@@ -38,18 +37,26 @@ boundary-enforcement and SSRF/IP-defense half.
    violating the core-only-Postgres invariant.
 5. The proxy process is **itself sandboxed** (net-permissive lockdown, `Net::ProxyEgress`),
    because it parses untrusted bytes from both sides and will hold plaintext secrets in slice #3.
-6. **Both existing net-workers keep working**, with the worker→proxy transport change confined
-   to the shared `web-common` crate (zero change in either worker crate): web-fetch (public
-   HTTPS hosts) and web-search (operator's local SearxNG on `http://127.0.0.1:PORT`).
+6. A reusable **host-side `core/src/egress` module** that spawns the sandboxed sidecar and maps
+   its decision stream to `audit_log` rows — proven end-to-end by an e2e that drives the
+   sidecar with a **trivial test `CONNECT` client**. (The hookup that auto-spawns the sidecar
+   per real net-worker, and the worker→proxy transport, are **slice #2** — see Non-goals.)
 
 ## Non-goals (this slice)
 
-- **Unbypassable force-routing.** Slice #1 hands the worker the proxy UDS but does not yet
-  *force* its use — the worker still has `--share-net` and a *compromised* worker can open its
-  own raw socket and ignore the proxy. So slice #1 is defense-in-depth + SSRF closure, **not**
-  hard containment. Making the route unbypassable (private netns + the bind-mounted UDS as the
-  only route out on Linux; pf/Seatbelt story on macOS) is **slice #2** — and the UDS transport
-  chosen here is exactly the channel #2 force-routes over.
+- **Worker→proxy transport + live `tool_host` hookup.** Slice #1 does **not** route the real
+  `web-fetch`/`web-search` workers through the proxy, and does **not** modify `tool_host`'s
+  spawn path. Reqwest's proxy support is TCP-only (no `unix://` scheme), so routing over the
+  UDS needs a hand-rolled CONNECT-over-UDS client (hyper + tokio-rustls — already in the lock
+  graph, but a real ~150-line async mini-client since the worker terminates TLS end-to-end).
+  That client, plus auto-spawning the sidecar per net-worker, only becomes *load-bearing* with
+  force-routing — so both land in **slice #2**. (Rationale: nobody routes real traffic through
+  the proxy until #2 makes it unbypassable, so wiring live workers in #1 is premature work in
+  the wrong slice. Slice #1's machinery is proven by an e2e test client instead.)
+- **Unbypassable force-routing.** The thing #2 adds on top: a private netns with the
+  bind-mounted UDS as the only route out (Linux; pf/Seatbelt story on macOS), so a
+  *compromised* worker physically cannot bypass the proxy. The UDS the proxy listens on here is
+  exactly the channel #2 force-routes over.
 - **TLS interception / credential-leak scanning** (ROADMAP:142) — needs MITM with a per-instance
   CA the workers trust. **Slice #3.** Slice #1 leaves TLS end-to-end worker↔origin and never
   sees request/response bodies.
@@ -88,11 +95,14 @@ single source of truth — do **not** re-implement). Pure, exhaustively-unit-tes
 plus a thin I/O drive, following the `web-fetch` decomposition and the project's
 "pure functions in reusable modules" rule:
 
-- **`ssrf.rs`** *(pure, security-critical)* —
-  `fn ssrf_verdict(resolved: IpAddr, entry: &AllowlistEntry) -> Verdict`.
-  Classifies `resolved` against the denied ranges and **allows it only if the matching
-  allowlist entry was itself a literal IP in that same denied range** (operator intent).
-  Denied ranges (must all be covered by tests, IPv4 **and** IPv6):
+- **`ssrf.rs`** *(pure, security-critical)* — `fn is_denied_range(ip: IpAddr) -> bool`, the
+  range classifier. The literal-IP carve-out lives in `proxy.rs`, not here: a **literal-IP
+  CONNECT target** (parses as `IpAddr`) that `HostAllowlist::is_allowed` accepts is connected to
+  directly — no DNS, no range-deny — because the operator allowlisted that exact address
+  (the local-SearxNG case). A **hostname** target is resolved and **every** resolved IP is run
+  through `is_denied_range`; any hit blocks (the DNS-rebinding defense — a public name that
+  resolves to a private IP is always blocked, since the operator allowlisted a *name*, not the
+  address). Denied ranges (must all be covered by tests, IPv4 **and** IPv6):
   - loopback `127.0.0.0/8`, `::1`
   - RFC1918 private `10/8`, `172.16/12`, `192.168/16`
   - link-local `169.254.0.0/16`, `fe80::/10`
@@ -103,9 +113,9 @@ plus a thin I/O drive, following the `web-fetch` decomposition and the project's
   - IPv4-mapped IPv6 `::ffff:0:0/96` (unwrap to the embedded v4 and re-classify, so a
     mapped private address can't slip through)
 - **`request_line.rs`** *(pure)* — extract host:port from a `CONNECT host:port` line. The
-  `web-common` connector issues `CONNECT` for **both** schemes (https tunnels, and the
-  loopback-`http` SearxNG case tunnels too — see "Worker→proxy transport"), so the proxy only
-  ever parses `CONNECT`. Rejects malformed input.
+  (slice-#2) `web-common` connector will issue `CONNECT` for **both** schemes (https tunnels,
+  and the loopback-`http` SearxNG case tunnels too), so the proxy only ever parses `CONNECT`.
+  Rejects malformed input.
 - **`proxy.rs`** *(thin I/O)* — the drive loop: accept (on the UDS) → `request_line` →
   `HostAllowlist` check → resolve (getaddrinfo via `std::net`) → `ssrf_verdict` filter over all
   resolved IPs → dial the **first surviving (pinned) IP** → reply `200` + bidi-copy the tunnel.
@@ -113,40 +123,37 @@ plus a thin I/O drive, following the `web-fetch` decomposition and the project's
 - **`report.rs`** *(pure record + line writer)* — emit one decision record per request as a
   JSON line on **stdout**: `{worker, host, port, resolved_ip, verdict, reason}`.
 
-### Worker→proxy transport (shared `web-common` change)
+### Worker→proxy transport (deferred to slice #2)
 
 The proxy listens on a **UDS** at a deterministic per-worker path (`<scratch>/egress.sock`,
 under the worker's writable scratch, bind-mounted so the worker — and only that worker — can
 reach it). A UDS can't be expressed as an `HTTP(S)_PROXY` URL, so reqwest's built-in proxy-env
-routing does not apply; instead `web-common::http` gains a **custom CONNECT-over-UDS
-connector**, enabled when an env var (`HHAGENT_EGRESS_PROXY_UDS`) points at the socket. The
-connector dials the UDS, sends `CONNECT host:port`, reads the `200`, and hands the stream to
-rustls (https) or uses it directly (http). Because **both** net-workers build their client
-through `web-common::http::ReqwestGet`, this is **one change in the shared transport** and
-**zero change in either worker crate**. Per-redirect re-checking is preserved: each new origin
-opens a new connection → a new `CONNECT` → a fresh proxy allowlist/SSRF check.
+routing does not apply; routing real workers over the UDS needs a custom CONNECT-over-UDS
+client in `web-common::http` (hyper + tokio-rustls). **That client lands in slice #2** alongside
+force-routing (it only becomes load-bearing then). Slice #1 proves the proxy with a trivial
+test client instead. The UDS contract (deterministic path, `CONNECT` for both schemes,
+per-redirect re-check via a fresh `CONNECT`) is fixed here so #2 only adds the client.
 
-### Host side — `core/src/egress/` (host-side spawn + wiring + audit ingest)
+### Host side — `core/src/egress/` (reusable spawn + audit-ingest module; not wired into `tool_host` this slice)
 
-When `tool_host` resolves a worker with `Net::Allowlist`:
+Slice #1 ships `core/src/egress` as a **reusable module**, exercised by the e2e but **not yet
+called from `tool_host`'s spawn path** (that hookup is slice #2, where it joins force-routing).
+It provides:
 
-1. **Spawn the sidecar** under a net-permissive lockdown `SandboxPolicy` (see below), passing
-   the worker's allowlist (env, mirroring how `web-fetch` receives
-   `HHAGENT_WEB_FETCH_ALLOWLIST`) and the UDS path to bind (`<scratch>/egress.sock`). The path
-   is **deterministic** — no port handshake; core, proxy, and worker all derive it from the
-   per-task scratch dir. Core waits for the socket to exist (bounded) before step 2.
-2. **Point the worker at the UDS.** Set `HHAGENT_EGRESS_PROXY_UDS=<scratch>/egress.sock` in the
-   *worker's* `policy.env`; the shared `web-common` connector picks it up (see "Worker→proxy
-   transport"). The socket is bind-mounted into the worker's scratch so only that worker reaches it.
-3. **Tie lifecycle.** The sidecar is killed when the worker reaches a terminal state
-   (reuse/extend the existing worker-lifecycle teardown). If the sidecar fails to spawn, the
-   net-worker is **not started** (fail-closed bring-up).
-4. **Ingest audit.** Core reads the sidecar's stdout decision stream and writes one
-   `audit_log` row per decision — `actor='egress_proxy'`,
+1. **`spawn_sidecar(allowlist, scratch_dir, backend) -> SidecarHandle`** — builds the
+   net-permissive lockdown `SandboxPolicy` (see below), passes the allowlist (env, mirroring
+   `HHAGENT_WEB_FETCH_ALLOWLIST`) and the UDS path to bind (`<scratch>/egress.sock`, deterministic
+   — no port handshake), spawns the sandboxed proxy via the `SandboxBackend`, and waits (bounded)
+   for the socket to exist. Fail-closed: spawn/bind timeout → `Err`.
+2. **`decision_to_audit(line: &str) -> Option<AuditRow>`** *(pure)* — maps one stdout decision
+   JSON line to an `audit_log` row: `actor='egress_proxy'`,
    `action='egress.allowed' | 'egress.blocked.allowlist' | 'egress.blocked.ssrf'`, payload
-   carrying `{worker, host, port, resolved_ip, reason}`. **The proxy never touches Postgres**
+   `{worker, host, port, resolved_ip, reason}`. **The proxy never touches Postgres**
    (core-only-DB invariant); decisions flow proxy→core→PG, consistent with the existing
-   stdio-between-core-and-workers and `audit_mirror` JSONL conventions.
+   stdio-between-core-and-workers and `audit_mirror` JSONL conventions. The actual DB insert is
+   exercised by a PG-gated test (skip-as-pass on the Mac); the mapping is unit-tested PG-free.
+3. **`SidecarHandle::shutdown()`** — kills the sidecar; slice #2's `tool_host` hookup ties this
+   to worker-terminal teardown.
 
 ### Sidecar sandbox policy
 
@@ -175,8 +182,9 @@ The proxy is the security boundary and the first component to touch plaintext se
 ## Data flow (one HTTPS request)
 
 ```
-worker (web-common CONNECT-over-UDS connector, HHAGENT_EGRESS_PROXY_UDS set)
-  │  CONNECT api.example.com:443   (over <scratch>/egress.sock)
+client over <scratch>/egress.sock
+  (slice #1: the e2e test CONNECT client; slice #2: the real worker via the web-common connector)
+  │  CONNECT api.example.com:443
   ▼
 sidecar proxy
   │  1. request_line  → host="api.example.com" port=443
@@ -190,10 +198,10 @@ sidecar proxy
 core ingests stdout line → audit_log row
 ```
 
-For the loopback-`http` SearxNG case the connector also issues `CONNECT 127.0.0.1:8888`;
-`HostAllowlist` matches the literal entry; `ssrf_verdict` sees loopback **but the allowlist
-entry is the literal `127.0.0.1`** → allowed; the proxy dials and tunnels the plain HTTP
-request through. Both existing workers keep working.
+For the loopback-`http` SearxNG case the (slice-#2) connector also issues `CONNECT
+127.0.0.1:8888`; `HostAllowlist` matches the literal entry; `ssrf_verdict` sees loopback **but
+the allowlist entry is the literal `127.0.0.1`** → allowed; the proxy dials and tunnels the
+plain HTTP request through.
 
 ## Error handling — fail-closed everywhere
 
@@ -203,8 +211,8 @@ request through. Both existing workers keep working.
 | Host not on allowlist | `403` / close, report `blocked.allowlist` |
 | Host unresolvable | `403` / close, report `blocked.ssrf` (no target) |
 | All resolved IPs SSRF-denied | `403` / close, report `blocked.ssrf` |
-| Dial to pinned IP fails | `502` / close. This is a **transport** failure, not a policy verdict: the allowlist+SSRF decision was `allowed`, so the row is `egress.allowed` with a `connect_failed` note — the worker just sees a `502`. |
-| Sidecar fails to spawn | net-worker **not started** (fail-closed bring-up) |
+| Dial to pinned IP fails | `502` / close. This is a **transport** failure, not a policy verdict: the allowlist+SSRF decision was `allowed`, so the row is `egress.allowed` with a `connect_failed` note — the caller just sees a `502`. |
+| Sidecar fails to spawn / bind UDS in time | `spawn_sidecar` returns `Err` (fail-closed); slice #2's `tool_host` hookup translates that into "net-worker not started" |
 
 The proxy never falls open: any uncertainty blocks.
 
@@ -214,19 +222,20 @@ The proxy never falls open: any uncertainty blocks.
   literal allowed, public-name→loopback blocked), IPv4-mapped-IPv6 unwrap. This is the
   security core → exhaustive.
 - **`request_line.rs` unit** — CONNECT form, default ports, malformed reject.
-- **`web-common` connector unit** — CONNECT-over-UDS handshake (sends `CONNECT host:port`,
-  parses `200` vs non-`200`); env-gated activation (`HHAGENT_EGRESS_PROXY_UDS` set vs unset =
-  direct, behaviour-preserving for non-proxied callers).
 - **Allowlist reuse** — a thin test confirming `web-common::HostAllowlist` is the matcher (no
   re-implementation drift).
-- **`proxy.rs` hermetic** — drive the loop against a localhost origin: allowed round-trip,
-  off-allowlist block, SSRF block (a hostname stubbed to resolve to a private IP).
-- **Decision-report** unit — JSON line shape for each verdict.
-- **`core` integration (`egress_proxy_e2e`)** — hermetic: spawning a net-worker brings up the
-  sidecar, worker traffic routes through it, an off-allowlist host is blocked at the boundary,
-  and an `audit_log` row is written. Plus one **`#[ignore]`** real-network test: a real
-  `web.fetch` round-trips *through* the spawned sidecar (validates DNS+pinning+tunnel end to
-  end), and a rebinding-style host is blocked.
+- **`proxy.rs` hermetic** — drive the loop over a UDS with a test `CONNECT` client against a
+  localhost origin: allowed round-trip, off-allowlist block, SSRF block (resolver stubbed to
+  return a private IP for a public-looking name).
+- **Decision-report** unit — JSON line shape for each verdict; `decision_to_audit` mapping unit
+  (each verdict → the right `action`, PG-free).
+- **`core` integration (`egress_proxy_e2e`)** — hermetic: `spawn_sidecar` brings up the
+  **sandboxed** proxy (real bwrap/Seatbelt), a test `CONNECT` client over the UDS gets an
+  allowed round-trip for a literal-allowlisted localhost origin and a block for an off-allowlist
+  host, and `decision_to_audit` produces the expected rows. Plus one **`#[ignore]`**
+  real-network test: a test `CONNECT` to a real public host round-trips *through* the spawned
+  sidecar (validates DNS + IP-pinning + tunnel end to end). A PG-gated test (skip-as-pass on the
+  Mac) asserts the audit row actually lands in `audit_log`.
 
 ## Cross-platform
 
@@ -237,28 +246,27 @@ hard cross-platform constraint.
 
 ## Open implementation points (for the plan, not blocking the design)
 
-- **Socket-readiness wait.** The UDS path is deterministic (no port handshake), but core must
-  wait for the sidecar to actually `bind()`+`listen()` before pointing the worker at it. Bounded
-  poll for the socket file vs a one-byte ready signal on the sidecar's stdout — plan picks one
-  (lean: bounded poll, simplest and fail-closed on timeout).
-- **Bind-mount plumbing.** `<scratch>/egress.sock` lives in the per-task scratch; confirm the
-  sidecar and worker see the *same* path under their respective mount namespaces (the scratch
-  is already bind-mounted into the worker; the sidecar needs the same scratch mounted writable
-  to create the socket). Pin the exact `fs_write` entry during planning.
-- **Where host-side spawn lives.** `core/src/egress/` new module vs `core/src/tool_host/
-  egress_proxy.rs`. Lean new module to keep `tool_host` under cap.
-- **Lifecycle hook.** Reuse `worker_lifecycle` teardown to kill the sidecar; confirm the exact
-  seam during planning.
-- **Audit-stream backpressure.** A chatty worker could emit many decision lines; bound the
+- **Socket-readiness wait.** The UDS path is deterministic (no port handshake), but
+  `spawn_sidecar` must wait for the sidecar to actually `bind()`+`listen()` before returning the
+  handle. Bounded poll for the socket file vs a one-byte ready signal on the sidecar's stdout —
+  plan picks one (lean: bounded poll, simplest and fail-closed on timeout).
+- **Bind-mount plumbing (for the e2e).** `<scratch>/egress.sock` lives in the per-task scratch;
+  the sandboxed sidecar must mount that scratch **writable** to create the socket, and the
+  host-side test client connects to the *same* file (bind-mount on Linux → same inode; no
+  remapping on macOS). Pin the exact `fs_write` entry + verify host↔sandbox path identity
+  during planning.
+- **Audit-stream backpressure.** A chatty client could emit many decision lines; bound the
   ingest (drop-with-`warn!` past a cap, like the handoff backstop) rather than unbounded.
 
 ## What this slice deliberately leaves true
 
-After slice #1, a *compromised* worker can still bypass the proxy (it keeps `--share-net` and
-can open its own raw socket instead of dialing the UDS). That is acknowledged and is **slice
-#2's** job — and since the worker-facing value (hard containment) only fully arrives with #2,
-shipping slice #1 as defense-in-depth first is deliberate. Slice #1's concrete wins: the
-SSRF/DNS-rebinding gap is closed, the allowlist is enforced at a second boundary, every egress
-decision is audited, the `Net::ProxyEgress` policy distinction and the UDS transport that #2
-force-routes over are both in place — all without TLS interception and without breaking either
-existing net-worker.
+Slice #1 builds the **mechanism**, not the live wiring: the real workers don't route through
+the proxy yet (`tool_host` is untouched), so the SSRF/allowlist/audit machinery is proven by an
+e2e test client rather than production traffic. That is deliberate — the worker→proxy transport
+and the force-routing that make it load-bearing both land together in **slice #2**, so wiring
+live workers now would be premature work in the wrong slice. Slice #1's concrete deliverables: a
+sandboxed boundary proxy that closes the SSRF/DNS-rebinding gap and enforces the allowlist at a
+second boundary; a pure, exhaustively-tested SSRF classifier; the `Net::ProxyEgress` policy
+distinction across all three sandbox backends; a reusable `core/src/egress` spawn + audit-ingest
+module; and the fixed UDS contract #2 force-routes over — all without TLS interception and
+without touching either existing net-worker.
