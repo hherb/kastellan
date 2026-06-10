@@ -11,7 +11,7 @@
 //! ## What this test does
 //!
 //! For each common coreutil — `cp`, `cat`, `mkdir`, …, `/bin/sh` — spawn
-//! `hhagent-lockdown-probe exec-after-lockdown <binary> [args]`. The
+//! `kastellan-lockdown-probe exec-after-lockdown <binary> [args]`. The
 //! probe locks down (seccomp `strict` + Landlock with the scratch dir
 //! writable), then `execve`s into the coreutil. The seccomp filter
 //! survives `execve` (`PR_SET_NO_NEW_PRIVS` was set), so any
@@ -34,7 +34,7 @@
 //!   the audit covered.
 //!
 //! Each test is isolated to its own scratch dir under
-//! `/tmp/hhagent_prelude_coreutils_smoke/<test-name>/` so parallel
+//! `/tmp/kastellan_prelude_coreutils_smoke/<test-name>/` so parallel
 //! runs don't collide.
 
 #![cfg(target_os = "linux")]
@@ -44,14 +44,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-const PROBE: &str = env!("CARGO_BIN_EXE_hhagent-lockdown-probe");
+const PROBE: &str = env!("CARGO_BIN_EXE_kastellan-lockdown-probe");
 
 /// SIGSYS = the signal seccomp's `KillProcess` action delivers. If the
 /// child exited with this signal, the coreutil hit a syscall that
 /// isn't in `BASE_ALLOW`.
 const SIGSYS: i32 = libc::SIGSYS;
 
-const SCRATCH_ROOT: &str = "/tmp/hhagent_prelude_coreutils_smoke";
+const SCRATCH_ROOT: &str = "/tmp/kastellan_prelude_coreutils_smoke";
 
 /// Per-test scratch dir. Created fresh (recursively removed first so a
 /// crashed prior run doesn't leak state); the dir is the only path
@@ -81,8 +81,8 @@ fn run_under_lockdown(binary: &str, args: &[&str], rw_dir: &Path) -> Output {
         // sometimes spawn subprocesses) can find them.
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HHAGENT_SECCOMP_PROFILE", "strict")
-        .env("HHAGENT_LANDLOCK_RW", &rw_json)
+        .env("KASTELLAN_SECCOMP_PROFILE", "strict")
+        .env("KASTELLAN_LANDLOCK_RW", &rw_json)
         .output()
         .expect("failed to spawn lockdown-probe")
 }
@@ -112,9 +112,9 @@ fn lockdown_enforces() -> bool {
             .args(["exec-after-lockdown", "/bin/true"])
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("HHAGENT_SECCOMP_PROFILE", "strict")
+            .env("KASTELLAN_SECCOMP_PROFILE", "strict")
             .env(
-                "HHAGENT_LANDLOCK_RW",
+                "KASTELLAN_LANDLOCK_RW",
                 serde_json::to_string(&[SCRATCH_ROOT]).unwrap(),
             )
             .output()

@@ -8,7 +8,7 @@
 //! string-or-list enum on that basis. The integration tests in
 //! Task 5 (`llm-router/tests/embedding_backend_e2e.rs`) validate the
 //! round-trip against canned envelopes; live-backend conformance is
-//! the operator's responsibility per their `HHAGENT_LLM_EMBEDDING_URL`.
+//! the operator's responsibility per their `KASTELLAN_LLM_EMBEDDING_URL`.
 //!
 //! ## Why we omit `encoding_format` and `dimensions`
 //! OpenAI's spec carries optional `encoding_format` (`"float"` or

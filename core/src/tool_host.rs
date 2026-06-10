@@ -1,5 +1,5 @@
 //! tool_host: spawn sandboxed worker processes and talk to them over the
-//! JSON-RPC stdio protocol from `hhagent_protocol`.
+//! JSON-RPC stdio protocol from `kastellan_protocol`.
 //!
 //! The agent core is the only thing that ever spawns a worker. Spawning goes
 //! through the configured [`SandboxBackend`] so workers cannot run unjailed
@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
-use hhagent_protocol::client::{Client, ClientError};
-use hhagent_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
+use kastellan_protocol::client::{Client, ClientError};
+use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
 
 mod audit_sink;
 pub use audit_sink::{AuditSink, PgAuditSink};
@@ -56,7 +56,7 @@ pub enum ToolHostError {
 ///   fields, or `.call`) because none of them are exported. The
 ///   `compile_fail` doctest below is the regression pin for that
 ///   side.
-/// * **Sibling modules inside `hhagent_core`** (e.g.
+/// * **Sibling modules inside `kastellan_core`** (e.g.
 ///   `scheduler::tool_dispatch`, or any future module) cannot reach
 ///   the constructor either — module-private items are visible only
 ///   from the declaring module and its descendants, not from sibling
@@ -77,17 +77,17 @@ pub enum ToolHostError {
 /// originally-`pub(crate)` constructor to module-private so the seal
 /// holds against sibling modules too.
 ///
-/// [issue #16]: https://github.com/hherb/hhagent/issues/16
+/// [issue #16]: https://github.com/hherb/kastellan/issues/16
 ///
 /// ```compile_fail
 /// // Each doctest is compiled as a separate crate that depends on
-/// // `hhagent_core`. `WorkerCommand` is `pub` so the `use` line
+/// // `kastellan_core`. `WorkerCommand` is `pub` so the `use` line
 /// // compiles, but the constructor is module-private (no `pub`
 /// // keyword at all) so the `::new` line is unreachable from any
-/// // crate other than `hhagent_core` itself — and even within
-/// // `hhagent_core` it is reachable only from `tool_host` and its
+/// // crate other than `kastellan_core` itself — and even within
+/// // `kastellan_core` it is reachable only from `tool_host` and its
 /// // descendants. Touch either fact and the test trips.
-/// use hhagent_core::tool_host::WorkerCommand;
+/// use kastellan_core::tool_host::WorkerCommand;
 /// let _via_new = WorkerCommand::new("echo", serde_json::Value::Null);
 /// ```
 pub struct WorkerCommand {
@@ -99,7 +99,7 @@ impl WorkerCommand {
     /// Build a sealed command. **Module-private** (no visibility
     /// modifier) so only `tool_host`'s own functions can construct
     /// one — the canonical (and currently only) caller is
-    /// [`dispatch`]. Sibling modules inside `hhagent_core` cannot
+    /// [`dispatch`]. Sibling modules inside `kastellan_core` cannot
     /// reach this constructor at compile time; adding a new caller
     /// requires editing the `tool_host` module (`tool_host.rs` or a
     /// file under `tool_host/`), which is the reviewable opt-out for
@@ -149,7 +149,7 @@ impl WorkerCommand {
 ///   on success, or
 ///   `{"req": <params>, "err": "<error string>", "ms": <duration>}`
 ///   on failure. Payloads larger than 4 KiB are replaced inside
-///   [`hhagent_db::audit::insert`] with a SHA-256 envelope.
+///   [`kastellan_db::audit::insert`] with a SHA-256 envelope.
 ///
 /// **Secret refs are redacted in `payload.req` (issue #147).** The
 /// `req` snapshot is taken BEFORE secret-ref substitution, so the
@@ -184,7 +184,7 @@ impl WorkerCommand {
 ///
 /// ## Why `block_in_place` around the sync `worker.call`
 ///
-/// `Client::call` from `hhagent-protocol` is synchronous (it uses
+/// `Client::call` from `kastellan-protocol` is synchronous (it uses
 /// `std::io::Read`/`Write` over the worker's piped stdio).
 /// [`tokio::task::block_in_place`] runs that on the current
 /// async-runtime worker thread without handing off — which means we
@@ -442,8 +442,8 @@ pub struct WorkerSpec<'a> {
 /// Spawn the worker under `backend` and return a [`SupervisedWorker`].
 ///
 /// Before spawning, [`derive_lockdown_env`] augments the policy with the
-/// `HHAGENT_LANDLOCK_RW` + `HHAGENT_SECCOMP_PROFILE` env entries that
-/// `hhagent-worker-prelude` reads at worker start-up. This is the
+/// `KASTELLAN_LANDLOCK_RW` + `KASTELLAN_SECCOMP_PROFILE` env entries that
+/// `kastellan-worker-prelude` reads at worker start-up. This is the
 /// chokepoint for the worker-side defence-in-depth layer: callers cannot
 /// accidentally skip it because tool_host always derives the env, and
 /// the worker installs the filters from inside its own process.
@@ -490,7 +490,7 @@ impl SupervisedWorker {
     /// 2026-05-13). Takes a sealed [`WorkerCommand`] so only
     /// [`dispatch`] (the canonical caller, in the same module) can
     /// reach this path. Both out-of-crate code and sibling modules
-    /// inside `hhagent_core` can hold a `&mut SupervisedWorker` (as
+    /// inside `kastellan_core` can hold a `&mut SupervisedWorker` (as
     /// `core/tests/audit_dispatch_e2e.rs` does, and as
     /// `core::scheduler::tool_dispatch` does), but neither can call
     /// this method directly — they must funnel through `dispatch`,

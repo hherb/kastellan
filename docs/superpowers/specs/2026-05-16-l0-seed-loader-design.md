@@ -60,7 +60,7 @@ append-only ledger discipline (matching `agent_prompts`).
 
 2. **Source format: single TOML file** at
    `seeds/memory/l0_meta_rules.toml` (default, overridable via
-   `HHAGENT_L0_RULES_FILE`). Each rule is a `[[rule]]` table with
+   `KASTELLAN_L0_RULES_FILE`). Each rule is a `[[rule]]` table with
    `id`, `body`, and optional `tags`.
    Rejected: one-file-per-rule (high per-file overhead for short
    one-sentence rules); YAML (indentation traps on plain-text bodies);
@@ -181,7 +181,7 @@ pub enum L0Error {
     #[error("io error reading {path}: {source}")]
     Io { path: PathBuf, source: std::io::Error },
     #[error("db error: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
 }
 
 /// Operator-visible summary of one seed run.
@@ -307,7 +307,7 @@ Slotted right after `pool` is available, parallel to
 `load_prompts_from_dir`, before lane runners spawn:
 
 ```rust
-let l0_path = std::env::var("HHAGENT_L0_RULES_FILE")
+let l0_path = std::env::var("KASTELLAN_L0_RULES_FILE")
     .map(PathBuf::from)
     .unwrap_or_else(|_| default_l0_rules_path()); // seeds/memory/l0_meta_rules.toml
 
@@ -327,7 +327,7 @@ if l0_path.exists() {
 
 The `default_l0_rules_path()` helper resolves
 `seeds/memory/l0_meta_rules.toml` relative to the daemon's working
-directory (matching the `HHAGENT_PROMPTS_DIR` pattern). Production
+directory (matching the `KASTELLAN_PROMPTS_DIR` pattern). Production
 deployment via the existing supervisor spec already sets `WorkingDir`
 to the install root.
 
@@ -355,7 +355,7 @@ to the install root.
 
 ### DB integration tests in `core/tests/memory_l0_seed_e2e.rs`
 
-Per-test PG cluster via `hhagent_tests_common::bring_up_pg_cluster`,
+Per-test PG cluster via `kastellan_tests_common::bring_up_pg_cluster`,
 same pattern as `memory_layers_e2e.rs`.
 
 The wire-in helper that writes the `actor='core' action='l0.seeded'`
@@ -412,7 +412,7 @@ moving the workspace count 607 → 631.
    `actor='core' action='l0.seeded'` audit row. Default-path
    resolver `default_l0_rules_path()` (cwd-relative
    `seeds/memory/l0_meta_rules.toml`). Add the env-var override
-   `HHAGENT_L0_RULES_FILE`.
+   `KASTELLAN_L0_RULES_FILE`.
 5. **Task 5.** Ship the starter TOML at
    `seeds/memory/l0_meta_rules.toml` with the two example rules.
    Add a brief operator-facing README.md in `seeds/memory/`
@@ -432,7 +432,7 @@ Each task is one commit. Workspace stays green between commits.
 - **Hot-reload on file change** (inotify / FSEvents). Not in scope.
   Operator restarts the daemon to pick up edits — same cadence as
   `agent_prompts`.
-- **L0 admin CLI** (`hhagent-cli l0 list/diff/lint`). Out of scope.
+- **L0 admin CLI** (`kastellan-cli l0 list/diff/lint`). Out of scope.
   The TOML file is the source of truth; if observation phase shows
   it's not enough, add later.
 - **Length budget vs `L0_DEFAULT_CAP_BYTES`** — at 8 KiB the active
@@ -449,7 +449,7 @@ Each task is one commit. Workspace stays green between commits.
   enforces a global token cap by dropping in priority order
   L4 → L2 → L3 → L1 → L0. Pre-req: this slice (already on `main`
   for L1; this slice for L0).
-- **L0 admin CLI** — `hhagent-cli l0 {list, diff <file>, lint <file>}`
+- **L0 admin CLI** — `kastellan-cli l0 {list, diff <file>, lint <file>}`
   for operator workflows beyond "edit and restart". Pre-req: this
   slice. Filed if observation surfaces a need.
 - **Per-org overlay files** — `seeds/memory/l0_meta_rules.toml` +

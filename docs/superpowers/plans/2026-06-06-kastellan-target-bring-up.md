@@ -1,16 +1,16 @@
-# `hhagent.target` Bring-up Implementation Plan
+# `kastellan.target` Bring-up Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an orchestrating `hhagent.target` that brings up Postgres + core as one unit — native systemd `.target` on Linux, readiness-based bundle on macOS.
+**Goal:** Add an orchestrating `kastellan.target` that brings up Postgres + core as one unit — native systemd `.target` on Linux, readiness-based bundle on macOS.
 
 **Architecture:** Two backend-neutral ordering fields on `ServiceSpec` (`after`, `part_of`) plus a `TargetSpec` bundle type. Four new `dyn`-safe `Supervisor` methods carry default implementations (the generic install-and-start-in-order bundle that macOS/launchd uses); `SystemdUser` overrides them to emit and drive a real `.target` unit. macOS ordering relies on core's existing fail-closed-restart-until-Postgres-ready loop.
 
-**Tech Stack:** Rust, `hhagent-supervisor` crate, systemd `--user` units, launchd LaunchAgents. Pure string builders + thin `systemctl`/`launchctl` drivers, mirroring the existing `build_unit_file`/`build_plist` pattern.
+**Tech Stack:** Rust, `kastellan-supervisor` crate, systemd `--user` units, launchd LaunchAgents. Pure string builders + thin `systemctl`/`launchctl` drivers, mirroring the existing `build_unit_file`/`build_plist` pattern.
 
-**Spec:** [`docs/superpowers/specs/2026-06-06-hhagent-target-bring-up-design.md`](../specs/2026-06-06-hhagent-target-bring-up-design.md)
+**Spec:** [`docs/superpowers/specs/2026-06-06-kastellan-target-bring-up-design.md`](../specs/2026-06-06-kastellan-target-bring-up-design.md)
 
-**Build prelude (every test/build step):** `source "$HOME/.cargo/env"` first; cargo is not on the non-interactive `PATH`. Crate-scoped runs: `cargo test -p hhagent-supervisor`.
+**Build prelude (every test/build step):** `source "$HOME/.cargo/env"` first; cargo is not on the non-interactive `PATH`. Crate-scoped runs: `cargo test -p kastellan-supervisor`.
 
 ---
 
@@ -19,7 +19,7 @@
 | File | Responsibility | Change |
 | ---- | -------------- | ------ |
 | `supervisor/src/lib.rs` | `ServiceSpec` (+`after`/`part_of`), new `TargetSpec`, `Supervisor` trait (+4 default target methods) | Modify |
-| `supervisor/src/specs.rs` | `HHAGENT_TARGET_NAME`, ordering on the two builders, `hhagent_target_spec()` | Modify |
+| `supervisor/src/specs.rs` | `KASTELLAN_TARGET_NAME`, ordering on the two builders, `kastellan_target_spec()` | Modify |
 | `supervisor/src/systemd_user.rs` | `build_unit_file` emits `After=`/`PartOf=`; new `build_target_unit`; `SystemdUser` overrides the 4 target methods | Modify (already over-cap — keep additions minimal; flag a future split) |
 | `supervisor/src/launchd_agents/builders.rs` | unit test pinning `build_plist` ignores the new fields | Modify (test only) |
 | `supervisor/tests/target_smoke.rs` | gated e2e: install/start/stop/uninstall the target round-trip (Linux native target + macOS bundle) | Create |
@@ -47,11 +47,11 @@ mod target_spec_tests {
     #[test]
     fn target_spec_holds_name_and_ordered_members() {
         let t = TargetSpec {
-            name: "hhagent".into(),
-            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+            name: "kastellan".into(),
+            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
         };
-        assert_eq!(t.name, "hhagent");
-        assert_eq!(t.members, vec!["hhagent-postgres", "hhagent-core"]);
+        assert_eq!(t.name, "kastellan");
+        assert_eq!(t.members, vec!["kastellan-postgres", "kastellan-core"]);
     }
 
     #[test]
@@ -77,7 +77,7 @@ mod target_spec_tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor target_spec_tests 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor target_spec_tests 2>&1 | tail -20`
 Expected: FAIL to compile — `cannot find type TargetSpec`, and `ServiceSpec` has no field `after`.
 
 - [ ] **Step 3: Add the fields and the type**
@@ -109,7 +109,7 @@ Then, after the `ServiceSpec` struct's closing brace, add the bundle type:
 ///
 /// `members` are service names listed in **start order** (dependencies
 /// first); teardown reverses the order. On systemd this compiles to a
-/// real `hhagent.target` unit; on launchd (which has no target concept)
+/// real `kastellan.target` unit; on launchd (which has no target concept)
 /// the [`Supervisor`] default methods install and start the members in
 /// this order, relying on each service's own readiness behaviour for
 /// correctness.
@@ -136,7 +136,7 @@ Add `after: vec![], part_of: None,` (before the closing `}`) to each of these li
 
 - [ ] **Step 5: Run test to verify it passes**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor target_spec_tests 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor target_spec_tests 2>&1 | tail -20`
 Expected: PASS (2 tests).
 
 - [ ] **Step 6: Commit**
@@ -148,7 +148,7 @@ git commit -m "feat(supervisor): add ServiceSpec ordering fields + TargetSpec ty
 
 ---
 
-## Task 2: `specs.rs` — ordering on builders + `hhagent_target_spec()`
+## Task 2: `specs.rs` — ordering on builders + `kastellan_target_spec()`
 
 **Files:**
 - Modify: `supervisor/src/specs.rs`
@@ -162,24 +162,24 @@ In `supervisor/src/specs.rs` `#[cfg(test)] mod tests` (after the existing tests)
     fn postgres_spec_belongs_to_target_with_no_dependency() {
         let spec = postgres_service_spec(
             Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/var/lib/hhagent/pgdata"),
+            Path::new("/var/lib/kastellan/pgdata"),
             Path::new("/tmp/logs"),
         );
         assert!(spec.after.is_empty(), "postgres is the dependency leaf");
-        assert_eq!(spec.part_of.as_deref(), Some(HHAGENT_TARGET_NAME));
+        assert_eq!(spec.part_of.as_deref(), Some(KASTELLAN_TARGET_NAME));
     }
 
     #[test]
     fn core_spec_starts_after_postgres_and_belongs_to_target() {
-        let spec = core_service_spec(Path::new("/opt/hhagent/hhagent"), Path::new("/tmp/logs"));
+        let spec = core_service_spec(Path::new("/opt/kastellan/kastellan"), Path::new("/tmp/logs"));
         assert_eq!(spec.after, vec![POSTGRES_SERVICE_NAME.to_string()]);
-        assert_eq!(spec.part_of.as_deref(), Some(HHAGENT_TARGET_NAME));
+        assert_eq!(spec.part_of.as_deref(), Some(KASTELLAN_TARGET_NAME));
     }
 
     #[test]
-    fn hhagent_target_lists_postgres_then_core_in_order() {
-        let t = hhagent_target_spec();
-        assert_eq!(t.name, HHAGENT_TARGET_NAME);
+    fn kastellan_target_lists_postgres_then_core_in_order() {
+        let t = kastellan_target_spec();
+        assert_eq!(t.name, KASTELLAN_TARGET_NAME);
         assert_eq!(
             t.members,
             vec![POSTGRES_SERVICE_NAME.to_string(), CORE_SERVICE_NAME.to_string()],
@@ -190,8 +190,8 @@ In `supervisor/src/specs.rs` `#[cfg(test)] mod tests` (after the existing tests)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor specs:: 2>&1 | tail -20`
-Expected: FAIL to compile — `HHAGENT_TARGET_NAME` and `hhagent_target_spec` not found; `spec.part_of` is `None`.
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor specs:: 2>&1 | tail -20`
+Expected: FAIL to compile — `KASTELLAN_TARGET_NAME` and `kastellan_target_spec` not found; `spec.part_of` is `None`.
 
 - [ ] **Step 3: Implement the const, builder ordering, and target builder**
 
@@ -201,9 +201,9 @@ Add the const after `POSTGRES_SERVICE_NAME` (~line 32):
 
 ```rust
 /// Canonical name of the service bundle that brings up the whole agent.
-/// Becomes `hhagent.target` on systemd; on launchd it names the member
+/// Becomes `kastellan.target` on systemd; on launchd it names the member
 /// set only. Same string on both OSes (see [`CORE_SERVICE_NAME`]).
-pub const HHAGENT_TARGET_NAME: &str = "hhagent";
+pub const KASTELLAN_TARGET_NAME: &str = "kastellan";
 ```
 
 Add the new import at the top (`use crate::ServiceSpec;` becomes):
@@ -216,14 +216,14 @@ In `core_service_spec`, set the two fields in the returned literal (replace the 
 
 ```rust
         after: vec![POSTGRES_SERVICE_NAME.to_string()],
-        part_of: Some(HHAGENT_TARGET_NAME.to_string()),
+        part_of: Some(KASTELLAN_TARGET_NAME.to_string()),
 ```
 
 In `postgres_service_spec`, set:
 
 ```rust
         after: vec![],
-        part_of: Some(HHAGENT_TARGET_NAME.to_string()),
+        part_of: Some(KASTELLAN_TARGET_NAME.to_string()),
 ```
 
 Add the target builder at the end of the production region (before `#[cfg(test)]`):
@@ -238,9 +238,9 @@ Add the target builder at the end of the production region (before `#[cfg(test)]
 /// `tool_host` spawns them on demand inside sandboxes when core runs.
 ///
 /// Pure: no I/O, same call → same value.
-pub fn hhagent_target_spec() -> TargetSpec {
+pub fn kastellan_target_spec() -> TargetSpec {
     TargetSpec {
-        name: HHAGENT_TARGET_NAME.to_string(),
+        name: KASTELLAN_TARGET_NAME.to_string(),
         members: vec![
             POSTGRES_SERVICE_NAME.to_string(),
             CORE_SERVICE_NAME.to_string(),
@@ -251,14 +251,14 @@ pub fn hhagent_target_spec() -> TargetSpec {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor specs:: 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor specs:: 2>&1 | tail -20`
 Expected: PASS (existing specs tests + 3 new).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add supervisor/src/specs.rs
-git commit -m "feat(supervisor): hhagent_target_spec + ordering on core/postgres specs"
+git commit -m "feat(supervisor): kastellan_target_spec + ordering on core/postgres specs"
 ```
 
 ---
@@ -275,13 +275,13 @@ In `supervisor/src/systemd_user.rs` `#[cfg(test)] mod tests`, add:
 ```rust
     #[test]
     fn unit_file_emits_after_and_part_of_when_set() {
-        let mut spec = minimal_spec("hhagent-core");
-        spec.after = vec!["hhagent-postgres".into()];
-        spec.part_of = Some("hhagent".into());
+        let mut spec = minimal_spec("kastellan-core");
+        spec.after = vec!["kastellan-postgres".into()];
+        spec.part_of = Some("kastellan".into());
         let body = build_unit_file(&spec);
-        assert!(body.contains("After=hhagent-postgres.service\n"), "{body}");
-        assert!(body.contains("PartOf=hhagent.target\n"), "{body}");
-        assert!(body.contains("WantedBy=hhagent.target\n"), "{body}");
+        assert!(body.contains("After=kastellan-postgres.service\n"), "{body}");
+        assert!(body.contains("PartOf=kastellan.target\n"), "{body}");
+        assert!(body.contains("WantedBy=kastellan.target\n"), "{body}");
         assert!(!body.contains("WantedBy=default.target\n"), "target member must not target default.target: {body}");
     }
 
@@ -298,7 +298,7 @@ In `supervisor/src/systemd_user.rs` `#[cfg(test)] mod tests`, add:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor unit_file_emits_after_and_part_of 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor unit_file_emits_after_and_part_of 2>&1 | tail -20`
 Expected: FAIL — `After=`/`PartOf=` not present.
 
 - [ ] **Step 3: Implement**
@@ -308,7 +308,7 @@ In `build_unit_file` (`supervisor/src/systemd_user.rs` ~line 92-94), extend the 
 ```rust
     // [Unit] section.
     out.push_str("[Unit]\n");
-    out.push_str(&format!("Description=hhagent service: {}\n", spec.name));
+    out.push_str(&format!("Description=kastellan service: {}\n", spec.name));
     out.push('\n');
 ```
 
@@ -317,7 +317,7 @@ with:
 ```rust
     // [Unit] section.
     out.push_str("[Unit]\n");
-    out.push_str(&format!("Description=hhagent service: {}\n", spec.name));
+    out.push_str(&format!("Description=kastellan service: {}\n", spec.name));
     // Ordering: one After= per dependency. systemd only *orders* against
     // units present in the same start transaction — harmless if absent.
     for dep in &spec.after {
@@ -352,7 +352,7 @@ with:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor --lib systemd_user 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor --lib systemd_user 2>&1 | tail -20`
 Expected: PASS (new 2 + all existing systemd_user unit tests; the existing `build_unit_file_emits_three_sections_in_order` still passes because `minimal_spec` sets no ordering).
 
 - [ ] **Step 5: Commit**
@@ -377,13 +377,13 @@ In `supervisor/src/systemd_user.rs` tests:
     #[test]
     fn target_unit_wants_all_members() {
         let t = crate::TargetSpec {
-            name: "hhagent".into(),
-            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+            name: "kastellan".into(),
+            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
         };
         let body = build_target_unit(&t);
         assert!(body.starts_with("[Unit]\n"), "{body}");
         assert!(
-            body.contains("Wants=hhagent-postgres.service hhagent-core.service\n"),
+            body.contains("Wants=kastellan-postgres.service kastellan-core.service\n"),
             "{body}"
         );
         assert!(body.contains("[Install]\nWantedBy=default.target\n"), "{body}");
@@ -392,7 +392,7 @@ In `supervisor/src/systemd_user.rs` tests:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor target_unit_wants_all_members 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor target_unit_wants_all_members 2>&1 | tail -20`
 Expected: FAIL — `build_target_unit` not found.
 
 - [ ] **Step 3: Implement**
@@ -413,7 +413,7 @@ Add next to `build_unit_file` in `supervisor/src/systemd_user.rs`:
 pub fn build_target_unit(target: &crate::TargetSpec) -> String {
     let mut out = String::with_capacity(256);
     out.push_str("[Unit]\n");
-    out.push_str(&format!("Description=hhagent service bundle: {}\n", target.name));
+    out.push_str(&format!("Description=kastellan service bundle: {}\n", target.name));
     if !target.members.is_empty() {
         let wants: Vec<String> = target
             .members
@@ -431,14 +431,14 @@ pub fn build_target_unit(target: &crate::TargetSpec) -> String {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor target_unit_wants_all_members 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor target_unit_wants_all_members 2>&1 | tail -20`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add supervisor/src/systemd_user.rs
-git commit -m "feat(supervisor): build_target_unit emits the hhagent.target unit"
+git commit -m "feat(supervisor): build_target_unit emits the kastellan.target unit"
 ```
 
 ---
@@ -495,7 +495,7 @@ mod default_target_tests {
             stdout_log: None,
             stderr_log: None,
             after: vec![],
-            part_of: Some("hhagent".into()),
+            part_of: Some("kastellan".into()),
         }
     }
 
@@ -503,20 +503,20 @@ mod default_target_tests {
     fn default_bundle_installs_then_starts_in_member_order() {
         let sup = RecordingSupervisor::default();
         let target = TargetSpec {
-            name: "hhagent".into(),
-            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+            name: "kastellan".into(),
+            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
         };
-        let members = [spec("hhagent-postgres"), spec("hhagent-core")];
+        let members = [spec("kastellan-postgres"), spec("kastellan-core")];
         sup.install_target(&target, &members).unwrap();
         sup.start_target(&target).unwrap();
         let calls = sup.calls.borrow().clone();
         assert_eq!(
             calls,
             vec![
-                "install:hhagent-postgres",
-                "install:hhagent-core",
-                "start:hhagent-postgres",
-                "start:hhagent-core",
+                "install:kastellan-postgres",
+                "install:kastellan-core",
+                "start:kastellan-postgres",
+                "start:kastellan-core",
             ]
         );
     }
@@ -525,13 +525,13 @@ mod default_target_tests {
     fn default_bundle_stops_in_reverse_member_order() {
         let sup = RecordingSupervisor::default();
         let target = TargetSpec {
-            name: "hhagent".into(),
-            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+            name: "kastellan".into(),
+            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
         };
         sup.stop_target(&target).unwrap();
         assert_eq!(
             sup.calls.borrow().clone(),
-            vec!["stop:hhagent-core", "stop:hhagent-postgres"]
+            vec!["stop:kastellan-core", "stop:kastellan-postgres"]
         );
     }
 }
@@ -539,7 +539,7 @@ mod default_target_tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor default_target_tests 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor default_target_tests 2>&1 | tail -20`
 Expected: FAIL to compile — no method `install_target` on `Supervisor`.
 
 - [ ] **Step 3: Implement the default methods**
@@ -599,7 +599,7 @@ In `supervisor/src/lib.rs`, inside `pub trait Supervisor`, after `fn status(...)
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor default_target_tests 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor default_target_tests 2>&1 | tail -20`
 Expected: PASS (2 tests).
 
 - [ ] **Step 5: Commit**
@@ -624,7 +624,7 @@ In `supervisor/src/systemd_user.rs` tests (these use a custom `units_dir` so no 
     #[test]
     fn install_target_writes_target_unit_and_members_into_units_dir() {
         let dir = std::env::temp_dir().join(format!(
-            "hhagent-target-unit-{}-{}",
+            "kastellan-target-unit-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -633,32 +633,32 @@ In `supervisor/src/systemd_user.rs` tests (these use a custom `units_dir` so no 
         ));
         let sup = SystemdUser::with_units_dir(dir.clone());
 
-        let mut pg = minimal_spec("hhagent-postgres");
+        let mut pg = minimal_spec("kastellan-postgres");
         pg.program = std::path::PathBuf::from("/usr/lib/postgresql/18/bin/postgres");
-        pg.part_of = Some("hhagent".into());
-        let mut core = minimal_spec("hhagent-core");
-        core.program = std::path::PathBuf::from("/opt/hhagent/hhagent");
-        core.after = vec!["hhagent-postgres".into()];
-        core.part_of = Some("hhagent".into());
+        pg.part_of = Some("kastellan".into());
+        let mut core = minimal_spec("kastellan-core");
+        core.program = std::path::PathBuf::from("/opt/kastellan/kastellan");
+        core.after = vec!["kastellan-postgres".into()];
+        core.part_of = Some("kastellan".into());
 
         let target = crate::TargetSpec {
-            name: "hhagent".into(),
-            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+            name: "kastellan".into(),
+            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
         };
         sup.install_target(&target, &[pg, core]).expect("install_target");
 
         // Target unit written with Wants= of both members.
         let target_body =
-            std::fs::read_to_string(dir.join("hhagent.target")).expect("target file");
+            std::fs::read_to_string(dir.join("kastellan.target")).expect("target file");
         assert!(
-            target_body.contains("Wants=hhagent-postgres.service hhagent-core.service\n"),
+            target_body.contains("Wants=kastellan-postgres.service kastellan-core.service\n"),
             "{target_body}"
         );
         // Member units written, core ordered After= postgres.
-        assert!(dir.join("hhagent-postgres.service").exists());
+        assert!(dir.join("kastellan-postgres.service").exists());
         let core_body =
-            std::fs::read_to_string(dir.join("hhagent-core.service")).expect("core file");
-        assert!(core_body.contains("After=hhagent-postgres.service\n"), "{core_body}");
+            std::fs::read_to_string(dir.join("kastellan-core.service")).expect("core file");
+        assert!(core_body.contains("After=kastellan-postgres.service\n"), "{core_body}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -666,8 +666,8 @@ In `supervisor/src/systemd_user.rs` tests (these use a custom `units_dir` so no 
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor install_target_writes_target_unit 2>&1 | tail -20`
-Expected: FAIL — `hhagent.target` file not found (the default `install_target` writes only member units, no target file).
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor install_target_writes_target_unit 2>&1 | tail -20`
+Expected: FAIL — `kastellan.target` file not found (the default `install_target` writes only member units, no target file).
 
 - [ ] **Step 3: Implement the overrides**
 
@@ -748,14 +748,14 @@ Then update the `use` at the top of `systemd_user.rs` to import `TargetSpec` (fi
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor --lib systemd_user 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor --lib systemd_user 2>&1 | tail -20`
 Expected: PASS (new target-install test + all existing systemd_user unit tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add supervisor/src/systemd_user.rs
-git commit -m "feat(supervisor): SystemdUser native hhagent.target install/start/stop/uninstall"
+git commit -m "feat(supervisor): SystemdUser native kastellan.target install/start/stop/uninstall"
 ```
 
 ---
@@ -776,17 +776,17 @@ In `supervisor/src/launchd_agents/builders.rs` tests:
         // launchd has no ordering / target concept: setting these fields
         // must not change the emitted plist. This pins the documented
         // "ignored on launchd" contract.
-        let base = minimal_spec("hhagent-core");
-        let mut with_ordering = minimal_spec("hhagent-core");
-        with_ordering.after = vec!["hhagent-postgres".into()];
-        with_ordering.part_of = Some("hhagent".into());
+        let base = minimal_spec("kastellan-core");
+        let mut with_ordering = minimal_spec("kastellan-core");
+        with_ordering.after = vec!["kastellan-postgres".into()];
+        with_ordering.part_of = Some("kastellan".into());
         assert_eq!(build_plist(&base), build_plist(&with_ordering));
     }
 ```
 
 - [ ] **Step 2: Run test to verify it fails or passes**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor build_plist_ignores_after 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor build_plist_ignores_after 2>&1 | tail -20`
 Expected: PASS immediately (build_plist never read the new fields). This is a *characterization/pin* test — if it already passes, that confirms the contract; keep it as a regression guard. (If it somehow fails, `build_plist` is touching the fields and must be fixed to ignore them.)
 
 - [ ] **Step 3: Add the module doc note**
@@ -799,7 +799,7 @@ In `supervisor/src/launchd_agents.rs` module-level doc comment (top of file), ad
 //! launchd has no inter-agent ordering and no target/aggregation
 //! concept. The [`crate::Supervisor`] default `*_target` methods install
 //! and start members in declared order, but launchd may still race their
-//! startup. hhagent tolerates this because core fail-closed-restarts
+//! startup. kastellan tolerates this because core fail-closed-restarts
 //! until Postgres is reachable (`KeepAlive=true`), so the bundle
 //! converges regardless of launchd start order. `ServiceSpec.after` and
 //! `ServiceSpec.part_of` are therefore **ignored** by `build_plist`.
@@ -807,7 +807,7 @@ In `supervisor/src/launchd_agents.rs` module-level doc comment (top of file), ad
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor build_plist_ignores_after 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor build_plist_ignores_after 2>&1 | tail -20`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -832,7 +832,7 @@ Create `supervisor/tests/target_smoke.rs`. The Linux path drives the real native
 //! End-to-end smoke test for the target bring-up (`install_target` →
 //! `start_target` → `stop_target` → `uninstall_target`).
 //!
-//! Linux exercises the native `hhagent.target` (real `systemctl --user`).
+//! Linux exercises the native `kastellan.target` (real `systemctl --user`).
 //! macOS exercises the generic readiness-based bundle (real `launchctl`).
 //! Both use trivial long-running dummy programs (`sleep`) so the test
 //! validates the *target orchestration mechanics* in isolation — real
@@ -844,7 +844,7 @@ Create `supervisor/tests/target_smoke.rs`. The Linux path drives the real native
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use hhagent_supervisor::{ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
+use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
 
 fn unique(prefix: &str) -> String {
     let nanos = std::time::SystemTime::now()
@@ -896,7 +896,7 @@ fn wait_for(
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use hhagent_supervisor::systemd_user::{probe, SystemdUser};
+    use kastellan_supervisor::systemd_user::{probe, SystemdUser};
 
     struct Guard {
         sup: SystemdUser,
@@ -915,9 +915,9 @@ mod linux {
             return;
         }
         let sup = SystemdUser::new();
-        let target_name = unique("hhagent-test-target");
-        let pg = unique("hhagent-test-pg");
-        let core = unique("hhagent-test-core");
+        let target_name = unique("kastellan-test-target");
+        let pg = unique("kastellan-test-pg");
+        let core = unique("kastellan-test-core");
         let target = TargetSpec {
             name: target_name.clone(),
             members: vec![pg.clone(), core.clone()],
@@ -958,7 +958,7 @@ mod linux {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use hhagent_supervisor::launchd_agents::{probe, LaunchAgents};
+    use kastellan_supervisor::launchd_agents::{probe, LaunchAgents};
 
     struct Guard {
         sup: LaunchAgents,
@@ -977,9 +977,9 @@ mod macos {
             return;
         }
         let sup = LaunchAgents::new();
-        let target_name = unique("hhagent-test-target");
-        let pg = unique("hhagent-test-pg");
-        let core = unique("hhagent-test-core");
+        let target_name = unique("kastellan-test-target");
+        let pg = unique("kastellan-test-pg");
+        let core = unique("kastellan-test-core");
         let target = TargetSpec {
             name: target_name.clone(),
             members: vec![pg.clone(), core.clone()],
@@ -1008,14 +1008,14 @@ mod macos {
 
 - [ ] **Step 2: Run the e2e (on the DGX, native systemd)**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-supervisor --test target_smoke -- --nocapture 2>&1 | tail -30`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-supervisor --test target_smoke -- --nocapture 2>&1 | tail -30`
 Expected: PASS (or `[SKIP]` if `systemctl --user` has no live manager — re-check on a host with `loginctl enable-linger`).
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add supervisor/tests/target_smoke.rs
-git commit -m "test(supervisor): gated e2e for hhagent.target round-trip (systemd + launchd)"
+git commit -m "test(supervisor): gated e2e for kastellan.target round-trip (systemd + launchd)"
 ```
 
 ---
@@ -1040,20 +1040,20 @@ Expected: all tests pass (native-Linux baseline was **1311 / 0 / 4** at `cdadea1
 In `docs/devel/ROADMAP.md` line ~60, change:
 
 ```markdown
-- [ ] `hhagent.target` that brings up Postgres, inference, core, workers
+- [ ] `kastellan.target` that brings up Postgres, inference, core, workers
 ```
 
 to (with a note recording the resolved scope):
 
 ```markdown
-- [x] `hhagent.target` that brings up Postgres + core — native systemd `.target` (Linux) / readiness-based bundle (macOS); inference is an external health-checked dependency, workers are core-owned (spawned on demand). `TargetSpec` + `Supervisor::{install,start,stop,uninstall}_target` + `hhagent_target_spec()` — 2026-06-06
+- [x] `kastellan.target` that brings up Postgres + core — native systemd `.target` (Linux) / readiness-based bundle (macOS); inference is an external health-checked dependency, workers are core-owned (spawned on demand). `TargetSpec` + `Supervisor::{install,start,stop,uninstall}_target` + `kastellan_target_spec()` — 2026-06-06
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add docs/devel/ROADMAP.md
-git commit -m "docs(roadmap): hhagent.target bring-up shipped (Postgres + core)"
+git commit -m "docs(roadmap): kastellan.target bring-up shipped (Postgres + core)"
 ```
 
 ---

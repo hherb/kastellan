@@ -284,7 +284,7 @@ loop wiring stays thin and the decision is unit-tested without a database.
 
 ## 8. The `pin` command
 
-`hhagent-cli memory l3 pin <id>`:
+`kastellan-cli memory l3 pin <id>`:
 
 - Loads the row, layer-guards to `MemoryLayer::Skill`, parses
   `metadata.{template, trust, body_sha256}`.
@@ -441,7 +441,7 @@ Regression: existing `cli_memory_l3_e2e`, `cli_memory_l3_run_e2e`,
 - by-name loader in `db` / `memory` beside the existing L3 loaders.
 - `core/src/cassandra/types.rs` — `InvokeDirective` + `Plan.invoke_skill` +
   `Plan::invoke_directive()`.
-- `core/src/bin/hhagent-cli/memory_l3.rs` — `pin` handler + dispatch/usage entry.
+- `core/src/bin/kastellan-cli/memory_l3.rs` — `pin` handler + dispatch/usage entry.
   Watch its size (it has grown across the L3 CLI slices); split the `pin` handler
   to a sibling if it approaches the cap.
 - `core/src/memory/l3_surface.rs` — trust/invocable marker on `SurfacedSkill` +

@@ -15,7 +15,7 @@ fn single_use_lifecycle_constructor_holds_the_sandbox_backend() {
     // The presence of a constructor that compiles is the assertion; the manager's
     // production spawn path is exercised end-to-end by `scheduler_step_dispatch_e2e`
     // (Task 6) and `cli_ask_e2e` after slice 1's wiring lands.
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let _mgr = SingleUseLifecycle::new(sandboxes);
 }
 
@@ -24,11 +24,11 @@ async fn idle_timeout_acquire_on_single_use_entry_returns_wiring_error() {
     // Defensive: an idle-timeout manager called with a single-use entry is a
     // wiring bug. The manager returns an `Io(InvalidInput)` error rather than
     // panicking so the dispatcher's `step.spawn_failed` audit row still fires.
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let mgr = IdleTimeoutLifecycle::new(sandboxes);
     let entry = crate::scheduler::tool_dispatch::ToolEntry {
         binary: std::path::PathBuf::from("/nope"),
-        policy: hhagent_sandbox::SandboxPolicy::default(),
+        policy: kastellan_sandbox::SandboxPolicy::default(),
         wall_clock_ms: None,
         lifecycle: Lifecycle::SingleUse,
         sandbox_backend: None,
@@ -57,7 +57,7 @@ fn worker_handle_exposes_worker_mut() {
 /// pure tests + production wiring (see `acquire_impl` in `idle_timeout.rs`).
 #[tokio::test]
 async fn test_slot_pending_acquires_returns_zero_for_absent_tool() {
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let mgr = IdleTimeoutLifecycle::new(sandboxes);
     assert_eq!(
         mgr._test_slot_pending_acquires("never-acquired"),
@@ -78,7 +78,7 @@ async fn test_slot_pending_acquires_returns_zero_for_absent_tool() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn single_use_lifecycle_acquire_routes_via_entry_sandbox_backend_kind() {
-    use hhagent_sandbox::{
+    use kastellan_sandbox::{
         SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxError, SandboxPolicy,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -165,7 +165,7 @@ async fn single_use_lifecycle_acquire_routes_via_entry_sandbox_backend_kind() {
 #[tokio::test]
 async fn idle_timeout_lifecycle_acquire_routes_via_entry_sandbox_backend_kind() {
     use crate::worker_lifecycle::{Contract, IdleTimeoutCaps};
-    use hhagent_sandbox::{
+    use kastellan_sandbox::{
         SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxError, SandboxPolicy,
     };
     use std::sync::atomic::{AtomicU32, Ordering};

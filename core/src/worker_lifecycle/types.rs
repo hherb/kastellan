@@ -34,7 +34,7 @@
 /// either the struct literal or the validated constructor as appropriate.
 ///
 /// ```compile_fail,E0639
-/// use hhagent_core::worker_lifecycle::{Lifecycle, IdleTimeoutCaps, Contract};
+/// use kastellan_core::worker_lifecycle::{Lifecycle, IdleTimeoutCaps, Contract};
 /// // Out-of-crate struct literal must NOT compile — pinning the issue #86 contract.
 /// let _ = Lifecycle::IdleTimeout {
 ///     caps: IdleTimeoutCaps {
@@ -74,7 +74,7 @@ impl Lifecycle {
     ///
     /// **Out-of-crate callers MUST use this constructor** — the `IdleTimeout` variant
     /// is `#[non_exhaustive]`, so the struct literal `Lifecycle::IdleTimeout { caps,
-    /// contract }` only compiles from inside `hhagent-core` (issue #86). In-crate
+    /// contract }` only compiles from inside `kastellan-core` (issue #86). In-crate
     /// tests that need to plant an invalid value deliberately can still use the
     /// struct literal.
     pub fn idle_timeout(

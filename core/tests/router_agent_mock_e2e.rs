@@ -36,17 +36,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hhagent_core::cassandra::types::DataClass;
-use hhagent_core::entity_extraction::{SeedSource, StaticEntityExtractor};
-use hhagent_core::prompt_assembly::StaticSystemPromptBuilder;
-use hhagent_core::recall_assembly::{
+use kastellan_core::cassandra::types::DataClass;
+use kastellan_core::entity_extraction::{SeedSource, StaticEntityExtractor};
+use kastellan_core::prompt_assembly::StaticSystemPromptBuilder;
+use kastellan_core::recall_assembly::{
     RecallBuilder, RecallError, RecalledContext, StaticRecallBuilder,
 };
-use hhagent_core::scheduler::agent::{AgentError, PlanFormulator, RouterAgent};
-use hhagent_core::scheduler::inner_loop::TaskContext;
-use hhagent_core::scheduler::prompts::{PromptCache, PromptEntry};
-use hhagent_db::tasks::Lane;
-use hhagent_llm_router::{Router, RouterConfig};
+use kastellan_core::scheduler::agent::{AgentError, PlanFormulator, RouterAgent};
+use kastellan_core::scheduler::inner_loop::TaskContext;
+use kastellan_core::scheduler::prompts::{PromptCache, PromptEntry};
+use kastellan_db::tasks::Lane;
+use kastellan_llm_router::{Router, RouterConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -223,7 +223,7 @@ fn ctx() -> TaskContext {
         lane: Lane::Fast,
         instruction: "ping".into(),
         classification_floor: DataClass::Public,
-        classification_floor_source: hhagent_core::scheduler::inner_loop::ClassificationFloorSource::Default,
+        classification_floor_source: kastellan_core::scheduler::inner_loop::ClassificationFloorSource::Default,
         classification_floor_signals: vec![],
         plans: vec![],
         advisories: vec![],
@@ -315,7 +315,7 @@ async fn happy_path_decodes_plan_and_populates_meta() {
         prompts,
         Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
         Arc::new(StaticRecallBuilder::empty()),
-        Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new()),
+        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
     );
 
     let (plan, meta) = agent.formulate_plan(&ctx()).await.expect("happy path");
@@ -478,7 +478,7 @@ async fn decode_error_when_assistant_content_is_not_a_plan() {
         prompts,
         Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
         Arc::new(StaticRecallBuilder::empty()),
-        Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new()),
+        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
     );
 
     let err = agent
@@ -528,7 +528,7 @@ async fn prompt_missing_short_circuits_before_dialing_backend() {
         prompts,
         Arc::new(StaticSystemPromptBuilder::empty()),
         Arc::new(StaticRecallBuilder::empty()),
-        Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new()),
+        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
     );
 
     let err = agent.formulate_plan(&ctx()).await.expect_err("must fail");

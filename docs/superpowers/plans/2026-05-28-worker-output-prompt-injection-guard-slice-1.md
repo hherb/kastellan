@@ -6,7 +6,7 @@
 
 **Architecture:** New module `core::cassandra::injection_guard` with `screen(&str) -> InjectionVerdict` and `extract_scannable_text(&Value, byte_cap) -> (String, bool)`. Called from the single `tool_host::dispatch` chokepoint between `worker.call` and the existing audit insert. Two-tier verdict (`Allow` / `Block`); 22-entry English-substring catalogue across 4 attack classes; per-rule weights summed, cap 1.0, ≥0.70 blocks. `InjectionDecision` is `#[non_exhaustive]` so a future Review tier slots in without breaking callers.
 
-**Tech Stack:** Rust workspace (hhagent-core crate). `sha2` already in workspace deps. No new dependencies. Substring matching post-normalisation (lowercase + zero-width strip). PG-backed integration tests follow the existing `shell_exec_e2e.rs` skip-as-pass pattern.
+**Tech Stack:** Rust workspace (kastellan-core crate). `sha2` already in workspace deps. No new dependencies. Substring matching post-normalisation (lowercase + zero-width strip). PG-backed integration tests follow the existing `shell_exec_e2e.rs` skip-as-pass pattern.
 
 **Spec:** [docs/superpowers/specs/2026-05-28-worker-output-prompt-injection-guard-design.md](../specs/2026-05-28-worker-output-prompt-injection-guard-design.md)
 
@@ -195,7 +195,7 @@ mod tests {
 - [ ] **Step 3: Run the const-pin tests**
 
 ```sh
-cargo test -p hhagent-core --lib cassandra::injection_guard::tests 2>&1 | tail -10
+cargo test -p kastellan-core --lib cassandra::injection_guard::tests 2>&1 | tail -10
 ```
 
 Expected: 2 passed (the const pins).
@@ -203,7 +203,7 @@ Expected: 2 passed (the const pins).
 - [ ] **Step 4: Verify the workspace still compiles (catch the `unimplemented!()` callers if any sibling re-exports broke)**
 
 ```sh
-cargo build -p hhagent-core 2>&1 | tail -10
+cargo build -p kastellan-core 2>&1 | tail -10
 ```
 
 Expected: clean build. The `unimplemented!()` panics are inside `pub fn` bodies so they don't break compilation.
@@ -293,7 +293,7 @@ Add these 5 tests to the existing `#[cfg(test)] mod tests` block in `injection_g
 - [ ] **Step 2: Run the new tests to confirm they fail (the helper still `unimplemented!()`s)**
 
 ```sh
-cargo test -p hhagent-core --lib cassandra::injection_guard::tests::extract_scannable_text 2>&1 | tail -15
+cargo test -p kastellan-core --lib cassandra::injection_guard::tests::extract_scannable_text 2>&1 | tail -15
 ```
 
 Expected: every test fails with a panic on `unimplemented!("filled in by Task 2")`.
@@ -371,7 +371,7 @@ fn walk(value: &Value, out: &mut String, byte_cap: usize) -> bool {
 - [ ] **Step 4: Run the tests again — all 5 must pass plus the 2 const pins**
 
 ```sh
-cargo test -p hhagent-core --lib cassandra::injection_guard::tests 2>&1 | tail -15
+cargo test -p kastellan-core --lib cassandra::injection_guard::tests 2>&1 | tail -15
 ```
 
 Expected: 7 passed (2 const + 5 helper), 0 failed.
@@ -547,7 +547,7 @@ Append these tests to the existing `tests` block in `injection_guard.rs`, after 
 - [ ] **Step 2: Run the new tests to confirm they fail (screen still `unimplemented!()`s)**
 
 ```sh
-cargo test -p hhagent-core --lib cassandra::injection_guard::tests 2>&1 | tail -20
+cargo test -p kastellan-core --lib cassandra::injection_guard::tests 2>&1 | tail -20
 ```
 
 Expected: const + extract tests pass; every `screen_*` and `normalize_*` test fails (either with `unimplemented!()` or with `cannot find function` for `normalize`).
@@ -636,7 +636,7 @@ pub fn screen(text: &str) -> InjectionVerdict {
 - [ ] **Step 4: Run all `injection_guard` tests — all 20 must pass (2 const + 5 extract + 11 screen + 2 normalize)**
 
 ```sh
-cargo test -p hhagent-core --lib cassandra::injection_guard::tests 2>&1 | tail -25
+cargo test -p kastellan-core --lib cassandra::injection_guard::tests 2>&1 | tail -25
 ```
 
 Expected: 20 passed, 0 failed.
@@ -644,7 +644,7 @@ Expected: 20 passed, 0 failed.
 - [ ] **Step 5: Run the full crate test suite to make sure no other test trips on a catalogue phrase**
 
 ```sh
-cargo test -p hhagent-core --lib 2>&1 | grep -E "^test result:" | tail -5
+cargo test -p kastellan-core --lib 2>&1 | grep -E "^test result:" | tail -5
 ```
 
 Expected: same `passed: <N>` as before this slice, plus 20 (the new tests). If any sibling test fails, inspect the failure — most likely a benign fixture string happens to contain `"act as a"` or similar. Mitigate inline by adjusting the fixture string (do NOT loosen the catalogue).
@@ -697,10 +697,10 @@ Create `core/tests/injection_guard_e2e.rs`:
 
 use std::path::PathBuf;
 
-use hhagent_core::cassandra::injection_guard;
-use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use hhagent_core::workspace::Workspace;
-use hhagent_tests_common::{
+use kastellan_core::cassandra::injection_guard;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::workspace::Workspace;
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, policy_for_shell_exec,
     shell_exec_worker_binary, skip_if_no_supervisor, skip_if_sandbox_unavailable,
     unique_suffix, PgCluster,
@@ -1101,7 +1101,7 @@ pub async fn dispatch(
         }),
     };
     if let Err(audit_err) =
-        hhagent_db::audit::insert(pool, &actor, method, audit_payload).await
+        kastellan_db::audit::insert(pool, &actor, method, audit_payload).await
     {
         tracing::error!(
             tool = %tool,
@@ -1129,7 +1129,7 @@ pub async fn dispatch(
             "body_truncated_at_64kib": truncated,
         });
         if let Err(e) =
-            hhagent_db::audit::insert(pool, "policy", "injection.blocked", policy_payload).await
+            kastellan_db::audit::insert(pool, "policy", "injection.blocked", policy_payload).await
         {
             tracing::error!(
                 tool = %tool,
@@ -1176,7 +1176,7 @@ cargo test --workspace 2>&1 | grep -E "^test result:" | awk '{ p+=$4; f+=$6; i+=
 
 Expected on macOS: `passed:1085 failed:0 ignored:3` (+20 unit tests; integration tests skip-pass when PG is absent on this Mac). If any existing test fails, inspect — the most likely culprit is a fixture string that contains a catalogue phrase. Mitigate inline by adjusting the fixture string (do NOT loosen the catalogue).
 
-If your host has PG configured (via `HHAGENT_PG_BIN_DIR` env var), the count would be +26 (+20 unit + 6 integration). Linux DGX: same count or +26 depending on PG.
+If your host has PG configured (via `KASTELLAN_PG_BIN_DIR` env var), the count would be +26 (+20 unit + 6 integration). Linux DGX: same count or +26 depending on PG.
 
 - [ ] **Step 8: Commit Task 4**
 
@@ -1230,7 +1230,7 @@ Expected on macOS: `passed:1085 failed:0 ignored:3` (or `passed:1091` if PG is c
 cargo clippy --workspace --all-targets 2>&1 | grep -E "^warning|^error" | head -20
 ```
 
-Expected: only the 4 pre-existing warnings flagged in HANDOVER (`MutexGuard`-across-await in `manager.rs::_test_slot_*`, doc-list-indent in `db/src/probe.rs`, `io_other_error` in `hhagent-protocol`, `mem_burner` `set_len()`-after-`reserve`). No new warnings from `injection_guard` or `tool_host` changes.
+Expected: only the 4 pre-existing warnings flagged in HANDOVER (`MutexGuard`-across-await in `manager.rs::_test_slot_*`, doc-list-indent in `db/src/probe.rs`, `io_other_error` in `kastellan-protocol`, `mem_burner` `set_len()`-after-`reserve`). No new warnings from `injection_guard` or `tool_host` changes.
 
 - [ ] **Step 3: Update HANDOVER + ROADMAP**
 

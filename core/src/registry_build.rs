@@ -65,7 +65,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// manifest's argv allowlist from the `tool_allowlists` DB table (the only
 /// async step), then delegates to the pure [`assemble_registry`].
 ///
-/// `exe_dir` (the directory of the running `hhagent` binary, from
+/// `exe_dir` (the directory of the running `kastellan` binary, from
 /// `current_exe()`) seeds the exe-relative sibling discovery default; pass
 /// `None` to disable that fallback (override-env-only).
 ///
@@ -74,7 +74,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 pub async fn build_tool_registry(
     pool: &sqlx::PgPool,
     exe_dir: Option<std::path::PathBuf>,
-) -> Result<(ToolRegistry, Vec<LoadedToolRecord>), hhagent_db::DbError> {
+) -> Result<(ToolRegistry, Vec<LoadedToolRecord>), kastellan_db::DbError> {
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -82,20 +82,20 @@ pub async fn build_tool_registry(
     let mut allowlists: HashMap<String, Vec<String>> = HashMap::new();
     for m in WORKER_MANIFESTS {
         if let Some(tool) = m.allowlist_tool() {
-            let al = hhagent_db::tool_allowlists::list_for_tool(pool, tool)
+            let al = kastellan_db::tool_allowlists::list_for_tool(pool, tool)
                 .await
                 .map_err(|e| {
-                    hhagent_db::DbError::Query(format!("loading {tool} allowlist: {e}"))
+                    kastellan_db::DbError::Query(format!("loading {tool} allowlist: {e}"))
                 })?;
             allowlists.insert(tool.to_string(), al);
         }
     }
 
     // Preserve the deprecation breadcrumb for the retired env-var allowlist.
-    if std::env::var_os("HHAGENT_SHELL_EXEC_ALLOWLIST").is_some() {
+    if std::env::var_os("KASTELLAN_SHELL_EXEC_ALLOWLIST").is_some() {
         tracing::warn!(
-            "HHAGENT_SHELL_EXEC_ALLOWLIST is no longer honored; \
-             use 'hhagent-cli tools allowlist add <tool> <argv0>' to populate the DB"
+            "KASTELLAN_SHELL_EXEC_ALLOWLIST is no longer honored; \
+             use 'kastellan-cli tools allowlist add <tool> <argv0>' to populate the DB"
         );
     }
 
@@ -117,7 +117,7 @@ pub async fn build_tool_registry(
 }
 
 /// Pure payload builder for the `registry.loaded` audit row. The daemon
-/// calls this then `hhagent_db::audit::insert`; the CLI never does.
+/// calls this then `kastellan_db::audit::insert`; the CLI never does.
 pub fn build_registry_loaded_payload(tools: &[LoadedToolRecord]) -> serde_json::Value {
     serde_json::json!({ "tools": tools })
 }
@@ -315,8 +315,8 @@ mod tests {
     #[test]
     fn shell_exec_registers_with_no_override_env_via_exe_sibling() {
         let exe_dir = PathBuf::from("/install/bin");
-        let sibling = exe_dir.join("hhagent-worker-shell-exec");
-        // No HHAGENT_SHELL_EXEC_BIN; only the sibling exists.
+        let sibling = exe_dir.join("kastellan-worker-shell-exec");
+        // No KASTELLAN_SHELL_EXEC_BIN; only the sibling exists.
         let get_env = |_k: &str| None;
         let exists = {
             let sibling = sibling.clone();

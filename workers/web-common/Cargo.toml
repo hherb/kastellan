@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-worker-web-common"
+name        = "kastellan-worker-web-common"
 description = "Shared building blocks for net-egress tool workers: host allowlist matcher + capped HTTP transport seam."
 version.workspace      = true
 edition.workspace      = true

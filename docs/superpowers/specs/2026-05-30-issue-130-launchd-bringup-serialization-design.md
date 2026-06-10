@@ -1,12 +1,12 @@
 # Issue #130 — serialize launchd bring-up in `bring_up_pg_cluster` (macOS)
 
 **Date:** 2026-05-30
-**Issue:** [#130](https://github.com/hherb/hhagent/issues/130) — parallel-launchd bring-up contention under `HHAGENT_PG_BIN_DIR` override
-**Scope:** test-infra only (`hhagent-tests-common`); no production code touched.
+**Issue:** [#130](https://github.com/hherb/kastellan/issues/130) — parallel-launchd bring-up contention under `KASTELLAN_PG_BIN_DIR` override
+**Scope:** test-infra only (`kastellan-tests-common`); no production code touched.
 
 ## Problem
 
-When `HHAGENT_PG_BIN_DIR` points at a Postgres.app `bin/` and the full
+When `KASTELLAN_PG_BIN_DIR` points at a Postgres.app `bin/` and the full
 workspace runs (`cargo test --workspace`), some `*_e2e.rs` tests time out at
 `pg active: timeout 30s; last=Inactive`, even though each file passes
 individually under the same override. Widening the 30 s cap
@@ -108,12 +108,12 @@ hang under live PG if `bring_up`'s lock were not reentrant.
 
 ## Verification
 
-- `cargo test -p hhagent-tests-common` — the two new `serial` tests pass.
+- `cargo test -p kastellan-tests-common` — the two new `serial` tests pass.
 - `cargo test --workspace` — stays **1153 / 0 / 3** on macOS (no behavior delta
-  to existing tests; skip-as-pass posture without `HHAGENT_PG_BIN_DIR`).
+  to existing tests; skip-as-pass posture without `KASTELLAN_PG_BIN_DIR`).
 - `cargo clippy --workspace --all-targets -- -D warnings` — exit 0 (macOS 1.96).
 - Optional operator validation: full-workspace run with
-  `HHAGENT_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin/'`
+  `KASTELLAN_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin/'`
   to confirm the flake is gone (and the `--test-threads=1` workaround is no
   longer required).
 
@@ -128,7 +128,7 @@ Two deviations surfaced during implementation; both operator-approved:
    dev-dependency of `tests-common`. Same semantics (reentrant, no poison).
 
 2. **Bundled fix for a separate bug found during live validation
-   ([#163](https://github.com/hherb/hhagent/issues/163)).** Validating live
+   ([#163](https://github.com/hherb/kastellan/issues/163)).** Validating live
    against Postgres.app v18 revealed `injection_guard_e2e` could never come up
    live — but the cause was *not* #130 contention (it reproduces with
    `--test-threads=1`). Its fixture built an over-long data label, overflowing

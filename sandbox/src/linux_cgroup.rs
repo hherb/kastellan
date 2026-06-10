@@ -29,9 +29,9 @@
 //!
 //! What this module does NOT enforce (handled elsewhere):
 //!   - `policy.cpu_ms` is enforced via `setrlimit(RLIMIT_CPU)` from
-//!     [`hhagent_worker_prelude::rlimit::apply_from_env`] (cross-platform,
+//!     [`kastellan_worker_prelude::rlimit::apply_from_env`] (cross-platform,
 //!     POSIX), called from `serve_stdio` before `lock_down`. The
-//!     `HHAGENT_CPU_MS` env var is set on the policy by
+//!     `KASTELLAN_CPU_MS` env var is set on the policy by
 //!     `core::tool_host::derive_lockdown_env` from `policy.cpu_ms`.
 //!     cgroup v2 has no direct CPU-seconds-budget primitive (its CPU
 //!     primitive is bandwidth, not budget), so the rlimit path is the

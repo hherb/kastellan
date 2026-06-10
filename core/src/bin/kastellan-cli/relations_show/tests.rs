@@ -78,7 +78,7 @@ fn parse_show_args_rejects_depth_zero() {
 
 #[test]
 fn parse_show_args_rejects_depth_above_cap() {
-    let too_deep = hhagent_db::graph::MAX_WALK_DEPTH + 1;
+    let too_deep = kastellan_db::graph::MAX_WALK_DEPTH + 1;
     let err = parse_show_args(&args(&["42", "--depth", &too_deep.to_string()])).unwrap_err();
     assert!(
         err.contains("exceeds cap"),
@@ -168,7 +168,7 @@ fn endpoint_str_escapes_backslash_before_quote() {
 
 #[test]
 fn edge_to_json_emits_canonical_fields() {
-    use hhagent_db::graph::WalkedEdge;
+    use kastellan_db::graph::WalkedEdge;
     let e = WalkedEdge {
         depth: 2,
         edge_id: 17,

@@ -2,7 +2,7 @@
 //!
 //! These serde structs match, field-for-field, the JSON the Python
 //! worker produces/consumes (see
-//! `workers/gliner-relex/src/hhagent_worker_gliner_relex/server.py`
+//! `workers/gliner-relex/src/kastellan_worker_gliner_relex/server.py`
 //! for the producing side + `workers/gliner-relex/README.md` for the
 //! field-by-field shape table). They carry no behaviour beyond
 //! (de)serialisation, so they live in their own leaf module with the
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Pinned to the matching `MAX_ENTITY_LABELS` constant on the Python
 /// side at
-/// `workers/gliner-relex/src/hhagent_worker_gliner_relex/server.py`.
+/// `workers/gliner-relex/src/kastellan_worker_gliner_relex/server.py`.
 /// Bumping either side requires bumping both: the Python validator
 /// will reject inputs the Rust caller could otherwise generate.
 pub const MAX_ENTITY_LABELS: usize = 64;

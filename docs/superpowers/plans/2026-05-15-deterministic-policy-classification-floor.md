@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land the first real Stage 0 reviewer rule (data-classification invariant check) plus a `hhagent-cli ask --classification-floor` flag so operators can pin the task-level floor at submission.
+**Goal:** Land the first real Stage 0 reviewer rule (data-classification invariant check) plus a `kastellan-cli ask --classification-floor` flag so operators can pin the task-level floor at submission.
 
-**Architecture:** Two pieces in one branch. (1) New pure module `core/src/cassandra/deterministic.rs` exporting `ClassificationViolation` enum + `screen_plan_for_classification_violations(plan, floor)` over the typed `DataClass` fields already on `Plan`/`PlannedStep`/`ReviewStageContext`. Checks three invariants in declared order, first hit wins. (2) `DeterministicPolicy::review` wired to the helper; `Verdict::Block(violation.format_reason())` on a hit. (3) `--classification-floor <DataClass>` flag added to `hhagent-cli ask`'s arg loop; serialises into `tasks.payload.classification_floor` as PascalCase (already read by `runner.rs:283-296` via serde).
+**Architecture:** Two pieces in one branch. (1) New pure module `core/src/cassandra/deterministic.rs` exporting `ClassificationViolation` enum + `screen_plan_for_classification_violations(plan, floor)` over the typed `DataClass` fields already on `Plan`/`PlannedStep`/`ReviewStageContext`. Checks three invariants in declared order, first hit wins. (2) `DeterministicPolicy::review` wired to the helper; `Verdict::Block(violation.format_reason())` on a hit. (3) `--classification-floor <DataClass>` flag added to `kastellan-cli ask`'s arg loop; serialises into `tasks.payload.classification_floor` as PascalCase (already read by `runner.rs:283-296` via serde).
 
 **Tech Stack:** Rust 2021, sync code (the pure module is non-async; the trait method is async per `ReviewStage`), `serde` for case-insensitive parsing, no new deps. Existing test harness (`#[tokio::test]` for the async trait, plain `#[test]` for the pure helpers).
 
@@ -19,10 +19,10 @@
 - **Create:** `core/src/cassandra/deterministic.rs` — pure invariant-check module; ~250 LOC (~120 production + ~130 tests). Public surface: `ClassificationViolation` enum + `screen_plan_for_classification_violations` + helper methods on the enum.
 - **Modify:** `core/src/cassandra/mod.rs` — add `pub mod deterministic;` declaration (1 line).
 - **Modify:** `core/src/cassandra/review.rs` — fill in `DeterministicPolicy::review` body; module-level doc updated; replace `deterministic_policy_is_still_a_stub` test with two new tests pinning the real behaviour.
-- **Modify:** `core/src/bin/hhagent-cli.rs` — new `parse_classification_floor` pure helper; new `--classification-floor` branch in `run_ask`'s arg loop; pass floor into `ask_async` (signature widening); add helper-tests module; update help text.
+- **Modify:** `core/src/bin/kastellan-cli.rs` — new `parse_classification_floor` pure helper; new `--classification-floor` branch in `run_ask`'s arg loop; pass floor into `ask_async` (signature widening); add helper-tests module; update help text.
 - **Modify:** `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — session-end update at the end.
 
-**File-size watch:** `core/src/cassandra/deterministic.rs` will land at ~250 LOC, well under the 500-LOC soft cap. `core/src/bin/hhagent-cli.rs` was 797 LOC before Slice B (already over the cap, flagged for future split into one-file-per-subcommand) — this slice adds ~80 LOC; not warranting a split today but the natural future shape (`run_ask` → `core/src/bin/hhagent-cli/ask.rs`) gets one step closer.
+**File-size watch:** `core/src/cassandra/deterministic.rs` will land at ~250 LOC, well under the 500-LOC soft cap. `core/src/bin/kastellan-cli.rs` was 797 LOC before Slice B (already over the cap, flagged for future split into one-file-per-subcommand) — this slice adds ~80 LOC; not warranting a split today but the natural future shape (`run_ask` → `core/src/bin/kastellan-cli/ask.rs`) gets one step closer.
 
 ---
 
@@ -34,7 +34,7 @@ Before starting, skim these in order so the surrounding contract is in context:
 2. **Type surface:** [core/src/cassandra/types.rs](../../../core/src/cassandra/types.rs) — read `DataClass` (lines 21-40), `PlannedStep.classification` (line 59), `Plan.data_ceiling` (line 90), the invariant comment at lines 105-110, and `Verdict::Block(String)` (line 136).
 3. **Mirror module — `ConstitutionalGuard`:** [core/src/cassandra/constitutional.rs](../../../core/src/cassandra/constitutional.rs) — note the module-doc structure (4 sections: why a separate module / scope / in-scope / out-of-scope), the pure helper signature pattern, the `mod tests` layout with verbatim fixture prompts as `const &str`. The new `deterministic.rs` should mirror this shape.
 4. **Mirror trait wiring — `ConstitutionalGuard::review`:** [core/src/cassandra/review.rs:87-100](../../../core/src/cassandra/review.rs#L87-L100) — three-line match body. `DeterministicPolicy::review` should be the same shape.
-5. **CLI arg-loop pattern:** [core/src/bin/hhagent-cli.rs:222-247](../../../core/src/bin/hhagent-cli.rs#L222-L247) (the `run_ask` body) plus [core/src/bin/hhagent-cli.rs:114-140](../../../core/src/bin/hhagent-cli.rs#L114-L140) (`run_audit_tail` as a flag-with-value pattern reference).
+5. **CLI arg-loop pattern:** [core/src/bin/kastellan-cli.rs:222-247](../../../core/src/bin/kastellan-cli.rs#L222-L247) (the `run_ask` body) plus [core/src/bin/kastellan-cli.rs:114-140](../../../core/src/bin/kastellan-cli.rs#L114-L140) (`run_audit_tail` as a flag-with-value pattern reference).
 6. **Floor read path:** [core/src/scheduler/runner.rs:283-296](../../../core/src/scheduler/runner.rs#L283-L296) — the existing `task.payload.classification_floor` reader uses serde directly on the PascalCase string. The CLI flag just needs to write the same shape.
 
 **Build/test:**
@@ -42,8 +42,8 @@ Before starting, skim these in order so the surrounding contract is in context:
 source "$HOME/.cargo/env"
 cargo build --workspace
 cargo test --workspace                            # 519 expected at start
-cargo test -p hhagent-core cassandra::            # subset for fast iteration
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e
+cargo test -p kastellan-core cassandra::            # subset for fast iteration
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e
 ```
 
 **Branch already created; no extra setup needed.**
@@ -101,7 +101,7 @@ Create `core/src/cassandra/deterministic.rs` with this exact content (the body c
 //! ## Out of scope (filed as follow-ups)
 //!
 //! - **Automatic floor inference from prompt keywords.** The floor is
-//!   operator-pinned via `hhagent-cli ask --classification-floor`.
+//!   operator-pinned via `kastellan-cli ask --classification-floor`.
 //!   Inferring it from instruction text is a separate slice.
 //! - **Anonymiser / declassifier mechanism.** A step that legitimately
 //!   downgrades classification (e.g. a "summarise without identifiers"
@@ -286,7 +286,7 @@ pub mod types;
 
 - [ ] **Step 2: Run the new tests — expect them to GREEN immediately**
 
-Run: `cargo test -p hhagent-core --lib cassandra::deterministic`
+Run: `cargo test -p kastellan-core --lib cassandra::deterministic`
 
 Expected: 4 passed (`reason_tag_is_stable_for_each_variant`, `format_reason_includes_tag_prefix_and_struct_values_i1`, `format_reason_includes_step_index_for_per_step_variants`, `scaffold_screen_returns_none_today`).
 
@@ -579,7 +579,7 @@ Open `core/src/cassandra/deterministic.rs`. Find the `#[cfg(test)] mod tests` bl
 
 - [ ] **Step 2: Run the new tests — expect them to FAIL**
 
-Run: `cargo test -p hhagent-core --lib cassandra::deterministic`
+Run: `cargo test -p kastellan-core --lib cassandra::deterministic`
 
 Expected: 11 PASS (the 3 enum-shape tests from Task 1) + 11 FAIL (the new screen tests above all expect `Some(...)` but the body still returns `None`).
 
@@ -641,7 +641,7 @@ Also update the doc-comment on the function (lines just above) — it currently 
 
 - [ ] **Step 4: Run the tests — expect ALL to PASS**
 
-Run: `cargo test -p hhagent-core --lib cassandra::deterministic`
+Run: `cargo test -p kastellan-core --lib cassandra::deterministic`
 
 Expected: 14 passed, 0 failed (the 3 enum-shape tests from Task 1 + 11 new screen tests).
 
@@ -846,7 +846,7 @@ Also delete the existing `deterministic_policy_is_still_a_stub` test (it's now w
 
 - [ ] **Step 3: Run the new tests — expect them to FAIL**
 
-Run: `cargo test -p hhagent-core --lib cassandra::review`
+Run: `cargo test -p kastellan-core --lib cassandra::review`
 
 Expected: `deterministic_policy_approves_valid_plan` PASS (the stub still returns Approve, matching). The three `deterministic_policy_blocks_*` tests FAIL (stub returns Approve; tests expect Block).
 
@@ -886,7 +886,7 @@ Replace with:
 ///   plan-internal consistency.
 ///
 /// The floor is operator-pinned at task submission via
-/// `hhagent-cli ask --classification-floor <DataClass>` (field
+/// `kastellan-cli ask --classification-floor <DataClass>` (field
 /// `tasks.payload.classification_floor`; default `Public`). Automatic
 /// floor inference from prompt text is a separate slice.
 pub struct DeterministicPolicy;
@@ -907,7 +907,7 @@ impl ReviewStage for DeterministicPolicy {
 
 - [ ] **Step 5: Run the tests — expect ALL to PASS**
 
-Run: `cargo test -p hhagent-core --lib cassandra::review`
+Run: `cargo test -p kastellan-core --lib cassandra::review`
 
 Expected: all tests in `cassandra::review::tests` pass, including the 4 new DP tests.
 
@@ -954,13 +954,13 @@ EOF
 ### Task 4: `parse_classification_floor` pure helper
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli.rs` (add helper + its tests, no flag wiring yet)
+- Modify: `core/src/bin/kastellan-cli.rs` (add helper + its tests, no flag wiring yet)
 
 Land the case-insensitive parser as a pure helper with its own unit tests, separately from the CLI arg-loop integration. This way the parser's contract is locked before we touch `run_ask`.
 
 - [ ] **Step 1: Locate the insertion point**
 
-Open `core/src/bin/hhagent-cli.rs`. Find the `fn run_ask(...)` function (around line 222). The helper goes immediately above `run_ask`, before its comment-header banner. Find `// ---------------------------------------------------------------------------` (the banner just above `// ---------------------------------------------------------------------------` around lines 218-221) — insert there.
+Open `core/src/bin/kastellan-cli.rs`. Find the `fn run_ask(...)` function (around line 222). The helper goes immediately above `run_ask`, before its comment-header banner. Find `// ---------------------------------------------------------------------------` (the banner just above `// ---------------------------------------------------------------------------` around lines 218-221) — insert there.
 
 - [ ] **Step 2: Add the failing test module**
 
@@ -970,7 +970,7 @@ Append a new `#[cfg(test)] mod parse_classification_floor_tests` block at the en
 #[cfg(test)]
 mod parse_classification_floor_tests {
     use super::parse_classification_floor;
-    use hhagent_core::cassandra::DataClass;
+    use kastellan_core::cassandra::DataClass;
 
     #[test]
     fn accepts_canonical_pascal_case() {
@@ -1023,7 +1023,7 @@ mod parse_classification_floor_tests {
 
 - [ ] **Step 3: Run the tests — expect compile FAIL (helper doesn't exist yet)**
 
-Run: `cargo test -p hhagent-core --bin hhagent-cli parse_classification_floor`
+Run: `cargo test -p kastellan-core --bin kastellan-cli parse_classification_floor`
 
 Expected: compile error `cannot find function parse_classification_floor in this scope`. That's the RED signal.
 
@@ -1045,8 +1045,8 @@ Insert the following function just above the `// -------------------------------
 /// one step.
 pub(crate) fn parse_classification_floor(
     raw: &str,
-) -> Result<hhagent_core::cassandra::DataClass, String> {
-    use hhagent_core::cassandra::DataClass;
+) -> Result<kastellan_core::cassandra::DataClass, String> {
+    use kastellan_core::cassandra::DataClass;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(
@@ -1074,7 +1074,7 @@ pub(crate) fn parse_classification_floor(
 
 - [ ] **Step 5: Run the tests — expect ALL to PASS**
 
-Run: `cargo test -p hhagent-core --bin hhagent-cli parse_classification_floor`
+Run: `cargo test -p kastellan-core --bin kastellan-cli parse_classification_floor`
 
 Expected: 7 passed, 0 failed.
 
@@ -1087,7 +1087,7 @@ Expected: every line `ok`; total = **543** (536 + 7).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli.rs
+git add core/src/bin/kastellan-cli.rs
 git commit -m "$(cat <<'EOF'
 feat(cli): parse_classification_floor pure helper
 
@@ -1113,19 +1113,19 @@ EOF
 ### Task 5: Wire `--classification-floor` into `run_ask`
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli.rs` (`run_ask` arg loop + `ask_async` signature + help text + usage line)
+- Modify: `core/src/bin/kastellan-cli.rs` (`run_ask` arg loop + `ask_async` signature + help text + usage line)
 
 Plumb the parsed floor through `run_ask` → `ask_async` → the submit payload JSON.
 
 - [ ] **Step 1: Widen `ask_async` to accept the floor**
 
-In `core/src/bin/hhagent-cli.rs`, find `async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCode` (around line 265). Widen its signature to take an optional floor:
+In `core/src/bin/kastellan-cli.rs`, find `async fn ask_async(lane: kastellan_db::tasks::Lane, instruction: String) -> ExitCode` (around line 265). Widen its signature to take an optional floor:
 
 ```rust
 async fn ask_async(
-    lane: hhagent_db::tasks::Lane,
+    lane: kastellan_db::tasks::Lane,
     instruction: String,
-    floor: Option<hhagent_core::cassandra::DataClass>,
+    floor: Option<kastellan_core::cassandra::DataClass>,
 ) -> ExitCode {
 ```
 
@@ -1163,13 +1163,13 @@ Find the arg-loop block (lines 222-243 today):
 
 ```rust
 fn run_ask(args: &[String]) -> ExitCode {
-    let mut lane = hhagent_db::tasks::Lane::Fast;
+    let mut lane = kastellan_db::tasks::Lane::Fast;
     let mut instruction: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--long" => { lane = hhagent_db::tasks::Lane::Long; }
-            "--fast" => { lane = hhagent_db::tasks::Lane::Fast; }
+            "--long" => { lane = kastellan_db::tasks::Lane::Long; }
+            "--fast" => { lane = kastellan_db::tasks::Lane::Fast; }
             other if other.starts_with("--") => {
                 eprintln!("ask: unknown flag {other}");
                 return ExitCode::from(2);
@@ -1190,14 +1190,14 @@ Replace with:
 
 ```rust
 fn run_ask(args: &[String]) -> ExitCode {
-    let mut lane = hhagent_db::tasks::Lane::Fast;
-    let mut floor: Option<hhagent_core::cassandra::DataClass> = None;
+    let mut lane = kastellan_db::tasks::Lane::Fast;
+    let mut floor: Option<kastellan_core::cassandra::DataClass> = None;
     let mut instruction: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--long" => { lane = hhagent_db::tasks::Lane::Long; }
-            "--fast" => { lane = hhagent_db::tasks::Lane::Fast; }
+            "--long" => { lane = kastellan_db::tasks::Lane::Long; }
+            "--fast" => { lane = kastellan_db::tasks::Lane::Fast; }
             "--classification-floor" => {
                 i += 1;
                 let Some(val) = args.get(i) else {
@@ -1239,13 +1239,13 @@ rt.block_on(ask_async(lane, instruction, floor))
 In `help_text()` (lines 79-112), the relevant block currently reads:
 
 ```
-    hhagent-cli ask "<instruction>" [--fast|--long]
+    kastellan-cli ask "<instruction>" [--fast|--long]
 ```
 
 Replace with:
 
 ```
-    hhagent-cli ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]
+    kastellan-cli ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]
 ```
 
 And add a new `flags (ask):` section just before `flags (audit tail):`:
@@ -1266,29 +1266,29 @@ flags (ask):
 Also update the usage line at the top of `run_ask` (line 245):
 
 ```rust
-eprintln!("usage: hhagent-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]");
+eprintln!("usage: kastellan-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]");
 ```
 
 - [ ] **Step 4: Build and smoke-test the CLI manually**
 
-Run: `cargo build --bin hhagent-cli`
+Run: `cargo build --bin kastellan-cli`
 
 Expected: clean build.
 
 Run a few flag-parsing smoke commands (they will return exit 1 because there's no daemon, but the flag should be accepted):
 
 ```sh
-./target/debug/hhagent-cli ask --help 2>&1 | head -20
-./target/debug/hhagent-cli ask --classification-floor 2>&1 | head -5   # expect: requires a value, exit 2
-./target/debug/hhagent-cli ask --classification-floor topsecret "x" 2>&1 | head -5  # expect: unknown value, exit 2
-./target/debug/hhagent-cli ask --classification-floor clinical-confidential "x" 2>&1 | head -5  # expect: db connect failure (no daemon), exit 1, but NOT a parse error
+./target/debug/kastellan-cli ask --help 2>&1 | head -20
+./target/debug/kastellan-cli ask --classification-floor 2>&1 | head -5   # expect: requires a value, exit 2
+./target/debug/kastellan-cli ask --classification-floor topsecret "x" 2>&1 | head -5  # expect: unknown value, exit 2
+./target/debug/kastellan-cli ask --classification-floor clinical-confidential "x" 2>&1 | head -5  # expect: db connect failure (no daemon), exit 1, but NOT a parse error
 ```
 
 If any of those produce the wrong exit code or message, fix and re-run.
 
 - [ ] **Step 5: Run the existing CLI integration tests — confirm no regressions**
 
-Run: `cargo test -p hhagent-core --test cli_ask_e2e 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core --test cli_ask_e2e 2>&1 | tail -10`
 
 Expected: same pass/skip behaviour as on `main`. The existing tests don't use `--classification-floor` (default Public preserved); their assertions don't change.
 
@@ -1299,9 +1299,9 @@ Expected: every line `ok`; total = **543** (no new tests in this task — the he
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli.rs
+git add core/src/bin/kastellan-cli.rs
 git commit -m "$(cat <<'EOF'
-feat(cli): hhagent-cli ask --classification-floor flag
+feat(cli): kastellan-cli ask --classification-floor flag
 
 Pins the task-level DataClass at submission so the new Stage 0
 reviewer rule has a non-default floor to check against.
@@ -1340,7 +1340,7 @@ End-of-session brief update so the next session can resume cold.
 
 Open `docs/devel/handovers/HANDOVER.md`. Update the top three lines:
 
-- `**Last updated:**` — bump to today's date, summary line: "first real `DeterministicPolicy` rule shipped: data-classification invariant check + `hhagent-cli ask --classification-floor`".
+- `**Last updated:**` — bump to today's date, summary line: "first real `DeterministicPolicy` rule shipped: data-classification invariant check + `kastellan-cli ask --classification-floor`".
 - `**Last commit (main):**` — leave as-is until merge; will be updated post-PR.
 - `**Session-end working state:**` — note workspace test count at **543**, file LOC for `deterministic.rs` (~250), the branch state.
 
@@ -1351,14 +1351,14 @@ Insert a new section at the top of the "Recently completed" stack (right after t
 ```markdown
 ## Recently completed (this session, 2026-05-15 — first real `DeterministicPolicy` rule, branch `feat/deterministic-policy-classification`)
 
-Branch: `feat/deterministic-policy-classification` (off `main` at `67d29a0`). The first real Stage 0 reviewer rule: a deterministic check enforcing three classification invariants over `(ctx.classification_floor, plan.data_ceiling, plan.steps[].classification)`. Paired with a small CLI flag (`hhagent-cli ask --classification-floor <DataClass>`) so operators can pin the floor at task submission — the minimum-viable upstream path for the rule to fire end-to-end in production. Stage 0 was always-`Approve` before this slice; the chain now has two real reviewers.
+Branch: `feat/deterministic-policy-classification` (off `main` at `67d29a0`). The first real Stage 0 reviewer rule: a deterministic check enforcing three classification invariants over `(ctx.classification_floor, plan.data_ceiling, plan.steps[].classification)`. Paired with a small CLI flag (`kastellan-cli ask --classification-floor <DataClass>`) so operators can pin the floor at task submission — the minimum-viable upstream path for the rule to fire end-to-end in production. Stage 0 was always-`Approve` before this slice; the chain now has two real reviewers.
 
 **Shape (1 NEW module + 3 modified files + 24 new tests):**
 
 - **NEW `core/src/cassandra/deterministic.rs`** (~250 LOC, ~120 production + ~130 tests). Pure helper `screen_plan_for_classification_violations(plan: &Plan, floor: DataClass) -> Option<ClassificationViolation>`. Three invariants checked in declared order (I1 ceiling≥floor, I2 every step≥floor, I3 every step≤ceiling); first hit wins; within per-step invariants, lowest step_index wins. `ClassificationViolation` enum carries structured detail per violation (struct values); `reason_tag()` returns a snake_case identifier for grep-ability; `format_reason()` returns a `"data-classification: <tag> — ..."` prefixed string used as the `Verdict::Block` payload.
 - **`core/src/cassandra/mod.rs`** — `pub mod deterministic;` declaration.
 - **`core/src/cassandra/review.rs`** — `DeterministicPolicy::review` body filled in; module-level doc updated (DP is no longer a stub); `deterministic_policy_is_still_a_stub` test deleted and replaced with 4 new tests (`deterministic_policy_approves_valid_plan` + one per invariant).
-- **`core/src/bin/hhagent-cli.rs`** — new pure helper `parse_classification_floor(raw: &str)` (case-insensitive; accepts PascalCase, lowercase, UPPERCASE, snake_case, hyphenated, space-separated; rejects empty + unknown with a "valid values: ..." message). New `--classification-floor` flag in `run_ask`'s arg loop; `ask_async` signature widened; payload conditionally gains `classification_floor: "<PascalCase>"` when set. Help text + usage line updated.
+- **`core/src/bin/kastellan-cli.rs`** — new pure helper `parse_classification_floor(raw: &str)` (case-insensitive; accepts PascalCase, lowercase, UPPERCASE, snake_case, hyphenated, space-separated; rejects empty + unknown with a "valid values: ..." message). New `--classification-floor` flag in `run_ask`'s arg loop; `ask_async` signature widened; payload conditionally gains `classification_floor: "<PascalCase>"` when set. Help text + usage line updated.
 
 **Verdict + audit-row shape (the headline):**
 
@@ -1383,11 +1383,11 @@ DP violations surface as `Verdict::Block(String)` where the string carries the s
 - **No retroactive verdict on existing audit-log rows.**
 - **No CLI short-form flag.** Long form only.
 - **No subprocess test for the new flag.** Helper-level unit tests + manual smoke cover it; an e2e subprocess test would require a real daemon submit-and-cancel flow which `cli_ask_e2e` already exercises at the default floor.
-- **No end-to-end fire against ec-001 in CI.** Captures retain `plan_json: null` (pre-Slice-A shape); recapture is one-time operator action that unblocks `hhagent-cli observation replay` against the fixture.
+- **No end-to-end fire against ec-001 in CI.** Captures retain `plan_json: null` (pre-Slice-A shape); recapture is one-time operator action that unblocks `kastellan-cli observation replay` against the fixture.
 
 **Open follow-up surfaces (not blocking):**
 
-- **Operator recapture against current daemon** to expose plan bodies; afterwards, `hhagent-cli observation replay --classification-floor` (separate flag — TBD) against ec-001 with the floor pinned will produce a `*` delta row showing the rule firing.
+- **Operator recapture against current daemon** to expose plan bodies; afterwards, `kastellan-cli observation replay --classification-floor` (separate flag — TBD) against ec-001 with the floor pinned will produce a `*` delta row showing the rule firing.
 - **Automatic floor inference** as a separate slice (planner-prompt hint or a CLI-side prompt-keyword classifier).
 - **Stage 0 rule catalogue growth.** Future rules (outbound-destination policy, per-tool classification deny-lists) land alongside the invariant check; if `deterministic.rs` grows past the 500-LOC soft cap, split per rule family behind a `deterministic/mod.rs` facade.
 
@@ -1395,7 +1395,7 @@ DP violations surface as `Verdict::Block(String)` where the string carries the s
 - NEW `core/src/cassandra/deterministic.rs` (~250 LOC).
 - `core/src/cassandra/mod.rs` — module declaration.
 - `core/src/cassandra/review.rs` — DP body filled, doc updated, +4/−1 tests.
-- `core/src/bin/hhagent-cli.rs` — helper + flag + help text + usage line.
+- `core/src/bin/kastellan-cli.rs` — helper + flag + help text + usage line.
 - `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
 
 ---
@@ -1406,7 +1406,7 @@ DP violations surface as `Verdict::Block(String)` where the string carries the s
 In HANDOVER.md, find the "★ Next concrete engineering pickup — First real `DeterministicPolicy` rule" bullet (around line 1678). Strike it through and annotate as shipped:
 
 ```
-- ~~**★ Next concrete engineering pickup — First real `DeterministicPolicy` rule**~~ **Shipped this session 2026-05-15** on branch `feat/deterministic-policy-classification`. See "Recently completed (this session)" entry above. **Next concrete pickup: operator recapture against the current daemon** — one-time action (`cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture`) that turns the pre-Slice-A capture JSONs into rule-iteration-harness-replayable inputs. Until recapture lands, the existing captures stay at `plan_json: null` and the harness skips them. After recapture, the natural follow-up engineering slice is automatic-floor-inference (either a planner-prompt hint or a CLI-side prompt-keyword classifier) so non-clinical operators don't have to remember the `--classification-floor` flag.
+- ~~**★ Next concrete engineering pickup — First real `DeterministicPolicy` rule**~~ **Shipped this session 2026-05-15** on branch `feat/deterministic-policy-classification`. See "Recently completed (this session)" entry above. **Next concrete pickup: operator recapture against the current daemon** — one-time action (`cargo test -p kastellan-core --test observation_capture -- --ignored --nocapture`) that turns the pre-Slice-A capture JSONs into rule-iteration-harness-replayable inputs. Until recapture lands, the existing captures stay at `plan_json: null` and the harness skips them. After recapture, the natural follow-up engineering slice is automatic-floor-inference (either a planner-prompt hint or a CLI-side prompt-keyword classifier) so non-clinical operators don't have to remember the `--classification-floor` flag.
 ```
 
 - [ ] **Step 4: Update ROADMAP.md**
@@ -1414,7 +1414,7 @@ In HANDOVER.md, find the "★ Next concrete engineering pickup — First real `D
 In `docs/devel/ROADMAP.md`, find the bullet currently reading `- [ ] **[follow-up] Real DeterministicPolicy rule(s)** — design step-level rule-sets...` (around line 96). Replace with:
 
 ```
-- [x] **[follow-up] First real `DeterministicPolicy` rule (data-classification invariant)** — landed 2026-05-15 on branch `feat/deterministic-policy-classification`. New pure module `core::cassandra::deterministic` ships `screen_plan_for_classification_violations(plan: &Plan, floor: DataClass) -> Option<ClassificationViolation>` — three invariants over the typed `DataClass` fields already on `Plan`/`PlannedStep`/`ReviewStageContext`: I1 (`plan.data_ceiling >= floor`), I2 (every `step.classification >= floor`), I3 (every `step.classification <= plan.data_ceiling`). Declared-order precedence; first hit wins; within per-step invariants, lowest step_index wins. `ClassificationViolation` enum carries structured detail per violation; `reason_tag()` returns a snake_case identifier (`ceiling_below_floor` / `step_classification_below_floor` / `step_classification_above_ceiling`); `format_reason()` returns a `"data-classification: <tag> — ..."` prefixed string used as `Verdict::Block` payload. `DeterministicPolicy::review` calls the helper on `(plan, ctx.classification_floor)` and maps `Some(v)` → `Verdict::Block(v.format_reason())`, `None` → `Verdict::Approve`. Paired with `hhagent-cli ask --classification-floor <DataClass>` — new pure helper `parse_classification_floor` (case-insensitive, accepts PascalCase/lowercase/UPPERCASE/snake_case/hyphenated/space-separated; rejects unknown + empty with `"valid values: ..."` messages). Default behaviour unchanged (Public, payload field omitted). 24 new tests; workspace 519 → 543.
+- [x] **[follow-up] First real `DeterministicPolicy` rule (data-classification invariant)** — landed 2026-05-15 on branch `feat/deterministic-policy-classification`. New pure module `core::cassandra::deterministic` ships `screen_plan_for_classification_violations(plan: &Plan, floor: DataClass) -> Option<ClassificationViolation>` — three invariants over the typed `DataClass` fields already on `Plan`/`PlannedStep`/`ReviewStageContext`: I1 (`plan.data_ceiling >= floor`), I2 (every `step.classification >= floor`), I3 (every `step.classification <= plan.data_ceiling`). Declared-order precedence; first hit wins; within per-step invariants, lowest step_index wins. `ClassificationViolation` enum carries structured detail per violation; `reason_tag()` returns a snake_case identifier (`ceiling_below_floor` / `step_classification_below_floor` / `step_classification_above_ceiling`); `format_reason()` returns a `"data-classification: <tag> — ..."` prefixed string used as `Verdict::Block` payload. `DeterministicPolicy::review` calls the helper on `(plan, ctx.classification_floor)` and maps `Some(v)` → `Verdict::Block(v.format_reason())`, `None` → `Verdict::Approve`. Paired with `kastellan-cli ask --classification-floor <DataClass>` — new pure helper `parse_classification_floor` (case-insensitive, accepts PascalCase/lowercase/UPPERCASE/snake_case/hyphenated/space-separated; rejects unknown + empty with `"valid values: ..."` messages). Default behaviour unchanged (Public, payload field omitted). 24 new tests; workspace 519 → 543.
 ```
 
 - [ ] **Step 5: Verify the final test count one more time**
@@ -1459,7 +1459,7 @@ gh pr create --title "feat(cassandra,cli): first real DeterministicPolicy rule �
 
 - First real Stage 0 reviewer rule: `DeterministicPolicy` now enforces three data-classification invariants over `(ctx.classification_floor, plan.data_ceiling, plan.steps[].classification)`. Stage 0 was always-`Approve` before this slice.
 - New pure module `core::cassandra::deterministic` carrying `screen_plan_for_classification_violations` + `ClassificationViolation` enum.
-- New `hhagent-cli ask --classification-floor <DataClass>` flag (case-insensitive parser) for operator-pinned floors at task submission.
+- New `kastellan-cli ask --classification-floor <DataClass>` flag (case-insensitive parser) for operator-pinned floors at task submission.
 
 ## Test plan
 

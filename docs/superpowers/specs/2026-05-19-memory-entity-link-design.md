@@ -40,7 +40,7 @@ Deliberately out of scope for this slice:
   follow-up. Without it, every newly-extracted entity sits at
   `quarantine = TRUE` and is invisible to `graph_search` (which passes
   `include_quarantined = false` on the production read path).
-- **Re-linking already-written memories.** A `hhagent-cli memory relink
+- **Re-linking already-written memories.** A `kastellan-cli memory relink
   [--layer X] [--id Y]` subcommand or one-shot backfill is a separate
   pickup; pre-existing rows stay unlinked until the operator runs that
   tool.
@@ -64,7 +64,7 @@ Confirmed during brainstorming:
    install only; idempotency skip on subsequent restarts).
 2. **Free-function API** in a new `core::memory::entity_link`
    module. Doesn't widen the `EntityExtractor` trait; doesn't create
-   a parallel `core::memory::write` wrapper of `hhagent_db::memories`.
+   a parallel `core::memory::write` wrapper of `kastellan_db::memories`.
 
 ---
 
@@ -121,7 +121,7 @@ use sqlx::PgPool;
 use crate::entity_extraction::{
     EntityExtractionError, EntityExtractor, EntitySeeds, SeedSource,
 };
-use hhagent_db::{audit, memories::link_memory_to_entities, DbError};
+use kastellan_db::{audit, memories::link_memory_to_entities, DbError};
 
 /// What the auto-linker actually did, for caller telemetry.
 #[derive(Clone, Debug)]
@@ -157,7 +157,7 @@ pub enum LinkError {
 /// `layer_label` is a stringly-typed identifier of the calling
 /// layer (`"L0"`, `"L1"`, future `"L2"`/`"L3"`/`"L4"`). It goes
 /// straight into the audit payload. Keeping it stringly avoids a
-/// circular dep from this module on `hhagent_db::memories::MemoryLayer`.
+/// circular dep from this module on `kastellan_db::memories::MemoryLayer`.
 pub async fn link_memory_entities(
     extractor: &dyn EntityExtractor,
     pool: &PgPool,
@@ -598,7 +598,7 @@ need to nail down concretely:
   warm GLiNER worker pool.
 - **`layer_label: &'static str`** on the API, not a typed enum —
   avoids the circular dep from `core::memory::entity_link` on
-  `hhagent_db::memories::MemoryLayer`.
+  `kastellan_db::memories::MemoryLayer`.
 - **NoOp-extractor case is a path optimisation**, not a branch — the
   empty-seeds fast-path in `link_memory_to_entities` makes it
   essentially free without any new conditional logic.

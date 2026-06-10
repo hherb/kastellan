@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hhagent_protocol::client::ClientError;
-use hhagent_sandbox::SandboxBackend;
+use kastellan_protocol::client::ClientError;
+use kastellan_sandbox::SandboxBackend;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
 
@@ -91,7 +91,7 @@ pub fn dispatch_indicates_worker_dead<T>(result: &Result<T, ToolHostError>) -> b
         Ok(_) => false,
         Err(ToolHostError::Sandbox(_)) => false, // pre-spawn; no worker to be dead
         Err(ToolHostError::Io(_)) => true,
-        // Exhaustive on `ClientError` so any future variant added to `hhagent-protocol`
+        // Exhaustive on `ClientError` so any future variant added to `kastellan-protocol`
         // breaks the build here and forces a deliberate classification decision rather
         // than silently inheriting the "dead" default.
         Err(ToolHostError::Protocol(ClientError::Rpc(_))) => false,
@@ -136,7 +136,7 @@ pub fn is_aged_out(age: Duration, max_age_seconds: u64) -> bool {
 /// decremented when the guard drops (i.e. once the lock has been acquired). The
 /// counter therefore reflects "depth of the queue" — callers waiting, not callers
 /// in flight. Exposed via `IdleTimeoutLifecycle::_test_slot_pending_acquires` for
-/// tests and the future `hhagent-cli supervisor status` operator surface.
+/// tests and the future `kastellan-cli supervisor status` operator surface.
 ///
 /// `last_warn_unix_nanos` (issue #136) is the unix-nanos timestamp of the most
 /// recent queue-depth warn for this slot. Reads + CAS happen on the hot path in

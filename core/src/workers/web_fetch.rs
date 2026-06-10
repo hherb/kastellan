@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
 use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerManifest};
@@ -16,9 +16,9 @@ use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerMani
 /// Tool name the registry keys web-fetch on.
 const TOOL_NAME: &str = "web-fetch";
 /// Operator override for the worker binary path.
-const BIN_ENV: &str = "HHAGENT_WEB_FETCH_BIN";
+const BIN_ENV: &str = "KASTELLAN_WEB_FETCH_BIN";
 /// Exe-relative sibling default (cargo `target/debug` + flat installs).
-const DEFAULT_BIN_NAME: &str = "hhagent-worker-web-fetch";
+const DEFAULT_BIN_NAME: &str = "kastellan-worker-web-fetch";
 
 /// Build the [`ToolEntry`] for the web-fetch worker.
 ///
@@ -26,7 +26,7 @@ const DEFAULT_BIN_NAME: &str = "hhagent-worker-web-fetch";
 /// `tool_allowlists` DB table by the daemon, keyed `"web-fetch"`); the
 /// LLM-supplied `step.parameters` cannot widen it. The same allowlist is
 /// represented twice from one source:
-///   - injected verbatim as the `HHAGENT_WEB_FETCH_ALLOWLIST` env JSON for the
+///   - injected verbatim as the `KASTELLAN_WEB_FETCH_ALLOWLIST` env JSON for the
 ///     worker's own per-hop check (which understands the `.domain` wildcard), and
 ///   - mapped to `host:443` entries for `Net::Allowlist`, so the policy is
 ///     correct for the future egress proxy. (Wildcard `.domain` entries map to
@@ -60,7 +60,7 @@ pub fn web_fetch_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         cpu_ms: 10_000,
         mem_mb: 512,
         profile: Profile::WorkerNetClient,
-        env: vec![("HHAGENT_WEB_FETCH_ALLOWLIST".to_string(), allow_json)],
+        env: vec![("KASTELLAN_WEB_FETCH_ALLOWLIST".to_string(), allow_json)],
         cpu_quota_pct: None,
         tasks_max: None,
     };
@@ -75,9 +75,9 @@ pub fn web_fetch_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
 }
 
 /// web-fetch's manifest. Discovery mirrors shell-exec: a set
-/// `HHAGENT_WEB_FETCH_BIN` override is authoritative (honoured iff it names a
+/// `KASTELLAN_WEB_FETCH_BIN` override is authoritative (honoured iff it names a
 /// runnable file, else fails closed); only when unset do we fall back to the
-/// exe-relative sibling `hhagent-worker-web-fetch`. See [`discover_binary`].
+/// exe-relative sibling `kastellan-worker-web-fetch`. See [`discover_binary`].
 pub struct WebFetchManifest;
 
 impl WorkerManifest for WebFetchManifest {
@@ -159,7 +159,7 @@ mod tests {
                 }
                 // Env carries the verbatim domain list (wildcard preserved).
                 let (k, v) = &entry.policy.env[0];
-                assert_eq!(k, "HHAGENT_WEB_FETCH_ALLOWLIST");
+                assert_eq!(k, "KASTELLAN_WEB_FETCH_ALLOWLIST");
                 assert_eq!(v, r#"["en.wikipedia.org",".example.com"]"#);
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
@@ -175,7 +175,7 @@ mod tests {
 
         match WebFetchManifest.resolve(&c) {
             Resolution::Misconfigured { detail } => {
-                assert!(detail.contains("hhagent-worker-web-fetch"), "detail: {detail}");
+                assert!(detail.contains("kastellan-worker-web-fetch"), "detail: {detail}");
             }
             other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
         }

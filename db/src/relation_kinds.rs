@@ -43,7 +43,7 @@ pub const MAX_RELATION_KIND_LEN: usize = 64;
 /// short of inflating audit-row size enough to break grep-driven
 /// operator workflows. Mirror of [`crate::entity_kinds::MAX_ENTITY_KIND_DESCRIPTION_LEN`].
 ///
-/// Issue [#111](https://github.com/hherb/hhagent/issues/111) item 3 —
+/// Issue [#111](https://github.com/hherb/kastellan/issues/111) item 3 —
 /// without this cap an operator could store an arbitrarily long
 /// description, which would then land verbatim in
 /// `audit_log.payload->>'description'`.
@@ -142,7 +142,7 @@ pub fn validate_relation_kind_description(
 /// 2 KiB cap — operator-set descriptions land in `audit_log.payload`
 /// so an unbounded length would inflate audit rows beyond
 /// grep-friendly sizes (Issue
-/// [#111](https://github.com/hherb/hhagent/issues/111) item 3).
+/// [#111](https://github.com/hherb/kastellan/issues/111) item 3).
 ///
 /// **Requires a connection with write privileges on `relation_kinds`**
 /// — that's the [`crate::pool::connect_admin_pool`] shape, not the
@@ -388,7 +388,7 @@ mod tests {
     /// paragraph but well short of inflating audit-row size enough to
     /// break grep-driven operator workflows. Pin the number so a
     /// future widening is a deliberate edit (Issue
-    /// [#111](https://github.com/hherb/hhagent/issues/111) item 3).
+    /// [#111](https://github.com/hherb/kastellan/issues/111) item 3).
     #[test]
     fn max_relation_kind_description_len_is_2048() {
         assert_eq!(MAX_RELATION_KIND_DESCRIPTION_LEN, 2048);

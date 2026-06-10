@@ -15,7 +15,7 @@
 `MemoryLayer::Index` (L1) has shipped as a storage primitive (PR #68), a loader (`load_l1_default`, also PR #68), and a renderer (`<l1_insights>` block in the prompt assembler, PR #74). What's still missing is a **writer**. As of `main` at `a2e97a0`:
 
 ```
-$ psql -d hhagent -c "SELECT COUNT(*) FROM memories WHERE layer = 1"
+$ psql -d kastellan -c "SELECT COUNT(*) FROM memories WHERE layer = 1"
  count
 -------
      0
@@ -45,7 +45,7 @@ In scope (this slice):
   - `ACTION_L1_PROMOTED = "l1.promoted"` (agent-raised path from `drain_lane`)
 - One new pure helper `build_l1_write_payload(outcome: &L1WriteOutcome, source: &L1Source, body_sha256: &str) -> serde_json::Value`. Shared between operator + agent paths so the payload key-set stays in lockstep.
 - New `core::cli_audit` helpers `l1_add_and_audit` + `l1_remove_and_audit`. Both emit `actor='cli'` audit rows. Mirrors the `tools_allowlist_{add,remove}_and_audit` precedent from PR #53.
-- New `hhagent-cli memory l1 {add, list, remove}` subcommand tree, hand-rolled (no clap dep), mirroring the `tools allowlist` precedent.
+- New `kastellan-cli memory l1 {add, list, remove}` subcommand tree, hand-rolled (no clap dep), mirroring the `tools allowlist` precedent.
 
 Out of scope (filed as follow-ups, listed at the end of this doc):
 
@@ -82,7 +82,7 @@ Both paths share the same dedup discipline:
 3. On hit, return `L1WriteOutcome::SkippedDuplicate(existing_id)`. No row written.
 4. On miss, `insert_memory_at_layer(MemoryLayer::Index, body, build_l1_metadata(source, body_sha256, now), None)` → `Inserted(new_id)`.
 
-Operator who runs `hhagent-cli memory l1 add 'X'` twice gets one row + two audit entries (the second carrying `action: "skipped_duplicate"`). Agent that re-emits the same insight on a second task gets one row + two audit entries with `action: "skipped_duplicate"` on the second.
+Operator who runs `kastellan-cli memory l1 add 'X'` twice gets one row + two audit entries (the second carrying `action: "skipped_duplicate"`). Agent that re-emits the same insight on a second task gets one row + two audit entries with `action: "skipped_duplicate"` on the second.
 
 This is the L0 idempotency pattern. Auto-eviction at write time is deliberately out of scope; the read-time cap is the only ceiling visible to the prompt. Filed as a follow-up.
 
@@ -92,7 +92,7 @@ Mirrors the issue #71 / PR #72 precedent established 2026-05-16 for `Classificat
 
 - The agent's plan can supply `Plan.l1_insight: Option<String>`, but it cannot supply provenance. The producer-side audit-row payload key for `l1_insight` is the **plan field's value**, not a `source` claim.
 - The **only** code path that constructs `L1Source::AgentRaised { task_id }` is `drain_lane` in `core::scheduler::runner`. Operators / future code paths that need to write through this provenance value will need a code change visible in a `grep`, not a wire-side payload key flip.
-- The operator CLI path constructs `L1Source::Operator` exclusively. There is no `hhagent-cli memory l1 promote --as-agent-raised` flag; deliberately not added.
+- The operator CLI path constructs `L1Source::Operator` exclusively. There is no `kastellan-cli memory l1 promote --as-agent-raised` flag; deliberately not added.
 
 The audit row's `source` field is therefore always the writer's own claim, not a producer's claim. This matches the integrity discipline in [`core/src/scheduler/runner.rs`](../../../core/src/scheduler/runner.rs)'s `parse_classification_floor_source_from_payload` (which rejects producer-supplied `agent_raised`).
 
@@ -119,7 +119,7 @@ The drain_lane hook never needs to inspect the Plan directly; it just reads `res
 ```
 Operator path:
 
-  hhagent-cli memory l1 add "foo"
+  kastellan-cli memory l1 add "foo"
     └── cli_audit::l1_add_and_audit(pool, body)
          └── memory::l1_promote::promote_l1(pool, body, L1Source::Operator)
               ├── validate_l1_body
@@ -166,7 +166,7 @@ MODIFIED (8):
 - `core/src/scheduler/runner.rs` — `drain_lane` hook after `write_finalize_row`.
 - `core/src/scheduler/audit.rs` — 3 new action constants + `build_l1_write_payload` helper + new unit tests.
 - `core/src/cli_audit.rs` — `l1_add_and_audit` + `l1_remove_and_audit` helpers.
-- `core/src/main.rs` — `hhagent-cli memory l1 {add, list, remove}` subcommand wiring (this file already houses the hand-rolled subcommand tree).
+- `core/src/main.rs` — `kastellan-cli memory l1 {add, list, remove}` subcommand wiring (this file already houses the hand-rolled subcommand tree).
 - `core/tests/scheduler_inner_loop_e2e.rs` + `core/tests/cli_ask_e2e.rs` + `core/tests/router_agent_mock_e2e.rs` + `core/tests/scheduler_lanes_e2e.rs` — `FormulationMeta {}` literal updates (gain `terminal_l1_insight: None` default) and the audit-payload mid-tier gate test in `scheduler_inner_loop_e2e` gains assertions on the new `l1_insight` key.
 
 DOCS (2):
@@ -176,8 +176,8 @@ DOCS (2):
 
 | Actor       | Action         | Payload keys                                                            | When                                                                          |
 |-------------|----------------|-------------------------------------------------------------------------|-------------------------------------------------------------------------------|
-| `cli`       | `l1.added`     | `{source, body_sha256, action, memory_id?}`                             | `hhagent-cli memory l1 add` — Operator path, validation passes, EXISTS-check resolves |
-| `cli`       | `l1.removed`   | `{memory_id, deleted}`                                                  | `hhagent-cli memory l1 remove` — Operator path, DELETE …WHERE id AND layer=1 |
+| `cli`       | `l1.added`     | `{source, body_sha256, action, memory_id?}`                             | `kastellan-cli memory l1 add` — Operator path, validation passes, EXISTS-check resolves |
+| `cli`       | `l1.removed`   | `{memory_id, deleted}`                                                  | `kastellan-cli memory l1 remove` — Operator path, DELETE …WHERE id AND layer=1 |
 | `scheduler` | `l1.promoted`  | `{source, task_id, body_sha256, action, memory_id?}`                    | `drain_lane` — Outcome::Completed + terminal Plan.l1_insight.is_some()       |
 | `agent`     | `plan.formulate` | 20/21 → **21/22 keys** (gains `l1_insight: Option<String>`)            | Every plan formulation — pure-additive payload bump                          |
 
@@ -205,7 +205,7 @@ Estimate: **+28 to +35 tests**, workspace 674 → ~702-709.
   - `list_l1(false)` returns load_l1_default rows; `list_l1(true)` returns all layer=1 rows.
   - Agent-raised happy path via scripted `RouterAgent` mock → terminal Plan with `l1_insight` → 1 L1 row + 1 `actor='scheduler' action='l1.promoted'` audit row.
   - Agent-raised dedup → two tasks emit same insight → second task's audit row has `action: "skipped_duplicate"`.
-- 3-4 CLI integration tests in `core/tests/cli_memory_l1_e2e.rs` exercising `hhagent-cli memory l1 add/list/remove` end-to-end (mirrors `cli_memory_l1_e2e` precedent from PR #53).
+- 3-4 CLI integration tests in `core/tests/cli_memory_l1_e2e.rs` exercising `kastellan-cli memory l1 add/list/remove` end-to-end (mirrors `cli_memory_l1_e2e` precedent from PR #53).
 - 1-2 audit-payload pin updates in `scheduler_inner_loop_e2e` (mid-tier gate gains `l1_insight` key assertions; happy path + refusal path).
 
 ## What this slice deliberately does NOT do

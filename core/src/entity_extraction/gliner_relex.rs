@@ -189,8 +189,8 @@ pub async fn upsert_entities_and_relations(
 use crate::entity_extraction::{EntityExtractor, EntityExtractionError, EntitySeeds, SeedSource};
 use crate::workers::gliner_relex::Client;
 use async_trait::async_trait;
-use hhagent_db::entity_kinds::KindsCache;
-use hhagent_db::relation_kinds::RelationKindsCache;
+use kastellan_db::entity_kinds::KindsCache;
+use kastellan_db::relation_kinds::RelationKindsCache;
 use std::sync::Arc;
 
 /// Default thresholds (per spike correction #3 — model is noisy below 0.5).
@@ -275,7 +275,7 @@ impl GlinerRelexExtractor {
                 Ok(labels) => strip_undefined_label(labels),
                 Err(e) => {
                     tracing::warn!(
-                        target: "hhagent::entity_extraction",
+                        target: "kastellan::entity_extraction",
                         error = %e,
                         "relation_kinds cache fetch failed; running entity-only for this call",
                     );
@@ -331,7 +331,7 @@ impl EntityExtractor for GlinerRelexExtractor {
                 Ok(resp) => chunk_responses.push((chunk.byte_offset, resp)),
                 Err(e) => {
                     tracing::warn!(
-                        target: "hhagent::entity_extraction",
+                        target: "kastellan::entity_extraction",
                         error = %e,
                         chunk_offset = chunk.byte_offset,
                         "client.extract failed; degrading chunk",
@@ -361,14 +361,14 @@ impl EntityExtractor for GlinerRelexExtractor {
             "multi-v1.0",
             latency_ms_total,
         );
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             &self.pool,
             "extractor:gliner-relex",
             crate::scheduler::audit::ACTION_EXTRACT_ENTITIES,
             payload,
         ).await {
             tracing::warn!(
-                target: "hhagent::entity_extraction",
+                target: "kastellan::entity_extraction",
                 error = %e,
                 "extract_entities audit row insert failed; not propagating",
             );

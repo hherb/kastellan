@@ -17,7 +17,7 @@
 //!    the OS keyring, which is gated by the OS user's keyring auth.
 //!
 //! 2. **Row swaps are detected.** The AAD passed to GCM begins with
-//!    `b"hhagent-secrets-v1\0" || name.as_bytes() || \0`, so renaming
+//!    `b"kastellan-secrets-v1\0" || name.as_bytes() || \0`, so renaming
 //!    a row (`UPDATE secrets SET name = ... WHERE id = ...`) breaks
 //!    decryption: the recomputed AAD on read disagrees with the
 //!    auth-tag's bound AAD, GCM auth fails, [`SecretsError::DecryptFailed`].
@@ -77,7 +77,7 @@ pub const NONCE_LEN: usize = 12;
 /// AEAD use of the wrapping key from any other future use; flipping
 /// the version suffix is the migration knob if the AAD layout ever
 /// has to change incompatibly.
-pub const AAD_DOMAIN: &[u8] = b"hhagent-secrets-v1";
+pub const AAD_DOMAIN: &[u8] = b"kastellan-secrets-v1";
 
 /// Soft cap on secret name length. The DB column is `TEXT` so PG
 /// accepts much more, but anything past this is almost certainly a
@@ -116,7 +116,7 @@ pub const MAX_CIPHERTEXT_LEN: usize = MAX_PLAINTEXT_LEN + GCM_TAG_LEN;
 /// detaches all stored rows from their wrapping key (subsequent `get`
 /// returns `KeyNotFound`). The pinning unit test `constants_are_pinned`
 /// catches the literal change but cannot enforce a rotation.
-pub const KEY_SERVICE: &str = "hhagent";
+pub const KEY_SERVICE: &str = "kastellan";
 
 /// Default keyring account name. Bumping the `vN` suffix is the only
 /// rotation knob for now: the new id slots into [`KeyProvider::current_id`]
@@ -384,7 +384,7 @@ impl KeyProvider for MapKeyProvider {
 
 /// OS-keyring-backed key provider.
 ///
-/// On Linux, opens or creates the entry `("hhagent", "secrets-v1")`
+/// On Linux, opens or creates the entry `("kastellan", "secrets-v1")`
 /// in libsecret over D-Bus (gnome-keyring / KWallet). On macOS, the
 /// same identity addresses a Keychain item. First-use generates a
 /// fresh 32-byte random key via `OsRng` and writes it; subsequent
@@ -400,7 +400,7 @@ pub struct OsKeyringProvider {
 
 impl OsKeyringProvider {
     /// Open or initialize the keyring entry for the default
-    /// `(hhagent, secrets-v1)` identity. See [`KEY_SERVICE`] /
+    /// `(kastellan, secrets-v1)` identity. See [`KEY_SERVICE`] /
     /// [`KEY_ACCOUNT`] for the literals.
     ///
     /// First call generates and stores a fresh key; subsequent calls
@@ -819,8 +819,8 @@ mod tests {
         assert_eq!(KEY_LEN, 32);
         assert_eq!(NONCE_LEN, 12);
         assert_eq!(GCM_TAG_LEN, 16);
-        assert_eq!(AAD_DOMAIN, b"hhagent-secrets-v1");
-        assert_eq!(KEY_SERVICE, "hhagent");
+        assert_eq!(AAD_DOMAIN, b"kastellan-secrets-v1");
+        assert_eq!(KEY_SERVICE, "kastellan");
         assert_eq!(KEY_ACCOUNT, "secrets-v1");
         // Derived: ciphertext budget = plaintext budget + tag overhead.
         // The `get` length-guard math depends on this identity.

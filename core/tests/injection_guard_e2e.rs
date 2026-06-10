@@ -8,11 +8,11 @@
 
 use std::path::PathBuf;
 
-use hhagent_core::cassandra::injection_guard;
-use hhagent_core::secrets::Vault;
-use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use hhagent_core::workspace::Workspace;
-use hhagent_tests_common::{
+use kastellan_core::cassandra::injection_guard;
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::workspace::Workspace;
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, policy_for_shell_exec,
     shell_exec_worker_binary, skip_if_no_supervisor, skip_if_sandbox_unavailable, unique_suffix,
     PgCluster,
@@ -39,7 +39,7 @@ fn bootstrap(label: &str) -> Option<TestRig> {
     }
     let suffix = unique_suffix();
     // Data/log labels must stay short: `unique_temp_root` already appends
-    // `-<pid>-<nanos>`, and the socket path `/tmp/hhagent-<label>-<pid>-<nanos>
+    // `-<pid>-<nanos>`, and the socket path `/tmp/kastellan-<label>-<pid>-<nanos>
     // /data/sockets/.s.PGSQL.5432` must fit macOS's 104-byte `sun_path`.
     // The previous `ig-{label}-{suffix}-data` form (with the suffix embedded
     // a second time) overflowed it for labels ≥ 6 chars, so postgres could
@@ -49,14 +49,14 @@ fn bootstrap(label: &str) -> Option<TestRig> {
         &bin_dir,
         &format!("ig-{label}-d"),
         &format!("ig-{label}-l"),
-        &format!("hhagent-supervisor-test-pg-ig-{label}-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-ig-{label}-{suffix}"),
     );
     Some(TestRig { cluster, worker_bin })
 }
 
 /// Probe + pool setup mirroring `shell_exec_e2e::probe_and_pool`.
-async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
-    hhagent_db::probe::run(
+async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
         conn_spec,
         "core",
         "startup",
@@ -64,7 +64,7 @@ async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPo
     )
     .await
     .expect("probe run");
-    hhagent_db::pool::connect_runtime_pool(conn_spec)
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
         .await
         .expect("connect runtime pool")
 }
@@ -84,7 +84,7 @@ async fn dispatch_returns_placeholder_when_worker_result_carries_injection_phras
     };
     let pool = probe_and_pool(&rig.cluster.conn_spec).await;
     let test_root = std::env::temp_dir().join(format!(
-        "hhagent-ig-e2e-placeholder-{}",
+        "kastellan-ig-e2e-placeholder-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&test_root);
@@ -132,7 +132,7 @@ async fn dispatch_writes_policy_injection_blocked_audit_row_on_block()
     };
     let pool = probe_and_pool(&rig.cluster.conn_spec).await;
     let test_root = std::env::temp_dir().join(format!(
-        "hhagent-ig-e2e-audit-{}",
+        "kastellan-ig-e2e-audit-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&test_root);
@@ -184,7 +184,7 @@ async fn policy_audit_row_contains_no_substring_of_blocked_body() -> std::io::Re
     };
     let pool = probe_and_pool(&rig.cluster.conn_spec).await;
     let test_root = std::env::temp_dir().join(format!(
-        "hhagent-ig-e2e-privacy-{}",
+        "kastellan-ig-e2e-privacy-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&test_root);
@@ -249,7 +249,7 @@ async fn policy_audit_row_carries_body_sha256_of_exact_scanned_body() -> std::io
     };
     let pool = probe_and_pool(&rig.cluster.conn_spec).await;
     let test_root = std::env::temp_dir().join(format!(
-        "hhagent-ig-e2e-sha-{}",
+        "kastellan-ig-e2e-sha-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&test_root);

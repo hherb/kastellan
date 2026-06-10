@@ -11,7 +11,7 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_memory(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli memory <l1|l3> ...");
+        eprintln!("usage: kastellan-cli memory <l1|l3> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -26,7 +26,7 @@ pub(crate) fn run_memory(args: &[String]) -> ExitCode {
 
 fn run_memory_l1(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli memory l1 <add|list|remove> ...");
+        eprintln!("usage: kastellan-cli memory l1 <add|list|remove> ...");
         return ExitCode::from(2);
     }
     // Per-action dispatch. `with_runtime` is called only from the known
@@ -44,15 +44,15 @@ fn run_memory_l1(args: &[String]) -> ExitCode {
 }
 
 async fn memory_l1_add(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::l1_add_and_audit;
-    use hhagent_core::entity_extraction::NoOpEntityExtractor;
-    use hhagent_core::memory::l1_promote::L1WriteOutcome;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::l1_add_and_audit;
+    use kastellan_core::entity_extraction::NoOpEntityExtractor;
+    use kastellan_core::memory::l1_promote::L1WriteOutcome;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let body = match args {
         [b] => b,
         _ => {
-            eprintln!("usage: hhagent-cli memory l1 add <body>");
+            eprintln!("usage: kastellan-cli memory l1 add <body>");
             return ExitCode::from(2);
         }
     };
@@ -69,7 +69,7 @@ async fn memory_l1_add(args: &[String]) -> ExitCode {
     // Operator-explicit additions are intentionally NOT auto-linked:
     // the spec routes auto-linking through write paths the agent
     // controls, while operator-added L1 rows go through this CLI.
-    // A future `hhagent-cli memory relink` subcommand will fill the
+    // A future `kastellan-cli memory relink` subcommand will fill the
     // gap in batch. Emit a one-line stderr hint on success so the
     // operator isn't surprised by an empty graph lane for these rows.
     let extractor = NoOpEntityExtractor::new();
@@ -94,8 +94,8 @@ async fn memory_l1_add(args: &[String]) -> ExitCode {
 }
 
 async fn memory_l1_list(args: &[String]) -> ExitCode {
-    use hhagent_core::memory::l1_promote::list_l1;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::memory::l1_promote::list_l1;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let mut all = false;
     let mut i = 0;
@@ -136,13 +136,13 @@ async fn memory_l1_list(args: &[String]) -> ExitCode {
 }
 
 async fn memory_l1_remove(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::l1_remove_and_audit;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::l1_remove_and_audit;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let id_str = match args {
         [s] => s,
         _ => {
-            eprintln!("usage: hhagent-cli memory l1 remove <id>");
+            eprintln!("usage: kastellan-cli memory l1 remove <id>");
             return ExitCode::from(2);
         }
     };

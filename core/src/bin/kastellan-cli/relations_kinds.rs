@@ -2,14 +2,14 @@
 //! for the `relation_kinds` lookup table.
 //!
 //! Symmetric to [`crate::entities_kinds`]; both ride on
-//! [`hhagent_db::pool::connect_admin_pool`] for `add` / `remove`
+//! [`kastellan_db::pool::connect_admin_pool`] for `add` / `remove`
 //! because migration 0017 REVOKEs INSERT/UPDATE/DELETE/TRUNCATE on
 //! `relation_kinds` from the runtime role (the daemon must not widen
 //! vocab on its own — a compromised extractor must not be able to add
 //! relation labels its operator never approved).
 //!
 //! `list` is SELECT-only; runtime role has SELECT per migration 0017,
-//! so the read path uses [`hhagent_db::pool::connect_runtime_pool`].
+//! so the read path uses [`kastellan_db::pool::connect_runtime_pool`].
 //! Mirror of the same choice in [`crate::entities_kinds::run`]'s
 //! `list` arm.
 //!
@@ -19,7 +19,7 @@
 //! action='relation_kinds.{add,remove}'` audit row per real state
 //! change. Idempotent no-ops, validation errors, and the
 //! `RemovalOfUndefinedRejected` sentinel-rejection write no audit row.
-//! Mirror of [`hhagent_core::cli_audit::tools_allowlist_add_and_audit`].
+//! Mirror of [`kastellan_core::cli_audit::tools_allowlist_add_and_audit`].
 //!
 //! Lifted from `relations.rs` per Item 22 (HANDOVER) to keep the
 //! per-substree files under the 500-LOC soft cap.
@@ -30,12 +30,12 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 /// Per-action dispatcher for `relations kinds <add|remove|list>`.
 ///
-/// Per [Issue #97](https://github.com/hherb/hhagent/issues/97)
+/// Per [Issue #97](https://github.com/hherb/kastellan/issues/97)
 /// posture, `with_runtime` is called only from known-action arms;
 /// unknown actions exit 2 *before* any tokio runtime construction.
 pub(crate) fn run(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli relations kinds <add|remove|list> ...");
+        eprintln!("usage: kastellan-cli relations kinds <add|remove|list> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -63,16 +63,16 @@ fn parse_add_args(args: &[String]) -> Result<(String, Option<String>), String> {
             Ok((kind.clone(), Some(value.clone())))
         }
         _ => Err(
-            "usage: hhagent-cli relations kinds add <kind> [--description \"<text>\"]"
+            "usage: kastellan-cli relations kinds add <kind> [--description \"<text>\"]"
                 .to_string(),
         ),
     }
 }
 
 async fn relations_kinds_add(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::relation_kinds_add_and_audit;
-    use hhagent_db::pool::connect_admin_pool;
-    use hhagent_db::relation_kinds::RelationKindError;
+    use kastellan_core::cli_audit::relation_kinds_add_and_audit;
+    use kastellan_db::pool::connect_admin_pool;
+    use kastellan_db::relation_kinds::RelationKindError;
 
     let (kind, description) = match parse_add_args(args) {
         Ok(parsed) => parsed,
@@ -109,7 +109,7 @@ async fn relations_kinds_add(args: &[String]) -> ExitCode {
         // Validation errors exit 2 (operator-correctable input fault),
         // matching the tools-allowlist posture. The `DescriptionTooLong`
         // variant joins the family — Issue
-        // [#111](https://github.com/hherb/hhagent/issues/111) item 3.
+        // [#111](https://github.com/hherb/kastellan/issues/111) item 3.
         Err(
             e @ (RelationKindError::InvalidKind
             | RelationKindError::KindHasNul
@@ -129,14 +129,14 @@ async fn relations_kinds_add(args: &[String]) -> ExitCode {
 }
 
 async fn relations_kinds_remove(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::relation_kinds_remove_and_audit;
-    use hhagent_db::pool::connect_admin_pool;
-    use hhagent_db::relation_kinds::RelationKindError;
+    use kastellan_core::cli_audit::relation_kinds_remove_and_audit;
+    use kastellan_db::pool::connect_admin_pool;
+    use kastellan_db::relation_kinds::RelationKindError;
 
     let kind = match args {
         [k] => k.clone(),
         _ => {
-            eprintln!("usage: hhagent-cli relations kinds remove <kind>");
+            eprintln!("usage: kastellan-cli relations kinds remove <kind>");
             return ExitCode::from(2);
         }
     };
@@ -184,11 +184,11 @@ async fn relations_kinds_remove(args: &[String]) -> ExitCode {
 }
 
 async fn relations_kinds_list(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::relation_kinds::list_all;
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::relation_kinds::list_all;
 
     if !args.is_empty() {
-        eprintln!("usage: hhagent-cli relations kinds list");
+        eprintln!("usage: kastellan-cli relations kinds list");
         return ExitCode::from(2);
     }
 
@@ -202,7 +202,7 @@ async fn relations_kinds_list(args: &[String]) -> ExitCode {
     // `list_all` is SELECT-only on `relation_kinds`. The runtime role
     // has SELECT (migration 0017), so use the runtime pool so this
     // action works for operators without cluster-superuser peer-auth
-    // (Issue [#111](https://github.com/hherb/hhagent/issues/111) item
+    // (Issue [#111](https://github.com/hherb/kastellan/issues/111) item
     // 1). `add` / `remove` continue to use `connect_admin_pool`
     // because 0017 REVOKEs writes from the runtime role.
     let pool = match connect_runtime_pool(&spec).await {
@@ -221,7 +221,7 @@ async fn relations_kinds_list(args: &[String]) -> ExitCode {
         }
     };
     // Dynamic column widths via the shared `format_kinds_table`
-    // helper — see Issue [#111](https://github.com/hherb/hhagent/issues/111)
+    // helper — see Issue [#111](https://github.com/hherb/kastellan/issues/111)
     // item 2 for the truncation footgun the previous `{:<24}`
     // formatter shipped with. Identical column shape to
     // `entities kinds list` for symmetric operator UX (same helper).

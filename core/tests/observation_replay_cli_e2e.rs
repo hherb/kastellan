@@ -1,4 +1,4 @@
-//! Integration tests for the `hhagent-cli observation replay`
+//! Integration tests for the `kastellan-cli observation replay`
 //! subcommand. Spawns the binary as a subprocess against a per-test
 //! tempdir of hand-crafted captures.
 
@@ -6,9 +6,9 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use hhagent_core::cassandra::types::{DataClass, Plan};
-use hhagent_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
-use hhagent_tests_common::cli_binary;
+use kastellan_core::cassandra::types::{DataClass, Plan};
+use kastellan_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
+use kastellan_tests_common::cli_binary;
 
 fn approve_capture() -> CaptureJson {
     let plan = Plan {
@@ -77,7 +77,7 @@ fn cli_observation_replay_happy_path() {
 
     let bin = cli_binary();
     if !bin.exists() {
-        eprintln!("[SKIP] hhagent-cli binary not built; run `cargo build` first");
+        eprintln!("[SKIP] kastellan-cli binary not built; run `cargo build` first");
         return;
     }
 
@@ -87,7 +87,7 @@ fn cli_observation_replay_happy_path() {
         .arg("--captures-dir")
         .arg(tempdir.path())
         .output()
-        .expect("spawn hhagent-cli observation replay");
+        .expect("spawn kastellan-cli observation replay");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -106,7 +106,7 @@ fn cli_observation_replay_rejects_unknown_flag() {
     let tempdir = TempDir::new().unwrap();
     let bin = cli_binary();
     if !bin.exists() {
-        eprintln!("[SKIP] hhagent-cli binary not built");
+        eprintln!("[SKIP] kastellan-cli binary not built");
         return;
     }
 
@@ -127,7 +127,7 @@ fn cli_observation_replay_empty_dir_exits_zero() {
     let tempdir = TempDir::new().unwrap();
     let bin = cli_binary();
     if !bin.exists() {
-        eprintln!("[SKIP] hhagent-cli binary not built");
+        eprintln!("[SKIP] kastellan-cli binary not built");
         return;
     }
 

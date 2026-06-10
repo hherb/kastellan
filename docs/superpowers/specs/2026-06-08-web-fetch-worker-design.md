@@ -21,10 +21,10 @@ data the proxy will consume.
 
 ## Decision summary
 
-Add a new tool worker `hhagent-worker-web-fetch` exposing a single JSON-RPC
+Add a new tool worker `kastellan-worker-web-fetch` exposing a single JSON-RPC
 method `web.fetch` that takes a URL and returns extracted readable text. It
 mirrors the `shell-exec` worker pattern exactly: a small Rust binary using
-`hhagent_worker_prelude::serve_stdio` (which calls `lock_down()` before serving),
+`kastellan_worker_prelude::serve_stdio` (which calls `lock_down()` before serving),
 plus a host-side `WorkerManifest` in `core/src/workers/web_fetch.rs` that declares
 the `SandboxPolicy`.
 
@@ -85,8 +85,8 @@ still reads `/etc/resolv.conf`, but bypasses NSS).
 
 ## Components
 
-- **`workers/web-fetch/`** — new crate `hhagent-worker-web-fetch`, bin
-  `hhagent-worker-web-fetch`. Deps: `hhagent-protocol`, `hhagent-worker-prelude`,
+- **`workers/web-fetch/`** — new crate `kastellan-worker-web-fetch`, bin
+  `kastellan-worker-web-fetch`. Deps: `kastellan-protocol`, `kastellan-worker-prelude`,
   `reqwest` (workspace), `tokio` (workspace), `serde`/`serde_json`/`anyhow`,
   `url`, the HTML-readability crate (aliased `readable_html`), the PDF-text crate.
 - **`core/src/workers/web_fetch.rs`** — `WebFetchManifest` + `web_fetch_entry(binary,
@@ -167,7 +167,7 @@ SandboxPolicy {
     cpu_ms: 10_000,
     mem_mb: 512,                                 // PDF/HTML parsing is heavier than argv exec
     profile: Profile::WorkerNetClient,           // permits socket()
-    env: vec![("HHAGENT_WEB_FETCH_ALLOWLIST".to_string(), allow_json)],
+    env: vec![("KASTELLAN_WEB_FETCH_ALLOWLIST".to_string(), allow_json)],
     cpu_quota_pct: None,
     tasks_max: None,
 }
@@ -177,19 +177,19 @@ SandboxPolicy {
 
 **One source, two representations.** The DB `tool_allowlists` rows for tool
 `"web-fetch"` are the canonical domain list. The manifest:
-- injects them as a JSON array env `HHAGENT_WEB_FETCH_ALLOWLIST` for the worker's
+- injects them as a JSON array env `KASTELLAN_WEB_FETCH_ALLOWLIST` for the worker's
   own per-hop check, and
 - maps them to `host:443` entries for `Net::Allowlist`,
 
 both from the same rows — no drift. The manifest declares
 `allowlist_tool() == Some("web-fetch")` so the daemon pre-fetches the rows (same
 plumbing shell-exec uses). Binary discovery uses the standard `discover_binary`
-precedence (`HHAGENT_WEB_FETCH_BIN` override authoritative, else exe-relative
-sibling `hhagent-worker-web-fetch`).
+precedence (`KASTELLAN_WEB_FETCH_BIN` override authoritative, else exe-relative
+sibling `kastellan-worker-web-fetch`).
 
 ## Error handling
 
-Maps onto existing `hhagent-protocol` codes (the vocabulary shell-exec uses):
+Maps onto existing `kastellan-protocol` codes (the vocabulary shell-exec uses):
 
 - `INVALID_PARAMS` — missing or malformed `url`.
 - `POLICY_DENIED` — non-https scheme, or host not on the allowlist (initial URL or

@@ -72,16 +72,16 @@ captured `plan_json` and report which fixtures would have changed verdict.
 
 Three pieces:
 
-1. **Library module** `hhagent_core::observation::capture` — pure data types
+1. **Library module** `kastellan_core::observation::capture` — pure data types
    and helpers. Unit-testable. Lives alongside `core::memory`, `core::scheduler`,
    `core::cassandra` as a sibling module.
 
 2. **`#[ignore]`-flagged integration test** `core/tests/observation_capture.rs`
    — the orchestrator. Reuses the per-test PG cluster pattern from
-   `cli_ask_e2e.rs` via `hhagent-tests-common`, brings up the real `hhagent`
+   `cli_ask_e2e.rs` via `kastellan-tests-common`, brings up the real `kastellan`
    daemon under the user supervisor, iterates fixtures, runs each through
-   `hhagent-cli ask` against the **real local LLM** (operator's
-   `HHAGENT_LLM_LOCAL_URL` endpoint), and writes one capture file per fixture.
+   `kastellan-cli ask` against the **real local LLM** (operator's
+   `KASTELLAN_LLM_LOCAL_URL` endpoint), and writes one capture file per fixture.
 
 3. **On-disk directory tree** `tests/observation/` carrying fixtures, captures,
    and an operator README.
@@ -110,7 +110,7 @@ tests/observation/
 ### `prompt.md`
 
 First H1 heading is the human-readable summary recorded in capture metadata.
-Body after the heading is the prompt text sent verbatim to `hhagent-cli ask`.
+Body after the heading is the prompt text sent verbatim to `kastellan-cli ask`.
 Blank lines between H1 and body are stripped.
 
 ```markdown
@@ -174,7 +174,7 @@ One capture file per `(date, model_slug)` baseline. Recapture never
 overwrites; it lands under a fresh filename so old baselines stay frozen as
 historical reference. Filename shape: `<YYYY-MM-DD>_<model_slug>.json`.
 
-## Module surface — `hhagent_core::observation::capture`
+## Module surface — `kastellan_core::observation::capture`
 
 ```rust
 //! Observation-phase capture data types and helpers.
@@ -323,19 +323,19 @@ pub enum ParseError {
 Single `#[test] #[ignore]`-flagged function. Bring-up sequence mirrors
 `cli_ask_e2e.rs`:
 
-1. `bring_up_pg_cluster(...)` from `hhagent-tests-common`.
-2. Read `HHAGENT_LLM_LOCAL_URL` (fail with a clear "set HHAGENT_LLM_LOCAL_URL"
+1. `bring_up_pg_cluster(...)` from `kastellan-tests-common`.
+2. Read `KASTELLAN_LLM_LOCAL_URL` (fail with a clear "set KASTELLAN_LLM_LOCAL_URL"
    message if absent — no default; the operator must opt in).
-3. Read `HHAGENT_LLM_LOCAL_MODEL` (default to `"gemma4:26b-a4b-it-q8_0"`
+3. Read `KASTELLAN_LLM_LOCAL_MODEL` (default to `"gemma4:26b-a4b-it-q8_0"`
    matching the operator's local Ollama; documented as override-able).
 4. Pre-flight: HTTP GET `<base_url>/models` (or equivalent health endpoint)
    with a 5 s timeout. If unreachable: **fail loudly** with the URL in the
    error message. (No skip-as-pass — the operator explicitly ran this; a
    silent skip would produce empty captures and waste their time.)
-5. Build `core_service_spec(...)` for the freshly-built `hhagent` binary with
-   env wiring: `HHAGENT_DATA_DIR`, `HHAGENT_STATE_DIR`, `HHAGENT_PROMPTS_DIR`,
-   `HHAGENT_LLM_LOCAL_URL`, `HHAGENT_LLM_LOCAL_MODEL`, `HHAGENT_SHELL_EXEC_BIN`,
-   `HHAGENT_SHELL_EXEC_ALLOWLIST` (deliberately permissive for observation —
+5. Build `core_service_spec(...)` for the freshly-built `kastellan` binary with
+   env wiring: `KASTELLAN_DATA_DIR`, `KASTELLAN_STATE_DIR`, `KASTELLAN_PROMPTS_DIR`,
+   `KASTELLAN_LLM_LOCAL_URL`, `KASTELLAN_LLM_LOCAL_MODEL`, `KASTELLAN_SHELL_EXEC_BIN`,
+   `KASTELLAN_SHELL_EXEC_ALLOWLIST` (deliberately permissive for observation —
    `/usr/bin/echo:/bin/echo:/usr/bin/date:/bin/cat:/usr/bin/ls`).
 6. Install + start + wait for `"scheduler spawned"` daemon log line.
 7. For each fixture directory under `tests/observation/fixtures/`:
@@ -343,7 +343,7 @@ Single `#[test] #[ignore]`-flagged function. Bring-up sequence mirrors
    - Parse `meta.toml` via the `toml` crate.
    - **Before spawning the CLI:** snapshot `SELECT max(id) FROM tasks` as
      `prior_max_task_id` (0 if empty).
-   - Spawn `hhagent-cli ask "<body>"` as a subprocess; capture stdout, stderr,
+   - Spawn `kastellan-cli ask "<body>"` as a subprocess; capture stdout, stderr,
      exit code; 120 s timeout (LLM cold-start tolerance).
    - After the CLI exits: query `SELECT id FROM tasks WHERE id > $1
      ORDER BY id ASC LIMIT 1` with `$1 = prior_max_task_id`. This is the
@@ -353,16 +353,16 @@ Single `#[test] #[ignore]`-flagged function. Bring-up sequence mirrors
    - Write via `write_capture_to_dir`.
 8. Tear down service + cluster.
 
-**Task-id discovery without a CLI flag change.** `hhagent-cli ask` accepts only
+**Task-id discovery without a CLI flag change.** `kastellan-cli ask` accepts only
 `<instruction> [--fast|--long]` today; it does not expose a `--payload`
 flag. Rather than widen the production CLI surface just for the operator's
 capture flow, the orchestrator captures the `max(id)` from `tasks` immediately
-before each `hhagent-cli ask` invocation and then reads back the single row
+before each `kastellan-cli ask` invocation and then reads back the single row
 whose id is greater after the CLI returns. Serial submission guarantees
 exactly one match — the orchestrator is the only thing inserting tasks during
 the run. Zero production-code change.
 
-**Dry-run mode:** `HHAGENT_OBSERVATION_DRY_RUN=1` short-circuits step 7 to
+**Dry-run mode:** `KASTELLAN_OBSERVATION_DRY_RUN=1` short-circuits step 7 to
 print the fixture-by-fixture plan (what would be captured) without dialing
 the LLM or writing files. Useful for adding a new fixture and verifying
 the meta.toml parses.

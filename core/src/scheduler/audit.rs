@@ -69,7 +69,7 @@
 
 use crate::memory::l1_promote::{L1Source, L1WriteOutcome};
 use crate::memory::l3_crystallise::{L3Source, L3WriteOutcome};
-use hhagent_db::tasks::Lane;
+use kastellan_db::tasks::Lane;
 use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -95,13 +95,13 @@ pub const ACTION_L0_SEEDED: &str = "l0.seeded";
 
 /// Action string for `actor='cli' action='l1.added'` audit rows.
 /// Emitted by `cli_audit::l1_add_and_audit` after a successful
-/// `hhagent-cli memory l1 add` call. The payload is built by
+/// `kastellan-cli memory l1 add` call. The payload is built by
 /// [`build_l1_write_payload`].
 pub const ACTION_L1_ADDED: &str = "l1.added";
 
 /// Action string for `actor='cli' action='l1.removed'` audit rows.
 /// Emitted by `cli_audit::l1_remove_and_audit` after a successful
-/// `hhagent-cli memory l1 remove`. Payload: `{memory_id, deleted}`.
+/// `kastellan-cli memory l1 remove`. Payload: `{memory_id, deleted}`.
 pub const ACTION_L1_REMOVED: &str = "l1.removed";
 
 /// Action string for `actor='scheduler' action='l1.promoted'` audit
@@ -152,7 +152,7 @@ pub const ACTION_TASK_RUNNING: &str = "task.running";
 /// Carries the aggregate counters observation-phase SQL needs.
 pub const ACTION_TASK_FINALIZE: &str = "task.finalize";
 
-/// `action` value for the producer-side row written by `hhagent-cli ask`
+/// `action` value for the producer-side row written by `kastellan-cli ask`
 /// after `tasks::insert_pending` succeeds. Distinct from the scheduler's
 /// own `task.running` row that fires later on claim — paired with
 /// [`crate::cli_audit::CLI_AUDIT_ACTOR`] so observation queries grouping
@@ -169,11 +169,11 @@ pub const ACTION_TASK_SUBMITTED: &str = "task.submitted";
 pub const ACTION_TASK_PREFIX: &str = "task.";
 
 /// Action string for `actor='cli'` audit rows emitted when an operator
-/// adds one allowlist entry via `hhagent-cli tools allowlist add`.
+/// adds one allowlist entry via `kastellan-cli tools allowlist add`.
 pub const ACTION_TOOLS_ALLOWLIST_ADD: &str = "tools.allowlist.add";
 
 /// Action string for `actor='cli'` audit rows emitted when an operator
-/// removes one allowlist entry via `hhagent-cli tools allowlist remove`.
+/// removes one allowlist entry via `kastellan-cli tools allowlist remove`.
 pub const ACTION_TOOLS_ALLOWLIST_REMOVE: &str = "tools.allowlist.remove";
 
 /// `actor='cli' action='entities.approved'` — operator flipped a
@@ -192,7 +192,7 @@ pub const ACTION_ENTITIES_REJECTED: &str = "entities.rejected";
 pub const ACTION_ENTITIES_MERGED: &str = "entities.merged";
 
 /// `actor='cli' action='entity_kinds.add'` — operator added a new
-/// entity-kind label via `hhagent-cli entities kinds add`. Payload:
+/// entity-kind label via `kastellan-cli entities kinds add`. Payload:
 /// `{kind, description}` where `description` is `null` when omitted.
 /// Emitted only on a real INSERT (`Ok(true)`); idempotent re-adds and
 /// validation errors write no row. Symmetric to
@@ -200,7 +200,7 @@ pub const ACTION_ENTITIES_MERGED: &str = "entities.merged";
 pub const ACTION_ENTITY_KINDS_ADD: &str = "entity_kinds.add";
 
 /// `actor='cli' action='entity_kinds.remove'` — operator removed an
-/// entity-kind label via `hhagent-cli entities kinds remove`. Payload:
+/// entity-kind label via `kastellan-cli entities kinds remove`. Payload:
 /// `{kind}`. Emitted only on a real DELETE (`Ok(true)`); idempotent
 /// no-ops, validation errors, and the explicit
 /// `RemovalOfUndefinedRejected` write no row. Symmetric to
@@ -208,7 +208,7 @@ pub const ACTION_ENTITY_KINDS_ADD: &str = "entity_kinds.add";
 pub const ACTION_ENTITY_KINDS_REMOVE: &str = "entity_kinds.remove";
 
 /// `actor='cli' action='relation_kinds.add'` — operator added a new
-/// relation-kind label via `hhagent-cli relations kinds add`. Payload:
+/// relation-kind label via `kastellan-cli relations kinds add`. Payload:
 /// `{kind, description}` where `description` is `null` when omitted.
 /// Emitted only on a real INSERT (`Ok(true)`); idempotent re-adds and
 /// validation errors write no row. Symmetric to
@@ -216,7 +216,7 @@ pub const ACTION_ENTITY_KINDS_REMOVE: &str = "entity_kinds.remove";
 pub const ACTION_RELATION_KINDS_ADD: &str = "relation_kinds.add";
 
 /// `actor='cli' action='relation_kinds.remove'` — operator removed a
-/// relation-kind label via `hhagent-cli relations kinds remove`.
+/// relation-kind label via `kastellan-cli relations kinds remove`.
 /// Payload: `{kind}`. Emitted only on a real DELETE (`Ok(true)`);
 /// idempotent no-ops, validation errors, and the explicit
 /// `RemovalOfUndefinedRejected` write no row. Symmetric to
@@ -234,7 +234,7 @@ pub const FINALIZE_PROVENANCE_RUNTIME: &str = "runtime";
 pub const FINALIZE_PROVENANCE_CRASH_RECOVERY: &str = "crash_recovery";
 
 /// Value of the `provenance` field in a `task.finalize` payload emitted
-/// when a producer (`hhagent-cli`) cancels a `pending` task that was
+/// when a producer (`kastellan-cli`) cancels a `pending` task that was
 /// never claimed. Counters are zero by construction; `started_at` is
 /// always JSON `null`.
 pub const FINALIZE_PROVENANCE_PRODUCER_CANCEL_PENDING: &str = "producer_cancel_pending";
@@ -366,7 +366,7 @@ pub fn build_crashed_finalize_payload(
 }
 
 /// Build the JSON payload for the `task.finalize` summary row emitted
-/// when a producer (`hhagent-cli`) cancels a `pending` task that was
+/// when a producer (`kastellan-cli`) cancels a `pending` task that was
 /// never claimed by any scheduler lane runner.
 ///
 /// Same 10-key shape as [`build_finalize_payload`] so observation-phase

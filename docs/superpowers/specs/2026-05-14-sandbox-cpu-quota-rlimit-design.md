@@ -1,7 +1,7 @@
 # Design: sandbox CPU/tasks quota policy fields + `setrlimit(RLIMIT_CPU)` enforcement
 
 **Status:** approved 2026-05-14 — supersedes the "Option G" sketch in `HANDOVER.md`.
-**Closes (in part):** [issue #6](https://github.com/hherb/hhagent/issues/6) main body.
+**Closes (in part):** [issue #6](https://github.com/hherb/kastellan/issues/6) main body.
 **Prereq landed:** `Default for SandboxPolicy` (previous session, PR #54).
 
 ## Background
@@ -102,7 +102,7 @@ too). Public surface:
 pub enum RlimitReport {
     /// `RLIMIT_CPU` applied at `cpu_seconds` (soft = hard).
     Applied { cpu_seconds: u64 },
-    /// `HHAGENT_CPU_MS` was unset, or `"0"`. No rlimit applied.
+    /// `KASTELLAN_CPU_MS` was unset, or `"0"`. No rlimit applied.
     Disabled,
 }
 
@@ -119,7 +119,7 @@ pub enum RlimitError {
 /// Saturates on overflow (no panic for `u64::MAX`).
 pub fn cpu_ms_to_seconds(ms: u64) -> u64;
 
-/// Read `HHAGENT_CPU_MS` and apply `RLIMIT_CPU` if set and non-zero.
+/// Read `KASTELLAN_CPU_MS` and apply `RLIMIT_CPU` if set and non-zero.
 pub fn apply_from_env() -> Result<RlimitReport, RlimitError>;
 ```
 
@@ -161,7 +161,7 @@ pub enum LockdownReport {
 
 The rename from `SkippedNonLinux` to `NonLinux { rlimit }` is a deliberate
 backward-incompat. The only in-tree match site is `serve_stdio`'s
-`eprintln!("hhagent-worker-prelude: lockdown {report:?}")` which uses the
+`eprintln!("kastellan-worker-prelude: lockdown {report:?}")` which uses the
 auto-derived `Debug` impl, so the rename is mechanical.
 
 ### `serve_stdio` order
@@ -185,8 +185,8 @@ pub fn serve_stdio<H: Handler>(handler: &mut H) -> io::Result<()> {
     let rlimit = rlimit::apply_from_env().map_err(io_err)?;
     // 2. Then lock_down (Landlock + seccomp; no-op on macOS).
     let report = lock_down_with_rlimit(rlimit).map_err(io_err)?;
-    eprintln!("hhagent-worker-prelude: lockdown {report:?}");
-    hhagent_protocol::server::serve_stdio(handler)
+    eprintln!("kastellan-worker-prelude: lockdown {report:?}");
+    kastellan_protocol::server::serve_stdio(handler)
 }
 
 // Helper: call lock_down() and inject the already-applied rlimit value.
@@ -212,7 +212,7 @@ entering its busy loop.
 `core/src/tool_host.rs::derive_lockdown_env` gains a third entry:
 
 ```rust
-pub const ENV_CPU_MS: &str = "HHAGENT_CPU_MS";
+pub const ENV_CPU_MS: &str = "KASTELLAN_CPU_MS";
 
 fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
     // ... existing landlock + seccomp env derivation ...
@@ -253,7 +253,7 @@ loop, mirroring `serve_stdio`'s order.
 
 #[test]
 fn cpu_burner_under_short_budget_is_killed_promptly() {
-    // Spawn lockdown-probe cpu-burner with HHAGENT_CPU_MS=200.
+    // Spawn lockdown-probe cpu-burner with KASTELLAN_CPU_MS=200.
     // Expect the subprocess to die within ~2 s wall-clock, killed by
     // SIGXCPU or SIGKILL (both indicate the rlimit fired). Loose
     // wall-clock tolerance because CPU-second != wall-clock second on
@@ -264,7 +264,7 @@ fn cpu_burner_under_short_budget_is_killed_promptly() {
 
 #[test]
 fn cpu_burner_with_no_env_runs_unbounded_baseline() {
-    // Without HHAGENT_CPU_MS, the cpu-burner runs > 1 s wall-clock
+    // Without KASTELLAN_CPU_MS, the cpu-burner runs > 1 s wall-clock
     // unmolested. Positive control so a future regression in
     // apply_from_env (always-disabled) is caught.
     // Uses a timeout via Child::kill so the test itself doesn't hang.
@@ -279,7 +279,7 @@ fn cpu_burner_with_no_env_runs_unbounded_baseline() {
 | `sandbox` unit (cross) | +2 | `SandboxPolicy::default()` has both new fields = `None`; existing Default test extended |
 | `prelude` unit | +8 | `cpu_ms_to_seconds` boundaries (0, 1, 999, 1000, 1001, u64::MAX); `apply_from_env` parse-error + happy + disabled |
 | `prelude` integration | +2 | `rlimit_smoke.rs` — cpu-burner SIGXCPU happy + no-env baseline |
-| `core` unit | +2 | `derive_lockdown_env` adds `HHAGENT_CPU_MS`; omits when `cpu_ms == 0` |
+| `core` unit | +2 | `derive_lockdown_env` adds `KASTELLAN_CPU_MS`; omits when `cpu_ms == 0` |
 | **Total** | **+18** | Workspace count 429 → ~447 |
 
 ## Files affected (7)

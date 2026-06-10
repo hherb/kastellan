@@ -150,9 +150,9 @@ pub fn clamp_memory_to_minimum(requested_mib: u64) -> ClampedMemory {
 /// `cpu_ms` is **not** mapped to a container-side flag: POSIX
 /// `RLIMIT_CPU` works inside the Linux VM unchanged via
 /// `workers/prelude::rlimit::apply_from_env` reading
-/// `HHAGENT_CPU_MS` — the same code path the existing Linux + macOS
+/// `KASTELLAN_CPU_MS` — the same code path the existing Linux + macOS
 /// workers already use. The `core::tool_host::derive_lockdown_env` helper
-/// sets `HHAGENT_CPU_MS` on the worker's env before it's passed here.
+/// sets `KASTELLAN_CPU_MS` on the worker's env before it's passed here.
 pub fn build_container_argv(
     policy: &SandboxPolicy,
     image: &str,

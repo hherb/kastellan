@@ -1,6 +1,6 @@
 //! Integration tests for `IdleTimeoutLifecycle` (slice-2 runtime).
 //!
-//! Drives `IdleTimeoutLifecycle::acquire` against the real `hhagent-worker-shell-exec`
+//! Drives `IdleTimeoutLifecycle::acquire` against the real `kastellan-worker-shell-exec`
 //! binary under the real sandbox backend. Each test constructs its own `ToolEntry`
 //! declaring `Lifecycle::IdleTimeout` — the production `shell_exec_entry()` stays
 //! single-use per the slice-1 pin.
@@ -35,13 +35,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hhagent_core::scheduler::ToolEntry;
-use hhagent_core::worker_lifecycle::{
+use kastellan_core::scheduler::ToolEntry;
+use kastellan_core::worker_lifecycle::{
     IdleTimeoutCaps, IdleTimeoutLifecycle, Lifecycle, RestartBackoff, WorkerLifecycleManager,
 };
-use hhagent_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
-use hhagent_tests_common::binaries::shell_exec_worker_binary;
-use hhagent_tests_common::sandbox::{backend, policy_for_shell_exec, skip_if_sandbox_unavailable};
+use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
+use kastellan_tests_common::binaries::shell_exec_worker_binary;
+use kastellan_tests_common::sandbox::{backend, policy_for_shell_exec, skip_if_sandbox_unavailable};
 use tokio::sync::oneshot;
 
 #[cfg(target_os = "linux")]
@@ -94,8 +94,8 @@ impl SandboxBackend for CountingSandboxBackend {
 /// counted instance. Tests in this file don't exercise opt-in
 /// per-worker backend selection — that is covered by the
 /// `lifecycle_container_routing_e2e` integration smoke.
-fn sandbox_bundle_from(backend: Arc<dyn SandboxBackend>) -> Arc<hhagent_sandbox::SandboxBackends> {
-    Arc::new(hhagent_sandbox::SandboxBackends {
+fn sandbox_bundle_from(backend: Arc<dyn SandboxBackend>) -> Arc<kastellan_sandbox::SandboxBackends> {
+    Arc::new(kastellan_sandbox::SandboxBackends {
         #[cfg(target_os = "linux")]
         bwrap: backend,
         #[cfg(target_os = "macos")]
@@ -110,7 +110,7 @@ fn sandbox_bundle_from(backend: Arc<dyn SandboxBackend>) -> Arc<hhagent_sandbox:
 /// way (slice-1 pin); tests need a fresh entry to opt-in to warm-keeping.
 fn idle_timeout_entry(worker: PathBuf, caps: IdleTimeoutCaps) -> ToolEntry {
     let policy = policy_for_shell_exec(&worker, &[ECHO_PATH]);
-    let contract = hhagent_core::worker_lifecycle::Contract { stateless: true };
+    let contract = kastellan_core::worker_lifecycle::Contract { stateless: true };
     let lifecycle = Lifecycle::idle_timeout(caps, contract).expect("valid lifecycle");
     ToolEntry {
         binary: worker,

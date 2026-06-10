@@ -7,7 +7,7 @@ use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
 
 use crate::report::{Decision, Reporter, Verdict};
 use crate::request_line::parse_connect;

@@ -52,7 +52,7 @@ pub struct CompositeLifecycle {
 
 impl CompositeLifecycle {
     /// Build with default exponential restart backoff (1 s → 60 s cap).
-    pub fn new(sandboxes: Arc<hhagent_sandbox::SandboxBackends>) -> Self {
+    pub fn new(sandboxes: Arc<kastellan_sandbox::SandboxBackends>) -> Self {
         Self {
             single_use: SingleUseLifecycle::new(Arc::clone(&sandboxes)),
             idle_timeout: IdleTimeoutLifecycle::new(sandboxes),
@@ -63,7 +63,7 @@ impl CompositeLifecycle {
     /// applies to the idle-timeout side only — `SingleUseLifecycle`
     /// has no warm-cache to back off from.
     pub fn with_backoff(
-        sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
+        sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
     ) -> Self {
         Self {
@@ -92,7 +92,7 @@ mod tests {
     use super::*;
 
     use crate::worker_lifecycle::{Contract, IdleTimeoutCaps};
-    use hhagent_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
+    use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
 
     /// Stub sandbox that always errors on spawn so the tests don't need
     /// a real `bwrap`/Seatbelt environment. We only need to verify the
@@ -149,7 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatches_single_use_entry_to_single_use_manager() {
-        let sbs = Arc::new(hhagent_sandbox::SandboxBackends {
+        let sbs = Arc::new(kastellan_sandbox::SandboxBackends {
             #[cfg(target_os = "linux")]
             bwrap: Arc::new(NeverSpawnsBackend),
             #[cfg(target_os = "macos")]
@@ -175,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatches_idle_timeout_entry_to_idle_timeout_manager() {
-        let sbs = Arc::new(hhagent_sandbox::SandboxBackends {
+        let sbs = Arc::new(kastellan_sandbox::SandboxBackends {
             #[cfg(target_os = "linux")]
             bwrap: Arc::new(NeverSpawnsBackend),
             #[cfg(target_os = "macos")]
@@ -213,7 +213,7 @@ mod tests {
         // operator-tuned backoff and dispatches identically to `new`.
         // We don't pin specific backoff timing here — that's the
         // idle_timeout::tests's job.
-        let sbs = Arc::new(hhagent_sandbox::SandboxBackends {
+        let sbs = Arc::new(kastellan_sandbox::SandboxBackends {
             #[cfg(target_os = "linux")]
             bwrap: Arc::new(NeverSpawnsBackend),
             #[cfg(target_os = "macos")]

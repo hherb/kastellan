@@ -171,8 +171,8 @@ Reviewers will reject a new rule that:
 When you change the catalogue or a stage's branch logic, run:
 
 ```sh
-cargo test -p hhagent-core cassandra
-cargo test -p hhagent-core injection_guard
+cargo test -p kastellan-core cassandra
+cargo test -p kastellan-core injection_guard
 ```
 
 `-- --nocapture` will show the audit-row payloads if you need to debug

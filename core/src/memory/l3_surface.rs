@@ -22,8 +22,8 @@
 use crate::cassandra::types::{L3Param, L3SkillCandidate};
 use crate::memory::l3_approval::SkillTrust;
 use crate::memory::l3_invoke::is_autonomously_invocable;
-use hhagent_db::memories::{load_layer_by_trust, MemoryLayer};
-use hhagent_db::DbError;
+use kastellan_db::memories::{load_layer_by_trust, MemoryLayer};
+use kastellan_db::DbError;
 use sqlx::PgPool;
 
 /// A trust-gated L3 skill projected to exactly what the planner sees:

@@ -6,7 +6,7 @@
 
 **Architecture:** One additive `Option<RestartBackoff>` field on `ServiceSpec` (`#[serde(default)]`, so `None` reproduces today's output byte-for-byte). The systemd unit-file builder emits two extra directives inside its existing `keep_alive` block; the launchd `install()` logs one `tracing::warn!` and writes today's plist unchanged. Mirrors the existing additive `after`/`part_of` precedent exactly.
 
-**Tech Stack:** Rust, `serde`, `tracing`, `cargo test`/`clippy`. All work is in the `hhagent-supervisor` crate. The launchd backend is `#[cfg(target_os = "macos")]`; the dev box is macOS, so both backends compile and test locally.
+**Tech Stack:** Rust, `serde`, `tracing`, `cargo test`/`clippy`. All work is in the `kastellan-supervisor` crate. The launchd backend is `#[cfg(target_os = "macos")]`; the dev box is macOS, so both backends compile and test locally.
 
 **Design doc:** [`docs/devel/specs/2026-06-07-restart-backoff-design.md`](../specs/2026-06-07-restart-backoff-design.md)
 
@@ -73,7 +73,7 @@ In `supervisor/src/lib.rs`, inside `mod spec_ordering_tests` (near line 396), ad
 
 - [ ] **Step 2: Run the test to verify it fails (does not compile)**
 
-Run: `cargo test -p hhagent-supervisor 2>&1 | head -30`
+Run: `cargo test -p kastellan-supervisor 2>&1 | head -30`
 Expected: compile error — `cannot find type RestartBackoff` and `struct ServiceSpec has no field named restart_backoff`.
 
 - [ ] **Step 3: Add the `RestartBackoff` type and the `ServiceSpec` field**
@@ -112,7 +112,7 @@ Then add the field to `ServiceSpec`, as the **last** field after `part_of` (afte
 
 - [ ] **Step 4: Add `restart_backoff: None,` to the `lib.rs` fixture and every other literal**
 
-In `supervisor/src/lib.rs`, the `spec()` fixture in `mod default_target_tests` (ends with `part_of: Some("hhagent".into()),` near line 326) — add as the last field:
+In `supervisor/src/lib.rs`, the `spec()` fixture in `mod default_target_tests` (ends with `part_of: Some("kastellan".into()),` near line 326) — add as the last field:
 ```rust
             restart_backoff: None,
 ```
@@ -138,7 +138,7 @@ In `supervisor/src/lib.rs`, `mod spec_ordering_tests`, the existing `service_spe
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cargo test -p hhagent-supervisor 2>&1 | tail -20`
+Run: `cargo test -p kastellan-supervisor 2>&1 | tail -20`
 Expected: all supervisor tests PASS, including `service_spec_restart_backoff_round_trips` and `service_spec_ordering_fields_default_when_absent`.
 
 - [ ] **Step 7: Commit**
@@ -204,7 +204,7 @@ In `supervisor/src/systemd_user/builder.rs`, inside its `#[cfg(test)] mod tests`
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p hhagent-supervisor build_unit_file_keep_alive_with_backoff 2>&1 | tail -20`
+Run: `cargo test -p kastellan-supervisor build_unit_file_keep_alive_with_backoff 2>&1 | tail -20`
 Expected: FAIL on the assertion `RestartSteps=8` not found (the builder doesn't emit it yet).
 
 - [ ] **Step 3: Emit the directives in the `keep_alive` block**
@@ -243,7 +243,7 @@ Also update the module-doc unit-file shape block near the top (line ~27) to list
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p hhagent-supervisor build_unit_file 2>&1 | tail -20`
+Run: `cargo test -p kastellan-supervisor build_unit_file 2>&1 | tail -20`
 Expected: all `build_unit_file*` tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -287,7 +287,7 @@ In `supervisor/src/launchd_agents/builders.rs`, inside its `#[cfg(test)] mod tes
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-supervisor build_plist_identical_with_and_without_backoff 2>&1 | tail -10`
+Run: `cargo test -p kastellan-supervisor build_plist_identical_with_and_without_backoff 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 3: Add the install-time warning**
@@ -311,7 +311,7 @@ In `supervisor/src/launchd_agents.rs`, in `install`, immediately before `let bod
 
 - [ ] **Step 4: Run the supervisor tests**
 
-Run: `cargo test -p hhagent-supervisor 2>&1 | tail -15`
+Run: `cargo test -p kastellan-supervisor 2>&1 | tail -15`
 Expected: all PASS (the warn is observability; the build_plist-identical test pins behaviour).
 
 - [ ] **Step 5: Commit**
@@ -338,7 +338,7 @@ In `supervisor/src/specs.rs`, inside `mod tests`, add (near the `*_keep_alive_is
     #[test]
     fn core_service_spec_carries_expected_backoff_curve() {
         let spec = core_service_spec(
-            Path::new("/usr/local/bin/hhagent"),
+            Path::new("/usr/local/bin/kastellan"),
             Path::new("/tmp"),
         );
         assert_eq!(
@@ -365,7 +365,7 @@ In `supervisor/src/specs.rs`, inside `mod tests`, add (near the `*_keep_alive_is
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p hhagent-supervisor _carries_expected_backoff_curve 2>&1 | tail -20`
+Run: `cargo test -p kastellan-supervisor _carries_expected_backoff_curve 2>&1 | tail -20`
 Expected: FAIL — `restart_backoff` is `None` (set provisionally in Task 1), not `Some(...)`. (If `RestartBackoff` is not yet imported, the failure is a compile error — Step 3 fixes both.)
 
 - [ ] **Step 3: Wire the curve into both production specs**
@@ -390,7 +390,7 @@ Update each function's doc comment `keep_alive` bullet to note the ramp, e.g. ad
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p hhagent-supervisor 2>&1 | tail -15`
+Run: `cargo test -p kastellan-supervisor 2>&1 | tail -15`
 Expected: all PASS, including the two new curve tests and the existing `*_keep_alive_is_true` / `build_unit_file_keep_alive_emits_restart_directives` tests.
 
 - [ ] **Step 5: Commit**
@@ -431,7 +431,7 @@ If `builders.rs` is ≤ 500 after Task 3, leave it. If it is 501–527 (a few LO
 
 - [ ] **Step 4: Re-run the crate tests**
 
-Run: `cargo test -p hhagent-supervisor 2>&1 | tail -15`
+Run: `cargo test -p kastellan-supervisor 2>&1 | tail -15`
 Expected: identical pass count to Task 4 (a test-lift is behaviour-preserving).
 
 - [ ] **Step 5: Commit (only if a lift happened)**
@@ -456,12 +456,12 @@ Expected: macOS skip-as-pass baseline holds (no regressions vs. the 1350/0/3 bas
 
 - [ ] **Step 2: Clippy gate on the supervisor crate**
 
-Run: `cargo clippy -p hhagent-supervisor --all-targets --locked -- -D warnings 2>&1 | tail -15`
+Run: `cargo clippy -p kastellan-supervisor --all-targets --locked -- -D warnings 2>&1 | tail -15`
 Expected: exit 0, no warnings.
 
 - [ ] **Step 3: Confirm `None` reproduces today's systemd output**
 
-Run: `cargo test -p hhagent-supervisor build_unit_file_keep_alive_without_backoff_omits_steps_and_max_delay -- --nocapture 2>&1 | tail -10`
+Run: `cargo test -p kastellan-supervisor build_unit_file_keep_alive_without_backoff_omits_steps_and_max_delay -- --nocapture 2>&1 | tail -10`
 Expected: PASS — proves an un-wired keep-alive spec still emits exactly `Restart=on-failure` + `RestartSec=5` and nothing more.
 
 - [ ] **Step 4: No commit** (verification only). Proceed to the session-end handover/ROADMAP update and PR.

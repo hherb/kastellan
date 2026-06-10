@@ -352,7 +352,7 @@ mod tests {
         // Asking about systemd in a diagnostic context — no self-
         // replication phrase. The AND-of-two-signals design rejects.
         let q = "What does the systemd service file at \
-                 /etc/systemd/system/hhagent-core.service say about \
+                 /etc/systemd/system/kastellan-core.service say about \
                  the restart policy?";
         assert_eq!(
             screen_instruction_for_principle_violations(q),

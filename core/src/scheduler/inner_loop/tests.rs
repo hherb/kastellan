@@ -18,7 +18,7 @@ use crate::cassandra::types::DataClass;
 fn ctx() -> TaskContext {
     TaskContext {
         task_id: 1,
-        lane: hhagent_db::tasks::Lane::Fast,
+        lane: kastellan_db::tasks::Lane::Fast,
         instruction: "ping".into(),
         classification_floor: DataClass::Public,
         classification_floor_source: ClassificationFloorSource::Default,

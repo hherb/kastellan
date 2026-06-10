@@ -10,18 +10,18 @@ use std::process::ExitCode;
 use sqlx::PgPool;
 
 use crate::common::resolve_connect_spec;
-use hhagent_core::cassandra::types::L3SkillCandidate;
-use hhagent_core::memory::l3_approval::{evaluate_approval, ApprovalDecision, RejectReason};
-use hhagent_db::memories::{fetch_by_ids, Memory, MemoryLayer};
-use hhagent_db::pool::connect_runtime_pool;
+use kastellan_core::cassandra::types::L3SkillCandidate;
+use kastellan_core::memory::l3_approval::{evaluate_approval, ApprovalDecision, RejectReason};
+use kastellan_db::memories::{fetch_by_ids, Memory, MemoryLayer};
+use kastellan_db::pool::connect_runtime_pool;
 
 /// Fetch the latest `registry.loaded` snapshot's tool-name set, or `None`
 /// when the daemon has never recorded one.
 pub(super) async fn latest_registry_tools(
     pool: &PgPool,
-) -> Result<Option<BTreeSet<String>>, hhagent_db::DbError> {
-    use hhagent_core::memory::l3_approval::extract_tool_names;
-    use hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED;
+) -> Result<Option<BTreeSet<String>>, kastellan_db::DbError> {
+    use kastellan_core::memory::l3_approval::extract_tool_names;
+    use kastellan_core::scheduler::audit::ACTION_REGISTRY_LOADED;
 
     let payload: Option<serde_json::Value> = sqlx::query_scalar(
         "SELECT payload FROM audit_log \
@@ -30,7 +30,7 @@ pub(super) async fn latest_registry_tools(
     .bind(ACTION_REGISTRY_LOADED)
     .fetch_optional(pool)
     .await
-    .map_err(|e| hhagent_db::DbError::Query(format!("latest_registry_tools: {e}")))?;
+    .map_err(|e| kastellan_db::DbError::Query(format!("latest_registry_tools: {e}")))?;
 
     Ok(payload.map(|p| extract_tool_names(&p)))
 }
@@ -49,7 +49,7 @@ pub(super) async fn load_skill_row(
     let id_str = match args {
         [s] => s,
         _ => {
-            eprintln!("usage: hhagent-cli memory l3 {cmd} <id>");
+            eprintln!("usage: kastellan-cli memory l3 {cmd} <id>");
             return Err(ExitCode::from(2));
         }
     };

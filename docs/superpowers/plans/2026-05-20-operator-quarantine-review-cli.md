@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** ship `hhagent-cli entities {list,show,approve,reject,merge}` so an operator can lift quarantine on extracted entities, deleting / merging junk. Once an entity is approved (`quarantine = FALSE`), production `graph_search` surfaces its linked memories — closing the graph lane in production.
+**Goal:** ship `kastellan-cli entities {list,show,approve,reject,merge}` so an operator can lift quarantine on extracted entities, deleting / merging junk. Once an entity is approved (`quarantine = FALSE`), production `graph_search` surfaces its linked memories — closing the graph lane in production.
 
-**Architecture:** a new DB module `hhagent_db::entities` owns the SQL surface (mirrors `tool_allowlists.rs` in shape and size). Three new `core::cli_audit` helpers compose the DB call with a wire-stable audit row. The CLI surface lives in `core/src/bin/hhagent-cli.rs` next to the existing `tools allowlist` and `memory l1` subcommand trees. No new migrations — the runtime role already has full CRUD on `entities` and cascade on `memory_entities`. `entity_kinds` (REVOKE per migration 0016) is deliberately untouched.
+**Architecture:** a new DB module `kastellan_db::entities` owns the SQL surface (mirrors `tool_allowlists.rs` in shape and size). Three new `core::cli_audit` helpers compose the DB call with a wire-stable audit row. The CLI surface lives in `core/src/bin/kastellan-cli.rs` next to the existing `tools allowlist` and `memory l1` subcommand trees. No new migrations — the runtime role already has full CRUD on `entities` and cascade on `memory_entities`. `entity_kinds` (REVOKE per migration 0016) is deliberately untouched.
 
 **Tech Stack:** Rust 2021, tokio (multi-thread), sqlx + PostgreSQL, thiserror, tracing, serde_json, `time::OffsetDateTime`, `core::process::ExitCode`.
 
@@ -22,14 +22,14 @@
 - `db/src/lib.rs` — add `pub mod entities;`
 - `core/src/scheduler/audit.rs` — +3 action constants + 3 payload builders + 6 unit tests
 - `core/src/cli_audit.rs` — +3 helpers (~110 LOC) + 2 compile-pin tests
-- `core/src/bin/hhagent-cli.rs` — +subcommand tree (~250 LOC) + `entities …` lines in `help_text()` + 2 arg-parser unit tests
+- `core/src/bin/kastellan-cli.rs` — +subcommand tree (~250 LOC) + `entities …` lines in `help_text()` + 2 arg-parser unit tests
 - `db/tests/postgres_e2e.rs` — +7 DB integration tests
 - `core/tests/memory_recall_e2e.rs` — +1 graph-lane recall pin
 
 **Test budget:** +26 (workspace 848 → ~874).
 - 4 unit (`db::entities::tests`) — `body_preview` (3) + `validate_merge_args` (1)
 - 6 unit (`scheduler::audit::tests`) — 3 payload pins + 3 action-const string pins
-- 2 unit (`bin::hhagent_cli` arg parsing) — `parse_entity_state` + `parse_id_list`
+- 2 unit (`bin::kastellan_cli` arg parsing) — `parse_entity_state` + `parse_id_list`
 - 7 DB integration (`postgres_e2e`)
 - 6 CLI subprocess (`cli_entities_e2e`)
 - 1 graph-lane recall pin (`memory_recall_e2e`)
@@ -79,7 +79,7 @@ pub mod entity_kinds;
 //! from extractor variance into one canonical row).
 //!
 //! This module owns the SQL surface for those operations. The CLI
-//! consumer lives in `core/src/bin/hhagent-cli.rs` under the
+//! consumer lives in `core/src/bin/kastellan-cli.rs` under the
 //! `entities` subcommand tree; the audit wrapper lives in
 //! `core::cli_audit`. Layout mirrors `db::tool_allowlists`.
 //!
@@ -317,8 +317,8 @@ mod tests {
 
 Run:
 ```
-cargo test -p hhagent-db entities:: --no-run 2>&1 | tail -20
-cargo test -p hhagent-db entities:: 2>&1 | tail -15
+cargo test -p kastellan-db entities:: --no-run 2>&1 | tail -20
+cargo test -p kastellan-db entities:: 2>&1 | tail -15
 ```
 Expected: all 7 tests pass.
 
@@ -506,18 +506,18 @@ pub async fn get_entity_with_mentions(
 
 ### Step 2.2: Write 2 DB integration tests in `db/tests/postgres_e2e.rs`
 
-- [ ] **Find the appropriate location** in `db/tests/postgres_e2e.rs` (alphabetical or grouped — match the precedent). Use the existing `bring_up_pg_cluster()` helper from `hhagent_tests_common`.
+- [ ] **Find the appropriate location** in `db/tests/postgres_e2e.rs` (alphabetical or grouped — match the precedent). Use the existing `bring_up_pg_cluster()` helper from `kastellan_tests_common`.
 
 Add these tests:
 
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_list_filters_by_state_kind_and_since() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
 
-    use hhagent_db::entities::{list_entities, EntityState, ListFilter};
+    use kastellan_db::entities::{list_entities, EntityState, ListFilter};
     use time::OffsetDateTime;
 
     // Seed 4 entities — 2 quarantined (different kinds), 1 approved, 1 old.
@@ -572,11 +572,11 @@ async fn entities_list_filters_by_state_kind_and_since() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_list_min_mentions_filter_uses_join_count() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
 
-    use hhagent_db::entities::{list_entities, ListFilter};
+    use kastellan_db::entities::{list_entities, ListFilter};
 
     // Seed 1 entity with 0 mentions and 1 entity with 2 mentions.
     sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES
@@ -590,8 +590,8 @@ async fn entities_list_min_mentions_filter_uses_join_count() {
         .fetch_one(&pool).await.unwrap();
 
     // Two memories linked only to the 'Two' entity.
-    use hhagent_db::memories::insert_memory_at_layer;
-    use hhagent_db::memories::MemoryLayer;
+    use kastellan_db::memories::insert_memory_at_layer;
+    use kastellan_db::memories::MemoryLayer;
     let _ = zero_id; // pinned but no mentions
     let mem1 = insert_memory_at_layer(&pool, "body 1", &serde_json::json!({}), None, MemoryLayer::Detail).await.unwrap();
     let mem2 = insert_memory_at_layer(&pool, "body 2", &serde_json::json!({}), None, MemoryLayer::Detail).await.unwrap();
@@ -622,7 +622,7 @@ async fn entities_list_min_mentions_filter_uses_join_count() {
 ### Step 2.3: Run the new tests to verify they pass
 
 ```
-cargo test -p hhagent-db --test postgres_e2e entities_list_ 2>&1 | tail -10
+cargo test -p kastellan-db --test postgres_e2e entities_list_ 2>&1 | tail -10
 ```
 Expected: 2 tests pass (or [SKIP] cleanly if no PG on host).
 
@@ -783,11 +783,11 @@ pub async fn reject_entity(
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_approve_flips_quarantine_and_is_idempotent() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
 
-    use hhagent_db::entities::{approve_entity, ApproveOutcome};
+    use kastellan_db::entities::{approve_entity, ApproveOutcome};
 
     sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES ('person', 'Approve Me', 'approve me')")
         .execute(&pool).await.unwrap();
@@ -816,12 +816,12 @@ async fn entities_approve_flips_quarantine_and_is_idempotent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_reject_cascades_memory_entities_and_returns_count() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
 
-    use hhagent_db::entities::{reject_entity, RejectOutcome};
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::entities::{reject_entity, RejectOutcome};
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 
     sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES ('person', 'Reject Me', 'reject me')")
         .execute(&pool).await.unwrap();
@@ -860,11 +860,11 @@ async fn entities_reject_cascades_memory_entities_and_returns_count() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_reject_returns_not_found_on_unknown_id() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
 
-    use hhagent_db::entities::{reject_entity, RejectOutcome};
+    use kastellan_db::entities::{reject_entity, RejectOutcome};
     assert!(matches!(
         reject_entity(&pool, 999_999).await.unwrap(),
         RejectOutcome::NotFound
@@ -875,7 +875,7 @@ async fn entities_reject_returns_not_found_on_unknown_id() {
 ### Step 3.3: Run + commit
 
 ```
-cargo test -p hhagent-db --test postgres_e2e entities_approve entities_reject 2>&1 | tail -10
+cargo test -p kastellan-db --test postgres_e2e entities_approve entities_reject 2>&1 | tail -10
 cargo test --workspace 2>&1 | tail -3
 ```
 Expected: 3 new pass; workspace = **860 passed**.
@@ -1058,12 +1058,12 @@ pub async fn merge_entities(
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_merge_retargets_links_and_drops_duplicates() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
 
-    use hhagent_db::entities::{merge_entities, MergeOutcome};
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::entities::{merge_entities, MergeOutcome};
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 
     // 3 person entities, target is 'Smith' (the variant 'SMITH' should be
     // a near-duplicate, 'Dr. Smith' another).
@@ -1113,11 +1113,11 @@ async fn entities_merge_retargets_links_and_drops_duplicates() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_merge_refuses_cross_kind_and_keep_in_drop_list() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
 
-    use hhagent_db::entities::{merge_entities, EntitiesError};
+    use kastellan_db::entities::{merge_entities, EntitiesError};
 
     sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES
         ('person', 'Alice',  'alice'),
@@ -1155,7 +1155,7 @@ async fn entities_merge_refuses_cross_kind_and_keep_in_drop_list() {
 ### Step 4.3: Run + commit
 
 ```
-cargo test -p hhagent-db --test postgres_e2e entities_merge 2>&1 | tail -10
+cargo test -p kastellan-db --test postgres_e2e entities_merge 2>&1 | tail -10
 cargo test --workspace 2>&1 | tail -3
 ```
 Expected: 2 new pass; workspace = **862 passed**.
@@ -1339,7 +1339,7 @@ fn build_entities_merged_payload_has_exact_six_keys() {
 ### Step 5.4: Run + commit
 
 ```
-cargo test -p hhagent-core scheduler::audit::tests 2>&1 | tail -8
+cargo test -p kastellan-core scheduler::audit::tests 2>&1 | tail -8
 cargo test --workspace 2>&1 | tail -3
 ```
 Expected: 6 new pass; workspace = **868 passed**.
@@ -1395,7 +1395,7 @@ use crate::scheduler::audit::{
 - [ ] **Append** the three helper functions at the end of the file, just before the `#[cfg(test)] mod tests` block:
 
 ```rust
-/// Compose `hhagent_db::entities::approve_entity` with one
+/// Compose `kastellan_db::entities::approve_entity` with one
 /// `actor='cli' action='entities.approved'` audit row. The audit row is
 /// emitted ONLY on the `Approved` variant (state-changing path);
 /// `AlreadyApproved` and `NotFound` produce no audit row.
@@ -1405,11 +1405,11 @@ use crate::scheduler::audit::{
 pub async fn entities_approve_and_audit(
     pool: &sqlx::PgPool,
     id: i64,
-) -> Result<hhagent_db::entities::ApproveOutcome, hhagent_db::entities::EntitiesError> {
-    let outcome = hhagent_db::entities::approve_entity(pool, id).await?;
-    if let hhagent_db::entities::ApproveOutcome::Approved { kind, name } = &outcome {
+) -> Result<kastellan_db::entities::ApproveOutcome, kastellan_db::entities::EntitiesError> {
+    let outcome = kastellan_db::entities::approve_entity(pool, id).await?;
+    if let kastellan_db::entities::ApproveOutcome::Approved { kind, name } = &outcome {
         let payload = build_entities_approved_payload(id, kind, name);
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool, CLI_AUDIT_ACTOR, ACTION_ENTITIES_APPROVED, payload,
         ).await {
             tracing::warn!(error = %e, entity_id = id,
@@ -1419,17 +1419,17 @@ pub async fn entities_approve_and_audit(
     Ok(outcome)
 }
 
-/// Compose `hhagent_db::entities::reject_entity` with one
+/// Compose `kastellan_db::entities::reject_entity` with one
 /// `actor='cli' action='entities.rejected'` audit row. The audit row is
 /// emitted ONLY on the `Rejected` variant; `NotFound` produces no row.
 pub async fn entities_reject_and_audit(
     pool: &sqlx::PgPool,
     id: i64,
-) -> Result<hhagent_db::entities::RejectOutcome, hhagent_db::entities::EntitiesError> {
-    let outcome = hhagent_db::entities::reject_entity(pool, id).await?;
-    if let hhagent_db::entities::RejectOutcome::Rejected { kind, name, mentions_dropped } = &outcome {
+) -> Result<kastellan_db::entities::RejectOutcome, kastellan_db::entities::EntitiesError> {
+    let outcome = kastellan_db::entities::reject_entity(pool, id).await?;
+    if let kastellan_db::entities::RejectOutcome::Rejected { kind, name, mentions_dropped } = &outcome {
         let payload = build_entities_rejected_payload(id, kind, name, *mentions_dropped);
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool, CLI_AUDIT_ACTOR, ACTION_ENTITIES_REJECTED, payload,
         ).await {
             tracing::warn!(error = %e, entity_id = id,
@@ -1439,7 +1439,7 @@ pub async fn entities_reject_and_audit(
     Ok(outcome)
 }
 
-/// Compose `hhagent_db::entities::merge_entities` with one
+/// Compose `kastellan_db::entities::merge_entities` with one
 /// `actor='cli' action='entities.merged'` audit row on the successful
 /// path. Precondition errors (KindMismatch / NotFound / NoDropIds /
 /// KeepInDropList) propagate to the caller without an audit row.
@@ -1447,8 +1447,8 @@ pub async fn entities_merge_and_audit(
     pool: &sqlx::PgPool,
     keep_id: i64,
     drop_ids: &[i64],
-) -> Result<hhagent_db::entities::MergeOutcome, hhagent_db::entities::EntitiesError> {
-    let outcome = hhagent_db::entities::merge_entities(pool, keep_id, drop_ids).await?;
+) -> Result<kastellan_db::entities::MergeOutcome, kastellan_db::entities::EntitiesError> {
+    let outcome = kastellan_db::entities::merge_entities(pool, keep_id, drop_ids).await?;
     let payload = build_entities_merged_payload(
         outcome.kept_id,
         &outcome.kept_kind,
@@ -1457,7 +1457,7 @@ pub async fn entities_merge_and_audit(
         outcome.links_retargeted,
         outcome.links_dropped_as_duplicate,
     );
-    if let Err(e) = hhagent_db::audit::insert(
+    if let Err(e) = kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_ENTITIES_MERGED, payload,
     ).await {
         tracing::warn!(error = %e, kept_id = outcome.kept_id,
@@ -1479,8 +1479,8 @@ fn entities_approve_and_audit_signature_compile_pin() {
         id: i64,
     ) -> impl std::future::Future<
         Output = Result<
-            hhagent_db::entities::ApproveOutcome,
-            hhagent_db::entities::EntitiesError,
+            kastellan_db::entities::ApproveOutcome,
+            kastellan_db::entities::EntitiesError,
         >,
     > + 'a {
         entities_approve_and_audit(pool, id)
@@ -1495,8 +1495,8 @@ fn entities_reject_and_audit_signature_compile_pin() {
         id: i64,
     ) -> impl std::future::Future<
         Output = Result<
-            hhagent_db::entities::RejectOutcome,
-            hhagent_db::entities::EntitiesError,
+            kastellan_db::entities::RejectOutcome,
+            kastellan_db::entities::EntitiesError,
         >,
     > + 'a {
         entities_reject_and_audit(pool, id)
@@ -1512,8 +1512,8 @@ fn entities_merge_and_audit_signature_compile_pin() {
         drops: &'a [i64],
     ) -> impl std::future::Future<
         Output = Result<
-            hhagent_db::entities::MergeOutcome,
-            hhagent_db::entities::EntitiesError,
+            kastellan_db::entities::MergeOutcome,
+            kastellan_db::entities::EntitiesError,
         >,
     > + 'a {
         entities_merge_and_audit(pool, keep, drops)
@@ -1525,7 +1525,7 @@ fn entities_merge_and_audit_signature_compile_pin() {
 ### Step 6.3: Run + commit
 
 ```
-cargo test -p hhagent-core cli_audit::tests::entities 2>&1 | tail -8
+cargo test -p kastellan-core cli_audit::tests::entities 2>&1 | tail -8
 cargo test --workspace 2>&1 | tail -3
 ```
 Expected: 3 new pass (compile-only); workspace = **871 passed**.
@@ -1534,7 +1534,7 @@ Expected: 3 new pass (compile-only); workspace = **871 passed**.
 git add core/src/cli_audit.rs
 git commit -m "feat(cli_audit): entities_{approve,reject,merge}_and_audit helpers
 
-Three async wrappers composing the new hhagent_db::entities operations
+Three async wrappers composing the new kastellan_db::entities operations
 with one wire-stable audit row per state change. Best-effort posture
 on audit insert (tracing::warn on failure, never propagates) matching
 l1_add_and_audit / tools_allowlist_add_and_audit. The audit row is
@@ -1551,10 +1551,10 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ---
 
-## Task 7: `hhagent-cli entities` subcommand tree + 2 arg-parser unit tests
+## Task 7: `kastellan-cli entities` subcommand tree + 2 arg-parser unit tests
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli.rs`
+- Modify: `core/src/bin/kastellan-cli.rs`
 
 ### Step 7.1: Wire `entities` into the top-level `match` in `main`
 
@@ -1569,12 +1569,12 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 - [ ] **In `help_text()`** (line 90 onwards), append the entities lines just below the `memory l1` block:
 
 ```
-    hhagent-cli entities list      [--kind K] [--state quarantined|approved|any]
+    kastellan-cli entities list      [--kind K] [--state quarantined|approved|any]
                                    [--limit N] [--since RFC3339] [--min-mentions N]
-    hhagent-cli entities show      <id>
-    hhagent-cli entities approve   <id> [<id>...]
-    hhagent-cli entities reject    <id> [<id>...]
-    hhagent-cli entities merge     --keep <id> --drop <id>[,<id>...]
+    kastellan-cli entities show      <id>
+    kastellan-cli entities approve   <id> [<id>...]
+    kastellan-cli entities reject    <id> [<id>...]
+    kastellan-cli entities merge     --keep <id> --drop <id>[,<id>...]
 ```
 
 ### Step 7.3: Add the parser helpers (unit-testable) and the dispatch tree
@@ -1583,8 +1583,8 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ```rust
 /// Parse the `--state` flag value. Case-insensitive.
-fn parse_entity_state(s: &str) -> Result<hhagent_db::entities::EntityState, String> {
-    use hhagent_db::entities::EntityState;
+fn parse_entity_state(s: &str) -> Result<kastellan_db::entities::EntityState, String> {
+    use kastellan_db::entities::EntityState;
     match s.trim().to_ascii_lowercase().as_str() {
         "quarantined" => Ok(EntityState::Quarantined),
         "approved"    => Ok(EntityState::Approved),
@@ -1626,7 +1626,7 @@ fn parse_id_list(s: &str) -> Result<Vec<i64>, String> {
 
 fn run_entities(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli entities <list|show|approve|reject|merge> ...");
+        eprintln!("usage: kastellan-cli entities <list|show|approve|reject|merge> ...");
         return ExitCode::from(2);
     }
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -1653,8 +1653,8 @@ fn run_entities(args: &[String]) -> ExitCode {
 }
 
 async fn entities_list(args: &[String]) -> ExitCode {
-    use hhagent_db::entities::{list_entities, EntityState, ListFilter};
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_db::entities::{list_entities, EntityState, ListFilter};
+    use kastellan_db::pool::connect_runtime_pool;
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
 
@@ -1774,13 +1774,13 @@ async fn entities_list(args: &[String]) -> ExitCode {
 }
 
 async fn entities_show(args: &[String]) -> ExitCode {
-    use hhagent_db::entities::get_entity_with_mentions;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_db::entities::get_entity_with_mentions;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let id_str = match args {
         [s] => s,
         _ => {
-            eprintln!("usage: hhagent-cli entities show <id>");
+            eprintln!("usage: kastellan-cli entities show <id>");
             return ExitCode::from(2);
         }
     };
@@ -1836,12 +1836,12 @@ async fn entities_show(args: &[String]) -> ExitCode {
 }
 
 async fn entities_approve(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entities_approve_and_audit;
-    use hhagent_db::entities::ApproveOutcome;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::entities_approve_and_audit;
+    use kastellan_db::entities::ApproveOutcome;
+    use kastellan_db::pool::connect_runtime_pool;
 
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli entities approve <id> [<id>...]");
+        eprintln!("usage: kastellan-cli entities approve <id> [<id>...]");
         return ExitCode::from(2);
     }
     let mut ids: Vec<i64> = Vec::with_capacity(args.len());
@@ -1886,12 +1886,12 @@ async fn entities_approve(args: &[String]) -> ExitCode {
 }
 
 async fn entities_reject(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entities_reject_and_audit;
-    use hhagent_db::entities::RejectOutcome;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::entities_reject_and_audit;
+    use kastellan_db::entities::RejectOutcome;
+    use kastellan_db::pool::connect_runtime_pool;
 
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli entities reject <id> [<id>...]");
+        eprintln!("usage: kastellan-cli entities reject <id> [<id>...]");
         return ExitCode::from(2);
     }
     let mut ids: Vec<i64> = Vec::with_capacity(args.len());
@@ -1933,9 +1933,9 @@ async fn entities_reject(args: &[String]) -> ExitCode {
 }
 
 async fn entities_merge(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entities_merge_and_audit;
-    use hhagent_db::entities::EntitiesError;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::entities_merge_and_audit;
+    use kastellan_db::entities::EntitiesError;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let mut keep: Option<i64> = None;
     let mut drop_ids: Option<Vec<i64>> = None;
@@ -2052,12 +2052,12 @@ Replace the `match entities_merge_and_audit(...)` body in `entities_merge` with:
 
 ### Step 7.4: Add 2 arg-parser unit tests
 
-- [ ] **Find or add a `#[cfg(test)] mod tests` block** at the end of `core/src/bin/hhagent-cli.rs`. If one exists already (it should — `parse_classification_floor` is tested in there), append:
+- [ ] **Find or add a `#[cfg(test)] mod tests` block** at the end of `core/src/bin/kastellan-cli.rs`. If one exists already (it should — `parse_classification_floor` is tested in there), append:
 
 ```rust
 #[test]
 fn parse_entity_state_accepts_canonical_lowercase_and_case_insensitive() {
-    use hhagent_db::entities::EntityState;
+    use kastellan_db::entities::EntityState;
     assert_eq!(parse_entity_state("quarantined").unwrap(), EntityState::Quarantined);
     assert_eq!(parse_entity_state("APPROVED").unwrap(),    EntityState::Approved);
     assert_eq!(parse_entity_state("Any").unwrap(),         EntityState::Any);
@@ -2079,9 +2079,9 @@ fn parse_id_list_accepts_comma_separated_and_rejects_empty_segments() {
 }
 ```
 
-> **Note:** If `core/src/bin/hhagent-cli.rs` has no existing `mod tests` block (only `parse_classification_floor` tests living next to the function), the search for the existing tests should land on the `#[cfg(test)] mod tests {` line. Confirm with:
+> **Note:** If `core/src/bin/kastellan-cli.rs` has no existing `mod tests` block (only `parse_classification_floor` tests living next to the function), the search for the existing tests should land on the `#[cfg(test)] mod tests {` line. Confirm with:
 > ```
-> grep -n "#\[cfg(test)\] *mod tests\|#\[cfg(test)\]" core/src/bin/hhagent-cli.rs
+> grep -n "#\[cfg(test)\] *mod tests\|#\[cfg(test)\]" core/src/bin/kastellan-cli.rs
 > ```
 
 ### Step 7.5: Build + commit
@@ -2093,10 +2093,10 @@ cargo test --workspace 2>&1 | tail -3
 Expected: clean build; 871 + 2 = **873 passed**.
 
 ```bash
-git add core/src/bin/hhagent-cli.rs
-git commit -m "feat(bin/hhagent-cli): entities subcommand tree (list/show/approve/reject/merge)
+git add core/src/bin/kastellan-cli.rs
+git commit -m "feat(bin/kastellan-cli): entities subcommand tree (list/show/approve/reject/merge)
 
-New top-level subcommand under hhagent-cli:
+New top-level subcommand under kastellan-cli:
 
   list      filterable by kind / state / since / min_mentions / limit
   show      single-entity deep view with first 10 linked memory previews
@@ -2135,7 +2135,7 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ### Step 8.1: Read the precedent
 
-Read `core/tests/cli_memory_l1_e2e.rs` for the subprocess-test pattern (per-test PG cluster bring-up, `hhagent-cli` binary discovery via `cargo`'s `CARGO_BIN_EXE_hhagent-cli` env, `Command::new(...).env(...).args(...).output()`):
+Read `core/tests/cli_memory_l1_e2e.rs` for the subprocess-test pattern (per-test PG cluster bring-up, `kastellan-cli` binary discovery via `cargo`'s `CARGO_BIN_EXE_kastellan-cli` env, `Command::new(...).env(...).args(...).output()`):
 
 ```bash
 grep -n "fn cli_binary\|fn pg_env_for_cli\|fn test_" core/tests/cli_memory_l1_e2e.rs | head -10
@@ -2146,10 +2146,10 @@ grep -n "fn cli_binary\|fn pg_env_for_cli\|fn test_" core/tests/cli_memory_l1_e2
 - [ ] **Create `core/tests/cli_entities_e2e.rs`** with the 6 subprocess tests. The structure mirrors `cli_memory_l1_e2e.rs`:
 
 ```rust
-//! Subprocess integration tests for `hhagent-cli entities ...`.
+//! Subprocess integration tests for `kastellan-cli entities ...`.
 //!
 //! Each test brings up a per-test PG cluster, seeds the entities +
-//! memory_entities fixtures, invokes the real `hhagent-cli` binary as
+//! memory_entities fixtures, invokes the real `kastellan-cli` binary as
 //! a subprocess with the per-cluster env, then asserts on (exit code,
 //! stdout, stderr, audit_log row presence).
 
@@ -2157,13 +2157,13 @@ use std::process::Command;
 use sqlx::PgPool;
 
 fn cli_binary() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_hhagent-cli"))
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_kastellan-cli"))
 }
 
-fn cli_env(cluster: &hhagent_tests_common::PgCluster) -> Vec<(String, String)> {
+fn cli_env(cluster: &kastellan_tests_common::PgCluster) -> Vec<(String, String)> {
     vec![
-        ("HHAGENT_DATA_DIR".into(), cluster.data_dir().to_string_lossy().into_owned()),
-        // PGHOST / PGPORT are not needed; resolve_connect_spec reads HHAGENT_DATA_DIR.
+        ("KASTELLAN_DATA_DIR".into(), cluster.data_dir().to_string_lossy().into_owned()),
+        // PGHOST / PGPORT are not needed; resolve_connect_spec reads KASTELLAN_DATA_DIR.
     ]
 }
 
@@ -2176,8 +2176,8 @@ async fn seed_quarantined_entity(pool: &PgPool, kind: &str, name: &str) -> i64 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_entities_list_shows_quarantined_rows() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
     let _ = seed_quarantined_entity(&pool, "person", "Alice").await;
     let _ = seed_quarantined_entity(&pool, "place", "Sydney").await;
@@ -2187,7 +2187,7 @@ async fn cli_entities_list_shows_quarantined_rows() {
         .envs(cli_env(&cluster))
         .args(["entities", "list"])
         .output()
-        .expect("hhagent-cli entities list");
+        .expect("kastellan-cli entities list");
     assert!(output.status.success(),
         "exit={:?} stderr={}", output.status,
         String::from_utf8_lossy(&output.stderr));
@@ -2200,11 +2200,11 @@ async fn cli_entities_list_shows_quarantined_rows() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_entities_show_prints_entity_detail_and_linked_memories() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
     let entity_id = seed_quarantined_entity(&pool, "person", "Showme Smith").await;
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
     let mem_id = insert_memory_at_layer(&pool, "showme body example",
         &serde_json::json!({}), None, MemoryLayer::Detail).await.unwrap();
     sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES ($1, $2)")
@@ -2215,7 +2215,7 @@ async fn cli_entities_show_prints_entity_detail_and_linked_memories() {
         .envs(cli_env(&cluster))
         .args(["entities", "show", &entity_id.to_string()])
         .output()
-        .expect("hhagent-cli entities show");
+        .expect("kastellan-cli entities show");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Showme Smith"));
@@ -2226,8 +2226,8 @@ async fn cli_entities_show_prints_entity_detail_and_linked_memories() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_entities_approve_writes_audit_row() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
     let entity_id = seed_quarantined_entity(&pool, "person", "Approve Smith").await;
     drop(pool);
@@ -2236,7 +2236,7 @@ async fn cli_entities_approve_writes_audit_row() {
         .envs(cli_env(&cluster))
         .args(["entities", "approve", &entity_id.to_string()])
         .output()
-        .expect("hhagent-cli entities approve");
+        .expect("kastellan-cli entities approve");
     assert!(output.status.success(),
         "exit={:?} stderr={}", output.status,
         String::from_utf8_lossy(&output.stderr));
@@ -2256,11 +2256,11 @@ async fn cli_entities_approve_writes_audit_row() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_entities_reject_writes_audit_row_with_mentions_dropped() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
     let entity_id = seed_quarantined_entity(&pool, "person", "Reject Smith").await;
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
     let mem_id = insert_memory_at_layer(&pool, "reject body",
         &serde_json::json!({}), None, MemoryLayer::Detail).await.unwrap();
     sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES ($1, $2)")
@@ -2271,7 +2271,7 @@ async fn cli_entities_reject_writes_audit_row_with_mentions_dropped() {
         .envs(cli_env(&cluster))
         .args(["entities", "reject", &entity_id.to_string()])
         .output()
-        .expect("hhagent-cli entities reject");
+        .expect("kastellan-cli entities reject");
     assert!(output.status.success());
 
     let pool = cluster.connect_runtime().await;
@@ -2286,8 +2286,8 @@ async fn cli_entities_reject_writes_audit_row_with_mentions_dropped() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_entities_merge_writes_audit_row() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
     let keep = seed_quarantined_entity(&pool, "person", "Merge Keep").await;
     let drop_a = seed_quarantined_entity(&pool, "person", "Merge Drop A").await;
@@ -2299,7 +2299,7 @@ async fn cli_entities_merge_writes_audit_row() {
         .envs(cli_env(&cluster))
         .args(["entities", "merge", "--keep", &keep.to_string(), "--drop", &drop_arg])
         .output()
-        .expect("hhagent-cli entities merge");
+        .expect("kastellan-cli entities merge");
     assert!(output.status.success(),
         "exit={:?} stderr={}", output.status,
         String::from_utf8_lossy(&output.stderr));
@@ -2354,14 +2354,14 @@ async fn cli_entities_bad_args_exit_code_two() {
 ```
 
 > **Notes for the implementer:**
-> - The `cluster.data_dir()` accessor mirrors how `cli_memory_l1_e2e.rs` resolves the env. If the helper is named differently in `hhagent_tests_common::PgCluster`, follow the existing pattern (grep the precedent).
+> - The `cluster.data_dir()` accessor mirrors how `cli_memory_l1_e2e.rs` resolves the env. If the helper is named differently in `kastellan_tests_common::PgCluster`, follow the existing pattern (grep the precedent).
 > - `pg_serial_guard()` may be macOS-only (the launchd serial-lock pattern). If it's gated, follow the same gating shape.
 > - The `MemoryLayer::Detail` reference — verify the current variant name; the L0 layer is the seed layer.
 
 ### Step 8.3: Run + commit
 
 ```
-cargo test -p hhagent-core --test cli_entities_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --test cli_entities_e2e 2>&1 | tail -10
 cargo test --workspace 2>&1 | tail -3
 ```
 Expected: 6 new pass; workspace = **879 passed**.
@@ -2370,7 +2370,7 @@ Expected: 6 new pass; workspace = **879 passed**.
 git add core/tests/cli_entities_e2e.rs
 git commit -m "test(core/cli_entities_e2e): subprocess integration tests for entities CLI
 
-Six subprocess tests against the real hhagent-cli binary:
+Six subprocess tests against the real kastellan-cli binary:
 
   - list shows quarantined rows + header
   - show prints entity detail + first 10 linked memory previews
@@ -2380,7 +2380,7 @@ Six subprocess tests against the real hhagent-cli binary:
   - bad args (approve no ids; merge without --keep; unknown sub; bad
     --state value) all exit with code 2 + usage on stderr
 
-Each test brings up a per-test PG cluster via hhagent_tests_common,
+Each test brings up a per-test PG cluster via kastellan_tests_common,
 seeds fixtures, spawns the binary with the per-cluster env, asserts
 on (exit code, stdout, stderr, audit_log presence). Skip-as-pass
 when no PG is available (the bring_up_pg_cluster early-return).
@@ -2415,13 +2415,13 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ///    memory_entities row is gone).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recall_graph_lane_lights_up_after_operator_approve_and_reject() {
-    let _guard = hhagent_tests_common::pg_serial_guard().await;
-    let Some(cluster) = hhagent_tests_common::bring_up_pg_cluster().await else { return };
+    let _guard = kastellan_tests_common::pg_serial_guard().await;
+    let Some(cluster) = kastellan_tests_common::bring_up_pg_cluster().await else { return };
     let pool = cluster.connect_runtime().await;
 
-    use hhagent_core::cli_audit::{entities_approve_and_audit, entities_reject_and_audit};
-    use hhagent_core::memory::recall::{recall, RecallParams, RecallModes};
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_core::cli_audit::{entities_approve_and_audit, entities_reject_and_audit};
+    use kastellan_core::memory::recall::{recall, RecallParams, RecallModes};
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 
     // Seed quarantined entities. NOTE: do NOT call unquarantine_all_entities.
     sqlx::query("INSERT INTO entities (kind, name, name_norm, quarantine) VALUES
@@ -2449,7 +2449,7 @@ async fn recall_graph_lane_lights_up_after_operator_approve_and_reject() {
     assert_eq!(res.len(), 0, "quarantined-by-default invariant violated: {res:?}");
 
     // 2. Approve Alice -> graph lane surfaces her memory.
-    use hhagent_db::entities::ApproveOutcome;
+    use kastellan_db::entities::ApproveOutcome;
     assert!(matches!(
         entities_approve_and_audit(&pool, alice).await.unwrap(),
         ApproveOutcome::Approved { .. }
@@ -2460,7 +2460,7 @@ async fn recall_graph_lane_lights_up_after_operator_approve_and_reject() {
     assert_eq!(res[0].id, mem_alice);
 
     // 3. Reject Bob -> graph lane still returns just Alice's memory.
-    use hhagent_db::entities::RejectOutcome;
+    use kastellan_db::entities::RejectOutcome;
     assert!(matches!(
         entities_reject_and_audit(&pool, bob).await.unwrap(),
         RejectOutcome::Rejected { .. }
@@ -2494,7 +2494,7 @@ async fn recall_graph_lane_lights_up_after_operator_approve_and_reject() {
 ### Step 9.2: Run + commit
 
 ```
-cargo test -p hhagent-core --test memory_recall_e2e recall_graph_lane_lights_up 2>&1 | tail -10
+cargo test -p kastellan-core --test memory_recall_e2e recall_graph_lane_lights_up 2>&1 | tail -10
 cargo test --workspace 2>&1 | tail -3
 ```
 Expected: 1 new pass; workspace = **880 passed**.
@@ -2562,8 +2562,8 @@ Spec at [`docs/superpowers/specs/2026-05-20-operator-quarantine-review-cli-desig
 
 **What shipped:**
 
-- New `hhagent_db::entities` module (~280 LOC + 4 unit tests): types (EntityRow / ListFilter / EntityState / MemoryPreview / ApproveOutcome / RejectOutcome / MergeOutcome / EntitiesError) + 2 pure helpers (validate_merge_args / body_preview) + 5 I/O functions (list_entities, get_entity_with_mentions, approve_entity, reject_entity, merge_entities). Single-transaction shape on every state-changer (SELECT … FOR UPDATE to lock against concurrent auto-linker writes).
-- New CLI subcommand tree `hhagent-cli entities {list,show,approve,reject,merge}` in `core/src/bin/hhagent-cli.rs`. approve/reject are variadic; merge takes --keep + --drop comma-list (not repeatable). Three-variant ApproveOutcome / two-variant RejectOutcome surface to the CLI so it can produce distinct stderr lines without a second DB probe. Aggregate exit code 1 if any id was NotFound (CI / scripting friendly).
+- New `kastellan_db::entities` module (~280 LOC + 4 unit tests): types (EntityRow / ListFilter / EntityState / MemoryPreview / ApproveOutcome / RejectOutcome / MergeOutcome / EntitiesError) + 2 pure helpers (validate_merge_args / body_preview) + 5 I/O functions (list_entities, get_entity_with_mentions, approve_entity, reject_entity, merge_entities). Single-transaction shape on every state-changer (SELECT … FOR UPDATE to lock against concurrent auto-linker writes).
+- New CLI subcommand tree `kastellan-cli entities {list,show,approve,reject,merge}` in `core/src/bin/kastellan-cli.rs`. approve/reject are variadic; merge takes --keep + --drop comma-list (not repeatable). Three-variant ApproveOutcome / two-variant RejectOutcome surface to the CLI so it can produce distinct stderr lines without a second DB probe. Aggregate exit code 1 if any id was NotFound (CI / scripting friendly).
 - Three new wire-stable audit-row action constants (`entities.approved` / `entities.rejected` / `entities.merged`) + three payload builders in `core::scheduler::audit`, BTreeSet-pinned. Audit row emitted ONLY on the state-changing variant — AlreadyApproved / NotFound produce no row.
 - Three new `core::cli_audit` helpers (entities_{approve,reject,merge}_and_audit) composing the DB call with the audit row. Best-effort posture on audit insert (tracing::warn on failure).
 - 7 DB integration tests in `postgres_e2e` + 6 CLI subprocess tests in `cli_entities_e2e` + 1 end-to-end recall pin in `memory_recall_e2e` proving the graph lane lights up after operator approval.
@@ -2572,7 +2572,7 @@ Spec at [`docs/superpowers/specs/2026-05-20-operator-quarantine-review-cli-desig
 
 **What's deliberately NOT in this slice:** interactive TTY review mode; `entities kinds add/remove` (would need migration `0017` for grants); embedding-based merge suggestions (entities.embedding is NULL for every row); --mentions body-substring filter on list; `entities relink <memory_id>` backfill for the operator-explicit L0/L1 add path (NoOp extractor). All flagged in spec §10.
 
-**File-size watch:** `core/src/bin/hhagent-cli.rs` now at ~1700 LOC (was 1444 pre-slice). Already-flagged cap-breach; refactor is a separate slice on the priority list. `db/src/entities.rs` ships at ~280 LOC (well under cap). New `core/tests/cli_entities_e2e.rs` at ~350 LOC (under cap).
+**File-size watch:** `core/src/bin/kastellan-cli.rs` now at ~1700 LOC (was 1444 pre-slice). Already-flagged cap-breach; refactor is a separate slice on the priority list. `db/src/entities.rs` ships at ~280 LOC (well under cap). New `core/tests/cli_entities_e2e.rs` at ~350 LOC (under cap).
 ```
 
 ### Step 10.3: Update ROADMAP.md
@@ -2580,7 +2580,7 @@ Spec at [`docs/superpowers/specs/2026-05-20-operator-quarantine-review-cli-desig
 - [ ] **Find the Phase 1 entries section** in `docs/devel/ROADMAP.md` (search for "Memory-write-time entity auto-linker"). Add a new entry just after it:
 
 ```markdown
-- [x] **Operator quarantine-review CLI (2026-05-20)** — branch `feat/entities-quarantine-review`, 10 commits, awaiting PR review. New `hhagent-cli entities {list, show, approve, reject, merge}` subcommand tree + new `hhagent_db::entities` module + 3 new wire-stable audit-row action constants + 3 new `cli_audit` helpers. Workspace 848 → **874** (+26). Closes the graph-lane-empty-in-production gap — quarantined-by-default entities (migrations 0015/0016) are now operator-reviewable; production `graph_search` lights up the moment the first entity is approved. Spec at `docs/superpowers/specs/2026-05-20-operator-quarantine-review-cli-design.md`; plan at `docs/superpowers/plans/2026-05-20-operator-quarantine-review-cli.md`.
+- [x] **Operator quarantine-review CLI (2026-05-20)** — branch `feat/entities-quarantine-review`, 10 commits, awaiting PR review. New `kastellan-cli entities {list, show, approve, reject, merge}` subcommand tree + new `kastellan_db::entities` module + 3 new wire-stable audit-row action constants + 3 new `cli_audit` helpers. Workspace 848 → **874** (+26). Closes the graph-lane-empty-in-production gap — quarantined-by-default entities (migrations 0015/0016) are now operator-reviewable; production `graph_search` lights up the moment the first entity is approved. Spec at `docs/superpowers/specs/2026-05-20-operator-quarantine-review-cli-design.md`; plan at `docs/superpowers/plans/2026-05-20-operator-quarantine-review-cli.md`.
 ```
 
 ### Step 10.4: Commit the docs-sync
@@ -2592,7 +2592,7 @@ git commit -m "docs(handover,roadmap): operator quarantine-review CLI — sessio
 Wraps up the feat/entities-quarantine-review slice (10 commits):
 
   - db::entities module (types + 2 pure helpers + 5 async ops)
-  - hhagent-cli entities {list,show,approve,reject,merge} subcommands
+  - kastellan-cli entities {list,show,approve,reject,merge} subcommands
   - 3 wire-stable audit actions (entities.{approved,rejected,merged})
   - 3 cli_audit helpers composing the DB call + best-effort audit row
   - +26 tests (848 -> 874, 0 failures, 0 warnings, 0 [SKIP])
@@ -2635,7 +2635,7 @@ Sanity-check: at least one `test result` line per test binary.
 - §10 Open follow-ups — surfaced again in Task 10's session-end sync.
 - §11 Verification — Task 10's Step 10.1 is the verification.
 
-**2. Placeholder scan:** No `TBD` / `TODO` (the one reference to "the existing TODO note in `hhagent-cli memory l1 add`" is a deliberate citation, not a plan gap). Every code step has complete code. Every command has expected output.
+**2. Placeholder scan:** No `TBD` / `TODO` (the one reference to "the existing TODO note in `kastellan-cli memory l1 add`" is a deliberate citation, not a plan gap). Every code step has complete code. Every command has expected output.
 
 **3. Type consistency:** `ApproveOutcome` / `RejectOutcome` / `MergeOutcome` / `EntitiesError` / `EntityRow` / `ListFilter` / `EntityState` / `MemoryPreview` types appear identically across Task 1 (definition), Task 2-4 (function signatures), Task 6 (cli_audit helpers), Task 7 (CLI dispatch), Task 8 (subprocess tests), and Task 9 (recall pin). The three action constants (`ACTION_ENTITIES_APPROVED` / `ACTION_ENTITIES_REJECTED` / `ACTION_ENTITIES_MERGED`) appear identically across Task 5 (declaration), Task 6 (cli_audit imports + uses), and Task 8 (audit-row presence queries). The three payload builders (`build_entities_*_payload`) appear identically across Task 5 (declaration) and Task 6 (cli_audit imports + uses). The two pure helpers (`validate_merge_args`, `body_preview`) appear identically across Task 1 (declaration + tests) and Task 4 (body usage). Function signatures for the five async db::entities functions are stable across Tasks 1-4 (declaration) and Task 6 (await + match). The two CLI arg parsers (`parse_entity_state`, `parse_id_list`) appear identically across Task 7 (declaration + tests + use in `entities_list`/`entities_merge` dispatchers).
 

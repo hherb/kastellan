@@ -11,7 +11,7 @@
 //! CPU), but a latent foot-gun the moment a CPU-heavy test gets added.
 //!
 //! The fix is to assert the FFI shape from a *fresh* subprocess: spawn
-//! `hhagent-lockdown-probe rlimit-report` with `HHAGENT_CPU_MS=30000`,
+//! `kastellan-lockdown-probe rlimit-report` with `KASTELLAN_CPU_MS=30000`,
 //! let the probe's `main` call `apply_from_env` at startup, read the
 //! probe's stderr (which already prints `RLIMIT_REPORT: {report:?}`),
 //! and confirm the report says `Applied { cpu_seconds: 30 }`.
@@ -24,7 +24,7 @@
 
 use std::process::{Command, Stdio};
 
-const PROBE: &str = env!("CARGO_BIN_EXE_hhagent-lockdown-probe");
+const PROBE: &str = env!("CARGO_BIN_EXE_kastellan-lockdown-probe");
 
 #[test]
 fn apply_from_env_with_generous_budget_reports_applied() {
@@ -35,7 +35,7 @@ fn apply_from_env_with_generous_budget_reports_applied() {
     let output = Command::new(PROBE)
         .arg("rlimit-report")
         .env_clear()
-        .env("HHAGENT_CPU_MS", "30000")
+        .env("KASTELLAN_CPU_MS", "30000")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -63,7 +63,7 @@ fn apply_from_env_with_generous_budget_reports_applied() {
 
 #[test]
 fn apply_from_env_with_no_budget_env_reports_disabled() {
-    // Negative control: omit HHAGENT_CPU_MS entirely and assert the
+    // Negative control: omit KASTELLAN_CPU_MS entirely and assert the
     // probe prints `Disabled`. A future regression that silently
     // applies a default cap regardless of env would fail this — the
     // companion enforcement test (`cpu_burner_with_no_env_runs_past_one_second`)
@@ -80,7 +80,7 @@ fn apply_from_env_with_no_budget_env_reports_disabled() {
 
     assert!(
         output.status.success(),
-        "probe must exit 0 with no HHAGENT_CPU_MS set; got status {:?}; \
+        "probe must exit 0 with no KASTELLAN_CPU_MS set; got status {:?}; \
          stderr:\n{}",
         output.status,
         String::from_utf8_lossy(&output.stderr),
@@ -89,7 +89,7 @@ fn apply_from_env_with_no_budget_env_reports_disabled() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("RLIMIT_REPORT: Disabled"),
-        "expected RLIMIT_REPORT: Disabled on stderr when HHAGENT_CPU_MS is unset; \
+        "expected RLIMIT_REPORT: Disabled on stderr when KASTELLAN_CPU_MS is unset; \
          got:\n{stderr}",
     );
 }

@@ -207,7 +207,7 @@ wheels = [
 ]
 
 [[package]]
-name = "hhagent-worker-gliner-relex"
+name = "kastellan-worker-gliner-relex"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [

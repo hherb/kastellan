@@ -1,13 +1,13 @@
 # MacosContainer Slice 2 — per-worker backend selection
 
 **Date:** 2026-05-21
-**Issue:** [#55](https://github.com/hherb/hhagent/issues/55) (parent)
+**Issue:** [#55](https://github.com/hherb/kastellan/issues/55) (parent)
 **Predecessor slice:** [`2026-05-21-macos-container-spike-notes.md`](2026-05-21-macos-container-spike-notes.md) (spike) + PR #106 (Slice 1, merged at `cc0b0de`)
 **Scope:** 0.5–1 session — pure plumbing, no new image-build pipeline.
 
 ## Context
 
-Slice 1 (merged at `cc0b0de`) shipped `MacosContainer: SandboxBackend` as a sibling to `MacosSeatbelt`. The sibling is **opt-in per worker**, not the platform default: `hhagent_sandbox::default_backend()` on darwin still returns `MacosSeatbelt`. Slice 2 closes that opt-in seam — without it, the `MacosContainer` backend is dead code: nothing in the workspace can actually route a worker through it.
+Slice 1 (merged at `cc0b0de`) shipped `MacosContainer: SandboxBackend` as a sibling to `MacosSeatbelt`. The sibling is **opt-in per worker**, not the platform default: `kastellan_sandbox::default_backend()` on darwin still returns `MacosSeatbelt`. Slice 2 closes that opt-in seam — without it, the `MacosContainer` backend is dead code: nothing in the workspace can actually route a worker through it.
 
 The driving use case is the Phase 4 macOS gap: `MacosSeatbelt` has no memory primitive (`mem_mb` is silently ignored on darwin), but `MacosContainer` does (`-m <N>M` with SIGKILL on overrun). Workers like `gliner-relex` (PyTorch — easily 600 MiB+ resident) and the future `python-exec` need real memory enforcement on macOS. Slice 1 proved `MacosContainer` works; Slice 2 lets specific workers opt in to it while leaving the lightweight `shell-exec` path on Seatbelt for the 50× spawn-latency advantage (~50 ms Seatbelt vs ~760 ms warm Container).
 
@@ -15,7 +15,7 @@ The driving use case is the Phase 4 macOS gap: `MacosSeatbelt` has no memory pri
 
 ### In scope
 
-- New `SandboxBackendKind` enum in `hhagent_sandbox`, cfg-gated per-OS so mis-config is a compile-time error.
+- New `SandboxBackendKind` enum in `kastellan_sandbox`, cfg-gated per-OS so mis-config is a compile-time error.
 - New `SandboxBackends` struct + `default_for_current_os()` constructor + `resolve(kind) -> Arc<dyn SandboxBackend>` resolver.
 - New `sandbox_backend: Option<SandboxBackendKind>` field on `ToolEntry`. `None` defaults to the per-OS backend (current behaviour).
 - `SingleUseLifecycle` + `IdleTimeoutLifecycle` switch from holding `Arc<dyn SandboxBackend>` to holding `Arc<SandboxBackends>`; `acquire` resolves the entry's backend kind per call.
@@ -31,13 +31,13 @@ The driving use case is the Phase 4 macOS gap: `MacosSeatbelt` has no memory pri
 - **JSON-RPC end-to-end through the container.** No tiny JSON-RPC-speaking worker binary is cross-compiled in this slice. The smoke spawns `alpine sh -c 'echo ok'`, which proves the spawn-through-lifecycle chain reaches the container backend; the JSON-RPC layer was already proven separately by Slice 1's `macos_container_smoke.rs::echo_runs_inside_container`. Re-proving it would duplicate coverage.
 - **Issue #107 (--init / PID-1 / signal-handling).** Per the issue thread, the concern is real only for long-lived `IdleTimeoutLifecycle` workers. Slice 2's smoke is short-lived (single `echo`); Slice 2.5 is the natural place to address it alongside `gliner-relex`'s migration.
 - **Linux backend extension.** The `Bwrap` enum variant is defined for symmetry and so future work (e.g. an experimental Firecracker backend on Linux) has a precedent shape, but there is no behaviour change on Linux in this slice. `default_for_current_os()` on Linux returns a `SandboxBackends` holding only `Bwrap`.
-- **Operator CLI for swapping a worker's backend at runtime.** Backends are declared in the `ToolEntry` literal (e.g. `shell_exec_entry`, future `gliner_relex_entry`), not configured by `hhagent-cli` at runtime. If runtime swapping becomes a real operator need, that's a separate slice.
+- **Operator CLI for swapping a worker's backend at runtime.** Backends are declared in the `ToolEntry` literal (e.g. `shell_exec_entry`, future `gliner_relex_entry`), not configured by `kastellan-cli` at runtime. If runtime swapping becomes a real operator need, that's a separate slice.
 
 ## Design
 
 ### Types
 
-#### `SandboxBackendKind` (new, in `hhagent_sandbox`)
+#### `SandboxBackendKind` (new, in `kastellan_sandbox`)
 
 ```rust
 /// Operator-facing identifier for selecting a specific sandbox backend
@@ -62,7 +62,7 @@ pub enum SandboxBackendKind {
 
 **Trade-off considered:** an abstract `MicroVm` variant (which would map to `Container` on darwin and a future `Firecracker` on Linux) was rejected for now — it conflates two backends with quite different startup latency + image-build stories, and "I want memory enforcement on macOS specifically" is the only concrete use case today. If a Linux micro-VM backend ships later and operators want a single declarative knob across platforms, that's a future enum variant.
 
-#### `SandboxBackends` (new, in `hhagent_sandbox`)
+#### `SandboxBackends` (new, in `kastellan_sandbox`)
 
 ```rust
 /// Per-OS bundle of constructed sandbox backends, used by the lifecycle
@@ -121,7 +121,7 @@ pub struct ToolEntry {
 
 ```
 daemon startup
-└─► hhagent_sandbox::SandboxBackends::default_for_current_os()
+└─► kastellan_sandbox::SandboxBackends::default_for_current_os()
     └─► Arc<SandboxBackends>
         └─► SingleUseLifecycle::new(Arc<SandboxBackends>)
         └─► IdleTimeoutLifecycle::new(Arc<SandboxBackends>)
@@ -160,15 +160,15 @@ One-line swap:
 
 ```rust
 // before
-let sandbox: Arc<dyn SandboxBackend> = Arc::from(hhagent_sandbox::default_backend());
+let sandbox: Arc<dyn SandboxBackend> = Arc::from(kastellan_sandbox::default_backend());
 let manager = SingleUseLifecycle::new(sandbox);
 
 // after
-let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
 let manager = SingleUseLifecycle::new(sandboxes);
 ```
 
-`hhagent_sandbox::default_backend()` is kept (not deprecated, not removed) for direct-spawn callers like `tests-common::sandbox::backend()` that don't need per-entry selection.
+`kastellan_sandbox::default_backend()` is kept (not deprecated, not removed) for direct-spawn callers like `tests-common::sandbox::backend()` that don't need per-entry selection.
 
 ## Tests
 
@@ -228,5 +228,5 @@ None blocking. The smoke-test shape was clarified in the brainstorming round (ro
 
 ## Future slices (preview, not in this scope)
 
-- **Slice 2.5 (1 session):** `workers/gliner-relex/Containerfile` (Python 3.12 + uv sync + weights mount) + operator-runnable `container build -t hhagent/gliner-relex:dev workers/gliner-relex/` step. Update `gliner_relex_entry()` to set `sandbox_backend: Some(SandboxBackendKind::Container)` + image tag. Re-run e2e on macOS; confirm canonical `Dr Smith --[treats]--> asthma (0.994)` output through the container. **This is where Issue #107 (PID-1 / signal-handling) must be addressed** before `IdleTimeoutLifecycle` keeps gliner-relex warm.
+- **Slice 2.5 (1 session):** `workers/gliner-relex/Containerfile` (Python 3.12 + uv sync + weights mount) + operator-runnable `container build -t kastellan/gliner-relex:dev workers/gliner-relex/` step. Update `gliner_relex_entry()` to set `sandbox_backend: Some(SandboxBackendKind::Container)` + image tag. Re-run e2e on macOS; confirm canonical `Dr Smith --[treats]--> asthma (0.994)` output through the container. **This is where Issue #107 (PID-1 / signal-handling) must be addressed** before `IdleTimeoutLifecycle` keeps gliner-relex warm.
 - **Slice 3 (deferred to Phase 4):** `python-exec` worker — defaults to container on macOS for sandboxed user-Python execution.

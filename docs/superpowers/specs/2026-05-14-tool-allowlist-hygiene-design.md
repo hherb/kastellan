@@ -4,12 +4,12 @@
 **Date:** 2026-05-14
 **Branch (planned):** `feat/tool-allowlist-db`
 **Closes:** HANDOVER "Per-tool argv allowlist hygiene" pickup
-**Depends on:** Option L (`hhagent_runtime` role + GRANT shape), Option I (audit-log chokepoint), `cli_audit.rs` write-and-audit pattern (from `cancel_and_audit` / `submit_and_audit`).
+**Depends on:** Option L (`kastellan_runtime` role + GRANT shape), Option I (audit-log chokepoint), `cli_audit.rs` write-and-audit pattern (from `cancel_and_audit` / `submit_and_audit`).
 
 ## Problem
 
-`hhagent-core::main::build_tool_registry()` reads the argv allowlist for the
-`shell-exec` worker from `HHAGENT_SHELL_EXEC_ALLOWLIST` — a colon-separated
+`kastellan-core::main::build_tool_registry()` reads the argv allowlist for the
+`shell-exec` worker from `KASTELLAN_SHELL_EXEC_ALLOWLIST` — a colon-separated
 list of absolute paths. The deny-by-default posture (empty / unset → no programs
 allowlisted) is correct, but the source-of-truth is a process env var:
 
@@ -20,14 +20,14 @@ allowlisted) is correct, but the source-of-truth is a process env var:
 - Cross-restart drift ("the allowlist was different on yesterday's boot") is
   invisible.
 
-Production deployment of `hhagent` requires the argv allowlist to be a
+Production deployment of `kastellan` requires the argv allowlist to be a
 versioned, auditable source-of-truth that survives host restarts unchanged
 unless explicitly mutated through an audited code path.
 
 ## Goals
 
 1. The argv allowlist source-of-truth lives in Postgres, behind the existing
-   `hhagent_runtime` GRANT shape. INSERT / DELETE on the allowlist table is
+   `kastellan_runtime` GRANT shape. INSERT / DELETE on the allowlist table is
    the only path to widen or narrow it; every mutation writes one row in
    `audit_log`.
 2. The daemon loads the allowlist at startup and emits one
@@ -40,11 +40,11 @@ unless explicitly mutated through an audited code path.
 4. Test seam: `tests-common` exposes a `seed_tool_allowlist` helper for
    integration tests that already have a per-test PG cluster up; no extra
    bring-up cost.
-5. Hard cutover. `HHAGENT_SHELL_EXEC_ALLOWLIST` is no longer read.
+5. Hard cutover. `KASTELLAN_SHELL_EXEC_ALLOWLIST` is no longer read.
 
 ## Non-goals
 
-- **Binary path migration.** `HHAGENT_SHELL_EXEC_BIN` stays as an env var.
+- **Binary path migration.** `KASTELLAN_SHELL_EXEC_BIN` stays as an env var.
   Binary paths are orthogonal to allowlist hygiene; one worker = one binary,
   and the binary is constrained by the project's build artifact set.
 - **Multi-tenant / per-task allowlists.** The allowlist is host-global. A
@@ -73,7 +73,7 @@ CREATE TABLE tool_allowlists (
     CHECK (octet_length(argv0) > 0 AND argv0 LIKE '/%')
 );
 
-GRANT SELECT, INSERT, DELETE ON tool_allowlists TO hhagent_runtime;
+GRANT SELECT, INSERT, DELETE ON tool_allowlists TO kastellan_runtime;
 -- No UPDATE: changing an entry means DELETE + INSERT, preserving the
 -- audit trail of both the old and new shapes.
 ```
@@ -185,12 +185,12 @@ DB-error posture: same as `cancel_and_audit` / `submit_and_audit`. The audit
 insert is best-effort (`tracing::warn!` on failure); the DB mutation's
 success is the load-bearing signal.
 
-**New `hhagent-cli tools allowlist` subcommands:**
+**New `kastellan-cli tools allowlist` subcommands:**
 
 ```
-hhagent-cli tools allowlist add <tool> <argv0>
-hhagent-cli tools allowlist remove <tool> <argv0>
-hhagent-cli tools allowlist list [--tool <name>]
+kastellan-cli tools allowlist add <tool> <argv0>
+kastellan-cli tools allowlist remove <tool> <argv0>
+kastellan-cli tools allowlist list [--tool <name>]
 ```
 
 - `add` exits 0 on success (whether INSERT or no-op) with a 1-line stdout
@@ -201,7 +201,7 @@ hhagent-cli tools allowlist list [--tool <name>]
   Read-only — no audit row.
 
 `tools` subcommand group sits next to the existing `tasks` group in
-`hhagent-cli`; structure mirrors `hhagent-cli tasks list/status/cancel`.
+`kastellan-cli`; structure mirrors `kastellan-cli tasks list/status/cancel`.
 
 ### Section 3 — Daemon wiring
 
@@ -211,11 +211,11 @@ hhagent-cli tools allowlist list [--tool <name>]
 async fn build_tool_registry(pool: &PgPool) -> Result<ToolRegistry> {
     let mut reg = ToolRegistry::new();
 
-    if let Some(bin_os) = std::env::var_os("HHAGENT_SHELL_EXEC_BIN") {
+    if let Some(bin_os) = std::env::var_os("KASTELLAN_SHELL_EXEC_BIN") {
         let binary = PathBuf::from(&bin_os);
         if binary.is_file() {
             let allowlist =
-                hhagent_db::tool_allowlists::list_for_tool(pool, "shell-exec")
+                kastellan_db::tool_allowlists::list_for_tool(pool, "shell-exec")
                     .await
                     .context("loading shell-exec allowlist from DB")?;
             let entry = scheduler::shell_exec_entry(binary.clone(), &allowlist);
@@ -237,17 +237,17 @@ async fn build_tool_registry(pool: &PgPool) -> Result<ToolRegistry> {
         } else {
             tracing::warn!(
                 binary = %binary.display(),
-                "HHAGENT_SHELL_EXEC_BIN does not point to an existing file; \
+                "KASTELLAN_SHELL_EXEC_BIN does not point to an existing file; \
                  shell-exec NOT registered"
             );
         }
     }
 
     // Deprecation warning — does not block bring-up.
-    if std::env::var_os("HHAGENT_SHELL_EXEC_ALLOWLIST").is_some() {
+    if std::env::var_os("KASTELLAN_SHELL_EXEC_ALLOWLIST").is_some() {
         tracing::warn!(
-            "HHAGENT_SHELL_EXEC_ALLOWLIST is no longer honored; \
-             use 'hhagent-cli tools allowlist add' to populate the DB"
+            "KASTELLAN_SHELL_EXEC_ALLOWLIST is no longer honored; \
+             use 'kastellan-cli tools allowlist add' to populate the DB"
         );
     }
 
@@ -305,7 +305,7 @@ async fn build_tool_registry(pool: &PgPool) -> Result<ToolRegistry> {
 5. `list_all` returns 2 entries with `created_by="test"`.
 6. `remove(pool, "shell-exec", "/usr/bin/echo")` returns `Ok(true)`.
 7. Re-`remove` returns `Ok(false)`.
-8. `SET ROLE hhagent_runtime; UPDATE tool_allowlists SET argv0='/x' WHERE
+8. `SET ROLE kastellan_runtime; UPDATE tool_allowlists SET argv0='/x' WHERE
    tool='shell-exec'` returns `permission denied` (the structural pin for
    the missing UPDATE grant).
 9. Inserting a row with a relative `argv0` via raw SQL fails the CHECK
@@ -320,11 +320,11 @@ pub async fn seed_tool_allowlist(
 ```
 
 Bulk-INSERT with `created_by="test"`. Used by every e2e test that
-previously injected `HHAGENT_SHELL_EXEC_ALLOWLIST` into the `ServiceSpec.env`.
+previously injected `KASTELLAN_SHELL_EXEC_ALLOWLIST` into the `ServiceSpec.env`.
 
 **Migration of existing tests:**
 
-- `core/tests/cli_ask_e2e.rs`: drop `HHAGENT_SHELL_EXEC_ALLOWLIST` from the
+- `core/tests/cli_ask_e2e.rs`: drop `KASTELLAN_SHELL_EXEC_ALLOWLIST` from the
   `ServiceSpec.env` push; call `seed_tool_allowlist(&pool, "shell-exec",
   &[ECHO_PATH])` between PG bring-up and daemon start. Happy-path seeds
   echo; failure-path seeds the empty list (so `/bin/cat` is POLICY_DENIED).
@@ -342,7 +342,7 @@ previously injected `HHAGENT_SHELL_EXEC_ALLOWLIST` into the `ServiceSpec.env`.
 
 **New integration test `core/tests/cli_tools_allowlist_e2e.rs` (~250 LOC):**
 
-Subprocess-level pin for the CLI surface. Brings up PG; runs `hhagent-cli
+Subprocess-level pin for the CLI surface. Brings up PG; runs `kastellan-cli
 tools allowlist add/remove/list` as subprocesses; asserts:
 
 1. `add shell-exec /usr/bin/echo` exits 0, prints `added`, DB has one row,
@@ -375,13 +375,13 @@ tools allowlist add/remove/list` as subprocesses; asserts:
 
 ## Open follow-ups (filed but not in this slice)
 
-- Binary-path source-of-truth: `HHAGENT_SHELL_EXEC_BIN` could move to a
+- Binary-path source-of-truth: `KASTELLAN_SHELL_EXEC_BIN` could move to a
   `tools(name, binary)` table for full hygiene. Deferred: orthogonal to
   the allowlist concern, and would only matter when a second tool exists.
 - Per-task allowlist scoping: `tool_allowlists` is host-global today. A
   future column `scope TEXT NOT NULL DEFAULT 'host'` and matching CLI
   flag would allow per-task narrowing.
-- TOML config bootstrap: `hhagent-cli tools allowlist import <file>`
+- TOML config bootstrap: `kastellan-cli tools allowlist import <file>`
   reading a TOML/JSON seed for ops repeatability. Easy to add when an
   operator workflow surfaces the need.
 - Audit-driven rollback: a CLI subcommand `tools allowlist replay
@@ -398,7 +398,7 @@ tools allowlist add/remove/list` as subprocesses; asserts:
 - `core/src/cli_audit.rs` — two new helpers
 - `core/src/main.rs` — `build_tool_registry` async + DB-backed,
   `registry.loaded` audit row, deprecation warning
-- `core/src/bin/hhagent-cli.rs` — new `tools allowlist` subcommand tree
+- `core/src/bin/kastellan-cli.rs` — new `tools allowlist` subcommand tree
 - NEW `core/tests/cli_tools_allowlist_e2e.rs` (~250 LOC)
 - `core/tests/cli_ask_e2e.rs` — drop env var, add seed call, bump multiset
 - NEW `tests-common/src/allowlist.rs` carrying `seed_tool_allowlist`;

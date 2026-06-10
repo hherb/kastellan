@@ -3,12 +3,12 @@
 //! `drive()` is pure over the [`HttpGet`] seam so the redirect cap and the
 //! per-hop allowlist + https re-check (the security-critical bit: a 3xx to a
 //! non-allowlisted or non-https target is refused) are unit-tested with a fake
-//! transport. The transport itself lives in `hhagent_worker_web_common::http`.
+//! transport. The transport itself lives in `kastellan_worker_web_common::http`.
 
 use url::Url;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
-use hhagent_worker_web_common::http::HttpGet;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::http::HttpGet;
 
 /// Max redirect hops followed before giving up.
 pub const MAX_REDIRECTS: usize = 5;
@@ -77,8 +77,8 @@ pub fn drive<T: HttpGet>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_worker_web_common::http::RawResponse;
-    use hhagent_worker_web_common::testing::{al, ok_resp, redirect_to, FakeGet};
+    use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::testing::{al, ok_resp, redirect_to, FakeGet};
 
     #[test]
     fn terminal_response_is_returned() {

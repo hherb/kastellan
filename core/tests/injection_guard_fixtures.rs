@@ -7,7 +7,7 @@
 //! are the source-of-truth regression pins; a live spot-check that they
 //! match reality lives in `web_fetch_e2e.rs` (an `#[ignore]` real fetch).
 
-use hhagent_core::cassandra::injection_guard::{
+use kastellan_core::cassandra::injection_guard::{
     extract_scannable_text, screen_with_profile, GuardProfile, InjectionDecision, SCAN_BYTE_CAP,
 };
 use std::path::PathBuf;

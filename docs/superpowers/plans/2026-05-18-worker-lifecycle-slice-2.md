@@ -6,7 +6,7 @@
 
 **Architecture:** Per-tool warm slot guarded by `tokio::sync::Mutex<ToolState>` (held from `acquire` through `Drop` so concurrent same-tool requests serialise — matches the spec's v1 single-threaded contract). `WorkerHandle` widens to a `WorkerHandleKind` enum so single-use vs idle-timeout Drop semantics diverge cleanly. New module `core::worker_lifecycle::idle_timeout` carries the runtime so `manager.rs` stays small.
 
-**Tech Stack:** Rust 2021, `tokio::sync::{Mutex, OwnedMutexGuard}`, `tokio::time::sleep`, `tokio::spawn`, the existing `hhagent_protocol::client::ClientError` for crash classification, the existing `tool_host::spawn_worker` + `SupervisedWorker` + `ToolHostError`.
+**Tech Stack:** Rust 2021, `tokio::sync::{Mutex, OwnedMutexGuard}`, `tokio::time::sleep`, `tokio::spawn`, the existing `kastellan_protocol::client::ClientError` for crash classification, the existing `tool_host::spawn_worker` + `SupervisedWorker` + `ToolHostError`.
 
 ---
 
@@ -14,7 +14,7 @@
 
 1. The slice-1 implementation: `core/src/worker_lifecycle/{types.rs, manager.rs, mod.rs}`. Slice 2 extends `manager.rs` and adds `idle_timeout.rs`; the type layer in `types.rs` is unchanged.
 2. The design spec: `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md`. §"Cap-check semantics" (load-bearing invariant: no mid-flight kills) + §"Supervisor responsibilities" (full runtime contract) + §"Security model" (caveat 2 — persistence-of-compromise across requests).
-3. `hhagent_protocol::client::ClientError` variants: `Io`, `Decode`, `EarlyExit`, `IdMismatch`, `Rpc`. Slice 2 classifies the first four as "worker dead" and the last as "worker alive".
+3. `kastellan_protocol::client::ClientError` variants: `Io`, `Decode`, `EarlyExit`, `IdMismatch`, `Rpc`. Slice 2 classifies the first four as "worker dead" and the last as "worker alive".
 4. `core/src/tool_host.rs` — particularly `dispatch`'s return type (`Result<Value, ToolHostError>`) and `SupervisedWorker`'s Drop behaviour (closes stdio, cancels watchdog).
 5. `core/src/scheduler/tool_dispatch.rs::ToolHostStepDispatcher::dispatch_step` — slice 2 adds a `handle.report_crash()` call between `dispatch` and `map_dispatch_result`.
 
@@ -67,7 +67,7 @@ Create `core/src/worker_lifecycle/idle_timeout.rs`:
 
 use std::time::Duration;
 
-use hhagent_protocol::client::ClientError;
+use kastellan_protocol::client::ClientError;
 
 use crate::tool_host::ToolHostError;
 
@@ -157,7 +157,7 @@ pub fn is_aged_out(age: Duration, max_age_seconds: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_protocol::RpcError;
+    use kastellan_protocol::RpcError;
     use std::io;
 
     #[test]
@@ -252,7 +252,7 @@ mod tests {
         // SPAWN_FAILED path, not a warm-worker crash. The classifier returns false so
         // the restart-backoff counter doesn't increment.
         let r: Result<(), ToolHostError> = Err(ToolHostError::Sandbox(
-            hhagent_sandbox::SandboxError::Backend("test".into()),
+            kastellan_sandbox::SandboxError::Backend("test".into()),
         ));
         assert!(!dispatch_indicates_worker_dead(&r));
     }
@@ -319,7 +319,7 @@ pub use types::{Contract, IdleTimeoutCaps, Lifecycle, LifecycleValidationError};
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib worker_lifecycle::idle_timeout 2>&1 | tail -25
+cargo test -p kastellan-core --lib worker_lifecycle::idle_timeout 2>&1 | tail -25
 ```
 
 Expected: 13 tests pass (4 backoff + 5 dispatch-classifier + 2 cap-request + 2 cap-age).
@@ -496,7 +496,7 @@ Also remove the slice-1 `Default for IdleTimeoutLifecycle` impl (the slice-2 con
 
 - [ ] **Step 3: Update the slice-1 manager unit tests that constructed `IdleTimeoutLifecycle::new()` without arguments**
 
-In `manager.rs`'s `#[cfg(test)] mod tests`, replace `IdleTimeoutLifecycle::new()` with `IdleTimeoutLifecycle::new(Arc::from(hhagent_sandbox::default_backend()))`. The `#[should_panic]` test still trips on the new `unimplemented!()` body — adjust the expected panic message to match.
+In `manager.rs`'s `#[cfg(test)] mod tests`, replace `IdleTimeoutLifecycle::new()` with `IdleTimeoutLifecycle::new(Arc::from(kastellan_sandbox::default_backend()))`. The `#[should_panic]` test still trips on the new `unimplemented!()` body — adjust the expected panic message to match.
 
 The test now reads:
 
@@ -512,11 +512,11 @@ The test now reads:
         };
         let contract = Contract { stateless: true };
         let lc = Lifecycle::idle_timeout(caps, contract).expect("valid lifecycle");
-        let sandbox: Arc<dyn SandboxBackend> = Arc::from(hhagent_sandbox::default_backend());
+        let sandbox: Arc<dyn SandboxBackend> = Arc::from(kastellan_sandbox::default_backend());
         let mgr = IdleTimeoutLifecycle::new(sandbox);
         let entry = crate::scheduler::tool_dispatch::ToolEntry {
             binary: std::path::PathBuf::from("/nope"),
-            policy: hhagent_sandbox::SandboxPolicy::default(),
+            policy: kastellan_sandbox::SandboxPolicy::default(),
             wall_clock_ms: None,
             lifecycle: lc,
         };
@@ -530,7 +530,7 @@ The test now reads:
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib worker_lifecycle 2>&1 | tail -20
+cargo test -p kastellan-core --lib worker_lifecycle 2>&1 | tail -20
 ```
 
 Expected: all worker_lifecycle tests pass (6 types + 3 manager + 13 idle_timeout pure helpers = 22).
@@ -736,7 +736,7 @@ pub(crate) fn release_idle_timeout_worker(
 ```sh
 source "$HOME/.cargo/env"
 cargo build --workspace --tests 2>&1 | tail -10
-cargo test -p hhagent-core --lib worker_lifecycle 2>&1 | tail -10
+cargo test -p kastellan-core --lib worker_lifecycle 2>&1 | tail -10
 ```
 
 Expected: clean build; all 22 worker_lifecycle tests pass (the `#[should_panic]` on idle-timeout acquire still trips on its `unimplemented!()` body before Drop runs, so the `release_idle_timeout_worker` stub isn't reached).
@@ -795,7 +795,7 @@ The acquire logic:
 Add:
 
 ```rust
-use hhagent_sandbox::SandboxBackend;
+use kastellan_sandbox::SandboxBackend;
 use tokio::time::sleep;
 
 use crate::tool_host::ToolHostError;
@@ -912,11 +912,11 @@ The acquire body no longer panics; the test was a temporary placeholder. Delete 
         // Defensive: an idle-timeout manager called with a single-use entry is a
         // wiring bug. The manager returns an `Io(InvalidInput)` error rather than
         // panicking so the dispatcher's `step.spawn_failed` audit row still fires.
-        let sandbox: Arc<dyn SandboxBackend> = Arc::from(hhagent_sandbox::default_backend());
+        let sandbox: Arc<dyn SandboxBackend> = Arc::from(kastellan_sandbox::default_backend());
         let mgr = IdleTimeoutLifecycle::new(sandbox);
         let entry = crate::scheduler::tool_dispatch::ToolEntry {
             binary: std::path::PathBuf::from("/nope"),
-            policy: hhagent_sandbox::SandboxPolicy::default(),
+            policy: kastellan_sandbox::SandboxPolicy::default(),
             wall_clock_ms: None,
             lifecycle: Lifecycle::SingleUse,
         };
@@ -929,7 +929,7 @@ The acquire body no longer panics; the test was a temporary placeholder. Delete 
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib worker_lifecycle 2>&1 | tail -10
+cargo test -p kastellan-core --lib worker_lifecycle 2>&1 | tail -10
 ```
 
 Expected: pure-helper tests pass; the new `idle_timeout_acquire_on_single_use_entry_returns_wiring_error` passes; slice-1 panic-pin test deleted.
@@ -1037,7 +1037,7 @@ pub(crate) fn release_idle_timeout_worker(
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib worker_lifecycle 2>&1 | tail -10
+cargo test -p kastellan-core --lib worker_lifecycle 2>&1 | tail -10
 ```
 
 Expected: all tests pass; release path no longer `todo!()`s.
@@ -1154,7 +1154,7 @@ Verify `WorkerHandleKind::IdleTimeout` has both `slot_guard: Option<OwnedMutexGu
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib worker_lifecycle 2>&1 | tail -10
+cargo test -p kastellan-core --lib worker_lifecycle 2>&1 | tail -10
 ```
 
 Expected: all tests pass.
@@ -1259,8 +1259,8 @@ In `core/src/scheduler/tool_dispatch.rs`, between the `dispatch(...)` call and `
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib worker_lifecycle 2>&1 | tail -10
-cargo test -p hhagent-core --lib scheduler::tool_dispatch 2>&1 | tail -10
+cargo test -p kastellan-core --lib worker_lifecycle 2>&1 | tail -10
+cargo test -p kastellan-core --lib scheduler::tool_dispatch 2>&1 | tail -10
 ```
 
 Expected: all green.
@@ -1296,7 +1296,7 @@ EOF
 **Files:**
 - Create: `core/tests/worker_lifecycle_idle_timeout_e2e.rs`
 
-The test uses the existing `hhagent-worker-shell-exec` binary as the JSON-RPC stdio worker (since shell-exec is the only worker currently in the tree). It builds a custom `ToolEntry` declaring `Lifecycle::IdleTimeout { caps: {…} }` rather than going through `shell_exec_entry()` (which is single-use-pinned by the slice-1 test).
+The test uses the existing `kastellan-worker-shell-exec` binary as the JSON-RPC stdio worker (since shell-exec is the only worker currently in the tree). It builds a custom `ToolEntry` declaring `Lifecycle::IdleTimeout { caps: {…} }` rather than going through `shell_exec_entry()` (which is single-use-pinned by the slice-1 test).
 
 Scenarios:
 
@@ -1341,7 +1341,7 @@ Concrete skeleton (the body of each `#[tokio::test]` follows the pattern shown �
 ```rust
 //! Integration tests for `IdleTimeoutLifecycle` (slice 2 runtime).
 //!
-//! Uses `hhagent-worker-shell-exec` as the JSON-RPC stdio worker (the only worker
+//! Uses `kastellan-worker-shell-exec` as the JSON-RPC stdio worker (the only worker
 //! shipping today). Each test constructs its own `ToolEntry` declaring
 //! `Lifecycle::IdleTimeout` — the production `shell_exec_entry()` stays single-use
 //! per the slice-1 pin.
@@ -1351,11 +1351,11 @@ Concrete skeleton (the body of each `#[tokio::test]` follows the pattern shown �
 use std::sync::Arc;
 use std::time::Duration;
 
-use hhagent_core::worker_lifecycle::{
+use kastellan_core::worker_lifecycle::{
     IdleTimeoutCaps, IdleTimeoutLifecycle, Lifecycle, RestartBackoff, WorkerLifecycleManager,
 };
-use hhagent_sandbox::SandboxBackend;
-use hhagent_tests_common::{
+use kastellan_sandbox::SandboxBackend;
+use kastellan_tests_common::{
     pg_bin_dir_or_skip, policy_for_shell_exec, skip_if_sandbox_unavailable,
     workspace_target_binary, // ... and other helpers as needed
 };
@@ -1363,7 +1363,7 @@ use hhagent_tests_common::{
 fn idle_timeout_entry(
     binary: std::path::PathBuf,
     caps: IdleTimeoutCaps,
-) -> hhagent_core::scheduler::ToolEntry {
+) -> kastellan_core::scheduler::ToolEntry {
     // Build a ToolEntry like shell_exec_entry but declaring IdleTimeout.
     // (Concrete impl: same body as shell_exec_entry except for the lifecycle field.)
     todo!("see file: pattern-copy shell_exec_entry but swap lifecycle field")
@@ -1413,7 +1413,7 @@ The implementer fills in the body using the pattern from `scheduler_step_dispatc
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test worker_lifecycle_idle_timeout_e2e 2>&1 | tail -25
+cargo test -p kastellan-core --test worker_lifecycle_idle_timeout_e2e 2>&1 | tail -25
 ```
 
 Expected: 6 tests pass on Linux with bwrap AppArmor profile installed; clean skips on hosts without.
@@ -1435,7 +1435,7 @@ behaviours from spec §"Cap-check semantics" + §"Supervisor responsibilities":
   5. crash recovery — `report_crash` + backoff + clean restart
   6. concurrent serialisation — same-tool acquires await the per-slot mutex
 
-Uses `hhagent-worker-shell-exec` as the JSON-RPC stdio worker (a custom
+Uses `kastellan-worker-shell-exec` as the JSON-RPC stdio worker (a custom
 `ToolEntry` declaring `IdleTimeout`; the production `shell_exec_entry()`
 stays single-use per the slice-1 pin).
 
@@ -1483,7 +1483,7 @@ Expected: 0 + 0.
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test cli_ask_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --test cli_ask_e2e 2>&1 | tail -10
 ```
 
 Expected: both `cli_ask_e2e` scenarios still pass — shell-exec is single-use, so slice-2 changed nothing in its observable behaviour.
@@ -1498,7 +1498,7 @@ Bump `**Last updated:**` to mention slice 2 alongside slice 1. Update `**Session
 
 - [ ] **Step 2: Tick the ROADMAP slice-2 bullet**
 
-In `docs/devel/ROADMAP.md`, change the slice-2 bullet from `- [ ]` to `- [x]` with branch + commit + test-count details. The "Next pickups" list rolls forward (slice 3 is the SIGTERM grace + `hhagent-cli supervisor status` + worker manifest plumbing, OR jump straight to GLiNER-Relex as the first idle-timeout consumer).
+In `docs/devel/ROADMAP.md`, change the slice-2 bullet from `- [ ]` to `- [x]` with branch + commit + test-count details. The "Next pickups" list rolls forward (slice 3 is the SIGTERM grace + `kastellan-cli supervisor status` + worker manifest plumbing, OR jump straight to GLiNER-Relex as the first idle-timeout consumer).
 
 - [ ] **Step 3: Commit docs**
 
@@ -1538,7 +1538,7 @@ gh pr create --title "feat(core,worker_lifecycle): slices 1 + 2 — single_use r
 
 Two slices of the worker-lifecycle work bundled into one PR per the operator's request to ship them together:
 
-- **Slice 1** (commits `781acba`–`334f4e2`): pure types (`Lifecycle`, `IdleTimeoutCaps`, `Contract`), manager trait + `SingleUseLifecycle` (production, byte-equivalent to the previous per-request spawn) + `IdleTimeoutLifecycle` stub. `ToolEntry` gains a `lifecycle` field; `ToolHostStepDispatcher` routes through the manager. `hhagent-supervisor` (OS-unit installer) is untouched — naming overlap with the spec's "supervisor" wording is conceptual.
+- **Slice 1** (commits `781acba`–`334f4e2`): pure types (`Lifecycle`, `IdleTimeoutCaps`, `Contract`), manager trait + `SingleUseLifecycle` (production, byte-equivalent to the previous per-request spawn) + `IdleTimeoutLifecycle` stub. `ToolEntry` gains a `lifecycle` field; `ToolHostStepDispatcher` routes through the manager. `kastellan-supervisor` (OS-unit installer) is untouched — naming overlap with the spec's "supervisor" wording is conceptual.
 
 - **Slice 2** (subsequent commits): `IdleTimeoutLifecycle::acquire` filled in. Warm cache per tool, `tokio::sync::Mutex<ToolState>` serialisation, restart backoff (exponential 1s/2s/…/60s default), three caps (`max_requests`, `max_age_seconds`, `idle_seconds`), crash detection via post-dispatch error classifier. `WorkerHandle` widened to enum.
 
@@ -1548,9 +1548,9 @@ Plans: `docs/superpowers/plans/2026-05-18-worker-lifecycle-slice-1.md`, `docs/su
 ## Test plan
 
 - [x] `cargo test --workspace` — <FINAL_COUNT> passed, 0 failed, 0 SKIP, 0 warnings on Linux
-- [x] `cargo test -p hhagent-core --test cli_ask_e2e` — slice-1 regression pin (shell-exec single-use behaviour byte-equivalent)
-- [x] `cargo test -p hhagent-core --test worker_lifecycle_idle_timeout_e2e` — six runtime scenarios (warm reuse, two cap rotations, idle teardown, crash recovery + backoff, concurrent serialisation)
-- [x] `cargo test -p hhagent-core --lib worker_lifecycle` — unit coverage on pure helpers and types
+- [x] `cargo test -p kastellan-core --test cli_ask_e2e` — slice-1 regression pin (shell-exec single-use behaviour byte-equivalent)
+- [x] `cargo test -p kastellan-core --test worker_lifecycle_idle_timeout_e2e` — six runtime scenarios (warm reuse, two cap rotations, idle teardown, crash recovery + backoff, concurrent serialisation)
+- [x] `cargo test -p kastellan-core --lib worker_lifecycle` — unit coverage on pure helpers and types
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF

@@ -6,7 +6,7 @@
 //!   * Real-model tier (Task 3) — live gliner-relex worker against the
 //!     `multi-v1.0` weights. Gated on venv + weights presence (skip-as-pass).
 //!
-//! All tests use the shared `hhagent-tests-common` PG bring-up helper +
+//! All tests use the shared `kastellan-tests-common` PG bring-up helper +
 //! the standard skip-without-PG convention (skip_if_no_supervisor +
 //! pg_bin_dir_or_skip).
 
@@ -15,16 +15,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hhagent_core::entity_extraction::{
+use kastellan_core::entity_extraction::{
     EntityExtractor, NoOpEntityExtractor, SeedSource, StaticEntityExtractor,
 };
-use hhagent_core::memory::entity_link::link_memory_entities;
-use hhagent_core::worker_lifecycle::{CompositeLifecycle, WorkerLifecycleManager};
-use hhagent_core::workers::gliner_relex::{gliner_relex_entry, Client, GlinerRelexEnv};
-use hhagent_core::entity_extraction::gliner_relex::GlinerRelexExtractor;
-use hhagent_db::audit::fetch_since;
-use hhagent_db::memories::seed_meta_memory;
-use hhagent_tests_common::{
+use kastellan_core::memory::entity_link::link_memory_entities;
+use kastellan_core::worker_lifecycle::{CompositeLifecycle, WorkerLifecycleManager};
+use kastellan_core::workers::gliner_relex::{gliner_relex_entry, Client, GlinerRelexEnv};
+use kastellan_core::entity_extraction::gliner_relex::GlinerRelexExtractor;
+use kastellan_db::audit::fetch_since;
+use kastellan_db::memories::seed_meta_memory;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix,
 };
@@ -42,7 +42,7 @@ fn rt() -> tokio::runtime::Runtime {
 /// Helper: insert an entity manually so tests can return its id from a
 /// StaticEntityExtractor. Returns the entity id.
 async fn upsert_test_entity(pool: &sqlx::PgPool, kind: &str, name: &str) -> i64 {
-    use hhagent_db::graph::{Graph, PgGraph};
+    use kastellan_db::graph::{Graph, PgGraph};
     let graph = PgGraph::new(pool);
     graph
         .upsert_entity(kind, name, &serde_json::json!({}))
@@ -52,7 +52,7 @@ async fn upsert_test_entity(pool: &sqlx::PgPool, kind: &str, name: &str) -> i64 
 
 /// Shared helper: bring up a named PG cluster + run probe + open pool.
 /// Returns `None` (with [SKIP]) if supervisor or PG binaries are absent.
-async fn bring_up_pg(label: &str) -> Option<(hhagent_tests_common::PgCluster, sqlx::PgPool)> {
+async fn bring_up_pg(label: &str) -> Option<(kastellan_tests_common::PgCluster, sqlx::PgPool)> {
     // Must be called OUTSIDE the async block so skip returns the fn.
     // We return None instead of calling skip helpers (they're sync).
     let cluster = {
@@ -62,10 +62,10 @@ async fn bring_up_pg(label: &str) -> Option<(hhagent_tests_common::PgCluster, sq
             &bin_dir,
             &format!("mel-{label}-d"),
             &format!("mel-{label}-l"),
-            &format!("hhagent-supervisor-test-pg-mel-{label}-{suffix}"),
+            &format!("kastellan-supervisor-test-pg-mel-{label}-{suffix}"),
         )
     };
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -73,7 +73,7 @@ async fn bring_up_pg(label: &str) -> Option<(hhagent_tests_common::PgCluster, sq
     )
     .await
     .expect("probe run");
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("connect runtime pool");
     Some((cluster, pool))
@@ -351,7 +351,7 @@ fn link_db_failure_still_writes_audit_row_with_seed_info() {
         .await
         .expect_err("FK violation must surface as Err");
         match err {
-            hhagent_core::memory::entity_link::LinkError::Db(_) => {}
+            kastellan_core::memory::entity_link::LinkError::Db(_) => {}
             other => panic!("expected LinkError::Db, got {other:?}"),
         }
 
@@ -397,7 +397,7 @@ fn link_db_failure_still_writes_audit_row_with_seed_info() {
 //
 // The three helpers below (`resolve_worker_script`, `resolve_weights_dir`,
 // `build_real_extractor`) are duplicated from `entity_extraction_e2e.rs`.
-// Marker: if a third caller appears, lift them into `hhagent-tests-common`.
+// Marker: if a third caller appears, lift them into `kastellan-tests-common`.
 
 /// Resolve the in-tree gliner-relex venv shim path. Returns `None` with
 /// a `[SKIP]` print when the path doesn't exist.
@@ -408,7 +408,7 @@ fn resolve_worker_script() -> Option<PathBuf> {
         .expect("CARGO_MANIFEST_DIR has no parent")
         .to_path_buf();
     let script = workspace_root
-        .join("workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex");
+        .join("workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex");
     if !script.exists() {
         eprintln!(
             "\n[SKIP] gliner-relex venv shim not built at {} — run scripts/workers/gliner-relex/install.sh\n",
@@ -420,27 +420,27 @@ fn resolve_worker_script() -> Option<PathBuf> {
 }
 
 /// Resolve the `multi-v1.0` weights dir. Honours
-/// `HHAGENT_GLINER_RELEX_WEIGHTS_DIR`, then `HHAGENT_DATA_DIR`, then
-/// `$HOME/.local/share/hhagent`. Skip on missing.
+/// `KASTELLAN_GLINER_RELEX_WEIGHTS_DIR`, then `KASTELLAN_DATA_DIR`, then
+/// `$HOME/.local/share/kastellan`. Skip on missing.
 fn resolve_weights_dir() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("HHAGENT_GLINER_RELEX_WEIGHTS_DIR") {
+    if let Ok(explicit) = std::env::var("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR") {
         let p = PathBuf::from(explicit);
         if p.is_dir() {
             return Some(p);
         }
         eprintln!(
-            "\n[SKIP] HHAGENT_GLINER_RELEX_WEIGHTS_DIR points at {} which isn't a directory\n",
+            "\n[SKIP] KASTELLAN_GLINER_RELEX_WEIGHTS_DIR points at {} which isn't a directory\n",
             p.display()
         );
         return None;
     }
-    let data_dir = std::env::var("HHAGENT_DATA_DIR")
+    let data_dir = std::env::var("KASTELLAN_DATA_DIR")
         .ok()
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var("HOME")
                 .ok()
-                .map(|h| PathBuf::from(h).join(".local/share/hhagent"))
+                .map(|h| PathBuf::from(h).join(".local/share/kastellan"))
         })?;
     let weights = data_dir.join("workers/gliner-relex/weights/multi-v1.0");
     if !weights.is_dir() {
@@ -457,8 +457,8 @@ fn resolve_weights_dir() -> Option<PathBuf> {
 /// Returns `None` (with a `[SKIP]` print) when any precondition is absent:
 /// opt-in env-var, sandbox, supervisor, venv shim, or weights dir.
 async fn build_real_extractor(pool: &sqlx::PgPool) -> Option<Arc<dyn EntityExtractor>> {
-    if std::env::var("HHAGENT_GLINER_RELEX_ENABLE").ok().as_deref() != Some("1") {
-        eprintln!("\n[SKIP] HHAGENT_GLINER_RELEX_ENABLE != \"1\"\n");
+    if std::env::var("KASTELLAN_GLINER_RELEX_ENABLE").ok().as_deref() != Some("1") {
+        eprintln!("\n[SKIP] KASTELLAN_GLINER_RELEX_ENABLE != \"1\"\n");
         return None;
     }
     if skip_if_sandbox_unavailable() {
@@ -484,7 +484,7 @@ async fn build_real_extractor(pool: &sqlx::PgPool) -> Option<Arc<dyn EntityExtra
         container_image: None,
     };
     let entry = gliner_relex_entry(&env);
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle: Arc<dyn WorkerLifecycleManager> =
         Arc::new(CompositeLifecycle::new(sandboxes));
     let client = Client::new(lifecycle, pool.clone(), entry);

@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-09
 **Status:** approved (brainstorming)
-**Issue:** [#142](https://github.com/hherb/hhagent/issues/142) — chat-template tokens
+**Issue:** [#142](https://github.com/hherb/kastellan/issues/142) — chat-template tokens
 (`<|im_start|>`, `<|system|>`) false-positive on legitimate technical documentation.
 **Related:** PR #141 (injection-guard Slice 1), `web-fetch` (PR #197) and `web-search`
 (PR #238) — the workers that make this reachable.
@@ -183,7 +183,7 @@ TDD throughout. Three layers:
 
 ## Verification
 
-`cargo build --workspace`; `cargo test -p hhagent-core injection_guard`;
-`cargo test -p hhagent-core --test injection_guard_e2e`;
+`cargo build --workspace`; `cargo test -p kastellan-core injection_guard`;
+`cargo test -p kastellan-core --test injection_guard_e2e`;
 `cargo clippy --workspace --all-targets --locked -- -D warnings`.
 File stays under the 500-LOC cap (`injection_guard.rs` ~380 after the additions).

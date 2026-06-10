@@ -11,7 +11,7 @@ learned about GLiNER-Relex behaviour before any implementation.
 
 ## TL;DR
 
-**Worth implementing.** The Apache 2.0 license chain holds, the model produces sensible (entities, triples) on the kind of memory bodies hhagent will see, and **CPU latency is acceptable** (p50 ~157 ms warm on the GB10 host). The spike surfaced four corrections the design spec + plan need before implementation begins.
+**Worth implementing.** The Apache 2.0 license chain holds, the model produces sensible (entities, triples) on the kind of memory bodies kastellan will see, and **CPU latency is acceptable** (p50 ~157 ms warm on the GB10 host). The spike surfaced four corrections the design spec + plan need before implementation begins.
 
 ## Host
 
@@ -31,7 +31,7 @@ learned about GLiNER-Relex behaviour before any implementation.
 
 ```sh
 hf download knowledgator/gliner-relex-multi-v1.0 \
-  --local-dir ~/.local/share/hhagent/workers/gliner-relex/weights/multi-v1.0/
+  --local-dir ~/.local/share/kastellan/workers/gliner-relex/weights/multi-v1.0/
 # → 10 files, ~1.3 GB on disk (model.safetensors 1.2 GB)
 
 cd scripts/spike/gliner-relex/
@@ -42,7 +42,7 @@ SPIKE_DEVICE=cpu uv run python spike.py
 Three samples ran through `model.inference(...)` with `threshold=0.3`:
 
 1. `"Dr Smith treats asthma in his Mosman clinic."` (medical)
-2. `"The Rust workspace under hhagent uses uv-managed Python venvs per worker."` (technical)
+2. `"The Rust workspace under kastellan uses uv-managed Python venvs per worker."` (technical)
 3. `"PostgreSQL migration 0008 added the deleted_memories AFTER DELETE trigger that journals deleted rows."` (db)
 
 ## Latency
@@ -77,12 +77,12 @@ relations (10 — many duplicates):
 
 **Verdict:** clean. The model nails the high-confidence medical triple (`Dr Smith treats asthma`, 0.980) and the location chain.
 
-### Sample 2 — `"The Rust workspace under hhagent uses uv-managed Python venvs per worker."`
+### Sample 2 — `"The Rust workspace under kastellan uses uv-managed Python venvs per worker."`
 
 ```
 entities (8):
   - 'Rust workspace'        -> technology   (0.539)
-  - 'hhagent'               -> organization (0.943)
+  - 'kastellan'               -> organization (0.943)
   - 'uv-managed Python'     -> technology   (0.712)
   - 'uv-managed Python venvs' -> tool       (0.670)
   - 'worker'                -> person       (0.915)  ⚠️ false positive: "worker" is treated as a person
@@ -91,7 +91,7 @@ entities (8):
 relations (148 — heavy noise)
 ```
 
-**Verdict:** mixed. Strong entity for `hhagent → organization (0.943)`, but `worker → person (0.915)` is a false positive — a label-vocabulary problem (no `software_worker` distinction). The 148 relations include large numbers of duplicates from overlapping entity spans (`Rust` + `Rust workspace` + `Rust workspace under hhagent` all producing distinct `(head, relation, tail)` triples with the same surface text).
+**Verdict:** mixed. Strong entity for `kastellan → organization (0.943)`, but `worker → person (0.915)` is a false positive — a label-vocabulary problem (no `software_worker` distinction). The 148 relations include large numbers of duplicates from overlapping entity spans (`Rust` + `Rust workspace` + `Rust workspace under kastellan` all producing distinct `(head, relation, tail)` triples with the same surface text).
 
 ### Sample 3 — `"PostgreSQL migration 0008 added the deleted_memories AFTER DELETE trigger that journals deleted rows."`
 
@@ -174,7 +174,7 @@ Plan's Task 1.4 (`model.py`) wrapper still needs to **truncate triples whose hea
 
 ### 3. Production threshold should be higher; deduplication is the caller's job
 
-Sample 2 produced **148 relations** at threshold 0.3 — almost all duplicates or near-duplicates from overlapping entity subspans (`Rust`/`Rust workspace`/`Rust workspace under hhagent` are three separate entity spans, each producing its own relations with each candidate tail). At `threshold ≥ 0.5` the noise drops significantly but does not disappear.
+Sample 2 produced **148 relations** at threshold 0.3 — almost all duplicates or near-duplicates from overlapping entity subspans (`Rust`/`Rust workspace`/`Rust workspace under kastellan` are three separate entity spans, each producing its own relations with each candidate tail). At `threshold ≥ 0.5` the noise drops significantly but does not disappear.
 
 **Action items for the plan:**
 - Spec's "JSON-RPC wire contract" should add a note: **production callers should use `threshold ≥ 0.5`** (the spec's 0.5 default is correct; the spike used 0.3 to characterise behaviour).
@@ -185,7 +185,7 @@ Sample 2 produced **148 relations** at threshold 0.3 — almost all duplicates o
 
 On the DGX Spark, vLLM was consuming 107 GB of unified memory at spike time → `model.to("cuda")` raised `torch.AcceleratorError: CUDA error: out of memory`. The worker code must:
 
-- Resolve `HHAGENT_GLINER_RELEX_DEVICE=auto` based on `torch.cuda.is_available()` AND `torch.cuda.mem_get_info()` (or wrap the `.to("cuda")` in a try-except that falls back to CPU + WARNs).
+- Resolve `KASTELLAN_GLINER_RELEX_DEVICE=auto` based on `torch.cuda.is_available()` AND `torch.cuda.mem_get_info()` (or wrap the `.to("cuda")` in a try-except that falls back to CPU + WARNs).
 - CPU is a first-class deployment posture, not a fallback degradation.
 
 Plan's Task 1.5 `__main__.py::_resolve_device` currently does:

@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship the first writer for `MemoryLayer::Index` rows. Two paths: operator-explicit (`hhagent-cli memory l1 {add,list,remove}`) and agent-raised (`Plan.l1_insight` consumed by the inner loop on `Outcome::Completed`).
+**Goal:** Ship the first writer for `MemoryLayer::Index` rows. Two paths: operator-explicit (`kastellan-cli memory l1 {add,list,remove}`) and agent-raised (`Plan.l1_insight` consumed by the inner loop on `Outcome::Completed`).
 
 **Architecture:** A pure validator + idempotent writer module (`core::memory::l1_promote`) is shared by both paths. The operator path goes through `cli_audit::l1_*_and_audit` helpers (mirrors `tools_allowlist`). The agent-raised path is gated by `Plan::completion_insight()` and emitted in `runner::drain_lane` after the existing `task.finalize` row. Three new audit-row actions (`l1.added`, `l1.removed`, `l1.promoted`); one pure-additive payload key on `agent/plan.formulate` (`l1_insight`).
 
-**Tech Stack:** Rust workspace (sqlx + tokio + serde). `hhagent-tests-common::bring_up_pg_cluster` for PG-backed unit tests. Mirror of existing `core::memory::l0_seed` shape from PR #77.
+**Tech Stack:** Rust workspace (sqlx + tokio + serde). `kastellan-tests-common::bring_up_pg_cluster` for PG-backed unit tests. Mirror of existing `core::memory::l0_seed` shape from PR #77.
 
 **Spec:** [docs/superpowers/specs/2026-05-17-l1-promotion-writer-design.md](../specs/2026-05-17-l1-promotion-writer-design.md)
 
@@ -25,7 +25,7 @@ Canonical reference: [`core/tests/memory_l0_seed_e2e.rs`](../../../core/tests/me
 ```rust
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_tests_common::{
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -51,12 +51,12 @@ fn my_test_name() {
         &bin_dir,
         "l1p-d",  // SHORT data-dir label (per-task: pick a 3-4 char prefix; keep socket-path budget)
         "l1p-l",  // SHORT log-dir label
-        &format!("hhagent-supervisor-test-pg-l1p-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1p-{suffix}"),
     );
 
     rt().block_on(async {
         // 1. Apply migrations + write the bring-up audit row.
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -65,8 +65,8 @@ fn my_test_name() {
         .await
         .expect("probe");
 
-        // 2. Get the runtime-role pool (auto SET ROLE hhagent_runtime).
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        // 2. Get the runtime-role pool (auto SET ROLE kastellan_runtime).
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -83,9 +83,9 @@ Key invariants of the pattern:
 - **`unique_suffix()`** — collision-proof labels across parallel-running tests.
 - **3-4 char prefix** for data/log labels — Unix socket path budget is tight (108 bytes total).
 
-For **inline unit tests inside the source module** (`core/src/memory/l1_promote.rs::tests`), the pattern is the same but lives in a `#[cfg(test)] mod tests` block; the `use hhagent_tests_common::*` imports go inside the `mod tests` (because dev-deps don't reach the parent crate's main namespace).
+For **inline unit tests inside the source module** (`core/src/memory/l1_promote.rs::tests`), the pattern is the same but lives in a `#[cfg(test)] mod tests` block; the `use kastellan_tests_common::*` imports go inside the `mod tests` (because dev-deps don't reach the parent crate's main namespace).
 
-For **subprocess CLI tests** (Task 13), see the precedent at [`core/tests/cli_cancel_audit_e2e.rs`](../../../core/tests/cli_cancel_audit_e2e.rs) — same fixture shape but the test additionally `Command::new(workspace_target_binary("hhagent-cli"))` and `.envs(cluster.cli_env_vars_for_subprocess())` (or whatever the precedent calls it; copy the env-var injection block verbatim).
+For **subprocess CLI tests** (Task 13), see the precedent at [`core/tests/cli_cancel_audit_e2e.rs`](../../../core/tests/cli_cancel_audit_e2e.rs) — same fixture shape but the test additionally `Command::new(workspace_target_binary("kastellan-cli"))` and `.envs(cluster.cli_env_vars_for_subprocess())` (or whatever the precedent calls it; copy the env-var injection block verbatim).
 
 ### Where PG-backed tests live (codebase convention)
 
@@ -130,7 +130,7 @@ git log --oneline -1
 **Files:**
 - Modify: `db/src/memories.rs` (add async helper + inline unit tests)
 
-**Context for the engineer:** Today there is no DELETE path through `db::memories`. We need a layer-guarded `DELETE FROM memories WHERE id = $1 AND layer = $2` to support `hhagent-cli memory l1 remove <id>` without ever touching L0/L3 rows. The existing AFTER DELETE trigger on `memories` (migration `0008`) journals the deletion into `deleted_memories`; we get audit-trail for free.
+**Context for the engineer:** Today there is no DELETE path through `db::memories`. We need a layer-guarded `DELETE FROM memories WHERE id = $1 AND layer = $2` to support `kastellan-cli memory l1 remove <id>` without ever touching L0/L3 rows. The existing AFTER DELETE trigger on `memories` (migration `0008`) journals the deletion into `deleted_memories`; we get audit-trail for free.
 
 - [ ] **Step 1.1: Write the failing tests**
 
@@ -139,7 +139,7 @@ Append to `db/src/memories.rs` at the bottom of the existing `#[cfg(test)] mod t
 ```rust
     #[tokio::test]
     async fn delete_memory_at_layer_happy_path() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -166,7 +166,7 @@ Append to `db/src/memories.rs` at the bottom of the existing `#[cfg(test)] mod t
 
     #[tokio::test]
     async fn delete_memory_at_layer_rejects_wrong_layer() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -192,7 +192,7 @@ Append to `db/src/memories.rs` at the bottom of the existing `#[cfg(test)] mod t
 - [ ] **Step 1.2: Run tests to verify they fail**
 
 ```bash
-cargo test -p hhagent-db delete_memory_at_layer 2>&1 | tail -20
+cargo test -p kastellan-db delete_memory_at_layer 2>&1 | tail -20
 # Expected: compile error (unresolved import) or "cannot find function `delete_memory_at_layer`"
 ```
 
@@ -207,7 +207,7 @@ Add to `db/src/memories.rs`, placed after `insert_memory_at_layer` (search for `
 ///
 /// The layer guard exists so that callers of the L1 CLI cannot
 /// accidentally delete an L0 / L2 / L3 row through this path —
-/// the `hhagent-cli memory l1 remove <id>` operator subcommand
+/// the `kastellan-cli memory l1 remove <id>` operator subcommand
 /// passes `MemoryLayer::Index` here.
 ///
 /// The existing AFTER DELETE trigger on `memories` (migration
@@ -235,7 +235,7 @@ where
 - [ ] **Step 1.4: Run tests to verify they pass**
 
 ```bash
-cargo test -p hhagent-db delete_memory_at_layer 2>&1 | tail -10
+cargo test -p kastellan-db delete_memory_at_layer 2>&1 | tail -10
 # Expected: "2 passed; 0 failed"
 ```
 
@@ -246,7 +246,7 @@ git add db/src/memories.rs
 git commit -m "$(cat <<'EOF'
 feat(db,memories): delete_memory_at_layer async helper
 
-Adds a layer-guarded DELETE so the upcoming `hhagent-cli memory l1
+Adds a layer-guarded DELETE so the upcoming `kastellan-cli memory l1
 remove <id>` operator subcommand cannot reach into L0/L2/L3 rows
 through the L1 CLI path. Returns true iff a row was deleted.
 
@@ -349,7 +349,7 @@ Append to `core/src/cassandra/types.rs` (find `mod tests` and add at the bottom)
 - [ ] **Step 2.2: Run tests to verify they fail at compile time**
 
 ```bash
-cargo test -p hhagent-core cassandra::types 2>&1 | tail -30
+cargo test -p kastellan-core cassandra::types 2>&1 | tail -30
 # Expected: compile error "no field `l1_insight` on type `Plan`"
 # AND: error[E0599]: no method named `completion_insight`
 ```
@@ -479,7 +479,7 @@ Create `core/src/memory/l1_promote.rs` with this content (the tests + the bare t
 ```rust
 //! Writer for `MemoryLayer::Index` (L1) rows. Two callers:
 //!
-//! 1. **Operator** — via `hhagent-cli memory l1 add <body>` →
+//! 1. **Operator** — via `kastellan-cli memory l1 add <body>` →
 //!    [`crate::cli_audit::l1_add_and_audit`].
 //! 2. **Agent-raised** — via `Plan.l1_insight` consumed by
 //!    [`crate::scheduler::runner::drain_lane`] on `Outcome::Completed`.
@@ -487,12 +487,12 @@ Create `core/src/memory/l1_promote.rs` with this content (the tests + the bare t
 //! Both callers share the same validation + dedup discipline:
 //! validate via [`validate_l1_body`], compute SHA-256, EXISTS-check
 //! at `layer = 1` keyed on `metadata->>'body_sha256'`, insert on
-//! miss via [`hhagent_db::memories::insert_memory_at_layer`].
+//! miss via [`kastellan_db::memories::insert_memory_at_layer`].
 //!
 //! See `docs/superpowers/specs/2026-05-17-l1-promotion-writer-design.md`
 //! for the full design.
 
-use hhagent_db::DbError;
+use kastellan_db::DbError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -517,7 +517,7 @@ const RESERVED_TAG_OPEN: &str = "<l1_insights>";
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum L1Source {
-    /// Operator-explicit write via `hhagent-cli memory l1 add`.
+    /// Operator-explicit write via `kastellan-cli memory l1 add`.
     Operator,
     /// Agent-raised write from `runner::drain_lane` after
     /// `Outcome::Completed`. The originating `task_id` is carried
@@ -785,7 +785,7 @@ grep -n "pub mod" core/src/memory/mod.rs
 Then check the `core/Cargo.toml` has `sha2` and `thiserror` as workspace deps (it should already — these are used by `l0_seed`). If they're missing from `core/Cargo.toml`, add them.
 
 ```bash
-cargo build -p hhagent-core 2>&1 | tail -20
+cargo build -p kastellan-core 2>&1 | tail -20
 # If you see "unresolved import `sha2`" or "unresolved import `thiserror`",
 # add to core/Cargo.toml under [dependencies]:
 #   sha2 = { workspace = true }
@@ -795,7 +795,7 @@ cargo build -p hhagent-core 2>&1 | tail -20
 - [ ] **Step 3.3: Run tests**
 
 ```bash
-cargo test -p hhagent-core memory::l1_promote 2>&1 | tail -15
+cargo test -p kastellan-core memory::l1_promote 2>&1 | tail -15
 # Expected: "12 passed; 0 failed"
 ```
 
@@ -857,7 +857,7 @@ EOF
 Append inside `mod tests` in `core/src/memory/l1_promote.rs` (use a separate test module gate so the unit-tier tests still run cleanly):
 
 ```rust
-    use hhagent_db::memories::{load_l1, MemoryLayer};
+    use kastellan_db::memories::{load_l1, MemoryLayer};
 
     fn now_rfc3339() -> String {
         time::OffsetDateTime::now_utc()
@@ -867,7 +867,7 @@ Append inside `mod tests` in `core/src/memory/l1_promote.rs` (use a separate tes
 
     #[tokio::test]
     async fn promote_l1_inserts_new_row() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -893,7 +893,7 @@ Append inside `mod tests` in `core/src/memory/l1_promote.rs` (use a separate tes
 
     #[tokio::test]
     async fn promote_l1_is_idempotent_on_body_sha256() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -916,7 +916,7 @@ Append inside `mod tests` in `core/src/memory/l1_promote.rs` (use a separate tes
     #[tokio::test]
     async fn promote_l1_dedup_across_sources() {
         // Same body, different source -> still deduped (body_sha256 is source-agnostic).
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -936,7 +936,7 @@ Append inside `mod tests` in `core/src/memory/l1_promote.rs` (use a separate tes
 
     #[tokio::test]
     async fn promote_l1_propagates_validation_error() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -954,7 +954,7 @@ Append inside `mod tests` in `core/src/memory/l1_promote.rs` (use a separate tes
 
     #[tokio::test]
     async fn promote_l1_trims_body_before_storage() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -978,7 +978,7 @@ Append inside `mod tests` in `core/src/memory/l1_promote.rs` (use a separate tes
 - [ ] **Step 4.2: Run tests to verify failure**
 
 ```bash
-cargo test -p hhagent-core memory::l1_promote::tests::promote_l1 2>&1 | tail -15
+cargo test -p kastellan-core memory::l1_promote::tests::promote_l1 2>&1 | tail -15
 # Expected: compile error "cannot find function `promote_l1` in this scope"
 ```
 
@@ -987,7 +987,7 @@ cargo test -p hhagent-core memory::l1_promote::tests::promote_l1 2>&1 | tail -15
 Add to `core/src/memory/l1_promote.rs` above the `#[cfg(test)] mod tests` block:
 
 ```rust
-use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 use sqlx::PgPool;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -1029,7 +1029,7 @@ pub async fn promote_l1(
     .bind(&body_sha256)
     .fetch_optional(pool)
     .await
-    .map_err(|e| L1Error::Db(hhagent_db::DbError::from(e)))?;
+    .map_err(|e| L1Error::Db(kastellan_db::DbError::from(e)))?;
 
     if let Some(existing_id) = existing {
         return Ok(L1WriteOutcome::SkippedDuplicate { memory_id: existing_id });
@@ -1055,7 +1055,7 @@ pub async fn promote_l1(
 - [ ] **Step 4.4: Run tests to verify pass**
 
 ```bash
-cargo test -p hhagent-core memory::l1_promote 2>&1 | tail -15
+cargo test -p kastellan-core memory::l1_promote 2>&1 | tail -15
 # Expected: "17 passed; 0 failed" (12 from Task 3 + 5 new async)
 ```
 
@@ -1109,7 +1109,7 @@ Append to `mod tests` in `core/src/memory/l1_promote.rs`:
 ```rust
     #[tokio::test]
     async fn list_l1_in_prompt_returns_default_cap_view() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -1125,7 +1125,7 @@ Append to `mod tests` in `core/src/memory/l1_promote.rs`:
 
     #[tokio::test]
     async fn list_l1_all_returns_every_row() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -1145,7 +1145,7 @@ Append to `mod tests` in `core/src/memory/l1_promote.rs`:
 
     #[tokio::test]
     async fn remove_l1_deletes_at_layer_1() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -1163,14 +1163,14 @@ Append to `mod tests` in `core/src/memory/l1_promote.rs`:
 
     #[tokio::test]
     async fn remove_l1_refuses_to_touch_non_l1_row() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
         let pool = cluster.runtime_pool().await.expect("runtime pool");
 
         // Seed at the default Stable layer.
-        let id = hhagent_db::memories::insert_memory(
+        let id = kastellan_db::memories::insert_memory(
             &pool, "stable-row", serde_json::json!({}), None,
         ).await.expect("insert");
 
@@ -1178,7 +1178,7 @@ Append to `mod tests` in `core/src/memory/l1_promote.rs`:
         assert!(!deleted, "wrong-layer guard must reject");
 
         // L2 row is untouched.
-        let rows = hhagent_db::memories::fetch_by_ids(&pool, &[id]).await.expect("fetch");
+        let rows = kastellan_db::memories::fetch_by_ids(&pool, &[id]).await.expect("fetch");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].body, "stable-row");
     }
@@ -1187,7 +1187,7 @@ Append to `mod tests` in `core/src/memory/l1_promote.rs`:
 - [ ] **Step 5.2: Run tests to verify failure**
 
 ```bash
-cargo test -p hhagent-core memory::l1_promote::tests::list_l1 \
+cargo test -p kastellan-core memory::l1_promote::tests::list_l1 \
                                 memory::l1_promote::tests::remove_l1 2>&1 | tail -10
 # Expected: compile error "cannot find function `list_l1`"
 ```
@@ -1197,7 +1197,7 @@ cargo test -p hhagent-core memory::l1_promote::tests::list_l1 \
 Add to `core/src/memory/l1_promote.rs` above the `#[cfg(test)] mod tests` block (just after `promote_l1`):
 
 ```rust
-use hhagent_db::memories::{load_layer, Memory};
+use kastellan_db::memories::{load_layer, Memory};
 use crate::memory::layers::load_l1_default;
 
 /// Operator-facing list view.
@@ -1216,19 +1216,19 @@ pub async fn list_l1(pool: &PgPool, all: bool) -> Result<Vec<Memory>, DbError> {
 }
 
 /// Operator-facing remove. Layer-guarded via
-/// [`hhagent_db::memories::delete_memory_at_layer`]: cannot delete
+/// [`kastellan_db::memories::delete_memory_at_layer`]: cannot delete
 /// an L0 / L2 / L3 row even if the operator typoed the id.
 ///
 /// Returns `true` iff a row was deleted.
 pub async fn remove_l1(pool: &PgPool, id: i64) -> Result<bool, DbError> {
-    hhagent_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Index).await
+    kastellan_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Index).await
 }
 ```
 
 - [ ] **Step 5.4: Run tests to verify pass**
 
 ```bash
-cargo test -p hhagent-core memory::l1_promote 2>&1 | tail -10
+cargo test -p kastellan-core memory::l1_promote 2>&1 | tail -10
 # Expected: "21 passed; 0 failed" (12 + 5 + 4 new)
 ```
 
@@ -1239,7 +1239,7 @@ git add core/src/memory/l1_promote.rs
 git commit -m "$(cat <<'EOF'
 feat(core,memory,l1_promote): list_l1 + remove_l1 for operator CLI
 
-Two read/delete entry points consumed by `hhagent-cli memory l1
+Two read/delete entry points consumed by `kastellan-cli memory l1
 {list,remove}`:
 
 - `list_l1(pool, all)` flips between `load_l1_default` (in-prompt
@@ -1342,7 +1342,7 @@ Append to `core/src/scheduler/audit.rs` inside the existing `mod tests`:
 - [ ] **Step 6.2: Run to verify failure**
 
 ```bash
-cargo test -p hhagent-core scheduler::audit::tests::build_l1_write_payload \
+cargo test -p kastellan-core scheduler::audit::tests::build_l1_write_payload \
                                 scheduler::audit::tests::l1_action_constants 2>&1 | tail -10
 # Expected: compile error "cannot find function `build_l1_write_payload`"
 # AND: "cannot find value `ACTION_L1_ADDED`"
@@ -1355,13 +1355,13 @@ Add to `core/src/scheduler/audit.rs`, placed adjacent to the existing `ACTION_L0
 ```rust
 /// Action string for `actor='cli' action='l1.added'` audit rows.
 /// Emitted by `cli_audit::l1_add_and_audit` after a successful
-/// `hhagent-cli memory l1 add` call. The payload is built by
+/// `kastellan-cli memory l1 add` call. The payload is built by
 /// [`build_l1_write_payload`].
 pub const ACTION_L1_ADDED: &str = "l1.added";
 
 /// Action string for `actor='cli' action='l1.removed'` audit rows.
 /// Emitted by `cli_audit::l1_remove_and_audit` after a successful
-/// `hhagent-cli memory l1 remove`. Payload: `{memory_id, deleted}`.
+/// `kastellan-cli memory l1 remove`. Payload: `{memory_id, deleted}`.
 pub const ACTION_L1_REMOVED: &str = "l1.removed";
 
 /// Action string for `actor='scheduler' action='l1.promoted'` audit
@@ -1414,7 +1414,7 @@ pub fn build_l1_write_payload(
 - [ ] **Step 6.4: Run to verify pass**
 
 ```bash
-cargo test -p hhagent-core scheduler::audit 2>&1 | tail -15
+cargo test -p kastellan-core scheduler::audit 2>&1 | tail -15
 # Expected: all prior audit tests still pass + 5 new (4 shape + 1 stability)
 ```
 
@@ -1426,8 +1426,8 @@ git commit -m "$(cat <<'EOF'
 feat(core,scheduler,audit): L1 action constants + build_l1_write_payload
 
 Three new audit-row action strings (stable wire contract):
-  ACTION_L1_ADDED    = "l1.added"     -- actor=cli, hhagent-cli memory l1 add
-  ACTION_L1_REMOVED  = "l1.removed"   -- actor=cli, hhagent-cli memory l1 remove
+  ACTION_L1_ADDED    = "l1.added"     -- actor=cli, kastellan-cli memory l1 add
+  ACTION_L1_REMOVED  = "l1.removed"   -- actor=cli, kastellan-cli memory l1 remove
   ACTION_L1_PROMOTED = "l1.promoted"  -- actor=scheduler, drain_lane after Completed
 
 One pure helper build_l1_write_payload(outcome, source, body_sha256)
@@ -1477,7 +1477,7 @@ Then add one paragraph to the prose explaining the field. A reasonable place is 
 
 ```bash
 # No tests to run; just sanity-check that the file is still readable and the
-# JSON-example block parses. A future hhagent daemon start will SHA-256 and
+# JSON-example block parses. A future kastellan daemon start will SHA-256 and
 # ledger the new prompt automatically.
 wc -l prompts/agent_planner.md
 # Just confirm the count went up by a few lines.
@@ -1592,7 +1592,7 @@ Update each assertion to the new count: 20 → 21 for default/operator/agent_rai
 - [ ] **Step 8.3: Run tests to verify failure**
 
 ```bash
-cargo test -p hhagent-core scheduler::inner_loop 2>&1 | tail -25
+cargo test -p kastellan-core scheduler::inner_loop 2>&1 | tail -25
 # Expected: compile error "no field `terminal_l1_insight` on type `InnerLoopResult`"
 # AND: existing pin tests fail with off-by-one key counts
 ```
@@ -1669,7 +1669,7 @@ obj.insert(
 - [ ] **Step 8.5: Run tests to verify pass**
 
 ```bash
-cargo test -p hhagent-core scheduler::inner_loop 2>&1 | tail -20
+cargo test -p kastellan-core scheduler::inner_loop 2>&1 | tail -20
 # Expected: all prior tests pass + 3 new + bumped key-count tests now pass
 ```
 
@@ -1745,7 +1745,7 @@ mod tests {
         // If no PG cluster is reachable, the helper logs and returns —
         // it does NOT panic and does NOT propagate the error to the
         // caller (it's best-effort, like write_finalize_row).
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -1766,7 +1766,7 @@ mod tests {
 - [ ] **Step 9.2: Run to verify failure**
 
 ```bash
-cargo test -p hhagent-core scheduler::runner::tests 2>&1 | tail -10
+cargo test -p kastellan-core scheduler::runner::tests 2>&1 | tail -10
 # Expected: compile error "cannot find function `write_l1_promoted_row`"
 ```
 
@@ -1809,7 +1809,7 @@ async fn write_l1_promoted_row(pool: &PgPool, task_id: i64, insight: &str) {
     let body_sha256 = crate::memory::l1_promote::compute_body_sha256(insight.trim());
     let payload = build_l1_write_payload(&outcome, &source, &body_sha256);
 
-    if let Err(e) = hhagent_db::audit::insert(
+    if let Err(e) = kastellan_db::audit::insert(
         pool, SCHEDULER_AUDIT_ACTOR, ACTION_L1_PROMOTED, payload,
     ).await {
         tracing::warn!(
@@ -1836,7 +1836,7 @@ Then in `drain_lane`, after the existing `write_finalize_row(pool, &claimed, fin
 - [ ] **Step 9.4: Run to verify pass**
 
 ```bash
-cargo test -p hhagent-core scheduler::runner 2>&1 | tail -10
+cargo test -p kastellan-core scheduler::runner 2>&1 | tail -10
 # Expected: smoke test passes (1 new test).
 
 cargo test --workspace 2>&1 | tail -10
@@ -1905,7 +1905,7 @@ Append to `core/src/cli_audit.rs` (find the existing `mod tests` and add):
 
     #[tokio::test]
     async fn l1_add_and_audit_inserts_l1_row_and_writes_audit_row() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -1917,7 +1917,7 @@ Append to `core/src/cli_audit.rs` (find the existing `mod tests` and add):
         assert!(audit_id > 0);
 
         // Audit row landed at actor='cli' action='l1.added'.
-        let rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("fetch");
+        let rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("fetch");
         let l1_added: Vec<_> = rows.iter()
             .filter(|r| r.actor == "cli" && r.action == ACTION_L1_ADDED)
             .collect();
@@ -1932,7 +1932,7 @@ Append to `core/src/cli_audit.rs` (find the existing `mod tests` and add):
 
     #[tokio::test]
     async fn l1_add_and_audit_audits_skipped_duplicate() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -1942,7 +1942,7 @@ Append to `core/src/cli_audit.rs` (find the existing `mod tests` and add):
         let (outcome2, _) = l1_add_and_audit(&pool, "X").await.expect("second");
         assert!(matches!(outcome2, L1WriteOutcome::SkippedDuplicate { .. }));
 
-        let rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("fetch");
+        let rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("fetch");
         let l1_added: Vec<_> = rows.iter()
             .filter(|r| r.actor == "cli" && r.action == ACTION_L1_ADDED)
             .collect();
@@ -1956,7 +1956,7 @@ Append to `core/src/cli_audit.rs` (find the existing `mod tests` and add):
 
     #[tokio::test]
     async fn l1_add_and_audit_propagates_validation_error() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -1973,7 +1973,7 @@ Append to `core/src/cli_audit.rs` (find the existing `mod tests` and add):
 
         // No audit row written (operator sees the validation error on stderr;
         // mirrors L0_seed's posture).
-        let rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("fetch");
+        let rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("fetch");
         let l1_added: Vec<_> = rows.iter()
             .filter(|r| r.actor == "cli" && r.action == ACTION_L1_ADDED)
             .collect();
@@ -1982,7 +1982,7 @@ Append to `core/src/cli_audit.rs` (find the existing `mod tests` and add):
 
     #[tokio::test]
     async fn l1_remove_and_audit_deletes_and_writes_audit() {
-        let cluster = match hhagent_tests_common::bring_up_pg_cluster().await {
+        let cluster = match kastellan_tests_common::bring_up_pg_cluster().await {
             Some(c) => c,
             None => { eprintln!("[SKIP] no PG"); return; }
         };
@@ -1995,7 +1995,7 @@ Append to `core/src/cli_audit.rs` (find the existing `mod tests` and add):
         assert!(deleted);
         assert!(audit_id > 0);
 
-        let rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("fetch");
+        let rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("fetch");
         let l1_removed: Vec<_> = rows.iter()
             .filter(|r| r.actor == "cli" && r.action == ACTION_L1_REMOVED)
             .collect();
@@ -2009,7 +2009,7 @@ Append to `core/src/cli_audit.rs` (find the existing `mod tests` and add):
 - [ ] **Step 10.2: Run to verify failure**
 
 ```bash
-cargo test -p hhagent-core cli_audit::tests::l1_ 2>&1 | tail -10
+cargo test -p kastellan-core cli_audit::tests::l1_ 2>&1 | tail -10
 # Expected: "cannot find function `l1_add_and_audit`" / `l1_remove_and_audit`
 ```
 
@@ -2042,7 +2042,7 @@ pub async fn l1_add_and_audit(
     let body_sha256 = compute_body_sha256(&trimmed);
 
     let payload = build_l1_write_payload(&outcome, &source, &body_sha256);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L1_ADDED, payload,
     ).await {
         Ok(id) => id,
@@ -2062,14 +2062,14 @@ pub async fn l1_add_and_audit(
 pub async fn l1_remove_and_audit(
     pool: &sqlx::PgPool,
     memory_id: i64,
-) -> Result<(bool, i64), hhagent_db::DbError> {
+) -> Result<(bool, i64), kastellan_db::DbError> {
     use crate::memory::l1_promote::remove_l1;
     use crate::scheduler::audit::ACTION_L1_REMOVED;
 
     let deleted = remove_l1(pool, memory_id).await?;
     let payload = serde_json::json!({"memory_id": memory_id, "deleted": deleted});
 
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L1_REMOVED, payload,
     ).await {
         Ok(id) => id,
@@ -2086,7 +2086,7 @@ pub async fn l1_remove_and_audit(
 - [ ] **Step 10.4: Run to verify pass**
 
 ```bash
-cargo test -p hhagent-core cli_audit 2>&1 | tail -15
+cargo test -p kastellan-core cli_audit 2>&1 | tail -15
 # Expected: prior + 4 new
 ```
 
@@ -2108,7 +2108,7 @@ Wire shape:
 - l1_add_and_audit: -> Result<(L1WriteOutcome, audit_id), L1Error>
 - l1_remove_and_audit: -> Result<(bool deleted, audit_id), DbError>
 
-Both call hhagent_db::audit::insert with actor=CLI_AUDIT_ACTOR and
+Both call kastellan_db::audit::insert with actor=CLI_AUDIT_ACTOR and
 action=ACTION_L1_ADDED/ACTION_L1_REMOVED. Audit insert failures are
 logged at WARN and degrade to audit_id = 0 in the return — they do
 NOT propagate, matching the chokepoint posture (the underlying
@@ -2127,12 +2127,12 @@ EOF
 
 ---
 
-## Task 11: `hhagent-cli memory l1 {add, list, remove}` subcommand tree
+## Task 11: `kastellan-cli memory l1 {add, list, remove}` subcommand tree
 
 **Files:**
 - Modify: `core/src/main.rs` (hand-rolled subcommand parsing)
 
-**Context for the engineer:** The CLI uses hand-rolled subcommand parsing — search for the existing `tools allowlist` subcommand wiring and follow the same shape. The hierarchy is `hhagent-cli memory l1 {add, list, remove}` — three new leaf commands under a new `memory` group with a single `l1` subgroup for now (future `l0` / `l3` / `l4` subgroups would mirror this).
+**Context for the engineer:** The CLI uses hand-rolled subcommand parsing — search for the existing `tools allowlist` subcommand wiring and follow the same shape. The hierarchy is `kastellan-cli memory l1 {add, list, remove}` — three new leaf commands under a new `memory` group with a single `l1` subgroup for now (future `l0` / `l3` / `l4` subgroups would mirror this).
 
 - [ ] **Step 11.1: Locate the existing subcommand wiring**
 
@@ -2148,7 +2148,7 @@ In `core/src/main.rs`, add a new branch alongside the existing `"tools"` branch:
 
 ```rust
         "memory" => {
-            // hhagent-cli memory l1 {add, list, remove}
+            // kastellan-cli memory l1 {add, list, remove}
             let (group, rest) = rest.split_first()
                 .ok_or_else(|| anyhow::anyhow!("memory: missing subgroup (l1)"))?;
             match group.as_str() {
@@ -2162,14 +2162,14 @@ Then add the `dispatch_memory_l1` function (placed adjacent to `dispatch_tools_a
 
 ```rust
 async fn dispatch_memory_l1(args: &[String]) -> anyhow::Result<()> {
-    use hhagent_core::cli_audit::{l1_add_and_audit, l1_remove_and_audit};
-    use hhagent_core::memory::l1_promote::list_l1;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::{l1_add_and_audit, l1_remove_and_audit};
+    use kastellan_core::memory::l1_promote::list_l1;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let (action, rest) = args.split_first()
         .ok_or_else(|| anyhow::anyhow!("memory l1: missing action (add | list | remove)"))?;
 
-    let spec = hhagent_db::conn::ConnectSpec::from_env()?;
+    let spec = kastellan_db::conn::ConnectSpec::from_env()?;
     let pool = connect_runtime_pool(&spec).await?;
 
     match action.as_str() {
@@ -2178,7 +2178,7 @@ async fn dispatch_memory_l1(args: &[String]) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("memory l1 add: missing <body>"))?;
             match l1_add_and_audit(&pool, body).await {
                 Ok((outcome, _audit_id)) => {
-                    use hhagent_core::memory::l1_promote::L1WriteOutcome;
+                    use kastellan_core::memory::l1_promote::L1WriteOutcome;
                     match outcome {
                         L1WriteOutcome::Inserted { memory_id } => {
                             println!("inserted id={memory_id}");
@@ -2232,11 +2232,11 @@ cargo build --workspace 2>&1 | tail -5
 # Expected: no errors
 
 # Manual smoke (skip if no PG available):
-./target/debug/hhagent-cli memory l1 add 2>&1 | head -3
+./target/debug/kastellan-cli memory l1 add 2>&1 | head -3
 # Expected: "memory l1 add: missing <body>" error
-./target/debug/hhagent-cli memory 2>&1 | head -3
+./target/debug/kastellan-cli memory 2>&1 | head -3
 # Expected: "memory: missing subgroup (l1)" error
-./target/debug/hhagent-cli memory l1 bogus 2>&1 | head -3
+./target/debug/kastellan-cli memory l1 bogus 2>&1 | head -3
 # Expected: "memory l1: unknown action 'bogus'; expected: add | list | remove"
 ```
 
@@ -2247,15 +2247,15 @@ cargo build --workspace 2>&1 | tail -5
 ```bash
 git add core/src/main.rs
 git commit -m "$(cat <<'EOF'
-feat(core,cli): hhagent-cli memory l1 {add,list,remove} subcommand tree
+feat(core,cli): kastellan-cli memory l1 {add,list,remove} subcommand tree
 
 Hand-rolled subcommand parsing (no clap dep) matching the existing
 `tools allowlist` precedent. Three leaf commands under a new `memory
 l1` group:
 
-  hhagent-cli memory l1 add <body>      -> l1_add_and_audit
-  hhagent-cli memory l1 list [--all]    -> list_l1 (in-prompt or all)
-  hhagent-cli memory l1 remove <id>     -> l1_remove_and_audit
+  kastellan-cli memory l1 add <body>      -> l1_add_and_audit
+  kastellan-cli memory l1 list [--all]    -> list_l1 (in-prompt or all)
+  kastellan-cli memory l1 remove <id>     -> l1_remove_and_audit
 
 The `memory` group is scaffolded with a single `l1` subgroup for now;
 future `l0` / `l3` / `l4` operator surfaces would slot in alongside
@@ -2289,17 +2289,17 @@ Create `core/tests/memory_l1_promote_e2e.rs`:
 ```rust
 //! DB-integration coverage for the L1 promotion writer.
 //! Operator path + agent-raised path (via scripted RouterAgent mock).
-//! Per-test PG cluster from `hhagent-tests-common`; skips cleanly without PG.
+//! Per-test PG cluster from `kastellan-tests-common`; skips cleanly without PG.
 
-use hhagent_core::cli_audit::{l1_add_and_audit, l1_remove_and_audit};
-use hhagent_core::memory::l1_promote::{
+use kastellan_core::cli_audit::{l1_add_and_audit, l1_remove_and_audit};
+use kastellan_core::memory::l1_promote::{
     list_l1, promote_l1, L1Error, L1Source, L1WriteOutcome,
 };
-use hhagent_core::scheduler::audit::{
+use kastellan_core::scheduler::audit::{
     ACTION_L1_ADDED, ACTION_L1_PROMOTED, ACTION_L1_REMOVED,
 };
-use hhagent_db::memories::MemoryLayer;
-use hhagent_tests_common::bring_up_pg_cluster;
+use kastellan_db::memories::MemoryLayer;
+use kastellan_tests_common::bring_up_pg_cluster;
 
 macro_rules! skip_if_no_pg {
     () => {
@@ -2330,7 +2330,7 @@ async fn operator_add_writes_l1_row_and_audit_row() {
     assert_eq!(rows[0].layer, MemoryLayer::Index);
 
     // 1 audit row with the canonical operator payload.
-    let audit_rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
+    let audit_rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
     let l1_added: Vec<_> = audit_rows.iter()
         .filter(|r| r.actor == "cli" && r.action == ACTION_L1_ADDED)
         .collect();
@@ -2364,7 +2364,7 @@ async fn operator_add_is_idempotent_on_body_sha256() {
     assert_eq!(rows.len(), 1, "dedup must collapse to one row");
 
     // Two audit rows: one inserted + one skipped_duplicate.
-    let audit_rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
+    let audit_rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
     let l1_added: Vec<_> = audit_rows.iter()
         .filter(|r| r.actor == "cli" && r.action == ACTION_L1_ADDED)
         .collect();
@@ -2386,7 +2386,7 @@ async fn operator_add_rejects_invalid_body_with_no_audit_row() {
     assert_eq!(rows.len(), 0);
 
     // No audit rows.
-    let audit_rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
+    let audit_rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
     let l1_added: Vec<_> = audit_rows.iter()
         .filter(|r| r.actor == "cli" && r.action == ACTION_L1_ADDED)
         .collect();
@@ -2410,7 +2410,7 @@ async fn operator_remove_deletes_and_audits() {
     assert!(rows.iter().find(|r| r.id == id).is_none());
 
     // Audit row carries memory_id + deleted=true.
-    let audit_rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
+    let audit_rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
     let l1_removed: Vec<_> = audit_rows.iter()
         .filter(|r| r.actor == "cli" && r.action == ACTION_L1_REMOVED)
         .collect();
@@ -2424,7 +2424,7 @@ async fn operator_remove_refuses_wrong_layer() {
     let cluster = skip_if_no_pg!();
     let pool = cluster.runtime_pool().await.expect("pool");
 
-    let stable_id = hhagent_db::memories::insert_memory(
+    let stable_id = kastellan_db::memories::insert_memory(
         &pool, "stable-row", serde_json::json!({}), None,
     ).await.expect("insert");
 
@@ -2432,12 +2432,12 @@ async fn operator_remove_refuses_wrong_layer() {
     assert!(!deleted, "wrong-layer guard must reject");
 
     // L2 row survives.
-    let surviving = hhagent_db::memories::fetch_by_ids(&pool, &[stable_id]).await.expect("fetch");
+    let surviving = kastellan_db::memories::fetch_by_ids(&pool, &[stable_id]).await.expect("fetch");
     assert_eq!(surviving.len(), 1);
     assert_eq!(surviving[0].body, "stable-row");
 
     // Audit row still written (records the operator intent + the false outcome).
-    let audit_rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
+    let audit_rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
     let l1_removed: Vec<_> = audit_rows.iter()
         .filter(|r| r.actor == "cli" && r.action == ACTION_L1_REMOVED)
         .collect();
@@ -2514,7 +2514,7 @@ async fn list_l1_in_prompt_vs_all_distinguishes_at_cap_boundary() {
 - [ ] **Step 12.2: Run the file**
 
 ```bash
-cargo test -p hhagent-core --test memory_l1_promote_e2e 2>&1 | tail -15
+cargo test -p kastellan-core --test memory_l1_promote_e2e 2>&1 | tail -15
 # Expected: "8 passed; 0 failed" (skips on no-PG with [SKIP] lines)
 ```
 
@@ -2556,7 +2556,7 @@ EOF
 **Files:**
 - Create: `core/tests/cli_memory_l1_e2e.rs`
 
-**Context for the engineer:** Spawns the real `hhagent-cli` binary as a subprocess, points it at a per-test PG cluster, exercises the three subcommands end-to-end. Mirrors the shape of any existing `core/tests/cli_*_e2e.rs` file — find one (e.g. `cli_cancel_audit_e2e.rs`) and follow it.
+**Context for the engineer:** Spawns the real `kastellan-cli` binary as a subprocess, points it at a per-test PG cluster, exercises the three subcommands end-to-end. Mirrors the shape of any existing `core/tests/cli_*_e2e.rs` file — find one (e.g. `cli_cancel_audit_e2e.rs`) and follow it.
 
 - [ ] **Step 13.1: Find the closest CLI subprocess precedent**
 
@@ -2571,12 +2571,12 @@ ls core/tests/cli_*_e2e.rs
 Create `core/tests/cli_memory_l1_e2e.rs` modeled on the precedent above. Three test functions:
 
 ```rust
-//! Subprocess-level integration for `hhagent-cli memory l1 {add,list,remove}`.
+//! Subprocess-level integration for `kastellan-cli memory l1 {add,list,remove}`.
 //! Spawns the real CLI binary, points it at a per-test PG cluster,
 //! verifies stdout shape + audit-row landing. Per-test PG cluster
-//! from hhagent-tests-common; skip-as-pass on no-PG.
+//! from kastellan-tests-common; skip-as-pass on no-PG.
 
-use hhagent_tests_common::{bring_up_pg_cluster, workspace_target_binary};
+use kastellan_tests_common::{bring_up_pg_cluster, workspace_target_binary};
 use std::process::Command;
 
 macro_rules! skip_if_no_pg {
@@ -2596,7 +2596,7 @@ async fn cli_memory_l1_add_writes_row_and_audit() {
     let cluster = skip_if_no_pg!();
     let pool = cluster.runtime_pool().await.expect("pool");
 
-    let cli = workspace_target_binary("hhagent-cli");
+    let cli = workspace_target_binary("kastellan-cli");
     let env_vars = cluster.cli_env_vars();  // adapt to whatever the precedent uses
 
     let output = Command::new(&cli)
@@ -2611,7 +2611,7 @@ async fn cli_memory_l1_add_writes_row_and_audit() {
     assert!(stdout.contains("inserted id="), "stdout: {stdout}");
 
     // Audit row landed.
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 100).await.expect("audit");
     let added: Vec<_> = rows.iter()
         .filter(|r| r.actor == "cli" && r.action == "l1.added")
         .collect();
@@ -2622,7 +2622,7 @@ async fn cli_memory_l1_add_writes_row_and_audit() {
 async fn cli_memory_l1_list_shows_added_rows() {
     let cluster = skip_if_no_pg!();
     let _pool = cluster.runtime_pool().await.expect("pool");
-    let cli = workspace_target_binary("hhagent-cli");
+    let cli = workspace_target_binary("kastellan-cli");
     let env_vars = cluster.cli_env_vars();
 
     // Add 3 rows via CLI.
@@ -2652,7 +2652,7 @@ async fn cli_memory_l1_list_shows_added_rows() {
 async fn cli_memory_l1_remove_deletes_specified_id() {
     let cluster = skip_if_no_pg!();
     let pool = cluster.runtime_pool().await.expect("pool");
-    let cli = workspace_target_binary("hhagent-cli");
+    let cli = workspace_target_binary("kastellan-cli");
     let env_vars = cluster.cli_env_vars();
 
     // Add a row, parse its id from CLI stdout.
@@ -2687,12 +2687,12 @@ async fn cli_memory_l1_remove_deletes_specified_id() {
 }
 ```
 
-(Adapt to the exact env-var injection shape from `cli_cancel_audit_e2e.rs` — `cluster.cli_env_vars()` may not exist verbatim; use whatever the precedent does for setting `HHAGENT_DB_*` connection vars.)
+(Adapt to the exact env-var injection shape from `cli_cancel_audit_e2e.rs` — `cluster.cli_env_vars()` may not exist verbatim; use whatever the precedent does for setting `KASTELLAN_DB_*` connection vars.)
 
 - [ ] **Step 13.3: Run**
 
 ```bash
-cargo test -p hhagent-core --test cli_memory_l1_e2e 2>&1 | tail -15
+cargo test -p kastellan-core --test cli_memory_l1_e2e 2>&1 | tail -15
 # Expected: "3 passed; 0 failed" or skip-as-pass on no-PG.
 ```
 
@@ -2703,7 +2703,7 @@ git add core/tests/cli_memory_l1_e2e.rs
 git commit -m "$(cat <<'EOF'
 test(core,cli,memory_l1): CLI subprocess integration for add/list/remove
 
-3 scenarios spawning the real `hhagent-cli` binary against a per-test
+3 scenarios spawning the real `kastellan-cli` binary against a per-test
 PG cluster (cross-platform skip-as-pass on no-PG):
 
   cli_memory_l1_add_writes_row_and_audit
@@ -2711,7 +2711,7 @@ PG cluster (cross-platform skip-as-pass on no-PG):
   cli_memory_l1_remove_deletes_specified_id
 
 Verifies the hand-rolled subcommand parsing, the
-hhagent-core::cli_audit wire-in, and the stdout format ("inserted id=N",
+kastellan-core::cli_audit wire-in, and the stdout format ("inserted id=N",
 "removed id=N", "id\\tcreated_at\\tbody" table header).
 
 The CLI process integration is intentionally lighter than the
@@ -2764,7 +2764,7 @@ If the scenario has a path where the agent DOES set `l1_insight`, also add a str
 - [ ] **Step 14.3: Run**
 
 ```bash
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e 2>&1 | tail -10
 # Expected: prior + new assertions pass
 ```
 

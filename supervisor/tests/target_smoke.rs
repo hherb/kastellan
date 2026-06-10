@@ -1,7 +1,7 @@
 //! End-to-end smoke test for the target bring-up (`install_target` →
 //! `start_target` → `stop_target` → `uninstall_target`).
 //!
-//! Linux exercises the native `hhagent.target` (real `systemctl --user`).
+//! Linux exercises the native `kastellan.target` (real `systemctl --user`).
 //! macOS exercises the generic readiness-based bundle (real `launchctl`).
 //! Both use trivial long-running dummy programs (`sleep`) so the test
 //! validates the *target orchestration mechanics* in isolation — real
@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use hhagent_supervisor::{ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
+use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
 
 fn unique(prefix: &str) -> String {
     let nanos = std::time::SystemTime::now()
@@ -66,7 +66,7 @@ fn wait_for(
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use hhagent_supervisor::systemd_user::{probe, SystemdUser};
+    use kastellan_supervisor::systemd_user::{probe, SystemdUser};
 
     struct Guard {
         sup: SystemdUser,
@@ -85,9 +85,9 @@ mod linux {
             return;
         }
         let sup = SystemdUser::new();
-        let target_name = unique("hhagent-test-target");
-        let pg = unique("hhagent-test-pg");
-        let core = unique("hhagent-test-core");
+        let target_name = unique("kastellan-test-target");
+        let pg = unique("kastellan-test-pg");
+        let core = unique("kastellan-test-core");
         let target = TargetSpec {
             name: target_name.clone(),
             members: vec![pg.clone(), core.clone()],
@@ -129,7 +129,7 @@ mod linux {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use hhagent_supervisor::launchd_agents::{probe, LaunchAgents};
+    use kastellan_supervisor::launchd_agents::{probe, LaunchAgents};
 
     struct Guard {
         sup: LaunchAgents,
@@ -148,9 +148,9 @@ mod macos {
             return;
         }
         let sup = LaunchAgents::new();
-        let target_name = unique("hhagent-test-target");
-        let pg = unique("hhagent-test-pg");
-        let core = unique("hhagent-test-core");
+        let target_name = unique("kastellan-test-target");
+        let pg = unique("kastellan-test-pg");
+        let core = unique("kastellan-test-core");
         let target = TargetSpec {
             name: target_name.clone(),
             members: vec![pg.clone(), core.clone()],

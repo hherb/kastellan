@@ -210,7 +210,7 @@ fn build_crashed_finalize_payload_provenance_is_crash_recovery() {
 // --- build_producer_cancel_finalize_payload -------------------------
 //
 // Companion to `build_finalize_payload` for the producer-cancel
-// path (`hhagent-cli ask` cancelling a `pending` task that was
+// path (`kastellan-cli ask` cancelling a `pending` task that was
 // never claimed). Same 10-key shape; everything-known-constant
 // values hardcoded. Issue #50 schema-v2 added `provenance` so
 // observation queries no longer infer the path from

@@ -22,20 +22,20 @@
 //!   against an explicit allow-list of characters, so a malicious or
 //!   malformed task id can't escape the root.
 //!
-//! The default root is `$HHAGENT_WORKSPACE_ROOT` if set, falling back to
-//! `~/.hhagent/workspace`. Tests use [`Workspace::with_root`] to point at a
+//! The default root is `$KASTELLAN_WORKSPACE_ROOT` if set, falling back to
+//! `~/.kastellan/workspace`. Tests use [`Workspace::with_root`] to point at a
 //! per-test temp directory and avoid global state.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use hhagent_sandbox::SandboxPolicy;
+use kastellan_sandbox::SandboxPolicy;
 
 /// Env var name overriding the default workspace root. Useful for ops (e.g.
 /// putting scratch on a tmpfs) and required for tests so they don't pollute
-/// `~/.hhagent/`.
-pub const ENV_WORKSPACE_ROOT: &str = "HHAGENT_WORKSPACE_ROOT";
+/// `~/.kastellan/`.
+pub const ENV_WORKSPACE_ROOT: &str = "KASTELLAN_WORKSPACE_ROOT";
 
 /// Errors from constructing a workspace. Keep small and explicit so callers
 /// can turn each variant into a useful diagnostic.
@@ -188,7 +188,7 @@ impl Drop for Workspace {
             // the tracing subscriber may not be installed yet (or has
             // already been torn down).
             eprintln!(
-                "[hhagent-core] warning: failed to wipe workspace {}: {}",
+                "[kastellan-core] warning: failed to wipe workspace {}: {}",
                 self.task_dir.display(),
                 e
             );
@@ -211,14 +211,14 @@ fn validate_task_id(task_id: &str) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
-/// `$HHAGENT_WORKSPACE_ROOT` if set; otherwise `~/.hhagent/workspace`.
+/// `$KASTELLAN_WORKSPACE_ROOT` if set; otherwise `~/.kastellan/workspace`.
 /// Errors only if neither is available.
 fn default_root() -> Result<PathBuf, WorkspaceError> {
     if let Some(root) = std::env::var_os(ENV_WORKSPACE_ROOT) {
         return Ok(PathBuf::from(root));
     }
     let home = std::env::var_os("HOME").ok_or(WorkspaceError::NoHomeDir)?;
-    Ok(PathBuf::from(home).join(".hhagent").join("workspace"))
+    Ok(PathBuf::from(home).join(".kastellan").join("workspace"))
 }
 
 #[cfg(test)]
@@ -238,7 +238,7 @@ mod tests {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "hhagent-workspace-test-{}-{}-{}",
+                "kastellan-workspace-test-{}-{}-{}",
                 std::process::id(),
                 label,
                 n
@@ -300,17 +300,17 @@ mod tests {
 
     #[test]
     fn extend_policy_appends_three_paths_without_clobbering_existing() {
-        use hhagent_sandbox::SandboxPolicy;
+        use kastellan_sandbox::SandboxPolicy;
         let root = TestRoot::new("extend");
         let ws = Workspace::with_root(&root.0, "ext").unwrap();
 
         let mut policy = SandboxPolicy {
-            fs_write: vec![PathBuf::from("/var/cache/hhagent")],
+            fs_write: vec![PathBuf::from("/var/cache/kastellan")],
             ..SandboxPolicy::default()
         };
         ws.extend_policy(&mut policy);
         assert_eq!(policy.fs_write.len(), 4);
-        assert_eq!(policy.fs_write[0], PathBuf::from("/var/cache/hhagent"));
+        assert_eq!(policy.fs_write[0], PathBuf::from("/var/cache/kastellan"));
         assert_eq!(policy.fs_write[1], ws.inputs());
         assert_eq!(policy.fs_write[2], ws.outputs());
         assert_eq!(policy.fs_write[3], ws.tmp());

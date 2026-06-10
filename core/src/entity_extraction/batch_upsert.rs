@@ -10,7 +10,7 @@
 //! for design rationale.
 
 use crate::workers::gliner_relex::Entity;
-use hhagent_db::normalize_entity_name;
+use kastellan_db::normalize_entity_name;
 
 /// One unique entity input position in the batch. The `Vec<DedupedEntity>`
 /// returned by `dedup_entity_inputs` carries no original-input index; the
@@ -149,7 +149,7 @@ pub(crate) fn build_entity_unnest_arrays<'a>(
 
 use crate::entity_extraction::EntityExtractionError;
 use crate::workers::gliner_relex::ExtractResponse;
-use hhagent_db::DbError;
+use kastellan_db::DbError;
 use sqlx::PgPool;
 use std::collections::HashMap;
 

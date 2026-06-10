@@ -1,7 +1,7 @@
 //! Host allowlist matching for net-egress workers.
 //!
 //! Entries come from the worker's allowlist env (a JSON array of strings —
-//! `HHAGENT_WEB_FETCH_ALLOWLIST`, `HHAGENT_WEB_SEARCH_ALLOWLIST`, etc.),
+//! `KASTELLAN_WEB_FETCH_ALLOWLIST`, `KASTELLAN_WEB_SEARCH_ALLOWLIST`, etc.),
 //! injected by the host-side manifest from the `tool_allowlists` DB table.
 //! Two forms:
 //!   - `"en.wikipedia.org"` — exact host match only.

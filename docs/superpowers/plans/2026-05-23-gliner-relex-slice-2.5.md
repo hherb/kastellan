@@ -4,9 +4,9 @@
 
 **Goal:** Wire the `gliner-relex` worker through the macOS `MacosContainer` SandboxBackend with a real Containerfile + operator build script, closing the macOS memory-enforcement gap and Issue #107 (PID-1 signal handling) in one slice.
 
-**Architecture:** Add `--init` unconditionally to `build_container_argv`; widen `SandboxBackends::resolve()` to take both backend kind + optional container image tag; widen `ToolEntry` with `container_image: Option<String>`; branch `gliner_relex_entry` on a new `GlinerRelexEnv.use_container_backend` field driven by `HHAGENT_GLINER_RELEX_USE_CONTAINER=1`. Ship a Containerfile (`python:3.12-slim` + `uv pip install --system` + `USER nobody` + `ENTRYPOINT`) and an operator helper script. One new happy-path e2e + 11 unit/smoke tests verify end-to-end.
+**Architecture:** Add `--init` unconditionally to `build_container_argv`; widen `SandboxBackends::resolve()` to take both backend kind + optional container image tag; widen `ToolEntry` with `container_image: Option<String>`; branch `gliner_relex_entry` on a new `GlinerRelexEnv.use_container_backend` field driven by `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1`. Ship a Containerfile (`python:3.12-slim` + `uv pip install --system` + `USER nobody` + `ENTRYPOINT`) and an operator helper script. One new happy-path e2e + 11 unit/smoke tests verify end-to-end.
 
-**Tech Stack:** Rust (workspace: hhagent-sandbox + hhagent-core + hhagent-tests-common), Apple `container` 0.12.3, Python 3.12, uv 0.4.30, gliner + transformers + torch.
+**Tech Stack:** Rust (workspace: kastellan-sandbox + kastellan-core + kastellan-tests-common), Apple `container` 0.12.3, Python 3.12, uv 0.4.30, gliner + transformers + torch.
 
 **Spec:** [`docs/superpowers/specs/2026-05-23-gliner-relex-slice-2.5-design.md`](../specs/2026-05-23-gliner-relex-slice-2.5-design.md) at `845e8f7`.
 
@@ -75,7 +75,7 @@ fn argv_carries_init_for_signal_forwarding_and_zombie_reaping() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-sandbox --lib argv_carries_init -- --nocapture
+cargo test -p kastellan-sandbox --lib argv_carries_init -- --nocapture
 ```
 
 Expected: FAIL with `missing --init; got: [...]`.
@@ -173,7 +173,7 @@ Replace with:
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-sandbox --lib macos_container -- --nocapture
+cargo test -p kastellan-sandbox --lib macos_container -- --nocapture
 ```
 
 Expected: all `macos_container::tests::*` pass (including `argv_carries_init_for_signal_forwarding_and_zombie_reaping` and `argv_always_carries_rm_and_interactive_and_init_and_progress_none`). Test count on the macos_container module goes up by +1 net.
@@ -183,7 +183,7 @@ Expected: all `macos_container::tests::*` pass (including `argv_carries_init_for
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-sandbox --test macos_container_smoke -- --nocapture
+cargo test -p kastellan-sandbox --test macos_container_smoke -- --nocapture
 ```
 
 Expected: existing 7 smoke tests pass (skip-as-pass if `container` not running). The smoke tests spawn `alpine:3.20` via `container run` with the full real argv — `--init` going through is the structural verification.
@@ -234,14 +234,14 @@ Find the `mod tests { ... }` block in `sandbox/src/lib.rs` (around line 304). Ad
 #[test]
 fn sandbox_backends_resolve_with_custom_image_returns_fresh_container() {
     // When the operator opts a worker into container mode with a custom
-    // image tag (Slice 2.5: gliner-relex flips to hhagent/gliner-relex:dev),
-    // resolve(Some(Container), Some("hhagent/gliner-relex:dev")) must
+    // image tag (Slice 2.5: gliner-relex flips to kastellan/gliner-relex:dev),
+    // resolve(Some(Container), Some("kastellan/gliner-relex:dev")) must
     // return a backend whose image() method reports that tag — NOT the
     // cached default-image backend's tag (DEFAULT_IMAGE = alpine:3.20).
     let backends = SandboxBackends::default_for_current_os();
     let backend = backends.resolve(
         Some(SandboxBackendKind::Container),
-        Some("hhagent/gliner-relex:dev"),
+        Some("kastellan/gliner-relex:dev"),
     );
     // Downcast via Any is overkill — use the public surface of MacosContainer
     // by constructing one with the same image and checking the resolver
@@ -279,7 +279,7 @@ fn sandbox_backends_resolve_with_none_image_returns_cached_default() {
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-sandbox --lib sandbox_backends_resolve_with -- --nocapture 2>&1 | head -30
+cargo test -p kastellan-sandbox --lib sandbox_backends_resolve_with -- --nocapture 2>&1 | head -30
 ```
 
 Expected: compile error — `resolve()` takes 1 arg, not 2. This is the TDD signal.
@@ -379,7 +379,7 @@ Do this for all 4 existing test call sites.
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-sandbox --lib -- --nocapture
+cargo test -p kastellan-sandbox --lib -- --nocapture
 ```
 
 Expected: all sandbox lib tests pass, including the two new ones. The lifecycle-manager call-sites in `core` still don't compile — that's Task 3+4.
@@ -404,7 +404,7 @@ already validated CLI + system service (image-independent).
 +2 new macOS-gated unit tests pin the per-call vs cached behaviour.
 
 Slice 2.5 building block: enables per-worker image-tag plumbing so
-gliner-relex can request hhagent/gliner-relex:dev while other workers
+gliner-relex can request kastellan/gliner-relex:dev while other workers
 keep the default-image slot. core/ lifecycle managers will pick up
 this signature in the next commit.
 
@@ -462,7 +462,7 @@ mod tests {
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --lib shell_exec_entry_defaults_container_image -- --nocapture 2>&1 | head -20
+cargo test -p kastellan-core --lib shell_exec_entry_defaults_container_image -- --nocapture 2>&1 | head -20
 ```
 
 Expected: compile error — no field `container_image` on `ToolEntry`.
@@ -485,7 +485,7 @@ Find `pub struct ToolEntry { ... }` in `core/src/scheduler/tool_dispatch.rs` (ar
     /// other workers stay on `None` until they have a concrete
     /// reason to diverge. See
     /// `docs/superpowers/specs/2026-05-21-macos-container-slice-2-design.md`.
-    pub sandbox_backend: Option<hhagent_sandbox::SandboxBackendKind>,
+    pub sandbox_backend: Option<kastellan_sandbox::SandboxBackendKind>,
     /// Container image tag for the `MacosContainer` backend. Only
     /// meaningful when `sandbox_backend == Some(Container)`; ignored
     /// otherwise. Type is `Option<String>` rather than enum-coupled so
@@ -546,7 +546,7 @@ For each hit, add `container_image: None,` as the last struct field (or `contain
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --lib shell_exec_entry_defaults_container_image -- --nocapture
+cargo test -p kastellan-core --lib shell_exec_entry_defaults_container_image -- --nocapture
 ```
 
 Expected: PASS.
@@ -573,7 +573,7 @@ feat(core): add container_image: Option<String> to ToolEntry
 
 Per-worker container-image plumbing for the macOS MacosContainer
 backend. `None` everywhere today (byte-equivalent default); Slice 2.5
-Task 6 populates Some("hhagent/gliner-relex:dev") on gliner-relex's
+Task 6 populates Some("kastellan/gliner-relex:dev") on gliner-relex's
 container-mode entry.
 
 shell_exec_entry sets it to None explicitly. Every existing ToolEntry
@@ -669,7 +669,7 @@ Expected: empty output.
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --lib worker_lifecycle -- --nocapture
+cargo test -p kastellan-core --lib worker_lifecycle -- --nocapture
 ```
 
 Expected: all `worker_lifecycle::*` unit tests pass.
@@ -679,7 +679,7 @@ Expected: all `worker_lifecycle::*` unit tests pass.
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --test lifecycle_container_routing_e2e -- --nocapture
+cargo test -p kastellan-core --test lifecycle_container_routing_e2e -- --nocapture
 ```
 
 Expected: pass (or `[SKIP]` lines on hosts without container CLI). This is the structural pin that the routing-by-`entry.sandbox_backend` still works after the widening.
@@ -725,9 +725,9 @@ Find the `mod tests` block in `core/src/workers/gliner_relex.rs` (line 660). Fin
 #[test]
 fn resolve_env_sets_use_container_backend_when_env_var_is_one() {
     let env_map = std::collections::HashMap::from([
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
-        ("HHAGENT_GLINER_RELEX_USE_CONTAINER", "1"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+        ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", "1"),
     ]);
     let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
     let is_dir = |_: &Path| true;   // pretend /tmp/fake-weights exists
@@ -735,20 +735,20 @@ fn resolve_env_sets_use_container_backend_when_env_var_is_one() {
     let env = resolve_env(env_lookup, is_dir, exists).expect("resolve_env ok");
     assert!(
         env.use_container_backend,
-        "HHAGENT_GLINER_RELEX_USE_CONTAINER=1 must set use_container_backend = true"
+        "KASTELLAN_GLINER_RELEX_USE_CONTAINER=1 must set use_container_backend = true"
     );
 }
 
 #[test]
 fn resolve_env_strict_about_use_container_value() {
-    // Only "1" (after trim) counts — symmetric with HHAGENT_GLINER_RELEX_ENABLE
+    // Only "1" (after trim) counts — symmetric with KASTELLAN_GLINER_RELEX_ENABLE
     // strictness. Surface dialect debate ("true", "yes", "on") would
     // creep in over time without this pin.
     for value in &["true", "yes", "on", "0", " 1 \n"] {
         let env_map = std::collections::HashMap::from([
-            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
-            ("HHAGENT_GLINER_RELEX_USE_CONTAINER", *value),
+            ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+            ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+            ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", *value),
         ]);
         let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
         let is_dir = |_: &Path| true;
@@ -769,10 +769,10 @@ fn resolve_env_skips_venv_existence_check_in_container_mode() {
     // inside the image at /usr/local/bin/...). Don't force operators to
     // maintain a host venv when they're running container-mode-only.
     let env_map = std::collections::HashMap::from([
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
-        ("HHAGENT_GLINER_RELEX_USE_CONTAINER", "1"),
-        ("HHAGENT_DATA_DIR", "/nonexistent/data-dir"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+        ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", "1"),
+        ("KASTELLAN_DATA_DIR", "/nonexistent/data-dir"),
     ]);
     let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
     let is_dir = |p: &Path| p == Path::new("/tmp/fake-weights");
@@ -788,10 +788,10 @@ fn resolve_env_skips_venv_existence_check_in_container_mode() {
 #[test]
 fn resolve_env_picks_up_container_image_override() {
     let env_map = std::collections::HashMap::from([
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
-        ("HHAGENT_GLINER_RELEX_USE_CONTAINER", "1"),
-        ("HHAGENT_GLINER_RELEX_IMAGE", "hhagent/gliner-relex:v0.0.1"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+        ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", "1"),
+        ("KASTELLAN_GLINER_RELEX_IMAGE", "kastellan/gliner-relex:v0.0.1"),
     ]);
     let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
     let is_dir = |_: &Path| true;
@@ -799,8 +799,8 @@ fn resolve_env_picks_up_container_image_override() {
     let env = resolve_env(env_lookup, is_dir, exists).expect("resolve_env ok");
     assert_eq!(
         env.container_image.as_deref(),
-        Some("hhagent/gliner-relex:v0.0.1"),
-        "HHAGENT_GLINER_RELEX_IMAGE override must flow into GlinerRelexEnv.container_image"
+        Some("kastellan/gliner-relex:v0.0.1"),
+        "KASTELLAN_GLINER_RELEX_IMAGE override must flow into GlinerRelexEnv.container_image"
     );
 }
 ```
@@ -810,7 +810,7 @@ fn resolve_env_picks_up_container_image_override() {
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --lib resolve_env_sets_use_container -- --nocapture 2>&1 | head -20
+cargo test -p kastellan-core --lib resolve_env_sets_use_container -- --nocapture 2>&1 | head -20
 ```
 
 Expected: compile error — no field `use_container_backend` or `container_image` on `GlinerRelexEnv`.
@@ -829,7 +829,7 @@ pub struct GlinerRelexEnv {
     pub weights_dir: PathBuf,
     pub model_id: String,
     pub device: String,
-    /// True when the operator set `HHAGENT_GLINER_RELEX_USE_CONTAINER=1`
+    /// True when the operator set `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1`
     /// (strict: only `"1"` after trim counts). `gliner_relex_entry`
     /// branches on this field to emit the container-mode `ToolEntry`
     /// shape (in-container binary, weights-only `fs_read`,
@@ -838,21 +838,21 @@ pub struct GlinerRelexEnv {
     ///
     /// In container mode `resolve_env` also skips the host-venv
     /// existence check — the worker shim lives inside the image at
-    /// `/usr/local/bin/hhagent-worker-gliner-relex`, so requiring a
+    /// `/usr/local/bin/kastellan-worker-gliner-relex`, so requiring a
     /// host venv would be a footgun for container-mode-only operators.
     pub use_container_backend: bool,
     /// Operator-supplied container image tag override, read from
-    /// `HHAGENT_GLINER_RELEX_IMAGE`. `None` (default) falls back to
+    /// `KASTELLAN_GLINER_RELEX_IMAGE`. `None` (default) falls back to
     /// the `CONTAINER_IMAGE_DEFAULT` constant at the
     /// `gliner_relex_entry` callsite. Symmetric to
-    /// `HHAGENT_GLINER_RELEX_MODEL` override behaviour.
+    /// `KASTELLAN_GLINER_RELEX_MODEL` override behaviour.
     pub container_image: Option<String>,
 }
 ```
 
 ### Step 5.4: Update `resolve_env` to read the new env vars + skip venv check in container mode
 
-Find `pub fn resolve_env` (line 294). Find the venv-resolution block (around lines 326-343) — it's the cascade of `if let Some(v) = env_lookup("HHAGENT_GLINER_RELEX_VENV_DIR")`. Wrap the venv resolution in an `if !use_container_backend` branch.
+Find `pub fn resolve_env` (line 294). Find the venv-resolution block (around lines 326-343) — it's the cascade of `if let Some(v) = env_lookup("KASTELLAN_GLINER_RELEX_VENV_DIR")`. Wrap the venv resolution in an `if !use_container_backend` branch.
 
 Replace the entire `resolve_env` body from the `let enable = ...` line through the final `Ok(GlinerRelexEnv { ... })`:
 
@@ -869,12 +869,12 @@ where
     IsDir: Fn(&Path) -> bool,
     Exists: Fn(&Path) -> bool,
 {
-    let enable = env_lookup("HHAGENT_GLINER_RELEX_ENABLE").unwrap_or_default();
+    let enable = env_lookup("KASTELLAN_GLINER_RELEX_ENABLE").unwrap_or_default();
     if enable.trim() != "1" {
         return Err(ResolveSkipReason::Disabled);
     }
 
-    let weights_dir = match env_lookup("HHAGENT_GLINER_RELEX_WEIGHTS_DIR") {
+    let weights_dir = match env_lookup("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR") {
         Some(v) => PathBuf::from(v),
         None => return Err(ResolveSkipReason::WeightsDirEnvMissing),
     };
@@ -882,35 +882,35 @@ where
         return Err(ResolveSkipReason::WeightsDirNotADir { path: weights_dir });
     }
 
-    let model_id = env_lookup("HHAGENT_GLINER_RELEX_MODEL")
+    let model_id = env_lookup("KASTELLAN_GLINER_RELEX_MODEL")
         .unwrap_or_else(|| "knowledgator/gliner-relex-multi-v1.0".to_string());
-    let device = env_lookup("HHAGENT_GLINER_RELEX_DEVICE")
+    let device = env_lookup("KASTELLAN_GLINER_RELEX_DEVICE")
         .unwrap_or_else(|| "auto".to_string());
 
     // New env knobs (Slice 2.5):
-    //   * `HHAGENT_GLINER_RELEX_USE_CONTAINER=1` → container-mode (strict on "1").
-    //   * `HHAGENT_GLINER_RELEX_IMAGE=<tag>` → operator-supplied image override.
-    let use_container_backend = env_lookup("HHAGENT_GLINER_RELEX_USE_CONTAINER")
+    //   * `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1` → container-mode (strict on "1").
+    //   * `KASTELLAN_GLINER_RELEX_IMAGE=<tag>` → operator-supplied image override.
+    let use_container_backend = env_lookup("KASTELLAN_GLINER_RELEX_USE_CONTAINER")
         .map(|v| v.trim() == "1")
         .unwrap_or(false);
-    let container_image = env_lookup("HHAGENT_GLINER_RELEX_IMAGE");
+    let container_image = env_lookup("KASTELLAN_GLINER_RELEX_IMAGE");
 
     // Host venv resolution is skipped in container mode — the worker
     // shim lives inside the image, so no host venv is required.
     let (venv_dir, script_path) = if use_container_backend {
         (PathBuf::new(), PathBuf::new())
     } else {
-        let venv_dir = if let Some(v) = env_lookup("HHAGENT_GLINER_RELEX_VENV_DIR") {
+        let venv_dir = if let Some(v) = env_lookup("KASTELLAN_GLINER_RELEX_VENV_DIR") {
             PathBuf::from(v)
-        } else if let Some(data_dir) = env_lookup("HHAGENT_DATA_DIR") {
+        } else if let Some(data_dir) = env_lookup("KASTELLAN_DATA_DIR") {
             PathBuf::from(data_dir).join("workers/gliner-relex/.venv")
         } else if let Some(home) = env_lookup("HOME") {
             PathBuf::from(home)
-                .join(".local/share/hhagent/workers/gliner-relex/.venv")
+                .join(".local/share/kastellan/workers/gliner-relex/.venv")
         } else {
             return Err(ResolveSkipReason::VenvDirUnresolvable);
         };
-        let script_path = venv_dir.join("bin").join("hhagent-worker-gliner-relex");
+        let script_path = venv_dir.join("bin").join("kastellan-worker-gliner-relex");
         if !exists(&script_path) {
             return Err(ResolveSkipReason::ScriptShimMissing { path: script_path });
         }
@@ -938,7 +938,7 @@ Find `fn test_env()` in the same `mod tests` block (around line 770). Add the tw
 ```rust
 fn test_env() -> GlinerRelexEnv {
     GlinerRelexEnv {
-        script_path: PathBuf::from("/tmp/fake/.venv/bin/hhagent-worker-gliner-relex"),
+        script_path: PathBuf::from("/tmp/fake/.venv/bin/kastellan-worker-gliner-relex"),
         venv_dir: PathBuf::from("/tmp/fake/.venv"),
         weights_dir: PathBuf::from("/tmp/fake/weights/multi-v1.0"),
         model_id: "knowledgator/gliner-relex-multi-v1.0".to_string(),
@@ -954,7 +954,7 @@ fn test_env() -> GlinerRelexEnv {
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --lib workers::gliner_relex -- --nocapture
+cargo test -p kastellan-core --lib workers::gliner_relex -- --nocapture
 ```
 
 Expected: all existing tests pass (byte-equivalent — the new fields default to host-mode defaults via `test_env`); the 4 new `resolve_env_*` tests pass.
@@ -969,15 +969,15 @@ git commit -m "$(cat <<'EOF'
 feat(workers): GlinerRelexEnv + resolve_env support container-mode opt-in
 
 New env vars:
-  HHAGENT_GLINER_RELEX_USE_CONTAINER=1 — opt into container mode
+  KASTELLAN_GLINER_RELEX_USE_CONTAINER=1 — opt into container mode
       (strict: only "1" after trim counts; symmetric with the
-      HHAGENT_GLINER_RELEX_ENABLE convention).
-  HHAGENT_GLINER_RELEX_IMAGE=<tag>     — operator-supplied image
+      KASTELLAN_GLINER_RELEX_ENABLE convention).
+  KASTELLAN_GLINER_RELEX_IMAGE=<tag>     — operator-supplied image
       override; flows into GlinerRelexEnv.container_image.
 
 In container mode resolve_env() skips the host-venv existence check
 entirely — the worker shim lives inside the image at
-/usr/local/bin/hhagent-worker-gliner-relex; requiring an unused host
+/usr/local/bin/kastellan-worker-gliner-relex; requiring an unused host
 venv would be a footgun for container-mode-only operators.
 
 New fields on GlinerRelexEnv:
@@ -1044,7 +1044,7 @@ fn entry_container_mode_emits_in_container_binary_and_weights_only_fs_read() {
 
     assert_eq!(
         entry.binary,
-        PathBuf::from("/usr/local/bin/hhagent-worker-gliner-relex"),
+        PathBuf::from("/usr/local/bin/kastellan-worker-gliner-relex"),
         "container-mode binary must be the in-container shim path"
     );
     assert_eq!(
@@ -1054,28 +1054,28 @@ fn entry_container_mode_emits_in_container_binary_and_weights_only_fs_read() {
     );
     assert_eq!(
         entry.sandbox_backend,
-        Some(hhagent_sandbox::SandboxBackendKind::Container),
+        Some(kastellan_sandbox::SandboxBackendKind::Container),
     );
     assert_eq!(
         entry.container_image.as_deref(),
-        Some("hhagent/gliner-relex:dev"),
+        Some("kastellan/gliner-relex:dev"),
         "container_image defaults to CONTAINER_IMAGE_DEFAULT when env override absent"
     );
 }
 
-/// Operator-supplied image tag (HHAGENT_GLINER_RELEX_IMAGE) flows
+/// Operator-supplied image tag (KASTELLAN_GLINER_RELEX_IMAGE) flows
 /// through GlinerRelexEnv.container_image into the entry.
 #[test]
 fn entry_container_mode_honours_custom_image_tag() {
     let env = GlinerRelexEnv {
         use_container_backend: true,
-        container_image: Some("hhagent/gliner-relex:v0.0.1".to_string()),
+        container_image: Some("kastellan/gliner-relex:v0.0.1".to_string()),
         ..test_env()
     };
     let entry = gliner_relex_entry(&env);
     assert_eq!(
         entry.container_image.as_deref(),
-        Some("hhagent/gliner-relex:v0.0.1"),
+        Some("kastellan/gliner-relex:v0.0.1"),
         "operator-supplied image tag must flow into entry.container_image"
     );
 }
@@ -1086,7 +1086,7 @@ fn entry_container_mode_honours_custom_image_tag() {
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --lib entry_container_mode -- --nocapture 2>&1 | head -30
+cargo test -p kastellan-core --lib entry_container_mode -- --nocapture 2>&1 | head -30
 ```
 
 Expected: FAIL — `entry_container_mode_emits_in_container_binary` expects `binary == "/usr/local/bin/..."` but the unchanged `gliner_relex_entry` returns the host script_path. `entry_container_mode_honours_custom_image_tag` expects `container_image == Some(...)` but the entry has `container_image: None` (Task 3 default).
@@ -1099,16 +1099,16 @@ Find `pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry { ... }` (lin
 
 ```rust
 /// Default image tag for the gliner-relex container backend. Operator
-/// can override via `HHAGENT_GLINER_RELEX_IMAGE` env var (read by
+/// can override via `KASTELLAN_GLINER_RELEX_IMAGE` env var (read by
 /// `resolve_env`). Bumping this default is a paired edit with
 /// `scripts/workers/gliner-relex/build-image.sh`.
-const CONTAINER_IMAGE_DEFAULT: &str = "hhagent/gliner-relex:dev";
+const CONTAINER_IMAGE_DEFAULT: &str = "kastellan/gliner-relex:dev";
 
 /// In-container path to the worker shim. Containerfile uses
 /// `uv pip install --system .` which places the console-script from
 /// pyproject's `[project.scripts]` at `/usr/local/bin/<name>`. Bumping
 /// is a paired edit with the Containerfile's package install path.
-const CONTAINER_BINARY: &str = "/usr/local/bin/hhagent-worker-gliner-relex";
+const CONTAINER_BINARY: &str = "/usr/local/bin/kastellan-worker-gliner-relex";
 
 /// Construct the [`ToolEntry`] for the gliner-relex worker.
 ///
@@ -1120,8 +1120,8 @@ const CONTAINER_BINARY: &str = "/usr/local/bin/hhagent-worker-gliner-relex";
 ///   on Linux. Byte-equivalent to the pre-Slice-2.5 shape.
 ///
 /// * `true` → container-mode entry (macOS-only opt-in via
-///   `HHAGENT_GLINER_RELEX_USE_CONTAINER=1`): worker spawns inside
-///   the `hhagent/gliner-relex:dev` image (or operator override) via
+///   `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1`): worker spawns inside
+///   the `kastellan/gliner-relex:dev` image (or operator override) via
 ///   `MacosContainer`, FS allowlist holds only `weights_dir` (venv +
 ///   src baked into the image), `sandbox_backend = Some(Container)`,
 ///   `container_image = Some(<image>)`.
@@ -1144,7 +1144,7 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // The venv uses an editable install (uv's default for hatchling
     // workspace projects); `.venv/.../_editable_impl_*.pth` points at
     // `<worker_dir>/src`. Mounting only `.venv` would let Python start
-    // but fail on `from hhagent_worker_gliner_relex.__main__ import
+    // but fail on `from kastellan_worker_gliner_relex.__main__ import
     // main` with ModuleNotFoundError. Compute the sibling `src/` from
     // the documented `<worker_dir>/.venv` contract on `venv_dir` and
     // bind it read-only too.
@@ -1182,7 +1182,7 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
 
 /// Container-mode entry: routes the worker through the macOS
 /// `MacosContainer` SandboxBackend (Slice 2.5+; opt-in via
-/// `HHAGENT_GLINER_RELEX_USE_CONTAINER=1`). Only `weights_dir` mounts
+/// `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1`). Only `weights_dir` mounts
 /// from the host; venv + src are baked into the image. The image is
 /// per-call constructed via `SandboxBackends::resolve(Some(Container),
 /// Some(<image>))`.
@@ -1190,7 +1190,7 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // Container-mode policy: fs_read mounts host weights only.
     // build_container_argv uses source=<P>,target=<P> convention, so the
     // weights mount at the SAME host path inside the container — that
-    // makes the existing HHAGENT_GLINER_RELEX_WEIGHTS_DIR env value
+    // makes the existing KASTELLAN_GLINER_RELEX_WEIGHTS_DIR env value
     // work verbatim without a path rewrite.
     let policy = SandboxPolicy {
         fs_read: vec![env.weights_dir.clone()],
@@ -1214,7 +1214,7 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         policy,
         wall_clock_ms: None,
         lifecycle: build_idle_timeout_lifecycle(),
-        sandbox_backend: Some(hhagent_sandbox::SandboxBackendKind::Container),
+        sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::Container),
         container_image: Some(image),
     }
 }
@@ -1225,15 +1225,15 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
 fn build_runtime_env(env: &GlinerRelexEnv) -> Vec<(String, String)> {
     vec![
         (
-            "HHAGENT_GLINER_RELEX_WEIGHTS_DIR".to_string(),
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR".to_string(),
             env.weights_dir.to_string_lossy().into_owned(),
         ),
         (
-            "HHAGENT_GLINER_RELEX_MODEL".to_string(),
+            "KASTELLAN_GLINER_RELEX_MODEL".to_string(),
             env.model_id.clone(),
         ),
         (
-            "HHAGENT_GLINER_RELEX_DEVICE".to_string(),
+            "KASTELLAN_GLINER_RELEX_DEVICE".to_string(),
             env.device.clone(),
         ),
         ("HF_HUB_OFFLINE".to_string(), "1".to_string()),
@@ -1245,7 +1245,7 @@ fn build_runtime_env(env: &GlinerRelexEnv) -> Vec<(String, String)> {
         // /etc/passwd, so that fallback raises KeyError and the worker
         // exits before serving any RPC. Setting USER skips the pwd
         // lookup entirely.
-        ("USER".to_string(), "hhagent".to_string()),
+        ("USER".to_string(), "kastellan".to_string()),
         // TORCHINDUCTOR_CACHE_DIR pre-empts the home-dir cache
         // computation that triggers the getpass.getuser path above
         // (defense in depth — USER alone is sufficient today, but a
@@ -1282,7 +1282,7 @@ fn build_idle_timeout_lifecycle() -> Lifecycle {
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --lib workers::gliner_relex::tests::entry_ -- --nocapture
+cargo test -p kastellan-core --lib workers::gliner_relex::tests::entry_ -- --nocapture
 ```
 
 Expected: all 10 `entry_*` tests pass (7 existing + 3 new container-mode tests).
@@ -1292,7 +1292,7 @@ Expected: all 10 `entry_*` tests pass (7 existing + 3 new container-mode tests).
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --lib workers::gliner_relex -- --nocapture
+cargo test -p kastellan-core --lib workers::gliner_relex -- --nocapture
 ```
 
 Expected: all unit tests pass (including the 4 resolve_env tests from Task 5 + the 3 new entry tests + 7 existing entry tests + any other tests).
@@ -1327,8 +1327,8 @@ Shared helpers extracted:
       regression pin.
 
 Constants pinned at module top:
-  CONTAINER_IMAGE_DEFAULT = "hhagent/gliner-relex:dev"
-  CONTAINER_BINARY        = "/usr/local/bin/hhagent-worker-gliner-relex"
+  CONTAINER_IMAGE_DEFAULT = "kastellan/gliner-relex:dev"
+  CONTAINER_BINARY        = "/usr/local/bin/kastellan-worker-gliner-relex"
 
 +3 new entry tests pin the container-mode shape (default-image,
 custom-image, container_image=None in host mode).
@@ -1362,12 +1362,12 @@ EOF
 #   1. Debian-slim base — PyTorch wheels are glibc-only (manylinux2014);
 #      Alpine is OUT (musl libc).
 #   2. `uv pip install --system` — no .venv indirection; console script
-#      lands at /usr/local/bin/hhagent-worker-gliner-relex via
+#      lands at /usr/local/bin/kastellan-worker-gliner-relex via
 #      pyproject's [project.scripts] entry.
 #   3. Weights NOT baked in — operator mounts them at runtime via the
 #      policy.fs_read host path (build_container_argv uses
 #      source=<P>,target=<P> convention, so the existing
-#      HHAGENT_GLINER_RELEX_WEIGHTS_DIR env value works verbatim).
+#      KASTELLAN_GLINER_RELEX_WEIGHTS_DIR env value works verbatim).
 #      Image stays ~3 GB instead of ~4.5 GB; weight refreshes don't
 #      require image rebuild.
 #   4. ENTRYPOINT carries the worker shim. The MacosContainer backend
@@ -1401,7 +1401,7 @@ RUN uv pip install --system --no-cache --no-dev .
 # python:3.12-slim ships with nobody (uid 65534).
 USER nobody
 
-ENTRYPOINT ["hhagent-worker-gliner-relex"]
+ENTRYPOINT ["kastellan-worker-gliner-relex"]
 ```
 
 ### Step 7.2: Write the build helper script
@@ -1416,12 +1416,12 @@ ENTRYPOINT ["hhagent-worker-gliner-relex"]
 # builds the host venv (native Seatbelt/bwrap mode); this builds the
 # container image (macOS container mode).
 #
-# Tag default: hhagent/gliner-relex:dev (overridable via
-# HHAGENT_GLINER_RELEX_IMAGE env, matching the daemon-side knob).
+# Tag default: kastellan/gliner-relex:dev (overridable via
+# KASTELLAN_GLINER_RELEX_IMAGE env, matching the daemon-side knob).
 #
 # Usage:
 #     scripts/workers/gliner-relex/build-image.sh
-#     HHAGENT_GLINER_RELEX_IMAGE=hhagent/gliner-relex:v0.0.1 \
+#     KASTELLAN_GLINER_RELEX_IMAGE=kastellan/gliner-relex:v0.0.1 \
 #         scripts/workers/gliner-relex/build-image.sh
 #
 # Exits non-zero with a clear message if `container` CLI is missing or
@@ -1431,7 +1431,7 @@ ENTRYPOINT ["hhagent-worker-gliner-relex"]
 
 set -euo pipefail
 
-IMAGE_TAG="${HHAGENT_GLINER_RELEX_IMAGE:-hhagent/gliner-relex:dev}"
+IMAGE_TAG="${KASTELLAN_GLINER_RELEX_IMAGE:-kastellan/gliner-relex:dev}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_DIR="$(cd "$SCRIPT_DIR/../../../workers/gliner-relex" && pwd)"
@@ -1460,11 +1460,11 @@ container build -t "$IMAGE_TAG" "$WORKER_DIR"
 cat <<EOF
 
 Done. To enable container-mode in the daemon, set both:
-    export HHAGENT_GLINER_RELEX_ENABLE=1
-    export HHAGENT_GLINER_RELEX_USE_CONTAINER=1
+    export KASTELLAN_GLINER_RELEX_ENABLE=1
+    export KASTELLAN_GLINER_RELEX_USE_CONTAINER=1
 
 If you used a non-default image tag, also set:
-    export HHAGENT_GLINER_RELEX_IMAGE=$IMAGE_TAG
+    export KASTELLAN_GLINER_RELEX_IMAGE=$IMAGE_TAG
 EOF
 ```
 
@@ -1499,12 +1499,12 @@ feat(workers/gliner-relex): Containerfile + build-image.sh operator helper
 Containerfile shape:
 * python:3.12-slim base (PyTorch glibc wheels need it; Alpine is OUT)
 * uv pip install --system .  (no .venv indirection; console-script
-  lands at /usr/local/bin/hhagent-worker-gliner-relex)
+  lands at /usr/local/bin/kastellan-worker-gliner-relex)
 * USER nobody                (defense-in-depth complement to
   build_container_argv's --user nobody flag)
-* ENTRYPOINT ["hhagent-worker-gliner-relex"]
+* ENTRYPOINT ["kastellan-worker-gliner-relex"]
 * Weights NOT baked — operator mounts at runtime via policy.fs_read
-  (same host path inside container; HHAGENT_GLINER_RELEX_WEIGHTS_DIR
+  (same host path inside container; KASTELLAN_GLINER_RELEX_WEIGHTS_DIR
   env works verbatim).
 
 build-image.sh:
@@ -1514,8 +1514,8 @@ build-image.sh:
   the operator gets a clear diagnosis instead of a cryptic
   `container build` failure.
 * Final message reminds operator to set both
-  HHAGENT_GLINER_RELEX_ENABLE=1 and HHAGENT_GLINER_RELEX_USE_CONTAINER=1.
-* HHAGENT_GLINER_RELEX_IMAGE env overrides the default tag.
+  KASTELLAN_GLINER_RELEX_ENABLE=1 and KASTELLAN_GLINER_RELEX_USE_CONTAINER=1.
+* KASTELLAN_GLINER_RELEX_IMAGE env overrides the default tag.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -1593,7 +1593,7 @@ fn macos_container_argv_with_init_runs_alpine_cleanly() {
 If the imports at the top of `macos_container_smoke.rs` don't already cover `MacosContainer`, `SandboxPolicy`, `Profile`, `Net`, add them:
 
 ```rust
-use hhagent_sandbox::{MacosContainer, Net, Profile, SandboxBackend, SandboxPolicy};
+use kastellan_sandbox::{MacosContainer, Net, Profile, SandboxBackend, SandboxPolicy};
 ```
 
 (Check existing imports first — keep the `use` block clean.)
@@ -1603,7 +1603,7 @@ use hhagent_sandbox::{MacosContainer, Net, Profile, SandboxBackend, SandboxPolic
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-sandbox --test macos_container_smoke macos_container_argv_with_init -- --nocapture
+cargo test -p kastellan-sandbox --test macos_container_smoke macos_container_argv_with_init -- --nocapture
 ```
 
 Expected: PASS on this Mac (container CLI is running per pre-flight check + alpine:3.20 is in the cache from Slice 1's earlier work). If alpine:3.20 isn't cached, the test will exit-skip cleanly.
@@ -1618,7 +1618,7 @@ container image list 2>&1 | grep alpine:3.20 || container image pull alpine:3.20
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-sandbox --test macos_container_smoke -- --nocapture
+cargo test -p kastellan-sandbox --test macos_container_smoke -- --nocapture
 ```
 
 Expected: all smoke tests pass.
@@ -1673,20 +1673,20 @@ If the script fails:
 - [ ] **Run:**
 
 ```sh
-container image list | grep hhagent/gliner-relex
+container image list | grep kastellan/gliner-relex
 ```
 
-Expected: a line like `hhagent/gliner-relex   dev    arm64   <digest>   ...   ~3.0 GB ...`.
+Expected: a line like `kastellan/gliner-relex   dev    arm64   <digest>   ...   ~3.0 GB ...`.
 
 ### Step 9.3: Manually sanity-check the in-container worker shim path
 
 - [ ] **Run:**
 
 ```sh
-container run --rm hhagent/gliner-relex:dev which hhagent-worker-gliner-relex
+container run --rm kastellan/gliner-relex:dev which kastellan-worker-gliner-relex
 ```
 
-Expected: `/usr/local/bin/hhagent-worker-gliner-relex` printed on stdout. Confirms the Containerfile installed the shim where the manifest expects it.
+Expected: `/usr/local/bin/kastellan-worker-gliner-relex` printed on stdout. Confirms the Containerfile installed the shim where the manifest expects it.
 
 ---
 
@@ -1710,7 +1710,7 @@ Insert the following near the existing skip helpers (after `resolve_weights_dir`
 /// image. Mirrors the venv-staged `resolve_worker_script` skip pattern.
 #[cfg(target_os = "macos")]
 fn skip_if_container_unavailable() -> bool {
-    if hhagent_sandbox::MacosContainer::probe().is_err() {
+    if kastellan_sandbox::MacosContainer::probe().is_err() {
         eprintln!(
             "\n[SKIP] container CLI / system service not available — install via 'brew install container' and 'container system start'\n"
         );
@@ -1763,7 +1763,7 @@ fn build_test_entry_container() -> Option<ToolEntry> {
     if skip_if_container_unavailable() {
         return None;
     }
-    if skip_if_image_missing("hhagent/gliner-relex:dev") {
+    if skip_if_image_missing("kastellan/gliner-relex:dev") {
         return None;
     }
     let weights = resolve_weights_dir()?;
@@ -1814,15 +1814,15 @@ async fn happy_path_container_extract_returns_entities_and_triples() {
     // a future refactor that silently regresses build_test_entry_container).
     assert_eq!(
         entry.sandbox_backend,
-        Some(hhagent_sandbox::SandboxBackendKind::Container),
+        Some(kastellan_sandbox::SandboxBackendKind::Container),
         "build_test_entry_container must produce a Container-backend entry"
     );
     assert_eq!(
         entry.container_image.as_deref(),
-        Some("hhagent/gliner-relex:dev"),
+        Some("kastellan/gliner-relex:dev"),
     );
 
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle = IdleTimeoutLifecycle::new(sandboxes);
 
     let mut handle = lifecycle
@@ -1871,21 +1871,21 @@ async fn happy_path_container_extract_returns_entities_and_triples() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test gliner_relex_e2e happy_path_container -- --nocapture
+cargo test -p kastellan-core --test gliner_relex_e2e happy_path_container -- --nocapture
 ```
 
 Expected: PASS in ~30-60 s (cold-spawn container + model load + one inference + tear down).
 
-If it fails with a missing-weights skip but you HAVE staged weights, double-check `HHAGENT_DATA_DIR` matches what `resolve_weights_dir` expects (`$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0/`).
+If it fails with a missing-weights skip but you HAVE staged weights, double-check `KASTELLAN_DATA_DIR` matches what `resolve_weights_dir` expects (`$KASTELLAN_DATA_DIR/workers/gliner-relex/weights/multi-v1.0/`).
 
 If it fails inside the container with a Python error, drop into the container manually for debugging:
 ```sh
-container run --rm -it --mount type=bind,source=$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0,target=/weights,readonly \
-  -e HHAGENT_GLINER_RELEX_WEIGHTS_DIR=/weights \
-  -e HHAGENT_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
-  -e HHAGENT_GLINER_RELEX_DEVICE=auto \
+container run --rm -it --mount type=bind,source=$KASTELLAN_DATA_DIR/workers/gliner-relex/weights/multi-v1.0,target=/weights,readonly \
+  -e KASTELLAN_GLINER_RELEX_WEIGHTS_DIR=/weights \
+  -e KASTELLAN_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
+  -e KASTELLAN_GLINER_RELEX_DEVICE=auto \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
-  hhagent/gliner-relex:dev
+  kastellan/gliner-relex:dev
 ```
 (Then paste an `ExtractRequest` JSON-RPC line into the worker's stdin.)
 
@@ -1894,7 +1894,7 @@ container run --rm -it --mount type=bind,source=$HHAGENT_DATA_DIR/workers/gliner
 - [ ] **Run:**
 
 ```sh
-cargo test -p hhagent-core --test gliner_relex_e2e -- --nocapture
+cargo test -p kastellan-core --test gliner_relex_e2e -- --nocapture
 ```
 
 Expected: all existing host-mode tests + the new container-mode test pass (or skip cleanly).
@@ -1910,7 +1910,7 @@ test(core): e2e — gliner-relex extract via macOS container backend
 
 happy_path_container_extract_returns_entities_and_triples spawns the
 real Python worker INSIDE Apple `container` (image
-hhagent/gliner-relex:dev built by scripts/workers/gliner-relex/
+kastellan/gliner-relex:dev built by scripts/workers/gliner-relex/
 build-image.sh), dispatches one `extract` over JSON-RPC stdio through
 the production IdleTimeoutLifecycle + tool_host::dispatch chain, and
 asserts at least one entity is returned.
@@ -1970,7 +1970,7 @@ The replacement header should look like (substitute actual commit hashes from `g
 - [ ] **Edit the header:**
 
 ```markdown
-**Last updated:** 2026-05-23 (Next-TODO Item 25 — GLiNER-Relex Slice 2.5 (Containerfile + macOS image build) shipped on branch `feat/gliner-relex-slice-2.5`, PR pending. 10 commits: 1 spec + 1 `--init` always-on (closes #107) + 1 `SandboxBackends::resolve` widening + 1 `ToolEntry.container_image` field + 1 lifecycle-manager rerouting + 1 `GlinerRelexEnv`/`resolve_env` env-var support + 1 `gliner_relex_entry` host/container split + 1 Containerfile + build-image.sh + 1 container `--init` smoke + 1 e2e through container. Operator built `hhagent/gliner-relex:dev` via `scripts/workers/gliner-relex/build-image.sh`; `happy_path_container_extract_returns_entities_and_triples` confirms canonical extraction through Apple `container` 0.12.3. Workspace **998 → 1010 (+12)** on macOS, all green. Container backend now has real memory enforcement (`mem_mb=4096` is no longer a no-op on darwin); PID-1 signal forwarding closed via #107. Spec at `docs/superpowers/specs/2026-05-23-gliner-relex-slice-2.5-design.md`; plan at `docs/superpowers/plans/2026-05-23-gliner-relex-slice-2.5.md`. Earlier this session: docs sync on `main` (`7c53af3`) backfilling PR #117 (Item 23(a)) merge.
+**Last updated:** 2026-05-23 (Next-TODO Item 25 — GLiNER-Relex Slice 2.5 (Containerfile + macOS image build) shipped on branch `feat/gliner-relex-slice-2.5`, PR pending. 10 commits: 1 spec + 1 `--init` always-on (closes #107) + 1 `SandboxBackends::resolve` widening + 1 `ToolEntry.container_image` field + 1 lifecycle-manager rerouting + 1 `GlinerRelexEnv`/`resolve_env` env-var support + 1 `gliner_relex_entry` host/container split + 1 Containerfile + build-image.sh + 1 container `--init` smoke + 1 e2e through container. Operator built `kastellan/gliner-relex:dev` via `scripts/workers/gliner-relex/build-image.sh`; `happy_path_container_extract_returns_entities_and_triples` confirms canonical extraction through Apple `container` 0.12.3. Workspace **998 → 1010 (+12)** on macOS, all green. Container backend now has real memory enforcement (`mem_mb=4096` is no longer a no-op on darwin); PID-1 signal forwarding closed via #107. Spec at `docs/superpowers/specs/2026-05-23-gliner-relex-slice-2.5-design.md`; plan at `docs/superpowers/plans/2026-05-23-gliner-relex-slice-2.5.md`. Earlier this session: docs sync on `main` (`7c53af3`) backfilling PR #117 (Item 23(a)) merge.
 ```
 
 Then add a new `## Recently completed (this session, 2026-05-23 — Slice 2.5)` section before the existing `## Recently completed (this session, 2026-05-23 — Item 23 ...)` section, summarising the slice (key decisions, what shipped, test count delta, file-size watch, what's deliberately deferred). Mirror the format of the existing Item 23(a) entry.
@@ -1986,7 +1986,7 @@ Edit `docs/devel/ROADMAP.md`. Find the "Phase 0b" or "Phase 1" section that trac
 - [ ] **Add line:**
 
 ```markdown
-- [x] **Slice 2.5 — gliner-relex Containerfile + macOS image build (2026-05-23)** — branch `feat/gliner-relex-slice-2.5`, **merged to `main` via PR [#XXX](https://github.com/hherb/hhagent/pull/XXX) at `<hash>`**. Closes [#107](https://github.com/hherb/hhagent/issues/107) (PID-1 signal handling). First real workload routed through Apple `container` micro-VM on macOS, proving end-to-end the per-worker `SandboxBackendKind` selection shipped in Slice 2. New `workers/gliner-relex/Containerfile` (python:3.12-slim + `uv pip install --system`; image tag `hhagent/gliner-relex:dev`); new `scripts/workers/gliner-relex/build-image.sh` operator helper; new `HHAGENT_GLINER_RELEX_USE_CONTAINER=1` opt-in + `HHAGENT_GLINER_RELEX_IMAGE` override; `gliner_relex_entry` branches on `GlinerRelexEnv.use_container_backend`; `SandboxBackends::resolve` widens to take `image: Option<&str>`; `ToolEntry.container_image: Option<String>` new field; `--init` added unconditionally to `build_container_argv`. **Workspace 998 → 1010 (+12) on macOS, all green**: +1 `--init` argv pin, +1 existing always-on test renamed/tightened, +2 resolver widening (image-Arc-identity pins), +1 `shell_exec_entry` container_image default, +4 `resolve_env` env-var support (use_container strictness + venv-skip + image-override), +3 `gliner_relex_entry` container-mode shape, +1 macos_container_smoke `--init` envelope, +1 `happy_path_container_extract_returns_entities_and_triples` e2e.
+- [x] **Slice 2.5 — gliner-relex Containerfile + macOS image build (2026-05-23)** — branch `feat/gliner-relex-slice-2.5`, **merged to `main` via PR [#XXX](https://github.com/hherb/kastellan/pull/XXX) at `<hash>`**. Closes [#107](https://github.com/hherb/kastellan/issues/107) (PID-1 signal handling). First real workload routed through Apple `container` micro-VM on macOS, proving end-to-end the per-worker `SandboxBackendKind` selection shipped in Slice 2. New `workers/gliner-relex/Containerfile` (python:3.12-slim + `uv pip install --system`; image tag `kastellan/gliner-relex:dev`); new `scripts/workers/gliner-relex/build-image.sh` operator helper; new `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1` opt-in + `KASTELLAN_GLINER_RELEX_IMAGE` override; `gliner_relex_entry` branches on `GlinerRelexEnv.use_container_backend`; `SandboxBackends::resolve` widens to take `image: Option<&str>`; `ToolEntry.container_image: Option<String>` new field; `--init` added unconditionally to `build_container_argv`. **Workspace 998 → 1010 (+12) on macOS, all green**: +1 `--init` argv pin, +1 existing always-on test renamed/tightened, +2 resolver widening (image-Arc-identity pins), +1 `shell_exec_entry` container_image default, +4 `resolve_env` env-var support (use_container strictness + venv-skip + image-override), +3 `gliner_relex_entry` container-mode shape, +1 macos_container_smoke `--init` envelope, +1 `happy_path_container_extract_returns_entities_and_triples` e2e.
 ```
 
 (Replace `XXX` + `<hash>` after the PR is open and merged.)
@@ -2030,8 +2030,8 @@ git push -u origin feat/gliner-relex-slice-2.5
 gh pr create --title "GLiNER-Relex Slice 2.5 — Containerfile + macOS image build (closes #107)" --body "$(cat <<'EOF'
 ## Summary
 
-- First real workload routed through Apple `container` micro-VM on macOS: `gliner-relex` worker now opts into `MacosContainer` via `HHAGENT_GLINER_RELEX_USE_CONTAINER=1`, with `mem_mb=4096` actually enforced (Seatbelt has no memory primitive).
-- Closes [#107](https://github.com/hherb/hhagent/issues/107) by adding `--init` unconditionally to `build_container_argv` (parallel to bwrap's `--as-pid-1`).
+- First real workload routed through Apple `container` micro-VM on macOS: `gliner-relex` worker now opts into `MacosContainer` via `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1`, with `mem_mb=4096` actually enforced (Seatbelt has no memory primitive).
+- Closes [#107](https://github.com/hherb/kastellan/issues/107) by adding `--init` unconditionally to `build_container_argv` (parallel to bwrap's `--as-pid-1`).
 - New `workers/gliner-relex/Containerfile` (python:3.12-slim + `uv pip install --system .` + `USER nobody` + `ENTRYPOINT`); new operator helper `scripts/workers/gliner-relex/build-image.sh`.
 - Per-worker container image plumbing: new `container_image: Option<String>` field on `ToolEntry`; `SandboxBackends::resolve()` widens to take `(kind, image: Option<&str>)`.
 - `gliner_relex_entry` branches on a new `GlinerRelexEnv.use_container_backend` field; host-mode shape stays byte-equivalent (default).
@@ -2043,8 +2043,8 @@ Plan: [`docs/superpowers/plans/2026-05-23-gliner-relex-slice-2.5.md`](docs/super
 ## Test plan
 
 - [x] `cargo test --workspace` on macOS → 1010 / 0 / 3
-- [x] `cargo test -p hhagent-sandbox --test macos_container_smoke` → real `container run` envelope green with `--init`
-- [x] `cargo test -p hhagent-core --test gliner_relex_e2e happy_path_container` → canonical extraction through Apple `container`
+- [x] `cargo test -p kastellan-sandbox --test macos_container_smoke` → real `container run` envelope green with `--init`
+- [x] `cargo test -p kastellan-core --test gliner_relex_e2e happy_path_container` → canonical extraction through Apple `container`
 - [x] `cd workers/gliner-relex && uv run pytest` → 35 / 0 unchanged (no Python changes shipped)
 - [ ] CI on Linux → workspace stays at 994 / 0 / 4 (cross-platform unit tests on resolve_env strictness + ToolEntry widening + `--init` argv pin)
 
@@ -2084,6 +2084,6 @@ All 13 tests from the spec's test plan are covered (4 sandbox unit + 5 core unit
 - `GlinerRelexEnv.container_image: Option<String>` referenced consistently in Tasks 5, 6, 10.
 - `ToolEntry.container_image: Option<String>` referenced consistently in Tasks 3, 4, 6, 10.
 - `SandboxBackends::resolve(kind, image: Option<&str>)` referenced consistently in Tasks 2, 4.
-- Constants `CONTAINER_IMAGE_DEFAULT` (= `"hhagent/gliner-relex:dev"`) and `CONTAINER_BINARY` (= `"/usr/local/bin/hhagent-worker-gliner-relex"`) consistent across Tasks 6, 7 (in Containerfile install path), 10 (e2e test).
+- Constants `CONTAINER_IMAGE_DEFAULT` (= `"kastellan/gliner-relex:dev"`) and `CONTAINER_BINARY` (= `"/usr/local/bin/kastellan-worker-gliner-relex"`) consistent across Tasks 6, 7 (in Containerfile install path), 10 (e2e test).
 
 No issues found.

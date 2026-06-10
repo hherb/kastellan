@@ -1,4 +1,4 @@
-//! hhagent-sandbox: declarative, cross-platform sandbox for tool workers.
+//! kastellan-sandbox: declarative, cross-platform sandbox for tool workers.
 //!
 //! One [`SandboxPolicy`] drives all backends. Backend selection is automatic
 //! per OS, with an optional micro-VM backend for stronger isolation.
@@ -437,14 +437,14 @@ mod tests {
     #[test]
     fn sandbox_backends_resolve_with_custom_image_returns_fresh_container() {
         // When the operator opts a worker into container mode with a custom
-        // image tag (Slice 2.5: gliner-relex flips to hhagent/gliner-relex:dev),
-        // resolve(Some(Container), Some("hhagent/gliner-relex:dev")) must
+        // image tag (Slice 2.5: gliner-relex flips to kastellan/gliner-relex:dev),
+        // resolve(Some(Container), Some("kastellan/gliner-relex:dev")) must
         // return a backend whose image() method reports that tag — NOT the
         // cached default-image backend's tag (DEFAULT_IMAGE = alpine:3.20).
         let backends = SandboxBackends::default_for_current_os();
         let backend = backends.resolve(
             Some(SandboxBackendKind::Container),
-            Some("hhagent/gliner-relex:dev"),
+            Some("kastellan/gliner-relex:dev"),
         );
         // Downcast via Any is overkill — use the public surface of MacosContainer
         // by constructing one with the same image and checking the resolver

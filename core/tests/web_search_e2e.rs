@@ -8,7 +8,7 @@
 //!
 //! Ignored test (`real_search_against_searxng`): a real query against a live
 //! SearxNG instance. Run manually with `--ignored` and
-//! `HHAGENT_WEB_SEARCH_ENDPOINT` set; also validates DNS/TLS (or loopback)
+//! `KASTELLAN_WEB_SEARCH_ENDPOINT` set; also validates DNS/TLS (or loopback)
 //! inside the sandbox jail.
 //!
 //! `[SKIP]`s cleanly when PG, the supervisor, the worker binary, or a working
@@ -18,16 +18,16 @@
 
 use std::path::PathBuf;
 
-use hhagent_core::secrets::Vault;
-use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use hhagent_core::workers::web_search::web_search_entry;
-use hhagent_tests_common::{
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::workers::web_search::web_search_entry;
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
 };
 
-async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
-    hhagent_db::probe::run(
+async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
         conn_spec,
         "core",
         "startup",
@@ -35,7 +35,7 @@ async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPo
     )
     .await
     .expect("probe run");
-    hhagent_db::pool::connect_runtime_pool(conn_spec)
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
         .await
         .expect("connect runtime pool")
 }
@@ -63,7 +63,7 @@ fn ready_or_skip(endpoint: &str, allowlist: &[&str]) -> Option<TestEnv> {
         return None;
     }
     let bin_dir = pg_bin_dir_or_skip()?;
-    let worker_path = workspace_target_binary("hhagent-worker-web-search");
+    let worker_path = workspace_target_binary("kastellan-worker-web-search");
     if !worker_path.exists() {
         eprintln!("\n[SKIP] web-search worker binary not built; run cargo build --workspace\n");
         return None;
@@ -74,7 +74,7 @@ fn ready_or_skip(endpoint: &str, allowlist: &[&str]) -> Option<TestEnv> {
         &bin_dir,
         "ws-d",
         "ws-l",
-        &format!("hhagent-supervisor-test-pg-websearch-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-websearch-{suffix}"),
     );
 
     Some(TestEnv {
@@ -130,9 +130,9 @@ fn endpoint_off_allowlist_fails_closed() {
 }
 
 #[test]
-#[ignore = "hits a live SearxNG; set HHAGENT_WEB_SEARCH_ENDPOINT; validates DNS/TLS/loopback in jail"]
+#[ignore = "hits a live SearxNG; set KASTELLAN_WEB_SEARCH_ENDPOINT; validates DNS/TLS/loopback in jail"]
 fn real_search_against_searxng() {
-    let endpoint = std::env::var("HHAGENT_WEB_SEARCH_ENDPOINT")
+    let endpoint = std::env::var("KASTELLAN_WEB_SEARCH_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:8888/search".to_string());
     // Allowlist the endpoint host so the worker accepts it.
     let host = url_host(&endpoint);

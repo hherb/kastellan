@@ -21,9 +21,9 @@
 //! process immediately — equivalent to a clean kill.
 
 /// Env var read by [`apply_from_env`]. Set by
-/// `hhagent_core::tool_host::derive_lockdown_env` from
+/// `kastellan_core::tool_host::derive_lockdown_env` from
 /// `policy.cpu_ms`.
-pub const ENV_CPU_MS: &str = "HHAGENT_CPU_MS";
+pub const ENV_CPU_MS: &str = "KASTELLAN_CPU_MS";
 
 /// Status of the rlimit layer after [`apply_from_env`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +41,7 @@ pub enum RlimitReport {
 /// before serving any request.
 #[derive(Debug, thiserror::Error)]
 pub enum RlimitError {
-    /// `HHAGENT_CPU_MS` was set but couldn't be parsed as `u64`.
+    /// `KASTELLAN_CPU_MS` was set but couldn't be parsed as `u64`.
     #[error("env {ENV_CPU_MS}: {0}")]
     Env(String),
     /// `setrlimit(RLIMIT_CPU, …)` returned a non-zero error code.
@@ -83,7 +83,7 @@ pub fn cpu_ms_to_seconds(ms: u64) -> u64 {
     ms.saturating_add(999) / 1_000
 }
 
-/// Read `HHAGENT_CPU_MS` and apply `RLIMIT_CPU` if set and non-zero.
+/// Read `KASTELLAN_CPU_MS` and apply `RLIMIT_CPU` if set and non-zero.
 ///
 /// Returns `Disabled` if the env var is unset, empty, or `"0"`. Returns
 /// an error if the value is set but not parseable as `u64`, or if
@@ -146,9 +146,9 @@ mod tests {
     /// Tests in this module mutate the process-wide env block, which
     /// cargo's per-binary test harness runs in parallel by default.
     /// Take this mutex while inside any `apply_from_env` test so two
-    /// tests don't trample each other's `HHAGENT_CPU_MS` setting.
+    /// tests don't trample each other's `KASTELLAN_CPU_MS` setting.
     ///
-    /// Pattern lifted from `hhagent_tests_common::serial::serial_lock`.
+    /// Pattern lifted from `kastellan_tests_common::serial::serial_lock`.
     fn env_lock() -> MutexGuard<'static, ()> {
         static M: OnceLock<Mutex<()>> = OnceLock::new();
         // unwrap_or_else handles the rare poisoned-mutex case: a test
@@ -159,7 +159,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// RAII guard that restores `HHAGENT_CPU_MS` to its prior value on
+    /// RAII guard that restores `KASTELLAN_CPU_MS` to its prior value on
     /// drop — including on unwind. Without this, an assertion failure
     /// inside the closure passed to `with_env_var` would leak the test
     /// value into subsequent tests sharing the same binary.
@@ -176,7 +176,7 @@ mod tests {
         }
     }
 
-    /// Helper: temporarily set `HHAGENT_CPU_MS`, run a closure, then
+    /// Helper: temporarily set `KASTELLAN_CPU_MS`, run a closure, then
     /// restore the prior value via [`EnvRestore`]'s `Drop`. Returns
     /// the closure's value.
     ///
@@ -216,8 +216,8 @@ mod tests {
         assert_eq!(report, RlimitReport::Disabled);
     }
 
-    /// `HHAGENT_CPU_MS=""` is set-but-empty (e.g. a caller that did
-    /// `Command::env("HHAGENT_CPU_MS", "")`). The parse path would
+    /// `KASTELLAN_CPU_MS=""` is set-but-empty (e.g. a caller that did
+    /// `Command::env("KASTELLAN_CPU_MS", "")`). The parse path would
     /// reject it as garbage; we treat it as `Disabled` instead so the
     /// "set to empty" wire form is interchangeable with "unset" — which
     /// matches how `std::env::VarError::NotPresent` is mapped.

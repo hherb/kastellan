@@ -38,7 +38,7 @@ Out of scope (filed as follow-ups):
 
 - **Graph lane.** Needs entity extraction from the task instruction before any `seed_entity_ids` array can be populated. Separate slice; the existing `RecallModes::SEMANTIC_AND_LEXICAL` const is exactly the right default until then.
 - **L1 promotion writer.** L1 stays empty in production until a separate slice writes it. Recall reads what's in the `memories` table; whether L0/L1 hydration happens is independent of whether recall runs.
-- **Global token cap with priority-drop logic** ([#78](https://github.com/hherb/hhagent/issues/78)). Each loader still enforces its own per-loader cap (L0: 8 KiB / L1: 4 KiB / recall: 4 KiB). When all three would jointly overflow the model's context, the priority-drop logic from the HANDOVER headline spec lands as a separate slice.
+- **Global token cap with priority-drop logic** ([#78](https://github.com/hherb/kastellan/issues/78)). Each loader still enforces its own per-loader cap (L0: 8 KiB / L1: 4 KiB / recall: 4 KiB). When all three would jointly overflow the model's context, the priority-drop logic from the HANDOVER headline spec lands as a separate slice.
 - **Recall caching across plan iterations.** Re-runs on every iteration (matches the L0/L1 cadence — the `PgSystemPromptBuilder::build` from PR #75 is already called per-iteration). The instruction doesn't change mid-task, so this looks redundant — but the same is true of L0/L1 today, and adding caching is a cross-cutting decision that should land for all three loaders at once.
 - **Reviewer-chain recall.** `ConstitutionalGuard` / `DeterministicPolicy` are deterministic Rust checks today, no LLM call, no prompt.
 - **Operator-visible recall metrics.** No `tracing::info!` on every recall, no metrics export. The audit row is the recall trail.
@@ -177,8 +177,8 @@ impl RecalledContext {
 
 use async_trait::async_trait;
 use thiserror::Error;
-use hhagent_core::memory::MemoryError;
-use hhagent_db::DbError;
+use kastellan_core::memory::MemoryError;
+use kastellan_db::DbError;
 
 #[derive(Debug, Error)]
 pub enum RecallError {
@@ -209,7 +209,7 @@ pub trait RecallBuilder: Send + Sync {
 use std::sync::Arc;
 use async_trait::async_trait;
 use sqlx::PgPool;
-use hhagent_llm_router::Router;
+use kastellan_llm_router::Router;
 
 use crate::memory::{embed_query, recall, RecallParams, RecallModes, DEFAULT_RECALL_K};
 use super::{RecallBuilder, RecalledContext, RecallError};

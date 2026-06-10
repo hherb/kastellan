@@ -7,14 +7,14 @@
 -- means the daemon's *application-level* writes also run with
 -- superuser privilege — and `audit_log` is supposed to be append-only.
 --
--- This migration splits a `hhagent_runtime` role out from the bootstrap
+-- This migration splits a `kastellan_runtime` role out from the bootstrap
 -- superuser. The split is purely SQL-level: the cluster's `pg_hba.conf`
 -- still maps the OS user to the cluster superuser via peer auth, and
 -- the daemon switches into the runtime role at the start of each
--- application-level transaction via `SET ROLE hhagent_runtime`.
+-- application-level transaction via `SET ROLE kastellan_runtime`.
 -- Operational consequences:
 --
---   * `audit_log` rows are now created by `hhagent_runtime`, which is
+--   * `audit_log` rows are now created by `kastellan_runtime`, which is
 --     explicitly REVOKEd from UPDATE / DELETE / TRUNCATE on this table
 --     — a tampering attempt by the runtime path is rejected at the DB
 --     layer rather than relying on application discipline alone.
@@ -38,11 +38,11 @@
 -- ─── role ─────────────────────────────────────────────────────────
 -- `NOLOGIN` because the role is only entered via `SET ROLE` from the
 -- bootstrap user; nothing should ever connect to the cluster *as*
--- hhagent_runtime directly. `NOINHERIT` so the OS user (who is GRANTed
+-- kastellan_runtime directly. `NOINHERIT` so the OS user (who is GRANTed
 -- this role below) does NOT pick up the runtime privileges by default
 -- — they have to switch in explicitly. Together those two flags make
 -- privilege drops auditable: every application connection has to call
--- `SET ROLE hhagent_runtime` before doing any tampering-sensitive write.
+-- `SET ROLE kastellan_runtime` before doing any tampering-sensitive write.
 --
 -- The `IF NOT EXISTS`-style guard via DO/PL-pgSQL is needed because
 -- `CREATE ROLE` itself does not support `IF NOT EXISTS` (unlike
@@ -52,8 +52,8 @@
 -- re-apply by hand in pathological recovery scenarios.
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hhagent_runtime') THEN
-        CREATE ROLE hhagent_runtime
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'kastellan_runtime') THEN
+        CREATE ROLE kastellan_runtime
             NOSUPERUSER
             NOCREATEROLE
             NOCREATEDB
@@ -65,8 +65,8 @@ $$;
 
 -- ─── role membership ──────────────────────────────────────────────
 -- Whoever ran the migration (= the OS user, = the cluster's bootstrap
--- superuser under peer auth) needs to be a member of `hhagent_runtime`
--- so `SET ROLE hhagent_runtime` works on subsequent application
+-- superuser under peer auth) needs to be a member of `kastellan_runtime`
+-- so `SET ROLE kastellan_runtime` works on subsequent application
 -- connections. We use `format(... %I, current_user)` rather than a
 -- hardcoded role name because the OS username varies per host (`hherb`
 -- on the developer box, something else on CI/macOS).
@@ -75,7 +75,7 @@ $$;
 -- partial apply does no harm.
 DO $$
 BEGIN
-    EXECUTE format('GRANT hhagent_runtime TO %I', current_user);
+    EXECUTE format('GRANT kastellan_runtime TO %I', current_user);
 END;
 $$;
 
@@ -85,7 +85,7 @@ $$;
 -- `public.audit_log`). USAGE alone does NOT permit creation of new
 -- objects in the schema; `CREATE` would have to be granted separately
 -- and is intentionally withheld here.
-GRANT USAGE ON SCHEMA public TO hhagent_runtime;
+GRANT USAGE ON SCHEMA public TO kastellan_runtime;
 
 -- ─── audit_log: insert + select only ──────────────────────────────
 -- This is the contract pin from `0001_init.sql`'s comment block:
@@ -101,12 +101,12 @@ GRANT USAGE ON SCHEMA public TO hhagent_runtime;
 -- The REVOKE statements are defense-in-depth (a brand-new role has no
 -- prior grants on this table, so the REVOKE is a no-op today) — but
 -- they pin the intent in code so a future `GRANT ALL ON audit_log TO
--- hhagent_runtime` added by mistake elsewhere is a pure regression that
+-- kastellan_runtime` added by mistake elsewhere is a pure regression that
 -- would need to also delete these REVOKEs to take effect. Same logic
 -- for `REVOKE ALL ... FROM PUBLIC`: PUBLIC has nothing on user tables
 -- by default, but the line documents the intent.
-GRANT  SELECT, INSERT                       ON audit_log TO hhagent_runtime;
-REVOKE UPDATE, DELETE, TRUNCATE             ON audit_log FROM hhagent_runtime;
+GRANT  SELECT, INSERT                       ON audit_log TO kastellan_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE             ON audit_log FROM kastellan_runtime;
 REVOKE ALL                                  ON audit_log FROM PUBLIC;
 
 -- The id column is BIGSERIAL, which expands to
@@ -114,7 +114,7 @@ REVOKE ALL                                  ON audit_log FROM PUBLIC;
 -- omit the id (the only sensible shape) need USAGE on the sequence to
 -- call nextval(). Without this grant every INSERT from the runtime
 -- role would fail with "permission denied for sequence audit_log_id_seq".
-GRANT USAGE ON SEQUENCE audit_log_id_seq TO hhagent_runtime;
+GRANT USAGE ON SEQUENCE audit_log_id_seq TO kastellan_runtime;
 
 -- ─── application tables: full CRUD ────────────────────────────────
 -- The other five tables are the agent's day-to-day state. Each of them
@@ -126,7 +126,7 @@ GRANT USAGE ON SEQUENCE audit_log_id_seq TO hhagent_runtime;
 -- materialises in Phase 1 — premature today.
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON tasks, memories, entities, relations, secrets
-    TO hhagent_runtime;
+    TO kastellan_runtime;
 
 -- Sequences are independent objects from their owning tables, so they
 -- need their own grant. See the audit_log_id_seq comment above for
@@ -134,11 +134,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE
 GRANT USAGE ON SEQUENCE
     tasks_id_seq, memories_id_seq, entities_id_seq,
     relations_id_seq, secrets_id_seq
-    TO hhagent_runtime;
+    TO kastellan_runtime;
 
 -- ─── default privileges for future migrations ─────────────────────
 -- Without this block, every future migration that adds a table would
--- have to remember to `GRANT ... TO hhagent_runtime` or the runtime
+-- have to remember to `GRANT ... TO kastellan_runtime` or the runtime
 -- daemon would silently lose access to the new table at the next
 -- restart. Easy to forget; nasty to debug.
 --
@@ -150,11 +150,11 @@ GRANT USAGE ON SEQUENCE
 --
 -- Caveat for future authors: an insert-only table (a future
 -- audit-style log) needs its own explicit
--- `REVOKE UPDATE, DELETE, TRUNCATE FROM hhagent_runtime` after creation
+-- `REVOKE UPDATE, DELETE, TRUNCATE FROM kastellan_runtime` after creation
 -- because ALTER DEFAULT PRIVILEGES will have already granted the
 -- forbidden operations along with the rest.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO hhagent_runtime;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kastellan_runtime;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT USAGE, SELECT ON SEQUENCES TO hhagent_runtime;
+    GRANT USAGE, SELECT ON SEQUENCES TO kastellan_runtime;

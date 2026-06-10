@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-core"
+name        = "kastellan-core"
 description = "Agent core: scheduler, memory orchestration, policy gate, LLM router, IPC, audit log."
 version.workspace      = true
 edition.workspace      = true
@@ -13,23 +13,23 @@ readme.workspace       = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "hhagent"
+name = "kastellan"
 path = "src/main.rs"
 
-# Operator CLI: today only `hhagent-cli audit tail` for streaming the
-# JSONL mirror under ~/.local/state/hhagent/. Needs no Postgres
+# Operator CLI: today only `kastellan-cli audit tail` for streaming the
+# JSONL mirror under ~/.local/state/kastellan/. Needs no Postgres
 # connection so it works against a daemon that has crashed (the JSONL
 # files are the durable replica written by the mirror task).
 [[bin]]
-name = "hhagent-cli"
-path = "src/bin/hhagent-cli/main.rs"
+name = "kastellan-cli"
+path = "src/bin/kastellan-cli/main.rs"
 
 [dependencies]
-hhagent-sandbox    = { path = "../sandbox" }
-hhagent-supervisor = { path = "../supervisor" }
-hhagent-protocol   = { path = "../protocol" }
-hhagent-db         = { path = "../db" }
-hhagent-llm-router = { path = "../llm-router" }
+kastellan-sandbox    = { path = "../sandbox" }
+kastellan-supervisor = { path = "../supervisor" }
+kastellan-protocol   = { path = "../protocol" }
+kastellan-db         = { path = "../db" }
+kastellan-llm-router = { path = "../llm-router" }
 
 tokio              = { workspace = true }
 async-trait        = { workspace = true }
@@ -53,7 +53,7 @@ url                = { workspace = true }
 # Shared test fixtures hoisted in issue #15: per-test Postgres cluster
 # bring-up, RAII guards, skip helpers, sandbox factory, binary discovery,
 # deterministic embedding seed, macOS launchd serial lock. dev-only.
-hhagent-tests-common = { path = "../tests-common" }
+kastellan-tests-common = { path = "../tests-common" }
 
 # Integration-test crates do not inherit the library's normal [dependencies];
 # the e2e tests name `url::Url` directly (web_search_e2e.rs), so url must be a

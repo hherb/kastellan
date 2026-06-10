@@ -67,7 +67,7 @@ impl ClassificationFloorSource {
 #[derive(Debug)]
 pub struct TaskContext {
     pub task_id: i64,
-    pub lane: hhagent_db::tasks::Lane,
+    pub lane: kastellan_db::tasks::Lane,
     pub instruction: String,
     pub classification_floor: DataClass,
     /// Provenance of `classification_floor`. Set at task entry by
@@ -195,7 +195,7 @@ pub enum InnerLoopError {
     #[error("agent: {0}")]
     Agent(#[from] AgentError),
     #[error("db: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
 }
 
 /// Trait for executing a single `PlannedStep`. The production impl
@@ -232,7 +232,7 @@ pub async fn run_to_terminal(
     dispatcher: Arc<dyn StepDispatcher>,
     mut ctx: TaskContext,
 ) -> Result<InnerLoopResult, InnerLoopError> {
-    use hhagent_db::tasks;
+    use kastellan_db::tasks;
 
     // Tracks every `StepDispatcher::dispatch_step` call this task makes
     // (success or failure). Reported back in `InnerLoopResult` for the
@@ -333,7 +333,7 @@ pub async fn run_to_terminal(
                     let payload = build_l3_invoke_rejected_agent_payload(
                         $name, $mem, $sha, &reasons_v,
                     );
-                    hhagent_db::audit::insert(
+                    kastellan_db::audit::insert(
                         pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKE_REJECTED, payload,
                     ).await?;
                     for r in &reasons_v { ctx.blocks.push(format!("invoke_rejected: {r}")); }
@@ -382,7 +382,7 @@ pub async fn run_to_terminal(
                                     pinned.memory_id, &name, &pinned.body_sha256,
                                     &arg_names, steps.len(),
                                 );
-                                hhagent_db::audit::insert(
+                                kastellan_db::audit::insert(
                                     pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
                                 ).await?;
                                 plan.steps = steps;
@@ -535,7 +535,7 @@ pub async fn run_to_terminal(
             let payload = build_l3_invoke_outcome_payload(
                 *memory_id, skill_name, steps_executed, steps_total, any_err,
             );
-            hhagent_db::audit::insert(
+            kastellan_db::audit::insert(
                 pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKE_OUTCOME, payload,
             ).await?;
         }

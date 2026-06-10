@@ -6,7 +6,7 @@
 
 **Architecture:** A new `memory_entities` join table (composite PK + entity-id index) backs the lane. The reader computes a 1-hop outbound entity expansion via the existing `Graph::neighbors` chokepoint, then ranks memories by hit-count against `memory_entities`. The lane composes into the existing `recall()` flow via a new `RecallModes::graph` flag and a new `seed_entity_ids` field on `RecallParams`. A separate migration adds an AFTER DELETE trigger on `memories` that journals the deleted row's full shape into `deleted_memories` (append-only by GRANT shape).
 
-**Tech Stack:** Postgres 18 + pgvector, sqlx 0.8 embedded migrator, Rust async (tokio + `futures::future::try_join_all`), the existing `hhagent-tests-common` dev-dep for per-test cluster bring-up.
+**Tech Stack:** Postgres 18 + pgvector, sqlx 0.8 embedded migrator, Rust async (tokio + `futures::future::try_join_all`), the existing `kastellan-tests-common` dev-dep for per-test cluster bring-up.
 
 **Branch:** `feat/memory-graph-lane`, off `main` at `97f2743`. The spec + handover refresh are already committed at `5e68600` on this branch.
 
@@ -79,7 +79,7 @@ CREATE INDEX memory_entities_entity_idx
 -- Runtime role gets the same shape as memories/entities/relations
 -- (full CRUD). audit_log's REVOKE shape does NOT apply here — this is
 -- a mutable derived index, not an immutable audit trail.
-GRANT SELECT, INSERT, UPDATE, DELETE ON memory_entities TO hhagent_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON memory_entities TO kastellan_runtime;
 ```
 
 - [ ] **Step 2: Verify the migration compiles into MIGRATOR and applies**
@@ -88,7 +88,7 @@ The `sqlx::migrate!()` macro embeds every `db/migrations/*.sql` at compile time.
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-db --test postgres_e2e probe_runs_migrations_and_graph_happy_path -- --nocapture 2>&1 | tail -20
+cargo test -p kastellan-db --test postgres_e2e probe_runs_migrations_and_graph_happy_path -- --nocapture 2>&1 | tail -20
 ```
 
 Expected: PASS in ~3s. The probe runs 0001..0007 against a fresh per-test cluster; if the new SQL has a syntax error or references a non-existent symbol, the test fails at MIGRATOR.run with a sqlx error pointing at the offending line.
@@ -178,15 +178,15 @@ CREATE TRIGGER memories_after_delete_audit
 -- Runtime needs SELECT (for reads) and INSERT (because the trigger
 -- runs as the DELETE issuer's role, SECURITY INVOKER by default).
 -- UPDATE/DELETE revoked — same append-only shape as audit_log.
-GRANT  SELECT, INSERT ON deleted_memories TO hhagent_runtime;
-REVOKE UPDATE, DELETE, TRUNCATE ON deleted_memories FROM hhagent_runtime;
+GRANT  SELECT, INSERT ON deleted_memories TO kastellan_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON deleted_memories FROM kastellan_runtime;
 ```
 
 - [ ] **Step 2: Verify the migration applies**
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-db --test postgres_e2e probe_runs_migrations_and_graph_happy_path -- --nocapture 2>&1 | tail -20
+cargo test -p kastellan-db --test postgres_e2e probe_runs_migrations_and_graph_happy_path -- --nocapture 2>&1 | tail -20
 ```
 
 Expected: PASS. Probe now runs 0001..0008.
@@ -202,7 +202,7 @@ AFTER DELETE trigger on memories journals the deleted row's full
 shape (body, metadata, embedding, original created_at) plus a
 deleted_at timestamp into a dedicated deleted_memories table.
 
-Append-only by GRANT shape: SELECT + INSERT for hhagent_runtime
+Append-only by GRANT shape: SELECT + INSERT for kastellan_runtime
 (INSERT needed because the trigger runs as the DELETE issuer's role,
 SECURITY INVOKER by default). UPDATE/DELETE/TRUNCATE revoked at the
 DB layer — same defence as audit_log from migration 0002.
@@ -228,7 +228,7 @@ EOF
 
 **Rationale:** TDD step — pin the contract for the not-yet-written `link_memory_to_entities` helper plus the trigger from Task 2. The tests compile-fail today (the helper doesn't exist) — that's the RED state.
 
-The existing test file already uses `hhagent_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, PgCluster}` per the tests-common hoist. Follow the existing import shape and the `tasks_lifecycle_e2e` test as the closest stylistic precedent.
+The existing test file already uses `kastellan_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, PgCluster}` per the tests-common hoist. Follow the existing import shape and the `tasks_lifecycle_e2e` test as the closest stylistic precedent.
 
 - [ ] **Step 1: Append the three test fns at the bottom of `db/tests/postgres_e2e.rs`**
 
@@ -245,21 +245,21 @@ async fn memory_entities_link_round_trip_and_idempotency() {
         &bin_dir,
         "memory-entities-link",
         "memory-entities-link",
-        "hhagent-postgres-memory-entities-link",
+        "kastellan-postgres-memory-entities-link",
     )
     .await
     .expect("bring_up_pg_cluster");
 
-    hhagent_db::probe::run(&cluster.conn_spec, "core", "startup")
+    kastellan_db::probe::run(&cluster.conn_spec, "core", "startup")
         .await
         .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
     // Seed: 1 memory, 3 entities.
-    let mem_id = hhagent_db::memories::insert_memory(
+    let mem_id = kastellan_db::memories::insert_memory(
         &pool,
         "alpha body",
         &serde_json::json!({}),
@@ -268,7 +268,7 @@ async fn memory_entities_link_round_trip_and_idempotency() {
     .await
     .expect("insert memory");
 
-    let graph = hhagent_db::graph::PgGraph::new(&pool);
+    let graph = kastellan_db::graph::PgGraph::new(&pool);
     let e1 = graph
         .upsert_entity("person", "alice", &serde_json::json!({}))
         .await
@@ -283,19 +283,19 @@ async fn memory_entities_link_round_trip_and_idempotency() {
         .expect("upsert e3");
 
     // First link: both new.
-    let n = hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
+    let n = kastellan_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
         .await
         .expect("link 1");
     assert_eq!(n, 2, "first link of 2 fresh entities must insert 2 rows");
 
     // Re-link same pair: idempotent.
-    let n = hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
+    let n = kastellan_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
         .await
         .expect("link 2");
     assert_eq!(n, 0, "re-link of existing pairs must insert 0 rows");
 
     // Mixed (one new, one dupe): only the new one counts.
-    let n = hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e3])
+    let n = kastellan_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e3])
         .await
         .expect("link 3");
     assert_eq!(n, 1, "mixed re-link + new must insert 1 row");
@@ -322,19 +322,19 @@ async fn memory_entities_cascade_on_entity_delete() {
         &bin_dir,
         "memory-entities-cascade",
         "memory-entities-cascade",
-        "hhagent-postgres-memory-entities-cascade",
+        "kastellan-postgres-memory-entities-cascade",
     )
     .await
     .expect("bring_up_pg_cluster");
 
-    hhagent_db::probe::run(&cluster.conn_spec, "core", "startup")
+    kastellan_db::probe::run(&cluster.conn_spec, "core", "startup")
         .await
         .expect("probe");
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    let mem_id = hhagent_db::memories::insert_memory(
+    let mem_id = kastellan_db::memories::insert_memory(
         &pool,
         "bravo body",
         &serde_json::json!({}),
@@ -342,13 +342,13 @@ async fn memory_entities_cascade_on_entity_delete() {
     )
     .await
     .expect("insert memory");
-    let graph = hhagent_db::graph::PgGraph::new(&pool);
+    let graph = kastellan_db::graph::PgGraph::new(&pool);
     let e_id = graph
         .upsert_entity("person", "alice", &serde_json::json!({}))
         .await
         .expect("upsert");
 
-    hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e_id])
+    kastellan_db::memories::link_memory_to_entities(&pool, mem_id, &[e_id])
         .await
         .expect("link");
 
@@ -397,23 +397,23 @@ async fn memory_delete_writes_deleted_memories_row() {
         &bin_dir,
         "memory-delete-audit",
         "memory-delete-audit",
-        "hhagent-postgres-memory-delete-audit",
+        "kastellan-postgres-memory-delete-audit",
     )
     .await
     .expect("bring_up_pg_cluster");
 
-    hhagent_db::probe::run(&cluster.conn_spec, "core", "startup")
+    kastellan_db::probe::run(&cluster.conn_spec, "core", "startup")
         .await
         .expect("probe");
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
     // Build a memory with an embedding so we exercise the full row shape.
     // Deterministic seeded vector via tests-common.
-    let emb = hhagent_tests_common::text_to_embedding("delete-audit-fixture");
+    let emb = kastellan_tests_common::text_to_embedding("delete-audit-fixture");
     let metadata = serde_json::json!({"k": "v"});
-    let mem_id = hhagent_db::memories::insert_memory(
+    let mem_id = kastellan_db::memories::insert_memory(
         &pool,
         "audit body",
         &metadata,
@@ -477,10 +477,10 @@ async fn memory_delete_writes_deleted_memories_row() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-db --test postgres_e2e memory_entities 2>&1 | tail -20
+cargo test -p kastellan-db --test postgres_e2e memory_entities 2>&1 | tail -20
 ```
 
-Expected: compile error mentioning `link_memory_to_entities` and `unresolved import hhagent_db::memories::link_memory_to_entities` (or similar). The third test's compile path depends on whether `hhagent_tests_common::text_to_embedding` is re-exported — it is, per the `tests-common/src/lib.rs` flat re-export pattern from the hoist.
+Expected: compile error mentioning `link_memory_to_entities` and `unresolved import kastellan_db::memories::link_memory_to_entities` (or similar). The third test's compile path depends on whether `kastellan_tests_common::text_to_embedding` is re-exported — it is, per the `tests-common/src/lib.rs` flat re-export pattern from the hoist.
 
 If the third test compiles but the first two don't, that's the expected RED state. Do not commit at this step.
 
@@ -540,7 +540,7 @@ where
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-db --test postgres_e2e memory_entities_link_round_trip_and_idempotency memory_entities_cascade_on_entity_delete 2>&1 | tail -20
+cargo test -p kastellan-db --test postgres_e2e memory_entities_link_round_trip_and_idempotency memory_entities_cascade_on_entity_delete 2>&1 | tail -20
 ```
 
 Expected: 2 passed (each ~2.5 s). The third test (`memory_delete_writes_deleted_memories_row`) still uses the helper indirectly but should also pass now since `link_memory_to_entities` exists.
@@ -548,7 +548,7 @@ Expected: 2 passed (each ~2.5 s). The third test (`memory_delete_writes_deleted_
 - [ ] **Step 3: Run the third test to confirm the trigger path works**
 
 ```sh
-cargo test -p hhagent-db --test postgres_e2e memory_delete_writes_deleted_memories_row 2>&1 | tail -10
+cargo test -p kastellan-db --test postgres_e2e memory_delete_writes_deleted_memories_row 2>&1 | tail -10
 ```
 
 Expected: PASS in ~2.5 s. The trigger from migration 0008 fires on DELETE FROM memories and writes the journal row.
@@ -569,7 +569,7 @@ Empty entity_ids is a fast-path no-op. FK violations surface as
 DbError::Query with the underlying Postgres error context.
 
 Three new integration tests in db/tests/postgres_e2e.rs (all per-test
-PG cluster via hhagent-tests-common, skip cleanly on hosts without PG):
+PG cluster via kastellan-tests-common, skip cleanly on hosts without PG):
 
 1. memory_entities_link_round_trip_and_idempotency — verifies returned
    counts on first link / re-link / mixed-new-and-dupe + final SELECT
@@ -731,8 +731,8 @@ pub struct RecallModes {
     /// [`RecallParams::query_text`] to be a non-empty string.
     pub lexical: bool,
     /// Run the graph lane (1-hop outbound expansion of
-    /// [`RecallParams::seed_entity_ids`] via [`hhagent_db::graph::Graph::neighbors`],
-    /// then ranking via [`hhagent_db::memories::graph_search`]).
+    /// [`RecallParams::seed_entity_ids`] via [`kastellan_db::graph::Graph::neighbors`],
+    /// then ranking via [`kastellan_db::memories::graph_search`]).
     /// Requires `seed_entity_ids` to be a non-empty slice.
     pub graph: bool,
 }
@@ -791,7 +791,7 @@ pub struct RecallParams<'a> {
     /// Pre-resolved seed entity ids. Used by the graph lane; ignored
     /// when [`RecallModes::graph`] is `false`. The caller resolves
     /// entity names → ids out-of-band (via
-    /// [`hhagent_db::graph::Graph::get_entity`] or a future
+    /// [`kastellan_db::graph::Graph::get_entity`] or a future
     /// extraction worker) before invoking recall. An empty slice with
     /// the graph lane enabled is a warn-and-skip, not an error.
     pub seed_entity_ids: Option<&'a [i64]>,
@@ -814,7 +814,7 @@ impl<'a> RecallParams<'a> {
             query_text: Some(query_text),
             query_embedding: Some(query_embedding),
             seed_entity_ids: None,
-            k: hhagent_db::memories::DEFAULT_RECALL_K,
+            k: kastellan_db::memories::DEFAULT_RECALL_K,
             modes: RecallModes::ALL,
         }
     }
@@ -830,7 +830,7 @@ Add this near the existing `LANE_FANOUT` constant:
 ///
 /// Bounds the worst case: a "hub" entity with thousands of relations
 /// (followers, mentions, etc.) cannot flood the expanded set. The
-/// value is the order-of-magnitude that [`hhagent_db::graph::Graph::neighbors`]'s
+/// value is the order-of-magnitude that [`kastellan_db::graph::Graph::neighbors`]'s
 /// `limit` param accepts — generous for typical knowledge graphs,
 /// tight against pathological hubs.
 pub const GRAPH_FANOUT_CAP_PER_SEED: i64 = 32;
@@ -969,7 +969,7 @@ And `recall_modes_lexical_only_disables_semantic`:
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib memory::recall 2>&1 | tail -15
+cargo test -p kastellan-core --lib memory::recall 2>&1 | tail -15
 ```
 
 Expected: all recall unit tests pass (the existing 11 + 4 new + 3 updated). Net unit test count for the file: 11 → 15 (the 4 new tests; the 3 updated ones replace their predecessors in place).
@@ -1060,7 +1060,7 @@ In `core/src/memory/recall.rs`, locate the existing `recall` function body. Afte
                 // fanned out in parallel. Per-seed cap defends against
                 // hub explosion: an entity with thousands of outbound
                 // edges contributes at most GRAPH_FANOUT_CAP_PER_SEED.
-                let graph = hhagent_db::graph::PgGraph::new(pool);
+                let graph = kastellan_db::graph::PgGraph::new(pool);
                 let neighbour_lists = futures::future::try_join_all(
                     seeds.iter().map(|&s| {
                         graph.neighbors(s, None, GRAPH_FANOUT_CAP_PER_SEED)
@@ -1081,13 +1081,13 @@ In `core/src/memory/recall.rs`, locate the existing `recall` function body. Afte
                 let expanded_vec: Vec<i64> = expanded.into_iter().collect();
 
                 lane_lists.push(
-                    hhagent_db::memories::graph_search(pool, &expanded_vec, lane_k)
+                    kastellan_db::memories::graph_search(pool, &expanded_vec, lane_k)
                         .await?,
                 );
             }
             _ => {
                 tracing::warn!(
-                    target: "hhagent::memory",
+                    target: "kastellan::memory",
                     "graph lane requested but seed_entity_ids is empty or None; skipping"
                 );
             }
@@ -1109,8 +1109,8 @@ Expected: clean.
 - [ ] **Step 4: Run existing recall tests to verify they still pass**
 
 ```sh
-cargo test -p hhagent-core --lib memory 2>&1 | tail -10
-cargo test -p hhagent-core --test memory_recall_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --lib memory 2>&1 | tail -10
+cargo test -p kastellan-core --test memory_recall_e2e 2>&1 | tail -10
 ```
 
 Expected: all PASS. The existing integration test doesn't set `seed_entity_ids`, so the graph lane logs a warn-and-skip and the test's existing assertions are unchanged.
@@ -1165,7 +1165,7 @@ EOF
 - [ ] **Step 1: Read the existing test to find the splice point**
 
 ```sh
-cat /home/hherb/src/hhagent/core/tests/memory_recall_e2e.rs | tail -40
+cat /home/hherb/src/kastellan/core/tests/memory_recall_e2e.rs | tail -40
 ```
 
 Identify the line just before the test fn's closing `drop(pool); }` (or equivalent cleanup tail). The new assertion blocks go in just before that cleanup.
@@ -1179,7 +1179,7 @@ Append, inside the existing `#[tokio::test]` fn body and BEFORE the final `drop(
     //
     // alice owns cat (relation); bob is unconnected.
     // mem_a is tagged with {alice, cat}; mem_b with {cat}; mem_c with {bob}.
-    use hhagent_db::graph::PgGraph;
+    use kastellan_db::graph::PgGraph;
     let graph_g = PgGraph::new(&pool);
     let alice_id = graph_g
         .upsert_entity("person", "alice", &serde_json::json!({}))
@@ -1198,13 +1198,13 @@ Append, inside the existing `#[tokio::test]` fn body and BEFORE the final `drop(
         .await
         .expect("upsert relation");
 
-    hhagent_db::memories::link_memory_to_entities(&pool, mem_a, &[alice_id, cat_id])
+    kastellan_db::memories::link_memory_to_entities(&pool, mem_a, &[alice_id, cat_id])
         .await
         .expect("link mem_a");
-    hhagent_db::memories::link_memory_to_entities(&pool, mem_b, &[cat_id])
+    kastellan_db::memories::link_memory_to_entities(&pool, mem_b, &[cat_id])
         .await
         .expect("link mem_b");
-    hhagent_db::memories::link_memory_to_entities(&pool, mem_c, &[bob_id])
+    kastellan_db::memories::link_memory_to_entities(&pool, mem_c, &[bob_id])
         .await
         .expect("link mem_c");
 
@@ -1214,14 +1214,14 @@ Append, inside the existing `#[tokio::test]` fn body and BEFORE the final `drop(
     // mem_a is linked to BOTH alice and cat → hit count 2.
     // mem_b is linked to cat only → hit count 1.
     // mem_c is linked to bob (NOT in expanded) → absent from result.
-    let r = hhagent_core::memory::recall(
+    let r = kastellan_core::memory::recall(
         &pool,
-        &hhagent_core::memory::RecallParams {
+        &kastellan_core::memory::RecallParams {
             query_text: None,
             query_embedding: None,
             seed_entity_ids: Some(&[alice_id]),
             k: 10,
-            modes: hhagent_core::memory::RecallModes::GRAPH_ONLY,
+            modes: kastellan_core::memory::RecallModes::GRAPH_ONLY,
         },
     )
     .await
@@ -1234,14 +1234,14 @@ Append, inside the existing `#[tokio::test]` fn body and BEFORE the final `drop(
     // ─── Assertion 2: GRAPH_ONLY with seed=[bob] surfaces C only ────
     //
     // Expanded set = {bob} (bob has no neighbours). Only mem_c links bob.
-    let r = hhagent_core::memory::recall(
+    let r = kastellan_core::memory::recall(
         &pool,
-        &hhagent_core::memory::RecallParams {
+        &kastellan_core::memory::RecallParams {
             query_text: None,
             query_embedding: None,
             seed_entity_ids: Some(&[bob_id]),
             k: 10,
-            modes: hhagent_core::memory::RecallModes::GRAPH_ONLY,
+            modes: kastellan_core::memory::RecallModes::GRAPH_ONLY,
         },
     )
     .await
@@ -1257,15 +1257,15 @@ Append, inside the existing `#[tokio::test]` fn body and BEFORE the final `drop(
     //   * lexical: mem_a's body contains "alpha"
     //   * graph: mem_a has hit count 2 (alice + cat)
     // Fused RRF rank-1 must be mem_a.
-    let q_emb = hhagent_tests_common::text_to_embedding("alpha");
-    let r = hhagent_core::memory::recall(
+    let q_emb = kastellan_tests_common::text_to_embedding("alpha");
+    let r = kastellan_core::memory::recall(
         &pool,
-        &hhagent_core::memory::RecallParams {
+        &kastellan_core::memory::RecallParams {
             query_text: Some("alpha"),
             query_embedding: Some(&q_emb),
             seed_entity_ids: Some(&[alice_id]),
             k: 10,
-            modes: hhagent_core::memory::RecallModes::ALL,
+            modes: kastellan_core::memory::RecallModes::ALL,
         },
     )
     .await
@@ -1277,14 +1277,14 @@ Append, inside the existing `#[tokio::test]` fn body and BEFORE the final `drop(
     // Empty seed slice + GRAPH_ONLY → no lane runs → empty fused list,
     // not an error. Matches warn-and-skip semantics for missing inputs.
     let empty: &[i64] = &[];
-    let r = hhagent_core::memory::recall(
+    let r = kastellan_core::memory::recall(
         &pool,
-        &hhagent_core::memory::RecallParams {
+        &kastellan_core::memory::RecallParams {
             query_text: None,
             query_embedding: None,
             seed_entity_ids: Some(empty),
             k: 10,
-            modes: hhagent_core::memory::RecallModes::GRAPH_ONLY,
+            modes: kastellan_core::memory::RecallModes::GRAPH_ONLY,
         },
     )
     .await
@@ -1298,7 +1298,7 @@ The placeholders `mem_a`, `mem_b`, `mem_c` are the variable names the existing t
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test memory_recall_e2e -- --nocapture 2>&1 | tail -20
+cargo test -p kastellan-core --test memory_recall_e2e -- --nocapture 2>&1 | tail -20
 ```
 
 Expected: PASS in ~2.5–3 s. All four new assertion blocks plus the existing assertions.
@@ -1308,7 +1308,7 @@ Expected: PASS in ~2.5–3 s. All four new assertion blocks plus the existing as
 ```sh
 for i in 1 2 3; do
     echo "=== run $i ==="
-    cargo test -p hhagent-core --test memory_recall_e2e 2>&1 | tail -3
+    cargo test -p kastellan-core --test memory_recall_e2e 2>&1 | tail -3
 done
 ```
 
@@ -1320,7 +1320,7 @@ Expected: 3 consecutive PASS results. Per the project convention for new integra
 cargo test --workspace 2>&1 | tail -5
 ```
 
-Expected: `350 passed; 0 failed; 0 ignored` (modulo the 2 pre-existing `ignored` doctests in hhagent-sandbox / hhagent-worker-prelude, which the spec accounted for). 0 SKIP lines on Linux with the AppArmor profile installed.
+Expected: `350 passed; 0 failed; 0 ignored` (modulo the 2 pre-existing `ignored` doctests in kastellan-sandbox / kastellan-worker-prelude, which the spec accounted for). 0 SKIP lines on Linux with the AppArmor profile installed.
 
 - [ ] **Step 6: Commit**
 

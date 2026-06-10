@@ -6,7 +6,7 @@
 //! Behaviour: attempts `bootstrap_look_up(bootstrap_port,
 //! "com.apple.coreservices.appleevents", &port)`. Apple Events broker is a
 //! deliberately benign-but-non-essential service to probe with — it's
-//! present on every macOS host, but no shipping hhagent worker has any
+//! present on every macOS host, but no shipping kastellan worker has any
 //! legitimate reason to talk to it (it's the back-end for AppleScript /
 //! distributed Apple-Event delivery, the canonical privilege-escalation
 //! surface our threat model wants to keep workers away from).

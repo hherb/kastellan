@@ -51,13 +51,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hhagent_core::cassandra::types::{DataClass, PlannedStep};
-use hhagent_core::handoff::{HandoffCache, HandoffRef, DEFAULT_RESULT_BYTE_CAP};
-use hhagent_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
-use hhagent_core::scheduler::{shell_exec_entry, ToolEntry, ToolHostStepDispatcher, ToolRegistry};
-use hhagent_core::secrets::Vault;
-use hhagent_sandbox::SandboxPolicy;
-use hhagent_tests_common::{
+use kastellan_core::cassandra::types::{DataClass, PlannedStep};
+use kastellan_core::handoff::{HandoffCache, HandoffRef, DEFAULT_RESULT_BYTE_CAP};
+use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
+use kastellan_core::scheduler::{shell_exec_entry, ToolEntry, ToolHostStepDispatcher, ToolRegistry};
+use kastellan_core::secrets::Vault;
+use kastellan_sandbox::SandboxPolicy;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -68,7 +68,7 @@ const ECHO_PATH: &str = "/bin/echo";
 
 #[cfg(target_os = "linux")]
 fn skip_if_sandbox_unavailable() -> bool {
-    use hhagent_sandbox::linux_bwrap::LinuxBwrap;
+    use kastellan_sandbox::linux_bwrap::LinuxBwrap;
     if let Err(e) = LinuxBwrap::probe() {
         eprintln!("\n[SKIP] bwrap probe failed: {e}\n");
         return true;
@@ -78,7 +78,7 @@ fn skip_if_sandbox_unavailable() -> bool {
 
 #[cfg(target_os = "macos")]
 fn skip_if_sandbox_unavailable() -> bool {
-    use hhagent_sandbox::macos_seatbelt::MacosSeatbelt;
+    use kastellan_sandbox::macos_seatbelt::MacosSeatbelt;
     if let Err(e) = MacosSeatbelt::probe() {
         eprintln!("\n[SKIP] sandbox-exec probe failed: {e}\n");
         return true;
@@ -86,8 +86,8 @@ fn skip_if_sandbox_unavailable() -> bool {
     false
 }
 
-fn sandbox_bundle() -> Arc<hhagent_sandbox::SandboxBackends> {
-    Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os())
+fn sandbox_bundle() -> Arc<kastellan_sandbox::SandboxBackends> {
+    Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os())
 }
 
 fn worker_binary() -> PathBuf {
@@ -95,7 +95,7 @@ fn worker_binary() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| manifest.parent().unwrap().join("target"));
-    target.join("debug").join("hhagent-worker-shell-exec")
+    target.join("debug").join("kastellan-worker-shell-exec")
 }
 
 fn step(tool: &str, method: &str, params: serde_json::Value) -> PlannedStep {
@@ -128,7 +128,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
     }
 
     let suffix = unique_suffix();
-    let service_name = format!("hhagent-supervisor-test-pg-stepdisp-{suffix}");
+    let service_name = format!("kastellan-supervisor-test-pg-stepdisp-{suffix}");
     let _cluster = bring_up_pg_cluster(&bin_dir, "step-d", "step-l", &service_name);
     let conn_spec = &_cluster.conn_spec;
 
@@ -142,7 +142,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
 
     rt.block_on(async {
         // Probe applies migrations and writes the bring-up audit row.
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             conn_spec,
             "core",
             "startup",
@@ -151,7 +151,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(conn_spec)
             .await
             .expect("connect runtime pool");
 
@@ -181,7 +181,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
                     ..SandboxPolicy::default()
                 },
                 wall_clock_ms: Some(5_000),
-                lifecycle: hhagent_core::worker_lifecycle::Lifecycle::SingleUse,
+                lifecycle: kastellan_core::worker_lifecycle::Lifecycle::SingleUse,
                 sandbox_backend: None,
                 container_image: None,
             },
@@ -190,8 +190,8 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
         assert_eq!(registry.len(), 2);
 
         let sandboxes = sandbox_bundle();
-        let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
-            Arc::new(hhagent_core::worker_lifecycle::SingleUseLifecycle::new(
+        let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> =
+            Arc::new(kastellan_core::worker_lifecycle::SingleUseLifecycle::new(
                 sandboxes,
             ));
         let dispatcher = ToolHostStepDispatcher::new(
@@ -199,7 +199,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
             Arc::new(Vault::new()),
             lifecycle,
             registry,
-            std::sync::Arc::new(hhagent_core::handoff::HandoffCache::new()),
+            std::sync::Arc::new(kastellan_core::handoff::HandoffCache::new()),
         );
 
         // ---------- (1) Happy path ----------
@@ -390,7 +390,7 @@ fn dispatcher_stashes_oversized_ok_result_only_for_positive_task_id() {
     }
 
     let suffix = unique_suffix();
-    let service_name = format!("hhagent-supervisor-test-pg-stashdisp-{suffix}");
+    let service_name = format!("kastellan-supervisor-test-pg-stashdisp-{suffix}");
     let _cluster = bring_up_pg_cluster(&bin_dir, "stash-d", "stash-l", &service_name);
     let conn_spec = &_cluster.conn_spec;
 
@@ -401,7 +401,7 @@ fn dispatcher_stashes_oversized_ok_result_only_for_positive_task_id() {
         .expect("build multi-threaded tokio runtime");
 
     rt.block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             conn_spec,
             "core",
             "startup",
@@ -410,7 +410,7 @@ fn dispatcher_stashes_oversized_ok_result_only_for_positive_task_id() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(conn_spec)
             .await
             .expect("connect runtime pool");
 
@@ -421,8 +421,8 @@ fn dispatcher_stashes_oversized_ok_result_only_for_positive_task_id() {
         );
         let registry = Arc::new(registry);
 
-        let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
-            Arc::new(hhagent_core::worker_lifecycle::SingleUseLifecycle::new(
+        let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> =
+            Arc::new(kastellan_core::worker_lifecycle::SingleUseLifecycle::new(
                 sandbox_bundle(),
             ));
 

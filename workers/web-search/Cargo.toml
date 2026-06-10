@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-worker-web-search"
+name        = "kastellan-worker-web-search"
 description = "Tool worker: query an operator-configured SearxNG instance and return ranked structured hits. GET-only."
 version.workspace      = true
 edition.workspace      = true
@@ -10,17 +10,17 @@ repository.workspace   = true
 readme.workspace       = true
 
 [[bin]]
-name = "hhagent-worker-web-search"
+name = "kastellan-worker-web-search"
 path = "src/main.rs"
 
 [dependencies]
-hhagent-protocol          = { path = "../../protocol" }
-hhagent-worker-prelude    = { path = "../prelude" }
-hhagent-worker-web-common = { path = "../web-common" }
+kastellan-protocol          = { path = "../../protocol" }
+kastellan-worker-prelude    = { path = "../prelude" }
+kastellan-worker-web-common = { path = "../web-common" }
 serde                     = { workspace = true }
 serde_json                = { workspace = true }
 anyhow                    = { workspace = true }
 url                       = { workspace = true }
 
 [dev-dependencies]
-hhagent-worker-web-common = { path = "../web-common", features = ["testing"] }
+kastellan-worker-web-common = { path = "../web-common", features = ["testing"] }

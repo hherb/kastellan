@@ -209,7 +209,7 @@ where
 /// matches `layer`. Returns `true` if a row was deleted; `false` if
 /// no row matched (id absent or layer mismatch).
 ///
-/// The layer guard exists so that `hhagent-cli memory l1 remove <id>`
+/// The layer guard exists so that `kastellan-cli memory l1 remove <id>`
 /// cannot accidentally delete an L0 / L2 / L3 row through this path —
 /// the operator subcommand passes `MemoryLayer::Index` here.
 ///
@@ -341,7 +341,7 @@ mod tests {
     /// short-circuits **before any SQL**, so this needs no live database:
     /// a lazily-constructed pool that never opens a connection is enough.
     /// This pins the policy guard on every dev machine — the PG-required
-    /// e2e test only runs where `HHAGENT_PG_BIN_DIR` is configured (the
+    /// e2e test only runs where `KASTELLAN_PG_BIN_DIR` is configured (the
     /// macOS skip-as-pass posture skips it), and the guard is the one
     /// security-relevant behaviour of the light path.
     #[tokio::test]

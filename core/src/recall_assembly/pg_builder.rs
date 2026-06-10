@@ -2,7 +2,7 @@
 //!
 //! * [`PgRecallBuilder`] — composes [`crate::memory::embed_query`] +
 //!   [`crate::memory::recall`] against a [`sqlx::PgPool`] and a shared
-//!   [`hhagent_llm_router::Router`].
+//!   [`kastellan_llm_router::Router`].
 //! * [`StaticRecallBuilder`] — returns a fixed [`super::RecalledContext`]
 //!   regardless of the query string. Always `pub` (not `cfg(test)`)
 //!   so cross-crate integration tests in `core/tests/*.rs` can use it.
@@ -10,9 +10,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hhagent_db::memories::Memory;
+use kastellan_db::memories::Memory;
 use sqlx::PgPool;
-use hhagent_llm_router::Router;
+use kastellan_llm_router::Router;
 
 use crate::memory::{embed_query, recall, RecallParams};
 use super::{sha256_hex, RecallBuilder, RecalledContext, RecallError, L_RECALL_CAP_BYTES};
@@ -59,7 +59,7 @@ pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, V
             // guard was redundant.
             if ids.is_empty() {
                 tracing::warn!(
-                    target: "hhagent::recall_assembly",
+                    target: "kastellan::recall_assembly",
                     memory_id = row.id,
                     row_bytes = row.body.len(),
                     cap_bytes,
@@ -67,7 +67,7 @@ pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, V
                 );
             } else {
                 tracing::debug!(
-                    target: "hhagent::recall_assembly",
+                    target: "kastellan::recall_assembly",
                     memory_id = row.id,
                     row_bytes = row.body.len(),
                     used_bytes = used,
@@ -176,7 +176,7 @@ impl RecallBuilder for StaticRecallBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_db::memories::{Memory, MemoryLayer};
+    use kastellan_db::memories::{Memory, MemoryLayer};
     use time::OffsetDateTime;
 
     fn mem(id: i64, body: &str) -> Memory {

@@ -1,4 +1,4 @@
-# CASSANDRA — Semantic Oversight Layer for hhagent
+# CASSANDRA — Semantic Oversight Layer for kastellan
 
 **Status:** Design draft, 2026-05-08
 **Purpose:** Memory aide and discussion basis for further design iteration
@@ -7,7 +7,7 @@
 
 ## 1. What CASSANDRA Is
 
-CASSANDRA is a semantic oversight system embedded in the hhagent core. Where the existing security layers (bwrap, Landlock, seccomp, egress proxy) enforce mechanical boundaries — "this process cannot open that socket" — CASSANDRA evaluates *intent*: "should this agent be doing this at all, given what the user actually asked for?"
+CASSANDRA is a semantic oversight system embedded in the kastellan core. Where the existing security layers (bwrap, Landlock, seccomp, egress proxy) enforce mechanical boundaries — "this process cannot open that socket" — CASSANDRA evaluates *intent*: "should this agent be doing this at all, given what the user actually asked for?"
 
 CASSANDRA operates at the **plan level**, not the individual tool-call level. The agent formulates a plan (a sequence of intended actions with reasoning), CASSANDRA reviews the plan holistically, and approved steps execute under runtime verification that actual execution matches the approved plan.
 
@@ -78,7 +78,7 @@ The system must not take actions that increase its own capabilities, persistence
 - Modifying its own code, configuration, or prompts through any mechanism other than the designated user-controlled update path
 - Establishing persistent access to systems beyond what the current task requires (e.g., creating API keys that outlive the task, registering webhooks, setting up recurring automations without explicit user authorisation)
 
-This constraint is future-proofing. Today's hhagent cannot do most of these things. The constraint exists before the capability arrives so that the boundary is established, tested, and trusted before it becomes load-bearing.
+This constraint is future-proofing. Today's kastellan cannot do most of these things. The constraint exists before the capability arrives so that the boundary is established, tested, and trusted before it becomes load-bearing.
 
 ### Principle 5: Do Not Suppress Oversight
 
@@ -258,7 +258,7 @@ Deviations trigger immediate re-review or block, depending on severity. A tool c
 
 On outbound actions specifically:
 
-- Credential-leak scanner (already planned in hhagent roadmap Phase 3)
+- Credential-leak scanner (already planned in kastellan roadmap Phase 3)
 - [Future] BERT risk scorer on message content
 - [Future] Anonymiser as final safety net ("declassifier tool") — catches anything the plan-level privacy gate missed
 
@@ -353,7 +353,7 @@ If Postgres server compromise is a concern, CASSANDRA's database can be hosted o
 The governing principle: if a compromised agent could reach the code, it must be compiled Rust outside the agent's write boundary. If the code is unreachable by the agent (sandboxed worker with read-only mounts), Python is preferred for development speed.
 
 
-## 11. Integration Points in hhagent
+## 11. Integration Points in kastellan
 
 ### Where CASSANDRA hooks in:
 
@@ -1172,4 +1172,4 @@ This is a design constraint on umbrella tool implementations: they select *how* 
 
 ---
 
-*This document is a snapshot of design thinking as of 2026-05-08, updated with constitutional constraints, resolved decisions, prompt specifications, and user anomaly detection from the same session. Settled decisions should migrate into the hhagent `docs/` directory; remaining open questions should be resolved and recorded in the handover trail.*
+*This document is a snapshot of design thinking as of 2026-05-08, updated with constitutional constraints, resolved decisions, prompt specifications, and user anomaly detection from the same session. Settled decisions should migrate into the kastellan `docs/` directory; remaining open questions should be resolved and recorded in the handover trail.*

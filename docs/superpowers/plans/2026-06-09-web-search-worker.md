@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a sandboxed `hhagent-worker-web-search` exposing one JSON-RPC method `web.search` that queries an operator-configured SearxNG instance and returns ranked structured hits, and extract the reusable allowlist + HTTP transport into a shared `workers/web-common` crate.
+**Goal:** Add a sandboxed `kastellan-worker-web-search` exposing one JSON-RPC method `web.search` that queries an operator-configured SearxNG instance and returns ranked structured hits, and extract the reusable allowlist + HTTP transport into a shared `workers/web-common` crate.
 
 **Architecture:** Mirror the `web-fetch` worker. First extract `HostAllowlist` + the `HttpGet`/`ReqwestGet` transport seam + the `FakeGet` test helper out of `web-fetch` into a new `workers/web-common` lib crate (single source of truth for the security-critical allowlist matcher), re-pointing `web-fetch` at it with no behaviour change. Then build `web-search` on top: pure `parse.rs` (SearxNG JSON → `Vec<Hit>`) + pure `search.rs` (endpoint validation, request build, one-GET drive, count cap) + `handler.rs` (RPC dispatch) + a host-side `WebSearchManifest`. The LLM supplies only the query string; the endpoint is operator-configured, so there is no URL-injection surface — `http://` is therefore allowed for loopback only, `https://` mandatory elsewhere.
 
-**Tech Stack:** Rust, `serde`/`serde_json`, `reqwest::blocking` + rustls, `url`, `hhagent-protocol` (JSON-RPC), `hhagent-worker-prelude` (`serve_stdio` + sandbox lockdown). SearxNG (Docker) for the live backend.
+**Tech Stack:** Rust, `serde`/`serde_json`, `reqwest::blocking` + rustls, `url`, `kastellan-protocol` (JSON-RPC), `kastellan-worker-prelude` (`serve_stdio` + sandbox lockdown). SearxNG (Docker) for the live backend.
 
 **Reference (read before starting):** the merged `web-fetch` worker — `workers/web-fetch/src/{allowlist,fetch,handler,extract,test_transport,main}.rs`, `core/src/workers/web_fetch.rs`, `core/tests/web_fetch_e2e.rs` — and the design spec `docs/superpowers/specs/2026-06-09-web-search-worker-design.md`.
 
@@ -41,7 +41,7 @@ In the root `Cargo.toml`, add `"workers/web-common",` to the `members` array (im
 
 ```toml
 [package]
-name        = "hhagent-worker-web-common"
+name        = "kastellan-worker-web-common"
 description = "Shared building blocks for net-egress tool workers: host allowlist matcher + capped HTTP transport seam."
 version.workspace      = true
 edition.workspace      = true
@@ -86,7 +86,7 @@ Copy `workers/web-fetch/src/allowlist.rs` to `workers/web-common/src/allowlist.r
 
 - [ ] **Step 5: Build + test web-common**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-common`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-common`
 Expected: PASS — the 8 moved allowlist tests (`exact_matches_only_that_host`, `leading_dot_*`, `matching_is_case_insensitive`, `empty_allowlist_denies_everything`, `malformed_json_is_an_error`, `whitespace_padded_entry_is_trimmed`, `lone_dot_entry_is_ignored`).
 
 - [ ] **Step 6: Commit**
@@ -105,7 +105,7 @@ git commit -m "refactor(web-common): new shared crate with HostAllowlist moved f
 
 - [ ] **Step 1: Write `workers/web-common/src/http.rs`**
 
-This is the transport half of the current `workers/web-fetch/src/fetch.rs` (`HttpGet`, `RawResponse`, `ReqwestGet`, and the `MAX_BODY_BYTES`/`TIMEOUT_SECS` constants), lifted out. The redirect-following `drive()` + `FetchError`/`FetchOutcome`/`MAX_REDIRECTS` stay in `web-fetch` (Task 4). User-agent generalised to `hhagent/0`.
+This is the transport half of the current `workers/web-fetch/src/fetch.rs` (`HttpGet`, `RawResponse`, `ReqwestGet`, and the `MAX_BODY_BYTES`/`TIMEOUT_SECS` constants), lifted out. The redirect-following `drive()` + `FetchError`/`FetchOutcome`/`MAX_REDIRECTS` stay in `web-fetch` (Task 4). User-agent generalised to `kastellan/0`.
 
 ```rust
 //! HTTP transport seam shared by net-egress workers.
@@ -148,7 +148,7 @@ impl ReqwestGet {
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .user_agent("hhagent/0")
+            .user_agent("kastellan/0")
             .build()?;
         Ok(Self { client })
     }
@@ -188,7 +188,7 @@ impl HttpGet for ReqwestGet {
 
 - [ ] **Step 2: Build web-common**
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-worker-web-common`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-worker-web-common`
 Expected: PASS (compiles; no tests added in this task).
 
 - [ ] **Step 3: Commit**
@@ -281,7 +281,7 @@ pub fn json_resp(json: &str) -> RawResponse {
 
 - [ ] **Step 2: Build web-common with the testing feature**
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-worker-web-common --features testing`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-worker-web-common --features testing`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
@@ -309,9 +309,9 @@ Add the `web-common` dependency, add a `[dev-dependencies]` entry enabling `test
 
 ```toml
 [dependencies]
-hhagent-protocol         = { path = "../../protocol" }
-hhagent-worker-prelude   = { path = "../prelude" }
-hhagent-worker-web-common = { path = "../web-common" }
+kastellan-protocol         = { path = "../../protocol" }
+kastellan-worker-prelude   = { path = "../prelude" }
+kastellan-worker-web-common = { path = "../web-common" }
 serde                    = { workspace = true }
 serde_json               = { workspace = true }
 anyhow                   = { workspace = true }
@@ -320,7 +320,7 @@ pdf-extract              = { workspace = true }
 readable_html            = { workspace = true }
 
 [dev-dependencies]
-hhagent-worker-web-common = { path = "../web-common", features = ["testing"] }
+kastellan-worker-web-common = { path = "../web-common", features = ["testing"] }
 ```
 
 - [ ] **Step 2: Delete the moved files**
@@ -339,12 +339,12 @@ Replace the whole file with the version below: the transport (`HttpGet`/`RawResp
 //! `drive()` is pure over the [`HttpGet`] seam so the redirect cap and the
 //! per-hop allowlist + https re-check (the security-critical bit: a 3xx to a
 //! non-allowlisted or non-https target is refused) are unit-tested with a fake
-//! transport. The transport itself lives in `hhagent_worker_web_common::http`.
+//! transport. The transport itself lives in `kastellan_worker_web_common::http`.
 
 use url::Url;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
-use hhagent_worker_web_common::http::HttpGet;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::http::HttpGet;
 
 /// Max redirect hops followed before giving up.
 pub const MAX_REDIRECTS: usize = 5;
@@ -413,8 +413,8 @@ pub fn drive<T: HttpGet>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_worker_web_common::http::RawResponse;
-    use hhagent_worker_web_common::testing::{al, ok_resp, redirect_to, FakeGet};
+    use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::testing::{al, ok_resp, redirect_to, FakeGet};
 
     #[test]
     fn terminal_response_is_returned() {
@@ -496,8 +496,8 @@ use crate::fetch::{drive, FetchError, HttpGet, ReqwestGet};
 with:
 
 ```rust
-use hhagent_worker_web_common::allowlist::HostAllowlist;
-use hhagent_worker_web_common::http::{HttpGet, ReqwestGet};
+use kastellan_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::http::{HttpGet, ReqwestGet};
 
 use crate::extract::{extract, main_type};
 use crate::fetch::{drive, FetchError};
@@ -513,8 +513,8 @@ Then in the handler's `#[cfg(test)] mod tests`, replace the two test-helper impo
 with:
 
 ```rust
-    use hhagent_worker_web_common::http::RawResponse;
-    use hhagent_worker_web_common::testing::{al, FakeGet};
+    use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::testing::{al, FakeGet};
 ```
 
 (The body of every test is unchanged.)
@@ -531,13 +531,13 @@ mod handler;
 
 - [ ] **Step 6: Build + test web-fetch (the safety net)**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-fetch`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-fetch`
 Expected: PASS — all web-fetch unit tests still green (allowlist tests now run in web-common; web-fetch retains its extract/fetch/handler tests). If the count looks lower than 29, that is expected: the 8 allowlist tests moved to web-common.
 
 - [ ] **Step 7: Build the whole workspace (catch the e2e dependency)**
 
 Run: `source "$HOME/.cargo/env" && cargo build --workspace`
-Expected: PASS — `core/tests/web_fetch_e2e.rs` still references `hhagent_core::workers::web_fetch::web_fetch_entry` (unchanged by this phase).
+Expected: PASS — `core/tests/web_fetch_e2e.rs` still references `kastellan_core::workers::web_fetch::web_fetch_entry` (unchanged by this phase).
 
 - [ ] **Step 8: Commit**
 
@@ -572,7 +572,7 @@ In root `Cargo.toml`, add `"workers/web-search",` right after `"workers/web-fetc
 
 ```toml
 [package]
-name        = "hhagent-worker-web-search"
+name        = "kastellan-worker-web-search"
 description = "Tool worker: query an operator-configured SearxNG instance and return ranked structured hits. GET-only."
 version.workspace      = true
 edition.workspace      = true
@@ -583,20 +583,20 @@ repository.workspace   = true
 readme.workspace       = true
 
 [[bin]]
-name = "hhagent-worker-web-search"
+name = "kastellan-worker-web-search"
 path = "src/main.rs"
 
 [dependencies]
-hhagent-protocol          = { path = "../../protocol" }
-hhagent-worker-prelude    = { path = "../prelude" }
-hhagent-worker-web-common = { path = "../web-common" }
+kastellan-protocol          = { path = "../../protocol" }
+kastellan-worker-prelude    = { path = "../prelude" }
+kastellan-worker-web-common = { path = "../web-common" }
 serde                     = { workspace = true }
 serde_json                = { workspace = true }
 anyhow                    = { workspace = true }
 url                       = { workspace = true }
 
 [dev-dependencies]
-hhagent-worker-web-common = { path = "../web-common", features = ["testing"] }
+kastellan-worker-web-common = { path = "../web-common", features = ["testing"] }
 ```
 
 - [ ] **Step 3: Write the failing test for `parse.rs`**
@@ -730,7 +730,7 @@ fn main() -> anyhow::Result<()> {
 
 - [ ] **Step 4: Run the parse tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-search parse`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-search parse`
 Expected: PASS (6 parse tests). (`main` is an empty stub for now; a dead-code warning on `parse` is acceptable until Task 8 wires it.)
 
 - [ ] **Step 5: Commit**
@@ -759,8 +759,8 @@ use std::net::IpAddr;
 
 use url::Url;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
-use hhagent_worker_web_common::http::HttpGet;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::http::HttpGet;
 
 use crate::parse::{parse_results, Hit};
 
@@ -831,7 +831,7 @@ pub fn build_query_url(endpoint: &Url, query: &str) -> Url {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_worker_web_common::testing::al;
+    use kastellan_worker_web_common::testing::al;
 
     #[test]
     fn loopback_recognises_localhost_and_loopback_ips() {
@@ -910,7 +910,7 @@ mod search;
 
 - [ ] **Step 3: Run the search-validation tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-search search::tests`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-search search::tests`
 Expected: PASS (7 tests). A dead-code warning on `SearchError::{Transport,Redirected,BadStatus,Parse,EmptyQuery}` and on `parse_results`/`DEFAULT_COUNT`/`MAX_COUNT` is acceptable until Task 7.
 
 - [ ] **Step 4: Commit**
@@ -932,8 +932,8 @@ git commit -m "feat(web-search): endpoint validation + loopback rule + request-U
 Append these tests to the `mod tests` block in `search.rs`:
 
 ```rust
-    use hhagent_worker_web_common::http::RawResponse;
-    use hhagent_worker_web_common::testing::{json_resp, redirect_to, FakeGet};
+    use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::testing::{json_resp, redirect_to, FakeGet};
 
     fn endpoint() -> Url {
         Url::parse("https://searx.example.org/search").unwrap()
@@ -1016,7 +1016,7 @@ Append these tests to the `mod tests` block in `search.rs`:
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-search search::tests::search_returns_parsed_hits`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-search search::tests::search_returns_parsed_hits`
 Expected: FAIL to compile — `search` function not found.
 
 - [ ] **Step 3: Implement `search()`**
@@ -1062,7 +1062,7 @@ pub fn search<T: HttpGet>(
 
 - [ ] **Step 4: Run the full search test module**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-search search`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-search search`
 Expected: PASS (13 search tests: 7 from Task 6 + 6 here).
 
 - [ ] **Step 5: Commit**
@@ -1090,12 +1090,12 @@ git commit -m "feat(web-search): one-GET search drive with count cap"
 //! (`from_env`); each call re-checks the host (defense in depth). Errors map
 //! onto the protocol code vocabulary. No silent fallbacks.
 
-use hhagent_protocol::{codes, server::Handler, RpcError};
+use kastellan_protocol::{codes, server::Handler, RpcError};
 use serde::Deserialize;
 use url::Url;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
-use hhagent_worker_web_common::http::{HttpGet, ReqwestGet};
+use kastellan_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::http::{HttpGet, ReqwestGet};
 
 use crate::search::{search, validate_endpoint, SearchError, DEFAULT_COUNT};
 
@@ -1153,10 +1153,10 @@ impl WebSearchHandler<ReqwestGet> {
     /// Validates the endpoint up front and fails closed (the worker never
     /// serves) if it is missing, unparseable, wrong-scheme, or off-allowlist.
     pub fn from_env() -> anyhow::Result<Self> {
-        let endpoint_raw = std::env::var("HHAGENT_WEB_SEARCH_ENDPOINT")
-            .map_err(|_| anyhow::anyhow!("HHAGENT_WEB_SEARCH_ENDPOINT not set"))?;
+        let endpoint_raw = std::env::var("KASTELLAN_WEB_SEARCH_ENDPOINT")
+            .map_err(|_| anyhow::anyhow!("KASTELLAN_WEB_SEARCH_ENDPOINT not set"))?;
         let allow_raw =
-            std::env::var("HHAGENT_WEB_SEARCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
+            std::env::var("KASTELLAN_WEB_SEARCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
         let allowlist = HostAllowlist::from_env_json(&allow_raw)?;
         let endpoint = validate_endpoint(&endpoint_raw, &allowlist)
             .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
@@ -1202,8 +1202,8 @@ impl<T: HttpGet> Handler for WebSearchHandler<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_worker_web_common::http::RawResponse;
-    use hhagent_worker_web_common::testing::{al, json_resp, FakeGet};
+    use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::testing::{al, json_resp, FakeGet};
 
     fn handler(responses: Vec<RawResponse>) -> WebSearchHandler<FakeGet> {
         WebSearchHandler::with_parts(
@@ -1279,7 +1279,7 @@ mod handler;
 mod parse;
 mod search;
 
-use hhagent_worker_prelude::serve_stdio;
+use kastellan_worker_prelude::serve_stdio;
 
 fn main() -> anyhow::Result<()> {
     let mut handler = handler::WebSearchHandler::from_env()?;
@@ -1290,7 +1290,7 @@ fn main() -> anyhow::Result<()> {
 
 - [ ] **Step 3: Run the whole web-search unit suite**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-search`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-search`
 Expected: PASS — parse (6) + search (13) + handler (5) = 24 tests, zero dead-code warnings now that everything is wired.
 
 - [ ] **Step 4: Commit**
@@ -1336,7 +1336,7 @@ Mirrors `core/src/workers/web_fetch.rs`. The one structural difference: `Net::Al
 
 use std::path::PathBuf;
 
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 use url::Url;
 
 use crate::scheduler::ToolEntry;
@@ -1345,11 +1345,11 @@ use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerMani
 /// Tool name the registry keys web-search on.
 const TOOL_NAME: &str = "web-search";
 /// Operator override for the worker binary path.
-const BIN_ENV: &str = "HHAGENT_WEB_SEARCH_BIN";
+const BIN_ENV: &str = "KASTELLAN_WEB_SEARCH_BIN";
 /// Exe-relative sibling default (cargo `target/debug` + flat installs).
-const DEFAULT_BIN_NAME: &str = "hhagent-worker-web-search";
+const DEFAULT_BIN_NAME: &str = "kastellan-worker-web-search";
 /// Operator-configured SearxNG endpoint, read from the daemon's own env.
-const ENDPOINT_ENV: &str = "HHAGENT_WEB_SEARCH_ENDPOINT";
+const ENDPOINT_ENV: &str = "KASTELLAN_WEB_SEARCH_ENDPOINT";
 
 /// Derive the `Net::Allowlist` `host:port` entry from the endpoint URL. Returns
 /// an empty list if the endpoint is unset or unparseable — the worker fails
@@ -1369,7 +1369,7 @@ fn net_entries_from_endpoint(endpoint: &str) -> Vec<String> {
 
 /// Build the [`ToolEntry`] for the web-search worker.
 ///
-/// The administrator controls both the endpoint (`HHAGENT_WEB_SEARCH_ENDPOINT`
+/// The administrator controls both the endpoint (`KASTELLAN_WEB_SEARCH_ENDPOINT`
 /// on the daemon) and the host allowlist (`tool_allowlists` keyed
 /// `"web-search"`); the LLM-supplied params carry only the query string and
 /// cannot influence the URL. `Net::Allowlist` derives from the endpoint's
@@ -1397,7 +1397,7 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
         profile: Profile::WorkerNetClient,
         env: vec![
             (ENDPOINT_ENV.to_string(), endpoint.to_string()),
-            ("HHAGENT_WEB_SEARCH_ALLOWLIST".to_string(), allow_json),
+            ("KASTELLAN_WEB_SEARCH_ALLOWLIST".to_string(), allow_json),
         ],
         cpu_quota_pct: None,
         tasks_max: None,
@@ -1413,9 +1413,9 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
 }
 
 /// web-search's manifest. Discovery mirrors web-fetch: a set
-/// `HHAGENT_WEB_SEARCH_BIN` override is authoritative (honoured iff it names a
+/// `KASTELLAN_WEB_SEARCH_BIN` override is authoritative (honoured iff it names a
 /// runnable file, else fails closed); only when unset do we fall back to the
-/// exe-relative sibling `hhagent-worker-web-search`. The endpoint is read from
+/// exe-relative sibling `kastellan-worker-web-search`. The endpoint is read from
 /// the daemon env at resolve time and injected into the worker policy.
 pub struct WebSearchManifest;
 
@@ -1494,7 +1494,7 @@ mod tests {
                 // Env carries the endpoint + the verbatim allowlist JSON.
                 assert_eq!(entry.policy.env[0].0, ENDPOINT_ENV);
                 assert_eq!(entry.policy.env[0].1, "http://127.0.0.1:8888/search");
-                assert_eq!(entry.policy.env[1].0, "HHAGENT_WEB_SEARCH_ALLOWLIST");
+                assert_eq!(entry.policy.env[1].0, "KASTELLAN_WEB_SEARCH_ALLOWLIST");
                 assert_eq!(entry.policy.env[1].1, r#"["127.0.0.1"]"#);
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
@@ -1532,7 +1532,7 @@ mod tests {
 
         match WebSearchManifest.resolve(&c) {
             Resolution::Misconfigured { detail } => {
-                assert!(detail.contains("hhagent-worker-web-search"), "detail: {detail}");
+                assert!(detail.contains("kastellan-worker-web-search"), "detail: {detail}");
             }
             other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
         }
@@ -1564,10 +1564,10 @@ In `core/src/registry_build.rs`, add to the `WORKER_MANIFESTS` array (after the 
 
 - [ ] **Step 4: Run the manifest tests + core build**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib web_search`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib web_search`
 Expected: PASS (3 manifest tests).
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-core`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-core`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1586,7 +1586,7 @@ git commit -m "feat(core): web-search host manifest + register in WORKER_MANIFES
 
 - [ ] **Step 1: Write the e2e test**
 
-Mirrors `core/tests/web_fetch_e2e.rs`. Hermetic deny-path: an endpoint whose host is **not** on the allowlist makes the worker fail closed at startup, so `dispatch` errors — no server needed. The `#[ignore]` test needs a live SearxNG (set `HHAGENT_WEB_SEARCH_ENDPOINT` before running with `--ignored`).
+Mirrors `core/tests/web_fetch_e2e.rs`. Hermetic deny-path: an endpoint whose host is **not** on the allowlist makes the worker fail closed at startup, so `dispatch` errors — no server needed. The `#[ignore]` test needs a live SearxNG (set `KASTELLAN_WEB_SEARCH_ENDPOINT` before running with `--ignored`).
 
 ```rust
 //! End-to-end: agent core spawns the `web-search` worker under the platform
@@ -1599,7 +1599,7 @@ Mirrors `core/tests/web_fetch_e2e.rs`. Hermetic deny-path: an endpoint whose hos
 //!
 //! Ignored test (`real_search_against_searxng`): a real query against a live
 //! SearxNG instance. Run manually with `--ignored` and
-//! `HHAGENT_WEB_SEARCH_ENDPOINT` set; also validates DNS/TLS (or loopback)
+//! `KASTELLAN_WEB_SEARCH_ENDPOINT` set; also validates DNS/TLS (or loopback)
 //! inside the sandbox jail.
 //!
 //! `[SKIP]`s cleanly when PG, the supervisor, the worker binary, or a working
@@ -1609,16 +1609,16 @@ Mirrors `core/tests/web_fetch_e2e.rs`. Hermetic deny-path: an endpoint whose hos
 
 use std::path::PathBuf;
 
-use hhagent_core::secrets::Vault;
-use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use hhagent_core::workers::web_search::web_search_entry;
-use hhagent_tests_common::{
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::workers::web_search::web_search_entry;
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
 };
 
-async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
-    hhagent_db::probe::run(
+async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
         conn_spec,
         "core",
         "startup",
@@ -1626,7 +1626,7 @@ async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPo
     )
     .await
     .expect("probe run");
-    hhagent_db::pool::connect_runtime_pool(conn_spec)
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
         .await
         .expect("connect runtime pool")
 }
@@ -1654,7 +1654,7 @@ fn ready_or_skip(endpoint: &str, allowlist: &[&str]) -> Option<TestEnv> {
         return None;
     }
     let bin_dir = pg_bin_dir_or_skip()?;
-    let worker_path = workspace_target_binary("hhagent-worker-web-search");
+    let worker_path = workspace_target_binary("kastellan-worker-web-search");
     if !worker_path.exists() {
         eprintln!("\n[SKIP] web-search worker binary not built; run cargo build --workspace\n");
         return None;
@@ -1665,7 +1665,7 @@ fn ready_or_skip(endpoint: &str, allowlist: &[&str]) -> Option<TestEnv> {
         &bin_dir,
         "ws-d",
         "ws-l",
-        &format!("hhagent-supervisor-test-pg-websearch-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-websearch-{suffix}"),
     );
 
     Some(TestEnv {
@@ -1721,9 +1721,9 @@ fn endpoint_off_allowlist_fails_closed() {
 }
 
 #[test]
-#[ignore = "hits a live SearxNG; set HHAGENT_WEB_SEARCH_ENDPOINT; validates DNS/TLS/loopback in jail"]
+#[ignore = "hits a live SearxNG; set KASTELLAN_WEB_SEARCH_ENDPOINT; validates DNS/TLS/loopback in jail"]
 fn real_search_against_searxng() {
-    let endpoint = std::env::var("HHAGENT_WEB_SEARCH_ENDPOINT")
+    let endpoint = std::env::var("KASTELLAN_WEB_SEARCH_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:8888/search".to_string());
     // Allowlist the endpoint host so the worker accepts it.
     let host = url_host(&endpoint);
@@ -1783,8 +1783,8 @@ url = { workspace = true }
 
 - [ ] **Step 2: Build the test (typecheck) and run the hermetic arm**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --test web_search_e2e -- --nocapture`
-Expected: PASS or `[SKIP]` lines (no PG/supervisor/sandbox/binary). On the dev Mac without `HHAGENT_PG_BIN_DIR`, a clean `[SKIP]` is the expected pass posture. If it compiles and the hermetic test runs where PG is available, it passes.
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --test web_search_e2e -- --nocapture`
+Expected: PASS or `[SKIP]` lines (no PG/supervisor/sandbox/binary). On the dev Mac without `KASTELLAN_PG_BIN_DIR`, a clean `[SKIP]` is the expected pass posture. If it compiles and the hermetic test runs where PG is available, it passes.
 
 - [ ] **Step 3: Commit**
 
@@ -1804,7 +1804,7 @@ git commit -m "test(web-search): e2e fail-closed deny-path + ignored real-SearxN
 
 ```bash
 #!/usr/bin/env bash
-# Stand up a local SearxNG instance for the hhagent web-search worker.
+# Stand up a local SearxNG instance for the kastellan web-search worker.
 #
 # SearxNG serves plain HTTP on a loopback port and DISABLES the JSON format by
 # default — this script writes a settings.yml that enables JSON and runs the
@@ -1813,9 +1813,9 @@ git commit -m "test(web-search): e2e fail-closed deny-path + ignored real-SearxN
 # worker's trust boundary.
 set -euo pipefail
 
-PORT="${HHAGENT_SEARXNG_PORT:-8888}"
-NAME="${HHAGENT_SEARXNG_NAME:-hhagent-searxng}"
-STATE_DIR="${HHAGENT_SEARXNG_STATE:-$HOME/.local/state/hhagent/searxng}"
+PORT="${KASTELLAN_SEARXNG_PORT:-8888}"
+NAME="${KASTELLAN_SEARXNG_NAME:-kastellan-searxng}"
+STATE_DIR="${KASTELLAN_SEARXNG_STATE:-$HOME/.local/state/kastellan/searxng}"
 IMAGE="searxng/searxng:latest"
 
 # Pick a container runtime.
@@ -1835,7 +1835,7 @@ SETTINGS="$STATE_DIR/settings.yml"
 if [ ! -f "$SETTINGS" ]; then
   SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   cat >"$SETTINGS" <<YAML
-# Minimal SearxNG settings for hhagent web-search (dev). The key line is
+# Minimal SearxNG settings for kastellan web-search (dev). The key line is
 # search.formats — the JSON API is off by default.
 use_default_settings: true
 server:
@@ -1866,10 +1866,10 @@ cat <<MSG
 
 SearxNG running at http://127.0.0.1:${PORT}/
 
-Export these for the hhagent daemon / web-search worker:
+Export these for the kastellan daemon / web-search worker:
 
-  export HHAGENT_WEB_SEARCH_ENDPOINT='http://127.0.0.1:${PORT}/search'
-  export HHAGENT_WEB_SEARCH_ALLOWLIST='["127.0.0.1"]'
+  export KASTELLAN_WEB_SEARCH_ENDPOINT='http://127.0.0.1:${PORT}/search'
+  export KASTELLAN_WEB_SEARCH_ALLOWLIST='["127.0.0.1"]'
 
 Smoke test the JSON API:
 
@@ -1915,10 +1915,10 @@ Expected: PASS on macOS skip-as-pass posture (live-PG suites `[SKIP]`); the new 
 
 - [ ] **Step 2: Clippy the new crates + core**
 
-Run: `source "$HOME/.cargo/env" && cargo clippy -p hhagent-worker-web-common -p hhagent-worker-web-search -p hhagent-worker-web-fetch --all-targets -- -D warnings`
+Run: `source "$HOME/.cargo/env" && cargo clippy -p kastellan-worker-web-common -p kastellan-worker-web-search -p kastellan-worker-web-fetch --all-targets -- -D warnings`
 Expected: exit 0.
 
-Run: `source "$HOME/.cargo/env" && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings`
+Run: `source "$HOME/.cargo/env" && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings`
 Expected: exit 0.
 
 - [ ] **Step 3: Tick ROADMAP:146**
@@ -1949,4 +1949,4 @@ gh pr create --base main --title "feat: web-search worker (SearxNG) + shared web
 
 - **Spec coverage:** structured-hits contract (Task 5/8), shared web-common extraction (Tasks 1–4), endpoint+scheme rule incl. loopback (Task 6), Net::Allowlist from endpoint host:port (Task 9), `web.search` params + count cap (Tasks 7–8), host manifest + registration (Task 9), e2e fail-closed + ignored real (Task 10), setup script with JSON enabled (Task 11), threat-model caveat (Task 9 rustdoc), docs (Task 12). All spec sections map to a task.
 - **Placeholder scan:** every code step carries complete code; the only free-form steps are the HANDOVER prose update (Task 12 Step 4, governed by the in-repo checklist) and the PR body.
-- **Type consistency:** `Hit`, `SearchError`, `search()`/`validate_endpoint()`/`build_query_url()`/`is_loopback()`, `WebSearchHandler::{from_env,with_parts}`, `web_search_entry(binary, endpoint, allowlist)`, `WebSearchManifest`, `DEFAULT_COUNT`/`MAX_COUNT` are named identically everywhere they appear. Transport types (`HttpGet`/`RawResponse`/`ReqwestGet`/`FakeGet`) resolve to `hhagent_worker_web_common` after Phase A.
+- **Type consistency:** `Hit`, `SearchError`, `search()`/`validate_endpoint()`/`build_query_url()`/`is_loopback()`, `WebSearchHandler::{from_env,with_parts}`, `web_search_entry(binary, endpoint, allowlist)`, `WebSearchManifest`, `DEFAULT_COUNT`/`MAX_COUNT` are named identically everywhere they appear. Transport types (`HttpGet`/`RawResponse`/`ReqwestGet`/`FakeGet`) resolve to `kastellan_worker_web_common` after Phase A.

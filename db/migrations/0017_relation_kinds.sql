@@ -50,7 +50,7 @@
 --       extractor does. The REVOKE undoes the silent full-CRUD pickup
 --       from 0002's `ALTER DEFAULT PRIVILEGES IN SCHEMA public ...
 --       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO
---       hhagent_runtime`.
+--       kastellan_runtime`.
 
 BEGIN;
 
@@ -105,7 +105,7 @@ ALTER TABLE relations
 --     but not write the operator-managed vocabulary. ALTER DEFAULT
 --     PRIVILEGES from 0002 silently granted full CRUD on every
 --     newly-created table, so the REVOKE is load-bearing.
-GRANT  SELECT                          ON relation_kinds TO hhagent_runtime;
-REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON relation_kinds FROM hhagent_runtime;
+GRANT  SELECT                          ON relation_kinds TO kastellan_runtime;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON relation_kinds FROM kastellan_runtime;
 
 COMMIT;

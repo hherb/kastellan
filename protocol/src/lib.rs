@@ -1,4 +1,4 @@
-//! hhagent-protocol: minimal JSON-RPC 2.0 over stdio for tool workers.
+//! kastellan-protocol: minimal JSON-RPC 2.0 over stdio for tool workers.
 //!
 //! One JSON object per line on stdin / stdout. This is compatible with the
 //! Model Context Protocol's stdio transport and intentionally trivial — no
@@ -14,7 +14,7 @@ pub mod server;
 
 use serde::{Deserialize, Serialize};
 
-/// JSON-RPC 2.0 error codes used by hhagent. Subset of the spec plus our own
+/// JSON-RPC 2.0 error codes used by kastellan. Subset of the spec plus our own
 /// app-level codes in the -32000..-32099 reserved range.
 pub mod codes {
     pub const PARSE_ERROR: i32 = -32700;

@@ -7,19 +7,19 @@
 -- at the bottom of 0015 even said so ("INSERT on entity_kinds is
 -- operator-only by GRANT default"). But 0002's
 -- `ALTER DEFAULT PRIVILEGES IN SCHEMA public ... GRANT SELECT, INSERT,
--- UPDATE, DELETE ON TABLES TO hhagent_runtime` fires automatically for
+-- UPDATE, DELETE ON TABLES TO kastellan_runtime` fires automatically for
 -- every new table created by the superuser running migrations, so
 -- 0015's `CREATE TABLE entity_kinds` silently picked up full CRUD for
 -- the runtime role. The explicit `GRANT SELECT` at the end of 0015 was
 -- redundant; this migration adds the load-bearing REVOKE.
 --
 -- Same pattern as 0008's `deleted_memories` (insert-only audit table:
--- explicit `REVOKE UPDATE, DELETE, TRUNCATE FROM hhagent_runtime`) and
+-- explicit `REVOKE UPDATE, DELETE, TRUNCATE FROM kastellan_runtime`) and
 -- 0002's `audit_log` (same shape). The caveat in 0002's default-privileges
 -- comment block flagged this exact scenario:
 --
 --   "Caveat for future authors: an insert-only table [...] needs its
---    own explicit `REVOKE UPDATE, DELETE, TRUNCATE FROM hhagent_runtime`
+--    own explicit `REVOKE UPDATE, DELETE, TRUNCATE FROM kastellan_runtime`
 --    after creation because ALTER DEFAULT PRIVILEGES will have already
 --    granted the forbidden operations along with the rest."
 --
@@ -29,6 +29,6 @@
 
 BEGIN;
 
-REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON entity_kinds FROM hhagent_runtime;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON entity_kinds FROM kastellan_runtime;
 
 COMMIT;

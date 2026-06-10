@@ -9,7 +9,7 @@ use crate::common::resolve_connect_spec;
 
 /// Parsed argv for `memory l3 run` (after the `run` subcommand token is
 /// stripped). `arg_tokens` are the raw `name=value` strings, validated later
-/// by [`hhagent_core::memory::l3_invoke::parse_args`].
+/// by [`kastellan_core::memory::l3_invoke::parse_args`].
 #[derive(Debug, PartialEq, Eq)]
 struct RunArgv {
     id: i64,
@@ -47,7 +47,7 @@ fn parse_run_argv(args: &[String]) -> Result<RunArgv, String> {
         i += 1;
     }
     let id_str = id_str.ok_or_else(|| {
-        "usage: hhagent-cli memory l3 run <id> [--arg name=value]… [--execute | --yes]".to_string()
+        "usage: kastellan-cli memory l3 run <id> [--arg name=value]… [--execute | --yes]".to_string()
     })?;
     let id: i64 = id_str
         .parse()
@@ -63,12 +63,12 @@ fn parse_run_argv(args: &[String]) -> Result<RunArgv, String> {
 pub(super) fn render_invoke_report(
     id: i64,
     skill_name: &str,
-    report: &hhagent_core::memory::l3_invoke::InvokeReport,
+    report: &kastellan_core::memory::l3_invoke::InvokeReport,
 ) -> (String, i32) {
     use std::fmt::Write as _;
 
-    use hhagent_core::memory::l3_invoke::InvokeReport;
-    use hhagent_core::scheduler::inner_loop::StepOutcome;
+    use kastellan_core::memory::l3_invoke::InvokeReport;
+    use kastellan_core::scheduler::inner_loop::StepOutcome;
 
     let mut out = String::new();
     match report {
@@ -127,10 +127,10 @@ pub(super) fn render_invoke_report(
 pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
     use std::time::Duration;
 
-    use hhagent_core::cli_audit::submit_and_audit;
-    use hhagent_core::memory::l3_invoke::{parse_args, InvokeReport};
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::{get, Lane};
+    use kastellan_core::cli_audit::submit_and_audit;
+    use kastellan_core::memory::l3_invoke::{parse_args, InvokeReport};
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::{get, Lane};
     use sqlx::postgres::PgListener;
 
     // --- parse argv ----------------------------------------------------
@@ -183,10 +183,10 @@ pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
     // generous (30 min) because a legitimate `--execute` can run a long step
     // list; it exists only so a daemon that claims the task but never NOTIFYs
     // (a hang) cannot block the operator's terminal forever. Both are
-    // env-overridable — lower `HHAGENT_L3_RUN_TIMEOUT_SECS` for snappier
+    // env-overridable — lower `KASTELLAN_L3_RUN_TIMEOUT_SECS` for snappier
     // dry-runs, raise it for known-slow skills.
-    let grace = Duration::from_secs(env_secs("HHAGENT_L3_RUN_GRACE_SECS", 5));
-    let overall = Duration::from_secs(env_secs("HHAGENT_L3_RUN_TIMEOUT_SECS", 1800));
+    let grace = Duration::from_secs(env_secs("KASTELLAN_L3_RUN_GRACE_SECS", 5));
+    let overall = Duration::from_secs(env_secs("KASTELLAN_L3_RUN_TIMEOUT_SECS", 1800));
 
     // Phase 1: until claimed (daemon present) or grace elapses (no daemon).
     if let Err(code) = wait_until_claimed_or_no_daemon(&pool, &mut listener, task_id, grace).await {
@@ -256,7 +256,7 @@ fn env_secs(key: &str, default: u64) -> u64 {
 /// (DB error, absent row, no name) falls back to `"<skill>"`. Never affects
 /// control flow.
 async fn resolve_skill_name(pool: &sqlx::PgPool, id: i64) -> String {
-    use hhagent_db::memories::fetch_by_ids;
+    use kastellan_db::memories::fetch_by_ids;
     fetch_by_ids(pool, &[id])
         .await
         .ok()
@@ -305,7 +305,7 @@ async fn wait_until_claimed_or_no_daemon(
     task_id: i64,
     grace: std::time::Duration,
 ) -> Result<(), std::process::ExitCode> {
-    use hhagent_db::tasks::{any_live_worker, get};
+    use kastellan_db::tasks::{any_live_worker, get};
 
     // A NOTIFY may arrive during the grace window if the task completes very
     // fast; we don't rely on it — we authoritatively re-check state below.
@@ -379,7 +379,7 @@ async fn cancel_pending_or_proceed(
     task_id: i64,
     reason: &str,
 ) -> Result<(), std::process::ExitCode> {
-    use hhagent_core::cli_audit::{cancel_if_pending_and_audit, CancelOutcome};
+    use kastellan_core::cli_audit::{cancel_if_pending_and_audit, CancelOutcome};
 
     match cancel_if_pending_and_audit(pool, task_id).await {
         Ok(CancelOutcome::Cancelled(_)) => {
@@ -401,8 +401,8 @@ async fn cancel_pending_or_proceed(
 #[cfg(test)]
 mod tests {
     use super::{parse_run_argv, render_invoke_report, RunArgv};
-    use hhagent_core::memory::l3_invoke::InvokeReport;
-    use hhagent_core::scheduler::inner_loop::StepOutcome;
+    use kastellan_core::memory::l3_invoke::InvokeReport;
+    use kastellan_core::scheduler::inner_loop::StepOutcome;
 
     fn v(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()

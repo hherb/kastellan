@@ -6,7 +6,7 @@
 
 **Architecture:** New `core::memory::l0_seed` module with three layers: pure `parse_l0_rules(toml_str) → Vec<L0Rule>`, async DB writer `seed_l0_from_rules(pool, rules) → L0SeedReport`, and file convenience wrapper `seed_l0_from_file(pool, path)`. A new `db::memories::load_active_l0` function carries the `SELECT DISTINCT ON (metadata->>'l0_rule_id')` SQL; the core wrapper `load_l0_active` applies in-Rust byte caps mirroring `load_l1`. Wire-in in `core/src/main.rs` runs right after the prompts loader and writes one `actor='core' action='l0.seeded'` audit row.
 
-**Tech Stack:** Rust 2021, sqlx 0.8 (PgPool), toml 0.8 (workspace dep), sha2 0.10 (workspace dep), tokio multi-thread runtime, `hhagent_tests_common` for per-test PG clusters.
+**Tech Stack:** Rust 2021, sqlx 0.8 (PgPool), toml 0.8 (workspace dep), sha2 0.10 (workspace dep), tokio multi-thread runtime, `kastellan_tests_common` for per-test PG clusters.
 
 **Spec:** [docs/superpowers/specs/2026-05-16-l0-seed-loader-design.md](../specs/2026-05-16-l0-seed-loader-design.md) (committed at `7153b48` on branch `feat/l0-seed-loader`).
 
@@ -106,8 +106,8 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use thiserror::Error;
 
-use hhagent_db::memories::Memory;
-use hhagent_db::DbError;
+use kastellan_db::memories::Memory;
+use kastellan_db::DbError;
 
 /// Default upper bound on the active L0 row count returned by
 /// [`load_l0_active_default`].
@@ -666,7 +666,7 @@ Run:
 
 ```bash
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core memory::l0_seed::tests -- --nocapture
+cargo test -p kastellan-core memory::l0_seed::tests -- --nocapture
 ```
 
 Expected: all 15 unit tests pass.
@@ -875,7 +875,7 @@ pub async fn seed_l0_from_rules(
         }
 
         let metadata = build_l0_metadata(&rule.id, &body_sha256, &rule.tags, source_path);
-        hhagent_db::memories::seed_meta_memory(pool, &rule.body, &metadata, None).await?;
+        kastellan_db::memories::seed_meta_memory(pool, &rule.body, &metadata, None).await?;
         report.new_rows_written += 1;
     }
 
@@ -890,7 +890,7 @@ Create the new test file with the first 3 scenarios. Follow `memory_layers_e2e.r
 - [ ] **Create `core/tests/memory_l0_seed_e2e.rs`**
 
 ```rust
-//! End-to-end smoke for [`hhagent_core::memory::l0_seed`] — the
+//! End-to-end smoke for [`kastellan_core::memory::l0_seed`] — the
 //! L0 (meta-rule) seed loader and its paired read-side helper.
 //!
 //! Each scenario brings up its own per-test Postgres cluster (same
@@ -904,11 +904,11 @@ Create the new test file with the first 3 scenarios. Follow `memory_layers_e2e.r
 
 use std::path::Path;
 
-use hhagent_core::memory::l0_seed::{
+use kastellan_core::memory::l0_seed::{
     seed_l0_from_rules, L0Rule,
 };
-use hhagent_db::memories::load_active_l0;
-use hhagent_tests_common::{
+use kastellan_db::memories::load_active_l0;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -946,11 +946,11 @@ fn seed_from_rules_writes_new_rows() {
         &bin_dir,
         "l0n-d",
         "l0n-l",
-        &format!("hhagent-supervisor-test-pg-l0new-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0new-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -959,7 +959,7 @@ fn seed_from_rules_writes_new_rows() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -986,7 +986,7 @@ fn seed_from_rules_writes_new_rows() {
         for m in &active {
             assert_eq!(
                 m.layer,
-                hhagent_db::memories::MemoryLayer::Meta,
+                kastellan_db::memories::MemoryLayer::Meta,
                 "all active L0 rows must report layer=Meta"
             );
         }
@@ -1017,11 +1017,11 @@ fn seed_from_rules_is_idempotent_on_unchanged_input() {
         &bin_dir,
         "l0i-d",
         "l0i-l",
-        &format!("hhagent-supervisor-test-pg-l0idem-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0idem-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -1030,7 +1030,7 @@ fn seed_from_rules_is_idempotent_on_unchanged_input() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -1073,11 +1073,11 @@ fn seed_from_rules_writes_new_row_on_edited_body() {
         &bin_dir,
         "l0e-d",
         "l0e-l",
-        &format!("hhagent-supervisor-test-pg-l0edit-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0edit-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -1086,7 +1086,7 @@ fn seed_from_rules_writes_new_row_on_edited_body() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -1156,7 +1156,7 @@ Run:
 
 ```bash
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test memory_l0_seed_e2e -- --nocapture
+cargo test -p kastellan-core --test memory_l0_seed_e2e -- --nocapture
 ```
 
 Expected: 3 tests pass (or `[SKIP]` lines if PG isn't reachable — verify with `--nocapture` that they aren't `[SKIP]` on this host).
@@ -1164,7 +1164,7 @@ Expected: 3 tests pass (or `[SKIP]` lines if PG isn't reachable — verify with 
 Also rerun the unit tests to confirm no regression:
 
 ```bash
-cargo test -p hhagent-core memory::l0_seed::tests
+cargo test -p kastellan-core memory::l0_seed::tests
 ```
 
 Expected: 15 unit tests pass.
@@ -1265,7 +1265,7 @@ pub async fn load_l0_active(
     if cap_rows == 0 || cap_bytes == 0 {
         return Ok(Vec::new());
     }
-    let candidates = hhagent_db::memories::load_active_l0(pool, cap_rows).await?;
+    let candidates = kastellan_db::memories::load_active_l0(pool, cap_rows).await?;
 
     let mut acc: Vec<Memory> = Vec::with_capacity(candidates.len());
     let mut bytes_used: usize = 0;
@@ -1310,10 +1310,10 @@ Append to `core/tests/memory_l0_seed_e2e.rs`. Update the imports at the top to p
 
 - [ ] **Edit `core/tests/memory_l0_seed_e2e.rs` — update import block**
 
-Replace the existing `use hhagent_core::memory::l0_seed::{...}` line:
+Replace the existing `use kastellan_core::memory::l0_seed::{...}` line:
 
 ```rust
-use hhagent_core::memory::l0_seed::{
+use kastellan_core::memory::l0_seed::{
     seed_l0_from_rules, L0Rule,
 };
 ```
@@ -1321,7 +1321,7 @@ use hhagent_core::memory::l0_seed::{
 with:
 
 ```rust
-use hhagent_core::memory::l0_seed::{
+use kastellan_core::memory::l0_seed::{
     load_l0_active, load_l0_active_default, seed_l0_from_file, seed_l0_from_rules,
     L0Error, L0Rule, L0_DEFAULT_CAP_BYTES, L0_DEFAULT_CAP_ROWS,
 };
@@ -1349,11 +1349,11 @@ fn seed_from_file_reads_parses_and_seeds() {
         &bin_dir,
         "l0f-d",
         "l0f-l",
-        &format!("hhagent-supervisor-test-pg-l0file-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0file-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -1362,7 +1362,7 @@ fn seed_from_file_reads_parses_and_seeds() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -1408,11 +1408,11 @@ fn seed_from_file_fails_closed_on_malformed_toml() {
         &bin_dir,
         "l0m-d",
         "l0m-l",
-        &format!("hhagent-supervisor-test-pg-l0mal-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0mal-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -1421,7 +1421,7 @@ fn seed_from_file_fails_closed_on_malformed_toml() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -1464,11 +1464,11 @@ fn load_l0_active_returns_newest_per_rule_id() {
         &bin_dir,
         "l0d-d",
         "l0d-l",
-        &format!("hhagent-supervisor-test-pg-l0dedup-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0dedup-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -1477,7 +1477,7 @@ fn load_l0_active_returns_newest_per_rule_id() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -1519,11 +1519,11 @@ fn load_l0_active_respects_cap_rows() {
         &bin_dir,
         "l0r-d",
         "l0r-l",
-        &format!("hhagent-supervisor-test-pg-l0caprows-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0caprows-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -1532,7 +1532,7 @@ fn load_l0_active_respects_cap_rows() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -1570,11 +1570,11 @@ fn load_l0_active_oversize_body_dropped_silently() {
         &bin_dir,
         "l0o-d",
         "l0o-l",
-        &format!("hhagent-supervisor-test-pg-l0over-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0over-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -1583,7 +1583,7 @@ fn load_l0_active_oversize_body_dropped_silently() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -1642,11 +1642,11 @@ fn load_l0_active_excludes_legacy_l0_rows_without_rule_id() {
         &bin_dir,
         "l0l-d",
         "l0l-l",
-        &format!("hhagent-supervisor-test-pg-l0legacy-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0legacy-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -1655,13 +1655,13 @@ fn load_l0_active_excludes_legacy_l0_rows_without_rule_id() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
         // A "legacy" L0 row written directly via seed_meta_memory with
         // empty metadata (no l0_rule_id). load_active_l0 must skip it.
-        hhagent_db::memories::seed_meta_memory(
+        kastellan_db::memories::seed_meta_memory(
             &pool,
             "legacy without rule_id",
             &serde_json::json!({}),
@@ -1708,7 +1708,7 @@ Pick (a) — literal values in tests make the assertion-vs-default split visible
 Replace:
 
 ```rust
-use hhagent_core::memory::l0_seed::{
+use kastellan_core::memory::l0_seed::{
     load_l0_active, load_l0_active_default, seed_l0_from_file, seed_l0_from_rules,
     L0Error, L0Rule, L0_DEFAULT_CAP_BYTES, L0_DEFAULT_CAP_ROWS,
 };
@@ -1717,7 +1717,7 @@ use hhagent_core::memory::l0_seed::{
 with:
 
 ```rust
-use hhagent_core::memory::l0_seed::{
+use kastellan_core::memory::l0_seed::{
     load_l0_active, load_l0_active_default, seed_l0_from_file, seed_l0_from_rules,
     L0Error, L0Rule,
 };
@@ -1738,8 +1738,8 @@ Expected: clean build, no warnings.
 
 ```bash
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test memory_l0_seed_e2e -- --nocapture
-cargo test -p hhagent-core memory::l0_seed::tests
+cargo test -p kastellan-core --test memory_l0_seed_e2e -- --nocapture
+cargo test -p kastellan-core memory::l0_seed::tests
 ```
 
 Expected: 9 integration tests pass, 15 unit tests pass.
@@ -1785,10 +1785,10 @@ Edit `core/src/main.rs`. Find the existing prompts-loading block (around line 60
 
 ```rust
 // Load every prompts/*.md, hash, upsert into agent_prompts.
-let prompts_dir = std::env::var("HHAGENT_PROMPTS_DIR")
+let prompts_dir = std::env::var("KASTELLAN_PROMPTS_DIR")
     .map(std::path::PathBuf::from)
     .unwrap_or_else(|_| std::path::PathBuf::from("prompts"));
-let prompts = hhagent_core::scheduler::prompts::load_prompts_from_dir(&pool, &prompts_dir)
+let prompts = kastellan_core::scheduler::prompts::load_prompts_from_dir(&pool, &prompts_dir)
     .await
     .with_context(|| format!("loading prompts from {:?}", prompts_dir))?;
 ```
@@ -1800,14 +1800,14 @@ Insert the L0 loader block **immediately after** the prompts loader and **before
 ```rust
     // Seed L0 (meta-rule) rows from the operator-edited TOML file.
     // Default: `seeds/memory/l0_meta_rules.toml` relative to CWD.
-    // Override: `HHAGENT_L0_RULES_FILE` env var. Missing file is
+    // Override: `KASTELLAN_L0_RULES_FILE` env var. Missing file is
     // logged at info level and skipped (daemon comes up). Malformed
     // file is fatal (loader returns Err here, ? propagates).
-    let l0_path = std::env::var("HHAGENT_L0_RULES_FILE")
+    let l0_path = std::env::var("KASTELLAN_L0_RULES_FILE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("seeds/memory/l0_meta_rules.toml"));
     if l0_path.exists() {
-        let report = hhagent_core::memory::l0_seed::seed_l0_from_file(&pool, &l0_path)
+        let report = kastellan_core::memory::l0_seed::seed_l0_from_file(&pool, &l0_path)
             .await
             .with_context(|| format!("seeding L0 rules from {:?}", l0_path))?;
         write_l0_seeded_audit_row(&pool, &report).await?;
@@ -1831,7 +1831,7 @@ Find the place near the bottom of `main.rs` where private helpers live (e.g. aft
 ```rust
 async fn write_l0_seeded_audit_row(
     pool: &sqlx::PgPool,
-    report: &hhagent_core::memory::l0_seed::L0SeedReport,
+    report: &kastellan_core::memory::l0_seed::L0SeedReport,
 ) -> anyhow::Result<()> {
     let payload = serde_json::json!({
         "rules_loaded": report.rules_loaded,
@@ -1840,7 +1840,7 @@ async fn write_l0_seeded_audit_row(
         "source_path": report.source_path.to_string_lossy(),
         "source_sha256": report.source_sha256,
     });
-    hhagent_db::audit::insert(pool, "core", "l0.seeded", &payload)
+    kastellan_db::audit::insert(pool, "core", "l0.seeded", &payload)
         .await
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("write l0.seeded audit row: {e}"))
@@ -1854,7 +1854,7 @@ Verify the `audit::insert` signature matches what's in `db::audit`:
 Run:
 
 ```bash
-grep -n "pub async fn insert" /home/hherb/src/hhagent/db/src/audit.rs
+grep -n "pub async fn insert" /home/hherb/src/kastellan/db/src/audit.rs
 ```
 
 Expected output should be a function returning `Result<i64, DbError>` taking `(pool, actor, action, payload)`. If the actual signature differs (e.g. uses `&serde_json::Value` vs owned), adjust the helper body accordingly — the wire-in plus error propagation stays the same.
@@ -1904,7 +1904,7 @@ git add core/src/main.rs
 git commit -m "$(cat <<'EOF'
 feat(core,main): wire L0 seed loader into daemon startup
 
-Reads HHAGENT_L0_RULES_FILE (default: seeds/memory/l0_meta_rules.toml)
+Reads KASTELLAN_L0_RULES_FILE (default: seeds/memory/l0_meta_rules.toml)
 right after the prompts loader and before the LLM router. Missing
 file is info-logged and skipped; malformed file is fatal (returns
 Err, which ? propagates and refuses to start the daemon — matches
@@ -1949,7 +1949,7 @@ ls seeds/memory  # verify
 #
 # The loader is idempotent on (rule_id, body_sha256); old versions of
 # edited rules stay in the database for audit. Removing a rule from
-# this file does NOT delete it from the database — `hhagent-cli`
+# this file does NOT delete it from the database — `kastellan-cli`
 # tooling (future slice) will surface and prune stale rules.
 #
 # Each rule needs:
@@ -1986,10 +1986,10 @@ If `supervisor_e2e` shows a new audit row in the count, that's expected (the dae
 
 - [ ] **Verify the seed file's location relative to test CWD**
 
-The test harness sets the daemon's working directory via `HHAGENT_DATA_DIR` / `HHAGENT_STATE_DIR`, but the *working directory* for the daemon process itself in `supervisor_e2e` comes from the supervisor spec. Check `core_service_spec` to see what `WorkingDirectory` the daemon runs under:
+The test harness sets the daemon's working directory via `KASTELLAN_DATA_DIR` / `KASTELLAN_STATE_DIR`, but the *working directory* for the daemon process itself in `supervisor_e2e` comes from the supervisor spec. Check `core_service_spec` to see what `WorkingDirectory` the daemon runs under:
 
 ```bash
-grep -n "WorkingDirectory\|working_dir" /home/hherb/src/hhagent/supervisor/src/specs.rs | head -5
+grep -n "WorkingDirectory\|working_dir" /home/hherb/src/kastellan/supervisor/src/specs.rs | head -5
 ```
 
 If `WorkingDirectory` is `/` or unset, the daemon will not find `seeds/memory/l0_meta_rules.toml` (cwd-relative). That's *fine* — the loader logs `info!("no L0 rules file found")` and continues. The supervisor smoke test should still pass without writing the `l0.seeded` audit row.
@@ -2078,7 +2078,7 @@ Branch: `feat/l0-seed-loader` (off `main` at `305941a`). Spec: [`docs/superpower
 - **NEW `core/src/memory/l0_seed.rs`** — `L0Rule` / `L0Error` / `L0SeedReport` types; pure `parse_l0_rules` (TOML → validated Vec<L0Rule>) with full validation (charset, length, dedup, unknown-field rejection); pure helpers `compute_body_sha256`, `compute_source_sha256`, `build_l0_metadata`; async DB writer `seed_l0_from_rules` (per-rule EXISTS-check + `seed_meta_memory`); file convenience `seed_l0_from_file`; read-side `load_l0_active` / `load_l0_active_default` wrapping `db::memories::load_active_l0` with in-Rust byte caps (mirrors `load_l1`'s saturating_add idiom; oversize single row dropped with `tracing::warn!`). Constants `L0_DEFAULT_CAP_ROWS = 64`, `L0_DEFAULT_CAP_BYTES = 8192`, `L0_MAX_BODY_BYTES = 1024`, `L0_MAX_ID_LEN = 64`.
 - **`db/src/memories.rs` — new `load_active_l0` function.** `SELECT DISTINCT ON (metadata->>'l0_rule_id') ... WHERE layer = 0 AND metadata ? 'l0_rule_id'`, outer `ORDER BY created_at DESC, id DESC LIMIT $1`. Rows missing the rule_id metadata key (e.g. legacy hand-fixed L0 rows) are excluded from the active set.
 - **NEW `core/tests/memory_l0_seed_e2e.rs`** — 9 DB integration scenarios covering: fresh-DB seed; idempotency on unchanged input; edited body produces new row while old row stays for audit; file round-trip via `seed_l0_from_file`; fail-closed on malformed TOML (no partial state); dedup returns newest version per rule_id; `cap_rows` trims DB-side; `cap_bytes` drops oversize body silently with `tracing::warn!`; legacy L0 rows without `l0_rule_id` metadata excluded.
-- **`core/src/main.rs` wire-in** — right after the prompts loader, before the LLM router. Default path `seeds/memory/l0_meta_rules.toml` cwd-relative; override via `HHAGENT_L0_RULES_FILE`. Missing file → `info!` and skip (daemon comes up); malformed file → `Err`, daemon refuses to start. On success, one `actor='core' action='l0.seeded'` audit row carrying `{rules_loaded, new_rows_written, unchanged_skipped, source_path, source_sha256}`.
+- **`core/src/main.rs` wire-in** — right after the prompts loader, before the LLM router. Default path `seeds/memory/l0_meta_rules.toml` cwd-relative; override via `KASTELLAN_L0_RULES_FILE`. Missing file → `info!` and skip (daemon comes up); malformed file → `Err`, daemon refuses to start. On success, one `actor='core' action='l0.seeded'` audit row carrying `{rules_loaded, new_rows_written, unchanged_skipped, source_path, source_sha256}`.
 - **NEW `seeds/memory/l0_meta_rules.toml`** — starter file with 2 defensible-default rules (recursive-delete safety + refusal stickiness). Operator-owned thereafter.
 
 **Test count delta:** **607 → 631** (+15 unit + +9 DB integration). Zero failures, zero warnings, zero `[SKIP]` lines on Linux.
@@ -2102,7 +2102,7 @@ Five keys exactly; pinned implicitly via the L0SeedReport struct's field set + t
 **What this slice deliberately does NOT do** (matches the spec's non-goals):
 
 - **No prompt-assembler wiring.** `load_l0_active_default` ships but nothing consumes it. Same posture as the L1 slice. Prompt assembler is the next slice.
-- **No L0 admin CLI.** Future `hhagent-cli l0 list/diff/lint` is filed if observation surfaces a need.
+- **No L0 admin CLI.** Future `kastellan-cli l0 list/diff/lint` is filed if observation surfaces a need.
 - **No hot-reload.** Operator edits + restarts the daemon to pick up changes; matches `agent_prompts` cadence.
 - **No tag-based filtering at load time.** Tags stored for future ops queries.
 - **No embeddings on L0 rows.** They're pinned into every prompt unconditionally; no semantic recall path.
@@ -2134,7 +2134,7 @@ Find the existing block of L0/L1 entries (around line 108-111 in the post-merge 
 - [ ] **Edit `docs/devel/ROADMAP.md`** — add new entry after line 111
 
 ```markdown
-- [x] **L0 seed data loader** — landed 2026-05-16 on branch `feat/l0-seed-loader`. New `core::memory::l0_seed` module: pure `parse_l0_rules` (TOML → validated Vec<L0Rule>); async `seed_l0_from_rules` (idempotent per-rule EXISTS-check on `(l0_rule_id, body_sha256)`); `seed_l0_from_file` (file convenience); `load_l0_active` / `load_l0_active_default` (cap-wrapped active-set reader, mirroring `load_l1`'s saturating_add idiom). New `db::memories::load_active_l0` carries the `SELECT DISTINCT ON (metadata->>'l0_rule_id') WHERE layer = 0` SQL; rows missing the rule_id metadata key are excluded from the active set. Wire-in in `core/src/main.rs` runs right after the prompts loader: env-overridable `HHAGENT_L0_RULES_FILE`, default `seeds/memory/l0_meta_rules.toml`; missing file = `info!` and skip; malformed file = fatal. One `actor='core' action='l0.seeded'` audit row per daemon startup with `{rules_loaded, new_rows_written, unchanged_skipped, source_path, source_sha256}`. Starter TOML ships in-tree with two defensible-default rules (recursive-delete safety + refusal stickiness). +24 tests (607 → 631). Spec at `docs/superpowers/specs/2026-05-16-l0-seed-loader-design.md`; plan at `docs/superpowers/plans/2026-05-16-l0-seed-loader.md`. Unblocks the prompt-assembler `llm_router::build_system_prompt` slice.
+- [x] **L0 seed data loader** — landed 2026-05-16 on branch `feat/l0-seed-loader`. New `core::memory::l0_seed` module: pure `parse_l0_rules` (TOML → validated Vec<L0Rule>); async `seed_l0_from_rules` (idempotent per-rule EXISTS-check on `(l0_rule_id, body_sha256)`); `seed_l0_from_file` (file convenience); `load_l0_active` / `load_l0_active_default` (cap-wrapped active-set reader, mirroring `load_l1`'s saturating_add idiom). New `db::memories::load_active_l0` carries the `SELECT DISTINCT ON (metadata->>'l0_rule_id') WHERE layer = 0` SQL; rows missing the rule_id metadata key are excluded from the active set. Wire-in in `core/src/main.rs` runs right after the prompts loader: env-overridable `KASTELLAN_L0_RULES_FILE`, default `seeds/memory/l0_meta_rules.toml`; missing file = `info!` and skip; malformed file = fatal. One `actor='core' action='l0.seeded'` audit row per daemon startup with `{rules_loaded, new_rows_written, unchanged_skipped, source_path, source_sha256}`. Starter TOML ships in-tree with two defensible-default rules (recursive-delete safety + refusal stickiness). +24 tests (607 → 631). Spec at `docs/superpowers/specs/2026-05-16-l0-seed-loader-design.md`; plan at `docs/superpowers/plans/2026-05-16-l0-seed-loader.md`. Unblocks the prompt-assembler `llm_router::build_system_prompt` slice.
 ```
 
 ### Step 4: Commit

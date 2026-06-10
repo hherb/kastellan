@@ -44,18 +44,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use hhagent_core::cassandra::types::{L3Param, L3SkillCandidate, L3TemplateStep};
-use hhagent_core::memory::l3_approval::SkillTrust;
-use hhagent_core::memory::l3_crystallise::{crystallise_l3, L3Source, L3WriteOutcome};
-use hhagent_core::memory::l3_invoke::{invoke_l3, InvokeReport};
-use hhagent_core::scheduler::inner_loop::StepOutcome;
-use hhagent_core::scheduler::{shell_exec_entry, ToolHostStepDispatcher, ToolRegistry};
-use hhagent_core::secrets::Vault;
-use hhagent_core::worker_lifecycle::CompositeLifecycle;
-use hhagent_db::memories::set_skill_trust;
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_core::cassandra::types::{L3Param, L3SkillCandidate, L3TemplateStep};
+use kastellan_core::memory::l3_approval::SkillTrust;
+use kastellan_core::memory::l3_crystallise::{crystallise_l3, L3Source, L3WriteOutcome};
+use kastellan_core::memory::l3_invoke::{invoke_l3, InvokeReport};
+use kastellan_core::scheduler::inner_loop::StepOutcome;
+use kastellan_core::scheduler::{shell_exec_entry, ToolHostStepDispatcher, ToolRegistry};
+use kastellan_core::secrets::Vault;
+use kastellan_core::worker_lifecycle::CompositeLifecycle;
+use kastellan_db::memories::set_skill_trust;
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, shell_exec_worker_binary, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix,
 };
@@ -85,7 +85,7 @@ async fn bring_up_for_scenario(
     data_label: &str,
     log_label: &str,
     service_suffix: &str,
-) -> Option<(sqlx::PgPool, hhagent_tests_common::PgCluster)> {
+) -> Option<(sqlx::PgPool, kastellan_tests_common::PgCluster)> {
     if skip_if_no_supervisor() {
         return None;
     }
@@ -101,7 +101,7 @@ async fn bring_up_for_scenario(
     }
 
     let suffix = unique_suffix();
-    let service_name = format!("hhagent-postgres-l3-run-{service_suffix}-{suffix}");
+    let service_name = format!("kastellan-postgres-l3-run-{service_suffix}-{suffix}");
 
     let cluster = tokio::task::block_in_place(|| {
         bring_up_pg_cluster(&bin_dir, data_label, log_label, &service_name)
@@ -134,13 +134,13 @@ fn make_dispatcher(
     registry.insert("shell-exec", shell_exec_entry(worker, allowlist));
     let registry = Arc::new(registry);
 
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
-    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
+    let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> =
         Arc::new(CompositeLifecycle::new(Arc::clone(&sandboxes)));
     let vault = Arc::new(Vault::new());
 
     ToolHostStepDispatcher::new(pool, vault, lifecycle, registry,
-        std::sync::Arc::new(hhagent_core::handoff::HandoffCache::new()),
+        std::sync::Arc::new(kastellan_core::handoff::HandoffCache::new()),
     )
 }
 

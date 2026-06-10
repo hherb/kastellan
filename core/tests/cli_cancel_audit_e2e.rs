@@ -2,7 +2,7 @@
 //!
 //! What this test pins (against a per-test PG cluster):
 //!
-//! 1. [`hhagent_core::cli_audit::cancel_and_audit`] on a `pending` task:
+//! 1. [`kastellan_core::cli_audit::cancel_and_audit`] on a `pending` task:
 //!    * flips `tasks.state` to `cancelled`,
 //!    * writes **two** new `actor='cli'` rows in `audit_log`:
 //!      - one `action='task.cancelled'` with the canonical lifecycle
@@ -18,11 +18,11 @@
 //!    * returns `CancelOutcome::Cancelled(Task)` with the freshly-updated
 //!      row data so the caller can display it.
 //!
-//! 2. [`hhagent_core::cli_audit::cancel_and_audit`] on an already-terminal
+//! 2. [`kastellan_core::cli_audit::cancel_and_audit`] on an already-terminal
 //!    task (here: a task that has just been cancelled): returns
 //!    `CancelOutcome::NotCancellable` and writes no new audit row.
 //!
-//! 3. [`hhagent_core::cli_audit::cancel_and_audit`] on a `running` task
+//! 3. [`kastellan_core::cli_audit::cancel_and_audit`] on a `running` task
 //!    (one already claimed by the scheduler) writes ONLY the
 //!    `task.cancelled` producer row — NOT a producer `task.finalize`.
 //!    The scheduler's inner-loop `observe_state` poll will write its own
@@ -33,7 +33,7 @@
 //!
 //! ## Why the test exists
 //!
-//! Before this slice, `hhagent-cli tasks cancel` of a `pending` task
+//! Before this slice, `kastellan-cli tasks cancel` of a `pending` task
 //! flipped the row via the `tasks_cancelled` NOTIFY trigger but emitted
 //! no audit row at all — the scheduler never observed the transition
 //! (the task was never claimed), and the CLI itself had no audit shim.
@@ -48,9 +48,9 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::cli_audit::{cancel_and_audit, CancelOutcome, CLI_AUDIT_ACTOR};
-use hhagent_db::tasks::{insert_pending, observe_state, Lane};
-use hhagent_tests_common::{
+use kastellan_core::cli_audit::{cancel_and_audit, CancelOutcome, CLI_AUDIT_ACTOR};
+use kastellan_db::tasks::{insert_pending, observe_state, Lane};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -72,7 +72,7 @@ fn cancel_pending_task_writes_lifecycle_and_finalize_rows() {
         &bin_dir,
         "cca-d",
         "cca-l",
-        &format!("hhagent-supervisor-test-pg-cca-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-cca-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -82,7 +82,7 @@ fn cancel_pending_task_writes_lifecycle_and_finalize_rows() {
         .expect("build multi-thread tokio runtime");
 
     rt.block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -91,7 +91,7 @@ fn cancel_pending_task_writes_lifecycle_and_finalize_rows() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 
@@ -315,7 +315,7 @@ fn cancel_already_terminal_task_writes_no_audit_row() {
         &bin_dir,
         "ccab-d",
         "ccab-l",
-        &format!("hhagent-supervisor-test-pg-ccab-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-ccab-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -325,7 +325,7 @@ fn cancel_already_terminal_task_writes_no_audit_row() {
         .expect("build multi-thread tokio runtime");
 
     rt.block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -334,7 +334,7 @@ fn cancel_already_terminal_task_writes_no_audit_row() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 
@@ -400,7 +400,7 @@ fn cancel_already_terminal_task_writes_no_audit_row() {
 /// action='task.finalize'` row when it sees the new state, and a
 /// producer finalize would double-count the finalize stream.
 ///
-/// The discriminator inside [`hhagent_core::cli_audit::cancel_and_audit`]
+/// The discriminator inside [`kastellan_core::cli_audit::cancel_and_audit`]
 /// is `task.started_at.is_none()` — true iff the task was never claimed
 /// (set by `claim_one` only). This test plants a running task by calling
 /// `claim_one` directly (no real scheduler needed; the discriminator is
@@ -420,7 +420,7 @@ fn cancel_running_task_does_not_write_producer_finalize() {
         &bin_dir,
         "ccar-d",
         "ccar-l",
-        &format!("hhagent-supervisor-test-pg-ccar-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-ccar-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -430,7 +430,7 @@ fn cancel_running_task_does_not_write_producer_finalize() {
         .expect("build multi-thread tokio runtime");
 
     rt.block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -439,7 +439,7 @@ fn cancel_running_task_does_not_write_producer_finalize() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 
@@ -453,7 +453,7 @@ fn cancel_running_task_does_not_write_producer_finalize() {
         .await
         .expect("insert_pending");
 
-        let claimed = hhagent_db::tasks::claim_one(&pool, Lane::Fast, 60)
+        let claimed = kastellan_db::tasks::claim_one(&pool, Lane::Fast, 60)
             .await
             .expect("claim_one")
             .expect("claimed task");

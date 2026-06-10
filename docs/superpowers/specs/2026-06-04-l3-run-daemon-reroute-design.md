@@ -1,15 +1,15 @@
 # L3 `run` daemon reroute — the #179 Opt-3 structural fix
 
 **Date:** 2026-06-04
-**Issue:** [#179](https://github.com/hherb/hhagent/issues/179) — `memory l3 run`: live registry rebuilt from operator env diverges from the daemon's `registry.loaded` snapshot.
+**Issue:** [#179](https://github.com/hherb/kastellan/issues/179) — `memory l3 run`: live registry rebuilt from operator env diverges from the daemon's `registry.loaded` snapshot.
 **Status:** design approved, ready for plan.
 
 ## Problem
 
-`hhagent-cli memory l3 run <id>` closes the invocation TOCTOU window by
+`kastellan-cli memory l3 run <id>` closes the invocation TOCTOU window by
 **rebuilding the tool registry in-process** (`registry_build::build_tool_registry`)
 and re-validating the approved skill against *that* registry. The rebuild reads
-the operator's environment (`HHAGENT_SHELL_EXEC_BIN`, the gliner-relex vars, …).
+the operator's environment (`KASTELLAN_SHELL_EXEC_BIN`, the gliner-relex vars, …).
 
 The daemon, by contrast, builds its registry once at startup from *its* unit-file
 environment and holds it in an `Arc<ToolRegistry>` for the whole process lifetime.
@@ -64,7 +64,7 @@ There is no `--local` fallback and no auto-fallback — one path, one registry.
 ### Data flow
 
 ```
-operator: hhagent-cli memory l3 run <id> [--arg k=v]… [--execute]
+operator: kastellan-cli memory l3 run <id> [--arg k=v]… [--execute]
    │  parse argv (parse_run_argv, unchanged)
    │  INSERT tasks: kind="l3_run", payload={memory_id, args, execute}, lane=long
    │     + audit actor='cli' action='task.submitted'
@@ -93,7 +93,7 @@ which is the whole point of the fix.
 
 ## Components
 
-### CLI — `core/src/bin/hhagent-cli/memory_l3/run.rs` (shrinks)
+### CLI — `core/src/bin/kastellan-cli/memory_l3/run.rs` (shrinks)
 
 - **Keep** `parse_run_argv` verbatim (the `RunArgv { id, arg_tokens, execute }`
   contract is unchanged).
@@ -167,7 +167,7 @@ the cliff until Opt-3 — is now done by Opt-3 itself.
 ## Error handling & edge cases
 
 - **No daemon running:** after submit, if the task stays `pending` past a grace
-  window (default ~5 s, env-overridable, e.g. `HHAGENT_L3_RUN_GRACE_SECS`), no
+  window (default ~5 s, env-overridable, e.g. `KASTELLAN_L3_RUN_GRACE_SECS`), no
   lane loop is consuming it → the CLI prints a clear "daemon does not appear to be
   running" message, **marks the task cancelled** (reuse `mark_cancelled` +
   `task.cancelled` audit, as `ask` does on interrupt), and exits non-zero. The
@@ -196,7 +196,7 @@ the cliff until Opt-3 — is now done by Opt-3 itself.
 ### Live-PG e2e — rewrite `core/tests/cli_memory_l3_run_e2e.rs` to drive a real daemon
 
 Each scenario brings up a daemon (with `shell-exec` registered) and runs the
-`hhagent-cli` binary as a subprocess:
+`kastellan-cli` binary as a subprocess:
 1. **Dry-run preview** — approved skill, no `--execute` → report lists the
    concrete steps; nothing dispatched.
 2. **Execute** — `--execute` → steps dispatch through the daemon; outcomes Ok.
@@ -206,7 +206,7 @@ Each scenario brings up a daemon (with `shell-exec` registered) and runs the
 5. **Stop at first error** — multi-step skill whose first step fails → only the
    first outcome present, `any_err` set.
 6. **★ Divergence fixed (the #179 regression pin)** — the daemon has `shell-exec`
-   registered; the CLI subprocess runs in an env *without* `HHAGENT_SHELL_EXEC_BIN`;
+   registered; the CLI subprocess runs in an env *without* `KASTELLAN_SHELL_EXEC_BIN`;
    `run --execute` now **succeeds** (previously refused). This is the test that
    proves the cause is removed.
 7. **No daemon** — submit with no daemon consuming the lane → grace-timeout →

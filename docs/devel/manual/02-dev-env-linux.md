@@ -51,7 +51,7 @@ once per machine.
 To confirm it worked:
 
 ```sh
-cargo test -p hhagent-sandbox -- --nocapture 2>&1 | grep -E 'SKIP|ok|FAILED'
+cargo test -p kastellan-sandbox -- --nocapture 2>&1 | grep -E 'SKIP|ok|FAILED'
 ```
 
 You should see `ok` lines, not `[SKIP]` lines. If you still see `[SKIP]`, the
@@ -74,10 +74,10 @@ instance the agent manages itself.
 Initialise a per-user cluster:
 
 ```sh
-cargo run -p hhagent-db --bin hhagent-db-init
+cargo run -p kastellan-db --bin kastellan-db-init
 ```
 
-This creates a cluster in `~/.local/share/hhagent/postgres/`, configured for
+This creates a cluster in `~/.local/share/kastellan/postgres/`, configured for
 localhost-only Unix socket connections with peer auth.
 
 ---
@@ -116,5 +116,5 @@ not present in a standard dev setup (a real GLiNER model, the Apple
 |---------|-------------|-----|
 | `bwrap: creating new session` error in tests | AppArmor restriction | Re-run step 3 |
 | `[SKIP]` lines in sandbox tests | Same as above | Re-run step 3 |
-| `connection refused` in Postgres tests | DB not running | `cargo run -p hhagent-db --bin hhagent-db-init` |
+| `connection refused` in Postgres tests | DB not running | `cargo run -p kastellan-db --bin kastellan-db-init` |
 | `command not found: cargo` | Rust env not sourced | `source "$HOME/.cargo/env"` |

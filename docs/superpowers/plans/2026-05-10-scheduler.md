@@ -2,18 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the agent loop / scheduler for hhagent: a tasks-table-drain queue with two concurrent lanes (`fast`, `long`), per-task iterative replanning, CASSANDRA review pipeline scaffolded with stub stages, and a prompt-traceability ledger end-to-end.
+**Goal:** Build the agent loop / scheduler for kastellan: a tasks-table-drain queue with two concurrent lanes (`fast`, `long`), per-task iterative replanning, CASSANDRA review pipeline scaffolded with stub stages, and a prompt-traceability ledger end-to-end.
 
-**Architecture:** Producers (`hhagent-cli ask`, future channel adapters) INSERT rows into `tasks`. Two long-lived tokio runners inside the daemon (`lane_fast`, `lane_long`) wake on `LISTEN tasks_inserted`, claim atomically with `FOR UPDATE SKIP LOCKED`, and drive each task through an iterative replanning loop: `formulate_plan → ChainReviewStage::review → dispatch each step → reflect → replan` until the agent emits `decision: "task_complete"` or a termination bound is hit. CASSANDRA stages ship as stubs (always Approve) so the agent loop's baseline performance can be measured before real review overhead is added.
+**Architecture:** Producers (`kastellan-cli ask`, future channel adapters) INSERT rows into `tasks`. Two long-lived tokio runners inside the daemon (`lane_fast`, `lane_long`) wake on `LISTEN tasks_inserted`, claim atomically with `FOR UPDATE SKIP LOCKED`, and drive each task through an iterative replanning loop: `formulate_plan → ChainReviewStage::review → dispatch each step → reflect → replan` until the agent emits `decision: "task_complete"` or a termination bound is hit. CASSANDRA stages ship as stubs (always Approve) so the agent loop's baseline performance can be measured before real review overhead is added.
 
-**Tech Stack:** Rust 2021, tokio (multi-thread), sqlx (Postgres + UDS, peer auth), pgvector for memory recall (existing), JSON-RPC 2.0 over stdio for worker IPC (existing `hhagent-protocol`), bwrap+Landlock+seccomp on Linux / sandbox-exec on macOS for sandboxing (existing).
+**Tech Stack:** Rust 2021, tokio (multi-thread), sqlx (Postgres + UDS, peer auth), pgvector for memory recall (existing), JSON-RPC 2.0 over stdio for worker IPC (existing `kastellan-protocol`), bwrap+Landlock+seccomp on Linux / sandbox-exec on macOS for sandboxing (existing).
 
 **Spec:** [`docs/superpowers/specs/2026-05-10-scheduler-design.md`](../specs/2026-05-10-scheduler-design.md). Read the spec before starting; this plan implements it.
 
 **Conventions to follow** (verified from the existing tree):
-- Hand-rolled CLI parser (no `clap` dep). Extend `core/src/bin/hhagent-cli.rs` directly.
+- Hand-rolled CLI parser (no `clap` dep). Extend `core/src/bin/kastellan-cli.rs` directly.
 - Per-test PG cluster pattern (see `core/tests/audit_dispatch_e2e.rs` and `db/tests/postgres_e2e.rs`). RAII `ServiceGuard`/`PathGuard` cleanup. `[SKIP]` on hosts without PG, supervisor, sandbox, or worker binary. **Issue #15** will eventually hoist this into a shared fixture; until then, copy and adapt the existing recipe.
-- `runtime_role` REVOKE pattern (Option L, migration `0002`): every new table gets explicit GRANTs to `hhagent_runtime`. Append-only tables (audit_log, agent_prompts) receive `SELECT, INSERT` only — never `UPDATE/DELETE`.
+- `runtime_role` REVOKE pattern (Option L, migration `0002`): every new table gets explicit GRANTs to `kastellan_runtime`. Append-only tables (audit_log, agent_prompts) receive `SELECT, INSERT` only — never `UPDATE/DELETE`.
 - `WorkerCommand` is sealed at the type system (Option M). The scheduler must call `tool_host::dispatch`, not `worker.call` directly.
 - `audit_log` payload truncation envelope (`PAYLOAD_MAX_BYTES = 4096`) already enforced by `db::audit::insert` — no need to re-truncate.
 - `pub mod foo;` in lib.rs to expose new modules.
@@ -54,7 +54,7 @@
 | `db/src/lib.rs` | `pub mod tasks; pub mod agent_prompts;` |
 | `core/src/lib.rs` | `pub mod cassandra; pub mod scheduler;` |
 | `core/src/main.rs` | Load prompts, run crash-sweep, spawn scheduler alongside audit-mirror |
-| `core/src/bin/hhagent-cli.rs` | Add subcommands: `ask`, `tasks list/status/cancel/fail/tail` |
+| `core/src/bin/kastellan-cli.rs` | Add subcommands: `ask`, `tasks list/status/cancel/fail/tail` |
 | `docs/devel/handovers/HANDOVER.md` | Final session entry |
 | `docs/devel/ROADMAP.md` | Mark scheduler items complete; add follow-up entry |
 
@@ -92,7 +92,7 @@ Create the file with this exact content:
 -- Three NOTIFY triggers (mirroring 0003_audit_log_notify.sql):
 --   tasks_inserted   — wakes lane runners on new pending row
 --   tasks_cancelled  — wakes the inner loop's cancellation poller
---   tasks_completed  — wakes hhagent-cli ask subscribers on terminal transition
+--   tasks_completed  — wakes kastellan-cli ask subscribers on terminal transition
 
 ALTER TABLE tasks
     ADD COLUMN lane TEXT NOT NULL DEFAULT 'fast'
@@ -151,13 +151,13 @@ CREATE TRIGGER tasks_notify_completed
     AFTER UPDATE OF state ON tasks FOR EACH ROW
     EXECUTE FUNCTION notify_task_completed();
 
-GRANT SELECT, INSERT, UPDATE ON tasks TO hhagent_runtime;
-GRANT USAGE, SELECT ON SEQUENCE tasks_id_seq TO hhagent_runtime;
+GRANT SELECT, INSERT, UPDATE ON tasks TO kastellan_runtime;
+GRANT USAGE, SELECT ON SEQUENCE tasks_id_seq TO kastellan_runtime;
 ```
 
 - [ ] **Step 2: Build to verify migration compiles into `MIGRATOR`**
 
-Run: `cargo build -p hhagent-db`
+Run: `cargo build -p kastellan-db`
 Expected: clean build (sqlx `migrate!` macro embeds the new file).
 
 - [ ] **Step 3: Commit**
@@ -188,7 +188,7 @@ git commit -m "feat(db): migration 0005 — scheduler additions to tasks (lanes,
 -- can correlate behavioural drift to specific prompt versions.
 --
 -- Append-only at the DB-role layer, same shape as audit_log:
---   • SELECT, INSERT granted to hhagent_runtime
+--   • SELECT, INSERT granted to kastellan_runtime
 --   • UPDATE, DELETE never granted — old rows persist forever.
 --
 -- A new commit changing a prompt + daemon restart inserts a new row
@@ -205,13 +205,13 @@ CREATE TABLE agent_prompts (
 CREATE INDEX agent_prompts_name_idx
     ON agent_prompts (name, first_loaded_at DESC);
 
-GRANT SELECT, INSERT ON agent_prompts TO hhagent_runtime;
+GRANT SELECT, INSERT ON agent_prompts TO kastellan_runtime;
 -- Intentionally NO UPDATE, DELETE grants. Append-only by GRANT.
 ```
 
 - [ ] **Step 2: Build to verify migration compiles**
 
-Run: `cargo build -p hhagent-db`
+Run: `cargo build -p kastellan-db`
 Expected: clean build.
 
 - [ ] **Step 3: Commit**
@@ -305,7 +305,7 @@ mod tests {
 
 - [ ] **Step 3: Run the test, expect PASS**
 
-Run: `cargo test -p hhagent-db tasks::tests::lane_round_trips_through_sql_string`
+Run: `cargo test -p kastellan-db tasks::tests::lane_round_trips_through_sql_string`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
@@ -367,7 +367,7 @@ pub async fn insert_pending(
 
 - [ ] **Step 2: Build to verify**
 
-Run: `cargo build -p hhagent-db`
+Run: `cargo build -p kastellan-db`
 Expected: clean build.
 
 - [ ] **Step 3: Commit**
@@ -449,7 +449,7 @@ pub async fn claim_one(
 
 - [ ] **Step 2: Build to verify**
 
-Run: `cargo build -p hhagent-db`
+Run: `cargo build -p kastellan-db`
 Expected: clean build.
 
 - [ ] **Step 3: Commit**
@@ -529,7 +529,7 @@ pub async fn mark_cancelled(pool: &PgPool, task_id: i64) -> Result<bool, DbError
 
 /// Operator-side escape hatch: forcibly mark a `running` task as
 /// crashed before its lease elapses. Mirrors the startup sweep but
-/// scoped to one row, used by `hhagent-cli tasks fail <id>`. Returns
+/// scoped to one row, used by `kastellan-cli tasks fail <id>`. Returns
 /// true iff a row was updated.
 pub async fn mark_failed_running(pool: &PgPool, task_id: i64) -> Result<bool, DbError> {
     let r = sqlx::query(
@@ -659,12 +659,12 @@ pub async fn list(
 
 - [ ] **Step 2: Build to verify**
 
-Run: `cargo build -p hhagent-db`
+Run: `cargo build -p kastellan-db`
 Expected: clean build.
 
 - [ ] **Step 3: Run all db unit tests**
 
-Run: `cargo test -p hhagent-db --lib`
+Run: `cargo test -p kastellan-db --lib`
 Expected: existing 71 tests + 1 new (`lane_round_trips_through_sql_string`) = 72 PASS, 0 fail.
 
 - [ ] **Step 4: Commit**
@@ -804,7 +804,7 @@ sha2 = "0.10"
 
 - [ ] **Step 4: Run the unit tests**
 
-Run: `cargo test -p hhagent-db agent_prompts::tests`
+Run: `cargo test -p kastellan-db agent_prompts::tests`
 Expected: 3 PASS.
 
 - [ ] **Step 5: Commit**
@@ -1022,7 +1022,7 @@ mod tests {
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p hhagent-core cassandra::types::tests`
+Run: `cargo test -p kastellan-core cassandra::types::tests`
 Expected: 4 PASS.
 
 - [ ] **Step 5: Commit**
@@ -1251,7 +1251,7 @@ async-trait = { workspace = true }
 
 - [ ] **Step 3: Run the tests**
 
-Run: `cargo test -p hhagent-core cassandra::review::tests`
+Run: `cargo test -p kastellan-core cassandra::review::tests`
 Expected: 5 PASS.
 
 - [ ] **Step 4: Commit**
@@ -1301,7 +1301,7 @@ async fn tasks_lifecycle_e2e() {
     };
     // ctx holds: pool, data_dir, log_dir, service_guard
 
-    use hhagent_db::tasks::{
+    use kastellan_db::tasks::{
         self, claim_one, finalize, get, insert_pending, mark_cancelled,
         observe_state, sweep_crashed, Lane,
     };
@@ -1384,7 +1384,7 @@ to stay under the 108-byte sockaddr_un cap.)
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-db --test postgres_e2e tasks_lifecycle_e2e -- --nocapture`
+Run: `cargo test -p kastellan-db --test postgres_e2e tasks_lifecycle_e2e -- --nocapture`
 Expected: PASS, no `[SKIP]` lines on a host with PG.
 
 - [ ] **Step 3: Commit**
@@ -1595,14 +1595,14 @@ use sqlx::PgPool;
 use thiserror::Error;
 use tokio::fs;
 
-use hhagent_db::agent_prompts;
+use kastellan_db::agent_prompts;
 
 #[derive(Debug, Error)]
 pub enum PromptError {
     #[error("io error reading {path:?}: {source}")]
     Io { path: std::path::PathBuf, source: std::io::Error },
     #[error("db error: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
     #[error("prompt name has invalid characters: {0:?}")]
     InvalidName(String),
 }
@@ -1700,7 +1700,7 @@ mod tests {
 
 - [ ] **Step 4: Run the unit tests**
 
-Run: `cargo test -p hhagent-core scheduler::prompts::tests`
+Run: `cargo test -p kastellan-core scheduler::prompts::tests`
 Expected: 2 PASS.
 
 - [ ] **Step 5: Commit**
@@ -1721,7 +1721,7 @@ git commit -m "feat(scheduler): prompts module — load_prompts_from_dir + Promp
 
 ```rust
 //! Agent LLM adapter — produces a `Plan` from a `TaskContext` via
-//! the existing `hhagent_llm_router::Router`. Strict JSON parsing on
+//! the existing `kastellan_llm_router::Router`. Strict JSON parsing on
 //! the way out: a model that emits a malformed plan is treated as a
 //! decode-error, surfaced as `RouterError::DecodeResponse`, and the
 //! scheduler's retry policy applies (transient → backoff; decode →
@@ -1735,8 +1735,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::cassandra::types::Plan;
-use hhagent_llm_router::messages::{ChatMessage, ChatRequest, ChatResponse};
-use hhagent_llm_router::{Router, RouterError};
+use kastellan_llm_router::messages::{ChatMessage, ChatRequest, ChatResponse};
+use kastellan_llm_router::{Router, RouterError};
 
 use super::inner_loop::TaskContext;
 use super::prompts::PromptCache;
@@ -1873,7 +1873,7 @@ audit-log instrumentation, not load-bearing logic.)
 
 - [ ] **Step 3: Build to verify**
 
-Run: `cargo build -p hhagent-core`
+Run: `cargo build -p kastellan-core`
 Expected: clean build (the test module is empty for this task; the real test lands in 2.5).
 
 - [ ] **Step 4: Commit**
@@ -1914,7 +1914,7 @@ use super::agent::{AgentError, FormulationMeta, PlanFormulator};
 #[derive(Debug)]
 pub struct TaskContext {
     pub task_id: i64,
-    pub lane: hhagent_db::tasks::Lane,
+    pub lane: kastellan_db::tasks::Lane,
     pub instruction: String,
     pub classification_floor: DataClass,
     pub plans: Vec<(Plan, Vec<StepOutcome>)>,
@@ -1990,7 +1990,7 @@ pub enum InnerLoopError {
     #[error("agent: {0}")]
     Agent(#[from] AgentError),
     #[error("db: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
 }
 
 /// Trait for executing a single `PlannedStep`. The production impl
@@ -2010,7 +2010,7 @@ pub async fn run_to_terminal(
     dispatcher: Arc<dyn StepDispatcher>,
     mut ctx: TaskContext,
 ) -> Result<Outcome, InnerLoopError> {
-    use hhagent_db::tasks;
+    use kastellan_db::tasks;
 
     loop {
         // Cancellation poll — top of loop.
@@ -2106,8 +2106,8 @@ pub async fn run_to_terminal(
     }
 }
 
-fn is_transient(_e: &hhagent_llm_router::RouterError) -> bool {
-    use hhagent_llm_router::RouterError::*;
+fn is_transient(_e: &kastellan_llm_router::RouterError) -> bool {
+    use kastellan_llm_router::RouterError::*;
     matches!(_e, Transport(_) | HttpStatus { status, .. } if (500..600).contains(status))
 }
 
@@ -2129,7 +2129,7 @@ async fn write_audit_plan_formulate(
         "plan_step_count":  plan.steps.len(),
         "decision_kind":    if plan.is_terminal() { "task_complete" } else { "act" },
     });
-    hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
+    kastellan_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
 }
 
@@ -2154,7 +2154,7 @@ async fn write_audit_verdict(
         "detail":       detail,
         "latency_ms":   latency_ms,
     });
-    hhagent_db::audit::insert(pool, "cassandra:chain", "verdict", payload).await?;
+    kastellan_db::audit::insert(pool, "cassandra:chain", "verdict", payload).await?;
     Ok(())
 }
 
@@ -2172,7 +2172,7 @@ async fn write_audit_plan_outcome(
         "steps_executed":  steps_executed,
         "steps_total":     steps_total,
     });
-    hhagent_db::audit::insert(pool, "scheduler", "plan.outcome", payload).await?;
+    kastellan_db::audit::insert(pool, "scheduler", "plan.outcome", payload).await?;
     Ok(())
 }
 
@@ -2184,7 +2184,7 @@ mod tests {
     fn ctx() -> TaskContext {
         TaskContext {
             task_id: 1,
-            lane: hhagent_db::tasks::Lane::Fast,
+            lane: kastellan_db::tasks::Lane::Fast,
             instruction: "ping".into(),
             classification_floor: DataClass::Public,
             plans: vec![],
@@ -2245,7 +2245,7 @@ mod tests {
 
 - [ ] **Step 2: Run the unit tests**
 
-Run: `cargo test -p hhagent-core scheduler::inner_loop::tests`
+Run: `cargo test -p kastellan-core scheduler::inner_loop::tests`
 Expected: 4 PASS.
 
 - [ ] **Step 3: Commit**
@@ -2290,13 +2290,13 @@ Create the test file. Use the per-test PG cluster bring-up pattern from `audit_d
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use hhagent_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
-use hhagent_core::cassandra::types::{DataClass, Plan, PlannedStep};
-use hhagent_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
-use hhagent_core::scheduler::inner_loop::{
+use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
+use kastellan_core::cassandra::types::{DataClass, Plan, PlannedStep};
+use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
+use kastellan_core::scheduler::inner_loop::{
     run_to_terminal, Outcome, StepDispatcher, StepOutcome, TaskContext,
 };
-use hhagent_db::tasks::{self, insert_pending, Lane};
+use kastellan_db::tasks::{self, insert_pending, Lane};
 
 // --- Bring-up boilerplate identical in shape to audit_dispatch_e2e.rs.
 // Reproduce only the bits used here; hoist to a shared helper later (issue #15).
@@ -2509,7 +2509,7 @@ copying its body. Use whatever pattern is current — see issue #15.)
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-core --test scheduler_inner_loop_e2e -- --nocapture`
+Run: `cargo test -p kastellan-core --test scheduler_inner_loop_e2e -- --nocapture`
 Expected: 4 PASS, no `[SKIP]` on a host with PG.
 
 - [ ] **Step 3: Commit**
@@ -2557,7 +2557,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
-use hhagent_db::tasks::{self, Lane, Task, DEFAULT_DEADLINE_FAST_S, DEFAULT_DEADLINE_LONG_S,
+use kastellan_db::tasks::{self, Lane, Task, DEFAULT_DEADLINE_FAST_S, DEFAULT_DEADLINE_LONG_S,
     DEFAULT_MAX_PLANS_FAST, DEFAULT_MAX_PLANS_LONG};
 
 use crate::cassandra::review::ChainReviewStage;
@@ -2710,7 +2710,7 @@ async fn run_one(
 
 - [ ] **Step 3: Build to verify**
 
-Run: `cargo build -p hhagent-core`
+Run: `cargo build -p kastellan-core`
 Expected: clean build.
 
 - [ ] **Step 4: Commit**
@@ -2739,15 +2739,15 @@ Modify `core/src/main.rs`. After the existing `spawn_mirror` line and before `wa
 ```rust
 // Crash sweep: any task left in 'running' from a previous daemon
 // instance whose lease has elapsed gets marked 'crashed'. Idempotent.
-if let Err(e) = hhagent_db::tasks::sweep_crashed(&pool).await {
+if let Err(e) = kastellan_db::tasks::sweep_crashed(&pool).await {
     eprintln!("startup: tasks::sweep_crashed failed (non-fatal): {e}");
 }
 
 // Load every prompts/*.md, hash, upsert into agent_prompts.
-let prompts_dir = std::env::var("HHAGENT_PROMPTS_DIR")
+let prompts_dir = std::env::var("KASTELLAN_PROMPTS_DIR")
     .map(std::path::PathBuf::from)
     .unwrap_or_else(|_| std::path::PathBuf::from("prompts"));
-let prompts = match hhagent_core::scheduler::prompts::load_prompts_from_dir(
+let prompts = match kastellan_core::scheduler::prompts::load_prompts_from_dir(
     &pool, &prompts_dir,
 ).await {
     Ok(p) => p,
@@ -2758,33 +2758,33 @@ let prompts = match hhagent_core::scheduler::prompts::load_prompts_from_dir(
 };
 
 // LLM router (existing skeleton).
-let router_cfg = hhagent_llm_router::RouterConfig::from_env()
+let router_cfg = kastellan_llm_router::RouterConfig::from_env()
     .unwrap_or_else(|e| {
         eprintln!("startup: RouterConfig::from_env failed: {e}");
         std::process::exit(1);
     });
-let router = std::sync::Arc::new(hhagent_llm_router::Router::new(router_cfg));
+let router = std::sync::Arc::new(kastellan_llm_router::Router::new(router_cfg));
 
 // Production review pipeline: stub stages in this scope (see spec
 // §6.1). Real implementations replace these structs in place.
 let review = std::sync::Arc::new(
-    hhagent_core::cassandra::review::ChainReviewStage::new(vec![
-        std::sync::Arc::new(hhagent_core::cassandra::review::ConstitutionalGuard),
-        std::sync::Arc::new(hhagent_core::cassandra::review::DeterministicPolicy),
+    kastellan_core::cassandra::review::ChainReviewStage::new(vec![
+        std::sync::Arc::new(kastellan_core::cassandra::review::ConstitutionalGuard),
+        std::sync::Arc::new(kastellan_core::cassandra::review::DeterministicPolicy),
     ])
 );
 
-let formulator: std::sync::Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
-    std::sync::Arc::new(hhagent_core::scheduler::agent::RouterAgent::new(
+let formulator: std::sync::Arc<dyn kastellan_core::scheduler::agent::PlanFormulator> =
+    std::sync::Arc::new(kastellan_core::scheduler::agent::RouterAgent::new(
         router.clone(), prompts.clone(),
     ));
 
 // Production dispatcher: thin wrapper around tool_host::dispatch.
 // See `tool_host_step_dispatcher` in core/src/scheduler/runner.rs
 // (added in a follow-up commit if not already present).
-let dispatcher: std::sync::Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
+let dispatcher: std::sync::Arc<dyn kastellan_core::scheduler::inner_loop::StepDispatcher> =
     std::sync::Arc::new(
-        hhagent_core::scheduler::runner::ToolHostStepDispatcher::new(
+        kastellan_core::scheduler::runner::ToolHostStepDispatcher::new(
             pool.clone(),
             // sandbox backend, workspace root injected here
             sandbox_backend(),
@@ -2792,7 +2792,7 @@ let dispatcher: std::sync::Arc<dyn hhagent_core::scheduler::inner_loop::StepDisp
         )
     );
 
-let scheduler = hhagent_core::scheduler::spawn_scheduler(
+let scheduler = kastellan_core::scheduler::spawn_scheduler(
     pool.clone(), formulator, review, dispatcher, workspace_root.clone(),
 );
 
@@ -2814,7 +2814,7 @@ Append to `core/src/scheduler/runner.rs`:
 ```rust
 use crate::tool_host::{dispatch, spawn_worker, WorkerSpec};
 use crate::workspace::Workspace;
-use hhagent_sandbox::SandboxBackend;
+use kastellan_sandbox::SandboxBackend;
 
 /// Production `StepDispatcher`: maps each `PlannedStep` onto a
 /// `tool_host::dispatch` call against a freshly spawned worker.
@@ -2919,7 +2919,7 @@ async fn dispatch_step(
         let target = std::env::var_os("CARGO_TARGET_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| manifest.parent().unwrap().join("target"));
-        target.join("debug").join("hhagent-worker-shell-exec")
+        target.join("debug").join("kastellan-worker-shell-exec")
     };
     if !worker_bin.exists() {
         return StepOutcome::Err {
@@ -2936,7 +2936,7 @@ async fn dispatch_step(
         Err(e) => return StepOutcome::Err { code: "WORKSPACE".into(), detail: e.to_string() },
     };
 
-    let mut policy = hhagent_sandbox::SandboxPolicy::default();
+    let mut policy = kastellan_sandbox::SandboxPolicy::default();
     workspace.extend_policy(&mut policy);
 
     let spec = WorkerSpec {
@@ -3001,8 +3001,8 @@ git commit -m "feat(scheduler): wire ToolHostStepDispatcher to tool_host::dispat
 async fn two_lanes_run_concurrently() {
     let Some((pool, _g1, _g2, _g3)) = common::bring_up_pg("lanes").await else { return };
 
-    use hhagent_core::scheduler::spawn_scheduler;
-    use hhagent_db::tasks::{insert_pending, Lane};
+    use kastellan_core::scheduler::spawn_scheduler;
+    use kastellan_db::tasks::{insert_pending, Lane};
     use sqlx::postgres::PgListener;
     use std::time::{Duration, Instant};
 
@@ -3018,14 +3018,14 @@ async fn two_lanes_run_concurrently() {
     );
     let dispatcher = std::sync::Arc::new(SleepyDispatcher::new(Duration::from_millis(1000)));
     let review = std::sync::Arc::new(
-        hhagent_core::cassandra::review::ChainReviewStage::new(vec![
-            std::sync::Arc::new(hhagent_core::cassandra::review::NoopReviewStage),
+        kastellan_core::cassandra::review::ChainReviewStage::new(vec![
+            std::sync::Arc::new(kastellan_core::cassandra::review::NoopReviewStage),
         ])
     );
 
     let scheduler = spawn_scheduler(
         pool.clone(), formulator, review, dispatcher,
-        std::path::PathBuf::from("/tmp/hhagent-scheduler-lanes-test"),
+        std::path::PathBuf::from("/tmp/kastellan-scheduler-lanes-test"),
     );
 
     let id_fast = insert_pending(&pool, Lane::Fast, serde_json::json!({"instruction":"a"})).await.unwrap();
@@ -3057,7 +3057,7 @@ into production crates.)
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-core --test scheduler_lanes_e2e -- --nocapture`
+Run: `cargo test -p kastellan-core --test scheduler_lanes_e2e -- --nocapture`
 Expected: PASS, no `[SKIP]` on a host with PG.
 
 - [ ] **Step 3: Commit**
@@ -3093,7 +3093,7 @@ git commit -m "test(scheduler): lanes_e2e — concurrent fast+long claim with ti
 async fn back_dated_lease_is_swept_to_crashed() {
     let Some((pool, _g1, _g2, _g3)) = common::bring_up_pg("crash").await else { return };
 
-    use hhagent_db::tasks::{self, insert_pending, Lane};
+    use kastellan_db::tasks::{self, insert_pending, Lane};
 
     let id = insert_pending(&pool, Lane::Fast, serde_json::json!({})).await.unwrap();
     let _ = tasks::claim_one(&pool, Lane::Fast, 60).await.unwrap().unwrap();
@@ -3116,7 +3116,7 @@ async fn back_dated_lease_is_swept_to_crashed() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-core --test scheduler_crash_recovery_e2e -- --nocapture`
+Run: `cargo test -p kastellan-core --test scheduler_crash_recovery_e2e -- --nocapture`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
@@ -3130,14 +3130,14 @@ git commit -m "test(scheduler): crash_recovery_e2e — back-dated lease → swee
 
 ## Phase 4 — CLI surface
 
-### Task 4.1: `hhagent-cli ask` subcommand
+### Task 4.1: `kastellan-cli ask` subcommand
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli.rs`
+- Modify: `core/src/bin/kastellan-cli.rs`
 
 - [ ] **Step 1: Inspect existing dispatcher**
 
-Open `core/src/bin/hhagent-cli.rs`. The `match args[1].as_str()` block currently has only `"audit"`. Add cases for `"ask"` and `"tasks"`.
+Open `core/src/bin/kastellan-cli.rs`. The `match args[1].as_str()` block currently has only `"audit"`. Add cases for `"ask"` and `"tasks"`.
 
 - [ ] **Step 2: Add `ask` subcommand**
 
@@ -3152,13 +3152,13 @@ Then append the `run_ask` function after `run_audit_tail`:
 
 ```rust
 fn run_ask(args: &[String]) -> ExitCode {
-    let mut lane = hhagent_db::tasks::Lane::Fast;
+    let mut lane = kastellan_db::tasks::Lane::Fast;
     let mut instruction: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--long" => { lane = hhagent_db::tasks::Lane::Long; }
-            "--fast" => { lane = hhagent_db::tasks::Lane::Fast; }
+            "--long" => { lane = kastellan_db::tasks::Lane::Long; }
+            "--fast" => { lane = kastellan_db::tasks::Lane::Fast; }
             other if other.starts_with("--") => {
                 eprintln!("ask: unknown flag {other}");
                 return ExitCode::from(2);
@@ -3174,7 +3174,7 @@ fn run_ask(args: &[String]) -> ExitCode {
         i += 1;
     }
     let Some(instruction) = instruction else {
-        eprintln!("usage: hhagent-cli ask \"<instruction>\" [--fast|--long]");
+        eprintln!("usage: kastellan-cli ask \"<instruction>\" [--fast|--long]");
         return ExitCode::from(2);
     };
 
@@ -3182,9 +3182,9 @@ fn run_ask(args: &[String]) -> ExitCode {
     rt.block_on(ask_async(lane, instruction))
 }
 
-async fn ask_async(lane: hhagent_db::tasks::Lane, instruction: String) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::{get, insert_pending, mark_cancelled};
+async fn ask_async(lane: kastellan_db::tasks::Lane, instruction: String) -> ExitCode {
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::{get, insert_pending, mark_cancelled};
     use sqlx::postgres::PgListener;
 
     let pool = match connect_runtime_pool().await {
@@ -3259,47 +3259,47 @@ Replace the help text to include the new subcommands:
 
 ```rust
 fn help_text() -> &'static str {
-    "hhagent-cli — operator CLI for hhagent
+    "kastellan-cli — operator CLI for kastellan
 
 usage:
-    hhagent-cli ask \"<instruction>\" [--fast|--long]
-    hhagent-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
-    hhagent-cli tasks status <id>
-    hhagent-cli tasks cancel <id>
-    hhagent-cli tasks fail   <id>
-    hhagent-cli tasks tail   <id>
-    hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
+    kastellan-cli ask \"<instruction>\" [--fast|--long]
+    kastellan-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
+    kastellan-cli tasks status <id>
+    kastellan-cli tasks cancel <id>
+    kastellan-cli tasks fail   <id>
+    kastellan-cli tasks tail   <id>
+    kastellan-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 "
 }
 ```
 
 - [ ] **Step 4: Build to verify**
 
-Run: `cargo build -p hhagent-core --bin hhagent-cli`
+Run: `cargo build -p kastellan-core --bin kastellan-cli`
 Expected: clean build.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli.rs
-git commit -m "feat(cli): hhagent-cli ask subcommand (LISTEN-before-INSERT, ctrl-C cancel)"
+git add core/src/bin/kastellan-cli.rs
+git commit -m "feat(cli): kastellan-cli ask subcommand (LISTEN-before-INSERT, ctrl-C cancel)"
 ```
 
 ---
 
-### Task 4.2: `hhagent-cli tasks list/status`
+### Task 4.2: `kastellan-cli tasks list/status`
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli.rs`
+- Modify: `core/src/bin/kastellan-cli.rs`
 
 - [ ] **Step 1: Add `run_tasks` dispatcher and `list`/`status` cases**
 
-Append to `core/src/bin/hhagent-cli.rs`:
+Append to `core/src/bin/kastellan-cli.rs`:
 
 ```rust
 fn run_tasks(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli tasks <list|status|cancel|fail|tail> ...");
+        eprintln!("usage: kastellan-cli tasks <list|status|cancel|fail|tail> ...");
         return ExitCode::from(2);
     }
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -3314,8 +3314,8 @@ fn run_tasks(args: &[String]) -> ExitCode {
 }
 
 async fn tasks_list(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::{list, Lane};
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::{list, Lane};
 
     let mut lane: Option<Lane> = None;
     let mut state: Option<String> = None;
@@ -3360,8 +3360,8 @@ async fn tasks_list(args: &[String]) -> ExitCode {
 }
 
 async fn tasks_status(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::get;
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::get;
 
     let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(i) => i, None => { eprintln!("usage: tasks status <id>"); return ExitCode::from(2) }
@@ -3393,31 +3393,31 @@ async fn tasks_status(args: &[String]) -> ExitCode {
 
 - [ ] **Step 2: Build to verify**
 
-Run: `cargo build -p hhagent-core --bin hhagent-cli`
+Run: `cargo build -p kastellan-core --bin kastellan-cli`
 Expected: clean build.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli.rs
+git add core/src/bin/kastellan-cli.rs
 git commit -m "feat(cli): tasks list + status subcommands"
 ```
 
 ---
 
-### Task 4.3: `hhagent-cli tasks cancel/fail/tail`
+### Task 4.3: `kastellan-cli tasks cancel/fail/tail`
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli.rs`
+- Modify: `core/src/bin/kastellan-cli.rs`
 
 - [ ] **Step 1: Append cancel, fail, tail handlers**
 
-Append to `core/src/bin/hhagent-cli.rs`:
+Append to `core/src/bin/kastellan-cli.rs`:
 
 ```rust
 async fn tasks_cancel(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::mark_cancelled;
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::mark_cancelled;
     let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(i) => i, None => { eprintln!("usage: tasks cancel <id>"); return ExitCode::from(2) }
     };
@@ -3432,8 +3432,8 @@ async fn tasks_cancel(args: &[String]) -> ExitCode {
 }
 
 async fn tasks_fail(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::mark_failed_running;
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::mark_failed_running;
     let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(i) => i, None => { eprintln!("usage: tasks fail <id>"); return ExitCode::from(2) }
     };
@@ -3456,7 +3456,7 @@ fn tasks_tail(args: &[String]) -> ExitCode {
     let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(i) => i, None => { eprintln!("usage: tasks tail <id>"); return ExitCode::from(2) }
     };
-    use hhagent_core::audit_tail::{tail_loop, TailConfig};
+    use kastellan_core::audit_tail::{tail_loop, TailConfig};
     let cfg = TailConfig {
         from_start: true,  // tail from beginning so older task rows show too
         no_follow: false,
@@ -3484,13 +3484,13 @@ Open `core/src/audit_tail.rs`. Add the field to `TailConfig` struct, default to 
 
 - [ ] **Step 3: Build**
 
-Run: `cargo build -p hhagent-core --bin hhagent-cli`
+Run: `cargo build -p kastellan-core --bin kastellan-cli`
 Expected: clean build.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli.rs core/src/audit_tail.rs
+git add core/src/bin/kastellan-cli.rs core/src/audit_tail.rs
 git commit -m "feat(cli): tasks cancel + fail + tail subcommands"
 ```
 
@@ -3504,11 +3504,11 @@ git commit -m "feat(cli): tasks cancel + fail + tail subcommands"
 - [ ] **Step 1: Write the subprocess integration test**
 
 ```rust
-//! End-to-end test for `hhagent-cli ask`.
+//! End-to-end test for `kastellan-cli ask`.
 //!
-//! Brings up a per-test PG cluster + spawns the `hhagent` daemon
+//! Brings up a per-test PG cluster + spawns the `kastellan` daemon
 //! pointed at it (with a stub-friendly env), then runs
-//! `hhagent-cli ask "ping"` as a subprocess and asserts:
+//! `kastellan-cli ask "ping"` as a subprocess and asserts:
 //!   - subprocess exits 0
 //!   - stdout contains the daemon-emitted result body
 //!   - tasks row is in state='completed'
@@ -3523,18 +3523,18 @@ git commit -m "feat(cli): tasks cancel + fail + tail subcommands"
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ask_happy_path_returns_zero_and_prints_body() {
     // Skip on hosts without PG/supervisor/sandbox/worker-binary.
-    // Bring up cluster, install + start the hhagent daemon via
+    // Bring up cluster, install + start the kastellan daemon via
     // default_supervisor() + core_service_spec() (mirror
     // supervisor_e2e.rs::core_service_install_start_observe_log_uninstall).
     // The daemon must run prompts/agent_planner.md from the test's
-    // workspace_root so HHAGENT_PROMPTS_DIR is set in the spec.env.
+    // workspace_root so KASTELLAN_PROMPTS_DIR is set in the spec.env.
     //
-    // For the LLM router, point HHAGENT_LLM_LOCAL_URL at a mock
+    // For the LLM router, point KASTELLAN_LLM_LOCAL_URL at a mock
     // endpoint that always returns a `task_complete` plan with
     // body="pong" — hand-rolled tokio::net::TcpListener as in
     // llm-router/tests/local_backend_e2e.rs::happy_path.
     //
-    // Run hhagent-cli ask "ping" as a subprocess. Assert exit 0,
+    // Run kastellan-cli ask "ping" as a subprocess. Assert exit 0,
     // stdout == "pong\n", and the matching tasks row state.
 
     // (Implementation follows the patterns in supervisor_e2e.rs +
@@ -3545,7 +3545,7 @@ async fn ask_happy_path_returns_zero_and_prints_body() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ask_sigint_cancels_task_and_exits_nonzero() {
     // Same bring-up. Mock LLM returns a slow plan that takes
-    // >1s. Spawn `hhagent-cli ask` subprocess; after 200ms send
+    // >1s. Spawn `kastellan-cli ask` subprocess; after 200ms send
     // SIGINT. Assert: subprocess exits non-zero (130 specifically),
     // tasks row state='cancelled'.
 }
@@ -3559,7 +3559,7 @@ patterns.)
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-core --test cli_ask_e2e -- --nocapture`
+Run: `cargo test -p kastellan-core --test cli_ask_e2e -- --nocapture`
 Expected: 2 PASS.
 
 - [ ] **Step 3: Commit**
@@ -3598,8 +3598,8 @@ async fn prompt_hash_lands_in_ledger_and_audit_payload() {
     let Some((pool, _g1, _g2, _g3)) = common::bring_up_pg("prompts").await else { return };
 
     // Run `load_prompts_from_dir` against a temp dir with one file.
-    use hhagent_core::scheduler::prompts::load_prompts_from_dir;
-    use hhagent_db::agent_prompts::hash_content;
+    use kastellan_core::scheduler::prompts::load_prompts_from_dir;
+    use kastellan_db::agent_prompts::hash_content;
 
     let tmp = tempfile::tempdir().unwrap();
     let prompt_path = tmp.path().join("agent_planner.md");
@@ -3651,7 +3651,7 @@ tempfile = "3"
 
 - [ ] **Step 3: Run the test**
 
-Run: `cargo test -p hhagent-core --test agent_prompts_e2e -- --nocapture`
+Run: `cargo test -p kastellan-core --test agent_prompts_e2e -- --nocapture`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
@@ -3718,7 +3718,7 @@ Open `docs/devel/handovers/HANDOVER.md`. Update the `**Last updated:**` and `**L
 - `core::cassandra` types + trait + `ChainReviewStage` short-circuit semantics + stub stages (`ConstitutionalGuard`, `DeterministicPolicy`, `NoopReviewStage`). Real impls deferred to the post-observation-phase follow-up — see ROADMAP.
 - `core::scheduler::{prompts, agent, inner_loop, runner}`. Two lane runners (`lane_fast`, `lane_long`) hold their own `PgListener` on `tasks_inserted` + `tasks_cancelled`, claim atomically with `FOR UPDATE SKIP LOCKED`, drive the inner loop's iterative replanning until terminal, finalise via `db::tasks::finalize` (which fires `tasks_completed` NOTIFY for CLI subscribers).
 - Daemon startup: crash sweep + prompt load + ChainReviewStage construction + scheduler spawn, all in `core/src/main.rs`. Daemon shutdown joins both lane runners.
-- `hhagent-cli` extended: `ask` (LISTEN-before-INSERT, ctrl-C cancels via mark_cancelled, exit 130), `tasks list/status/cancel/fail/tail`. Hand-rolled parser preserved.
+- `kastellan-cli` extended: `ask` (LISTEN-before-INSERT, ctrl-C cancels via mark_cancelled, exit 130), `tasks list/status/cancel/fail/tail`. Hand-rolled parser preserved.
 - `prompts/agent_planner.md`: planning protocol with constitutional principles inline, even though stubs don't enforce them — agent born aware.
 - Audit-log payload schemas pinned (per spec §7): `plan.formulate`, `cassandra:chain verdict`, `plan.outcome`, `task.<state>` rows all carry the timing + identity fields needed for the observation phase.
 

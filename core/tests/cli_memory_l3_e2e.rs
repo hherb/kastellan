@@ -1,9 +1,9 @@
-//! Subprocess-level pin for `hhagent-cli memory l3 {list,remove,approve,pin,revoke,run}`.
+//! Subprocess-level pin for `kastellan-cli memory l3 {list,remove,approve,pin,revoke,run}`.
 //!
 //! ## What this file pins
 //!
 //! Ten independent scenarios, each bringing up its own per-test PG cluster
-//! and spawning the real `hhagent-cli` binary as a subprocess:
+//! and spawning the real `kastellan-cli` binary as a subprocess:
 //!
 //! 1. **`cli_memory_l3_list_empty_then_populated`** — `memory l3 list` against
 //!    an empty DB exits 0 with just the header; after seeding one skill via
@@ -50,11 +50,11 @@
 
 use std::process::Command;
 
-use hhagent_core::memory::l3_crystallise::{crystallise_l3, L3Source, L3WriteOutcome};
-use hhagent_core::cassandra::types::{L3SkillCandidate, L3Param, L3TemplateStep};
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_core::memory::l3_crystallise::{crystallise_l3, L3Source, L3WriteOutcome};
+use kastellan_core::cassandra::types::{L3SkillCandidate, L3Param, L3TemplateStep};
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, current_username, pg_bin_dir_or_skip,
     skip_if_no_supervisor, unique_suffix,
 };
@@ -102,10 +102,10 @@ fn skill_with_secret_ref() -> L3SkillCandidate {
 async fn seed_registry_loaded(pool: &sqlx::PgPool, tool_names: &[&str]) {
     let tools: Vec<serde_json::Value> =
         tool_names.iter().map(|n| serde_json::json!({ "name": n })).collect();
-    hhagent_db::audit::insert(
+    kastellan_db::audit::insert(
         pool,
         "core",
-        hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED,
+        kastellan_core::scheduler::audit::ACTION_REGISTRY_LOADED,
         serde_json::json!({ "tools": tools }),
     )
     .await
@@ -119,12 +119,12 @@ async fn seed_registry_loaded(pool: &sqlx::PgPool, tool_names: &[&str]) {
 /// Build the env block the CLI subprocess needs to find PG via UDS.
 ///
 /// Mirrors `cli_env` in `cli_memory_l1_e2e.rs` verbatim: the CLI's
-/// `resolve_connect_spec` reads `HHAGENT_DATA_DIR` and derives the socket
+/// `resolve_connect_spec` reads `KASTELLAN_DATA_DIR` and derives the socket
 /// path from there. `HOME` and `USER` are forwarded so the process can find
 /// its home directory and so that audit-row `actor` fields resolve cleanly.
 fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env = vec![
-        ("HHAGENT_DATA_DIR".to_string(), data_dir.display().to_string()),
+        ("KASTELLAN_DATA_DIR".to_string(), data_dir.display().to_string()),
     ];
     if let Some(home) = std::env::var_os("HOME") {
         env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
@@ -141,7 +141,7 @@ fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
 // Scenario 1 — list: empty header, then populated data row
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli memory l3 list` must:
+/// `kastellan-cli memory l3 list` must:
 ///   * exit 0 on an empty DB with only the header line,
 ///   * exit 0 after seeding one skill with a row containing `untrusted`
 ///     and the skill name `summarise_repo_readme`.
@@ -155,7 +155,7 @@ async fn cli_memory_l3_list_empty_then_populated() {
         &bin_dir,
         "cml3-lst-d",
         "cml3-lst-l",
-        &format!("hhagent-postgres-cli-memory-l3-list-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-list-{suffix}"),
     );
 
     probe_run(
@@ -249,7 +249,7 @@ async fn cli_memory_l3_list_empty_then_populated() {
 // Scenario 2 — remove existing: exits 0 with `removed id=N`, row gone
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli memory l3 remove <id>` for an existing row must:
+/// `kastellan-cli memory l3 remove <id>` for an existing row must:
 ///   * exit 0,
 ///   * print `removed id=N` to stdout,
 ///   * leave the DB with no layer-3 rows.
@@ -263,7 +263,7 @@ async fn cli_memory_l3_remove_existing() {
         &bin_dir,
         "cml3-rm-d",
         "cml3-rm-l",
-        &format!("hhagent-postgres-cli-memory-l3-remove-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-remove-{suffix}"),
     );
 
     probe_run(
@@ -341,7 +341,7 @@ async fn cli_memory_l3_remove_existing() {
 // Scenario 3 — remove missing id: exits 0 with informative message
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli memory l3 remove 999999` against a DB with no such row must:
+/// `kastellan-cli memory l3 remove 999999` against a DB with no such row must:
 ///   * exit 0,
 ///   * stdout contains `no row at layer 3 with id=999999`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -354,7 +354,7 @@ async fn cli_memory_l3_remove_missing_id() {
         &bin_dir,
         "cml3-mis-d",
         "cml3-mis-l",
-        &format!("hhagent-postgres-cli-memory-l3-missing-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-missing-{suffix}"),
     );
 
     probe_run(
@@ -397,7 +397,7 @@ async fn cli_memory_l3_remove_missing_id() {
 // Scenario 4 — remove bad arg: exits 2 with `invalid id` on stderr
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli memory l3 remove notanumber` must:
+/// `kastellan-cli memory l3 remove notanumber` must:
 ///   * exit 2,
 ///   * stderr contains `invalid id`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -410,7 +410,7 @@ async fn cli_memory_l3_remove_bad_arg() {
         &bin_dir,
         "cml3-bad-d",
         "cml3-bad-l",
-        &format!("hhagent-postgres-cli-memory-l3-badarg-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-badarg-{suffix}"),
     );
 
     probe_run(
@@ -464,7 +464,7 @@ async fn cli_memory_l3_approve_happy() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-app-d", "cml3-app-l",
-        &format!("hhagent-postgres-cli-memory-l3-approve-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-approve-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_approve_happy"})).await.expect("probe");
@@ -508,7 +508,7 @@ async fn cli_memory_l3_approve_rejects_secret_ref() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-sec-d", "cml3-sec-l",
-        &format!("hhagent-postgres-cli-memory-l3-secret-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-secret-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_approve_rejects_secret_ref"})).await.expect("probe");
@@ -557,7 +557,7 @@ async fn cli_memory_l3_approve_fail_closed_no_snapshot() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-noc-d", "cml3-noc-l",
-        &format!("hhagent-postgres-cli-memory-l3-nosnap-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-nosnap-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_approve_fail_closed_no_snapshot"})).await.expect("probe");
@@ -595,7 +595,7 @@ async fn cli_memory_l3_revoke_after_approve() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-rev-d", "cml3-rev-l",
-        &format!("hhagent-postgres-cli-memory-l3-revoke-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-revoke-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_revoke_after_approve"})).await.expect("probe");
@@ -642,7 +642,7 @@ async fn cli_memory_l3_pin_happy() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-pin-d", "cml3-pin-l",
-        &format!("hhagent-postgres-cli-memory-l3-pin-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-pin-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_pin_happy"})).await.expect("probe");
@@ -701,7 +701,7 @@ async fn cli_memory_l3_pin_rejects_not_approved() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-pnr-d", "cml3-pnr-l",
-        &format!("hhagent-postgres-cli-memory-l3-pin-reject-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-pin-reject-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_pin_rejects_not_approved"})).await.expect("probe");

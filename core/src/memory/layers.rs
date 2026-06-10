@@ -26,8 +26,8 @@
 //! count). Both apply, in that order: the DB caps the row count first,
 //! the in-Rust loop applies the byte cap second.
 
-use hhagent_db::memories::{load_layer, Memory, MemoryLayer};
-use hhagent_db::DbError;
+use kastellan_db::memories::{load_layer, Memory, MemoryLayer};
+use kastellan_db::DbError;
 use sqlx::PgPool;
 
 /// Default upper bound on L1 row count.
@@ -53,7 +53,7 @@ pub const L1_DEFAULT_CAP_BYTES: usize = 4096;
 /// `cap_bytes`. The boundary is inclusive — rows that fill `cap_bytes`
 /// exactly still fit. Rows come back newest-first
 /// (`(created_at DESC, id DESC)` from
-/// [`hhagent_db::memories::load_layer`]); the caller concatenates them
+/// [`kastellan_db::memories::load_layer`]); the caller concatenates them
 /// into the system prompt verbatim.
 ///
 /// Returns `Ok(vec![])` when no L1 rows exist — that is the expected

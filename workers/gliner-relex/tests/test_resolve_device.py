@@ -29,8 +29,8 @@ import sys
 
 import pytest
 
-from hhagent_worker_gliner_relex.__main__ import _resolve_device
-from hhagent_worker_gliner_relex.errors import UNSUPPORTED_DEVICE
+from kastellan_worker_gliner_relex.__main__ import _resolve_device
+from kastellan_worker_gliner_relex.errors import UNSUPPORTED_DEVICE
 
 
 def _fake_torch(
@@ -74,7 +74,7 @@ def patched_torch_cpu(monkeypatch):
 def test_darwin_auto_resolves_to_cpu_even_when_mps_available(monkeypatch):
     """The spike found MPS regresses ~5x vs CPU on realistic input. So
     `auto` on darwin must NEVER pick mps — operators who want mps must
-    set `HHAGENT_GLINER_RELEX_DEVICE=mps` explicitly.
+    set `KASTELLAN_GLINER_RELEX_DEVICE=mps` explicitly.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setitem(

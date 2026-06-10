@@ -25,7 +25,7 @@ Three projects with confusable names — the licensing story diverges sharply:
 | **GLiREL** (`jackboyla/GLiREL`) | Separate relation-extraction library | **CC BY-NC-SA 4.0** — non-commercial, **AGPL-incompatible** | inherits |
 | **GLiNER-Relex** (Knowledgator) | Joint NER+RE model loaded via the upstream `gliner` Python package | Apache 2.0 (upstream lib) | **Apache 2.0** |
 
-**For hhagent's AGPL-3.0 project, only the Knowledgator `gliner-relex-*` models are usable.** GLiREL is a hard block. Confirm-at-install: the model card URL must contain `knowledgator/gliner-relex-` for the licensing chain to hold.
+**For kastellan's AGPL-3.0 project, only the Knowledgator `gliner-relex-*` models are usable.** GLiREL is a hard block. Confirm-at-install: the model card URL must contain `knowledgator/gliner-relex-` for the licensing chain to hold.
 
 Sources:
 - [urchade/GLiNER LICENSE](https://github.com/urchade/GLiNER/blob/main/LICENSE) — Apache 2.0
@@ -64,7 +64,7 @@ Sources:
 
 - **Fully offline after one-time weight download.** Standard pattern: `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` + `local_files_only=True`. No extra support needed from gliner itself. Compatible with the sandbox's no-network-egress posture at inference time.
 - **No telemetry or phone-home** in the upstream dep tree.
-- **No official Docker image** — plain `pip install gliner`. Fits hhagent's bwrap / Seatbelt worker model trivially.
+- **No official Docker image** — plain `pip install gliner`. Fits kastellan's bwrap / Seatbelt worker model trivially.
 
 ## Warm-worker corollary
 
@@ -76,7 +76,7 @@ The v2 entity-extraction redesign should not implement until the worker-lifecycl
 
 ## Effort estimate
 
-~150-250 LOC Python worker: load model in `__main__`, JSON-RPC `extract(text, entity_types, relation_types) → {entities, triples}`, offline-mode env vars, structured error reporting. Reuses the existing JSON-RPC stdio contract from `hhagent-protocol`. The Rust side gains a thin client + the `idle_timeout` lifecycle manifest.
+~150-250 LOC Python worker: load model in `__main__`, JSON-RPC `extract(text, entity_types, relation_types) → {entities, triples}`, offline-mode env vars, structured error reporting. Reuses the existing JSON-RPC stdio contract from `kastellan-protocol`. The Rust side gains a thin client + the `idle_timeout` lifecycle manifest.
 
 ## Loud gotchas
 

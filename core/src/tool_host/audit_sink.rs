@@ -2,7 +2,7 @@
 //!
 //! [`super::dispatch`] writes audit rows at four points (tool row, the two
 //! secret-ref rows, and the `injection.blocked` forensic row). In production
-//! all four go straight to Postgres via [`hhagent_db::audit::insert`]. This
+//! all four go straight to Postgres via [`kastellan_db::audit::insert`]. This
 //! module factors that single dependency behind the [`AuditSink`] trait so a
 //! test can substitute a fake sink and force individual inserts to fail —
 //! exercising the best-effort *swallow-and-continue* paths that are otherwise
@@ -23,21 +23,21 @@ use async_trait::async_trait;
 use serde_json::Value;
 use sqlx::PgPool;
 
-use hhagent_db::DbError;
+use kastellan_db::DbError;
 
 /// Where [`super::dispatch_with_sink`] sends its audit rows.
 ///
-/// Mirrors the shape of [`hhagent_db::audit::insert`] (actor, action,
+/// Mirrors the shape of [`kastellan_db::audit::insert`] (actor, action,
 /// payload → row id) so [`PgAuditSink`] is a one-line adapter and the prod
 /// behaviour is byte-for-byte what `dispatch` did before the seam existed.
 #[async_trait]
 pub trait AuditSink: Send + Sync {
     /// Insert one audit row. Returns the new row id on success, mirroring
-    /// [`hhagent_db::audit::insert`].
+    /// [`kastellan_db::audit::insert`].
     async fn insert(&self, actor: &str, action: &str, payload: Value) -> Result<i64, DbError>;
 }
 
-/// Production [`AuditSink`]: forwards straight to [`hhagent_db::audit::insert`]
+/// Production [`AuditSink`]: forwards straight to [`kastellan_db::audit::insert`]
 /// over a borrowed pool. This is the only sink ever used in production —
 /// [`super::dispatch`] constructs it from its `pool` argument.
 pub struct PgAuditSink<'a> {
@@ -54,6 +54,6 @@ impl<'a> PgAuditSink<'a> {
 #[async_trait]
 impl AuditSink for PgAuditSink<'_> {
     async fn insert(&self, actor: &str, action: &str, payload: Value) -> Result<i64, DbError> {
-        hhagent_db::audit::insert(self.pool, actor, action, payload).await
+        kastellan_db::audit::insert(self.pool, actor, action, payload).await
     }
 }

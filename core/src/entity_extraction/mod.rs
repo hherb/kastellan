@@ -14,11 +14,11 @@ pub mod gliner_relex;
 pub mod batch_upsert;
 
 /// Canonical form for entity-name dedup. Re-exported from
-/// `hhagent-db` so the v2 extractor and `PgGraph::upsert_entity`
+/// `kastellan-db` so the v2 extractor and `PgGraph::upsert_entity`
 /// share one normalization implementation — schema concern (the
 /// `entities.name_norm` column) lives in the db crate; core just
 /// re-exports for convenience at the call sites.
-pub use hhagent_db::normalize_entity_name;
+pub use kastellan_db::normalize_entity_name;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,7 @@ impl EntitySeeds {
 #[derive(Debug, thiserror::Error)]
 pub enum EntityExtractionError {
     #[error("db error: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
     #[error("client error: {0}")]
     Client(String),
 }

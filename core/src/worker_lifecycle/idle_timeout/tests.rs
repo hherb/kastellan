@@ -12,7 +12,7 @@ use super::*;
 // rather than via a `#[cfg(test)]` re-export on the parent so the structural
 // home of the helper is explicit at the import site.
 use super::release::replace_idle_teardown_handle;
-use hhagent_protocol::RpcError;
+use kastellan_protocol::RpcError;
 use std::io;
 
 #[test]
@@ -124,7 +124,7 @@ fn dispatch_classifier_sandbox_is_not_a_warm_worker_crash() {
     // SPAWN_FAILED path, not a warm-worker crash. The classifier returns false so
     // the restart-backoff counter doesn't increment.
     let r: Result<(), ToolHostError> = Err(ToolHostError::Sandbox(
-        hhagent_sandbox::SandboxError::Backend("test".into()),
+        kastellan_sandbox::SandboxError::Backend("test".into()),
     ));
     assert!(!dispatch_indicates_worker_dead(&r));
 }

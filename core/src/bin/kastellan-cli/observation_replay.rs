@@ -10,7 +10,7 @@ use crate::common::with_runtime;
 
 pub(crate) fn run_observation(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli observation replay [opts]");
+        eprintln!("usage: kastellan-cli observation replay [opts]");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -85,7 +85,7 @@ fn default_captures_dir() -> PathBuf {
         debug_assert_eq!(
             p.file_name().and_then(|s| s.to_str()),
             Some("core"),
-            "default_captures_dir assumes hhagent-cli lives in core/ \
+            "default_captures_dir assumes kastellan-cli lives in core/ \
              (CARGO_MANIFEST_DIR = {p:?})"
         );
         p.pop(); // strip `/core` to reach workspace root
@@ -100,10 +100,10 @@ async fn observation_replay_async(
     model_filter: Option<&str>,
 ) -> ExitCode {
     use std::sync::Arc;
-    use hhagent_core::cassandra::review::{
+    use kastellan_core::cassandra::review::{
         ChainReviewStage, ConstitutionalGuard, DeterministicPolicy,
     };
-    use hhagent_core::observation::replay::{
+    use kastellan_core::observation::replay::{
         format_report_table, load_captures_from_dir, replay_capture, ReplayResult,
     };
 

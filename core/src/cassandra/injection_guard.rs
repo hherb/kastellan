@@ -69,7 +69,7 @@
 //! pinned by `policy_audit_row_contains_no_substring_of_blocked_body`).
 //! The tool row also stores the redacted placeholder, not the
 //! original. So a blocked worker output is **unrecoverable
-//! post-hoc**: an operator reviewing a future `hhagent-cli policy
+//! post-hoc**: an operator reviewing a future `kastellan-cli policy
 //! review` cannot inspect the offending text, only its hash, size,
 //! and class codes. This is the privacy-over-debuggability trade-off
 //! cited in the design spec; a future slice could revisit it by

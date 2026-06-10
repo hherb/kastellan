@@ -3,7 +3,7 @@
 //!
 //! Walks `relations` outbound and inbound from the given entity up to
 //! `--depth N` hops (default 1, hard-capped at
-//! [`hhagent_db::graph::MAX_WALK_DEPTH`]). Renders one row per
+//! [`kastellan_db::graph::MAX_WALK_DEPTH`]). Renders one row per
 //! traversed edge in canonical
 //! `(src_kind, "src_name") --[edge_kind]--> (dst_kind, "dst_name")`
 //! shape regardless of which walk surfaced it; quarantined entities
@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use crate::common::{resolve_connect_spec, with_runtime};
 
 /// Per-direction OUTPUT row cap applied SQL-side in
-/// [`hhagent_db::graph::Graph::walk_edges_around`] (separate LIMITs on
+/// [`kastellan_db::graph::Graph::walk_edges_around`] (separate LIMITs on
 /// the outbound and inbound rendered CTEs inside its single UNION ALL
 /// query). 10_000 is generous enough that an operator inspecting a hub
 /// entity sees the full neighbourhood even at depth 3-5.
@@ -27,7 +27,7 @@ use crate::common::{resolve_connect_spec, with_runtime};
 /// completion *before* `ORDER BY (depth ASC, edge_id ASC) LIMIT N` clips
 /// the output, so this constant bounds the row count we render, not the
 /// row count Postgres traverses. The actual walk-cost bound is
-/// [`hhagent_db::graph::MAX_WALK_DEPTH`] — at depth 5 on a 10-fan-out
+/// [`kastellan_db::graph::MAX_WALK_DEPTH`] — at depth 5 on a 10-fan-out
 /// graph the CTE can still touch ~100_000 rows before LIMIT applies.
 /// `MAX_WALK_DEPTH` is the safety budget; `SHOW_PER_DIRECTION_LIMIT` is
 /// purely an operator-output ergonomic.
@@ -75,12 +75,12 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
 ///
 /// **Depth validation:** `--depth 0` is rejected (a depth-0 walk has no
 /// edges by construction — almost certainly an operator mistake).
-/// Depths greater than [`hhagent_db::graph::MAX_WALK_DEPTH`] are
+/// Depths greater than [`kastellan_db::graph::MAX_WALK_DEPTH`] are
 /// rejected at parse time too rather than silently clamped — the
 /// operator should see the cap, not get a surprising truncated output.
 /// The DB layer also clamps as a defense-in-depth measure.
 fn parse_show_args(args: &[String]) -> Result<(i64, u8, ShowFormat), String> {
-    const USAGE: &str = "usage: hhagent-cli relations show <entity-id> \
+    const USAGE: &str = "usage: kastellan-cli relations show <entity-id> \
         [--depth N] [--format plain|json]";
 
     if args.is_empty() {
@@ -107,10 +107,10 @@ fn parse_show_args(args: &[String]) -> Result<(i64, u8, ShowFormat), String> {
                         "relations show: --depth 0 has no edges to walk; pass --depth 1 or more\n{USAGE}"
                     ));
                 }
-                if n > hhagent_db::graph::MAX_WALK_DEPTH {
+                if n > kastellan_db::graph::MAX_WALK_DEPTH {
                     return Err(format!(
                         "relations show: --depth {n} exceeds cap {cap}; pick a smaller value\n{USAGE}",
-                        cap = hhagent_db::graph::MAX_WALK_DEPTH,
+                        cap = kastellan_db::graph::MAX_WALK_DEPTH,
                     ));
                 }
                 depth = n;
@@ -142,8 +142,8 @@ fn parse_show_args(args: &[String]) -> Result<(i64, u8, ShowFormat), String> {
 }
 
 async fn relations_show(args: &[String]) -> ExitCode {
-    use hhagent_db::graph::{Graph, PgGraph};
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_db::graph::{Graph, PgGraph};
+    use kastellan_db::pool::connect_runtime_pool;
 
     let (id, depth, format) = match parse_show_args(args) {
         Ok(parsed) => parsed,
@@ -184,8 +184,8 @@ async fn relations_show(args: &[String]) -> ExitCode {
     };
 
     // Single round-trip combining both directions via UNION ALL — see
-    // [`hhagent_db::graph::Graph::walk_edges_around`] and issue
-    // [#115](https://github.com/hherb/hhagent/issues/115). The
+    // [`kastellan_db::graph::Graph::walk_edges_around`] and issue
+    // [#115](https://github.com/hherb/kastellan/issues/115). The
     // `per_direction_limit` is applied SQL-side inside each rendered
     // CTE so an outbound-heavy hub cannot starve inbound rows out of
     // the operator's view.
@@ -245,8 +245,8 @@ async fn fetch_entity_summary(
 fn render_show_plain(
     seed: &SeedSummary,
     depth: u8,
-    outbound: &[hhagent_db::graph::WalkedEdge],
-    inbound: &[hhagent_db::graph::WalkedEdge],
+    outbound: &[kastellan_db::graph::WalkedEdge],
+    inbound: &[kastellan_db::graph::WalkedEdge],
 ) {
     let q_tag = |q: bool| if q { " [Q]" } else { "" };
     println!(
@@ -264,7 +264,7 @@ fn render_show_plain(
     render_direction("inbound", inbound);
 }
 
-fn render_direction(label: &str, edges: &[hhagent_db::graph::WalkedEdge]) {
+fn render_direction(label: &str, edges: &[kastellan_db::graph::WalkedEdge]) {
     println!("{label} ({}):", edges.len());
     if edges.is_empty() {
         return;
@@ -323,8 +323,8 @@ fn endpoint_str(kind: &str, name: &str, quarantine: bool) -> String {
 fn render_show_json(
     seed: &SeedSummary,
     depth: u8,
-    outbound: &[hhagent_db::graph::WalkedEdge],
-    inbound: &[hhagent_db::graph::WalkedEdge],
+    outbound: &[kastellan_db::graph::WalkedEdge],
+    inbound: &[kastellan_db::graph::WalkedEdge],
 ) {
     println!(
         "{}",
@@ -349,7 +349,7 @@ fn render_show_json(
     }
 }
 
-fn edge_to_json(direction: &str, e: &hhagent_db::graph::WalkedEdge) -> String {
+fn edge_to_json(direction: &str, e: &kastellan_db::graph::WalkedEdge) -> String {
     serde_json::json!({
         "type": "edge",
         "direction": direction,

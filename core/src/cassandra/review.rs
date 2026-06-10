@@ -118,7 +118,7 @@ impl ReviewStage for ConstitutionalGuard {
 ///   plan-internal consistency.
 ///
 /// The floor is set at task submission via
-/// `hhagent-cli ask --classification-floor <DataClass>` (operator
+/// `kastellan-cli ask --classification-floor <DataClass>` (operator
 /// override) or by automatic keyword inference from the prompt
 /// (`core::classification_inference`). Provenance lands in
 /// `tasks.payload.classification_floor` /

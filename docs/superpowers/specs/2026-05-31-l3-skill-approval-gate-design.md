@@ -22,7 +22,7 @@ This slice ships the **gate, not the door**:
 
 - A typed `SkillTrust` enum (`Untrusted | UserApproved | Pinned`) replacing the bare `trust` string at the read boundary.
 - A **pure** approval gate that, given a skill template and the set of tools the daemon actually registered, decides Approve / Reject-with-reasons. It rejects any skill that (a) is structurally invalid, (b) carries a baked-in `secret://` reference, or (c) names a tool the live daemon did not register.
-- An operator surface — `hhagent-cli memory l3 approve <id>` / `revoke <id>` — that runs the gate, flips the stored trust, and emits a typed audit row (including for *rejected* approvals, so the security trail captures every operator attempt).
+- An operator surface — `kastellan-cli memory l3 approve <id>` / `revoke <id>` — that runs the gate, flips the stored trust, and emits a typed audit row (including for *rejected* approvals, so the security trail captures every operator attempt).
 
 Crucially, **nothing executes a skill in this slice.** `UserApproved` and `Pinned` have no behavioural consequence yet — no code reads `trust` to decide whether to run anything. The gate is built and verified before the door exists, exactly as the writer-only slice built storage before recall.
 
@@ -34,7 +34,7 @@ In scope (this slice):
 - **New db helper** `db::memories::set_skill_trust(pool, id, trust: &str) -> Result<bool, DbError>` ([`db/src/memories/write.rs`](../../../db/src/memories/write.rs)) — layer-guarded `UPDATE … WHERE id = $1 AND layer = 3`. db takes a `&str` (the `db` crate sits below `core` and cannot depend on the `core`-owned `SkillTrust` enum).
 - **Three new audit action constants** in [`core/src/scheduler/audit.rs`](../../../core/src/scheduler/audit.rs): `ACTION_L3_APPROVED = "l3.approved"`, `ACTION_L3_APPROVE_REJECTED = "l3.approve_rejected"`, `ACTION_L3_REVOKED = "l3.revoked"` — plus pure payload builders.
 - **Two new `cli_audit` helpers** — `l3_approve_and_audit`, `l3_revoke_and_audit` (mirror `l3_remove_and_audit`).
-- **CLI** [`core/src/bin/hhagent-cli/memory_l3.rs`](../../../core/src/bin/hhagent-cli/memory_l3.rs) gains `approve` + `revoke` subcommands; `list` output reads the typed `SkillTrust` instead of the raw string.
+- **CLI** [`core/src/bin/kastellan-cli/memory_l3.rs`](../../../core/src/bin/kastellan-cli/memory_l3.rs) gains `approve` + `revoke` subcommands; `list` output reads the typed `SkillTrust` instead of the raw string.
 
 Out of scope (named follow-ups at the end):
 
@@ -46,7 +46,7 @@ Out of scope (named follow-ups at the end):
 
 ## Where the tool check lives (the central design tension)
 
-The `ToolRegistry` is a **daemon-runtime artifact**: [`build_tool_registry`](../../../core/src/main.rs) constructs it at startup from environment (`HHAGENT_SHELL_EXEC_BIN`) plus DB allowlists, reflecting what is actually deployed on *this* host. The CLI binary never runs that bring-up, and the DB exposes only per-tool allowlists (no "list all tools", and env-gated tools like `gliner-relex` are absent from the allowlist table). So the CLI cannot reconstruct the live registry directly.
+The `ToolRegistry` is a **daemon-runtime artifact**: [`build_tool_registry`](../../../core/src/main.rs) constructs it at startup from environment (`KASTELLAN_SHELL_EXEC_BIN`) plus DB allowlists, reflecting what is actually deployed on *this* host. The CLI binary never runs that bring-up, and the DB exposes only per-tool allowlists (no "list all tools", and env-gated tools like `gliner-relex` are absent from the allowlist table). So the CLI cannot reconstruct the live registry directly.
 
 The faithful, DB-backed source the CLI *can* read is the **latest `registry.loaded` audit row** — the daemon's own list of the tool names it registered. The gate sources `known_tools` from that snapshot.
 
@@ -161,7 +161,7 @@ Auditing the **rejected** path is a deliberate departure from the writer's "vali
 ## Data flow
 
 ```
-operator: hhagent-cli memory l3 approve 42
+operator: kastellan-cli memory l3 approve 42
   └─ db::memories::fetch_by_ids(pool, &[42]) → Memory (reject if layer != 3 / absent)
   └─ parse memory.metadata["template"] → L3SkillCandidate     (reject ⇒ l3.approve_rejected, StructuralInvalid)
   └─ SELECT payload FROM audit_log
@@ -176,12 +176,12 @@ operator: hhagent-cli memory l3 approve 42
                     print reasons to stderr                    ; exit 1
                     (trust UNCHANGED — no db write)
 
-operator: hhagent-cli memory l3 revoke 42
+operator: kastellan-cli memory l3 revoke 42
   └─ db::set_skill_trust(42, "untrusted")  (no gate; downgrade is always safe)
   └─ cli_audit::…  audit cli/l3.revoked {memory_id, updated}
   └─ print result                                              ; exit 0
 
-operator: hhagent-cli memory l3 list
+operator: kastellan-cli memory l3 list
   └─ list_l3(pool) → rows; render SkillTrust::from_metadata_str(metadata.trust)
 ```
 
@@ -197,8 +197,8 @@ MODIFIED (~8):
 - `db/src/memories/write.rs` — `set_skill_trust` + (parent `memories.rs` re-export so `db::memories::set_skill_trust` resolves, matching the existing write-helper re-exports).
 - `core/src/scheduler/audit.rs` — three action constants + payload builders + unit tests.
 - `core/src/cli_audit.rs` — `l3_approve_and_audit`, `l3_revoke_and_audit`.
-- `core/src/bin/hhagent-cli/memory_l3.rs` — `approve` + `revoke` subcommands; typed-trust in `list`.
-- `core/src/bin/hhagent-cli/main.rs` — dispatch wiring for the two new subcommands (if the router is centralised there rather than in `memory_l3.rs`).
+- `core/src/bin/kastellan-cli/memory_l3.rs` — `approve` + `revoke` subcommands; typed-trust in `list`.
+- `core/src/bin/kastellan-cli/main.rs` — dispatch wiring for the two new subcommands (if the router is centralised there rather than in `memory_l3.rs`).
 - `db/tests/postgres_e2e.rs` — `set_skill_trust` flip + layer-guard cases.
 
 DOCS (2): `HANDOVER.md` + `ROADMAP.md` session-end update.
@@ -238,7 +238,7 @@ If any of these turn out wrong during implementation, file the correction inline
 
 - [x] No placeholders / TBD / TODO in body text.
 - [x] Audit-row bump described concretely (three new actions, pure builders) and the rejected-path departure from the writer's no-audit rule is justified.
-- [x] File-touch list cross-checked against the precedent (`l3_crystallise.rs`, `cli_audit::l3_remove_and_audit`, `bin/hhagent-cli/memory_l3.rs`, `audit.rs` `ACTION_ENTITIES_APPROVED` pair, `db/memories/write.rs` re-export pattern).
+- [x] File-touch list cross-checked against the precedent (`l3_crystallise.rs`, `cli_audit::l3_remove_and_audit`, `bin/kastellan-cli/memory_l3.rs`, `audit.rs` `ACTION_ENTITIES_APPROVED` pair, `db/memories/write.rs` re-export pattern).
 - [x] No new `db/` table or migration claimed — `metadata` column + `fetch_by_ids` confirmed already shipped.
 - [x] Central tension (registry is daemon-only) stated, resolved (snapshot + fail-closed), and the resolution's safety (false-reject only, never false-approve; live re-check at invocation) is explicit.
 - [x] Writer-only/gate-only boundary explicit: nothing executes; `UserApproved`/`Pinned` are inert this slice.

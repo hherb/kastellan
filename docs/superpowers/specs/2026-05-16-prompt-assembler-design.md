@@ -111,7 +111,7 @@ You are the agent...
 ```rust
 // core/src/prompt_assembly/assemble.rs
 
-use hhagent_db::memories::Memory;
+use kastellan_db::memories::Memory;
 
 /// Build the system message by concatenating L0 + L1 + base under
 /// XML-style section tags. Empty layers omit their tags entirely.
@@ -127,7 +127,7 @@ pub fn assemble_system_prompt(l0: &[Memory], l1: &[Memory], base: &str) -> Strin
 // core/src/prompt_assembly/mod.rs
 
 use async_trait::async_trait;
-use hhagent_db::DbError;
+use kastellan_db::DbError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -467,4 +467,4 @@ All three new files stay under the 500-LOC soft cap. `inner_loop.rs`'s pre-exist
 
 ## Verification step
 
-`cargo test --workspace` on Linux: 638 → ~651 passed, 0 failed, 0 `[SKIP]` lines, 0 warnings. Manual smoke: `hhagent-cli ask "echo marker"` with the L0 seed file in place; inspect the resulting `plan.formulate` row (`hhagent-cli audit tail`) and confirm `l0_count = 2`, `l1_count = 0`, `system_prompt_sha256 != prompt_sha256`.
+`cargo test --workspace` on Linux: 638 → ~651 passed, 0 failed, 0 `[SKIP]` lines, 0 warnings. Manual smoke: `kastellan-cli ask "echo marker"` with the L0 seed file in place; inspect the resulting `plan.formulate` row (`kastellan-cli audit tail`) and confirm `l0_count = 2`, `l1_count = 0`, `system_prompt_sha256 != prompt_sha256`.

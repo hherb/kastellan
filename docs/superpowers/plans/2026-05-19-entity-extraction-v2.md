@@ -173,7 +173,7 @@ pub mod entity_extraction;
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core entity_extraction::tests --lib -- --nocapture
+cargo test -p kastellan-core entity_extraction::tests --lib -- --nocapture
 ```
 
 Expected: 5 passed.
@@ -293,7 +293,7 @@ CREATE INDEX entities_unquarantined_idx
 --     extractor's startup label-list resolution. INSERT on entity_kinds
 --     is operator-only by GRANT default — adding a kind is a deliberate
 --     act, not something the agent or extractor does.
-GRANT SELECT ON entity_kinds TO hhagent_runtime;
+GRANT SELECT ON entity_kinds TO kastellan_runtime;
 
 COMMIT;
 ```
@@ -305,7 +305,7 @@ Open `db/tests/postgres_e2e.rs` and append at the end (before any closing brace)
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migration_0015_seeds_entity_kinds_and_adds_quarantine() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
     // entity_kinds present + 20 seed rows.
@@ -351,7 +351,7 @@ async fn migration_0015_seeds_entity_kinds_and_adds_quarantine() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_upsert_dedup_by_name_norm() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
     // Insert "Dr Smith"; second insert with "DR SMITH" (different
@@ -381,7 +381,7 @@ async fn entities_upsert_dedup_by_name_norm() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kind_delete_sets_default_to_undefined() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let admin = cluster.admin_pool().await.expect("admin pool");
 
     // Seed a custom kind + an entity of that kind.
@@ -404,7 +404,7 @@ async fn kind_delete_sets_default_to_undefined() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entities_kind_fk_blocks_unknown_kind() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
     let r = sqlx::query(
@@ -419,7 +419,7 @@ async fn entities_kind_fk_blocks_unknown_kind() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn relation_persists_when_endpoints_quarantined() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
     // Two quarantined entities + a relation between them.
@@ -459,11 +459,11 @@ async fn relation_persists_when_endpoints_quarantined() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-db --test postgres_e2e migration_0015 -- --nocapture
-cargo test -p hhagent-db --test postgres_e2e entities_upsert_dedup -- --nocapture
-cargo test -p hhagent-db --test postgres_e2e kind_delete_sets_default -- --nocapture
-cargo test -p hhagent-db --test postgres_e2e entities_kind_fk_blocks -- --nocapture
-cargo test -p hhagent-db --test postgres_e2e relation_persists_when -- --nocapture
+cargo test -p kastellan-db --test postgres_e2e migration_0015 -- --nocapture
+cargo test -p kastellan-db --test postgres_e2e entities_upsert_dedup -- --nocapture
+cargo test -p kastellan-db --test postgres_e2e kind_delete_sets_default -- --nocapture
+cargo test -p kastellan-db --test postgres_e2e entities_kind_fk_blocks -- --nocapture
+cargo test -p kastellan-db --test postgres_e2e relation_persists_when -- --nocapture
 ```
 
 Expected: 5 passed.
@@ -606,7 +606,7 @@ In alphabetical order between `pub mod ...` modules (slots between `conn` and `g
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-db entity_kinds::tests --lib -- --nocapture
+cargo test -p kastellan-db entity_kinds::tests --lib -- --nocapture
 ```
 
 Expected: 2 passed.
@@ -618,10 +618,10 @@ Append to `db/tests/postgres_e2e.rs`:
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entity_kinds_cache_returns_seeded_list() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
-    let cache = hhagent_db::entity_kinds::KindsCache::new();
+    let cache = kastellan_db::entity_kinds::KindsCache::new();
     let kinds = cache.list_kinds(&pool).await.expect("list_kinds");
     assert_eq!(kinds.len(), 20, "20 seeded kinds");
     assert!(kinds.contains(&"undefined".to_string()), "must contain undefined");
@@ -631,10 +631,10 @@ async fn entity_kinds_cache_returns_seeded_list() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entity_kinds_fetch_kinds_orders_alphabetically() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
-    let kinds = hhagent_db::entity_kinds::fetch_kinds(&pool).await.expect("fetch");
+    let kinds = kastellan_db::entity_kinds::fetch_kinds(&pool).await.expect("fetch");
     let mut sorted = kinds.clone();
     sorted.sort();
     assert_eq!(kinds, sorted, "fetch_kinds returns alphabetical order");
@@ -646,10 +646,10 @@ async fn entity_kinds_cache_hits_warm_does_not_re_query() {
     // We can't easily observe "no SQL" from outside without query
     // logging, so this is a smoke that the cached path doesn't panic
     // and returns identical content.
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
-    let cache = hhagent_db::entity_kinds::KindsCache::new();
+    let cache = kastellan_db::entity_kinds::KindsCache::new();
     let kinds1 = cache.list_kinds(&pool).await.expect("first");
     let kinds2 = cache.list_kinds(&pool).await.expect("second");
     assert_eq!(kinds1, kinds2);
@@ -659,7 +659,7 @@ async fn entity_kinds_cache_hits_warm_does_not_re_query() {
 - [ ] **Step 5: Run integration tests**
 
 ```sh
-cargo test -p hhagent-db --test postgres_e2e entity_kinds -- --nocapture
+cargo test -p kastellan-db --test postgres_e2e entity_kinds -- --nocapture
 ```
 
 Expected: 3 passed.
@@ -765,9 +765,9 @@ In `core/src/memory/recall.rs`, find every `graph_search(` call. Each one gains 
 
 ```rust
 // Before:
-let graph_ids = hhagent_db::memories::graph_search(&mut *tx, &expanded, fanout).await?;
+let graph_ids = kastellan_db::memories::graph_search(&mut *tx, &expanded, fanout).await?;
 // After:
-let graph_ids = hhagent_db::memories::graph_search(&mut *tx, &expanded, fanout, false).await?;
+let graph_ids = kastellan_db::memories::graph_search(&mut *tx, &expanded, fanout, false).await?;
 ```
 
 (If there are multiple call sites, update them all.)
@@ -779,7 +779,7 @@ Append to `db/tests/postgres_e2e.rs`:
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graph_search_excludes_quarantined_by_default() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
     // Two entities — one promoted, one quarantined — both linked to
@@ -812,7 +812,7 @@ async fn graph_search_excludes_quarantined_by_default() {
         .execute(&pool).await.expect("links");
 
     // include_quarantined = false (production default).
-    let hits = hhagent_db::memories::graph_search(
+    let hits = kastellan_db::memories::graph_search(
         &pool, &[ent_promoted, ent_quar], 10, false,
     ).await.expect("graph_search");
     assert_eq!(hits, vec![mem_promoted], "default must exclude quarantined");
@@ -820,7 +820,7 @@ async fn graph_search_excludes_quarantined_by_default() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graph_search_includes_quarantined_when_flag_true() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
     let ent_quar: i64 = sqlx::query_scalar(
@@ -836,7 +836,7 @@ async fn graph_search_includes_quarantined_when_flag_true() {
         .bind(mem).bind(ent_quar)
         .execute(&pool).await.expect("link");
 
-    let hits = hhagent_db::memories::graph_search(
+    let hits = kastellan_db::memories::graph_search(
         &pool, &[ent_quar], 10, true,
     ).await.expect("graph_search with quarantined");
     assert_eq!(hits, vec![mem], "include_quarantined=true surfaces row");
@@ -848,8 +848,8 @@ async fn graph_search_includes_quarantined_when_flag_true() {
 ```sh
 source "$HOME/.cargo/env"
 cargo build --workspace
-cargo test -p hhagent-db --test postgres_e2e graph_search -- --nocapture
-cargo test -p hhagent-core memory::recall::tests -- --nocapture
+cargo test -p kastellan-db --test postgres_e2e graph_search -- --nocapture
+cargo test -p kastellan-core memory::recall::tests -- --nocapture
 ```
 
 Expected: build clean, graph_search tests pass, recall tests pass (call-site updates).
@@ -911,7 +911,7 @@ impl EntitySeeds {
 #[derive(Debug, thiserror::Error)]
 pub enum EntityExtractionError {
     #[error("db error: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
     #[error("client error: {0}")]
     Client(String),
 }
@@ -1029,7 +1029,7 @@ impl EntityExtractor for StaticEntityExtractor {
 - [ ] **Step 3: Run the tests**
 
 ```sh
-cargo test -p hhagent-core entity_extraction::tests --lib -- --nocapture
+cargo test -p kastellan-core entity_extraction::tests --lib -- --nocapture
 ```
 
 Expected: 10 passed (5 from Task 1 + 5 new).
@@ -1055,7 +1055,7 @@ Find the bottom of the public-surface region in `core/src/workers/gliner_relex.r
 ```rust
 use crate::tool_host::{self, ToolHostError};
 use crate::worker_lifecycle::{WorkerLifecycleManager, WorkerHandle};
-use hhagent_protocol::ClientError as ClientErrorProtocol;
+use kastellan_protocol::ClientError as ClientErrorProtocol;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -1185,8 +1185,8 @@ pub enum ClientError {
 - [ ] **Step 3: Run the tests**
 
 ```sh
-cargo test -p hhagent-core workers::gliner_relex::tests::client -- --nocapture
-cargo test -p hhagent-core workers::gliner_relex::tests -- --nocapture
+cargo test -p kastellan-core workers::gliner_relex::tests::client -- --nocapture
+cargo test -p kastellan-core workers::gliner_relex::tests -- --nocapture
 ```
 
 Expected: all existing gliner_relex tests still pass; 2 new client tests pass.
@@ -1351,7 +1351,7 @@ mod tests {
 - [ ] **Step 2: Run the tests**
 
 ```sh
-cargo test -p hhagent-core entity_extraction::gliner_relex::tests::chunk_text -- --nocapture
+cargo test -p kastellan-core entity_extraction::gliner_relex::tests::chunk_text -- --nocapture
 ```
 
 Expected: 5 passed.
@@ -1518,7 +1518,7 @@ Append inside the existing `#[cfg(test)] mod tests`:
 - [ ] **Step 3: Run the tests**
 
 ```sh
-cargo test -p hhagent-core entity_extraction::gliner_relex::tests::merge -- --nocapture
+cargo test -p kastellan-core entity_extraction::gliner_relex::tests::merge -- --nocapture
 ```
 
 Expected: 3 passed.
@@ -1591,7 +1591,7 @@ pub async fn upsert_entities_and_relations(
         .bind(&name_norm)
         .fetch_optional(pool)
         .await
-        .map_err(|e| hhagent_db::DbError::Query(format!("upsert entity: {e}")))?;
+        .map_err(|e| kastellan_db::DbError::Query(format!("upsert entity: {e}")))?;
 
         let id = match inserted_id {
             Some(id) => {
@@ -1607,7 +1607,7 @@ pub async fn upsert_entities_and_relations(
                 .bind(&name_norm)
                 .fetch_one(pool)
                 .await
-                .map_err(|e| hhagent_db::DbError::Query(format!("resolve entity id: {e}")))?
+                .map_err(|e| kastellan_db::DbError::Query(format!("resolve entity id: {e}")))?
             }
         };
         entity_ids.push(id);
@@ -1658,7 +1658,7 @@ pub async fn upsert_entities_and_relations(
         .bind(&relation_norm)
         .execute(pool)
         .await
-        .map_err(|e| hhagent_db::DbError::Query(format!("insert relation: {e}")))?
+        .map_err(|e| kastellan_db::DbError::Query(format!("insert relation: {e}")))?
         .rows_affected();
         n_relations_inserted += n as u32;
     }
@@ -1709,7 +1709,7 @@ git commit -m "feat(core/entity_extraction/gliner_relex): upsert_entities_and_re
 - [ ] **Step 1: Find the existing audit-action constants and helpers**
 
 ```sh
-grep -n "ACTION_\|pub fn build_" /home/hherb/src/hhagent/core/src/scheduler/audit.rs | head -20
+grep -n "ACTION_\|pub fn build_" /home/hherb/src/kastellan/core/src/scheduler/audit.rs | head -20
 ```
 
 Note the naming pattern (e.g., `ACTION_TASK_FINALIZE`, `build_finalize_payload`). The new const + helper follow it.
@@ -1792,7 +1792,7 @@ mod tests_extract_entities {
 - [ ] **Step 3: Run the tests**
 
 ```sh
-cargo test -p hhagent-core scheduler::audit::tests_extract_entities -- --nocapture
+cargo test -p kastellan-core scheduler::audit::tests_extract_entities -- --nocapture
 ```
 
 Expected: 2 passed.
@@ -1819,7 +1819,7 @@ Append to `core/src/entity_extraction/gliner_relex.rs` (above `#[cfg(test)]`):
 use crate::entity_extraction::{EntityExtractor, EntityExtractionError, EntitySeeds, SeedSource};
 use crate::workers::gliner_relex::Client;
 use async_trait::async_trait;
-use hhagent_db::entity_kinds::KindsCache;
+use kastellan_db::entity_kinds::KindsCache;
 use std::sync::Arc;
 
 /// Default thresholds (per spike correction #3 — model is noisy below 0.5).
@@ -1879,7 +1879,7 @@ impl EntityExtractor for GlinerRelexExtractor {
                 Ok(resp) => chunk_responses.push((chunk.byte_offset, resp)),
                 Err(e) => {
                     tracing::warn!(
-                        target: "hhagent::entity_extraction",
+                        target: "kastellan::entity_extraction",
                         error = %e,
                         chunk_offset = chunk.byte_offset,
                         "client.extract failed; degrading chunk",
@@ -1909,14 +1909,14 @@ impl EntityExtractor for GlinerRelexExtractor {
             "multi-v1.0",
             latency_ms_total,
         );
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             &self.pool,
             "extractor:gliner-relex",
             crate::scheduler::audit::ACTION_EXTRACT_ENTITIES,
             payload,
         ).await {
             tracing::warn!(
-                target: "hhagent::entity_extraction",
+                target: "kastellan::entity_extraction",
                 error = %e,
                 "extract_entities audit row insert failed; not propagating",
             );
@@ -2075,7 +2075,7 @@ Expected: clean build. If any test impls of `RecallBuilder` exist elsewhere (gre
 - [ ] **Step 5: Run the existing recall tests to confirm shim works**
 
 ```sh
-cargo test -p hhagent-core recall_assembly -- --nocapture
+cargo test -p kastellan-core recall_assembly -- --nocapture
 ```
 
 Expected: all existing tests pass (the default-impl shim handles the `build()` callers).
@@ -2151,7 +2151,7 @@ After the `recall_query_sha256` insert, add (before the `if classification_floor
 - [ ] **Step 3: Update existing payload-shape pin tests**
 
 ```sh
-grep -rn "build_plan_formulate_payload\|21\|22 keys\|24\|25 keys" /home/hherb/src/hhagent/core/src/scheduler/inner_loop_audit.rs | head -20
+grep -rn "build_plan_formulate_payload\|21\|22 keys\|24\|25 keys" /home/hherb/src/kastellan/core/src/scheduler/inner_loop_audit.rs | head -20
 ```
 
 Find the in-place test that pins the key count (likely something like `payload_carries_21_keys_when_refused_is_null` or similar). Update the expected count from 21/22 to 24/25 and add assertions on the 3 new keys:
@@ -2170,7 +2170,7 @@ Find the in-place test that pins the key count (likely something like `payload_c
 - [ ] **Step 4: Update every `FormulationMeta` constructor in tests**
 
 ```sh
-grep -rn "FormulationMeta\s*{" /home/hherb/src/hhagent/core/ /home/hherb/src/hhagent/db/ 2>/dev/null | head -20
+grep -rn "FormulationMeta\s*{" /home/hherb/src/kastellan/core/ /home/hherb/src/kastellan/db/ 2>/dev/null | head -20
 ```
 
 Every literal `FormulationMeta { ... }` needs the 3 new fields. Add to each:
@@ -2181,15 +2181,15 @@ Every literal `FormulationMeta { ... }` needs the 3 new fields. Add to each:
             graph_seed_source: crate::entity_extraction::SeedSource::None,
 ```
 
-(If the fixture lives in tests where `crate::` doesn't work, use the full path `hhagent_core::entity_extraction::SeedSource::None`.)
+(If the fixture lives in tests where `crate::` doesn't work, use the full path `kastellan_core::entity_extraction::SeedSource::None`.)
 
 - [ ] **Step 5: Build + run tests**
 
 ```sh
 cargo build --workspace
-cargo test -p hhagent-core scheduler::inner_loop_audit -- --nocapture
-cargo test -p hhagent-core scheduler::agent -- --nocapture
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e -- --nocapture
+cargo test -p kastellan-core scheduler::inner_loop_audit -- --nocapture
+cargo test -p kastellan-core scheduler::agent -- --nocapture
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e -- --nocapture
 ```
 
 Expected: all green.
@@ -2266,7 +2266,7 @@ In `core/src/scheduler/agent.rs`, find the `formulate_plan` impl (lines 100-192)
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
-                    target: "hhagent::scheduler::agent",
+                    target: "kastellan::scheduler::agent",
                     error = %e,
                     "entity extraction failed; continuing with empty seeds",
                 );
@@ -2284,7 +2284,7 @@ In `core/src/scheduler/agent.rs`, find the `formulate_plan` impl (lines 100-192)
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
-                    target: "hhagent::scheduler::agent",
+                    target: "kastellan::scheduler::agent",
                     error = %e,
                     "recall failed; continuing with empty recall context",
                 );
@@ -2344,16 +2344,16 @@ Likely break points:
 Find all callers:
 
 ```sh
-grep -rn "RouterAgent::new" /home/hherb/src/hhagent/core/ /home/hherb/src/hhagent/db/ 2>/dev/null
+grep -rn "RouterAgent::new" /home/hherb/src/kastellan/core/ /home/hherb/src/kastellan/db/ 2>/dev/null
 ```
 
-For test callers, add `Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new())` as the 5th arg. For the `core/src/main.rs` site, defer to Task 15.
+For test callers, add `Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new())` as the 5th arg. For the `core/src/main.rs` site, defer to Task 15.
 
 - [ ] **Step 4: Run scheduler-agent tests**
 
 ```sh
-cargo test -p hhagent-core scheduler::agent -- --nocapture
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e -- --nocapture
+cargo test -p kastellan-core scheduler::agent -- --nocapture
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e -- --nocapture
 ```
 
 Expected: green. (`main.rs` will fail to build until Task 15.)
@@ -2380,15 +2380,15 @@ Restructure to:
 
 ```rust
     // Sandbox backend (cross-platform).
-    let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = sandbox_backend();
+    let sandbox: Arc<dyn kastellan_sandbox::SandboxBackend> = sandbox_backend();
 
     // Worker lifecycle Arc — created once, shared between the step
     // dispatcher (existing consumer) and the entity-extraction client
     // (new in v2). The same `Arc` is the same warm-keep slot for
     // gliner-relex regardless of whether the call originates from a
     // PlannedStep or an extractor invocation.
-    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
-        hhagent_core::worker_lifecycle::CompositeLifecycle::new(sandbox.clone()),
+    let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
+        kastellan_core::worker_lifecycle::CompositeLifecycle::new(sandbox.clone()),
     );
 
     // Tool registry — same flow as before.
@@ -2397,43 +2397,43 @@ Restructure to:
     // Entity extractor (v2). When gliner-relex is configured, builds a
     // typed Client over the shared lifecycle Arc + worker manifest and
     // returns GlinerRelexExtractor. When the worker isn't configured
-    // (HHAGENT_GLINER_RELEX_ENABLE=0 or preconditions failed), falls
+    // (KASTELLAN_GLINER_RELEX_ENABLE=0 or preconditions failed), falls
     // back to NoOpEntityExtractor — daemon stays up; graph lane stays
     // empty; the WARN is the only operator signal.
-    let entity_extractor: Arc<dyn hhagent_core::entity_extraction::EntityExtractor> =
+    let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
         match build_gliner_relex_entry() {
             Some(entry) => {
                 tracing::info!(
-                    target: "hhagent::main",
+                    target: "kastellan::main",
                     "gliner-relex configured; constructing v2 entity extractor",
                 );
-                let client = hhagent_core::workers::gliner_relex::Client::new(
+                let client = kastellan_core::workers::gliner_relex::Client::new(
                     lifecycle.clone(),
                     pool.clone(),
                     entry,
                 );
                 Arc::new(
-                    hhagent_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
+                    kastellan_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
                         client, pool.clone(),
                     ),
                 )
             }
             None => {
                 tracing::warn!(
-                    target: "hhagent::main",
+                    target: "kastellan::main",
                     "gliner-relex not configured; using NoOpEntityExtractor (graph lane disabled)",
                 );
-                Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new())
+                Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new())
             }
         };
 
     // PlanFormulator — now takes the extractor as 5th arg.
-    let formulator: Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
-        Arc::new(hhagent_core::scheduler::agent::RouterAgent::new(
+    let formulator: Arc<dyn kastellan_core::scheduler::agent::PlanFormulator> =
+        Arc::new(kastellan_core::scheduler::agent::RouterAgent::new(
             router.clone(),
             prompts.clone(),
-            Arc::new(hhagent_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
-            Arc::new(hhagent_core::recall_assembly::PgRecallBuilder::new(
+            Arc::new(kastellan_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
+            Arc::new(kastellan_core::recall_assembly::PgRecallBuilder::new(
                 pool.clone(),
                 router.clone(),
             )),
@@ -2441,9 +2441,9 @@ Restructure to:
         ));
 
     // Dispatcher — same lifecycle Arc as the extractor.
-    let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
+    let dispatcher: Arc<dyn kastellan_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
-            hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
+            kastellan_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
                 pool.clone(),
                 lifecycle,
                 tool_registry,
@@ -2458,7 +2458,7 @@ The original `lifecycle` definition (lines 147-161) is removed (replaced by the 
 Actually — re-check `build_tool_registry` to confirm it calls `build_gliner_relex_entry` internally, and that calling it again here is safe:
 
 ```sh
-grep -n "build_gliner_relex_entry\|fn build_tool_registry" /home/hherb/src/hhagent/core/src/main.rs
+grep -n "build_gliner_relex_entry\|fn build_tool_registry" /home/hherb/src/kastellan/core/src/main.rs
 ```
 
 If `build_tool_registry` consumes the entry by value, the second call constructs a fresh one — fine because the function is pure (re-reads env, re-builds `ToolEntry`). The two `ToolEntry` instances are logically identical.
@@ -2466,7 +2466,7 @@ If `build_tool_registry` consumes the entry by value, the second call constructs
 - [ ] **Step 2: Build and verify daemon compiles**
 
 ```sh
-cargo build --bin hhagent
+cargo build --bin kastellan
 ```
 
 Expected: clean build.
@@ -2474,7 +2474,7 @@ Expected: clean build.
 - [ ] **Step 3: Run any daemon-startup tests**
 
 ```sh
-cargo test -p hhagent-core --test supervisor_e2e -- --nocapture
+cargo test -p kastellan-core --test supervisor_e2e -- --nocapture
 ```
 
 Expected: green (skip-as-pass on hosts without systemd / supervisor).
@@ -2514,18 +2514,18 @@ Create `core/tests/entity_extraction_e2e.rs`:
 
 use std::sync::Arc;
 
-fn skip_if_no_pg() -> Option<hhagent_tests_common::PgCluster> {
+fn skip_if_no_pg() -> Option<kastellan_tests_common::PgCluster> {
     // Reuses the same helper gliner_relex_e2e.rs uses; if the actual
     // helper name differs in your tree, match it.
-    futures::executor::block_on(hhagent_tests_common::pg_cluster_or_skip())
+    futures::executor::block_on(kastellan_tests_common::pg_cluster_or_skip())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upsert_creates_quarantined_entities() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
-    use hhagent_core::workers::gliner_relex::{Entity, ExtractResponse};
+    use kastellan_core::workers::gliner_relex::{Entity, ExtractResponse};
     let merged = ExtractResponse {
         entities: vec![
             Entity {
@@ -2541,7 +2541,7 @@ async fn upsert_creates_quarantined_entities() {
         ],
         triples: vec![],
     };
-    let outcome = hhagent_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
+    let outcome = kastellan_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
         &pool, &merged,
     ).await.expect("upsert");
 
@@ -2558,10 +2558,10 @@ async fn upsert_creates_quarantined_entities() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upsert_is_idempotent_on_rerun() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
-    use hhagent_core::workers::gliner_relex::{Entity, Triple, TripleEntity, ExtractResponse};
+    use kastellan_core::workers::gliner_relex::{Entity, Triple, TripleEntity, ExtractResponse};
     let merged = ExtractResponse {
         entities: vec![
             Entity { text: "Alpha".into(), label: "concept".into(), start: 0, end: 5, score: 0.9 },
@@ -2579,10 +2579,10 @@ async fn upsert_is_idempotent_on_rerun() {
         ],
     };
 
-    let out1 = hhagent_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
+    let out1 = kastellan_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
         &pool, &merged,
     ).await.expect("first upsert");
-    let out2 = hhagent_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
+    let out2 = kastellan_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
         &pool, &merged,
     ).await.expect("second upsert");
 
@@ -2595,10 +2595,10 @@ async fn upsert_is_idempotent_on_rerun() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upsert_dedup_works_with_case_variants() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
-    use hhagent_core::workers::gliner_relex::{Entity, ExtractResponse};
+    use kastellan_core::workers::gliner_relex::{Entity, ExtractResponse};
     let merged_a = ExtractResponse {
         entities: vec![
             Entity { text: "Dr Smith".into(), label: "person".into(), start: 0, end: 8, score: 0.9 },
@@ -2611,10 +2611,10 @@ async fn upsert_dedup_works_with_case_variants() {
         ],
         triples: vec![],
     };
-    let out_a = hhagent_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
+    let out_a = kastellan_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
         &pool, &merged_a,
     ).await.expect("a");
-    let out_b = hhagent_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
+    let out_b = kastellan_core::entity_extraction::gliner_relex::upsert_entities_and_relations(
         &pool, &merged_b,
     ).await.expect("b");
 
@@ -2630,17 +2630,17 @@ async fn upsert_dedup_works_with_case_variants() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extractor_extract_writes_summary_audit_row() {
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
     // Test the extractor's audit emission directly by calling the
     // helper. The full Extractor.extract path needs the worker; this
     // narrower test pins the audit-row shape using the same helper
     // the production path uses.
-    let payload = hhagent_core::scheduler::audit::build_extract_entities_payload(
+    let payload = kastellan_core::scheduler::audit::build_extract_entities_payload(
         234, 1, 5, 2, 5, 2, "multi-v1.0", 142,
     );
-    hhagent_db::audit::insert(
+    kastellan_db::audit::insert(
         &pool, "extractor:gliner-relex", "extract_entities", payload,
     ).await.expect("audit insert");
 
@@ -2656,9 +2656,9 @@ async fn extractor_extract_writes_summary_audit_row() {
 fn worker_preconditions_or_skip() -> Option<()> {
     // Same skip pattern as gliner_relex_e2e.rs. If the helper is named
     // differently in your tree, mirror that file's call.
-    let enable = std::env::var("HHAGENT_GLINER_RELEX_ENABLE").ok();
+    let enable = std::env::var("KASTELLAN_GLINER_RELEX_ENABLE").ok();
     if enable.as_deref() != Some("1") {
-        eprintln!("[SKIP] HHAGENT_GLINER_RELEX_ENABLE != 1");
+        eprintln!("[SKIP] KASTELLAN_GLINER_RELEX_ENABLE != 1");
         return None;
     }
     Some(())
@@ -2667,17 +2667,17 @@ fn worker_preconditions_or_skip() -> Option<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn extractor_extract_against_real_worker_returns_seeds() {
     let Some(_) = worker_preconditions_or_skip() else { return };
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
     // Construct the same lifecycle + Client + Extractor stack the
     // daemon does at startup.
-    let sandbox = hhagent_tests_common::sandbox_or_skip();
-    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
-        hhagent_core::worker_lifecycle::CompositeLifecycle::new(sandbox),
+    let sandbox = kastellan_tests_common::sandbox_or_skip();
+    let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
+        kastellan_core::worker_lifecycle::CompositeLifecycle::new(sandbox),
     );
 
-    use hhagent_core::workers::gliner_relex::{gliner_relex_entry, resolve_env};
+    use kastellan_core::workers::gliner_relex::{gliner_relex_entry, resolve_env};
     let entry = match resolve_env(|k| std::env::var(k).ok(),
                                   |p| p.is_dir(),
                                   |p| p.exists()) {
@@ -2688,20 +2688,20 @@ async fn extractor_extract_against_real_worker_returns_seeds() {
         }
     };
 
-    let client = hhagent_core::workers::gliner_relex::Client::new(
+    let client = kastellan_core::workers::gliner_relex::Client::new(
         lifecycle, pool.clone(), entry,
     );
-    let extractor = hhagent_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
+    let extractor = kastellan_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
         client, pool.clone(),
     );
 
-    use hhagent_core::entity_extraction::EntityExtractor;
+    use kastellan_core::entity_extraction::EntityExtractor;
     let seeds = extractor.extract(
         "Dr Smith treats asthma in Mosman.",
     ).await.expect("extract");
 
     assert!(!seeds.ids.is_empty(), "real model produces entity ids");
-    assert_eq!(seeds.source, hhagent_core::entity_extraction::SeedSource::GlinerRelex);
+    assert_eq!(seeds.source, kastellan_core::entity_extraction::SeedSource::GlinerRelex);
     assert_eq!(seeds.model_version.as_deref(), Some("multi-v1.0"));
 
     // Summary audit row was written.
@@ -2722,26 +2722,26 @@ async fn extractor_extract_against_real_worker_returns_seeds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn extractor_chunking_path_against_real_worker() {
     let Some(_) = worker_preconditions_or_skip() else { return };
-    let Some(cluster) = hhagent_tests_common::pg_cluster_or_skip().await else { return };
+    let Some(cluster) = kastellan_tests_common::pg_cluster_or_skip().await else { return };
     let pool = cluster.runtime_pool().await.expect("runtime pool");
 
     // Construct extractor (same boilerplate as above — could be lifted
     // to a helper).
-    let sandbox = hhagent_tests_common::sandbox_or_skip();
-    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
-        hhagent_core::worker_lifecycle::CompositeLifecycle::new(sandbox),
+    let sandbox = kastellan_tests_common::sandbox_or_skip();
+    let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
+        kastellan_core::worker_lifecycle::CompositeLifecycle::new(sandbox),
     );
-    use hhagent_core::workers::gliner_relex::{gliner_relex_entry, resolve_env};
+    use kastellan_core::workers::gliner_relex::{gliner_relex_entry, resolve_env};
     let entry = match resolve_env(|k| std::env::var(k).ok(),
                                   |p| p.is_dir(),
                                   |p| p.exists()) {
         Ok(env) => gliner_relex_entry(&env),
         Err(reason) => { eprintln!("[SKIP] resolve_env: {:?}", reason); return; }
     };
-    let client = hhagent_core::workers::gliner_relex::Client::new(
+    let client = kastellan_core::workers::gliner_relex::Client::new(
         lifecycle, pool.clone(), entry,
     );
-    let extractor = hhagent_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
+    let extractor = kastellan_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
         client, pool.clone(),
     );
 
@@ -2751,7 +2751,7 @@ async fn extractor_chunking_path_against_real_worker() {
     let long = format!("{part_a}{part_b}");
     assert!(long.len() > 8192, "test input must exceed worker's 8KiB cap");
 
-    use hhagent_core::entity_extraction::EntityExtractor;
+    use kastellan_core::entity_extraction::EntityExtractor;
     let seeds = extractor.extract(&long).await.expect("extract long");
 
     // Both halves contributed at least one entity.
@@ -2787,7 +2787,7 @@ Expected: clean build (with skip-as-pass behaviour on hosts without precondition
 - [ ] **Step 3: Run the mock tier**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e \
+cargo test -p kastellan-core --test entity_extraction_e2e \
     upsert_creates_quarantined upsert_is_idempotent upsert_dedup extractor_extract_writes_summary \
     -- --nocapture
 ```
@@ -2797,13 +2797,13 @@ Expected: 4 passed (skipped if no PG).
 - [ ] **Step 4: Run the real-model tier (DGX only)**
 
 ```sh
-HHAGENT_GLINER_RELEX_ENABLE=1 \
-HHAGENT_GLINER_RELEX_WEIGHTS_DIR="$HOME/.local/share/hhagent/workers/gliner-relex/weights/multi-v1.0" \
-cargo test -p hhagent-core --test entity_extraction_e2e extractor_extract_against_real_worker \
+KASTELLAN_GLINER_RELEX_ENABLE=1 \
+KASTELLAN_GLINER_RELEX_WEIGHTS_DIR="$HOME/.local/share/kastellan/workers/gliner-relex/weights/multi-v1.0" \
+cargo test -p kastellan-core --test entity_extraction_e2e extractor_extract_against_real_worker \
     -- --nocapture
-HHAGENT_GLINER_RELEX_ENABLE=1 \
-HHAGENT_GLINER_RELEX_WEIGHTS_DIR="$HOME/.local/share/hhagent/workers/gliner-relex/weights/multi-v1.0" \
-cargo test -p hhagent-core --test entity_extraction_e2e extractor_chunking_path \
+KASTELLAN_GLINER_RELEX_ENABLE=1 \
+KASTELLAN_GLINER_RELEX_WEIGHTS_DIR="$HOME/.local/share/kastellan/workers/gliner-relex/weights/multi-v1.0" \
+cargo test -p kastellan-core --test entity_extraction_e2e extractor_chunking_path \
     -- --nocapture
 ```
 

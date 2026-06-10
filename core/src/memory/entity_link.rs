@@ -21,7 +21,7 @@ use sqlx::PgPool;
 use crate::entity_extraction::{
     EntityExtractionError, EntityExtractor, EntitySeeds, SeedSource,
 };
-use hhagent_db::{audit, memories::link_memory_to_entities, DbError};
+use kastellan_db::{audit, memories::link_memory_to_entities, DbError};
 
 /// What the auto-linker did, for caller telemetry. Returned on success
 /// only; on failure the caller receives [`LinkError`] and decides
@@ -29,7 +29,7 @@ use hhagent_db::{audit, memories::link_memory_to_entities, DbError};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkOutcome {
     /// Post-`ON CONFLICT DO NOTHING` row count from
-    /// [`hhagent_db::memories::link_memory_to_entities`]. May be smaller
+    /// [`kastellan_db::memories::link_memory_to_entities`]. May be smaller
     /// than `seeds.ids.len()` when some entities were already linked to
     /// this memory (re-run idempotency path).
     pub n_entities_linked: u64,
@@ -71,7 +71,7 @@ pub enum LinkError {
 /// `layer_label` is a stringly-typed identifier of the calling layer
 /// (`"L0"`, `"L1"`, future `"L2"`/`"L3"`/`"L4"`). It goes straight into
 /// the audit payload's `layer` key. Stringly avoids a circular dep on
-/// `hhagent_db::memories::MemoryLayer` from this module.
+/// `kastellan_db::memories::MemoryLayer` from this module.
 ///
 /// The function calls `extract` unconditionally; the NoOp-extractor
 /// case is a path optimisation (empty `seeds.ids` short-circuits at the

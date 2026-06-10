@@ -1,4 +1,4 @@
-//! `hhagent-worker-prelude`: defence-in-depth primitives that every tool
+//! `kastellan-worker-prelude`: defence-in-depth primitives that every tool
 //! worker calls **from inside its own process** before it serves any request.
 //!
 //! ## Why a separate crate
@@ -24,14 +24,14 @@
 //! ```ignore
 //! fn main() -> anyhow::Result<()> {
 //!     let mut handler = MyHandler::from_env()?;
-//!     hhagent_worker_prelude::serve_stdio(&mut handler)?;
+//!     kastellan_worker_prelude::serve_stdio(&mut handler)?;
 //!     Ok(())
 //! }
 //! ```
 //!
 //! `serve_stdio` calls [`lock_down`] before dispatching any JSON-RPC traffic.
 //! Workers that need finer-grained control may call [`lock_down`] directly
-//! and then use `hhagent_protocol::server::serve_stdio` — but they are then
+//! and then use `kastellan_protocol::server::serve_stdio` — but they are then
 //! responsible for ensuring no I/O happens between dynamic-linker resolution
 //! and the lock-down call.
 //!
@@ -53,7 +53,7 @@ pub mod seccomp_lock;
 
 use std::io;
 
-use hhagent_protocol::server::Handler;
+use kastellan_protocol::server::Handler;
 
 /// What `serve_stdio` actually managed to install. Returned so the
 /// worker can log it (and tests can assert on it).
@@ -97,7 +97,7 @@ pub enum LandlockReport {
 pub enum SeccompReport {
     /// BPF filter loaded and active.
     Installed,
-    /// `HHAGENT_SECCOMP_PROFILE` env var was missing or set to `"none"`,
+    /// `KASTELLAN_SECCOMP_PROFILE` env var was missing or set to `"none"`,
     /// so no filter was applied. Useful in tests; not recommended in prod.
     Disabled,
 }
@@ -120,10 +120,10 @@ pub enum LockdownError {
 /// Reads its policy from environment variables set by the parent process
 /// (`core::tool_host`):
 ///
-///   * `HHAGENT_LANDLOCK_RW`  — JSON array of absolute paths the worker may
+///   * `KASTELLAN_LANDLOCK_RW`  — JSON array of absolute paths the worker may
 ///     write to (its scratch dir). Read-only access to `/usr`, `/lib*`,
 ///     `/etc/ld.so.cache` is implicit so dynamic-linker + libc still work.
-///   * `HHAGENT_SECCOMP_PROFILE` — `"strict"`, `"net_client"`, or `"none"`.
+///   * `KASTELLAN_SECCOMP_PROFILE` — `"strict"`, `"net_client"`, or `"none"`.
 ///     `"none"` disables seccomp entirely (used in tests).
 ///
 /// The function only fails on programmer error (malformed env, kernel ABI
@@ -156,7 +156,7 @@ pub fn lock_down() -> Result<LockdownReport, LockdownError> {
     }
 }
 
-/// Drop-in replacement for `hhagent_protocol::server::serve_stdio` that
+/// Drop-in replacement for `kastellan_protocol::server::serve_stdio` that
 /// applies `rlimit::apply_from_env` and [`lock_down`] before entering
 /// the request loop. This is the recommended entry point for tool
 /// workers.
@@ -191,7 +191,7 @@ pub fn serve_stdio<H: Handler>(handler: &mut H) -> io::Result<()> {
     // for the audit log without parsing JSON. Workers that want
     // richer logging can call `rlimit::apply_from_env` + `lock_down`
     // themselves and skip this.
-    eprintln!("hhagent-worker-prelude: lockdown {report:?}");
+    eprintln!("kastellan-worker-prelude: lockdown {report:?}");
 
-    hhagent_protocol::server::serve_stdio(handler)
+    kastellan_protocol::server::serve_stdio(handler)
 }

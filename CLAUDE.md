@@ -18,11 +18,11 @@ ROADMAP.md) and commit them — see the checklist at the bottom of HANDOVER.md.
 A personal agentic system, security-first, vendor-neutral, AGPL-licensed.
 Rust workspace with 5 crates today:
 
-- `core` (`hhagent-core`): bin + lib. Owns the agent loop, memory, policy, LLM router, audit log, IPC. Currently has `tool_host`; everything else is stubbed.
-- `sandbox` (`hhagent-sandbox`): cross-platform sandbox abstraction. `SandboxPolicy` + `SandboxBackend` trait. **Linux backend done** (`linux_bwrap.rs`); macOS Seatbelt backend is the next major work item.
-- `supervisor` (`hhagent-supervisor`): systemd / launchd abstraction. Stub.
-- `protocol` (`hhagent-protocol`): JSON-RPC 2.0 server/client over stdio (MCP-stdio compatible). Sole IPC mechanism between core and workers.
-- `workers/shell-exec` (`hhagent-worker-shell-exec`): first jailed worker. Argv allowlist via `HHAGENT_SHELL_ALLOWLIST` env, no shell interpretation.
+- `core` (`kastellan-core`): bin + lib. Owns the agent loop, memory, policy, LLM router, audit log, IPC. Currently has `tool_host`; everything else is stubbed.
+- `sandbox` (`kastellan-sandbox`): cross-platform sandbox abstraction. `SandboxPolicy` + `SandboxBackend` trait. **Linux backend done** (`linux_bwrap.rs`); macOS Seatbelt backend is the next major work item.
+- `supervisor` (`kastellan-supervisor`): systemd / launchd abstraction. Stub.
+- `protocol` (`kastellan-protocol`): JSON-RPC 2.0 server/client over stdio (MCP-stdio compatible). Sole IPC mechanism between core and workers.
+- `workers/shell-exec` (`kastellan-worker-shell-exec`): first jailed worker. Argv allowlist via `KASTELLAN_SHELL_ALLOWLIST` env, no shell interpretation.
 
 ## Hard constraints (do not violate)
 
@@ -41,12 +41,12 @@ source "$HOME/.cargo/env"
 
 cargo build --workspace                                    # builds core + workers
 cargo test --workspace                                     # all tests, currently 18 green
-cargo test -p hhagent-sandbox                              # one crate
-cargo test -p hhagent-sandbox --test linux_smoke           # one integration-test file
-cargo test -p hhagent-sandbox argv_starts_with_bwrap       # one test by name substring
+cargo test -p kastellan-sandbox                              # one crate
+cargo test -p kastellan-sandbox --test linux_smoke           # one integration-test file
+cargo test -p kastellan-sandbox argv_starts_with_bwrap       # one test by name substring
 cargo test --workspace -- --nocapture                      # show stderr (useful when sandbox tests skip)
 
-./target/debug/hhagent                                     # run the (skeleton) core daemon
+./target/debug/kastellan                                     # run the (skeleton) core daemon
 ```
 
 There's no `cargo fmt` or `clippy` config yet; before adding either, decide on style. Until then, keep formatting consistent with what's already in the tree.
@@ -65,7 +65,7 @@ Other Linux distros without AppArmor user-ns restrictions don't need this script
 ## Architecture invariants worth knowing
 
 - **Threat-model invariant:** worst-case compromise (LLM, tool, dep, agent-authored Python) reaches *at most* the agent's own OS user, its own Postgres role, its own scratch FS, and the explicitly allowlisted endpoints for the *one* tool that was compromised. Nothing else. See `docs/threat-model.md`.
-- **One process per worker, one OS sandbox per worker.** Tool workers do not share a process or sandbox with each other or with the core. IPC is JSON-RPC 2.0 line-delimited over stdin/stdout (`hhagent-protocol`).
+- **One process per worker, one OS sandbox per worker.** Tool workers do not share a process or sandbox with each other or with the core. IPC is JSON-RPC 2.0 line-delimited over stdin/stdout (`kastellan-protocol`).
 - **bwrap argv builder pattern.** `linux_bwrap::build_argv()` is a pure function that takes `SandboxPolicy` → `Vec<String>`; it's separately testable from the spawn. Always include `--unshare-all`, `--die-with-parent`, `--new-session`, `--as-pid-1`, `--clearenv`. Env vars come *only* from `policy.env` via `--setenv`. When `Net::Allowlist`, also pass `--share-net` (allowlist enforced by the future egress proxy, not by bwrap).
 - **`SandboxPolicy.fs_read` paths must be absolute.** `LinuxBwrap::spawn_under_policy` rejects relative paths up front.
 - **`SandboxBackend` is `dyn`-safe.** Don't add generic methods to it; add new strategies as new types implementing the trait.
@@ -78,4 +78,4 @@ The Linux sandbox integration tests use a `skip_if_no_userns()` early-return pat
 
 ## Memory & persistence (your own, not the agent's)
 
-The user has a memory store under `~/.claude/projects/-home-hherb-src-hhagent/memory/`. Locked-in decisions (license, stack, cross-platform, LLM strategy, handover convention) are recorded there and auto-loaded into context. Don't re-ask the user about settled decisions — check the memory.
+The user has a memory store under `~/.claude/projects/-home-hherb-src-kastellan/memory/`. Locked-in decisions (license, stack, cross-platform, LLM strategy, handover convention) are recorded there and auto-loaded into context. Don't re-ask the user about settled decisions — check the memory.

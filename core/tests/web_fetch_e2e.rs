@@ -18,17 +18,17 @@
 
 use std::path::PathBuf;
 
-use hhagent_core::secrets::Vault;
-use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use hhagent_core::workers::web_fetch::web_fetch_entry;
-use hhagent_protocol::codes;
-use hhagent_tests_common::{
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::workers::web_fetch::web_fetch_entry;
+use kastellan_protocol::codes;
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
 };
 
-async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
-    hhagent_db::probe::run(
+async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
         conn_spec,
         "core",
         "startup",
@@ -36,7 +36,7 @@ async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPo
     )
     .await
     .expect("probe run");
-    hhagent_db::pool::connect_runtime_pool(conn_spec)
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
         .await
         .expect("connect runtime pool")
 }
@@ -63,7 +63,7 @@ fn ready_or_skip(allowlist: &[&str]) -> Option<TestEnv> {
         return None;
     }
     let bin_dir = pg_bin_dir_or_skip()?;
-    let worker_path = workspace_target_binary("hhagent-worker-web-fetch");
+    let worker_path = workspace_target_binary("kastellan-worker-web-fetch");
     if !worker_path.exists() {
         eprintln!("\n[SKIP] web-fetch worker binary not built; run cargo build --workspace\n");
         return None;
@@ -74,7 +74,7 @@ fn ready_or_skip(allowlist: &[&str]) -> Option<TestEnv> {
         &bin_dir,
         "wf-d",
         "wf-l",
-        &format!("hhagent-supervisor-test-pg-webfetch-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-webfetch-{suffix}"),
     );
 
     Some(TestEnv {

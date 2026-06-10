@@ -1,4 +1,4 @@
-//! Subprocess-level pin for `hhagent-cli entities kinds {add,remove,list}`.
+//! Subprocess-level pin for `kastellan-cli entities kinds {add,remove,list}`.
 //!
 //! Mirror of [`cli_relations_kinds_e2e`]. Same shape: per-test PG
 //! cluster + spawn the real CLI binary; assert DB row state + audit
@@ -18,9 +18,9 @@
 use std::collections::BTreeMap;
 use std::process::Command;
 
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, current_username, pg_bin_dir_or_skip,
     skip_if_no_supervisor, unique_suffix,
 };
@@ -29,7 +29,7 @@ use sqlx::Row;
 /// Same shape as `cli_relations_kinds_e2e::cli_env`.
 fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env = vec![
-        ("HHAGENT_DATA_DIR".to_string(), data_dir.display().to_string()),
+        ("KASTELLAN_DATA_DIR".to_string(), data_dir.display().to_string()),
     ];
     if let Some(home) = std::env::var_os("HOME") {
         env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
@@ -56,7 +56,7 @@ async fn cli_entities_kinds_add_remove_list_round_trip_writes_audit_rows() {
         &bin_dir,
         "ek-cli-d",
         "ek-cli-l",
-        &format!("hhagent-postgres-cli-entities-kinds-e2e-{suffix}"),
+        &format!("kastellan-postgres-cli-entities-kinds-e2e-{suffix}"),
     );
 
     // Apply migrations (including 0015 which seeds entity_kinds + 0016
@@ -246,7 +246,7 @@ async fn cli_entities_kinds_add_remove_list_round_trip_writes_audit_rows() {
     );
 
     // --- 8b. Validation error: oversize description -------------------
-    // Issue [#111](https://github.com/hherb/hhagent/issues/111) item 3:
+    // Issue [#111](https://github.com/hherb/kastellan/issues/111) item 3:
     // a description larger than `MAX_ENTITY_KIND_DESCRIPTION_LEN` is
     // rejected at the DB layer and surfaces as exit 2 from the CLI.
     // 2049 bytes is exactly one byte over the cap; the rejection

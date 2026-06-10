@@ -1,4 +1,4 @@
-//! hhagent-core: the agent core.
+//! kastellan-core: the agent core.
 //!
 //! Modules will be filled in across phases:
 //!   - scheduler        — agent loop and task queue
@@ -35,7 +35,7 @@ pub mod workspace;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Log line emitted by the `hhagent` daemon's `main` after the database
+/// Log line emitted by the `kastellan` daemon's `main` after the database
 /// bring-up probe completes. Tests and supervisors poll the daemon's
 /// redirected stdout for this string to decide that the daemon is ready.
 ///

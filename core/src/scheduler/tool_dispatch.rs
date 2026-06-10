@@ -77,7 +77,7 @@ use std::time::Instant;
 use crate::handoff::{FetchResult, HandoffCache, DEFAULT_RESULT_BYTE_CAP};
 use crate::secrets::Vault;
 
-use hhagent_sandbox::SandboxPolicy;
+use kastellan_sandbox::SandboxPolicy;
 use sqlx::PgPool;
 
 use crate::cassandra::types::PlannedStep;
@@ -121,7 +121,7 @@ pub struct ToolEntry {
     /// other workers stay on `None` until they have a concrete
     /// reason to diverge. See
     /// `docs/superpowers/specs/2026-05-21-macos-container-slice-2-design.md`.
-    pub sandbox_backend: Option<hhagent_sandbox::SandboxBackendKind>,
+    pub sandbox_backend: Option<kastellan_sandbox::SandboxBackendKind>,
     /// Container image tag for the `MacosContainer` backend. Only
     /// meaningful when `sandbox_backend == Some(Container)`; ignored
     /// otherwise. Type is `Option<String>` rather than enum-coupled so
@@ -344,7 +344,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
                 "outcome": outcome_label,
                 "ms": elapsed_ms,
             });
-            if let Err(e) = hhagent_db::audit::insert(
+            if let Err(e) = kastellan_db::audit::insert(
                 &self.pool, "policy", ACTION_HANDOFF_FETCHED, payload,
             ).await {
                 tracing::error!(
@@ -377,7 +377,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
                 None,
                 elapsed_ms,
             );
-            if let Err(audit_err) = hhagent_db::audit::insert(
+            if let Err(audit_err) = kastellan_db::audit::insert(
                 &self.pool,
                 SCHEDULER_AUDIT_ACTOR,
                 ACTION_STEP_UNKNOWN_TOOL,
@@ -425,7 +425,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
                     Some(&err_string),
                     elapsed_ms,
                 );
-                if let Err(audit_err) = hhagent_db::audit::insert(
+                if let Err(audit_err) = kastellan_db::audit::insert(
                     &self.pool,
                     SCHEDULER_AUDIT_ACTOR,
                     ACTION_STEP_SPAWN_FAILED,
@@ -488,7 +488,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
                         "handoff_ref": stash.handoff_ref.as_str(),
                         "byte_len": stash.byte_len,
                     });
-                    if let Err(e) = hhagent_db::audit::insert(
+                    if let Err(e) = kastellan_db::audit::insert(
                         &self.pool, "policy", ACTION_HANDOFF_STASHED, payload,
                     ).await {
                         tracing::error!(

@@ -14,14 +14,14 @@
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use super::resolve::GlinerRelexEnv;
 use crate::scheduler::ToolEntry;
 use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle};
 
 /// Default image tag for the gliner-relex container backend. Operator
-/// can override via `HHAGENT_GLINER_RELEX_IMAGE` env var (read by
+/// can override via `KASTELLAN_GLINER_RELEX_IMAGE` env var (read by
 /// `resolve_env`). Bumping this default is a paired edit with
 /// `scripts/workers/gliner-relex/build-image.sh`.
 ///
@@ -30,7 +30,7 @@ use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle};
 /// so gating the const avoids a dead-code warning on the Linux build
 /// (issue #144).
 #[cfg(target_os = "macos")]
-const CONTAINER_IMAGE_DEFAULT: &str = "hhagent/gliner-relex:dev";
+const CONTAINER_IMAGE_DEFAULT: &str = "kastellan/gliner-relex:dev";
 
 /// In-container path to the worker shim. Containerfile uses
 /// `uv pip install --system .` which places the console-script from
@@ -39,7 +39,7 @@ const CONTAINER_IMAGE_DEFAULT: &str = "hhagent/gliner-relex:dev";
 ///
 /// macOS-only for the same reason as [`CONTAINER_IMAGE_DEFAULT`].
 #[cfg(target_os = "macos")]
-const CONTAINER_BINARY: &str = "/usr/local/bin/hhagent-worker-gliner-relex";
+const CONTAINER_BINARY: &str = "/usr/local/bin/kastellan-worker-gliner-relex";
 
 /// Construct the [`ToolEntry`] for the gliner-relex worker.
 ///
@@ -51,8 +51,8 @@ const CONTAINER_BINARY: &str = "/usr/local/bin/hhagent-worker-gliner-relex";
 ///   on Linux. Byte-equivalent to the pre-Slice-2.5 shape.
 ///
 /// * `true` → container-mode entry (macOS-only opt-in via
-///   `HHAGENT_GLINER_RELEX_USE_CONTAINER=1`): worker spawns inside
-///   the `hhagent/gliner-relex:dev` image (or operator override) via
+///   `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1`): worker spawns inside
+///   the `kastellan/gliner-relex:dev` image (or operator override) via
 ///   `MacosContainer`, FS allowlist holds only `weights_dir` (venv +
 ///   src baked into the image), `sandbox_backend = Some(Container)`,
 ///   `container_image = Some(<image>)`.
@@ -61,7 +61,7 @@ const CONTAINER_BINARY: &str = "/usr/local/bin/hhagent-worker-gliner-relex";
 /// `build_idle_timeout_lifecycle()` helper.
 ///
 /// The returned entry is registered in `core::main` when
-/// `HHAGENT_GLINER_RELEX_ENABLE=1` and the weights directory exists
+/// `KASTELLAN_GLINER_RELEX_ENABLE=1` and the weights directory exists
 /// on disk. Without those preconditions the entry is skip-registered
 /// (existing deployments byte-equivalent) and calls to `gliner-relex`
 /// return `UNKNOWN_TOOL` from the dispatcher.
@@ -115,7 +115,7 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // The venv uses an editable install (uv's default for hatchling
     // workspace projects); `.venv/.../_editable_impl_*.pth` points at
     // `<worker_dir>/src`. Mounting only `.venv` would let Python start
-    // but fail on `from hhagent_worker_gliner_relex.__main__ import
+    // but fail on `from kastellan_worker_gliner_relex.__main__ import
     // main` with ModuleNotFoundError. Compute the sibling `src/` from
     // the documented `<worker_dir>/.venv` contract on `venv_dir` and
     // bind it read-only too.
@@ -125,8 +125,8 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // resolves to either is a wiring bug in the caller — daemon
     // startup walks `.venv/bin/<shim>` and the env-resolver always
     // anchors the venv path under at least one extra directory
-    // (HHAGENT_GLINER_RELEX_VENV_DIR is required to be absolute by
-    // the operator; the HHAGENT_DATA_DIR / HOME fallbacks tack on
+    // (KASTELLAN_GLINER_RELEX_VENV_DIR is required to be absolute by
+    // the operator; the KASTELLAN_DATA_DIR / HOME fallbacks tack on
     // `workers/gliner-relex/.venv`). So fail loudly here rather than
     // silently mounting the wrong path.
     let worker_src_dir = env
@@ -163,13 +163,13 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
 
 /// Container-mode entry: routes the worker through the macOS
 /// `MacosContainer` SandboxBackend (Slice 2.5+; opt-in via
-/// `HHAGENT_GLINER_RELEX_USE_CONTAINER=1`). Only `weights_dir` mounts
+/// `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1`). Only `weights_dir` mounts
 /// from the host; venv + src are baked into the image. The image is
 /// per-call constructed via `SandboxBackends::resolve(Some(Container),
 /// Some(<image>))`.
 ///
 /// macOS-only: emits an entry tagged `SandboxBackendKind::Container`,
-/// which is `#[cfg(target_os = "macos")]`-gated in `hhagent-sandbox`.
+/// which is `#[cfg(target_os = "macos")]`-gated in `kastellan-sandbox`.
 /// Compiling this on Linux is what broke the core build before issue
 /// #144 — Linux drives `use_container_backend` to a compile-time
 /// `false`, so this function is never reached there and need not exist.
@@ -178,7 +178,7 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // Container-mode policy: fs_read mounts host weights only.
     // build_container_argv uses source=<P>,target=<P> convention, so the
     // weights mount at the SAME host path inside the container — that
-    // makes the existing HHAGENT_GLINER_RELEX_WEIGHTS_DIR env value
+    // makes the existing KASTELLAN_GLINER_RELEX_WEIGHTS_DIR env value
     // work verbatim without a path rewrite.
     //
     // Enforcement parity note (Slice 2.5):
@@ -215,7 +215,7 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         policy,
         wall_clock_ms: None,
         lifecycle: build_idle_timeout_lifecycle(),
-        sandbox_backend: Some(hhagent_sandbox::SandboxBackendKind::Container),
+        sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::Container),
         container_image: Some(image),
     }
 }
@@ -226,15 +226,15 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
 fn build_runtime_env(env: &GlinerRelexEnv) -> Vec<(String, String)> {
     vec![
         (
-            "HHAGENT_GLINER_RELEX_WEIGHTS_DIR".to_string(),
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR".to_string(),
             env.weights_dir.to_string_lossy().into_owned(),
         ),
         (
-            "HHAGENT_GLINER_RELEX_MODEL".to_string(),
+            "KASTELLAN_GLINER_RELEX_MODEL".to_string(),
             env.model_id.clone(),
         ),
         (
-            "HHAGENT_GLINER_RELEX_DEVICE".to_string(),
+            "KASTELLAN_GLINER_RELEX_DEVICE".to_string(),
             env.device.clone(),
         ),
         ("HF_HUB_OFFLINE".to_string(), "1".to_string()),
@@ -246,7 +246,7 @@ fn build_runtime_env(env: &GlinerRelexEnv) -> Vec<(String, String)> {
         // /etc/passwd, so that fallback raises KeyError and the worker
         // exits before serving any RPC. Setting USER skips the pwd
         // lookup entirely.
-        ("USER".to_string(), "hhagent".to_string()),
+        ("USER".to_string(), "kastellan".to_string()),
         // TORCHINDUCTOR_CACHE_DIR pre-empts the home-dir cache
         // computation that triggers the getpass.getuser path above
         // (defense in depth — USER alone is sufficient today, but a

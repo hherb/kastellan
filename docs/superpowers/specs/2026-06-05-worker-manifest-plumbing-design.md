@@ -25,7 +25,7 @@ Two costs follow:
    function and another chance to write an inconsistent or subtly-insecure
    entry. There is no single declarative place a worker says what it is.
 2. **No production discovery convention.** Binaries are found via per-worker env
-   vars (`HHAGENT_SHELL_EXEC_BIN`, gliner's venv dir) plus `target/debug` for
+   vars (`KASTELLAN_SHELL_EXEC_BIN`, gliner's venv dir) plus `target/debug` for
    tests. A deployed daemon has no stable, env-free way to locate its workers
    (worker-lifecycle open question 6).
 
@@ -34,7 +34,7 @@ Two costs follow:
 - One **uniform, declarative** way each worker describes itself, replacing the
   hardcoded branches in `registry_build.rs` with a single iterate-the-list loop.
 - A **production binary-discovery convention** resolved relative to the running
-  `hhagent` binary, so a deployed daemon finds plain workers with no env vars
+  `kastellan` binary, so a deployed daemon finds plain workers with no env vars
   set, while existing env-var overrides keep working.
 - **Behaviour-preserving** for the two workers that exist today: every produced
   `ToolEntry` is byte-identical, every integration pin stays green, no schema or
@@ -121,7 +121,7 @@ pub enum Resolution {
 Mapping from today's behaviour:
 
 - gliner's 5-variant `ResolveSkipReason` collapses to `Disabled` (the
-  `HHAGENT_GLINER_RELEX_ENABLE != "1"` case) vs `Misconfigured` (the four
+  `KASTELLAN_GLINER_RELEX_ENABLE != "1"` case) vs `Misconfigured` (the four
   broken-env cases). The per-variant `log_gliner_relex_skip` helper in
   `registry_build.rs` is deleted; its severity choices move into the gliner
   manifest's `resolve`.
@@ -142,7 +142,7 @@ pub struct ResolveCtx<'a> {
     pub exists: &'a dyn Fn(&Path) -> bool,
     /// Probe: is this path a directory?
     pub is_dir: &'a dyn Fn(&Path) -> bool,
-    /// Directory of the running `hhagent` binary, for current_exe()-relative
+    /// Directory of the running `kastellan` binary, for current_exe()-relative
     /// worker discovery. None when it cannot be determined (fail-soft).
     pub exe_dir: Option<&'a Path>,
     /// Operational argv allowlist, pre-fetched from the DB by the builder,
@@ -164,7 +164,7 @@ Shared pure helper in `worker_manifest.rs`:
 
 ```rust
 /// Locate a worker binary. Precedence:
-///   1. explicit override env var (e.g. "HHAGENT_SHELL_EXEC_BIN") if it names
+///   1. explicit override env var (e.g. "KASTELLAN_SHELL_EXEC_BIN") if it names
 ///      an existing file — preserves every current deployment/test;
 ///   2. else the exe-relative sibling default `<exe_dir>/<default_name>`, if it
 ///      exists.
@@ -183,20 +183,20 @@ pub fn discover_binary(
 > shipped semantics make a set override **authoritative** — honoured iff it names
 > a runnable file, else **fail closed** (`None` → `Misconfigured`); the sibling
 > default applies *only* when the override is unset. This also restores exact
-> parity with the pre-manifest behaviour (`HHAGENT_SHELL_EXEC_BIN` set but not a
+> parity with the pre-manifest behaviour (`KASTELLAN_SHELL_EXEC_BIN` set but not a
 > file ⇒ not registered).
 
-**The convention: a plain compiled worker lives as a *sibling of the `hhagent`
+**The convention: a plain compiled worker lives as a *sibling of the `kastellan`
 binary* (`<exe_dir>/<worker-name>`), discoverable with no env vars set.**
 
-- **Production:** a flat install (`hhagent` + its workers in one bindir,
+- **Production:** a flat install (`kastellan` + its workers in one bindir,
   controlled by the systemd/launchd unit's install path) just works — the daemon
-  finds workers via `current_exe()` with zero `HHAGENT_*_BIN` env. This is the
+  finds workers via `current_exe()` with zero `KASTELLAN_*_BIN` env. This is the
   stable install-location convention open question 6 asks for.
-- **Dev/test:** cargo already places `target/debug/hhagent` and
-  `target/debug/hhagent-worker-shell-exec` side by side, so the same default
+- **Dev/test:** cargo already places `target/debug/kastellan` and
+  `target/debug/kastellan-worker-shell-exec` side by side, so the same default
   works in the test tree. Override-wins precedence means tests that *do* set
-  `HHAGENT_SHELL_EXEC_BIN` keep passing unchanged; we additionally gain a test
+  `KASTELLAN_SHELL_EXEC_BIN` keep passing unchanged; we additionally gain a test
   proving zero-env discovery.
 
 `exe_dir` is computed once by the builder via `std::env::current_exe()` and
@@ -209,7 +209,7 @@ plus weights, so its `resolve` does its own env-driven resolution exactly as
 today. `discover_binary` is a helper plain workers opt into, not a mold forced
 on everyone — which is the point of per-worker `resolve`.
 
-An FHS-style `<prefix>/libexec/hhagent/<worker>` layout was considered and
+An FHS-style `<prefix>/libexec/kastellan/<worker>` layout was considered and
 rejected for now: it breaks the cargo-sibling property (forcing `../libexec/...`
 traversal and env vars in tests) for no real gain at this stage. Note it as a
 future packaging refinement, not built here.
@@ -226,7 +226,7 @@ pub static WORKER_MANIFESTS: &[&dyn WorkerManifest] =
 ```
 
 `build_tool_registry` in `registry_build.rs` becomes one uniform loop; the
-hardcoded `if HHAGENT_SHELL_EXEC_BIN { … }` / `if let Some(gliner) { … }`
+hardcoded `if KASTELLAN_SHELL_EXEC_BIN { … }` / `if let Some(gliner) { … }`
 branches are deleted:
 
 ```rust
@@ -296,7 +296,7 @@ Each worker owns its host-side manifest ("a Rust struct in each worker crate").
   exists → `None`; (d) `exe_dir = None` → override-only, no panic.
 - `ShellExecManifest::resolve`: happy path (binary discovered, injected
   allowlist closure) → `Register` with the **byte-identical** `SandboxPolicy`
-  shipped today (`fs_read = [binary]`, `HHAGENT_SHELL_ALLOWLIST` env = JSON of
+  shipped today (`fs_read = [binary]`, `KASTELLAN_SHELL_ALLOWLIST` env = JSON of
   the allowlist, `Net::Deny`, `cpu_ms 5000`, `mem_mb 256`, `WorkerStrict`,
   `wall_clock_ms 30_000`, `SingleUse`); binary absent → `Misconfigured`.
 - `GlinerRelexManifest::resolve`: `Disabled` flag → `Disabled`; each broken-env
@@ -313,7 +313,7 @@ Each worker owns its host-side manifest ("a Rust struct in each worker crate").
   sandbox → shell-exec round-trip), `cli_memory_l3_run_daemon_e2e` (reads the
   `registry.loaded` snapshot). Byte-identical `ToolEntry`s ⇒ all pass untouched.
 - **One new integration test** proving the payoff: a registry build with
-  `HHAGENT_SHELL_EXEC_BIN` **unset** still registers shell-exec via the
+  `KASTELLAN_SHELL_EXEC_BIN` **unset** still registers shell-exec via the
   exe-relative sibling default. The only genuinely new behaviour, and additive.
 
 ## Migration / behaviour preservation
@@ -321,7 +321,7 @@ Each worker owns its host-side manifest ("a Rust struct in each worker crate").
 Migration is behaviour-preserving by construction. Every `ToolEntry` the two
 workers produce is identical to today's; the only new reachable behaviour is the
 additive sibling-discovery fallback (override still wins). The
-`HHAGENT_SHELL_EXEC_ALLOWLIST`-deprecation warning is preserved. No migration,
+`KASTELLAN_SHELL_EXEC_ALLOWLIST`-deprecation warning is preserved. No migration,
 no schema change, no audit-row change.
 
 ## Verification

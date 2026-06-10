@@ -187,11 +187,11 @@ pub trait WorkerLifecycleManager: Send + Sync {
 /// `sandbox_backend` per call. Existing entries default to `None` so
 /// the per-OS default backend keeps being used (byte-equivalent).
 pub struct SingleUseLifecycle {
-    sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
+    sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
 }
 
 impl SingleUseLifecycle {
-    pub fn new(sandboxes: Arc<hhagent_sandbox::SandboxBackends>) -> Self {
+    pub fn new(sandboxes: Arc<kastellan_sandbox::SandboxBackends>) -> Self {
         Self { sandboxes }
     }
 }
@@ -245,20 +245,20 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
 /// The warm-cache key remains the tool name, so two tools that select
 /// different backends still get separate warm slots.
 pub struct IdleTimeoutLifecycle {
-    sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
+    sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
     backoff: super::idle_timeout::RestartBackoff,
     registry: super::idle_timeout::WarmRegistry,
 }
 
 impl IdleTimeoutLifecycle {
     /// Construct with default exponential backoff (1s, 2s, 4s, 8s, …, capped at 60s).
-    pub fn new(sandboxes: Arc<hhagent_sandbox::SandboxBackends>) -> Self {
+    pub fn new(sandboxes: Arc<kastellan_sandbox::SandboxBackends>) -> Self {
         Self::with_backoff(sandboxes, super::idle_timeout::RestartBackoff::default())
     }
 
     /// Construct with operator-supplied backoff configuration.
     pub fn with_backoff(
-        sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
+        sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
     ) -> Self {
         Self {
@@ -325,7 +325,7 @@ impl IdleTimeoutLifecycle {
     ///
     /// **Not the production CLI surface.** Matches the `_test_slot_*` naming
     /// convention of its sibling inspectors above; the future
-    /// `hhagent-cli supervisor status` plumbing will add a parallel `pub fn
+    /// `kastellan-cli supervisor status` plumbing will add a parallel `pub fn
     /// slot_pending_acquires` (or equivalent) wrapping the same atomic load.
     /// Inlining the production accessor here would have meant either renaming
     /// all three inspectors at once or breaking convention for just this one.

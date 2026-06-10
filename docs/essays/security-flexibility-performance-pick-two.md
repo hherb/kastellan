@@ -4,15 +4,15 @@ There's an old engineering proverb that for any non-trivial system you get to
 pick two of *fast*, *cheap*, *good*. Autonomous agent systems have their own
 version of the triangle, and it bites harder because the thing you're sandboxing
 is an LLM that will, given enough turns, try things its designers never imagined.
-For hhagent the three corners are **Security**, **Flexibility**, and
+For kastellan the three corners are **Security**, **Flexibility**, and
 **Performance** — and the honest position is that you cannot maximize all three.
-hhagent makes its choice explicit: **Security and Flexibility, with Performance
+kastellan makes its choice explicit: **Security and Flexibility, with Performance
 as the deliberate sacrifice.**
 
 ## Security is not negotiable, so it isn't really a variable
 
 The first thing to notice is that one corner has been removed from the trade
-entirely. hhagent's threat-model invariant — worst-case compromise of the LLM, a
+entirely. kastellan's threat-model invariant — worst-case compromise of the LLM, a
 tool, a dependency, or agent-authored Python reaches *at most* the agent's own OS
 user, its own Postgres role, its own scratch filesystem, and the allowlisted
 endpoints for the *one* compromised tool — is a hard constraint, not a tuning
@@ -23,7 +23,7 @@ axis: **of the remaining two, which do you trade against the other?**
 
 ## Flexibility is the chosen second corner
 
-hhagent spends almost all of its design budget buying flexibility:
+kastellan spends almost all of its design budget buying flexibility:
 
 - **Vendor neutrality** — AGPL-compatible dependencies only, no NVIDIA/DGX hard
   dependency despite the primary host being a Spark. The system must run on any
@@ -65,7 +65,7 @@ None of these are accidents or things to optimize away later. They are the
 
 ## Why this is the right two for *this* system
 
-The choice maps cleanly to what hhagent is: a **personal**, security-first agent,
+The choice maps cleanly to what kastellan is: a **personal**, security-first agent,
 not a high-throughput multi-tenant service. A personal agent runs at human
 conversational cadence. The marginal cost of a sandbox spin-up or a JSON
 round-trip is invisible against the seconds an LLM already spends thinking, and
@@ -82,9 +82,9 @@ Security and Performance, sacrificing Flexibility, are the locked-down
 single-vendor appliances that are fast and safe but can only ever do the one
 thing they shipped with.
 
-hhagent's bet is that for a personal agentic system the durable winners are
+kastellan's bet is that for a personal agentic system the durable winners are
 Security and Flexibility, and that Performance is the corner you can afford to
 give back — because you can always make a contained, flexible system faster, but
 you can rarely make a fast, flexible, *insecure* one safe after the fact.
 
-**Pick two. hhagent picks the two you can't bolt on later.**
+**Pick two. kastellan picks the two you can't bolt on later.**

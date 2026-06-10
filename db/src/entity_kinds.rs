@@ -36,7 +36,7 @@ pub const MAX_ENTITY_KIND_LEN: usize = 64;
 /// operator workflows. Mirror of
 /// [`crate::relation_kinds::MAX_RELATION_KIND_DESCRIPTION_LEN`].
 ///
-/// Issue [#111](https://github.com/hherb/hhagent/issues/111) item 3 —
+/// Issue [#111](https://github.com/hherb/kastellan/issues/111) item 3 —
 /// without this cap an operator could store an arbitrarily long
 /// description, which would then land verbatim in
 /// `audit_log.payload->>'description'`.
@@ -139,7 +139,7 @@ pub fn validate_entity_kind_description(
 /// 2 KiB cap — operator-set descriptions land in `audit_log.payload`
 /// so an unbounded length would inflate audit rows beyond
 /// grep-friendly sizes (Issue
-/// [#111](https://github.com/hherb/hhagent/issues/111) item 3).
+/// [#111](https://github.com/hherb/kastellan/issues/111) item 3).
 ///
 /// **Requires a connection with write privileges on `entity_kinds`**
 /// — that's the [`crate::pool::connect_admin_pool`] shape, not the

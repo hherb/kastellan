@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 use url::Url;
 
 use crate::scheduler::ToolEntry;
@@ -18,11 +18,11 @@ use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerMani
 /// Tool name the registry keys web-search on.
 const TOOL_NAME: &str = "web-search";
 /// Operator override for the worker binary path.
-const BIN_ENV: &str = "HHAGENT_WEB_SEARCH_BIN";
+const BIN_ENV: &str = "KASTELLAN_WEB_SEARCH_BIN";
 /// Exe-relative sibling default (cargo `target/debug` + flat installs).
-const DEFAULT_BIN_NAME: &str = "hhagent-worker-web-search";
+const DEFAULT_BIN_NAME: &str = "kastellan-worker-web-search";
 /// Operator-configured SearxNG endpoint, read from the daemon's own env.
-const ENDPOINT_ENV: &str = "HHAGENT_WEB_SEARCH_ENDPOINT";
+const ENDPOINT_ENV: &str = "KASTELLAN_WEB_SEARCH_ENDPOINT";
 
 /// Derive the `Net::Allowlist` `host:port` entry from the endpoint URL. Returns
 /// an empty list if the endpoint is unset or unparseable — the worker fails
@@ -42,7 +42,7 @@ fn net_entries_from_endpoint(endpoint: &str) -> Vec<String> {
 
 /// Build the [`ToolEntry`] for the web-search worker.
 ///
-/// The administrator controls both the endpoint (`HHAGENT_WEB_SEARCH_ENDPOINT`
+/// The administrator controls both the endpoint (`KASTELLAN_WEB_SEARCH_ENDPOINT`
 /// on the daemon) and the host allowlist (`tool_allowlists` keyed
 /// `"web-search"`); the LLM-supplied params carry only the query string and
 /// cannot influence the URL. `Net::Allowlist` derives from the endpoint's
@@ -70,7 +70,7 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
         profile: Profile::WorkerNetClient,
         env: vec![
             (ENDPOINT_ENV.to_string(), endpoint.to_string()),
-            ("HHAGENT_WEB_SEARCH_ALLOWLIST".to_string(), allow_json),
+            ("KASTELLAN_WEB_SEARCH_ALLOWLIST".to_string(), allow_json),
         ],
         cpu_quota_pct: None,
         tasks_max: None,
@@ -86,9 +86,9 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
 }
 
 /// web-search's manifest. Discovery mirrors web-fetch: a set
-/// `HHAGENT_WEB_SEARCH_BIN` override is authoritative (honoured iff it names a
+/// `KASTELLAN_WEB_SEARCH_BIN` override is authoritative (honoured iff it names a
 /// runnable file, else fails closed); only when unset do we fall back to the
-/// exe-relative sibling `hhagent-worker-web-search`. The endpoint is read from
+/// exe-relative sibling `kastellan-worker-web-search`. The endpoint is read from
 /// the daemon env at resolve time and injected into the worker policy.
 pub struct WebSearchManifest;
 
@@ -167,7 +167,7 @@ mod tests {
                 // Env carries the endpoint + the verbatim allowlist JSON.
                 assert_eq!(entry.policy.env[0].0, ENDPOINT_ENV);
                 assert_eq!(entry.policy.env[0].1, "http://127.0.0.1:8888/search");
-                assert_eq!(entry.policy.env[1].0, "HHAGENT_WEB_SEARCH_ALLOWLIST");
+                assert_eq!(entry.policy.env[1].0, "KASTELLAN_WEB_SEARCH_ALLOWLIST");
                 assert_eq!(entry.policy.env[1].1, r#"["127.0.0.1"]"#);
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
@@ -205,7 +205,7 @@ mod tests {
 
         match WebSearchManifest.resolve(&c) {
             Resolution::Misconfigured { detail } => {
-                assert!(detail.contains("hhagent-worker-web-search"), "detail: {detail}");
+                assert!(detail.contains("kastellan-worker-web-search"), "detail: {detail}");
             }
             other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
         }

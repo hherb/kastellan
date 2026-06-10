@@ -6,7 +6,7 @@
 
 **Architecture:** A thin named delegate to the existing `insert_memory_at_layer` chokepoint with `embedding = None`. No new SQL, no schema change. Inherits the L0 (`MemoryLayer::Meta`) `PolicyViolation` guard for free. The value-add is the intent-signalling name plus a documented degradation contract (lexical + `metadata @>` work; semantic + graph degrade gracefully). Mirrors how `seed_meta_memory` is a named pass-through.
 
-**Tech Stack:** Rust, `sqlx` (Postgres), the `hhagent-db` crate. Integration tests are PG-required and live in `db/tests/postgres_e2e.rs` using the `hhagent-tests-common` bring-up helpers (skip-as-pass without PG).
+**Tech Stack:** Rust, `sqlx` (Postgres), the `kastellan-db` crate. Integration tests are PG-required and live in `db/tests/postgres_e2e.rs` using the `kastellan-tests-common` bring-up helpers (skip-as-pass without PG).
 
 **Spec:** [`docs/devel/specs/2026-06-07-memory-light-write-path-design.md`](../specs/2026-06-07-memory-light-write-path-design.md)
 
@@ -31,8 +31,8 @@ Append this test to `db/tests/postgres_e2e.rs` (after `insert_memory_at_layer_ro
 /// second cluster — same pattern as `insert_memory_at_layer_round_trip`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn insert_memory_light_round_trip_and_rejects_l0() {
-    use hhagent_db::memories::{insert_memory_light, MemoryLayer};
-    use hhagent_tests_common::{
+    use kastellan_db::memories::{insert_memory_light, MemoryLayer};
+    use kastellan_tests_common::{
         bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
     };
 
@@ -48,10 +48,10 @@ async fn insert_memory_light_round_trip_and_rejects_l0() {
         &bin_dir,
         "mr-d",
         "mr-l",
-        &format!("hhagent-pg-mlight-round-trip-{suffix}"),
+        &format!("kastellan-pg-mlight-round-trip-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -60,7 +60,7 @@ async fn insert_memory_light_round_trip_and_rejects_l0() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -97,7 +97,7 @@ async fn insert_memory_light_round_trip_and_rejects_l0() {
     )
     .await;
     match rejected {
-        Err(hhagent_db::DbError::PolicyViolation(msg)) => {
+        Err(kastellan_db::DbError::PolicyViolation(msg)) => {
             assert!(
                 msg.contains("L0") && msg.contains("seed_meta_memory"),
                 "PolicyViolation must name L0 and the admin path; got: {msg}"
@@ -124,10 +124,10 @@ async fn insert_memory_light_round_trip_and_rejects_l0() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-db --test postgres_e2e insert_memory_light_round_trip_and_rejects_l0 2>&1 | tail -20
+cargo test -p kastellan-db --test postgres_e2e insert_memory_light_round_trip_and_rejects_l0 2>&1 | tail -20
 ```
 
-Expected: **compile error** — `insert_memory_light` does not exist yet (`cannot find function insert_memory_light in module hhagent_db::memories`). (This is the TDD red state for a Rust API addition; a missing-symbol compile failure is the failing test.)
+Expected: **compile error** — `insert_memory_light` does not exist yet (`cannot find function insert_memory_light in module kastellan_db::memories`). (This is the TDD red state for a Rust API addition; a missing-symbol compile failure is the failing test.)
 
 - [ ] **Step 3: Write the minimal implementation**
 
@@ -192,10 +192,10 @@ pub use write::{
 - [ ] **Step 4: Run test to verify it passes**
 
 ```sh
-cargo test -p hhagent-db --test postgres_e2e insert_memory_light_round_trip_and_rejects_l0 2>&1 | tail -20
+cargo test -p kastellan-db --test postgres_e2e insert_memory_light_round_trip_and_rejects_l0 2>&1 | tail -20
 ```
 
-Expected: **PASS** with live PG (`HHAGENT_PG_BIN_DIR` set / DGX), or a `[SKIP]`/early-return with no PG (macOS skip-as-pass). Either is green; it must not FAIL or error-compile.
+Expected: **PASS** with live PG (`KASTELLAN_PG_BIN_DIR` set / DGX), or a `[SKIP]`/early-return with no PG (macOS skip-as-pass). Either is green; it must not FAIL or error-compile.
 
 - [ ] **Step 5: Commit**
 
@@ -230,11 +230,11 @@ Append after the Task 1 test in `db/tests/postgres_e2e.rs`. It inserts one norma
 /// not an empty query).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn insert_memory_light_degrades_gracefully_across_lanes() {
-    use hhagent_db::memories::{
+    use kastellan_db::memories::{
         insert_memory_at_layer, insert_memory_light, lexical_search, semantic_search,
         MemoryLayer, EMBEDDING_DIM,
     };
-    use hhagent_tests_common::{
+    use kastellan_tests_common::{
         bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
     };
 
@@ -250,10 +250,10 @@ async fn insert_memory_light_degrades_gracefully_across_lanes() {
         &bin_dir,
         "mr-d",
         "mr-l",
-        &format!("hhagent-pg-mlight-degrade-{suffix}"),
+        &format!("kastellan-pg-mlight-degrade-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -262,7 +262,7 @@ async fn insert_memory_light_degrades_gracefully_across_lanes() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -335,7 +335,7 @@ async fn insert_memory_light_degrades_gracefully_across_lanes() {
 - [ ] **Step 2: Run test to verify it fails (or passes immediately)**
 
 ```sh
-cargo test -p hhagent-db --test postgres_e2e insert_memory_light_degrades_gracefully_across_lanes 2>&1 | tail -20
+cargo test -p kastellan-db --test postgres_e2e insert_memory_light_degrades_gracefully_across_lanes 2>&1 | tail -20
 ```
 
 Expected: with live PG, **PASS** (Task 1 already added the function, so this test compiles and the contract already holds). With no PG, early-return skip. This task is a *characterization pin* of already-correct behaviour — there is no separate implementation step because the degradation is a property of the existing `semantic_search` filter + the NULL embedding, not new code. If it FAILS, the contract assumption in the spec is wrong — stop and re-examine `semantic_search`/`lexical_search` before forcing the test green.
@@ -393,4 +393,4 @@ No commit — this task is pure verification. Any failure here sends you back to
 - **No migration, no schema change.** `embedding` is already nullable; `insert_memory_at_layer` already has the NULL-embedding SQL branch.
 - **Why Task 2 has no implementation step:** the degradation is an emergent property of `semantic_search`'s existing `WHERE embedding IS NOT NULL` filter ([`db/src/memories/search.rs:51`](../../../db/src/memories/search.rs#L51)) combined with the NULL embedding. The test characterizes it; it does not drive new code.
 - **Deferred (do NOT build now):** core-side caller wiring, per-namespace caps + oldest-eviction. These are follow-ups noted in the spec.
-- **macOS dev box:** the two integration tests skip-as-pass without `HHAGENT_PG_BIN_DIR`. To run them for real locally, use the session-local Postgres.app override (see the memory note `postgres-app-bin-paths.md`). Otherwise they are verified on the DGX/CI.
+- **macOS dev box:** the two integration tests skip-as-pass without `KASTELLAN_PG_BIN_DIR`. To run them for real locally, use the session-local Postgres.app override (see the memory note `postgres-app-bin-paths.md`). Otherwise they are verified on the DGX/CI.

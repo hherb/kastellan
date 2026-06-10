@@ -14,7 +14,7 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 use crate::worker_lifecycle::Lifecycle;
-use hhagent_sandbox::{Net, Profile};
+use kastellan_sandbox::{Net, Profile};
 
 #[test]
 fn extract_request_serialises_with_expected_keys() {
@@ -109,7 +109,7 @@ fn extract_response_round_trips_real_wire_shape() {
 #[test]
 fn label_caps_match_python_side() {
     // Pinned at the values used by the Python validators (see
-    // workers/gliner-relex/src/hhagent_worker_gliner_relex/server.py
+    // workers/gliner-relex/src/kastellan_worker_gliner_relex/server.py
     // MAX_TEXT_BYTES / MAX_ENTITY_LABELS / MAX_RELATION_LABELS).
     // A drift here would let the Rust caller generate inputs the
     // Python side immediately rejects with INVALID_INPUT.
@@ -124,7 +124,7 @@ fn label_caps_match_python_side() {
 /// assertions below so a refactor that changes them gets caught.
 fn test_env() -> GlinerRelexEnv {
     GlinerRelexEnv {
-        script_path: PathBuf::from("/tmp/fake/.venv/bin/hhagent-worker-gliner-relex"),
+        script_path: PathBuf::from("/tmp/fake/.venv/bin/kastellan-worker-gliner-relex"),
         venv_dir: PathBuf::from("/tmp/fake/.venv"),
         weights_dir: PathBuf::from("/tmp/fake/weights/multi-v1.0"),
         model_id: "knowledgator/gliner-relex-multi-v1.0".to_string(),
@@ -239,11 +239,11 @@ fn entry_carries_offline_and_routing_env_vars() {
     assert_eq!(env_map.get("HF_HUB_OFFLINE"), Some(&"1"));
     assert_eq!(env_map.get("TRANSFORMERS_OFFLINE"), Some(&"1"));
     assert_eq!(
-        env_map.get("HHAGENT_GLINER_RELEX_MODEL"),
+        env_map.get("KASTELLAN_GLINER_RELEX_MODEL"),
         Some(&env.model_id.as_str())
     );
     assert_eq!(
-        env_map.get("HHAGENT_GLINER_RELEX_DEVICE"),
+        env_map.get("KASTELLAN_GLINER_RELEX_DEVICE"),
         Some(&env.device.as_str())
     );
     // The weights path is plumbed via env so the worker's
@@ -251,7 +251,7 @@ fn entry_carries_offline_and_routing_env_vars() {
     // form because the policy env stores `String`, not `PathBuf`.
     let expected_weights = env.weights_dir.to_string_lossy().into_owned();
     assert_eq!(
-        env_map.get("HHAGENT_GLINER_RELEX_WEIGHTS_DIR"),
+        env_map.get("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR"),
         Some(&expected_weights.as_str())
     );
     // USER + TORCHINDUCTOR_CACHE_DIR are sandbox-hygiene shims
@@ -275,7 +275,7 @@ fn entry_forwards_device_verbatim_regardless_of_value() {
     // `workers/gliner-relex/.../__main__._resolve_device`. The
     // manifest's job is only to forward whatever the operator
     // (or `auto`-resolution upstream) chose into
-    // `HHAGENT_GLINER_RELEX_DEVICE` so the Python startup path
+    // `KASTELLAN_GLINER_RELEX_DEVICE` so the Python startup path
     // sees it. Pinning the forwarding of `"mps"` here so a future
     // refactor that adds platform branches to gliner_relex_entry
     // — moving validation out of Python — has to update this
@@ -296,7 +296,7 @@ fn entry_forwards_device_verbatim_regardless_of_value() {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         assert_eq!(
-            env_map.get("HHAGENT_GLINER_RELEX_DEVICE"),
+            env_map.get("KASTELLAN_GLINER_RELEX_DEVICE"),
             Some(device),
             "manifest must forward device={device:?} verbatim into the env",
         );
@@ -365,7 +365,7 @@ fn entry_container_mode_emits_in_container_binary_and_weights_only_fs_read() {
 
     assert_eq!(
         entry.binary,
-        PathBuf::from("/usr/local/bin/hhagent-worker-gliner-relex"),
+        PathBuf::from("/usr/local/bin/kastellan-worker-gliner-relex"),
         "container-mode binary must be the in-container shim path"
     );
     assert_eq!(
@@ -375,16 +375,16 @@ fn entry_container_mode_emits_in_container_binary_and_weights_only_fs_read() {
     );
     assert_eq!(
         entry.sandbox_backend,
-        Some(hhagent_sandbox::SandboxBackendKind::Container),
+        Some(kastellan_sandbox::SandboxBackendKind::Container),
     );
     assert_eq!(
         entry.container_image.as_deref(),
-        Some("hhagent/gliner-relex:dev"),
+        Some("kastellan/gliner-relex:dev"),
         "container_image defaults to CONTAINER_IMAGE_DEFAULT when env override absent"
     );
 }
 
-/// Operator-supplied image tag (HHAGENT_GLINER_RELEX_IMAGE) flows
+/// Operator-supplied image tag (KASTELLAN_GLINER_RELEX_IMAGE) flows
 /// through GlinerRelexEnv.container_image into the entry.
 ///
 /// macOS-only: see issue #144 — container mode is gated to macOS.
@@ -393,13 +393,13 @@ fn entry_container_mode_emits_in_container_binary_and_weights_only_fs_read() {
 fn entry_container_mode_honours_custom_image_tag() {
     let env = GlinerRelexEnv {
         use_container_backend: true,
-        container_image: Some("hhagent/gliner-relex:v0.0.1".to_string()),
+        container_image: Some("kastellan/gliner-relex:v0.0.1".to_string()),
         ..test_env()
     };
     let entry = gliner_relex_entry(&env);
     assert_eq!(
         entry.container_image.as_deref(),
-        Some("hhagent/gliner-relex:v0.0.1"),
+        Some("kastellan/gliner-relex:v0.0.1"),
         "operator-supplied image tag must flow into entry.container_image"
     );
 }
@@ -442,7 +442,7 @@ fn resolve_env_disabled_when_enable_unset() {
 #[test]
 fn resolve_env_disabled_when_enable_is_zero_or_truthy_alias() {
     for v in ["0", "true", "yes", "on", ""] {
-        let env = env_map_of(&[("HHAGENT_GLINER_RELEX_ENABLE", v)]);
+        let env = env_map_of(&[("KASTELLAN_GLINER_RELEX_ENABLE", v)]);
         let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
         assert_eq!(
             r,
@@ -454,13 +454,13 @@ fn resolve_env_disabled_when_enable_is_zero_or_truthy_alias() {
 
 #[test]
 fn resolve_env_trims_whitespace_on_enable() {
-    // Common operator footgun: `echo "1" > /etc/hhagent/env` yields
+    // Common operator footgun: `echo "1" > /etc/kastellan/env` yields
     // a value ending in `\n`. The README documents `=1` but trimming
     // is cheap insurance.
     let env = env_map_of(&[
-        ("HHAGENT_GLINER_RELEX_ENABLE", " 1\n"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
-        ("HHAGENT_DATA_DIR", "/srv/data"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", " 1\n"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+        ("KASTELLAN_DATA_DIR", "/srv/data"),
     ]);
     let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
     assert!(
@@ -471,7 +471,7 @@ fn resolve_env_trims_whitespace_on_enable() {
 
 #[test]
 fn resolve_env_returns_weights_env_missing() {
-    let env = env_map_of(&[("HHAGENT_GLINER_RELEX_ENABLE", "1")]);
+    let env = env_map_of(&[("KASTELLAN_GLINER_RELEX_ENABLE", "1")]);
     let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
     assert_eq!(r, Err(ResolveSkipReason::WeightsDirEnvMissing));
 }
@@ -479,9 +479,9 @@ fn resolve_env_returns_weights_env_missing() {
 #[test]
 fn resolve_env_returns_weights_dir_not_a_dir() {
     let env = env_map_of(&[
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/missing"),
-        ("HHAGENT_DATA_DIR", "/srv/data"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/srv/missing"),
+        ("KASTELLAN_DATA_DIR", "/srv/data"),
     ]);
     let r = resolve_env(|k| env.get(k).cloned(), always_false, always_true);
     match r {
@@ -496,11 +496,11 @@ fn resolve_env_returns_weights_dir_not_a_dir() {
 fn resolve_env_returns_venv_unresolvable_when_no_anchor() {
     // Enable + weights set + dir exists, but none of the three venv
     // anchors set. Pre-refactor this would silently fall through to
-    // `/tmp/.local/share/hhagent/...`; now it surfaces a structured
+    // `/tmp/.local/share/kastellan/...`; now it surfaces a structured
     // skip reason so the operator log says exactly what's missing.
     let env = env_map_of(&[
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
     ]);
     let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
     assert_eq!(r, Err(ResolveSkipReason::VenvDirUnresolvable));
@@ -511,9 +511,9 @@ fn resolve_env_returns_script_shim_missing() {
     // Weights dir exists but the venv shim doesn't (operator
     // staged the weights but forgot `uv sync`).
     let env = env_map_of(&[
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
-        ("HHAGENT_GLINER_RELEX_VENV_DIR", "/opt/glr/.venv"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+        ("KASTELLAN_GLINER_RELEX_VENV_DIR", "/opt/glr/.venv"),
     ]);
     // weights dir is a dir; script doesn't exist.
     let r = resolve_env(
@@ -525,7 +525,7 @@ fn resolve_env_returns_script_shim_missing() {
         Err(ResolveSkipReason::ScriptShimMissing { path }) => {
             assert_eq!(
                 path,
-                PathBuf::from("/opt/glr/.venv/bin/hhagent-worker-gliner-relex")
+                PathBuf::from("/opt/glr/.venv/bin/kastellan-worker-gliner-relex")
             );
         }
         other => panic!("expected ScriptShimMissing, got {other:?}"),
@@ -534,15 +534,15 @@ fn resolve_env_returns_script_shim_missing() {
 
 #[test]
 fn resolve_env_happy_path_explicit_venv_dir_wins() {
-    // Explicit `HHAGENT_GLINER_RELEX_VENV_DIR` must override the
-    // `HHAGENT_DATA_DIR`-derived default, even when both are set.
+    // Explicit `KASTELLAN_GLINER_RELEX_VENV_DIR` must override the
+    // `KASTELLAN_DATA_DIR`-derived default, even when both are set.
     let env = env_map_of(&[
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
-        ("HHAGENT_GLINER_RELEX_VENV_DIR", "/opt/explicit/.venv"),
-        ("HHAGENT_DATA_DIR", "/srv/data"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+        ("KASTELLAN_GLINER_RELEX_VENV_DIR", "/opt/explicit/.venv"),
+        ("KASTELLAN_DATA_DIR", "/srv/data"),
     ]);
-    let exists_paths: HashSet<PathBuf> = ["/srv/weights", "/opt/explicit/.venv/bin/hhagent-worker-gliner-relex"]
+    let exists_paths: HashSet<PathBuf> = ["/srv/weights", "/opt/explicit/.venv/bin/kastellan-worker-gliner-relex"]
         .iter()
         .map(PathBuf::from)
         .collect();
@@ -555,7 +555,7 @@ fn resolve_env_happy_path_explicit_venv_dir_wins() {
     assert_eq!(r.venv_dir, PathBuf::from("/opt/explicit/.venv"));
     assert_eq!(
         r.script_path,
-        PathBuf::from("/opt/explicit/.venv/bin/hhagent-worker-gliner-relex")
+        PathBuf::from("/opt/explicit/.venv/bin/kastellan-worker-gliner-relex")
     );
     assert_eq!(r.weights_dir, PathBuf::from("/srv/weights"));
     assert_eq!(r.model_id, "knowledgator/gliner-relex-multi-v1.0");
@@ -563,17 +563,17 @@ fn resolve_env_happy_path_explicit_venv_dir_wins() {
 }
 
 #[test]
-fn resolve_env_happy_path_uses_hhagent_data_dir() {
+fn resolve_env_happy_path_uses_kastellan_data_dir() {
     let env = env_map_of(&[
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
-        ("HHAGENT_DATA_DIR", "/srv/data"),
-        ("HHAGENT_GLINER_RELEX_MODEL", "knowledgator/gliner-relex-large-v0.5"),
-        ("HHAGENT_GLINER_RELEX_DEVICE", "cuda"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+        ("KASTELLAN_DATA_DIR", "/srv/data"),
+        ("KASTELLAN_GLINER_RELEX_MODEL", "knowledgator/gliner-relex-large-v0.5"),
+        ("KASTELLAN_GLINER_RELEX_DEVICE", "cuda"),
     ]);
     let exists_paths: HashSet<PathBuf> = [
         "/srv/weights",
-        "/srv/data/workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex",
+        "/srv/data/workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex",
     ]
     .iter()
     .map(PathBuf::from)
@@ -592,13 +592,13 @@ fn resolve_env_happy_path_uses_hhagent_data_dir() {
 #[test]
 fn resolve_env_happy_path_home_fallback_when_no_data_dir() {
     let env = env_map_of(&[
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/srv/weights"),
         ("HOME", "/home/op"),
     ]);
     let exists_paths: HashSet<PathBuf> = [
         "/srv/weights",
-        "/home/op/.local/share/hhagent/workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex",
+        "/home/op/.local/share/kastellan/workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex",
     ]
     .iter()
     .map(PathBuf::from)
@@ -611,7 +611,7 @@ fn resolve_env_happy_path_home_fallback_when_no_data_dir() {
     .expect("happy path");
     assert_eq!(
         r.venv_dir,
-        PathBuf::from("/home/op/.local/share/hhagent/workers/gliner-relex/.venv")
+        PathBuf::from("/home/op/.local/share/kastellan/workers/gliner-relex/.venv")
     );
 }
 
@@ -622,9 +622,9 @@ fn resolve_env_happy_path_home_fallback_when_no_data_dir() {
 #[test]
 fn resolve_env_sets_use_container_backend_when_env_var_is_one() {
     let env_map = std::collections::HashMap::from([
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
-        ("HHAGENT_GLINER_RELEX_USE_CONTAINER", "1"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+        ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", "1"),
     ]);
     let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
     let is_dir = |_: &Path| true;   // pretend /tmp/fake-weights exists
@@ -632,23 +632,23 @@ fn resolve_env_sets_use_container_backend_when_env_var_is_one() {
     let env = resolve_env(env_lookup, is_dir, exists).expect("resolve_env ok");
     assert!(
         env.use_container_backend,
-        "HHAGENT_GLINER_RELEX_USE_CONTAINER=1 must set use_container_backend = true"
+        "KASTELLAN_GLINER_RELEX_USE_CONTAINER=1 must set use_container_backend = true"
     );
 }
 
-// macOS-only: the strict-"1" parsing of HHAGENT_GLINER_RELEX_USE_CONTAINER
+// macOS-only: the strict-"1" parsing of KASTELLAN_GLINER_RELEX_USE_CONTAINER
 // only runs on macOS; on Linux the flag is compile-time `false` (issue #144).
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_env_strict_about_use_container_value() {
-    // Only "1" (after trim) counts — symmetric with HHAGENT_GLINER_RELEX_ENABLE
+    // Only "1" (after trim) counts — symmetric with KASTELLAN_GLINER_RELEX_ENABLE
     // strictness. Surface dialect debate ("true", "yes", "on") would
     // creep in over time without this pin.
     for value in &["true", "yes", "on", "0", " 1 \n"] {
         let env_map = std::collections::HashMap::from([
-            ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
-            ("HHAGENT_GLINER_RELEX_USE_CONTAINER", *value),
+            ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+            ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+            ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", *value),
             // Anchor required so host-mode path can resolve venv dir
             // (non-"1" values fall through to host mode, which needs
             // at least one of VENV_DIR / DATA_DIR / HOME set).
@@ -676,10 +676,10 @@ fn resolve_env_skips_venv_existence_check_in_container_mode() {
     // inside the image at /usr/local/bin/...). Don't force operators to
     // maintain a host venv when they're running container-mode-only.
     let env_map = std::collections::HashMap::from([
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
-        ("HHAGENT_GLINER_RELEX_USE_CONTAINER", "1"),
-        ("HHAGENT_DATA_DIR", "/nonexistent/data-dir"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+        ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", "1"),
+        ("KASTELLAN_DATA_DIR", "/nonexistent/data-dir"),
     ]);
     let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
     let is_dir = |p: &Path| p == Path::new("/tmp/fake-weights");
@@ -699,10 +699,10 @@ fn resolve_env_skips_venv_existence_check_in_container_mode() {
 #[test]
 fn resolve_env_picks_up_container_image_override() {
     let env_map = std::collections::HashMap::from([
-        ("HHAGENT_GLINER_RELEX_ENABLE", "1"),
-        ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
-        ("HHAGENT_GLINER_RELEX_USE_CONTAINER", "1"),
-        ("HHAGENT_GLINER_RELEX_IMAGE", "hhagent/gliner-relex:v0.0.1"),
+        ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+        ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+        ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", "1"),
+        ("KASTELLAN_GLINER_RELEX_IMAGE", "kastellan/gliner-relex:v0.0.1"),
     ]);
     let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
     let is_dir = |_: &Path| true;
@@ -710,8 +710,8 @@ fn resolve_env_picks_up_container_image_override() {
     let env = resolve_env(env_lookup, is_dir, exists).expect("resolve_env ok");
     assert_eq!(
         env.container_image.as_deref(),
-        Some("hhagent/gliner-relex:v0.0.1"),
-        "HHAGENT_GLINER_RELEX_IMAGE override must flow into GlinerRelexEnv.container_image"
+        Some("kastellan/gliner-relex:v0.0.1"),
+        "KASTELLAN_GLINER_RELEX_IMAGE override must flow into GlinerRelexEnv.container_image"
     );
 }
 
@@ -772,20 +772,20 @@ fn manifest_disabled_when_enable_flag_absent() {
     let c = gliner_ctx(&get_env, &is_dir, &exists);
     match GlinerRelexManifest.resolve(&c) {
         Resolution::Disabled { .. } => {}
-        _ => panic!("expected Disabled when HHAGENT_GLINER_RELEX_ENABLE unset"),
+        _ => panic!("expected Disabled when KASTELLAN_GLINER_RELEX_ENABLE unset"),
     }
 }
 
 #[test]
 fn manifest_misconfigured_when_weights_dir_env_missing() {
     let get_env =
-        |k: &str| (k == "HHAGENT_GLINER_RELEX_ENABLE").then(|| "1".to_string());
+        |k: &str| (k == "KASTELLAN_GLINER_RELEX_ENABLE").then(|| "1".to_string());
     let is_dir = |_p: &Path| false;
     let exists = |_p: &Path| false;
     let c = gliner_ctx(&get_env, &is_dir, &exists);
     match GlinerRelexManifest.resolve(&c) {
         Resolution::Misconfigured { detail } => {
-            assert!(detail.contains("HHAGENT_GLINER_RELEX_WEIGHTS_DIR"), "detail: {detail}");
+            assert!(detail.contains("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR"), "detail: {detail}");
         }
         _ => panic!("expected Misconfigured when weights dir env missing"),
     }
@@ -795,17 +795,17 @@ fn manifest_misconfigured_when_weights_dir_env_missing() {
 fn manifest_registers_on_happy_path() {
     // enable=1, weights dir is a dir, explicit venv dir, shim exists.
     let get_env = |k: &str| match k {
-        "HHAGENT_GLINER_RELEX_ENABLE" => Some("1".to_string()),
-        "HHAGENT_GLINER_RELEX_WEIGHTS_DIR" => Some("/weights".to_string()),
-        "HHAGENT_GLINER_RELEX_VENV_DIR" => Some("/data/.venv".to_string()),
+        "KASTELLAN_GLINER_RELEX_ENABLE" => Some("1".to_string()),
+        "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR" => Some("/weights".to_string()),
+        "KASTELLAN_GLINER_RELEX_VENV_DIR" => Some("/data/.venv".to_string()),
         _ => None,
     };
     let is_dir = |p: &Path| p == Path::new("/weights");
-    // resolve_env checks the shim path `<venv>/bin/hhagent-worker-gliner-relex`.
+    // resolve_env checks the shim path `<venv>/bin/kastellan-worker-gliner-relex`.
     // Confirmed: line 520 of gliner_relex.rs builds
-    // `venv_dir.join("bin").join("hhagent-worker-gliner-relex")`,
-    // so for venv `/data/.venv` → `/data/.venv/bin/hhagent-worker-gliner-relex`.
-    let exists = |p: &Path| p == Path::new("/data/.venv/bin/hhagent-worker-gliner-relex");
+    // `venv_dir.join("bin").join("kastellan-worker-gliner-relex")`,
+    // so for venv `/data/.venv` → `/data/.venv/bin/kastellan-worker-gliner-relex`.
+    let exists = |p: &Path| p == Path::new("/data/.venv/bin/kastellan-worker-gliner-relex");
     let c = gliner_ctx(&get_env, &is_dir, &exists);
     match GlinerRelexManifest.resolve(&c) {
         Resolution::Register(entry) => {

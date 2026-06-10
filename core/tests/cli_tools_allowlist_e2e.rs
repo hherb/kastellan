@@ -1,4 +1,4 @@
-//! Subprocess-level pin for `hhagent-cli tools allowlist {add,remove,list}`.
+//! Subprocess-level pin for `kastellan-cli tools allowlist {add,remove,list}`.
 //!
 //! Each subtest runs the real CLI binary against a per-test PG cluster,
 //! asserts the DB row state, the audit-row shape, and the CLI exit code
@@ -9,20 +9,20 @@
 use std::collections::BTreeMap;
 use std::process::Command;
 
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, current_username, pg_bin_dir_or_skip,
     skip_if_no_supervisor, unique_suffix,
 };
 use sqlx::Row;
 
 /// Build the env block the CLI subprocess needs to find PG via UDS.
-/// The CLI's `resolve_connect_spec` reads `HHAGENT_DATA_DIR` and
+/// The CLI's `resolve_connect_spec` reads `KASTELLAN_DATA_DIR` and
 /// builds the socket path from there.
 fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env = vec![
-        ("HHAGENT_DATA_DIR".to_string(), data_dir.display().to_string()),
+        ("KASTELLAN_DATA_DIR".to_string(), data_dir.display().to_string()),
     ];
     if let Some(home) = std::env::var_os("HOME") {
         env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
@@ -46,7 +46,7 @@ async fn cli_tools_allowlist_add_remove_list_round_trip_writes_audit_rows() {
         &bin_dir,
         "ta-cli-d",
         "ta-cli-l",
-        &format!("hhagent-postgres-cli-tools-allowlist-e2e-{suffix}"),
+        &format!("kastellan-postgres-cli-tools-allowlist-e2e-{suffix}"),
     );
 
     // Apply migrations.

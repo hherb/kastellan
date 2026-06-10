@@ -4,41 +4,41 @@
 //! sibling-lift). [`derive_lockdown_env`] is the chokepoint for the
 //! worker-side defence-in-depth layer: before any worker spawns,
 //! [`crate::tool_host::spawn_worker`] augments the [`SandboxPolicy`] with the
-//! `HHAGENT_LANDLOCK_RW` / `HHAGENT_SECCOMP_PROFILE` / `HHAGENT_CPU_MS` env
-//! entries that `hhagent-worker-prelude` reads at worker start-up. Callers
+//! `KASTELLAN_LANDLOCK_RW` / `KASTELLAN_SECCOMP_PROFILE` / `KASTELLAN_CPU_MS` env
+//! entries that `kastellan-worker-prelude` reads at worker start-up. Callers
 //! cannot accidentally skip it because tool_host always derives the env, and
 //! the worker installs the filters from inside its own process.
 //!
 //! The consts and [`derive_lockdown_env`] are re-exported from
 //! `crate::tool_host` (`pub use`) so the public path
-//! `hhagent_core::tool_host::ENV_LANDLOCK_RW` (etc.) is unchanged by the lift.
+//! `kastellan_core::tool_host::ENV_LANDLOCK_RW` (etc.) is unchanged by the lift.
 
-use hhagent_sandbox::{Profile, SandboxPolicy};
+use kastellan_sandbox::{Profile, SandboxPolicy};
 
-/// Env var name read by `hhagent-worker-prelude::landlock_lock` for the
+/// Env var name read by `kastellan-worker-prelude::landlock_lock` for the
 /// JSON-encoded list of writable scratch paths. Workers using
 /// `prelude::serve_stdio` get a Landlock filter built from this.
-pub const ENV_LANDLOCK_RW: &str = "HHAGENT_LANDLOCK_RW";
-/// Env var name read by `hhagent-worker-prelude::landlock_lock` for the
+pub const ENV_LANDLOCK_RW: &str = "KASTELLAN_LANDLOCK_RW";
+/// Env var name read by `kastellan-worker-prelude::landlock_lock` for the
 /// JSON-encoded list of read-only paths derived from `SandboxPolicy.fs_read`.
 /// These are bind-mounted read-only by bwrap and must also be granted
 /// Landlock read rights so the worker can actually access them after
 /// `lock_down()` completes (e.g. `/etc/resolv.conf` for DNS in web-fetch).
-pub const ENV_LANDLOCK_RO: &str = "HHAGENT_LANDLOCK_RO";
-/// Env var name read by `hhagent-worker-prelude::seccomp_lock` for the
+pub const ENV_LANDLOCK_RO: &str = "KASTELLAN_LANDLOCK_RO";
+/// Env var name read by `kastellan-worker-prelude::seccomp_lock` for the
 /// per-worker seccomp profile selector.
-pub const ENV_SECCOMP_PROFILE: &str = "HHAGENT_SECCOMP_PROFILE";
-/// Env var name read by `hhagent-worker-prelude::rlimit` for the
+pub const ENV_SECCOMP_PROFILE: &str = "KASTELLAN_SECCOMP_PROFILE";
+/// Env var name read by `kastellan-worker-prelude::rlimit` for the
 /// `policy.cpu_ms` budget. Plumbed cross-platform — applied via
 /// `setrlimit(RLIMIT_CPU)` from the worker prelude before lock-down.
 /// Omitted (not set to `"0"`) when `policy.cpu_ms == 0` so the prelude
 /// can treat "unset" as the canonical `Disabled` signal.
-pub const ENV_CPU_MS: &str = "HHAGENT_CPU_MS";
+pub const ENV_CPU_MS: &str = "KASTELLAN_CPU_MS";
 
 /// Pure transform: clone `policy` and append the worker-prelude lockdown
 /// env entries that aren't already present. Callers that explicitly set
 /// either env var win — useful in tests and for future per-worker overrides
-/// (e.g. a probe worker that needs `HHAGENT_SECCOMP_PROFILE=none`).
+/// (e.g. a probe worker that needs `KASTELLAN_SECCOMP_PROFILE=none`).
 ///
 /// Exposed for unit testing the env-derivation logic without spinning up
 /// a real sandbox.
@@ -191,7 +191,7 @@ mod tests {
             .env
             .iter()
             .find(|(k, _)| k == ENV_LANDLOCK_RO)
-            .expect("HHAGENT_LANDLOCK_RO must be derived from fs_read");
+            .expect("KASTELLAN_LANDLOCK_RO must be derived from fs_read");
         // Exact-string assertion is OK because serde_json on a Vec<String>
         // is deterministic.
         assert_eq!(
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn derive_landlock_ro_empty_when_fs_read_empty() {
-        // When policy.fs_read is empty, HHAGENT_LANDLOCK_RO should be
+        // When policy.fs_read is empty, KASTELLAN_LANDLOCK_RO should be
         // derived as "[]" (an empty JSON array) rather than omitted —
         // the worker prelude parses this as an empty Vec, which is fine.
         let p = base_policy();
@@ -211,7 +211,7 @@ mod tests {
             .env
             .iter()
             .find(|(k, _)| k == ENV_LANDLOCK_RO)
-            .expect("HHAGENT_LANDLOCK_RO must always be derived (even when empty)");
+            .expect("KASTELLAN_LANDLOCK_RO must always be derived (even when empty)");
         assert_eq!(landlock_ro.1, "[]");
     }
 
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(
             ro_entries.len(),
             1,
-            "caller-supplied HHAGENT_LANDLOCK_RO must not be duplicated"
+            "caller-supplied KASTELLAN_LANDLOCK_RO must not be duplicated"
         );
         assert_eq!(ro_entries[0].1, r#"["/custom/ro"]"#);
     }

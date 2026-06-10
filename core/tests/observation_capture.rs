@@ -1,24 +1,24 @@
 //! Observation-phase orchestrator (#[ignore]-flagged).
 //!
-//! Brings up a per-test PG cluster + real `hhagent` daemon under
+//! Brings up a per-test PG cluster + real `kastellan` daemon under
 //! `systemd --user` / `launchctl` + sandboxed worker, points the daemon
-//! at the **real local LLM** (operator's HHAGENT_LLM_LOCAL_URL), iterates
+//! at the **real local LLM** (operator's KASTELLAN_LLM_LOCAL_URL), iterates
 //! every fixture under `tests/observation/fixtures/`, runs each through
-//! `hhagent-cli ask`, queries `audit_log` for the task's rows, and
+//! `kastellan-cli ask`, queries `audit_log` for the task's rows, and
 //! writes one capture JSON per fixture under
 //! `tests/observation/captures/<id>/<date>_<model_slug>.json`.
 //!
 //! ## Invocation
 //!
 //! ```sh
-//! cargo test -p hhagent-core --test observation_capture \
+//! cargo test -p kastellan-core --test observation_capture \
 //!     -- --ignored --nocapture
 //! ```
 //!
 //! Env knobs:
-//! - `HHAGENT_LLM_LOCAL_URL` (required) — operator's local LLM endpoint
-//! - `HHAGENT_LLM_LOCAL_MODEL` (default: "gemma4:26b-a4b-it-q8_0")
-//! - `HHAGENT_OBSERVATION_DRY_RUN=1` — walk fixtures + print work plan,
+//! - `KASTELLAN_LLM_LOCAL_URL` (required) — operator's local LLM endpoint
+//! - `KASTELLAN_LLM_LOCAL_MODEL` (default: "gemma4:26b-a4b-it-q8_0")
+//! - `KASTELLAN_OBSERVATION_DRY_RUN=1` — walk fixtures + print work plan,
 //!   no LLM dial, no file write
 //!
 //! ## Why #[ignore]
@@ -33,21 +33,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hhagent_core::observation::capture::{
+use kastellan_core::observation::capture::{
     capture_filename, extract_plans_from_audit_rows, fetch_audit_rows_for_task,
     parse_fixture_prompt, slug_model, write_capture_to_dir, CaptureJson, SCHEMA_VERSION,
 };
-use hhagent_db::{conn::ConnectSpec, pool::connect_runtime_pool};
-use hhagent_supervisor::specs::core_service_spec;
-use hhagent_supervisor::{default_supervisor, ServiceStatus};
-use hhagent_tests_common::{
+use kastellan_db::{conn::ConnectSpec, pool::connect_runtime_pool};
+use kastellan_supervisor::specs::core_service_spec;
+use kastellan_supervisor::{default_supervisor, ServiceStatus};
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, core_binary, current_username, pg_bin_dir_or_skip,
     seed_tool_allowlist, shell_exec_worker_binary, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, unique_temp_root, wait_for_log_match,
     wait_for_status, PathGuard, PgCluster, ServiceGuard,
 };
 #[cfg(target_os = "macos")]
-use hhagent_tests_common::serial_lock;
+use kastellan_tests_common::serial_lock;
 
 // Per-OS argv0 paths for the read-only coreutils the seed fixtures may
 // reach for (echo / date / ls / cat). The allowlist matches argv[0]
@@ -77,19 +77,19 @@ const DEFAULT_LLM_MODEL: &str = "gemma4:26b-a4b-it-q8_0";
 /// Default per-fixture wall-clock budget. Sized to allow up to the
 /// 3-plan cap on a moderately fast local model; reasoning-heavy or
 /// large quantised models may need more. Operators override with
-/// `HHAGENT_OBSERVATION_PER_FIXTURE_TIMEOUT_SECS`.
+/// `KASTELLAN_OBSERVATION_PER_FIXTURE_TIMEOUT_SECS`.
 const DEFAULT_PER_FIXTURE_TIMEOUT_SECS: u64 = 600;
 
 /// Default per-LLM-call timeout the orchestrator forces on the daemon
-/// via `HHAGENT_LLM_TIMEOUT_MS`. Picked to be smaller than the per-fixture
+/// via `KASTELLAN_LLM_TIMEOUT_MS`. Picked to be smaller than the per-fixture
 /// wall-clock budget so a hung call surfaces as a transport error inside
 /// the agent loop (and the agent can retry within the same fixture)
 /// rather than as a wall-clock kill from the test harness. Operators
-/// override with `HHAGENT_OBSERVATION_LLM_TIMEOUT_MS`.
+/// override with `KASTELLAN_OBSERVATION_LLM_TIMEOUT_MS`.
 const DEFAULT_LLM_TIMEOUT_MS: u64 = 180_000;
 
 fn per_fixture_timeout() -> Duration {
-    let secs = std::env::var("HHAGENT_OBSERVATION_PER_FIXTURE_TIMEOUT_SECS")
+    let secs = std::env::var("KASTELLAN_OBSERVATION_PER_FIXTURE_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_PER_FIXTURE_TIMEOUT_SECS);
@@ -97,7 +97,7 @@ fn per_fixture_timeout() -> Duration {
 }
 
 fn llm_timeout_ms_string() -> String {
-    std::env::var("HHAGENT_OBSERVATION_LLM_TIMEOUT_MS").unwrap_or_else(|_| DEFAULT_LLM_TIMEOUT_MS.to_string())
+    std::env::var("KASTELLAN_OBSERVATION_LLM_TIMEOUT_MS").unwrap_or_else(|_| DEFAULT_LLM_TIMEOUT_MS.to_string())
 }
 
 /// Locate `tests/observation/` relative to the workspace root.
@@ -245,7 +245,7 @@ fn bring_up_daemon(
 
     let binary = core_binary();
     let mut spec = core_service_spec(&binary, &core_log_dir);
-    spec.name = format!("hhagent-supervisor-test-core-obs-{suffix}");
+    spec.name = format!("kastellan-supervisor-test-core-obs-{suffix}");
     assert!(spec.name.len() <= 200);
     let stdout_path = core_log_dir.join(format!("{}.out", spec.name));
     let stderr_path = core_log_dir.join(format!("{}.err", spec.name));
@@ -253,12 +253,12 @@ fn bring_up_daemon(
     spec.stderr_log = Some(stderr_path.clone());
 
     spec.env.push((
-        "HHAGENT_DATA_DIR".into(),
+        "KASTELLAN_DATA_DIR".into(),
         data_dir.to_string_lossy().into_owned(),
     ));
     spec.env.push(("USER".into(), user.to_string()));
     spec.env.push((
-        "HHAGENT_STATE_DIR".into(),
+        "KASTELLAN_STATE_DIR".into(),
         state_dir.to_string_lossy().into_owned(),
     ));
 
@@ -267,22 +267,22 @@ fn bring_up_daemon(
         .expect("workspace root")
         .join("prompts");
     spec.env.push((
-        "HHAGENT_PROMPTS_DIR".into(),
+        "KASTELLAN_PROMPTS_DIR".into(),
         workspace_prompts.to_string_lossy().into_owned(),
     ));
 
     spec.env.push((
-        "HHAGENT_LLM_LOCAL_URL".into(),
+        "KASTELLAN_LLM_LOCAL_URL".into(),
         llm_base_url.to_string(),
     ));
     spec.env.push((
-        "HHAGENT_LLM_LOCAL_MODEL".into(),
+        "KASTELLAN_LLM_LOCAL_MODEL".into(),
         llm_model.to_string(),
     ));
-    spec.env.push(("HHAGENT_LLM_TIMEOUT_MS".into(), llm_timeout_ms_string()));
+    spec.env.push(("KASTELLAN_LLM_TIMEOUT_MS".into(), llm_timeout_ms_string()));
 
     spec.env.push((
-        "HHAGENT_SHELL_EXEC_BIN".into(),
+        "KASTELLAN_SHELL_EXEC_BIN".into(),
         shell_exec_worker_binary().to_string_lossy().into_owned(),
     ));
     // Allowlist is now sourced from the `tool_allowlists` table (see
@@ -290,9 +290,9 @@ fn bring_up_daemon(
     // (echo/date/ls/cat — read-only) for its OS via
     // `seed_tool_allowlist` immediately after pool connect, before the
     // fast-fail assertion (which exists as defence-in-depth in case a
-    // future refactor breaks the seeding path). HHAGENT_SHELL_EXEC_ALLOWLIST
+    // future refactor breaks the seeding path). KASTELLAN_SHELL_EXEC_ALLOWLIST
     // env is no longer honored (deprecation WARN logs once on bring-up).
-    // Operators do not need to run `hhagent-cli tools allowlist add`
+    // Operators do not need to run `kastellan-cli tools allowlist add`
     // manually — the per-test PG cluster is ephemeral; only the
     // orchestrator can reach it.
 
@@ -332,10 +332,10 @@ fn bring_up_daemon(
 /// stderr. Called at the end of every capture run so operators can see
 /// the daemon's tracing output before the PathGuard RAII teardown wipes
 /// the log dir. Cheap (the files are small) and only fires under the
-/// HHAGENT_OBSERVATION_DUMP_DAEMON_LOG env knob to avoid spam when the
+/// KASTELLAN_OBSERVATION_DUMP_DAEMON_LOG env knob to avoid spam when the
 /// captures are all clean.
 fn dump_daemon_log(label: &str, path: &Path) {
-    if std::env::var("HHAGENT_OBSERVATION_DUMP_DAEMON_LOG").is_err() {
+    if std::env::var("KASTELLAN_OBSERVATION_DUMP_DAEMON_LOG").is_err() {
         return;
     }
     eprintln!("\n[obs] ===== daemon {label} ({}) =====", path.display());
@@ -351,7 +351,7 @@ fn dump_daemon_log(label: &str, path: &Path) {
     eprintln!("[obs] ===== end daemon {label} =====\n");
 }
 
-/// Submit one prompt via `hhagent-cli ask`, then capture the audit-log
+/// Submit one prompt via `kastellan-cli ask`, then capture the audit-log
 /// stream for the resulting task. Returns the constructed CaptureJson.
 // Test helper that threads the full capture context (pool, paths, user,
 // fixture, backend, …) into one call; the arg-count heuristic is moot here.
@@ -382,9 +382,9 @@ async fn capture_one_fixture(
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("USER", user)
-        .env("HHAGENT_DATA_DIR", data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_DATA_DIR", data_dir.to_string_lossy().as_ref())
         .output()
-        .expect("spawn hhagent-cli ask");
+        .expect("spawn kastellan-cli ask");
     let elapsed = start.elapsed();
     assert!(
         elapsed < per_fixture,
@@ -436,14 +436,14 @@ async fn capture_one_fixture(
 }
 
 fn dry_run_enabled() -> bool {
-    std::env::var("HHAGENT_OBSERVATION_DRY_RUN")
+    std::env::var("KASTELLAN_OBSERVATION_DRY_RUN")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
 fn dry_run_report(fixtures: &[FixtureMeta]) {
     eprintln!(
-        "\n[DRY RUN] would capture {} fixtures (HHAGENT_OBSERVATION_DRY_RUN=1):",
+        "\n[DRY RUN] would capture {} fixtures (KASTELLAN_OBSERVATION_DRY_RUN=1):",
         fixtures.len()
     );
     for f in fixtures {
@@ -458,7 +458,7 @@ fn dry_run_report(fixtures: &[FixtureMeta]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[ignore = "operator-run: needs real local LLM at HHAGENT_LLM_LOCAL_URL"]
+#[ignore = "operator-run: needs real local LLM at KASTELLAN_LLM_LOCAL_URL"]
 // The macOS `serial_lock()` guard is deliberately held for the whole test
 // body — including its awaits — to serialise this launchd-touching capture
 // run against sibling tests. Holding it across awaits is the intent, so the
@@ -494,13 +494,13 @@ async fn capture_all_fixtures_against_live_llm() {
     // LLM env. Fail loudly on missing URL or unreachable backend —
     // operators ran this explicitly; a silent skip would produce no
     // captures and waste their time.
-    let llm_base_url = std::env::var("HHAGENT_LLM_LOCAL_URL").unwrap_or_else(|_| {
+    let llm_base_url = std::env::var("KASTELLAN_LLM_LOCAL_URL").unwrap_or_else(|_| {
         panic!(
-            "HHAGENT_LLM_LOCAL_URL is required; set it to your local LLM \
+            "KASTELLAN_LLM_LOCAL_URL is required; set it to your local LLM \
              OpenAI-compat base URL (e.g. http://127.0.0.1:11434/v1)"
         )
     });
-    let llm_model = std::env::var("HHAGENT_LLM_LOCAL_MODEL")
+    let llm_model = std::env::var("KASTELLAN_LLM_LOCAL_MODEL")
         .unwrap_or_else(|_| DEFAULT_LLM_MODEL.to_string());
     if let Err(why) = check_llm_reachable(&llm_base_url) {
         panic!(
@@ -515,7 +515,7 @@ async fn capture_all_fixtures_against_live_llm() {
         &bin_dir,
         "obs-cap-d",
         "obs-cap-l",
-        &format!("hhagent-supervisor-test-pg-obs-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-obs-{suffix}"),
     );
 
     // Seed the per-test PG cluster's `tool_allowlists` BEFORE the daemon
@@ -528,7 +528,7 @@ async fn capture_all_fixtures_against_live_llm() {
     // The probe is required before the seed because the `tool_allowlists`
     // table is created by migration 0009; the seed pool's runtime-role
     // connection cannot insert into a non-existent table.
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "test",
         "setup",
@@ -638,7 +638,7 @@ async fn capture_all_fixtures_against_live_llm() {
     assert!(fname.ends_with(".json"));
 
     // Operator-facing diagnostic dump of the daemon logs. Gated behind
-    // HHAGENT_OBSERVATION_DUMP_DAEMON_LOG=1 so clean runs stay quiet.
+    // KASTELLAN_OBSERVATION_DUMP_DAEMON_LOG=1 so clean runs stay quiet.
     // Captures live in tests/observation/captures/ so the data is safe;
     // this is purely for understanding *why* a capture turned out the
     // way it did when the audit-log slice doesn't tell the whole story

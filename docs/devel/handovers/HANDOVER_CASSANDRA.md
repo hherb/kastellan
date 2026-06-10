@@ -26,7 +26,7 @@
 ## How to resume
 
 1. Enter the worktree (use the native `EnterWorktree` tool, pass
-   `path: "/Users/hherb/src/hhagent/.claude/worktrees/scheduler-phase1"`).
+   `path: "/Users/hherb/src/kastellan/.claude/worktrees/scheduler-phase1"`).
    The branch is `worktree-scheduler-phase1`.
 2. The scheduler implementation is **complete** — all tests pass (267 workspace,
    all skip-as-pass on macOS without PG).
@@ -46,7 +46,7 @@
 - **`core::scheduler::inner_loop`** — `run_to_terminal` (claim → LLM plan → CASSANDRA review chain → dispatch steps → repeat), `Outcome` (Completed/Failed/Cancelled), `StepDispatcher` trait, `StepOutcome`. Plan-iteration cap = 10.
 - **`core::scheduler::runner`** — `LaneRunner` (per-lane `PgListener` wake-up + `claim_one` loop + spawn inner_loop), `ToolHostStepDispatcher` (NOT_IMPLEMENTED placeholder — see deferrals), `spawn_scheduler` (starts both lanes).
 - **`core/src/main.rs` wiring** — `spawn_scheduler` at daemon startup; `sweep_crashed` on boot; prompt load; `ChainReviewStage` with stub stages.
-- **`hhagent-cli` subcommands** — `ask` (LISTEN-before-INSERT completion signal, ctrl-C cancel), `tasks list`, `tasks status`, `tasks cancel`, `tasks fail`, `tasks tail`.
+- **`kastellan-cli` subcommands** — `ask` (LISTEN-before-INSERT completion signal, ctrl-C cancel), `tasks list`, `tasks status`, `tasks cancel`, `tasks fail`, `tasks tail`.
 - **Integration tests (skip-as-pass without PG):** `scheduler_inner_loop_e2e` (4 scenarios: happy path, tool-fail-recover, cap-exhausted, cancel); `scheduler_lanes_e2e` (concurrent fast+long claim timing); `scheduler_crash_recovery_e2e` (back-dated lease → sweep_crashed); `agent_prompts_e2e` (hash lands + both versions persist).
 - **ROADMAP** — scheduler entry marked `[x]` with commit range; 3.2.bis, 4.4, and real-stages follow-up entries added as unchecked items.
 
@@ -123,7 +123,7 @@
   the lane's deadline (30 min on long lane). Spec §3.4.
 - **Crash recovery is fail-loud** — on daemon restart, sweep marks
   expired-lease running tasks as `crashed`. **Never auto-resume.**
-  The user (or operator via `hhagent-cli tasks fail`) decides whether
+  The user (or operator via `kastellan-cli tasks fail`) decides whether
   to resubmit. Spec §3.6, decisions log row 7.
 
 ## Notable judgment calls during the run

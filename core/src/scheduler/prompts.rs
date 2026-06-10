@@ -17,14 +17,14 @@ use sqlx::PgPool;
 use thiserror::Error;
 use tokio::fs;
 
-use hhagent_db::agent_prompts;
+use kastellan_db::agent_prompts;
 
 #[derive(Debug, Error)]
 pub enum PromptError {
     #[error("io error reading {path:?}: {source}")]
     Io { path: std::path::PathBuf, source: std::io::Error },
     #[error("db error: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
 }
 
 /// Load all `.md` files under `dir` into a `PromptCache`. Each file's

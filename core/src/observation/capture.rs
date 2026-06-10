@@ -55,7 +55,7 @@ pub struct CaptureJson {
     pub fixture_summary: String,
     /// RFC 3339 string (UTC).
     pub captured_at: String,
-    /// Matches `hhagent_llm_router::Backend::as_tag()` so consumers can
+    /// Matches `kastellan_llm_router::Backend::as_tag()` so consumers can
     /// fold producer-side audit rows in directly.
     pub llm_backend: String,
     /// Verbatim from `RouterConfig::local_model` at capture time.
@@ -204,8 +204,8 @@ pub fn capture_filename(date_yyyy_mm_dd: &str, model_slug: &str) -> String {
 /// can mean any of three things, in increasing severity:
 ///   1. Pre-Slice-A capture (operator must recapture).
 ///   2. The producer wrote a payload that exceeded
-///      [`hhagent_db::audit::PAYLOAD_MAX_BYTES`] (4 KiB) and
-///      [`hhagent_db::audit::truncate_payload`] replaced the entire
+///      [`kastellan_db::audit::PAYLOAD_MAX_BYTES`] (4 KiB) and
+///      [`kastellan_db::audit::truncate_payload`] replaced the entire
 ///      object with the `{_truncated, sha256, len}` envelope — `plan`
 ///      was nuked along with every other key.
 ///   3. A genuine writer regression dropped the key.

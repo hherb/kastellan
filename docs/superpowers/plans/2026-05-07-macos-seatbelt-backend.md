@@ -153,7 +153,7 @@ impl SandboxBackend for NotYetImplemented {
 
 - [ ] **Step 3: Compile to verify the wiring**
 
-Run: `cargo build -p hhagent-sandbox`
+Run: `cargo build -p kastellan-sandbox`
 Expected: builds clean (no errors, possibly a `dead_code` warning on the `_unused_imports_marker` helper — that is fine and goes away in Task 2).
 
 - [ ] **Step 4: Commit**
@@ -219,7 +219,7 @@ mod tests {
 
 - [ ] **Step 2: Run the test, verify it fails to compile (no `build_profile`)**
 
-Run: `cargo test -p hhagent-sandbox profile_starts_with_version_and_deny_default`
+Run: `cargo test -p kastellan-sandbox profile_starts_with_version_and_deny_default`
 Expected: FAIL — compilation error `cannot find function 'build_profile' in this scope`.
 
 - [ ] **Step 3: Implement minimal `build_profile`**
@@ -250,7 +250,7 @@ use std::process::{Child, Command, Stdio};
 
 - [ ] **Step 4: Run the test, verify it passes**
 
-Run: `cargo test -p hhagent-sandbox profile_starts_with_version_and_deny_default`
+Run: `cargo test -p kastellan-sandbox profile_starts_with_version_and_deny_default`
 Expected: PASS (1 test passed).
 
 - [ ] **Step 5: Commit**
@@ -300,7 +300,7 @@ fn profile_emits_always_on_allows() {
 
 - [ ] **Step 2: Run the test, verify it fails**
 
-Run: `cargo test -p hhagent-sandbox profile_emits_always_on_allows`
+Run: `cargo test -p kastellan-sandbox profile_emits_always_on_allows`
 Expected: FAIL — assertion fires on the first missing needle (`(allow process-fork)`).
 
 - [ ] **Step 3: Extend `build_profile` to emit the always-on allows**
@@ -331,7 +331,7 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
 
 - [ ] **Step 4: Run both tests, verify they pass**
 
-Run: `cargo test -p hhagent-sandbox --lib`
+Run: `cargo test -p kastellan-sandbox --lib`
 Expected: 2 passed.
 
 - [ ] **Step 5: Commit**
@@ -389,7 +389,7 @@ fn dev_allowlist_is_minimal() {
 
 - [ ] **Step 2: Run the test, verify it fails**
 
-Run: `cargo test -p hhagent-sandbox dev_allowlist_is_minimal`
+Run: `cargo test -p kastellan-sandbox dev_allowlist_is_minimal`
 Expected: FAIL — assertion fires on `(literal "/dev/null")`.
 
 - [ ] **Step 3: Extend `build_profile` with the /dev allowlist**
@@ -410,7 +410,7 @@ After the `out.push_str("(allow sysctl-read)\n");` line in `build_profile`, appe
 
 - [ ] **Step 4: Run all tests, verify they pass**
 
-Run: `cargo test -p hhagent-sandbox --lib`
+Run: `cargo test -p kastellan-sandbox --lib`
 Expected: 3 passed.
 
 - [ ] **Step 5: Commit**
@@ -455,7 +455,7 @@ Also remove the `_path_marker` placeholder from Task 2 — `PathBuf` is now used
 
 - [ ] **Step 2: Run the test, verify it fails**
 
-Run: `cargo test -p hhagent-sandbox fs_read_emits_subpath_allow`
+Run: `cargo test -p kastellan-sandbox fs_read_emits_subpath_allow`
 Expected: FAIL — `(subpath "/etc/ssl")` not present.
 
 - [ ] **Step 3: Extend `build_profile` to emit fs_read rules**
@@ -497,7 +497,7 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
 
 - [ ] **Step 4: Run tests, verify they pass**
 
-Run: `cargo test -p hhagent-sandbox --lib`
+Run: `cargo test -p kastellan-sandbox --lib`
 Expected: 4 passed.
 
 - [ ] **Step 5: Commit**
@@ -527,15 +527,15 @@ Append to `mod tests`:
 #[test]
 fn fs_write_emits_read_and_write_subpath_allow() {
     let mut p = strict_policy();
-    p.fs_write = vec![PathBuf::from("/var/lib/hhagent/scratch")];
+    p.fs_write = vec![PathBuf::from("/var/lib/kastellan/scratch")];
     let prof = build_profile(&p);
     assert!(
-        prof.contains("(allow file-read* file-write* (subpath \"/var/lib/hhagent/scratch\"))"),
+        prof.contains("(allow file-read* file-write* (subpath \"/var/lib/kastellan/scratch\"))"),
         "expected combined read+write allow; got:\n{prof}"
     );
     // The fs_write path must NOT appear as a separate read-only allow.
     assert!(
-        !prof.contains("(allow file-read* (subpath \"/var/lib/hhagent/scratch\"))"),
+        !prof.contains("(allow file-read* (subpath \"/var/lib/kastellan/scratch\"))"),
         "fs_write path must not also be emitted as a separate read-only rule; got:\n{prof}"
     );
 }
@@ -543,7 +543,7 @@ fn fs_write_emits_read_and_write_subpath_allow() {
 
 - [ ] **Step 2: Run the test, verify it fails**
 
-Run: `cargo test -p hhagent-sandbox fs_write_emits_read_and_write_subpath_allow`
+Run: `cargo test -p kastellan-sandbox fs_write_emits_read_and_write_subpath_allow`
 Expected: FAIL — combined rule not present.
 
 - [ ] **Step 3: Extend `build_profile` to emit fs_write rules**
@@ -561,7 +561,7 @@ After the `for path in &policy.fs_read { ... }` loop, append:
 
 - [ ] **Step 4: Run tests, verify they pass**
 
-Run: `cargo test -p hhagent-sandbox --lib`
+Run: `cargo test -p kastellan-sandbox --lib`
 Expected: 5 passed.
 
 - [ ] **Step 5: Commit**
@@ -605,7 +605,7 @@ fn allowlist_does_allow_network() {
 
 - [ ] **Step 2: Run the tests, verify the allowlist one fails**
 
-Run: `cargo test -p hhagent-sandbox --lib`
+Run: `cargo test -p kastellan-sandbox --lib`
 Expected: 6 tests, 1 FAIL — `allowlist_does_allow_network` (deny test passes incidentally because no rule has been added yet).
 
 - [ ] **Step 3: Add the network rule**
@@ -623,7 +623,7 @@ After the `for path in &policy.fs_write { ... }` loop in `build_profile`, append
 
 - [ ] **Step 4: Run tests, verify all pass**
 
-Run: `cargo test -p hhagent-sandbox --lib`
+Run: `cargo test -p kastellan-sandbox --lib`
 Expected: 7 passed.
 
 - [ ] **Step 5: Commit**
@@ -672,7 +672,7 @@ fn relative_policy_paths_are_rejected_by_spawn() {
 
 - [ ] **Step 2: Run the test, verify it fails (current stub returns the wrong error)**
 
-Run: `cargo test -p hhagent-sandbox relative_policy_paths_are_rejected_by_spawn`
+Run: `cargo test -p kastellan-sandbox relative_policy_paths_are_rejected_by_spawn`
 Expected: FAIL — error contains "not yet implemented", not "must be absolute".
 
 - [ ] **Step 3: Implement `spawn_under_policy`**
@@ -728,7 +728,7 @@ use std::process::{Child, Command, Stdio};
 
 - [ ] **Step 4: Run tests, verify all pass**
 
-Run: `cargo test -p hhagent-sandbox --lib`
+Run: `cargo test -p kastellan-sandbox --lib`
 Expected: 8 passed.
 
 - [ ] **Step 5: Commit**
@@ -771,7 +771,7 @@ fn probe_succeeds_on_this_host() {
 
 - [ ] **Step 2: Run the test, verify it fails (no `probe` method yet)**
 
-Run: `cargo test -p hhagent-sandbox probe_succeeds_on_this_host`
+Run: `cargo test -p kastellan-sandbox probe_succeeds_on_this_host`
 Expected: FAIL — compilation error `no function or associated item named 'probe'`.
 
 - [ ] **Step 3: Implement `MacosSeatbelt::probe()`**
@@ -819,7 +819,7 @@ In `impl MacosSeatbelt { ... }`, after `pub fn new()`, add:
 
 - [ ] **Step 4: Run all unit tests**
 
-Run: `cargo test -p hhagent-sandbox --lib`
+Run: `cargo test -p kastellan-sandbox --lib`
 Expected: 9 passed.
 
 - [ ] **Step 5: Commit**
@@ -858,7 +858,7 @@ EOF
 use std::io::Read;
 use std::path::PathBuf;
 
-use hhagent_sandbox::{macos_seatbelt::MacosSeatbelt, Net, Profile, SandboxBackend, SandboxPolicy};
+use kastellan_sandbox::{macos_seatbelt::MacosSeatbelt, Net, Profile, SandboxBackend, SandboxPolicy};
 
 /// Skip the test if Seatbelt is unavailable on this host. Prints to stderr
 /// via `eprintln!` so `cargo test -- --nocapture` shows the skip line —
@@ -907,7 +907,7 @@ fn scaffold_compiles_and_skip_helper_runs() {
 
 - [ ] **Step 2: Run the integration test**
 
-Run: `cargo test -p hhagent-sandbox --test macos_smoke`
+Run: `cargo test -p kastellan-sandbox --test macos_smoke`
 Expected: 1 passed.
 
 - [ ] **Step 3: Commit**
@@ -960,7 +960,7 @@ fn echo_runs_inside_sandbox() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-sandbox --test macos_smoke echo_runs_inside_sandbox -- --nocapture`
+Run: `cargo test -p kastellan-sandbox --test macos_smoke echo_runs_inside_sandbox -- --nocapture`
 Expected: PASS. If it FAILS, the stderr will show the missing allow rule (e.g. `deny file-read /bin/echo`); add the path's parent dir to the always-on allows or to `policy.fs_read` accordingly. `/bin` should be reachable via `(allow process-exec*)` + `(allow file-read-metadata (subpath "/"))` + dyld reading from `/usr/lib` — verify before changing the profile.
 
 - [ ] **Step 3: Commit**
@@ -1014,7 +1014,7 @@ fn host_etc_master_passwd_is_invisible_when_not_in_policy() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-sandbox --test macos_smoke host_etc_master_passwd_is_invisible_when_not_in_policy`
+Run: `cargo test -p kastellan-sandbox --test macos_smoke host_etc_master_passwd_is_invisible_when_not_in_policy`
 Expected: PASS — `cat` exits non-zero because Seatbelt denies the read.
 
 - [ ] **Step 3: Commit**
@@ -1065,7 +1065,7 @@ fn host_users_dir_is_invisible_when_not_in_policy() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-sandbox --test macos_smoke host_users_dir_is_invisible_when_not_in_policy`
+Run: `cargo test -p kastellan-sandbox --test macos_smoke host_users_dir_is_invisible_when_not_in_policy`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
@@ -1116,7 +1116,7 @@ fn fs_read_path_is_visible_when_listed() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-sandbox --test macos_smoke fs_read_path_is_visible_when_listed`
+Run: `cargo test -p kastellan-sandbox --test macos_smoke fs_read_path_is_visible_when_listed`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
@@ -1149,7 +1149,7 @@ fn relative_policy_paths_are_rejected() {
     let mut policy = strict_policy();
     policy.fs_read.push(PathBuf::from("relative/path"));
     let res = backend.spawn_under_policy(&policy, "/usr/bin/true", &[]);
-    assert!(matches!(res, Err(hhagent_sandbox::SandboxError::Backend(_))));
+    assert!(matches!(res, Err(kastellan_sandbox::SandboxError::Backend(_))));
 }
 ```
 
@@ -1157,7 +1157,7 @@ fn relative_policy_paths_are_rejected() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-sandbox --test macos_smoke relative_policy_paths_are_rejected`
+Run: `cargo test -p kastellan-sandbox --test macos_smoke relative_policy_paths_are_rejected`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
@@ -1206,7 +1206,7 @@ fn reading_dev_disk0_is_denied() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p hhagent-sandbox --test macos_smoke reading_dev_disk0_is_denied`
+Run: `cargo test -p kastellan-sandbox --test macos_smoke reading_dev_disk0_is_denied`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
@@ -1279,7 +1279,7 @@ doc = false
 
 - [ ] **Step 3: Build and verify the binary lands in `target/debug/`**
 
-Run: `cargo build -p hhagent-sandbox --bin net_probe`
+Run: `cargo build -p kastellan-sandbox --bin net_probe`
 Then: `ls -l target/debug/net_probe`
 Expected: file exists, is executable. Run `./target/debug/net_probe; echo "exit=$?"` — exit will be 0 if you have internet, 1 if you don't. Either is fine here.
 
@@ -1353,7 +1353,7 @@ fn net_is_unreachable_under_deny() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo build --workspace && cargo test -p hhagent-sandbox --test macos_smoke net_is_unreachable_under_deny -- --nocapture`
+Run: `cargo build --workspace && cargo test -p kastellan-sandbox --test macos_smoke net_is_unreachable_under_deny -- --nocapture`
 Expected: PASS — TCP connect denied by Seatbelt under `(deny default)`. The probe exits 1.
 
 - [ ] **Step 3: Commit**
@@ -1402,13 +1402,13 @@ Replace the entire contents of `core/tests/shell_exec_e2e.rs` with:
 
 use std::path::PathBuf;
 
-use hhagent_core::tool_host::{spawn_worker, WorkerSpec};
-use hhagent_protocol::codes;
-use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+use kastellan_core::tool_host::{spawn_worker, WorkerSpec};
+use kastellan_protocol::codes;
+use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
 #[cfg(target_os = "linux")]
 fn skip_if_sandbox_unavailable() -> bool {
-    use hhagent_sandbox::linux_bwrap::LinuxBwrap;
+    use kastellan_sandbox::linux_bwrap::LinuxBwrap;
     if let Err(e) = LinuxBwrap::probe() {
         eprintln!("\n[SKIP] bwrap probe failed: {e}\n");
         return true;
@@ -1418,7 +1418,7 @@ fn skip_if_sandbox_unavailable() -> bool {
 
 #[cfg(target_os = "macos")]
 fn skip_if_sandbox_unavailable() -> bool {
-    use hhagent_sandbox::macos_seatbelt::MacosSeatbelt;
+    use kastellan_sandbox::macos_seatbelt::MacosSeatbelt;
     if let Err(e) = MacosSeatbelt::probe() {
         eprintln!("\n[SKIP] sandbox-exec probe failed: {e}\n");
         return true;
@@ -1428,12 +1428,12 @@ fn skip_if_sandbox_unavailable() -> bool {
 
 #[cfg(target_os = "linux")]
 fn backend() -> Box<dyn SandboxBackend> {
-    Box::new(hhagent_sandbox::linux_bwrap::LinuxBwrap::new())
+    Box::new(kastellan_sandbox::linux_bwrap::LinuxBwrap::new())
 }
 
 #[cfg(target_os = "macos")]
 fn backend() -> Box<dyn SandboxBackend> {
-    Box::new(hhagent_sandbox::macos_seatbelt::MacosSeatbelt::new())
+    Box::new(kastellan_sandbox::macos_seatbelt::MacosSeatbelt::new())
 }
 
 /// Locate the worker binary. Same path layout on Linux and macOS today —
@@ -1445,7 +1445,7 @@ fn worker_binary() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| manifest.parent().unwrap().join("target"));
-    target.join("debug").join("hhagent-worker-shell-exec")
+    target.join("debug").join("kastellan-worker-shell-exec")
 }
 
 fn policy_for_shell_exec(worker: &PathBuf, allowlist: &[&str]) -> SandboxPolicy {
@@ -1457,7 +1457,7 @@ fn policy_for_shell_exec(worker: &PathBuf, allowlist: &[&str]) -> SandboxPolicy 
         cpu_ms: 5_000,
         mem_mb: 256,
         profile: Profile::WorkerStrict,
-        env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
+        env: vec![("KASTELLAN_SHELL_ALLOWLIST".to_string(), allow_json)],
     }
 }
 
@@ -1562,12 +1562,12 @@ The reject test now uses `/bin/cat /etc/master.passwd` instead of `/etc/passwd`,
 
 - [ ] **Step 3: Run the e2e tests on macOS**
 
-Run: `cargo build --workspace && cargo test -p hhagent-core --test shell_exec_e2e -- --nocapture`
+Run: `cargo build --workspace && cargo test -p kastellan-core --test shell_exec_e2e -- --nocapture`
 Expected: 3 passed, 0 skipped on a healthy macOS host. If the worker binary isn't found, build the workspace first.
 
 - [ ] **Step 4: Run the full sandbox suite to make sure nothing regressed**
 
-Run: `cargo test -p hhagent-sandbox -- --nocapture`
+Run: `cargo test -p kastellan-sandbox -- --nocapture`
 Expected: 9 unit + 7 macos_smoke = 16 passed, 0 skipped.
 
 - [ ] **Step 5: Commit**
@@ -1718,13 +1718,13 @@ Total tests after this session on macOS: 26 passed, 0 skipped (`cargo test --wor
 Then refresh the **Working state** block:
 
 ```
-hhagent (Rust workspace, 6 crates, AGPL-3.0)
-├── core               hhagent-core: lib + bin (skeleton main); tool_host derives lockdown env
-├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (probe fixed) + MacosSeatbelt
-├── supervisor         hhagent-supervisor: stub (NotYetImplemented)
-├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
-├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down
-└── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
+kastellan (Rust workspace, 6 crates, AGPL-3.0)
+├── core               kastellan-core: lib + bin (skeleton main); tool_host derives lockdown env
+├── sandbox            kastellan-sandbox: SandboxPolicy + LinuxBwrap (probe fixed) + MacosSeatbelt
+├── supervisor         kastellan-supervisor: stub (NotYetImplemented)
+├── protocol           kastellan-protocol: JSON-RPC 2.0 over stdio (working)
+├── workers/prelude      kastellan-worker-prelude: Linux-only Landlock + seccomp lock_down
+└── workers/shell-exec   kastellan-worker-shell-exec: uses prelude::serve_stdio
 ```
 
 And update the Suite table to add a `sandbox` macos_smoke row + the new sandbox unit-test count:

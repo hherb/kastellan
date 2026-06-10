@@ -44,5 +44,5 @@ CREATE TRIGGER memories_after_delete_audit
 -- Runtime needs SELECT (for reads) and INSERT (because the trigger
 -- runs as the DELETE issuer's role, SECURITY INVOKER by default).
 -- UPDATE/DELETE revoked — same append-only shape as audit_log.
-GRANT  SELECT, INSERT ON deleted_memories TO hhagent_runtime;
-REVOKE UPDATE, DELETE, TRUNCATE ON deleted_memories FROM hhagent_runtime;
+GRANT  SELECT, INSERT ON deleted_memories TO kastellan_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON deleted_memories FROM kastellan_runtime;

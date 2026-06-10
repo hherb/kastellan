@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hhagent_supervisor::systemd_user::{probe, SystemdUser};
-use hhagent_supervisor::{ServiceSpec, ServiceStatus, Supervisor};
+use kastellan_supervisor::systemd_user::{probe, SystemdUser};
+use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor};
 
 /// Skip the test when there's no usable user manager to talk to.
 fn skip_if_no_user_manager() -> bool {
@@ -38,14 +38,14 @@ fn skip_if_no_user_manager() -> bool {
 
 /// Generate a unique, easily-greppable service name for this run.
 ///
-/// The `hhagent-supervisor-test-` prefix lets a maintainer find and
+/// The `kastellan-supervisor-test-` prefix lets a maintainer find and
 /// remove leftovers from a crashed test with a single `find` command.
 fn unique_service_name() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("hhagent-supervisor-test-{}-{}", std::process::id(), nanos)
+    format!("kastellan-supervisor-test-{}-{}", std::process::id(), nanos)
 }
 
 /// RAII guard that ensures we always uninstall the test unit, even
@@ -177,7 +177,7 @@ fn invalid_name_is_rejected_before_any_systemctl_call() {
         .start("../etc/passwd")
         .expect_err("traversal name must be rejected");
     assert!(
-        matches!(err, hhagent_supervisor::SupervisorError::InvalidName(_)),
+        matches!(err, kastellan_supervisor::SupervisorError::InvalidName(_)),
         "expected InvalidName, got: {err}"
     );
 }

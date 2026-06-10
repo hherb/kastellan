@@ -110,15 +110,15 @@ fn fs_read_emits_subpath_allow() {
 #[test]
 fn fs_write_emits_read_and_write_subpath_allow() {
     let mut p = strict_policy();
-    p.fs_write = vec![PathBuf::from("/var/lib/hhagent/scratch")];
+    p.fs_write = vec![PathBuf::from("/var/lib/kastellan/scratch")];
     let prof = build_profile(&p);
     assert!(
-        prof.contains("(allow file-read* file-write* (subpath \"/var/lib/hhagent/scratch\"))"),
+        prof.contains("(allow file-read* file-write* (subpath \"/var/lib/kastellan/scratch\"))"),
         "expected combined read+write allow; got:\n{prof}"
     );
     // The fs_write path must NOT appear as a separate read-only allow.
     assert!(
-        !prof.contains("(allow file-read* (subpath \"/var/lib/hhagent/scratch\"))"),
+        !prof.contains("(allow file-read* (subpath \"/var/lib/kastellan/scratch\"))"),
         "fs_write path must not also be emitted as a separate read-only rule; got:\n{prof}"
     );
 }
@@ -233,9 +233,9 @@ fn canonicalize_policy_paths_resolves_etc_symlink() {
 
 #[test]
 fn canonicalize_policy_paths_falls_back_for_nonexistent() {
-    // /var/lib/hhagent/scratch_xyz_does_not_exist — should keep its literal form.
+    // /var/lib/kastellan/scratch_xyz_does_not_exist — should keep its literal form.
     let mut p = strict_policy();
-    let nonexistent = PathBuf::from("/var/lib/hhagent/scratch_xyz_does_not_exist");
+    let nonexistent = PathBuf::from("/var/lib/kastellan/scratch_xyz_does_not_exist");
     p.fs_write = vec![nonexistent.clone()];
     let canon = canonicalize_policy_paths(&p).expect("NotFound must fall back, not error");
     assert_eq!(canon.fs_write[0], nonexistent);
@@ -253,7 +253,7 @@ fn canonicalize_policy_paths_propagates_non_notfound_errors() {
     // canonicalize a path inside it — the parent walk fails with
     // PermissionDenied. We must propagate rather than fall back.
     let tmp = std::env::temp_dir().join(format!(
-        "hhagent_canon_perm_{}_{}",
+        "kastellan_canon_perm_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

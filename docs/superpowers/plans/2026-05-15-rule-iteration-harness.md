@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a two-slice rule-iteration harness for CASSANDRA: (A) enrich the `agent/plan.formulate` audit payload so captures carry the full `Plan` JSON + `classification_floor`; (B) build a pure-Rust replay library + `hhagent-cli observation replay` subcommand that loads captures and reports per-fixture verdict deltas against a candidate `ChainReviewStage`.
+**Goal:** Ship a two-slice rule-iteration harness for CASSANDRA: (A) enrich the `agent/plan.formulate` audit payload so captures carry the full `Plan` JSON + `classification_floor`; (B) build a pure-Rust replay library + `kastellan-cli observation replay` subcommand that loads captures and reports per-fixture verdict deltas against a candidate `ChainReviewStage`.
 
-**Architecture:** Slice A is a pure-additive audit-payload bump on one writer (`write_audit_plan_formulate` in `core/src/scheduler/inner_loop.rs`). Slice B adds one new module `core/src/observation/replay.rs` (pure helpers + an async `replay_capture`) plus a thin CLI wrapper in `core/src/bin/hhagent-cli.rs` (one new top-level `observation` subcommand mirroring the existing `tools` pattern). Slice B reads on-disk captures via `serde_json` and degrades gracefully on pre-Slice-A captures (skips with `plans_skipped_missing_body` counter).
+**Architecture:** Slice A is a pure-additive audit-payload bump on one writer (`write_audit_plan_formulate` in `core/src/scheduler/inner_loop.rs`). Slice B adds one new module `core/src/observation/replay.rs` (pure helpers + an async `replay_capture`) plus a thin CLI wrapper in `core/src/bin/kastellan-cli.rs` (one new top-level `observation` subcommand mirroring the existing `tools` pattern). Slice B reads on-disk captures via `serde_json` and degrades gracefully on pre-Slice-A captures (skips with `plans_skipped_missing_body` counter).
 
-**Tech Stack:** Rust 2021, `serde_json`, `tokio` (async-trait for the `ReviewStage`), `async_trait`, no new workspace deps. Tests use `tokio::test` + the existing `hhagent-tests-common` workspace dev-dep.
+**Tech Stack:** Rust 2021, `serde_json`, `tokio` (async-trait for the `ReviewStage`), `async_trait`, no new workspace deps. Tests use `tokio::test` + the existing `kastellan-tests-common` workspace dev-dep.
 
 **Spec:** [docs/superpowers/specs/2026-05-15-rule-iteration-harness-design.md](../specs/2026-05-15-rule-iteration-harness-design.md)
 
@@ -134,7 +134,7 @@ The tests use `Plan`, `PlannedStep`, `DataClass`, `FormulationMeta`. They must a
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib scheduler::inner_loop::tests::build_plan_formulate_payload -- --nocapture
+cargo test -p kastellan-core --lib scheduler::inner_loop::tests::build_plan_formulate_payload -- --nocapture
 ```
 
 Expected: compile errors mentioning `build_plan_formulate_payload` unresolved. If you see "test passed," the helper already exists and you have the wrong file — verify location.
@@ -155,7 +155,7 @@ async fn write_audit_plan_formulate(
         else { "act" };
     let refused = plan.refused.as_ref()...;
     let payload = serde_json::json!({ ... });
-    hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
+    kastellan_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
 }
 ```
@@ -241,7 +241,7 @@ async fn write_audit_plan_formulate(
         plan,
         meta,
     );
-    hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
+    kastellan_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
 }
 ```
@@ -251,7 +251,7 @@ If the tests module needs additional imports (e.g. `PlannedStep`), add them insi
 - [ ] **Step 4: Run the unit tests to verify they pass**
 
 ```sh
-cargo test -p hhagent-core --lib scheduler::inner_loop::tests::build_plan_formulate_payload -- --nocapture
+cargo test -p kastellan-core --lib scheduler::inner_loop::tests::build_plan_formulate_payload -- --nocapture
 ```
 
 Expected: 2 tests pass.
@@ -259,7 +259,7 @@ Expected: 2 tests pass.
 - [ ] **Step 5: Run the full lib test suite + commit**
 
 ```sh
-cargo test -p hhagent-core --lib
+cargo test -p kastellan-core --lib
 git add core/src/scheduler/inner_loop.rs
 git commit -m "$(cat <<'EOF'
 feat(scheduler): extract build_plan_formulate_payload + carry full Plan + classification_floor
@@ -285,7 +285,7 @@ EOF
 )"
 ```
 
-Expected output: `cargo test -p hhagent-core --lib` reports the new tests as passing alongside existing lib tests; the commit shows up in `git log --oneline -1`.
+Expected output: `cargo test -p kastellan-core --lib` reports the new tests as passing alongside existing lib tests; the commit shows up in `git log --oneline -1`.
 
 ### Task A2: Extend e2e test assertions to pin new keys
 
@@ -310,7 +310,7 @@ Locate the assertion block in `core/tests/scheduler_inner_loop_e2e.rs` starting 
     );
 ```
 
-Note: `crate::Plan` likely won't resolve — integration tests in `core/tests/*.rs` use `hhagent_core::cassandra::types::Plan` (or whichever the existing test imports use). Check the top-of-file `use` block and use whatever path is already in scope. If nothing's imported, add `use hhagent_core::cassandra::types::Plan;` at the test module top.
+Note: `crate::Plan` likely won't resolve — integration tests in `core/tests/*.rs` use `kastellan_core::cassandra::types::Plan` (or whichever the existing test imports use). Check the top-of-file `use` block and use whatever path is already in scope. If nothing's imported, add `use kastellan_core::cassandra::types::Plan;` at the test module top.
 
 - [ ] **Step 2: Extend the refusal-scenario payload assertions (around line 735)**
 
@@ -333,7 +333,7 @@ In the refusal scenario (function `refusal_plan_terminates_with_state_refused`, 
 - [ ] **Step 3: Run the two scenarios to confirm they pass**
 
 ```sh
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e -- --nocapture
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e -- --nocapture
 ```
 
 Expected: 4 tests pass (happy + tool-fail-then-recover + plan-cap-exhausted + cancel-mid-exec) plus the 3 refusal scenarios (the count matches HANDOVER's reporting of 4 scenarios; the 3 refusal e2e tests come from the post-refusal-state slice).
@@ -387,7 +387,7 @@ Branch: `feat/audit-plan-formulate-carries-plan-body` (off `main` at `7588b9e`).
 
 **Shape (1 production file + 1 e2e test modified):**
 
-- **`core/src/scheduler/inner_loop.rs` — extracted pure `build_plan_formulate_payload`.** Same pattern `scheduler/audit.rs` already uses (`build_finalize_payload`, `build_lifecycle_payload`); the wire shape is now unit-testable without a Postgres pool. 2 new unit tests pin the 13-key set (BTreeSet equality assertion so a future accidental extra/missing key trips loudly) and the round-trip shape of `plan` + `classification_floor`. `write_audit_plan_formulate` shrinks to a one-line shim over the helper + `hhagent_db::audit::insert`.
+- **`core/src/scheduler/inner_loop.rs` — extracted pure `build_plan_formulate_payload`.** Same pattern `scheduler/audit.rs` already uses (`build_finalize_payload`, `build_lifecycle_payload`); the wire shape is now unit-testable without a Postgres pool. 2 new unit tests pin the 13-key set (BTreeSet equality assertion so a future accidental extra/missing key trips loudly) and the round-trip shape of `plan` + `classification_floor`. `write_audit_plan_formulate` shrinks to a one-line shim over the helper + `kastellan_db::audit::insert`.
 
 - **`core/tests/scheduler_inner_loop_e2e.rs` — extended two scenarios** (happy path around line 440; refusal around line 730). New assertions deserialise `payload["plan"]` back into a `Plan` and pin the round-trip; both scenarios assert `payload["classification_floor"]` is the PascalCase string `"Public"` (the test fixtures' tasks don't set `classification_floor` in `tasks.payload`, so `runner.rs` defaults it to Public per the security comment at line 278).
 
@@ -640,7 +640,7 @@ pub mod replay;
 - [ ] **Step 3: Verify the workspace builds**
 
 ```sh
-cargo build -p hhagent-core
+cargo build -p kastellan-core
 ```
 
 Expected: clean build, possibly one or two `unused` warnings on the new types — fine for this task; they get exercised in B2.
@@ -746,7 +746,7 @@ mod tests {
 - [ ] **Step 2: Run the tests to verify they pass**
 
 ```sh
-cargo test -p hhagent-core --lib observation::replay::tests -- --nocapture
+cargo test -p kastellan-core --lib observation::replay::tests -- --nocapture
 ```
 
 Expected: 6 tests pass.
@@ -821,7 +821,7 @@ EOF
 - [ ] **Step 2: Run to verify failing**
 
 ```sh
-cargo test -p hhagent-core --lib observation::replay::tests::is_delta -- --nocapture
+cargo test -p kastellan-core --lib observation::replay::tests::is_delta -- --nocapture
 ```
 
 Expected: compile error — `is_delta` undefined.
@@ -846,7 +846,7 @@ fn is_delta(baseline: Option<&str>, new: Option<&String>) -> bool {
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```sh
-cargo test -p hhagent-core --lib observation::replay::tests::is_delta -- --nocapture
+cargo test -p kastellan-core --lib observation::replay::tests::is_delta -- --nocapture
 ```
 
 Expected: 6 tests pass.
@@ -1010,7 +1010,7 @@ Append to the `tests` module:
 - [ ] **Step 2: Run to verify failing**
 
 ```sh
-cargo test -p hhagent-core --lib observation::replay::tests::format_report_table -- --nocapture
+cargo test -p kastellan-core --lib observation::replay::tests::format_report_table -- --nocapture
 ```
 
 Expected: compile error — `format_report_table` undefined.
@@ -1124,7 +1124,7 @@ fn render_new_verdict(snap: &VerdictSnapshot) -> String {
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```sh
-cargo test -p hhagent-core --lib observation::replay::tests::format_report_table -- --nocapture
+cargo test -p kastellan-core --lib observation::replay::tests::format_report_table -- --nocapture
 ```
 
 Expected: 6 tests pass. If a column-width assertion fails (e.g. " 1 " not found), eyeball the test output — the expected width might have shifted by one space.
@@ -1308,7 +1308,7 @@ Append to the `tests` module:
 - [ ] **Step 2: Run to verify failing**
 
 ```sh
-cargo test -p hhagent-core --lib observation::replay::tests::replay_capture -- --nocapture
+cargo test -p kastellan-core --lib observation::replay::tests::replay_capture -- --nocapture
 ```
 
 Expected: compile error — `replay_capture` undefined.
@@ -1434,7 +1434,7 @@ If you encounter an "unused import" warning on `Arc` from earlier tasks (none re
 - [ ] **Step 4: Run tests**
 
 ```sh
-cargo test -p hhagent-core --lib observation::replay::tests -- --nocapture
+cargo test -p kastellan-core --lib observation::replay::tests -- --nocapture
 ```
 
 Expected: all `replay_capture`-prefixed tests pass alongside the existing VerdictSnapshot / is_delta / format_report_table ones. Total ~17 tests in the `replay::tests` module.
@@ -1480,10 +1480,10 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use hhagent_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
-use hhagent_core::cassandra::types::{DataClass, Plan};
-use hhagent_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
-use hhagent_core::observation::replay::{load_captures_from_dir, replay_capture};
+use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
+use kastellan_core::cassandra::types::{DataClass, Plan};
+use kastellan_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
+use kastellan_core::observation::replay::{load_captures_from_dir, replay_capture};
 
 fn approve_baseline_capture() -> CaptureJson {
     let plan = Plan {
@@ -1629,7 +1629,7 @@ async fn replay_against_pre_slice_a_capture_skips_with_reason() {
 - [ ] **Step 2: Run to verify failing**
 
 ```sh
-cargo test -p hhagent-core --test observation_replay_e2e -- --nocapture
+cargo test -p kastellan-core --test observation_replay_e2e -- --nocapture
 ```
 
 Expected: compile error — `load_captures_from_dir` undefined.
@@ -1705,7 +1705,7 @@ pub fn load_captures_from_dir(dir: &Path) -> std::io::Result<Vec<LoadedCapture>>
 - [ ] **Step 4: Run integration tests**
 
 ```sh
-cargo test -p hhagent-core --test observation_replay_e2e -- --nocapture
+cargo test -p kastellan-core --test observation_replay_e2e -- --nocapture
 ```
 
 Expected: 2 tests pass.
@@ -1730,15 +1730,15 @@ EOF
 )"
 ```
 
-### Task B7: CLI subcommand `hhagent-cli observation replay`
+### Task B7: CLI subcommand `kastellan-cli observation replay`
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli.rs` — add top-level `observation` subcommand
-- Modify: `core/src/bin/hhagent-cli.rs` — extend `help_text`
+- Modify: `core/src/bin/kastellan-cli.rs` — add top-level `observation` subcommand
+- Modify: `core/src/bin/kastellan-cli.rs` — extend `help_text`
 
 - [ ] **Step 1: Add the dispatcher branch**
 
-In `core/src/bin/hhagent-cli.rs` `main()`'s `match args[1].as_str()` (around line 56-75), add a new arm before `"--help"`:
+In `core/src/bin/kastellan-cli.rs` `main()`'s `match args[1].as_str()` (around line 56-75), add a new arm before `"--help"`:
 
 ```rust
         "observation" => run_observation(&args[2..]),
@@ -1762,10 +1762,10 @@ So the match becomes:
 
 Replace the `help_text()` body (around line 78-101) to include the new lines for `observation replay`. The current return value ends in the `audit tail` flags block; add `observation replay` above the flags block:
 
-Insert (after the existing `hhagent-cli audit tail ...` line in usage):
+Insert (after the existing `kastellan-cli audit tail ...` line in usage):
 
 ```
-    hhagent-cli observation replay [--captures-dir PATH] [--model SLUG]
+    kastellan-cli observation replay [--captures-dir PATH] [--model SLUG]
 ```
 
 And a new flags block:
@@ -1782,7 +1782,7 @@ flags (observation replay):
 
 - [ ] **Step 3: Add the `run_observation` + helpers below `run_tools_allowlist_list`**
 
-Append to `core/src/bin/hhagent-cli.rs` after the existing tools-allowlist subcommand tree (find a clean location, e.g. just before the `#[cfg(test)]` block at end of file):
+Append to `core/src/bin/kastellan-cli.rs` after the existing tools-allowlist subcommand tree (find a clean location, e.g. just before the `#[cfg(test)]` block at end of file):
 
 ```rust
 // ============================================================
@@ -1791,7 +1791,7 @@ Append to `core/src/bin/hhagent-cli.rs` after the existing tools-allowlist subco
 
 fn run_observation(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli observation replay [opts]");
+        eprintln!("usage: kastellan-cli observation replay [opts]");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -1878,8 +1878,8 @@ async fn observation_replay_async(
     model_filter: Option<&str>,
 ) -> ExitCode {
     use std::sync::Arc;
-    use hhagent_core::cassandra::review::{ChainReviewStage, ConstitutionalGuard, DeterministicPolicy};
-    use hhagent_core::observation::replay::{
+    use kastellan_core::cassandra::review::{ChainReviewStage, ConstitutionalGuard, DeterministicPolicy};
+    use kastellan_core::observation::replay::{
         format_report_table, load_captures_from_dir, replay_capture, ReplayResult,
     };
 
@@ -1935,7 +1935,7 @@ async fn observation_replay_async(
 - [ ] **Step 4: Build the binary**
 
 ```sh
-cargo build -p hhagent-core --bin hhagent-cli
+cargo build -p kastellan-core --bin kastellan-cli
 ```
 
 Expected: clean build with no warnings.
@@ -1943,7 +1943,7 @@ Expected: clean build with no warnings.
 - [ ] **Step 5: Run the help text manually as a sanity check**
 
 ```sh
-./target/debug/hhagent-cli --help
+./target/debug/kastellan-cli --help
 ```
 
 Expected: `observation replay` appears in usage; flags block is present.
@@ -1951,9 +1951,9 @@ Expected: `observation replay` appears in usage; flags block is present.
 - [ ] **Step 6: Commit**
 
 ```sh
-git add core/src/bin/hhagent-cli.rs
+git add core/src/bin/kastellan-cli.rs
 git commit -m "$(cat <<'EOF'
-feat(cli): hhagent-cli observation replay subcommand
+feat(cli): kastellan-cli observation replay subcommand
 
 Slice B Task 7. Thin wrapper over core::observation::replay. Loads
 captures from --captures-dir (defaults to tests/observation/captures
@@ -1980,7 +1980,7 @@ EOF
 Create `core/tests/observation_replay_cli_e2e.rs`:
 
 ```rust
-//! Integration tests for the `hhagent-cli observation replay`
+//! Integration tests for the `kastellan-cli observation replay`
 //! subcommand. Spawns the binary as a subprocess against a per-test
 //! tempdir of hand-crafted captures.
 
@@ -1988,12 +1988,12 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use hhagent_core::cassandra::types::{DataClass, Plan};
-use hhagent_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
-use hhagent_tests_common::workspace_target_binary;
+use kastellan_core::cassandra::types::{DataClass, Plan};
+use kastellan_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
+use kastellan_tests_common::workspace_target_binary;
 
-fn hhagent_cli_binary() -> std::path::PathBuf {
-    workspace_target_binary("hhagent-cli")
+fn kastellan_cli_binary() -> std::path::PathBuf {
+    workspace_target_binary("kastellan-cli")
 }
 
 fn approve_capture() -> CaptureJson {
@@ -2057,9 +2057,9 @@ fn cli_observation_replay_happy_path() {
     let tempdir = TempDir::new().unwrap();
     write_capture(tempdir.path(), &approve_capture());
 
-    let bin = hhagent_cli_binary();
+    let bin = kastellan_cli_binary();
     if !bin.exists() {
-        eprintln!("[SKIP] hhagent-cli binary not built; run `cargo build` first");
+        eprintln!("[SKIP] kastellan-cli binary not built; run `cargo build` first");
         return;
     }
 
@@ -2069,7 +2069,7 @@ fn cli_observation_replay_happy_path() {
         .arg("--captures-dir")
         .arg(tempdir.path())
         .output()
-        .expect("spawn hhagent-cli observation replay");
+        .expect("spawn kastellan-cli observation replay");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -2086,9 +2086,9 @@ fn cli_observation_replay_happy_path() {
 #[test]
 fn cli_observation_replay_rejects_unknown_flag() {
     let tempdir = TempDir::new().unwrap();
-    let bin = hhagent_cli_binary();
+    let bin = kastellan_cli_binary();
     if !bin.exists() {
-        eprintln!("[SKIP] hhagent-cli binary not built");
+        eprintln!("[SKIP] kastellan-cli binary not built");
         return;
     }
 
@@ -2107,9 +2107,9 @@ fn cli_observation_replay_rejects_unknown_flag() {
 #[test]
 fn cli_observation_replay_empty_dir_exits_zero() {
     let tempdir = TempDir::new().unwrap();
-    let bin = hhagent_cli_binary();
+    let bin = kastellan_cli_binary();
     if !bin.exists() {
-        eprintln!("[SKIP] hhagent-cli binary not built");
+        eprintln!("[SKIP] kastellan-cli binary not built");
         return;
     }
 
@@ -2128,12 +2128,12 @@ fn cli_observation_replay_empty_dir_exits_zero() {
 }
 ```
 
-`hhagent_tests_common::workspace_target_binary` is the established helper for locating workspace binaries from tests.
+`kastellan_tests_common::workspace_target_binary` is the established helper for locating workspace binaries from tests.
 
 - [ ] **Step 2: Build the binary**
 
 ```sh
-cargo build -p hhagent-core --bin hhagent-cli
+cargo build -p kastellan-core --bin kastellan-cli
 ```
 
 Expected: clean build.
@@ -2141,7 +2141,7 @@ Expected: clean build.
 - [ ] **Step 3: Run the integration tests**
 
 ```sh
-cargo test -p hhagent-core --test observation_replay_cli_e2e -- --nocapture
+cargo test -p kastellan-core --test observation_replay_cli_e2e -- --nocapture
 ```
 
 Expected: 3 tests pass. If the binary is missing the test prints `[SKIP]` and returns success — re-run after the build step.
@@ -2151,7 +2151,7 @@ Expected: 3 tests pass. If the binary is missing the test prints `[SKIP]` and re
 ```sh
 git add core/tests/observation_replay_cli_e2e.rs
 git commit -m "$(cat <<'EOF'
-test(cli): hhagent-cli observation replay e2e — 3 scenarios
+test(cli): kastellan-cli observation replay e2e — 3 scenarios
 
 Slice B Task 8. Subprocess-level pin: happy path (synthetic approve
 baseline + assert fixture row + summary line appear on stdout),
@@ -2187,13 +2187,13 @@ In `docs/devel/handovers/HANDOVER.md`, the Slice A entry (added in Task A3) beco
 ```markdown
 ## Recently completed (this session, 2026-05-15 — Slice B: rule-iteration harness, branch `feat/rule-iteration-harness`)
 
-Branch: `feat/rule-iteration-harness` (off `main` post-Slice-A merge). New pure-Rust library `core::observation::replay` + thin `hhagent-cli observation replay` subcommand. Loads captures from disk, replays each captured plan through the production `ChainReviewStage::new(vec![Arc::new(ConstitutionalGuard), Arc::new(DeterministicPolicy)])`, prints a per-fixture verdict-delta ASCII table.
+Branch: `feat/rule-iteration-harness` (off `main` post-Slice-A merge). New pure-Rust library `core::observation::replay` + thin `kastellan-cli observation replay` subcommand. Loads captures from disk, replays each captured plan through the production `ChainReviewStage::new(vec![Arc::new(ConstitutionalGuard), Arc::new(DeterministicPolicy)])`, prints a per-fixture verdict-delta ASCII table.
 
 **Shape (1 NEW library + 1 modified CLI + 2 NEW integration tests):**
 
 - **NEW `core/src/observation/replay.rs`** (~500 LOC incl. tests). Public surface: `VerdictSnapshot`, `ReplayedPlan`, `ReplayResult`, `LoadedCapture`; pure `is_delta`, `format_report_table`, `render_new_verdict`; async `replay_capture(capture, chain) -> ReplayResult`; I/O `load_captures_from_dir(dir) -> Vec<LoadedCapture>`. Skips a plan with `plan_json: null` via `plans_skipped_missing_body` counter — never fabricates synthetic Plan from derived fields. Classification floor preference: audit-row's `classification_floor` (post-Slice-A) > `Plan.data_ceiling` > `Public`.
 - **`core/src/observation/mod.rs`** — `pub mod replay;` declared.
-- **`core/src/bin/hhagent-cli.rs`** — new `observation` top-level dispatcher + `run_observation_replay` (mirrors existing `tools allowlist` pattern; hand-rolled argv, no clap dep). Help text updated.
+- **`core/src/bin/kastellan-cli.rs`** — new `observation` top-level dispatcher + `run_observation_replay` (mirrors existing `tools allowlist` pattern; hand-rolled argv, no clap dep). Help text updated.
 - **NEW `core/tests/observation_replay_e2e.rs`** — 2 library-level scenarios (synthetic approve baseline → no delta; pre-Slice-A capture → skip with reason).
 - **NEW `core/tests/observation_replay_cli_e2e.rs`** — 3 subprocess scenarios (happy path; unknown-flag exit 2; empty dir exit 0).
 
@@ -2215,7 +2215,7 @@ ASCII-only; fixed column widths; grep-friendly. Markers `.` (no delta) / `*` (de
 
 **TDD ordering** (per CLAUDE.md rule #2): nine commits, each RED → GREEN. B1 scaffolds the type surface; B2-B4 land pure helpers with full test coverage; B5 wires the async `replay_capture`; B6 adds `load_captures_from_dir` with integration tests; B7 ships the CLI subcommand; B8 the CLI integration tests; B9 (this) wraps with docs.
 
-**Operator iteration loop:** edit `ConstitutionalGuard::review` (or `DeterministicPolicy::review`) bodies in `core/src/cassandra/review.rs` → `cargo build --bin hhagent-cli` → `./target/debug/hhagent-cli observation replay`. No daemon, no DB, no LLM. Fast iteration; deterministic; same chain composition as production.
+**Operator iteration loop:** edit `ConstitutionalGuard::review` (or `DeterministicPolicy::review`) bodies in `core/src/cassandra/review.rs` → `cargo build --bin kastellan-cli` → `./target/debug/kastellan-cli observation replay`. No daemon, no DB, no LLM. Fast iteration; deterministic; same chain composition as production.
 
 **What this slice deliberately does NOT do.**
 - **No real `ConstitutionalGuard` / `DeterministicPolicy` rule.** Stubs stay always-`Approve`; the harness mechanism is what ships. First real rule is a follow-up slice.
@@ -2229,7 +2229,7 @@ ASCII-only; fixed column widths; grep-friendly. Markers `.` (no delta) / `*` (de
 - NEW `core/tests/observation_replay_e2e.rs` (~150 LOC).
 - NEW `core/tests/observation_replay_cli_e2e.rs` (~140 LOC).
 - `core/src/observation/mod.rs` — module declaration.
-- `core/src/bin/hhagent-cli.rs` — new top-level subcommand + help text.
+- `core/src/bin/kastellan-cli.rs` — new top-level subcommand + help text.
 - `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — this update.
 ```
 
@@ -2238,7 +2238,7 @@ ASCII-only; fixed column widths; grep-friendly. Markers `.` (no delta) / `*` (de
 In `docs/devel/ROADMAP.md`, just after the Slice A entry from Task A3, add:
 
 ```markdown
-- [x] **[follow-up] Rule-iteration harness for CASSANDRA review pipeline (Slice B of rule-iteration harness)** — landed 2026-05-15 on branch `feat/rule-iteration-harness`. New pure library `core::observation::replay` + thin `hhagent-cli observation replay` subcommand. Loads captures from disk, replays each through the production `ChainReviewStage::new(vec![ConstitutionalGuard, DeterministicPolicy])`, prints per-fixture verdict-delta ASCII table. Pre-Slice-A captures (`plan_json: null`) skip cleanly via `plans_skipped_missing_body` counter; the harness never fabricates synthetic Plans. Operator iteration loop: edit `ConstitutionalGuard::review` body → rebuild → re-run; deterministic, no DB/LLM/daemon. +~17 tests; workspace 467 → ~484.
+- [x] **[follow-up] Rule-iteration harness for CASSANDRA review pipeline (Slice B of rule-iteration harness)** — landed 2026-05-15 on branch `feat/rule-iteration-harness`. New pure library `core::observation::replay` + thin `kastellan-cli observation replay` subcommand. Loads captures from disk, replays each through the production `ChainReviewStage::new(vec![ConstitutionalGuard, DeterministicPolicy])`, prints per-fixture verdict-delta ASCII table. Pre-Slice-A captures (`plan_json: null`) skip cleanly via `plans_skipped_missing_body` counter; the harness never fabricates synthetic Plans. Operator iteration loop: edit `ConstitutionalGuard::review` body → rebuild → re-run; deterministic, no DB/LLM/daemon. +~17 tests; workspace 467 → ~484.
 ```
 
 - [ ] **Step 4: Commit + push + PR**
@@ -2248,7 +2248,7 @@ git add docs/devel/handovers/HANDOVER.md docs/devel/ROADMAP.md
 git commit -m "$(cat <<'EOF'
 docs(handover,roadmap): Slice B — rule-iteration harness shipped
 
-Pure-Rust library core::observation::replay + thin hhagent-cli
+Pure-Rust library core::observation::replay + thin kastellan-cli
 observation replay subcommand. Loads captures from disk, replays
 each through the production chain, prints per-fixture verdict-delta
 ASCII table.
@@ -2265,15 +2265,15 @@ git push -u origin feat/rule-iteration-harness
 gh pr create --title "feat(observation): rule-iteration harness for CASSANDRA review pipeline" --body "$(cat <<'EOF'
 ## Summary
 - New pure-Rust library `core::observation::replay` (replay one capture through a chain; pure helpers + async replay_capture).
-- New `hhagent-cli observation replay` subcommand (thin wrapper; defaults to tests/observation/captures; --captures-dir + --model flags).
+- New `kastellan-cli observation replay` subcommand (thin wrapper; defaults to tests/observation/captures; --captures-dir + --model flags).
 - Loads captures from disk, replays each captured plan through production `ChainReviewStage::new(vec![Arc::new(ConstitutionalGuard), Arc::new(DeterministicPolicy)])`, prints per-fixture verdict-delta ASCII table.
 - Pre-Slice-A captures (plan_json: null) skip cleanly via plans_skipped_missing_body counter; the harness never fabricates synthetic Plans.
 - Test count 467 → ~484 (+~17 across replay::tests + observation_replay_e2e + observation_replay_cli_e2e).
 
 ## Test plan
 - [ ] `cargo test --workspace` green on Linux.
-- [ ] `./target/debug/hhagent-cli observation replay` works against the operator's recaptured fixtures (operator action: recapture after Slice A merged).
-- [ ] `./target/debug/hhagent-cli observation replay --captures-dir tests/observation/captures` against the existing pre-Slice-A captures prints "[skipped: plan body missing]" rows + 7 skipped count in the summary (defensible degraded mode).
+- [ ] `./target/debug/kastellan-cli observation replay` works against the operator's recaptured fixtures (operator action: recapture after Slice A merged).
+- [ ] `./target/debug/kastellan-cli observation replay --captures-dir tests/observation/captures` against the existing pre-Slice-A captures prints "[skipped: plan body missing]" rows + 7 skipped count in the summary (defensible degraded mode).
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF

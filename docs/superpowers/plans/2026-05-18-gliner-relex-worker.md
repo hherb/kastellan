@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship hhagent's first idle_timeout consumer — a Python worker that runs Knowledgator's GLiNER-Relex (Apache 2.0; joint NER + relation extraction in one forward pass) under bwrap/Seatbelt, serving repeated `extract` requests across the same warm process.
+**Goal:** Ship kastellan's first idle_timeout consumer — a Python worker that runs Knowledgator's GLiNER-Relex (Apache 2.0; joint NER + relation extraction in one forward pass) under bwrap/Seatbelt, serving repeated `extract` requests across the same warm process.
 
-**Architecture:** Two-slice delivery (split by language boundary). **Slice 1** ships the Python package at `workers/gliner-relex/` with a uv-managed venv, JSON-RPC stdio loop, model load, and Python unit + smoke tests — operator-runnable but no Rust caller. **Slice 2** adds the Rust manifest entry (`core::workers::gliner_relex::gliner_relex_entry -> ToolEntry`), wire-shape serde types, conditional daemon registration via `HHAGENT_GLINER_RELEX_ENABLE=1`, and an end-to-end integration test that spawns the real Python worker and verifies warm-reuse via worker-lifecycle slice-2's `_test_slot_has_warm` accessor. A typed Rust client wrapping the call is deferred to the v2 entity-extraction consumer slice — the dispatcher's `report_crash` chokepoint makes premature client design wasteful.
+**Architecture:** Two-slice delivery (split by language boundary). **Slice 1** ships the Python package at `workers/gliner-relex/` with a uv-managed venv, JSON-RPC stdio loop, model load, and Python unit + smoke tests — operator-runnable but no Rust caller. **Slice 2** adds the Rust manifest entry (`core::workers::gliner_relex::gliner_relex_entry -> ToolEntry`), wire-shape serde types, conditional daemon registration via `KASTELLAN_GLINER_RELEX_ENABLE=1`, and an end-to-end integration test that spawns the real Python worker and verifies warm-reuse via worker-lifecycle slice-2's `_test_slot_has_warm` accessor. A typed Rust client wrapping the call is deferred to the v2 entity-extraction consumer slice — the dispatcher's `report_crash` chokepoint makes premature client design wasteful.
 
-**Tech Stack:** Python 3.11+ (uv-managed venv per worker; uv lockfile committed), `gliner >= 0.2`, `transformers`, `sentencepiece`, `torch` (CUDA on Linux), Rust workspace (existing `core` + `hhagent-protocol`), JSON-RPC 2.0 line-delimited over stdio (matches the contract `hhagent-protocol` already speaks), `cargo test --workspace` is the regression gate, `pytest` runs inside the worker venv via `uv run pytest`.
+**Tech Stack:** Python 3.11+ (uv-managed venv per worker; uv lockfile committed), `gliner >= 0.2`, `transformers`, `sentencepiece`, `torch` (CUDA on Linux), Rust workspace (existing `core` + `kastellan-protocol`), JSON-RPC 2.0 line-delimited over stdio (matches the contract `kastellan-protocol` already speaks), `cargo test --workspace` is the regression gate, `pytest` runs inside the worker venv via `uv run pytest`.
 
 **Spec:** `docs/superpowers/specs/2026-05-18-gliner-relex-worker-design.md`. **Companion specs:** `docs/superpowers/specs/2026-05-18-gliner-relex-feasibility-study.md` (license chain + capability), `docs/superpowers/specs/2026-05-18-worker-lifecycle-policy-design.md` (the `Lifecycle::IdleTimeout` runtime this worker consumes).
 
@@ -48,7 +48,7 @@ workers/gliner-relex/
 ├── uv.lock                                                   # committed for reproducibility
 ├── .gitignore                                                # .venv/, __pycache__/, .pytest_cache/
 ├── README.md                                                 # operator install + smoke command
-└── src/hhagent_worker_gliner_relex/
+└── src/kastellan_worker_gliner_relex/
     ├── __init__.py                                           # package marker (empty)
     ├── __main__.py                                           # entry point: env parsing + model load + server.run()
     ├── errors.py                                             # custom JSON-RPC codes + envelope helpers
@@ -106,7 +106,7 @@ Expected: prints a version string `≥ 0.5.0`. If missing, install per https://d
 - [ ] **Step 2: Create the directory layout**
 
 ```bash
-mkdir -p workers/gliner-relex/src/hhagent_worker_gliner_relex
+mkdir -p workers/gliner-relex/src/kastellan_worker_gliner_relex
 mkdir -p workers/gliner-relex/tests
 ```
 
@@ -114,13 +114,13 @@ mkdir -p workers/gliner-relex/tests
 
 ```toml
 [project]
-name = "hhagent-worker-gliner-relex"
+name = "kastellan-worker-gliner-relex"
 version = "0.0.1"
-description = "GLiNER-Relex inference worker for hhagent (Apache 2.0 model; JSON-RPC stdio)"
+description = "GLiNER-Relex inference worker for kastellan (Apache 2.0 model; JSON-RPC stdio)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }
-authors = [{ name = "hhagent contributors" }]
+authors = [{ name = "kastellan contributors" }]
 dependencies = [
     # GLiNER pulls the upstream `gliner` library (Apache 2.0). The
     # Knowledgator gliner-relex-* model weights load via this same lib;
@@ -141,18 +141,18 @@ dev = [
 ]
 
 [project.scripts]
-# uv generates an executable shim at .venv/bin/hhagent-worker-gliner-relex
-# equivalent to: python -m hhagent_worker_gliner_relex
+# uv generates an executable shim at .venv/bin/kastellan-worker-gliner-relex
+# equivalent to: python -m kastellan_worker_gliner_relex
 # The manifest's `binary: PathBuf` field points at this shim — keeps
 # the existing ToolEntry schema unchanged (no `args` field needed).
-hhagent-worker-gliner-relex = "hhagent_worker_gliner_relex.__main__:main"
+kastellan-worker-gliner-relex = "kastellan_worker_gliner_relex.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hhagent_worker_gliner_relex"]
+packages = ["src/kastellan_worker_gliner_relex"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -188,7 +188,7 @@ Expected: creates `.venv/` and `uv.lock`. First run will download torch + transf
 - [ ] **Step 7: Verify the console-script shim exists**
 
 ```bash
-ls -l workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex
+ls -l workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex
 ```
 
 Expected: file exists, mode `-rwxr-xr-x`. (It is currently broken — the entry point doesn't exist yet — but the shim itself must be present after `uv sync` so we know Task 1.5's `main:main` reference resolves.)
@@ -205,15 +205,15 @@ git commit -m "feat(workers/gliner-relex): scaffold uv project + .venv lockfile"
 ### Task 1.2: Write `errors.py` — JSON-RPC error envelope helpers
 
 **Files:**
-- Create: `workers/gliner-relex/src/hhagent_worker_gliner_relex/errors.py`
-- Create: `workers/gliner-relex/src/hhagent_worker_gliner_relex/__init__.py` (empty marker)
+- Create: `workers/gliner-relex/src/kastellan_worker_gliner_relex/errors.py`
+- Create: `workers/gliner-relex/src/kastellan_worker_gliner_relex/__init__.py` (empty marker)
 - Create: `workers/gliner-relex/tests/__init__.py` (empty marker)
 - Create: `workers/gliner-relex/tests/test_errors.py`
 
 - [ ] **Step 1: Create the empty `__init__.py` files**
 
 ```bash
-: > workers/gliner-relex/src/hhagent_worker_gliner_relex/__init__.py
+: > workers/gliner-relex/src/kastellan_worker_gliner_relex/__init__.py
 : > workers/gliner-relex/tests/__init__.py
 ```
 
@@ -227,7 +227,7 @@ corresponding update in the Rust-side mapping in
 core::workers::gliner_relex (Slice 2). See the spec's "JSON-RPC wire
 contract" section.
 """
-from hhagent_worker_gliner_relex.errors import (
+from kastellan_worker_gliner_relex.errors import (
     error_response,
     INVALID_INPUT,
     MODEL_LOAD_FAILED,
@@ -284,9 +284,9 @@ cd workers/gliner-relex
 uv run pytest tests/test_errors.py -v
 ```
 
-Expected: 6 collection errors (`ImportError: cannot import name '...' from 'hhagent_worker_gliner_relex.errors'`).
+Expected: 6 collection errors (`ImportError: cannot import name '...' from 'kastellan_worker_gliner_relex.errors'`).
 
-- [ ] **Step 4: Write `src/hhagent_worker_gliner_relex/errors.py`**
+- [ ] **Step 4: Write `src/kastellan_worker_gliner_relex/errors.py`**
 
 ```python
 """JSON-RPC 2.0 error envelope helpers + custom application codes.
@@ -368,7 +368,7 @@ git commit -m "feat(workers/gliner-relex): JSON-RPC error envelope helpers + cus
 ### Task 1.3: Write `server.py` — stdio JSON-RPC framing + dispatch
 
 **Files:**
-- Create: `workers/gliner-relex/src/hhagent_worker_gliner_relex/server.py`
+- Create: `workers/gliner-relex/src/kastellan_worker_gliner_relex/server.py`
 - Create: `workers/gliner-relex/tests/test_server.py`
 - Create: `workers/gliner-relex/tests/conftest.py`
 
@@ -422,8 +422,8 @@ import json
 
 import pytest
 
-from hhagent_worker_gliner_relex.server import Server
-from hhagent_worker_gliner_relex.errors import (
+from kastellan_worker_gliner_relex.server import Server
+from kastellan_worker_gliner_relex.errors import (
     METHOD_NOT_FOUND,
     INVALID_INPUT,
     PARSE_ERROR,
@@ -554,9 +554,9 @@ def test_text_over_8192_bytes_rejected(fake_model):
 uv run pytest tests/test_server.py -v
 ```
 
-Expected: collection error — `cannot import name 'Server' from 'hhagent_worker_gliner_relex.server'`.
+Expected: collection error — `cannot import name 'Server' from 'kastellan_worker_gliner_relex.server'`.
 
-- [ ] **Step 4: Write `src/hhagent_worker_gliner_relex/server.py`**
+- [ ] **Step 4: Write `src/kastellan_worker_gliner_relex/server.py`**
 
 ```python
 """JSON-RPC 2.0 stdio loop + extract dispatch.
@@ -693,7 +693,7 @@ Expected: 9 passed.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add workers/gliner-relex/src/hhagent_worker_gliner_relex/server.py workers/gliner-relex/tests/test_server.py workers/gliner-relex/tests/conftest.py
+git add workers/gliner-relex/src/kastellan_worker_gliner_relex/server.py workers/gliner-relex/tests/test_server.py workers/gliner-relex/tests/conftest.py
 git commit -m "feat(workers/gliner-relex): stdio JSON-RPC server + extract dispatch + validators"
 ```
 
@@ -702,7 +702,7 @@ git commit -m "feat(workers/gliner-relex): stdio JSON-RPC server + extract dispa
 ### Task 1.4: Write `model.py` — GLiNER wrapper with mocked-load tests
 
 **Files:**
-- Create: `workers/gliner-relex/src/hhagent_worker_gliner_relex/model.py`
+- Create: `workers/gliner-relex/src/kastellan_worker_gliner_relex/model.py`
 - Create: `workers/gliner-relex/tests/test_model.py`
 
 - [ ] **Step 1: Write the failing test `tests/test_model.py`**
@@ -720,7 +720,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from hhagent_worker_gliner_relex.model import GlinerModel
+from kastellan_worker_gliner_relex.model import GlinerModel
 
 
 @pytest.fixture
@@ -731,7 +731,7 @@ def fake_gliner_class():
     method (matching the upstream gliner API); tests can configure it
     per case.
     """
-    with patch("hhagent_worker_gliner_relex.model.GLiNER") as mock_cls:
+    with patch("kastellan_worker_gliner_relex.model.GLiNER") as mock_cls:
         instance = MagicMock(name="GliNERInstance")
         mock_cls.from_pretrained.return_value = instance
         yield mock_cls, instance
@@ -826,9 +826,9 @@ def test_extract_filters_triples_to_surviving_entity_spans(fake_gliner_class):
 uv run pytest tests/test_model.py -v
 ```
 
-Expected: collection error — `cannot import name 'GlinerModel' from 'hhagent_worker_gliner_relex.model'`.
+Expected: collection error — `cannot import name 'GlinerModel' from 'kastellan_worker_gliner_relex.model'`.
 
-- [ ] **Step 3: Write `src/hhagent_worker_gliner_relex/model.py`**
+- [ ] **Step 3: Write `src/kastellan_worker_gliner_relex/model.py`**
 
 ```python
 """GLiNER-Relex model wrapper.
@@ -931,7 +931,7 @@ Expected: 5 passed.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add workers/gliner-relex/src/hhagent_worker_gliner_relex/model.py workers/gliner-relex/tests/test_model.py
+git add workers/gliner-relex/src/kastellan_worker_gliner_relex/model.py workers/gliner-relex/tests/test_model.py
 git commit -m "feat(workers/gliner-relex): GLiNER model wrapper + envelope shaping + max_entities cap"
 ```
 
@@ -940,14 +940,14 @@ git commit -m "feat(workers/gliner-relex): GLiNER model wrapper + envelope shapi
 ### Task 1.5: Write `__main__.py` — entry point with env parsing + startup errors
 
 **Files:**
-- Create: `workers/gliner-relex/src/hhagent_worker_gliner_relex/__main__.py`
+- Create: `workers/gliner-relex/src/kastellan_worker_gliner_relex/__main__.py`
 
 There are no automated tests for `__main__.py` — the entry point's behaviour (env-driven model load, startup error reporting, then handoff to `Server.run`) is exercised by the manual smoke test (Task 1.7) and Slice 2's `gliner_relex_e2e.rs`.
 
-- [ ] **Step 1: Write `src/hhagent_worker_gliner_relex/__main__.py`**
+- [ ] **Step 1: Write `src/kastellan_worker_gliner_relex/__main__.py`**
 
 ```python
-"""Entry point for `hhagent-worker-gliner-relex` (uv-generated shim).
+"""Entry point for `kastellan-worker-gliner-relex` (uv-generated shim).
 
 Reads the required env vars (see the spec's "Manifest entry" section
 for the canonical list), resolves the device, loads the model, and
@@ -989,7 +989,7 @@ def _resolve_device(requested: str) -> str:
     if requested == "mps":
         _exit_with_error(
             UNSUPPORTED_DEVICE,
-            f"device=mps not supported on this platform (Linux build); set HHAGENT_GLINER_RELEX_DEVICE to auto|cuda|cpu",
+            f"device=mps not supported on this platform (Linux build); set KASTELLAN_GLINER_RELEX_DEVICE to auto|cuda|cpu",
             status=2,
         )
     _exit_with_error(
@@ -1002,20 +1002,20 @@ def _resolve_device(requested: str) -> str:
 
 
 def main() -> None:
-    weights_dir = os.environ.get("HHAGENT_GLINER_RELEX_WEIGHTS_DIR")
-    model_id = os.environ.get("HHAGENT_GLINER_RELEX_MODEL")
-    device_requested = os.environ.get("HHAGENT_GLINER_RELEX_DEVICE", "auto")
+    weights_dir = os.environ.get("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR")
+    model_id = os.environ.get("KASTELLAN_GLINER_RELEX_MODEL")
+    device_requested = os.environ.get("KASTELLAN_GLINER_RELEX_DEVICE", "auto")
 
     if not weights_dir:
         _exit_with_error(
             MODEL_LOAD_FAILED,
-            "HHAGENT_GLINER_RELEX_WEIGHTS_DIR is unset",
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR is unset",
             status=1,
         )
     if not model_id:
         _exit_with_error(
             MODEL_LOAD_FAILED,
-            "HHAGENT_GLINER_RELEX_MODEL is unset",
+            "KASTELLAN_GLINER_RELEX_MODEL is unset",
             status=1,
         )
     if not os.path.isdir(weights_dir):
@@ -1048,7 +1048,7 @@ if __name__ == "__main__":
 
 ```bash
 cd workers/gliner-relex
-uv run python -c "from hhagent_worker_gliner_relex import __main__; print('ok')"
+uv run python -c "from kastellan_worker_gliner_relex import __main__; print('ok')"
 ```
 
 Expected: prints `ok`. No `ImportError`. (We don't call `main()` here — calling it without the env vars would exit.)
@@ -1059,7 +1059,7 @@ Expected: prints `ok`. No `ImportError`. (We don't call `main()` here — callin
 uv run python -c "import importlib.metadata as m; [print(e.value) for e in m.entry_points(group='console_scripts') if 'gliner-relex' in e.name]"
 ```
 
-Expected: prints `hhagent_worker_gliner_relex.__main__:main`. If empty, `uv sync` needs to re-run after the pyproject change.
+Expected: prints `kastellan_worker_gliner_relex.__main__:main`. If empty, `uv sync` needs to re-run after the pyproject change.
 
 - [ ] **Step 4: Verify the full test suite still passes**
 
@@ -1072,7 +1072,7 @@ Expected: 20 passed (6 errors tests + 9 server tests + 5 model tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add workers/gliner-relex/src/hhagent_worker_gliner_relex/__main__.py
+git add workers/gliner-relex/src/kastellan_worker_gliner_relex/__main__.py
 git commit -m "feat(workers/gliner-relex): entry point + env parsing + startup error reporting"
 ```
 
@@ -1087,12 +1087,12 @@ git commit -m "feat(workers/gliner-relex): entry point + env parsing + startup e
 - [ ] **Step 1: Write `workers/gliner-relex/README.md`**
 
 ```markdown
-# hhagent-worker-gliner-relex
+# kastellan-worker-gliner-relex
 
-hhagent's GLiNER-Relex inference worker. Runs Knowledgator's joint NER + relation-extraction model under bwrap/Seatbelt, serving repeated `extract` JSON-RPC requests across the same warm process.
+kastellan's GLiNER-Relex inference worker. Runs Knowledgator's joint NER + relation-extraction model under bwrap/Seatbelt, serving repeated `extract` JSON-RPC requests across the same warm process.
 
 **Model:** `knowledgator/gliner-relex-multi-v1.0` (default; Apache 2.0; ~1.3 GB on disk, ~2-3 GB resident).
-Optionally also supports `knowledgator/gliner-relex-large-v0.5` (~2.5 GB) when `HHAGENT_GLINER_RELEX_INSTALL_LARGE=1` at install time.
+Optionally also supports `knowledgator/gliner-relex-large-v0.5` (~2.5 GB) when `KASTELLAN_GLINER_RELEX_INSTALL_LARGE=1` at install time.
 
 **Lifecycle:** `idle_timeout` (warm-keep; 10 min idle; daily rotation; per-spec).
 
@@ -1105,7 +1105,7 @@ Optionally also supports `knowledgator/gliner-relex-large-v0.5` (~2.5 GB) when `
 
 This:
 1. Runs `uv sync` in `workers/gliner-relex/` to create `.venv` with pinned deps.
-2. Downloads `gliner-relex-multi-v1.0` weights to `$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0/`.
+2. Downloads `gliner-relex-multi-v1.0` weights to `$KASTELLAN_DATA_DIR/workers/gliner-relex/weights/multi-v1.0/`.
 3. (Optional) Downloads `gliner-relex-large-v0.5` when the env knob is set.
 
 Required tools on PATH: `uv`, `hf` (or `huggingface-cli`), `python3`.
@@ -1114,11 +1114,11 @@ Required tools on PATH: `uv`, `hf` (or `huggingface-cli`), `python3`.
 
 ```sh
 cd workers/gliner-relex
-HHAGENT_GLINER_RELEX_WEIGHTS_DIR=$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0 \
-HHAGENT_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
-HHAGENT_GLINER_RELEX_DEVICE=auto \
+KASTELLAN_GLINER_RELEX_WEIGHTS_DIR=$KASTELLAN_DATA_DIR/workers/gliner-relex/weights/multi-v1.0 \
+KASTELLAN_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
+KASTELLAN_GLINER_RELEX_DEVICE=auto \
 echo '{"jsonrpc":"2.0","id":1,"method":"extract","params":{"text":"Dr Smith treats asthma in Mosman.","entity_labels":["person","disease","location"],"relation_labels":["treats","located_in"]}}' \
-  | uv run hhagent-worker-gliner-relex
+  | uv run kastellan-worker-gliner-relex
 ```
 
 Expected: a single JSON-RPC response line on stdout with at least one entity and one triple. Cold start ~10-30 s on first run; warm calls < 200 ms on CUDA.
@@ -1127,9 +1127,9 @@ Expected: a single JSON-RPC response line on stdout with at least one entity and
 
 | Name | Required | Description |
 |------|----------|-------------|
-| `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` | yes | absolute path to the model snapshot directory |
-| `HHAGENT_GLINER_RELEX_MODEL` | yes | HF repo ID (`knowledgator/gliner-relex-multi-v1.0` or `…large-v0.5`) |
-| `HHAGENT_GLINER_RELEX_DEVICE` | no (default `auto`) | `auto` \| `cuda` \| `cpu` (`mps` is reserved for the macOS follow-up) |
+| `KASTELLAN_GLINER_RELEX_WEIGHTS_DIR` | yes | absolute path to the model snapshot directory |
+| `KASTELLAN_GLINER_RELEX_MODEL` | yes | HF repo ID (`knowledgator/gliner-relex-multi-v1.0` or `…large-v0.5`) |
+| `KASTELLAN_GLINER_RELEX_DEVICE` | no (default `auto`) | `auto` \| `cuda` \| `cpu` (`mps` is reserved for the macOS follow-up) |
 | `HF_HUB_OFFLINE` | injected by daemon | `1` — offline-only |
 | `TRANSFORMERS_OFFLINE` | injected by daemon | `1` — offline-only |
 
@@ -1140,11 +1140,11 @@ cd workers/gliner-relex
 uv run pytest -v
 ```
 
-Tests mock the GLiNER load — no weights or GPU needed. The real-model round-trip lives on the Rust side: `cargo test -p hhagent-core --test gliner_relex_e2e` (skip-as-pass without venv + weights).
+Tests mock the GLiNER load — no weights or GPU needed. The real-model round-trip lives on the Rust side: `cargo test -p kastellan-core --test gliner_relex_e2e` (skip-as-pass without venv + weights).
 
 ## License
 
-The worker code is AGPL-3.0-or-later (matches the hhagent project). The GLiNER library is Apache 2.0; the model weights from Knowledgator are Apache 2.0 on both code and weights. The confusable GLiREL (`jackboyla/GLiREL`) is CC BY-NC-SA — do NOT swap it in; it is AGPL-incompatible.
+The worker code is AGPL-3.0-or-later (matches the kastellan project). The GLiNER library is Apache 2.0; the model weights from Knowledgator are Apache 2.0 on both code and weights. The confusable GLiREL (`jackboyla/GLiREL`) is CC BY-NC-SA — do NOT swap it in; it is AGPL-incompatible.
 
 See `docs/superpowers/specs/2026-05-18-gliner-relex-feasibility-study.md` for the full licensing chain.
 ```
@@ -1182,11 +1182,11 @@ fi
 # ----- paths -----
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 WORKER_DIR="$REPO_ROOT/workers/gliner-relex"
-DATA_DIR="${HHAGENT_DATA_DIR:-$HOME/.local/share/hhagent}"
+DATA_DIR="${KASTELLAN_DATA_DIR:-$HOME/.local/share/kastellan}"
 WEIGHTS_DIR="$DATA_DIR/workers/gliner-relex/weights"
 
 if [ ! -d "$WORKER_DIR" ]; then
-  echo "error: $WORKER_DIR not found; run from a checkout of the hhagent repo" >&2
+  echo "error: $WORKER_DIR not found; run from a checkout of the kastellan repo" >&2
   exit 1
 fi
 
@@ -1200,7 +1200,7 @@ echo ">>> downloading multi-v1.0 to $WEIGHTS_DIR/multi-v1.0"
 "$HF" download knowledgator/gliner-relex-multi-v1.0 \
   --local-dir "$WEIGHTS_DIR/multi-v1.0"
 
-if [ "${HHAGENT_GLINER_RELEX_INSTALL_LARGE:-0}" = "1" ]; then
+if [ "${KASTELLAN_GLINER_RELEX_INSTALL_LARGE:-0}" = "1" ]; then
   echo ">>> downloading large-v0.5 to $WEIGHTS_DIR/large-v0.5"
   "$HF" download knowledgator/gliner-relex-large-v0.5 \
     --local-dir "$WEIGHTS_DIR/large-v0.5"
@@ -1215,7 +1215,7 @@ fi
 echo
 echo "ok: gliner-relex weights at $WEIGHTS_DIR"
 echo "ok: venv at $WORKER_DIR/.venv"
-echo "To enable in the daemon, export HHAGENT_GLINER_RELEX_ENABLE=1 before starting hhagent."
+echo "To enable in the daemon, export KASTELLAN_GLINER_RELEX_ENABLE=1 before starting kastellan."
 ```
 
 - [ ] **Step 3: Make the script executable**
@@ -1257,11 +1257,11 @@ Expected: completes with the `ok: gliner-relex weights at ...` line. May take 5-
 
 ```bash
 cd workers/gliner-relex
-HHAGENT_GLINER_RELEX_WEIGHTS_DIR="${HHAGENT_DATA_DIR:-$HOME/.local/share/hhagent}/workers/gliner-relex/weights/multi-v1.0" \
-HHAGENT_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
-HHAGENT_GLINER_RELEX_DEVICE=auto \
+KASTELLAN_GLINER_RELEX_WEIGHTS_DIR="${KASTELLAN_DATA_DIR:-$HOME/.local/share/kastellan}/workers/gliner-relex/weights/multi-v1.0" \
+KASTELLAN_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
+KASTELLAN_GLINER_RELEX_DEVICE=auto \
 echo '{"jsonrpc":"2.0","id":1,"method":"extract","params":{"text":"Dr Smith treats asthma in Mosman.","entity_labels":["person","disease","location"],"relation_labels":["treats","located_in"]}}' \
-  | uv run hhagent-worker-gliner-relex
+  | uv run kastellan-worker-gliner-relex
 ```
 
 Expected: one JSON-RPC success response on stdout with `result.entities` non-empty.
@@ -1374,7 +1374,7 @@ Expected: builds cleanly. New module is empty but compiles.
 - [ ] **Step 5: Run the placeholder test**
 
 ```bash
-cargo test -p hhagent-core workers::gliner_relex -- --nocapture
+cargo test -p kastellan-core workers::gliner_relex -- --nocapture
 ```
 
 Expected: `placeholder_compiles ... ok`.
@@ -1457,7 +1457,7 @@ fn label_caps_match_python_side() {
 - [ ] **Step 2: Run the test to confirm it fails**
 
 ```bash
-cargo test -p hhagent-core workers::gliner_relex
+cargo test -p kastellan-core workers::gliner_relex
 ```
 
 Expected: compile errors — `cannot find ExtractRequest` etc.
@@ -1471,7 +1471,7 @@ use serde::{Deserialize, Serialize};
 
 /// Maximum number of distinct entity labels per `extract` request.
 ///
-/// Matches `MAX_ENTITY_LABELS` in `workers/gliner-relex/src/hhagent_worker_gliner_relex/server.py`.
+/// Matches `MAX_ENTITY_LABELS` in `workers/gliner-relex/src/kastellan_worker_gliner_relex/server.py`.
 /// Bumping either side requires bumping both.
 pub const MAX_ENTITY_LABELS: usize = 64;
 
@@ -1522,7 +1522,7 @@ pub struct Triple {
 - [ ] **Step 4: Run the test to confirm it passes**
 
 ```bash
-cargo test -p hhagent-core workers::gliner_relex
+cargo test -p kastellan-core workers::gliner_relex
 ```
 
 Expected: 4 new tests pass plus the placeholder. Replace the placeholder with the new tests' arrival — drop the `placeholder_compiles` test by removing it from the test module.
@@ -1579,7 +1579,7 @@ fn gliner_relex_entry_denies_network() {
     // Match by discriminant only — `Net::Deny` may carry no inner state, but
     // the comparison form below avoids depending on PartialEq on `Net`.
     match entry.policy.net {
-        hhagent_sandbox::Net::Deny => {}
+        kastellan_sandbox::Net::Deny => {}
         other => panic!("expected Net::Deny, got {:?}", other),
     }
     // sanity check the lifecycle is wired
@@ -1603,14 +1603,14 @@ fn gliner_relex_entry_carries_offline_env_vars() {
         .map(|(k, v)| (k.as_str(), v.as_str())).collect();
     assert_eq!(env_map.get("HF_HUB_OFFLINE"), Some(&"1"));
     assert_eq!(env_map.get("TRANSFORMERS_OFFLINE"), Some(&"1"));
-    assert_eq!(env_map.get("HHAGENT_GLINER_RELEX_WEIGHTS_DIR"), Some(&env.weights_dir.to_string_lossy().as_ref()));
-    assert_eq!(env_map.get("HHAGENT_GLINER_RELEX_MODEL"), Some(&env.model_id.as_str()));
-    assert_eq!(env_map.get("HHAGENT_GLINER_RELEX_DEVICE"), Some(&env.device.as_str()));
+    assert_eq!(env_map.get("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR"), Some(&env.weights_dir.to_string_lossy().as_ref()));
+    assert_eq!(env_map.get("KASTELLAN_GLINER_RELEX_MODEL"), Some(&env.model_id.as_str()));
+    assert_eq!(env_map.get("KASTELLAN_GLINER_RELEX_DEVICE"), Some(&env.device.as_str()));
 }
 
 fn test_env() -> GlinerRelexEnv {
     GlinerRelexEnv {
-        script_path: std::path::PathBuf::from("/tmp/fake/.venv/bin/hhagent-worker-gliner-relex"),
+        script_path: std::path::PathBuf::from("/tmp/fake/.venv/bin/kastellan-worker-gliner-relex"),
         venv_dir: std::path::PathBuf::from("/tmp/fake/.venv"),
         weights_dir: std::path::PathBuf::from("/tmp/fake/weights/multi-v1.0"),
         model_id: "knowledgator/gliner-relex-multi-v1.0".to_string(),
@@ -1622,7 +1622,7 @@ fn test_env() -> GlinerRelexEnv {
 - [ ] **Step 2: Run the test to confirm it fails**
 
 ```bash
-cargo test -p hhagent-core workers::gliner_relex
+cargo test -p kastellan-core workers::gliner_relex
 ```
 
 Expected: compile errors — `cannot find GlinerRelexEnv` etc.
@@ -1634,7 +1634,7 @@ Append to `core/src/workers/gliner_relex.rs` (before the `tests` module):
 ```rust
 use std::path::PathBuf;
 
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::tool_dispatch::ToolEntry;
 use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle};
@@ -1644,7 +1644,7 @@ use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle};
 #[derive(Debug, Clone)]
 pub struct GlinerRelexEnv {
     /// Absolute path to the uv-generated console-script shim:
-    /// `<worker_dir>/.venv/bin/hhagent-worker-gliner-relex`.
+    /// `<worker_dir>/.venv/bin/kastellan-worker-gliner-relex`.
     pub script_path: PathBuf,
     /// Absolute path to the worker venv root: `<worker_dir>/.venv/`.
     /// Mounted into the sandbox via `policy.fs_read` so the Python
@@ -1663,7 +1663,7 @@ pub struct GlinerRelexEnv {
 /// Construct the GLiNER-Relex tool registry entry.
 ///
 /// The returned entry is registered in `core::main` when
-/// `HHAGENT_GLINER_RELEX_ENABLE=1` is set and the weights directory
+/// `KASTELLAN_GLINER_RELEX_ENABLE=1` is set and the weights directory
 /// exists. Without those preconditions, the entry is skip-registered
 /// and calls to `gliner-relex` return `UNKNOWN_TOOL` per the existing
 /// dispatcher path.
@@ -1686,9 +1686,9 @@ pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
         mem_mb: 4_096,
         profile: Profile::WorkerStrict,
         env: vec![
-            ("HHAGENT_GLINER_RELEX_WEIGHTS_DIR".to_string(), env.weights_dir.to_string_lossy().into_owned()),
-            ("HHAGENT_GLINER_RELEX_MODEL".to_string(), env.model_id.clone()),
-            ("HHAGENT_GLINER_RELEX_DEVICE".to_string(), env.device.clone()),
+            ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR".to_string(), env.weights_dir.to_string_lossy().into_owned()),
+            ("KASTELLAN_GLINER_RELEX_MODEL".to_string(), env.model_id.clone()),
+            ("KASTELLAN_GLINER_RELEX_DEVICE".to_string(), env.device.clone()),
             ("HF_HUB_OFFLINE".to_string(), "1".to_string()),
             ("TRANSFORMERS_OFFLINE".to_string(), "1".to_string()),
         ],
@@ -1719,7 +1719,7 @@ pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
 - [ ] **Step 4: Run the test to confirm it passes**
 
 ```bash
-cargo test -p hhagent-core workers::gliner_relex
+cargo test -p kastellan-core workers::gliner_relex
 ```
 
 Expected: 9 tests passed (4 wire-shape + 5 manifest).
@@ -1768,7 +1768,7 @@ Sketch (adapt to the actual surrounding code shape — the goal is one helper ca
 /// Build the GLiNER-Relex tool entry from environment variables.
 ///
 /// Returns `None` and logs a `tracing::info!` when the worker is
-/// opted-out (default — `HHAGENT_GLINER_RELEX_ENABLE` unset or `0`),
+/// opted-out (default — `KASTELLAN_GLINER_RELEX_ENABLE` unset or `0`),
 /// preserving byte-equivalent startup with existing deployments.
 ///
 /// Returns `None` and logs a `tracing::error!` (fatal: the daemon
@@ -1776,21 +1776,21 @@ Sketch (adapt to the actual surrounding code shape — the goal is one helper ca
 /// requested but weights are missing. **Default posture per spec is
 /// fail-closed**: callers may upgrade this to `panic!` if the operator
 /// would rather have a hard refusal than a degraded startup.
-fn build_gliner_relex_entry() -> Option<hhagent_core::scheduler::tool_dispatch::ToolEntry> {
+fn build_gliner_relex_entry() -> Option<kastellan_core::scheduler::tool_dispatch::ToolEntry> {
     use std::path::PathBuf;
-    use hhagent_core::workers::gliner_relex::{GlinerRelexEnv, gliner_relex_entry};
+    use kastellan_core::workers::gliner_relex::{GlinerRelexEnv, gliner_relex_entry};
 
-    let enable = std::env::var("HHAGENT_GLINER_RELEX_ENABLE").unwrap_or_default();
+    let enable = std::env::var("KASTELLAN_GLINER_RELEX_ENABLE").unwrap_or_default();
     if enable != "1" {
-        tracing::info!("gliner-relex: HHAGENT_GLINER_RELEX_ENABLE != 1; skip registering");
+        tracing::info!("gliner-relex: KASTELLAN_GLINER_RELEX_ENABLE != 1; skip registering");
         return None;
     }
 
     // Required env: weights dir + model id + (optional) device.
-    let weights_dir = match std::env::var("HHAGENT_GLINER_RELEX_WEIGHTS_DIR") {
+    let weights_dir = match std::env::var("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR") {
         Ok(v) => PathBuf::from(v),
         Err(_) => {
-            tracing::error!("gliner-relex enabled but HHAGENT_GLINER_RELEX_WEIGHTS_DIR is unset; skip registering");
+            tracing::error!("gliner-relex enabled but KASTELLAN_GLINER_RELEX_WEIGHTS_DIR is unset; skip registering");
             return None;
         }
     };
@@ -1798,26 +1798,26 @@ fn build_gliner_relex_entry() -> Option<hhagent_core::scheduler::tool_dispatch::
         tracing::error!("gliner-relex enabled but weights dir missing at {}; skip registering", weights_dir.display());
         return None;
     }
-    let model_id = std::env::var("HHAGENT_GLINER_RELEX_MODEL")
+    let model_id = std::env::var("KASTELLAN_GLINER_RELEX_MODEL")
         .unwrap_or_else(|_| "knowledgator/gliner-relex-multi-v1.0".to_string());
-    let device = std::env::var("HHAGENT_GLINER_RELEX_DEVICE")
+    let device = std::env::var("KASTELLAN_GLINER_RELEX_DEVICE")
         .unwrap_or_else(|_| "auto".to_string());
 
-    // Resolve venv + shim path: $REPO_ROOT/workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex
+    // Resolve venv + shim path: $REPO_ROOT/workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex
     // The daemon does not know its own source-tree path at runtime; the
     // operator points us at the venv via env. Reasonable default is
-    // $HHAGENT_DATA_DIR/workers/gliner-relex/.venv but the operator may override.
-    let venv_dir = std::env::var("HHAGENT_GLINER_RELEX_VENV_DIR")
+    // $KASTELLAN_DATA_DIR/workers/gliner-relex/.venv but the operator may override.
+    let venv_dir = std::env::var("KASTELLAN_GLINER_RELEX_VENV_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            let data = std::env::var("HHAGENT_DATA_DIR")
+            let data = std::env::var("KASTELLAN_DATA_DIR")
                 .unwrap_or_else(|_| {
                     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                    format!("{home}/.local/share/hhagent")
+                    format!("{home}/.local/share/kastellan")
                 });
             PathBuf::from(data).join("workers/gliner-relex/.venv")
         });
-    let script_path = venv_dir.join("bin").join("hhagent-worker-gliner-relex");
+    let script_path = venv_dir.join("bin").join("kastellan-worker-gliner-relex");
     if !script_path.exists() {
         tracing::error!("gliner-relex enabled but script shim missing at {}; skip registering", script_path.display());
         return None;
@@ -1867,7 +1867,7 @@ Expected: same as Task 2.3 (760 passed). Skip-register path means no behaviour c
 
 ```bash
 git add core/src/main.rs
-git commit -m "feat(core/main): conditionally register gliner-relex when HHAGENT_GLINER_RELEX_ENABLE=1"
+git commit -m "feat(core/main): conditionally register gliner-relex when KASTELLAN_GLINER_RELEX_ENABLE=1"
 ```
 
 ---
@@ -1882,7 +1882,7 @@ git commit -m "feat(core/main): conditionally register gliner-relex when HHAGENT
 ```rust
 //! End-to-end integration tests for the gliner-relex worker.
 //!
-//! These tests spawn the real Python worker (`workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex`)
+//! These tests spawn the real Python worker (`workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex`)
 //! against a real model. Without the venv + weights, they skip-as-pass —
 //! the daemon's default deployment posture (env unset) matches this.
 //!
@@ -1901,7 +1901,7 @@ fn resolve_worker_script() -> Option<PathBuf> {
         .map(|d| PathBuf::from(d).parent().unwrap().to_path_buf())
         .unwrap_or_else(|_| PathBuf::from("."));
     let script = workspace_root
-        .join("workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex");
+        .join("workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex");
     if !script.exists() {
         eprintln!("[SKIP] gliner-relex venv not built: {} missing — run scripts/workers/gliner-relex/install.sh", script.display());
         return None;
@@ -1910,8 +1910,8 @@ fn resolve_worker_script() -> Option<PathBuf> {
 }
 
 fn resolve_weights_dir() -> Option<PathBuf> {
-    let data_dir = std::env::var("HHAGENT_DATA_DIR")
-        .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.local/share/hhagent")))
+    let data_dir = std::env::var("KASTELLAN_DATA_DIR")
+        .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.local/share/kastellan")))
         .ok()
         .map(PathBuf::from)?;
     let weights = data_dir.join("workers/gliner-relex/weights/multi-v1.0");
@@ -1934,7 +1934,7 @@ async fn skip_helper_compiles() {
 - [ ] **Step 2: Run the placeholder integration test**
 
 ```bash
-cargo test -p hhagent-core --test gliner_relex_e2e -- --nocapture
+cargo test -p kastellan-core --test gliner_relex_e2e -- --nocapture
 ```
 
 Expected: 1 passed. On a host without the venv + weights, two `[SKIP]` lines print on stderr but the test still passes.
@@ -1960,16 +1960,16 @@ This task only fires on a host with weights installed. The `[SKIP]` path is exer
 Append to `core/tests/gliner_relex_e2e.rs`:
 
 ```rust
-use hhagent_core::workers::gliner_relex::{
+use kastellan_core::workers::gliner_relex::{
     gliner_relex_entry, ExtractRequest, ExtractResponse, GlinerRelexEnv,
 };
 
 // Bring in the shared sandbox + lifecycle scaffolding from the existing
 // integration helpers. Match the pattern in
 // core/tests/worker_lifecycle_idle_timeout_e2e.rs.
-use hhagent_core::scheduler::tool_dispatch::{ToolEntry, ToolRegistry};
-use hhagent_core::tool_host;
-use hhagent_core::worker_lifecycle::{IdleTimeoutLifecycle, WorkerLifecycleManager};
+use kastellan_core::scheduler::tool_dispatch::{ToolEntry, ToolRegistry};
+use kastellan_core::tool_host;
+use kastellan_core::worker_lifecycle::{IdleTimeoutLifecycle, WorkerLifecycleManager};
 use std::sync::Arc;
 
 /// Build the lifecycle manager + manifest entry, spawning a real
@@ -1988,7 +1988,7 @@ async fn try_acquire_worker(
         device: "auto".to_string(),
     };
     let entry = gliner_relex_entry(&env);
-    let sandbox = hhagent_tests_common::default_sandbox_backend();
+    let sandbox = kastellan_tests_common::default_sandbox_backend();
     let lifecycle = IdleTimeoutLifecycle::new(Arc::from(sandbox));
     Some((lifecycle, entry))
 }
@@ -2000,7 +2000,7 @@ async fn happy_path_extract_returns_entities_and_triples() {
     let mut handle = lifecycle.acquire("gliner-relex", &entry).await
         .expect("acquire");
 
-    let pool = hhagent_tests_common::bring_up_pg_cluster_or_skip().await;
+    let pool = kastellan_tests_common::bring_up_pg_cluster_or_skip().await;
     let Some(pool) = pool else { eprintln!("[SKIP] no PG"); return };
 
     let req = ExtractRequest {
@@ -2031,7 +2031,7 @@ async fn happy_path_extract_returns_entities_and_triples() {
 - [ ] **Step 2: Run the test**
 
 ```bash
-cargo test -p hhagent-core --test gliner_relex_e2e happy_path -- --nocapture
+cargo test -p kastellan-core --test gliner_relex_e2e happy_path -- --nocapture
 ```
 
 Expected on a fully-installed host: 1 passed (test takes ~10-30 s the first time due to cold-start; subsequent runs warmer if the daemon keeps the model loaded).
@@ -2058,7 +2058,7 @@ git commit -m "test(core/gliner_relex_e2e): happy-path round-trip against real m
 #[tokio::test(flavor = "multi_thread")]
 async fn warm_reuse_serves_two_calls_from_one_worker() {
     let Some((lifecycle, entry)) = try_acquire_worker().await else { return };
-    let pool = hhagent_tests_common::bring_up_pg_cluster_or_skip().await;
+    let pool = kastellan_tests_common::bring_up_pg_cluster_or_skip().await;
     let Some(pool) = pool else { eprintln!("[SKIP] no PG"); return };
 
     let request = || ExtractRequest {
@@ -2100,7 +2100,7 @@ async fn warm_reuse_serves_two_calls_from_one_worker() {
 - [ ] **Step 2: Run the test**
 
 ```bash
-cargo test -p hhagent-core --test gliner_relex_e2e warm_reuse -- --nocapture
+cargo test -p kastellan-core --test gliner_relex_e2e warm_reuse -- --nocapture
 ```
 
 Expected on installed host: passes. The second call is materially faster than the first (warm reuse — no model reload).
@@ -2122,12 +2122,12 @@ git commit -m "test(core/gliner_relex_e2e): warm-reuse pin via _test_slot_has_wa
 - [ ] **Step 1: Append the error-propagation test**
 
 ```rust
-use hhagent_core::tool_host::ToolHostError;
+use kastellan_core::tool_host::ToolHostError;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn invalid_input_surfaces_as_invalid_input_rpc_error() {
     let Some((lifecycle, entry)) = try_acquire_worker().await else { return };
-    let pool = hhagent_tests_common::bring_up_pg_cluster_or_skip().await;
+    let pool = kastellan_tests_common::bring_up_pg_cluster_or_skip().await;
     let Some(pool) = pool else { eprintln!("[SKIP] no PG"); return };
 
     let mut handle = lifecycle.acquire("gliner-relex", &entry).await.expect("acquire");
@@ -2146,7 +2146,7 @@ async fn invalid_input_surfaces_as_invalid_input_rpc_error() {
     let err = outcome.expect_err("empty text must error");
     match err {
         ToolHostError::Client(client_err) => {
-            // The hhagent-protocol Rpc variant carries the JSON-RPC code.
+            // The kastellan-protocol Rpc variant carries the JSON-RPC code.
             // The exact match shape depends on ClientError's surface; we
             // assert the code is INVALID_INPUT (-32001) by string match
             // on the Display impl — adapt to the actual API if more
@@ -2176,7 +2176,7 @@ async fn invalid_input_surfaces_as_invalid_input_rpc_error() {
 - [ ] **Step 2: Run the test**
 
 ```bash
-cargo test -p hhagent-core --test gliner_relex_e2e invalid_input -- --nocapture
+cargo test -p kastellan-core --test gliner_relex_e2e invalid_input -- --nocapture
 ```
 
 Expected on installed host: passes. The test also implicitly verifies that INVALID_INPUT does not trigger `report_crash` (worker stays alive).
@@ -2214,7 +2214,7 @@ The roadmap already has the worker-lifecycle slices marked complete. Add a new e
 
 ```markdown
 - [x] **GLiNER-Relex worker — Slice 1 (Python package)** — landed YYYY-MM-DD on branch `feat/gliner-relex-slice-1` (N commits); merged to main via PR #XX at `<sha>`. New `workers/gliner-relex/` Python package (uv-managed venv, `pyproject.toml`, `[project.scripts]` shim, JSON-RPC stdio loop, GLiNER wrapper, custom error codes, 20 pytest tests covering errors/server/model). Operator install script + README. License chain (Apache 2.0 model + Apache 2.0 upstream lib) holds per the feasibility study. Pre-req for the next-natural slice (Slice 2: Rust manifest + e2e). Workspace cargo count unchanged.
-- [x] **GLiNER-Relex worker — Slice 2 (Rust manifest + e2e)** — landed YYYY-MM-DD on branch `feat/gliner-relex-slice-2` (N commits); merged to main via PR #XX at `<sha>`. New `core::workers::gliner_relex` module ships `GlinerRelexEnv` builder + `gliner_relex_entry() -> ToolEntry` (manifest constants: `Lifecycle::IdleTimeout { idle_seconds: 600, max_requests: 10_000, max_age_seconds: 86_400, grace_period_seconds: 5 }` + `Contract { stateless: true }` + `cpu_ms: 0` + `wall_clock_ms: None` per spec rationale). Wire-shape serde types (`ExtractRequest`/`ExtractResponse`/`Entity`/`Triple`). Conditional daemon registration via `HHAGENT_GLINER_RELEX_ENABLE=1`; skip-register by default (existing deployments byte-equivalent). 9 unit tests + 3 integration tests in new `core/tests/gliner_relex_e2e.rs` (skip-as-pass without venv/weights). Linux-first; macOS MPS path documented as a separate follow-up slice. Test count 751 → ~763 on Linux. Typed Rust client deferred to the v2 entity-extraction consumer slice.
+- [x] **GLiNER-Relex worker — Slice 2 (Rust manifest + e2e)** — landed YYYY-MM-DD on branch `feat/gliner-relex-slice-2` (N commits); merged to main via PR #XX at `<sha>`. New `core::workers::gliner_relex` module ships `GlinerRelexEnv` builder + `gliner_relex_entry() -> ToolEntry` (manifest constants: `Lifecycle::IdleTimeout { idle_seconds: 600, max_requests: 10_000, max_age_seconds: 86_400, grace_period_seconds: 5 }` + `Contract { stateless: true }` + `cpu_ms: 0` + `wall_clock_ms: None` per spec rationale). Wire-shape serde types (`ExtractRequest`/`ExtractResponse`/`Entity`/`Triple`). Conditional daemon registration via `KASTELLAN_GLINER_RELEX_ENABLE=1`; skip-register by default (existing deployments byte-equivalent). 9 unit tests + 3 integration tests in new `core/tests/gliner_relex_e2e.rs` (skip-as-pass without venv/weights). Linux-first; macOS MPS path documented as a separate follow-up slice. Test count 751 → ~763 on Linux. Typed Rust client deferred to the v2 entity-extraction consumer slice.
 ```
 
 - [ ] **Step 3: Commit**

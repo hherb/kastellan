@@ -12,7 +12,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::entity_extraction::EntityExtractor;
 
-use hhagent_db::tasks::{self, Lane, Task, DEFAULT_DEADLINE_FAST_S, DEFAULT_DEADLINE_LONG_S,
+use kastellan_db::tasks::{self, Lane, Task, DEFAULT_DEADLINE_FAST_S, DEFAULT_DEADLINE_LONG_S,
     DEFAULT_MAX_PLANS_FAST, DEFAULT_MAX_PLANS_LONG};
 
 use crate::cassandra::review::ChainReviewStage;
@@ -317,7 +317,7 @@ async fn write_lifecycle_row(
 ) {
     let payload = build_lifecycle_payload(task_id, lane, plan_count);
     if let Err(e) =
-        hhagent_db::audit::insert(pool, SCHEDULER_AUDIT_ACTOR, action, payload).await
+        kastellan_db::audit::insert(pool, SCHEDULER_AUDIT_ACTOR, action, payload).await
     {
         tracing::warn!(
             task_id, action, error = %e,
@@ -349,7 +349,7 @@ async fn write_finalize_row(
         finished_at,
     };
     let payload = build_finalize_payload(claimed.id, claimed.lane, final_state, &stats);
-    if let Err(e) = hhagent_db::audit::insert(
+    if let Err(e) = kastellan_db::audit::insert(
         pool, SCHEDULER_AUDIT_ACTOR, ACTION_TASK_FINALIZE, payload,
     ).await {
         tracing::warn!(
@@ -392,7 +392,7 @@ async fn write_l1_promoted_row(pool: &PgPool, extractor: &dyn EntityExtractor, t
     let body_sha256 = crate::memory::l1_promote::compute_body_sha256(insight.trim());
     let payload = build_l1_write_payload(&outcome, &source, &body_sha256);
 
-    if let Err(e) = hhagent_db::audit::insert(
+    if let Err(e) = kastellan_db::audit::insert(
         pool, SCHEDULER_AUDIT_ACTOR, ACTION_L1_PROMOTED, payload,
     ).await {
         tracing::warn!(
@@ -446,7 +446,7 @@ async fn write_l3_crystallised_row(
     let body_sha256 = compute_template_sha256(&normalised);
     let payload = build_l3_write_payload(&outcome, &source, &normalised.name, &body_sha256);
 
-    if let Err(e) = hhagent_db::audit::insert(
+    if let Err(e) = kastellan_db::audit::insert(
         pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_CRYSTALLISED, payload,
     ).await {
         tracing::warn!(
@@ -567,7 +567,7 @@ fn failed_result(detail: String) -> InnerLoopResult {
 /// - **Absent (`None`)** → `Ok(Default)`. The producer opted out of
 ///   provenance; the floor was not set by inference or operator flag.
 /// - **`"operator"`** → `Ok(Operator)`. Operator pinned the floor via
-///   `hhagent-cli ask --classification-floor X`.
+///   `kastellan-cli ask --classification-floor X`.
 /// - **`"cli_inferred"`** → `Ok(CliInferred)`. The CLI's
 ///   `classification_inference` keyword classifier elevated above Public.
 /// - **`"default"`** → `Ok(Default)`. Explicit "no provenance" — same
@@ -592,7 +592,7 @@ fn failed_result(detail: String) -> InnerLoopResult {
 /// reject here matches on the parsed variant (not the wire string) so a
 /// rename of `AgentRaised` + its serde tag propagates automatically.
 ///
-/// [issue #71]: https://github.com/hherb/hhagent/issues/71
+/// [issue #71]: https://github.com/hherb/kastellan/issues/71
 fn parse_classification_floor_source_from_payload(
     value: Option<&serde_json::Value>,
 ) -> Result<ClassificationFloorSource, String> {

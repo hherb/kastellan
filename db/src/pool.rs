@@ -44,7 +44,7 @@
 //! its own audit insert. The pool from this module is for
 //! *post-migration* application work only. Calling
 //! `connect_runtime_pool` against a cluster where 0002 hasn't run
-//! yet will fail at `after_connect` with `role "hhagent_runtime"
+//! yet will fail at `after_connect` with `role "kastellan_runtime"
 //! does not exist`.
 
 use std::time::Duration;
@@ -147,7 +147,7 @@ pub async fn connect_runtime_pool_with_max(
 ///
 /// ## When NOT to use this
 ///
-/// Only call from `hhagent-cli` operator workflows that mutate a
+/// Only call from `kastellan-cli` operator workflows that mutate a
 /// REVOKE-protected table. **Never** use this from the daemon itself —
 /// it would re-open the privilege escalation that [`crate::conn::RUNTIME_ROLE`]
 /// closes. The runtime pool ([`connect_runtime_pool`]) is the right

@@ -40,7 +40,7 @@ impl TestRoot {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "hhagent-supervisor-test-{}-{}-{}",
+            "kastellan-supervisor-test-{}-{}-{}",
             std::process::id(),
             label,
             n
@@ -65,10 +65,10 @@ impl Drop for TestRoot {
 fn install_writes_unit_file_with_expected_content() {
     let dir = TestRoot::new("install-content");
     let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
-    let spec = minimal_spec("hhagent-test");
+    let spec = minimal_spec("kastellan-test");
     sup.install(&spec).expect("install");
 
-    let path = sup.unit_path("hhagent-test");
+    let path = sup.unit_path("kastellan-test");
     assert!(path.exists(), "unit file not written: {}", path.display());
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("[Unit]"), "{body}");
@@ -138,25 +138,25 @@ fn status_returns_not_installed_when_unit_absent() {
 fn install_rejects_after_entry_with_injection() {
     let dir = TestRoot::new("inject-after");
     let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
-    let mut spec = minimal_spec("hhagent-core");
+    let mut spec = minimal_spec("kastellan-core");
     spec.program = std::path::PathBuf::from("/bin/true");
     spec.after = vec!["pg\n[Service]\nExecStart=/bin/evil".into()];
     let err = sup.install(&spec).unwrap_err();
     assert!(matches!(err, SupervisorError::InvalidName(_)), "{err:?}");
     // No unit file should have been written.
-    assert!(!dir.path().join("hhagent-core.service").exists());
+    assert!(!dir.path().join("kastellan-core.service").exists());
 }
 
 #[test]
 fn install_rejects_part_of_with_injection() {
     let dir = TestRoot::new("inject-partof");
     let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
-    let mut spec = minimal_spec("hhagent-core");
+    let mut spec = minimal_spec("kastellan-core");
     spec.program = std::path::PathBuf::from("/bin/true");
-    spec.part_of = Some("hhagent\nWantedBy=evil.target".into());
+    spec.part_of = Some("kastellan\nWantedBy=evil.target".into());
     let err = sup.install(&spec).unwrap_err();
     assert!(matches!(err, SupervisorError::InvalidName(_)), "{err:?}");
-    assert!(!dir.path().join("hhagent-core.service").exists());
+    assert!(!dir.path().join("kastellan-core.service").exists());
 }
 
 #[test]
@@ -164,20 +164,20 @@ fn install_target_rejects_member_with_injection() {
     let dir = TestRoot::new("inject-member");
     let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
     let target = TargetSpec {
-        name: "hhagent".into(),
+        name: "kastellan".into(),
         members: vec!["pg\nExecStart=/bin/evil".into()],
     };
     // members slice can be empty here — the target-name/members validation
     // must fire before any member install.
     let err = sup.install_target(&target, &[]).unwrap_err();
     assert!(matches!(err, SupervisorError::InvalidName(_)), "{err:?}");
-    assert!(!dir.path().join("hhagent.target").exists());
+    assert!(!dir.path().join("kastellan.target").exists());
 }
 
 #[test]
 fn install_target_writes_target_unit_and_members_into_units_dir() {
     let dir = std::env::temp_dir().join(format!(
-        "hhagent-target-unit-{}-{}",
+        "kastellan-target-unit-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -186,32 +186,32 @@ fn install_target_writes_target_unit_and_members_into_units_dir() {
     ));
     let sup = SystemdUser::with_units_dir(dir.clone());
 
-    let mut pg = minimal_spec("hhagent-postgres");
+    let mut pg = minimal_spec("kastellan-postgres");
     pg.program = std::path::PathBuf::from("/usr/lib/postgresql/18/bin/postgres");
-    pg.part_of = Some("hhagent".into());
-    let mut core = minimal_spec("hhagent-core");
-    core.program = std::path::PathBuf::from("/opt/hhagent/hhagent");
-    core.after = vec!["hhagent-postgres".into()];
-    core.part_of = Some("hhagent".into());
+    pg.part_of = Some("kastellan".into());
+    let mut core = minimal_spec("kastellan-core");
+    core.program = std::path::PathBuf::from("/opt/kastellan/kastellan");
+    core.after = vec!["kastellan-postgres".into()];
+    core.part_of = Some("kastellan".into());
 
     let target = TargetSpec {
-        name: "hhagent".into(),
-        members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        name: "kastellan".into(),
+        members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
     };
     sup.install_target(&target, &[pg, core]).expect("install_target");
 
     // Target unit written with Wants= of both members.
     let target_body =
-        std::fs::read_to_string(dir.join("hhagent.target")).expect("target file");
+        std::fs::read_to_string(dir.join("kastellan.target")).expect("target file");
     assert!(
-        target_body.contains("Wants=hhagent-postgres.service hhagent-core.service\n"),
+        target_body.contains("Wants=kastellan-postgres.service kastellan-core.service\n"),
         "{target_body}"
     );
     // Member units written, core ordered After= postgres.
-    assert!(dir.join("hhagent-postgres.service").exists());
+    assert!(dir.join("kastellan-postgres.service").exists());
     let core_body =
-        std::fs::read_to_string(dir.join("hhagent-core.service")).expect("core file");
-    assert!(core_body.contains("After=hhagent-postgres.service\n"), "{core_body}");
+        std::fs::read_to_string(dir.join("kastellan-core.service")).expect("core file");
+    assert!(core_body.contains("After=kastellan-postgres.service\n"), "{core_body}");
 
     std::fs::remove_dir_all(&dir).ok();
 }

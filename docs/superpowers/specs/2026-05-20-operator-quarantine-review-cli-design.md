@@ -17,8 +17,8 @@ The unblocker is an operator CLI that surfaces the quarantined entities and lets
 ## 2. Scope
 
 In scope:
-- A new top-level subcommand tree `hhagent-cli entities` with five actions: `list`, `show`, `approve`, `reject`, `merge`.
-- A new DB module `hhagent_db::entities` carrying pure helpers + I/O for the four operations the CLI needs.
+- A new top-level subcommand tree `kastellan-cli entities` with five actions: `list`, `show`, `approve`, `reject`, `merge`.
+- A new DB module `kastellan_db::entities` carrying pure helpers + I/O for the four operations the CLI needs.
 - Three new audit-row wire actions (`entities.approved` / `entities.rejected` / `entities.merged`).
 - Three new `core::cli_audit::*_and_audit` helpers composing the DB call + audit emission.
 - DB and subprocess integration tests covering the happy paths, idempotency, cascade behaviour, and one end-to-end recall pin that demonstrates the graph lane lights up after approval.
@@ -33,12 +33,12 @@ Deliberately NOT in scope:
 ## 3. CLI surface
 
 ```
-hhagent-cli entities list      [--kind <K>] [--state quarantined|approved|any]
+kastellan-cli entities list      [--kind <K>] [--state quarantined|approved|any]
                                [--limit N] [--since <RFC3339>] [--min-mentions N]
-hhagent-cli entities show      <id>
-hhagent-cli entities approve   <id>...
-hhagent-cli entities reject    <id>...
-hhagent-cli entities merge     --keep <id> --drop <id>[,<id>...]
+kastellan-cli entities show      <id>
+kastellan-cli entities approve   <id>...
+kastellan-cli entities reject    <id>...
+kastellan-cli entities merge     --keep <id> --drop <id>[,<id>...]
 ```
 
 Conventions match the existing `tools allowlist` / `memory l1` subcommand precedents: fixed-width columnar output, `eprintln!` + `ExitCode::from(2)` for arg errors, `ExitCode::from(1)` for runtime errors, `--flag value` style (no `--flag=value`).
@@ -164,7 +164,7 @@ Why this shape:
 
 Cross-kind merge refusal pins the operator's mental model: merging `person:Dr Smith` into `place:Smith Street` is almost certainly a mistake, not a typo. The error message names both kinds so the operator can re-check.
 
-## 4. New DB module — `hhagent_db::entities`
+## 4. New DB module — `kastellan_db::entities`
 
 File: `db/src/entities.rs` (NEW, ~270 LOC including tests).
 
@@ -344,8 +344,8 @@ pub async fn entities_merge_and_audit(
 ```
 
 Each helper:
-1. Calls the corresponding `hhagent_db::entities::*` function.
-2. **Only on the state-changing outcome variant** (`Approved`, `Rejected`, or successful `merge`), builds the payload via the `core::scheduler::audit::build_entities_*_payload` helper and calls `hhagent_db::audit::insert(pool, "cli", ACTION_ENTITIES_*, payload)`. `AlreadyApproved` / `NotFound` outcomes produce no audit row (no state was changed).
+1. Calls the corresponding `kastellan_db::entities::*` function.
+2. **Only on the state-changing outcome variant** (`Approved`, `Rejected`, or successful `merge`), builds the payload via the `core::scheduler::audit::build_entities_*_payload` helper and calls `kastellan_db::audit::insert(pool, "cli", ACTION_ENTITIES_*, payload)`. `AlreadyApproved` / `NotFound` outcomes produce no audit row (no state was changed).
 3. Best-effort posture on audit insert: a failure is logged at `tracing::warn!` and swallowed; the helper still returns the operation outcome.
 
 This matches the existing `l1_add_and_audit` / `tools_allowlist_add_and_audit` posture exactly, with the additional refinement that the audit-row emit is gated on the state-change variant so observation-phase SQL never sees a `cli/entities.approved` row for an entity that was already approved.
@@ -374,12 +374,12 @@ Budget: 848 → ~874. Margin against the proposal's +18 estimate is comfortable;
 - `db/src/lib.rs` — add `pub mod entities;`
 - `core/src/cli_audit.rs` — +3 helpers (~110 LOC)
 - `core/src/scheduler/audit.rs` — +3 action constants + 3 payload builders + stability tests
-- `core/src/bin/hhagent-cli.rs` — +subcommand tree (~250 LOC); also add `entities …` to `help_text()`
+- `core/src/bin/kastellan-cli.rs` — +subcommand tree (~250 LOC); also add `entities …` to `help_text()`
 - `db/tests/postgres_e2e.rs` — +7 tests
 - `core/tests/memory_recall_e2e.rs` — +1 recall-pin scenario
 
 **File-size watch:**
-- `hhagent-cli.rs` already at **1444 LOC** (a known 500-LOC cap-breach flagged in HANDOVER's "Open follow-up surfaces"). This slice adds ~250 → ~1700 LOC. The split-into-modules refactor is a separate slice already on the priority list; this slice deliberately does not attempt it.
+- `kastellan-cli.rs` already at **1444 LOC** (a known 500-LOC cap-breach flagged in HANDOVER's "Open follow-up surfaces"). This slice adds ~250 → ~1700 LOC. The split-into-modules refactor is a separate slice already on the priority list; this slice deliberately does not attempt it.
 - `db/src/memories.rs` already at **949 LOC**; this slice doesn't touch it.
 - New `db/src/entities.rs` ships under cap at ~280 LOC.
 
@@ -397,7 +397,7 @@ If a future slice introduces a `kinds` subcommand, that one will need migration 
 
 Filed against this slice's exit but explicitly out of scope for the present slice:
 
-1. **`entities relink <memory_id>` subcommand** — operator-driven backfill for the auto-linker's "operator-explicit L1 add" gap (NoOp extractor) and any pre-extractor memory rows. Pairs with the existing TODO note in `hhagent-cli memory l1 add`.
+1. **`entities relink <memory_id>` subcommand** — operator-driven backfill for the auto-linker's "operator-explicit L1 add" gap (NoOp extractor) and any pre-extractor memory rows. Pairs with the existing TODO note in `kastellan-cli memory l1 add`.
 2. **Interactive review mode** — terminal UI iterating quarantined entities one-by-one, accepting `a/r/m/q` keystrokes. The DB primitives shipped here would be the building blocks.
 3. **Embedding-based merge suggestions** — once `entities.embedding` is populated, `entities suggest-merges <id>` would surface near-duplicates by cosine similarity.
 4. **Per-entity provenance** — `entities.created_by_extractor` / `entities.created_at_audit_id` would let the CLI surface "this entity was extracted by Gemma 4 on 2026-05-19; the source memory body is X". Today's `mention_count` query is a weak proxy.
@@ -405,5 +405,5 @@ Filed against this slice's exit but explicitly out of scope for the present slic
 ## 11. Verification
 
 - `cargo test --workspace` post-slice: 848 → ~872 passed, 0 failed, 0 [SKIP] on Linux.
-- Smoke test (operator-runnable, post-deploy): after seeding ≥1 memory through the L0 or L1 path with `HHAGENT_GLINER_RELEX_ENABLE=1` and verifying `SELECT COUNT(*) FROM entities WHERE quarantine = TRUE > 0`, run `hhagent-cli entities list`. Approve a known entity. Submit a follow-up task referencing that entity. `agent/plan.formulate` audit-row should now show `graph_seed_count >= 1` (Slice F key from the v2 extractor's payload).
+- Smoke test (operator-runnable, post-deploy): after seeding ≥1 memory through the L0 or L1 path with `KASTELLAN_GLINER_RELEX_ENABLE=1` and verifying `SELECT COUNT(*) FROM entities WHERE quarantine = TRUE > 0`, run `kastellan-cli entities list`. Approve a known entity. Submit a follow-up task referencing that entity. `agent/plan.formulate` audit-row should now show `graph_seed_count >= 1` (Slice F key from the v2 extractor's payload).
 - Threat-model invariant unchanged: this slice introduces no new sandboxed code paths and no new egress endpoints. The CLI runs as the operator's OS user, talks to the same runtime PG pool the daemon uses.

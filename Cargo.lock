@@ -1050,186 +1050,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hhagent-core"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "hhagent-db",
- "hhagent-llm-router",
- "hhagent-protocol",
- "hhagent-sandbox",
- "hhagent-supervisor",
- "hhagent-tests-common",
- "libc",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "url",
- "zeroize",
-]
-
-[[package]]
-name = "hhagent-db"
-version = "0.0.0"
-dependencies = [
- "aes-gcm",
- "hhagent-supervisor",
- "hhagent-tests-common",
- "keyring",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "thiserror",
- "time",
- "tokio",
- "tracing",
- "unicode-normalization",
- "zeroize",
-]
-
-[[package]]
-name = "hhagent-llm-router"
-version = "0.0.0"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "hhagent-protocol"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "hhagent-sandbox"
-version = "0.0.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "hhagent-supervisor"
-version = "0.0.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "hhagent-tests-common"
-version = "0.0.0"
-dependencies = [
- "hhagent-db",
- "hhagent-sandbox",
- "hhagent-supervisor",
- "parking_lot",
- "serde_json",
- "sha2",
- "sqlx",
-]
-
-[[package]]
-name = "hhagent-worker-egress-proxy"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "hhagent-worker-prelude",
- "hhagent-worker-web-common",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "hhagent-worker-prelude"
-version = "0.0.0"
-dependencies = [
- "hhagent-protocol",
- "landlock",
- "libc",
- "seccompiler",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "hhagent-worker-shell-exec"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "hhagent-protocol",
- "hhagent-worker-prelude",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "hhagent-worker-web-common"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "reqwest",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "hhagent-worker-web-fetch"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "dom_smoothie",
- "hhagent-protocol",
- "hhagent-worker-prelude",
- "hhagent-worker-web-common",
- "pdf-extract",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "hhagent-worker-web-search"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "hhagent-protocol",
- "hhagent-worker-prelude",
- "hhagent-worker-web-common",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1526,6 +1346,186 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kastellan-core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "kastellan-db",
+ "kastellan-llm-router",
+ "kastellan-protocol",
+ "kastellan-sandbox",
+ "kastellan-supervisor",
+ "kastellan-tests-common",
+ "libc",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "kastellan-db"
+version = "0.0.0"
+dependencies = [
+ "aes-gcm",
+ "kastellan-supervisor",
+ "kastellan-tests-common",
+ "keyring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+ "unicode-normalization",
+ "zeroize",
+]
+
+[[package]]
+name = "kastellan-llm-router"
+version = "0.0.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "kastellan-protocol"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "kastellan-sandbox"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "kastellan-supervisor"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "kastellan-tests-common"
+version = "0.0.0"
+dependencies = [
+ "kastellan-db",
+ "kastellan-sandbox",
+ "kastellan-supervisor",
+ "parking_lot",
+ "serde_json",
+ "sha2",
+ "sqlx",
+]
+
+[[package]]
+name = "kastellan-worker-egress-proxy"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "kastellan-worker-prelude",
+ "kastellan-worker-web-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kastellan-worker-prelude"
+version = "0.0.0"
+dependencies = [
+ "kastellan-protocol",
+ "landlock",
+ "libc",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "kastellan-worker-shell-exec"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kastellan-worker-web-common"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "kastellan-worker-web-fetch"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "dom_smoothie",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "kastellan-worker-web-common",
+ "pdf-extract",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "kastellan-worker-web-search"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "kastellan-worker-web-common",
+ "serde",
+ "serde_json",
+ "url",
 ]
 
 [[package]]

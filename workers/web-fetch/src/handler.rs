@@ -6,12 +6,12 @@
 //! / OPERATION_FAILED / METHOD_NOT_FOUND). No silent fallbacks: any failure is
 //! an error, never an empty-but-success result.
 
-use hhagent_protocol::{codes, server::Handler, RpcError};
+use kastellan_protocol::{codes, server::Handler, RpcError};
 use serde::Deserialize;
 use url::Url;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
-use hhagent_worker_web_common::http::{HttpGet, ReqwestGet};
+use kastellan_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::http::{HttpGet, ReqwestGet};
 
 use crate::extract::{extract, main_type};
 use crate::fetch::{drive, FetchError};
@@ -97,9 +97,9 @@ pub struct WebFetchHandler<T: HttpGet> {
 impl WebFetchHandler<ReqwestGet> {
     /// Build from env: allowlist JSON + real reqwest transport.
     pub fn from_env() -> anyhow::Result<Self> {
-        let raw = std::env::var("HHAGENT_WEB_FETCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
+        let raw = std::env::var("KASTELLAN_WEB_FETCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
         let allowlist = HostAllowlist::from_env_json(&raw)?;
-        let transport = ReqwestGet::new("hhagent-web-fetch/0")?;
+        let transport = ReqwestGet::new("kastellan-web-fetch/0")?;
         Ok(Self { allowlist, transport })
     }
 }
@@ -152,8 +152,8 @@ impl<T: HttpGet> Handler for WebFetchHandler<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_worker_web_common::http::RawResponse;
-    use hhagent_worker_web_common::testing::{al, FakeGet};
+    use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::testing::{al, FakeGet};
 
     fn handler(entries: &[&str], responses: Vec<RawResponse>) -> WebFetchHandler<FakeGet> {
         WebFetchHandler::with_parts(al(entries), FakeGet::new(responses))

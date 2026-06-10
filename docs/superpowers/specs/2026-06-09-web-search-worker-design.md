@@ -19,11 +19,11 @@ reads.**
 
 ## Decision summary
 
-Add a tool worker `hhagent-worker-web-search` exposing a single JSON-RPC method
+Add a tool worker `kastellan-worker-web-search` exposing a single JSON-RPC method
 `web.search` that takes a query string and returns a ranked list of result hits
 from a SearxNG instance's JSON API (`/search?format=json`). It mirrors the
 `web-fetch` worker pattern: a small Rust binary using
-`hhagent_worker_prelude::serve_stdio` (which calls `lock_down()` before serving),
+`kastellan_worker_prelude::serve_stdio` (which calls `lock_down()` before serving),
 plus a host-side `WorkerManifest` in `core/src/workers/web_search.rs` declaring the
 `SandboxPolicy` (`Net::Allowlist` + `Profile::WorkerNetClient`).
 
@@ -53,8 +53,8 @@ Extract from `web-fetch` the two genuinely reusable, security-relevant pieces:
   `web-fetch`; its unit tests move with it. **Host-matching only — scheme-agnostic.**
 - **`http.rs`** — the `HttpGet` trait + `RawResponse` + `ReqwestGet` (the
   redirect-disabled, body-capped `reqwest::blocking` + rustls transport;
-  `TIMEOUT_SECS`, `MAX_BODY_BYTES`). Generic user-agent `hhagent/0` (was
-  `hhagent-web-fetch/0`).
+  `TIMEOUT_SECS`, `MAX_BODY_BYTES`). Generic user-agent `kastellan/0` (was
+  `kastellan-web-fetch/0`).
 - **`testing.rs`** (behind a `testing` cargo feature) — `FakeGet` + the
   `ok_resp`/`redirect_to`/`al` test helpers, so both workers' unit suites share the
   one fake transport. Consumed via `web-common = { features = ["testing"] }` in each
@@ -85,7 +85,7 @@ tests + e2e stay green (the allowlist tests now live in `web-common`).
   allowlist, or disallowed scheme), `OPERATION_FAILED` (transport / non-200 /
   redirect / JSON parse), `METHOD_NOT_FOUND`.
 - **`main.rs`** — `serve_stdio` + `WebSearchHandler::from_env`, which reads
-  `HHAGENT_WEB_SEARCH_ENDPOINT` + `HHAGENT_WEB_SEARCH_ALLOWLIST`, parses + validates
+  `KASTELLAN_WEB_SEARCH_ENDPOINT` + `KASTELLAN_WEB_SEARCH_ALLOWLIST`, parses + validates
   the endpoint **at startup**, and **fails closed** (returns `Err`, the worker never
   serves) if the endpoint is missing, unparseable, has a disallowed scheme, or its
   host is not on the allowlist.
@@ -132,9 +132,9 @@ as `IpAddr` and use `.is_loopback()`; if it does not parse as an IP, return
   `--unshare-all`).
 - `cpu_ms = 5_000`, `mem_mb = 256` (lighter than web-fetch's 512 — JSON parsing
   only, no HTML readability or PDF), `wall_clock_ms = Some(30_000)`, `SingleUse`.
-- Env injected: `HHAGENT_WEB_SEARCH_ENDPOINT` (read on the host from the daemon's
+- Env injected: `KASTELLAN_WEB_SEARCH_ENDPOINT` (read on the host from the daemon's
   own env via `ctx.get_env` — operator-controlled, **not** LLM-supplied) and
-  `HHAGENT_WEB_SEARCH_ALLOWLIST` (the `tool_allowlists` rows keyed `"web-search"`,
+  `KASTELLAN_WEB_SEARCH_ALLOWLIST` (the `tool_allowlists` rows keyed `"web-search"`,
   same governance path web-fetch uses).
 - `allowlist_tool()` → `Some("web-search")`. Registered in `WORKER_MANIFESTS`.
 
@@ -166,8 +166,8 @@ cross-platform: Docker Desktop on macOS, docker/podman on Linux):
 3. Run `searxng/searxng` bound to `127.0.0.1:8888` with that settings file mounted,
    under a stable container name (idempotent: reuse/restart if already present).
 4. Print the two env lines to export:
-   - `HHAGENT_WEB_SEARCH_ENDPOINT=http://127.0.0.1:8888/search`
-   - `HHAGENT_WEB_SEARCH_ALLOWLIST=["127.0.0.1"]`
+   - `KASTELLAN_WEB_SEARCH_ENDPOINT=http://127.0.0.1:8888/search`
+   - `KASTELLAN_WEB_SEARCH_ALLOWLIST=["127.0.0.1"]`
 
 The script is a dev convenience, not part of the worker's trust boundary; it is
 documented in the worker crate README / HANDOFF, not invoked by the daemon.
@@ -187,7 +187,7 @@ documented in the worker crate README / HANDOFF, not invoked by the daemon.
   - `host_outside_allowlist_is_denied` (hermetic: endpoint host not on allowlist →
     worker refuses at startup / `POLICY_DENIED`, real sandbox, no server),
   - `#[ignore]` `real_search_against_searxng` (needs a live instance; reads
-    `HHAGENT_WEB_SEARCH_ENDPOINT`; validates DNS+TLS/loopback in-jail and a real
+    `KASTELLAN_WEB_SEARCH_ENDPOINT`; validates DNS+TLS/loopback in-jail and a real
     SearxNG round-trip).
   - `[SKIP]`s cleanly when PG / supervisor / worker binary / sandbox are missing.
 - **`core` unit (manifest)** — `web_search.rs` resolve tests: registers with
@@ -241,7 +241,7 @@ Cargo.toml (workspace)           + workers/web-common, workers/web-search member
 - **Structured hits only** — web-search finds, web-fetch reads.
 - **Shared `web-common` crate** — single source of truth for the allowlist matcher
   + transport seam; web-fetch re-pointed, behaviour byte-preserved.
-- **Operator-configured endpoint** via `HHAGENT_WEB_SEARCH_ENDPOINT`; LLM supplies
+- **Operator-configured endpoint** via `KASTELLAN_WEB_SEARCH_ENDPOINT`; LLM supplies
   only the query — no URL-injection surface.
 - **http allowed for loopback only**; https mandatory for every other host.
 - **`Net::Allowlist` derived from the endpoint host:port** (correct for loopback

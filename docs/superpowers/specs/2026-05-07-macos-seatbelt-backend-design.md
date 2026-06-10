@@ -20,7 +20,7 @@ Implement the macOS counterpart of the Linux `bwrap` sandbox backend so the same
 - Same `SandboxPolicy` and `SandboxBackend` trait drive both platforms — no new fields, no new variants.
 - One process per worker, one Seatbelt jail per worker — invariant 1 in `architecture.md`.
 - The host network allowlist is enforced by the future egress proxy, not by Seatbelt; `Net::Allowlist` lifts the network-deny in the profile, the proxy enforces the per-host list. Same split as bwrap's `--share-net`.
-- Worker-side defence-in-depth: `hhagent-worker-prelude::lock_down()` already returns `LockdownReport::SkippedNonLinux` on macOS. We do not add a worker-side macOS layer in this session — Seatbelt is the parent-side filter, and the threat model already documents that macOS is the weaker of the two platforms.
+- Worker-side defence-in-depth: `kastellan-worker-prelude::lock_down()` already returns `LockdownReport::SkippedNonLinux` on macOS. We do not add a worker-side macOS layer in this session — Seatbelt is the parent-side filter, and the threat model already documents that macOS is the weaker of the two platforms.
 
 ## File layout
 

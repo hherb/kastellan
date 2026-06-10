@@ -35,7 +35,7 @@ pub struct ReqwestGet {
 
 impl ReqwestGet {
     /// Build the transport with a caller-supplied `User-Agent`. Each worker
-    /// passes its own (`hhagent-web-fetch/0`, `hhagent-web-search/0`, …) so the
+    /// passes its own (`kastellan-web-fetch/0`, `kastellan-web-search/0`, …) so the
     /// UA on the wire stays attributable per worker and unchanged by the shared
     /// crate move.
     pub fn new(user_agent: &str) -> anyhow::Result<Self> {

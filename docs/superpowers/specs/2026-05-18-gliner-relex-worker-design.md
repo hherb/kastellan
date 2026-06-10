@@ -23,7 +23,7 @@ The spike at `scripts/spike/gliner-relex/` (deleted; results in the spike notes 
 
 The worker-lifecycle policy slice 2 (merged 2026-05-18 in PR #83) shipped the `idle_timeout` runtime — per-tool warm cache, post-completion cap evaluation, passive crash detection, exponential restart backoff. The first natural consumer is GLiNER-Relex: Knowledgator's joint NER + relation-extraction model (Apache 2.0 weights, ~1.3 GB resident at fp32, single forward pass for entities + triples). This spec defines the worker itself — Python package, JSON-RPC contract, manifest, sandbox boundary, operator setup — and explicitly scopes out the downstream consumer (v2 entity extraction) so the worker can land standalone.
 
-The spec also establishes the convention for **every future Python worker** in the tree (embedding-as-worker, sentiment, classification, OCR). Until now, `workers/prelude` is Rust and `workers/shell-exec` is Rust; this is hhagent's first Python worker. Tooling choices here cascade.
+The spec also establishes the convention for **every future Python worker** in the tree (embedding-as-worker, sentiment, classification, OCR). Until now, `workers/prelude` is Rust and `workers/shell-exec` is Rust; this is kastellan's first Python worker. Tooling choices here cascade.
 
 ## What this spec defines
 
@@ -48,19 +48,19 @@ The spec also establishes the convention for **every future Python worker** in t
 
 ## Architecture
 
-Two processes communicating over JSON-RPC 2.0 line-delimited stdio — the same contract `hhagent-protocol` uses today for shell-exec.
+Two processes communicating over JSON-RPC 2.0 line-delimited stdio — the same contract `kastellan-protocol` uses today for shell-exec.
 
 ```
-hhagent (core, Rust)
+kastellan (core, Rust)
   │
   │  spawn under SandboxPolicy via Lifecycle::IdleTimeout manager
   │
   ▼
-.venv/bin/hhagent-worker-gliner-relex               (Python worker, sandboxed;
+.venv/bin/kastellan-worker-gliner-relex               (Python worker, sandboxed;
                                                      uv-generated console-script shim
-                                                     equivalent to: python -m hhagent_worker_gliner_relex)
+                                                     equivalent to: python -m kastellan_worker_gliner_relex)
   │
-  ├── on startup: load model from HHAGENT_GLINER_RELEX_WEIGHTS_DIR
+  ├── on startup: load model from KASTELLAN_GLINER_RELEX_WEIGHTS_DIR
   ├── stdio loop: read JSON-RPC frames, dispatch `extract`, write response
   └── exits on stdin EOF or SIGTERM (lifecycle eviction)
 ```
@@ -155,22 +155,22 @@ These limits are enforced in Python (defence in depth) and pinned in Rust client
 
 The manifest lives as a Rust function returning `ToolEntry`, per worker-lifecycle slice 1's pattern (`shell_exec_entry()`). The on-disk TOML manifest discussed in the worker-lifecycle spec's open question 1 stays deferred — no operator has yet asked to edit it.
 
-`ToolEntry`'s schema today has `binary: PathBuf` + `policy: SandboxPolicy` + `wall_clock_ms: Option<u64>` + `lifecycle: Lifecycle`. It does NOT have an `args` field — `WorkerSpec.args` is constructed inside `SingleUseLifecycle::acquire` as `&[]`. To launch `python -m hhagent_worker_gliner_relex` without extending `ToolEntry`, the worker exposes a `[project.scripts]` entry in its `pyproject.toml`:
+`ToolEntry`'s schema today has `binary: PathBuf` + `policy: SandboxPolicy` + `wall_clock_ms: Option<u64>` + `lifecycle: Lifecycle`. It does NOT have an `args` field — `WorkerSpec.args` is constructed inside `SingleUseLifecycle::acquire` as `&[]`. To launch `python -m kastellan_worker_gliner_relex` without extending `ToolEntry`, the worker exposes a `[project.scripts]` entry in its `pyproject.toml`:
 
 ```toml
 # workers/gliner-relex/pyproject.toml
 [project.scripts]
-hhagent-worker-gliner-relex = "hhagent_worker_gliner_relex.__main__:main"
+kastellan-worker-gliner-relex = "kastellan_worker_gliner_relex.__main__:main"
 ```
 
-After `uv sync`, `.venv/bin/hhagent-worker-gliner-relex` is a real executable shim. The manifest's `binary` field points at that path; no args needed.
+After `uv sync`, `.venv/bin/kastellan-worker-gliner-relex` is a real executable shim. The manifest's `binary` field points at that path; no args needed.
 
 ```rust
 // core/src/workers/gliner_relex.rs (new module)
 
 pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
     ToolEntry {
-        binary: env.script_path.clone(),  // .venv/bin/hhagent-worker-gliner-relex (uv-generated shim)
+        binary: env.script_path.clone(),  // .venv/bin/kastellan-worker-gliner-relex (uv-generated shim)
         policy: SandboxPolicy {
             fs_read: vec![
                 env.weights_dir.clone(),
@@ -208,22 +208,22 @@ pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
 
 `GlinerRelexEnv` is a small builder that the daemon's startup populates from environment variables. It carries:
 
-- `script_path: PathBuf` — `${workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex}` resolved absolute.
+- `script_path: PathBuf` — `${workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex}` resolved absolute.
 - `venv_dir: PathBuf` — `${workers/gliner-relex/.venv/}` for `fs_read` (covers Python interpreter + site-packages).
-- `weights_dir: PathBuf` — `$HHAGENT_DATA_DIR/workers/gliner-relex/weights/<model-slug>/`.
+- `weights_dir: PathBuf` — `$KASTELLAN_DATA_DIR/workers/gliner-relex/weights/<model-slug>/`.
 - `model_id: String` — Knowledgator HF repo ID, e.g. `knowledgator/gliner-relex-multi-v1.0`.
 - `device: String` — `auto` (Linux default → CUDA if available else CPU), `cuda`, `cpu`, `mps` (macOS follow-up only).
 
 `env.derived_env_vars()` produces the env passed to the worker via `--setenv`:
 
 ```
-HHAGENT_GLINER_RELEX_WEIGHTS_DIR=<absolute path>
-HHAGENT_GLINER_RELEX_MODEL=<HF repo ID>
-HHAGENT_GLINER_RELEX_DEVICE=<auto|cuda|cpu|mps>
+KASTELLAN_GLINER_RELEX_WEIGHTS_DIR=<absolute path>
+KASTELLAN_GLINER_RELEX_MODEL=<HF repo ID>
+KASTELLAN_GLINER_RELEX_DEVICE=<auto|cuda|cpu|mps>
 HF_HUB_OFFLINE=1
 TRANSFORMERS_OFFLINE=1
-HHAGENT_LANDLOCK_RW=<derived per existing prelude>
-HHAGENT_SECCOMP_PROFILE=worker-strict
+KASTELLAN_LANDLOCK_RW=<derived per existing prelude>
+KASTELLAN_SECCOMP_PROFILE=worker-strict
 ```
 
 The `HF_HUB_OFFLINE` + `TRANSFORMERS_OFFLINE` pair is belt-and-suspenders: even if `Net::Deny` were misconfigured the worker still refuses to phone home.
@@ -269,7 +269,7 @@ command -v hf >/dev/null 2>&1 || command -v huggingface-cli >/dev/null 2>&1 || {
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 WORKER_DIR="$REPO_ROOT/workers/gliner-relex"
-DATA_DIR="${HHAGENT_DATA_DIR:-$HOME/.local/share/hhagent}"
+DATA_DIR="${KASTELLAN_DATA_DIR:-$HOME/.local/share/kastellan}"
 WEIGHTS_DIR="$DATA_DIR/workers/gliner-relex/weights"
 
 # 1. uv sync — creates .venv with pinned deps
@@ -283,7 +283,7 @@ hf download knowledgator/gliner-relex-multi-v1.0 \
   --local-dir "$WEIGHTS_DIR/multi-v1.0"
 
 # 4. (optional, opt-in) download large-v0.5
-if [ "${HHAGENT_GLINER_RELEX_INSTALL_LARGE:-0}" = "1" ]; then
+if [ "${KASTELLAN_GLINER_RELEX_INSTALL_LARGE:-0}" = "1" ]; then
   hf download knowledgator/gliner-relex-large-v0.5 \
     --local-dir "$WEIGHTS_DIR/large-v0.5"
 fi
@@ -300,8 +300,8 @@ echo "ok: venv at $WORKER_DIR/.venv"
 
 Daemon startup behaviour on missing weights:
 
-- **Default posture: fail-closed.** If `HHAGENT_GLINER_RELEX_ENABLE=1` is set and the weights directory is missing, the daemon exits at startup with a structured error pointing at the install script.
-- **Opt-out posture: skip-register.** If `HHAGENT_GLINER_RELEX_ENABLE` is unset (or `0`), the daemon does not register the gliner-relex `ToolEntry` at all. Calls to `gliner-relex` return `UNKNOWN_TOOL` per the existing dispatcher path. This is the default; existing deployments are unaffected by the slice landing.
+- **Default posture: fail-closed.** If `KASTELLAN_GLINER_RELEX_ENABLE=1` is set and the weights directory is missing, the daemon exits at startup with a structured error pointing at the install script.
+- **Opt-out posture: skip-register.** If `KASTELLAN_GLINER_RELEX_ENABLE` is unset (or `0`), the daemon does not register the gliner-relex `ToolEntry` at all. Calls to `gliner-relex` return `UNKNOWN_TOOL` per the existing dispatcher path. This is the default; existing deployments are unaffected by the slice landing.
 
 The flag is *enable*, not *disable*, so accidental opt-in is impossible.
 
@@ -314,11 +314,11 @@ The flag is *enable*, not *disable*, so accidental opt-in is impossible.
 - `workers/gliner-relex/` directory with:
   - `pyproject.toml` (project metadata, deps: `gliner>=…`, `transformers>=…`, `sentencepiece`, `onnxruntime` as optional)
   - `uv.lock` (committed; reproducible installs)
-  - `src/hhagent_worker_gliner_relex/__init__.py`
-  - `src/hhagent_worker_gliner_relex/__main__.py` (entry point)
-  - `src/hhagent_worker_gliner_relex/server.py` (stdio loop, JSON-RPC framing)
-  - `src/hhagent_worker_gliner_relex/model.py` (model load + extract method)
-  - `src/hhagent_worker_gliner_relex/errors.py` (custom error codes + envelope helpers)
+  - `src/kastellan_worker_gliner_relex/__init__.py`
+  - `src/kastellan_worker_gliner_relex/__main__.py` (entry point)
+  - `src/kastellan_worker_gliner_relex/server.py` (stdio loop, JSON-RPC framing)
+  - `src/kastellan_worker_gliner_relex/model.py` (model load + extract method)
+  - `src/kastellan_worker_gliner_relex/errors.py` (custom error codes + envelope helpers)
   - `tests/test_server.py` (wire-shape, error envelope, label validation; ~10 tests)
   - `tests/test_model.py` (mocked model; entity/triple shape assertions; ~3 tests; the real-model test is the spike + slice-2 e2e)
   - `README.md` (operator install steps, env-var reference)
@@ -329,18 +329,18 @@ The flag is *enable*, not *disable*, so accidental opt-in is impossible.
 
 ```sh
 cd workers/gliner-relex
-HHAGENT_GLINER_RELEX_WEIGHTS_DIR=$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0 \
-HHAGENT_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
-HHAGENT_GLINER_RELEX_DEVICE=cuda \
+KASTELLAN_GLINER_RELEX_WEIGHTS_DIR=$KASTELLAN_DATA_DIR/workers/gliner-relex/weights/multi-v1.0 \
+KASTELLAN_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
+KASTELLAN_GLINER_RELEX_DEVICE=cuda \
 echo '{"jsonrpc":"2.0","id":1,"method":"extract","params":{"text":"Dr Smith treats asthma.","entity_labels":["person","disease"],"relation_labels":["treats"]}}' \
-  | uv run hhagent-worker-gliner-relex     # uv-generated console-script shim
+  | uv run kastellan-worker-gliner-relex     # uv-generated console-script shim
 ```
 
 Expected: stdout carries a single line, valid JSON-RPC response, with at least one entity and one triple.
 
 **What's deliberately NOT in Slice 1:**
 - Rust code of any kind.
-- Operator-facing `hhagent-cli` command to invoke the worker.
+- Operator-facing `kastellan-cli` command to invoke the worker.
 - Lifecycle integration (no manifest entry, no `gliner_relex_entry()`).
 - A `cargo test`-runnable integration test (Python tests run via `uv run pytest` in the worker directory, not under cargo).
 
@@ -358,7 +358,7 @@ Expected: stdout carries a single line, valid JSON-RPC response, with at least o
 - Wire-shape types: `ExtractRequest`, `ExtractResponse`, `Entity`, `Triple`, all `#[derive(Serialize, Deserialize)]`. These are JSON shape types, not a typed client. They serve two purposes: serde-pin tests on the wire contract, and a future consumer slice can use them as the param/result types without re-deriving.
 - Unit tests in `core/src/workers/gliner_relex.rs::tests` (~5 tests): `ExtractRequest`/`ExtractResponse` serialisation pins (match the Python side's wire shape byte-for-byte), label-cap validation, payload-size cap, manifest-shape pins (`Lifecycle::IdleTimeout`, `Contract::stateless == true`, `cpu_ms == 0`, `wall_clock_ms == None`).
 - Integration test `core/tests/gliner_relex_e2e.rs` (~3-4 tests): skip-as-pass if venv or weights missing; happy-path round-trip via raw `tool_host::dispatch(pool, handle.worker_mut(), "gliner-relex", "extract", params)` against a real Python worker; warm-reuse pin (2 consecutive calls hit the same warm worker, asserted via slice-2's `_test_slot_has_warm` accessor); error propagation (canned `INVALID_INPUT` from the Python side surfaces as a JSON-RPC error code at the Rust side).
-- Daemon wiring: `core::main` registers `gliner_relex_entry` conditionally when `HHAGENT_GLINER_RELEX_ENABLE=1` AND weights dir exists.
+- Daemon wiring: `core::main` registers `gliner_relex_entry` conditionally when `KASTELLAN_GLINER_RELEX_ENABLE=1` AND weights dir exists.
 - `HANDOVER.md` + `ROADMAP.md` updates.
 
 **Deliberately NOT in Slice 2 (deferred to the v2 entity-extraction consumer slice):**
@@ -371,7 +371,7 @@ Expected: stdout carries a single line, valid JSON-RPC response, with at least o
 **Acceptance:**
 - `cargo test --workspace` stays green on Linux with the gliner-relex tests running (when venv + weights present) and skip-as-pass (when not).
 - The slice-2 integration test proves warm-reuse: two consecutive `tool_host::dispatch(...)` calls against the same lifecycle handle hit the same warm worker, confirming the lifecycle abstraction is wired correctly.
-- Daemon startup with `HHAGENT_GLINER_RELEX_ENABLE=1` succeeds on a properly-installed host; fails-closed with a structured error on missing weights.
+- Daemon startup with `KASTELLAN_GLINER_RELEX_ENABLE=1` succeeds on a properly-installed host; fails-closed with a structured error on missing weights.
 - Daemon startup with the env unset is byte-equivalent to today (no behaviour change).
 
 ## Linux-first + macOS gap
@@ -416,7 +416,7 @@ model = GLiNER.from_pretrained(
 
 samples = [
     "Dr Smith treats asthma in his Mosman clinic.",
-    "The Rust workspace under hhagent uses uv-managed Python venvs per worker.",
+    "The Rust workspace under kastellan uses uv-managed Python venvs per worker.",
     "PostgreSQL migration 0008 added the deleted_memories AFTER DELETE trigger.",
 ]
 
@@ -454,7 +454,7 @@ Total: ~8-9 new Rust tests (Slice 2: ~5 unit + ~3-4 integration) + ~13 new Pytho
 ## Open questions (for the planning slice, not this design slice)
 
 1. **Default `entity_labels` and `relation_labels` for the consumer.** Out of scope for the worker — the consumer (v2 entity extraction) picks. The spike uses a generic set (`person`, `organization`, `location`, `date`, `technology`, `disease`, `medication`; relations `mentions`, `treats`, `located_in`, `uses`, `affects`) to validate the worker, not to lock in vocabulary.
-2. **Whether to ship `large-v0.5` alongside `multi-v1.0` in the v1 install.** Spec says it's manifest-configurable; install script gates `large-v0.5` behind `HHAGENT_GLINER_RELEX_INSTALL_LARGE=1`. If the spike shows `multi-v1.0` is enough, the large variant may stay opt-in indefinitely.
+2. **Whether to ship `large-v0.5` alongside `multi-v1.0` in the v1 install.** Spec says it's manifest-configurable; install script gates `large-v0.5` behind `KASTELLAN_GLINER_RELEX_INSTALL_LARGE=1`. If the spike shows `multi-v1.0` is enough, the large variant may stay opt-in indefinitely.
 3. **PyTorch wheel choice on the DGX Spark.** CUDA toolkit version detection happens at `uv sync`. If multiple PyTorch wheel variants are available, the install script may need a `--index-url` flag for the right CUDA version. Spike will surface this if it's a real issue.
 4. **macOS spike sequencing.** Follow-up session on Apple Silicon hardware. Spec does not pre-commit to a date.
 

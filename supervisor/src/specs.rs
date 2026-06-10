@@ -1,6 +1,6 @@
-//! Typed [`ServiceSpec`] builders for the canonical hhagent services.
+//! Typed [`ServiceSpec`] builders for the canonical kastellan services.
 //!
-//! Centralizes "what a real hhagent service looks like" so both the
+//! Centralizes "what a real kastellan service looks like" so both the
 //! Linux ([`crate::systemd_user`]) and macOS ([`crate::launchd_agents`])
 //! backends emit the same semantics from one source of truth.
 //!
@@ -10,7 +10,7 @@
 //! without filesystem side effects.
 //!
 //! Today this module ships the agent-core and Postgres daemon specs, plus the
-//! `hhagent_target_spec` bundle that ties the canonical services together.
+//! `kastellan_target_spec` bundle that ties the canonical services together.
 //! More will land here as services are added (inference router, etc.).
 
 use std::path::Path;
@@ -19,30 +19,30 @@ use crate::{RestartBackoff, ServiceSpec, TargetSpec};
 
 /// Canonical name used for the agent-core daemon's unit/agent file.
 ///
-/// Same string on both OSes — the file becomes `hhagent-core.service`
-/// on Linux and `hhagent-core.plist` on macOS, and the launchd `Label`
+/// Same string on both OSes — the file becomes `kastellan-core.service`
+/// on Linux and `kastellan-core.plist` on macOS, and the launchd `Label`
 /// is the same. We deliberately don't use a reverse-DNS form
-/// (`org.hhagent.core`) so the same name works through both backends
+/// (`org.kastellan.core`) so the same name works through both backends
 /// without per-OS branching in caller code (the supervisor lib.rs
 /// doc-comment on `ServiceSpec.name` calls out that either style is
 /// acceptable).
-pub const CORE_SERVICE_NAME: &str = "hhagent-core";
+pub const CORE_SERVICE_NAME: &str = "kastellan-core";
 
 /// Canonical name used for the per-user Postgres daemon's unit/agent
 /// file. Same shape rationale as [`CORE_SERVICE_NAME`].
-pub const POSTGRES_SERVICE_NAME: &str = "hhagent-postgres";
+pub const POSTGRES_SERVICE_NAME: &str = "kastellan-postgres";
 
 /// Canonical name of the service bundle that brings up the whole agent.
-/// Becomes `hhagent.target` on systemd; on launchd it names the member
+/// Becomes `kastellan.target` on systemd; on launchd it names the member
 /// set only. Same string on both OSes (see [`CORE_SERVICE_NAME`]).
-pub const HHAGENT_TARGET_NAME: &str = "hhagent";
+pub const KASTELLAN_TARGET_NAME: &str = "kastellan";
 
-/// Build a [`ServiceSpec`] for the agent-core daemon (`hhagent`
+/// Build a [`ServiceSpec`] for the agent-core daemon (`kastellan`
 /// binary, see `core/src/main.rs`).
 ///
 /// Arguments:
-/// - `binary` — absolute path to the compiled `hhagent` binary.
-///   Today this is `target/debug/hhagent` in dev. Production install
+/// - `binary` — absolute path to the compiled `kastellan` binary.
+///   Today this is `target/debug/kastellan` in dev. Production install
 ///   location is an open question (see HANDOVER "Open questions"
 ///   #6); when that lands, the *caller* changes, this helper does
 ///   not.
@@ -86,7 +86,7 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
         stdout_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.out"))),
         stderr_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.err"))),
         after: vec![POSTGRES_SERVICE_NAME.to_string()],
-        part_of: Some(HHAGENT_TARGET_NAME.to_string()),
+        part_of: Some(KASTELLAN_TARGET_NAME.to_string()),
         restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
     }
 }
@@ -101,10 +101,10 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
 ///   macOS Homebrew default:
 ///   `/opt/homebrew/opt/postgresql@18/bin/postgres` (Apple Silicon)
 ///   or `/usr/local/opt/postgresql@18/bin/postgres` (Intel).
-///   Caller resolves which one — see [`hhagent_db::find_pg_bin_dir`]
+///   Caller resolves which one — see [`kastellan_db::find_pg_bin_dir`]
 ///   in the `db` crate.
 /// - `data_dir` — absolute path to the cluster data dir (the one that
-///   `hhagent-db-init` populated; postgres is invoked with `-D <path>`).
+///   `kastellan-db-init` populated; postgres is invoked with `-D <path>`).
 /// - `log_dir` — directory where the supervisor appends stdout/stderr.
 ///   Caller must create the dir before [`crate::Supervisor::install`].
 ///   Files: `<POSTGRES_SERVICE_NAME>.out` and `.err`.
@@ -151,7 +151,7 @@ pub fn postgres_service_spec(
         stdout_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.out"))),
         stderr_log: Some(log_dir.join(format!("{POSTGRES_SERVICE_NAME}.err"))),
         after: vec![],
-        part_of: Some(HHAGENT_TARGET_NAME.to_string()),
+        part_of: Some(KASTELLAN_TARGET_NAME.to_string()),
         restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
     }
 }
@@ -165,9 +165,9 @@ pub fn postgres_service_spec(
 /// `tool_host` spawns them on demand inside sandboxes when core runs.
 ///
 /// Pure: no I/O, same call → same value.
-pub fn hhagent_target_spec() -> TargetSpec {
+pub fn kastellan_target_spec() -> TargetSpec {
     TargetSpec {
-        name: HHAGENT_TARGET_NAME.into(),
+        name: KASTELLAN_TARGET_NAME.into(),
         members: vec![
             POSTGRES_SERVICE_NAME.into(),
             CORE_SERVICE_NAME.into(),
@@ -185,10 +185,10 @@ mod tests {
     #[test]
     fn core_service_spec_uses_canonical_name() {
         let spec = core_service_spec(
-            Path::new("/usr/local/bin/hhagent"),
-            Path::new("/var/log/hhagent"),
+            Path::new("/usr/local/bin/kastellan"),
+            Path::new("/var/log/kastellan"),
         );
-        assert_eq!(spec.name, "hhagent-core");
+        assert_eq!(spec.name, "kastellan-core");
         assert_eq!(spec.name, CORE_SERVICE_NAME);
     }
 
@@ -197,7 +197,7 @@ mod tests {
     /// job to pass one (this helper is pure).
     #[test]
     fn core_service_spec_program_is_caller_supplied() {
-        let bin = PathBuf::from("/opt/hhagent/bin/hhagent");
+        let bin = PathBuf::from("/opt/kastellan/bin/kastellan");
         let spec = core_service_spec(&bin, Path::new("/tmp/logs"));
         assert_eq!(spec.program, bin);
     }
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn core_service_spec_args_are_empty() {
         let spec = core_service_spec(
-            Path::new("/usr/local/bin/hhagent"),
+            Path::new("/usr/local/bin/kastellan"),
             Path::new("/tmp"),
         );
         assert!(spec.args.is_empty(), "daemon takes no flags yet");
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn core_service_spec_env_is_empty() {
         let spec = core_service_spec(
-            Path::new("/usr/local/bin/hhagent"),
+            Path::new("/usr/local/bin/kastellan"),
             Path::new("/tmp"),
         );
         assert!(spec.env.is_empty(), "no env injection by default");
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn core_service_spec_does_not_set_working_dir() {
         let spec = core_service_spec(
-            Path::new("/usr/local/bin/hhagent"),
+            Path::new("/usr/local/bin/kastellan"),
             Path::new("/tmp"),
         );
         assert!(spec.working_dir.is_none());
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn core_service_spec_keep_alive_is_true() {
         let spec = core_service_spec(
-            Path::new("/usr/local/bin/hhagent"),
+            Path::new("/usr/local/bin/kastellan"),
             Path::new("/tmp"),
         );
         assert!(spec.keep_alive);
@@ -253,16 +253,16 @@ mod tests {
     #[test]
     fn core_service_spec_emits_log_paths_under_log_dir() {
         let spec = core_service_spec(
-            Path::new("/usr/local/bin/hhagent"),
-            Path::new("/var/log/hhagent"),
+            Path::new("/usr/local/bin/kastellan"),
+            Path::new("/var/log/kastellan"),
         );
         assert_eq!(
             spec.stdout_log,
-            Some(PathBuf::from("/var/log/hhagent/hhagent-core.out"))
+            Some(PathBuf::from("/var/log/kastellan/kastellan-core.out"))
         );
         assert_eq!(
             spec.stderr_log,
-            Some(PathBuf::from("/var/log/hhagent/hhagent-core.err"))
+            Some(PathBuf::from("/var/log/kastellan/kastellan-core.err"))
         );
     }
 
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn core_service_spec_log_paths_are_distinct() {
         let spec = core_service_spec(
-            Path::new("/usr/local/bin/hhagent"),
+            Path::new("/usr/local/bin/kastellan"),
             Path::new("/tmp"),
         );
         assert_ne!(spec.stdout_log, spec.stderr_log);
@@ -284,10 +284,10 @@ mod tests {
     fn postgres_service_spec_uses_canonical_name() {
         let spec = postgres_service_spec(
             Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/var/lib/hhagent/pg/data"),
-            Path::new("/var/log/hhagent"),
+            Path::new("/var/lib/kastellan/pg/data"),
+            Path::new("/var/log/kastellan"),
         );
-        assert_eq!(spec.name, "hhagent-postgres");
+        assert_eq!(spec.name, "kastellan-postgres");
         assert_eq!(spec.name, POSTGRES_SERVICE_NAME);
     }
 
@@ -309,12 +309,12 @@ mod tests {
     fn postgres_service_spec_passes_dash_d_data_dir_in_args() {
         let spec = postgres_service_spec(
             Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/srv/hhagent/pg/data"),
+            Path::new("/srv/kastellan/pg/data"),
             Path::new("/tmp/logs"),
         );
         assert_eq!(spec.args.len(), 2, "args: {:?}", spec.args);
         assert_eq!(spec.args[0], "-D");
-        assert_eq!(spec.args[1], "/srv/hhagent/pg/data");
+        assert_eq!(spec.args[1], "/srv/kastellan/pg/data");
     }
 
     /// We deliberately pass no env so the daemon inherits the clean
@@ -362,15 +362,15 @@ mod tests {
         let spec = postgres_service_spec(
             Path::new("/usr/lib/postgresql/18/bin/postgres"),
             Path::new("/d"),
-            Path::new("/var/log/hhagent"),
+            Path::new("/var/log/kastellan"),
         );
         assert_eq!(
             spec.stdout_log,
-            Some(PathBuf::from("/var/log/hhagent/hhagent-postgres.out"))
+            Some(PathBuf::from("/var/log/kastellan/kastellan-postgres.out"))
         );
         assert_eq!(
             spec.stderr_log,
-            Some(PathBuf::from("/var/log/hhagent/hhagent-postgres.err"))
+            Some(PathBuf::from("/var/log/kastellan/kastellan-postgres.err"))
         );
     }
 
@@ -389,32 +389,32 @@ mod tests {
     #[test]
     fn canonical_service_names_are_distinct() {
         assert_ne!(CORE_SERVICE_NAME, POSTGRES_SERVICE_NAME);
-        assert_ne!(HHAGENT_TARGET_NAME, CORE_SERVICE_NAME);
-        assert_ne!(HHAGENT_TARGET_NAME, POSTGRES_SERVICE_NAME);
+        assert_ne!(KASTELLAN_TARGET_NAME, CORE_SERVICE_NAME);
+        assert_ne!(KASTELLAN_TARGET_NAME, POSTGRES_SERVICE_NAME);
     }
 
     #[test]
     fn postgres_spec_belongs_to_target_with_no_dependency() {
         let spec = postgres_service_spec(
             Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/var/lib/hhagent/pgdata"),
+            Path::new("/var/lib/kastellan/pgdata"),
             Path::new("/tmp/logs"),
         );
         assert!(spec.after.is_empty(), "postgres is the dependency leaf");
-        assert_eq!(spec.part_of.as_deref(), Some(HHAGENT_TARGET_NAME));
+        assert_eq!(spec.part_of.as_deref(), Some(KASTELLAN_TARGET_NAME));
     }
 
     #[test]
     fn core_spec_starts_after_postgres_and_belongs_to_target() {
-        let spec = core_service_spec(Path::new("/opt/hhagent/hhagent"), Path::new("/tmp/logs"));
+        let spec = core_service_spec(Path::new("/opt/kastellan/kastellan"), Path::new("/tmp/logs"));
         assert_eq!(spec.after, vec![POSTGRES_SERVICE_NAME.to_string()]);
-        assert_eq!(spec.part_of.as_deref(), Some(HHAGENT_TARGET_NAME));
+        assert_eq!(spec.part_of.as_deref(), Some(KASTELLAN_TARGET_NAME));
     }
 
     #[test]
-    fn hhagent_target_lists_postgres_then_core_in_order() {
-        let t = hhagent_target_spec();
-        assert_eq!(t.name, HHAGENT_TARGET_NAME);
+    fn kastellan_target_lists_postgres_then_core_in_order() {
+        let t = kastellan_target_spec();
+        assert_eq!(t.name, KASTELLAN_TARGET_NAME);
         assert_eq!(
             t.members,
             vec![POSTGRES_SERVICE_NAME.to_string(), CORE_SERVICE_NAME.to_string()],
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn core_service_spec_carries_expected_backoff_curve() {
         let spec = core_service_spec(
-            Path::new("/usr/local/bin/hhagent"),
+            Path::new("/usr/local/bin/kastellan"),
             Path::new("/tmp"),
         );
         assert_eq!(

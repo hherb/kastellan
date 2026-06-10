@@ -19,7 +19,7 @@ struct DecisionLine {
     reason: String,
 }
 
-/// An audit row ready for `hhagent_db::audit::insert` (actor + action + payload).
+/// An audit row ready for `kastellan_db::audit::insert` (actor + action + payload).
 #[derive(Debug, PartialEq, Eq)]
 pub struct EgressAuditRow {
     pub actor: &'static str,

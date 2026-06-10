@@ -112,7 +112,7 @@ pub async fn invoke_l3(
 }
 
 async fn best_effort_audit(pool: &PgPool, action: &str, payload: serde_json::Value) {
-    if let Err(e) = hhagent_db::audit::insert(pool, CLI_AUDIT_ACTOR, action, payload).await {
+    if let Err(e) = kastellan_db::audit::insert(pool, CLI_AUDIT_ACTOR, action, payload).await {
         tracing::warn!(error = %e, action, "l3 invoke audit insert failed (best-effort)");
     }
 }

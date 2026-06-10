@@ -17,7 +17,7 @@
 //! Parallel to `macos_smoke.rs` for the Seatbelt backend.
 //!
 //! Scope note: `SandboxPolicy::cpu_ms` enforcement is deliberately not
-//! exercised here. It flows via `HHAGENT_CPU_MS` + `workers/prelude::rlimit`
+//! exercised here. It flows via `KASTELLAN_CPU_MS` + `workers/prelude::rlimit`
 //! inside the container; the smoke tests use opaque commands (`/bin/echo`,
 //! `/bin/cat`, `/bin/sh`) that don't run the worker prelude. End-to-end
 //! validation through a real worker lands in Slice 2.5 alongside the
@@ -30,8 +30,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hhagent_sandbox::macos_container::{MacosContainer, DEFAULT_IMAGE};
-use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+use kastellan_sandbox::macos_container::{MacosContainer, DEFAULT_IMAGE};
+use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
 /// Skip the test if Apple `container` is unavailable on this host. Prints
 /// to stderr via `eprintln!` so `cargo test -- --nocapture` shows the
@@ -179,7 +179,7 @@ fn fs_read_bind_mount_makes_host_file_visible_to_container() {
     if skip_if_no_container() {
         return;
     }
-    let dir = tempdir("hhagent-container-smoke-fsread");
+    let dir = tempdir("kastellan-container-smoke-fsread");
     let file = dir.join("greeting.txt");
     std::fs::write(&file, "hello-from-host").expect("write fixture");
     // World-readable so the container's `nobody` user can read it (the
@@ -220,7 +220,7 @@ fn fs_read_bind_mount_rejects_writes() {
     if skip_if_no_container() {
         return;
     }
-    let dir = tempdir("hhagent-container-smoke-fsread-rw");
+    let dir = tempdir("kastellan-container-smoke-fsread-rw");
     let file = dir.join("ro-target.txt");
     std::fs::write(&file, "initial").expect("write fixture");
     use std::os::unix::fs::PermissionsExt;
@@ -415,7 +415,7 @@ fn probe_image_returns_ok_for_cached_image_and_err_for_missing_tag() {
     // `container image inspect` exits non-zero on absence; helper maps
     // that to `Err(SandboxError::Backend(...))` carrying the missing tag.
     let bogus_tag = format!(
-        "hhagent/definitely-not-built-{}:nonexistent",
+        "kastellan/definitely-not-built-{}:nonexistent",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

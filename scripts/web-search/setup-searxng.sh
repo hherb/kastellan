@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stand up a local SearxNG instance for the hhagent web-search worker.
+# Stand up a local SearxNG instance for the kastellan web-search worker.
 #
 # SearxNG serves plain HTTP on a loopback port and DISABLES the JSON format by
 # default — this script writes a settings.yml that enables JSON and runs the
@@ -8,9 +8,9 @@
 # worker's trust boundary.
 set -euo pipefail
 
-PORT="${HHAGENT_SEARXNG_PORT:-8888}"
-NAME="${HHAGENT_SEARXNG_NAME:-hhagent-searxng}"
-STATE_DIR="${HHAGENT_SEARXNG_STATE:-$HOME/.local/state/hhagent/searxng}"
+PORT="${KASTELLAN_SEARXNG_PORT:-8888}"
+NAME="${KASTELLAN_SEARXNG_NAME:-kastellan-searxng}"
+STATE_DIR="${KASTELLAN_SEARXNG_STATE:-$HOME/.local/state/kastellan/searxng}"
 IMAGE="searxng/searxng:latest"
 
 # Pick a container runtime.
@@ -30,7 +30,7 @@ SETTINGS="$STATE_DIR/settings.yml"
 if [ ! -f "$SETTINGS" ]; then
   SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   cat >"$SETTINGS" <<YAML
-# Minimal SearxNG settings for hhagent web-search (dev). The key line is
+# Minimal SearxNG settings for kastellan web-search (dev). The key line is
 # search.formats — the JSON API is off by default.
 use_default_settings: true
 server:
@@ -61,10 +61,10 @@ cat <<MSG
 
 SearxNG running at http://127.0.0.1:${PORT}/
 
-Export these for the hhagent daemon / web-search worker:
+Export these for the kastellan daemon / web-search worker:
 
-  export HHAGENT_WEB_SEARCH_ENDPOINT='http://127.0.0.1:${PORT}/search'
-  export HHAGENT_WEB_SEARCH_ALLOWLIST='["127.0.0.1"]'
+  export KASTELLAN_WEB_SEARCH_ENDPOINT='http://127.0.0.1:${PORT}/search'
+  export KASTELLAN_WEB_SEARCH_ALLOWLIST='["127.0.0.1"]'
 
 Smoke test the JSON API:
 

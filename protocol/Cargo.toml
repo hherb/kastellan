@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-protocol"
+name        = "kastellan-protocol"
 description = "JSON-RPC 2.0 over stdio: tool-worker IPC. MCP-compatible stdio transport."
 version.workspace      = true
 edition.workspace      = true

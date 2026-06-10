@@ -8,7 +8,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 #[allow(unused_imports)]
-use hhagent_sandbox::{macos_seatbelt::MacosSeatbelt, SandboxBackend, SandboxPolicy};
+use kastellan_sandbox::{macos_seatbelt::MacosSeatbelt, SandboxBackend, SandboxPolicy};
 
 /// Skip the test if Seatbelt is unavailable on this host. Prints to stderr
 /// via `eprintln!` so `cargo test -- --nocapture` shows the skip line —
@@ -156,7 +156,7 @@ fn relative_policy_paths_are_rejected() {
     let mut policy = strict_policy();
     policy.fs_read.push(PathBuf::from("relative/path"));
     let res = backend.spawn_under_policy(&policy, "/usr/bin/true", &[]);
-    assert!(matches!(res, Err(hhagent_sandbox::SandboxError::Backend(_))));
+    assert!(matches!(res, Err(kastellan_sandbox::SandboxError::Backend(_))));
 }
 
 #[test]

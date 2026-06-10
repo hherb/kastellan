@@ -1,4 +1,4 @@
-"""Entry point for `hhagent-worker-gliner-relex` (uv-generated shim).
+"""Entry point for `kastellan-worker-gliner-relex` (uv-generated shim).
 
 Reads the required env vars (see the spec's "Manifest entry" section
 for the canonical list), resolves the device, loads the model, and
@@ -64,7 +64,7 @@ def _resolve_device(requested: str) -> str:
           ~600-char paragraph input despite winning on a 33-char probe
           — and worst-case cold MPS dispatch is 4 s. Default safety
           first; operators who want MPS must opt in explicitly via
-          `HHAGENT_GLINER_RELEX_DEVICE=mps`.
+          `KASTELLAN_GLINER_RELEX_DEVICE=mps`.
 
     * `cpu`: accepted on every platform.
 
@@ -112,7 +112,7 @@ def _resolve_device(requested: str) -> str:
             _exit_with_error(
                 UNSUPPORTED_DEVICE,
                 "device=cuda not supported on darwin (Apple Silicon has no "
-                "NVIDIA GPU); set HHAGENT_GLINER_RELEX_DEVICE to auto|cpu|mps",
+                "NVIDIA GPU); set KASTELLAN_GLINER_RELEX_DEVICE to auto|cpu|mps",
                 status=2,
             )
         return "cuda"
@@ -122,7 +122,7 @@ def _resolve_device(requested: str) -> str:
             _exit_with_error(
                 UNSUPPORTED_DEVICE,
                 "device=mps not supported on this platform (mps is darwin-only); "
-                "set HHAGENT_GLINER_RELEX_DEVICE to auto|cuda|cpu",
+                "set KASTELLAN_GLINER_RELEX_DEVICE to auto|cuda|cpu",
                 status=2,
             )
         # Two rejection-reason states to surface distinctly so the
@@ -138,7 +138,7 @@ def _resolve_device(requested: str) -> str:
             _exit_with_error(
                 UNSUPPORTED_DEVICE,
                 f"device=mps requested but `import torch` failed ({e!r}); "
-                "fix the worker venv or set HHAGENT_GLINER_RELEX_DEVICE to auto|cpu",
+                "fix the worker venv or set KASTELLAN_GLINER_RELEX_DEVICE to auto|cpu",
                 status=2,
             )
         if torch.backends.mps.is_available():
@@ -147,7 +147,7 @@ def _resolve_device(requested: str) -> str:
             UNSUPPORTED_DEVICE,
             "device=mps requested but torch.backends.mps.is_available() is "
             "False (Intel Mac, macOS < 12.3, or PyTorch build without MPS); "
-            "set HHAGENT_GLINER_RELEX_DEVICE to auto|cpu",
+            "set KASTELLAN_GLINER_RELEX_DEVICE to auto|cpu",
             status=2,
         )
 
@@ -159,20 +159,20 @@ def _resolve_device(requested: str) -> str:
 
 
 def main() -> None:
-    weights_dir = os.environ.get("HHAGENT_GLINER_RELEX_WEIGHTS_DIR")
-    model_id = os.environ.get("HHAGENT_GLINER_RELEX_MODEL")
-    device_requested = os.environ.get("HHAGENT_GLINER_RELEX_DEVICE", "auto")
+    weights_dir = os.environ.get("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR")
+    model_id = os.environ.get("KASTELLAN_GLINER_RELEX_MODEL")
+    device_requested = os.environ.get("KASTELLAN_GLINER_RELEX_DEVICE", "auto")
 
     if not weights_dir:
         _exit_with_error(
             MODEL_LOAD_FAILED,
-            "HHAGENT_GLINER_RELEX_WEIGHTS_DIR is unset",
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR is unset",
             status=1,
         )
     if not model_id:
         _exit_with_error(
             MODEL_LOAD_FAILED,
-            "HHAGENT_GLINER_RELEX_MODEL is unset",
+            "KASTELLAN_GLINER_RELEX_MODEL is unset",
             status=1,
         )
     if not os.path.isdir(weights_dir):

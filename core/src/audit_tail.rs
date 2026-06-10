@@ -4,7 +4,7 @@
 //! ## Why a separate module
 //!
 //! The [`crate::audit_mirror`] producer needs Postgres; the consumer
-//! (operator running `hhagent-cli audit tail`) does not — and a key
+//! (operator running `kastellan-cli audit tail`) does not — and a key
 //! design goal is "the operator can debug a daemon that crashed
 //! mid-startup without bringing the cluster up." So the tail path is
 //! pure file I/O against the JSONL files, with no DB coupling.
@@ -309,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn find_audit_files_on_missing_dir_returns_empty() {
         let files =
-            find_audit_files(Path::new("/no/such/dir/hhagent-tail-test-xyz")).await;
+            find_audit_files(Path::new("/no/such/dir/kastellan-tail-test-xyz")).await;
         assert!(files.is_empty());
     }
 
@@ -341,7 +341,7 @@ mod tests {
         // don't synchronise any sibling memory off the counter.
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!(
-            "hhagent-audit-tail-{}-{}-{}",
+            "kastellan-audit-tail-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

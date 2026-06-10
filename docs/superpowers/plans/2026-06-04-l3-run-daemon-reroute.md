@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `hhagent-cli memory l3 run <id>` execute inside the daemon against its single live `ToolRegistry` (via the existing Postgres task queue) instead of rebuilding the registry in-process from the operator's env — removing the #179 env-divergence cliff and retiring the in-process execution path entirely.
+**Goal:** Make `kastellan-cli memory l3 run <id>` execute inside the daemon against its single live `ToolRegistry` (via the existing Postgres task queue) instead of rebuilding the registry in-process from the operator's env — removing the #179 env-divergence cliff and retiring the in-process execution path entirely.
 
 **Architecture:** `run` enqueues an `l3_run` task (`{kind, memory_id, args, execute}`) on the long lane and waits on `LISTEN tasks_completed` (same channel `ask` uses). The daemon's `drain_lane`, on claiming a task whose payload `kind == "l3_run"`, routes it to a new `scheduler::l3_run` handler that loads the L3 row and calls the **existing** `invoke_l3` with the daemon's live dispatcher (`dispatcher.known_tools()` as the live tool set), then finalizes the task with the serialized `InvokeReport`. The CLI deserializes that result and renders Refused/DryRun/Executed exactly as today. The interim `diagnose_registry_divergence` diagnostic (PR #180) is deleted as now-obsolete.
 
-**Tech Stack:** Rust (tokio, sqlx, serde_json), Postgres `tasks` table + `LISTEN/NOTIFY`, the `hhagent-core` scheduler + `memory::l3_invoke` modules.
+**Tech Stack:** Rust (tokio, sqlx, serde_json), Postgres `tasks` table + `LISTEN/NOTIFY`, the `kastellan-core` scheduler + `memory::l3_invoke` modules.
 
 **Spec:** [`docs/superpowers/specs/2026-06-04-l3-run-daemon-reroute-design.md`](../specs/2026-06-04-l3-run-daemon-reroute-design.md)
 
@@ -14,8 +14,8 @@
 
 **Build/test reminders (this repo):**
 - `source "$HOME/.cargo/env"` first (cargo not on non-interactive PATH).
-- Unit tests: `cargo test -p hhagent-core <name>`.
-- Live-PG e2e on the DGX (native): `cargo test -p hhagent-core --test <file> -- --nocapture` with a Postgres bin dir configured (`HHAGENT_PG_BIN_DIR`). Sandbox/daemon e2e print `[SKIP]` if `bwrap`/userns unavailable — re-check with `--nocapture`.
+- Unit tests: `cargo test -p kastellan-core <name>`.
+- Live-PG e2e on the DGX (native): `cargo test -p kastellan-core --test <file> -- --nocapture` with a Postgres bin dir configured (`KASTELLAN_PG_BIN_DIR`). Sandbox/daemon e2e print `[SKIP]` if `bwrap`/userns unavailable — re-check with `--nocapture`.
 - Clippy gate: `cargo clippy --workspace --all-targets --locked -- -D warnings`.
 
 ---
@@ -31,8 +31,8 @@
 | `core/src/scheduler/l3_run.rs` | **NEW** — daemon-side `l3_run` payload parse + handler | Create |
 | `core/src/scheduler/mod.rs` | scheduler module list | Add `pub mod l3_run;` |
 | `core/src/scheduler/runner.rs` | `drain_lane` claim loop | Branch to the `l3_run` handler on `kind == "l3_run"` |
-| `core/src/bin/hhagent-cli/memory_l3/run.rs` | the `run` CLI handler | Rewrite body: submit + wait + render; keep `parse_run_argv`; add `render_invoke_report` |
-| `core/src/bin/hhagent-cli/memory_l3/shared.rs` | shared CLI helpers | (No change unless `latest_registry_tools` becomes unused — see Task 5) |
+| `core/src/bin/kastellan-cli/memory_l3/run.rs` | the `run` CLI handler | Rewrite body: submit + wait + render; keep `parse_run_argv`; add `render_invoke_report` |
+| `core/src/bin/kastellan-cli/memory_l3/shared.rs` | shared CLI helpers | (No change unless `latest_registry_tools` becomes unused — see Task 5) |
 | `core/tests/cli_memory_l3_run_e2e.rs` | in-process `invoke_l3` tests | Update module doc only (now documents daemon-side machinery) |
 | `core/tests/cli_memory_l3_run_daemon_e2e.rs` | **NEW** — real-daemon + CLI-subprocess e2e | Create |
 | `core/tests/cli_memory_l3_e2e.rs` | CLI subprocess e2e | **Delete** the obsolete divergence-hint scenario (scenario 9) |
@@ -54,7 +54,7 @@ In `core/src/memory/l3_invoke/tests.rs`, add (adjust the `use super::*;` / impor
 ```rust
 #[test]
 fn invoke_report_serde_round_trips_each_variant() {
-    use hhagent_core::scheduler::inner_loop::StepOutcome;
+    use kastellan_core::scheduler::inner_loop::StepOutcome;
     // NOTE: inside the crate the path is `crate::...`; this test module is a
     // sibling of l3_invoke, so use the same import style already present in
     // this file for InvokeReport / L3TemplateStep.
@@ -77,7 +77,7 @@ fn invoke_report_serde_round_trips_each_variant() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p hhagent-core invoke_report_serde_round_trips`
+Run: `cargo test -p kastellan-core invoke_report_serde_round_trips`
 Expected: FAIL — `InvokeReport` does not implement `Serialize`/`Deserialize` (compile error: `the trait bound InvokeReport: Serialize is not satisfied`).
 
 - [ ] **Step 3: Add the derive**
@@ -102,7 +102,7 @@ pub enum InvokeReport {
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test -p hhagent-core invoke_report_serde_round_trips`
+Run: `cargo test -p kastellan-core invoke_report_serde_round_trips`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -140,7 +140,7 @@ Create `core/src/scheduler/l3_run.rs` with the pure surface + the test module:
 ```rust
 //! Daemon-side handling of operator-submitted `l3_run` tasks (issue #179).
 //!
-//! `hhagent-cli memory l3 run <id>` no longer executes in-process. It enqueues
+//! `kastellan-cli memory l3 run <id>` no longer executes in-process. It enqueues
 //! a `tasks` row whose payload `kind == "l3_run"`; the scheduler claims it on a
 //! lane loop and routes it here. We load the L3 skill row and call the existing
 //! [`crate::memory::l3_invoke::invoke_l3`] with the daemon's live dispatcher —
@@ -246,7 +246,7 @@ mod tests {
 
 - [ ] **Step 3: Run the pure tests to verify they pass**
 
-Run: `cargo test -p hhagent-core --lib scheduler::l3_run`
+Run: `cargo test -p kastellan-core --lib scheduler::l3_run`
 Expected: PASS (6 tests). The async handler is not present yet — that is fine; these tests cover only the pure functions.
 
 - [ ] **Step 4: Implement the async handler**
@@ -260,7 +260,7 @@ use crate::cassandra::types::L3SkillCandidate;
 use crate::memory::l3_approval::SkillTrust;
 use crate::memory::l3_invoke::{invoke_l3, InvokeReport};
 use crate::scheduler::inner_loop::StepDispatcher;
-use hhagent_db::memories::{fetch_by_ids, MemoryLayer};
+use kastellan_db::memories::{fetch_by_ids, MemoryLayer};
 ```
 
 Add the handler:
@@ -335,13 +335,13 @@ pub async fn run_l3_run_task(
 }
 ```
 
-The full top-of-file `use` block is then: `std::collections::BTreeMap`, `serde_json::Value`, `sqlx::PgPool`, `crate::cassandra::types::L3SkillCandidate`, `crate::memory::l3_approval::SkillTrust`, `crate::memory::l3_invoke::{invoke_l3, InvokeReport}`, `crate::scheduler::inner_loop::StepDispatcher`, `hhagent_db::memories::{fetch_by_ids, MemoryLayer}`.
+The full top-of-file `use` block is then: `std::collections::BTreeMap`, `serde_json::Value`, `sqlx::PgPool`, `crate::cassandra::types::L3SkillCandidate`, `crate::memory::l3_approval::SkillTrust`, `crate::memory::l3_invoke::{invoke_l3, InvokeReport}`, `crate::scheduler::inner_loop::StepDispatcher`, `kastellan_db::memories::{fetch_by_ids, MemoryLayer}`.
 
 - [ ] **Step 5: Run the tests to verify they pass + clippy**
 
-Run: `cargo test -p hhagent-core --lib scheduler::l3_run`
+Run: `cargo test -p kastellan-core --lib scheduler::l3_run`
 Expected: PASS (6 tests).
-Run: `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings`
+Run: `cargo clippy -p kastellan-core --all-targets --locked -- -D warnings`
 Expected: exit 0.
 
 - [ ] **Step 6: Commit**
@@ -400,12 +400,12 @@ In `core/src/scheduler/runner.rs`, inside `drain_lane`, immediately **after** th
 
 - [ ] **Step 2: Build to verify it compiles**
 
-Run: `cargo build -p hhagent-core`
+Run: `cargo build -p kastellan-core`
 Expected: success. (Behaviour is covered by the Task 6 e2e; there is no cheap unit test for `drain_lane`, which needs a live DB + dispatcher.)
 
 - [ ] **Step 3: Clippy**
 
-Run: `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings`
+Run: `cargo clippy -p kastellan-core --all-targets --locked -- -D warnings`
 Expected: exit 0.
 
 - [ ] **Step 4: Commit**
@@ -422,7 +422,7 @@ git commit -m "feat(scheduler): route l3_run tasks to the daemon-side handler in
 The CLI stops building any registry/dispatcher. It submits an `l3_run` task, waits for completion (with a no-daemon grace-timeout that cancels the task), reads the serialized `InvokeReport` from `tasks.result`, and renders it with a pure helper.
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli/memory_l3/run.rs` (rewrite `memory_l3_run`; keep `parse_run_argv` + its tests; add `render_invoke_report`; delete `DryRunNeverDispatches`)
+- Modify: `core/src/bin/kastellan-cli/memory_l3/run.rs` (rewrite `memory_l3_run`; keep `parse_run_argv` + its tests; add `render_invoke_report`; delete `DryRunNeverDispatches`)
 - Test: the inline `#[cfg(test)] mod tests` in `run.rs`
 
 - [ ] **Step 1: Write failing tests for `render_invoke_report`**
@@ -431,8 +431,8 @@ Add to the `#[cfg(test)] mod tests` in `run.rs` (the module currently imports `s
 
 ```rust
     use super::render_invoke_report;
-    use hhagent_core::memory::l3_invoke::InvokeReport;
-    use hhagent_core::scheduler::inner_loop::StepOutcome;
+    use kastellan_core::memory::l3_invoke::InvokeReport;
+    use kastellan_core::scheduler::inner_loop::StepOutcome;
 
     #[test]
     fn render_refused_is_nonzero_and_lists_reasons() {
@@ -482,10 +482,10 @@ Add to the `#[cfg(test)] mod tests` in `run.rs` (the module currently imports `s
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cargo test -p hhagent-core --bin hhagent-cli render_`
+Run: `cargo test -p kastellan-core --bin kastellan-cli render_`
 Expected: FAIL — `render_invoke_report` not defined.
 
-> If `--bin hhagent-cli` is not the exact bin name, find it with `grep -n "name = \"hhagent-cli\"" core/Cargo.toml` or run the whole bin test set: `cargo test -p hhagent-core --bins render_`.
+> If `--bin kastellan-cli` is not the exact bin name, find it with `grep -n "name = \"kastellan-cli\"" core/Cargo.toml` or run the whole bin test set: `cargo test -p kastellan-core --bins render_`.
 
 - [ ] **Step 3: Add the pure `render_invoke_report` helper**
 
@@ -548,11 +548,11 @@ pub(super) fn render_invoke_report(
 }
 ```
 
-Add the imports `render_invoke_report` needs at the top of the module body (or inside the fn): `use hhagent_core::memory::l3_invoke::InvokeReport;` and `use hhagent_core::scheduler::inner_loop::StepOutcome;` — place them with the other `use` lines used by `memory_l3_run`.
+Add the imports `render_invoke_report` needs at the top of the module body (or inside the fn): `use kastellan_core::memory::l3_invoke::InvokeReport;` and `use kastellan_core::scheduler::inner_loop::StepOutcome;` — place them with the other `use` lines used by `memory_l3_run`.
 
 - [ ] **Step 4: Run the render tests to verify they pass**
 
-Run: `cargo test -p hhagent-core --bins render_`
+Run: `cargo test -p kastellan-core --bins render_`
 Expected: PASS (4 tests).
 
 - [ ] **Step 5: Rewrite `memory_l3_run` to submit + wait**
@@ -563,10 +563,10 @@ Replace the entire body of `memory_l3_run` (the part after argv parsing) and del
 pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
     use std::time::Duration;
 
-    use hhagent_core::cli_audit::submit_and_audit; // cancel_and_audit is used inside the wait helper
-    use hhagent_core::memory::l3_invoke::{parse_args, InvokeReport};
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::{get, Lane};
+    use kastellan_core::cli_audit::submit_and_audit; // cancel_and_audit is used inside the wait helper
+    use kastellan_core::memory::l3_invoke::{parse_args, InvokeReport};
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::{get, Lane};
     use sqlx::postgres::PgListener;
 
     // --- parse argv ----------------------------------------------------
@@ -617,8 +617,8 @@ pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
     // grace window elapses. If still 'pending' after grace, no lane loop is
     // consuming it → the daemon is not running; cancel so it can't be run
     // silently later, and error out.
-    let grace = Duration::from_secs(env_secs("HHAGENT_L3_RUN_GRACE_SECS", 5));
-    let overall = Duration::from_secs(env_secs("HHAGENT_L3_RUN_TIMEOUT_SECS", 1800));
+    let grace = Duration::from_secs(env_secs("KASTELLAN_L3_RUN_GRACE_SECS", 5));
+    let overall = Duration::from_secs(env_secs("KASTELLAN_L3_RUN_TIMEOUT_SECS", 1800));
 
     if let Err(code) = wait_until_claimed_or_no_daemon(&pool, &mut listener, task_id, grace).await {
         // wait_until_claimed_or_no_daemon already printed + cancelled as needed.
@@ -683,8 +683,8 @@ async fn wait_until_claimed_or_no_daemon(
     task_id: i64,
     grace: std::time::Duration,
 ) -> Result<(), std::process::ExitCode> {
-    use hhagent_core::cli_audit::cancel_and_audit;
-    use hhagent_db::tasks::get;
+    use kastellan_core::cli_audit::cancel_and_audit;
+    use kastellan_db::tasks::get;
 
     // A NOTIFY may arrive during the grace window if the task completes very
     // fast; treat that as "claimed" (Phase 2's recv will see the same id again
@@ -752,15 +752,15 @@ Remove now-unused imports (the old `BTreeSet`, `Arc`, `ToolHostStepDispatcher`, 
 
 - [ ] **Step 7: Build, test, clippy**
 
-Run: `cargo test -p hhagent-core --bins -- parse_run_argv render_`
+Run: `cargo test -p kastellan-core --bins -- parse_run_argv render_`
 Expected: PASS (the 11 `parse_run_argv` tests + 4 render tests).
-Run: `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings`
+Run: `cargo clippy -p kastellan-core --all-targets --locked -- -D warnings`
 Expected: exit 0.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli/memory_l3/run.rs
+git add core/src/bin/kastellan-cli/memory_l3/run.rs
 git commit -m "feat(cli): reroute 'memory l3 run' through the daemon via the task queue (#179)"
 ```
 
@@ -775,7 +775,7 @@ With the in-process rebuild gone, `diagnose_registry_divergence` / `RegistryDive
 - Modify: `core/src/memory/l3_invoke/tests.rs` (delete the diagnose tests)
 - Modify: `core/src/memory/l3_invoke/mod.rs` (drop any explicit re-export of the removed names)
 - Modify: `core/tests/cli_memory_l3_e2e.rs` (delete the divergence-hint scenario, "scenario 9")
-- Modify: `core/src/bin/hhagent-cli/memory_l3/shared.rs` (only if `latest_registry_tools` is now unused — verify)
+- Modify: `core/src/bin/kastellan-cli/memory_l3/shared.rs` (only if `latest_registry_tools` is now unused — verify)
 
 - [ ] **Step 1: Find every reference**
 
@@ -803,7 +803,7 @@ If the only remaining references are its definition in `shared.rs` and (still) t
 
 Run: `grep -rn "diagnose_registry_divergence\|RegistryDivergence" --include=*.rs`
 Expected: **no matches.**
-Run: `cargo build -p hhagent-core && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings`
+Run: `cargo build -p kastellan-core && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings`
 Expected: build OK, clippy exit 0 (no unused-import/dead-code warnings).
 
 - [ ] **Step 7: Commit**
@@ -818,7 +818,7 @@ git commit -m "refactor(l3): drop the obsolete registry-divergence diagnostic (#
 
 ## Task 6: Daemon-driven e2e — the #179 regression pin
 
-Prove the cause is gone: a real daemon with `shell-exec` registered, and a `hhagent-cli` subprocess run **without** `HHAGENT_SHELL_EXEC_BIN`, where `memory l3 run --execute` now **succeeds**. Plus dry-run-via-daemon and no-daemon scenarios. Reuse the daemon bring-up + CLI-subprocess machinery from `core/tests/cli_ask_e2e.rs` and the skill-insertion/approval helpers from `core/tests/cli_memory_l3_e2e.rs`.
+Prove the cause is gone: a real daemon with `shell-exec` registered, and a `kastellan-cli` subprocess run **without** `KASTELLAN_SHELL_EXEC_BIN`, where `memory l3 run --execute` now **succeeds**. Plus dry-run-via-daemon and no-daemon scenarios. Reuse the daemon bring-up + CLI-subprocess machinery from `core/tests/cli_ask_e2e.rs` and the skill-insertion/approval helpers from `core/tests/cli_memory_l3_e2e.rs`.
 
 **Files:**
 - Create: `core/tests/cli_memory_l3_run_daemon_e2e.rs`
@@ -847,7 +847,7 @@ Create `core/tests/cli_memory_l3_run_daemon_e2e.rs`. Model the daemon bring-up +
 //! Live-PG + real-daemon e2e for `memory l3 run` after the #179 reroute.
 //!
 //! The daemon registers `shell-exec` via its environment; the CLI subprocess
-//! runs WITHOUT `HHAGENT_SHELL_EXEC_BIN`. Pre-#179 the in-process rebuild would
+//! runs WITHOUT `KASTELLAN_SHELL_EXEC_BIN`. Pre-#179 the in-process rebuild would
 //! refuse ("tool 'shell-exec' not in registry"); after the reroute the daemon
 //! executes against its own live registry and the run SUCCEEDS.
 
@@ -859,17 +859,17 @@ Create `core/tests/cli_memory_l3_run_daemon_e2e.rs`. Model the daemon bring-up +
 async fn run_succeeds_against_daemon_registry_without_operator_env() {
     // 0. skip guards (sandbox + supervisor + pg bin dir), as in cli_ask_e2e.
     // 1. bring up a PG cluster + seed the shell-exec allowlist (echo).
-    // 2. bring up the daemon WITH HHAGENT_SHELL_EXEC_BIN set (so its registry
+    // 2. bring up the daemon WITH KASTELLAN_SHELL_EXEC_BIN set (so its registry
     //    has shell-exec) — reuse bring_up_daemon from cli_ask_e2e.
     // 3. insert an L3 skill whose single step is shell-exec/<echo argv>, and
     //    flip its trust to user_approved (reuse the crystallise + set_skill_trust
     //    helpers / the approve CLI path from cli_memory_l3_e2e). Capture its id.
-    // 4. run the CLI subprocess WITHOUT HHAGENT_SHELL_EXEC_BIN:
+    // 4. run the CLI subprocess WITHOUT KASTELLAN_SHELL_EXEC_BIN:
     //        Command::new(cli_binary())
     //          .args(["memory","l3","run", &id.to_string(), "--execute"])
     //          .env("PATH","/usr/bin:/bin").env("LC_ALL","C").env("USER",&user)
-    //          .env("HHAGENT_DATA_DIR", cluster.data_dir … )
-    //          // NB: intentionally NO HHAGENT_SHELL_EXEC_BIN
+    //          .env("KASTELLAN_DATA_DIR", cluster.data_dir … )
+    //          // NB: intentionally NO KASTELLAN_SHELL_EXEC_BIN
     //          .output()
     // 5. assert success:
     let status_ok = output.status.success();
@@ -903,22 +903,22 @@ async fn dry_run_previews_steps_via_daemon() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_with_no_daemon_cancels_and_errors() {
     // Bring up ONLY a PG cluster (no daemon). Insert + approve a skill.
-    // Set HHAGENT_L3_RUN_GRACE_SECS=1 in the subprocess env to keep the test
+    // Set KASTELLAN_L3_RUN_GRACE_SECS=1 in the subprocess env to keep the test
     // fast. Run `memory l3 run <id>` (dry-run is fine).
     // Assert: non-zero exit; stderr mentions "daemon does not appear to be
     // running"; and the task row is in state 'cancelled' (query via
-    // hhagent_db::tasks::get against the pool).
+    // kastellan_db::tasks::get against the pool).
 }
 ```
 
 - [ ] **Step 5: Run the new e2e (DGX, native, with PG configured)**
 
-Run: `cargo test -p hhagent-core --test cli_memory_l3_run_daemon_e2e -- --nocapture`
+Run: `cargo test -p kastellan-core --test cli_memory_l3_run_daemon_e2e -- --nocapture`
 Expected: 3 tests PASS, zero `[SKIP]` (on a host with bwrap + PG). If `[SKIP]` lines appear, the sandbox/supervisor/PG isn't available — resolve per CLAUDE.md before claiming green.
 
 - [ ] **Step 6: Run the preserved invoke_l3 e2e to confirm it still passes**
 
-Run: `cargo test -p hhagent-core --test cli_memory_l3_run_e2e -- --nocapture`
+Run: `cargo test -p kastellan-core --test cli_memory_l3_run_e2e -- --nocapture`
 Expected: the existing scenarios (A–E) PASS unchanged.
 
 - [ ] **Step 7: Commit**
@@ -936,8 +936,8 @@ git commit -m "test(l3): real-daemon e2e for the #179 run reroute (divergence fi
 - [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0.
 - [ ] `grep -rn "diagnose_registry_divergence\|RegistryDivergence" --include=*.rs` → no matches.
 - [ ] Doc-links unchanged vs `main` (run the repo's doc-link check).
-- [ ] Manual smoke (optional, DGX): start the daemon, `hhagent-cli memory l3 run <approved-id>` in a plain shell (no `HHAGENT_SHELL_EXEC_BIN`) → dry-run preview; `--execute` → executes.
-- [ ] File-size check: `core/src/scheduler/runner.rs` and `core/src/bin/hhagent-cli/memory_l3/run.rs` LOC after changes; if `runner.rs` nears 500, note the `l3_run` handler already lives in its own module (good). Update HANDOVER + ROADMAP and open the PR.
+- [ ] Manual smoke (optional, DGX): start the daemon, `kastellan-cli memory l3 run <approved-id>` in a plain shell (no `KASTELLAN_SHELL_EXEC_BIN`) → dry-run preview; `--execute` → executes.
+- [ ] File-size check: `core/src/scheduler/runner.rs` and `core/src/bin/kastellan-cli/memory_l3/run.rs` LOC after changes; if `runner.rs` nears 500, note the `l3_run` handler already lives in its own module (good). Update HANDOVER + ROADMAP and open the PR.
 
 ---
 

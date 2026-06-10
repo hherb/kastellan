@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-llm-router"
+name        = "kastellan-llm-router"
 description = "Sole egress for LLM calls. OpenAI-compatible HTTP client with backend selection (local/frontier) and a Phase-5 policy-gate seam."
 version.workspace      = true
 edition.workspace      = true

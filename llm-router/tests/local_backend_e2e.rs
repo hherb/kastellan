@@ -23,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hhagent_llm_router::{
+use kastellan_llm_router::{
     ChatMessage, ChatRequest, ChatRole, Router, RouterConfig, RouterError,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -310,7 +310,7 @@ async fn router_send_routes_to_pick_backend_choice() {
     // succeed. We use the mock to ensure no HTTP traffic is sent
     // when the policy denies — the mock's `served_rx` should *not*
     // fire because the router refuses before reaching the wire.
-    use hhagent_llm_router::{Backend, PolicyGate};
+    use kastellan_llm_router::{Backend, PolicyGate};
 
     #[derive(Debug)]
     struct AlwaysFrontier;

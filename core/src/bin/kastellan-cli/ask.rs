@@ -7,14 +7,14 @@ use std::process::ExitCode;
 use crate::common::{parse_classification_floor, resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_ask(args: &[String]) -> ExitCode {
-    let mut lane = hhagent_db::tasks::Lane::Fast;
-    let mut floor: Option<hhagent_core::cassandra::DataClass> = None;
+    let mut lane = kastellan_db::tasks::Lane::Fast;
+    let mut floor: Option<kastellan_core::cassandra::DataClass> = None;
     let mut instruction: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--long" => { lane = hhagent_db::tasks::Lane::Long; }
-            "--fast" => { lane = hhagent_db::tasks::Lane::Fast; }
+            "--long" => { lane = kastellan_db::tasks::Lane::Long; }
+            "--fast" => { lane = kastellan_db::tasks::Lane::Fast; }
             "--classification-floor" => {
                 i += 1;
                 let Some(val) = args.get(i) else {
@@ -44,7 +44,7 @@ pub(crate) fn run_ask(args: &[String]) -> ExitCode {
         i += 1;
     }
     let Some(instruction) = instruction else {
-        eprintln!("usage: hhagent-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]");
+        eprintln!("usage: kastellan-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]");
         return ExitCode::from(2);
     };
 
@@ -78,16 +78,16 @@ pub(crate) fn run_ask(args: &[String]) -> ExitCode {
 /// without spinning up a Postgres pool or the tokio runtime.
 fn resolve_floor_for_submission(
     instruction: &str,
-    operator_flag: Option<hhagent_core::cassandra::DataClass>,
-    warn_on_suppress: &mut dyn FnMut(hhagent_core::cassandra::DataClass, &[&'static str]),
+    operator_flag: Option<kastellan_core::cassandra::DataClass>,
+    warn_on_suppress: &mut dyn FnMut(kastellan_core::cassandra::DataClass, &[&'static str]),
 ) -> (
-    hhagent_core::cassandra::DataClass,
-    hhagent_core::scheduler::inner_loop::ClassificationFloorSource,
+    kastellan_core::cassandra::DataClass,
+    kastellan_core::scheduler::inner_loop::ClassificationFloorSource,
     Vec<&'static str>,
 ) {
-    use hhagent_core::cassandra::DataClass;
-    use hhagent_core::classification_inference::infer_floor;
-    use hhagent_core::scheduler::inner_loop::ClassificationFloorSource as Src;
+    use kastellan_core::cassandra::DataClass;
+    use kastellan_core::classification_inference::infer_floor;
+    use kastellan_core::scheduler::inner_loop::ClassificationFloorSource as Src;
 
     if let Some(op) = operator_flag {
         // Operator wins. Optionally warn if inference would have elevated.
@@ -105,13 +105,13 @@ fn resolve_floor_for_submission(
 }
 
 async fn ask_async(
-    lane: hhagent_db::tasks::Lane,
+    lane: kastellan_db::tasks::Lane,
     instruction: String,
-    floor: Option<hhagent_core::cassandra::DataClass>,
+    floor: Option<kastellan_core::cassandra::DataClass>,
 ) -> ExitCode {
-    use hhagent_core::cli_audit::{cancel_and_audit, submit_and_audit};
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::get;
+    use kastellan_core::cli_audit::{cancel_and_audit, submit_and_audit};
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::get;
     use sqlx::postgres::PgListener;
 
     let spec = match resolve_connect_spec() {
@@ -140,7 +140,7 @@ async fn ask_async(
     // captures `floor` so we can render its PascalCase string for the
     // warn line when inference would have elevated above the operator's
     // pinned value.
-    let mut suppressed: Option<(hhagent_core::cassandra::DataClass, Vec<&'static str>)> = None;
+    let mut suppressed: Option<(kastellan_core::cassandra::DataClass, Vec<&'static str>)> = None;
     let (resolved_floor, resolved_source, resolved_signals) =
         resolve_floor_for_submission(&instruction, floor, &mut |c, s| {
             suppressed = Some((c, s.to_vec()));
@@ -238,8 +238,8 @@ async fn ask_async(
 #[cfg(test)]
 mod resolve_floor_for_submission_tests {
     use super::resolve_floor_for_submission;
-    use hhagent_core::cassandra::DataClass;
-    use hhagent_core::scheduler::inner_loop::ClassificationFloorSource as Src;
+    use kastellan_core::cassandra::DataClass;
+    use kastellan_core::scheduler::inner_loop::ClassificationFloorSource as Src;
 
     #[test]
     fn no_operator_flag_no_signals_returns_default() {

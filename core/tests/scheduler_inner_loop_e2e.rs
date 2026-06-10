@@ -24,19 +24,19 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use hhagent_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
-use hhagent_core::cassandra::types::{DataClass, Plan, PlannedStep};
-use hhagent_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
-use hhagent_core::scheduler::inner_loop::{
+use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
+use kastellan_core::cassandra::types::{DataClass, Plan, PlannedStep};
+use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
+use kastellan_core::scheduler::inner_loop::{
     run_to_terminal, Outcome, StepDispatcher, StepOutcome, TaskContext,
 };
-use hhagent_db::tasks::{self, insert_pending, Lane};
-use hhagent_tests_common::{
+use kastellan_db::tasks::{self, insert_pending, Lane};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, PgCluster,
 };
 
 /// Async helper: bring up a PG cluster (via the shared
-/// [`hhagent_tests_common::bring_up_pg_cluster`]), run migrations,
+/// [`kastellan_tests_common::bring_up_pg_cluster`]), run migrations,
 /// return pool + cluster handle. The `PgCluster` carries the cleanup
 /// guards internally and drops them in the right order at end of scope.
 /// Returns `None` when PG or supervisor is unavailable (skip).
@@ -46,12 +46,12 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     }
     let bin_dir = pg_bin_dir_or_skip()?;
     let suffix = format!("{}-{}", label, unique_suffix());
-    let service_name = format!("hhagent-sched-test-pg-ilp-{suffix}");
+    let service_name = format!("kastellan-sched-test-pg-ilp-{suffix}");
     let cluster = tokio::task::block_in_place(|| {
         bring_up_pg_cluster(&bin_dir, "ilp-d", "ilp-l", &service_name)
     });
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -60,7 +60,7 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     .await
     .ok()?;
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .ok()?;
 
@@ -117,7 +117,7 @@ impl PlanFormulator for ScriptedFormulator {
                 recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
                 graph_seed_entity_ids: Vec::new(),
                 graph_seed_count: 0,
-                graph_seed_source: hhagent_core::entity_extraction::SeedSource::None,
+                graph_seed_source: kastellan_core::entity_extraction::SeedSource::None,
             },
         ))
     }
@@ -195,7 +195,7 @@ fn make_ctx(task_id: i64, max_plans: u32) -> TaskContext {
         lane: Lane::Fast,
         instruction: "ping".into(),
         classification_floor: DataClass::Public,
-        classification_floor_source: hhagent_core::scheduler::inner_loop::ClassificationFloorSource::Default,
+        classification_floor_source: kastellan_core::scheduler::inner_loop::ClassificationFloorSource::Default,
         classification_floor_signals: vec![],
         plans: vec![],
         advisories: vec![],
@@ -205,11 +205,11 @@ fn make_ctx(task_id: i64, max_plans: u32) -> TaskContext {
     }
 }
 
-use hhagent_core::cassandra::types::InvokeDirective;
+use kastellan_core::cassandra::types::InvokeDirective;
 
 /// Insert a `pinned` L3 skill row directly. Returns its memory id.
 async fn seed_pinned_skill(pool: &sqlx::PgPool, name: &str, tool: &str, method: &str) -> i64 {
-    use hhagent_db::memories::{insert_memory_at_layer, set_skill_trust, MemoryLayer};
+    use kastellan_db::memories::{insert_memory_at_layer, set_skill_trust, MemoryLayer};
     let template = serde_json::json!({
         "name": name, "description": "d",
         "parameters": [{"name":"p","description":"d"}],
@@ -271,7 +271,7 @@ async fn happy_path_one_plan_returns_completed() {
     // Issue #23 spec §3: the `refused` audit-row key is always present.
     // On a non-refusal plan the value is explicit JSON null — distinct
     // from key-absent so JSONB queries can rely on the key existing.
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch audit rows");
     let plan_rows: Vec<_> = rows.iter()
@@ -509,14 +509,14 @@ struct ScriptedConstitutionalBlockStage {
 }
 
 #[async_trait]
-impl hhagent_core::cassandra::review::ReviewStage for ScriptedConstitutionalBlockStage {
+impl kastellan_core::cassandra::review::ReviewStage for ScriptedConstitutionalBlockStage {
     fn name(&self) -> &str { "scripted-cb" }
     async fn review(
         &self,
-        _plan: &hhagent_core::cassandra::types::Plan,
-        _ctx: &hhagent_core::cassandra::review::ReviewStageContext<'_>,
-    ) -> hhagent_core::cassandra::types::Verdict {
-        hhagent_core::cassandra::types::Verdict::ConstitutionalBlock {
+        _plan: &kastellan_core::cassandra::types::Plan,
+        _ctx: &kastellan_core::cassandra::review::ReviewStageContext<'_>,
+    ) -> kastellan_core::cassandra::types::Verdict {
+        kastellan_core::cassandra::types::Verdict::ConstitutionalBlock {
             principle: self.principle,
             reason: self.reason.clone(),
         }
@@ -531,14 +531,14 @@ struct ScriptedBlockStage {
 }
 
 #[async_trait]
-impl hhagent_core::cassandra::review::ReviewStage for ScriptedBlockStage {
+impl kastellan_core::cassandra::review::ReviewStage for ScriptedBlockStage {
     fn name(&self) -> &str { "scripted-block" }
     async fn review(
         &self,
-        _plan: &hhagent_core::cassandra::types::Plan,
-        _ctx: &hhagent_core::cassandra::review::ReviewStageContext<'_>,
-    ) -> hhagent_core::cassandra::types::Verdict {
-        hhagent_core::cassandra::types::Verdict::Block(self.reason.clone())
+        _plan: &kastellan_core::cassandra::types::Plan,
+        _ctx: &kastellan_core::cassandra::review::ReviewStageContext<'_>,
+    ) -> kastellan_core::cassandra::types::Verdict {
+        kastellan_core::cassandra::types::Verdict::Block(self.reason.clone())
     }
 }
 
@@ -567,7 +567,7 @@ async fn refusal_plan_terminates_with_state_refused() {
             "body": "I cannot help with that; it would risk physical harm.",
         })),
         data_ceiling: DataClass::Public,
-        refused: Some(hhagent_core::cassandra::types::RefusedReason {
+        refused: Some(kastellan_core::cassandra::types::RefusedReason {
             principle: 1,
             reason: "physical_harm".into(),
         }),
@@ -618,7 +618,7 @@ async fn refusal_plan_terminates_with_state_refused() {
     //   - decision_kind == "refused"
     //   - refused == { principle: 1, reason: "physical_harm" }
     //   - plan_step_count == 0
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch audit rows");
     let plan_rows: Vec<_> = rows.iter()
@@ -689,7 +689,7 @@ async fn reviewer_constitutional_block_wins_over_agent_refusal() {
             "body": "agent prose mentioning P1",
         })),
         data_ceiling: DataClass::Public,
-        refused: Some(hhagent_core::cassandra::types::RefusedReason {
+        refused: Some(kastellan_core::cassandra::types::RefusedReason {
             principle: 1,
             reason: "physical_harm_agent_side".into(),
         }),
@@ -754,7 +754,7 @@ async fn verdict_block_on_refusal_plan_does_not_loop() {
             "body": "I will not proceed — privacy boundary.",
         })),
         data_ceiling: DataClass::Public,
-        refused: Some(hhagent_core::cassandra::types::RefusedReason {
+        refused: Some(kastellan_core::cassandra::types::RefusedReason {
             principle: 4,
             reason: "privacy_violation".into(),
         }),
@@ -795,7 +795,7 @@ async fn verdict_block_on_refusal_plan_does_not_loop() {
 
     // The reviewer's Block verdict is still audit-logged (forensic
     // record), even though it did not override the refusal.
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch audit rows");
     let verdict_rows: Vec<_> = rows.iter()
@@ -868,7 +868,7 @@ async fn agent_floor_raise_chain_blocks_low_classification_step() {
     // Use the REAL DeterministicPolicy — the rule under test is its I2
     // invariant against the elevated floor.
     let review = Arc::new(ChainReviewStage::new(vec![
-        Arc::new(hhagent_core::cassandra::review::DeterministicPolicy),
+        Arc::new(kastellan_core::cassandra::review::DeterministicPolicy),
     ]));
     let dispatcher = Arc::new(ScriptedDispatcher { table: Default::default(), tools: Default::default() });
 
@@ -889,7 +889,7 @@ async fn agent_floor_raise_chain_blocks_low_classification_step() {
 
     // Audit pin: every plan.formulate row carries the elevated floor
     // and the AgentRaised source.
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch audit rows");
     let plan_rows: Vec<_> = rows.iter()
@@ -973,7 +973,7 @@ async fn agent_invoke_pinned_skill_expands_and_dispatches() {
     assert!(matches!(result.outcome, Outcome::Completed(_)), "got {:?}", result.outcome);
     assert_eq!(result.dispatch_count, 1, "the expanded template's single step dispatched");
 
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
     let has = |actor: &str, action: &str| rows.iter().any(|r| r.actor == actor && r.action == action);
     assert!(has("scheduler", "l3.invoked"), "l3.invoked row (scheduler) present");
     assert!(has("scheduler", "l3.invoke_outcome"), "l3.invoke_outcome row present");
@@ -1006,7 +1006,7 @@ async fn agent_invoke_unknown_skill_refuses_then_replans() {
         o => panic!("expected Completed after replan, got {:?}", o),
     }
     assert_eq!(result.dispatch_count, 0, "refused invoke dispatched nothing");
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
     assert!(rows.iter().any(|r| r.actor == "scheduler" && r.action == "l3.invoke_rejected"),
         "refusal audited");
 }
@@ -1042,7 +1042,7 @@ async fn agent_invoke_pinned_skill_with_unregistered_tool_refuses() {
         o => panic!("expected Completed after replan, got {:?}", o),
     }
     assert_eq!(result.dispatch_count, 0, "live re-validation refused; nothing dispatched");
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
     let rejected: Vec<_> = rows.iter()
         .filter(|r| r.actor == "scheduler" && r.action == "l3.invoke_rejected")
         .collect();
@@ -1066,10 +1066,10 @@ async fn invoke_driven_task_suppresses_recrystallisation() {
 
     // plan 1 invokes; plan 2 is terminal AND carries an l3_skill candidate.
     let mut terminal = task_complete_plan("done");
-    terminal.l3_skill = Some(hhagent_core::cassandra::types::L3SkillCandidate {
+    terminal.l3_skill = Some(kastellan_core::cassandra::types::L3SkillCandidate {
         name: "newly_learned".into(), description: "d".into(),
         parameters: vec![],
-        steps: vec![hhagent_core::cassandra::types::L3TemplateStep {
+        steps: vec![kastellan_core::cassandra::types::L3TemplateStep {
             tool: "shell-exec".into(), method: "shell.exec".into(),
             parameters: serde_json::json!({}),
         }],

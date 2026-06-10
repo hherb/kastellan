@@ -31,5 +31,5 @@ UPDATE memories SET layer = 2 WHERE layer IS NULL;
 -- "show me everything at layer X" query.
 CREATE INDEX memories_layer_idx ON memories (layer, created_at DESC);
 
--- No GRANT change: hhagent_runtime already has full CRUD on `memories`
+-- No GRANT change: kastellan_runtime already has full CRUD on `memories`
 -- (migration 0002); the new column is part of that table.

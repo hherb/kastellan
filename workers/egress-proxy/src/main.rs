@@ -4,12 +4,12 @@
 //! Design: docs/superpowers/specs/2026-06-10-egress-proxy-boundary-enforcement-design.md
 //!
 //! Env contract (set by the host-side `core::egress::spawn_sidecar`):
-//!   HHAGENT_EGRESS_PROXY_UDS       — absolute path of the UDS to bind.
-//!   HHAGENT_EGRESS_PROXY_ALLOWLIST — JSON array of allowed host strings. Slice
+//!   KASTELLAN_EGRESS_PROXY_UDS       — absolute path of the UDS to bind.
+//!   KASTELLAN_EGRESS_PROXY_ALLOWLIST — JSON array of allowed host strings. Slice
 //!       #1 matches the *host* only — an allowlisted host is reachable on any
 //!       port. Port-scoped endpoints (`host:443`) land with slice #2's live
 //!       routing (see `proxy::decide`).
-//!   HHAGENT_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
+//!   KASTELLAN_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
 
 mod proxy;
 mod report;
@@ -18,17 +18,17 @@ mod ssrf;
 
 use std::os::unix::net::UnixListener;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
 
 use proxy::{handle_conn, StdResolve};
 use report::LineReporter;
 
 fn main() -> anyhow::Result<()> {
-    let uds = std::env::var("HHAGENT_EGRESS_PROXY_UDS")
-        .map_err(|_| anyhow::anyhow!("HHAGENT_EGRESS_PROXY_UDS unset"))?;
-    let allow_json = std::env::var("HHAGENT_EGRESS_PROXY_ALLOWLIST")
-        .map_err(|_| anyhow::anyhow!("HHAGENT_EGRESS_PROXY_ALLOWLIST unset"))?;
-    let worker = std::env::var("HHAGENT_EGRESS_PROXY_WORKER").unwrap_or_else(|_| "unknown".into());
+    let uds = std::env::var("KASTELLAN_EGRESS_PROXY_UDS")
+        .map_err(|_| anyhow::anyhow!("KASTELLAN_EGRESS_PROXY_UDS unset"))?;
+    let allow_json = std::env::var("KASTELLAN_EGRESS_PROXY_ALLOWLIST")
+        .map_err(|_| anyhow::anyhow!("KASTELLAN_EGRESS_PROXY_ALLOWLIST unset"))?;
+    let worker = std::env::var("KASTELLAN_EGRESS_PROXY_WORKER").unwrap_or_else(|_| "unknown".into());
     let allow = HostAllowlist::from_env_json(&allow_json)?;
 
     // Bind the UDS *before* lock-down (Landlock will forbid fs mutation after).
@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
     // seccomp profile permits AF_UNIX bind/listen/accept *and* AF_INET connect
     // for a process that both serves and dials; widen `seccomp_lock` if `accept`
     // is refused.
-    let _report = hhagent_worker_prelude::lock_down()?;
+    let _report = kastellan_worker_prelude::lock_down()?;
 
     let resolver = StdResolve;
     for conn in listener.incoming() {

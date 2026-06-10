@@ -1,7 +1,7 @@
 # Apple `container` micro-VM backend — discovery spike notes
 
 **Date:** 2026-05-21
-**Issue:** [#55](https://github.com/hherb/hhagent/issues/55)
+**Issue:** [#55](https://github.com/hherb/kastellan/issues/55)
 **Host:** Apple M3 Max, macOS 26.5 (Build 25F71)
 **`container` version:** 0.12.3 (installed via `brew install container`)
 **Scope:** one-session feasibility spike. Throwaway POC + this write-up.
@@ -37,7 +37,7 @@ Clean 1-to-1 mapping. Apple `container` exposes every primitive our policy needs
 | `fs_read: Vec<PathBuf>` | `--mount type=bind,source=<P>,target=<P>,readonly` per path | Same shape as bwrap `--ro-bind`. |
 | `fs_write: Vec<PathBuf>` | `--mount type=bind,source=<P>,target=<P>` per path | Same shape as bwrap `--bind`. |
 | `mem_mb: u64` | `-m <N>M` (suffix-aware; value is MiB per the policy field's unit) | **Floor: 200 MiB.** `container` rejects anything smaller with `invalidArgument: minimum memory amount allowed is 200 MiB`. Slice 1 emits this via `clamp_memory_to_minimum`; see Slice 1 note about emitting a `tracing::warn!` when clamping actually fires (so operators see when their policy is being widened). |
-| `cpu_ms: u64` | reuse `workers/prelude::rlimit::apply_from_env` via `HHAGENT_CPU_MS` env | POSIX `RLIMIT_CPU` works inside the Linux VM unchanged — same code path as the existing Linux/macOS workers. No `container`-side flag needed. |
+| `cpu_ms: u64` | reuse `workers/prelude::rlimit::apply_from_env` via `KASTELLAN_CPU_MS` env | POSIX `RLIMIT_CPU` works inside the Linux VM unchanged — same code path as the existing Linux/macOS workers. No `container`-side flag needed. |
 | `cpu_quota_pct: Option<u32>` | `-c <fractional vCPUs>` (e.g. `200% → -c 2.0`) | The field is documented as "percent of one CPU" (per `sandbox/src/lib.rs::SandboxPolicy::cpu_quota_pct`), so `200%` ↔ `2.0` vCPUs is the natural conversion. **The field is Linux-cgroup-only today** (the docstring says so explicitly); macOS support is new in this slice. |
 | `tasks_max: Option<u64>` | `--ulimit nproc=<N>:<N>` | **Semantic gap worth flagging.** On Linux, `tasks_max` maps to cgroup `pids.max` (per-cgroup process count, enforced by the kernel pids controller). On macOS via `--ulimit nproc`, it becomes per-real-UID `RLIMIT_NPROC` inside the Linux VM — i.e. per-user across the VM rather than per-cgroup. Inside a one-worker container running as a single UID the practical effect is similar, but the guarantees are not identical and Slice 1 should call this out in the field's doc-comment. |
 | `env: Vec<(String, String)>` | `-e <key>=<value>` per entry | Direct match. |
@@ -92,7 +92,7 @@ Rationale: replacing Seatbelt globally costs us today's <50 ms macOS bwrap-equiv
 ### Slice 2.5 (1 session, depends on Slice 2) — `gliner-relex` Containerfile + image-build smoke
 
 - Write a `workers/gliner-relex/Containerfile` (Python 3.12 + `uv sync` + weights mounted at `/weights` via `--mount`).
-- Operator-runnable `container build -t hhagent/gliner-relex:dev workers/gliner-relex/` step (no `cargo build` automation yet — that's a future slice).
+- Operator-runnable `container build -t kastellan/gliner-relex:dev workers/gliner-relex/` step (no `cargo build` automation yet — that's a future slice).
 - Update the `gliner-relex` `WorkerSpec` to set `sandbox_backend: Some(Container)` + the image tag, then re-run the e2e on macOS and confirm canonical `Dr Smith --[treats]--> asthma (0.994)` output through the container.
 - This is the slice that actually validates the end-to-end story on a real workload that needs memory enforcement. Slice 2 is just the plumbing.
 
@@ -104,7 +104,7 @@ Rationale: replacing Seatbelt globally costs us today's <50 ms macOS bwrap-equiv
 ## What this spike deliberately does NOT do
 
 - **No worker-image build pipeline.** Slices above assume the operator runs `container build` against a per-worker `Containerfile` and tags locally. A future slice could automate this via `cargo build` integration, but that's a meaningful slice on its own.
-- **No Containerfile for any existing worker.** Today's workers are macOS-native binaries (`hhagent-worker-shell-exec` builds for darwin). Adopting container backend per-worker requires either (a) cross-compiling the Rust worker to `aarch64-unknown-linux-musl` and packaging into an image, or (b) writing the worker in a language with a Linux runtime that already has an image (Python is the obvious candidate for `gliner-relex` — Slice 2.5 above is exactly this). Slice 1's smoke test will use a plain `alpine` shim until the image-build path exists; Slice 2's plumbing-validation also uses `alpine`. Slice 2.5 ships the first real `Containerfile` (for `gliner-relex`).
+- **No Containerfile for any existing worker.** Today's workers are macOS-native binaries (`kastellan-worker-shell-exec` builds for darwin). Adopting container backend per-worker requires either (a) cross-compiling the Rust worker to `aarch64-unknown-linux-musl` and packaging into an image, or (b) writing the worker in a language with a Linux runtime that already has an image (Python is the obvious candidate for `gliner-relex` — Slice 2.5 above is exactly this). Slice 1's smoke test will use a plain `alpine` shim until the image-build path exists; Slice 2's plumbing-validation also uses `alpine`. Slice 2.5 ships the first real `Containerfile` (for `gliner-relex`).
 - **No latency comparison to a real GLiNER-Relex inference call.** The 0.76 s warm-spawn cost is the floor; the actual end-to-end cost depends on model load time, which we know from the macOS MPS spike is ~3.7 s cold + 82 ms per-call CPU on Apple Silicon.
 - **No Linux Firecracker counterpart.** The cross-platform parity story is the opposite direction from the usual: today Linux *already* enforces `mem_mb` / `cpu_quota_pct` / `tasks_max` via `systemd-run --user --scope` + cgroup v2 ([`sandbox/src/linux_cgroup.rs`](../../../sandbox/src/linux_cgroup.rs)), and macOS is the platform with the open gap (Seatbelt has no memory primitive — see the `mem_mb` docstring in [`sandbox/src/lib.rs`](../../../sandbox/src/lib.rs)). Adding `MacosContainerBackend` closes the macOS gap and brings the two platforms to parity; it is **not** a Linux-side strengthening. A Linux-side Firecracker layer would be defense-in-depth atop the existing cgroup enforcement, not a parity fix, and is out of scope for this spike.
 

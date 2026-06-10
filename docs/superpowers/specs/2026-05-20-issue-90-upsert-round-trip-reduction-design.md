@@ -1,7 +1,7 @@
 # Issue #90 — `upsert_entities_and_relations` round-trip reduction (Layer A)
 
 **Status:** Design approved 2026-05-20.
-**Filed:** GitHub issue [#90](https://github.com/hherb/hhagent/issues/90) on 2026-05-19 during the post-merge code-review pass of PR #91 (entity extraction v2).
+**Filed:** GitHub issue [#90](https://github.com/hherb/kastellan/issues/90) on 2026-05-19 during the post-merge code-review pass of PR #91 (entity extraction v2).
 **Scope chosen:** Layer A only (`xmax = 0` discriminator). Layer B (`unnest` full-batch) explicitly deferred.
 
 ## Background
@@ -64,7 +64,7 @@ for ent in &merged.entities {
     )
     .bind(&ent.label).bind(&ent.text).bind(&name_norm)
     .fetch_optional(pool).await
-    .map_err(|e| hhagent_db::DbError::Query(format!("upsert entity: {e}")))?;
+    .map_err(|e| kastellan_db::DbError::Query(format!("upsert entity: {e}")))?;
 
     let id = match inserted_id {
         Some(id) => { n_new += 1; id }
@@ -74,7 +74,7 @@ for ent in &merged.entities {
             )
             .bind(&ent.label).bind(&name_norm)
             .fetch_one(pool).await
-            .map_err(|e| hhagent_db::DbError::Query(format!("resolve entity id: {e}")))?
+            .map_err(|e| kastellan_db::DbError::Query(format!("resolve entity id: {e}")))?
         }
     };
     entity_ids.push(id);
@@ -102,7 +102,7 @@ for ent in &merged.entities {
     )
     .bind(&ent.label).bind(&ent.text).bind(&name_norm)
     .fetch_one(pool).await
-    .map_err(|e| hhagent_db::DbError::Query(format!("upsert entity: {e}")))?;
+    .map_err(|e| kastellan_db::DbError::Query(format!("upsert entity: {e}")))?;
     if row.1 { n_new += 1; }
     entity_ids.push(row.0);
 }
@@ -120,7 +120,7 @@ The NEW tests target two cases the existing suite doesn't cover:
 
 **New (2):**
 
-1. **`upsert_preserves_operator_unquarantine_decision`** — bug-of-omission regression pin. Seed one entity (lands quarantined per the default), manually `UPDATE entities SET quarantine = FALSE WHERE id = $1` (simulating an operator approval via `hhagent-cli entities approve`), then call `upsert_entities_and_relations` with that same `(kind, name_norm)`. Assert: post-call, the row's `quarantine` column is still `FALSE`. Catches a future edit that changes the no-op `SET` to clobber `quarantine` — the load-bearing guarantee that makes the operator quarantine-review CLI's approvals survive re-extraction.
+1. **`upsert_preserves_operator_unquarantine_decision`** — bug-of-omission regression pin. Seed one entity (lands quarantined per the default), manually `UPDATE entities SET quarantine = FALSE WHERE id = $1` (simulating an operator approval via `kastellan-cli entities approve`), then call `upsert_entities_and_relations` with that same `(kind, name_norm)`. Assert: post-call, the row's `quarantine` column is still `FALSE`. Catches a future edit that changes the no-op `SET` to clobber `quarantine` — the load-bearing guarantee that makes the operator quarantine-review CLI's approvals survive re-extraction.
 
 2. **`upsert_counts_new_inserts_correctly_in_mixed_batch`** — mixed-batch counter pin. Seed one entity. Call `upsert_entities_and_relations` with two entities in the same call: the pre-existing one + one fresh. Assert `entity_ids.len() == 2`, `n_entities_upserted_new == 1` (only the fresh one). Catches an accumulator bug where the `xmax = 0` discriminator is read but the per-iteration counter increment goes wrong. The existing tests cover all-new (`upsert_creates_quarantined_entities`, `upsert_dedup_works_with_case_variants`) and all-existing (`upsert_is_idempotent_on_rerun`); the mixed case is the gap.
 
@@ -139,7 +139,7 @@ Plus all 6 existing mock-tier and real-model tier extractor tests in the same fi
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test entity_extraction_e2e      # the touched suite
+cargo test -p kastellan-core --test entity_extraction_e2e      # the touched suite
 cargo test --workspace                                       # the regression net
 ```
 

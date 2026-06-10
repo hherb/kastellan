@@ -46,7 +46,7 @@ pub fn unique_temp_root(label: &str) -> PathBuf {
     let base = PathBuf::from("/tmp");
     #[cfg(not(target_os = "macos"))]
     let base = std::env::temp_dir();
-    base.join(format!("hhagent-{}-{}", label, unique_suffix()))
+    base.join(format!("kastellan-{}-{}", label, unique_suffix()))
 }
 
 /// OS username via `$USER` with a `whoami` fallback. Used to name the
@@ -67,5 +67,5 @@ pub fn current_username() -> String {
             return String::from_utf8_lossy(&out.stdout).trim().to_string();
         }
     }
-    "hhagent".into()
+    "kastellan".into()
 }

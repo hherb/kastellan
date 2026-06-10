@@ -1,4 +1,4 @@
-//! Shared test fixtures for `hhagent` integration tests.
+//! Shared test fixtures for `kastellan` integration tests.
 //!
 //! Hoisted from byte-duplicated copies that previously lived in eight
 //! separate `tests/*.rs` files (issue #15). The point of consolidation
@@ -25,8 +25,8 @@
 //!   factory + `policy_for_shell_exec` helper used by tests that spawn
 //!   the shell-exec worker.
 //! * [`binaries`] — workspace target-dir-aware binary discovery for
-//!   integration tests that exec the `hhagent`, `hhagent-cli`, and
-//!   `hhagent-worker-shell-exec` binaries.
+//!   integration tests that exec the `kastellan`, `kastellan-cli`, and
+//!   `kastellan-worker-shell-exec` binaries.
 //! * [`serial`] — macOS-only `serial_lock()` that mutexes the launchd
 //!   `gui/<uid>` domain across daemon-spawning tests.
 //! * [`embedding`] — `text_to_embedding` deterministic SHA-256-seeded

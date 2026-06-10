@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use zeroize::Zeroizing;
 
-use hhagent_db::secrets::KeyProvider;
+use kastellan_db::secrets::KeyProvider;
 
 use super::{DEFAULT_TTL, REF_HEX_LEN, REF_PREFIX};
 
@@ -91,17 +91,17 @@ pub enum RedeemResult {
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
     #[error("vault: secret lookup failed: {0}")]
-    Secrets(#[from] hhagent_db::secrets::SecretsError),
+    Secrets(#[from] kastellan_db::secrets::SecretsError),
 
     /// Hard-fail on audit write — see spec §5.4. Wraps the existing
-    /// `hhagent_db::DbError` returned by `audit::insert`.
+    /// `kastellan_db::DbError` returned by `audit::insert`.
     ///
     /// **No `#[from]` on purpose:** `DbError` is the crate-wide error
-    /// type for `hhagent_db`; a blanket `From` would silently swallow
+    /// type for `kastellan_db`; a blanket `From` would silently swallow
     /// any DbError from a future method on Vault. Callers map
     /// explicitly via `.map_err(VaultError::Audit)`.
     #[error("vault: audit row insert failed during materialize: {0}")]
-    Audit(hhagent_db::DbError),
+    Audit(kastellan_db::DbError),
 
     #[error("vault: materialized plaintext is empty")]
     EmptyPlaintext,
@@ -143,7 +143,7 @@ impl Vault {
     ) -> Result<SecretRef, VaultError> {
         // 1. Decrypt the secret at the host boundary.
         let plaintext: Zeroizing<Vec<u8>> =
-            hhagent_db::secrets::get(pool, key_provider, name, None).await?;
+            kastellan_db::secrets::get(pool, key_provider, name, None).await?;
 
         if plaintext.is_empty() {
             return Err(VaultError::EmptyPlaintext);
@@ -182,7 +182,7 @@ impl Vault {
             "ttl_secs": ttl_secs,
             "actor":    actor,
         });
-        hhagent_db::audit::insert(pool, "policy", "secret.materialized", payload)
+        kastellan_db::audit::insert(pool, "policy", "secret.materialized", payload)
             .await
             .map_err(VaultError::Audit)?;
 

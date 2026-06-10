@@ -1,4 +1,4 @@
-//! Producer-side audit-row helpers for the `hhagent-cli` binary.
+//! Producer-side audit-row helpers for the `kastellan-cli` binary.
 //!
 //! The scheduler writes `actor='scheduler' action='task.<state>'` rows when
 //! it **observes** lifecycle transitions on tasks it has claimed. The CLI
@@ -19,7 +19,7 @@
 //! Two helpers live here and both can emit a producer row that is later
 //! followed by a scheduler observation row for the same logical event:
 //!
-//! - **Submit:** `hhagent-cli ask` writes `actor='cli',
+//! - **Submit:** `kastellan-cli ask` writes `actor='cli',
 //!   action='task.submitted'` at insert time; the scheduler later writes
 //!   `actor='scheduler', action='task.running'` when it claims the same
 //!   task. Two rows, one logical task entry.
@@ -88,9 +88,9 @@
 //! queries that depend on a strict 1:1 producer-row:event mapping must
 //! treat the audit-row count as a lower bound, not a total.
 
-use hhagent_db::audit;
-use hhagent_db::tasks::{insert_pending, mark_cancelled, mark_cancelled_if_pending, Lane, Task};
-use hhagent_db::DbError;
+use kastellan_db::audit;
+use kastellan_db::tasks::{insert_pending, mark_cancelled, mark_cancelled_if_pending, Lane, Task};
+use kastellan_db::DbError;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 
@@ -300,7 +300,7 @@ async fn emit_producer_cancel_finalize(pool: &PgPool, task: &Task) {
 ///
 /// # Two-rows-on-one-event note
 ///
-/// `hhagent-cli ask` will produce two rows in `audit_log` for one
+/// `kastellan-cli ask` will produce two rows in `audit_log` for one
 /// logical task entry: this producer row at submit time, and the
 /// scheduler's later `task.running` observation row on claim. The split
 /// is intentional — observation queries asking "who submitted" use
@@ -358,11 +358,11 @@ pub async fn tools_allowlist_add_and_audit(
     pool: &PgPool,
     tool: &str,
     argv0: &str,
-) -> Result<bool, hhagent_db::tool_allowlists::ToolAllowlistError> {
-    let inserted = hhagent_db::tool_allowlists::add(pool, tool, argv0, CLI_AUDIT_ACTOR).await?;
+) -> Result<bool, kastellan_db::tool_allowlists::ToolAllowlistError> {
+    let inserted = kastellan_db::tool_allowlists::add(pool, tool, argv0, CLI_AUDIT_ACTOR).await?;
     if inserted {
         let payload = serde_json::json!({ "tool": tool, "argv0": argv0 });
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool,
             CLI_AUDIT_ACTOR,
             ACTION_TOOLS_ALLOWLIST_ADD,
@@ -390,11 +390,11 @@ pub async fn tools_allowlist_remove_and_audit(
     pool: &PgPool,
     tool: &str,
     argv0: &str,
-) -> Result<bool, hhagent_db::tool_allowlists::ToolAllowlistError> {
-    let removed = hhagent_db::tool_allowlists::remove(pool, tool, argv0).await?;
+) -> Result<bool, kastellan_db::tool_allowlists::ToolAllowlistError> {
+    let removed = kastellan_db::tool_allowlists::remove(pool, tool, argv0).await?;
     if removed {
         let payload = serde_json::json!({ "tool": tool, "argv0": argv0 });
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool,
             CLI_AUDIT_ACTOR,
             ACTION_TOOLS_ALLOWLIST_REMOVE,
@@ -427,7 +427,7 @@ pub async fn tools_allowlist_remove_and_audit(
 /// audit row is logged via `tracing::warn!` and swallowed; the
 /// underlying `db::relation_kinds::add` outcome propagates either way.
 ///
-/// **Requires an admin-pool connection** ([`hhagent_db::pool::connect_admin_pool`])
+/// **Requires an admin-pool connection** ([`kastellan_db::pool::connect_admin_pool`])
 /// — the runtime role does not have INSERT on `relation_kinds`
 /// (migration 0017 REVOKE). Passing a runtime-role pool yields
 /// `Err(RelationKindError::Db(...))` carrying a Postgres `permission
@@ -436,8 +436,8 @@ pub async fn relation_kinds_add_and_audit(
     pool: &PgPool,
     kind: &str,
     description: Option<&str>,
-) -> Result<bool, hhagent_db::relation_kinds::RelationKindError> {
-    let inserted = hhagent_db::relation_kinds::add(pool, kind, description).await?;
+) -> Result<bool, kastellan_db::relation_kinds::RelationKindError> {
+    let inserted = kastellan_db::relation_kinds::add(pool, kind, description).await?;
     if inserted {
         // `description: null` is the explicit "unset" wire value so a
         // downstream payload reader can distinguish "operator did not
@@ -446,7 +446,7 @@ pub async fn relation_kinds_add_and_audit(
             "kind": kind,
             "description": description,
         });
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool,
             CLI_AUDIT_ACTOR,
             ACTION_RELATION_KINDS_ADD,
@@ -477,11 +477,11 @@ pub async fn relation_kinds_add_and_audit(
 pub async fn relation_kinds_remove_and_audit(
     pool: &PgPool,
     kind: &str,
-) -> Result<bool, hhagent_db::relation_kinds::RelationKindError> {
-    let removed = hhagent_db::relation_kinds::remove(pool, kind).await?;
+) -> Result<bool, kastellan_db::relation_kinds::RelationKindError> {
+    let removed = kastellan_db::relation_kinds::remove(pool, kind).await?;
     if removed {
         let payload = serde_json::json!({ "kind": kind });
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool,
             CLI_AUDIT_ACTOR,
             ACTION_RELATION_KINDS_REMOVE,
@@ -511,14 +511,14 @@ pub async fn entity_kinds_add_and_audit(
     pool: &PgPool,
     kind: &str,
     description: Option<&str>,
-) -> Result<bool, hhagent_db::entity_kinds::EntityKindError> {
-    let inserted = hhagent_db::entity_kinds::add(pool, kind, description).await?;
+) -> Result<bool, kastellan_db::entity_kinds::EntityKindError> {
+    let inserted = kastellan_db::entity_kinds::add(pool, kind, description).await?;
     if inserted {
         let payload = serde_json::json!({
             "kind": kind,
             "description": description,
         });
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool,
             CLI_AUDIT_ACTOR,
             ACTION_ENTITY_KINDS_ADD,
@@ -546,11 +546,11 @@ pub async fn entity_kinds_add_and_audit(
 pub async fn entity_kinds_remove_and_audit(
     pool: &PgPool,
     kind: &str,
-) -> Result<bool, hhagent_db::entity_kinds::EntityKindError> {
-    let removed = hhagent_db::entity_kinds::remove(pool, kind).await?;
+) -> Result<bool, kastellan_db::entity_kinds::EntityKindError> {
+    let removed = kastellan_db::entity_kinds::remove(pool, kind).await?;
     if removed {
         let payload = serde_json::json!({ "kind": kind });
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool,
             CLI_AUDIT_ACTOR,
             ACTION_ENTITY_KINDS_REMOVE,
@@ -593,7 +593,7 @@ pub async fn l1_add_and_audit(
     let body_sha256 = compute_body_sha256(&trimmed);
 
     let payload = build_l1_write_payload(&outcome, &source, &body_sha256);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L1_ADDED, payload,
     ).await {
         Ok(id) => id,
@@ -613,13 +613,13 @@ pub async fn l1_add_and_audit(
 pub async fn l1_remove_and_audit(
     pool: &PgPool,
     memory_id: i64,
-) -> Result<(bool, i64), hhagent_db::DbError> {
+) -> Result<(bool, i64), kastellan_db::DbError> {
     use crate::memory::l1_promote::remove_l1;
 
     let deleted = remove_l1(pool, memory_id).await?;
     let payload = serde_json::json!({"memory_id": memory_id, "deleted": deleted});
 
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L1_REMOVED, payload,
     ).await {
         Ok(id) => id,
@@ -638,13 +638,13 @@ pub async fn l1_remove_and_audit(
 pub async fn l3_remove_and_audit(
     pool: &PgPool,
     memory_id: i64,
-) -> Result<(bool, i64), hhagent_db::DbError> {
+) -> Result<(bool, i64), kastellan_db::DbError> {
     use crate::memory::l3_crystallise::remove_l3;
 
     let deleted = remove_l3(pool, memory_id).await?;
     let payload = serde_json::json!({"memory_id": memory_id, "deleted": deleted});
 
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_REMOVED, payload,
     ).await {
         Ok(id) => id,
@@ -667,12 +667,12 @@ pub async fn l3_approve_and_audit(
     skill_name: &str,
     body_sha256: &str,
     tools: &[String],
-) -> Result<i64, hhagent_db::DbError> {
+) -> Result<i64, kastellan_db::DbError> {
     use crate::memory::l3_approval::SkillTrust;
 
-    hhagent_db::memories::set_skill_trust(pool, memory_id, SkillTrust::UserApproved.as_str()).await?;
+    kastellan_db::memories::set_skill_trust(pool, memory_id, SkillTrust::UserApproved.as_str()).await?;
     let payload = build_l3_approved_payload(memory_id, skill_name, body_sha256, tools);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_APPROVED, payload,
     ).await {
         Ok(id) => id,
@@ -692,9 +692,9 @@ pub async fn l3_approve_rejected_audit(
     skill_name: Option<&str>,
     body_sha256: Option<&str>,
     reasons: &[String],
-) -> Result<i64, hhagent_db::DbError> {
+) -> Result<i64, kastellan_db::DbError> {
     let payload = build_l3_approve_rejected_payload(memory_id, skill_name, body_sha256, reasons);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_APPROVE_REJECTED, payload,
     ).await {
         Ok(id) => id,
@@ -712,12 +712,12 @@ pub async fn l3_approve_rejected_audit(
 pub async fn l3_revoke_and_audit(
     pool: &PgPool,
     memory_id: i64,
-) -> Result<(bool, i64), hhagent_db::DbError> {
+) -> Result<(bool, i64), kastellan_db::DbError> {
     use crate::memory::l3_approval::SkillTrust;
 
-    let updated = hhagent_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Untrusted.as_str()).await?;
+    let updated = kastellan_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Untrusted.as_str()).await?;
     let payload = build_l3_revoked_payload(memory_id, updated);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_REVOKED, payload,
     ).await {
         Ok(id) => id,
@@ -739,12 +739,12 @@ pub async fn l3_pin_and_audit(
     memory_id: i64,
     skill_name: &str,
     body_sha256: &str,
-) -> Result<i64, hhagent_db::DbError> {
+) -> Result<i64, kastellan_db::DbError> {
     use crate::memory::l3_approval::SkillTrust;
 
-    hhagent_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Pinned.as_str()).await?;
+    kastellan_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Pinned.as_str()).await?;
     let payload = build_l3_pinned_payload(memory_id, skill_name, body_sha256);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_PINNED, payload,
     ).await {
         Ok(id) => id,
@@ -765,7 +765,7 @@ pub async fn l3_pin_rejected_audit(
     reasons: &[String],
 ) -> i64 {
     let payload = build_l3_pin_rejected_payload(memory_id, skill_name, reasons);
-    match hhagent_db::audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_L3_PIN_REJECTED, payload).await {
+    match kastellan_db::audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_L3_PIN_REJECTED, payload).await {
         Ok(id) => id,
         Err(e) => {
             tracing::warn!(error = %e, "l3.pin_rejected audit insert failed (best-effort)");
@@ -774,7 +774,7 @@ pub async fn l3_pin_rejected_audit(
     }
 }
 
-/// Compose `hhagent_db::entities::approve_entity` with one
+/// Compose `kastellan_db::entities::approve_entity` with one
 /// `actor='cli' action='entities.approved'` audit row. The audit row is
 /// emitted ONLY on the `Approved` variant (state-changing path);
 /// `AlreadyApproved` and `NotFound` produce no audit row.
@@ -784,11 +784,11 @@ pub async fn l3_pin_rejected_audit(
 pub async fn entities_approve_and_audit(
     pool: &sqlx::PgPool,
     id: i64,
-) -> Result<hhagent_db::entities::ApproveOutcome, hhagent_db::entities::EntitiesError> {
-    let outcome = hhagent_db::entities::approve_entity(pool, id).await?;
-    if let hhagent_db::entities::ApproveOutcome::Approved { kind, name } = &outcome {
+) -> Result<kastellan_db::entities::ApproveOutcome, kastellan_db::entities::EntitiesError> {
+    let outcome = kastellan_db::entities::approve_entity(pool, id).await?;
+    if let kastellan_db::entities::ApproveOutcome::Approved { kind, name } = &outcome {
         let payload = build_entities_approved_payload(id, kind, name);
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool, CLI_AUDIT_ACTOR, ACTION_ENTITIES_APPROVED, payload,
         ).await {
             tracing::warn!(error = %e, entity_id = id,
@@ -798,17 +798,17 @@ pub async fn entities_approve_and_audit(
     Ok(outcome)
 }
 
-/// Compose `hhagent_db::entities::reject_entity` with one
+/// Compose `kastellan_db::entities::reject_entity` with one
 /// `actor='cli' action='entities.rejected'` audit row. The audit row is
 /// emitted ONLY on the `Rejected` variant; `NotFound` produces no row.
 pub async fn entities_reject_and_audit(
     pool: &sqlx::PgPool,
     id: i64,
-) -> Result<hhagent_db::entities::RejectOutcome, hhagent_db::entities::EntitiesError> {
-    let outcome = hhagent_db::entities::reject_entity(pool, id).await?;
-    if let hhagent_db::entities::RejectOutcome::Rejected { kind, name, mentions_dropped } = &outcome {
+) -> Result<kastellan_db::entities::RejectOutcome, kastellan_db::entities::EntitiesError> {
+    let outcome = kastellan_db::entities::reject_entity(pool, id).await?;
+    if let kastellan_db::entities::RejectOutcome::Rejected { kind, name, mentions_dropped } = &outcome {
         let payload = build_entities_rejected_payload(id, kind, name, *mentions_dropped);
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool, CLI_AUDIT_ACTOR, ACTION_ENTITIES_REJECTED, payload,
         ).await {
             tracing::warn!(error = %e, entity_id = id,
@@ -818,7 +818,7 @@ pub async fn entities_reject_and_audit(
     Ok(outcome)
 }
 
-/// Compose `hhagent_db::entities::merge_entities` with one
+/// Compose `kastellan_db::entities::merge_entities` with one
 /// `actor='cli' action='entities.merged'` audit row on the successful
 /// path. Precondition errors (KindMismatch / NotFound / NoDropIds /
 /// KeepInDropList) propagate to the caller without an audit row.
@@ -826,8 +826,8 @@ pub async fn entities_merge_and_audit(
     pool: &sqlx::PgPool,
     keep_id: i64,
     drop_ids: &[i64],
-) -> Result<hhagent_db::entities::MergeOutcome, hhagent_db::entities::EntitiesError> {
-    let outcome = hhagent_db::entities::merge_entities(pool, keep_id, drop_ids).await?;
+) -> Result<kastellan_db::entities::MergeOutcome, kastellan_db::entities::EntitiesError> {
+    let outcome = kastellan_db::entities::merge_entities(pool, keep_id, drop_ids).await?;
     let payload = build_entities_merged_payload(
         outcome.kept_id,
         &outcome.kept_kind,
@@ -836,7 +836,7 @@ pub async fn entities_merge_and_audit(
         outcome.links_retargeted,
         outcome.links_dropped_as_duplicate,
     );
-    if let Err(e) = hhagent_db::audit::insert(
+    if let Err(e) = kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_ENTITIES_MERGED, payload,
     ).await {
         tracing::warn!(error = %e, kept_id = outcome.kept_id,
@@ -892,7 +892,7 @@ mod tests {
         fn _signature_pin<'a>(
             pool: &'a sqlx::PgPool,
             memory_id: i64,
-        ) -> impl std::future::Future<Output = Result<(bool, i64), hhagent_db::DbError>> + 'a {
+        ) -> impl std::future::Future<Output = Result<(bool, i64), kastellan_db::DbError>> + 'a {
             l1_remove_and_audit(pool, memory_id)
         }
         let _ = _signature_pin;
@@ -905,8 +905,8 @@ mod tests {
             id: i64,
         ) -> impl std::future::Future<
             Output = Result<
-                hhagent_db::entities::ApproveOutcome,
-                hhagent_db::entities::EntitiesError,
+                kastellan_db::entities::ApproveOutcome,
+                kastellan_db::entities::EntitiesError,
             >,
         > + 'a {
             entities_approve_and_audit(pool, id)
@@ -921,8 +921,8 @@ mod tests {
             id: i64,
         ) -> impl std::future::Future<
             Output = Result<
-                hhagent_db::entities::RejectOutcome,
-                hhagent_db::entities::EntitiesError,
+                kastellan_db::entities::RejectOutcome,
+                kastellan_db::entities::EntitiesError,
             >,
         > + 'a {
             entities_reject_and_audit(pool, id)
@@ -933,7 +933,7 @@ mod tests {
     #[test]
     fn l3_remove_and_audit_signature_compile_pin() {
         fn _pin<'a>(pool: &'a sqlx::PgPool, id: i64)
-            -> impl std::future::Future<Output = Result<(bool, i64), hhagent_db::DbError>> + 'a {
+            -> impl std::future::Future<Output = Result<(bool, i64), kastellan_db::DbError>> + 'a {
             super::l3_remove_and_audit(pool, id)
         }
         let _ = _pin;
@@ -947,8 +947,8 @@ mod tests {
             drops: &'a [i64],
         ) -> impl std::future::Future<
             Output = Result<
-                hhagent_db::entities::MergeOutcome,
-                hhagent_db::entities::EntitiesError,
+                kastellan_db::entities::MergeOutcome,
+                kastellan_db::entities::EntitiesError,
             >,
         > + 'a {
             entities_merge_and_audit(pool, keep, drops)

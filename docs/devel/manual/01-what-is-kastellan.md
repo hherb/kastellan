@@ -1,8 +1,8 @@
-# 1 — What is hhagent?
+# 1 — What is kastellan?
 
 ## The one-sentence version
 
-hhagent is a always-on personal AI agent that runs on your own machine,
+kastellan is a always-on personal AI agent that runs on your own machine,
 sandboxes every tool it uses at the OS level, reviews its own plans before
 acting, and never trusts its own LLM output.
 
@@ -10,7 +10,7 @@ acting, and never trusts its own LLM output.
 
 ## What it does
 
-When running, hhagent:
+When running, kastellan:
 
 - listens on secure messaging channels (Telegram, Signal) and email (IMAP/SMTP)
 - receives a task from you (e.g. "research this topic and draft a summary")
@@ -34,7 +34,7 @@ Existing personal-agent projects (including several Rust ones in the
 2. Tools run in a sandbox that wraps the entire runtime — a bit better,
    but all tools share the same sandbox boundary.
 
-hhagent's position: **one OS process + one kernel sandbox per tool invocation,
+kastellan's position: **one OS process + one kernel sandbox per tool invocation,
 every time, no exceptions.** A compromised tool reaches at most the network
 endpoints in *that tool's* allowlist. It cannot reach the agent's memory, the
 next tool's secrets, or the core process.

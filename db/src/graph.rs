@@ -364,7 +364,7 @@ pub trait Graph {
     /// Equivalent to calling [`Graph::walk_outbound_edges`] +
     /// [`Graph::walk_inbound_edges`] back-to-back, but issues exactly
     /// one query against the DB instead of two. Used by the operator-
-    /// facing `hhagent-cli relations show` command which always needs
+    /// facing `kastellan-cli relations show` command which always needs
     /// both directions.
     ///
     /// **Semantics:**
@@ -381,7 +381,7 @@ pub trait Graph {
     ///   edge_id ASC)` within each direction) all match the per-
     ///   direction methods.
     ///
-    /// Closes [issue #115](https://github.com/hherb/hhagent/issues/115).
+    /// Closes [issue #115](https://github.com/hherb/kastellan/issues/115).
     fn walk_edges_around(
         &self,
         seed_id: i64,
@@ -642,7 +642,7 @@ impl<'a> Graph for PgGraph<'a> {
         // treats the recursive term as a bag with non-deterministic
         // enumeration.
         //
-        // [issue #114]: https://github.com/hherb/hhagent/issues/114
+        // [issue #114]: https://github.com/hherb/kastellan/issues/114
         let rows = sqlx::query(
             r#"
             WITH RECURSIVE walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
@@ -717,7 +717,7 @@ impl<'a> Graph for PgGraph<'a> {
         // dedupe as the outbound walk — see that method's body comment
         // for the [issue #114] rationale.
         //
-        // [issue #114]: https://github.com/hherb/hhagent/issues/114
+        // [issue #114]: https://github.com/hherb/kastellan/issues/114
         let rows = sqlx::query(
             r#"
             WITH RECURSIVE walk(edge_id, src_id, dst_id, kind, depth, visited) AS (
@@ -801,7 +801,7 @@ impl<'a> Graph for PgGraph<'a> {
         // rather than across the union, so an outbound-heavy seed
         // doesn't starve inbound rows out of the result.
         //
-        // [issue #115]: https://github.com/hherb/hhagent/issues/115
+        // [issue #115]: https://github.com/hherb/kastellan/issues/115
         let rows = sqlx::query(
             r#"
             WITH RECURSIVE outbound_walk(edge_id, src_id, dst_id, kind, depth, visited) AS (

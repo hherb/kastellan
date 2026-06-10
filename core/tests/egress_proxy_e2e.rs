@@ -12,16 +12,16 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 
-use hhagent_core::egress::audit::decision_to_audit;
-use hhagent_core::egress::spawn::spawn_sidecar;
-use hhagent_tests_common::{
+use kastellan_core::egress::audit::decision_to_audit;
+use kastellan_core::egress::spawn::spawn_sidecar;
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_sandbox_unavailable, unique_suffix,
     workspace_target_binary,
 };
 
 /// Locate the built proxy binary; `[SKIP]` if absent.
 fn proxy_binary_or_skip() -> Option<std::path::PathBuf> {
-    let p = workspace_target_binary("hhagent-worker-egress-proxy");
+    let p = workspace_target_binary("kastellan-worker-egress-proxy");
     if p.exists() {
         Some(p)
     } else {
@@ -134,8 +134,8 @@ fn real_host_round_trips_through_sidecar() {
 
 /// PG-gated: insert an egress decision row into `audit_log` and read it back.
 ///
-/// Proves the `decision_to_audit` → `hhagent_db::audit::insert` →
-/// `hhagent_db::audit::fetch_by_id` pipeline is wired correctly end-to-end.
+/// Proves the `decision_to_audit` → `kastellan_db::audit::insert` →
+/// `kastellan_db::audit::fetch_by_id` pipeline is wired correctly end-to-end.
 /// `[SKIP]`s cleanly when no Postgres bin dir is available (macOS without
 /// Postgres.app, CI without a PG install) — same skip-as-pass posture as
 /// `web_fetch_e2e.rs`.
@@ -153,7 +153,7 @@ fn decision_row_persists_to_audit_log() {
         &bin_dir,
         "ea-d",
         "ea-l",
-        &format!("hhagent-egress-audit-test-pg-{suffix}"),
+        &format!("kastellan-egress-audit-test-pg-{suffix}"),
     );
 
     // Step 3: Build a sample blocked-ssrf decision line.
@@ -168,7 +168,7 @@ fn decision_row_persists_to_audit_log() {
         .expect("build tokio runtime")
         .block_on(async {
             // Probe runs migrations (creates audit_log table).
-            hhagent_db::probe::run(
+            kastellan_db::probe::run(
                 &cluster.conn_spec,
                 "core",
                 "startup",
@@ -177,17 +177,17 @@ fn decision_row_persists_to_audit_log() {
             .await
             .expect("probe run");
 
-            let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
                 .await
                 .expect("connect runtime pool");
 
             // Insert the egress decision row.
-            let inserted_id = hhagent_db::audit::insert(&pool, row.actor, &row.action, row.payload)
+            let inserted_id = kastellan_db::audit::insert(&pool, row.actor, &row.action, row.payload)
                 .await
                 .expect("audit insert");
 
             // Step 5: Read it back and assert the fields we care about.
-            let fetched = hhagent_db::audit::fetch_by_id(&pool, inserted_id)
+            let fetched = kastellan_db::audit::fetch_by_id(&pool, inserted_id)
                 .await
                 .expect("fetch_by_id");
 

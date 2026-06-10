@@ -98,7 +98,7 @@ same way `cli_ask` already constructs scheduler machinery in-process for its
 e2e.
 
 This is genuinely "live re-validation": the registry is rebuilt from the
-current `HHAGENT_SHELL_EXEC_BIN` env + the `tool_allowlists` DB table + the
+current `KASTELLAN_SHELL_EXEC_BIN` env + the `tool_allowlists` DB table + the
 gliner-relex env *at invocation time*, which is strictly stronger than the
 approval-time audit snapshot. Spawning sandboxed workers from the CLI process
 is the same threat model as from the daemon — same OS user, same sandbox, same
@@ -108,7 +108,7 @@ chokepoint (see `docs/threat-model.md`).
 binary (`core/src/main.rs`) and emits a `registry.loaded` audit row as a side
 effect. Split it:
 
-- A library function in `hhagent_core` builds the registry from `(pool,
+- A library function in `kastellan_core` builds the registry from `(pool,
   gliner_relex_entry)` and **does not** write any audit row.
 - `main.rs` calls the library function, then writes the `registry.loaded` row
   separately (its current behaviour, preserved byte-for-byte).
@@ -294,7 +294,7 @@ Notes:
 ## 8. CLI surface
 
 ```
-hhagent-cli memory l3 run <id> [--arg name=value]… [--execute | --yes]
+kastellan-cli memory l3 run <id> [--arg name=value]… [--execute | --yes]
 ```
 
 - Default (no `--execute`): **dry-run** — load + layer-guard the row, rebuild
@@ -309,8 +309,8 @@ hhagent-cli memory l3 run <id> [--arg name=value]… [--execute | --yes]
   `metadata.template` + `metadata.trust` + `metadata.body_sha256`, derives
   `live_tools` from the rebuilt registry's `entries()`, and calls `invoke_l3`.
 - Clear, specific errors: an unparseable stored template, a missing/wrong-layer
-  id, or a tool the rebuilt registry lacks (e.g. `HHAGENT_SHELL_EXEC_BIN`
-  unset → "shell-exec not registered; set HHAGENT_SHELL_EXEC_BIN") each produce
+  id, or a tool the rebuilt registry lacks (e.g. `KASTELLAN_SHELL_EXEC_BIN`
+  unset → "shell-exec not registered; set KASTELLAN_SHELL_EXEC_BIN") each produce
   a distinct message and a non-zero exit.
 - Exit codes: `0` on dry-run print and on all-steps-ok execute; `1` on refusal
   / step error / db error; `2` on usage error.
@@ -358,7 +358,7 @@ Regression: existing `cli_memory_l3_e2e` (list/approve/revoke/remove) and
 - Registry-build refactor: a new small lib module (e.g.
   `core/src/registry_build.rs`) holding the no-audit registry builder +
   gliner-entry resolver, re-exported; `main.rs` shrinks accordingly.
-- CLI: extend `core/src/bin/hhagent-cli/memory_l3.rs` (watch its size; it is
+- CLI: extend `core/src/bin/kastellan-cli/memory_l3.rs` (watch its size; it is
   ~255 LOC today — adding `run` may approach the cap, in which case split the
   `run` handler into a sibling).
 - Audit constants + payload builders beside the existing `l3.*` ones

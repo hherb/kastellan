@@ -309,7 +309,7 @@ pub async fn any_live_worker(pool: &PgPool) -> Result<bool, DbError> {
 
 /// Operator-side escape hatch: forcibly mark a `running` task as
 /// crashed before its lease elapses. Mirrors the startup sweep but
-/// scoped to one row, used by `hhagent-cli tasks fail <id>`. Returns
+/// scoped to one row, used by `kastellan-cli tasks fail <id>`. Returns
 /// true iff a row was updated.
 pub async fn mark_failed_running(pool: &PgPool, task_id: i64) -> Result<bool, DbError> {
     let r = sqlx::query(

@@ -32,17 +32,17 @@ pub fn workspace_target_binary(name: &str) -> PathBuf {
     target.join("debug").join(name)
 }
 
-/// Path to `hhagent-worker-shell-exec`.
+/// Path to `kastellan-worker-shell-exec`.
 pub fn shell_exec_worker_binary() -> PathBuf {
-    workspace_target_binary("hhagent-worker-shell-exec")
+    workspace_target_binary("kastellan-worker-shell-exec")
 }
 
-/// Path to the agent core daemon (`hhagent`).
+/// Path to the agent core daemon (`kastellan`).
 pub fn core_binary() -> PathBuf {
-    workspace_target_binary("hhagent")
+    workspace_target_binary("kastellan")
 }
 
-/// Path to the operator CLI (`hhagent-cli`).
+/// Path to the operator CLI (`kastellan-cli`).
 pub fn cli_binary() -> PathBuf {
-    workspace_target_binary("hhagent-cli")
+    workspace_target_binary("kastellan-cli")
 }

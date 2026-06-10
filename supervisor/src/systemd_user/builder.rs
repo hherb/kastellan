@@ -13,7 +13,7 @@
 //!
 //! ```ini
 //! [Unit]
-//! Description=hhagent service: <name>
+//! Description=kastellan service: <name>
 //! After=<dep>.service                   # one line per spec.after entry (omitted when empty)
 //! PartOf=<target>.target                # only when spec.part_of is set
 //!
@@ -76,7 +76,7 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
 
     // [Unit] section.
     out.push_str("[Unit]\n");
-    out.push_str(&format!("Description=hhagent service: {}\n", spec.name));
+    out.push_str(&format!("Description=kastellan service: {}\n", spec.name));
     // Ordering: one After= per dependency. systemd only *orders* against
     // units present in the same start transaction — harmless if absent.
     for dep in &spec.after {
@@ -168,7 +168,7 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
 pub fn build_target_unit(target: &TargetSpec) -> String {
     let mut out = String::with_capacity(256);
     out.push_str("[Unit]\n");
-    out.push_str(&format!("Description=hhagent service bundle: {}\n", target.name));
+    out.push_str(&format!("Description=kastellan service bundle: {}\n", target.name));
     if !target.members.is_empty() {
         let wants: Vec<String> = target
             .members

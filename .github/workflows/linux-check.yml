@@ -1,7 +1,7 @@
 # Linux build smoke — the regression guard for issue #144.
 #
 # The dev machine is an Apple Silicon Mac; the DGX (the primary host) is
-# the only routine Linux box. That left a gap: `hhagent-core` stopped
+# the only routine Linux box. That left a gap: `kastellan-core` stopped
 # compiling on Linux (issue #144 — `gliner_relex::container_mode_entry`
 # referenced the macOS-only `SandboxBackendKind::Container` variant
 # unconditionally) and nothing caught it until an operator built on the

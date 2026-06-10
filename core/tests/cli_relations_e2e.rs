@@ -1,4 +1,4 @@
-//! Subprocess-level pin for `hhagent-cli relations kinds {add,remove,list}`.
+//! Subprocess-level pin for `kastellan-cli relations kinds {add,remove,list}`.
 //!
 //! Each subtest runs the real CLI binary against a per-test PG cluster,
 //! asserts the DB row state, the audit-row shape, and the CLI exit
@@ -29,22 +29,22 @@
 use std::collections::BTreeMap;
 use std::process::Command;
 
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, current_username, pg_bin_dir_or_skip,
     skip_if_no_supervisor, unique_suffix,
 };
 use sqlx::Row;
 
 /// Same shape as `cli_tools_allowlist_e2e::cli_env`. The CLI's
-/// `resolve_connect_spec` reads `HHAGENT_DATA_DIR` and builds the
+/// `resolve_connect_spec` reads `KASTELLAN_DATA_DIR` and builds the
 /// socket path from there. Peer auth keys off `$USER`; the cluster's
 /// bootstrap role IS the OS user, so `$USER` must reach the
 /// subprocess intact.
 fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env = vec![
-        ("HHAGENT_DATA_DIR".to_string(), data_dir.display().to_string()),
+        ("KASTELLAN_DATA_DIR".to_string(), data_dir.display().to_string()),
     ];
     if let Some(home) = std::env::var_os("HOME") {
         env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
@@ -71,7 +71,7 @@ async fn cli_relations_kinds_add_remove_list_round_trip_writes_audit_rows() {
         &bin_dir,
         "rk-cli-d",
         "rk-cli-l",
-        &format!("hhagent-postgres-cli-relations-kinds-e2e-{suffix}"),
+        &format!("kastellan-postgres-cli-relations-kinds-e2e-{suffix}"),
     );
 
     // Apply migrations (including 0017 which seeds relation_kinds).
@@ -270,7 +270,7 @@ async fn cli_relations_kinds_add_remove_list_round_trip_writes_audit_rows() {
     );
 
     // --- 8b. Validation error: oversize description -------------------
-    // Issue [#111](https://github.com/hherb/hhagent/issues/111) item 3:
+    // Issue [#111](https://github.com/hherb/kastellan/issues/111) item 3:
     // a description larger than `MAX_RELATION_KIND_DESCRIPTION_LEN`
     // (2048 bytes) is rejected at the DB layer and surfaces as exit 2
     // from the CLI. 2049 bytes is exactly one byte over the cap; the

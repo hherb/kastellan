@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-tests-common"
+name        = "kastellan-tests-common"
 description = "Shared test fixtures: per-test Postgres bring-up, RAII guards, skip helpers, sandbox factory, mock LLM. Dev-dependency only."
 publish     = false
 version.workspace      = true
@@ -15,16 +15,16 @@ readme.workspace       = true
 # from `[dev-dependencies]` only — never linked into a runtime binary.
 #
 # Dependency rationale: every helper here reaches across two-or-more
-# runtime crates (e.g. `bring_up_pg_cluster` glues `hhagent-db`'s initdb
-# argv builder to `hhagent-supervisor`'s `Supervisor` trait), so the
+# runtime crates (e.g. `bring_up_pg_cluster` glues `kastellan-db`'s initdb
+# argv builder to `kastellan-supervisor`'s `Supervisor` trait), so the
 # crate itself depends on the runtime crates whose surfaces it composes.
 # This is safe because `[dev-dependencies]` are excluded from the
 # downstream `cargo build` graph; no production binary picks up a
-# dependency on `hhagent-tests-common`.
+# dependency on `kastellan-tests-common`.
 [dependencies]
-hhagent-db         = { path = "../db" }
-hhagent-supervisor = { path = "../supervisor" }
-hhagent-sandbox    = { path = "../sandbox" }
+kastellan-db         = { path = "../db" }
+kastellan-supervisor = { path = "../supervisor" }
+kastellan-sandbox    = { path = "../sandbox" }
 serde_json         = { workspace = true }
 sha2               = { workspace = true }
 sqlx               = { workspace = true }

@@ -19,7 +19,7 @@
 //!      / cluster superuser — required for `CREATE EXTENSION`,
 //!      `CREATE ROLE`, and any future migration that touches a
 //!      superuser-only catalog.
-//!   5. `SET ROLE hhagent_runtime` to drop privileges before any
+//!   5. `SET ROLE kastellan_runtime` to drop privileges before any
 //!      application write. From this point on the connection cannot
 //!      UPDATE or DELETE `audit_log` rows even if compromised; see
 //!      `db/migrations/0002_runtime_role.sql` for the GRANT shape.
@@ -76,7 +76,7 @@ pub async fn run(
     // a freshly-migrated cluster.
     conn.execute(set_role_runtime_statement().as_str())
         .await
-        .map_err(|e| DbError::Query(format!("SET ROLE hhagent_runtime: {e}")))?;
+        .map_err(|e| DbError::Query(format!("SET ROLE kastellan_runtime: {e}")))?;
 
     sqlx::query("INSERT INTO audit_log (actor, action, payload) VALUES ($1, $2, $3)")
         .bind(actor)
@@ -157,9 +157,9 @@ mod tests {
         // clause), this test is the canary.
         let s = format!(
             "CREATE DATABASE {} OWNER {}",
-            quote_ident("hhagent"),
+            quote_ident("kastellan"),
             quote_ident("alice"),
         );
-        assert_eq!(s, "CREATE DATABASE \"hhagent\" OWNER \"alice\"");
+        assert_eq!(s, "CREATE DATABASE \"kastellan\" OWNER \"alice\"");
     }
 }

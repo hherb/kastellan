@@ -1,6 +1,6 @@
 //! End-to-end DB integration coverage for the L1 promotion writer —
-//! [`hhagent_core::memory::l1_promote`] (direct path) and the
-//! operator-facing wrappers in [`hhagent_core::cli_audit`].
+//! [`kastellan_core::memory::l1_promote`] (direct path) and the
+//! operator-facing wrappers in [`kastellan_core::cli_audit`].
 //!
 //! Each scenario brings up its own per-test Postgres cluster so seeded
 //! rows cannot drift between scenarios.  Skips silently with `[SKIP]`
@@ -9,11 +9,11 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::cli_audit::{l1_add_and_audit, l1_remove_and_audit};
-use hhagent_core::entity_extraction::NoOpEntityExtractor;
-use hhagent_core::memory::l1_promote::{promote_l1, list_l1, L1Source, L1WriteOutcome, L1Error};
-use hhagent_db::memories::MemoryLayer;
-use hhagent_tests_common::{
+use kastellan_core::cli_audit::{l1_add_and_audit, l1_remove_and_audit};
+use kastellan_core::entity_extraction::NoOpEntityExtractor;
+use kastellan_core::memory::l1_promote::{promote_l1, list_l1, L1Source, L1WriteOutcome, L1Error};
+use kastellan_db::memories::MemoryLayer;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -43,11 +43,11 @@ fn operator_add_writes_l1_row_and_audit_row() {
         &bin_dir,
         "l1pa-d",
         "l1pa-l",
-        &format!("hhagent-supervisor-test-pg-l1pa-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1pa-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -56,7 +56,7 @@ fn operator_add_writes_l1_row_and_audit_row() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -80,7 +80,7 @@ fn operator_add_writes_l1_row_and_audit_row() {
         );
 
         // audit_log has exactly 1 l1.added row with actor='cli'.
-        let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
             .await
             .expect("fetch_since");
         let l1_added: Vec<_> = all_audit
@@ -122,11 +122,11 @@ fn operator_add_is_idempotent_on_body_sha256() {
         &bin_dir,
         "l1pb-d",
         "l1pb-l",
-        &format!("hhagent-supervisor-test-pg-l1pb-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1pb-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -135,7 +135,7 @@ fn operator_add_is_idempotent_on_body_sha256() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -160,7 +160,7 @@ fn operator_add_is_idempotent_on_body_sha256() {
         assert_eq!(rows.len(), 1, "dedup: only 1 row in DB");
 
         // 2 audit rows: one action=inserted, one action=skipped_duplicate.
-        let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
             .await
             .expect("fetch_since");
         let l1_added: Vec<_> = all_audit
@@ -204,11 +204,11 @@ fn operator_add_rejects_invalid_body_with_no_audit_row() {
         &bin_dir,
         "l1pc-d",
         "l1pc-l",
-        &format!("hhagent-supervisor-test-pg-l1pc-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1pc-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -217,7 +217,7 @@ fn operator_add_rejects_invalid_body_with_no_audit_row() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -237,7 +237,7 @@ fn operator_add_rejects_invalid_body_with_no_audit_row() {
         assert_eq!(rows.len(), 0, "no rows written on validation error");
 
         // Zero audit rows written.
-        let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
             .await
             .expect("fetch_since");
         let l1_added_count = all_audit
@@ -271,11 +271,11 @@ fn operator_remove_deletes_and_audits() {
         &bin_dir,
         "l1pd-d",
         "l1pd-l",
-        &format!("hhagent-supervisor-test-pg-l1pd-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1pd-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -284,7 +284,7 @@ fn operator_remove_deletes_and_audits() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -305,7 +305,7 @@ fn operator_remove_deletes_and_audits() {
         assert_eq!(rows.len(), 0, "row must be gone after remove");
 
         // Audit log has 1 l1.removed row with {memory_id, deleted: true}.
-        let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
             .await
             .expect("fetch_since");
         let l1_removed: Vec<_> = all_audit
@@ -346,11 +346,11 @@ fn operator_remove_refuses_wrong_layer() {
         &bin_dir,
         "l1pe-d",
         "l1pe-l",
-        &format!("hhagent-supervisor-test-pg-l1pe-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1pe-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -359,12 +359,12 @@ fn operator_remove_refuses_wrong_layer() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
         // Seed an L2 (Stable) row directly through insert_memory (default layer).
-        let stable_id = hhagent_db::memories::insert_memory(
+        let stable_id = kastellan_db::memories::insert_memory(
             &pool,
             "stable row body",
             &serde_json::json!({}),
@@ -380,7 +380,7 @@ fn operator_remove_refuses_wrong_layer() {
         assert!(!deleted, "must not delete a non-L1 row");
 
         // The stable row must still be present.
-        let remaining = hhagent_db::memories::fetch_by_ids(&pool, &[stable_id])
+        let remaining = kastellan_db::memories::fetch_by_ids(&pool, &[stable_id])
             .await
             .expect("fetch_by_ids");
         assert_eq!(
@@ -390,7 +390,7 @@ fn operator_remove_refuses_wrong_layer() {
         );
 
         // Audit log has 1 l1.removed row with {memory_id, deleted: false}.
-        let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+        let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
             .await
             .expect("fetch_since");
         let l1_removed: Vec<_> = all_audit
@@ -430,11 +430,11 @@ fn agent_raised_promote_l1_writes_l1_row_with_task_id_metadata() {
         &bin_dir,
         "l1pf-d",
         "l1pf-l",
-        &format!("hhagent-supervisor-test-pg-l1pf-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1pf-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -443,7 +443,7 @@ fn agent_raised_promote_l1_writes_l1_row_with_task_id_metadata() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -499,11 +499,11 @@ fn agent_raised_promote_dedups_against_operator_row() {
         &bin_dir,
         "l1pg-d",
         "l1pg-l",
-        &format!("hhagent-supervisor-test-pg-l1pg-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1pg-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -512,7 +512,7 @@ fn agent_raised_promote_dedups_against_operator_row() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -577,11 +577,11 @@ fn list_l1_in_prompt_vs_all_distinguishes_at_cap_boundary() {
         &bin_dir,
         "l1ph-d",
         "l1ph-l",
-        &format!("hhagent-supervisor-test-pg-l1ph-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1ph-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -590,7 +590,7 @@ fn list_l1_in_prompt_vs_all_distinguishes_at_cap_boundary() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -638,19 +638,19 @@ fn promote_l1_inserted_outcome_carries_link_outcome() {
         return;
     };
 
-    use hhagent_core::entity_extraction::StaticEntityExtractor;
-    use hhagent_db::graph::{Graph, PgGraph};
+    use kastellan_core::entity_extraction::StaticEntityExtractor;
+    use kastellan_db::graph::{Graph, PgGraph};
 
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
         "l1el-d",
         "l1el-l",
-        &format!("hhagent-supervisor-test-pg-l1el-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1el-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -659,7 +659,7 @@ fn promote_l1_inserted_outcome_carries_link_outcome() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 

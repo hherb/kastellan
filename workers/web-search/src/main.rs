@@ -7,7 +7,7 @@ mod handler;
 mod parse;
 mod search;
 
-use hhagent_worker_prelude::serve_stdio;
+use kastellan_worker_prelude::serve_stdio;
 
 fn main() -> anyhow::Result<()> {
     let mut handler = handler::WebSearchHandler::from_env()?;

@@ -1,5 +1,5 @@
 //! Agent LLM adapter — produces a `Plan` from a `TaskContext` via
-//! the existing `hhagent_llm_router::Router`. Strict JSON parsing on
+//! the existing `kastellan_llm_router::Router`. Strict JSON parsing on
 //! the way out: a model that emits a malformed plan is treated as a
 //! decode-error, surfaced as `RouterError::DecodeResponse`, and the
 //! scheduler's retry policy applies (transient → backoff; decode →
@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::cassandra::types::Plan;
-use hhagent_llm_router::messages::{ChatMessage, ChatRequest};
-use hhagent_llm_router::{Router, RouterError};
+use kastellan_llm_router::messages::{ChatMessage, ChatRequest};
+use kastellan_llm_router::{Router, RouterError};
 
 use super::inner_loop::TaskContext;
 use super::plan_parser::parse_plan_lenient;
@@ -126,7 +126,7 @@ impl PlanFormulator for RouterAgent {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
-                    target: "hhagent::scheduler::agent",
+                    target: "kastellan::scheduler::agent",
                     error = %e,
                     "entity extraction failed; continuing with empty seeds",
                 );
@@ -146,7 +146,7 @@ impl PlanFormulator for RouterAgent {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
-                    target: "hhagent::scheduler::agent",
+                    target: "kastellan::scheduler::agent",
                     error = %e,
                     "recall failed; continuing with empty recall context",
                 );

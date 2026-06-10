@@ -23,8 +23,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use hhagent_supervisor::launchd_agents::{probe, LaunchAgents};
-use hhagent_supervisor::{ServiceSpec, ServiceStatus, Supervisor};
+use kastellan_supervisor::launchd_agents::{probe, LaunchAgents};
+use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor};
 
 /// Serialize all smoke-test bodies. The launchd GUI domain and
 /// `~/Library/LaunchAgents/` are shared global resources; running
@@ -54,15 +54,15 @@ fn skip_if_no_gui_domain() -> bool {
 
 /// Generate a unique, easily-greppable agent label for this run.
 ///
-/// The `hhagent-supervisor-test-` prefix lets a maintainer find and
+/// The `kastellan-supervisor-test-` prefix lets a maintainer find and
 /// remove leftovers from a crashed test with `find ~/Library/LaunchAgents
-/// -name 'hhagent-supervisor-test-*'`.
+/// -name 'kastellan-supervisor-test-*'`.
 fn unique_service_name() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("hhagent-supervisor-test-{}-{}", std::process::id(), nanos)
+    format!("kastellan-supervisor-test-{}-{}", std::process::id(), nanos)
 }
 
 /// RAII guard that ensures we always uninstall the test agent, even
@@ -261,7 +261,7 @@ fn invalid_name_is_rejected_before_any_launchctl_call() {
         .start("../etc/passwd")
         .expect_err("traversal name must be rejected");
     assert!(
-        matches!(err, hhagent_supervisor::SupervisorError::InvalidName(_)),
+        matches!(err, kastellan_supervisor::SupervisorError::InvalidName(_)),
         "expected InvalidName, got: {err}"
     );
 }

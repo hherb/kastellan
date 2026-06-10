@@ -3,13 +3,13 @@
 
 use std::process::ExitCode;
 
-use hhagent_core::audit_mirror;
+use kastellan_core::audit_mirror;
 
 use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_tasks(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli tasks <list|status|cancel|fail|tail> ...");
+        eprintln!("usage: kastellan-cli tasks <list|status|cancel|fail|tail> ...");
         return ExitCode::from(2);
     }
     // Per-action dispatch. `with_runtime` is called only from the known
@@ -26,8 +26,8 @@ pub(crate) fn run_tasks(args: &[String]) -> ExitCode {
 }
 
 async fn tasks_list(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::{list, Lane};
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::{list, Lane};
 
     let mut lane: Option<Lane> = None;
     let mut state: Option<String> = None;
@@ -88,8 +88,8 @@ async fn tasks_list(args: &[String]) -> ExitCode {
 }
 
 async fn tasks_status(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::get;
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::get;
 
     let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(i) => i,
@@ -125,8 +125,8 @@ async fn tasks_status(args: &[String]) -> ExitCode {
 }
 
 async fn tasks_cancel(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::{cancel_and_audit, CancelOutcome};
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::{cancel_and_audit, CancelOutcome};
+    use kastellan_db::pool::connect_runtime_pool;
 
     let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(i) => i,
@@ -151,8 +151,8 @@ async fn tasks_cancel(args: &[String]) -> ExitCode {
 }
 
 async fn tasks_fail(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tasks::mark_failed_running;
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tasks::mark_failed_running;
 
     let id: i64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(i) => i,

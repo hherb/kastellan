@@ -12,11 +12,11 @@
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
-use hhagent_core::cassandra::types::L3SkillCandidate;
-use hhagent_core::cli_audit::{
+use kastellan_core::cassandra::types::L3SkillCandidate;
+use kastellan_core::cli_audit::{
     l3_approve_and_audit, l3_approve_rejected_audit, l3_pin_and_audit, l3_pin_rejected_audit,
 };
-use hhagent_core::memory::l3_approval::{ApprovalDecision, SkillTrust};
+use kastellan_core::memory::l3_approval::{ApprovalDecision, SkillTrust};
 
 use super::shared::{decide_against_registry, load_skill_row};
 

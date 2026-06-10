@@ -6,8 +6,8 @@ use std::net::IpAddr;
 
 use url::Url;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
-use hhagent_worker_web_common::http::HttpGet;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::http::HttpGet;
 
 use crate::parse::{parse_results, Hit};
 
@@ -77,7 +77,7 @@ pub fn validate_endpoint(raw: &str, allowlist: &HostAllowlist) -> Result<Url, Se
 ///
 /// Note: this `clear()`s any query string the operator put on the configured
 /// endpoint — pre-pinned params like `?engines=google` on
-/// `HHAGENT_WEB_SEARCH_ENDPOINT` are dropped, not merged. Per-call engine/
+/// `KASTELLAN_WEB_SEARCH_ENDPOINT` are dropped, not merged. Per-call engine/
 /// language tuning is deferred (see the design spec); configure those in
 /// SearxNG's own `settings.yml` rather than on the endpoint URL.
 pub fn build_query_url(endpoint: &Url, query: &str) -> Url {
@@ -127,7 +127,7 @@ pub fn search<T: HttpGet>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_worker_web_common::testing::al;
+    use kastellan_worker_web_common::testing::al;
 
     #[test]
     fn loopback_recognises_localhost_and_loopback_ips() {
@@ -192,8 +192,8 @@ mod tests {
         assert!(pairs.contains(&("format".into(), "json".into())));
     }
 
-    use hhagent_worker_web_common::http::RawResponse;
-    use hhagent_worker_web_common::testing::{json_resp, redirect_to, FakeGet};
+    use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::testing::{json_resp, redirect_to, FakeGet};
 
     fn endpoint() -> Url {
         Url::parse("https://searx.example.org/search").unwrap()

@@ -15,13 +15,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hhagent_core::cassandra::types::{DataClass, PlannedStep};
-use hhagent_core::handoff::{HandoffCache, HandoffRef, DEFAULT_RESULT_BYTE_CAP};
-use hhagent_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
-use hhagent_core::scheduler::{ToolEntry, ToolHostStepDispatcher, ToolRegistry};
-use hhagent_core::secrets::Vault;
-use hhagent_core::tool_host::ToolHostError;
-use hhagent_core::worker_lifecycle::{WorkerHandle, WorkerLifecycleManager};
+use kastellan_core::cassandra::types::{DataClass, PlannedStep};
+use kastellan_core::handoff::{HandoffCache, HandoffRef, DEFAULT_RESULT_BYTE_CAP};
+use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
+use kastellan_core::scheduler::{ToolEntry, ToolHostStepDispatcher, ToolRegistry};
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::ToolHostError;
+use kastellan_core::worker_lifecycle::{WorkerHandle, WorkerLifecycleManager};
 use sqlx::postgres::PgPoolOptions;
 
 /// Lifecycle fake that must never be acquired — the fetch intercept returns

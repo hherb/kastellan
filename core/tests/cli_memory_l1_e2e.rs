@@ -1,9 +1,9 @@
-//! Subprocess-level pin for `hhagent-cli memory l1 {add,list,remove}`.
+//! Subprocess-level pin for `kastellan-cli memory l1 {add,list,remove}`.
 //!
 //! ## What this file pins
 //!
 //! Three independent scenarios, each bringing up its own per-test PG cluster
-//! and spawning the real `hhagent-cli` binary as a subprocess:
+//! and spawning the real `kastellan-cli` binary as a subprocess:
 //!
 //! 1. **`cli_memory_l1_add_writes_row_and_audit`** — `memory l1 add` inserts
 //!    a row, emits `inserted id=N` on stdout, and writes one
@@ -26,9 +26,9 @@
 
 use std::process::Command;
 
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, current_username, pg_bin_dir_or_skip,
     skip_if_no_supervisor, unique_suffix,
 };
@@ -40,12 +40,12 @@ use hhagent_tests_common::{
 /// Build the env block the CLI subprocess needs to find PG via UDS.
 ///
 /// Mirrors `cli_env` in `cli_tools_allowlist_e2e.rs` verbatim: the CLI's
-/// `resolve_connect_spec` reads `HHAGENT_DATA_DIR` and derives the socket
+/// `resolve_connect_spec` reads `KASTELLAN_DATA_DIR` and derives the socket
 /// path from there. `HOME` and `USER` are forwarded so the process can find
 /// its home directory and so that audit-row `actor` fields resolve cleanly.
 fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env = vec![
-        ("HHAGENT_DATA_DIR".to_string(), data_dir.display().to_string()),
+        ("KASTELLAN_DATA_DIR".to_string(), data_dir.display().to_string()),
     ];
     if let Some(home) = std::env::var_os("HOME") {
         env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
@@ -62,7 +62,7 @@ fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
 // Scenario 1 — add writes a DB row and an audit row
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli memory l1 add <body>` must:
+/// `kastellan-cli memory l1 add <body>` must:
 ///   * exit 0,
 ///   * print `inserted id=N` to stdout,
 ///   * write exactly one `actor='cli' action='l1.added'` row to `audit_log`.
@@ -76,7 +76,7 @@ async fn cli_memory_l1_add_writes_row_and_audit() {
         &bin_dir,
         "cml1-add-d",
         "cml1-add-l",
-        &format!("hhagent-postgres-cli-memory-l1-add-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l1-add-{suffix}"),
     );
 
     probe_run(
@@ -147,7 +147,7 @@ async fn cli_memory_l1_add_writes_row_and_audit() {
 // Scenario 2 — list shows all added rows
 // ---------------------------------------------------------------------------
 
-/// After three `add` calls, `hhagent-cli memory l1 list` must:
+/// After three `add` calls, `kastellan-cli memory l1 list` must:
 ///   * exit 0,
 ///   * print the fixed-width table header (`ID`, `CREATED_AT`, `BODY`),
 ///   * contain each of the three body strings.
@@ -161,7 +161,7 @@ async fn cli_memory_l1_list_shows_added_rows() {
         &bin_dir,
         "cml1-lst-d",
         "cml1-lst-l",
-        &format!("hhagent-postgres-cli-memory-l1-list-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l1-list-{suffix}"),
     );
 
     probe_run(
@@ -229,7 +229,7 @@ async fn cli_memory_l1_list_shows_added_rows() {
 // Scenario 3 — remove deletes the specified row
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli memory l1 remove <id>` must:
+/// `kastellan-cli memory l1 remove <id>` must:
 ///   * exit 0,
 ///   * print `removed id=N` to stdout,
 ///   * leave `COUNT(*) FROM memories WHERE layer = 1` at zero.
@@ -243,7 +243,7 @@ async fn cli_memory_l1_remove_deletes_specified_id() {
         &bin_dir,
         "cml1-rm-d",
         "cml1-rm-l",
-        &format!("hhagent-postgres-cli-memory-l1-remove-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l1-remove-{suffix}"),
     );
 
     probe_run(

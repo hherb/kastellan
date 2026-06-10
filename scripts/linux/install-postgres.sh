@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # install-postgres.sh
 #
-# One-time setup for the hhagent Postgres dependency on Ubuntu 24.04+.
+# One-time setup for the kastellan Postgres dependency on Ubuntu 24.04+.
 #
 # We install PostgreSQL 18 and pgvector from the official upstream PGDG apt
 # repo (apt.postgresql.org). Only the *binaries* end up on the system; the
-# *data dir* is created later under ~/.local/share/hhagent/pg/data by
-# `hhagent-db-init`, so this install does not start a system-wide cluster.
+# *data dir* is created later under ~/.local/share/kastellan/pg/data by
+# `kastellan-db-init`, so this install does not start a system-wide cluster.
 #
 # Idempotent: re-running is safe. If the PGDG sources file is already in
 # place we skip writing it; if the packages are already installed apt is a
@@ -16,7 +16,7 @@
 # 18 for features (and to align with current upstream). PGDG is the canonical
 # upstream apt repo, signed with their key, used by the project itself.
 #
-# Why not Docker? hhagent's deployment model is single-host with native
+# Why not Docker? kastellan's deployment model is single-host with native
 # OS-level supervision (systemd --user / launchd). Adding Docker just for
 # Postgres contradicts that and adds a runtime dependency the rest of the
 # project deliberately avoids.
@@ -27,7 +27,7 @@
 #     instance against our own data dir; the system instance can keep
 #     running on its own port (5432) without colliding with ours (we
 #     listen on a unix socket only, no TCP at all).
-#   - Run initdb. That's `hhagent-db-init`'s job, run as your user.
+#   - Run initdb. That's `kastellan-db-init`'s job, run as your user.
 #   - Install AGE or pg_search. Those PG-18 builds are not yet in PGDG
 #     (AGE tops out at PG 16, ParadeDB primarily ships via Docker).
 #     Tracked as separate GitHub issues; defer to Phase 1.
@@ -125,7 +125,7 @@ apt-get install -y --no-install-recommends \
 
 # Step 4 — defang the auto-created system cluster. Debian's postgresql-18
 # package runs `pg_createcluster 18 main` post-install, which spins up a
-# system-wide cluster on port 5432. We don't want that for hhagent — our
+# system-wide cluster on port 5432. We don't want that for kastellan — our
 # user-instance data dir is the only one we manage. Stop and disable it
 # (idempotent: noop if already stopped/disabled).
 if command -v systemctl >/dev/null 2>&1; then
@@ -144,7 +144,7 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 # Step 5 — sanity print so the operator can confirm the binaries we'll
-# point hhagent-db-init at.
+# point kastellan-db-init at.
 PG_BIN="/usr/lib/postgresql/18/bin"
 if [[ -x "${PG_BIN}/postgres" && -x "${PG_BIN}/initdb" ]]; then
     echo
@@ -152,9 +152,9 @@ if [[ -x "${PG_BIN}/postgres" && -x "${PG_BIN}/initdb" ]]; then
     "${PG_BIN}/postgres" --version
     "${PG_BIN}/initdb" --version
     echo
-    echo "Next: as your normal (non-root) user, run hhagent-db-init to"
+    echo "Next: as your normal (non-root) user, run kastellan-db-init to"
     echo "create the user-instance data dir under"
-    echo "~/.local/share/hhagent/pg/data and configure UDS-only listen,"
+    echo "~/.local/share/kastellan/pg/data and configure UDS-only listen,"
     echo "peer auth. The supervisor will pick it up from there."
 else
     echo "Warning: ${PG_BIN}/postgres or initdb missing after install." >&2

@@ -84,7 +84,7 @@ use crate::handoff::{MAX_FETCH_BYTES, SUMMARY_HEAD_BYTES};
 use crate::memory::l3_surface::{render_skill_entry, SurfacedSkill};
 use crate::recall_assembly::RecalledContext;
 use crate::scheduler::tool_dispatch::{HANDOFF_METHOD_FETCH, HANDOFF_TOOL};
-use hhagent_db::memories::Memory;
+use kastellan_db::memories::Memory;
 
 /// Render the always-present `<handoff>` block.
 ///

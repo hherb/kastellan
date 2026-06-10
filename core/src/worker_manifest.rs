@@ -62,7 +62,7 @@ pub struct ResolveCtx<'a> {
     pub exists: &'a dyn Fn(&Path) -> bool,
     /// Probe: is this path a directory?
     pub is_dir: &'a dyn Fn(&Path) -> bool,
-    /// Directory of the running `hhagent` binary, for `current_exe()`-relative
+    /// Directory of the running `kastellan` binary, for `current_exe()`-relative
     /// worker discovery. `None` when it can't be determined (fail-soft).
     pub exe_dir: Option<&'a Path>,
     /// Operational argv allowlist, pre-fetched from the DB by the builder,
@@ -72,13 +72,13 @@ pub struct ResolveCtx<'a> {
 }
 
 /// Locate a worker binary. Precedence:
-///   1. **If the override env var (e.g. `"HHAGENT_SHELL_EXEC_BIN"`) is set, it
+///   1. **If the override env var (e.g. `"KASTELLAN_SHELL_EXEC_BIN"`) is set, it
 ///      is authoritative** — return it iff it names a runnable file, otherwise
 ///      return `None`. A set-but-invalid override **fails closed**: we never
 ///      silently substitute a *different* binary for the one the operator
 ///      explicitly named (that would subvert their intent and is a footgun in a
 ///      security-first daemon). This also matches the pre-manifest behaviour
-///      (`HHAGENT_SHELL_EXEC_BIN` set but not a file ⇒ not registered).
+///      (`KASTELLAN_SHELL_EXEC_BIN` set but not a file ⇒ not registered).
 ///   2. **Only when the override is unset**, fall back to the exe-relative
 ///      sibling default `<exe_dir>/<default_name>`, if it is a runnable file.
 ///

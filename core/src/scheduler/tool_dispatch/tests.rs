@@ -15,8 +15,8 @@ use super::*;
 // parent's `use` glob — import them directly here (all were previously
 // reached via `use super::*`).
 use crate::tool_host::ToolHostError;
-use hhagent_protocol::{client::ClientError, codes, RpcError};
-use hhagent_sandbox::{Net, Profile};
+use kastellan_protocol::{client::ClientError, codes, RpcError};
+use kastellan_sandbox::{Net, Profile};
 use std::io;
 use std::path::PathBuf;
 
@@ -25,7 +25,7 @@ use std::path::PathBuf;
 #[test]
 fn rpc_code_name_maps_known_codes() {
     // Each branch is pinned individually so a future rename in
-    // `hhagent_protocol::codes` (e.g. renaming POLICY_DENIED) trips
+    // `kastellan_protocol::codes` (e.g. renaming POLICY_DENIED) trips
     // a single specific assertion instead of a coalesced diff.
     assert_eq!(rpc_code_name(codes::PARSE_ERROR), "PARSE_ERROR");
     assert_eq!(rpc_code_name(codes::INVALID_REQUEST), "INVALID_REQUEST");
@@ -168,12 +168,12 @@ fn tool_registry_insert_replaces_existing_entry() {
     let mut reg = ToolRegistry::new();
     reg.insert("shell-exec", fake_entry());
     let mut second = fake_entry();
-    second.binary = PathBuf::from("/opt/hhagent/shell-exec");
+    second.binary = PathBuf::from("/opt/kastellan/shell-exec");
     reg.insert("shell-exec", second);
     assert_eq!(reg.len(), 1);
     assert_eq!(
         reg.lookup("shell-exec").unwrap().binary,
-        PathBuf::from("/opt/hhagent/shell-exec")
+        PathBuf::from("/opt/kastellan/shell-exec")
     );
 }
 
@@ -195,10 +195,10 @@ fn tool_names_returns_registered_names_sorted() {
 #[test]
 fn shell_exec_entry_carries_allowlist_in_env() {
     // The allowlist round-trips into the policy's env vec as
-    // HHAGENT_SHELL_ALLOWLIST = JSON array. The worker reads it
+    // KASTELLAN_SHELL_ALLOWLIST = JSON array. The worker reads it
     // at startup; changing the env-var name or the encoding here
     // requires a coordinated change in `workers/shell-exec/src`.
-    let binary = PathBuf::from("/usr/local/bin/hhagent-worker-shell-exec");
+    let binary = PathBuf::from("/usr/local/bin/kastellan-worker-shell-exec");
     let allowlist = vec![
         "/usr/bin/echo".to_string(),
         "/bin/echo".to_string(),
@@ -220,7 +220,7 @@ fn shell_exec_entry_carries_allowlist_in_env() {
 
     // The allowlist env entry.
     let allow_env = entry.policy.env.iter()
-        .find(|(k, _)| k == "HHAGENT_SHELL_ALLOWLIST")
+        .find(|(k, _)| k == "KASTELLAN_SHELL_ALLOWLIST")
         .expect("allowlist env entry must be present");
     let parsed: Vec<String> = serde_json::from_str(&allow_env.1)
         .expect("allowlist value must be JSON-decodable");
@@ -236,7 +236,7 @@ fn shell_exec_entry_empty_allowlist_is_valid_deny_all() {
     // POLICY_DENIED.
     let entry = shell_exec_entry(PathBuf::from("/x"), &[]);
     let allow_env = entry.policy.env.iter()
-        .find(|(k, _)| k == "HHAGENT_SHELL_ALLOWLIST")
+        .find(|(k, _)| k == "KASTELLAN_SHELL_ALLOWLIST")
         .expect("allowlist env entry must be present");
     assert_eq!(allow_env.1, "[]");
 }

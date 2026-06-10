@@ -35,4 +35,4 @@ CREATE INDEX memory_entities_entity_idx
 -- Runtime role gets the same shape as memories/entities/relations
 -- (full CRUD). audit_log's REVOKE shape does NOT apply here — this is
 -- a mutable derived index, not an immutable audit trail.
-GRANT SELECT, INSERT, UPDATE, DELETE ON memory_entities TO hhagent_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON memory_entities TO kastellan_runtime;

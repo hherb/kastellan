@@ -141,8 +141,8 @@ etc.). Production code stays byte-identical across the lift.
 
 ## Verification
 
-- `cargo test -p hhagent-core --lib prompt_assembly` green.
-- `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings` exit 0.
+- `cargo test -p kastellan-core --lib prompt_assembly` green.
+- `cargo clippy -p kastellan-core --all-targets --locked -- -D warnings` exit 0.
 - `cargo build --workspace` clean.
 
 No PG / sandbox / worker needed — this is a pure-function change.

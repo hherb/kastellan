@@ -1,4 +1,4 @@
-//! `hhagent-llm-router` — sole egress for LLM calls.
+//! `kastellan-llm-router` — sole egress for LLM calls.
 //!
 //! ## Role in the system
 //!
@@ -218,7 +218,7 @@ impl Router {
     ) -> Result<EmbeddingResponse, RouterError> {
         let url = compose_url(&self.config.embedding_url, EMBEDDINGS_PATH);
         tracing::debug!(
-            target: "hhagent::llm_router",
+            target: "kastellan::llm_router",
             backend = "local",
             url = %url,
             model = %request.model,
@@ -268,7 +268,7 @@ impl Router {
     async fn dispatch_local(&self, request: &ChatRequest) -> Result<ChatResponse, RouterError> {
         let url = compose_url(&self.config.local_url, CHAT_COMPLETIONS_PATH);
         tracing::debug!(
-            target: "hhagent::llm_router",
+            target: "kastellan::llm_router",
             backend = "local",
             url = %url,
             model = %request.model,

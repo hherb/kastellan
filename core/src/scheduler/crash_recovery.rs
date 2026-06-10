@@ -2,7 +2,7 @@
 //! emission.
 //!
 //! At daemon start the previous instance may have died mid-run leaving
-//! tasks in `running` state. [`hhagent_db::tasks::sweep_crashed`] is
+//! tasks in `running` state. [`kastellan_db::tasks::sweep_crashed`] is
 //! the SQL-layer fix: it flips every `running` row whose lease elapsed
 //! to `crashed`. That alone is enough for `tasks.state` to be correct,
 //! but observation-phase SQL queries that pivot on the audit log can't
@@ -79,8 +79,8 @@
 use sqlx::PgPool;
 use time::OffsetDateTime;
 
-use hhagent_db::tasks::{self, Task};
-use hhagent_db::DbError;
+use kastellan_db::tasks::{self, Task};
+use kastellan_db::DbError;
 
 use super::audit::{
     action_task_terminal, build_crashed_finalize_payload, build_lifecycle_payload,
@@ -114,7 +114,7 @@ async fn emit_task_crashed_row(pool: &PgPool, task: &Task) {
     let action = action_task_terminal("crashed");
     let payload = build_lifecycle_payload(task.id, task.lane, task.plan_count);
     if let Err(e) =
-        hhagent_db::audit::insert(pool, SCHEDULER_AUDIT_ACTOR, &action, payload).await
+        kastellan_db::audit::insert(pool, SCHEDULER_AUDIT_ACTOR, &action, payload).await
     {
         tracing::warn!(
             task_id = task.id,
@@ -153,7 +153,7 @@ async fn emit_task_finalize_row(pool: &PgPool, task: &Task) {
         task.started_at,
         finished_at,
     );
-    if let Err(e) = hhagent_db::audit::insert(
+    if let Err(e) = kastellan_db::audit::insert(
         pool,
         SCHEDULER_AUDIT_ACTOR,
         ACTION_TASK_FINALIZE,

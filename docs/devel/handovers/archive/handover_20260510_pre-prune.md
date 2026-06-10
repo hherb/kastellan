@@ -1,4 +1,4 @@
-# hhagent — Session Handover
+# kastellan — Session Handover
 
 > Rolling document. Updated at the end of every working session so the next
 > session (likely a fresh Claude Code) can resume cold. See
@@ -16,23 +16,23 @@
 2. [`docs/threat-model.md`](../../threat-model.md) — invariant, scenarios in scope, defence-in-depth layers
 3. [`docs/devel/ROADMAP.md`](../ROADMAP.md) — the master sequenced TODO list with commit hashes for shipped items
 4. The design plan (outside the repo) — `~/.claude/plans/i-d-like-to-design-logical-starlight.md`
-5. Memory notes (auto-loaded) — see `~/.claude/projects/-home-hherb-src-hhagent/memory/MEMORY.md`
+5. Memory notes (auto-loaded) — see `~/.claude/projects/-home-hherb-src-kastellan/memory/MEMORY.md`
 
 ## Working state (what's green right now)
 
 ```
-hhagent (Rust workspace, 8 crates, AGPL-3.0)
-├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs now runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup for probe + pool; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), memory (Phase-1 `recall(pool, params)` — fans out to `db::memories` semantic + lexical lanes, fuses via Reciprocal Rank Fusion, hydrates top-k bodies in one round-trip; pure `reciprocal_rank_fusion(lists, k)` helper exposed for testing and future re-rankers; `RecallModes::{ALL, SEMANTIC_ONLY, LEXICAL_ONLY}` selector; graph lane deferred — needs entity↔memory linkage that the schema doesn't carry yet)
-├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement (drop-privilege helper) + probe::run (ensure DB → migrate as superuser → SET ROLE hhagent_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + audit::{insert, fetch_by_id, fetch_since, truncate_payload} (pure 4 KiB SHA-256 envelope + async CRUD) + memories::{insert_memory, semantic_search, lexical_search, fetch_by_ids, vector_literal} (pgvector text-cast bind for `vector(1024)` — no `pgvector` Rust crate dep yet; `<=>` cosine distance via sequential scan since HNSW is deferred to first batch ingest; `to_tsvector('simple')` + `ts_rank` paired with the schema's GENERATED `tsv` column) + pool::connect_runtime_pool (PgPool with `after_connect` SET ROLE hhagent_runtime hook) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql + 0002_runtime_role.sql + 0003_audit_log_notify.sql + 0004_secrets_aad_nonempty.sql) + secrets::{Router-shaped AES-256-GCM at-rest with OS keyring KeyProvider} + hhagent-db-init bin
-├── llm-router         hhagent-llm-router: sole egress for LLM calls. `Router::send(&ChatRequest) -> Result<ChatResponse, RouterError>` over reqwest+rustls; `Backend::{Local, Frontier}` closed enum; `PolicyGate` trait with `DefaultLocalPolicy` always picking `Local` (Phase-5 seam). `RouterConfig::from_env` reads `HHAGENT_LLM_LOCAL_URL` / `HHAGENT_LLM_LOCAL_MODEL` / `HHAGENT_LLM_FRONTIER_URL` / `HHAGENT_LLM_FRONTIER_MODEL` / `HHAGENT_LLM_TIMEOUT_MS`. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns `RouterError::PolicyDeniedFrontier` until Phase 5
-├── sandbox            hhagent-sandbox: SandboxPolicy + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt
-├── supervisor         hhagent-supervisor: SystemdUser (Linux) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec} + default_probe (per-OS supervisor probe)
-├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
-├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS)
-└── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
+kastellan (Rust workspace, 8 crates, AGPL-3.0)
+├── core               kastellan-core: lib + 2 bins (`kastellan` daemon + `kastellan-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs now runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup for probe + pool; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `kastellan-cli audit tail`), memory (Phase-1 `recall(pool, params)` — fans out to `db::memories` semantic + lexical lanes, fuses via Reciprocal Rank Fusion, hydrates top-k bodies in one round-trip; pure `reciprocal_rank_fusion(lists, k)` helper exposed for testing and future re-rankers; `RecallModes::{ALL, SEMANTIC_ONLY, LEXICAL_ONLY}` selector; graph lane deferred — needs entity↔memory linkage that the schema doesn't carry yet)
+├── db                 kastellan-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir) + conn::ConnectSpec (UDS PgConnectOptions builder) + RUNTIME_ROLE/set_role_runtime_statement (drop-privilege helper) + probe::run (ensure DB → migrate as superuser → SET ROLE kastellan_runtime → audit row, fail-closed) + graph::{Graph trait, PgGraph} (relational entities/relations + recursive-CTE path()) + audit::{insert, fetch_by_id, fetch_since, truncate_payload} (pure 4 KiB SHA-256 envelope + async CRUD) + memories::{insert_memory, semantic_search, lexical_search, fetch_by_ids, vector_literal} (pgvector text-cast bind for `vector(1024)` — no `pgvector` Rust crate dep yet; `<=>` cosine distance via sequential scan since HNSW is deferred to first batch ingest; `to_tsvector('simple')` + `ts_rank` paired with the schema's GENERATED `tsv` column) + pool::connect_runtime_pool (PgPool with `after_connect` SET ROLE kastellan_runtime hook) + MIGRATOR (sqlx::migrate!() over migrations/0001_init.sql + 0002_runtime_role.sql + 0003_audit_log_notify.sql + 0004_secrets_aad_nonempty.sql) + secrets::{Router-shaped AES-256-GCM at-rest with OS keyring KeyProvider} + kastellan-db-init bin
+├── llm-router         kastellan-llm-router: sole egress for LLM calls. `Router::send(&ChatRequest) -> Result<ChatResponse, RouterError>` over reqwest+rustls; `Backend::{Local, Frontier}` closed enum; `PolicyGate` trait with `DefaultLocalPolicy` always picking `Local` (Phase-5 seam). `RouterConfig::from_env` reads `KASTELLAN_LLM_LOCAL_URL` / `KASTELLAN_LLM_LOCAL_MODEL` / `KASTELLAN_LLM_FRONTIER_URL` / `KASTELLAN_LLM_FRONTIER_MODEL` / `KASTELLAN_LLM_TIMEOUT_MS`. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns `RouterError::PolicyDeniedFrontier` until Phase 5
+├── sandbox            kastellan-sandbox: SandboxPolicy + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt
+├── supervisor         kastellan-supervisor: SystemdUser (Linux) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec} + default_probe (per-OS supervisor probe)
+├── protocol           kastellan-protocol: JSON-RPC 2.0 over stdio (working)
+├── workers/prelude      kastellan-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS)
+└── workers/shell-exec   kastellan-worker-shell-exec: uses prelude::serve_stdio
 ```
 
-**`cargo test --workspace` on Linux: 249 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (247 → 249 from Options N's code-review follow-up: removed the `insert_memory_rejects_wrong_dim` mirror test and replaced it with three tests against the now-extracted real helpers — `check_embedding_dim_rejects_too_short`, `check_embedding_dim_accepts_correct_length`, `limit_as_i64_saturates_at_i64_max`; see "Code-review follow-up" below). Two pre-existing doctests in `hhagent-sandbox` and `hhagent-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
+**`cargo test --workspace` on Linux: 249 tests passed, 0 failed, 0 `[SKIP]` lines, 0 warnings** (247 → 249 from Options N's code-review follow-up: removed the `insert_memory_rejects_wrong_dim` mirror test and replaced it with three tests against the now-extracted real helpers — `check_embedding_dim_rejects_too_short`, `check_embedding_dim_accepts_correct_length`, `limit_as_i64_saturates_at_i64_max`; see "Code-review follow-up" below). Two pre-existing doctests in `kastellan-sandbox` and `kastellan-worker-prelude` are `ignored` (explicit `ignore` markers, not regressions from this session).
 **macOS projection:** ~196 (was ~194; +2 from the same set — every new test is platform-neutral). Re-run on macOS to confirm.
 
 | Suite | Tests | What's verified |
@@ -42,20 +42,20 @@ hhagent (Rust workspace, 8 crates, AGPL-3.0)
 | `sandbox` unit (macos) | 14 | sandbox-exec profile builder shape + path canonicalization + on-host probe + TinyScheme-injection rejection + canonicalize error propagation + **strict profile does NOT contain unrestricted `(allow mach-lookup)`** (issue #1) |
 | `sandbox` integration (`linux_smoke`) | 7 | **real** bwrap+cgroup: echo runs jailed, /etc/passwd & /home invisible, listed paths visible, net unreachable under `Net::Deny`, relative-path policy rejected, **mem_burner allocating 256 MiB under `MemoryMax=32M` is OOM-killed by the kernel** |
 | `sandbox` integration (`macos_smoke`) | 10 | **real** sandbox-exec: scaffold marker, echo runs jailed, /etc/master.passwd invisible, /Users does not leak username, fs_read paths readable (canonicalize /etc symlinks), /dev/disk0 denied, relative-path policy rejected, network unreachable under `Net::Deny`, **worker is the leader of a fresh session — sid == pid via setsid (issue #2)**, **worker cannot `bootstrap_look_up` `com.apple.coreservices.appleevents` (issue #1)** |
-| `core` unit | 40 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests). **Option I additions (10):** `audit_mirror::audit_log_path_for` zero-pads month/day + handles 4-digit year (2 tests), `format_jsonl_line` ends with single \n + serialises every AuditRow field (2 tests), `default_state_dir` resolves under `$HOME/.local/state/hhagent` (1 test). `audit_tail::parse_audit_filename` accepts canonical shape + rejects every off-shape (no prefix/suffix/wrong digit count/non-numeric/invalid date) (2 tests), `find_audit_files` returns dates ascending + ignores non-matching files + handles missing dirs (2 tests), `tail_loop` from-start mode replays then exits (1 test). **Option M additions (2):** `worker_command_new_carries_method_and_params` pins that the `pub(crate)` constructor preserves both the method (any `Into<String>` form) and the JSON params verbatim (1 test); `worker_command_new_accepts_owned_string` pins that the `Into<String>` parameter shape accepts both `&str` (the dispatcher's call site form) and an owned `String` so a refactor narrowing the bound trips this test (1 test). **Option N additions (12):** `memory::reciprocal_rank_fusion` algorithm pins (7 tests: empty input → empty output, single lane preserves order with strictly decreasing scores, two agreeing lanes sum to `2/(k+1)`, two disagreeing lanes tiebreak on smaller id, items absent from a lane contribute 0 not a penalty, two-lane appearer beats single-lane top-1, smaller `k` widens the rank-1-vs-rank-2 ratio); `RecallModes` shape pins (4 tests: `default()` enables every lane, `ALL` constant agrees with `Default`, `SEMANTIC_ONLY` disables lexical, `LEXICAL_ONLY` disables semantic); `RRF_K_CONSTANT` pinned at exactly `60.0` to match the Cormack/Clarke/Buettcher 2009 paper (1 test) |
+| `core` unit | 40 | `derive_lockdown_env` adds correct env entries (4 tests); watchdog loop honours cancel, fires at deadline, exits early on cancel during sleep, guard's Drop sets cancel flag (4 tests); `is_valid_target_pid` rejects 0/1/u32::MAX/`i32::MAX+1` (1 test); workspace creates layout, drops wipes tree, `fs_write_paths` order, `extend_policy` appends, task-id validation, root auto-create, pre-existing dir refused (7 tests). **Option I additions (10):** `audit_mirror::audit_log_path_for` zero-pads month/day + handles 4-digit year (2 tests), `format_jsonl_line` ends with single \n + serialises every AuditRow field (2 tests), `default_state_dir` resolves under `$HOME/.local/state/kastellan` (1 test). `audit_tail::parse_audit_filename` accepts canonical shape + rejects every off-shape (no prefix/suffix/wrong digit count/non-numeric/invalid date) (2 tests), `find_audit_files` returns dates ascending + ignores non-matching files + handles missing dirs (2 tests), `tail_loop` from-start mode replays then exits (1 test). **Option M additions (2):** `worker_command_new_carries_method_and_params` pins that the `pub(crate)` constructor preserves both the method (any `Into<String>` form) and the JSON params verbatim (1 test); `worker_command_new_accepts_owned_string` pins that the `Into<String>` parameter shape accepts both `&str` (the dispatcher's call site form) and an owned `String` so a refactor narrowing the bound trips this test (1 test). **Option N additions (12):** `memory::reciprocal_rank_fusion` algorithm pins (7 tests: empty input → empty output, single lane preserves order with strictly decreasing scores, two agreeing lanes sum to `2/(k+1)`, two disagreeing lanes tiebreak on smaller id, items absent from a lane contribute 0 not a penalty, two-lane appearer beats single-lane top-1, smaller `k` widens the rank-1-vs-rank-2 ratio); `RecallModes` shape pins (4 tests: `default()` enables every lane, `ALL` constant agrees with `Default`, `SEMANTIC_ONLY` disables lexical, `LEXICAL_ONLY` disables semantic); `RRF_K_CONSTANT` pinned at exactly `60.0` to match the Cormack/Clarke/Buettcher 2009 paper (1 test) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → bwrap+landlock+seccomp (Linux) / sandbox-exec (macOS) → shell-exec round-trip — **rewritten this session (Option M)** to route every call through `tool_host::dispatch`, since the new `WorkerCommand` seal forecloses out-of-crate `worker.call(...)` invocations. Each test brings up its own per-test PG cluster (same recipe as `audit_dispatch_e2e.rs`) so dispatch's audit-log INSERT lands somewhere; `[SKIP]`s cleanly without PG / supervisor / sandbox / worker binary. Same four assertion shapes: echo round-trip; non-allowlisted argv → POLICY_DENIED (now wrapped in `ToolHostError::Protocol(...)` whose Display still includes the JSON-RPC code); unknown method → METHOD_NOT_FOUND; **workspace e2e**: `Workspace::extend_policy` wires `<root>/<task_id>/{in,out,tmp}` into the policy, sandboxed `cp` reads from `in/` and writes to `out/`, host reads back byte-for-byte, `Workspace::Drop` wipes the whole tree. Per-test PG cost: ~3 s × 4 = ~12 s additional integration-test time on Linux; acceptable for the compile-time chokepoint pin |
 | `core` integration (`memory_recall_e2e`) | 1 | **NEW Option N — cross-platform real** Phase-1 entry. Brings up a per-test PG cluster (same recipe as `audit_dispatch_e2e.rs` and `supervisor_e2e.rs` — issue #15 will eventually hoist this), runs `db::probe::run` to apply 0001+0002+0003+0004, opens `pool::connect_runtime_pool`, then seeds 3 memories with bodies that share no surface words (`"alpha bravo charlie ..."`, `"delta echo foxtrot ..."`, `"golf hotel india ..."`) and 1024-dim L2-normalised embeddings produced by a hermetic `text_to_embedding(text)` helper (SHA-256 of the body → 8-byte xorshift64 seed → 1024 floats in `[-1, 1]` → normalise; same text → same vector → cosine similarity 1.0 → distance 0; different texts → near-orthogonal vectors → distance ≈ 1). Asserts: (1) `db::memories::semantic_search(emb_a, 10).first() == Some(id_a)` — pgvector cosine ranks the exact-match memory first; (2) `db::memories::lexical_search("alpha", 10) == [id_a]` — `tsvector @@ plainto_tsquery('simple', 'alpha')` matches only A; (3) `core::memory::recall(SEMANTIC_ONLY)` returns `id_a` as top-1 with the body byte-for-byte; (4) `core::memory::recall(LEXICAL_ONLY)` returns exactly `[A]`; (5) `core::memory::recall(ALL)` with both lanes voting for A still ranks A first AND includes B + C below it (proves RRF *fuses* rather than intersects). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~1.9 s on the DGX Spark. No HNSW index needed at 3 rows (sequential scan is fast); the index lands with Phase 1's first batch ingest |
-| `core` integration (`audit_dispatch_e2e`) | 1 | **NEW Option I — cross-platform real** dispatcher chokepoint. Brings up a per-test PG cluster (initdb + `postgres_service_spec` + start + wait Active + wait socket), runs `db::probe::run` to apply 0001/0002/0003, opens a `pool::connect_runtime_pool` (which auto-`SET ROLE hhagent_runtime` on every dialed conn), spawns shell-exec under the platform sandbox, and exercises `tool_host::dispatch` twice: once with an allowlisted argv (`echo dispatch-ok`) → success path returns the worker's result and writes a row with `actor=tool:shell-exec`, `action=shell.exec`, payload `{req, result, ms}` (no `err`); once with `/bin/cat /etc/passwd` → POLICY_DENIED, dispatch propagates the error AND writes a row with payload `{req, err, ms}` (no `result`). Final assertion: exactly 3 rows in `audit_log` (bring-up + 2 dispatches) with the per-row payload-shape pins. Multi-thread tokio runtime is mandatory — `dispatch` uses `block_in_place` around the synchronous `Client::call`. Short temp-dir labels (`disp-d`, `disp-l`) keep the cluster socket path under the 108-byte sockaddr_un limit |
-| `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `hhagent` binary with `HHAGENT_DATA_DIR` + `HHAGENT_STATE_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user; `HHAGENT_STATE_DIR` keeps the audit-mirror's JSONL out of the operator's `~/.local/state/`). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d hhagent` and assert `audit_log` has at least one `(actor='core', action='startup')` row → **NEW Option I**: poll the per-test state dir for an `audit-YYYY-MM-DD.jsonl` file containing the bring-up row within ≤ 5 s (proves the audit-mirror task spawned, listened, drained, and fsynced) and assert every line is valid JSON → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + four `PathGuard`s clean up PG service, core service, two data/log dirs, the core log dir, and the per-test state dir on panic. Unique `hhagent-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
-| `db` unit | 71 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`hhagent`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"hhagent"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "hhagent" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"hhagent_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "hhagent_runtime"` (identifier-quoted). **Plus Option I additions (6):** `audit::truncate_payload` — small payloads pass through (1), empty object passes through (1), boundary-inclusive non-truncation at exactly `PAYLOAD_MAX_BYTES = 4096` (1), oversize replaced with `{_truncated, sha256, len}` envelope with 64-char lowercase-hex digest (1), deterministic for same input (1), distinct fingerprints for distinct inputs at same length (1). **Plus secrets-at-rest additions (18):** AES-GCM round-trip recovers plaintext (1); decrypt fails under wrong key (1), wrong AAD (1), tampered ciphertext (1), tampered nonce (1); each `encrypt` call uses a fresh nonce — no determinism leak (1); `encrypt` rejects > `MAX_PLAINTEXT_LEN = 64 KiB` (1); AAD shape pin — starts with `AAD_DOMAIN = b"hhagent-secrets-v1"`, NUL-delimited, name embedded (1); AAD with `extra` appends after the second NUL (1); AAD is always non-empty by construction (closes #12 at the application layer) (1); `validate_name` rejects empty (1), oversize > `MAX_NAME_LEN = 256` (1), embedded NUL (1), other control bytes (1); accepts typical operator-friendly names (1); `MapKeyProvider` returns the registered key (1); unknown id is `KeyNotFound` (1); constants `KEY_LEN = 32` / `NONCE_LEN = 12` / `AAD_DOMAIN` / `KEY_SERVICE = "hhagent"` / `KEY_ACCOUNT = "secrets-v1"` are all pinned (1). **Plus Option N additions (9 — was 7 before code-review follow-up):** `memories::EMBEDDING_DIM` pinned at `1024` (1); `DEFAULT_RECALL_K` is at least 1 (1); `vector_literal` formatter shape — empty slice → `[]` (1), single-element no trailing comma → `[0.5]` (1), multi-element preserves order → `[1,2,3]` not `[3,2,1]` (1), negatives flow through → `[-0.5,0.5]` (1). **Code-review follow-up replaces the inline `check_dim` mirror with the real helper:** `check_embedding_dim_rejects_too_short` exercises the production `check_embedding_dim(label, v)` (shared by `insert_memory` write-path and `semantic_search` read-path) and pins that the error message includes the call-site label so operators can tell INSERT from query failures apart (1); `check_embedding_dim_accepts_correct_length` pins the happy-path (1); `limit_as_i64_saturates_at_i64_max` pins that the new `usize → i64` `LIMIT` cast saturates at `i64::MAX` rather than wrapping to negative (defense-in-depth against a future config-file caller passing an unreasonably large `k`) (1) |
-| `db` integration (`postgres_e2e`) | 5 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `hhagent-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (existing C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Runtime ~2.1 s on the DGX Spark. **`runtime_role_audit_log_revoke_is_enforced`** (Option L): brings up a per-test PG cluster, runs the probe (which now applies `0001` + `0002` and switches to `SET ROLE hhagent_runtime` for its own audit insert), then connects on a fresh pool connection, asserts `pg_roles` rolsuper/rolcanlogin/rolinherit/rolcreaterole/rolcreatedb are all false, asserts the OS user is recorded in `pg_auth_members` for `hhagent_runtime`, holds an acquired connection out of the pool and runs `SET ROLE hhagent_runtime` on it, then proves: INSERT into `audit_log` succeeds; UPDATE on `audit_log` fails with `"permission denied"`; DELETE on `audit_log` fails with `"permission denied"`; full SELECT/INSERT/UPDATE/DELETE on `memories` succeeds (so the bulk CRUD GRANT block is wired); final `audit_log` count is exactly 2 (probe row + test INSERT, no UPDATE rewrite, no DELETE leak). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~3.0 s on the DGX Spark. **`audit_helpers_pool_and_notify_round_trip`** (NEW Option I): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003), opens `pool::connect_runtime_pool` and proves UPDATE on `audit_log` via the pool fails with `"permission denied"` (negative-path proof that `after_connect` SET ROLE actually ran). Then attaches a `PgListener` on `audit_log_inserted` BEFORE the watched insert, calls `audit::insert(&pool, "tool:test", "call", json)`, asserts `tokio::time::timeout(2 s, listener.recv())` returns a notification on the right channel whose payload parses as the inserted row id, calls `audit::fetch_by_id` and confirms the row round-trips byte-for-byte. Finally, `audit::insert` with an 8 KiB payload + `fetch_by_id` returns the `_truncated` envelope (proves `truncate_payload` is wired into the insert path, not just an unused pure helper). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark. **`secrets_put_get_list_delete_round_trip`** (NEW secrets-at-rest): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003 + the new 0004 `secrets_aad_nonempty` migration), opens a runtime-role pool, then exercises every leaf of the `db::secrets` API end-to-end with a `MapKeyProvider`. Asserts: (1) `put` then `get` round-trips plaintext byte-for-byte, with the AAD column populated by the application so 0004's `CHECK (octet_length(aad) > 0)` passes; (2) `list` returns metadata only (name + key_id + timestamps, ORDER BY name ASC) — no ciphertext, no nonce, no AAD in the returned struct; (3) re-`put` of the same name UPSERTs (single row, new ciphertext + new nonce); (4) `delete` removes the row and is idempotent (`Ok(false)` on absent), and a subsequent `get` is `NotFound`; (5) `UPDATE secrets SET name = …` via the runtime-role pool (which holds UPDATE on `secrets`, just not on `audit_log` — the worst-case attacker surface from the threat model) is detected by `get` as `AadMismatch` because the stored AAD still binds to the *old* name; (6) flipping a byte of `secrets.ciphertext` via `set_byte(...) # 1` is detected by `get` as `DecryptFailed` (GCM auth tag mismatch); (7) a direct `INSERT INTO secrets … aad = ''::bytea` is rejected by 0004's CHECK constraint with `"secrets_aad_nonempty"` in the error message. Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark |
-| `llm-router` unit | 28 | **NEW Option J.** `error::truncate_for_error` passes short strings through, appends `…[truncated]` marker when oversized (2); `ERROR_BODY_CAP` pinned at `1024` bytes (1). `messages::ChatRole` serialises `system`/`user`/`assistant`/`tool` lowercase + rejects unknown variants like `"developer"` — closed enum (2); `ChatMessage::{system,user,assistant}` constructors set the right role (1); `ChatRequest` serialises with `skip_serializing_if = Option::is_none` so `max_tokens`/`temperature` never leak as `null` on the wire — older llama.cpp builds reject null-valued optional fields (1); `ChatRequest` includes optional fields when set (1); `ChatResponse` decodes the canonical OpenAI-style envelope from vLLM 0.5+ with full `usage` block (1); decodes the minimal Ollama envelope without `id`/`usage`/`finish_reason` — `serde(default)` + `Option` survives missing fields (1). `backend::Backend` serialises lowercase tag (1), `as_tag()` matches the serde rename (1), round-trips (1). `config::default_local_url_for_os()` returns `http://127.0.0.1:8000/v1` on Linux + `http://127.0.0.1:11434/v1` on macOS (1); `DEFAULT_LOCAL_MODEL = "local-default"` + `DEFAULT_TIMEOUT_MS = 30_000` pinned (1); `RouterConfig::default()` shape (1); `RouterConfig::from_env` with no vars set equals `default()` (1); each env var override flows through individually + parses timeout as ms (1); empty-string env var treated as absent (1); non-numeric `HHAGENT_LLM_TIMEOUT_MS` rejected with operator-readable error (1). `policy::DefaultLocalPolicy` always picks `Backend::Local` regardless of model name / message count / sensitivity hints (1); compile-time `Send + Sync` pin so a future implementor capturing `Rc<_>` won't compile (1). `lib::compose_url` trims a single trailing slash from the base, inserts a slash when the path lacks one (2); `CHAT_COMPLETIONS_PATH = "/chat/completions"` pinned (1); `Router::new` succeeds with `RouterConfig::default()` (1); `Router::pick_backend` delegates to the policy (1); `Router::send` returns `RouterError::PolicyDeniedFrontier` synchronously when a test policy picks `Backend::Frontier` (1, async test) |
+| `core` integration (`audit_dispatch_e2e`) | 1 | **NEW Option I — cross-platform real** dispatcher chokepoint. Brings up a per-test PG cluster (initdb + `postgres_service_spec` + start + wait Active + wait socket), runs `db::probe::run` to apply 0001/0002/0003, opens a `pool::connect_runtime_pool` (which auto-`SET ROLE kastellan_runtime` on every dialed conn), spawns shell-exec under the platform sandbox, and exercises `tool_host::dispatch` twice: once with an allowlisted argv (`echo dispatch-ok`) → success path returns the worker's result and writes a row with `actor=tool:shell-exec`, `action=shell.exec`, payload `{req, result, ms}` (no `err`); once with `/bin/cat /etc/passwd` → POLICY_DENIED, dispatch propagates the error AND writes a row with payload `{req, err, ms}` (no `result`). Final assertion: exactly 3 rows in `audit_log` (bring-up + 2 dispatches) with the per-row payload-shape pins. Multi-thread tokio runtime is mandatory — `dispatch` uses `block_in_place` around the synchronous `Client::call`. Short temp-dir labels (`disp-d`, `disp-l`) keep the cluster socket path under the 108-byte sockaddr_un limit |
+| `core` integration (`supervisor_e2e`) | 1 | **cross-platform real** end-to-end smoke for the daemon's hard PG dependency. Brings up a per-test PG cluster via `default_supervisor()` (initdb + `postgres_service_spec` + start + wait socket + 500 ms stable-Active recheck), then `core_service_spec` for the freshly-built `kastellan` binary with `KASTELLAN_DATA_DIR` + `KASTELLAN_STATE_DIR` + `USER` injected via `spec.env` (peer auth needs role==OS user; `KASTELLAN_STATE_DIR` keeps the audit-mirror's JSONL out of the operator's `~/.local/state/`). Install → start → wait Active → hold 500 ms and re-check (catches probe failure that would loop under `Restart=on-failure`) → poll the redirected stdout for the daemon's `"database probe succeeded"` log line → connect via `psql -d kastellan` and assert `audit_log` has at least one `(actor='core', action='startup')` row → **NEW Option I**: poll the per-test state dir for an `audit-YYYY-MM-DD.jsonl` file containing the bring-up row within ≤ 5 s (proves the audit-mirror task spawned, listened, drained, and fsynced) and assert every line is valid JSON → stop core → wait Inactive → uninstall → status=NotInstalled. Two `ServiceGuard`s + four `PathGuard`s clean up PG service, core service, two data/log dirs, the core log dir, and the per-test state dir on panic. Unique `kastellan-supervisor-test-{pg,core}-{pid}-{nanos}` names so concurrent runs don't collide. macOS holds the same intra-binary serial mutex as `launchd_agents_smoke.rs` |
+| `db` unit | 71 | `build_initdb_argv` (8) + `build_postgresql_auto_conf` (7) + `find_pg_bin_dir` (3) + `is_data_dir_initialized` (2) + `require_absolute` / `default_data_dir` / `default_socket_dir` (5) — same 23 as before. **C2.2 additions:** `conn::ConnectSpec` (9 tests: `default_for` resolves `<data>/sockets`+`$USER`+`kastellan`; fails closed with `EnvVarMissing("USER")` when `$USER` is unset or empty; `for_maintenance_db` swaps only the database field; `DEFAULT_APPLICATION_DB` pinned `"kastellan"`; `MAINTENANCE_DB` pinned `"postgres"`; `quote_ident` wraps + doubles `"` + handles empty); `graph::{Entity, Relation}` field-shape pins (2); `probe::ensure_database_exists` SQL shape pin (1: `CREATE DATABASE "kastellan" OWNER "alice"`). **Plus Option L additions (2):** `RUNTIME_ROLE` const pinned `"kastellan_runtime"`; `set_role_runtime_statement()` returns `SET ROLE "kastellan_runtime"` (identifier-quoted). **Plus Option I additions (6):** `audit::truncate_payload` — small payloads pass through (1), empty object passes through (1), boundary-inclusive non-truncation at exactly `PAYLOAD_MAX_BYTES = 4096` (1), oversize replaced with `{_truncated, sha256, len}` envelope with 64-char lowercase-hex digest (1), deterministic for same input (1), distinct fingerprints for distinct inputs at same length (1). **Plus secrets-at-rest additions (18):** AES-GCM round-trip recovers plaintext (1); decrypt fails under wrong key (1), wrong AAD (1), tampered ciphertext (1), tampered nonce (1); each `encrypt` call uses a fresh nonce — no determinism leak (1); `encrypt` rejects > `MAX_PLAINTEXT_LEN = 64 KiB` (1); AAD shape pin — starts with `AAD_DOMAIN = b"kastellan-secrets-v1"`, NUL-delimited, name embedded (1); AAD with `extra` appends after the second NUL (1); AAD is always non-empty by construction (closes #12 at the application layer) (1); `validate_name` rejects empty (1), oversize > `MAX_NAME_LEN = 256` (1), embedded NUL (1), other control bytes (1); accepts typical operator-friendly names (1); `MapKeyProvider` returns the registered key (1); unknown id is `KeyNotFound` (1); constants `KEY_LEN = 32` / `NONCE_LEN = 12` / `AAD_DOMAIN` / `KEY_SERVICE = "kastellan"` / `KEY_ACCOUNT = "secrets-v1"` are all pinned (1). **Plus Option N additions (9 — was 7 before code-review follow-up):** `memories::EMBEDDING_DIM` pinned at `1024` (1); `DEFAULT_RECALL_K` is at least 1 (1); `vector_literal` formatter shape — empty slice → `[]` (1), single-element no trailing comma → `[0.5]` (1), multi-element preserves order → `[1,2,3]` not `[3,2,1]` (1), negatives flow through → `[-0.5,0.5]` (1). **Code-review follow-up replaces the inline `check_dim` mirror with the real helper:** `check_embedding_dim_rejects_too_short` exercises the production `check_embedding_dim(label, v)` (shared by `insert_memory` write-path and `semantic_search` read-path) and pins that the error message includes the call-site label so operators can tell INSERT from query failures apart (1); `check_embedding_dim_accepts_correct_length` pins the happy-path (1); `limit_as_i64_saturates_at_i64_max` pins that the new `usize → i64` `LIMIT` cast saturates at `i64::MAX` rather than wrapping to negative (defense-in-depth against a future config-file caller passing an unreasonably large `k`) (1) |
+| `db` integration (`postgres_e2e`) | 5 | **`postgres_install_start_select_one_uninstall`** (existing): supervisor lifecycle for `kastellan-postgres` + `psql SELECT 1` over UDS. **`probe_runs_migrations_and_graph_happy_path`** (existing C2.2): brings up a per-test PG cluster, runs `db::probe::run` *twice* (proves CREATE DATABASE + migration idempotency — second run is a no-op except the audit row), then connects with sqlx and exercises `PgGraph`: upsert two `person` entities (alice, bob), re-upsert alice (id stable under `ON CONFLICT (kind, name)`, attrs updated), upsert relation alice—knows—bob, `get_entity` round-trip with updated attrs, `neighbors` filtered + unfiltered both return `[bob]`, `path(alice, bob, 5)` returns `[alice, bob]`, `path(bob, alice, 5)` returns `None` (relations are directed), final `audit_log` count == 2 (one row per probe call, no spurious writes). Runtime ~2.1 s on the DGX Spark. **`runtime_role_audit_log_revoke_is_enforced`** (Option L): brings up a per-test PG cluster, runs the probe (which now applies `0001` + `0002` and switches to `SET ROLE kastellan_runtime` for its own audit insert), then connects on a fresh pool connection, asserts `pg_roles` rolsuper/rolcanlogin/rolinherit/rolcreaterole/rolcreatedb are all false, asserts the OS user is recorded in `pg_auth_members` for `kastellan_runtime`, holds an acquired connection out of the pool and runs `SET ROLE kastellan_runtime` on it, then proves: INSERT into `audit_log` succeeds; UPDATE on `audit_log` fails with `"permission denied"`; DELETE on `audit_log` fails with `"permission denied"`; full SELECT/INSERT/UPDATE/DELETE on `memories` succeeds (so the bulk CRUD GRANT block is wired); final `audit_log` count is exactly 2 (probe row + test INSERT, no UPDATE rewrite, no DELETE leak). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~3.0 s on the DGX Spark. **`audit_helpers_pool_and_notify_round_trip`** (NEW Option I): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003), opens `pool::connect_runtime_pool` and proves UPDATE on `audit_log` via the pool fails with `"permission denied"` (negative-path proof that `after_connect` SET ROLE actually ran). Then attaches a `PgListener` on `audit_log_inserted` BEFORE the watched insert, calls `audit::insert(&pool, "tool:test", "call", json)`, asserts `tokio::time::timeout(2 s, listener.recv())` returns a notification on the right channel whose payload parses as the inserted row id, calls `audit::fetch_by_id` and confirms the row round-trips byte-for-byte. Finally, `audit::insert` with an 8 KiB payload + `fetch_by_id` returns the `_truncated` envelope (proves `truncate_payload` is wired into the insert path, not just an unused pure helper). Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark. **`secrets_put_get_list_delete_round_trip`** (NEW secrets-at-rest): brings up a per-test PG cluster, runs the probe (applies 0001 + 0002 + 0003 + the new 0004 `secrets_aad_nonempty` migration), opens a runtime-role pool, then exercises every leaf of the `db::secrets` API end-to-end with a `MapKeyProvider`. Asserts: (1) `put` then `get` round-trips plaintext byte-for-byte, with the AAD column populated by the application so 0004's `CHECK (octet_length(aad) > 0)` passes; (2) `list` returns metadata only (name + key_id + timestamps, ORDER BY name ASC) — no ciphertext, no nonce, no AAD in the returned struct; (3) re-`put` of the same name UPSERTs (single row, new ciphertext + new nonce); (4) `delete` removes the row and is idempotent (`Ok(false)` on absent), and a subsequent `get` is `NotFound`; (5) `UPDATE secrets SET name = …` via the runtime-role pool (which holds UPDATE on `secrets`, just not on `audit_log` — the worst-case attacker surface from the threat model) is detected by `get` as `AadMismatch` because the stored AAD still binds to the *old* name; (6) flipping a byte of `secrets.ciphertext` via `set_byte(...) # 1` is detected by `get` as `DecryptFailed` (GCM auth tag mismatch); (7) a direct `INSERT INTO secrets … aad = ''::bytea` is rejected by 0004's CHECK constraint with `"secrets_aad_nonempty"` in the error message. Skips with `[SKIP]` when no PG / no supervisor. Runtime ~2.1 s on the DGX Spark |
+| `llm-router` unit | 28 | **NEW Option J.** `error::truncate_for_error` passes short strings through, appends `…[truncated]` marker when oversized (2); `ERROR_BODY_CAP` pinned at `1024` bytes (1). `messages::ChatRole` serialises `system`/`user`/`assistant`/`tool` lowercase + rejects unknown variants like `"developer"` — closed enum (2); `ChatMessage::{system,user,assistant}` constructors set the right role (1); `ChatRequest` serialises with `skip_serializing_if = Option::is_none` so `max_tokens`/`temperature` never leak as `null` on the wire — older llama.cpp builds reject null-valued optional fields (1); `ChatRequest` includes optional fields when set (1); `ChatResponse` decodes the canonical OpenAI-style envelope from vLLM 0.5+ with full `usage` block (1); decodes the minimal Ollama envelope without `id`/`usage`/`finish_reason` — `serde(default)` + `Option` survives missing fields (1). `backend::Backend` serialises lowercase tag (1), `as_tag()` matches the serde rename (1), round-trips (1). `config::default_local_url_for_os()` returns `http://127.0.0.1:8000/v1` on Linux + `http://127.0.0.1:11434/v1` on macOS (1); `DEFAULT_LOCAL_MODEL = "local-default"` + `DEFAULT_TIMEOUT_MS = 30_000` pinned (1); `RouterConfig::default()` shape (1); `RouterConfig::from_env` with no vars set equals `default()` (1); each env var override flows through individually + parses timeout as ms (1); empty-string env var treated as absent (1); non-numeric `KASTELLAN_LLM_TIMEOUT_MS` rejected with operator-readable error (1). `policy::DefaultLocalPolicy` always picks `Backend::Local` regardless of model name / message count / sensitivity hints (1); compile-time `Send + Sync` pin so a future implementor capturing `Rc<_>` won't compile (1). `lib::compose_url` trims a single trailing slash from the base, inserts a slash when the path lacks one (2); `CHAT_COMPLETIONS_PATH = "/chat/completions"` pinned (1); `Router::new` succeeds with `RouterConfig::default()` (1); `Router::pick_backend` delegates to the policy (1); `Router::send` returns `RouterError::PolicyDeniedFrontier` synchronously when a test policy picks `Backend::Frontier` (1, async test) |
 | `llm-router` integration (`local_backend_e2e`) | 4 | **NEW Option J.** `happy_path_round_trips_request_and_response` brings up a hand-rolled `tokio::net::TcpListener` mock on `127.0.0.1:0` that speaks just enough HTTP/1.1 to canned-respond a vLLM-shaped chat-completion (no `wiremock`/`httpmock` dev-dep — matches the `db/tests/postgres_e2e.rs` style of bringing fixtures up by hand). Asserts the router POSTs to `/chat/completions`, the request body decodes back as the original `ChatRequest` byte-for-byte (proves the `skip_serializing_if = Option::is_none` pin from `messages.rs` survives the round-trip), the response decodes as `ChatResponse` with full `usage` block. **`http_error_status_is_surfaced_with_truncated_body`**: backend returns 500 → `RouterError::HttpStatus { status: 500, body: <≤1 KiB capture> }`, body preserves operator-readable error text. **`decode_error_is_surfaced_when_response_is_not_chat_response`**: backend returns 200 + JSON that lacks `choices` → `RouterError::DecodeResponse { source, body }`, body captured for triage. **`router_send_routes_to_pick_backend_choice`**: a test-only `AlwaysFrontier` policy is wired into the router pointed at the mock; `Router::send` returns `RouterError::PolicyDeniedFrontier` AND no HTTP request reaches the mock (asserted via `oneshot::TryRecvError::Empty`). Defends the chokepoint: a future refactor that bypassed `policy.pick(&request)` would dial the local URL anyway and silently succeed — this test catches it |
 | `prelude` unit | 11 | env-var parsing, profile parsing, BPF program builds (Strict + NetClient), unshare/mount/ptrace/bpf absent from allow-list under both profiles, socket present *only* in NetClient, essential syscalls present in BASE_ALLOW |
 | `prelude` integration (`landlock_smoke`) | 4 | write-to-non-allowlisted denied with EACCES; allowlisted scratch write works; `/usr` reads still work; **v6 ABI yields `FullyEnforced` on this kernel** |
 | `prelude` integration (`seccomp_smoke`) | 6 | `unshare(CLONE_NEWUSER)` and `mount(...)` killed with SIGSYS under both Strict and NetClient; `socket(AF_INET, SOCK_STREAM)` killed under Strict, survives under NetClient; `getpid()` survives |
-| `supervisor` unit (linux) | 44 | `build_unit_file` shape (14 tests: section order, Description, ExecStart program+args, arg quoting + escape of `"`/`\`, Environment ordering, Environment value quoting, WorkingDirectory present/absent, log redirects, keep_alive Restart=on-failure, no-Restart when keep_alive=false, TimeoutStopSec always, [Install] WantedBy=default.target); `validate_service_name` (6 tests: typical names, empty, traversal, dot/dash prefix, overlong, whitespace+specials); driver against custom units_dir (7 tests: install writes file, rejects relative program, rejects invalid name, creates units_dir, uninstall removes file, uninstall idempotent, status NotInstalled when absent); `specs::core_service_spec` (8 tests: canonical name `hhagent-core`, caller-supplied program path flows through, args+env empty by default, no working_dir, keep_alive=true regression pin (flipped from false 2026-05-09 when the daemon became long-running), log paths under log_dir with predictable filenames, stdout/stderr distinct); `specs::postgres_service_spec` (8 tests: canonical name `hhagent-postgres`, caller-supplied program path flows through, args=`["-D", <data_dir>]` in order, env empty by default, no working_dir, keep_alive=true so a postgres crash respawns under `Restart=on-failure`, log paths under log_dir with predictable filenames, stdout/stderr distinct); `canonical_service_names_are_distinct` (1 test: `hhagent-core` ≠ `hhagent-postgres` so unit/agent files never collide) |
-| `supervisor` unit (macos) | 52 | `build_plist` shape (14 tests: XML preamble + DOCTYPE, Label, ProgramArguments order, XML-escaping of `<`, `>`, `&`, `"`, `'` in args, EnvironmentVariables presence/order/omission-when-empty, WorkingDirectory present/absent, log redirects, RunAtLoad=true unconditional, KeepAlive=true/false mirror of spec, ExitTimeOut always, Label XML-escaped); `validate_service_name` (6 tests: typical names incl. reverse-DNS like `org.hhagent.core`, empty, traversal, dot/dash prefix, overlong, whitespace+specials); helpers (7 tests: `xml_escape` predefined entities + Unicode passthrough, `parse_print_state` indented/multi-word/absent, `is_no_such_service_error` phrases, `user_domain_target` `gui/<digits>` shape); driver against custom agents_dir (8 tests: install writes plist, rejects relative program, rejects invalid name, rejects relative working_dir, creates agents_dir, uninstall removes plist, uninstall idempotent, status NotInstalled when absent); `specs::*` (17 tests: 8 `core_service_spec` + 8 `postgres_service_spec` + 1 `canonical_service_names_are_distinct` — same suite runs on both OSes since `specs.rs` has no platform deps) |
+| `supervisor` unit (linux) | 44 | `build_unit_file` shape (14 tests: section order, Description, ExecStart program+args, arg quoting + escape of `"`/`\`, Environment ordering, Environment value quoting, WorkingDirectory present/absent, log redirects, keep_alive Restart=on-failure, no-Restart when keep_alive=false, TimeoutStopSec always, [Install] WantedBy=default.target); `validate_service_name` (6 tests: typical names, empty, traversal, dot/dash prefix, overlong, whitespace+specials); driver against custom units_dir (7 tests: install writes file, rejects relative program, rejects invalid name, creates units_dir, uninstall removes file, uninstall idempotent, status NotInstalled when absent); `specs::core_service_spec` (8 tests: canonical name `kastellan-core`, caller-supplied program path flows through, args+env empty by default, no working_dir, keep_alive=true regression pin (flipped from false 2026-05-09 when the daemon became long-running), log paths under log_dir with predictable filenames, stdout/stderr distinct); `specs::postgres_service_spec` (8 tests: canonical name `kastellan-postgres`, caller-supplied program path flows through, args=`["-D", <data_dir>]` in order, env empty by default, no working_dir, keep_alive=true so a postgres crash respawns under `Restart=on-failure`, log paths under log_dir with predictable filenames, stdout/stderr distinct); `canonical_service_names_are_distinct` (1 test: `kastellan-core` ≠ `kastellan-postgres` so unit/agent files never collide) |
+| `supervisor` unit (macos) | 52 | `build_plist` shape (14 tests: XML preamble + DOCTYPE, Label, ProgramArguments order, XML-escaping of `<`, `>`, `&`, `"`, `'` in args, EnvironmentVariables presence/order/omission-when-empty, WorkingDirectory present/absent, log redirects, RunAtLoad=true unconditional, KeepAlive=true/false mirror of spec, ExitTimeOut always, Label XML-escaped); `validate_service_name` (6 tests: typical names incl. reverse-DNS like `org.kastellan.core`, empty, traversal, dot/dash prefix, overlong, whitespace+specials); helpers (7 tests: `xml_escape` predefined entities + Unicode passthrough, `parse_print_state` indented/multi-word/absent, `is_no_such_service_error` phrases, `user_domain_target` `gui/<digits>` shape); driver against custom agents_dir (8 tests: install writes plist, rejects relative program, rejects invalid name, rejects relative working_dir, creates agents_dir, uninstall removes plist, uninstall idempotent, status NotInstalled when absent); `specs::*` (17 tests: 8 `core_service_spec` + 8 `postgres_service_spec` + 1 `canonical_service_names_are_distinct` — same suite runs on both OSes since `specs.rs` has no platform deps) |
 | `supervisor` integration (`systemd_user_smoke`, linux) | 2 | **real** `systemctl --user` round-trip: install → daemon-reload → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled, with RAII cleanup guard so a panic does not leave residue in `~/.config/systemd/user/`; invalid name rejected before any systemctl call |
 | `supervisor` integration (`launchd_agents_smoke`, macos) | 4 | **real** `launchctl bootstrap gui/<uid>` round-trip against `~/Library/LaunchAgents/`: install → start → status=Active → stop → status=Inactive → uninstall → status=NotInstalled; idempotent `start` after start (status-first check via `launchctl print`, no version-specific error-string parsing); idempotent `stop` against not-bootstrapped agent; invalid name rejected before any launchctl call. RAII guard cleans up plist file + `bootout` on panic; tests serialised with a static `Mutex` because the GUI launchd domain is a shared global resource. `[SKIP]` line on hosts where the GUI domain is unreachable (SSH-only sessions). |
 
@@ -69,9 +69,9 @@ the full `build_argv` mount layout in the probe. Today's run shows zero
 **Build & test:**
 ```sh
 source "$HOME/.cargo/env"
-cargo build --workspace          # produces ./target/debug/hhagent + workers
+cargo build --workspace          # produces ./target/debug/kastellan + workers
 cargo test --workspace           # all green
-./target/debug/hhagent           # runs the (skeleton) core daemon, emits one JSON log line
+./target/debug/kastellan           # runs the (skeleton) core daemon, emits one JSON log line
 ```
 
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile
@@ -129,7 +129,7 @@ discussions were filed as GitHub issues for the next session.
     in-crate hole — sibling modules can bypass `dispatch`.* The
     `pub(crate)` constructor closes the out-of-crate path
     (the Option-M `compile_fail` doctest still pins this), but
-    any sibling module inside `hhagent_core` can construct one
+    any sibling module inside `kastellan_core` can construct one
     and reach `SupervisedWorker::call` directly. Three
     candidate fixes proposed in the issue: (a) move the
     worker-spawn API into a private submodule that exposes only
@@ -345,7 +345,7 @@ audit-log row. The seal turns it into a compile-time invariant.
   constructor. The `pub(crate)` visibility on both the fields and
   the constructor means an out-of-crate caller — including each
   doctest harness, which compiles as a separate crate that depends
-  on `hhagent_core` — cannot construct one. The
+  on `kastellan_core` — cannot construct one. The
   `SupervisedWorker::call` method's signature changed from `(method:
   &str, params: serde_json::Value)` to `(cmd: WorkerCommand)`: it
   now requires a sealed command. So the only path by which any
@@ -354,7 +354,7 @@ audit-log row. The seal turns it into a compile-time invariant.
 
 - **The `compile_fail` doctest is the regression pin:**
   `core/src/tool_host.rs::WorkerCommand`'s doc comment carries a
-  `compile_fail` block that does `use hhagent_core::tool_host::WorkerCommand;
+  `compile_fail` block that does `use kastellan_core::tool_host::WorkerCommand;
   let _ = WorkerCommand::new("echo", serde_json::Value::Null);`. The
   doctest harness compiles each block as a separate crate, so the
   `pub(crate) fn new` is out of scope and the block must fail to
@@ -362,7 +362,7 @@ audit-log row. The seal turns it into a compile-time invariant.
   (or `WorkerCommand`'s fields to `pub`), the doctest fails with a
   "compile_fail block compiled successfully" error and the
   chokepoint pin is restored before merge. Verified live this
-  session: `cargo test -p hhagent-core --doc` returns
+  session: `cargo test -p kastellan-core --doc` returns
   `1 passed; 0 failed; 0 ignored`.
 
 - **Why a `pub(crate) fn new` constructor and not `pub(crate)`-field
@@ -394,7 +394,7 @@ audit-log row. The seal turns it into a compile-time invariant.
   `default_supervisor()` install + start + wait Active + wait
   socket + 500 ms stable-Active recheck); (3) runs the probe to
   apply migrations 0001 + 0002 + 0003 + 0004; (4) opens a
-  `pool::connect_runtime_pool` (auto-`SET ROLE hhagent_runtime` on
+  `pool::connect_runtime_pool` (auto-`SET ROLE kastellan_runtime` on
   every dialed conn); (5) spawns the worker; (6) calls
   `dispatch(&pool, &mut sworker, "shell-exec", method, params).await`
   in place of the direct `worker.call`. Assertion shapes are
@@ -466,13 +466,13 @@ tests are platform-neutral.
 last application-layer plumbing required before Phase 1 is in place:
 every future model call (memory recall ranking in Phase 1, the
 scheduler's reasoning step, channel auto-reply drafting in Phase 2,
-…) goes through `hhagent_llm_router::Router::send(&ChatRequest) ->
+…) goes through `kastellan_llm_router::Router::send(&ChatRequest) ->
 Result<ChatResponse, RouterError>`. Phase 0's `DefaultLocalPolicy`
 always picks `Backend::Local`; the `Backend::Frontier` arm of
 `Router::send` returns `RouterError::PolicyDeniedFrontier` by design
 until the Phase-5 policy gate lands.
 
-- **New top-level workspace crate `llm-router` (`hhagent-llm-router`,
+- **New top-level workspace crate `llm-router` (`kastellan-llm-router`,
   member #3 alongside `core` and `db`):** ~960 lines of Rust + ~340
   lines of integration test, 32 tests total (28 unit + 4 integration).
   License: AGPL-3.0-only (workspace inherit). Not a sub-folder of
@@ -520,13 +520,13 @@ until the Phase-5 policy gate lands.
   `http://127.0.0.1:11434/v1`, the default Ollama port). Other
   Unixes fall back to the Linux default — better to have *something*
   than to require an env var. `from_env()` reads
-  `HHAGENT_LLM_LOCAL_URL` / `HHAGENT_LLM_LOCAL_MODEL` /
-  `HHAGENT_LLM_FRONTIER_URL` / `HHAGENT_LLM_FRONTIER_MODEL` /
-  `HHAGENT_LLM_TIMEOUT_MS` with two operator-friendly behaviours: an
+  `KASTELLAN_LLM_LOCAL_URL` / `KASTELLAN_LLM_LOCAL_MODEL` /
+  `KASTELLAN_LLM_FRONTIER_URL` / `KASTELLAN_LLM_FRONTIER_MODEL` /
+  `KASTELLAN_LLM_TIMEOUT_MS` with two operator-friendly behaviours: an
   *unset* var or an *empty-string* var (e.g. a stray `export
-  HHAGENT_LLM_FRONTIER_URL=` in a shell profile) is treated as
+  KASTELLAN_LLM_FRONTIER_URL=` in a shell profile) is treated as
   absent (the latter is the most common operator footgun); a
-  non-numeric `HHAGENT_LLM_TIMEOUT_MS` is rejected with a typed
+  non-numeric `KASTELLAN_LLM_TIMEOUT_MS` is rejected with a typed
   `RouterError::Config` carrying both the env-var name and the
   invalid value. The frontier URL/model are deliberately *not*
   defaulted; setting them is purely a forward-compatible seam for
@@ -709,7 +709,7 @@ key.
   (`encrypt`, `decrypt`, `compute_aad`, `validate_name`) decoupled
   from any I/O so the AES-GCM contract is pinned by unit tests
   without a DB or a keyring. AAD layout:
-  `b"hhagent-secrets-v1" || 0x00 || name.as_bytes() || 0x00 ||
+  `b"kastellan-secrets-v1" || 0x00 || name.as_bytes() || 0x00 ||
   optional_extra` — domain-separated, NUL-delimited, name-bound.
   This is what gives us row-rename detection: `UPDATE secrets SET
   name = …` leaves the stored AAD pointing at the old name, so
@@ -727,7 +727,7 @@ key.
 - **`KeyProvider` trait + two impls (in the same file):**
   `MapKeyProvider` is the test seam — production code never sees
   it. `OsKeyringProvider::ensure_initialized()` opens the
-  `(hhagent, secrets-v1)` entry on first use; if no entry exists,
+  `(kastellan, secrets-v1)` entry on first use; if no entry exists,
   it generates a fresh 32-byte key via `aead::OsRng` and writes it.
   The cached `key_bytes` field means the keyring lookup (and any
   unlock prompt) happens once at startup, not on every `get`. The
@@ -751,7 +751,7 @@ key.
 
 - **`db/migrations/0004_secrets_aad_nonempty.sql` (~30 lines):**
   drops the provisional `aad BYTEA NOT NULL DEFAULT ''::bytea` and
-  adds `CHECK (octet_length(aad) > 0)`. Closes [#12](https://github.com/hherb/hhagent/issues/12).
+  adds `CHECK (octet_length(aad) > 0)`. Closes [#12](https://github.com/hherb/kastellan/issues/12).
   Belt-and-braces: the application layer is structurally
   incapable of producing an empty AAD (`compute_aad` always emits
   at least `AAD_DOMAIN.len() + 2` bytes), but the DB-layer CHECK
@@ -858,14 +858,14 @@ is done; the unit tests are platform-neutral, the integration test
 
 ---
 
-### Phase 0 cont. (Option I — dispatcher chokepoint + audit_log NOTIFY trigger + JSONL mirror + `hhagent-cli audit tail`)
+### Phase 0 cont. (Option I — dispatcher chokepoint + audit_log NOTIFY trigger + JSONL mirror + `kastellan-cli audit tail`)
 
 **Closed Option I from the previous handover's Next-TODO menu.** Every
 Phase 0+ tool call now goes through a single `tool_host::dispatch`
 chokepoint that writes one `audit_log` row per call. A long-lived
 `audit_mirror` task (spawned by the daemon at startup) replicates
-committed rows to `~/.local/state/hhagent/audit-YYYY-MM-DD.jsonl` with
-fsync per write and daily UTC rotation; `hhagent-cli audit tail` reads
+committed rows to `~/.local/state/kastellan/audit-YYYY-MM-DD.jsonl` with
+fsync per write and daily UTC rotation; `kastellan-cli audit tail` reads
 those files with no DB connection, so an operator can debug a daemon
 that crashed mid-startup. The DB is the source of truth (the Phase 0
 runtime-role `REVOKE UPDATE, DELETE` makes that durable); the JSONL
@@ -963,7 +963,7 @@ stream is the operator-visibility replica.
   the final `sync_all` always runs.
 
 - **`core/src/audit_tail.rs` (~190 lines, 5 unit tests):**
-  `tail -f`-style follower used by `hhagent-cli audit tail`. Pure
+  `tail -f`-style follower used by `kastellan-cli audit tail`. Pure
   helpers: `parse_audit_filename` (strict shape: `audit-YYYY-MM-DD.jsonl`,
   rejects every off-form including invalid dates like `Feb 30`),
   `find_audit_files` (returns `Vec<(Date, PathBuf)>` sorted ascending,
@@ -977,15 +977,15 @@ stream is the operator-visibility replica.
   flushing the previous file's tail before switching, so a midnight
   rotation doesn't drop the last few lines.
 
-- **`core/src/bin/hhagent-cli.rs` (~140 lines):** new operator CLI
-  binary. Today only one subcommand: `hhagent-cli audit tail
+- **`core/src/bin/kastellan-cli.rs` (~140 lines):** new operator CLI
+  binary. Today only one subcommand: `kastellan-cli audit tail
   [--from-start] [--no-follow] [--state-dir PATH]`. Hand-rolled argv
   parsing (no `clap` dep — the surface is too small to justify one).
-  Resolves the state dir from `--state-dir` → `$HHAGENT_STATE_DIR` →
-  `$HOME/.local/state/hhagent`, in that order. Maps SIGPIPE-style
+  Resolves the state dir from `--state-dir` → `$KASTELLAN_STATE_DIR` →
+  `$HOME/.local/state/kastellan`, in that order. Maps SIGPIPE-style
   `BrokenPipe` to exit 0 (matches BSD `tail`'s "downstream `head`
   closed early is not an error" behaviour). Built into
-  `target/debug/hhagent-cli` via a second `[[bin]]` stanza in
+  `target/debug/kastellan-cli` via a second `[[bin]]` stanza in
   `core/Cargo.toml`.
 
 - **`core/src/main.rs` rewrite (~30 lines net):** after `probe::run`,
@@ -995,7 +995,7 @@ stream is the operator-visibility replica.
   source of truth). On SIGTERM/SIGINT, it shuts down the mirror
   *before* closing the pool so the mirror's final `sync_all`
   observes an alive pool. Adds a third env-var seam:
-  `HHAGENT_STATE_DIR` (parallel to `HHAGENT_DATA_DIR`) so the
+  `KASTELLAN_STATE_DIR` (parallel to `KASTELLAN_DATA_DIR`) so the
   supervisor_e2e test can point the audit-mirror at a per-test
   tempdir without touching the operator's `~/.local/state/`.
 
@@ -1037,12 +1037,12 @@ scheduler has a concrete contract for what audit-row durability
 means to it (e.g. "no tool result enters the recall corpus until its
 audit row is committed").
 
-**Why the JSONL state dir is `$HOME/.local/state/hhagent` on both
+**Why the JSONL state dir is `$HOME/.local/state/kastellan` on both
 OSes.** XDG-compliant on Linux; macOS doesn't follow XDG by default
 but does support the path. We use the same on both OSes for the same
 reason `default_data_dir` does — operator docs and scripts don't
-need per-OS branches. The `HHAGENT_STATE_DIR` env override (parallel
-to `HHAGENT_DATA_DIR`) is the test seam.
+need per-OS branches. The `KASTELLAN_STATE_DIR` env override (parallel
+to `KASTELLAN_DATA_DIR`) is the test seam.
 
 **Why `block_in_place` instead of converting `Client::call` async.**
 The protocol crate's `Client` is synchronous (BufReader / Write over
@@ -1080,25 +1080,25 @@ guarantee, and the daemon now drops privileges before every
 application-level write. The contract is enforced at the database
 layer, not by application discipline alone — a compromised
 dispatcher (or LLM-issued SQL, or a future bug) running under
-`hhagent_runtime` cannot tamper with prior audit rows even if the
+`kastellan_runtime` cannot tamper with prior audit rows even if the
 caller wanted to. Phase 0 Option I (the dispatcher write-site) and
 all later application paths inherit the same connection pattern.
 
 - **`db/migrations/0002_runtime_role.sql` (~140 lines):** creates
-  `hhagent_runtime` with `NOSUPERUSER NOCREATEROLE NOCREATEDB
+  `kastellan_runtime` with `NOSUPERUSER NOCREATEROLE NOCREATEDB
   NOLOGIN NOINHERIT`, grants the OS user (= cluster bootstrap
-  superuser) membership via `EXECUTE format('GRANT hhagent_runtime
+  superuser) membership via `EXECUTE format('GRANT kastellan_runtime
   TO %I', current_user)` so `SET ROLE` works on every host
   regardless of the OS username, then carves the GRANT/REVOKE shape:
   `GRANT SELECT, INSERT ON audit_log` paired with
-  `REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM hhagent_runtime`
+  `REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM kastellan_runtime`
   (the contract pin from `0001_init.sql`'s comment block) and
   `REVOKE ALL ON audit_log FROM PUBLIC`. The other five tables
   (`tasks`, `memories`, `entities`, `relations`, `secrets`) get
   bulk `GRANT SELECT, INSERT, UPDATE, DELETE`. Sequences for all
   six tables get explicit `GRANT USAGE` because BIGSERIAL needs
   `nextval()`. `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT …
-  TO hhagent_runtime` covers future migrations' tables/sequences
+  TO kastellan_runtime` covers future migrations' tables/sequences
   automatically (caveat noted inline: future insert-only tables
   still need their own explicit `REVOKE UPDATE, DELETE`). The
   `CREATE ROLE` is wrapped in a `DO $$ IF NOT EXISTS … END $$`
@@ -1107,9 +1107,9 @@ all later application paths inherit the same connection pattern.
   recovery scenarios.
 
 - **`db/src/conn.rs` additions (~40 lines, +2 unit tests):**
-  `pub const RUNTIME_ROLE: &str = "hhagent_runtime"` (paired
+  `pub const RUNTIME_ROLE: &str = "kastellan_runtime"` (paired
   regression-test pin) and `pub fn set_role_runtime_statement() ->
-  String` returning `SET ROLE "hhagent_runtime"` (identifier-quoted
+  String` returning `SET ROLE "kastellan_runtime"` (identifier-quoted
   via the existing `quote_ident` helper, so a future role-rename to
   a name containing a reserved word or unusual character can't
   silently parse as a different statement). Pure functions — no
@@ -1122,7 +1122,7 @@ all later application paths inherit the same connection pattern.
   role + grant are guaranteed to exist by the time SET ROLE runs.
   Module docstring updated to spell out the new pipeline (5 steps
   → 6 steps; SET ROLE is step 5). `audit_log` rows from this point
-  on are inserted under `hhagent_runtime`, so the runtime-layer
+  on are inserted under `kastellan_runtime`, so the runtime-layer
   prohibition on UPDATE/DELETE applies to the probe's own writes
   too — defense-in-depth even on the bootstrap path.
 
@@ -1133,11 +1133,11 @@ all later application paths inherit the same connection pattern.
   contract:
   - **Role shape pin**: `SELECT rolname, rolcanlogin, rolsuper,
     rolinherit, rolcreaterole, rolcreatedb FROM pg_roles WHERE
-    rolname = 'hhagent_runtime'` — all five booleans must be `false`.
+    rolname = 'kastellan_runtime'` — all five booleans must be `false`.
   - **Membership pin**: `pg_auth_members` join asserts the OS user
-    has been granted `hhagent_runtime` (so `SET ROLE` will succeed).
+    has been granted `kastellan_runtime` (so `SET ROLE` will succeed).
   - **Negative path**: hold a pool-acquired connection out, `SET
-    ROLE hhagent_runtime`, then INSERT a row (succeeds), UPDATE
+    ROLE kastellan_runtime`, then INSERT a row (succeeds), UPDATE
     (must fail, error message contains `"permission denied"`),
     DELETE (must fail, same message check). Substring match on
     `"permission denied"` is portable across PG major versions and
@@ -1163,7 +1163,7 @@ conceptually. We went with SET ROLE for two reasons specific to
 our codebase shape: (1) it's pure SQL and lives entirely in a
 sqlx migration — no need to mutate `pg_hba.conf`/`pg_ident.conf`
 inside the data dir post-`initdb`, which would require either
-modifying `hhagent-db-init` (with awkward upgrade semantics) or
+modifying `kastellan-db-init` (with awkward upgrade semantics) or
 adding a non-SQL config-file step to the probe; (2) the runtime
 role's privileges are bounded by the GRANTs regardless of how the
 role was entered, so the threat-model story is identical. The
@@ -1193,7 +1193,7 @@ a daemon-scoped `PgPool`, via sqlx's `PoolOptions::after_connect`
 hook so every pool connection comes pre-SET-ROLE.
 
 **Why we did not split per-worker roles yet** (e.g.
-`hhagent_memory`, `hhagent_dispatcher`). The HANDOVER's Option-L
+`kastellan_memory`, `kastellan_dispatcher`). The HANDOVER's Option-L
 note said "GRANT all needed CRUD on the other tables; … audit each
 subsystem's needs first". The audit revealed that today there's
 exactly one application path — the daemon's audit_log INSERT —
@@ -1258,7 +1258,7 @@ runs migrations → emits a bring-up `audit_log` row.
   pure description of how to reach the per-user cluster.
   `default_for(&data_dir)` reads `$USER` for peer-auth identity,
   resolves `<data_dir>/sockets` for the UDS host, and pins the
-  application database name to `"hhagent"`. Fails closed with
+  application database name to `"kastellan"`. Fails closed with
   `DbError::EnvVarMissing("USER")` when `$USER` is unset or empty —
   peer auth has no fallback identity so guessing would lead to a
   confusing connection failure or (worse) authenticating as the
@@ -1271,8 +1271,8 @@ runs migrations → emits a bring-up `audit_log` row.
 - **`db/src/probe.rs` (~150 lines, 1 unit test + 1 integration
   test):** `probe::run` is the single entry point the daemon calls
   on startup. Steps: connect to maintenance DB → check
-  `pg_database` for `hhagent` → CREATE DATABASE if absent → reconnect
-  to `hhagent` → `MIGRATOR.run(&mut conn)` → INSERT into `audit_log`.
+  `pg_database` for `kastellan` → CREATE DATABASE if absent → reconnect
+  to `kastellan` → `MIGRATOR.run(&mut conn)` → INSERT into `audit_log`.
   Fail-closed: any error short-circuits the daemon startup with `?`
   propagation, exits non-zero, the supervisor sees the failure, and
   the next restart attempt re-runs the probe. `ensure_database_exists`
@@ -1301,7 +1301,7 @@ runs migrations → emits a bring-up `audit_log` row.
   `_sqlx_migrations` so re-running on an up-to-date DB is a no-op.
 - **`core::main::bring_up_database` (~30 lines, wired into `main.rs`
   before `wait_for_shutdown`):** the daemon's contract. Reads
-  `HHAGENT_DATA_DIR` env (test-only override; production uses
+  `KASTELLAN_DATA_DIR` env (test-only override; production uses
   `default_data_dir()`), constructs the `ConnectSpec` from `$USER`,
   emits a structured tracing line with the resolved values, calls
   `probe::run` with `actor="core" action="startup" payload={"version": …}`,
@@ -1320,8 +1320,8 @@ runs migrations → emits a bring-up `audit_log` row.
   `core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly`
   to reflect the new contract. Brings up a per-test PG cluster
   (initdb + `postgres_service_spec` + start + wait socket + 500 ms
-  stable-Active recheck) before installing the `hhagent` core
-  service. Forwards `HHAGENT_DATA_DIR` and `USER` via `spec.env`
+  stable-Active recheck) before installing the `kastellan` core
+  service. Forwards `KASTELLAN_DATA_DIR` and `USER` via `spec.env`
   so the daemon's probe targets the temp cluster (`USER` is needed
   because systemd `--user` units only inherit env vars listed in
   the unit file's `Environment=` lines). Asserts the
@@ -1331,9 +1331,9 @@ runs migrations → emits a bring-up `audit_log` row.
   `probe_runs_migrations_and_graph_happy_path` exercises probe
   idempotency + the `Graph` trait happy path against a real
   cluster (see "test table" entry above for the sequence).
-- **`HHAGENT_DATA_DIR` env var override:** new optional env knob in
+- **`KASTELLAN_DATA_DIR` env var override:** new optional env knob in
   `core::main::bring_up_database`. Production deployments leave it
-  unset and use `default_data_dir()` → `~/.local/share/hhagent/pg/data`;
+  unset and use `default_data_dir()` → `~/.local/share/kastellan/pg/data`;
   tests inject a per-test temp dir so the operator's installed
   cluster is never touched. The doc-comment on `bring_up_database`
   makes the precedence explicit.
@@ -1354,7 +1354,7 @@ test + supervisor_e2e rewrite (still 1 test, contract upgraded);
 `brew install postgresql@18`'s done; the new integration tests
 `[SKIP]` cleanly without it.
 
-**Why the probe lives in `hhagent-db` rather than `hhagent-core`.**
+**Why the probe lives in `kastellan-db` rather than `kastellan-core`.**
 The probe's logic (connect → ensure DB → migrate → audit row) is
 pure database orchestration with zero `core`-specific shape. Putting
 it in `db` means the future memory worker (Phase 1) can call the
@@ -1363,12 +1363,12 @@ in. `core/src/main.rs` is a thin adapter: it resolves env-derived
 defaults and supplies the `actor`/`action`/`payload` strings that
 identify *who* is starting up.
 
-**Why peer auth, role = OS user, application DB = `hhagent`.** These
+**Why peer auth, role = OS user, application DB = `kastellan`.** These
 three pin the smallest containment story. Peer auth on a UDS means
 remote auth is structurally impossible (no listener); role = OS user
 means a different OS user on the same host literally cannot
 connect (peer rejects + 0700 socket dir); application DB =
-`hhagent` keeps `postgres`/`template0`/`template1` for maintenance.
+`kastellan` keeps `postgres`/`template0`/`template1` for maintenance.
 The cluster is born locked-down at `initdb` and stays that way
 because every connection assumes this triple — there is no
 "connect with password" code path to leak through.
@@ -1378,7 +1378,7 @@ HANDOVER's audit_log description called for `REVOKE UPDATE, DELETE
 ON audit_log FROM <runtime_role>` once a non-superuser role is
 split out. Today the daemon connects as the cluster superuser
 (role == OS user, set up at `initdb` time). Adding a
-`hhagent_runtime` role + `GRANT INSERT, SELECT ON audit_log` and
+`kastellan_runtime` role + `GRANT INSERT, SELECT ON audit_log` and
 having the daemon connect as that role is a clean follow-up but
 needs a careful audit of what each subsystem (memory worker,
 graph writes, secret reads) actually requires before we GRANT.
@@ -1439,14 +1439,14 @@ issues. None changed the test count (151 → 151, all green). Net diff:
   rewritten** — execution order in the recursive term is irrelevant;
   the `ORDER BY depth ASC LIMIT 1` is what picks min-depth.
 - **Parking issues filed for items deferred to later phases:**
-  [#11](https://github.com/hherb/hhagent/issues/11) `PgPool` lifecycle
+  [#11](https://github.com/hherb/kastellan/issues/11) `PgPool` lifecycle
   (one daemon-scoped pool when concurrent workload lands in Phase 1);
-  [#12](https://github.com/hherb/hhagent/issues/12) reject empty
+  [#12](https://github.com/hherb/kastellan/issues/12) reject empty
   `secrets.aad` in the runtime encrypt path when it lands;
-  [#13](https://github.com/hherb/hhagent/issues/13) migration numbering
+  [#13](https://github.com/hherb/kastellan/issues/13) migration numbering
   / rename-hygiene checklist (sqlx fingerprints version+slug, so a
   rename on a shipped migration silently breaks startup on existing
-  clusters); [#14](https://github.com/hherb/hhagent/issues/14) brittle
+  clusters); [#14](https://github.com/hherb/kastellan/issues/14) brittle
   `wait_for_log_match("database probe succeeded")` in
   `core/tests/supervisor_e2e.rs` — promote to either a tracing constant
   in the daemon's public API or a dedicated readiness signal once
@@ -1464,10 +1464,10 @@ issues. None changed the test count (151 → 151, all green). Net diff:
 
 ### Linux: Phase 0 cont. (Option C2 — Postgres bring-up, foundation slice)
 
-**Install PG 18 binaries, idempotent `hhagent-db-init`, `postgres_service_spec`, full e2e against `default_supervisor()`.**
+**Install PG 18 binaries, idempotent `kastellan-db-init`, `postgres_service_spec`, full e2e against `default_supervisor()`.**
 
 This is the first slice of HANDOVER's "headline next-pickup": a private
-per-user PG cluster under `~/.local/share/hhagent/pg/data` managed by a
+per-user PG cluster under `~/.local/share/kastellan/pg/data` managed by a
 user-level supervisor unit, never network-listen, peer auth over UDS.
 Foundation only — migrations, sqlx-cli, and the core probe land in a
 follow-up session.
@@ -1483,8 +1483,8 @@ follow-up session.
   user-instance — Debian's postgresql package launches a system
   cluster on port 5432 by default; we want only the *binaries* on the
   system, with our cluster running under
-  `~/.local/share/hhagent/pg/data` and listening on a UDS only.
-- **New crate `hhagent-db` (~620 lines split across `lib.rs`, `bin/hhagent-db-init.rs`, `tests/postgres_e2e.rs`):**
+  `~/.local/share/kastellan/pg/data` and listening on a UDS only.
+- **New crate `kastellan-db` (~620 lines split across `lib.rs`, `bin/kastellan-db-init.rs`, `tests/postgres_e2e.rs`):**
   - **Pure functions in `lib.rs`** (23 unit tests):
     `build_initdb_argv(initdb_bin, &InitDbOptions) -> Vec<String>`
     pins `--auth-local=peer` + `--auth-host=reject` (so a future
@@ -1512,10 +1512,10 @@ follow-up session.
     `sandbox::linux_bwrap::build_argv` and
     `supervisor::systemd_user::build_unit_file` (separately testable
     from any I/O).
-  - **`bin/hhagent-db-init`** drives the helpers: parse argv (`--data-dir`,
+  - **`bin/kastellan-db-init`** drives the helpers: parse argv (`--data-dir`,
     `--bin-dir`, `--username`, `--help`), resolve defaults
-    (`$HOME/.local/share/hhagent/pg/data`, auto-detect bin dir,
-    `hhagent` superuser), short-circuit if `PG_VERSION` already
+    (`$HOME/.local/share/kastellan/pg/data`, auto-detect bin dir,
+    `kastellan` superuser), short-circuit if `PG_VERSION` already
     present (re-running is safe — it still re-writes
     `postgresql.auto.conf` so config drift is corrected), spawn
     `initdb` with the argv, create `<data_dir>/sockets` mode 0700,
@@ -1527,7 +1527,7 @@ follow-up session.
 - **New `supervisor::specs::postgres_service_spec` (+ `POSTGRES_SERVICE_NAME` const, +9 unit tests):**
   Pure ServiceSpec builder mirroring `core_service_spec`. Caller
   passes `postgres_binary`, `data_dir`, `log_dir`; helper returns
-  `name = "hhagent-postgres"`, `args = ["-D", <data_dir>]` (the
+  `name = "kastellan-postgres"`, `args = ["-D", <data_dir>]` (the
   socket path comes from `postgresql.auto.conf` inside the data dir,
   so no `-k` flag at the supervisor layer), empty env, no
   working_dir, `keep_alive = true` (postgres is a long-running
@@ -1543,7 +1543,7 @@ follow-up session.
   pure helpers (peer auth, --data-checksums) → write
   `postgresql.auto.conf` (UDS-only) → build spec via
   `postgres_service_spec`, override name to
-  `hhagent-supervisor-test-pg-{pid}-{nanos}` for collision-free
+  `kastellan-supervisor-test-pg-{pid}-{nanos}` for collision-free
   parallel test runs → install → start → poll status until Active
   (≤ 15 s) → poll for `<sockets>/.s.PGSQL.5432` to appear → hold
   500 ms and re-check Active (rules out flapping under
@@ -1553,7 +1553,7 @@ follow-up session.
   `1` → stop → poll until Inactive → uninstall → status=NotInstalled.
   RAII `ServiceGuard` and two `PathGuard`s (data dir, log dir) clean
   up even on panic. Runtime ~1.8 s on the DGX Spark.
-- **Both extension-deferral issues dropped as won't-fix ([#9](https://github.com/hherb/hhagent/issues/9) Apache AGE, [#10](https://github.com/hherb/hhagent/issues/10) ParadeDB pg_search).**
+- **Both extension-deferral issues dropped as won't-fix ([#9](https://github.com/hherb/kastellan/issues/9) Apache AGE, [#10](https://github.com/hherb/kastellan/issues/10) ParadeDB pg_search).**
   Both extensions were originally on the wishlist for this session
   ("install if available, defer if not"). After looking at what each
   actually buys for *our* use case versus the cost of tracking their
@@ -1594,7 +1594,7 @@ actually obeys — so the spec passes only `-D` and trusts the conf file.
 Tests read the same `default_socket_dir(<data_dir>)` constant the conf
 writer uses; production reads `<data_dir>/sockets` by the same convention.
 
-**Why we picked `<data_dir>/sockets/` over `/run/user/<uid>/hhagent-pg/`
+**Why we picked `<data_dir>/sockets/` over `/run/user/<uid>/kastellan-pg/`
 or `/tmp`.** Three reasons: (1) the data dir already has mode 0700
 ownership by the cluster's OS user, so a sub-directory inherits the
 right access shape; (2) it dodges the
@@ -1630,11 +1630,11 @@ the daemon body actually runs forever, where it would have been
 cargo-culted noise on the previous "log line and exit 0" shape.
 
 - **`core/src/main.rs` rewrite (~45 lines):** drops the `(skeleton)`
-  suffix from the startup line ("hhagent core starting" is now the
+  suffix from the startup line ("kastellan core starting" is now the
   precise contract), then `await wait_for_shutdown()`. Helper uses
   `tokio::signal::unix::signal(SignalKind::terminate())` and
   `SignalKind::interrupt()` in a `tokio::select!` so either signal
-  returns Ok and `main` logs a clean "hhagent core shutting down"
+  returns Ok and `main` logs a clean "kastellan core shutting down"
   line and exits 0. systemd treats exit-on-SIGTERM as success
   (so `Restart=on-failure` does *not* trigger an unwanted
   respawn); macOS launchd's `bootout` removes the agent from the
@@ -1670,9 +1670,9 @@ cargo-culted noise on the previous "log line and exit 0" shape.
   poll demoted from primary signal to belt-and-suspenders sanity
   check. Test runtime grew ~600 ms (the explicit hold + the
   Inactive poll) but is still well under 1.5 s on this host.
-- **Closes [#7](https://github.com/hherb/hhagent/issues/7).** With
+- **Closes [#7](https://github.com/hherb/kastellan/issues/7).** With
   `(skeleton)` gone from the startup line, the substring
-  `"hhagent core starting"` is now the precise startup contract —
+  `"kastellan core starting"` is now the precise startup contract —
   no further tightening needed until the daemon body changes
   again.
 
@@ -1694,18 +1694,18 @@ backoff" item in ROADMAP rather than smuggled into this session.
 
 ## Recently completed (earlier in 2026-05-09 session)
 
-**Phase 0 cont. — wire core into the supervisor (typed `core_service_spec` + cross-OS `default_probe` + e2e against the real `hhagent` binary).**
+**Phase 0 cont. — wire core into the supervisor (typed `core_service_spec` + cross-OS `default_probe` + e2e against the real `kastellan` binary).**
 
 Closed Option C4 from the previous handover. The supervisor crate now
 ships a typed [`ServiceSpec`] builder for the agent core daemon and a
 cross-OS supervisor probe; the core crate proves both supervisor
-backends can host the real `hhagent` binary end-to-end without per-OS
+backends can host the real `kastellan` binary end-to-end without per-OS
 branching in the test code.
 
 - **New module `supervisor/src/specs.rs` (~150 lines, 8 unit tests):**
   pure `core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec`
-  + `pub const CORE_SERVICE_NAME: &str = "hhagent-core"`. Returned spec:
-  `name = "hhagent-core"` (same string on both OSes — no reverse-DNS,
+  + `pub const CORE_SERVICE_NAME: &str = "kastellan-core"`. Returned spec:
+  `name = "kastellan-core"` (same string on both OSes — no reverse-DNS,
   the lib.rs `ServiceSpec.name` doc-comment explicitly allows this);
   `program = caller-supplied`; `args` empty (daemon takes no flags
   yet); `env` empty (daemon's `RUST_LOG` defaults to `"info"` via
@@ -1715,7 +1715,7 @@ branching in the test code.
   clean exit anyway; flip when the daemon becomes a long-running
   event loop, regression pin in
   `core_service_spec_keep_alive_is_false_for_now`); `stdout_log =
-  log_dir/hhagent-core.out`, `stderr_log = log_dir/hhagent-core.err`.
+  log_dir/kastellan-core.out`, `stderr_log = log_dir/kastellan-core.err`.
   Pure: no I/O, no env probing — caller resolves both inputs.
 - **New `supervisor::default_probe()` in `supervisor/src/lib.rs`:**
   cross-OS supervisor probe mirroring `default_supervisor()`. Linux →
@@ -1729,12 +1729,12 @@ branching in the test code.
   - `core_service_install_start_observe_log_uninstall` — full e2e
     against `default_supervisor()`: build spec via
     `core_service_spec`, override the name to a unique
-    `hhagent-supervisor-test-{pid}-{nanos}` (avoids clobbering a real
-    installed `hhagent-core` and lets concurrent test runs coexist),
+    `kastellan-supervisor-test-{pid}-{nanos}` (avoids clobbering a real
+    installed `kastellan-core` and lets concurrent test runs coexist),
     redirect stdout to a per-test log file under `temp_dir`, install,
     assert pre-start status=Inactive, start, **poll the redirected
     stdout file** (50 ms tick, 5 s budget) for the daemon's startup
-    JSON line containing `"hhagent core starting"` and the
+    JSON line containing `"kastellan core starting"` and the
     `"version":` field, stop (must be safe even after the daemon's
     natural exit — pins the "stop is always idempotent" contract),
     uninstall, assert post-uninstall status=NotInstalled. RAII
@@ -1781,22 +1781,22 @@ would be a bug.
 `5d02a2f`, no test-count change (still 105 on Linux):
 - New `LogDirGuard` in `core/tests/supervisor_e2e.rs` mirrors the
   existing `ServiceGuard` so a panic mid-test no longer leaks the
-  per-test `temp_dir/hhagent-supervisor-e2e-…/` log dir alongside its
+  per-test `temp_dir/kastellan-supervisor-e2e-…/` log dir alongside its
   (already-cleaned) supervisor unit. Drop order on success: log dir
   → service uninstall → macOS serial-mutex release (resource then
   lock — the right sequence).
 - Cheap insurance assert that the constructed
-  `hhagent-supervisor-test-{pid}-{nanos}` name stays inside both
+  `kastellan-supervisor-test-{pid}-{nanos}` name stays inside both
   backends' `MAX_NAME_LEN=200`. Today's worst case is ~54 chars, so
   the assert trips well before `install` would, and the panic message
   tells the next person what to rework.
 
 Two follow-ups from the same review filed but deferred:
-- [#7](https://github.com/hherb/hhagent/issues/7) — tighten the daemon
+- [#7](https://github.com/hherb/kastellan/issues/7) — tighten the daemon
   log-line substring match when the daemon body is rewritten (no-op
   until then; coupled to dropping `(skeleton)` from
   `core/src/main.rs`'s startup line, which is part of Option H).
-- [#8](https://github.com/hherb/hhagent/issues/8) — collapse the
+- [#8](https://github.com/hherb/kastellan/issues/8) — collapse the
   `default_probe`/`default_supervisor` cfg-ladder duplication once a
   third entry point or backend OS appears.
 ### macOS: Seatbelt hardening — closed two open GitHub issues (#1 + #2)
@@ -1849,7 +1849,7 @@ finding this session: **none of our shipping workers need it on macOS
 26.4 ARM64.** Verified by spawning each binary under a probe profile
 with the rule replaced by `(deny mach-lookup)`:
 
-- `hhagent-worker-shell-exec` → starts cleanly, prelude reports
+- `kastellan-worker-shell-exec` → starts cleanly, prelude reports
   `lockdown SkippedNonLinux`.
 - `sid_probe`, `net_probe`, `mach_probe` (all Rust) → exit 0.
 - `/bin/echo`, `/bin/sh`, `/bin/cat`, `/bin/ls`, `/usr/bin/true` →
@@ -1885,7 +1885,7 @@ rule again.
   "com.apple.coreservices.appleevents", &mut port)` via `extern "C"`
   declarations against `libSystem`. Apple Events broker is a
   deliberately benign-but-non-essential service: present on every
-  macOS host, but no shipping hhagent worker has any legitimate reason
+  macOS host, but no shipping kastellan worker has any legitimate reason
   to talk to it (it's the back-end for AppleScript-driven cross-app
   automation — the canonical privilege-escalation surface). Built into
   `target/debug/mach_probe` via a `[[bin]]` stanza.
@@ -1923,7 +1923,7 @@ test changed; three new tests were added.
 
 ## Recently completed (previous session, 2026-05-08)
 
-**Phase 0 cont. — macOS service supervisor (`hhagent-supervisor::launchd_agents`).**
+**Phase 0 cont. — macOS service supervisor (`kastellan-supervisor::launchd_agents`).**
 
 Cross-platform parity with the Linux `SystemdUser` backend. The supervisor
 crate now ships real install/start/stop/status/uninstall on both
@@ -1937,7 +1937,7 @@ falls through to the `NotYetImplemented` placeholder.
   `NotYetImplemented` placeholder is now correctly cfg-gated to
   *non*-Linux-*non*-macOS Unixes. The `ServiceSpec.name` doc-comment
   is updated to reflect that file basename = `<name>.plist` on macOS
-  (not the previously-suggested `org.hhagent.<name>.plist` auto-prefix
+  (not the previously-suggested `org.kastellan.<name>.plist` auto-prefix
   scheme). Trait + spec are otherwise unchanged.
 - **New module `supervisor/src/launchd_agents.rs` (~700 lines, ~280
   of those in the test block):**
@@ -1957,7 +1957,7 @@ falls through to the `NotYetImplemented` placeholder.
     max 200 chars, no `.`/`..`). Identical rule set on both backends
     so a single user-facing service name is portable to either OS
     without a "rename for macOS" step. Includes tests for typical
-    reverse-DNS labels like `org.hhagent.core`.
+    reverse-DNS labels like `org.kastellan.core`.
   - **`LaunchAgents` driver** — `new()` resolves `~/Library/LaunchAgents/`
     from `$HOME`; `with_agents_dir(path)` is the test seam that lets
     unit tests exercise the file-writing half against a temp dir
@@ -2013,7 +2013,7 @@ macOS (+35 unit, +4 smoke). No existing test changed.
 **Why RunAtLoad is always true.** `launchctl bootstrap` only runs the
 program when `RunAtLoad=true`; with `RunAtLoad=false` the agent loads
 into the domain but sits dormant waiting for a demand-driven trigger
-that hhagent doesn't use. Our public API contract is "install + start
+that kastellan doesn't use. Our public API contract is "install + start
 runs the program," so the builder pins `RunAtLoad=true` regardless of
 what the caller might set on the spec. There's a unit test
 (`build_plist_run_at_load_is_always_true`) that pins this invariant.
@@ -2042,19 +2042,19 @@ silently bootout someone else's service. Fixed by checking
 dirs, uninstall is purely a file removal. Mirrors the Linux backend's
 "only daemon-reload when writing into the canonical dir" pattern.
 
-**`hhagent-supervisor-test-` prefix discipline.** The smoke tests name
-their plist `hhagent-supervisor-test-{pid}-{nanos}.plist` — uniquely
+**`kastellan-supervisor-test-` prefix discipline.** The smoke tests name
+their plist `kastellan-supervisor-test-{pid}-{nanos}.plist` — uniquely
 greppable so leftovers from a hard crash can be cleaned up with
-`find ~/Library/LaunchAgents -name 'hhagent-supervisor-test-*'`.
+`find ~/Library/LaunchAgents -name 'kastellan-supervisor-test-*'`.
 Verified post-test: zero residue (`ls ~/Library/LaunchAgents/ | grep
-hhagent` returns nothing; `launchctl print-disabled gui/$(id -u) |
-grep hhagent` agrees).
+kastellan` returns nothing; `launchctl print-disabled gui/$(id -u) |
+grep kastellan` agrees).
 
 ---
 
 ## Recently completed (2026-05-10)
 
-**Phase 0 cont. — Linux service supervisor scaffold (`hhagent-supervisor::systemd_user`).**
+**Phase 0 cont. — Linux service supervisor scaffold (`kastellan-supervisor::systemd_user`).**
 
 The supervisor crate previously held a `Supervisor` trait + `ServiceSpec`
 struct + a `NotYetImplemented` placeholder; this session grew the trait
@@ -2125,13 +2125,13 @@ so a caller *can* `systemctl --user enable <name>.service` to make the
 service start at session login, but `install` does not call `enable`
 itself. Whether to enable is a policy decision per service (the core
 daemon probably wants it; one-shot test units don't). When we ship the
-first concrete `hhagent.service` we'll make that explicit.
+first concrete `kastellan.service` we'll make that explicit.
 
-**`hhagent-supervisor-test-` prefix discipline:** the smoke test names
-its unit `hhagent-supervisor-test-{pid}-{nanos}.service` — uniquely
+**`kastellan-supervisor-test-` prefix discipline:** the smoke test names
+its unit `kastellan-supervisor-test-{pid}-{nanos}.service` — uniquely
 greppable so leftovers from a hard crash can be cleaned up with
-`find ~/.config/systemd/user/ -name 'hhagent-supervisor-test-*'`. Verified
-post-test: zero residue (`ls ~/.config/systemd/user/ | grep hhagent`
+`find ~/.config/systemd/user/ -name 'kastellan-supervisor-test-*'`. Verified
+post-test: zero residue (`ls ~/.config/systemd/user/ | grep kastellan`
 returns nothing; `systemctl --user list-units` agrees).
 
 ---
@@ -2219,7 +2219,7 @@ canonical wiring point), spawn shell-exec with `cp` allowlisted, copy
 `in/ → out/` *inside* the jail, read the artifact back from the host,
 drop the workspace, assert the whole task tree is gone. This is the
 first test that proves the host (`policy.fs_write` → bwrap bind-mount)
-and worker (`HHAGENT_LANDLOCK_RW` → Landlock allow-list) layers agree
+and worker (`KASTELLAN_LANDLOCK_RW` → Landlock allow-list) layers agree
 on what the worker may write — they share `Workspace::fs_write_paths`
 through `derive_lockdown_env`, but the e2e is what catches drift.
 
@@ -2254,7 +2254,7 @@ path. Replaces the previous "caller authors `policy.fs_write` paths
 ad-hoc per worker" pattern, which had no cleanup contract at all.
 
 - `Workspace::new(task_id)` uses default root from
-  `$HHAGENT_WORKSPACE_ROOT` or `~/.hhagent/workspace`. Tests use
+  `$KASTELLAN_WORKSPACE_ROOT` or `~/.kastellan/workspace`. Tests use
   `Workspace::with_root(&temp_dir, task_id)` so they don't pollute
   global state and don't depend on env vars.
 - `extend_policy(&mut policy)` is the canonical wiring point: it
@@ -2431,22 +2431,22 @@ post-Phase-0b review of the macOS backend.
 **Filed as follow-up GitHub issues** (won't fit this session but flagged so they
 don't get forgotten):
 
-- [#1 — narrow `(allow mach-lookup)` to a `global-name` allowlist](https://github.com/hherb/hhagent/issues/1).
+- [#1 — narrow `(allow mach-lookup)` to a `global-name` allowlist](https://github.com/hherb/kastellan/issues/1).
   The unrestricted Mach lookup is the largest concrete weakness in the macOS
   profile; capture the actual service set per worker and switch to an explicit
   allowlist.
-- [#2 — evaluate `setpgid(0,0)` → `setsid()` for stronger session isolation](https://github.com/hherb/hhagent/issues/2).
+- [#2 — evaluate `setpgid(0,0)` → `setsid()` for stronger session isolation](https://github.com/hherb/kastellan/issues/2).
   Today the worker is in its own process group but inherits the controlling
   terminal; `/dev/tty` is excluded from the profile but the asymmetry vs Linux
   `--new-session` is real.
-- [#3 — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64](https://github.com/hherb/hhagent/issues/3).
+- [#3 — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64](https://github.com/hherb/kastellan/issues/3).
   Hygiene only; the shim in `workers/prelude/src/seccomp_lock.rs` carries the
   kernel ABI numbers explicitly so `BASE_ALLOW` compiles on `aarch64`.
-- [#4 — bump Last-commit + test-count fields whenever a Recently-completed entry is added](https://github.com/hherb/hhagent/issues/4).
+- [#4 — bump Last-commit + test-count fields whenever a Recently-completed entry is added](https://github.com/hherb/kastellan/issues/4).
   This session started with HANDOVER 4 commits behind HEAD; the prose was
   updated but the header fields weren't. Promote the bump-the-header step
   to the top of the end-of-session checklist.
-- [#5 — audit `BASE_ALLOW` against a fixture of common worker binaries](https://github.com/hherb/hhagent/issues/5).
+- [#5 — audit `BASE_ALLOW` against a fixture of common worker binaries](https://github.com/hherb/kastellan/issues/5).
   `BASE_ALLOW` was empirically derived from `echo`; the workspace e2e test
   surfaced a silent gap that broke `cp` (fixed in `50a06ec`). Build a
   coreutils fixture and audit before Phase 4 (`python-exec`) starts adding
@@ -2456,14 +2456,14 @@ don't get forgotten):
 
 **Phase 0 hardening — stage 1 (Landlock + seccomp + bwrap probe fix):**
 
-- New crate `workers/prelude` (`hhagent-worker-prelude`):
-  - `landlock_lock` module — applies a Landlock LSM filter from inside the worker. Targets ABI v1; RO+exec on `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc/ld.so.cache`, `/dev`, `/proc`; RW from `HHAGENT_LANDLOCK_RW` env (JSON array of absolute paths). Graceful `KernelTooOld` fallback.
+- New crate `workers/prelude` (`kastellan-worker-prelude`):
+  - `landlock_lock` module — applies a Landlock LSM filter from inside the worker. Targets ABI v1; RO+exec on `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc/ld.so.cache`, `/dev`, `/proc`; RW from `KASTELLAN_LANDLOCK_RW` env (JSON array of absolute paths). Graceful `KernelTooOld` fallback.
   - `seccomp_lock` module — installs a seccomp-bpf deny-list killing `unshare`, `setns`, `mount`, `umount2`, `pivot_root`, `init_module`, `finit_module`, `delete_module`, `ptrace`, `bpf`, `perf_event_open`, `kexec_load`, `kexec_file_load`, `reboot`, `swapon`, `swapoff`, `settimeofday`, `clock_settime`, `clock_adjtime`, `adjtimex`, `keyctl`, `add_key`, `request_key`, `personality` with `KillProcess`. Sets `PR_SET_NO_NEW_PRIVS` first.
-  - `serve_stdio()` — drop-in wrapper around `hhagent_protocol::server::serve_stdio` that calls `lock_down()` first.
+  - `serve_stdio()` — drop-in wrapper around `kastellan_protocol::server::serve_stdio` that calls `lock_down()` first.
   - `lockdown_probe` test binary — subprocess fixture that integration tests fork off so the one-way filters don't poison sibling tests.
   - 8 unit tests (parsers, BPF builder), 3 landlock integration tests, 3 seccomp integration tests — all green, zero skips.
-- `core/src/tool_host.rs`: `derive_lockdown_env()` injects `HHAGENT_LANDLOCK_RW` (from `policy.fs_write`) and `HHAGENT_SECCOMP_PROFILE` (from `policy.profile`) so callers cannot accidentally skip the worker-side layer. Caller-supplied env wins (useful for tests that want `seccomp=none`). 4 new unit tests.
-- `workers/shell-exec/src/main.rs`: 1-line swap from `hhagent_protocol::server::serve_stdio` to `hhagent_worker_prelude::serve_stdio`. Existing 3 e2e tests still pass — this time **for real** (see bug fix below).
+- `core/src/tool_host.rs`: `derive_lockdown_env()` injects `KASTELLAN_LANDLOCK_RW` (from `policy.fs_write`) and `KASTELLAN_SECCOMP_PROFILE` (from `policy.profile`) so callers cannot accidentally skip the worker-side layer. Caller-supplied env wins (useful for tests that want `seccomp=none`). 4 new unit tests.
+- `workers/shell-exec/src/main.rs`: 1-line swap from `kastellan_protocol::server::serve_stdio` to `kastellan_worker_prelude::serve_stdio`. Existing 3 e2e tests still pass — this time **for real** (see bug fix below).
 - **Bug fix in `sandbox/src/linux_bwrap.rs`**: `LinuxBwrap::probe()` was launching `bwrap` without the `/lib*` symlinks the dynamic linker needs, so `execvp /usr/bin/true` returned `ENOENT` (interpreter unreachable) and the probe failed-closed. The skip-on-probe-failure pattern in the integration tests then turned that into `[SKIP]` lines that masqueraded as green. Probe now mirrors `build_argv`'s mount layout. **The previous handover's "18 tests, 0 skipped" was wrong** — only the 12 host-only tests were actually running.
 - New deps (workspace): `landlock = "0.4"` (MIT OR Apache-2.0), `seccompiler = "0.5"` (Apache-2.0 OR BSD-3-Clause), both AGPL-compatible.
 - Docs: `threat-model.md` defence-in-depth table now lists the worker-side Landlock+seccomp row with the parent-side bwrap/Seatbelt row; "negative tests already shipped" section added.
@@ -2492,16 +2492,16 @@ don't get forgotten):
 agent-core daemon comes up fail-closed against a per-user,
 UDS-only Postgres cluster managed by the same
 `default_supervisor()` that supervises the daemon itself. Every
-application write runs under the non-superuser `hhagent_runtime`
+application write runs under the non-superuser `kastellan_runtime`
 role with a database-layer prohibition on tampering with prior
 audit rows (Option L). Every Phase 0+ tool call is funneled
 through `tool_host::dispatch`, which writes one `audit_log` row
 per call (Option I); those rows are replicated to a daily-rotated
-JSONL stream under `~/.local/state/hhagent/` by a long-lived
+JSONL stream under `~/.local/state/kastellan/` by a long-lived
 listener that wakes on `pg_notify`. Every secret at rest is
 AES-256-GCM-encrypted under a keyring-wrapped key with AAD-bound
 row identity. The sole-egress LLM router
-(`hhagent-llm-router`) with an OpenAI-compatible `Router::send`,
+(`kastellan-llm-router`) with an OpenAI-compatible `Router::send`,
 per-OS local-backend default, and `PolicyGate` seam is in place;
 frontier-dispatch is unwired by design until Phase 5.
 **As of this session,** Phase 1's first slice has shipped:
@@ -2529,7 +2529,7 @@ The next pickups, in roughly suggested order:
   array, then plumbs `Graph::neighbors` into `recall` as a
   third lane fused alongside semantic + lexical.
 - **Hoist the duplicated PG bring-up boilerplate into a
-  `tests-common` dev-dep crate** ([issue #15](https://github.com/hherb/hhagent/issues/15))
+  `tests-common` dev-dep crate** ([issue #15](https://github.com/hherb/kastellan/issues/15))
   — now five duplication sites with the new
   `core/tests/memory_recall_e2e.rs`. Pure mechanical refactor;
   not blocking but cheap to ship and would clean up the test
@@ -2550,15 +2550,15 @@ pre-computed `query_embedding`; production needs free-text
 query → embedding vector → semantic recall.
 
 - **Shape:** new `workers/embedding-worker/` crate + binary,
-  same prelude (`hhagent-worker-prelude::serve_stdio`) as
+  same prelude (`kastellan-worker-prelude::serve_stdio`) as
   shell-exec. JSON-RPC method `embed` takes `{texts: [string]}`,
   returns `{embeddings: [[f32; 1024]]}`. Inside the worker:
-  HTTP POST to `<HHAGENT_LLM_LOCAL_URL>/embeddings` with the
+  HTTP POST to `<KASTELLAN_LLM_LOCAL_URL>/embeddings` with the
   OpenAI-compat embedding-request shape (`{"model": "...",
   "input": [...]}`); decode the response. Worker side is a
   thin shim — the `Router::send` path lives in `core` because
   the policy gate is `core`'s concern.
-- **`hhagent-llm-router::messages` extension:** add
+- **`kastellan-llm-router::messages` extension:** add
   `EmbeddingRequest` / `EmbeddingResponse` types parallel to
   `ChatRequest` / `ChatResponse`. New `Router::embed(&request)`
   method that (a) calls `policy.pick_embed(&request)` (Phase 5
@@ -2668,10 +2668,10 @@ else writes yet, and there's no on-disk mirror an operator can
   watches `audit_log` (LISTEN/NOTIFY on a `audit_log_inserted`
   channel, with a `LASTVAL`-style fallback poll every 5 s) and
   appends each row as a JSON line to
-  `~/.local/state/hhagent/audit-YYYY-MM-DD.jsonl`. Rotate on UTC
+  `~/.local/state/kastellan/audit-YYYY-MM-DD.jsonl`. Rotate on UTC
   date. `fsync` after each write — operator visibility beats
   throughput at this scale.
-- **`hhagent-cli audit tail`** (new bin in core or a new tiny crate):
+- **`kastellan-cli audit tail`** (new bin in core or a new tiny crate):
   reads the JSONL files in date order, follows the latest one. No
   DB connection needed for the viewer — operator can debug a daemon
   that crashed mid-startup without bringing the cluster up.
@@ -2698,7 +2698,7 @@ else writes yet, and there's no on-disk mirror an operator can
 
 (Original pickup notes preserved below for context.) Same shape
 as the audit-log mirror item: one new module in `core` (or a new
-`hhagent-llm-router` crate, depending on where it grows to), an
+`kastellan-llm-router` crate, depending on where it grows to), an
 OpenAI-compatible HTTP client over `reqwest` (or `hyper`), a
 config knob pointing at a local backend (vLLM/SGLang on Linux,
 llama.cpp/Ollama on macOS), and a *placeholder* for the Phase-5
@@ -2725,7 +2725,7 @@ since today's daemon doesn't crash routinely.
 
 ### Option H — long-running daemon + `keep_alive=true`  *(SHIPPED 2026-05-09 — see "Recently completed (previous session)")*
 
-### Option G — make `cpu_quota_pct`/`tasks_max` policy-driven + setrlimit-based `cpu_ms` enforcement  ([#6](https://github.com/hherb/hhagent/issues/6))
+### Option G — make `cpu_quota_pct`/`tasks_max` policy-driven + setrlimit-based `cpu_ms` enforcement  ([#6](https://github.com/hherb/kastellan/issues/6))
 
 Smaller follow-up to Option E. Today the cgroup layer hardcodes
 `CPUQuota=200%` and `TasksMax=64`; `policy.cpu_ms` is documented but
@@ -2754,24 +2754,24 @@ unenforced. To wire them up:
 
 ### Open follow-up issues (filed but not picked)
 
-- [#1](https://github.com/hherb/hhagent/issues/1) — narrow macOS `(allow mach-lookup)` to a `global-name` allowlist
-- [#2](https://github.com/hherb/hhagent/issues/2) — evaluate `setpgid` → `setsid` for stronger session isolation on macOS
-- [#3](https://github.com/hherb/hhagent/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64
-- [#4](https://github.com/hherb/hhagent/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added
-- [#5](https://github.com/hherb/hhagent/issues/5) — audit `BASE_ALLOW` against a fixture of common worker binaries
-- [#6](https://github.com/hherb/hhagent/issues/6) — tunable `cpu_quota_pct`/`tasks_max` policy fields + `setrlimit`-based `cpu_ms` enforcement (Option G above)
-- [#8](https://github.com/hherb/hhagent/issues/8) — collapse `default_probe` / `default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears
-- [#11](https://github.com/hherb/hhagent/issues/11) — switch `core` to a daemon-scoped `PgPool` when Phase 1's concurrent workload lands (filed during C2.2 review)
-- ~~[#12](https://github.com/hherb/hhagent/issues/12) — reject empty `secrets.aad` in the runtime encrypt path; drop the schema's `DEFAULT ''::bytea` once all call sites populate explicitly~~ **closed this session** — `db::secrets::put` always populates AAD via `compute_aad(name, _)` (structurally non-empty), migration `0004_secrets_aad_nonempty.sql` drops the DEFAULT and adds `CHECK (octet_length(aad) > 0)`
-- [#13](https://github.com/hherb/hhagent/issues/13) — write a migration numbering / rename hygiene checklist; sqlx fingerprints version+slug, so a rename or edit on a shipped migration silently breaks startup on existing clusters (filed during C2.2 review)
-- [#14](https://github.com/hherb/hhagent/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `core/tests/supervisor_e2e.rs` with a constant in `hhagent-core`'s public API or a real readiness signal (filed during C2.2 review)
-- [#15](https://github.com/hherb/hhagent/issues/15) — hoist the duplicated PG bring-up boilerplate (`unique_temp_root` + `initdb` + `postgresql.auto.conf` + supervisor install/start/wait) into a shared `tests-common` dev-dep crate; today it lives copy-pasted across **four** sites: `db/tests/postgres_e2e.rs`, `core/tests/audit_dispatch_e2e.rs`, `core/tests/supervisor_e2e.rs`, and (newly added 2026-05-10 with Option M) `core/tests/shell_exec_e2e.rs`. The natural extraction shape is a workspace-level dev-dep crate (since `db/tests/` and `core/tests/` live in different packages, a `tests/common/mod.rs` only-shares-within-one-package approach won't work). Filed during the post-Option-I review in `553dcf8`; touched but not closed by Option M
+- [#1](https://github.com/hherb/kastellan/issues/1) — narrow macOS `(allow mach-lookup)` to a `global-name` allowlist
+- [#2](https://github.com/hherb/kastellan/issues/2) — evaluate `setpgid` → `setsid` for stronger session isolation on macOS
+- [#3](https://github.com/hherb/kastellan/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64
+- [#4](https://github.com/hherb/kastellan/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added
+- [#5](https://github.com/hherb/kastellan/issues/5) — audit `BASE_ALLOW` against a fixture of common worker binaries
+- [#6](https://github.com/hherb/kastellan/issues/6) — tunable `cpu_quota_pct`/`tasks_max` policy fields + `setrlimit`-based `cpu_ms` enforcement (Option G above)
+- [#8](https://github.com/hherb/kastellan/issues/8) — collapse `default_probe` / `default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears
+- [#11](https://github.com/hherb/kastellan/issues/11) — switch `core` to a daemon-scoped `PgPool` when Phase 1's concurrent workload lands (filed during C2.2 review)
+- ~~[#12](https://github.com/hherb/kastellan/issues/12) — reject empty `secrets.aad` in the runtime encrypt path; drop the schema's `DEFAULT ''::bytea` once all call sites populate explicitly~~ **closed this session** — `db::secrets::put` always populates AAD via `compute_aad(name, _)` (structurally non-empty), migration `0004_secrets_aad_nonempty.sql` drops the DEFAULT and adds `CHECK (octet_length(aad) > 0)`
+- [#13](https://github.com/hherb/kastellan/issues/13) — write a migration numbering / rename hygiene checklist; sqlx fingerprints version+slug, so a rename or edit on a shipped migration silently breaks startup on existing clusters (filed during C2.2 review)
+- [#14](https://github.com/hherb/kastellan/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `core/tests/supervisor_e2e.rs` with a constant in `kastellan-core`'s public API or a real readiness signal (filed during C2.2 review)
+- [#15](https://github.com/hherb/kastellan/issues/15) — hoist the duplicated PG bring-up boilerplate (`unique_temp_root` + `initdb` + `postgresql.auto.conf` + supervisor install/start/wait) into a shared `tests-common` dev-dep crate; today it lives copy-pasted across **four** sites: `db/tests/postgres_e2e.rs`, `core/tests/audit_dispatch_e2e.rs`, `core/tests/supervisor_e2e.rs`, and (newly added 2026-05-10 with Option M) `core/tests/shell_exec_e2e.rs`. The natural extraction shape is a workspace-level dev-dep crate (since `db/tests/` and `core/tests/` live in different packages, a `tests/common/mod.rs` only-shares-within-one-package approach won't work). Filed during the post-Option-I review in `553dcf8`; touched but not closed by Option M
 
-(All Phase 0 follow-up issues filed in earlier sessions are still open: [#1](https://github.com/hherb/hhagent/issues/1)–[#6](https://github.com/hherb/hhagent/issues/6), [#8](https://github.com/hherb/hhagent/issues/8), and the C2.2-review issues [#11](https://github.com/hherb/hhagent/issues/11), [#13](https://github.com/hherb/hhagent/issues/13), [#14](https://github.com/hherb/hhagent/issues/14), plus [#15](https://github.com/hherb/hhagent/issues/15). [#12](https://github.com/hherb/hhagent/issues/12) is now closed by the secrets-at-rest slice. Both extension-deferral issues filed earlier are closed won't-fix — see below.)
+(All Phase 0 follow-up issues filed in earlier sessions are still open: [#1](https://github.com/hherb/kastellan/issues/1)–[#6](https://github.com/hherb/kastellan/issues/6), [#8](https://github.com/hherb/kastellan/issues/8), and the C2.2-review issues [#11](https://github.com/hherb/kastellan/issues/11), [#13](https://github.com/hherb/kastellan/issues/13), [#14](https://github.com/hherb/kastellan/issues/14), plus [#15](https://github.com/hherb/kastellan/issues/15). [#12](https://github.com/hherb/kastellan/issues/12) is now closed by the secrets-at-rest slice. Both extension-deferral issues filed earlier are closed won't-fix — see below.)
 
-(Closed in this session, both as won't-fix after review: [#9](https://github.com/hherb/hhagent/issues/9) Apache AGE — relational `entities`/`relations` behind a `Graph` trait + recursive CTEs are sufficient for a personal-agent graph; AGE upstream lags PG releases and stores attributes in JSONB which fights pgvector/tsvector indexing. [#10](https://github.com/hherb/hhagent/issues/10) ParadeDB `pg_search` — native `tsvector`+GIN+`ts_rank` is comparable to BM25 at our corpus size; the embedding dominates the lexical re-ranker; RRF is ~5 lines of SQL.)
+(Closed in this session, both as won't-fix after review: [#9](https://github.com/hherb/kastellan/issues/9) Apache AGE — relational `entities`/`relations` behind a `Graph` trait + recursive CTEs are sufficient for a personal-agent graph; AGE upstream lags PG releases and stores attributes in JSONB which fights pgvector/tsvector indexing. [#10](https://github.com/hherb/kastellan/issues/10) ParadeDB `pg_search` — native `tsvector`+GIN+`ts_rank` is comparable to BM25 at our corpus size; the embedding dominates the lexical re-ranker; RRF is ~5 lines of SQL.)
 
-(Closed in earlier 2026-05-09 session: [#7](https://github.com/hherb/hhagent/issues/7) — daemon log-line substring is now precise after `(skeleton)` was dropped from the startup line.)
+(Closed in earlier 2026-05-09 session: [#7](https://github.com/hherb/kastellan/issues/7) — daemon log-line substring is now precise after `(skeleton)` was dropped from the startup line.)
 
 ---
 
@@ -2793,7 +2793,7 @@ Two adjacent OpenClaw-derived projects ship code we can read (Apache-2.0/MIT, AG
 - **ZeroClaw** ([`zeroclaw-labs/zeroclaw`](https://github.com/zeroclaw-labs/zeroclaw), 100% Rust): read [`crates/zeroclaw-runtime/src/security/`](https://github.com/zeroclaw-labs/zeroclaw/tree/main/crates/zeroclaw-runtime/src/security) — has working `bubblewrap.rs`, `landlock.rs`, `seatbelt.rs`, `firejail.rs`, `pairing.rs`, `webauthn.rs`, `leak_detector.rs`, `workspace_boundary.rs`. Architectural drawback vs us: tools run as in-process Rust traits, OS sandbox wraps the runtime — weaker boundary than our process-per-worker. Don't copy the in-process tool model.
 - **IronClaw** ([`nearai/ironclaw`](https://github.com/nearai/ironclaw)): read its dispatcher chokepoint pattern (`ToolDispatcher::dispatch()` is the single audit/safety-validation funnel for *every* action, regardless of caller). Drawbacks: WASM-as-boundary is software-only containment; Postgres+libSQL dual backend is overkill at our stage.
 
-The *defining* architectural difference: hhagent enforces **one OS process + one bwrap/Seatbelt jail per worker**. Both reference projects retreated from that. Don't.
+The *defining* architectural difference: kastellan enforces **one OS process + one bwrap/Seatbelt jail per worker**. Both reference projects retreated from that. Don't.
 
 ## How to update this document at session end
 

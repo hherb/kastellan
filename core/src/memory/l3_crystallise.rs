@@ -9,7 +9,7 @@
 //! closed-world integrity + reserved-tag + caps), dedups on a
 //! canonical SHA-256 over the template, and inserts at `layer = 3`
 //! marked `trust: "untrusted"` via
-//! [`hhagent_db::memories::insert_memory_at_layer`].
+//! [`kastellan_db::memories::insert_memory_at_layer`].
 //!
 //! **Crystallised skills are non-executable in this slice.** There is
 //! no invocation path; `trust: "untrusted"` is a forward-compatible
@@ -27,8 +27,8 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::cassandra::types::L3SkillCandidate;
-use hhagent_db::memories::{insert_memory_at_layer, load_layer, Memory, MemoryLayer};
-use hhagent_db::DbError;
+use kastellan_db::memories::{insert_memory_at_layer, load_layer, Memory, MemoryLayer};
+use kastellan_db::DbError;
 
 /// Max bytes for the skill `name` (a stable identifier).
 pub const L3_MAX_NAME_BYTES: usize = 64;
@@ -68,7 +68,7 @@ pub enum L3Error {
     #[error("L3 skill validation failed: {0}")]
     Validation(String),
     #[error("L3 db error: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
 }
 
 /// Outcome of a single `crystallise_l3` call.
@@ -448,7 +448,7 @@ pub async fn crystallise_l3(
     .fetch_optional(pool)
     .await
     .map_err(|e| {
-        L3Error::Db(hhagent_db::DbError::Query(format!(
+        L3Error::Db(kastellan_db::DbError::Query(format!(
             "crystallise_l3 EXISTS-check body_sha256={body_sha256}: {e}"
         )))
     })?;
@@ -480,10 +480,10 @@ pub async fn list_l3(pool: &PgPool) -> Result<Vec<Memory>, DbError> {
 }
 
 /// Operator-facing remove, layer-guarded via
-/// `hhagent_db::memories::delete_memory_at_layer` (cannot delete an
+/// `kastellan_db::memories::delete_memory_at_layer` (cannot delete an
 /// L0/L1/L2 row even on a typoed id). Returns `true` iff a row was deleted.
 pub async fn remove_l3(pool: &PgPool, id: i64) -> Result<bool, DbError> {
-    hhagent_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Skill).await
+    kastellan_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Skill).await
 }
 
 #[cfg(test)]

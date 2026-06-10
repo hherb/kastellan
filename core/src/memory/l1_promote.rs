@@ -1,6 +1,6 @@
 //! Writer for `MemoryLayer::Index` (L1) rows. Two callers:
 //!
-//! 1. **Operator** — via `hhagent-cli memory l1 add <body>` →
+//! 1. **Operator** — via `kastellan-cli memory l1 add <body>` →
 //!    `crate::cli_audit::l1_add_and_audit`.
 //! 2. **Agent-raised** — via `Plan.l1_insight` consumed by
 //!    `crate::scheduler::runner::drain_lane` on `Outcome::Completed`.
@@ -8,7 +8,7 @@
 //! Both callers share the same validation + dedup discipline:
 //! validate via [`validate_l1_body`], compute SHA-256, EXISTS-check
 //! at `layer = 1` keyed on `metadata->>'body_sha256'`, insert on
-//! miss via [`hhagent_db::memories::insert_memory_at_layer`].
+//! miss via [`kastellan_db::memories::insert_memory_at_layer`].
 //!
 //! ## Side effect: entity auto-link
 //!
@@ -25,8 +25,8 @@
 //! See `docs/superpowers/specs/2026-05-17-l1-promotion-writer-design.md`
 //! for the full design.
 
-use hhagent_db::memories::{insert_memory_at_layer, load_layer, Memory, MemoryLayer};
-use hhagent_db::DbError;
+use kastellan_db::memories::{insert_memory_at_layer, load_layer, Memory, MemoryLayer};
+use kastellan_db::DbError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -57,7 +57,7 @@ const RESERVED_TAG_OPEN: &str = "<l1_insights>";
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum L1Source {
-    /// Operator-explicit write via `hhagent-cli memory l1 add`.
+    /// Operator-explicit write via `kastellan-cli memory l1 add`.
     Operator,
     /// Agent-raised write from `runner::drain_lane` after
     /// `Outcome::Completed`. The originating `task_id` is carried
@@ -234,7 +234,7 @@ pub async fn promote_l1(
     .bind(&body_sha256)
     .fetch_optional(pool)
     .await
-    .map_err(|e| L1Error::Db(hhagent_db::DbError::Query(
+    .map_err(|e| L1Error::Db(kastellan_db::DbError::Query(
         format!("promote_l1 EXISTS-check body_sha256={body_sha256}: {e}")
     )))?;
 
@@ -292,12 +292,12 @@ pub async fn list_l1(pool: &PgPool, all: bool) -> Result<Vec<Memory>, DbError> {
 }
 
 /// Operator-facing remove. Layer-guarded via
-/// `hhagent_db::memories::delete_memory_at_layer`: cannot delete
+/// `kastellan_db::memories::delete_memory_at_layer`: cannot delete
 /// an L0 / L2 / L3 row even if the operator typoed the id.
 ///
 /// Returns `true` iff a row was deleted.
 pub async fn remove_l1(pool: &PgPool, id: i64) -> Result<bool, DbError> {
-    hhagent_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Index).await
+    kastellan_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Index).await
 }
 
 #[cfg(test)]
@@ -482,7 +482,7 @@ mod tests {
         fn _signature_pin<'a>(
             pool: &'a sqlx::PgPool,
             all: bool,
-        ) -> impl std::future::Future<Output = Result<Vec<hhagent_db::memories::Memory>, hhagent_db::DbError>> + 'a {
+        ) -> impl std::future::Future<Output = Result<Vec<kastellan_db::memories::Memory>, kastellan_db::DbError>> + 'a {
             list_l1(pool, all)
         }
         let _ = _signature_pin;
@@ -493,7 +493,7 @@ mod tests {
         fn _signature_pin<'a>(
             pool: &'a sqlx::PgPool,
             id: i64,
-        ) -> impl std::future::Future<Output = Result<bool, hhagent_db::DbError>> + 'a {
+        ) -> impl std::future::Future<Output = Result<bool, kastellan_db::DbError>> + 'a {
             remove_l1(pool, id)
         }
         let _ = _signature_pin;

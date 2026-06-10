@@ -49,8 +49,8 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use thiserror::Error;
 
-use hhagent_db::memories::Memory;
-use hhagent_db::DbError;
+use kastellan_db::memories::Memory;
+use kastellan_db::DbError;
 
 /// Default upper bound on the active L0 row count returned by
 /// [`load_l0_active_default`].
@@ -365,7 +365,7 @@ pub async fn seed_l0_from_rules(
 
         let metadata = build_l0_metadata(&rule.id, &body_sha256, &rule.tags, source_path);
         let memory_id =
-            hhagent_db::memories::seed_meta_memory(pool, &rule.body, &metadata, None).await?;
+            kastellan_db::memories::seed_meta_memory(pool, &rule.body, &metadata, None).await?;
         report.new_rows_written += 1;
 
         // Auto-link entities. Degrade-and-warn posture — a failure
@@ -419,7 +419,7 @@ pub async fn load_l0_active(
     if cap_rows == 0 || cap_bytes == 0 {
         return Ok(Vec::new());
     }
-    let candidates = hhagent_db::memories::load_active_l0(pool, cap_rows).await?;
+    let candidates = kastellan_db::memories::load_active_l0(pool, cap_rows).await?;
 
     let mut acc: Vec<Memory> = Vec::with_capacity(candidates.len());
     let mut bytes_used: usize = 0;

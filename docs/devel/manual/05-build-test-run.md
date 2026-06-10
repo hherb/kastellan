@@ -20,12 +20,12 @@ source "$HOME/.cargo/env"
 cargo build --workspace
 
 # Build only one crate (faster when iterating on a specific piece)
-cargo build -p hhagent-sandbox
-cargo build -p hhagent-core
+cargo build -p kastellan-sandbox
+cargo build -p kastellan-core
 ```
 
 Warnings are expected for a few pre-existing issues in `db/src/probe.rs` and
-`hhagent-protocol`. Do not introduce new warnings.
+`kastellan-protocol`. Do not introduce new warnings.
 
 ---
 
@@ -39,13 +39,13 @@ cargo test --workspace
 cargo test --workspace -- --nocapture
 
 # One crate
-cargo test -p hhagent-sandbox
+cargo test -p kastellan-sandbox
 
 # One integration test file
-cargo test -p hhagent-sandbox --test linux_smoke
+cargo test -p kastellan-sandbox --test linux_smoke
 
 # One test by name substring
-cargo test -p hhagent-sandbox argv_starts_with_bwrap
+cargo test -p kastellan-sandbox argv_starts_with_bwrap
 ```
 
 ### What "ignored" means
@@ -71,7 +71,7 @@ without actually testing containment.
 To check whether real sandboxing is active:
 
 ```sh
-cargo test -p hhagent-sandbox -- --nocapture 2>&1 | grep -E 'SKIP|ok'
+cargo test -p kastellan-sandbox -- --nocapture 2>&1 | grep -E 'SKIP|ok'
 ```
 
 If you see `[SKIP]` on Linux, re-run the AppArmor setup from
@@ -81,10 +81,10 @@ If you see `[SKIP]` on Linux, re-run the AppArmor setup from
 
 ## Running the daemon
 
-The agent core binary is built at `target/debug/hhagent`:
+The agent core binary is built at `target/debug/kastellan`:
 
 ```sh
-./target/debug/hhagent
+./target/debug/kastellan
 ```
 
 It starts, runs migrations (if needed), and then blocks waiting for tasks.
@@ -93,10 +93,10 @@ Exit with Ctrl-C.
 The CLI for interacting with a running daemon:
 
 ```sh
-./target/debug/hhagent-cli --help
-./target/debug/hhagent-cli audit tail
-./target/debug/hhagent-cli tasks list
-./target/debug/hhagent-cli ask "Summarise the last 5 emails from Alice"
+./target/debug/kastellan-cli --help
+./target/debug/kastellan-cli audit tail
+./target/debug/kastellan-cli tasks list
+./target/debug/kastellan-cli ask "Summarise the last 5 emails from Alice"
 ```
 
 ---
@@ -105,11 +105,11 @@ The CLI for interacting with a running daemon:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `HHAGENT_LLM_LOCAL_URL` | `http://127.0.0.1:8000/v1` (Linux) / `:11434/v1` (macOS) | Local LLM endpoint |
-| `HHAGENT_LLM_LOCAL_MODEL` | `""` | Model name to pass to the local LLM |
-| `HHAGENT_SHELL_EXEC_BIN` | (auto-detected) | Path to `hhagent-worker-shell-exec` binary |
-| `HHAGENT_SHELL_EXEC_ALLOWLIST` | `""` | Colon-separated list of allowed shell commands |
-| `HHAGENT_STATE_DIR` | `~/.local/state/hhagent` | Audit JSONL output directory |
+| `KASTELLAN_LLM_LOCAL_URL` | `http://127.0.0.1:8000/v1` (Linux) / `:11434/v1` (macOS) | Local LLM endpoint |
+| `KASTELLAN_LLM_LOCAL_MODEL` | `""` | Model name to pass to the local LLM |
+| `KASTELLAN_SHELL_EXEC_BIN` | (auto-detected) | Path to `kastellan-worker-shell-exec` binary |
+| `KASTELLAN_SHELL_EXEC_ALLOWLIST` | `""` | Colon-separated list of allowed shell commands |
+| `KASTELLAN_STATE_DIR` | `~/.local/state/kastellan` | Audit JSONL output directory |
 
 ---
 

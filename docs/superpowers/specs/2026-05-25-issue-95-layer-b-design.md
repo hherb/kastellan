@@ -1,7 +1,7 @@
 # Issue #95 — entity-upsert Layer B (full-batch unnest + per-row attribution fallback)
 
 **Date:** 2026-05-25
-**Issue:** [#95](https://github.com/hherb/hhagent/issues/95)
+**Issue:** [#95](https://github.com/hherb/kastellan/issues/95)
 **Predecessor:** PR #94 (Layer A, merged at `3ab94f6` on 2026-05-20)
 **Author/operator:** Horst Herb
 **Status:** Spec — ready for implementation plan.
@@ -34,7 +34,7 @@ violation (re-run as today's Layer A loop with diagnostic error wrapping)**.
 
 The empirical observation that re-frames the trade-off: **today's Layer A
 loop has weak per-row attribution too**. Each per-entity `.map_err(|e|
-hhagent_db::DbError::Query(format!("upsert entity: {e}")))` wraps the sqlx
+kastellan_db::DbError::Query(format!("upsert entity: {e}")))` wraps the sqlx
 error without identifying the failing entity. The fallback path is therefore
 an opportunity to *add* per-row attribution where Layer A had none, not just
 preserve parity.
@@ -50,14 +50,14 @@ preserve parity.
 4. Preserve every Layer A invariant byte-identically:
    - `UpsertOutcome { entity_ids, n_entities_upserted_new, n_relations_inserted }`
      public-API shape.
-   - `EntityExtractionError` enum unchanged (still wraps `hhagent_db::DbError`
+   - `EntityExtractionError` enum unchanged (still wraps `kastellan_db::DbError`
      and `String` for client errors).
    - 8-key `build_extract_entities_payload` audit-row contract.
    - `quarantine`-column preservation via the no-op `SET name_norm =
      entities.name_norm` self-assignment — operator-approved entities must
      survive re-extraction.
    - `name_norm` derivation via the existing
-     `hhagent_db::entity_name::normalize_entity_name` helper.
+     `kastellan_db::entity_name::normalize_entity_name` helper.
 5. Net-improve atomicity on the happy path: a single INSERT statement is
    atomically all-or-nothing, whereas Layer A's per-row loop allows partial
    commits on failure (one row commits before the next one fails). Layer B's
@@ -373,7 +373,7 @@ are; only the `[SKIP]`-on-no-PG check varies per host).
    covers it end-to-end.
 4. **Race against operator vocabulary changes** — between the entity batch
    succeeding and the relation batch starting, an operator could
-   `hhagent-cli relations kinds remove <kind>` and trip a relation-kind FK
+   `kastellan-cli relations kinds remove <kind>` and trip a relation-kind FK
    violation. The fallback path handles this cleanly — operator gets a
    diagnostic naming the kind. Same race exists today in Layer A; not a
    regression.

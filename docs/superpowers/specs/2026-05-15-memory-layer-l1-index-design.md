@@ -36,7 +36,7 @@ column existing.
 GenericAgent's design thesis is "the right knowledge is always in
 scope" — achieved by keeping a tiny, structured index loaded
 unconditionally and using it as a routing table for everything else.
-hhagent already has the recall lanes (semantic + lexical + graph) but
+kastellan already has the recall lanes (semantic + lexical + graph) but
 no notion of "this row is a routing pointer, load it every turn." That
 missing primitive blocks every later memory-tier idea (L3 skills,
 L4 session digests) because they all need a layer tag to be retrievable
@@ -166,7 +166,7 @@ UPDATE memories SET layer = 2 WHERE layer IS NULL;
 
 CREATE INDEX memories_layer_idx ON memories (layer, created_at DESC);
 
--- No GRANT change: hhagent_runtime already has full CRUD on memories
+-- No GRANT change: kastellan_runtime already has full CRUD on memories
 -- (migration 0002), and the new column is part of that table.
 ```
 
@@ -327,7 +327,7 @@ pub async fn load_l1(
     pool: &sqlx::PgPool,
     cap_rows: usize,
     cap_bytes: usize,
-) -> Result<Vec<hhagent_db::memories::Memory>, hhagent_db::DbError>;
+) -> Result<Vec<kastellan_db::memories::Memory>, kastellan_db::DbError>;
 ```
 
 Implementation:
@@ -338,7 +338,7 @@ pub async fn load_l1(
     cap_rows: usize,
     cap_bytes: usize,
 ) -> Result<Vec<Memory>, DbError> {
-    let candidates = hhagent_db::memories::load_layer(
+    let candidates = kastellan_db::memories::load_layer(
         pool, MemoryLayer::Index, cap_rows,
     ).await?;
 
@@ -412,7 +412,7 @@ Zero new error variants. Everything flows through `DbError`:
 
 ### Core integration (`core/tests/memory_layers_e2e.rs`, NEW, 4 `#[test]` fns)
 
-Each uses `bring_up_pg_cluster` from `hhagent-tests-common` (the
+Each uses `bring_up_pg_cluster` from `kastellan-tests-common` (the
 same helper as `memory_recall_e2e.rs`).
 
 1. **`load_l1_empty_returns_empty_vec`**
@@ -485,7 +485,7 @@ functions by name at execution time, not at trigger-creation time.
 
 ## Implementation order (TDD, per CLAUDE.md rule #2)
 
-1. Write `0013_memories_layer.sql`. `cargo test -p hhagent-db` still
+1. Write `0013_memories_layer.sql`. `cargo test -p kastellan-db` still
    green (no test names the column yet; existing rows backfill to 2).
 2. Write the 3 DB integration tests against not-yet-existing
    `MemoryLayer` / `insert_memory_at_layer` / `load_layer` — confirmed red.
@@ -526,8 +526,8 @@ functions by name at execution time, not at trigger-creation time.
 source "$HOME/.cargo/env"
 cargo build --workspace
 cargo test --workspace                                    # +10 vs baseline
-cargo test -p hhagent-db memories_layer                   # the 3 db tests
-cargo test -p hhagent-core --test memory_layers_e2e       # the 4 e2e tests
+cargo test -p kastellan-db memories_layer                   # the 3 db tests
+cargo test -p kastellan-core --test memory_layers_e2e       # the 4 e2e tests
 ```
 
 ## Follow-ups this slice unlocks (separate specs)

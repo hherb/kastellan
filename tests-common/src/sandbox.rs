@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use hhagent_sandbox::{SandboxBackend, SandboxPolicy};
+use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
 /// Returns `true` if the per-OS sandbox backend's probe fails. Caller
 /// should `return` immediately to short-circuit the test.
@@ -19,7 +19,7 @@ use hhagent_sandbox::{SandboxBackend, SandboxPolicy};
 /// installs from 10.5+).
 #[cfg(target_os = "linux")]
 pub fn skip_if_sandbox_unavailable() -> bool {
-    use hhagent_sandbox::linux_bwrap::LinuxBwrap;
+    use kastellan_sandbox::linux_bwrap::LinuxBwrap;
     if let Err(e) = LinuxBwrap::probe() {
         eprintln!("\n[SKIP] bwrap probe failed: {e}\n");
         return true;
@@ -29,7 +29,7 @@ pub fn skip_if_sandbox_unavailable() -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn skip_if_sandbox_unavailable() -> bool {
-    use hhagent_sandbox::macos_seatbelt::MacosSeatbelt;
+    use kastellan_sandbox::macos_seatbelt::MacosSeatbelt;
     if let Err(e) = MacosSeatbelt::probe() {
         eprintln!("\n[SKIP] sandbox-exec probe failed: {e}\n");
         return true;
@@ -39,16 +39,16 @@ pub fn skip_if_sandbox_unavailable() -> bool {
 
 /// Boxed per-OS [`SandboxBackend`] for use in tests that spawn a
 /// real sandboxed worker. The cfg-gating mirrors `default_backend()`
-/// in `hhagent_sandbox` but stays here so tests don't import a
+/// in `kastellan_sandbox` but stays here so tests don't import a
 /// production helper that may grow per-feature gates.
 #[cfg(target_os = "linux")]
 pub fn backend() -> Box<dyn SandboxBackend> {
-    Box::new(hhagent_sandbox::linux_bwrap::LinuxBwrap::new())
+    Box::new(kastellan_sandbox::linux_bwrap::LinuxBwrap::new())
 }
 
 #[cfg(target_os = "macos")]
 pub fn backend() -> Box<dyn SandboxBackend> {
-    Box::new(hhagent_sandbox::macos_seatbelt::MacosSeatbelt::new())
+    Box::new(kastellan_sandbox::macos_seatbelt::MacosSeatbelt::new())
 }
 
 /// Canonical sandbox policy for the shell-exec worker.
@@ -61,7 +61,7 @@ pub fn backend() -> Box<dyn SandboxBackend> {
 ///   override these.
 /// * `profile = WorkerStrict` — Landlock + seccomp lockdown applied
 ///   from inside the worker before serve_stdio.
-/// * `env` carries `HHAGENT_SHELL_ALLOWLIST` as a JSON array of
+/// * `env` carries `KASTELLAN_SHELL_ALLOWLIST` as a JSON array of
 ///   strings (the worker's allowlist contract).
 ///
 /// Scope: this helper is for *direct* worker-spawn tests (e.g.
@@ -70,7 +70,7 @@ pub fn backend() -> Box<dyn SandboxBackend> {
 /// `cli_ask_e2e`, `observation_capture`) do not use this helper —
 /// they seed the `tool_allowlists` table via
 /// [`crate::allowlist::seed_tool_allowlist`] and let the daemon's
-/// `build_tool_registry` pack `HHAGENT_SHELL_ALLOWLIST` from the DB
+/// `build_tool_registry` pack `KASTELLAN_SHELL_ALLOWLIST` from the DB
 /// at spawn time.
 pub fn policy_for_shell_exec(worker: &Path, allowlist: &[&str]) -> SandboxPolicy {
     let allow_json = serde_json::to_string(allowlist).expect("serialize allowlist");
@@ -78,7 +78,7 @@ pub fn policy_for_shell_exec(worker: &Path, allowlist: &[&str]) -> SandboxPolicy
         fs_read: vec![worker.to_path_buf()],
         cpu_ms: 5_000,
         mem_mb: 256,
-        env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
+        env: vec![("KASTELLAN_SHELL_ALLOWLIST".to_string(), allow_json)],
         ..SandboxPolicy::default()
     }
 }

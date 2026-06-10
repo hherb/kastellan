@@ -6,7 +6,7 @@
 
 **Architecture:** New `core::prompt_assembly` module ships a pure `assemble_system_prompt(l0, l1, base) -> String` function and a `SystemPromptBuilder` async trait parallel to the existing `PlanFormulator`. Production impl `PgSystemPromptBuilder` holds a `PgPool` (cheap-clonable; sqlx wraps its connections in an internal `Arc`) and orchestrates the two loaders; test-only `StaticSystemPromptBuilder` returns a fixed string. `RouterAgent` gains an `Arc<dyn SystemPromptBuilder>` field. The trait returns `AssembledPrompt { system_prompt, l0_count, l1_count }` so counts reach the audit row without re-parsing the string.
 
-**Tech Stack:** Rust (workspace at `/home/hherb/src/hhagent`), `sqlx` for Postgres, `async-trait`, `thiserror`, `sha2`, `serde_json`, `tokio`. Branch: `feat/prompt-assembler-l0-l1` (already created at `7062e5e`).
+**Tech Stack:** Rust (workspace at `/home/hherb/src/kastellan`), `sqlx` for Postgres, `async-trait`, `thiserror`, `sha2`, `serde_json`, `tokio`. Branch: `feat/prompt-assembler-l0-l1` (already created at `7062e5e`).
 
 **Spec:** [docs/superpowers/specs/2026-05-16-prompt-assembler-design.md](../specs/2026-05-16-prompt-assembler-design.md)
 
@@ -66,7 +66,7 @@ Modified files (7):
 Find the existing line:
 
 ```sh
-grep -n "^pub mod" /home/hherb/src/hhagent/core/src/lib.rs
+grep -n "^pub mod" /home/hherb/src/kastellan/core/src/lib.rs
 ```
 
 Add this new line in alphabetical position:
@@ -152,7 +152,7 @@ pub use assemble::assemble_system_prompt;
 //!    of the memory store.
 //! 5. Deterministic: same `(l0, l1, base)` produces the same bytes.
 
-use hhagent_db::memories::Memory;
+use kastellan_db::memories::Memory;
 
 /// Render the supplied memory slices and base prompt into a single
 /// LLM-ready system message.
@@ -194,7 +194,7 @@ pub fn assemble_system_prompt(l0: &[Memory], l1: &[Memory], base: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_db::memories::{Memory, MemoryLayer};
+    use kastellan_db::memories::{Memory, MemoryLayer};
     use time::OffsetDateTime;
 
     /// Construct a minimal `Memory` for tests. `id` is set to a stable
@@ -228,7 +228,7 @@ mod tests {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib prompt_assembly::assemble::tests::empty_l0_and_l1_emits_base_block_only
+cargo test -p kastellan-core --lib prompt_assembly::assemble::tests::empty_l0_and_l1_emits_base_block_only
 ```
 
 **Expected:** test passes. If the test fails, read the diff in the panic output and fix the function until the assertion holds.
@@ -363,7 +363,7 @@ The function above already implements the full contract, so the remaining tests 
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib prompt_assembly::assemble::tests
+cargo test -p kastellan-core --lib prompt_assembly::assemble::tests
 ```
 
 **Expected:** 9 tests pass, 0 failed. If any fails, the function in step 1.3 doesn't yet match the contract — re-read the failing assertion and adjust the function (not the test).
@@ -572,7 +572,7 @@ mod tests {
 //! type implementing the same trait, not a rewrite.
 
 use async_trait::async_trait;
-use hhagent_db::DbError;
+use kastellan_db::DbError;
 use thiserror::Error;
 
 pub mod assemble;
@@ -637,7 +637,7 @@ The trait and `AssembledPrompt` now exist, but `PgSystemPromptBuilder::build` re
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib prompt_assembly::pg_builder::tests
+cargo test -p kastellan-core --lib prompt_assembly::pg_builder::tests
 ```
 
 **Expected:** 2 tests pass.
@@ -688,7 +688,7 @@ EOF
 - [ ] **Create `core/tests/prompt_assembly_e2e.rs`:**
 
 ```rust
-//! End-to-end smoke for [`hhagent_core::prompt_assembly::PgSystemPromptBuilder`].
+//! End-to-end smoke for [`kastellan_core::prompt_assembly::PgSystemPromptBuilder`].
 //!
 //! Each scenario brings up its own per-test Postgres cluster (same
 //! recipe as `memory_l0_seed_e2e.rs` and `memory_layers_e2e.rs`) so
@@ -699,9 +699,9 @@ EOF
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::prompt_assembly::{PgSystemPromptBuilder, SystemPromptBuilder};
-use hhagent_db::memories::{insert_memory_at_layer, seed_meta_memory, MemoryLayer};
-use hhagent_tests_common::{
+use kastellan_core::prompt_assembly::{PgSystemPromptBuilder, SystemPromptBuilder};
+use kastellan_db::memories::{insert_memory_at_layer, seed_meta_memory, MemoryLayer};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -727,11 +727,11 @@ fn pg_builder_build_against_seeded_db() {
         &bin_dir,
         "pas-d",
         "pas-l",
-        &format!("hhagent-supervisor-test-pg-pa-seeded-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-pa-seeded-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -740,7 +740,7 @@ fn pg_builder_build_against_seeded_db() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -800,11 +800,11 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
         &bin_dir,
         "pae-d",
         "pae-l",
-        &format!("hhagent-supervisor-test-pg-pa-empty-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-pa-empty-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -813,7 +813,7 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -836,7 +836,7 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test prompt_assembly_e2e -- --nocapture
+cargo test -p kastellan-core --test prompt_assembly_e2e -- --nocapture
 ```
 
 **Expected on a host with Postgres available:** 2 tests pass. On a host without Postgres: 2 `[SKIP]` lines and the tests still report `ok` (skip-as-pass).
@@ -1039,7 +1039,7 @@ The struct now needs a third argument. The mock tests don't care about the assem
 - [ ] **Modify `core/tests/router_agent_mock_e2e.rs`:** at the top of the file, add the import:
 
 ```rust
-use hhagent_core::prompt_assembly::StaticSystemPromptBuilder;
+use kastellan_core::prompt_assembly::StaticSystemPromptBuilder;
 ```
 
 (If a `use` block is already present, slot the line in alphabetically.)
@@ -1092,7 +1092,7 @@ cargo test --workspace 2>&1 | tail -5
 To find any remaining call sites:
 
 ```sh
-grep -rn "FormulationMeta {" /home/hherb/src/hhagent/core/src /home/hherb/src/hhagent/core/tests
+grep -rn "FormulationMeta {" /home/hherb/src/kastellan/core/src /home/hherb/src/kastellan/core/tests
 ```
 
 Every occurrence must initialize the new fields.
@@ -1360,7 +1360,7 @@ The body of the test (assertions on `plan_back`, `classification_floor`, etc.) s
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib scheduler::inner_loop::tests::build_plan_formulate
+cargo test -p kastellan-core --lib scheduler::inner_loop::tests::build_plan_formulate
 ```
 
 **Expected:** all `build_plan_formulate_*` tests pass (including the renamed ones).
@@ -1412,13 +1412,13 @@ EOF
 
 ```rust
     let prompt_builder: std::sync::Arc<
-        dyn hhagent_core::prompt_assembly::SystemPromptBuilder,
+        dyn kastellan_core::prompt_assembly::SystemPromptBuilder,
     > = std::sync::Arc::new(
-        hhagent_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone()),
+        kastellan_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone()),
     );
 
-    let formulator: Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
-        Arc::new(hhagent_core::scheduler::agent::RouterAgent::new(
+    let formulator: Arc<dyn kastellan_core::scheduler::agent::PlanFormulator> =
+        Arc::new(kastellan_core::scheduler::agent::RouterAgent::new(
             router.clone(),
             prompts.clone(),
             prompt_builder,
@@ -1433,7 +1433,7 @@ Note: the existing `pool` binding in `main.rs` is `sqlx::PgPool` (the type retur
 
 ```sh
 source "$HOME/.cargo/env"
-cargo build -p hhagent-core --bins 2>&1 | tail -10
+cargo build -p kastellan-core --bins 2>&1 | tail -10
 ```
 
 **Expected:** clean build (or warning-free).
@@ -1449,21 +1449,21 @@ cargo test --workspace 2>&1 | tail -5
 
 **Expected:** `test result: ok. 651 passed; 0 failed`. The `cli_ask_e2e` happy-path now exercises the full chain with the L0 starter rules loaded — and the payload loop from step 5.7 confirms every `plan.formulate` row carries the 3 new keys with the right shape.
 
-If `cli_ask_e2e` is the test that fails, the most likely cause is that the `system_prompt_sha256` length isn't 64 chars (a stale `assembled_prompt_sha256` from a `StaticSystemPromptBuilder` somewhere). Re-check that the binary is built with the changes from Task 4 (`cargo clean -p hhagent-core && cargo build -p hhagent-core --bins`) if in doubt.
+If `cli_ask_e2e` is the test that fails, the most likely cause is that the `system_prompt_sha256` length isn't 64 chars (a stale `assembled_prompt_sha256` from a `StaticSystemPromptBuilder` somewhere). Re-check that the binary is built with the changes from Task 4 (`cargo clean -p kastellan-core && cargo build -p kastellan-core --bins`) if in doubt.
 
 ### Step 6.4 — Manual smoke (optional but recommended)
 
-- [ ] **Optional verification** (requires the local LLM running, per `~/.claude/projects/-home-hherb-src-hhagent/memory/user_local_inference_setup.md`):
+- [ ] **Optional verification** (requires the local LLM running, per `~/.claude/projects/-home-hherb-src-kastellan/memory/user_local_inference_setup.md`):
 
 ```sh
 source "$HOME/.cargo/env"
-./target/debug/hhagent-cli ask "echo marker"
+./target/debug/kastellan-cli ask "echo marker"
 ```
 
 Expected: exits 0, output contains `marker`. If you want to see the new audit keys, in another terminal:
 
 ```sh
-./target/debug/hhagent-cli audit tail --since 1m
+./target/debug/kastellan-cli audit tail --since 1m
 ```
 
 You should see two `agent/plan.formulate` rows whose payload contains `"l0_count": 2, "l1_count": 0, "system_prompt_sha256": "<64-char-hex>"`.
