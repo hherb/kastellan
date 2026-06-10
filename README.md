@@ -1,10 +1,30 @@
-# kastellan
+# Kastellan
 
 <p align="center">
   <img src="assets/kastellan_logo_transparent.png" alt="kastellan logo" width="280">
 </p>
 
-A personal, always-on agentic system designed from the ground up for security and vendor neutrality.
+> A castellan is the officer a lord entrusts to hold a stronghold:
+> full authority within the walls, none to act beyond them.
+
+Kastellan is a personal, always-on AI agent built so that security is its
+foundational property, not a layer added later. It talks to you over secure
+messaging (Telegram, Signal) and its own email account, drives a browser,
+searches and fetches the web, executes Python, and maintains persistent
+memory in Postgres with hybrid retrieval. But every tool runs inside its own
+kernel sandbox, bounded to that tool's own allowlist, and every plan it forms
+is first reviewed by **CASSANDRA** — a semantic oversight layer enforcing five
+constitutional constraints that no user, admin, or configuration change can
+override.
+
+The name is the design. Kastellan acts on your behalf and runs unattended,
+but only ever within boundaries it cannot widen for itself: mechanical ones
+(the OS process boundary, with bubblewrap, Landlock, and seccomp) and semantic
+ones (CASSANDRA). It is vendor-neutral by construction — the primary host is
+the NVIDIA DGX Spark, but nothing in the core requires NVIDIA or a specific
+cloud, and Linux and macOS are both first-class. The core is small and Rust,
+with no eval, no metaprogramming, and no dynamic import; Python lives only
+inside sandboxed workers.
 
 ## What it is
 
