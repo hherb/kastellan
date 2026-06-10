@@ -1494,10 +1494,17 @@ name = "kastellan-worker-web-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "reqwest",
+ "rustls-pki-types",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-rustls",
  "url",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2449,6 +2456,7 @@ version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
