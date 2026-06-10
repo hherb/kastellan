@@ -1494,10 +1494,12 @@ name = "kastellan-worker-web-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "http-body-util",
  "hyper",
  "hyper-util",
  "reqwest",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
