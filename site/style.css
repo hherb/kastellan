@@ -560,6 +560,8 @@ pre.chip {
 .dot-done,
 .dot-wip,
 .dot-plan {
+  display: inline-block;
+  vertical-align: -1px;
   width: 12px;
   height: 12px;
   border-radius: 50%;
