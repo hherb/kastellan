@@ -64,6 +64,7 @@ pub fn proxy_policy(binary: &Path, allowlist: &[String], scratch: &Path, worker:
             (ENV_ALLOWLIST.to_string(), allow_json),
             (ENV_WORKER.to_string(), worker.to_string()),
         ],
+        proxy_uds: None,
     }
 }
 

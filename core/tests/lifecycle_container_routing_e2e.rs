@@ -74,6 +74,7 @@ fn minimal_policy() -> SandboxPolicy {
         cpu_quota_pct: None,
         tasks_max: None,
         env: vec![],
+        proxy_uds: None,
     }
 }
 
