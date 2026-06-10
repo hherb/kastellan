@@ -5,7 +5,10 @@
 //!
 //! Env contract (set by the host-side `core::egress::spawn_sidecar`):
 //!   HHAGENT_EGRESS_PROXY_UDS       — absolute path of the UDS to bind.
-//!   HHAGENT_EGRESS_PROXY_ALLOWLIST — JSON array of allowed host strings.
+//!   HHAGENT_EGRESS_PROXY_ALLOWLIST — JSON array of allowed host strings. Slice
+//!       #1 matches the *host* only — an allowlisted host is reachable on any
+//!       port. Port-scoped endpoints (`host:443`) land with slice #2's live
+//!       routing (see `proxy::decide`).
 //!   HHAGENT_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
 
 mod proxy;
@@ -35,9 +38,10 @@ fn main() -> anyhow::Result<()> {
     // Worker-side defense-in-depth (Linux Landlock+seccomp; no-op on macOS,
     // where the parent Seatbelt profile contains us). Outbound socket(2) +
     // AF_UNIX accept must remain permitted — see the net_client profile.
-    // NOTE (Linux verification, run on the DGX): confirm the seccomp profile
-    // permits AF_UNIX bind/listen/accept *and* AF_INET connect for a process
-    // that both serves and dials; widen `seccomp_lock` if `accept` is refused.
+    // NOTE (Linux verification, run on the DGX — tracked in #243): confirm the
+    // seccomp profile permits AF_UNIX bind/listen/accept *and* AF_INET connect
+    // for a process that both serves and dials; widen `seccomp_lock` if `accept`
+    // is refused.
     let _report = hhagent_worker_prelude::lock_down()?;
 
     let resolver = StdResolve;

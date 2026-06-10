@@ -48,6 +48,11 @@ workers through the proxy and does **not** modify `tool_host`. The worker→prox
 CONNECT-over-UDS connector, hyper+tokio-rustls) and the **unbypassable force-routing** (private netns + the
 `tool_host` auto-spawn hookup) that make a *compromised* worker actually unable to bypass it are **slice #2** — see
 Next TODO. Until #2, live containment for net workers is unchanged (the worker's self-enforced allowlist).
+**`/review` follow-up (this session):** added a 10 s upstream `connect_timeout` (`proxy::decide`); documented the
+slice-#1 scope boundaries in code (allowlist is **host-only — port unconstrained**; tunnel idle/resolve timeouts
+deferred) and lodged three tracking issues for slice #2: **[#241](https://github.com/hherb/hhagent/issues/241)**
+port-scope the allowlist, **[#242](https://github.com/hherb/hhagent/issues/242)** tunnel idle/resolve-timeout
+hardening, **[#243](https://github.com/hherb/hhagent/issues/243)** DGX seccomp `accept`/UDS-path verification.
 
 **Prior session — injection-guard per-tool profiles ([#142](https://github.com/hherb/hhagent/issues/142), PR [#239](https://github.com/hherb/hhagent/pull/239) MERGED).**
 `GuardProfile { Strict | Relaxed }` (`#[non_exhaustive]`) + `GuardProfile::for_tool` (fail-closed: only
@@ -150,7 +155,8 @@ incl. 2 real-UDS `handle_conn` round-trips), **`core --test egress_proxy_e2e` 2 
 `Net::ProxyEgress` builder-shape tests across bwrap/seatbelt/container; bwrap arm cross-clippy'd for
 `aarch64-unknown-linux-gnu`). All egress-proxy files < 500 LOC. Final whole-implementation security review: APPROVED,
 no Critical, no allowlist/SSRF bypass found.
-**Linux verification still owed (run on the DGX):** the proxy is a UDS *server* + outbound *client*; confirm the
+**Linux verification still owed (run on the DGX — tracked in [#243](https://github.com/hherb/hhagent/issues/243)):**
+the proxy is a UDS *server* + outbound *client*; confirm the
 `net_client` seccomp profile (`workers/prelude/src/seccomp_lock.rs`) permits AF_UNIX `bind`/`listen`/`accept` (it
 was authored for an outbound-only HTTP client) — flagged in `egress-proxy/src/main.rs`; widen + pin if `accept` is
 killed. Also confirm host↔jail path identity for the bind-mounted `<scratch>/egress.sock` under bwrap.
@@ -382,6 +388,10 @@ together because each is inert without the others:
   story, likely weaker — design it honestly). This is the cross-platform-divergent hard part; **needs its own spec
   first.** Verification: a real `web.fetch` round-trips through the spawned sidecar and an off-allowlist host is
   refused even when the worker tries to bypass. (Slices #3 TLS-intercept leak-scanner / #4 TLS-pinning follow.)
+- **Slice-#1 review follow-ups to fold in here:** [#241](https://github.com/hherb/hhagent/issues/241) port-scope the
+  proxy allowlist (currently host-only — settle in the slice-#2 spec), [#242](https://github.com/hherb/hhagent/issues/242)
+  tunnel idle/resolve-timeout tuning against the live workload, [#243](https://github.com/hherb/hhagent/issues/243) DGX
+  seccomp `accept`/UDS-path verification (blocks the Linux force-routing path).
 
 **Natural web-search follow-ups** (cheap, on demand): stand up a local SearxNG with `scripts/web-search/setup-searxng.sh`, set `HHAGENT_WEB_SEARCH_ENDPOINT` + the `web-search` `tool_allowlists` row, and run the `#[ignore]` `core/tests/web_search_e2e.rs::real_search_against_searxng` to validate the real round-trip end to end. If/when a caller needs them: category/language/engine params or pagination on `web.search` (deferred per spec).
 

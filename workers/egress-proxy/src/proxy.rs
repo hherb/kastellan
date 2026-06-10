@@ -3,8 +3,9 @@
 //! so the policy paths are unit-testable; `handle_conn` does the byte-shuffling.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 use hhagent_worker_web_common::allowlist::HostAllowlist;
 
@@ -35,11 +36,26 @@ pub enum Target {
     Block(Verdict, String),
 }
 
+/// Bound on the upstream TCP connect so a slow/unreachable pinned IP cannot pin
+/// a proxy thread open indefinitely. Resolution (`to_socket_addrs`) has no std
+/// timeout, and the per-direction tunnel copy is deliberately *not* idle-capped
+/// in slice #1 (a sane idle timeout depends on the live worker's workload —
+/// deferred to slice #2 when real traffic flows; tracked in #242). The sidecar
+/// is `SingleUse` and dies with worker teardown, which bounds the worst case.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Decide what to do with `host:port`, given the allowlist and a resolver.
 /// - Literal-IP target: allowed iff the allowlist accepts the literal string;
 ///   the SSRF range check is **skipped** (operator allowlisted that exact addr).
 /// - Hostname target: allowed iff the allowlist accepts the name; then every
 ///   resolved IP is range-checked and the first non-denied one is pinned.
+///
+/// **Port scope (slice #1):** the allowlist matches the *host* only — `port` is
+/// parsed and pinned for the dial but is **not** itself constrained, so an
+/// allowlisted host is reachable on any port. Port-scoped endpoints (e.g.
+/// `host:443`) are deferred to slice #2, where the proxy goes live and the
+/// `tool_allowlists` → proxy plumbing is built (needs its own design — tracked
+/// in #241). Until then nothing routes through the proxy, so this is inert.
 pub fn decide(host: &str, port: u16, allow: &HostAllowlist, resolver: &dyn Resolve) -> Target {
     if !allow.is_allowed(host) {
         return Target::Block(Verdict::BlockedAllowlist, format!("{host} not on allowlist"));
@@ -92,7 +108,7 @@ pub fn handle_conn(
             let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n");
         }
         Target::Dial(ip) => {
-            let upstream = match TcpStream::connect((ip, port)) {
+            let upstream = match TcpStream::connect_timeout(&SocketAddr::new(ip, port), CONNECT_TIMEOUT) {
                 Ok(s) => s,
                 Err(e) => {
                     // Transport failure, not a policy verdict: decision was allowed.
