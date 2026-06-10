@@ -175,6 +175,21 @@ fn net_allowlist_emits_network_default() {
     assert_eq!(argv[net_idx + 1], "default");
 }
 
+#[test]
+fn proxy_egress_maps_to_network_default() {
+    let p = SandboxPolicy {
+        profile: Profile::WorkerNetClient,
+        net: Net::ProxyEgress,
+        ..SandboxPolicy::default()
+    };
+    let argv = build_container_argv(&p, DEFAULT_IMAGE, "/bin/true", &[]);
+    let net_idx = argv
+        .iter()
+        .position(|s| s == "--network")
+        .expect("missing --network");
+    assert_eq!(argv[net_idx + 1], "default");
+}
+
 /// WorkerStrict adds `--read-only` (root FS RO), `--cap-drop ALL`,
 /// `--user nobody`, and `--tmpfs /tmp` (so processes have a writable
 /// scratch despite --read-only).

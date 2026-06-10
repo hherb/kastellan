@@ -184,10 +184,10 @@ pub fn build_container_argv(
             argv.push("--network".into());
             argv.push("none".into());
         }
-        Net::Allowlist(_) => {
-            // The allowlist itself is enforced by the future egress proxy
-            // worker (see docs/architecture.md invariant 5), not by
-            // `container` — same split as bwrap's `--share-net`.
+        Net::Allowlist(_) | Net::ProxyEgress => {
+            // The allowlist itself is enforced by the egress proxy worker, not
+            // by `container` — same split as bwrap's `--share-net`. ProxyEgress
+            // is the proxy's own policy (real netns); Allowlist is a worker's.
             argv.push("--network".into());
             argv.push("default".into());
         }

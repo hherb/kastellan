@@ -318,7 +318,7 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
         ));
     }
 
-    if matches!(policy.net, crate::Net::Allowlist(_)) {
+    if matches!(policy.net, crate::Net::Allowlist(_) | crate::Net::ProxyEgress) {
         // The host allowlist itself is enforced by the future egress proxy
         // (see docs/architecture.md invariant 5), not by Seatbelt — same
         // split as bwrap's --share-net.
