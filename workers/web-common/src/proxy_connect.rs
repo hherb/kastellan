@@ -4,6 +4,7 @@
 //! out. TLS stays end-to-end worker↔origin (the proxy tunnels ciphertext).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use http_body_util::BodyExt;
@@ -21,6 +22,8 @@ const MAX_PROXY_HEAD_BYTES: usize = 8 * 1024;
 pub struct ProxyConnectGet {
     user_agent: String,
     uds: PathBuf,
+    /// Shared TLS config built once at construction; cheap to clone per-connection.
+    tls: Arc<rustls::ClientConfig>,
     rt: tokio::runtime::Runtime,
 }
 
@@ -32,7 +35,18 @@ impl ProxyConnectGet {
             .enable_all()
             .build()
             .expect("current-thread runtime");
-        Self { user_agent: user_agent.to_string(), uds, rt }
+
+        // Build TLS config once — cloning ~150 webpki roots on every HTTPS call
+        // is measurably expensive; store it behind an Arc.
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
+
+        Self { user_agent: user_agent.to_string(), uds, tls, rt }
     }
 
     async fn get_async(&self, url: &Url) -> Result<RawResponse, String> {
@@ -60,7 +74,7 @@ impl ProxyConnectGet {
         // 3. Layer transport and run one GET.
         match url.scheme() {
             "https" => {
-                let tls = tls_connect(stream, url).await?;
+                let tls = tls_connect(stream, url, Arc::clone(&self.tls)).await?;
                 run_get(tls, url, host, &self.user_agent).await
             }
             "http" => run_get(stream, url, host, &self.user_agent).await,
@@ -87,15 +101,22 @@ impl HttpGet for ProxyConnectGet {
 
 /// Read from `stream` until `\r\n\r\n` or EOF, bounded by `MAX_PROXY_HEAD_BYTES`.
 /// Returns the first line of the response (the status line).
+///
+/// # Errors
+/// Returns `Err` if the proxy closes the connection before the blank-line
+/// terminator (`\r\n\r\n`) arrives — a truncated head must not be parsed as
+/// success.
 async fn read_proxy_head(stream: &mut tokio::net::UnixStream) -> Result<String, String> {
     let mut buf = [0u8; 1];
     let mut acc: Vec<u8> = Vec::new();
+    let mut terminated = false;
     loop {
         let n = stream
             .read(&mut buf)
             .await
             .map_err(|e| format!("read proxy head: {e}"))?;
         if n == 0 {
+            // EOF before the blank-line terminator — truncated head.
             break;
         }
         acc.push(buf[0]);
@@ -103,9 +124,18 @@ async fn read_proxy_head(stream: &mut tokio::net::UnixStream) -> Result<String, 
             return Err(format!("proxy head exceeds {MAX_PROXY_HEAD_BYTES} bytes"));
         }
         if acc.ends_with(b"\r\n\r\n") {
+            terminated = true;
             break;
         }
     }
+
+    if !terminated {
+        return Err(
+            "proxy closed connection before sending a complete response head (no \\r\\n\\r\\n)"
+                .to_string(),
+        );
+    }
+
     // Extract the first line (status line).
     let head_str = String::from_utf8_lossy(&acc);
     let first_line = head_str
@@ -115,12 +145,13 @@ async fn read_proxy_head(stream: &mut tokio::net::UnixStream) -> Result<String, 
     Ok(first_line.to_string())
 }
 
-/// Wrap the raw `UnixStream` in a TLS layer using the system roots.
+/// Wrap the raw `UnixStream` in a TLS layer using the pre-built `ClientConfig`.
 /// Builds the `ServerName` from `url.host()` (NOT the raw `host_str()`) so
 /// that IPv6 literals are not passed with their URL-authority brackets.
 async fn tls_connect(
     stream: tokio::net::UnixStream,
     url: &Url,
+    tls_config: Arc<rustls::ClientConfig>,
 ) -> Result<tokio_rustls::client::TlsStream<tokio::net::UnixStream>, String> {
     let server_name: ServerName<'static> = match url.host() {
         Some(Host::Domain(d)) => ServerName::try_from(d.to_owned())
@@ -130,14 +161,7 @@ async fn tls_connect(
         None => return Err("url has no host for TLS".to_string()),
     };
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let connector = tokio_rustls::TlsConnector::from(tls_config);
     connector
         .connect(server_name, stream)
         .await
@@ -194,16 +218,17 @@ where
         .unwrap_or("")
         .to_string();
 
-    // Collect body with a running cap.
+    // Collect body with a running cap. Check BEFORE extending so the oversized
+    // chunk is never copied in — mirrors ReqwestGet's hard-limit posture.
     let mut body_bytes = Vec::new();
     let mut frames = resp.into_body();
     while let Some(frame) = frames.frame().await {
         let frame = frame.map_err(|e| format!("body read: {e}"))?;
         if let Some(data) = frame.data_ref() {
-            body_bytes.extend_from_slice(data);
-            if body_bytes.len() > MAX_BODY_BYTES {
+            if body_bytes.len() + data.len() > MAX_BODY_BYTES {
                 return Err(format!("response body exceeds {MAX_BODY_BYTES} bytes"));
             }
+            body_bytes.extend_from_slice(data);
         }
     }
 
@@ -286,7 +311,9 @@ mod tests {
             loop {
                 let n = conn.read(&mut buf).unwrap();
                 acc.extend_from_slice(&buf[..n]);
-                if acc.windows(4).any(|w| w == b"\r\n\r\n") || n == 0 { break; }
+                if acc.windows(4).any(|w| w == b"\r\n\r\n") || n == 0 {
+                    break;
+                }
             }
             conn.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").unwrap();
             // Now act as the raw-HTTP origin.
@@ -306,8 +333,6 @@ mod tests {
             uds.clone(),
             b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
         );
-        // Give the listener a moment to bind.
-        std::thread::sleep(std::time::Duration::from_millis(50));
 
         let get = ProxyConnectGet::new("kastellan-test/0", uds.clone());
         let url = Url::parse("http://127.0.0.1:8888/search").unwrap();
@@ -316,6 +341,81 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(resp.content_type, "application/json");
         assert_eq!(resp.body, b"{}");
+        let _ = std::fs::remove_file(&uds);
+    }
+
+    // ── I1 + M4: premature-EOF and proxy-refused tests ──────────────────────
+
+    /// Stub that sends a partial head (no blank line) then closes — client MUST
+    /// return Err, not Ok (I1: premature EOF is not success).
+    fn spawn_stub_proxy_truncated_head(path: std::path::PathBuf) {
+        let listener = UnixListener::bind(&path).unwrap();
+        thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            // Drain CONNECT request (we don't care about its content).
+            let mut buf = [0u8; 1024];
+            let _ = conn.read(&mut buf);
+            // Send a partial status line — deliberately NO blank line, then close.
+            conn.write_all(b"HTTP/1.1 200\r\n").unwrap();
+            // Drop conn → EOF.
+        });
+    }
+
+    #[test]
+    fn premature_eof_is_an_error_not_success() {
+        let dir =
+            std::env::temp_dir().join(format!("kastellan-pc-trunc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let uds = dir.join("trunc.sock");
+        let _ = std::fs::remove_file(&uds);
+        spawn_stub_proxy_truncated_head(uds.clone());
+
+        let get = ProxyConnectGet::new("kastellan-test/0", uds.clone());
+        let url = Url::parse("http://127.0.0.1:8888/search").unwrap();
+        let result = get.get(&url);
+
+        assert!(
+            result.is_err(),
+            "expected Err for truncated proxy head, got Ok"
+        );
+        let msg = result.err().unwrap();
+        assert!(
+            msg.contains("complete response head"),
+            "expected 'complete response head' in error, got: {msg}"
+        );
+        let _ = std::fs::remove_file(&uds);
+    }
+
+    /// Stub that returns a well-formed `403 Forbidden` — client must return Err.
+    fn spawn_stub_proxy_403(path: std::path::PathBuf) {
+        let listener = UnixListener::bind(&path).unwrap();
+        thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = conn.read(&mut buf);
+            conn.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").unwrap();
+        });
+    }
+
+    #[test]
+    fn proxy_refused_403_is_an_error() {
+        let dir =
+            std::env::temp_dir().join(format!("kastellan-pc-403-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let uds = dir.join("refused.sock");
+        let _ = std::fs::remove_file(&uds);
+        spawn_stub_proxy_403(uds.clone());
+
+        let get = ProxyConnectGet::new("kastellan-test/0", uds.clone());
+        let url = Url::parse("http://127.0.0.1:8888/search").unwrap();
+        let result = get.get(&url);
+
+        assert!(result.is_err(), "expected Err for 403 CONNECT refusal, got Ok");
+        let msg = result.err().unwrap();
+        assert!(
+            msg.contains("403"),
+            "expected '403' in error message, got: {msg}"
+        );
         let _ = std::fs::remove_file(&uds);
     }
 }

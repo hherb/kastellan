@@ -96,36 +96,47 @@ impl HttpGet for ReqwestGet {
     }
 }
 
-/// Build the appropriate `HttpGet` for the current environment. When
-/// `KASTELLAN_EGRESS_PROXY_UDS` is set (force-routing active), egress MUST go
-/// through the proxy, so return [`crate::proxy_connect::ProxyConnectGet`];
-/// otherwise the direct [`ReqwestGet`] for dev/no-proxy runs.
-pub fn make_get(user_agent: &str) -> anyhow::Result<Box<dyn HttpGet>> {
-    match std::env::var("KASTELLAN_EGRESS_PROXY_UDS") {
-        Ok(uds) if !uds.is_empty() => Ok(Box::new(
+/// Inner selection logic for `make_get`. `uds_override` is the value of
+/// `KASTELLAN_EGRESS_PROXY_UDS` (already extracted by the caller), or `None`
+/// when the variable is absent or empty.
+///
+/// Extracted so tests can exercise both branches **without touching process
+/// env** (env mutation is a data race when other threads read the same var).
+pub(crate) fn make_get_inner(
+    user_agent: &str,
+    uds_override: Option<&str>,
+) -> anyhow::Result<Box<dyn HttpGet>> {
+    match uds_override {
+        Some(uds) if !uds.is_empty() => Ok(Box::new(
             crate::proxy_connect::ProxyConnectGet::new(user_agent, PathBuf::from(uds)),
         )),
         _ => Ok(Box::new(ReqwestGet::new(user_agent)?)),
     }
 }
 
+/// Build the appropriate `HttpGet` for the current environment. When
+/// `KASTELLAN_EGRESS_PROXY_UDS` is set (force-routing active), egress MUST go
+/// through the proxy, so return [`crate::proxy_connect::ProxyConnectGet`];
+/// otherwise the direct [`ReqwestGet`] for dev/no-proxy runs.
+pub fn make_get(user_agent: &str) -> anyhow::Result<Box<dyn HttpGet>> {
+    // Treat absent *and* empty the same way (empty = effectively unset).
+    let uds = std::env::var("KASTELLAN_EGRESS_PROXY_UDS").ok();
+    make_get_inner(user_agent, uds.as_deref())
+}
+
 #[cfg(test)]
 mod make_get_tests {
     use super::*;
 
-    /// Run both env branches sequentially in one test to avoid interleaving
-    /// when the test harness runs tests in parallel threads.
+    /// Both branches exercised via `make_get_inner` — no env mutation, no race.
     #[test]
-    fn make_get_selects_transport_from_env() {
-        // Branch 1: no env var → reqwest.
-        std::env::remove_var("KASTELLAN_EGRESS_PROXY_UDS");
-        let g = make_get("kastellan-test/0").unwrap();
+    fn make_get_inner_selects_transport_by_uds() {
+        // No UDS → reqwest.
+        let g = make_get_inner("kastellan-test/0", None).unwrap();
         assert_eq!(g.transport_kind(), "reqwest");
 
-        // Branch 2: env var set → proxy-connect.
-        std::env::set_var("KASTELLAN_EGRESS_PROXY_UDS", "/tmp/does-not-need-to-exist.sock");
-        let g = make_get("kastellan-test/0").unwrap();
+        // UDS set → proxy-connect (socket doesn't need to exist for construction).
+        let g = make_get_inner("kastellan-test/0", Some("/tmp/x.sock")).unwrap();
         assert_eq!(g.transport_kind(), "proxy-connect");
-        std::env::remove_var("KASTELLAN_EGRESS_PROXY_UDS");
     }
 }
