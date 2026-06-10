@@ -155,10 +155,13 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
     argv.push("bwrap".into());
 
     argv.push("--unshare-all".into());
-    if matches!(policy.net, Net::Allowlist(_) | Net::ProxyEgress) {
-        // Allowlist is enforced by the egress proxy on the host side; bwrap just
-        // needs to keep the host network namespace so the worker can reach it.
-        argv.push("--share-net".into());
+    match (&policy.net, &policy.proxy_uds) {
+        // Force-routed worker: private netns (no route out); only the bound
+        // proxy UDS reaches the host. AF_UNIX is mount-ns-scoped, not net-ns.
+        (Net::Allowlist(_), Some(_uds)) => { /* no --share-net: keep --unshare-all's private netns */ }
+        // The proxy itself, or legacy Allowlist without a proxy: real netns.
+        (Net::ProxyEgress, _) | (Net::Allowlist(_), None) => argv.push("--share-net".into()),
+        (Net::Deny, _) => { /* no net */ }
     }
 
     argv.push("--die-with-parent".into());
@@ -192,6 +195,13 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
     }
     for path in &policy.fs_write {
         push_bind(&mut argv, "--bind-try", path);
+    }
+    if let Some(uds) = &policy.proxy_uds {
+        // Bind the proxy UDS rw at an identical host↔jail path.
+        // AF_UNIX connect requires write permission on the inode; `--bind`
+        // (not `--ro-bind`) gives the worker that permission while keeping
+        // the path identical so no path rewrite is needed inside the jail.
+        push_bind(&mut argv, "--bind", uds);
     }
 
     argv.push("--".into());
@@ -269,6 +279,51 @@ mod tests {
         let joined = argv.join(" ");
         assert!(joined.contains("--bind-try /var/lib/kastellan/scratch /var/lib/kastellan/scratch"));
         assert!(!joined.contains("--ro-bind-try /var/lib/kastellan/scratch"));
+    }
+
+    #[test]
+    fn allowlist_with_proxy_uds_uses_private_netns_and_binds_socket() {
+        let p = SandboxPolicy {
+            net: Net::Allowlist(vec!["api.example.com:443".into()]),
+            proxy_uds: Some(PathBuf::from("/scratch/egress.sock")),
+            ..SandboxPolicy::default()
+        };
+        let argv = build_argv(&p, "/bin/worker", &[]);
+        // No host-net sharing — private netns only.
+        assert!(!argv.contains(&"--share-net".to_string()),
+            "Net::Allowlist with proxy_uds must NOT --share-net; got: {argv:?}");
+        // The proxy UDS is bind-mounted in (rw) at an identical path. Scan for the
+        // `--bind <src> <dst>` triple matching the UDS anywhere in argv — do NOT
+        // assume the *first* `--bind` is the proxy socket: fs_write binds can
+        // precede it, so a `position(|a| a == "--bind")` on the first match would
+        // assert against the wrong entry once a worker has fs_write paths.
+        let has_uds_bind = argv.windows(3).any(|w| {
+            w[0] == "--bind" && w[1] == "/scratch/egress.sock" && w[2] == "/scratch/egress.sock"
+        });
+        assert!(has_uds_bind,
+            "proxy UDS must be --bind'd at an identical host↔jail path; got: {argv:?}");
+    }
+
+    #[test]
+    fn allowlist_without_proxy_uds_keeps_legacy_share_net() {
+        let p = SandboxPolicy {
+            net: Net::Allowlist(vec!["api.example.com:443".into()]),
+            // proxy_uds = None (default)
+            ..SandboxPolicy::default()
+        };
+        let argv = build_argv(&p, "/bin/worker", &[]);
+        assert!(argv.contains(&"--share-net".to_string()),
+            "legacy Allowlist (no proxy_uds) keeps --share-net; got: {argv:?}");
+    }
+
+    #[test]
+    fn proxy_egress_still_shares_net() {
+        let p = SandboxPolicy {
+            net: Net::ProxyEgress,
+            ..SandboxPolicy::default()
+        };
+        let argv = build_argv(&p, "/bin/proxy", &[]);
+        assert!(argv.contains(&"--share-net".to_string()));
     }
 
     #[test]
