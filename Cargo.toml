@@ -13,6 +13,7 @@ members = [
     "workers/web-common",
     "workers/web-fetch",
     "workers/web-search",
+    "workers/egress-proxy",
 ]
 
 [workspace.package]
