@@ -10,7 +10,7 @@ use serde::Deserialize;
 use url::Url;
 
 use kastellan_worker_web_common::allowlist::HostAllowlist;
-use kastellan_worker_web_common::http::{HttpGet, ReqwestGet};
+use kastellan_worker_web_common::http::{make_get, HttpGet};
 
 use crate::search::{search, validate_endpoint, SearchError, DEFAULT_COUNT};
 
@@ -63,10 +63,12 @@ pub struct WebSearchHandler<T: HttpGet> {
     transport: T,
 }
 
-impl WebSearchHandler<ReqwestGet> {
-    /// Build from env: endpoint + allowlist JSON + real reqwest transport.
+impl WebSearchHandler<Box<dyn HttpGet>> {
+    /// Build from env: endpoint + allowlist JSON + env-selected transport.
     /// Validates the endpoint up front and fails closed (the worker never
     /// serves) if it is missing, unparseable, wrong-scheme, or off-allowlist.
+    /// When `KASTELLAN_EGRESS_PROXY_UDS` is set, uses `ProxyConnectGet`;
+    /// otherwise uses `ReqwestGet`.
     pub fn from_env() -> anyhow::Result<Self> {
         let endpoint_raw = std::env::var("KASTELLAN_WEB_SEARCH_ENDPOINT")
             .map_err(|_| anyhow::anyhow!("KASTELLAN_WEB_SEARCH_ENDPOINT not set"))?;
@@ -75,7 +77,7 @@ impl WebSearchHandler<ReqwestGet> {
         let allowlist = HostAllowlist::from_env_json(&allow_raw)?;
         let endpoint = validate_endpoint(&endpoint_raw, &allowlist)
             .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
-        let transport = ReqwestGet::new("kastellan-web-search/0")?;
+        let transport = make_get("kastellan-web-search/0")?;
         Ok(Self { endpoint, allowlist, transport })
     }
 }
