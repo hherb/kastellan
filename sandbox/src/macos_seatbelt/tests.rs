@@ -138,6 +138,16 @@ fn allowlist_does_allow_network() {
 }
 
 #[test]
+fn proxy_egress_emits_allow_network() {
+    let p = SandboxPolicy {
+        net: crate::Net::ProxyEgress,
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(prof.contains("(allow network*)"), "ProxyEgress must allow network; got:\n{prof}");
+}
+
+#[test]
 fn relative_policy_paths_are_rejected_by_spawn() {
     let backend = MacosSeatbelt::new();
     let mut p = strict_policy();

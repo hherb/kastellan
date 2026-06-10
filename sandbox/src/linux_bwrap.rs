@@ -155,7 +155,7 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
     argv.push("bwrap".into());
 
     argv.push("--unshare-all".into());
-    if matches!(policy.net, Net::Allowlist(_)) {
+    if matches!(policy.net, Net::Allowlist(_) | Net::ProxyEgress) {
         // Allowlist is enforced by the egress proxy on the host side; bwrap just
         // needs to keep the host network namespace so the worker can reach it.
         argv.push("--share-net".into());
@@ -238,6 +238,16 @@ mod tests {
     fn allowlist_does_share_net() {
         let mut p = strict_policy();
         p.net = Net::Allowlist(vec!["api.example.com:443".into()]);
+        let argv = build_argv(&p, "/bin/true", &[]);
+        assert!(argv.contains(&"--share-net".into()));
+    }
+
+    #[test]
+    fn proxy_egress_shares_net_like_allowlist() {
+        let p = SandboxPolicy {
+            net: Net::ProxyEgress,
+            ..SandboxPolicy::default()
+        };
         let argv = build_argv(&p, "/bin/true", &[]);
         assert!(argv.contains(&"--share-net".into()));
     }

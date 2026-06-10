@@ -40,6 +40,12 @@ pub enum Net {
     Deny,
     /// Allowlist of "host:port" entries. Egress still flows through the egress proxy.
     Allowlist(Vec<String>),
+    /// The egress proxy itself: real outbound + DNS, self-enforcing. Maps to
+    /// the same "share the host network namespace" behaviour as `Allowlist`
+    /// *today*, but names the proxy-vs-worker distinction explicitly. Slice #2
+    /// diverges them: `Allowlist` workers get a private netns whose only route
+    /// out is the proxy UDS, while `ProxyEgress` keeps the real netns.
+    ProxyEgress,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
