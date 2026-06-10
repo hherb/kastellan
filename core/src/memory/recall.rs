@@ -4,7 +4,7 @@
 //! lanes (semantic via pgvector, lexical via `tsvector`+`ts_rank`),
 //! fuses their ranked id-lists via Reciprocal Rank Fusion, then
 //! hydrates the top-`k` rows. The lanes themselves live in
-//! `hhagent_db::memories`; this module composes them.
+//! `kastellan_db::memories`; this module composes them.
 //!
 //! ## Why RRF and not weighted-sum / softmax-fusion
 //!
@@ -22,9 +22,9 @@
 //! doesn't appear. Items absent from *every* lane do not appear in
 //! the output.
 
-use hhagent_db::graph::Graph;
-use hhagent_db::memories::{fetch_by_ids, lexical_search, semantic_search, Memory, EMBEDDING_DIM};
-use hhagent_db::DbError;
+use kastellan_db::graph::Graph;
+use kastellan_db::memories::{fetch_by_ids, lexical_search, semantic_search, Memory, EMBEDDING_DIM};
+use kastellan_db::DbError;
 use sqlx::PgPool;
 
 /// Reciprocal Rank Fusion's `k` constant.
@@ -53,8 +53,8 @@ pub struct RecallModes {
     /// [`RecallParams::query_text`] to be a non-empty string.
     pub lexical: bool,
     /// Run the graph lane (1-hop outbound expansion of
-    /// [`RecallParams::seed_entity_ids`] via [`hhagent_db::graph::Graph::neighbors`],
-    /// then ranking via [`hhagent_db::memories::graph_search`]).
+    /// [`RecallParams::seed_entity_ids`] via [`kastellan_db::graph::Graph::neighbors`],
+    /// then ranking via [`kastellan_db::memories::graph_search`]).
     /// Requires `seed_entity_ids` to be a non-empty slice.
     pub graph: bool,
 }
@@ -123,7 +123,7 @@ pub struct RecallParams<'a> {
     /// Pre-resolved seed entity ids. Used by the graph lane; ignored
     /// when [`RecallModes::graph`] is `false`. The caller resolves
     /// entity names → ids out-of-band (via
-    /// [`hhagent_db::graph::Graph::get_entity`] or a future
+    /// [`kastellan_db::graph::Graph::get_entity`] or a future
     /// extraction worker) before invoking recall. An empty slice with
     /// the graph lane enabled is a warn-and-skip, not an error.
     pub seed_entity_ids: Option<&'a [i64]>,
@@ -150,7 +150,7 @@ impl<'a> RecallParams<'a> {
             query_text: Some(query_text),
             query_embedding: Some(query_embedding),
             seed_entity_ids: None,
-            k: hhagent_db::memories::DEFAULT_RECALL_K,
+            k: kastellan_db::memories::DEFAULT_RECALL_K,
             modes: RecallModes::SEMANTIC_AND_LEXICAL,
         }
     }
@@ -158,7 +158,7 @@ impl<'a> RecallParams<'a> {
     /// Seed-bearing constructor: all three lanes ([`RecallModes::ALL`]),
     /// default budget, seeds wired in for the graph lane. Use when the
     /// caller has already resolved entity ids (e.g. from an
-    /// entity-extraction step or a [`hhagent_db::graph::Graph::get_entity`]
+    /// entity-extraction step or a [`kastellan_db::graph::Graph::get_entity`]
     /// lookup) and wants the graph lane to contribute to fusion.
     pub fn with_seeds(
         query_text: &'a str,
@@ -169,7 +169,7 @@ impl<'a> RecallParams<'a> {
             query_text: Some(query_text),
             query_embedding: Some(query_embedding),
             seed_entity_ids: Some(seed_entity_ids),
-            k: hhagent_db::memories::DEFAULT_RECALL_K,
+            k: kastellan_db::memories::DEFAULT_RECALL_K,
             modes: RecallModes::ALL,
         }
     }
@@ -190,7 +190,7 @@ const LANE_FANOUT: usize = 4;
 ///
 /// Bounds the worst case: a "hub" entity with thousands of relations
 /// (followers, mentions, etc.) cannot flood the expanded set. The
-/// value is the order-of-magnitude that [`hhagent_db::graph::Graph::neighbors`]'s
+/// value is the order-of-magnitude that [`kastellan_db::graph::Graph::neighbors`]'s
 /// `limit` param accepts — generous for typical knowledge graphs,
 /// tight against pathological hubs.
 pub const GRAPH_FANOUT_CAP_PER_SEED: i64 = 32;
@@ -213,7 +213,7 @@ pub const GRAPH_FANOUT_CAP_PER_SEED: i64 = 32;
 /// Zero enabled lanes (`modes: RecallModes { ..false }`) is treated
 /// the same way: a caller asking for *no* lanes is asking for nothing.
 ///
-/// [0]: https://github.com/hherb/hhagent/issues/17
+/// [0]: https://github.com/hherb/kastellan/issues/17
 ///
 /// ## Other error modes
 ///
@@ -257,7 +257,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
             }
             None => {
                 tracing::warn!(
-                    target: "hhagent::memory",
+                    target: "kastellan::memory",
                     "semantic lane requested but query_embedding is None; skipping"
                 );
             }
@@ -272,7 +272,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
             }
             _ => {
                 tracing::warn!(
-                    target: "hhagent::memory",
+                    target: "kastellan::memory",
                     "lexical lane requested but query_text is empty; skipping"
                 );
             }
@@ -287,7 +287,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
                 // fanned out in parallel. Per-seed cap defends against
                 // hub explosion: an entity with thousands of outbound
                 // edges contributes at most GRAPH_FANOUT_CAP_PER_SEED.
-                let graph = hhagent_db::graph::PgGraph::new(pool);
+                let graph = kastellan_db::graph::PgGraph::new(pool);
                 let neighbour_lists = futures::future::try_join_all(
                     seeds.iter().map(|&s| {
                         graph.neighbors(s, None, GRAPH_FANOUT_CAP_PER_SEED)
@@ -317,7 +317,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
                 let expanded_vec: Vec<i64> = expanded.into_iter().collect();
 
                 lane_lists.push(
-                    hhagent_db::memories::graph_search(
+                    kastellan_db::memories::graph_search(
                         pool,
                         &expanded_vec,
                         lane_k,
@@ -328,7 +328,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
             }
             _ => {
                 tracing::warn!(
-                    target: "hhagent::memory",
+                    target: "kastellan::memory",
                     "graph lane requested but seed_entity_ids is empty or None; skipping"
                 );
             }

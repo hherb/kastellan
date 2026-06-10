@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `hhagent-cli memory l3 run <id> [--arg k=v]… [--execute]` so an operator can execute an approved L3 skill — substitute params → live-registry re-validation → sandboxed dispatch of each step → audit — dry-run by default.
+**Goal:** Add `kastellan-cli memory l3 run <id> [--arg k=v]… [--execute]` so an operator can execute an approved L3 skill — substitute params → live-registry re-validation → sandboxed dispatch of each step → audit — dry-run by default.
 
 **Architecture:** A new pure engine module `core/src/memory/l3_invoke.rs` (arg parsing, `{{placeholder}}` substitution, a pure `prepare_invocation` decision reusing the approval gate against the *live* tool set, and an async `invoke_l3` orchestration that drives the existing `ToolHostStepDispatcher`). Registry construction is factored out of the daemon binary into a shared lib module `core/src/registry_build.rs` (no audit side effect) so the CLI can rebuild an identical registry in-process. New `l3.invoked` / `l3.invoke_outcome` / `l3.invoke_rejected` audit rows; per-step rows come from the unchanged `tool_host::dispatch` chokepoint. No CASSANDRA review on the operator path; planner prompt untouched.
 
-**Tech Stack:** Rust (workspace crate `hhagent-core`), sqlx/PgPool, `serde_json`, the existing `StepDispatcher` / `ToolHostStepDispatcher` / `ToolRegistry` / `SkillTrust` / `evaluate_approval` machinery.
+**Tech Stack:** Rust (workspace crate `kastellan-core`), sqlx/PgPool, `serde_json`, the existing `StepDispatcher` / `ToolHostStepDispatcher` / `ToolRegistry` / `SkillTrust` / `evaluate_approval` machinery.
 
 **Spec:** `docs/superpowers/specs/2026-06-02-l3-skill-invocation-design.md`
 
@@ -25,7 +25,7 @@
 - `core/src/memory/mod.rs` — `pub mod l3_invoke;`
 - `core/src/lib.rs` — `pub mod registry_build;`
 - `core/src/main.rs` — delete the moved registry helpers; call the lib versions; write the `registry.loaded` row at the call site.
-- `core/src/bin/hhagent-cli/memory_l3.rs` — add the `run` subcommand + handler.
+- `core/src/bin/kastellan-cli/memory_l3.rs` — add the `run` subcommand + handler.
 
 ---
 
@@ -110,7 +110,7 @@ fn log_gliner_relex_skip(reason: &crate::workers::gliner_relex::ResolveSkipReaso
     match reason {
         R::Disabled => tracing::info!(
             tool = crate::workers::gliner_relex::Client::TOOL_NAME,
-            "gliner-relex disabled (HHAGENT_GLINER_RELEX_ENABLE != 1); not registered"
+            "gliner-relex disabled (KASTELLAN_GLINER_RELEX_ENABLE != 1); not registered"
         ),
         other => tracing::error!(
             tool = crate::workers::gliner_relex::Client::TOOL_NAME,
@@ -122,23 +122,23 @@ fn log_gliner_relex_skip(reason: &crate::workers::gliner_relex::ResolveSkipReaso
 
 /// Build the registry of tools the scheduler may dispatch. Reads the
 /// shell-exec argv allowlist from the `tool_allowlists` DB table and the
-/// `HHAGENT_SHELL_EXEC_BIN` env var; folds in the optional gliner-relex
+/// `KASTELLAN_SHELL_EXEC_BIN` env var; folds in the optional gliner-relex
 /// entry. **Writes no audit row** — returns the per-tool records so the
 /// caller can write `registry.loaded` itself (daemon only).
 pub async fn build_tool_registry(
     pool: &sqlx::PgPool,
     gliner_relex_entry: Option<ToolEntry>,
-) -> Result<(ToolRegistry, Vec<LoadedToolRecord>), hhagent_db::DbError> {
+) -> Result<(ToolRegistry, Vec<LoadedToolRecord>), kastellan_db::DbError> {
     let mut reg = ToolRegistry::new();
     let mut loaded: Vec<LoadedToolRecord> = Vec::new();
 
-    if let Some(bin_os) = std::env::var_os("HHAGENT_SHELL_EXEC_BIN") {
+    if let Some(bin_os) = std::env::var_os("KASTELLAN_SHELL_EXEC_BIN") {
         let binary = std::path::PathBuf::from(&bin_os);
         if binary.is_file() {
-            let allowlist = hhagent_db::tool_allowlists::list_for_tool(pool, "shell-exec")
+            let allowlist = kastellan_db::tool_allowlists::list_for_tool(pool, "shell-exec")
                 .await
                 .map_err(|e| {
-                    hhagent_db::DbError::Query(format!("loading shell-exec allowlist: {e}"))
+                    kastellan_db::DbError::Query(format!("loading shell-exec allowlist: {e}"))
                 })?;
             let entry = crate::scheduler::shell_exec_entry(binary.clone(), &allowlist);
             tracing::info!(
@@ -157,16 +157,16 @@ pub async fn build_tool_registry(
         } else {
             tracing::warn!(
                 binary = %binary.display(),
-                "HHAGENT_SHELL_EXEC_BIN does not point to an existing file; \
+                "KASTELLAN_SHELL_EXEC_BIN does not point to an existing file; \
                  shell-exec NOT registered"
             );
         }
     }
 
-    if std::env::var_os("HHAGENT_SHELL_EXEC_ALLOWLIST").is_some() {
+    if std::env::var_os("KASTELLAN_SHELL_EXEC_ALLOWLIST").is_some() {
         tracing::warn!(
-            "HHAGENT_SHELL_EXEC_ALLOWLIST is no longer honored; \
-             use 'hhagent-cli tools allowlist add <tool> <argv0>' to populate the DB"
+            "KASTELLAN_SHELL_EXEC_ALLOWLIST is no longer honored; \
+             use 'kastellan-cli tools allowlist add <tool> <argv0>' to populate the DB"
         );
     }
 
@@ -189,7 +189,7 @@ pub async fn build_tool_registry(
 }
 
 /// Pure payload builder for the `registry.loaded` audit row. The daemon
-/// calls this then `hhagent_db::audit::insert`; the CLI never does.
+/// calls this then `kastellan_db::audit::insert`; the CLI never does.
 pub fn build_registry_loaded_payload(tools: &[LoadedToolRecord]) -> serde_json::Value {
     serde_json::json!({ "tools": tools })
 }
@@ -251,14 +251,14 @@ Keep `async fn write_registry_loaded_row(...)` but rewrite its body to use the l
 Replace the registry-build call (currently around `main.rs:120` and `main.rs:134`):
 
 ```rust
-    let gliner_relex_entry = hhagent_core::registry_build::build_gliner_relex_entry();
+    let gliner_relex_entry = kastellan_core::registry_build::build_gliner_relex_entry();
 ```
 
 and
 
 ```rust
     let (registry, loaded_tool_records) =
-        hhagent_core::registry_build::build_tool_registry(&pool, gliner_relex_entry.clone())
+        kastellan_core::registry_build::build_tool_registry(&pool, gliner_relex_entry.clone())
             .await?;
     let tool_registry = Arc::new(registry);
     // Best-effort audit row (was previously written inside build_tool_registry;
@@ -273,13 +273,13 @@ Rewrite `write_registry_loaded_row` in `main.rs` to take the lib record type and
 ```rust
 async fn write_registry_loaded_row(
     pool: &sqlx::PgPool,
-    tools: &[hhagent_core::registry_build::LoadedToolRecord],
-) -> Result<(), hhagent_db::DbError> {
-    let payload = hhagent_core::registry_build::build_registry_loaded_payload(tools);
-    hhagent_db::audit::insert(
+    tools: &[kastellan_core::registry_build::LoadedToolRecord],
+) -> Result<(), kastellan_db::DbError> {
+    let payload = kastellan_core::registry_build::build_registry_loaded_payload(tools);
+    kastellan_db::audit::insert(
         pool,
         "core",
-        hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED,
+        kastellan_core::scheduler::audit::ACTION_REGISTRY_LOADED,
         payload,
     )
     .await
@@ -292,7 +292,7 @@ async fn write_registry_loaded_row(
 Run: `source "$HOME/.cargo/env" && cargo build --workspace 2>&1 | tail -20`
 Expected: clean build (the daemon binary + lib both compile; no `unused import` for the deleted `info!` if it's still used elsewhere — if `use tracing::info;` is now unused in main.rs, remove it).
 
-Run: `cargo test -p hhagent-core registry_build 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core registry_build 2>&1 | tail -20`
 Expected: the 2 new unit tests PASS.
 
 - [ ] **Step 6: Verify no behaviour change + clippy**
@@ -376,7 +376,7 @@ fn build_l3_invoke_rejected_payload_shape() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core build_l3_invoke 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core build_l3_invoke 2>&1 | tail -20`
 Expected: FAIL — `cannot find function build_l3_invoked_payload` etc.
 
 - [ ] **Step 3: Add the constants**
@@ -461,7 +461,7 @@ pub fn build_l3_invoke_rejected_payload(
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo test -p hhagent-core build_l3_invoke 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core build_l3_invoke 2>&1 | tail -20`
 Expected: all 4 tests PASS.
 
 - [ ] **Step 6: Commit**
@@ -613,7 +613,7 @@ mod tests {
 
 - [ ] **Step 3: Run tests to verify they pass (the module compiles and `parse_args` works)**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core l3_invoke::tests::parse_args 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core l3_invoke::tests::parse_args 2>&1 | tail -20`
 Expected: 5 `parse_args` tests PASS. (`BTreeSet` import is unused until Task 4/5 — add `#[allow(unused_imports)]` is NOT needed yet; instead omit `BTreeSet` from the `use` in this task and add it in Task 5. Remove `BTreeSet` from the import line for now to keep clippy clean.)
 
 > Implementer note: change the import in Step 2 to `use std::collections::BTreeMap;` for this task; widen to add `BTreeSet` in Task 5 when first used.
@@ -722,7 +722,7 @@ fn substitute_rejects_value_containing_brace_sequence() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p hhagent-core l3_invoke::tests::substitute 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core l3_invoke::tests::substitute 2>&1 | tail -20`
 Expected: FAIL — `cannot find function substitute_template`.
 
 - [ ] **Step 3: Implement `substitute_template` + the JSON walker**
@@ -871,7 +871,7 @@ Also widen the top-of-file import to `use std::collections::{BTreeMap, BTreeSet}
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p hhagent-core l3_invoke::tests::substitute 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core l3_invoke::tests::substitute 2>&1 | tail -20`
 Expected: all 6 `substitute_*` tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -970,7 +970,7 @@ fn planned_step_from_l3_carries_tool_method_params() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p hhagent-core l3_invoke::tests 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core l3_invoke::tests 2>&1 | tail -20`
 Expected: FAIL — `is_runnable` / `prepare_invocation` / `InvokeRefusal` / `planned_step_from_l3` not found.
 
 - [ ] **Step 3: Implement**
@@ -1060,12 +1060,12 @@ pub fn prepare_invocation(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p hhagent-core l3_invoke::tests 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core l3_invoke::tests 2>&1 | tail -20`
 Expected: all tests through Task 5 PASS.
 
 - [ ] **Step 5: clippy + commit**
 
-Run: `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -10`
+Run: `cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -10`
 Expected: exit 0.
 
 ```bash
@@ -1144,7 +1144,7 @@ async fn run_steps_stops_at_first_error() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p hhagent-core l3_invoke::tests::run_steps 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core l3_invoke::tests::run_steps 2>&1 | tail -20`
 Expected: FAIL — `cannot find function run_steps`.
 
 - [ ] **Step 3: Implement `run_steps`**
@@ -1179,7 +1179,7 @@ pub async fn run_steps(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p hhagent-core l3_invoke::tests::run_steps 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core l3_invoke::tests::run_steps 2>&1 | tail -20`
 Expected: both `run_steps_*` tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -1277,7 +1277,7 @@ pub async fn invoke_l3(
 }
 
 async fn best_effort_audit(pool: &PgPool, action: &str, payload: serde_json::Value) {
-    if let Err(e) = hhagent_db::audit::insert(pool, CLI_AUDIT_ACTOR, action, payload).await {
+    if let Err(e) = kastellan_db::audit::insert(pool, CLI_AUDIT_ACTOR, action, payload).await {
         tracing::warn!(error = %e, action, "l3 invoke audit insert failed (best-effort)");
     }
 }
@@ -1291,7 +1291,7 @@ Edit the signature and the three `build_l3_*` calls per the note above so each a
 
 - [ ] **Step 3: Build + run all l3_invoke unit tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core l3_invoke 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core l3_invoke 2>&1 | tail -20`
 Expected: all prior l3_invoke unit tests still PASS; the module compiles with `invoke_l3` + `InvokeReport`.
 
 - [ ] **Step 4: Check file size; lift tests to sibling if near cap**
@@ -1301,7 +1301,7 @@ If > ~470 lines, move the `#[cfg(test)] mod tests { … }` block into a sibling 
 
 - [ ] **Step 5: clippy + commit**
 
-Run: `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -10`
+Run: `cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -10`
 Expected: exit 0.
 
 ```bash
@@ -1318,15 +1318,15 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ## Task 8: CLI `memory l3 run` subcommand + handler
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli/memory_l3.rs`
+- Modify: `core/src/bin/kastellan-cli/memory_l3.rs`
 
 - [ ] **Step 1: Add `run` to the dispatch table + usage**
 
-In `run_memory_l3` (`core/src/bin/hhagent-cli/memory_l3.rs`), update the usage string and add the arm:
+In `run_memory_l3` (`core/src/bin/kastellan-cli/memory_l3.rs`), update the usage string and add the arm:
 
 ```rust
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli memory l3 <list|approve|revoke|remove|run> ...");
+        eprintln!("usage: kastellan-cli memory l3 <list|approve|revoke|remove|run> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -1357,13 +1357,13 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    use hhagent_core::cassandra::types::L3SkillCandidate;
-    use hhagent_core::memory::l3_approval::SkillTrust;
-    use hhagent_core::memory::l3_invoke::{invoke_l3, parse_args, InvokeReport};
-    use hhagent_core::scheduler::inner_loop::StepDispatcher;
-    use hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher;
-    use hhagent_db::memories::{fetch_by_ids, MemoryLayer};
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cassandra::types::L3SkillCandidate;
+    use kastellan_core::memory::l3_approval::SkillTrust;
+    use kastellan_core::memory::l3_invoke::{invoke_l3, parse_args, InvokeReport};
+    use kastellan_core::scheduler::inner_loop::StepDispatcher;
+    use kastellan_core::scheduler::tool_dispatch::ToolHostStepDispatcher;
+    use kastellan_db::memories::{fetch_by_ids, MemoryLayer};
+    use kastellan_db::pool::connect_runtime_pool;
 
     // --- parse argv: <id> then --arg k=v … and --execute ---------------
     let mut id_str: Option<&String> = None;
@@ -1394,7 +1394,7 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
     let id: i64 = match id_str.map(|s| s.parse()) {
         Some(Ok(n)) => n,
         _ => {
-            eprintln!("usage: hhagent-cli memory l3 run <id> [--arg name=value]… [--execute]");
+            eprintln!("usage: kastellan-cli memory l3 run <id> [--arg name=value]… [--execute]");
             return ExitCode::from(2);
         }
     };
@@ -1443,9 +1443,9 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
     let body_sha256 = row.metadata.get("body_sha256").and_then(|v| v.as_str()).unwrap_or("");
 
     // --- rebuild the live registry in-process (no registry.loaded write) ---
-    let gliner = hhagent_core::registry_build::build_gliner_relex_entry();
+    let gliner = kastellan_core::registry_build::build_gliner_relex_entry();
     let (registry, _records) =
-        match hhagent_core::registry_build::build_tool_registry(&pool, gliner).await {
+        match kastellan_core::registry_build::build_tool_registry(&pool, gliner).await {
             Ok(x) => x,
             Err(e) => { eprintln!("memory l3 run: building registry: {e}"); return ExitCode::from(1); }
         };
@@ -1453,10 +1453,10 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
         registry.entries().map(|(name, _)| name.to_string()).collect();
 
     // --- build the dispatcher (same machinery as the daemon) ----------
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
-    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
-        Arc::new(hhagent_core::worker_lifecycle::CompositeLifecycle::new(Arc::clone(&sandboxes)));
-    let vault = Arc::new(hhagent_core::secrets::Vault::new());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
+    let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> =
+        Arc::new(kastellan_core::worker_lifecycle::CompositeLifecycle::new(Arc::clone(&sandboxes)));
+    let vault = Arc::new(kastellan_core::secrets::Vault::new());
     let dispatcher: Arc<dyn StepDispatcher> = Arc::new(ToolHostStepDispatcher::new(
         pool.clone(),
         vault,
@@ -1489,9 +1489,9 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
             println!("executed skill '{}' (#{id}): {}/{} step(s)", template.name, outcomes.len(), steps_total);
             for (n, o) in outcomes.iter().enumerate() {
                 match o {
-                    hhagent_core::scheduler::inner_loop::StepOutcome::Ok(v) =>
+                    kastellan_core::scheduler::inner_loop::StepOutcome::Ok(v) =>
                         println!("  [{n}] ok: {v}"),
-                    hhagent_core::scheduler::inner_loop::StepOutcome::Err { code, detail } =>
+                    kastellan_core::scheduler::inner_loop::StepOutcome::Err { code, detail } =>
                         println!("  [{n}] ERR {code}: {detail}"),
                 }
             }
@@ -1501,7 +1501,7 @@ async fn memory_l3_run(args: &[String]) -> ExitCode {
 }
 ```
 
-> Note: confirm `hhagent_sandbox` is already a dependency of the `hhagent-cli` binary / `hhagent-core` crate (it is — `core` depends on `hhagent_sandbox`). The CLI binary is part of the `hhagent-core` crate, so `hhagent_sandbox::…` resolves. If a `use` is needed it is `hhagent_sandbox` (the crate).
+> Note: confirm `kastellan_sandbox` is already a dependency of the `kastellan-cli` binary / `kastellan-core` crate (it is — `core` depends on `kastellan_sandbox`). The CLI binary is part of the `kastellan-core` crate, so `kastellan_sandbox::…` resolves. If a `use` is needed it is `kastellan_sandbox` (the crate).
 
 - [ ] **Step 3: Build**
 
@@ -1510,8 +1510,8 @@ Expected: clean build.
 
 - [ ] **Step 4: Smoke-check the usage path (no DB)**
 
-Run: `./target/debug/hhagent-cli memory l3 run 2>&1 | head -3`
-Expected: the usage line (exit 2) — `usage: hhagent-cli memory l3 run <id> …`.
+Run: `./target/debug/kastellan-cli memory l3 run 2>&1 | head -3`
+Expected: the usage line (exit 2) — `usage: kastellan-cli memory l3 run <id> …`.
 
 - [ ] **Step 5: clippy + commit**
 
@@ -1519,7 +1519,7 @@ Run: `cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tail
 Expected: exit 0.
 
 ```bash
-git add core/src/bin/hhagent-cli/memory_l3.rs
+git add core/src/bin/kastellan-cli/memory_l3.rs
 git commit -m "feat(cli): memory l3 run <id> [--arg k=v]… [--execute] — operator skill invocation
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
@@ -1532,7 +1532,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Create: `core/tests/cli_memory_l3_run_e2e.rs`
 
-This mirrors the existing `cli_memory_l3_e2e.rs` harness (skip-as-pass without `HHAGENT_PG_BIN_DIR`; the session-local-override pattern from the memory note — Postgres.app v18 at port 5532). The implementer should open `core/tests/cli_memory_l3_e2e.rs` first and reuse its bring-up + helper conventions (e.g. how it seeds an L3 row, sets trust, and reads audit rows).
+This mirrors the existing `cli_memory_l3_e2e.rs` harness (skip-as-pass without `KASTELLAN_PG_BIN_DIR`; the session-local-override pattern from the memory note — Postgres.app v18 at port 5532). The implementer should open `core/tests/cli_memory_l3_e2e.rs` first and reuse its bring-up + helper conventions (e.g. how it seeds an L3 row, sets trust, and reads audit rows).
 
 - [ ] **Step 1: Read the existing harness for conventions**
 
@@ -1546,7 +1546,7 @@ Create `core/tests/cli_memory_l3_run_e2e.rs` with these scenarios (reuse the har
 ```rust
 //! Live-PG e2e for `memory l3 run` (operator-triggered skill invocation).
 //!
-//! Skips-as-pass without HHAGENT_PG_BIN_DIR (no live cluster) — matches the
+//! Skips-as-pass without KASTELLAN_PG_BIN_DIR (no live cluster) — matches the
 //! cross-platform posture of the sibling cli_memory_l3_e2e.
 
 // (Reuse the bring-up + skip + seed helpers from cli_memory_l3_e2e.rs.)
@@ -1587,20 +1587,20 @@ Create `core/tests/cli_memory_l3_run_e2e.rs` with these scenarios (reuse the har
 //      the l3.invoke_outcome row shows steps_executed=1, steps_total=2.
 ```
 
-> Implementer guidance: prefer calling the library `invoke_l3` directly (constructing the dispatcher exactly as the CLI handler does) over shelling out to the binary — it gives typed assertions on `InvokeReport` and avoids argv plumbing. Use the test allowlist seeding the sibling e2e already does (`tool_allowlists` add for shell-exec) so the rebuilt registry includes shell-exec. For the worker binary, set `HHAGENT_SHELL_EXEC_BIN` to the built `shell-exec` worker path the way `shell_exec_e2e.rs` discovers it (`worker_binary` helper).
+> Implementer guidance: prefer calling the library `invoke_l3` directly (constructing the dispatcher exactly as the CLI handler does) over shelling out to the binary — it gives typed assertions on `InvokeReport` and avoids argv plumbing. Use the test allowlist seeding the sibling e2e already does (`tool_allowlists` add for shell-exec) so the rebuilt registry includes shell-exec. For the worker binary, set `KASTELLAN_SHELL_EXEC_BIN` to the built `shell-exec` worker path the way `shell_exec_e2e.rs` discovers it (`worker_binary` helper).
 
 - [ ] **Step 3: Run the e2e WITHOUT a live cluster (skip-as-pass)**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --test cli_memory_l3_run_e2e 2>&1 | tail -20`
-Expected: compiles; tests SKIP-as-pass (no `HHAGENT_PG_BIN_DIR`).
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --test cli_memory_l3_run_e2e 2>&1 | tail -20`
+Expected: compiles; tests SKIP-as-pass (no `KASTELLAN_PG_BIN_DIR`).
 
 - [ ] **Step 4: Run the e2e WITH the live cluster (Postgres.app v18)**
 
 Run (session-local override per the memory note — preferred v18 at port 5532):
 ```bash
 source "$HOME/.cargo/env"
-HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin" \
-  cargo test -p hhagent-core --test cli_memory_l3_run_e2e -- --nocapture 2>&1 | tail -40
+KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin" \
+  cargo test -p kastellan-core --test cli_memory_l3_run_e2e -- --nocapture 2>&1 | tail -40
 ```
 Expected: all 5 scenarios PASS, zero `[SKIP]`.
 
@@ -1626,15 +1626,15 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 source "$HOME/.cargo/env"
 cargo test --workspace 2>&1 | tail -5
 cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tail -5
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc -p hhagent-core --no-deps --document-private-items 2>&1 | tail -5
+RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc -p kastellan-core --no-deps --document-private-items 2>&1 | tail -5
 ```
 Expected: workspace tests pass (baseline + new unit tests); clippy exit 0; doc-links count == `main`'s 21 (zero new broken links).
 
 - [ ] **Step 2: Live-PG regression (sibling L3 suites stay green)**
 
 ```bash
-HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin" \
-  cargo test -p hhagent-core --test cli_memory_l3_e2e --test memory_l3_crystallise_e2e --test cli_memory_l3_run_e2e 2>&1 | tail -20
+KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin" \
+  cargo test -p kastellan-core --test cli_memory_l3_e2e --test memory_l3_crystallise_e2e --test cli_memory_l3_run_e2e 2>&1 | tail -20
 ```
 Expected: all green, zero `[SKIP]`.
 

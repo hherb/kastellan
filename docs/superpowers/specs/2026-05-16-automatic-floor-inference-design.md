@@ -9,7 +9,7 @@
 The current `DeterministicPolicy` rule fires three invariants against
 `(task.classification_floor, plan.data_ceiling, plan.steps[].classification)`.
 The floor is producer-set: today the only producer path that ever sets it is
-`hhagent-cli ask --classification-floor <DataClass>`. Without that flag the
+`kastellan-cli ask --classification-floor <DataClass>`. Without that flag the
 floor defaults to `Public`, so the I1 invariant (`data_ceiling >= floor`) and
 the I2 invariant (every `step.classification >= floor`) are trivially satisfied
 on Public-defaulted tasks — only the I3 invariant (`step <= ceiling`) does any
@@ -110,7 +110,7 @@ so passive forms (`silenced`, `disabled`) and substring collisions
 `discharge summary`) use `contains` directly since they have no whole-word
 collision risk.
 
-### 2. CLI wiring — `hhagent-cli ask`
+### 2. CLI wiring — `kastellan-cli ask`
 
 Existing helper `parse_classification_floor` stays unchanged.
 
@@ -252,7 +252,7 @@ parallel to the existing handling of `classification_floor`.
   - Multi-word phrase: `ct scan` matches; `ct` alone does not.
   - Aliases collapse to canonical tag: `ekg` and `ecg` both → `ecg` tag.
   - Empty / whitespace-only / case variants.
-- `hhagent-cli::tests` (~3): operator-explicit suppresses inference (no
+- `kastellan-cli::tests` (~3): operator-explicit suppresses inference (no
   signals collected); `tracing::warn!` fires on suppression-with-elevation
   (verified by an enabled-logger test seam if practical, else pinned by
   source-tag-equals-Operator);  `--classification-floor` + matching
@@ -312,7 +312,7 @@ zero warnings, zero `[SKIP]` lines on Linux.
 - NEW `core/src/cli_audit/classification_inference.rs` (~200 LOC incl. tests).
 - `core/src/cli_audit.rs` — make `classification_inference` a public
   submodule via `pub mod classification_inference;`.
-- `core/src/bin/hhagent-cli.rs` — wire `infer_floor` into `run_ask` /
+- `core/src/bin/kastellan-cli.rs` — wire `infer_floor` into `run_ask` /
   `ask_async`; thread the inferred class + source + signals into the
   submitted payload; emit `tracing::warn!` on operator-explicit
   suppression-with-elevation; +3 unit tests.
@@ -339,7 +339,7 @@ No schema migration. `task.payload` is JSONB; new keys are pure-additive.
 ## Files-size compliance (CLAUDE.md rule #4)
 
 - `classification_inference.rs` — target <300 LOC including tests.
-- `core/src/bin/hhagent-cli.rs` — already 1089 LOC; soft-cap breach is
+- `core/src/bin/kastellan-cli.rs` — already 1089 LOC; soft-cap breach is
   pre-existing (flagged in HANDOVER). This slice adds ~30 LOC for the
   inference wiring + 3 unit tests; modest growth, no split warranted.
 - `core/src/scheduler/inner_loop.rs` — already ~700 LOC; soft-cap breach is

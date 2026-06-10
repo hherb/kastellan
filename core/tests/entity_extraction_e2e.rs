@@ -3,7 +3,7 @@
 //! Two tiers:
 //!   - **Mock-client tier** (always runs when PG is available): exercises
 //!     [`upsert_entities_and_relations`], [`build_extract_entities_payload`],
-//!     and [`hhagent_db::audit::insert`] directly, without spawning a real
+//!     and [`kastellan_db::audit::insert`] directly, without spawning a real
 //!     worker. Pins the quarantine + idempotency + case-dedup behaviour
 //!     against the live Postgres schema.
 //!   - **Real-model tier** (skip-as-pass when worker preconditions
@@ -28,17 +28,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hhagent_core::entity_extraction::gliner_relex::{
+use kastellan_core::entity_extraction::gliner_relex::{
     upsert_entities_and_relations, GlinerRelexExtractor,
 };
-use hhagent_core::entity_extraction::{EntityExtractor, SeedSource};
-use hhagent_core::scheduler::ToolEntry;
-use hhagent_core::worker_lifecycle::{CompositeLifecycle, WorkerLifecycleManager};
-use hhagent_core::workers::gliner_relex::{
+use kastellan_core::entity_extraction::{EntityExtractor, SeedSource};
+use kastellan_core::scheduler::ToolEntry;
+use kastellan_core::worker_lifecycle::{CompositeLifecycle, WorkerLifecycleManager};
+use kastellan_core::workers::gliner_relex::{
     gliner_relex_entry, Client, Entity, ExtractResponse, GlinerRelexEnv, Triple,
     TripleEntity,
 };
-use hhagent_tests_common::{
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, PgCluster,
 };
@@ -61,9 +61,9 @@ async fn bring_up_pg(label: &str) -> Option<(PgCluster, sqlx::PgPool)> {
         &bin_dir,
         &format!("ee-{label}-d"),
         &format!("ee-{label}-l"),
-        &format!("hhagent-supervisor-test-pg-extract-{label}-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-extract-{label}-{suffix}"),
     );
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -71,7 +71,7 @@ async fn bring_up_pg(label: &str) -> Option<(PgCluster, sqlx::PgPool)> {
     )
     .await
     .expect("probe run");
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("connect runtime pool");
     Some((cluster, pool))
@@ -87,7 +87,7 @@ fn resolve_worker_script() -> Option<PathBuf> {
         .expect("CARGO_MANIFEST_DIR has no parent")
         .to_path_buf();
     let script = workspace_root
-        .join("workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex");
+        .join("workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex");
     if !script.exists() {
         eprintln!(
             "\n[SKIP] gliner-relex venv shim not built at {} — run scripts/workers/gliner-relex/install.sh\n",
@@ -99,29 +99,29 @@ fn resolve_worker_script() -> Option<PathBuf> {
 }
 
 /// Resolve the `multi-v1.0` weights dir. Honours
-/// `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` (when set verbatim — the daemon-
+/// `KASTELLAN_GLINER_RELEX_WEIGHTS_DIR` (when set verbatim — the daemon-
 /// style override the run-command for these tests uses), otherwise
-/// `HHAGENT_DATA_DIR`, otherwise `$HOME/.local/share/hhagent`. Skip on
+/// `KASTELLAN_DATA_DIR`, otherwise `$HOME/.local/share/kastellan`. Skip on
 /// missing.
 fn resolve_weights_dir() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("HHAGENT_GLINER_RELEX_WEIGHTS_DIR") {
+    if let Ok(explicit) = std::env::var("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR") {
         let p = PathBuf::from(explicit);
         if p.is_dir() {
             return Some(p);
         }
         eprintln!(
-            "\n[SKIP] HHAGENT_GLINER_RELEX_WEIGHTS_DIR points at {} which isn't a directory\n",
+            "\n[SKIP] KASTELLAN_GLINER_RELEX_WEIGHTS_DIR points at {} which isn't a directory\n",
             p.display()
         );
         return None;
     }
-    let data_dir = std::env::var("HHAGENT_DATA_DIR")
+    let data_dir = std::env::var("KASTELLAN_DATA_DIR")
         .ok()
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var("HOME")
                 .ok()
-                .map(|h| PathBuf::from(h).join(".local/share/hhagent"))
+                .map(|h| PathBuf::from(h).join(".local/share/kastellan"))
         })?;
     let weights = data_dir.join("workers/gliner-relex/weights/multi-v1.0");
     if !weights.is_dir() {
@@ -139,8 +139,8 @@ fn resolve_weights_dir() -> Option<PathBuf> {
 /// sandbox unavailable, supervisor unavailable, venv shim missing,
 /// weights dir missing.
 fn build_real_model_entry() -> Option<ToolEntry> {
-    if std::env::var("HHAGENT_GLINER_RELEX_ENABLE").ok().as_deref() != Some("1") {
-        eprintln!("\n[SKIP] HHAGENT_GLINER_RELEX_ENABLE != \"1\"\n");
+    if std::env::var("KASTELLAN_GLINER_RELEX_ENABLE").ok().as_deref() != Some("1") {
+        eprintln!("\n[SKIP] KASTELLAN_GLINER_RELEX_ENABLE != \"1\"\n");
         return None;
     }
     if skip_if_sandbox_unavailable() {
@@ -366,7 +366,7 @@ async fn upsert_preserves_operator_unquarantine_decision() {
     assert_eq!(out1.entity_ids.len(), 1);
     let entity_id = out1.entity_ids[0];
 
-    // Simulate `hhagent-cli entities approve <id>` — operator approves
+    // Simulate `kastellan-cli entities approve <id>` — operator approves
     // the entity, flipping quarantine to FALSE.
     sqlx::query("UPDATE entities SET quarantine = FALSE WHERE id = $1")
         .bind(entity_id)
@@ -473,16 +473,16 @@ async fn extractor_extract_writes_summary_audit_row() {
     };
 
     // Narrow audit-shape pin: don't spin up the real worker. Call
-    // `build_extract_entities_payload` + `hhagent_db::audit::insert`
+    // `build_extract_entities_payload` + `kastellan_db::audit::insert`
     // directly with the same 8-key shape `GlinerRelexExtractor::extract`
     // emits in production.
-    let payload = hhagent_core::scheduler::audit::build_extract_entities_payload(
+    let payload = kastellan_core::scheduler::audit::build_extract_entities_payload(
         234, 1, 5, 2, 5, 2, "multi-v1.0", 142,
     );
-    hhagent_db::audit::insert(
+    kastellan_db::audit::insert(
         &pool,
         "extractor:gliner-relex",
-        hhagent_core::scheduler::audit::ACTION_EXTRACT_ENTITIES,
+        kastellan_core::scheduler::audit::ACTION_EXTRACT_ENTITIES,
         payload,
     )
     .await
@@ -513,7 +513,7 @@ async fn extractor_extract_against_real_worker_returns_seeds() {
         return;
     };
 
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle: Arc<dyn WorkerLifecycleManager> =
         Arc::new(CompositeLifecycle::new(sandboxes));
 
@@ -565,7 +565,7 @@ async fn extractor_chunking_path_against_real_worker() {
         return;
     };
 
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle: Arc<dyn WorkerLifecycleManager> =
         Arc::new(CompositeLifecycle::new(sandboxes));
 
@@ -836,7 +836,7 @@ async fn upsert_batch_falls_back_to_per_row_on_entity_kind_fk_violation() {
     // entity_kinds is REVOKE-protected (runtime role cannot mutate it).
     // Use the admin pool (peer-auth as OS superuser, no SET ROLE) for
     // the DELETE, exactly as the operator CLI does.
-    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+    let admin_pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
         .await
         .expect("connect admin pool");
     let deleted_kind = "drug";

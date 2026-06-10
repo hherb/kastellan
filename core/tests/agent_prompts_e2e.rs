@@ -7,14 +7,14 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::scheduler::prompts::load_prompts_from_dir;
-use hhagent_db::agent_prompts::hash_content;
-use hhagent_tests_common::{
+use kastellan_core::scheduler::prompts::load_prompts_from_dir;
+use kastellan_db::agent_prompts::hash_content;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, PgCluster,
 };
 
 /// Async helper: bring up a PG cluster (via the shared
-/// [`hhagent_tests_common::bring_up_pg_cluster`]), run migrations,
+/// [`kastellan_tests_common::bring_up_pg_cluster`]), run migrations,
 /// return pool + cluster handle. The `PgCluster` carries the cleanup
 /// guards internally and drops them in the right order at end of scope.
 /// Returns `None` when PG or supervisor is unavailable (skip).
@@ -24,7 +24,7 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     }
     let bin_dir = pg_bin_dir_or_skip()?;
     let suffix = format!("{}-{}", label, unique_suffix());
-    let service_name = format!("hhagent-sched-test-pg-ap-{suffix}");
+    let service_name = format!("kastellan-sched-test-pg-ap-{suffix}");
     // The shared `bring_up_pg_cluster` is sync (spawns initdb, uses
     // systemd/launchd). `PgCluster::sup` holds Box<dyn Supervisor>
     // which is not Send, so we cannot use spawn_blocking. Use
@@ -35,7 +35,7 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
         bring_up_pg_cluster(&bin_dir, "ap-d", "ap-l", &service_name)
     });
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -44,7 +44,7 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     .await
     .ok()?;
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .ok()?;
 

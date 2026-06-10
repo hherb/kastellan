@@ -56,7 +56,7 @@ pub(super) fn spawn_watchdog(pid: u32, wall_clock_ms: u64) -> WatchdogGuard {
     let deadline = Instant::now() + Duration::from_millis(wall_clock_ms);
 
     std::thread::Builder::new()
-        .name(format!("hhagent-watchdog-{pid}"))
+        .name(format!("kastellan-watchdog-{pid}"))
         .spawn(move || watchdog_loop(pid, deadline, cancel_clone, send_sigkill))
         .expect("spawn watchdog thread");
 

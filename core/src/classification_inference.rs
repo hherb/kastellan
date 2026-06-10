@@ -1,6 +1,6 @@
 //! CLI-side automatic classification-floor inference.
 //!
-//! Pure tiered keyword classifier called from `hhagent-cli ask` before
+//! Pure tiered keyword classifier called from `kastellan-cli ask` before
 //! task submission. Maps the user instruction to a [`DataClass`] floor
 //! plus a list of grep-friendly signal tags that explain WHY the
 //! floor was elevated.

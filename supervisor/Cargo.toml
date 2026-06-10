@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-supervisor"
+name        = "kastellan-supervisor"
 description = "Service-supervisor abstraction: systemd --user (Linux) and launchd LaunchAgents (macOS)."
 version.workspace      = true
 edition.workspace      = true

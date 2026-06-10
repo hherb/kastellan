@@ -2,23 +2,23 @@
 //!
 //! ## What this file pins — the #179 regression
 //!
-//! Pre-#179, `hhagent-cli memory l3 run <id>` rebuilt the tool registry
+//! Pre-#179, `kastellan-cli memory l3 run <id>` rebuilt the tool registry
 //! **in-process from the operator's environment**. Because the operator CLI
-//! subprocess runs WITHOUT `HHAGENT_SHELL_EXEC_BIN`, that rebuild produced a
+//! subprocess runs WITHOUT `KASTELLAN_SHELL_EXEC_BIN`, that rebuild produced a
 //! registry that lacked `shell-exec`, so an otherwise-valid approved skill was
 //! refused with "tool 'shell-exec' not in registry".
 //!
 //! Post-#179 the CLI submits an `l3_run` task on the `long` lane; the **daemon**
 //! claims it and runs `invoke_l3` against ITS OWN live registry (which DOES have
-//! `shell-exec`, registered from the daemon's own `HHAGENT_SHELL_EXEC_BIN`).
+//! `shell-exec`, registered from the daemon's own `KASTELLAN_SHELL_EXEC_BIN`).
 //! The decisive property: the same operator env that used to fail now succeeds,
 //! because execution moved into the daemon.
 //!
 //! Scenarios:
 //!
 //!  1. **`run_succeeds_against_daemon_registry_without_operator_env`** — the
-//!     #179 pin. Daemon up (with `HHAGENT_SHELL_EXEC_BIN`); CLI subprocess run
-//!     with `--execute` and **no** `HHAGENT_SHELL_EXEC_BIN`. Asserts exit 0 and
+//!     #179 pin. Daemon up (with `KASTELLAN_SHELL_EXEC_BIN`); CLI subprocess run
+//!     with `--execute` and **no** `KASTELLAN_SHELL_EXEC_BIN`. Asserts exit 0 and
 //!     stdout `"executed skill"`.
 //!
 //!  2. **`run_with_no_daemon_cancels_and_errors`** — PG only, NO daemon. CLI
@@ -37,18 +37,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use hhagent_core::cassandra::types::{L3Param, L3SkillCandidate, L3TemplateStep};
-use hhagent_core::memory::l3_crystallise::{crystallise_l3, L3Source};
-use hhagent_supervisor::specs::core_service_spec;
-use hhagent_supervisor::{default_supervisor, ServiceStatus};
-use hhagent_tests_common::{
+use kastellan_core::cassandra::types::{L3Param, L3SkillCandidate, L3TemplateStep};
+use kastellan_core::memory::l3_crystallise::{crystallise_l3, L3Source};
+use kastellan_supervisor::specs::core_service_spec;
+use kastellan_supervisor::{default_supervisor, ServiceStatus};
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, core_binary, current_username, pg_bin_dir_or_skip,
     seed_tool_allowlist, shell_exec_worker_binary, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, unique_temp_root, wait_for_log_match,
     wait_for_status, PathGuard, PgCluster, ServiceGuard,
 };
 #[cfg(target_os = "macos")]
-use hhagent_tests_common::serial_lock;
+use kastellan_tests_common::serial_lock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -115,7 +115,7 @@ async fn spawn_inert_mock() -> MockLlm {
 
 // ---------------------------------------------------------------------------
 // Daemon bring-up — copied from cli_ask_e2e.rs, trimmed to what l3_run needs.
-// Crucially this sets HHAGENT_SHELL_EXEC_BIN on the *daemon* so its live
+// Crucially this sets KASTELLAN_SHELL_EXEC_BIN on the *daemon* so its live
 // registry has shell-exec — the operator CLI subprocess will NOT carry it.
 // ---------------------------------------------------------------------------
 
@@ -143,7 +143,7 @@ fn bring_up_daemon(
 
     let binary = core_binary();
     let mut spec = core_service_spec(&binary, &core_log_dir);
-    spec.name = format!("hhagent-supervisor-test-core-l3run-{suffix}");
+    spec.name = format!("kastellan-supervisor-test-core-l3run-{suffix}");
     assert!(spec.name.len() <= 200);
     let stdout_path = core_log_dir.join(format!("{}.out", spec.name));
     let stderr_path = core_log_dir.join(format!("{}.err", spec.name));
@@ -151,12 +151,12 @@ fn bring_up_daemon(
     spec.stderr_log = Some(stderr_path.clone());
 
     spec.env.push((
-        "HHAGENT_DATA_DIR".into(),
+        "KASTELLAN_DATA_DIR".into(),
         data_dir.to_string_lossy().into_owned(),
     ));
     spec.env.push(("USER".into(), user.to_string()));
     spec.env.push((
-        "HHAGENT_STATE_DIR".into(),
+        "KASTELLAN_STATE_DIR".into(),
         state_dir.to_string_lossy().into_owned(),
     ));
 
@@ -166,24 +166,24 @@ fn bring_up_daemon(
         .expect("workspace root")
         .join("prompts");
     spec.env.push((
-        "HHAGENT_PROMPTS_DIR".into(),
+        "KASTELLAN_PROMPTS_DIR".into(),
         workspace_prompts.to_string_lossy().into_owned(),
     ));
 
     // LLM router → inert mock. The l3_run path never dials it, but the daemon
     // needs a valid-looking config to construct its router at startup.
     spec.env.push((
-        "HHAGENT_LLM_LOCAL_URL".into(),
+        "KASTELLAN_LLM_LOCAL_URL".into(),
         format!("{mock_base_url}/v1"),
     ));
     spec.env
-        .push(("HHAGENT_LLM_LOCAL_MODEL".into(), "test-local-model".into()));
-    spec.env.push(("HHAGENT_LLM_TIMEOUT_MS".into(), "5000".into()));
+        .push(("KASTELLAN_LLM_LOCAL_MODEL".into(), "test-local-model".into()));
+    spec.env.push(("KASTELLAN_LLM_TIMEOUT_MS".into(), "5000".into()));
 
     // The decisive #179 env var: the daemon registers shell-exec from ITS OWN
     // environment. The operator CLI subprocess below deliberately omits it.
     spec.env.push((
-        "HHAGENT_SHELL_EXEC_BIN".into(),
+        "KASTELLAN_SHELL_EXEC_BIN".into(),
         shell_exec_worker_binary().to_string_lossy().into_owned(),
     ));
 
@@ -226,7 +226,7 @@ fn cluster_for(suffix: &str) -> PgCluster {
         &bin_dir,
         "l3rd-d",
         "l3rd-l",
-        &format!("hhagent-supervisor-test-pg-l3run-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l3run-{suffix}"),
     )
 }
 
@@ -265,7 +265,7 @@ async fn seed_and_approve_echo_skill(pool: &sqlx::PgPool, data_dir: &Path, user:
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("USER", user)
-        .env("HHAGENT_DATA_DIR", data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_DATA_DIR", data_dir.to_string_lossy().as_ref())
         .output()
         .expect("spawn cli memory l3 approve");
     assert!(
@@ -284,10 +284,10 @@ async fn seed_registry_loaded(pool: &sqlx::PgPool, tool_names: &[&str]) {
         .iter()
         .map(|n| serde_json::json!({ "name": n }))
         .collect();
-    hhagent_db::audit::insert(
+    kastellan_db::audit::insert(
         pool,
         "core",
-        hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED,
+        kastellan_core::scheduler::audit::ACTION_REGISTRY_LOADED,
         serde_json::json!({ "tools": tools }),
     )
     .await
@@ -297,7 +297,7 @@ async fn seed_registry_loaded(pool: &sqlx::PgPool, tool_names: &[&str]) {
 /// Apply migrations + seed the shell-exec allowlist before the daemon boots
 /// (build_tool_registry reads the allowlist from the DB at start).
 async fn prepare_db(cluster: &PgCluster) -> sqlx::PgPool {
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "test",
         "setup",
@@ -305,7 +305,7 @@ async fn prepare_db(cluster: &PgCluster) -> sqlx::PgPool {
     )
     .await
     .expect("probe run");
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
     seed_tool_allowlist(&pool, "shell-exec", &[ECHO_PATH])
@@ -316,7 +316,7 @@ async fn prepare_db(cluster: &PgCluster) -> sqlx::PgPool {
 
 // ---------------------------------------------------------------------------
 // Scenario 1 — the #179 pin: run succeeds against the daemon's own registry
-// even though the operator CLI carries NO HHAGENT_SHELL_EXEC_BIN.
+// even though the operator CLI carries NO KASTELLAN_SHELL_EXEC_BIN.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -334,9 +334,9 @@ async fn run_succeeds_against_daemon_registry_without_operator_env() {
         return;
     }
     for (label, p) in &[
-        ("hhagent", core_binary()),
-        ("hhagent-cli", cli_binary()),
-        ("hhagent-worker-shell-exec", shell_exec_worker_binary()),
+        ("kastellan", core_binary()),
+        ("kastellan-cli", cli_binary()),
+        ("kastellan-worker-shell-exec", shell_exec_worker_binary()),
     ] {
         if !p.exists() {
             eprintln!("\n[SKIP] {label} binary missing at {}\n", p.display());
@@ -355,7 +355,7 @@ async fn run_succeeds_against_daemon_registry_without_operator_env() {
     let (daemon, _daemon_guards) =
         bring_up_daemon(&suffix, &cluster.data_dir, &mock.base_url, &user);
 
-    // The operator CLI subprocess: NO HHAGENT_SHELL_EXEC_BIN. Pre-#179 the
+    // The operator CLI subprocess: NO KASTELLAN_SHELL_EXEC_BIN. Pre-#179 the
     // in-process rebuild refused here; post-#179 the daemon executes against
     // its own registry and this SUCCEEDS.
     let output = Command::new(cli_binary())
@@ -372,13 +372,13 @@ async fn run_succeeds_against_daemon_registry_without_operator_env() {
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("USER", &user)
-        .env("HHAGENT_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
-        .env("HHAGENT_L3_RUN_GRACE_SECS", "30")
+        .env("KASTELLAN_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_L3_RUN_GRACE_SECS", "30")
         // Bound Phase-2 (execution-wait) so a daemon that claims the task but
         // never NOTIFYs can't hang the suite for the 1800s default.
-        .env("HHAGENT_L3_RUN_TIMEOUT_SECS", "120")
+        .env("KASTELLAN_L3_RUN_TIMEOUT_SECS", "120")
         .output()
-        .expect("spawn hhagent-cli memory l3 run --execute");
+        .expect("spawn kastellan-cli memory l3 run --execute");
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -419,7 +419,7 @@ async fn run_with_no_daemon_cancels_and_errors() {
         return;
     };
     if !cli_binary().exists() {
-        eprintln!("\n[SKIP] hhagent-cli binary missing\n");
+        eprintln!("\n[SKIP] kastellan-cli binary missing\n");
         return;
     }
 
@@ -440,10 +440,10 @@ async fn run_with_no_daemon_cancels_and_errors() {
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("USER", &user)
-        .env("HHAGENT_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
-        .env("HHAGENT_L3_RUN_GRACE_SECS", "1")
+        .env("KASTELLAN_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_L3_RUN_GRACE_SECS", "1")
         .output()
-        .expect("spawn hhagent-cli memory l3 run (no daemon)");
+        .expect("spawn kastellan-cli memory l3 run (no daemon)");
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

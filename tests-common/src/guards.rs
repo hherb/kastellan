@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use hhagent_supervisor::Supervisor;
+use kastellan_supervisor::Supervisor;
 
 /// Owns a supervisor handle + the service name to clean up. On drop,
 /// calls `stop` then `uninstall`. Both are idempotent in the trait

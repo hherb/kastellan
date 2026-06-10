@@ -1,7 +1,7 @@
-//! hhagent-db: bring up a private per-user PostgreSQL instance.
+//! kastellan-db: bring up a private per-user PostgreSQL instance.
 //!
 //! Containment shape:
-//!   - **Data dir** lives under `~/.local/share/hhagent/pg/data` (XDG-style).
+//!   - **Data dir** lives under `~/.local/share/kastellan/pg/data` (XDG-style).
 //!     One cluster, one user, no system-wide PG involvement.
 //!   - **Socket dir** lives inside the data dir itself
 //!     (`<data_dir>/sockets`, mode 0700). Avoids the `/run/user/<uid>`
@@ -14,7 +14,7 @@
 //!
 //! This module is split between *pure functions* (everything in `lib.rs`,
 //! tested without Postgres installed — they only build argv vectors and
-//! config strings) and the small *driver* in `bin/hhagent-db-init.rs`
+//! config strings) and the small *driver* in `bin/kastellan-db-init.rs`
 //! that performs the I/O.
 //!
 //! The split mirrors `sandbox::linux_bwrap` (pure `build_argv` separately
@@ -173,7 +173,7 @@ pub struct InitDbOptions {
     /// idempotency check).
     pub data_dir: PathBuf,
     /// Username (Postgres role) that owns the cluster. Almost always
-    /// the OS username running `initdb`. Defaults to "hhagent" if empty.
+    /// the OS username running `initdb`. Defaults to "kastellan" if empty.
     pub username: String,
     /// Cluster encoding. Default: "UTF8".
     pub encoding: String,
@@ -188,7 +188,7 @@ impl Default for InitDbOptions {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::new(),
-            username: "hhagent".into(),
+            username: "kastellan".into(),
             encoding: "UTF8".into(),
             data_checksums: true,
         }
@@ -225,7 +225,7 @@ pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Vec<String>
     argv.push(opts.data_dir.to_string_lossy().into_owned());
 
     let username = if opts.username.trim().is_empty() {
-        "hhagent"
+        "kastellan"
     } else {
         opts.username.as_str()
     };
@@ -306,7 +306,7 @@ pub fn build_postgresql_auto_conf(opts: &PgConfigOptions) -> String {
     let buffers = opts.shared_buffers_mb.max(1);
 
     format!(
-        "# Managed by hhagent-db-init. Do not edit by hand.\n\
+        "# Managed by kastellan-db-init. Do not edit by hand.\n\
          # Postgres applies this file after postgresql.conf, so values here win.\n\
          listen_addresses = ''\n\
          unix_socket_directories = '{socket}'\n\
@@ -351,7 +351,7 @@ pub fn build_postgresql_auto_conf(opts: &PgConfigOptions) -> String {
 /// Postgres.app installed — and they're the majority. Operators who
 /// want to use Postgres.app or any other non-standard install with the
 /// test fixtures should call [`pg_bin_dir_candidates_with_env_override`]
-/// and set the `HHAGENT_PG_BIN_DIR` env var to that install's `bin/`
+/// and set the `KASTELLAN_PG_BIN_DIR` env var to that install's `bin/`
 /// directory before running the tests.
 pub fn default_pg_bin_dir_candidates() -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(16);
@@ -378,9 +378,9 @@ pub fn default_pg_bin_dir_candidates() -> Vec<PathBuf> {
 ///
 /// Defined as a `const` so the literal cannot drift between the
 /// production read site and the unit tests that exercise it.
-pub const PG_BIN_DIR_ENV: &str = "HHAGENT_PG_BIN_DIR";
+pub const PG_BIN_DIR_ENV: &str = "KASTELLAN_PG_BIN_DIR";
 
-/// Test-fixture discovery: `HHAGENT_PG_BIN_DIR` (if set and non-blank),
+/// Test-fixture discovery: `KASTELLAN_PG_BIN_DIR` (if set and non-blank),
 /// followed by [`default_pg_bin_dir_candidates`].
 ///
 /// Intended for test infrastructure (`tests-common::pg_bin_dir_or_skip`
@@ -395,7 +395,7 @@ pub const PG_BIN_DIR_ENV: &str = "HHAGENT_PG_BIN_DIR";
 ///   Trim-then-check matches the strict-only-"1" parse style used
 ///   elsewhere in the workspace for boolean env knobs and silently
 ///   tolerates the common shell-script footgun
-///   `export HHAGENT_PG_BIN_DIR=$(some_failing_lookup)` producing a
+///   `export KASTELLAN_PG_BIN_DIR=$(some_failing_lookup)` producing a
 ///   blank value.
 /// - Non-blank value → prepended to the defaults so a bogus or
 ///   missing override falls through to defaults rather than skipping
@@ -488,10 +488,10 @@ pub fn is_data_dir_initialized(data_dir: &Path) -> bool {
 
 /// XDG-style default cluster data dir for the current user.
 ///
-/// Linux + macOS use the same path: `$HOME/.local/share/hhagent/pg/data`.
+/// Linux + macOS use the same path: `$HOME/.local/share/kastellan/pg/data`.
 /// On macOS we deliberately don't follow Apple's
 /// `~/Library/Application Support/` convention because:
-///  - hhagent is a portable agent system; the same path on both OSes
+///  - kastellan is a portable agent system; the same path on both OSes
 ///    means scripts and docs don't need per-OS branches.
 ///  - `~/.local/share` is well-supported on macOS too (Homebrew,
 ///    XDG-aware tools, etc.).
@@ -501,7 +501,7 @@ pub fn is_data_dir_initialized(data_dir: &Path) -> bool {
 pub fn default_data_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| {
         let mut p = PathBuf::from(h);
-        p.push(".local/share/hhagent/pg/data");
+        p.push(".local/share/kastellan/pg/data");
         p
     })
 }

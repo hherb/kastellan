@@ -88,7 +88,7 @@ knows *exactly* whose secrets to scan for), and it matches the codebase's "one p
 identity per worker" ethos. Net workers are `SingleUse` and few, so "an extra process per
 net-worker spawn" is an acceptable cost.
 
-### New crate `workers/egress-proxy` (`hhagent-worker-egress-proxy`)
+### New crate `workers/egress-proxy` (`kastellan-worker-egress-proxy`)
 
 A binary. Reuses `web-common::allowlist::HostAllowlist` (the security-critical matcher,
 single source of truth — do **not** re-implement). Pure, exhaustively-unit-tested modules
@@ -142,7 +142,7 @@ It provides:
 
 1. **`spawn_sidecar(allowlist, scratch_dir, backend) -> SidecarHandle`** — builds the
    net-permissive lockdown `SandboxPolicy` (see below), passes the allowlist (env, mirroring
-   `HHAGENT_WEB_FETCH_ALLOWLIST`) and the UDS path to bind (`<scratch>/egress.sock`, deterministic
+   `KASTELLAN_WEB_FETCH_ALLOWLIST`) and the UDS path to bind (`<scratch>/egress.sock`, deterministic
    — no port handshake), spawns the sandboxed proxy via the `SandboxBackend`, and waits (bounded)
    for the socket to exist. Fail-closed: spawn/bind timeout → `Err`.
 2. **`decision_to_audit(line: &str) -> Option<AuditRow>`** *(pure)* — maps one stdout decision

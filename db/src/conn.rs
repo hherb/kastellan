@@ -1,4 +1,4 @@
-//! Connection-options builder for the per-user hhagent cluster.
+//! Connection-options builder for the per-user kastellan cluster.
 //!
 //! All call sites that need to talk to the cluster (the runtime probe,
 //! tests, the future memory worker) go through [`ConnectSpec`] so the
@@ -11,9 +11,9 @@
 //!     authenticator the cluster knows. Peer auth maps the connecting
 //!     OS uid → Postgres role of the same name; if those disagree the
 //!     connection is refused at the auth layer.
-//!   * Application database = `hhagent`. The cluster's bootstrap
+//!   * Application database = `kastellan`. The cluster's bootstrap
 //!     databases (`postgres`, `template0`, `template1`) are
-//!     left alone; [`probe::ensure_database_exists`] creates `hhagent`
+//!     left alone; [`probe::ensure_database_exists`] creates `kastellan`
 //!     on first bring-up.
 //!
 //! The helpers here are *pure* (build options, return strings) so they
@@ -28,12 +28,12 @@ use crate::{default_socket_dir, DbError};
 
 /// Application database name. The cluster's bootstrap DB
 /// (`postgres`) is reserved for one-off DDL like `CREATE DATABASE`;
-/// every hhagent migration and runtime row goes in `hhagent`.
-pub const DEFAULT_APPLICATION_DB: &str = "hhagent";
+/// every kastellan migration and runtime row goes in `kastellan`.
+pub const DEFAULT_APPLICATION_DB: &str = "kastellan";
 
 /// Postgres's always-present maintenance database. We connect to this
 /// briefly to check `pg_database` and (if needed) `CREATE DATABASE
-/// hhagent`. After that, every connection in the daemon uses the
+/// kastellan`. After that, every connection in the daemon uses the
 /// application DB.
 pub const MAINTENANCE_DB: &str = "postgres";
 
@@ -50,7 +50,7 @@ pub const MAINTENANCE_DB: &str = "postgres";
 /// shape. Pinned as a constant so the role name lives in one place; a
 /// rename here must be paired with a new migration that creates the new
 /// role and migrates membership.
-pub const RUNTIME_ROLE: &str = "hhagent_runtime";
+pub const RUNTIME_ROLE: &str = "kastellan_runtime";
 
 /// SQL statement that switches the current connection's session role
 /// to [`RUNTIME_ROLE`].
@@ -125,7 +125,7 @@ impl ConnectSpec {
     /// Variant pointing at the cluster's maintenance database
     /// (`postgres`). Used by [`crate::probe::run`] for the one-shot
     /// `pg_database` lookup + `CREATE DATABASE` that materialises
-    /// `hhagent` on first bring-up. CREATE DATABASE cannot run inside
+    /// `kastellan` on first bring-up. CREATE DATABASE cannot run inside
     /// a transaction and connects must target an *existing* DB — so
     /// the bootstrap DB is the only viable connection target here.
     pub fn for_maintenance_db(&self) -> Self {
@@ -175,7 +175,7 @@ mod tests {
 
     fn spec_with(user: &str, db: &str) -> ConnectSpec {
         ConnectSpec {
-            socket_dir: PathBuf::from("/srv/hhagent/sockets"),
+            socket_dir: PathBuf::from("/srv/kastellan/sockets"),
             user: user.into(),
             database: db.into(),
         }
@@ -194,8 +194,8 @@ mod tests {
         let _guard = crate::env_lock();
         let prev = std::env::var("USER").ok();
         std::env::set_var("USER", "testuser");
-        let spec = ConnectSpec::default_for(Path::new("/srv/hhagent")).unwrap();
-        assert_eq!(spec.socket_dir, PathBuf::from("/srv/hhagent/sockets"));
+        let spec = ConnectSpec::default_for(Path::new("/srv/kastellan")).unwrap();
+        assert_eq!(spec.socket_dir, PathBuf::from("/srv/kastellan/sockets"));
         assert_eq!(spec.user, "testuser");
         assert_eq!(spec.database, DEFAULT_APPLICATION_DB);
         match prev {
@@ -254,8 +254,8 @@ mod tests {
     /// a non-existent DB), so the constant change is paired with this
     /// regression test as a forced acknowledgement.
     #[test]
-    fn application_db_name_is_hhagent() {
-        assert_eq!(DEFAULT_APPLICATION_DB, "hhagent");
+    fn application_db_name_is_kastellan() {
+        assert_eq!(DEFAULT_APPLICATION_DB, "kastellan");
     }
 
     /// Pin the maintenance DB name. Postgres bootstraps `postgres`,
@@ -273,8 +273,8 @@ mod tests {
     /// runs `SET ROLE` against a role that doesn't exist and every
     /// post-bring-up application write fails at the auth layer.
     #[test]
-    fn runtime_role_name_is_hhagent_runtime() {
-        assert_eq!(RUNTIME_ROLE, "hhagent_runtime");
+    fn runtime_role_name_is_kastellan_runtime() {
+        assert_eq!(RUNTIME_ROLE, "kastellan_runtime");
     }
 
     /// Pin the SET ROLE statement shape. The role name MUST be wrapped
@@ -285,7 +285,7 @@ mod tests {
     fn set_role_runtime_statement_quotes_role_name() {
         assert_eq!(
             set_role_runtime_statement(),
-            "SET ROLE \"hhagent_runtime\"",
+            "SET ROLE \"kastellan_runtime\"",
         );
     }
 
@@ -294,7 +294,7 @@ mod tests {
     /// that might pipe a less-trusted name into DDL.
     #[test]
     fn quote_ident_handles_plain_name() {
-        assert_eq!(quote_ident("hhagent"), "\"hhagent\"");
+        assert_eq!(quote_ident("kastellan"), "\"kastellan\"");
     }
 
     #[test]

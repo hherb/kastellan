@@ -10,7 +10,7 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_tools(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli tools allowlist <add|remove|list> ...");
+        eprintln!("usage: kastellan-cli tools allowlist <add|remove|list> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -24,7 +24,7 @@ pub(crate) fn run_tools(args: &[String]) -> ExitCode {
 
 fn run_tools_allowlist(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli tools allowlist <add|remove|list> ...");
+        eprintln!("usage: kastellan-cli tools allowlist <add|remove|list> ...");
         return ExitCode::from(2);
     }
     // Per-action dispatch. `with_runtime` is called only from the known
@@ -42,13 +42,13 @@ fn run_tools_allowlist(args: &[String]) -> ExitCode {
 }
 
 async fn tools_allowlist_add(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::tools_allowlist_add_and_audit;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::tools_allowlist_add_and_audit;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let (tool, argv0) = match args {
         [t, a] => (t.clone(), a.clone()),
         _ => {
-            eprintln!("usage: hhagent-cli tools allowlist add <tool> <argv0>");
+            eprintln!("usage: kastellan-cli tools allowlist add <tool> <argv0>");
             return ExitCode::from(2);
         }
     };
@@ -65,10 +65,10 @@ async fn tools_allowlist_add(args: &[String]) -> ExitCode {
     match tools_allowlist_add_and_audit(&pool, &tool, &argv0).await {
         Ok(true)  => { println!("added {tool} {argv0}"); ExitCode::from(0) }
         Ok(false) => { println!("already present"); ExitCode::from(0) }
-        Err(e @ (hhagent_db::tool_allowlists::ToolAllowlistError::InvalidArgv0
-            | hhagent_db::tool_allowlists::ToolAllowlistError::InvalidToolName
-            | hhagent_db::tool_allowlists::ToolAllowlistError::Argv0HasNul
-            | hhagent_db::tool_allowlists::ToolAllowlistError::Argv0HasDotDot)) => {
+        Err(e @ (kastellan_db::tool_allowlists::ToolAllowlistError::InvalidArgv0
+            | kastellan_db::tool_allowlists::ToolAllowlistError::InvalidToolName
+            | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasNul
+            | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasDotDot)) => {
             eprintln!("{e}");
             ExitCode::from(2)
         }
@@ -77,13 +77,13 @@ async fn tools_allowlist_add(args: &[String]) -> ExitCode {
 }
 
 async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::tools_allowlist_remove_and_audit;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::tools_allowlist_remove_and_audit;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let (tool, argv0) = match args {
         [t, a] => (t.clone(), a.clone()),
         _ => {
-            eprintln!("usage: hhagent-cli tools allowlist remove <tool> <argv0>");
+            eprintln!("usage: kastellan-cli tools allowlist remove <tool> <argv0>");
             return ExitCode::from(2);
         }
     };
@@ -99,10 +99,10 @@ async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
     match tools_allowlist_remove_and_audit(&pool, &tool, &argv0).await {
         Ok(true)  => { println!("removed {tool} {argv0}"); ExitCode::from(0) }
         Ok(false) => { println!("not present"); ExitCode::from(0) }
-        Err(e @ (hhagent_db::tool_allowlists::ToolAllowlistError::InvalidArgv0
-            | hhagent_db::tool_allowlists::ToolAllowlistError::InvalidToolName
-            | hhagent_db::tool_allowlists::ToolAllowlistError::Argv0HasNul
-            | hhagent_db::tool_allowlists::ToolAllowlistError::Argv0HasDotDot)) => {
+        Err(e @ (kastellan_db::tool_allowlists::ToolAllowlistError::InvalidArgv0
+            | kastellan_db::tool_allowlists::ToolAllowlistError::InvalidToolName
+            | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasNul
+            | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasDotDot)) => {
             eprintln!("{e}");
             ExitCode::from(2)
         }
@@ -111,8 +111,8 @@ async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
 }
 
 async fn tools_allowlist_list(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tool_allowlists::{list_all, list_for_tool_full};
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tool_allowlists::{list_all, list_for_tool_full};
 
     let mut tool_filter: Option<String> = None;
     let mut i = 0;

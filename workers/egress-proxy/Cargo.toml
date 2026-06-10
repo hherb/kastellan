@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-worker-egress-proxy"
+name        = "kastellan-worker-egress-proxy"
 description = "Per-worker egress proxy: host-allowlist + SSRF/IP-pinning boundary enforcement over a UDS. Slice #1 (no TLS interception)."
 version.workspace      = true
 edition.workspace      = true
@@ -10,12 +10,12 @@ repository.workspace   = true
 readme.workspace       = true
 
 [[bin]]
-name = "hhagent-worker-egress-proxy"
+name = "kastellan-worker-egress-proxy"
 path = "src/main.rs"
 
 [dependencies]
-hhagent-worker-prelude    = { path = "../prelude" }
-hhagent-worker-web-common = { path = "../web-common" }
+kastellan-worker-prelude    = { path = "../prelude" }
+kastellan-worker-web-common = { path = "../web-common" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }

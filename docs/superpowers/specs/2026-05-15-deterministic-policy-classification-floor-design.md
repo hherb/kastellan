@@ -25,7 +25,7 @@ The blocker today: nothing upstream sets `task.payload.classification_floor`, so
 Two paired changes, shipping in one branch:
 
 1. Land the first real Stage 0 rule: a deterministic check enforcing three classification invariants over (`task.classification_floor`, `plan.data_ceiling`, `plan.steps[].classification`).
-2. Add `hhagent-cli ask --classification-floor <DataClass>` so operators can pin the floor at submission. This is the minimum-viable upstream path for the rule to fire end-to-end in production.
+2. Add `kastellan-cli ask --classification-floor <DataClass>` so operators can pin the floor at submission. This is the minimum-viable upstream path for the rule to fire end-to-end in production.
 
 Both pieces are deliberate non-goals for **automatic** floor inference, anonymiser/declassifier flows, and `Verdict::Escalate` severity-splits. Those are filed as separate slices.
 
@@ -122,9 +122,9 @@ Module-level doc updated: DP is no longer a stub.
 
 `Verdict::Block` (not `ConstitutionalBlock`) — these are policy violations, retryable in the same shape as any other reviewer Block: the agent receives `BLOCK: <reason>` ([prompts/agent_planner.md:140](../../../prompts/agent_planner.md#L140)) and may reformulate within the per-task plan cap. Constitutional principles stay reserved for the 5 absolute constraints in CG.
 
-### CLI flag: `hhagent-cli ask --classification-floor <DataClass>`
+### CLI flag: `kastellan-cli ask --classification-floor <DataClass>`
 
-[core/src/bin/hhagent-cli.rs:222-247](../../../core/src/bin/hhagent-cli.rs#L222-L247) is the `run_ask` arg-loop. Add a new branch handling `--classification-floor`, accepting the next positional arg as the floor value.
+[core/src/bin/kastellan-cli.rs:222-247](../../../core/src/bin/kastellan-cli.rs#L222-L247) is the `run_ask` arg-loop. Add a new branch handling `--classification-floor`, accepting the next positional arg as the floor value.
 
 Pure helper `parse_classification_floor(s: &str) -> Result<DataClass, String>`:
 
@@ -140,10 +140,10 @@ When set to non-default, serialise as the PascalCase string into `tasks.payload.
 { "instruction": "...", "kind": "ask", "classification_floor": "ClinicalConfidential" }
 ```
 
-Help-text update at `core/src/bin/hhagent-cli.rs:83`:
+Help-text update at `core/src/bin/kastellan-cli.rs:83`:
 
 ```
-hhagent-cli ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]
+kastellan-cli ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]
 ```
 
 Plus an entry in the flags-explanation block.
@@ -201,7 +201,7 @@ Workspace stays green between every commit.
 
 ## Open follow-up surfaces
 
-- **Operator recapture against current daemon.** Once recapture lands, `hhagent-cli observation replay` against ec-001 (with floor pinned in the captured task payload) will show the rule firing as a delta row.
+- **Operator recapture against current daemon.** Once recapture lands, `kastellan-cli observation replay` against ec-001 (with floor pinned in the captured task payload) will show the rule firing as a delta row.
 - **Automatic floor inference.** Either a planner-prompt rule asking the agent to declare a `classification_floor` in its first plan, or a prompt-keyword classifier in the CLI/producer.
 - **Stage 0 rule catalogue growth.** Future Stage 0 rules (outbound-destination policy, per-tool classification deny-lists) would land alongside the invariant check. If `deterministic.rs` grows past the 500-LOC soft cap, the natural split is one file per rule family, behind a `deterministic/mod.rs` facade — same shape `constitutional.rs` might take.
 - **Audit-row enrichment.** Today the DP verdict flows through `cassandra:chain/verdict`. If operators want per-rule counters, a future slice can extend the payload with a `policy_tag` field.

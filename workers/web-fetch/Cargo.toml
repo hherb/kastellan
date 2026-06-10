@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-worker-web-fetch"
+name        = "kastellan-worker-web-fetch"
 description = "Tool worker: fetch a URL (HTTPS-only, host allowlist) and return extracted readable text. GET-only."
 version.workspace      = true
 edition.workspace      = true
@@ -10,13 +10,13 @@ repository.workspace   = true
 readme.workspace       = true
 
 [[bin]]
-name = "hhagent-worker-web-fetch"
+name = "kastellan-worker-web-fetch"
 path = "src/main.rs"
 
 [dependencies]
-hhagent-protocol         = { path = "../../protocol" }
-hhagent-worker-prelude   = { path = "../prelude" }
-hhagent-worker-web-common = { path = "../web-common" }
+kastellan-protocol         = { path = "../../protocol" }
+kastellan-worker-prelude   = { path = "../prelude" }
+kastellan-worker-web-common = { path = "../web-common" }
 serde                    = { workspace = true }
 serde_json               = { workspace = true }
 anyhow                   = { workspace = true }
@@ -25,4 +25,4 @@ pdf-extract              = { workspace = true }
 readable_html            = { workspace = true }
 
 [dev-dependencies]
-hhagent-worker-web-common = { path = "../web-common", features = ["testing"] }
+kastellan-worker-web-common = { path = "../web-common", features = ["testing"] }

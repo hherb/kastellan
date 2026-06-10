@@ -6,7 +6,7 @@
 
 **Architecture:** New `core::recall_assembly` module ships a `RecalledContext { ids, bodies, query_sha256 }` value type and an async `RecallBuilder` trait parallel to the existing `SystemPromptBuilder`. Production impl `PgRecallBuilder` composes `embed_query` + `recall`; test impl `StaticRecallBuilder` returns a fixed context. The existing `assemble_system_prompt` widens from 3-arg (`l0, l1, base`) to 4-arg (`l0, l1, recalled, base`); `RecalledContext::empty()` reproduces the v1 byte-output. `RouterAgent` gains a second `Arc<dyn RecallBuilder>` constructor argument; `formulate_plan` runs recall, **degrades-and-warns on failure** (recall is enrichment, not policy — distinct from the fail-closed `PromptAssembly` posture), then assembles. `FormulationMeta` widens by 3 fields; the audit-row payload grows by 3 keys (17/18 → 20/21).
 
-**Tech Stack:** Rust (workspace at `/home/hherb/src/hhagent`), `sqlx` for Postgres, `async-trait`, `thiserror`, `sha2`, `tracing`, `tokio`. Branch: `feat/recall-lane-wiring` (already created at `76a342b`).
+**Tech Stack:** Rust (workspace at `/home/hherb/src/kastellan`), `sqlx` for Postgres, `async-trait`, `thiserror`, `sha2`, `tracing`, `tokio`. Branch: `feat/recall-lane-wiring` (already created at `76a342b`).
 
 **Spec:** [docs/superpowers/specs/2026-05-17-recall-lane-wiring-design.md](../specs/2026-05-17-recall-lane-wiring-design.md)
 
@@ -67,7 +67,7 @@ Modified files (8):
 - [ ] **Modify `core/src/lib.rs`:** find the existing `pub mod prompt_assembly;` line:
 
 ```sh
-grep -n "^pub mod" /home/hherb/src/hhagent/core/src/lib.rs
+grep -n "^pub mod" /home/hherb/src/kastellan/core/src/lib.rs
 ```
 
 Insert `pub mod recall_assembly;` immediately after `pub mod prompt_assembly;` (alphabetical-ish: `prompt_assembly` < `recall_assembly`).
@@ -102,7 +102,7 @@ Insert `pub mod recall_assembly;` immediately after `pub mod prompt_assembly;` (
 //! ## Module layout
 //!
 //! * [`pg_builder::PgRecallBuilder`] — production impl. Holds a
-//!   [`sqlx::PgPool`] and an [`hhagent_llm_router::Router`]; composes
+//!   [`sqlx::PgPool`] and an [`kastellan_llm_router::Router`]; composes
 //!   [`crate::memory::embed_query`] + [`crate::memory::recall`].
 //! * [`pg_builder::StaticRecallBuilder`] — test impl. Returns a fixed
 //!   [`RecalledContext`] regardless of the query string.
@@ -121,7 +121,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::memory::MemoryError;
-use hhagent_db::DbError;
+use kastellan_db::DbError;
 
 pub mod pg_builder;
 
@@ -261,7 +261,7 @@ mod tests {
 //!
 //! * [`PgRecallBuilder`] — composes [`crate::memory::embed_query`] +
 //!   [`crate::memory::recall`] against a [`sqlx::PgPool`] and a shared
-//!   [`hhagent_llm_router::Router`].
+//!   [`kastellan_llm_router::Router`].
 //! * [`StaticRecallBuilder`] — returns a fixed [`super::RecalledContext`]
 //!   regardless of the query string. Always `pub` (not `cfg(test)`)
 //!   so cross-crate integration tests in `core/tests/*.rs` can use it.
@@ -392,7 +392,7 @@ mod tests {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib recall_assembly
+cargo test -p kastellan-core --lib recall_assembly
 ```
 
 **Expected:** 5 tests pass (2 in `mod.rs::tests` + 3 in `pg_builder::tests`). Total workspace count rises 652 → 657 transiently — Task 5 will replace the stub `PgRecallBuilder`, but the test counts are stable from this point forward.
@@ -529,7 +529,7 @@ EOF
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib prompt_assembly::assemble::tests 2>&1 | tail -30
+cargo test -p kastellan-core --lib prompt_assembly::assemble::tests 2>&1 | tail -30
 ```
 
 **Expected:** compile error — `assemble_system_prompt` takes 3 args but the new tests pass 4. This is the RED step proving the test exercises the signature change.
@@ -538,7 +538,7 @@ cargo test -p hhagent-core --lib prompt_assembly::assemble::tests 2>&1 | tail -3
 
 - [ ] **Modify `core/src/prompt_assembly/assemble.rs`:**
 
-Add the import at the top (near the existing `use hhagent_db::memories::Memory;`):
+Add the import at the top (near the existing `use kastellan_db::memories::Memory;`):
 
 ```rust
 use crate::recall_assembly::RecalledContext;
@@ -661,7 +661,7 @@ And add a new rule entry between the existing rules 4 and 5 (relabel as 5 and 6)
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib prompt_assembly
+cargo test -p kastellan-core --lib prompt_assembly
 ```
 
 **Expected:** all `prompt_assembly` tests pass — existing 10 + 4 new from Step 2.1 = 14. The widened signature compiles cleanly.
@@ -743,7 +743,7 @@ EOF
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib prompt_assembly::pg_builder::tests::static_builder_build_with_recalled_passes_recalled_count_through 2>&1 | tail -20
+cargo test -p kastellan-core --lib prompt_assembly::pg_builder::tests::static_builder_build_with_recalled_passes_recalled_count_through 2>&1 | tail -20
 ```
 
 **Expected:** compile error — `build_with_recalled` doesn't exist on the trait; `AssembledPrompt` has no `recalled_count` field.
@@ -807,7 +807,7 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
         // internal per-layer caps. Safe today because both L1 and the
         // recalled-bodies cap are bounded; the deferred "global token
         // cap with priority drop" follow-up will plumb a budget
-        // through here. See https://github.com/hherb/hhagent/issues/78.
+        // through here. See https://github.com/hherb/kastellan/issues/78.
         let l0 = load_l0_active_default(&self.pool).await?;
         let l1 = load_l1_default(&self.pool).await?;
         let system_prompt = assemble_system_prompt(&l0, &l1, recalled, base);
@@ -868,8 +868,8 @@ Same in `pg_builder_build_with_empty_db_returns_base_only` after the existing as
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib prompt_assembly
-cargo test -p hhagent-core --test prompt_assembly_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --lib prompt_assembly
+cargo test -p kastellan-core --test prompt_assembly_e2e 2>&1 | tail -10
 ```
 
 **Expected:** all prompt_assembly tests pass.
@@ -922,7 +922,7 @@ EOF
 - [ ] **Modify `core/src/recall_assembly/pg_builder.rs`:** in the existing `#[cfg(test)] mod tests` block, ADD these new tests:
 
 ```rust
-    use hhagent_db::memories::{Memory, MemoryLayer};
+    use kastellan_db::memories::{Memory, MemoryLayer};
     use time::OffsetDateTime;
 
     fn mem(id: i64, body: &str) -> Memory {
@@ -980,7 +980,7 @@ EOF
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib recall_assembly::pg_builder::tests::cap_and_split 2>&1 | tail -15
+cargo test -p kastellan-core --lib recall_assembly::pg_builder::tests::cap_and_split 2>&1 | tail -15
 ```
 
 **Expected:** compile error — `cap_and_split` doesn't exist.
@@ -990,7 +990,7 @@ cargo test -p hhagent-core --lib recall_assembly::pg_builder::tests::cap_and_spl
 - [ ] **Modify `core/src/recall_assembly/pg_builder.rs`:** ABOVE the existing `pub struct PgRecallBuilder` line, add the helper:
 
 ```rust
-use hhagent_db::memories::Memory;
+use kastellan_db::memories::Memory;
 
 use super::L_RECALL_CAP_BYTES;
 
@@ -1013,7 +1013,7 @@ pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, V
         let next = used.saturating_add(row.body.len());
         if next > cap_bytes {
             tracing::warn!(
-                target: "hhagent::recall_assembly",
+                target: "kastellan::recall_assembly",
                 memory_id = row.id,
                 row_bytes = row.body.len(),
                 used_bytes = used,
@@ -1037,7 +1037,7 @@ pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, V
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib recall_assembly
+cargo test -p kastellan-core --lib recall_assembly
 ```
 
 **Expected:** all `recall_assembly` tests pass (5 from Task 1 + 4 from Task 4 = 9 in this module's tests).
@@ -1090,7 +1090,7 @@ EOF
 - [ ] **Create `core/tests/recall_assembly_e2e.rs`:**
 
 ```rust
-//! End-to-end smoke for [`hhagent_core::recall_assembly::PgRecallBuilder`].
+//! End-to-end smoke for [`kastellan_core::recall_assembly::PgRecallBuilder`].
 //!
 //! Each scenario brings up its own per-test Postgres cluster + a
 //! hand-rolled `tokio::net::TcpListener` mock for `/embeddings` (same
@@ -1103,11 +1103,11 @@ EOF
 
 use std::sync::Arc;
 
-use hhagent_core::memory::EMBEDDING_DIM;
-use hhagent_core::recall_assembly::{PgRecallBuilder, RecallBuilder};
-use hhagent_db::memories::insert_memory;
-use hhagent_llm_router::{RouterConfig, Router};
-use hhagent_tests_common::{
+use kastellan_core::memory::EMBEDDING_DIM;
+use kastellan_core::recall_assembly::{PgRecallBuilder, RecallBuilder};
+use kastellan_db::memories::insert_memory;
+use kastellan_llm_router::{RouterConfig, Router};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, text_to_embedding,
     unique_suffix,
 };
@@ -1173,11 +1173,11 @@ fn pg_recall_builder_round_trips_against_seeded_pool_and_mock_embedding() {
         &bin_dir,
         "rae-d",
         "rae-l",
-        &format!("hhagent-supervisor-test-pg-rae-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-rae-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -1186,7 +1186,7 @@ fn pg_recall_builder_round_trips_against_seeded_pool_and_mock_embedding() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -1248,7 +1248,7 @@ fn pg_recall_builder_round_trips_against_seeded_pool_and_mock_embedding() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test recall_assembly_e2e --no-run 2>&1 | tail -15
+cargo test -p kastellan-core --test recall_assembly_e2e --no-run 2>&1 | tail -15
 ```
 
 **Expected:** compile error on `PgRecallBuilder::new(pool.clone(), router)` — the Task-1 stub takes no args.
@@ -1257,12 +1257,12 @@ cargo test -p hhagent-core --test recall_assembly_e2e --no-run 2>&1 | tail -15
 
 - [ ] **Modify `core/src/recall_assembly/pg_builder.rs`:**
 
-Add the imports near the top (under the existing `use hhagent_db::memories::Memory;` line that Task 4 added):
+Add the imports near the top (under the existing `use kastellan_db::memories::Memory;` line that Task 4 added):
 
 ```rust
 use std::sync::Arc;
 use sqlx::PgPool;
-use hhagent_llm_router::Router;
+use kastellan_llm_router::Router;
 
 use crate::memory::{embed_query, recall, RecallParams, RecallModes};
 ```
@@ -1325,20 +1325,20 @@ impl RecallBuilder for PgRecallBuilder {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test recall_assembly_e2e pg_recall_builder_round_trips_against_seeded_pool_and_mock_embedding -- --nocapture 2>&1 | tail -20
+cargo test -p kastellan-core --test recall_assembly_e2e pg_recall_builder_round_trips_against_seeded_pool_and_mock_embedding -- --nocapture 2>&1 | tail -20
 ```
 
 **Expected:** test passes (or skips silently with `[SKIP]` on a host without Postgres). On the DGX Spark with PG available, expect ~2 s runtime.
 
-### Step 5.5 — Update the `hhagent_core::memory` re-export to include `EMBEDDING_DIM`
+### Step 5.5 — Update the `kastellan_core::memory` re-export to include `EMBEDDING_DIM`
 
-The e2e test imports `hhagent_core::memory::EMBEDDING_DIM`. If `cargo test --test recall_assembly_e2e --no-run` reports a missing-symbol error here:
+The e2e test imports `kastellan_core::memory::EMBEDDING_DIM`. If `cargo test --test recall_assembly_e2e --no-run` reports a missing-symbol error here:
 
 - [ ] **Modify `core/src/memory/mod.rs`:** in the `pub use` re-exports near the bottom, add `EMBEDDING_DIM`:
 
 ```rust
 pub use embed::{embed_query, MemoryError};
-pub use hhagent_db::memories::EMBEDDING_DIM;
+pub use kastellan_db::memories::EMBEDDING_DIM;
 pub use recall::{
     recall, reciprocal_rank_fusion, RecallModes, RecallParams, GRAPH_FANOUT_CAP_PER_SEED,
     RRF_K_CONSTANT,
@@ -1464,7 +1464,7 @@ impl PlanFormulator for RouterAgent {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
-                    target: "hhagent::scheduler::agent",
+                    target: "kastellan::scheduler::agent",
                     error = %e,
                     "recall failed; continuing with empty recall context",
                 );
@@ -1561,12 +1561,12 @@ cargo build --workspace 2>&1 | tail -40
 - [ ] **Modify `core/src/main.rs`:** replace the existing `RouterAgent::new` construction (lines 119–124) with:
 
 ```rust
-    let formulator: Arc<dyn hhagent_core::scheduler::agent::PlanFormulator> =
-        Arc::new(hhagent_core::scheduler::agent::RouterAgent::new(
+    let formulator: Arc<dyn kastellan_core::scheduler::agent::PlanFormulator> =
+        Arc::new(kastellan_core::scheduler::agent::RouterAgent::new(
             router.clone(),
             prompts.clone(),
-            Arc::new(hhagent_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
-            Arc::new(hhagent_core::recall_assembly::PgRecallBuilder::new(
+            Arc::new(kastellan_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
+            Arc::new(kastellan_core::recall_assembly::PgRecallBuilder::new(
                 pool.clone(),
                 router.clone(),
             )),
@@ -1579,10 +1579,10 @@ cargo build --workspace 2>&1 | tail -40
 
 ```sh
 source "$HOME/.cargo/env"
-cargo build --bin hhagent 2>&1 | tail -10
+cargo build --bin kastellan 2>&1 | tail -10
 ```
 
-**Expected:** `hhagent` daemon builds cleanly. Workspace tests still fail to compile (call sites in `tests/*.rs` still broken — fixed in Task 8).
+**Expected:** `kastellan` daemon builds cleanly. Workspace tests still fail to compile (call sites in `tests/*.rs` still broken — fixed in Task 8).
 
 ---
 
@@ -1599,7 +1599,7 @@ cargo build --bin hhagent 2>&1 | tail -10
 - [ ] **Run:**
 
 ```sh
-grep -rn "RouterAgent::new\|FormulationMeta {" /home/hherb/src/hhagent/core/tests/ /home/hherb/src/hhagent/core/src/ 2>/dev/null | grep -v "target/"
+grep -rn "RouterAgent::new\|FormulationMeta {" /home/hherb/src/kastellan/core/tests/ /home/hherb/src/kastellan/core/src/ 2>/dev/null | grep -v "target/"
 ```
 
 Expect: 3 sites in `router_agent_mock_e2e.rs`, ≥1 in `scheduler_inner_loop_e2e.rs`, and possibly more depending on what the inner-loop unit-test fixtures use. (`main.rs` and the prod `scheduler/agent.rs` body are already fixed by Tasks 6+7.)
@@ -1609,7 +1609,7 @@ Expect: 3 sites in `router_agent_mock_e2e.rs`, ≥1 in `scheduler_inner_loop_e2e
 - [ ] **Modify `core/tests/router_agent_mock_e2e.rs`:** at the top, add the import:
 
 ```rust
-use hhagent_core::recall_assembly::StaticRecallBuilder;
+use kastellan_core::recall_assembly::StaticRecallBuilder;
 ```
 
 Then at each of the 3 `RouterAgent::new(...)` call sites (use grep to find them), add the 4th argument `Arc::new(StaticRecallBuilder::empty())`:
@@ -1883,7 +1883,7 @@ And find the existing test `build_plan_formulate_payload_carries_full_plan_and_c
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib scheduler::inner_loop::tests 2>&1 | tail -20
+cargo test -p kastellan-core --lib scheduler::inner_loop::tests 2>&1 | tail -20
 ```
 
 **Expected:** the 4 new tests fail (payload missing the new keys); the existing 17/18-key tests also fail (they're gone — renamed to 20/21).
@@ -1926,7 +1926,7 @@ pub(crate) fn build_plan_formulate_payload(
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib scheduler::inner_loop::tests
+cargo test -p kastellan-core --lib scheduler::inner_loop::tests
 cargo test --workspace 2>&1 | grep "^test result:" | awk '{p+=$4; f+=$6; i+=$8} END {print "passed:", p, "failed:", f, "ignored:", i}'
 ```
 
@@ -1979,7 +1979,7 @@ EOF
 - [ ] **Run:**
 
 ```sh
-grep -n 'l0_count\|l1_count\|recalled_memory_ids\|recall_count\|recall_query_sha256' /home/hherb/src/hhagent/core/tests/scheduler_inner_loop_e2e.rs
+grep -n 'l0_count\|l1_count\|recalled_memory_ids\|recall_count\|recall_query_sha256' /home/hherb/src/kastellan/core/tests/scheduler_inner_loop_e2e.rs
 ```
 
 The Slice-C happy-path assertions live around line 477 (where `l0_count`/`l1_count` are pinned as numeric u64).
@@ -2019,7 +2019,7 @@ INSERT these three checks immediately after (same indentation):
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e -- --nocapture 2>&1 | tail -10
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e -- --nocapture 2>&1 | tail -10
 cargo test --workspace 2>&1 | grep "^test result:" | awk '{p+=$4; f+=$6; i+=$8} END {print "passed:", p, "failed:", f, "ignored:", i}'
 ```
 
@@ -2078,11 +2078,11 @@ fn pg_builder_with_recalled_renders_block_against_seeded_db() {
         &bin_dir,
         "par-d",
         "par-l",
-        &format!("hhagent-supervisor-test-pg-par-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-par-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -2091,14 +2091,14 @@ fn pg_builder_with_recalled_renders_block_against_seeded_db() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
         // Empty DB → no L0/L1 sections; recalled context supplied
         // directly so we exercise the <recalled> rendering without
         // going through the real recall lane.
-        let recalled = hhagent_core::recall_assembly::RecalledContext {
+        let recalled = kastellan_core::recall_assembly::RecalledContext {
             ids: vec![10, 20],
             bodies: vec!["RECALL ALPHA".into(), "RECALL BETA".into()],
             query_sha256: "a".repeat(64),
@@ -2124,7 +2124,7 @@ fn pg_builder_with_recalled_renders_block_against_seeded_db() {
         let r_via_explicit_empty = builder
             .build_with_recalled(
                 "BASE BODY",
-                &hhagent_core::recall_assembly::RecalledContext::empty(),
+                &kastellan_core::recall_assembly::RecalledContext::empty(),
             )
             .await
             .expect("explicit empty build");
@@ -2142,7 +2142,7 @@ fn pg_builder_with_recalled_renders_block_against_seeded_db() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test prompt_assembly_e2e -- --nocapture 2>&1 | tail -10
+cargo test -p kastellan-core --test prompt_assembly_e2e -- --nocapture 2>&1 | tail -10
 cargo test --workspace 2>&1 | grep "^test result:" | awk '{p+=$4; f+=$6; i+=$8} END {print "passed:", p, "failed:", f, "ignored:", i}'
 ```
 
@@ -2227,7 +2227,7 @@ The "Next TODO" section's "Open follow-up surfaces" line "Recall-lane wiring —
 - [ ] **Modify `docs/devel/ROADMAP.md`:** find the existing Phase 1 entries near the prompt-assembler bullet (around line 113) and add immediately after:
 
 ```markdown
-- [x] **Recall-lane wiring** — landed 2026-05-17 on branch `feat/recall-lane-wiring`. New `core::recall_assembly` module ships pure `RecalledContext { ids, bodies, query_sha256 }` value type + async `RecallBuilder` trait (parallel to `SystemPromptBuilder`) + prod `PgRecallBuilder` (composes `embed_query` + `recall(SEMANTIC | LEXICAL)`) + test `StaticRecallBuilder`. `assemble_system_prompt` widens to 4-arg (`l0, l1, recalled, base`); `RecalledContext::empty()` reproduces v1 byte-output. `RouterAgent::formulate_plan` runs recall before assembly with **degrade-and-warn** posture (recall is enrichment, not policy — distinct from the fail-closed `PromptAssembly` posture). 3 new `agent/plan.formulate` audit-row keys: `recalled_memory_ids`, `recall_count`, `recall_query_sha256` (pure-additive; payload 17/18 → 20/21 keys). +18 tests (workspace 652 → **670**). Spec at `docs/superpowers/specs/2026-05-17-recall-lane-wiring-design.md`; plan at `docs/superpowers/plans/2026-05-17-recall-lane-wiring.md`. Closes the HANDOVER "Next concrete engineering pickup #1" (recall lane wiring); unblocks future entity-extraction + graph-lane wiring and prompt-cap priority-drop ([issue #78](https://github.com/hherb/hhagent/issues/78)).
+- [x] **Recall-lane wiring** — landed 2026-05-17 on branch `feat/recall-lane-wiring`. New `core::recall_assembly` module ships pure `RecalledContext { ids, bodies, query_sha256 }` value type + async `RecallBuilder` trait (parallel to `SystemPromptBuilder`) + prod `PgRecallBuilder` (composes `embed_query` + `recall(SEMANTIC | LEXICAL)`) + test `StaticRecallBuilder`. `assemble_system_prompt` widens to 4-arg (`l0, l1, recalled, base`); `RecalledContext::empty()` reproduces v1 byte-output. `RouterAgent::formulate_plan` runs recall before assembly with **degrade-and-warn** posture (recall is enrichment, not policy — distinct from the fail-closed `PromptAssembly` posture). 3 new `agent/plan.formulate` audit-row keys: `recalled_memory_ids`, `recall_count`, `recall_query_sha256` (pure-additive; payload 17/18 → 20/21 keys). +18 tests (workspace 652 → **670**). Spec at `docs/superpowers/specs/2026-05-17-recall-lane-wiring-design.md`; plan at `docs/superpowers/plans/2026-05-17-recall-lane-wiring.md`. Closes the HANDOVER "Next concrete engineering pickup #1" (recall lane wiring); unblocks future entity-extraction + graph-lane wiring and prompt-cap priority-drop ([issue #78](https://github.com/hherb/kastellan/issues/78)).
 ```
 
 ### Step 12.4 — Final commit

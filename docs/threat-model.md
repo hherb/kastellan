@@ -1,4 +1,4 @@
-# hhagent — Threat Model
+# kastellan — Threat Model
 
 > **Status: skeleton.** Updated as backends and workers come online.
 
@@ -42,15 +42,15 @@ The daemon locates plain compiled workers as **siblings of its own binary**
 (`current_exe()`-relative `<exe_dir>/<worker-name>`; see
 [`core::worker_manifest::discover_binary`](../core/src/worker_manifest.rs)), so a
 flat install resolves with no env vars. This introduces one trust assumption
-worth stating explicitly: **the install directory containing `hhagent` and its
+worth stating explicitly: **the install directory containing `kastellan` and its
 worker binaries must not be writable by the agent's own OS user.** The invariant
 above grants a worst-case compromise the agent's own user account — so if
 `<exe_dir>` were user-writable, a compromised process could drop a malicious
-`hhagent-worker-<name>` next to the daemon and have it registered as a tool on
+`kastellan-worker-<name>` next to the daemon and have it registered as a tool on
 the next start. Production deployment therefore installs the daemon + workers
 into a root-owned bindir (the systemd/launchd unit's install path); the
 user-writable cargo `target/debug` tree is a dev convenience, not a production
-trust boundary. The `HHAGENT_*_BIN` override is authoritative and **fails
+trust boundary. The `KASTELLAN_*_BIN` override is authoritative and **fails
 closed** (a set-but-invalid override is rejected, never silently substituted by
 the sibling), so it cannot be used to widen discovery beyond the operator's
 explicit intent.
@@ -75,13 +75,13 @@ the best containment available without entitlements.
 | ----- | ------- |
 | Policy gate (core) | Static allow/deny per `(tool, args, data class)` before any tool spawn |
 | Parent-side sandbox (bwrap / Seatbelt) | Namespace isolation, FS bind-mount, network unshare. Applied by `core::tool_host`. |
-| Worker-side sandbox (Landlock + seccomp-bpf) | Second, finer kernel filter installed by the worker on itself via [`hhagent-worker-prelude`](../workers/prelude/). One-way: cannot be relaxed once `restrict_self`/`apply_filter` returns. |
+| Worker-side sandbox (Landlock + seccomp-bpf) | Second, finer kernel filter installed by the worker on itself via [`kastellan-worker-prelude`](../workers/prelude/). One-way: cannot be relaxed once `restrict_self`/`apply_filter` returns. |
 | Resource caps (Linux: cgroup v2 via `systemd-run --user --scope`) | Hard `MemoryMax` + `MemorySwapMax=0` from `policy.mem_mb`; defense-in-depth `CPUQuota=200%` and `TasksMax=64` defaults. Wraps `bwrap` so the cgroup is in place before the worker namespace is created. Applied by [`sandbox::linux_cgroup`](../sandbox/src/linux_cgroup.rs). |
 | Egress proxy       | Per-worker host allowlist, SSRF/IP-pinning, TLS pinning, audit-log every request. **Slice #1 built** (boundary allowlist + SSRF/IP defense, `workers/egress-proxy`); not yet live-wired — see "Network egress" below. Force-routing + TLS-intercept leak-scanner + TLS-pinning are slices #2–4. |
 | Postgres role isolation | Workers cannot reach Postgres at all; only the core has the DB connection |
 | Append-only audit log   | Every tool call, LLM call, channel message, memory write |
 
-The two sandbox rows together implement the "parent denies + child denies again" double containment: a kernel bug in either layer alone does not breach the worker's threat boundary. The worker-side layer is enforced from inside the worker process *after* dynamic-linker resolution but *before* serving any JSON-RPC request, via `hhagent_worker_prelude::serve_stdio`.
+The two sandbox rows together implement the "parent denies + child denies again" double containment: a kernel bug in either layer alone does not breach the worker's threat boundary. The worker-side layer is enforced from inside the worker process *after* dynamic-linker resolution but *before* serving any JSON-RPC request, via `kastellan_worker_prelude::serve_stdio`.
 
 ### Secrets in the audit log
 

@@ -15,7 +15,7 @@
 //!     allow-listed exec target reachable. (`bwrap` already mounts these
 //!     read-only; Landlock is a second, kernel-side check.)
 //!   * **All FS rights** under any path listed in the
-//!     `HHAGENT_LANDLOCK_RW` env var (JSON array of absolute paths).
+//!     `KASTELLAN_LANDLOCK_RW` env var (JSON array of absolute paths).
 //!     This is the worker's scratch dir.
 //!
 //! Everything else — including `/etc`, `/home`, `/root`, `/var` — is denied.
@@ -99,7 +99,7 @@ const DEFAULT_RO_EXEC_ROOTS: &[&str] = &[
     "/proc",
 ];
 
-/// Read [`HHAGENT_LANDLOCK_RW`] and [`HHAGENT_LANDLOCK_RO`] from the
+/// Read [`KASTELLAN_LANDLOCK_RW`] and [`KASTELLAN_LANDLOCK_RO`] from the
 /// environment and apply the ruleset. Used by [`crate::lock_down`].
 pub fn apply_from_env() -> Result<LandlockReport, LockdownError> {
     let rw_paths = parse_rw_env_var()?;
@@ -107,12 +107,12 @@ pub fn apply_from_env() -> Result<LandlockReport, LockdownError> {
     apply(&rw_paths, &ro_paths)
 }
 
-/// Pure parser for the `HHAGENT_LANDLOCK_RW` env var. Exposed for testing.
+/// Pure parser for the `KASTELLAN_LANDLOCK_RW` env var. Exposed for testing.
 ///
 /// Accepted: missing, empty, or a JSON array of absolute path strings.
 /// Returns an error on malformed JSON or relative paths.
 pub fn parse_rw_env_var() -> Result<Vec<PathBuf>, LockdownError> {
-    let raw = match std::env::var("HHAGENT_LANDLOCK_RW") {
+    let raw = match std::env::var("KASTELLAN_LANDLOCK_RW") {
         Ok(s) if !s.is_empty() => s,
         _ => return Ok(Vec::new()),
     };
@@ -124,7 +124,7 @@ pub fn parse_rw_env_var() -> Result<Vec<PathBuf>, LockdownError> {
 pub fn parse_rw_string(raw: &str) -> Result<Vec<PathBuf>, LockdownError> {
     let parsed: Vec<String> = serde_json::from_str(raw).map_err(|e| {
         LockdownError::Env(format!(
-            "HHAGENT_LANDLOCK_RW must be a JSON array of strings: {e}"
+            "KASTELLAN_LANDLOCK_RW must be a JSON array of strings: {e}"
         ))
     })?;
     let mut out = Vec::with_capacity(parsed.len());
@@ -132,7 +132,7 @@ pub fn parse_rw_string(raw: &str) -> Result<Vec<PathBuf>, LockdownError> {
         let pb = PathBuf::from(&p);
         if !pb.is_absolute() {
             return Err(LockdownError::Env(format!(
-                "HHAGENT_LANDLOCK_RW path {p:?} must be absolute"
+                "KASTELLAN_LANDLOCK_RW path {p:?} must be absolute"
             )));
         }
         out.push(pb);
@@ -140,12 +140,12 @@ pub fn parse_rw_string(raw: &str) -> Result<Vec<PathBuf>, LockdownError> {
     Ok(out)
 }
 
-/// Pure parser for the `HHAGENT_LANDLOCK_RO` env var. Exposed for testing.
+/// Pure parser for the `KASTELLAN_LANDLOCK_RO` env var. Exposed for testing.
 ///
 /// Accepted: missing, empty, or a JSON array of absolute path strings.
 /// Returns an error on malformed JSON or relative paths.
 pub fn parse_ro_env_var() -> Result<Vec<PathBuf>, LockdownError> {
-    let raw = match std::env::var("HHAGENT_LANDLOCK_RO") {
+    let raw = match std::env::var("KASTELLAN_LANDLOCK_RO") {
         Ok(s) if !s.is_empty() => s,
         _ => return Ok(Vec::new()),
     };
@@ -157,7 +157,7 @@ pub fn parse_ro_env_var() -> Result<Vec<PathBuf>, LockdownError> {
 pub fn parse_ro_string(raw: &str) -> Result<Vec<PathBuf>, LockdownError> {
     let parsed: Vec<String> = serde_json::from_str(raw).map_err(|e| {
         LockdownError::Env(format!(
-            "HHAGENT_LANDLOCK_RO must be a JSON array of strings: {e}"
+            "KASTELLAN_LANDLOCK_RO must be a JSON array of strings: {e}"
         ))
     })?;
     let mut out = Vec::with_capacity(parsed.len());
@@ -165,7 +165,7 @@ pub fn parse_ro_string(raw: &str) -> Result<Vec<PathBuf>, LockdownError> {
         let pb = PathBuf::from(&p);
         if !pb.is_absolute() {
             return Err(LockdownError::Env(format!(
-                "HHAGENT_LANDLOCK_RO path {p:?} must be absolute"
+                "KASTELLAN_LANDLOCK_RO path {p:?} must be absolute"
             )));
         }
         out.push(pb);
@@ -176,10 +176,10 @@ pub fn parse_ro_string(raw: &str) -> Result<Vec<PathBuf>, LockdownError> {
 /// Install the Landlock ruleset.
 ///
 /// `rw_paths` is the worker's writable scratch list (typically just one
-/// entry, from `HHAGENT_LANDLOCK_RW`).
+/// entry, from `KASTELLAN_LANDLOCK_RW`).
 ///
 /// `ro_paths` is the list of additional read-only paths derived from
-/// `SandboxPolicy.fs_read` (from `HHAGENT_LANDLOCK_RO`). These are
+/// `SandboxPolicy.fs_read` (from `KASTELLAN_LANDLOCK_RO`). These are
 /// bind-mounted read-only by bwrap; Landlock must also grant read rights
 /// so the worker can access them after `lock_down()`. For example,
 /// `/etc/resolv.conf` for DNS in the web-fetch worker.
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn parse_rw_string_accepts_absolute_paths() {
-        let v = parse_rw_string(r#"["/tmp/scratch","/var/lib/hhagent/work"]"#).unwrap();
+        let v = parse_rw_string(r#"["/tmp/scratch","/var/lib/kastellan/work"]"#).unwrap();
         assert_eq!(v.len(), 2);
         assert_eq!(v[0], PathBuf::from("/tmp/scratch"));
     }

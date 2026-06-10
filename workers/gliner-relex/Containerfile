@@ -9,12 +9,12 @@
 #   1. Debian-slim base — PyTorch wheels are glibc-only (manylinux2014);
 #      Alpine is OUT (musl libc).
 #   2. `uv pip install --system` — no .venv indirection; console script
-#      lands at /usr/local/bin/hhagent-worker-gliner-relex via
+#      lands at /usr/local/bin/kastellan-worker-gliner-relex via
 #      pyproject's [project.scripts] entry.
 #   3. Weights NOT baked in — operator mounts them at runtime via the
 #      policy.fs_read host path (build_container_argv uses
 #      source=<P>,target=<P> convention, so the existing
-#      HHAGENT_GLINER_RELEX_WEIGHTS_DIR env value works verbatim).
+#      KASTELLAN_GLINER_RELEX_WEIGHTS_DIR env value works verbatim).
 #      Image stays ~3 GB instead of ~4.5 GB; weight refreshes don't
 #      require image rebuild.
 #   4. ENTRYPOINT carries the worker shim. The MacosContainer backend
@@ -50,4 +50,4 @@ RUN uv pip install --system --no-cache .
 # python:3.12-slim ships with nobody (uid 65534).
 USER nobody
 
-ENTRYPOINT ["hhagent-worker-gliner-relex"]
+ENTRYPOINT ["kastellan-worker-gliner-relex"]

@@ -1,8 +1,8 @@
-//! `hhagent-db-init` — idempotent setup for the per-user Postgres cluster.
+//! `kastellan-db-init` — idempotent setup for the per-user Postgres cluster.
 //!
 //! What this binary does, in order:
 //!   1. Resolve the cluster data dir (CLI flag or default
-//!      `$HOME/.local/share/hhagent/pg/data`).
+//!      `$HOME/.local/share/kastellan/pg/data`).
 //!   2. Resolve the Postgres bin dir (CLI flag or auto-detect from the
 //!      `default_pg_bin_dir_candidates()` list — PG 18 first).
 //!   3. If the data dir already contains a `PG_VERSION` file, skip
@@ -31,7 +31,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use hhagent_db::{
+use kastellan_db::{
     build_initdb_argv, build_postgresql_auto_conf, default_data_dir,
     default_pg_bin_dir_candidates, default_socket_dir, find_pg_bin_dir,
     is_data_dir_initialized, require_absolute, DbError, InitDbOptions,
@@ -42,7 +42,7 @@ fn main() -> ExitCode {
     match run(env::args_os().collect()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("hhagent-db-init: {e}");
+            eprintln!("kastellan-db-init: {e}");
             ExitCode::FAILURE
         }
     }
@@ -57,15 +57,15 @@ struct Args {
 }
 
 const HELP: &str = "\
-Usage: hhagent-db-init [OPTIONS]
+Usage: kastellan-db-init [OPTIONS]
 
-Idempotent setup for the per-user Postgres cluster used by hhagent.
+Idempotent setup for the per-user Postgres cluster used by kastellan.
 
 OPTIONS:
-  --data-dir <PATH>   Cluster data dir. Default: $HOME/.local/share/hhagent/pg/data
+  --data-dir <PATH>   Cluster data dir. Default: $HOME/.local/share/kastellan/pg/data
   --bin-dir  <PATH>   Postgres bin dir (containing postgres + initdb).
                       Default: auto-detect (PG 18 first, then 17 .. 14).
-  --username <NAME>   Postgres role to create as superuser.  Default: hhagent
+  --username <NAME>   Postgres role to create as superuser.  Default: kastellan
   -h, --help          Print this help and exit.
 
 Re-running on an already-initialized data dir is a no-op (skips initdb)
@@ -139,11 +139,11 @@ fn run(argv: Vec<OsString>) -> Result<(), DbError> {
     if !is_data_dir_initialized(&data_dir) {
         let opts = InitDbOptions {
             data_dir: data_dir.clone(),
-            username: args.username.unwrap_or_else(|| "hhagent".into()),
+            username: args.username.unwrap_or_else(|| "kastellan".into()),
             ..InitDbOptions::default()
         };
         let argv = build_initdb_argv(&initdb_bin, &opts);
-        eprintln!("hhagent-db-init: running {}", argv.join(" "));
+        eprintln!("kastellan-db-init: running {}", argv.join(" "));
         let status = Command::new(&argv[0])
             .args(&argv[1..])
             .env_clear()
@@ -162,7 +162,7 @@ fn run(argv: Vec<OsString>) -> Result<(), DbError> {
         }
     } else {
         eprintln!(
-            "hhagent-db-init: data dir already initialized, skipping initdb (PG_VERSION present at {})",
+            "kastellan-db-init: data dir already initialized, skipping initdb (PG_VERSION present at {})",
             data_dir.display()
         );
     }
@@ -188,7 +188,7 @@ fn run(argv: Vec<OsString>) -> Result<(), DbError> {
     write_atomic(&data_dir.join("postgresql.auto.conf"), conf_body.as_bytes())?;
 
     eprintln!(
-        "hhagent-db-init: cluster ready at {} (socket {}); start via supervisor",
+        "kastellan-db-init: cluster ready at {} (socket {}); start via supervisor",
         data_dir.display(),
         socket_dir.display()
     );

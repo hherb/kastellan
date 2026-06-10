@@ -11,7 +11,7 @@
 //!      lands an audit row, but with `err` instead of `result`.
 //!
 //! Bring-up scaffolding (per-test PG cluster + sandbox probe + binary
-//! discovery + RAII cleanup) lives in `hhagent-tests-common` as of
+//! discovery + RAII cleanup) lives in `kastellan-tests-common` as of
 //! issue #15.
 //!
 //! Skips silently with `[SKIP]` lines on hosts without Postgres, a
@@ -20,9 +20,9 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::secrets::Vault;
-use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use hhagent_tests_common::{
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, policy_for_shell_exec,
     shell_exec_worker_binary, skip_if_no_supervisor, skip_if_sandbox_unavailable, unique_suffix,
 };
@@ -55,7 +55,7 @@ fn dispatch_writes_audit_row_for_success_and_failure() {
         &bin_dir,
         "disp-d",
         "disp-l",
-        &format!("hhagent-supervisor-test-pg-dispatch-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-dispatch-{suffix}"),
     );
 
     // Dispatch uses `tokio::task::block_in_place` around the
@@ -71,7 +71,7 @@ fn dispatch_writes_audit_row_for_success_and_failure() {
         // Probe applies migrations 0001 + 0002 + 0003 and writes the
         // bring-up audit row. The dispatch test inserts on top of that
         // baseline.
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -80,7 +80,7 @@ fn dispatch_writes_audit_row_for_success_and_failure() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 

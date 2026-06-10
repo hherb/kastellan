@@ -1,9 +1,9 @@
-# hhagent-worker-gliner-relex
+# kastellan-worker-gliner-relex
 
-hhagent's GLiNER-Relex inference worker. Runs Knowledgator's joint NER + relation-extraction model under bwrap/Seatbelt, serving repeated `extract` JSON-RPC requests across the same warm process.
+kastellan's GLiNER-Relex inference worker. Runs Knowledgator's joint NER + relation-extraction model under bwrap/Seatbelt, serving repeated `extract` JSON-RPC requests across the same warm process.
 
 **Model:** `knowledgator/gliner-relex-multi-v1.0` (default; Apache 2.0; ~1.3 GB on disk, ~2-3 GB resident).
-Optionally also supports `knowledgator/gliner-relex-large-v0.5` (~2.5 GB) when `HHAGENT_GLINER_RELEX_INSTALL_LARGE=1` at install time.
+Optionally also supports `knowledgator/gliner-relex-large-v0.5` (~2.5 GB) when `KASTELLAN_GLINER_RELEX_INSTALL_LARGE=1` at install time.
 
 **Lifecycle:** `idle_timeout` (warm-keep; 10 min idle; daily rotation; per-spec).
 
@@ -16,7 +16,7 @@ Optionally also supports `knowledgator/gliner-relex-large-v0.5` (~2.5 GB) when `
 
 This:
 1. Runs `uv sync` in `workers/gliner-relex/` to create `.venv` with pinned deps.
-2. Downloads `gliner-relex-multi-v1.0` weights to `$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0/`.
+2. Downloads `gliner-relex-multi-v1.0` weights to `$KASTELLAN_DATA_DIR/workers/gliner-relex/weights/multi-v1.0/`.
 3. (Optional) Downloads `gliner-relex-large-v0.5` when the env knob is set.
 
 Required tools on PATH: `uv`, `hf` (or `huggingface-cli`), `python3`.
@@ -26,10 +26,10 @@ Required tools on PATH: `uv`, `hf` (or `huggingface-cli`), `python3`.
 ```sh
 cd workers/gliner-relex
 echo '{"jsonrpc":"2.0","id":1,"method":"extract","params":{"text":"Dr Smith treats asthma in Mosman.","entity_labels":["person","disease","location"],"relation_labels":["treats","located_in"]}}' \
-  | env HHAGENT_GLINER_RELEX_WEIGHTS_DIR="$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0" \
-        HHAGENT_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
-        HHAGENT_GLINER_RELEX_DEVICE=auto \
-    uv run hhagent-worker-gliner-relex
+  | env KASTELLAN_GLINER_RELEX_WEIGHTS_DIR="$KASTELLAN_DATA_DIR/workers/gliner-relex/weights/multi-v1.0" \
+        KASTELLAN_GLINER_RELEX_MODEL=knowledgator/gliner-relex-multi-v1.0 \
+        KASTELLAN_GLINER_RELEX_DEVICE=auto \
+    uv run kastellan-worker-gliner-relex
 ```
 
 The `env` wrapper is load-bearing: a bare `VAR=value cmd1 | cmd2` shell prefix only sets the env for `cmd1` (the echo), not `cmd2` (the worker). With `env` on the right side of the pipe, the env vars reach `uv run`.
@@ -72,9 +72,9 @@ Triple-level deduplication is NOT performed by the worker — consumers decide t
 
 | Name | Required | Description |
 |------|----------|-------------|
-| `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` | yes | absolute path to the model snapshot directory |
-| `HHAGENT_GLINER_RELEX_MODEL` | yes | HF repo ID (`knowledgator/gliner-relex-multi-v1.0` or `…large-v0.5`) |
-| `HHAGENT_GLINER_RELEX_DEVICE` | no (default `auto`) | `auto` (CUDA if `mem_get_info` reports ≥ 3 GiB free, else CPU) \| `cuda` (forced; will OOM if memory unavailable) \| `cpu` (`mps` reserved for the macOS follow-up) |
+| `KASTELLAN_GLINER_RELEX_WEIGHTS_DIR` | yes | absolute path to the model snapshot directory |
+| `KASTELLAN_GLINER_RELEX_MODEL` | yes | HF repo ID (`knowledgator/gliner-relex-multi-v1.0` or `…large-v0.5`) |
+| `KASTELLAN_GLINER_RELEX_DEVICE` | no (default `auto`) | `auto` (CUDA if `mem_get_info` reports ≥ 3 GiB free, else CPU) \| `cuda` (forced; will OOM if memory unavailable) \| `cpu` (`mps` reserved for the macOS follow-up) |
 | `HF_HUB_OFFLINE` | injected by daemon | `1` — offline-only |
 | `TRANSFORMERS_OFFLINE` | injected by daemon | `1` — offline-only |
 
@@ -85,10 +85,10 @@ cd workers/gliner-relex
 uv run pytest -v
 ```
 
-24 tests (6 errors + 12 server + 6 model). All mock the GLiNER load — no weights or GPU needed. The real-model round-trip lives on the Rust side: `cargo test -p hhagent-core --test gliner_relex_e2e` (skip-as-pass without venv + weights; Slice 2 of the implementation plan).
+24 tests (6 errors + 12 server + 6 model). All mock the GLiNER load — no weights or GPU needed. The real-model round-trip lives on the Rust side: `cargo test -p kastellan-core --test gliner_relex_e2e` (skip-as-pass without venv + weights; Slice 2 of the implementation plan).
 
 ## License
 
-The worker code is AGPL-3.0-or-later (matches the hhagent project). The GLiNER library is Apache 2.0; the model weights from Knowledgator are Apache 2.0 on both code and weights. The confusable GLiREL (`jackboyla/GLiREL`) is CC BY-NC-SA — do NOT swap it in; it is AGPL-incompatible.
+The worker code is AGPL-3.0-or-later (matches the kastellan project). The GLiNER library is Apache 2.0; the model weights from Knowledgator are Apache 2.0 on both code and weights. The confusable GLiREL (`jackboyla/GLiREL`) is CC BY-NC-SA — do NOT swap it in; it is AGPL-incompatible.
 
 See `docs/superpowers/specs/2026-05-18-gliner-relex-feasibility-study.md` for the full licensing chain.

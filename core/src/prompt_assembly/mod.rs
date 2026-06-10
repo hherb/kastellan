@@ -31,7 +31,7 @@
 //! type implementing the same trait, not a rewrite.
 
 use async_trait::async_trait;
-use hhagent_db::DbError;
+use kastellan_db::DbError;
 use thiserror::Error;
 
 pub mod assemble;

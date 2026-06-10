@@ -1,4 +1,4 @@
-//! `hhagent-lockdown-probe`: a tiny CLI that integration tests spawn as a
+//! `kastellan-lockdown-probe`: a tiny CLI that integration tests spawn as a
 //! subprocess to verify the Landlock + seccomp filters actually do what
 //! they claim. It is not a tool worker; it is a test fixture.
 //!
@@ -35,7 +35,7 @@
 //!
 //! lockdown-probe exec-after-lockdown <binary> [<binary-args>...]
 //!     Call lock_down() — the seccomp filter installs and Landlock
-//!     restricts FS access to `HHAGENT_LANDLOCK_RW` — then `execve()`
+//!     restricts FS access to `KASTELLAN_LANDLOCK_RW` — then `execve()`
 //!     into `<binary>` with the remaining args. The new process
 //!     inherits the seccomp filter (filters survive execve under
 //!     PR_SET_NO_NEW_PRIVS, which lock_down already set). Used by
@@ -44,7 +44,7 @@
 //!
 //! lockdown-probe cpu-burner
 //!     Call rlimit::apply_from_env() and lock_down(), then enter a
-//!     CPU-bound busy loop. If HHAGENT_CPU_MS was set, the kernel kills
+//!     CPU-bound busy loop. If KASTELLAN_CPU_MS was set, the kernel kills
 //!     the process via SIGXCPU/SIGKILL within `cpu_seconds`. Used by
 //!     `rlimit_smoke.rs` to verify worker-side cpu_ms enforcement.
 //!     Exits 0 if the loop runs for > 10 wall-clock seconds (the test
@@ -73,7 +73,7 @@ fn main() -> ExitCode {
     }
 
     // Apply rlimit first, matching serve_stdio's order. Cross-platform.
-    let rlimit_report = match hhagent_worker_prelude::rlimit::apply_from_env() {
+    let rlimit_report = match kastellan_worker_prelude::rlimit::apply_from_env() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("RLIMIT_ERROR: {e}");
@@ -85,7 +85,7 @@ fn main() -> ExitCode {
     // Lock down next, then dispatch. If lock_down itself fails, that's a
     // distinct exit code so tests can tell "the filter machinery is
     // broken" apart from "the filter blocked the test action".
-    let report = match hhagent_worker_prelude::lock_down() {
+    let report = match kastellan_worker_prelude::lock_down() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("LOCKDOWN_ERROR: {e}");
@@ -182,7 +182,7 @@ fn probe_mount() -> ExitCode {
     let rc = unsafe {
         libc::mount(
             c"none".as_ptr(),
-            c"/tmp/__hhagent_probe_mount".as_ptr(),
+            c"/tmp/__kastellan_probe_mount".as_ptr(),
             c"tmpfs".as_ptr(),
             0,
             std::ptr::null(),
@@ -259,7 +259,7 @@ fn errno() -> i32 {
 ///
 /// Used by `rlimit_smoke.rs` to verify the worker-side rlimit layer
 /// actually enforces the CPU budget the parent encoded in
-/// HHAGENT_CPU_MS. Volatile reads + writes defend against the loop
+/// KASTELLAN_CPU_MS. Volatile reads + writes defend against the loop
 /// being optimised away under release builds.
 fn probe_cpu_burner() -> ExitCode {
     use std::time::Instant;

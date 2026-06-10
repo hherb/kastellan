@@ -1,4 +1,4 @@
-//! End-to-end smoke for [`hhagent_core::memory::layers::load_l1`] —
+//! End-to-end smoke for [`kastellan_core::memory::layers::load_l1`] —
 //! the storage-level L1 insight-index reader.
 //!
 //! Each test brings up its own per-test Postgres cluster (same
@@ -20,11 +20,11 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::memory::layers::{
+use kastellan_core::memory::layers::{
     load_l1, load_l1_default, L1_DEFAULT_CAP_BYTES, L1_DEFAULT_CAP_ROWS,
 };
-use hhagent_db::memories::{insert_memory_at_layer, seed_meta_memory, MemoryLayer};
-use hhagent_tests_common::{
+use kastellan_db::memories::{insert_memory_at_layer, seed_meta_memory, MemoryLayer};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -51,11 +51,11 @@ fn load_l1_empty_returns_empty_vec() {
         &bin_dir,
         "l1e-d",
         "l1e-l",
-        &format!("hhagent-supervisor-test-pg-l1empty-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1empty-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -64,7 +64,7 @@ fn load_l1_empty_returns_empty_vec() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -95,11 +95,11 @@ fn load_l1_returns_only_l1_rows_newest_first() {
         &bin_dir,
         "l1o-d",
         "l1o-l",
-        &format!("hhagent-supervisor-test-pg-l1only-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1only-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -108,7 +108,7 @@ fn load_l1_returns_only_l1_rows_newest_first() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -161,11 +161,11 @@ fn load_l1_respects_row_cap() {
         &bin_dir,
         "l1r-d",
         "l1r-l",
-        &format!("hhagent-supervisor-test-pg-l1row-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1row-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -174,7 +174,7 @@ fn load_l1_respects_row_cap() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -223,11 +223,11 @@ fn load_l1_respects_byte_cap() {
         &bin_dir,
         "l1b-d",
         "l1b-l",
-        &format!("hhagent-supervisor-test-pg-l1byte-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1byte-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -236,7 +236,7 @@ fn load_l1_respects_byte_cap() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -298,11 +298,11 @@ fn load_l1_default_matches_explicit_default_caps() {
         &bin_dir,
         "l1d-d",
         "l1d-l",
-        &format!("hhagent-supervisor-test-pg-l1default-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l1default-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -311,7 +311,7 @@ fn load_l1_default_matches_explicit_default_caps() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 

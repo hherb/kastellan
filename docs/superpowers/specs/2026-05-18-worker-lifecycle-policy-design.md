@@ -13,7 +13,7 @@ The only worker that exists today, `workers/shell-exec`, spawns per request, exe
 
 This breaks the moment we add an inference worker. The GLiNER-Relex feasibility study (`vNEXT` note next to the entity-extraction v1 spec) measured the model at ~1.3 GB on disk and ~2-3 GB resident at fp32 inference, with cold-start dominated by `transformers` model load. Spawn-per-request would pay that cost on every memory write. The same shape recurs for sentiment, embedding, classification, OCR, and any future small-model worker — none of which want to be cold-started 50 times an hour.
 
-The right abstraction is **lifecycle policy declared per worker type**, with the `hhagent-supervisor` crate (currently a stub) growing into the role of "manages worker processes." This spec defines the policy enum, the manifest schema additions, the cap semantics, the stateless contract, and the migration story for shell-exec.
+The right abstraction is **lifecycle policy declared per worker type**, with the `kastellan-supervisor` crate (currently a stub) growing into the role of "manages worker processes." This spec defines the policy enum, the manifest schema additions, the cap semantics, the stateless contract, and the migration story for shell-exec.
 
 ## What this spec defines
 
@@ -29,7 +29,7 @@ The right abstraction is **lifecycle policy declared per worker type**, with the
 
 - **No pool support.** Concurrent throughput via N warm workers is deferred; today's workload is single-user, single-task at a time. When a real throughput bottleneck appears, `pool` slots in as a third policy variant without touching `single_use` or `idle_timeout`.
 - **No per-request timeouts.** A worker hanging mid-request is a separate concern (handled by the JSON-RPC dispatcher, not the lifecycle layer). This spec does not introduce request-level deadlines.
-- **No new IPC layer.** The supervisor is a crate the core links against, not a separate process. The existing JSON-RPC-over-stdio contract from `hhagent-protocol` is unchanged.
+- **No new IPC layer.** The supervisor is a crate the core links against, not a separate process. The existing JSON-RPC-over-stdio contract from `kastellan-protocol` is unchanged.
 - **No sandbox-policy changes.** Every worker still runs under its own `SandboxBackend` with its own `SandboxPolicy`. A long-lived worker has the same sandbox as a short-lived one.
 - **No GLiNER-Relex implementation.** That's the next slice. This spec is the prerequisite the next slice consumes.
 
@@ -129,7 +129,7 @@ Strawman shape (subject to refinement during implementation):
 ```toml
 # workers/gliner-relex/manifest.toml
 name = "gliner-relex"
-binary = "hhagent-worker-gliner-relex"
+binary = "kastellan-worker-gliner-relex"
 
 [lifecycle]
 kind = "idle_timeout"
@@ -148,7 +148,7 @@ stateless = true              # per-request stateless; required for idle_timeout
 ```toml
 # workers/shell-exec/manifest.toml
 name = "shell-exec"
-binary = "hhagent-worker-shell-exec"
+binary = "kastellan-worker-shell-exec"
 
 [lifecycle]
 kind = "single_use"
@@ -162,14 +162,14 @@ Manifest discovery, registration, and parsing are an implementation question for
 
 ## Supervisor responsibilities
 
-The `hhagent-supervisor` crate, currently a stub, grows the following responsibilities for `idle_timeout` workers:
+The `kastellan-supervisor` crate, currently a stub, grows the following responsibilities for `idle_timeout` workers:
 
 1. **Spawn-on-demand.** First incoming request for a worker type whose process is not running triggers a spawn under the worker's `SandboxPolicy`. Subsequent requests reuse the live process.
 2. **Request serialisation.** A single warm worker serves requests one at a time (no in-process concurrency in v1; the worker is single-threaded by contract). The supervisor queues concurrent callers for the same worker. Queue depth and backpressure are an implementation question — the simplest answer is "tokio mpsc, unbounded, since the agent's plan cap bounds concurrency upstream." If contention becomes real, the `pool` policy variant addresses it.
 3. **Cap evaluation.** Post-completion checks per §"Cap-check semantics" above.
 4. **Crash detection.** SIGCHLD handler / `wait()` poll; restart on death with exponential backoff, max-restart-rate cap to avoid restart loops.
 5. **Graceful teardown.** SIGTERM → grace period → SIGKILL on lifecycle eviction and on daemon shutdown.
-6. **Health introspection.** Expose `(worker_name, pid, spawned_at, request_count, last_completion_at, state)` for the future `hhagent-cli supervisor status` operator surface.
+6. **Health introspection.** Expose `(worker_name, pid, spawned_at, request_count, last_completion_at, state)` for the future `kastellan-cli supervisor status` operator surface.
 
 For `single_use` workers, the supervisor's role degenerates to "spawn one process, wait for exit" — identical to today's `tool_host::dispatch` behaviour. No new code path is needed for the shell-exec migration.
 
@@ -194,7 +194,7 @@ For the immediate use cases (GLiNER-Relex, sentiment, embedding, classification,
 - **shell-exec:** declare `lifecycle.kind = "single_use"` in its new manifest. No code change in the worker binary. The supervisor's `single_use` path is bytewise-equivalent to today's `tool_host::dispatch` behaviour. Migration is a one-line manifest add + the supervisor doing the spawn it used to do.
 - **All future inference workers (GLiNER-Relex first):** declare `lifecycle.kind = "idle_timeout"` + `contract.stateless = true` + concrete cap values. The supervisor handles the rest.
 - **The L0 / L1 / L2 / L3 / L4 memory layers and the LLM router** are not workers; they are core-side modules. Unaffected.
-- **The `hhagent-cli` binary** gains a new operator surface — `hhagent-cli supervisor status` — for inspecting warm workers. This is a separate slice from the supervisor's core implementation; the lifecycle work doesn't block on it.
+- **The `kastellan-cli` binary** gains a new operator surface — `kastellan-cli supervisor status` — for inspecting warm workers. This is a separate slice from the supervisor's core implementation; the lifecycle work doesn't block on it.
 
 ## Open questions (for the planning slice, not this design slice)
 

@@ -18,18 +18,18 @@
 //! worker binary, or a working sandbox is missing.
 //!
 //! Bring-up scaffolding (PG cluster, sandbox probe, binary discovery,
-//! RAII guards) is hoisted into `hhagent-tests-common` as of issue
+//! RAII guards) is hoisted into `kastellan-tests-common` as of issue
 //! #15.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::path::PathBuf;
 
-use hhagent_core::secrets::Vault;
-use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use hhagent_core::workspace::Workspace;
-use hhagent_protocol::codes;
-use hhagent_tests_common::{
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::workspace::Workspace;
+use kastellan_protocol::codes;
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, policy_for_shell_exec, shell_exec_worker_binary,
     skip_if_no_supervisor, skip_if_sandbox_unavailable, unique_suffix, PgCluster,
 };
@@ -54,8 +54,8 @@ const CP_PATH: &str = "/bin/cp";
 /// 0004) and open a runtime-role pool. Each shell-exec test calls this
 /// inside its tokio runtime block_on. The probe writes one bring-up
 /// audit row; the dispatcher writes one row per call on top.
-async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
-    hhagent_db::probe::run(
+async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
         conn_spec,
         "core",
         "startup",
@@ -63,7 +63,7 @@ async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPo
     )
     .await
     .expect("probe run");
-    hhagent_db::pool::connect_runtime_pool(conn_spec)
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
         .await
         .expect("connect runtime pool")
 }
@@ -112,7 +112,7 @@ fn ready_or_skip(allowlist: &[&str]) -> Option<TestEnv> {
         &bin_dir,
         "shx-d",
         "shx-l",
-        &format!("hhagent-supervisor-test-pg-shellexec-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-shellexec-{suffix}"),
     );
 
     Some(TestEnv {
@@ -257,7 +257,7 @@ fn unknown_method_yields_method_not_found() {
 /// real workers. The test:
 ///
 /// 1. Creates a `Workspace` under a per-test temp root (so we don't pollute
-///    `~/.hhagent/`).
+///    `~/.kastellan/`).
 /// 2. Stages a known string at `<ws>/in/source.txt` from the host.
 /// 3. Calls `extend_policy` to add `in/`, `out/`, `tmp/` to `policy.fs_write`.
 ///    On Linux this single call also flows into the worker-side Landlock
@@ -282,9 +282,9 @@ fn workspace_dir_is_writable_during_call_and_wiped_on_drop() {
     };
 
     // Per-test root keeps tests independent (so two parallel runs don't
-    // collide on the same task id) and avoids touching `~/.hhagent/`.
+    // collide on the same task id) and avoids touching `~/.kastellan/`.
     let test_root = std::env::temp_dir().join(format!(
-        "hhagent-e2e-workspace-{}-{}",
+        "kastellan-e2e-workspace-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

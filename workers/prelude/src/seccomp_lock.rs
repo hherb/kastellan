@@ -63,7 +63,7 @@ use seccompiler::{
 
 use crate::{LockdownError, SeccompReport};
 
-/// Profile selector exposed to workers via the `HHAGENT_SECCOMP_PROFILE`
+/// Profile selector exposed to workers via the `KASTELLAN_SECCOMP_PROFILE`
 /// env var.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
@@ -89,15 +89,15 @@ impl Profile {
             "net_client" => Ok(Some(Profile::NetClient)),
             "none" | "" => Ok(None),
             other => Err(LockdownError::Env(format!(
-                "HHAGENT_SECCOMP_PROFILE must be 'strict' | 'net_client' | 'none', got {other:?}"
+                "KASTELLAN_SECCOMP_PROFILE must be 'strict' | 'net_client' | 'none', got {other:?}"
             ))),
         }
     }
 }
 
-/// Read `HHAGENT_SECCOMP_PROFILE` and apply the corresponding filter.
+/// Read `KASTELLAN_SECCOMP_PROFILE` and apply the corresponding filter.
 pub fn apply_from_env() -> Result<SeccompReport, LockdownError> {
-    let raw = std::env::var("HHAGENT_SECCOMP_PROFILE").unwrap_or_else(|_| "none".to_string());
+    let raw = std::env::var("KASTELLAN_SECCOMP_PROFILE").unwrap_or_else(|_| "none".to_string());
     match Profile::parse(&raw)? {
         None => Ok(SeccompReport::Disabled),
         Some(p) => apply(p).map(|()| SeccompReport::Installed),
@@ -306,7 +306,7 @@ pub const BASE_ALLOW: &[i64] = &[
 
     // `fchown` + `fchownat`: change file ownership. The kernel
     // already restricts these for non-root processes — a worker
-    // running as uid `hhagent` cannot `chown(uid=root)`; the most a
+    // running as uid `kastellan` cannot `chown(uid=root)`; the most a
     // worker can do is preserve or set ownership to its own uid/gid.
     // Required by `gzip` (preserves group on the compressed
     // replacement) and `cp -p` (preserves ownership when permissions

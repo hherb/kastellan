@@ -1,4 +1,4 @@
-# hhagent — Architecture
+# kastellan — Architecture
 
 > **Status: skeleton.** This file will grow as the build progresses. Authoritative source for design decisions is the design plan; this doc captures architecture detail for code reviewers.
 
@@ -31,7 +31,7 @@
 
 ## Process model
 
-- One **agent core** binary (`hhagent`).
+- One **agent core** binary (`kastellan`).
 - One **tool worker** process per tool, each in its own sandbox.
 - One **channel adapter** process per channel (Telegram, Signal, IMAP).
 - One **egress proxy** process (TLS-terminating, allowlist-enforcing).

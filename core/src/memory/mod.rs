@@ -55,7 +55,7 @@ pub mod layers;
 mod recall;
 
 // Re-export the public surface so external callers see a flat
-// `hhagent_core::memory::{...}` namespace — splitting into submodules
+// `kastellan_core::memory::{...}` namespace — splitting into submodules
 // is an internal refactor that must not break import sites.
 pub use embed::{embed_query, MemoryError};
 pub use recall::{

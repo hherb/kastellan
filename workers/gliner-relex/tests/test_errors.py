@@ -5,7 +5,7 @@ corresponding update in the Rust-side mapping in
 core::workers::gliner_relex (Slice 2). See the spec's "JSON-RPC wire
 contract" section.
 """
-from hhagent_worker_gliner_relex.errors import (
+from kastellan_worker_gliner_relex.errors import (
     error_response,
     INVALID_INPUT,
     MODEL_LOAD_FAILED,

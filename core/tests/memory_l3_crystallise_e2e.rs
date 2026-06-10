@@ -1,5 +1,5 @@
 //! End-to-end DB integration coverage for L3 skill crystallisation —
-//! [`hhagent_core::memory::l3_crystallise`] (direct path) and the
+//! [`kastellan_core::memory::l3_crystallise`] (direct path) and the
 //! scheduler-driven path via `runner::drain_lane` (which writes the
 //! `actor='scheduler' action='l3.crystallised'` audit row).
 //!
@@ -24,18 +24,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hhagent_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
-use hhagent_core::cassandra::types::{DataClass, L3SkillCandidate, L3Param, L3TemplateStep, Plan, PlannedStep};
-use hhagent_core::cli_audit::l3_remove_and_audit;
-use hhagent_core::entity_extraction::NoOpEntityExtractor;
-use hhagent_core::memory::l1_promote::{promote_l1, L1Source};
-use hhagent_core::memory::l3_crystallise::{crystallise_l3, list_l3, L3Source};
-use hhagent_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
-use hhagent_core::scheduler::inner_loop::{StepDispatcher, StepOutcome, TaskContext};
-use hhagent_core::scheduler::spawn_scheduler;
-use hhagent_db::memories::MemoryLayer;
-use hhagent_db::tasks::{insert_pending, Lane};
-use hhagent_tests_common::{
+use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
+use kastellan_core::cassandra::types::{DataClass, L3SkillCandidate, L3Param, L3TemplateStep, Plan, PlannedStep};
+use kastellan_core::cli_audit::l3_remove_and_audit;
+use kastellan_core::entity_extraction::NoOpEntityExtractor;
+use kastellan_core::memory::l1_promote::{promote_l1, L1Source};
+use kastellan_core::memory::l3_crystallise::{crystallise_l3, list_l3, L3Source};
+use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
+use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome, TaskContext};
+use kastellan_core::scheduler::spawn_scheduler;
+use kastellan_db::memories::MemoryLayer;
+use kastellan_db::tasks::{insert_pending, Lane};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, PgCluster,
 };
 use sqlx::postgres::PgListener;
@@ -138,7 +138,7 @@ impl PlanFormulator for ScriptedFormulator {
                         .into(),
                 graph_seed_entity_ids: Vec::new(),
                 graph_seed_count: 0,
-                graph_seed_source: hhagent_core::entity_extraction::SeedSource::None,
+                graph_seed_source: kastellan_core::entity_extraction::SeedSource::None,
             },
         ))
     }
@@ -209,7 +209,7 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     }
     let bin_dir = pg_bin_dir_or_skip()?;
     let suffix = format!("{}-{}", label, unique_suffix());
-    let service_name = format!("hhagent-l3-test-pg-{suffix}");
+    let service_name = format!("kastellan-l3-test-pg-{suffix}");
     // data_label and log_label must be short and unique per concurrent test.
     // Use the first 4 chars of label so the socket path stays well under
     // the macOS sockaddr_un.sun_path 104-byte cap.
@@ -219,7 +219,7 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
         bring_up_pg_cluster(&bin_dir, &data_label, &log_label, &service_name)
     });
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -228,7 +228,7 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     .await
     .ok()?;
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .ok()?;
 
@@ -265,7 +265,7 @@ async fn run_task_through_scheduler(
     let formulator = Arc::new(ScriptedFormulator::new_per_task(vec![(task_id, plans)]));
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
     let dispatcher = Arc::new(OkDispatcher);
-    let entity_extractor: Arc<dyn hhagent_core::entity_extraction::EntityExtractor> =
+    let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
         Arc::new(NoOpEntityExtractor::new());
 
     let scheduler = spawn_scheduler(pool.clone(), formulator, review, dispatcher, entity_extractor);
@@ -325,7 +325,7 @@ async fn agent_raised_happy_inserts_l3_row_and_audit() {
     );
 
     // --- audit_log table ---
-    let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch_since");
     let l3_rows: Vec<_> = all_audit
@@ -388,7 +388,7 @@ async fn agent_raised_dedup_skips_second() {
     assert_eq!(count, 1, "dedup: only one row in DB");
 
     // Two l3.crystallised audit rows: first=inserted, second=skipped_duplicate.
-    let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch_since");
     let l3_rows: Vec<_> = all_audit
@@ -440,7 +440,7 @@ async fn grounding_gate_drops_pure_text_task() {
     .expect("count layer-3");
     assert_eq!(count, 0, "grounding gate must have suppressed the skill row");
 
-    let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch_since");
     let l3_audit_count = all_audit
@@ -498,7 +498,7 @@ async fn invalid_skill_writes_nothing() {
     .expect("count layer-3");
     assert_eq!(count, 0, "invalid skill must write zero layer-3 rows");
 
-    let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch_since");
     let l3_audit_count = all_audit
@@ -556,7 +556,7 @@ async fn remove_deletes_and_journals() {
     assert_eq!(deleted_count, 1, "deleted_memories must have the removed row");
 
     // One l3.removed audit row with deleted=true.
-    let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch_since");
     let l3_removed: Vec<_> = all_audit
@@ -605,13 +605,13 @@ async fn remove_wrong_layer_is_noop() {
     assert!(!deleted, "must not delete an L1 row via l3_remove");
 
     // The L1 row must still exist.
-    let still_there = hhagent_db::memories::fetch_by_ids(&pool, &[l1_id])
+    let still_there = kastellan_db::memories::fetch_by_ids(&pool, &[l1_id])
         .await
         .expect("fetch_by_ids");
     assert_eq!(still_there.len(), 1, "L1 row must still exist after noop remove");
 
     // One l3.removed audit row with deleted=false.
-    let all_audit = hhagent_db::audit::fetch_since(&pool, 0, 100)
+    let all_audit = kastellan_db::audit::fetch_since(&pool, 0, 100)
         .await
         .expect("fetch_since");
     let l3_removed: Vec<_> = all_audit

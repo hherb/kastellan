@@ -85,7 +85,7 @@ impl TestRoot {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "hhagent-launchd-test-{}-{}-{}",
+            "kastellan-launchd-test-{}-{}-{}",
             std::process::id(),
             label,
             n
@@ -108,15 +108,15 @@ impl Drop for TestRoot {
 fn install_writes_plist_with_expected_content() {
     let dir = TestRoot::new("install-content");
     let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
-    let spec = minimal_spec("hhagent-test");
+    let spec = minimal_spec("kastellan-test");
     sup.install(&spec).expect("install");
 
-    let path = sup.plist_path("hhagent-test");
+    let path = sup.plist_path("kastellan-test");
     assert!(path.exists(), "plist not written: {}", path.display());
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("<?xml version=\"1.0\""), "{body}");
     assert!(
-        body.contains("<key>Label</key>\n    <string>hhagent-test</string>"),
+        body.contains("<key>Label</key>\n    <string>kastellan-test</string>"),
         "{body}"
     );
     assert!(

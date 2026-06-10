@@ -1,12 +1,12 @@
-//! `hhagent-cli` — operator-facing CLI tool.
+//! `kastellan-cli` — operator-facing CLI tool.
 //!
 //! Subcommands:
 //!
 //! * `audit tail`  — stream the daemon's `audit-YYYY-MM-DD.jsonl`
-//!   files from `~/.local/state/hhagent/`. Works without Postgres
+//!   files from `~/.local/state/kastellan/`. Works without Postgres
 //!   and survives a crashed daemon (the JSONL is the durable replica
 //!   of `audit_log` written by the mirror task —
-//!   see [`hhagent_core::audit_mirror`]).
+//!   see [`kastellan_core::audit_mirror`]).
 //!
 //! * `ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]` — submit a task to the
 //!   scheduler, LISTEN for the completion NOTIFY, then print the
@@ -65,35 +65,35 @@
 //! Usage:
 //!
 //! ```text
-//! hhagent-cli ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]
-//! hhagent-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
-//! hhagent-cli tasks status <id>
-//! hhagent-cli tasks cancel <id>
-//! hhagent-cli tasks fail   <id>
-//! hhagent-cli tasks tail   <id>
-//! hhagent-cli tools allowlist add    <tool> <argv0>
-//! hhagent-cli tools allowlist remove <tool> <argv0>
-//! hhagent-cli tools allowlist list   [--tool <name>]
-//! hhagent-cli memory l1 add    <body>
-//! hhagent-cli memory l1 list   [--all]
-//! hhagent-cli memory l1 remove <id>
-//! hhagent-cli memory l3 list
-//! hhagent-cli memory l3 remove <id>
-//! hhagent-cli entities list      [--kind K] [--state quarantined|approved|any]
+//! kastellan-cli ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]
+//! kastellan-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
+//! kastellan-cli tasks status <id>
+//! kastellan-cli tasks cancel <id>
+//! kastellan-cli tasks fail   <id>
+//! kastellan-cli tasks tail   <id>
+//! kastellan-cli tools allowlist add    <tool> <argv0>
+//! kastellan-cli tools allowlist remove <tool> <argv0>
+//! kastellan-cli tools allowlist list   [--tool <name>]
+//! kastellan-cli memory l1 add    <body>
+//! kastellan-cli memory l1 list   [--all]
+//! kastellan-cli memory l1 remove <id>
+//! kastellan-cli memory l3 list
+//! kastellan-cli memory l3 remove <id>
+//! kastellan-cli entities list      [--kind K] [--state quarantined|approved|any]
 //!                                [--limit N] [--since RFC3339] [--min-mentions N]
-//! hhagent-cli entities show      <id>
-//! hhagent-cli entities approve   <id> [<id>...]
-//! hhagent-cli entities reject    <id> [<id>...]
-//! hhagent-cli entities merge     --keep <id> --drop <id>[,<id>...]
-//! hhagent-cli entities kinds add    <kind> [--description "<text>"]
-//! hhagent-cli entities kinds remove <kind>
-//! hhagent-cli entities kinds list
-//! hhagent-cli relations kinds add    <kind> [--description "<text>"]
-//! hhagent-cli relations kinds remove <kind>
-//! hhagent-cli relations kinds list
-//! hhagent-cli relations show         <entity-id> [--depth N] [--format plain|json]
-//! hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
-//! hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
+//! kastellan-cli entities show      <id>
+//! kastellan-cli entities approve   <id> [<id>...]
+//! kastellan-cli entities reject    <id> [<id>...]
+//! kastellan-cli entities merge     --keep <id> --drop <id>[,<id>...]
+//! kastellan-cli entities kinds add    <kind> [--description "<text>"]
+//! kastellan-cli entities kinds remove <kind>
+//! kastellan-cli entities kinds list
+//! kastellan-cli relations kinds add    <kind> [--description "<text>"]
+//! kastellan-cli relations kinds remove <kind>
+//! kastellan-cli relations kinds list
+//! kastellan-cli relations show         <entity-id> [--depth N] [--format plain|json]
+//! kastellan-cli observation replay     [--captures-dir PATH] [--model SLUG]
+//! kastellan-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 //! ```
 //!
 //! The CLI parser is hand-rolled (no `clap` dep) because the surface
@@ -148,7 +148,7 @@ fn main() -> ExitCode {
         "audit" => match args.get(2).map(|s| s.as_str()) {
             Some("tail") => audit_tail::run_audit_tail(&args[3..]),
             _ => {
-                eprintln!("usage: hhagent-cli audit tail [opts]");
+                eprintln!("usage: kastellan-cli audit tail [opts]");
                 ExitCode::from(2)
             }
         },
@@ -171,38 +171,38 @@ fn main() -> ExitCode {
 }
 
 fn help_text() -> &'static str {
-    "hhagent-cli — operator CLI for hhagent
+    "kastellan-cli — operator CLI for kastellan
 
 usage:
-    hhagent-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]
-    hhagent-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
-    hhagent-cli tasks status <id>
-    hhagent-cli tasks cancel <id>
-    hhagent-cli tasks fail   <id>
-    hhagent-cli tasks tail   <id>
-    hhagent-cli tools allowlist add    <tool> <argv0>
-    hhagent-cli tools allowlist remove <tool> <argv0>
-    hhagent-cli tools allowlist list   [--tool <name>]
-    hhagent-cli memory l1 add    <body>
-    hhagent-cli memory l1 list   [--all]
-    hhagent-cli memory l1 remove <id>
-    hhagent-cli memory l3 list
-    hhagent-cli memory l3 remove <id>
-    hhagent-cli entities list      [--kind K] [--state quarantined|approved|any]
+    kastellan-cli ask \"<instruction>\" [--fast|--long] [--classification-floor <DataClass>]
+    kastellan-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
+    kastellan-cli tasks status <id>
+    kastellan-cli tasks cancel <id>
+    kastellan-cli tasks fail   <id>
+    kastellan-cli tasks tail   <id>
+    kastellan-cli tools allowlist add    <tool> <argv0>
+    kastellan-cli tools allowlist remove <tool> <argv0>
+    kastellan-cli tools allowlist list   [--tool <name>]
+    kastellan-cli memory l1 add    <body>
+    kastellan-cli memory l1 list   [--all]
+    kastellan-cli memory l1 remove <id>
+    kastellan-cli memory l3 list
+    kastellan-cli memory l3 remove <id>
+    kastellan-cli entities list      [--kind K] [--state quarantined|approved|any]
                                    [--limit N] [--since RFC3339] [--min-mentions N]
-    hhagent-cli entities show      <id>
-    hhagent-cli entities approve   <id> [<id>...]
-    hhagent-cli entities reject    <id> [<id>...]
-    hhagent-cli entities merge     --keep <id> --drop <id>[,<id>...]
-    hhagent-cli entities kinds add    <kind> [--description \"<text>\"]
-    hhagent-cli entities kinds remove <kind>
-    hhagent-cli entities kinds list
-    hhagent-cli relations kinds add    <kind> [--description \"<text>\"]
-    hhagent-cli relations kinds remove <kind>
-    hhagent-cli relations kinds list
-    hhagent-cli relations show         <entity-id> [--depth N] [--format plain|json]
-    hhagent-cli observation replay     [--captures-dir PATH] [--model SLUG]
-    hhagent-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
+    kastellan-cli entities show      <id>
+    kastellan-cli entities approve   <id> [<id>...]
+    kastellan-cli entities reject    <id> [<id>...]
+    kastellan-cli entities merge     --keep <id> --drop <id>[,<id>...]
+    kastellan-cli entities kinds add    <kind> [--description \"<text>\"]
+    kastellan-cli entities kinds remove <kind>
+    kastellan-cli entities kinds list
+    kastellan-cli relations kinds add    <kind> [--description \"<text>\"]
+    kastellan-cli relations kinds remove <kind>
+    kastellan-cli relations kinds list
+    kastellan-cli relations show         <entity-id> [--depth N] [--format plain|json]
+    kastellan-cli observation replay     [--captures-dir PATH] [--model SLUG]
+    kastellan-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 
 flags (ask):
     --fast | --long             Lane selection (default: --fast).
@@ -219,8 +219,8 @@ flags (audit tail):
                     before switching to follow mode.
     --no-follow     Exit after replaying existing content (use with
                     --from-start for a 'cat' of the JSONL files).
-    --state-dir P   Override the state dir (default: $HHAGENT_STATE_DIR
-                    or $HOME/.local/state/hhagent).
+    --state-dir P   Override the state dir (default: $KASTELLAN_STATE_DIR
+                    or $HOME/.local/state/kastellan).
 
 flags (observation replay):
     --captures-dir P  Override the captures directory (default:

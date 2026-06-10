@@ -32,9 +32,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hhagent_core::scheduler::ToolEntry;
-use hhagent_core::worker_lifecycle::{Lifecycle, SingleUseLifecycle, WorkerLifecycleManager};
-use hhagent_sandbox::{
+use kastellan_core::scheduler::ToolEntry;
+use kastellan_core::worker_lifecycle::{Lifecycle, SingleUseLifecycle, WorkerLifecycleManager};
+use kastellan_sandbox::{
     macos_container::MacosContainer, Net, Profile, SandboxBackendKind, SandboxBackends,
     SandboxPolicy,
 };

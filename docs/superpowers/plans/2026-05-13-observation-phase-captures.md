@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship the dataset infrastructure for the CASSANDRA observation phase: a fixture format on disk (`prompt.md` + `meta.toml` per fixture), 7 seed fixtures, a library module `hhagent_core::observation::capture` with pure helpers + one async DB helper, and an `#[ignore]`-flagged orchestrator integration test that runs the live agent against a real local LLM and freezes each fixture's output as JSON.
+**Goal:** Ship the dataset infrastructure for the CASSANDRA observation phase: a fixture format on disk (`prompt.md` + `meta.toml` per fixture), 7 seed fixtures, a library module `kastellan_core::observation::capture` with pure helpers + one async DB helper, and an `#[ignore]`-flagged orchestrator integration test that runs the live agent against a real local LLM and freezes each fixture's output as JSON.
 
 **Architecture:** New library module `core::observation::capture` (types + pure helpers + 1 async DB helper). New `#[ignore]`-flagged integration test `core/tests/observation_capture.rs` that mirrors `cli_ask_e2e.rs`'s daemon-under-supervisor bring-up but points at the operator's real local LLM. New tree `tests/observation/{fixtures,captures}/` with 7 seed fixtures across safe / 5 constitutional principles / 1 edge case.
 
-**Tech Stack:** Rust 1.75+, sqlx 0.8 (Postgres), serde + serde_json, `toml = "0.8"` (new workspace dep — for `meta.toml` parsing), tokio, `time` (RFC 3339 timestamps), `thiserror`. Reuses `hhagent-tests-common` for PG/daemon bring-up.
+**Tech Stack:** Rust 1.75+, sqlx 0.8 (Postgres), serde + serde_json, `toml = "0.8"` (new workspace dep — for `meta.toml` parsing), tokio, `time` (RFC 3339 timestamps), `thiserror`. Reuses `kastellan-tests-common` for PG/daemon bring-up.
 
 **Spec reference:** [`docs/superpowers/specs/2026-05-13-observation-phase-captures-design.md`](../specs/2026-05-13-observation-phase-captures-design.md)
 
@@ -61,7 +61,7 @@ toml               = { workspace = true }
 
 - [ ] **Step 3: Verify the dep resolves**
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-core 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-core 2>&1 | tail -20`
 Expected: Compiles cleanly. No warnings about the new dep.
 
 - [ ] **Step 4: Commit**
@@ -156,7 +156,7 @@ pub mod workspace;
 
 - [ ] **Step 3: Verify the empty module compiles**
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-core 2>&1 | tail -5`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-core 2>&1 | tail -5`
 Expected: Build fails with `file not found for module 'capture'` (because Task 2 hasn't run yet — that's the next step's red).
 
 This red is *expected*. The orchestration intent is "module first, then types" — the build-fail is the test driver for Task 2.
@@ -228,7 +228,7 @@ pub struct CaptureJson {
     pub fixture_summary: String,
     /// RFC 3339 string (UTC).
     pub captured_at: String,
-    /// Matches `hhagent_llm_router::Backend::as_tag()` so consumers can
+    /// Matches `kastellan_llm_router::Backend::as_tag()` so consumers can
     /// fold producer-side audit rows in directly.
     pub llm_backend: String,
     /// Verbatim from `RouterConfig::local_model` at capture time.
@@ -377,7 +377,7 @@ mod tests {
 
 - [ ] **Step 5: Verify the skeleton compiles + the test fails**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core observation::capture::tests 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core observation::capture::tests 2>&1 | tail -20`
 Expected: Compiles. One test `slug_model_lowercases_ascii_input` fails with `unimplemented!()` panic.
 
 - [ ] **Step 6: Commit Tasks 1 + 2 together**
@@ -444,7 +444,7 @@ In `mod tests`, after the existing `slug_model_lowercases_ascii_input`, append:
     }
 ```
 
-Run: `cargo test -p hhagent-core observation::capture::tests::slug_model 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core observation::capture::tests::slug_model 2>&1 | tail -10`
 Expected: All 6 `slug_model_*` tests fail with `unimplemented!()` panic.
 
 - [ ] **Step 2: Implement `slug_model`**
@@ -476,7 +476,7 @@ pub fn slug_model(model: &str) -> String {
 
 - [ ] **Step 3: Verify all `slug_model` tests pass**
 
-Run: `cargo test -p hhagent-core observation::capture::tests::slug_model 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core observation::capture::tests::slug_model 2>&1 | tail -10`
 Expected: 6 passed, 0 failed.
 
 - [ ] **Step 4: Commit**
@@ -519,7 +519,7 @@ Append in `mod tests`:
     }
 ```
 
-Run: `cargo test -p hhagent-core observation::capture::tests::capture_filename 2>&1 | tail -5`
+Run: `cargo test -p kastellan-core observation::capture::tests::capture_filename 2>&1 | tail -5`
 Expected: FAIL (`unimplemented!()`).
 
 - [ ] **Step 2: Implement**
@@ -532,7 +532,7 @@ pub fn capture_filename(date_yyyy_mm_dd: &str, model_slug: &str) -> String {
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo test -p hhagent-core observation::capture::tests::capture_filename 2>&1 | tail -5`
+Run: `cargo test -p kastellan-core observation::capture::tests::capture_filename 2>&1 | tail -5`
 Expected: 1 passed.
 
 - [ ] **Step 4: Commit**
@@ -607,7 +607,7 @@ Append in `mod tests`:
     }
 ```
 
-Run: `cargo test -p hhagent-core observation::capture::tests::parse_fixture_prompt 2>&1 | tail -15`
+Run: `cargo test -p kastellan-core observation::capture::tests::parse_fixture_prompt 2>&1 | tail -15`
 Expected: 6 failed.
 
 - [ ] **Step 2: Implement**
@@ -649,7 +649,7 @@ pub fn parse_fixture_prompt(md: &str) -> Result<(String, String), ParseError> {
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo test -p hhagent-core observation::capture::tests::parse_fixture_prompt 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core observation::capture::tests::parse_fixture_prompt 2>&1 | tail -10`
 Expected: 6 passed.
 
 - [ ] **Step 4: Commit**
@@ -771,7 +771,7 @@ Append in `mod tests`:
     }
 ```
 
-Run: `cargo test -p hhagent-core observation::capture::tests::extract_plans 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core observation::capture::tests::extract_plans 2>&1 | tail -10`
 Expected: 4 failed.
 
 - [ ] **Step 2: Implement**
@@ -823,7 +823,7 @@ For the missing-verdict case: plan 1 looks ahead and finds nothing → default A
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo test -p hhagent-core observation::capture::tests::extract_plans 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core observation::capture::tests::extract_plans 2>&1 | tail -10`
 Expected: 4 passed.
 
 - [ ] **Step 4: Commit**
@@ -913,7 +913,7 @@ Append in `mod tests`:
     }
 ```
 
-Run: `cargo test -p hhagent-core observation::capture::tests::write_capture 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core observation::capture::tests::write_capture 2>&1 | tail -10`
 Expected: 3 failed.
 
 - [ ] **Step 2: Implement**
@@ -964,7 +964,7 @@ pub fn write_capture_to_dir(out_dir: &Path, capture: &CaptureJson)
 
 - [ ] **Step 3: Verify all unit tests pass**
 
-Run: `cargo test -p hhagent-core observation::capture 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core observation::capture 2>&1 | tail -10`
 Expected: All unit tests pass (slug_model 6 + capture_filename 1 + parse_fixture_prompt 6 + extract_plans 4 + write_capture 3 = 20 tests).
 
 - [ ] **Step 4: Commit**
@@ -991,24 +991,24 @@ EOF
 **Files:**
 - Modify: `core/src/observation/capture.rs`
 - Modify: `db/tests/postgres_e2e.rs`
-- Modify: `db/Cargo.toml` (if `hhagent-core` not already a dev-dep)
+- Modify: `db/Cargo.toml` (if `kastellan-core` not already a dev-dep)
 
 - [ ] **Step 1: Verify dev-dep wiring**
 
-The integration test lives under `db/tests/` (it's PG-cluster-aware via `hhagent-tests-common`). It needs to import `hhagent_core::observation::capture::{fetch_audit_rows_for_task, CapturedAuditRow}`.
+The integration test lives under `db/tests/` (it's PG-cluster-aware via `kastellan-tests-common`). It needs to import `kastellan_core::observation::capture::{fetch_audit_rows_for_task, CapturedAuditRow}`.
 
 Check current state:
 
 ```bash
-grep -n "hhagent-core" db/Cargo.toml
+grep -n "kastellan-core" db/Cargo.toml
 ```
 
-If the result is empty (which is likely, since `db` is below `core` in the dependency graph), the integration test cannot directly call `hhagent_core::observation::capture::fetch_audit_rows_for_task`. We have two options:
+If the result is empty (which is likely, since `db` is below `core` in the dependency graph), the integration test cannot directly call `kastellan_core::observation::capture::fetch_audit_rows_for_task`. We have two options:
 
-  1. Add `hhagent-core` as a `[dev-dependencies]` entry in `db/Cargo.toml`.
+  1. Add `kastellan-core` as a `[dev-dependencies]` entry in `db/Cargo.toml`.
   2. Move the integration test into `core/tests/`.
 
-Option 2 is cleaner — `core/tests/` already has integration tests that touch PG via `hhagent-tests-common`. Use option 2.
+Option 2 is cleaner — `core/tests/` already has integration tests that touch PG via `kastellan-tests-common`. Use option 2.
 
 - [ ] **Step 2: Implement the async DB helper**
 
@@ -1050,7 +1050,7 @@ pub async fn fetch_audit_rows_for_task(
 Create `core/tests/observation_fetch_audit_e2e.rs` (NEW):
 
 ```rust
-//! Integration test for hhagent_core::observation::capture::fetch_audit_rows_for_task.
+//! Integration test for kastellan_core::observation::capture::fetch_audit_rows_for_task.
 //!
 //! Brings up a per-test PG cluster (skips cleanly without it), runs the
 //! probe, opens the runtime-role pool, inserts a handful of audit rows
@@ -1059,11 +1059,11 @@ Create `core/tests/observation_fetch_audit_e2e.rs` (NEW):
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::observation::capture::{
+use kastellan_core::observation::capture::{
     fetch_audit_rows_for_task, CapturedAuditRow,
 };
-use hhagent_db::{conn::ConnectSpec, pool::connect_runtime_pool, probe};
-use hhagent_tests_common::{bring_up_pg_cluster, current_username, pg_bin_dir_or_skip};
+use kastellan_db::{conn::ConnectSpec, pool::connect_runtime_pool, probe};
+use kastellan_tests_common::{bring_up_pg_cluster, current_username, pg_bin_dir_or_skip};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn fetch_audit_rows_for_task_filters_by_task_id_in_payload() {
@@ -1073,7 +1073,7 @@ async fn fetch_audit_rows_for_task_filters_by_task_id_in_payload() {
         &bin_dir,
         "obs-fetch-d",
         "obs-fetch-l",
-        "hhagent-supervisor-test-pg-obsfetch",
+        "kastellan-supervisor-test-pg-obsfetch",
     );
 
     let spec = ConnectSpec::default_for(&cluster.data_dir).expect("spec");
@@ -1091,7 +1091,7 @@ async fn fetch_audit_rows_for_task_filters_by_task_id_in_payload() {
         ("scheduler", "task.completed", task_id_other),
     ] {
         let payload = serde_json::json!({"task_id": tid, "lane": "fast", "plan_count": 0});
-        hhagent_db::audit::insert(&pool, actor, action, payload)
+        kastellan_db::audit::insert(&pool, actor, action, payload)
             .await
             .expect("audit insert");
     }
@@ -1137,7 +1137,7 @@ async fn fetch_audit_rows_for_task_filters_by_task_id_in_payload() {
 
 - [ ] **Step 4: Verify the integration test passes**
 
-Run: `cargo test -p hhagent-core --test observation_fetch_audit_e2e 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core --test observation_fetch_audit_e2e 2>&1 | tail -10`
 Expected: 1 passed (or `[SKIP]` if no PG bin dir; either is acceptable for CI).
 
 - [ ] **Step 5: Run the full workspace test suite**
@@ -1361,8 +1361,8 @@ the test fails loudly if the LLM is unreachable.
    port. Override either with env vars before invoking:
 
    ```sh
-   export HHAGENT_LLM_LOCAL_URL=http://127.0.0.1:11434/v1
-   export HHAGENT_LLM_LOCAL_MODEL='gemma4:26b-a4b-it-q8_0'
+   export KASTELLAN_LLM_LOCAL_URL=http://127.0.0.1:11434/v1
+   export KASTELLAN_LLM_LOCAL_MODEL='gemma4:26b-a4b-it-q8_0'
    ```
 
 2. Build the workspace once so the daemon, CLI, and worker binaries
@@ -1376,7 +1376,7 @@ the test fails loudly if the LLM is unreachable.
 3. Run the orchestrator:
 
    ```sh
-   cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture
+   cargo test -p kastellan-core --test observation_capture -- --ignored --nocapture
    ```
 
 4. Captures land under `tests/observation/captures/<id>/`. **The
@@ -1386,7 +1386,7 @@ the test fails loudly if the LLM is unreachable.
 
 ## Dry-run mode
 
-Set `HHAGENT_OBSERVATION_DRY_RUN=1` to walk the fixture tree, parse
+Set `KASTELLAN_OBSERVATION_DRY_RUN=1` to walk the fixture tree, parse
 each `prompt.md` + `meta.toml`, and print the work plan without
 dialing the LLM or writing files. Useful for adding a new fixture and
 verifying the meta parses.
@@ -1397,7 +1397,7 @@ verifying the meta parses.
 mkdir tests/observation/fixtures/<new-id>
 $EDITOR tests/observation/fixtures/<new-id>/prompt.md
 $EDITOR tests/observation/fixtures/<new-id>/meta.toml
-HHAGENT_OBSERVATION_DRY_RUN=1 cargo test -p hhagent-core \
+KASTELLAN_OBSERVATION_DRY_RUN=1 cargo test -p kastellan-core \
   --test observation_capture -- --ignored --nocapture
 ```
 
@@ -1450,25 +1450,25 @@ Create `core/tests/observation_capture.rs`:
 ```rust
 //! Observation-phase orchestrator (#[ignore]-flagged).
 //!
-//! Brings up a per-test PG cluster + real `hhagent` daemon under
+//! Brings up a per-test PG cluster + real `kastellan` daemon under
 //! `systemd --user` / `launchctl` + sandboxed worker, points the daemon
-//! at the **real local LLM** (operator's HHAGENT_LLM_LOCAL_URL), iterates
+//! at the **real local LLM** (operator's KASTELLAN_LLM_LOCAL_URL), iterates
 //! every fixture under `tests/observation/fixtures/`, runs each through
-//! `hhagent-cli ask`, queries `audit_log` for the task's rows, and
+//! `kastellan-cli ask`, queries `audit_log` for the task's rows, and
 //! writes one capture JSON per fixture under
 //! `tests/observation/captures/<id>/<date>_<model_slug>.json`.
 //!
 //! ## Invocation
 //!
 //! ```sh
-//! cargo test -p hhagent-core --test observation_capture \
+//! cargo test -p kastellan-core --test observation_capture \
 //!     -- --ignored --nocapture
 //! ```
 //!
 //! Env knobs:
-//! - `HHAGENT_LLM_LOCAL_URL` (required) — operator's local LLM endpoint
-//! - `HHAGENT_LLM_LOCAL_MODEL` (default: "gemma4:26b-a4b-it-q8_0")
-//! - `HHAGENT_OBSERVATION_DRY_RUN=1` — walk fixtures + print work plan,
+//! - `KASTELLAN_LLM_LOCAL_URL` (required) — operator's local LLM endpoint
+//! - `KASTELLAN_LLM_LOCAL_MODEL` (default: "gemma4:26b-a4b-it-q8_0")
+//! - `KASTELLAN_OBSERVATION_DRY_RUN=1` — walk fixtures + print work plan,
 //!   no LLM dial, no file write
 //!
 //! ## Why #[ignore]
@@ -1483,20 +1483,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hhagent_core::observation::capture::{
+use kastellan_core::observation::capture::{
     capture_filename, extract_plans_from_audit_rows, fetch_audit_rows_for_task,
     parse_fixture_prompt, slug_model, write_capture_to_dir, CaptureJson, SCHEMA_VERSION,
 };
-use hhagent_db::{conn::ConnectSpec, pool::connect_runtime_pool};
-use hhagent_supervisor::specs::core_service_spec;
-use hhagent_supervisor::{default_supervisor, ServiceStatus};
-use hhagent_tests_common::{
+use kastellan_db::{conn::ConnectSpec, pool::connect_runtime_pool};
+use kastellan_supervisor::specs::core_service_spec;
+use kastellan_supervisor::{default_supervisor, ServiceStatus};
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, core_binary, current_username, pg_bin_dir_or_skip,
     shell_exec_worker_binary, skip_if_no_supervisor, skip_if_sandbox_unavailable, unique_suffix,
     unique_temp_root, wait_for_log_match, wait_for_status, PathGuard, PgCluster, ServiceGuard,
 };
 #[cfg(target_os = "macos")]
-use hhagent_tests_common::serial_lock;
+use kastellan_tests_common::serial_lock;
 
 const ECHO_PATH_LINUX: &str = "/usr/bin/echo";
 const ECHO_PATH_MACOS: &str = "/bin/echo";
@@ -1575,16 +1575,16 @@ fn load_fixtures() -> Vec<FixtureMeta> {
 }
 ```
 
-**Note:** `hhagent-core` does not currently have `toml` as a runtime
+**Note:** `kastellan-core` does not currently have `toml` as a runtime
 dep, but Task 0 added it as a workspace dep. The integration test
 needs to reference it; either:
 
-  (a) it picks it up transitively through `hhagent-core` (which now
+  (a) it picks it up transitively through `kastellan-core` (which now
       depends on toml after Task 0), or
   (b) we add it as a `[dev-dependencies]` entry in `core/Cargo.toml`.
 
 Option (a) actually works because the test code links against the
-same `hhagent-core` crate that brings in `toml` via its Cargo.toml
+same `kastellan-core` crate that brings in `toml` via its Cargo.toml
 `[dependencies]`. So no further Cargo.toml edits needed.
 
 - [ ] **Step 3: Add the LLM pre-flight check**
@@ -1673,32 +1673,32 @@ fn bring_up_daemon(
 
     let binary = core_binary();
     let mut spec = core_service_spec(&binary, &core_log_dir);
-    spec.name = format!("hhagent-supervisor-test-core-obs-{suffix}");
+    spec.name = format!("kastellan-supervisor-test-core-obs-{suffix}");
     assert!(spec.name.len() <= 200);
     let stdout_path = core_log_dir.join(format!("{}.out", spec.name));
     let stderr_path = core_log_dir.join(format!("{}.err", spec.name));
     spec.stdout_log = Some(stdout_path.clone());
     spec.stderr_log = Some(stderr_path);
 
-    spec.env.push(("HHAGENT_DATA_DIR".into(),
+    spec.env.push(("KASTELLAN_DATA_DIR".into(),
         data_dir.to_string_lossy().into_owned()));
     spec.env.push(("USER".into(), user.to_string()));
-    spec.env.push(("HHAGENT_STATE_DIR".into(),
+    spec.env.push(("KASTELLAN_STATE_DIR".into(),
         state_dir.to_string_lossy().into_owned()));
 
     let workspace_prompts = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
         .join("prompts");
-    spec.env.push(("HHAGENT_PROMPTS_DIR".into(),
+    spec.env.push(("KASTELLAN_PROMPTS_DIR".into(),
         workspace_prompts.to_string_lossy().into_owned()));
 
-    spec.env.push(("HHAGENT_LLM_LOCAL_URL".into(),
+    spec.env.push(("KASTELLAN_LLM_LOCAL_URL".into(),
         llm_base_url.to_string()));
-    spec.env.push(("HHAGENT_LLM_LOCAL_MODEL".into(), llm_model.to_string()));
-    spec.env.push(("HHAGENT_LLM_TIMEOUT_MS".into(), "120000".into()));
+    spec.env.push(("KASTELLAN_LLM_LOCAL_MODEL".into(), llm_model.to_string()));
+    spec.env.push(("KASTELLAN_LLM_TIMEOUT_MS".into(), "120000".into()));
 
-    spec.env.push(("HHAGENT_SHELL_EXEC_BIN".into(),
+    spec.env.push(("KASTELLAN_SHELL_EXEC_BIN".into(),
         shell_exec_worker_binary().to_string_lossy().into_owned()));
     // Permissive allowlist for observation: echo, date, ls, cat (read-only).
     let allowlist = if cfg!(target_os = "linux") {
@@ -1708,7 +1708,7 @@ fn bring_up_daemon(
         format!("{}:{}:{}:{}",
             ECHO_PATH_MACOS, DATE_PATH_MACOS, LS_PATH_MACOS, "/bin/cat")
     };
-    spec.env.push(("HHAGENT_SHELL_EXEC_ALLOWLIST".into(), allowlist));
+    spec.env.push(("KASTELLAN_SHELL_EXEC_ALLOWLIST".into(), allowlist));
 
     let sup = default_supervisor();
     let service = ServiceGuard {
@@ -1747,7 +1747,7 @@ fn bring_up_daemon(
 Append:
 
 ```rust
-/// Submit one prompt via `hhagent-cli ask`, then capture the audit-log
+/// Submit one prompt via `kastellan-cli ask`, then capture the audit-log
 /// stream for the resulting task. Returns the constructed CaptureJson.
 async fn capture_one_fixture(
     pool: &sqlx::PgPool,
@@ -1774,9 +1774,9 @@ async fn capture_one_fixture(
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("USER", user)
-        .env("HHAGENT_DATA_DIR", data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_DATA_DIR", data_dir.to_string_lossy().as_ref())
         .output()
-        .expect("spawn hhagent-cli ask");
+        .expect("spawn kastellan-cli ask");
     let elapsed = start.elapsed();
     assert!(
         elapsed < PER_FIXTURE_TIMEOUT,
@@ -1835,14 +1835,14 @@ Append:
 
 ```rust
 fn dry_run_enabled() -> bool {
-    std::env::var("HHAGENT_OBSERVATION_DRY_RUN")
+    std::env::var("KASTELLAN_OBSERVATION_DRY_RUN")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
 fn dry_run_report(fixtures: &[FixtureMeta]) {
     eprintln!(
-        "\n[DRY RUN] would capture {} fixtures (HHAGENT_OBSERVATION_DRY_RUN=1):",
+        "\n[DRY RUN] would capture {} fixtures (KASTELLAN_OBSERVATION_DRY_RUN=1):",
         fixtures.len()
     );
     for f in fixtures {
@@ -1863,7 +1863,7 @@ Append:
 
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[ignore = "operator-run: needs real local LLM at HHAGENT_LLM_LOCAL_URL"]
+#[ignore = "operator-run: needs real local LLM at KASTELLAN_LLM_LOCAL_URL"]
 async fn capture_all_fixtures_against_live_llm() {
     #[cfg(target_os = "macos")]
     let _serial = serial_lock();
@@ -1892,13 +1892,13 @@ async fn capture_all_fixtures_against_live_llm() {
     // LLM env. Fail loudly on missing URL or unreachable backend —
     // operators ran this explicitly; a silent skip would produce no
     // captures and waste their time.
-    let llm_base_url = std::env::var("HHAGENT_LLM_LOCAL_URL").unwrap_or_else(|_| {
+    let llm_base_url = std::env::var("KASTELLAN_LLM_LOCAL_URL").unwrap_or_else(|_| {
         panic!(
-            "HHAGENT_LLM_LOCAL_URL is required; set it to your local LLM \
+            "KASTELLAN_LLM_LOCAL_URL is required; set it to your local LLM \
              OpenAI-compat base URL (e.g. http://127.0.0.1:11434/v1)"
         )
     });
-    let llm_model = std::env::var("HHAGENT_LLM_LOCAL_MODEL")
+    let llm_model = std::env::var("KASTELLAN_LLM_LOCAL_MODEL")
         .unwrap_or_else(|_| DEFAULT_LLM_MODEL.to_string());
     if let Err(why) = check_llm_reachable(&llm_base_url) {
         panic!(
@@ -1913,7 +1913,7 @@ async fn capture_all_fixtures_against_live_llm() {
         &bin_dir,
         "obs-cap-d",
         "obs-cap-l",
-        &format!("hhagent-supervisor-test-pg-obs-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-obs-{suffix}"),
     );
 
     let _daemon = bring_up_daemon(&suffix, &cluster.data_dir, &llm_base_url, &llm_model, &user);
@@ -1978,10 +1978,10 @@ async fn capture_all_fixtures_against_live_llm() {
 
 - [ ] **Step 8: Verify the file compiles + the `#[ignore]` flag works**
 
-Run: `cargo build --tests -p hhagent-core 2>&1 | tail -20`
+Run: `cargo build --tests -p kastellan-core 2>&1 | tail -20`
 Expected: Clean build, no warnings about unused imports.
 
-Run: `cargo test -p hhagent-core --test observation_capture 2>&1 | tail -5`
+Run: `cargo test -p kastellan-core --test observation_capture 2>&1 | tail -5`
 Expected: 1 ignored test reported, 0 passed (correct — `#[ignore]` is honoured).
 
 - [ ] **Step 9: Verify dry-run mode works against the fixture tree**
@@ -1989,7 +1989,7 @@ Expected: 1 ignored test reported, 0 passed (correct — `#[ignore]` is honoured
 Run:
 
 ```sh
-HHAGENT_OBSERVATION_DRY_RUN=1 cargo test -p hhagent-core \
+KASTELLAN_OBSERVATION_DRY_RUN=1 cargo test -p kastellan-core \
     --test observation_capture -- --ignored --nocapture 2>&1 | tail -25
 ```
 
@@ -2005,17 +2005,17 @@ git commit -m "$(cat <<'EOF'
 feat(core/tests): observation_capture orchestrator (#[ignore]-flagged)
 
 End-to-end orchestrator that runs every fixture under
-tests/observation/fixtures/ through the real hhagent daemon + sandboxed
+tests/observation/fixtures/ through the real kastellan daemon + sandboxed
 worker + operator's local LLM, captures the audit-row stream per task,
 and freezes one JSON per fixture under tests/observation/captures/.
 
-Pre-flight HTTP probe of HHAGENT_LLM_LOCAL_URL with loud failure on
+Pre-flight HTTP probe of KASTELLAN_LLM_LOCAL_URL with loud failure on
 unreachable LLM (no skip-as-pass for the operator path).
-HHAGENT_OBSERVATION_DRY_RUN=1 walks the tree and prints the work plan
+KASTELLAN_OBSERVATION_DRY_RUN=1 walks the tree and prints the work plan
 without any side effects — useful for verifying a new fixture parses.
 
 #[ignore]-flagged so cargo test --workspace skips it. Run with:
-  cargo test -p hhagent-core --test observation_capture \
+  cargo test -p kastellan-core --test observation_capture \
       -- --ignored --nocapture
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
@@ -2105,7 +2105,7 @@ Open `docs/devel/ROADMAP.md`. In Phase 1, after the existing
 - [x] **[follow-up] Observation-phase fixture captures** — landed
   2026-05-13 on branch `feat/observation-phase-captures`. Closes the
   HANDOVER "Next TODO" headline pickup for the observation phase
-  (spec §9). New library module `hhagent_core::observation::capture`
+  (spec §9). New library module `kastellan_core::observation::capture`
   carries the on-disk JSON schema (`SCHEMA_VERSION = 1`), pure helpers
   (`parse_fixture_prompt`, `slug_model`, `capture_filename`,
   `extract_plans_from_audit_rows`), an IO helper (`write_capture_to_dir`
@@ -2117,10 +2117,10 @@ Open `docs/devel/ROADMAP.md`. In Phase 1, after the existing
   1 clinical-data-leak edge case. Orchestrator
   `core/tests/observation_capture.rs` is `#[ignore]`-flagged so
   `cargo test --workspace` excludes it; operators run with
-  `cargo test -p hhagent-core --test observation_capture -- --ignored
-  --nocapture` after exporting `HHAGENT_LLM_LOCAL_URL`. Fails loudly on
+  `cargo test -p kastellan-core --test observation_capture -- --ignored
+  --nocapture` after exporting `KASTELLAN_LLM_LOCAL_URL`. Fails loudly on
   unreachable LLM (no skip-as-pass for the operator path).
-  `HHAGENT_OBSERVATION_DRY_RUN=1` walks the fixture tree without any
+  `KASTELLAN_OBSERVATION_DRY_RUN=1` walks the fixture tree without any
   side effects. **NOT in scope (filed as a follow-up):** rule-iteration
   harness that re-runs `ChainReviewStage::new(vec![candidate_rule])`
   against captured plans and reports verdict deltas. Workspace test
@@ -2137,7 +2137,7 @@ docs(handover,roadmap): observation-phase fixture captures shipped
 
 Branch feat/observation-phase-captures ships the dataset infrastructure
 for CASSANDRA rule iteration: library module
-hhagent_core::observation::capture + 7 seed fixtures + #[ignore]-flagged
+kastellan_core::observation::capture + 7 seed fixtures + #[ignore]-flagged
 orchestrator. Workspace test count 354 → 375.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>

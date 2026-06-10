@@ -17,8 +17,8 @@
 
 use std::time::Duration;
 
-use hhagent_llm_router::embeddings::{EmbeddingRequest, EmbeddingResponse};
-use hhagent_llm_router::{Router, RouterConfig, RouterError};
+use kastellan_llm_router::embeddings::{EmbeddingRequest, EmbeddingResponse};
+use kastellan_llm_router::{Router, RouterConfig, RouterError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;

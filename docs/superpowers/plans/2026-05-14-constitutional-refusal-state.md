@@ -6,7 +6,7 @@
 
 **Architecture:** Additive change across five layers. Types layer gains `RefusedReason` struct and optional `Plan.refused` field. Scheduler layer gains `Outcome::Refused` variant + inner-loop short-circuit (after the reviewer runs — defense in depth, `Verdict::ConstitutionalBlock` still wins). DB layer gains migration `0012` widening the `tasks.state` CHECK and the `notify_task_completed` trigger. Audit layer extends `agent/plan.formulate` payload with a structured `refused` object and a third `decision_kind` value. Prompt layer adds one sentence + schema example update so the LLM emits the structured marker.
 
-**Tech Stack:** Rust workspace (`hhagent_core`, `hhagent_db`); `sqlx` + Postgres via UDS; `serde` / `serde_json`; TDD via `cargo test --workspace`.
+**Tech Stack:** Rust workspace (`kastellan_core`, `kastellan_db`); `sqlx` + Postgres via UDS; `serde` / `serde_json`; TDD via `cargo test --workspace`.
 
 **Source spec:** [`docs/superpowers/specs/2026-05-14-constitutional-refusal-state-design.md`](../specs/2026-05-14-constitutional-refusal-state-design.md) — already committed on this branch at `162ac4a`. Read it before starting.
 
@@ -130,7 +130,7 @@ fn plan_is_refused_is_independent_of_is_terminal() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib cassandra::types::tests::plan_round_trips_refused_field_some 2>&1 | tail -20
+cargo test -p kastellan-core --lib cassandra::types::tests::plan_round_trips_refused_field_some 2>&1 | tail -20
 ```
 
 Expected: compile error `no field 'refused' in 'Plan'` and `cannot find type 'RefusedReason'`.
@@ -221,7 +221,7 @@ fn task_complete_plan(body: &str) -> Plan {
 To find every remaining site (defence against drift), run:
 
 ```sh
-grep -rn "Plan {" /home/hherb/src/hhagent --include="*.rs" \
+grep -rn "Plan {" /home/hherb/src/kastellan --include="*.rs" \
   | grep -v ".claude/worktrees" \
   | grep -v "PlanFormulator\|CapturedPlan"
 ```
@@ -233,7 +233,7 @@ Cross-check the output against the 8 sites above; if the engineer finds a 9th, a
 ### Step 1.5 — Run tests to confirm GREEN
 
 ```sh
-cargo test -p hhagent-core --lib cassandra::types::tests 2>&1 | tail -15
+cargo test -p kastellan-core --lib cassandra::types::tests 2>&1 | tail -15
 cargo build --workspace 2>&1 | tail -10
 ```
 
@@ -321,7 +321,7 @@ fn outcome_refused_result_payload_carries_principle_reason_and_body() {
 ### Step 2.2 — Run tests to confirm RED
 
 ```sh
-cargo test -p hhagent-core --lib scheduler::inner_loop::tests::outcome_refused 2>&1 | tail -15
+cargo test -p kastellan-core --lib scheduler::inner_loop::tests::outcome_refused 2>&1 | tail -15
 ```
 
 Expected: compile error `no variant 'Refused' on enum 'Outcome'`.
@@ -371,7 +371,7 @@ In `impl Outcome::result_payload` (line ~99–107), add an arm before the `_ =>`
 ### Step 2.4 — Run tests to confirm GREEN
 
 ```sh
-cargo test -p hhagent-core --lib scheduler::inner_loop::tests 2>&1 | tail -15
+cargo test -p kastellan-core --lib scheduler::inner_loop::tests 2>&1 | tail -15
 cargo build --workspace 2>&1 | tail -10
 ```
 
@@ -420,10 +420,10 @@ Append a new `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]` funct
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tasks_state_refused_passes_check_constraint() {
-    let Some(bin_dir) = hhagent_tests_common::pg_bin_dir_or_skip() else { return; };
-    let cluster = hhagent_tests_common::bring_up_pg_cluster(&bin_dir).await;
+    let Some(bin_dir) = kastellan_tests_common::pg_bin_dir_or_skip() else { return; };
+    let cluster = kastellan_tests_common::bring_up_pg_cluster(&bin_dir).await;
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.spec)
         .await.expect("runtime pool");
 
     // Seed a pending task we can flip to 'refused' via raw SQL.
@@ -475,7 +475,7 @@ Adjust `tasks_lane` cast or column names to match the existing schema; cross-ref
 ### Step 3.2 — Run test to confirm RED
 
 ```sh
-cargo test -p hhagent-db --test postgres_e2e tasks_state_refused_passes_check_constraint -- --nocapture 2>&1 | tail -30
+cargo test -p kastellan-db --test postgres_e2e tasks_state_refused_passes_check_constraint -- --nocapture 2>&1 | tail -30
 ```
 
 Expected: fail with a Postgres error along the lines of `new row for relation "tasks" violates check constraint "tasks_state_check"`. (If the host has no PG installed, the test will `[SKIP]` — in that case the engineer needs to install Postgres locally before continuing; per `CLAUDE.md` rule #6 all tests must pass before commit. See `scripts/linux/install-postgres.sh` for Linux.)
@@ -535,7 +535,7 @@ $$;
 ### Step 3.4 — Run test to confirm GREEN
 
 ```sh
-cargo test -p hhagent-db --test postgres_e2e tasks_state_refused_passes_check_constraint -- --nocapture 2>&1 | tail -15
+cargo test -p kastellan-db --test postgres_e2e tasks_state_refused_passes_check_constraint -- --nocapture 2>&1 | tail -15
 ```
 
 Expected: PASS. (sqlx will pick up the new migration via `MIGRATOR`'s embed-at-compile-time. The per-test PG cluster runs migrations from scratch each time.)
@@ -604,7 +604,7 @@ async fn refusal_plan_terminates_with_state_refused() {
             "body": "I cannot help with that; it would risk physical harm.",
         })),
         data_ceiling: DataClass::Public,
-        refused: Some(hhagent_core::cassandra::types::RefusedReason {
+        refused: Some(kastellan_core::cassandra::types::RefusedReason {
             principle: 1,
             reason: "physical_harm".into(),
         }),
@@ -660,7 +660,7 @@ async fn reviewer_constitutional_block_wins_over_agent_refusal() {
             "body": "agent prose mentioning P1",
         })),
         data_ceiling: DataClass::Public,
-        refused: Some(hhagent_core::cassandra::types::RefusedReason {
+        refused: Some(kastellan_core::cassandra::types::RefusedReason {
             principle: 1,
             reason: "physical_harm_agent_side".into(),
         }),
@@ -701,11 +701,11 @@ If a helper like `scripted_formulator`, `always_approve_reviewer`, `scripted_rev
 ### Step 4.2 — Run tests to confirm RED
 
 ```sh
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e \
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e \
     refusal_plan_terminates_with_state_refused \
     -- --nocapture 2>&1 | tail -30
 
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e \
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e \
     reviewer_constitutional_block_wins_over_agent_refusal \
     -- --nocapture 2>&1 | tail -30
 ```
@@ -802,7 +802,7 @@ Note: the existing match starts at `match &verdict { ... }`. After this refactor
 ### Step 4.4 — Run both scenarios + the full focused suite to confirm GREEN
 
 ```sh
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e -- --nocapture 2>&1 | tail -30
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e -- --nocapture 2>&1 | tail -30
 ```
 
 Expected: all scenarios green, including the two new ones. If `reviewer_constitutional_block_wins_over_agent_refusal` flips to RED at this point, the refusal short-circuit was placed before the CB short-circuit — re-order so CB is checked first.
@@ -872,7 +872,7 @@ In `core/tests/scheduler_inner_loop_e2e.rs::refusal_plan_terminates_with_state_r
     //   - decision_kind == "refused"
     //   - refused == { principle: 1, reason: "physical_harm" }
     //   - plan_step_count == 0
-    let rows = hhagent_db::audit::fetch_since(&pool, 0).await.expect("fetch audit");
+    let rows = kastellan_db::audit::fetch_since(&pool, 0).await.expect("fetch audit");
     let plan_rows: Vec<_> = rows.iter()
         .filter(|r| r.actor == "agent" && r.action == "plan.formulate")
         .collect();
@@ -885,14 +885,14 @@ In `core/tests/scheduler_inner_loop_e2e.rs::refusal_plan_terminates_with_state_r
     assert_eq!(payload["plan_step_count"], 0);
 ```
 
-The exact `hhagent_db::audit::fetch_since` signature may differ (check `db/src/audit.rs` for the right helper); the goal is a SELECT-all of audit rows for this test's task. Pre-existing test scenarios in this file may already have an audit-row helper — reuse it if so.
+The exact `kastellan_db::audit::fetch_since` signature may differ (check `db/src/audit.rs` for the right helper); the goal is a SELECT-all of audit rows for this test's task. Pre-existing test scenarios in this file may already have an audit-row helper — reuse it if so.
 
 - [ ] **Step 5.1 — Assertions added**
 
 ### Step 5.2 — Run test to confirm RED
 
 ```sh
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e refusal_plan_terminates_with_state_refused -- --nocapture 2>&1 | tail -30
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e refusal_plan_terminates_with_state_refused -- --nocapture 2>&1 | tail -30
 ```
 
 Expected: FAIL. The `decision_kind` field today is `"task_complete"` for a terminal-shape plan, regardless of `refused`. The `refused` key is absent from the payload entirely.
@@ -941,7 +941,7 @@ async fn write_audit_plan_formulate(
         "decision_kind":    decision_kind,
         "refused":          refused,
     });
-    hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
+    kastellan_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
 }
 ```
@@ -951,7 +951,7 @@ async fn write_audit_plan_formulate(
 ### Step 5.4 — Run tests to confirm GREEN
 
 ```sh
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e -- --nocapture 2>&1 | tail -30
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e -- --nocapture 2>&1 | tail -30
 cargo test --workspace 2>&1 | tail -20
 ```
 
@@ -1127,7 +1127,7 @@ In `docs/devel/ROADMAP.md`:
 - If no line item exists, append a new `[x]` line under the **`## Phase 1 — Memory & Loop`** section, slot at the appropriate position (e.g., right after the "Real `ConstitutionalGuard` + `DeterministicPolicy`" placeholder line since this work makes the refusal state available to those future stages):
 
 ```markdown
-- [x] **[follow-up] Distinguish constitutional refusal from successful completion in `tasks.state`** — landed 2026-05-14 on branch `feat/refusal-state`. New optional `Plan.refused: { principle, reason }` field, new `Outcome::Refused { principle, reason, body }` variant, new terminal `tasks.state='refused'` distinct from existing `'blocked'` (reviewer-detected). Inner loop short-circuits on `plan.refused.is_some()` after the reviewer runs (defense in depth — `Verdict::ConstitutionalBlock` wins over agent self-refusal so provenance is preserved). `agent/plan.formulate` audit-row payload gains `refused: {...}` + a third `decision_kind = "refused"` value. Migration `0012_tasks_state_refused.sql` widens both the `tasks_state_check` CHECK and the `notify_task_completed` trigger. Planner prompt adds one sentence + `"refused": null` default in the JSON-schema example. Closes [issue #23](https://github.com/hherb/hhagent/issues/23). Test count: 446 → <final>.
+- [x] **[follow-up] Distinguish constitutional refusal from successful completion in `tasks.state`** — landed 2026-05-14 on branch `feat/refusal-state`. New optional `Plan.refused: { principle, reason }` field, new `Outcome::Refused { principle, reason, body }` variant, new terminal `tasks.state='refused'` distinct from existing `'blocked'` (reviewer-detected). Inner loop short-circuits on `plan.refused.is_some()` after the reviewer runs (defense in depth — `Verdict::ConstitutionalBlock` wins over agent self-refusal so provenance is preserved). `agent/plan.formulate` audit-row payload gains `refused: {...}` + a third `decision_kind = "refused"` value. Migration `0012_tasks_state_refused.sql` widens both the `tasks_state_check` CHECK and the `notify_task_completed` trigger. Planner prompt adds one sentence + `"refused": null` default in the JSON-schema example. Closes [issue #23](https://github.com/hherb/kastellan/issues/23). Test count: 446 → <final>.
 ```
 
 - [ ] **Step 7.3 — ROADMAP updated**
@@ -1166,7 +1166,7 @@ The branch `feat/refusal-state` is ready for review. Operator decides whether to
 ## Deliberately NOT in scope (re-stated from the spec)
 
 - **Real `ConstitutionalGuard` reviewer rules.** Wait on observation-phase dataset.
-- **CLI-side "show refusals" surface.** `hhagent-cli tasks list --state refused` works for free.
+- **CLI-side "show refusals" surface.** `kastellan-cli tasks list --state refused` works for free.
 - **Channel-bus refusal notifications.** No channel-bus exists.
 - **Retroactive migration of older rows.** No `state='completed'` row is currently a constitutional refusal.
 - **`Plan::refused` value validation (`principle ∈ 1..=5`).** Field-shape validation could land later; for now the value is operator-visible in the audit log.

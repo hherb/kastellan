@@ -56,7 +56,7 @@ const MAX_NAME_LEN: usize = 200;
 ///
 /// `bootstrap` only runs the program when `RunAtLoad=true` (otherwise
 /// the agent sits dormant waiting for a demand-driven trigger that
-/// hhagent doesn't use). For our "install + start" model to actually
+/// kastellan doesn't use). For our "install + start" model to actually
 /// run anything, this must always be `true`.
 pub fn build_plist(spec: &ServiceSpec) -> String {
     let mut out = String::with_capacity(1024);

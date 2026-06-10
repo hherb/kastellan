@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a `SkillTrust` enum + a pure operator approval gate for crystallised L3 skills, with `hhagent-cli memory l3 {approve,revoke}` and typed audit rows — no execution.
+**Goal:** Ship a `SkillTrust` enum + a pure operator approval gate for crystallised L3 skills, with `kastellan-cli memory l3 {approve,revoke}` and typed audit rows — no execution.
 
 **Architecture:** A new pure module `core/src/memory/l3_approval.rs` owns the `SkillTrust` enum, the `evaluate_approval` gate (secret-ref scan + structural re-validation + tool-existence against an injected `known_tools` set), and two pure helpers. A layer-guarded db helper `set_skill_trust` flips the stored `trust` JSONB field. The CLI sources `known_tools` from the latest `registry.loaded` audit snapshot (fail-closed when absent) and emits typed `l3.approved`/`l3.approve_rejected`/`l3.revoked` rows via two `cli_audit` composers.
 
@@ -25,7 +25,7 @@
 | `db/tests/postgres_e2e.rs` | `set_skill_trust` flip + layer-guard cases | MOD |
 | `core/src/scheduler/audit.rs` | 3 action consts + 3 pure payload builders + tests | MOD |
 | `core/src/cli_audit.rs` | `l3_approve_and_audit`, `l3_approve_rejected_audit`, `l3_revoke_and_audit` | MOD |
-| `core/src/bin/hhagent-cli/memory_l3.rs` | `approve` + `revoke` handlers + router + typed-trust list | MOD |
+| `core/src/bin/kastellan-cli/memory_l3.rs` | `approve` + `revoke` handlers + router + typed-trust list | MOD |
 | `core/tests/cli_memory_l3_e2e.rs` | approve/revoke subprocess scenarios | MOD |
 
 ---
@@ -47,7 +47,7 @@ Create `core/src/memory/l3_approval.rs`:
 //! Crystallised skills land `trust:"untrusted"` and non-executable (see
 //! [`crate::memory::l3_crystallise`]). This module adds the typed
 //! [`SkillTrust`] read boundary and the pure [`evaluate_approval`] gate
-//! an operator runs (via `hhagent-cli memory l3 approve`) before a skill
+//! an operator runs (via `kastellan-cli memory l3 approve`) before a skill
 //! is promoted to `user_approved`. **Nothing here executes a skill** —
 //! `UserApproved`/`Pinned` are inert until the invocation slice lands.
 //!
@@ -125,12 +125,12 @@ pub mod l3_approval;
 
 - [ ] **Step 3: Run the tests — expect PASS**
 
-Run: `cargo test -p hhagent-core --lib l3_approval::tests`
+Run: `cargo test -p kastellan-core --lib l3_approval::tests`
 Expected: 2 tests PASS.
 
 - [ ] **Step 4: Clippy clean**
 
-Run: `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings`
+Run: `cargo clippy -p kastellan-core --all-targets --locked -- -D warnings`
 Expected: exit 0 (no unused-import warnings — confirm the `use` block was trimmed).
 
 - [ ] **Step 5: Commit**
@@ -194,7 +194,7 @@ Add to `mod tests` in `l3_approval.rs`:
 
 - [ ] **Step 2: Run — expect FAIL (functions not defined)**
 
-Run: `cargo test -p hhagent-core --lib l3_approval::tests`
+Run: `cargo test -p kastellan-core --lib l3_approval::tests`
 Expected: compile error — `scan_secret_refs` / `extract_tool_names` not found.
 
 - [ ] **Step 3: Implement the helpers**
@@ -252,13 +252,13 @@ pub fn extract_tool_names(payload: &serde_json::Value) -> BTreeSet<String> {
 
 - [ ] **Step 4: Run — expect PASS**
 
-Run: `cargo test -p hhagent-core --lib l3_approval::tests`
+Run: `cargo test -p kastellan-core --lib l3_approval::tests`
 Expected: 6 tests PASS.
 
 - [ ] **Step 5: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings
 git add core/src/memory/l3_approval.rs
 git commit -m "feat(memory): scan_secret_refs + extract_tool_names pure helpers"
 ```
@@ -385,7 +385,7 @@ Add to `mod tests`. First a fixture helper, then the cases:
 
 - [ ] **Step 2: Run — expect FAIL (types/fn not defined)**
 
-Run: `cargo test -p hhagent-core --lib l3_approval::tests`
+Run: `cargo test -p kastellan-core --lib l3_approval::tests`
 Expected: compile error — `ApprovalDecision` / `RejectReason` / `evaluate_approval` not found.
 
 - [ ] **Step 3: Implement the gate**
@@ -500,13 +500,13 @@ pub fn evaluate_approval(
 
 - [ ] **Step 4: Run — expect PASS**
 
-Run: `cargo test -p hhagent-core --lib l3_approval::tests`
+Run: `cargo test -p kastellan-core --lib l3_approval::tests`
 Expected: all (13) tests PASS.
 
 - [ ] **Step 5: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings
 git add core/src/memory/l3_approval.rs
 git commit -m "feat(memory): evaluate_approval gate (secret-ref + structural + tool existence)"
 ```
@@ -533,17 +533,17 @@ async fn set_skill_trust_flips_and_is_layer_guarded() {
 
     // Seed one L3 row (trust starts "untrusted") and one L1 row.
     let meta = serde_json::json!({ "trust": "untrusted", "template": {"name": "s"} });
-    let l3_id = hhagent_db::memories::insert_memory_at_layer(
-        pool, "body", &meta, None, hhagent_db::memories::MemoryLayer::Skill,
+    let l3_id = kastellan_db::memories::insert_memory_at_layer(
+        pool, "body", &meta, None, kastellan_db::memories::MemoryLayer::Skill,
     ).await.expect("insert L3");
-    let l1_id = hhagent_db::memories::insert_memory_at_layer(
+    let l1_id = kastellan_db::memories::insert_memory_at_layer(
         pool, "idxbody", &serde_json::json!({"trust": "untrusted"}), None,
-        hhagent_db::memories::MemoryLayer::Index,
+        kastellan_db::memories::MemoryLayer::Index,
     ).await.expect("insert L1");
 
     // Flip the L3 row → returns true, metadata.trust becomes user_approved,
     // and the rest of metadata is preserved.
-    let updated = hhagent_db::memories::set_skill_trust(pool, l3_id, "user_approved")
+    let updated = kastellan_db::memories::set_skill_trust(pool, l3_id, "user_approved")
         .await.expect("set_skill_trust");
     assert!(updated, "existing L3 row must report updated=true");
 
@@ -554,12 +554,12 @@ async fn set_skill_trust_flips_and_is_layer_guarded() {
         "set_skill_trust must preserve other metadata keys");
 
     // Layer guard: the same id on the wrong layer (L1) is a no-op.
-    let l1_updated = hhagent_db::memories::set_skill_trust(pool, l1_id, "user_approved")
+    let l1_updated = kastellan_db::memories::set_skill_trust(pool, l1_id, "user_approved")
         .await.expect("set_skill_trust L1");
     assert!(!l1_updated, "an L1 id must NOT be updated by the layer-3-guarded helper");
 
     // Non-existent id → false.
-    let ghost = hhagent_db::memories::set_skill_trust(pool, 999_999, "user_approved")
+    let ghost = kastellan_db::memories::set_skill_trust(pool, 999_999, "user_approved")
         .await.expect("set_skill_trust ghost");
     assert!(!ghost);
 }
@@ -569,7 +569,7 @@ async fn set_skill_trust_flips_and_is_layer_guarded() {
 
 - [ ] **Step 2: Run — expect FAIL (fn not found)**
 
-Run: `HHAGENT_PG_BIN_DIR=<pg bin> cargo test -p hhagent-db --test postgres_e2e set_skill_trust_flips_and_is_layer_guarded`
+Run: `KASTELLAN_PG_BIN_DIR=<pg bin> cargo test -p kastellan-db --test postgres_e2e set_skill_trust_flips_and_is_layer_guarded`
 (Postgres.app v18 bin dir, e.g. `/Applications/Postgres 2.app/Contents/Versions/18/bin/`.)
 Expected: compile error — `set_skill_trust` not found.
 
@@ -623,13 +623,13 @@ pub use write::{
 
 - [ ] **Step 5: Run — expect PASS**
 
-Run: `HHAGENT_PG_BIN_DIR=<pg bin> cargo test -p hhagent-db --test postgres_e2e set_skill_trust_flips_and_is_layer_guarded`
+Run: `KASTELLAN_PG_BIN_DIR=<pg bin> cargo test -p kastellan-db --test postgres_e2e set_skill_trust_flips_and_is_layer_guarded`
 Expected: 1 test PASS (or `[SKIP]` line if no PG — re-run with the bin dir set).
 
 - [ ] **Step 6: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-db --all-targets --locked -- -D warnings
+cargo clippy -p kastellan-db --all-targets --locked -- -D warnings
 git add db/src/memories/write.rs db/src/memories.rs db/tests/postgres_e2e.rs
 git commit -m "feat(db): set_skill_trust layer-guarded metadata UPDATE for L3 rows"
 ```
@@ -682,7 +682,7 @@ In `core/src/scheduler/audit.rs`'s `mod tests`, add:
 
 - [ ] **Step 2: Run — expect FAIL**
 
-Run: `cargo test -p hhagent-core --lib scheduler::audit::tests::l3_`
+Run: `cargo test -p kastellan-core --lib scheduler::audit::tests::l3_`
 Expected: compile error — builders not found.
 
 - [ ] **Step 3: Add constants + builders**
@@ -752,13 +752,13 @@ pub fn build_l3_revoked_payload(memory_id: i64, updated: bool) -> Value {
 
 - [ ] **Step 4: Run — expect PASS**
 
-Run: `cargo test -p hhagent-core --lib scheduler::audit::tests::l3_`
+Run: `cargo test -p kastellan-core --lib scheduler::audit::tests::l3_`
 Expected: 3 tests PASS.
 
 - [ ] **Step 5: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings
 git add core/src/scheduler/audit.rs
 git commit -m "feat(scheduler): l3 approve/revoke audit constants + payload builders"
 ```
@@ -797,12 +797,12 @@ pub async fn l3_approve_and_audit(
     skill_name: &str,
     body_sha256: &str,
     tools: &[String],
-) -> Result<i64, hhagent_db::DbError> {
+) -> Result<i64, kastellan_db::DbError> {
     use crate::memory::l3_approval::SkillTrust;
 
-    hhagent_db::memories::set_skill_trust(pool, memory_id, SkillTrust::UserApproved.as_str()).await?;
+    kastellan_db::memories::set_skill_trust(pool, memory_id, SkillTrust::UserApproved.as_str()).await?;
     let payload = build_l3_approved_payload(memory_id, skill_name, body_sha256, tools);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_APPROVED, payload,
     ).await {
         Ok(id) => id,
@@ -822,9 +822,9 @@ pub async fn l3_approve_rejected_audit(
     skill_name: Option<&str>,
     body_sha256: Option<&str>,
     reasons: &[String],
-) -> Result<i64, hhagent_db::DbError> {
+) -> Result<i64, kastellan_db::DbError> {
     let payload = build_l3_approve_rejected_payload(memory_id, skill_name, body_sha256, reasons);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_APPROVE_REJECTED, payload,
     ).await {
         Ok(id) => id,
@@ -842,12 +842,12 @@ pub async fn l3_approve_rejected_audit(
 pub async fn l3_revoke_and_audit(
     pool: &PgPool,
     memory_id: i64,
-) -> Result<(bool, i64), hhagent_db::DbError> {
+) -> Result<(bool, i64), kastellan_db::DbError> {
     use crate::memory::l3_approval::SkillTrust;
 
-    let updated = hhagent_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Untrusted.as_str()).await?;
+    let updated = kastellan_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Untrusted.as_str()).await?;
     let payload = build_l3_revoked_payload(memory_id, updated);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_REVOKED, payload,
     ).await {
         Ok(id) => id,
@@ -862,13 +862,13 @@ pub async fn l3_revoke_and_audit(
 
 - [ ] **Step 2: Build — expect PASS (no new unit test; e2e covers behaviour in Task 8)**
 
-Run: `cargo build -p hhagent-core`
+Run: `cargo build -p kastellan-core`
 Expected: compiles. (`PgPool` + `CLI_AUDIT_ACTOR` are already in scope in this file.)
 
 - [ ] **Step 3: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings
 git add core/src/cli_audit.rs
 git commit -m "feat(cli_audit): l3 approve / approve_rejected / revoke composers"
 ```
@@ -878,16 +878,16 @@ git commit -m "feat(cli_audit): l3 approve / approve_rejected / revoke composers
 ## Task 7: CLI `approve` + `revoke` subcommands + typed-trust list
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli/memory_l3.rs`
+- Modify: `core/src/bin/kastellan-cli/memory_l3.rs`
 
 - [ ] **Step 1: Update the router + usage**
 
-In `core/src/bin/hhagent-cli/memory_l3.rs`, change the `run_memory_l3` match + the empty-args usage line:
+In `core/src/bin/kastellan-cli/memory_l3.rs`, change the `run_memory_l3` match + the empty-args usage line:
 
 ```rust
 pub(crate) fn run_memory_l3(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli memory l3 <list|approve|revoke|remove> ...");
+        eprintln!("usage: kastellan-cli memory l3 <list|approve|revoke|remove> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -908,7 +908,7 @@ pub(crate) fn run_memory_l3(args: &[String]) -> ExitCode {
 In `memory_l3_list`, replace the `let trust = ...` line (currently `r.metadata.get("trust")...unwrap_or("?")`) with the fail-safe typed read:
 
 ```rust
-        let trust = hhagent_core::memory::l3_approval::SkillTrust::from_metadata_str(
+        let trust = kastellan_core::memory::l3_approval::SkillTrust::from_metadata_str(
             r.metadata.get("trust").and_then(|v| v.as_str()).unwrap_or(""),
         )
         .as_str();
@@ -923,9 +923,9 @@ Append to `memory_l3.rs`:
 /// when the daemon has never recorded one.
 async fn latest_registry_tools(
     pool: &sqlx::PgPool,
-) -> Result<Option<std::collections::BTreeSet<String>>, hhagent_db::DbError> {
-    use hhagent_core::memory::l3_approval::extract_tool_names;
-    use hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED;
+) -> Result<Option<std::collections::BTreeSet<String>>, kastellan_db::DbError> {
+    use kastellan_core::memory::l3_approval::extract_tool_names;
+    use kastellan_core::scheduler::audit::ACTION_REGISTRY_LOADED;
 
     let payload: Option<serde_json::Value> = sqlx::query_scalar(
         "SELECT payload FROM audit_log \
@@ -934,7 +934,7 @@ async fn latest_registry_tools(
     .bind(ACTION_REGISTRY_LOADED)
     .fetch_optional(pool)
     .await
-    .map_err(|e| hhagent_db::DbError::Query(format!("latest_registry_tools: {e}")))?;
+    .map_err(|e| kastellan_db::DbError::Query(format!("latest_registry_tools: {e}")))?;
 
     Ok(payload.map(|p| extract_tool_names(&p)))
 }
@@ -942,16 +942,16 @@ async fn latest_registry_tools(
 async fn memory_l3_approve(args: &[String]) -> ExitCode {
     use std::collections::BTreeSet;
 
-    use hhagent_core::cassandra::types::L3SkillCandidate;
-    use hhagent_core::cli_audit::{l3_approve_and_audit, l3_approve_rejected_audit};
-    use hhagent_core::memory::l3_approval::{evaluate_approval, ApprovalDecision, RejectReason};
-    use hhagent_db::memories::{fetch_by_ids, MemoryLayer};
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cassandra::types::L3SkillCandidate;
+    use kastellan_core::cli_audit::{l3_approve_and_audit, l3_approve_rejected_audit};
+    use kastellan_core::memory::l3_approval::{evaluate_approval, ApprovalDecision, RejectReason};
+    use kastellan_db::memories::{fetch_by_ids, MemoryLayer};
+    use kastellan_db::pool::connect_runtime_pool;
 
     let id_str = match args {
         [s] => s,
         _ => {
-            eprintln!("usage: hhagent-cli memory l3 approve <id>");
+            eprintln!("usage: kastellan-cli memory l3 approve <id>");
             return ExitCode::from(2);
         }
     };
@@ -1036,13 +1036,13 @@ async fn memory_l3_approve(args: &[String]) -> ExitCode {
 }
 
 async fn memory_l3_revoke(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::l3_revoke_and_audit;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::l3_revoke_and_audit;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let id_str = match args {
         [s] => s,
         _ => {
-            eprintln!("usage: hhagent-cli memory l3 revoke <id>");
+            eprintln!("usage: kastellan-cli memory l3 revoke <id>");
             return ExitCode::from(2);
         }
     };
@@ -1076,14 +1076,14 @@ async fn memory_l3_revoke(args: &[String]) -> ExitCode {
 
 - [ ] **Step 4: Build — expect PASS**
 
-Run: `cargo build -p hhagent-core --bin hhagent-cli`
-Expected: compiles. If `fetch_by_ids` is not re-exported at `hhagent_db::memories::fetch_by_ids`, check `db/src/memories.rs`'s `pub use search::{...}` and use the exact path (it is re-exported there).
+Run: `cargo build -p kastellan-core --bin kastellan-cli`
+Expected: compiles. If `fetch_by_ids` is not re-exported at `kastellan_db::memories::fetch_by_ids`, check `db/src/memories.rs`'s `pub use search::{...}` and use the exact path (it is re-exported there).
 
 - [ ] **Step 5: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings
-git add core/src/bin/hhagent-cli/memory_l3.rs
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings
+git add core/src/bin/kastellan-cli/memory_l3.rs
 git commit -m "feat(cli): memory l3 approve/revoke + typed-trust list"
 ```
 
@@ -1122,10 +1122,10 @@ fn skill_with_secret_ref() -> L3SkillCandidate {
 async fn seed_registry_loaded(pool: &sqlx::PgPool, tool_names: &[&str]) {
     let tools: Vec<serde_json::Value> =
         tool_names.iter().map(|n| serde_json::json!({ "name": n })).collect();
-    hhagent_db::audit::insert(
+    kastellan_db::audit::insert(
         pool,
         "core",
-        hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED,
+        kastellan_core::scheduler::audit::ACTION_REGISTRY_LOADED,
         serde_json::json!({ "tools": tools }),
     )
     .await
@@ -1146,7 +1146,7 @@ async fn cli_memory_l3_approve_happy() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-app-d", "cml3-app-l",
-        &format!("hhagent-postgres-cli-memory-l3-approve-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-approve-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_approve_happy"})).await.expect("probe");
@@ -1190,7 +1190,7 @@ async fn cli_memory_l3_approve_rejects_secret_ref() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-sec-d", "cml3-sec-l",
-        &format!("hhagent-postgres-cli-memory-l3-secret-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-secret-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_approve_rejects_secret_ref"})).await.expect("probe");
@@ -1239,7 +1239,7 @@ async fn cli_memory_l3_approve_fail_closed_no_snapshot() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-noc-d", "cml3-noc-l",
-        &format!("hhagent-postgres-cli-memory-l3-nosnap-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-nosnap-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_approve_fail_closed_no_snapshot"})).await.expect("probe");
@@ -1277,7 +1277,7 @@ async fn cli_memory_l3_revoke_after_approve() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "cml3-rev-d", "cml3-rev-l",
-        &format!("hhagent-postgres-cli-memory-l3-revoke-{suffix}"),
+        &format!("kastellan-postgres-cli-memory-l3-revoke-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "cli_memory_l3_revoke_after_approve"})).await.expect("probe");
@@ -1311,13 +1311,13 @@ async fn cli_memory_l3_revoke_after_approve() {
 
 - [ ] **Step 6: Run the e2e suite — expect PASS (PG live) or `[SKIP]`**
 
-Run: `HHAGENT_PG_BIN_DIR=<pg bin> cargo test -p hhagent-core --test cli_memory_l3_e2e`
+Run: `KASTELLAN_PG_BIN_DIR=<pg bin> cargo test -p kastellan-core --test cli_memory_l3_e2e`
 Expected: the 4 existing + 4 new scenarios PASS (or all `[SKIP]` without PG — then re-run with the bin dir).
 
 - [ ] **Step 7: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings
 git add core/tests/cli_memory_l3_e2e.rs
 git commit -m "test(cli): l3 approve/revoke subprocess e2e (happy, secret-ref, fail-closed, revoke)"
 ```
@@ -1336,7 +1336,7 @@ Expected: baseline 1177 + the new unit/db/e2e tests, 0 failed. Record the exact 
 
 - [ ] **Step 2: Full workspace test WITH live PG**
 
-Run: `HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/" cargo test --workspace`
+Run: `KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/" cargo test --workspace`
 Expected: the L3 approve/revoke e2e + `set_skill_trust` db e2e run green; only the known `embedding_recall_e2e`/`gliner_relex_e2e` initdb/pg_notify flake may appear (passes on retry; matches `main`).
 
 - [ ] **Step 3: Clippy gate (whole workspace)**
@@ -1346,7 +1346,7 @@ Expected: exit 0.
 
 - [ ] **Step 4: Doc-link check**
 
-Run: `RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links cargo doc -p hhagent-core --no-deps --document-private-items`
+Run: `RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links cargo doc -p kastellan-core --no-deps --document-private-items`
 Expected: same unresolved-link count as `main` (21); zero new. Fix any new `l3_approval`/`set_skill_trust` links flagged.
 
 - [ ] **Step 5: Update HANDOVER.md + ROADMAP.md**

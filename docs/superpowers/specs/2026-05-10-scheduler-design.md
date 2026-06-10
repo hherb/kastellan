@@ -23,7 +23,7 @@ Workload character: a senior emergency physician's personal agent. Interrupt-dri
 ## 2. Architecture overview
 
 ```
-                                  ┌──────────── hhagent (daemon process) ───────────────┐
+                                  ┌──────────── kastellan (daemon process) ───────────────┐
                                   │                                                       │
    producer (CLI / channel /      │                                                       │
    scheduled routine)             │  ┌──────── scheduler ───────────────────────────┐    │
@@ -44,8 +44,8 @@ Workload character: a senior emergency physician's personal agent. Interrupt-dri
        │ 'cancelled'              │  │                  │                                │  │
        │ (CLI cancel)             │  │                  ▼                                │  │
        │                          │  │   tool_host::dispatch (existing chokepoint, Option M)
-   hhagent-cli ask                │  │                  │                                │  │
-   hhagent-cli tasks ...          │  │                  ▼                                │  │
+   kastellan-cli ask                │  │                  │                                │  │
+   kastellan-cli tasks ...          │  │                  ▼                                │  │
                                   │  │   bwrap / sandbox-exec → worker process            │  │
                                   │  └────────────────────────────────────────────────────┘  │
                                   │                                                       │
@@ -58,7 +58,7 @@ Workload character: a senior emergency physician's personal agent. Interrupt-dri
 **Invariants this preserves**
 
 - **Dispatcher chokepoint** ([core/src/tool_host.rs](../../../core/src/tool_host.rs), Option M). Every tool call goes through `tool_host::dispatch`; `WorkerCommand` is sealed by a compile-fail doctest. The scheduler never constructs a `WorkerCommand` directly.
-- **Audit-log append-only at the DB-role layer** (Option L). The `hhagent_runtime` role has `SELECT, INSERT` on `audit_log`, never `UPDATE/DELETE`.
+- **Audit-log append-only at the DB-role layer** (Option L). The `kastellan_runtime` role has `SELECT, INSERT` on `audit_log`, never `UPDATE/DELETE`.
 - **Process-per-worker, sandbox-per-worker.** Each task gets its own `Workspace` and dispatches to its own worker process; the two lanes do not share workers.
 - **No in-process untrusted code.**
 
@@ -121,8 +121,8 @@ CREATE TRIGGER tasks_notify_completed
     AFTER UPDATE OF state ON tasks FOR EACH ROW
     EXECUTE FUNCTION notify_task_completed();
 
-GRANT SELECT, INSERT, UPDATE ON tasks TO hhagent_runtime;
-GRANT USAGE, SELECT ON SEQUENCE tasks_id_seq TO hhagent_runtime;
+GRANT SELECT, INSERT, UPDATE ON tasks TO kastellan_runtime;
+GRANT USAGE, SELECT ON SEQUENCE tasks_id_seq TO kastellan_runtime;
 ```
 
 ### 3.2 `payload` shape
@@ -152,7 +152,7 @@ All terminal. Every transition writes one `audit_log` row (`actor='scheduler'`, 
 
 ### 3.4 Lease semantics — single clock
 
-`lease_expires_at` is set at claim time to `now() + lane_deadline` and **never extended**. Wall-clock deadline and crash-liveness collapse into one column. Cost: a crashed long task sits in `state='running'` for up to `lane_deadline_long` (default 30 min) before a startup sweep reclaims it as `crashed`. Recovery latency is operational, not user-blocking; `hhagent-cli tasks fail <id>` is the manual override.
+`lease_expires_at` is set at claim time to `now() + lane_deadline` and **never extended**. Wall-clock deadline and crash-liveness collapse into one column. Cost: a crashed long task sits in `state='running'` for up to `lane_deadline_long` (default 30 min) before a startup sweep reclaims it as `crashed`. Recovery latency is operational, not user-blocking; `kastellan-cli tasks fail <id>` is the manual override.
 
 ### 3.5 Atomic claim
 
@@ -410,7 +410,7 @@ CREATE TABLE agent_prompts (
 CREATE INDEX agent_prompts_name_idx
     ON agent_prompts (name, first_loaded_at DESC);
 
-GRANT SELECT, INSERT ON agent_prompts TO hhagent_runtime;
+GRANT SELECT, INSERT ON agent_prompts TO kastellan_runtime;
 -- never UPDATE/DELETE; same append-only shape as audit_log
 ```
 
@@ -459,7 +459,7 @@ Payloads stay under the [Option I `PAYLOAD_MAX_BYTES = 4096` envelope](../../../
 
 ## 8. CLI / producer surface
 
-Extends the existing `hhagent-cli` binary (which currently has only `audit tail`).
+Extends the existing `kastellan-cli` binary (which currently has only `audit tail`).
 
 | Subcommand | Behaviour |
 |---|---|
@@ -472,7 +472,7 @@ Extends the existing `hhagent-cli` binary (which currently has only `audit tail`
 
 `ask` blocking has no CLI-side timeout; wall-clock is enforced by the daemon via the lease. CLI dies → task continues running → terminal state is observable via `tasks status` later. The right asymmetry for tasks-table-drain.
 
-**Output convention.** `tasks.result` is JSONB; `{kind: "text", body: "..."}` is the convention for ask-shaped tasks. `hhagent-cli ask` pretty-prints `kind=text`; falls back to JSON dump for unknown kinds.
+**Output convention.** `tasks.result` is JSONB; `{kind: "text", body: "..."}` is the convention for ask-shaped tasks. `kastellan-cli ask` pretty-prints `kind=text`; falls back to JSON dump for unknown kinds.
 
 **Future producers** (no scheduler-side change required):
 - Phase 2 channel adapter writes `{kind: 'channel_event', source: 'telegram', message_id: …, instruction: …, classification_floor: 'Personal'}` with `lane='long'` default.
@@ -488,15 +488,15 @@ Dependency-ordered commits. Each commit ships the *correct* thing for its scope;
 
 3. **Lane runners + crash recovery** — real lane runners with `PgListener` on `tasks_inserted` and `tasks_cancelled`, shutdown wiring, startup crash-sweep; `main.rs` integration. Two integration tests: `scheduler_lanes_e2e` (concurrent fast+long claim, timing-bounded); `scheduler_crash_recovery_e2e` (kill daemon mid-task, restart, assert `state='crashed'`).
 
-4. **CLI surface** — `hhagent-cli` subcommands. `cli_ask_e2e` (subprocess CLI happy path + SIGINT cancellation).
+4. **CLI surface** — `kastellan-cli` subcommands. `cli_ask_e2e` (subprocess CLI happy path + SIGINT cancellation).
 
 5. **Prompt-traceability ledger end-to-end** — `agent_prompts_e2e` (hash recorded on startup, edited prompt → second row, `plan.formulate` row carries hash). HANDOVER.md + ROADMAP.md updates. ROADMAP gains: "next: Stage -1 + Stage 0 implementations replace stubs in `core/src/cassandra/`, informed by observation-phase findings."
 
-**Synthetic load harness** — script under `scripts/observation/` that drives N concurrent `hhagent-cli ask` invocations against a configured local model. SQL queries against `audit_log` produce per-task / per-plan / per-step latency distributions. Ships in commit 5 unless deferred.
+**Synthetic load harness** — script under `scripts/observation/` that drives N concurrent `kastellan-cli ask` invocations against a configured local model. SQL queries against `audit_log` produce per-task / per-plan / per-step latency distributions. Ships in commit 5 unless deferred.
 
 **Observation phase** (deliberate non-coding hold after commit 5):
 
-- Local-model evaluation: drive a curated task corpus through different local models pinned via `HHAGENT_LLM_LOCAL_MODEL`. Compare success rate, plan quality, JSON-drift rate, latency distribution. Pin a chosen model.
+- Local-model evaluation: drive a curated task corpus through different local models pinned via `KASTELLAN_LLM_LOCAL_MODEL`. Compare success rate, plan quality, JSON-drift rate, latency distribution. Pin a chosen model.
 - Failure-mode catalogue: drive synthetic adversarial / clumsy / ambiguous instructions through the scheduler with stubs in place. Catalogue what the agent actually does. This becomes the design input for real Stage -1 + Stage 0 rules.
 - Latency baselining: p50 / p95 / p99 for plan formulation, dispatch, end-to-end. The numbers CASSANDRA's overhead will be measured against.
 
@@ -514,7 +514,7 @@ All integration tests use the existing per-test PG cluster recipe (see `db/tests
 | `core/tests/scheduler_inner_loop_e2e.rs` | `run_to_terminal` against scripted-router stub: happy path, tool-fail-then-replan, plan-cap exhausted, cancel mid-flight, decode-error → `Failed`. |
 | `core/tests/scheduler_lanes_e2e.rs` | Two `pending` tasks (one per lane) run concurrently; `tasks_completed` NOTIFY fires for each. |
 | `core/tests/scheduler_crash_recovery_e2e.rs` | Plant `pending`, claim, kill daemon mid-flight, restart, assert `state='crashed'`. |
-| `core/tests/cli_ask_e2e.rs` | Subprocess `hhagent-cli ask` happy path; SIGINT during execution → `state='cancelled'`, exit non-zero, worker dead. |
+| `core/tests/cli_ask_e2e.rs` | Subprocess `kastellan-cli ask` happy path; SIGINT during execution → `state='cancelled'`, exit non-zero, worker dead. |
 | `core/tests/agent_prompts_e2e.rs` | Hash recorded on startup; edited content → second row; `plan.formulate` row carries the matching hash. |
 | `core/src/cassandra/` unit tests | `Verdict` exhaustiveness; `ChainReviewStage` short-circuit (Approve → Approve → Block ⇒ Block, never bypass); audit-log row emission per stage. |
 
@@ -550,7 +550,7 @@ All integration tests use the existing per-test PG cluster recipe (see `db/tests
 
 ## 13. Verification overview
 
-End-to-end happy path: `hhagent-cli ask "ping"` → CLI INSERTs row → fast lane runner wakes via `tasks_inserted` NOTIFY → claims atomically → `formulate_plan` produces a `task_complete` plan via the stub-scripted router → `ChainReviewStage` returns `Approve` → loop returns `Completed` → `finalize` UPDATEs `state='completed'` → `tasks_completed` NOTIFY fires → CLI subscribed listener wakes → CLI prints `result.body` and exits 0. All intermediate steps emit the audit-log payload schemas pinned in §7.
+End-to-end happy path: `kastellan-cli ask "ping"` → CLI INSERTs row → fast lane runner wakes via `tasks_inserted` NOTIFY → claims atomically → `formulate_plan` produces a `task_complete` plan via the stub-scripted router → `ChainReviewStage` returns `Approve` → loop returns `Completed` → `finalize` UPDATEs `state='completed'` → `tasks_completed` NOTIFY fires → CLI subscribed listener wakes → CLI prints `result.body` and exits 0. All intermediate steps emit the audit-log payload schemas pinned in §7.
 
 Cross-platform: same flow runs green on Linux (bwrap + Landlock + seccomp) and macOS (sandbox-exec) because all platform-specific code lives in `tool_host::dispatch`'s sandbox layer, which is already cross-platform green.
 

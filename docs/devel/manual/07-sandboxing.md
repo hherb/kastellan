@@ -1,6 +1,6 @@
 # 7 — Sandboxing explained
 
-This chapter explains what sandboxing is and how hhagent uses it, without
+This chapter explains what sandboxing is and how kastellan uses it, without
 assuming prior kernel or security engineering experience.
 
 ---
@@ -17,7 +17,7 @@ the room (all other doors are locked by the OS kernel, not by the application).
 
 ---
 
-## Why does hhagent sandbox its workers?
+## Why does kastellan sandbox its workers?
 
 The agent runs untrusted code in workers: arbitrary shell commands, Python
 scripts, web fetches triggered by content the agent read online. Any of these
@@ -33,7 +33,7 @@ If a worker is compromised, the sandbox limits the damage to:
 
 ## The two layers of containment
 
-hhagent uses **two independent sandbox layers per worker**. The idea is that
+kastellan uses **two independent sandbox layers per worker**. The idea is that
 if one layer has a bug, the other still holds.
 
 ### Layer 1: Parent-side sandbox (bwrap on Linux, sandbox-exec on macOS)
@@ -56,7 +56,7 @@ should be allowed to do. The platform-specific code translates that policy.
 ### Layer 2: Worker-side sandbox (Landlock + seccomp on Linux)
 
 After the worker process starts, it installs a *second* layer on itself before
-serving any JSON-RPC request. It calls `hhagent_worker_prelude::serve_stdio`,
+serving any JSON-RPC request. It calls `kastellan_worker_prelude::serve_stdio`,
 which:
 
 1. Applies **Landlock** — a kernel mechanism that restricts which files the
@@ -79,7 +79,7 @@ needs via `SandboxPolicy`:
 ```rust
 SandboxPolicy {
     fs_read: vec!["/usr", "/lib"],           // directories the worker can read
-    fs_write: vec!["/tmp/hhagent/task-42"],  // directories it can write
+    fs_write: vec!["/tmp/kastellan/task-42"],  // directories it can write
     net: Net::Deny,                          // no network
     mem_mb: Some(256),                       // memory cap
     cpu_ms: None,                            // no CPU cap
@@ -119,7 +119,7 @@ false positive.**
 Always verify:
 
 ```sh
-cargo test -p hhagent-sandbox -- --nocapture 2>&1 | grep -E '\[SKIP\]|ok'
+cargo test -p kastellan-sandbox -- --nocapture 2>&1 | grep -E '\[SKIP\]|ok'
 ```
 
 You want to see `ok` lines, not `[SKIP]` lines.

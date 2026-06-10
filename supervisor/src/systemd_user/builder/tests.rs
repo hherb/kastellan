@@ -27,7 +27,7 @@ fn minimal_spec(name: &str) -> ServiceSpec {
 
 #[test]
 fn build_unit_file_emits_three_sections_in_order() {
-    let s = build_unit_file(&minimal_spec("hhagent"));
+    let s = build_unit_file(&minimal_spec("kastellan"));
     let unit = s.find("[Unit]").expect("[Unit]");
     let svc = s.find("[Service]").expect("[Service]");
     let install = s.find("[Install]").expect("[Install]");
@@ -37,9 +37,9 @@ fn build_unit_file_emits_three_sections_in_order() {
 
 #[test]
 fn build_unit_file_description_includes_name() {
-    let s = build_unit_file(&minimal_spec("hhagent-core"));
+    let s = build_unit_file(&minimal_spec("kastellan-core"));
     assert!(
-        s.contains("Description=hhagent service: hhagent-core"),
+        s.contains("Description=kastellan service: kastellan-core"),
         "missing Description, got:\n{s}"
     );
 }
@@ -98,9 +98,9 @@ fn build_unit_file_quotes_environment_values_with_spaces() {
 #[test]
 fn build_unit_file_emits_working_directory_when_set() {
     let mut spec = minimal_spec("svc");
-    spec.working_dir = Some(PathBuf::from("/var/lib/hhagent"));
+    spec.working_dir = Some(PathBuf::from("/var/lib/kastellan"));
     let s = build_unit_file(&spec);
-    assert!(s.contains("WorkingDirectory=/var/lib/hhagent"), "{s}");
+    assert!(s.contains("WorkingDirectory=/var/lib/kastellan"), "{s}");
 }
 
 #[test]
@@ -187,13 +187,13 @@ fn build_unit_file_install_section_wants_default_target() {
 
 #[test]
 fn unit_file_emits_after_and_part_of_when_set() {
-    let mut spec = minimal_spec("hhagent-core");
-    spec.after = vec!["hhagent-postgres".into()];
-    spec.part_of = Some("hhagent".into());
+    let mut spec = minimal_spec("kastellan-core");
+    spec.after = vec!["kastellan-postgres".into()];
+    spec.part_of = Some("kastellan".into());
     let body = build_unit_file(&spec);
-    assert!(body.contains("After=hhagent-postgres.service\n"), "{body}");
-    assert!(body.contains("PartOf=hhagent.target\n"), "{body}");
-    assert!(body.contains("WantedBy=hhagent.target\n"), "{body}");
+    assert!(body.contains("After=kastellan-postgres.service\n"), "{body}");
+    assert!(body.contains("PartOf=kastellan.target\n"), "{body}");
+    assert!(body.contains("WantedBy=kastellan.target\n"), "{body}");
     assert!(!body.contains("WantedBy=default.target\n"), "target member must not target default.target: {body}");
 }
 
@@ -210,13 +210,13 @@ fn unit_file_unchanged_when_ordering_unset() {
 #[test]
 fn target_unit_wants_all_members() {
     let t = TargetSpec {
-        name: "hhagent".into(),
-        members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+        name: "kastellan".into(),
+        members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
     };
     let body = build_target_unit(&t);
     assert!(body.starts_with("[Unit]\n"), "{body}");
     assert!(
-        body.contains("Wants=hhagent-postgres.service hhagent-core.service\n"),
+        body.contains("Wants=kastellan-postgres.service kastellan-core.service\n"),
         "{body}"
     );
     assert!(body.contains("[Install]\nWantedBy=default.target\n"), "{body}");
@@ -226,7 +226,7 @@ fn target_unit_wants_all_members() {
 
 #[test]
 fn validate_service_name_accepts_typical_names() {
-    for n in &["hhagent", "hhagent-core", "hhagent.core", "a_b", "abc123"] {
+    for n in &["kastellan", "kastellan-core", "kastellan.core", "a_b", "abc123"] {
         validate_service_name(n).expect(n);
     }
 }

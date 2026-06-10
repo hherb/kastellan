@@ -19,7 +19,7 @@
 //! worker
 //!
 //! Three memories are seeded with bodies that share no surface words.
-//! [`hhagent_tests_common::text_to_embedding`] hashes each body with
+//! [`kastellan_tests_common::text_to_embedding`] hashes each body with
 //! SHA-256 and uses the digest to seed a deterministic pseudo-random
 //! unit vector of length `EMBEDDING_DIM`. Same text → same vector →
 //! cosine 1.0; different texts → near-orthogonal vectors.
@@ -29,9 +29,9 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::memory::{recall, RecallModes, RecallParams};
-use hhagent_db::memories::{insert_memory, lexical_search, semantic_search, EMBEDDING_DIM};
-use hhagent_tests_common::{
+use kastellan_core::memory::{recall, RecallModes, RecallParams};
+use kastellan_db::memories::{insert_memory, lexical_search, semantic_search, EMBEDDING_DIM};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, text_to_embedding,
     unique_suffix,
 };
@@ -69,7 +69,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
         &bin_dir,
         "recall-d",
         "recall-l",
-        &format!("hhagent-supervisor-test-pg-recall-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-recall-{suffix}"),
     );
 
     // recall is async + uses sqlx — needs a real tokio runtime.
@@ -82,7 +82,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
     rt.block_on(async {
         // Probe applies migrations 0001 + 0002 + 0003 + 0004 and writes
         // the bring-up audit row.
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -91,7 +91,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 
@@ -213,7 +213,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
         //
         // alice owns cat (relation); bob is unconnected.
         // id_a is tagged with {alice, cat}; id_b with {cat}; id_c with {bob}.
-        use hhagent_db::graph::{Graph, PgGraph};
+        use kastellan_db::graph::{Graph, PgGraph};
         let graph_g = PgGraph::new(&pool);
         let alice_id = graph_g
             .upsert_entity("person", "alice", &serde_json::json!({}))
@@ -232,13 +232,13 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             .await
             .expect("upsert relation");
 
-        hhagent_db::memories::link_memory_to_entities(&pool, id_a, &[alice_id, cat_id])
+        kastellan_db::memories::link_memory_to_entities(&pool, id_a, &[alice_id, cat_id])
             .await
             .expect("link id_a");
-        hhagent_db::memories::link_memory_to_entities(&pool, id_b, &[cat_id])
+        kastellan_db::memories::link_memory_to_entities(&pool, id_b, &[cat_id])
             .await
             .expect("link id_b");
-        hhagent_db::memories::link_memory_to_entities(&pool, id_c, &[bob_id])
+        kastellan_db::memories::link_memory_to_entities(&pool, id_c, &[bob_id])
             .await
             .expect("link id_c");
 
@@ -348,7 +348,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
         // memory hits even though LEAF_COUNT > cap candidates exist.
         // This pins the *behaviour* of the cap (the constant itself is
         // pinned in unit tests).
-        use hhagent_core::memory::GRAPH_FANOUT_CAP_PER_SEED;
+        use kastellan_core::memory::GRAPH_FANOUT_CAP_PER_SEED;
         let cap_usize = GRAPH_FANOUT_CAP_PER_SEED as usize;
         let leaf_count: usize = cap_usize + 8; // strictly greater than cap
         let hub_id = graph_g
@@ -364,7 +364,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
                 .upsert_relation(hub_id, leaf_id, "knows", &serde_json::json!({}))
                 .await
                 .expect("upsert hub→leaf");
-            let leaf_mem = hhagent_db::memories::insert_memory(
+            let leaf_mem = kastellan_db::memories::insert_memory(
                 &pool,
                 &format!("body-leaf-{i}"),
                 &serde_json::json!({}),
@@ -372,7 +372,7 @@ fn recall_seeds_three_docs_and_ranks_target_first_per_mode_and_fused() {
             )
             .await
             .expect("insert leaf memory");
-            hhagent_db::memories::link_memory_to_entities(&pool, leaf_mem, &[leaf_id])
+            kastellan_db::memories::link_memory_to_entities(&pool, leaf_mem, &[leaf_id])
                 .await
                 .expect("link leaf memory");
         }
@@ -438,10 +438,10 @@ async fn recall_graph_lane_lights_up_after_operator_approve_and_reject() {
         &bin_dir,
         "recall-ql-d",
         "recall-ql-l",
-        &format!("hhagent-postgres-recall-quarantine-lane-{suffix}"),
+        &format!("kastellan-postgres-recall-quarantine-lane-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -450,14 +450,14 @@ async fn recall_graph_lane_lights_up_after_operator_approve_and_reject() {
     .await
     .expect("probe run");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("connect runtime pool");
 
-    use hhagent_core::cli_audit::{entities_approve_and_audit, entities_reject_and_audit};
-    use hhagent_db::entities::{ApproveOutcome, RejectOutcome};
-    use hhagent_db::memories::insert_memory_at_layer;
-    use hhagent_db::memories::MemoryLayer;
+    use kastellan_core::cli_audit::{entities_approve_and_audit, entities_reject_and_audit};
+    use kastellan_db::entities::{ApproveOutcome, RejectOutcome};
+    use kastellan_db::memories::insert_memory_at_layer;
+    use kastellan_db::memories::MemoryLayer;
 
     // Seed quarantined entities — deliberately do NOT call
     // unquarantine_all_entities here. The whole point of the test

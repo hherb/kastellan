@@ -4,7 +4,7 @@
 
 **Goal:** Wire a free-text query through a new `Router::embed` method to the existing semantic-recall lane, writing the first `actor='llm:router'` audit-log row in the system.
 
-**Architecture:** New embedding HTTP path inside `hhagent-llm-router` (in core's process, mirroring the existing `Router::send` precedent — no sandboxed worker). New caller helper `core::memory::embed_query(pool, router, text)` that calls `Router::embed`, validates dim, writes the audit row, returns `Vec<f32>`. `recall`'s signature is unchanged; callers compose `embed_query` then `recall`.
+**Architecture:** New embedding HTTP path inside `kastellan-llm-router` (in core's process, mirroring the existing `Router::send` precedent — no sandboxed worker). New caller helper `core::memory::embed_query(pool, router, text)` that calls `Router::embed`, validates dim, writes the audit row, returns `Vec<f32>`. `recall`'s signature is unchanged; callers compose `embed_query` then `recall`.
 
 **Tech Stack:** Rust 1.75+, sqlx, reqwest (rustls), thiserror, serde, tokio. Per-test Postgres cluster for the full-flow e2e (PG 18 + pgvector, peer auth on UDS). Hand-rolled `tokio::net::TcpListener` mock for backend HTTP (no `httpmock` / `wiremock` dev-dep). Spec: [`docs/superpowers/specs/2026-05-11-embedding-router-design.md`](../specs/2026-05-11-embedding-router-design.md).
 
@@ -213,7 +213,7 @@ pub mod policy;
 Run:
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-llm-router --lib embeddings
+cargo test -p kastellan-llm-router --lib embeddings
 ```
 
 Expected: 6 tests pass (the 6 in the `#[cfg(test)] mod tests` block above).
@@ -283,7 +283,7 @@ fn embedding_count_mismatch_error_carries_expected_and_returned() {
 
 Run:
 ```sh
-cargo test -p hhagent-llm-router --lib error::tests::embedding_count_mismatch
+cargo test -p kastellan-llm-router --lib error::tests::embedding_count_mismatch
 ```
 
 Expected: build error — `RouterError::EmbeddingCountMismatch` variant does not exist.
@@ -300,7 +300,7 @@ In `llm-router/src/error.rs`, add a new variant to the `RouterError` enum (after
 - [ ] **Step 2.4: Run test to verify it passes**
 
 ```sh
-cargo test -p hhagent-llm-router --lib error::tests
+cargo test -p kastellan-llm-router --lib error::tests
 ```
 
 Expected: 4 tests pass (3 existing + 1 new).
@@ -357,20 +357,20 @@ fn router_config_from_env_reads_embedding_url_when_set() {
     // Use the existing env-lock helper if your codebase ships one;
     // until then, a thread-local std::env::set_var/remove_var pair is
     // accepted (matches existing tests in this module).
-    std::env::remove_var("HHAGENT_LLM_LOCAL_URL");
-    std::env::set_var("HHAGENT_LLM_EMBEDDING_URL", "http://127.0.0.1:9999/v1");
+    std::env::remove_var("KASTELLAN_LLM_LOCAL_URL");
+    std::env::set_var("KASTELLAN_LLM_EMBEDDING_URL", "http://127.0.0.1:9999/v1");
     let cfg = RouterConfig::from_env().expect("env parse");
     assert_eq!(cfg.embedding_url, "http://127.0.0.1:9999/v1");
-    std::env::remove_var("HHAGENT_LLM_EMBEDDING_URL");
+    std::env::remove_var("KASTELLAN_LLM_EMBEDDING_URL");
 }
 
 #[test]
 fn router_config_from_env_reads_embedding_model_when_set() {
-    std::env::remove_var("HHAGENT_LLM_LOCAL_MODEL");
-    std::env::set_var("HHAGENT_LLM_EMBEDDING_MODEL", "BAAI/bge-m3");
+    std::env::remove_var("KASTELLAN_LLM_LOCAL_MODEL");
+    std::env::set_var("KASTELLAN_LLM_EMBEDDING_MODEL", "BAAI/bge-m3");
     let cfg = RouterConfig::from_env().expect("env parse");
     assert_eq!(cfg.embedding_model, "BAAI/bge-m3");
-    std::env::remove_var("HHAGENT_LLM_EMBEDDING_MODEL");
+    std::env::remove_var("KASTELLAN_LLM_EMBEDDING_MODEL");
 }
 ```
 
@@ -379,7 +379,7 @@ fn router_config_from_env_reads_embedding_model_when_set() {
 - [ ] **Step 3.2: Run tests to verify they fail**
 
 ```sh
-cargo test -p hhagent-llm-router --lib config::tests::router_config_default_embedding
+cargo test -p kastellan-llm-router --lib config::tests::router_config_default_embedding
 ```
 
 Expected: build error — `embedding_url` / `embedding_model` fields do not exist on `RouterConfig`.
@@ -400,7 +400,7 @@ pub struct RouterConfig {
     /// Default model name passed in the `model` field of
     /// `POST /embeddings`. Defaults to `"embedding-default"` — a
     /// placeholder that vLLM will reject with 4xx in production,
-    /// forcing the operator to set `HHAGENT_LLM_EMBEDDING_MODEL`
+    /// forcing the operator to set `KASTELLAN_LLM_EMBEDDING_MODEL`
     /// explicitly (loud failure preferred to silent fallback).
     pub embedding_model: String,
     pub frontier_url: Option<String>,
@@ -440,28 +440,28 @@ Modify `from_env` (line 96-116) to read the two new env vars. Place these reads 
     pub fn from_env() -> Result<Self, RouterError> {
         let mut cfg = Self::default();
 
-        if let Some(v) = read_env("HHAGENT_LLM_LOCAL_URL")? {
+        if let Some(v) = read_env("KASTELLAN_LLM_LOCAL_URL")? {
             cfg.local_url = v.clone();
             // local_url change also drives the embedding fallback —
             // re-sync embedding_url unless the operator has already
             // overridden it explicitly below.
             cfg.embedding_url = v;
         }
-        if let Some(v) = read_env("HHAGENT_LLM_LOCAL_MODEL")? {
+        if let Some(v) = read_env("KASTELLAN_LLM_LOCAL_MODEL")? {
             cfg.local_model = v;
         }
-        if let Some(v) = read_env("HHAGENT_LLM_EMBEDDING_URL")? {
+        if let Some(v) = read_env("KASTELLAN_LLM_EMBEDDING_URL")? {
             cfg.embedding_url = v;
         }
-        if let Some(v) = read_env("HHAGENT_LLM_EMBEDDING_MODEL")? {
+        if let Some(v) = read_env("KASTELLAN_LLM_EMBEDDING_MODEL")? {
             cfg.embedding_model = v;
         }
-        cfg.frontier_url = read_env("HHAGENT_LLM_FRONTIER_URL")?;
-        cfg.frontier_model = read_env("HHAGENT_LLM_FRONTIER_MODEL")?;
-        if let Some(v) = read_env("HHAGENT_LLM_TIMEOUT_MS")? {
+        cfg.frontier_url = read_env("KASTELLAN_LLM_FRONTIER_URL")?;
+        cfg.frontier_model = read_env("KASTELLAN_LLM_FRONTIER_MODEL")?;
+        if let Some(v) = read_env("KASTELLAN_LLM_TIMEOUT_MS")? {
             let ms: u64 = v.parse().map_err(|_| {
                 RouterError::Config(format!(
-                    "HHAGENT_LLM_TIMEOUT_MS must be a non-negative integer, got {v:?}"
+                    "KASTELLAN_LLM_TIMEOUT_MS must be a non-negative integer, got {v:?}"
                 ))
             })?;
             cfg.timeout = Duration::from_millis(ms);
@@ -475,7 +475,7 @@ Also update the module-level env-vars doc table (top of file, around lines 19-25
 - [ ] **Step 3.4: Run tests to verify they pass**
 
 ```sh
-cargo test -p hhagent-llm-router --lib config::tests
+cargo test -p kastellan-llm-router --lib config::tests
 ```
 
 Expected: 4 new tests pass (plus existing tests still pass).
@@ -496,9 +496,9 @@ git commit -m "$(cat <<'EOF'
 feat(llm-router): embedding_url/embedding_model fields + env (Option O step 3)
 
 Two new fields on RouterConfig with two new env vars:
-- HHAGENT_LLM_EMBEDDING_URL — falls back to HHAGENT_LLM_LOCAL_URL,
+- KASTELLAN_LLM_EMBEDDING_URL — falls back to KASTELLAN_LLM_LOCAL_URL,
   then per-OS default. Lets Ollama-on-macOS work with one URL set.
-- HHAGENT_LLM_EMBEDDING_MODEL — defaults to "embedding-default"
+- KASTELLAN_LLM_EMBEDDING_MODEL — defaults to "embedding-default"
   placeholder that vLLM rejects with 4xx, forcing operators to set
   the production model explicitly.
 
@@ -555,7 +555,7 @@ fn custom_policy_inherits_pick_embed_default_when_only_pick_is_overridden() {
 - [ ] **Step 4.2: Run tests to verify they fail**
 
 ```sh
-cargo test -p hhagent-llm-router --lib policy::tests::default_local_policy_pick_embed
+cargo test -p kastellan-llm-router --lib policy::tests::default_local_policy_pick_embed
 ```
 
 Expected: build error — `pick_embed` method does not exist on `PolicyGate`.
@@ -585,7 +585,7 @@ Update the module-level docstring to mention the new method exists alongside `pi
 - [ ] **Step 4.4: Run tests to verify they pass**
 
 ```sh
-cargo test -p hhagent-llm-router --lib policy::tests
+cargo test -p kastellan-llm-router --lib policy::tests
 ```
 
 Expected: 4 tests pass (2 existing + 2 new).
@@ -641,8 +641,8 @@ Create `llm-router/tests/embedding_backend_e2e.rs` with this content (mock helpe
 
 use std::time::Duration;
 
-use hhagent_llm_router::embeddings::{EmbeddingRequest, EmbeddingResponse};
-use hhagent_llm_router::{Router, RouterConfig, RouterError};
+use kastellan_llm_router::embeddings::{EmbeddingRequest, EmbeddingResponse};
+use kastellan_llm_router::{Router, RouterConfig, RouterError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -863,7 +863,7 @@ async fn embed_decode_error_when_body_is_not_embedding_response() {
 - [ ] **Step 5.2: Run tests to verify they fail**
 
 ```sh
-cargo test -p hhagent-llm-router --test embedding_backend_e2e
+cargo test -p kastellan-llm-router --test embedding_backend_e2e
 ```
 
 Expected: build error — `Router::embed` method does not exist.
@@ -929,7 +929,7 @@ Add the `Router::embed` method to the `impl Router` block (after `send` at line 
     ) -> Result<EmbeddingResponse, RouterError> {
         let url = compose_url(&self.config.embedding_url, EMBEDDINGS_PATH);
         tracing::debug!(
-            target: "hhagent::llm_router",
+            target: "kastellan::llm_router",
             backend = "local",
             url = %url,
             model = %request.model,
@@ -988,8 +988,8 @@ not load-bearing.
 - [ ] **Step 5.4: Run tests to verify they pass**
 
 ```sh
-cargo test -p hhagent-llm-router --test embedding_backend_e2e
-cargo test -p hhagent-llm-router --lib
+cargo test -p kastellan-llm-router --test embedding_backend_e2e
+cargo test -p kastellan-llm-router --lib
 ```
 
 Expected: 4 integration tests + all existing unit tests pass. (Integration count: 4 new. Unit count: unchanged from end of Task 4.)
@@ -1081,7 +1081,7 @@ Append to the `#[cfg(test)] mod tests` block at the bottom of `core/src/memory.r
 - [ ] **Step 6.2: Run tests to verify they fail**
 
 ```sh
-cargo test -p hhagent-core --lib memory::tests::embed_audit_payload
+cargo test -p kastellan-core --lib memory::tests::embed_audit_payload
 ```
 
 Expected: build error — `build_embed_audit_payload` does not exist.
@@ -1128,7 +1128,7 @@ pub(crate) fn build_embed_audit_payload(
 - [ ] **Step 6.4: Run tests to verify they pass**
 
 ```sh
-cargo test -p hhagent-core --lib memory::tests::embed_audit_payload
+cargo test -p kastellan-core --lib memory::tests::embed_audit_payload
 ```
 
 Expected: 3 new tests pass.
@@ -1177,8 +1177,8 @@ Create `core/tests/embedding_recall_e2e.rs`. Copy these helpers verbatim from th
 Then add a small Router-builder helper specific to this test:
 
 ```rust
-fn build_router_pointing_at(base_url: &str) -> hhagent_llm_router::Router {
-    use hhagent_llm_router::{Router, RouterConfig};
+fn build_router_pointing_at(base_url: &str) -> kastellan_llm_router::Router {
+    use kastellan_llm_router::{Router, RouterConfig};
     use std::time::Duration;
     let cfg = RouterConfig {
         local_url: base_url.to_string(),
@@ -1336,10 +1336,10 @@ Use this top-of-file content for imports:
 ```rust
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::memory::{embed_query, recall, MemoryError, RecallModes, RecallParams};
-use hhagent_db::memories::{insert_memory, EMBEDDING_DIM};
-use hhagent_llm_router::embeddings::EmbeddingRequest;
-use hhagent_llm_router::{Router, RouterConfig};
+use kastellan_core::memory::{embed_query, recall, MemoryError, RecallModes, RecallParams};
+use kastellan_db::memories::{insert_memory, EMBEDDING_DIM};
+use kastellan_llm_router::embeddings::EmbeddingRequest;
+use kastellan_llm_router::{Router, RouterConfig};
 // ... plus everything memory_recall_e2e.rs imports for PG bring-up ...
 ```
 
@@ -1348,7 +1348,7 @@ use hhagent_llm_router::{Router, RouterConfig};
 - [ ] **Step 7.2: Run tests to verify they fail**
 
 ```sh
-cargo test -p hhagent-core --test embedding_recall_e2e
+cargo test -p kastellan-core --test embedding_recall_e2e
 ```
 
 Expected: build error — `embed_query`, `MemoryError`, and `MemoryError::EmbeddingDimMismatch` do not exist in `core::memory`.
@@ -1358,9 +1358,9 @@ Expected: build error — `embed_query`, `MemoryError`, and `MemoryError::Embedd
 In `core/src/memory.rs`, near the top after the existing `use` block, add:
 
 ```rust
-use hhagent_db::audit;
-use hhagent_llm_router::embeddings::EmbeddingRequest;
-use hhagent_llm_router::{Router, RouterError};
+use kastellan_db::audit;
+use kastellan_llm_router::embeddings::EmbeddingRequest;
+use kastellan_llm_router::{Router, RouterError};
 use std::time::Instant;
 
 /// Errors returned by `core::memory` helpers that touch the LLM
@@ -1374,7 +1374,7 @@ pub enum MemoryError {
     #[error("router: {0}")]
     Router(#[from] RouterError),
     #[error("db: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
     #[error("audit insert: {0}")]
     AuditSqlx(#[from] sqlx::Error),
     #[error("embedding dim mismatch: expected {expected}, got {actual} from model {model}")]
@@ -1452,7 +1452,7 @@ pub async fn embed_query(
     let payload = build_embed_audit_payload(&req.model, 1, EMBEDDING_DIM, "local", latency_ms);
     if let Err(e) = audit::insert(pool, "llm:router", "embed", payload).await {
         tracing::error!(
-            target: "hhagent::memory",
+            target: "kastellan::memory",
             error = %e,
             "embed_query audit insert failed; embedding result preserved"
         );
@@ -1467,7 +1467,7 @@ If `core/src/memory.rs` imports list does not already include the right items, t
 - [ ] **Step 7.4: Run tests to verify they pass**
 
 ```sh
-cargo test -p hhagent-core --test embedding_recall_e2e
+cargo test -p kastellan-core --test embedding_recall_e2e
 ```
 
 Expected: 4 integration tests pass (or `[SKIP]` cleanly on macOS without PG).
@@ -1475,7 +1475,7 @@ Expected: 4 integration tests pass (or `[SKIP]` cleanly on macOS without PG).
 Run 5× determinism check (the cli_ask_e2e precedent):
 
 ```sh
-for i in 1 2 3 4 5; do cargo test -p hhagent-core --test embedding_recall_e2e || break; done
+for i in 1 2 3 4 5; do cargo test -p kastellan-core --test embedding_recall_e2e || break; done
 ```
 
 Expected: 5/5 green runs.

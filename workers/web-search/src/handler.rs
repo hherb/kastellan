@@ -5,12 +5,12 @@
 //! (`from_env`); each call re-checks the host (defense in depth). Errors map
 //! onto the protocol code vocabulary. No silent fallbacks.
 
-use hhagent_protocol::{codes, server::Handler, RpcError};
+use kastellan_protocol::{codes, server::Handler, RpcError};
 use serde::Deserialize;
 use url::Url;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
-use hhagent_worker_web_common::http::{HttpGet, ReqwestGet};
+use kastellan_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::http::{HttpGet, ReqwestGet};
 
 use crate::search::{search, validate_endpoint, SearchError, DEFAULT_COUNT};
 
@@ -68,14 +68,14 @@ impl WebSearchHandler<ReqwestGet> {
     /// Validates the endpoint up front and fails closed (the worker never
     /// serves) if it is missing, unparseable, wrong-scheme, or off-allowlist.
     pub fn from_env() -> anyhow::Result<Self> {
-        let endpoint_raw = std::env::var("HHAGENT_WEB_SEARCH_ENDPOINT")
-            .map_err(|_| anyhow::anyhow!("HHAGENT_WEB_SEARCH_ENDPOINT not set"))?;
+        let endpoint_raw = std::env::var("KASTELLAN_WEB_SEARCH_ENDPOINT")
+            .map_err(|_| anyhow::anyhow!("KASTELLAN_WEB_SEARCH_ENDPOINT not set"))?;
         let allow_raw =
-            std::env::var("HHAGENT_WEB_SEARCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
+            std::env::var("KASTELLAN_WEB_SEARCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
         let allowlist = HostAllowlist::from_env_json(&allow_raw)?;
         let endpoint = validate_endpoint(&endpoint_raw, &allowlist)
             .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
-        let transport = ReqwestGet::new("hhagent-web-search/0")?;
+        let transport = ReqwestGet::new("kastellan-web-search/0")?;
         Ok(Self { endpoint, allowlist, transport })
     }
 }
@@ -118,8 +118,8 @@ impl<T: HttpGet> Handler for WebSearchHandler<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhagent_worker_web_common::http::RawResponse;
-    use hhagent_worker_web_common::testing::{al, json_resp, FakeGet};
+    use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::testing::{al, json_resp, FakeGet};
 
     fn handler(responses: Vec<RawResponse>) -> WebSearchHandler<FakeGet> {
         WebSearchHandler::with_parts(

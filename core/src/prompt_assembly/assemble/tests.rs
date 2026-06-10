@@ -1,6 +1,6 @@
     use super::*;
     use crate::recall_assembly::RecalledContext;
-    use hhagent_db::memories::{Memory, MemoryLayer};
+    use kastellan_db::memories::{Memory, MemoryLayer};
     use time::OffsetDateTime;
 
     /// Construct a minimal `Memory` for tests. `id` is set to a stable

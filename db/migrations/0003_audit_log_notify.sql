@@ -10,7 +10,7 @@
 --   * Each NOTIFY carries the new row's `id` as text. The listener
 --     fetches the row by id (a single-row index lookup on
 --     `audit_log_pkey`) and appends it to
---     `~/.local/state/hhagent/audit-YYYY-MM-DD.jsonl` (UTC date,
+--     `~/.local/state/kastellan/audit-YYYY-MM-DD.jsonl` (UTC date,
 --     fsync per write, daily rotation).
 --   * Sole-source-of-truth: every operator-visible audit line on disk
 --     comes from a row that committed in the database. There is no
@@ -44,7 +44,7 @@
 -- can't return the trigger's NEW record in PG.
 --
 -- `SECURITY INVOKER` (the default) means the function runs with the
--- privileges of whatever role is INSERTing — `hhagent_runtime` in the
+-- privileges of whatever role is INSERTing — `kastellan_runtime` in the
 -- production path. `pg_notify()` is callable by any role; no
 -- privilege escalation needed.
 --

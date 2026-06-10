@@ -52,7 +52,7 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
         // internal per-layer caps. Safe today because both L1 and the
         // recalled-bodies cap are bounded; the deferred "global token
         // cap with priority drop" follow-up will plumb a budget
-        // through here. See https://github.com/hherb/hhagent/issues/78.
+        // through here. See https://github.com/hherb/kastellan/issues/78.
         let l0 = load_l0_active_default(&self.pool).await?;
         let l1 = load_l1_default(&self.pool).await?;
         let skills = crate::memory::l3_surface::load_l3_skills_default(&self.pool).await?;

@@ -3,22 +3,22 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move the per-tool argv allowlist source-of-truth from the
-`HHAGENT_SHELL_EXEC_ALLOWLIST` env var to a dedicated Postgres table
-behind the existing `hhagent_runtime` GRANT shape, with every mutation
+`KASTELLAN_SHELL_EXEC_ALLOWLIST` env var to a dedicated Postgres table
+behind the existing `kastellan_runtime` GRANT shape, with every mutation
 written to `audit_log`.
 
 **Architecture:** New table `tool_allowlists(tool, argv0, …)` with PK
 on `(tool, argv0)` and a GRANT shape of SELECT/INSERT/DELETE (no UPDATE).
 A new `db::tool_allowlists` module provides pure validators + async I/O.
-`core::cli_audit` gains write-and-audit helpers. `hhagent-cli` gains a
+`core::cli_audit` gains write-and-audit helpers. `kastellan-cli` gains a
 `tools allowlist {add, remove, list}` subcommand tree. `build_tool_registry`
 becomes async, queries the table at startup, and emits one
 `actor='core' action='registry.loaded'` audit row with the SHA-256 of the
 canonical-form list.
 
 **Tech Stack:** Rust, sqlx (Postgres, runtime-tokio), `time` for
-TIMESTAMPTZ, existing `hhagent-protocol` JSON-RPC, existing
-`hhagent-tests-common` PgCluster harness.
+TIMESTAMPTZ, existing `kastellan-protocol` JSON-RPC, existing
+`kastellan-tests-common` PgCluster harness.
 
 **Spec:** [docs/superpowers/specs/2026-05-14-tool-allowlist-hygiene-design.md](../specs/2026-05-14-tool-allowlist-hygiene-design.md).
 
@@ -28,7 +28,7 @@ TIMESTAMPTZ, existing `hhagent-protocol` JSON-RPC, existing
 
 - Branch: create `feat/tool-allowlist-db` off the current `main` tip
   (`97fdf04`). Do all work on the branch; do not merge to `main`.
-- Working dir: `/home/hherb/src/hhagent`. Source the cargo env once per
+- Working dir: `/home/hherb/src/kastellan`. Source the cargo env once per
   shell: `source "$HOME/.cargo/env"`.
 - Baseline: workspace test count is **387**. Each task that adds tests
   records the new count.
@@ -47,7 +47,7 @@ cargo test --workspace 2>&1 | tail -3   # expected: "test result: ok. 387 passed
 - Create: `db/migrations/0009_tool_allowlists.sql`
 
 **Rationale:** New table with a composite PK on `(tool, argv0)`,
-GRANT SELECT/INSERT/DELETE to `hhagent_runtime` (no UPDATE), CHECK
+GRANT SELECT/INSERT/DELETE to `kastellan_runtime` (no UPDATE), CHECK
 constraints at the SQL layer as the structural last line of defence.
 No new index — the PK covers `WHERE tool = $1`.
 
@@ -59,7 +59,7 @@ Create `db/migrations/0009_tool_allowlists.sql`:
 -- Phase 1 — per-tool argv allowlist hygiene.
 --
 -- Source-of-truth for which absolute `argv[0]` paths each registered
--- tool worker may exec. Replaces the previous `HHAGENT_SHELL_EXEC_ALLOWLIST`
+-- tool worker may exec. Replaces the previous `KASTELLAN_SHELL_EXEC_ALLOWLIST`
 -- env var: env-var-driven means a host restart with a typo can silently
 -- widen the allowlist with no audit trail. With this table, every change
 -- writes one row in `audit_log` via the chokepoint in `core::cli_audit`.
@@ -71,7 +71,7 @@ Create `db/migrations/0009_tool_allowlists.sql`:
 --   * Per-entry audit rows (one row per add/remove) rather than
 --     whole-list replacement diffs
 --
--- GRANT shape: SELECT/INSERT/DELETE for hhagent_runtime, deliberately
+-- GRANT shape: SELECT/INSERT/DELETE for kastellan_runtime, deliberately
 -- NO UPDATE. Changing an entry means DELETE + INSERT, preserving the
 -- audit trail of both the old and new shapes. Mirrors audit_log's
 -- append-only discipline from migration 0002, but applied as
@@ -88,7 +88,7 @@ CREATE TABLE tool_allowlists (
     CHECK (octet_length(argv0) > 0 AND argv0 LIKE '/%')
 );
 
-GRANT SELECT, INSERT, DELETE ON tool_allowlists TO hhagent_runtime;
+GRANT SELECT, INSERT, DELETE ON tool_allowlists TO kastellan_runtime;
 ```
 
 - [ ] **Step 2: Verify migration applies cleanly**
@@ -96,7 +96,7 @@ GRANT SELECT, INSERT, DELETE ON tool_allowlists TO hhagent_runtime;
 Run the existing PG-touching integration test that runs all migrations:
 
 ```bash
-cargo test -p hhagent-db --test postgres_e2e \
+cargo test -p kastellan-db --test postgres_e2e \
   postgres_install_start_select_one_uninstall -- --nocapture 2>&1 | tail -5
 ```
 
@@ -121,7 +121,7 @@ git commit -m "$(cat <<'EOF'
 db: add 0009_tool_allowlists migration
 
 New table for the per-tool argv allowlist source-of-truth. Composite
-PK on (tool, argv0); GRANT SELECT/INSERT/DELETE to hhagent_runtime
+PK on (tool, argv0); GRANT SELECT/INSERT/DELETE to kastellan_runtime
 (no UPDATE — changes are DELETE + INSERT to preserve audit trail).
 CHECK constraints pin: non-empty tool name; non-empty argv0 starting
 with `/`. Follow-up commits land the Rust layer + CLI subcommands.
@@ -154,7 +154,7 @@ Create `db/src/tool_allowlists.rs`:
 //! The `tool_allowlists` table (migration `0009_tool_allowlists.sql`) is
 //! the source-of-truth for which absolute `argv[0]` paths each registered
 //! tool worker may exec. Replaces the previous
-//! `HHAGENT_SHELL_EXEC_ALLOWLIST` env-var-driven shape.
+//! `KASTELLAN_SHELL_EXEC_ALLOWLIST` env-var-driven shape.
 //!
 //! Validators here are the user-facing gate — they produce typed errors
 //! that surface as readable CLI messages. The SQL-layer CHECK constraints
@@ -330,7 +330,7 @@ mod tests {
     fn validate_argv0_accepts_typical_absolute_paths() {
         validate_argv0("/usr/bin/echo").unwrap();
         validate_argv0("/bin/sh").unwrap();
-        validate_argv0("/opt/hhagent/bin/web-fetch-worker").unwrap();
+        validate_argv0("/opt/kastellan/bin/web-fetch-worker").unwrap();
         validate_argv0("/").unwrap(); // odd but technically absolute
     }
 
@@ -415,7 +415,7 @@ pub mod tool_allowlists;
 - [ ] **Step 4: Run tests, expect RED on the I/O stubs but GREEN on validators**
 
 ```bash
-cargo test -p hhagent-db --lib tool_allowlists -- --nocapture 2>&1 | tail -10
+cargo test -p kastellan-db --lib tool_allowlists -- --nocapture 2>&1 | tail -10
 ```
 
 Expected: 6 unit tests pass; the build itself compiles cleanly even
@@ -440,7 +440,7 @@ git add db/src/tool_allowlists.rs db/src/lib.rs
 git commit -m "$(cat <<'EOF'
 db(tool_allowlists): module skeleton + pure validators
 
-New module hhagent_db::tool_allowlists. Public surface: ToolAllowlistError
+New module kastellan_db::tool_allowlists. Public surface: ToolAllowlistError
 enum, AllowlistEntry struct, MAX_TOOL_NAME_LEN const, pure validate_tool_name
 and validate_argv0 helpers. Async I/O functions (add/remove/list_for_tool/
 list_all) are unimplemented!() stubs filled in by the next commit. 6 unit
@@ -480,12 +480,12 @@ shape.
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_allowlists_round_trip_and_grant_shape() {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::probe::run as probe_run;
-    use hhagent_db::tool_allowlists::{
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::probe::run as probe_run;
+    use kastellan_db::tool_allowlists::{
         add, list_all, list_for_tool, remove, AllowlistEntry, ToolAllowlistError,
     };
-    use hhagent_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor};
+    use kastellan_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor};
 
     if !skip_if_no_supervisor() { return; }
     let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
@@ -494,7 +494,7 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
         &bin_dir,
         "tool-allowlists-e2e",
         "tool-allowlists-e2e-log",
-        "hhagent-postgres-tool-allowlists-e2e",
+        "kastellan-postgres-tool-allowlists-e2e",
     )
     .await
     .expect("bring up PG cluster");
@@ -535,11 +535,11 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     let removed2 = remove(&pool, "shell-exec", "/usr/bin/echo").await.unwrap();
     assert!(!removed2, "second remove must be a no-op");
 
-    // (6) GRANT shape: UPDATE on tool_allowlists denied to hhagent_runtime.
+    // (6) GRANT shape: UPDATE on tool_allowlists denied to kastellan_runtime.
     // SET ROLE explicitly in the same transaction so the test isn't
     // sensitive to pool reuse.
     let mut conn = pool.acquire().await.unwrap();
-    sqlx::query("SET ROLE hhagent_runtime")
+    sqlx::query("SET ROLE kastellan_runtime")
         .execute(&mut *conn)
         .await
         .unwrap();
@@ -578,7 +578,7 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
 - [ ] **Step 2: Run integration test, expect compile-success / runtime-failure (RED)**
 
 ```bash
-cargo test -p hhagent-db --test postgres_e2e \
+cargo test -p kastellan-db --test postgres_e2e \
   tool_allowlists_round_trip_and_grant_shape -- --nocapture 2>&1 | tail -15
 ```
 
@@ -666,7 +666,7 @@ pub async fn list_all(pool: &PgPool) -> Result<Vec<AllowlistEntry>, ToolAllowlis
 - [ ] **Step 4: Run integration test, expect GREEN**
 
 ```bash
-cargo test -p hhagent-db --test postgres_e2e \
+cargo test -p kastellan-db --test postgres_e2e \
   tool_allowlists_round_trip_and_grant_shape -- --nocapture 2>&1 | tail -10
 ```
 
@@ -734,11 +734,11 @@ the const block:
 pub const ACTION_REGISTRY_LOADED: &str = "registry.loaded";
 
 /// Action string for `actor='cli'` audit rows emitted when an operator
-/// adds one allowlist entry via `hhagent-cli tools allowlist add`.
+/// adds one allowlist entry via `kastellan-cli tools allowlist add`.
 pub const ACTION_TOOLS_ALLOWLIST_ADD: &str = "tools.allowlist.add";
 
 /// Action string for `actor='cli'` audit rows emitted when an operator
-/// removes one allowlist entry via `hhagent-cli tools allowlist remove`.
+/// removes one allowlist entry via `kastellan-cli tools allowlist remove`.
 pub const ACTION_TOOLS_ALLOWLIST_REMOVE: &str = "tools.allowlist.remove";
 ```
 
@@ -816,11 +816,11 @@ pub async fn tools_allowlist_add_and_audit(
     pool: &PgPool,
     tool: &str,
     argv0: &str,
-) -> Result<bool, hhagent_db::tool_allowlists::ToolAllowlistError> {
-    let inserted = hhagent_db::tool_allowlists::add(pool, tool, argv0, CLI_AUDIT_ACTOR).await?;
+) -> Result<bool, kastellan_db::tool_allowlists::ToolAllowlistError> {
+    let inserted = kastellan_db::tool_allowlists::add(pool, tool, argv0, CLI_AUDIT_ACTOR).await?;
     if inserted {
         let payload = serde_json::json!({ "tool": tool, "argv0": argv0 });
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool,
             CLI_AUDIT_ACTOR,
             crate::scheduler::audit::ACTION_TOOLS_ALLOWLIST_ADD,
@@ -848,11 +848,11 @@ pub async fn tools_allowlist_remove_and_audit(
     pool: &PgPool,
     tool: &str,
     argv0: &str,
-) -> Result<bool, hhagent_db::tool_allowlists::ToolAllowlistError> {
-    let removed = hhagent_db::tool_allowlists::remove(pool, tool, argv0).await?;
+) -> Result<bool, kastellan_db::tool_allowlists::ToolAllowlistError> {
+    let removed = kastellan_db::tool_allowlists::remove(pool, tool, argv0).await?;
     if removed {
         let payload = serde_json::json!({ "tool": tool, "argv0": argv0 });
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool,
             CLI_AUDIT_ACTOR,
             crate::scheduler::audit::ACTION_TOOLS_ALLOWLIST_REMOVE,
@@ -913,10 +913,10 @@ EOF
 
 ---
 
-### Task 6: `hhagent-cli tools allowlist {add,remove,list}` + e2e test
+### Task 6: `kastellan-cli tools allowlist {add,remove,list}` + e2e test
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli.rs` (new `tools` subcommand tree)
+- Modify: `core/src/bin/kastellan-cli.rs` (new `tools` subcommand tree)
 - Create: `core/tests/cli_tools_allowlist_e2e.rs`
 
 **Rationale:** Subprocess-level pin for the CLI surface. The test brings
@@ -931,7 +931,7 @@ the `tasks` subcommand pattern).
 Create `core/tests/cli_tools_allowlist_e2e.rs`:
 
 ```rust
-//! Subprocess-level pin for `hhagent-cli tools allowlist {add,remove,list}`.
+//! Subprocess-level pin for `kastellan-cli tools allowlist {add,remove,list}`.
 //!
 //! Each subtest runs the real CLI binary against a per-test PG cluster,
 //! asserts the DB row state, the audit-row shape, and the CLI exit code
@@ -940,20 +940,20 @@ Create `core/tests/cli_tools_allowlist_e2e.rs`:
 use std::collections::BTreeMap;
 use std::process::Command;
 
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, pg_bin_dir_or_skip, skip_if_no_supervisor,
 };
 use sqlx::Row;
 
 /// Build the env block the CLI subprocess needs to find PG via UDS.
-/// The CLI's `resolve_connect_spec` reads `HHAGENT_DATA_DIR` and
+/// The CLI's `resolve_connect_spec` reads `KASTELLAN_DATA_DIR` and
 /// builds the socket path from there (matches the daemon's resolution
 /// shape — see `cli_ask_e2e::bring_up_daemon`).
 fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env = vec![
-        ("HHAGENT_DATA_DIR".to_string(), data_dir.display().to_string()),
+        ("KASTELLAN_DATA_DIR".to_string(), data_dir.display().to_string()),
     ];
     if let Some(home) = std::env::var_os("HOME") {
         env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
@@ -963,7 +963,7 @@ fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     } else {
         // ConnectSpec::default_for needs a user for peer auth; fall back
         // to the cluster bring-up user.
-        env.push(("USER".to_string(), hhagent_tests_common::current_username()));
+        env.push(("USER".to_string(), kastellan_tests_common::current_username()));
     }
     env
 }
@@ -977,7 +977,7 @@ async fn cli_tools_allowlist_add_remove_list_round_trip_writes_audit_rows() {
         &bin_dir,
         "cli-tools-allowlist-e2e",
         "cli-tools-allowlist-e2e-log",
-        "hhagent-postgres-cli-tools-allowlist-e2e",
+        "kastellan-postgres-cli-tools-allowlist-e2e",
     )
     .await
     .expect("bring up PG cluster");
@@ -1112,7 +1112,7 @@ async fn cli_tools_allowlist_add_remove_list_round_trip_writes_audit_rows() {
 - [ ] **Step 2: Run the test, expect compile-error RED**
 
 ```bash
-cargo test -p hhagent-core --test cli_tools_allowlist_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --test cli_tools_allowlist_e2e 2>&1 | tail -10
 ```
 
 Expected: build fails — the CLI binary doesn't know the `tools`
@@ -1126,11 +1126,11 @@ fails.
 Read the current dispatch shape:
 
 ```bash
-grep -n '^    match args\[1\]' core/src/bin/hhagent-cli.rs
+grep -n '^    match args\[1\]' core/src/bin/kastellan-cli.rs
 ```
 
 Modify the `match` arm in `main()` (around line 47) to add a `"tools"`
-arm. Add to `core/src/bin/hhagent-cli.rs` `main()`:
+arm. Add to `core/src/bin/kastellan-cli.rs` `main()`:
 
 ```rust
         "tools" => run_tools(&args[2..]),
@@ -1140,7 +1140,7 @@ arm. Add to `core/src/bin/hhagent-cli.rs` `main()`:
 
 - [ ] **Step 4: Add the `run_tools` dispatcher and three subcommand handlers**
 
-Append at the end of `core/src/bin/hhagent-cli.rs`, after the existing
+Append at the end of `core/src/bin/kastellan-cli.rs`, after the existing
 `tasks_*` handlers:
 
 ```rust
@@ -1150,7 +1150,7 @@ Append at the end of `core/src/bin/hhagent-cli.rs`, after the existing
 
 fn run_tools(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli tools allowlist <add|remove|list> ...");
+        eprintln!("usage: kastellan-cli tools allowlist <add|remove|list> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -1164,7 +1164,7 @@ fn run_tools(args: &[String]) -> ExitCode {
 
 fn run_tools_allowlist(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli tools allowlist <add|remove|list> ...");
+        eprintln!("usage: kastellan-cli tools allowlist <add|remove|list> ...");
         return ExitCode::from(2);
     }
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -1189,13 +1189,13 @@ fn run_tools_allowlist(args: &[String]) -> ExitCode {
 }
 
 async fn tools_allowlist_add(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::tools_allowlist_add_and_audit;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::tools_allowlist_add_and_audit;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let (tool, argv0) = match args {
         [t, a] => (t.clone(), a.clone()),
         _ => {
-            eprintln!("usage: hhagent-cli tools allowlist add <tool> <argv0>");
+            eprintln!("usage: kastellan-cli tools allowlist add <tool> <argv0>");
             return ExitCode::from(2);
         }
     };
@@ -1212,7 +1212,7 @@ async fn tools_allowlist_add(args: &[String]) -> ExitCode {
     match tools_allowlist_add_and_audit(&pool, &tool, &argv0).await {
         Ok(true)  => { println!("added {tool} {argv0}"); ExitCode::from(0) }
         Ok(false) => { println!("already present"); ExitCode::from(0) }
-        Err(hhagent_db::tool_allowlists::ToolAllowlistError::InvalidArgv0) => {
+        Err(kastellan_db::tool_allowlists::ToolAllowlistError::InvalidArgv0) => {
             eprintln!("argv0 must be an absolute path (starting with '/')");
             ExitCode::from(2)
         }
@@ -1221,13 +1221,13 @@ async fn tools_allowlist_add(args: &[String]) -> ExitCode {
 }
 
 async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::tools_allowlist_remove_and_audit;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::tools_allowlist_remove_and_audit;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let (tool, argv0) = match args {
         [t, a] => (t.clone(), a.clone()),
         _ => {
-            eprintln!("usage: hhagent-cli tools allowlist remove <tool> <argv0>");
+            eprintln!("usage: kastellan-cli tools allowlist remove <tool> <argv0>");
             return ExitCode::from(2);
         }
     };
@@ -1243,7 +1243,7 @@ async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
     match tools_allowlist_remove_and_audit(&pool, &tool, &argv0).await {
         Ok(true)  => { println!("removed {tool} {argv0}"); ExitCode::from(0) }
         Ok(false) => { println!("not present"); ExitCode::from(0) }
-        Err(hhagent_db::tool_allowlists::ToolAllowlistError::InvalidArgv0) => {
+        Err(kastellan_db::tool_allowlists::ToolAllowlistError::InvalidArgv0) => {
             eprintln!("argv0 must be an absolute path (starting with '/')");
             ExitCode::from(2)
         }
@@ -1252,8 +1252,8 @@ async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
 }
 
 async fn tools_allowlist_list(args: &[String]) -> ExitCode {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::tool_allowlists::{list_all, list_for_tool};
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::tool_allowlists::{list_all, list_for_tool};
 
     let mut tool_filter: Option<String> = None;
     let mut i = 0;
@@ -1310,14 +1310,14 @@ async fn tools_allowlist_list(args: &[String]) -> ExitCode {
 
 - [ ] **Step 5: Update the `help_text` and the file-level docstring**
 
-In `core/src/bin/hhagent-cli.rs`, update the `help_text()` return to
+In `core/src/bin/kastellan-cli.rs`, update the `help_text()` return to
 include the new subcommands. After the existing `tasks tail` line in
 the help string, insert:
 
 ```text
-    hhagent-cli tools allowlist add    <tool> <argv0>
-    hhagent-cli tools allowlist remove <tool> <argv0>
-    hhagent-cli tools allowlist list   [--tool <name>]
+    kastellan-cli tools allowlist add    <tool> <argv0>
+    kastellan-cli tools allowlist remove <tool> <argv0>
+    kastellan-cli tools allowlist list   [--tool <name>]
 ```
 
 And update the file-level `//!` comment (lines 3-17) to mention the new
@@ -1326,7 +1326,7 @@ And update the file-level `//!` comment (lines 3-17) to mention the new
 - [ ] **Step 6: Run the test, expect GREEN**
 
 ```bash
-cargo test -p hhagent-core --test cli_tools_allowlist_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --test cli_tools_allowlist_e2e 2>&1 | tail -10
 ```
 
 Expected: `test result: ok. 1 passed` (or `[SKIP]` if PG unavailable).
@@ -1345,9 +1345,9 @@ Expected: `test result: ok. 395 passed`.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli.rs core/tests/cli_tools_allowlist_e2e.rs
+git add core/src/bin/kastellan-cli.rs core/tests/cli_tools_allowlist_e2e.rs
 git commit -m "$(cat <<'EOF'
-core(hhagent-cli): tools allowlist {add,remove,list} subcommands
+core(kastellan-cli): tools allowlist {add,remove,list} subcommands
 
 Hand-rolled subcommand tree mirroring the existing tasks dispatcher
 (no clap dep). Add/remove flow through cli_audit::tools_allowlist_*
@@ -1384,7 +1384,7 @@ Create `tests-common/src/allowlist.rs`:
 ```rust
 //! Seed `tool_allowlists` rows for integration tests.
 //!
-//! Tests that bring up the `hhagent` daemon and want it to see a
+//! Tests that bring up the `kastellan` daemon and want it to see a
 //! populated argv allowlist can call this between PG cluster bring-up
 //! and daemon start. Bypasses the CLI binary for setup speed.
 
@@ -1436,7 +1436,7 @@ pub use allowlist::seed_tool_allowlist;
 - [ ] **Step 3: Verify it compiles**
 
 ```bash
-cargo build -p hhagent-tests-common 2>&1 | tail -3
+cargo build -p kastellan-tests-common 2>&1 | tail -3
 cargo build --workspace 2>&1 | tail -3
 ```
 
@@ -1478,7 +1478,7 @@ EOF
 function becomes `async`, takes a `&PgPool`, and emits one
 `actor='core' action='registry.loaded'` audit row with the SHA-256 of
 the canonical allowlist for cross-restart drift detection. The
-`HHAGENT_SHELL_EXEC_ALLOWLIST` env var is no longer read; a deprecation
+`KASTELLAN_SHELL_EXEC_ALLOWLIST` env var is no longer read; a deprecation
 WARN logs once if it's still set.
 
 - [ ] **Step 1: Read the current `build_tool_registry` and its call site**
@@ -1499,18 +1499,18 @@ with:
 ```rust
 async fn build_tool_registry(
     pool: &sqlx::PgPool,
-) -> anyhow::Result<hhagent_core::scheduler::ToolRegistry> {
+) -> anyhow::Result<kastellan_core::scheduler::ToolRegistry> {
     use anyhow::Context as _;
-    let mut reg = hhagent_core::scheduler::ToolRegistry::new();
+    let mut reg = kastellan_core::scheduler::ToolRegistry::new();
     let mut loaded: Vec<LoadedToolRecord> = Vec::new();
 
-    if let Some(bin_os) = std::env::var_os("HHAGENT_SHELL_EXEC_BIN") {
+    if let Some(bin_os) = std::env::var_os("KASTELLAN_SHELL_EXEC_BIN") {
         let binary = std::path::PathBuf::from(&bin_os);
         if binary.is_file() {
-            let allowlist = hhagent_db::tool_allowlists::list_for_tool(pool, "shell-exec")
+            let allowlist = kastellan_db::tool_allowlists::list_for_tool(pool, "shell-exec")
                 .await
                 .context("loading shell-exec allowlist from DB")?;
-            let entry = hhagent_core::scheduler::shell_exec_entry(binary.clone(), &allowlist);
+            let entry = kastellan_core::scheduler::shell_exec_entry(binary.clone(), &allowlist);
             info!(
                 tool = "shell-exec",
                 binary = %binary.display(),
@@ -1527,17 +1527,17 @@ async fn build_tool_registry(
         } else {
             tracing::warn!(
                 binary = %binary.display(),
-                "HHAGENT_SHELL_EXEC_BIN does not point to an existing file; \
+                "KASTELLAN_SHELL_EXEC_BIN does not point to an existing file; \
                  shell-exec NOT registered"
             );
         }
     }
 
     // Deprecation warning — does not block bring-up.
-    if std::env::var_os("HHAGENT_SHELL_EXEC_ALLOWLIST").is_some() {
+    if std::env::var_os("KASTELLAN_SHELL_EXEC_ALLOWLIST").is_some() {
         tracing::warn!(
-            "HHAGENT_SHELL_EXEC_ALLOWLIST is no longer honored; \
-             use 'hhagent-cli tools allowlist add <tool> <argv0>' to populate the DB"
+            "KASTELLAN_SHELL_EXEC_ALLOWLIST is no longer honored; \
+             use 'kastellan-cli tools allowlist add <tool> <argv0>' to populate the DB"
         );
     }
 
@@ -1592,10 +1592,10 @@ async fn write_registry_loaded_row(
     tools: &[LoadedToolRecord],
 ) -> Result<(), sqlx::Error> {
     let payload = serde_json::json!({ "tools": tools });
-    hhagent_db::audit::insert(
+    kastellan_db::audit::insert(
         pool,
         "core",
-        hhagent_core::scheduler::audit::ACTION_REGISTRY_LOADED,
+        kastellan_core::scheduler::audit::ACTION_REGISTRY_LOADED,
         payload,
     )
     .await
@@ -1642,11 +1642,11 @@ sha2 = { workspace = true }
 
 Two changes:
 
-(a) Drop the `HHAGENT_SHELL_EXEC_ALLOWLIST` env push (the daemon no
+(a) Drop the `KASTELLAN_SHELL_EXEC_ALLOWLIST` env push (the daemon no
 longer reads it). Find and delete:
 
 ```bash
-grep -n "HHAGENT_SHELL_EXEC_ALLOWLIST" core/tests/cli_ask_e2e.rs
+grep -n "KASTELLAN_SHELL_EXEC_ALLOWLIST" core/tests/cli_ask_e2e.rs
 ```
 
 Delete the matching `spec.env.push((...))` 2-line block.
@@ -1666,13 +1666,13 @@ between those two calls. For the happy-path test (around line 482):
     // Apply migrations explicitly (daemon would do it idempotently,
     // but we need the schema in place before seeding the allowlist).
     {
-        hhagent_db::probe::run(&cluster.conn_spec)
+        kastellan_db::probe::run(&cluster.conn_spec)
             .await
             .expect("probe run");
-        let seed_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let seed_pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("seed pool");
-        hhagent_tests_common::seed_tool_allowlist(&seed_pool, "shell-exec", &[ECHO_PATH])
+        kastellan_tests_common::seed_tool_allowlist(&seed_pool, "shell-exec", &[ECHO_PATH])
             .await
             .expect("seed shell-exec allowlist");
         drop(seed_pool);
@@ -1686,7 +1686,7 @@ migrations are in place:
 
 ```rust
     {
-        hhagent_db::probe::run(&cluster.conn_spec)
+        kastellan_db::probe::run(&cluster.conn_spec)
             .await
             .expect("probe run");
         // No allowlist seeding: every shell.exec call must surface
@@ -1718,7 +1718,7 @@ add:
 - [ ] **Step 6: Run the migrated test**
 
 ```bash
-cargo test -p hhagent-core --test cli_ask_e2e -- --nocapture 2>&1 | tail -15
+cargo test -p kastellan-core --test cli_ask_e2e -- --nocapture 2>&1 | tail -15
 ```
 
 Expected: both `cli_ask_e2e` tests pass. If they fail, the most likely
@@ -1744,7 +1744,7 @@ core(main): build_tool_registry reads allowlist from DB; registry.loaded row
 
 build_tool_registry is now async, takes &PgPool, and loads the
 shell-exec argv allowlist from the tool_allowlists table at startup.
-HHAGENT_SHELL_EXEC_ALLOWLIST env var is no longer honored — a one-time
+KASTELLAN_SHELL_EXEC_ALLOWLIST env var is no longer honored — a one-time
 WARN logs if still set. Fail-closed: DB error during the load aborts
 bring-up.
 
@@ -1808,7 +1808,7 @@ DeterministicPolicy" item:
   2026-05-14 on branch `feat/tool-allowlist-db`. New migration
   `0009_tool_allowlists.sql` + `db::tool_allowlists` module +
   `cli_audit::tools_allowlist_{add,remove}_and_audit` helpers +
-  `hhagent-cli tools allowlist {add,remove,list}` subcommands +
+  `kastellan-cli tools allowlist {add,remove,list}` subcommands +
   `core::build_tool_registry` rewired to read allowlist from DB +
   `actor='core' action='registry.loaded'` audit row carrying the
   SHA-256 of the canonical-form allowlist. Test count 387 → **395**
@@ -1846,8 +1846,8 @@ git push -u origin feat/tool-allowlist-db
 gh pr create --title "feat: per-tool argv allowlist hygiene (DB-backed)" --body "$(cat <<'EOF'
 ## Summary
 - Moves the per-tool argv allowlist source-of-truth from the
-  `HHAGENT_SHELL_EXEC_ALLOWLIST` env var to a new `tool_allowlists`
-  table (migration `0009`), behind the existing `hhagent_runtime`
+  `KASTELLAN_SHELL_EXEC_ALLOWLIST` env var to a new `tool_allowlists`
+  table (migration `0009`), behind the existing `kastellan_runtime`
   GRANT shape.
 - Every mutation flows through `cli_audit::tools_allowlist_*` and
   writes one `actor='cli' action='tools.allowlist.{add,remove}'`
@@ -1862,7 +1862,7 @@ gh pr create --title "feat: per-tool argv allowlist hygiene (DB-backed)" --body 
 - [x] `cli_ask_e2e` migrated to `seed_tool_allowlist`; happy + failure
       paths still green with new `registry.loaded` audit row included
       in the multiset.
-- [x] GRANT shape pin: `SET ROLE hhagent_runtime; UPDATE
+- [x] GRANT shape pin: `SET ROLE kastellan_runtime; UPDATE
       tool_allowlists …` denied.
 - [x] SQL CHECK pin: relative `argv0` rejected by Postgres.
 
@@ -1887,7 +1887,7 @@ EOF
 | §1 `db::tool_allowlists` async I/O | Task 3 |
 | §2 Action constants in `scheduler/audit.rs` | Task 4 |
 | §2 `cli_audit` write-and-audit helpers | Task 5 |
-| §2 `hhagent-cli tools allowlist {add,remove,list}` | Task 6 |
+| §2 `kastellan-cli tools allowlist {add,remove,list}` | Task 6 |
 | §3 Daemon wiring (async `build_tool_registry`, registry.loaded, deprecation warning) | Task 8 |
 | §4 Unit tests for validators | Task 2 |
 | §4 DB integration test | Task 3 |

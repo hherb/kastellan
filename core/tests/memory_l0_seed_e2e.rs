@@ -1,4 +1,4 @@
-//! End-to-end smoke for [`hhagent_core::memory::l0_seed`] — the
+//! End-to-end smoke for [`kastellan_core::memory::l0_seed`] — the
 //! L0 (meta-rule) seed loader and its paired read-side helper.
 //!
 //! Each scenario brings up its own per-test Postgres cluster (same
@@ -12,13 +12,13 @@
 
 use std::path::Path;
 
-use hhagent_core::entity_extraction::NoOpEntityExtractor;
-use hhagent_core::memory::l0_seed::{
+use kastellan_core::entity_extraction::NoOpEntityExtractor;
+use kastellan_core::memory::l0_seed::{
     load_l0_active, load_l0_active_default, seed_l0_from_file, seed_l0_from_rules,
     L0Error, L0Rule, L0_DEFAULT_CAP_BYTES, L0_DEFAULT_CAP_ROWS,
 };
-use hhagent_db::memories::load_active_l0;
-use hhagent_tests_common::{
+use kastellan_db::memories::load_active_l0;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -56,11 +56,11 @@ fn seed_from_rules_writes_new_rows() {
         &bin_dir,
         "l0n-d",
         "l0n-l",
-        &format!("hhagent-supervisor-test-pg-l0new-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0new-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -69,7 +69,7 @@ fn seed_from_rules_writes_new_rows() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -96,7 +96,7 @@ fn seed_from_rules_writes_new_rows() {
         for m in &active {
             assert_eq!(
                 m.layer,
-                hhagent_db::memories::MemoryLayer::Meta,
+                kastellan_db::memories::MemoryLayer::Meta,
                 "all active L0 rows must report layer=Meta"
             );
         }
@@ -127,11 +127,11 @@ fn seed_from_rules_is_idempotent_on_unchanged_input() {
         &bin_dir,
         "l0i-d",
         "l0i-l",
-        &format!("hhagent-supervisor-test-pg-l0idem-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0idem-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -140,7 +140,7 @@ fn seed_from_rules_is_idempotent_on_unchanged_input() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -183,11 +183,11 @@ fn seed_from_rules_writes_new_row_on_edited_body() {
         &bin_dir,
         "l0e-d",
         "l0e-l",
-        &format!("hhagent-supervisor-test-pg-l0edit-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0edit-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -196,7 +196,7 @@ fn seed_from_rules_writes_new_row_on_edited_body() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -258,11 +258,11 @@ fn seed_from_file_reads_parses_and_seeds() {
         &bin_dir,
         "l0f-d",
         "l0f-l",
-        &format!("hhagent-supervisor-test-pg-l0file-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0file-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -271,7 +271,7 @@ fn seed_from_file_reads_parses_and_seeds() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -317,11 +317,11 @@ fn seed_from_file_fails_closed_on_malformed_toml() {
         &bin_dir,
         "l0m-d",
         "l0m-l",
-        &format!("hhagent-supervisor-test-pg-l0mal-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0mal-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -330,7 +330,7 @@ fn seed_from_file_fails_closed_on_malformed_toml() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -373,11 +373,11 @@ fn load_l0_active_returns_newest_per_rule_id() {
         &bin_dir,
         "l0d-d",
         "l0d-l",
-        &format!("hhagent-supervisor-test-pg-l0dedup-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0dedup-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -386,7 +386,7 @@ fn load_l0_active_returns_newest_per_rule_id() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -428,11 +428,11 @@ fn load_l0_active_respects_cap_rows() {
         &bin_dir,
         "l0r-d",
         "l0r-l",
-        &format!("hhagent-supervisor-test-pg-l0caprows-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0caprows-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -441,7 +441,7 @@ fn load_l0_active_respects_cap_rows() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -479,11 +479,11 @@ fn load_l0_active_oversize_body_dropped_silently() {
         &bin_dir,
         "l0o-d",
         "l0o-l",
-        &format!("hhagent-supervisor-test-pg-l0over-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0over-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -492,7 +492,7 @@ fn load_l0_active_oversize_body_dropped_silently() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -548,11 +548,11 @@ fn load_l0_active_excludes_legacy_l0_rows_without_rule_id() {
         &bin_dir,
         "l0l-d",
         "l0l-l",
-        &format!("hhagent-supervisor-test-pg-l0legacy-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0legacy-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -561,13 +561,13 @@ fn load_l0_active_excludes_legacy_l0_rows_without_rule_id() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
         // A "legacy" L0 row written directly via seed_meta_memory with
         // empty metadata (no l0_rule_id). load_active_l0 must skip it.
-        hhagent_db::memories::seed_meta_memory(
+        kastellan_db::memories::seed_meta_memory(
             &pool,
             "legacy without rule_id",
             &serde_json::json!({}),
@@ -618,11 +618,11 @@ fn seed_from_file_returns_io_error_on_missing_path() {
         &bin_dir,
         "l0p-d",
         "l0p-l",
-        &format!("hhagent-supervisor-test-pg-l0iopath-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0iopath-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -631,7 +631,7 @@ fn seed_from_file_returns_io_error_on_missing_path() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -666,11 +666,11 @@ fn load_l0_active_warns_when_first_row_alone_exceeds_cap_bytes() {
         &bin_dir,
         "l0w-d",
         "l0w-l",
-        &format!("hhagent-supervisor-test-pg-l0warn-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0warn-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -679,7 +679,7 @@ fn load_l0_active_warns_when_first_row_alone_exceeds_cap_bytes() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -724,11 +724,11 @@ fn load_l0_active_zero_cap_bytes_returns_empty() {
         &bin_dir,
         "l0z-d",
         "l0z-l",
-        &format!("hhagent-supervisor-test-pg-l0zerobytes-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0zerobytes-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -737,7 +737,7 @@ fn load_l0_active_zero_cap_bytes_returns_empty() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -771,19 +771,19 @@ fn seed_l0_auto_links_entities_via_extractor() {
         return;
     };
 
-    use hhagent_core::entity_extraction::StaticEntityExtractor;
-    use hhagent_db::graph::{Graph, PgGraph};
+    use kastellan_core::entity_extraction::StaticEntityExtractor;
+    use kastellan_db::graph::{Graph, PgGraph};
 
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
         "l0el-d",
         "l0el-l",
-        &format!("hhagent-supervisor-test-pg-l0el-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-l0el-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -792,7 +792,7 @@ fn seed_l0_auto_links_entities_via_extractor() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 

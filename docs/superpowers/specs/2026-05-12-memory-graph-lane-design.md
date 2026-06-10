@@ -20,7 +20,7 @@ The slice ships the schema, the writer-side helper, the read-side helper, the la
 2. **Traversal:** 1-hop outbound expansion via `Graph::neighbors`, with a per-seed fanout cap of 32. Rejected: direct-only (no traversal — degenerate "graph" lane); N-hop expansion (unpredictable cost on dense subgraphs).
 3. **Writer API:** standalone `link_memory_to_entities(pool, memory_id, &[entity_id])` helper. Rejected: extending `insert_memory` signature (forces every call site to know entity ids up front; future "insert now, link later when extraction finishes" becomes awkward).
 4. **Seed shape:** pre-resolved `seed_entity_ids: Option<&[i64]>` on `RecallParams`. Rejected: natural-key `(kind, name)` input (silently drops unknowns, adds round-trips in the hot path); dual-shape API (premature, no two real callers differ today).
-5. **Delete audit:** trigger-driven `deleted_memories` append-only journal (responding to user's "memories never get deleted in a cascade" requirement, expanded). Rejected: REVOKE DELETE on memories from `hhagent_runtime` (blocks all future legitimate memory deletion); RESTRICT FK direction (link-rows-must-be-cleared-first awkwardness).
+5. **Delete audit:** trigger-driven `deleted_memories` append-only journal (responding to user's "memories never get deleted in a cascade" requirement, expanded). Rejected: REVOKE DELETE on memories from `kastellan_runtime` (blocks all future legitimate memory deletion); RESTRICT FK direction (link-rows-must-be-cleared-first awkwardness).
 
 ## Architecture
 
@@ -78,7 +78,7 @@ CREATE TABLE memory_entities (
 CREATE INDEX memory_entities_entity_idx
     ON memory_entities (entity_id);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON memory_entities TO hhagent_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON memory_entities TO kastellan_runtime;
 ```
 
 **Notes:**
@@ -121,8 +121,8 @@ CREATE TRIGGER memories_after_delete_audit
     FOR EACH ROW
     EXECUTE FUNCTION audit_memory_delete();
 
-GRANT  SELECT, INSERT ON deleted_memories TO hhagent_runtime;
-REVOKE UPDATE, DELETE, TRUNCATE ON deleted_memories FROM hhagent_runtime;
+GRANT  SELECT, INSERT ON deleted_memories TO kastellan_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON deleted_memories FROM kastellan_runtime;
 ```
 
 **Notes:**
@@ -236,7 +236,7 @@ pub struct RecallParams<'a> {
 if params.modes.graph {
     match params.seed_entity_ids {
         Some(seeds) if !seeds.is_empty() => {
-            let graph = hhagent_db::graph::PgGraph::new(pool);
+            let graph = kastellan_db::graph::PgGraph::new(pool);
             let neighbour_lists = futures::future::try_join_all(
                 seeds.iter().map(|&s| graph.neighbors(s, None, GRAPH_FANOUT_CAP_PER_SEED))
             ).await?;
@@ -249,12 +249,12 @@ if params.modes.graph {
             }
             let expanded_vec: Vec<i64> = expanded.into_iter().collect();
             lane_lists.push(
-                hhagent_db::memories::graph_search(pool, &expanded_vec, lane_k).await?,
+                kastellan_db::memories::graph_search(pool, &expanded_vec, lane_k).await?,
             );
         }
         _ => {
             tracing::warn!(
-                target: "hhagent::memory",
+                target: "kastellan::memory",
                 "graph lane requested but seed_entity_ids is empty; skipping"
             );
         }
@@ -390,8 +390,8 @@ Two new migration files: `0007_memory_entities.sql` and `0008_deleted_memories_a
 source "$HOME/.cargo/env"
 cargo build --workspace
 cargo test --workspace                     # expected: 350 passed / 0 failed / 0 SKIP
-cargo test -p hhagent-db                   # ~80 tests incl. 3 new integration
-cargo test -p hhagent-core --test memory_recall_e2e   # 1 test, extended assertions
+cargo test -p kastellan-db                   # ~80 tests incl. 3 new integration
+cargo test -p kastellan-core --test memory_recall_e2e   # 1 test, extended assertions
 ```
 
-Skip-as-pass paths on macOS (no PG available out of the box) remain valid: every new test goes through `bring_up_pg_cluster` from `hhagent-tests-common`, which prints `[SKIP]` to stderr when PG bin dir or supervisor isn't available.
+Skip-as-pass paths on macOS (no PG available out of the box) remain valid: every new test goes through `bring_up_pg_cluster` from `kastellan-tests-common`, which prints `[SKIP]` to stderr when PG bin dir or supervisor isn't available.

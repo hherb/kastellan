@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-bwrap-apparmor-profile.sh
 #
-# One-time setup for hhagent on Ubuntu 24.04+ (and other distros with
+# One-time setup for kastellan on Ubuntu 24.04+ (and other distros with
 # kernel.apparmor_restrict_unprivileged_userns=1).
 #
 # Without this, bwrap can't create unprivileged user namespaces, because the
@@ -43,7 +43,7 @@ if [[ ! -d /etc/apparmor.d ]]; then
 fi
 
 cat >"${PROFILE_PATH}" <<EOF
-# Installed by hhagent (scripts/linux/install-bwrap-apparmor-profile.sh).
+# Installed by kastellan (scripts/linux/install-bwrap-apparmor-profile.sh).
 # Allows bwrap to create unprivileged user namespaces. Same shape as the
 # stock /etc/apparmor.d/flatpak profile that ships with Ubuntu.
 

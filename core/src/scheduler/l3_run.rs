@@ -1,6 +1,6 @@
 //! Daemon-side handling of operator-submitted `l3_run` tasks (issue #179).
 //!
-//! `hhagent-cli memory l3 run <id>` no longer executes in-process. It enqueues
+//! `kastellan-cli memory l3 run <id>` no longer executes in-process. It enqueues
 //! a `tasks` row whose payload `kind == "l3_run"`; the scheduler claims it on a
 //! lane loop and routes it here. We load the L3 skill row and call the existing
 //! [`crate::memory::l3_invoke::invoke_l3`] with the daemon's live dispatcher —
@@ -16,7 +16,7 @@ use crate::cassandra::types::L3SkillCandidate;
 use crate::memory::l3_approval::SkillTrust;
 use crate::memory::l3_invoke::{invoke_l3, InvokeReport};
 use crate::scheduler::inner_loop::StepDispatcher;
-use hhagent_db::memories::{fetch_by_ids, MemoryLayer};
+use kastellan_db::memories::{fetch_by_ids, MemoryLayer};
 
 /// The `kind` discriminator written by the CLI into `tasks.payload`.
 pub const L3_RUN_KIND: &str = "l3_run";

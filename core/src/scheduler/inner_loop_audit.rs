@@ -9,7 +9,7 @@
 //!   - [`build_plan_formulate_payload`] — pure builder for the
 //!     `agent/plan.formulate` payload (unit-testable without a pool).
 //!   - [`write_audit_plan_formulate`] — async writer that composes
-//!     the builder with `hhagent_db::audit::insert`.
+//!     the builder with `kastellan_db::audit::insert`.
 //!   - [`write_audit_verdict`] — async writer for
 //!     `cassandra:chain/verdict` rows.
 //!   - [`write_audit_plan_outcome`] — async writer for
@@ -253,7 +253,7 @@ pub(super) async fn write_audit_plan_formulate(
         plan,
         meta,
     );
-    hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
+    kastellan_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
 }
 
@@ -278,7 +278,7 @@ pub(super) async fn write_audit_verdict(
         "detail":       detail,
         "latency_ms":   latency_ms,
     });
-    hhagent_db::audit::insert(pool, "cassandra:chain", "verdict", payload).await?;
+    kastellan_db::audit::insert(pool, "cassandra:chain", "verdict", payload).await?;
     Ok(())
 }
 
@@ -296,7 +296,7 @@ pub(super) async fn write_audit_plan_outcome(
         "steps_executed":  steps_executed,
         "steps_total":     steps_total,
     });
-    hhagent_db::audit::insert(pool, "scheduler", "plan.outcome", payload).await?;
+    kastellan_db::audit::insert(pool, "scheduler", "plan.outcome", payload).await?;
     Ok(())
 }
 

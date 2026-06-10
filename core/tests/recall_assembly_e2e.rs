@@ -1,4 +1,4 @@
-//! End-to-end smoke for [`hhagent_core::recall_assembly::PgRecallBuilder`].
+//! End-to-end smoke for [`kastellan_core::recall_assembly::PgRecallBuilder`].
 //!
 //! Each scenario brings up its own per-test Postgres cluster + a
 //! hand-rolled `tokio::net::TcpListener` mock for `/embeddings` (same
@@ -12,10 +12,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hhagent_core::recall_assembly::{PgRecallBuilder, RecallBuilder};
-use hhagent_db::memories::insert_memory;
-use hhagent_llm_router::{Router, RouterConfig};
-use hhagent_tests_common::{
+use kastellan_core::recall_assembly::{PgRecallBuilder, RecallBuilder};
+use kastellan_db::memories::insert_memory;
+use kastellan_llm_router::{Router, RouterConfig};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, text_to_embedding,
     unique_suffix,
 };
@@ -79,11 +79,11 @@ fn pg_recall_builder_round_trips_against_seeded_pool_and_mock_embedding() {
         &bin_dir,
         "rae-d",
         "rae-l",
-        &format!("hhagent-supervisor-test-pg-rae-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-rae-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -92,7 +92,7 @@ fn pg_recall_builder_round_trips_against_seeded_pool_and_mock_embedding() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 

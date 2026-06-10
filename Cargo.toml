@@ -22,7 +22,7 @@ edition = "2021"
 rust-version = "1.78"
 license = "AGPL-3.0-only"
 authors = ["Horst Herb <horst.herb@gmail.com>"]
-repository = "https://github.com/hherb/hhagent"
+repository = "https://github.com/hherb/kastellan"
 readme = "README.md"
 
 [workspace.dependencies]
@@ -64,7 +64,7 @@ libc        = "0.2"
 # Feature notes:
 #   - default-features=false drops the runtime-tokio-rustls bundle. We
 #     speak Postgres over a Unix-domain socket only (peer auth, see
-#     hhagent-db's module doc), so a TLS implementation would be dead
+#     kastellan-db's module doc), so a TLS implementation would be dead
 #     weight and a license-audit hazard.
 #   - "runtime-tokio" wires sqlx to the same Tokio reactor the rest of
 #     the workspace uses.
@@ -74,7 +74,7 @@ libc        = "0.2"
 #   - "macros" re-exports the `sqlx::migrate!()` proc-macro itself —
 #     the one that scans `./migrations/*.sql` at compile time and
 #     bakes them into a `Migrator` constant. Without this the
-#     `migrate!` invocation in hhagent-db won't resolve. We do NOT
+#     `migrate!` invocation in kastellan-db won't resolve. We do NOT
 #     opt in to the `query!()` / `query_as!()` compile-time-checked
 #     query macros (they require DATABASE_URL at build time, which
 #     would tie CI to a running cluster).
@@ -121,7 +121,7 @@ rand = { version = "0.8", features = ["std", "std_rng"] }
 # (`apple-native`) split. License: MIT OR Apache-2.0 across the
 # crate and all backend deps.
 
-# HTTP client for the `hhagent-llm-router` crate (sole egress for
+# HTTP client for the `kastellan-llm-router` crate (sole egress for
 # model calls). License: MIT OR Apache-2.0 — AGPL-compatible.
 #
 # Feature notes:

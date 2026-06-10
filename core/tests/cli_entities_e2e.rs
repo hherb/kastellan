@@ -1,9 +1,9 @@
-//! Subprocess-level pin for `hhagent-cli entities {list,show,approve,reject,merge}`.
+//! Subprocess-level pin for `kastellan-cli entities {list,show,approve,reject,merge}`.
 //!
 //! ## What this file pins
 //!
 //! Six independent scenarios, each bringing up its own per-test PG cluster
-//! and spawning the real `hhagent-cli` binary as a subprocess:
+//! and spawning the real `kastellan-cli` binary as a subprocess:
 //!
 //! 1. **`cli_entities_list_shows_quarantined_rows`** — after seeding two
 //!    quarantined entities, `entities list` exits 0, prints the header row
@@ -44,9 +44,9 @@
 
 use std::process::Command;
 
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, current_username, pg_bin_dir_or_skip,
     skip_if_no_supervisor, unique_suffix,
 };
@@ -58,12 +58,12 @@ use hhagent_tests_common::{
 /// Build the env block the CLI subprocess needs to find PG via UDS.
 ///
 /// Mirrors `cli_env` in `cli_memory_l1_e2e.rs` verbatim: the CLI's
-/// `resolve_connect_spec` reads `HHAGENT_DATA_DIR` and derives the socket
+/// `resolve_connect_spec` reads `KASTELLAN_DATA_DIR` and derives the socket
 /// path from there. `HOME` and `USER` are forwarded so the process can find
 /// its home directory and so that audit-row `actor` fields resolve cleanly.
 fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env = vec![
-        ("HHAGENT_DATA_DIR".to_string(), data_dir.display().to_string()),
+        ("KASTELLAN_DATA_DIR".to_string(), data_dir.display().to_string()),
     ];
     if let Some(home) = std::env::var_os("HOME") {
         env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
@@ -97,7 +97,7 @@ async fn seed_quarantined_entity(
 
 /// Seed one L2 memory row. Returns the memory id.
 async fn seed_memory(pool: &sqlx::PgPool, body: &str) -> i64 {
-    hhagent_db::memories::insert_memory(
+    kastellan_db::memories::insert_memory(
         pool,
         body,
         &serde_json::json!({"source": "test"}),
@@ -109,7 +109,7 @@ async fn seed_memory(pool: &sqlx::PgPool, body: &str) -> i64 {
 
 /// Link a memory to an entity via `memory_entities`.
 async fn link(pool: &sqlx::PgPool, memory_id: i64, entity_id: i64) {
-    hhagent_db::memories::link_memory_to_entities(pool, memory_id, &[entity_id])
+    kastellan_db::memories::link_memory_to_entities(pool, memory_id, &[entity_id])
         .await
         .expect("link: link_memory_to_entities failed");
 }
@@ -118,7 +118,7 @@ async fn link(pool: &sqlx::PgPool, memory_id: i64, entity_id: i64) {
 // Test 1 — list shows quarantined rows + header
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli entities list` must:
+/// `kastellan-cli entities list` must:
 ///   * exit 0,
 ///   * print the fixed-width table header (ID, KIND, NAME, QUARANTINE, MENTIONS),
 ///   * contain both seeded entity names,
@@ -133,7 +133,7 @@ async fn cli_entities_list_shows_quarantined_rows() {
         &bin_dir,
         "cent-lst-d",
         "cent-lst-l",
-        &format!("hhagent-postgres-cli-ent-list-{suffix}"),
+        &format!("kastellan-postgres-cli-ent-list-{suffix}"),
     );
 
     probe_run(
@@ -202,7 +202,7 @@ async fn cli_entities_list_shows_quarantined_rows() {
 // Test 2 — show prints entity detail + linked memories
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli entities show <id>` must:
+/// `kastellan-cli entities show <id>` must:
 ///   * exit 0,
 ///   * print `kind:          person`,
 ///   * print `quarantine:    TRUE`,
@@ -218,7 +218,7 @@ async fn cli_entities_show_prints_entity_detail_and_linked_memories() {
         &bin_dir,
         "cent-shw-d",
         "cent-shw-l",
-        &format!("hhagent-postgres-cli-ent-show-{suffix}"),
+        &format!("kastellan-postgres-cli-ent-show-{suffix}"),
     );
 
     probe_run(
@@ -282,7 +282,7 @@ async fn cli_entities_show_prints_entity_detail_and_linked_memories() {
 // Test 3 — approve writes audit row + flips quarantine
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli entities approve <id>` must:
+/// `kastellan-cli entities approve <id>` must:
 ///   * exit 0,
 ///   * write exactly one `actor='cli' action='entities.approved'` audit row
 ///     with `payload->>'entity_id' = '<id>'`,
@@ -297,7 +297,7 @@ async fn cli_entities_approve_writes_audit_row() {
         &bin_dir,
         "cent-app-d",
         "cent-app-l",
-        &format!("hhagent-postgres-cli-ent-approve-{suffix}"),
+        &format!("kastellan-postgres-cli-ent-approve-{suffix}"),
     );
 
     probe_run(
@@ -372,7 +372,7 @@ async fn cli_entities_approve_writes_audit_row() {
 // Test 4 — reject writes audit row with mentions_dropped
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli entities reject <id>` must:
+/// `kastellan-cli entities reject <id>` must:
 ///   * exit 0,
 ///   * write exactly one `actor='cli' action='entities.rejected'` audit row
 ///     with `payload->>'name' = 'Reject Smith'` and
@@ -387,7 +387,7 @@ async fn cli_entities_reject_writes_audit_row_with_mentions_dropped() {
         &bin_dir,
         "cent-rej-d",
         "cent-rej-l",
-        &format!("hhagent-postgres-cli-ent-reject-{suffix}"),
+        &format!("kastellan-postgres-cli-ent-reject-{suffix}"),
     );
 
     probe_run(
@@ -450,7 +450,7 @@ async fn cli_entities_reject_writes_audit_row_with_mentions_dropped() {
 // Test 5 — merge writes audit row + drops source rows
 // ---------------------------------------------------------------------------
 
-/// `hhagent-cli entities merge --keep K --drop A,B` must:
+/// `kastellan-cli entities merge --keep K --drop A,B` must:
 ///   * exit 0,
 ///   * write exactly one `actor='cli' action='entities.merged'` audit row
 ///     with `(payload->>'kept_id')::BIGINT = K`,
@@ -465,7 +465,7 @@ async fn cli_entities_merge_writes_audit_row() {
         &bin_dir,
         "cent-mrg-d",
         "cent-mrg-l",
-        &format!("hhagent-postgres-cli-ent-merge-{suffix}"),
+        &format!("kastellan-postgres-cli-ent-merge-{suffix}"),
     );
 
     probe_run(
@@ -560,7 +560,7 @@ async fn cli_entities_merge_writes_audit_row() {
 async fn cli_entities_bad_args_exit_code_two() {
     let bin = cli_binary();
     if !bin.exists() {
-        eprintln!("[SKIP] cli_entities_bad_args_exit_code_two: hhagent-cli binary not built at {}", bin.display());
+        eprintln!("[SKIP] cli_entities_bad_args_exit_code_two: kastellan-cli binary not built at {}", bin.display());
         return;
     }
 
@@ -568,7 +568,7 @@ async fn cli_entities_bad_args_exit_code_two() {
     let out_a = Command::new(&bin)
         .args(["entities", "approve"])
         .env_clear()
-        .env("HHAGENT_DATA_DIR", "/nonexistent-hhagent-test-path")
+        .env("KASTELLAN_DATA_DIR", "/nonexistent-kastellan-test-path")
         .env("HOME", std::env::var_os("HOME").unwrap_or_default())
         .output()
         .expect("spawn cli entities approve (no ids)");
@@ -589,7 +589,7 @@ async fn cli_entities_bad_args_exit_code_two() {
     let out_b = Command::new(&bin)
         .args(["entities", "merge", "--drop", "1,2"])
         .env_clear()
-        .env("HHAGENT_DATA_DIR", "/nonexistent-hhagent-test-path")
+        .env("KASTELLAN_DATA_DIR", "/nonexistent-kastellan-test-path")
         .env("HOME", std::env::var_os("HOME").unwrap_or_default())
         .output()
         .expect("spawn cli entities merge (no --keep)");
@@ -606,7 +606,7 @@ async fn cli_entities_bad_args_exit_code_two() {
     let out_c = Command::new(&bin)
         .args(["entities", "wat"])
         .env_clear()
-        .env("HHAGENT_DATA_DIR", "/nonexistent-hhagent-test-path")
+        .env("KASTELLAN_DATA_DIR", "/nonexistent-kastellan-test-path")
         .env("HOME", std::env::var_os("HOME").unwrap_or_default())
         .output()
         .expect("spawn cli entities wat");
@@ -627,7 +627,7 @@ async fn cli_entities_bad_args_exit_code_two() {
     let out_d = Command::new(&bin)
         .args(["entities", "list", "--state", "bogus"])
         .env_clear()
-        .env("HHAGENT_DATA_DIR", "/nonexistent-hhagent-test-path")
+        .env("KASTELLAN_DATA_DIR", "/nonexistent-kastellan-test-path")
         .env("HOME", std::env::var_os("HOME").unwrap_or_default())
         .output()
         .expect("spawn cli entities list (bad --state)");

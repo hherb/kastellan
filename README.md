@@ -1,7 +1,7 @@
-# hhagent
+# kastellan
 
 <p align="center">
-  <img src="assets/hhagent_logo_transparent.png" alt="hhagent logo" width="280">
+  <img src="assets/kastellan_logo_transparent.png" alt="kastellan logo" width="280">
 </p>
 
 A personal, always-on agentic system designed from the ground up for security and vendor neutrality.
@@ -30,7 +30,7 @@ what's still on the roadmap.
 ## Security architecture
 
 <p align="center">
-  <img src="assets/security-architecture.png" alt="hhagent security architecture" width="800">
+  <img src="assets/security-architecture.png" alt="kastellan security architecture" width="800">
 </p>
 
 The mechanical layers along the bottom of the diagram — bwrap, Landlock,
@@ -50,7 +50,7 @@ execution, and the egress proxy — with the block / advisory / escalation
 branches drawn explicitly. Source: [`docs/security-request-flow.svg`](docs/security-request-flow.svg).
 
 <p align="center">
-  <img src="assets/security-request-flow.png" alt="Request flow through hhagent's security layers" width="1100">
+  <img src="assets/security-request-flow.png" alt="Request flow through kastellan's security layers" width="1100">
 </p>
 
 ## Why another one?
@@ -58,7 +58,7 @@ branches drawn explicitly. Source: [`docs/security-request-flow.svg`](docs/secur
 Several Rust personal-agent projects exist in the OpenClaw-derived
 family — notably [IronClaw](https://github.com/nearai/ironclaw) and
 [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw). They share a lot
-with hhagent: Rust core, local-first, OS sandboxing, MCP-compatible IPC.
+with kastellan: Rust core, local-first, OS sandboxing, MCP-compatible IPC.
 The reason for *another* one is posture, not feature count: **security
 is the foundational property here, not a layer added later.** Each rule
 below is a load-bearing invariant, not a default we relax under deadline
@@ -68,7 +68,7 @@ pressure.
   runs tools as WASM modules inside the runtime; ZeroClaw runs them as
   in-process Rust traits with the OS sandbox wrapping the *whole*
   runtime. Both are software-only or coarse-grained boundaries.
-  hhagent's boundary is the OS process boundary — `bubblewrap` on
+  kastellan's boundary is the OS process boundary — `bubblewrap` on
   Linux, `sandbox-exec` on macOS — so a compromised tool reaches at
   most the endpoints in *that tool's* allowlist, never the next
   tool's, and never the core.
@@ -162,9 +162,9 @@ What works today:
   `Net::Allowlist` consumer), and `gliner-relex` (Python entity/relation
   extraction under the sandbox).
 - **Supporting infrastructure.** OS-native supervisor units (`systemd --user` /
-  launchd) including an `hhagent.target`; AES-256-GCM secrets at rest with opaque
+  launchd) including an `kastellan.target`; AES-256-GCM secrets at rest with opaque
   `secret://` references; an OpenAI-compatible, local-first LLM router; a
-  `hhagent-cli audit tail` viewer.
+  `kastellan-cli audit tail` viewer.
 
 Not built yet (see the roadmap): channel adapters (Telegram/Signal/email),
 outbound messaging, the browser worker, `python-exec`, the egress proxy + its
@@ -181,16 +181,16 @@ sequenced build plan is [`docs/devel/ROADMAP.md`](docs/devel/ROADMAP.md). See al
 Rust workspace, 10 crates:
 
 ```
-core/                 hhagent-core: agent loop, scheduler, memory, CASSANDRA, audit,
-                      tool-host chokepoint, handoff cache; `hhagent` daemon + `hhagent-cli`
-db/                   hhagent-db: Postgres helpers + embedded migrations (pgvector +
+core/                 kastellan-core: agent loop, scheduler, memory, CASSANDRA, audit,
+                      tool-host chokepoint, handoff cache; `kastellan` daemon + `kastellan-cli`
+db/                   kastellan-db: Postgres helpers + embedded migrations (pgvector +
                       tsvector/GIN + relational graph), secrets-at-rest, audit writer
-llm-router/           hhagent-llm-router: sole egress for LLM calls (OpenAI-compatible HTTP)
-sandbox/              hhagent-sandbox: SandboxPolicy + per-OS backends
+llm-router/           kastellan-llm-router: sole egress for LLM calls (OpenAI-compatible HTTP)
+sandbox/              kastellan-sandbox: SandboxPolicy + per-OS backends
                       (bwrap / Seatbelt / Apple container)
-supervisor/           hhagent-supervisor: systemd --user / launchd unit generation + drivers
-protocol/             hhagent-protocol: JSON-RPC 2.0 over stdio (MCP-stdio compatible)
-tests-common/         hhagent-tests-common: shared dev-dep test harness (Pg cluster, fixtures)
+supervisor/           kastellan-supervisor: systemd --user / launchd unit generation + drivers
+protocol/             kastellan-protocol: JSON-RPC 2.0 over stdio (MCP-stdio compatible)
+tests-common/         kastellan-tests-common: shared dev-dep test harness (Pg cluster, fixtures)
 workers/prelude/      Landlock + seccomp lock-down prelude (worker-side `serve_stdio`)
 workers/shell-exec/   argv-allowlisted execve worker
 workers/web-fetch/    HTTPS-only, host-allowlisted fetch + readable-text extraction
@@ -221,7 +221,7 @@ This is the same pattern Flatpak uses (`/etc/apparmor.d/flatpak`). After
 installing, sandbox tests should pass:
 
 ```sh
-cargo test -p hhagent-sandbox
+cargo test -p kastellan-sandbox
 ```
 
 If you skip this step, the agent will refuse to spawn workers and emit a

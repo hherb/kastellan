@@ -32,7 +32,7 @@ The classic "agent runs one step, then declares completion" flow. Mock LLM serve
 - **Plan A** (returned to call 1): non-terminal — `decision != "task_complete"`, `steps: [{tool: "shell-exec", method: "shell.exec", parameters: {argv: [ECHO_PATH, "<marker>"]}}]`. The inner loop dispatches the step.
 - **Plan B** (returned to call 2): terminal — `decision: "task_complete"`, `steps: []`, `result: {kind: "text", body: "<marker>"}`. The inner loop short-circuits to `Outcome::Completed`.
 
-The `<marker>` token (e.g. `marker-<unique-suffix>`) flows from plan B's result through the daemon's `finalize` write into the `tasks.result` column, and from there into the CLI's stdout via `hhagent-cli.rs:307-311`.
+The `<marker>` token (e.g. `marker-<unique-suffix>`) flows from plan B's result through the daemon's `finalize` write into the `tasks.result` column, and from there into the CLI's stdout via `kastellan-cli.rs:307-311`.
 
 **Assertions:**
 
@@ -56,14 +56,14 @@ Mock LLM queue: 3 identical responses, each carrying:
 **Assertions:**
 
 - CLI process exits with status 1.
-- CLI stderr contains `"failed"` (matches `hhagent-cli.rs:320 — eprintln!("ask: task ended in state '{state}'")`).
+- CLI stderr contains `"failed"` (matches `kastellan-cli.rs:320 — eprintln!("ask: task ended in state '{state}'")`).
 - `tasks` row: `state = "failed"`, `plan_count = 3`.
 - `audit_log` shape: 3× `tool:shell-exec/shell.exec` rows whose payload carries `err.code == "POLICY_DENIED"`.
 
 ## What is explicitly out of scope
 
 - **Constitutional-block path** — CASSANDRA stages are stubbed to always Approve in this phase (`core::cassandra::review::{ConstitutionalGuard, DeterministicPolicy}` returning `Verdict::Approve`). Real-stage paths get coverage in the observation-phase follow-up.
-- **Cancel mid-execution from the CLI side** — `hhagent-cli ask` supports ctrl-C, but reliably planting a SIGINT during inner-loop step execution is a different kind of test (timing-sensitive, would benefit from `BarrierDispatcher`). Filed for later.
+- **Cancel mid-execution from the CLI side** — `kastellan-cli ask` supports ctrl-C, but reliably planting a SIGINT during inner-loop step execution is a different kind of test (timing-sensitive, would benefit from `BarrierDispatcher`). Filed for later.
 - **Long lane** — both tests use `Lane::Fast`. The lane runner abstraction is already pinned by `scheduler_lanes_e2e`.
 - **Multiple concurrent CLI invocations** — `scheduler_lanes_e2e` already pins the lane parallel-claim invariant.
 - **CLI flag handling regressions** — `tasks list/status/cancel/fail/tail` and `audit tail` have their own coverage (CLI unit tests + `supervisor_e2e` for the mirror integration).
@@ -121,17 +121,17 @@ Backed by a single `tokio::net::TcpListener` and a `Vec<String>` queue inside an
 
 | Env var                          | Value                                                       | Purpose                                                                  |
 | -------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `HHAGENT_DATA_DIR`               | per-test PG data dir                                        | Daemon points at our per-test cluster, not user's installed cluster.     |
-| `HHAGENT_STATE_DIR`              | per-test temp dir                                           | Audit-mirror JSONL writes here, away from `~/.local/state/`.             |
-| `HHAGENT_PROMPTS_DIR`            | `<workspace>/prompts/`                                      | Prompt loader is fail-closed if missing.                                 |
-| `HHAGENT_LLM_LOCAL_URL`          | `format!("{}/v1", mock.base_url)`                           | `compose_url` will append `/chat/completions`.                           |
-| `HHAGENT_LLM_LOCAL_MODEL`        | `"test-local-model"`                                        | Echoed in `FormulationMeta`.                                             |
-| `HHAGENT_LLM_TIMEOUT_MS`         | `2000`                                                      | Tight timeout — mock failures surface fast.                              |
-| `HHAGENT_SHELL_EXEC_BIN`         | `<workspace>/target/debug/hhagent-worker-shell-exec`        | Registers shell-exec in the tool registry.                               |
-| `HHAGENT_SHELL_EXEC_ALLOWLIST`   | `ECHO_PATH` only                                            | Echo allowed; `/bin/cat` deliberately denied for the failure path.       |
+| `KASTELLAN_DATA_DIR`               | per-test PG data dir                                        | Daemon points at our per-test cluster, not user's installed cluster.     |
+| `KASTELLAN_STATE_DIR`              | per-test temp dir                                           | Audit-mirror JSONL writes here, away from `~/.local/state/`.             |
+| `KASTELLAN_PROMPTS_DIR`            | `<workspace>/prompts/`                                      | Prompt loader is fail-closed if missing.                                 |
+| `KASTELLAN_LLM_LOCAL_URL`          | `format!("{}/v1", mock.base_url)`                           | `compose_url` will append `/chat/completions`.                           |
+| `KASTELLAN_LLM_LOCAL_MODEL`        | `"test-local-model"`                                        | Echoed in `FormulationMeta`.                                             |
+| `KASTELLAN_LLM_TIMEOUT_MS`         | `2000`                                                      | Tight timeout — mock failures surface fast.                              |
+| `KASTELLAN_SHELL_EXEC_BIN`         | `<workspace>/target/debug/kastellan-worker-shell-exec`        | Registers shell-exec in the tool registry.                               |
+| `KASTELLAN_SHELL_EXEC_ALLOWLIST`   | `ECHO_PATH` only                                            | Echo allowed; `/bin/cat` deliberately denied for the failure path.       |
 | `USER`                           | inherited from test process                                 | Required by `ConnectSpec::default_for` (peer auth identity).             |
 
-The CLI subprocess inherits its env from the test process and only needs `HHAGENT_DATA_DIR` propagated (it shares the cluster with the daemon).
+The CLI subprocess inherits its env from the test process and only needs `KASTELLAN_DATA_DIR` propagated (it shares the cluster with the daemon).
 
 ### CLI invocation pattern
 
@@ -141,10 +141,10 @@ let output = Command::new(&cli_binary)
     .arg(format!("say {marker}"))
     .env_clear()
     .env("PATH", "/usr/bin:/bin")
-    .env("HHAGENT_DATA_DIR", &data_dir)
+    .env("KASTELLAN_DATA_DIR", &data_dir)
     .env("USER", &user)
     .output()
-    .expect("spawn hhagent-cli ask");
+    .expect("spawn kastellan-cli ask");
 ```
 
 Use `output()` (blocking, captures stdout/stderr) rather than `spawn()` so we have a single witness for exit code + streams. The CLI's `ask` path waits for the completion NOTIFY internally — no external sleep needed.
@@ -175,7 +175,7 @@ Identical to `scheduler_step_dispatch_e2e.rs`:
 - `[SKIP] supervisor probe failed` — no `systemd --user` / no `loginctl enable-linger` on Linux; SSH-only macOS.
 - `[SKIP] no Postgres install found` — no PGDG / Homebrew binaries.
 - `[SKIP] sandbox probe failed` — bwrap user-namespace not enabled.
-- `[SKIP] hhagent / hhagent-worker-shell-exec binary not found` — workspace not built.
+- `[SKIP] kastellan / kastellan-worker-shell-exec binary not found` — workspace not built.
 
 All skips print to stderr via `eprintln!`; `cargo test -- --nocapture` to see them.
 
@@ -183,11 +183,11 @@ All skips print to stderr via `eprintln!`; `cargo test -- --nocapture` to see th
 
 ### CLI's LISTEN-BEFORE-INSERT race
 
-`hhagent-cli ask` does `PgListener::connect` → `listen("tasks_completed")` → `insert_pending` (`hhagent-cli.rs:257-275`). The daemon's scheduler claims the task only after the INSERT; the NOTIFY fires after `finalize`. The ordering is safe because the listener is established before the INSERT — the same pattern that survives in production.
+`kastellan-cli ask` does `PgListener::connect` → `listen("tasks_completed")` → `insert_pending` (`kastellan-cli.rs:257-275`). The daemon's scheduler claims the task only after the INSERT; the NOTIFY fires after `finalize`. The ordering is safe because the listener is established before the INSERT — the same pattern that survives in production.
 
 ### Mock LLM HTTP timing
 
-Tight `HHAGENT_LLM_TIMEOUT_MS=2000`. A slow CI machine could conceivably take longer than 2 s between connect and full response. Mitigation: the mock responds inline on the same accepted socket — there's no buffered work. If we observe flakes, bump to 5 s.
+Tight `KASTELLAN_LLM_TIMEOUT_MS=2000`. A slow CI machine could conceivably take longer than 2 s between connect and full response. Mitigation: the mock responds inline on the same accepted socket — there's no buffered work. If we observe flakes, bump to 5 s.
 
 ### Multi-thread tokio runtime
 
@@ -214,6 +214,6 @@ Workspace total: **297 → 299**.
 ## Acceptance
 
 - `cargo test --workspace` green; zero `[SKIP]` lines on the DGX (real bwrap + real systemd-user + real PG installed).
-- Both new tests pass deterministically across 5 consecutive runs (`for i in {1..5}; do cargo test -p hhagent-core --test cli_ask_e2e; done`).
+- Both new tests pass deterministically across 5 consecutive runs (`for i in {1..5}; do cargo test -p kastellan-core --test cli_ask_e2e; done`).
 - HANDOVER + ROADMAP updated with the slice description + the new test count.
 - A summary committed alongside the test, with `Co-Authored-By: Claude Opus 4.7`.

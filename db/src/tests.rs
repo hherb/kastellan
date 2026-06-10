@@ -1,4 +1,4 @@
-//! Pure unit tests for the `hhagent-db` crate root.
+//! Pure unit tests for the `kastellan-db` crate root.
 //!
 //! Lifted from an inline `#[cfg(test)] mod tests` block in `lib.rs` to keep
 //! the crate-root file under the 500-LOC soft cap. The body is byte-identical
@@ -74,13 +74,13 @@ fn build_initdb_argv_includes_data_checksums_when_enabled() {
 }
 
 #[test]
-fn build_initdb_argv_falls_back_to_hhagent_when_username_blank() {
+fn build_initdb_argv_falls_back_to_kastellan_when_username_blank() {
     let mut o = opts("/d");
     o.username = "   ".into();
     let argv = build_initdb_argv(Path::new("/u/initdb"), &o);
     assert!(
-        argv.iter().any(|a| a == "--username=hhagent"),
-        "blank username should fall back to hhagent, got {argv:?}"
+        argv.iter().any(|a| a == "--username=kastellan"),
+        "blank username should fall back to kastellan, got {argv:?}"
     );
 }
 
@@ -111,9 +111,9 @@ fn auto_conf_disables_tcp_listener() {
 /// `psql -h <socket_dir>` connect string lines up.
 #[test]
 fn auto_conf_pins_unix_socket_dir() {
-    let s = build_postgresql_auto_conf(&cfg("/srv/hhagent/sockets"));
+    let s = build_postgresql_auto_conf(&cfg("/srv/kastellan/sockets"));
     assert!(
-        s.contains("unix_socket_directories = '/srv/hhagent/sockets'"),
+        s.contains("unix_socket_directories = '/srv/kastellan/sockets'"),
         "auto.conf: {s}"
     );
 }
@@ -157,7 +157,7 @@ fn auto_conf_clamps_shared_buffers_to_at_least_one_mb() {
 fn auto_conf_marks_itself_as_machine_managed() {
     let s = build_postgresql_auto_conf(&cfg("/x"));
     assert!(
-        s.starts_with("# Managed by hhagent-db-init"),
+        s.starts_with("# Managed by kastellan-db-init"),
         "auto.conf must start with the don't-edit warning, got: {s}"
     );
 }
@@ -184,11 +184,11 @@ fn pg_bin_dir_candidates_prefer_higher_versions() {
 /// This is the load-bearing no-regression guarantee for every existing
 /// test fixture: switching call sites from the default to the
 /// override-aware helper must NOT change behaviour for any developer
-/// who does not set `HHAGENT_PG_BIN_DIR`.
+/// who does not set `KASTELLAN_PG_BIN_DIR`.
 #[test]
 fn pg_bin_dir_candidates_with_env_override_returns_defaults_when_unset() {
     // Hold `env_lock` so concurrent tests in this crate cannot race
-    // a stale `HHAGENT_PG_BIN_DIR` into our read.
+    // a stale `KASTELLAN_PG_BIN_DIR` into our read.
     let _guard = crate::env_lock();
     let prior = std::env::var(PG_BIN_DIR_ENV).ok();
     std::env::remove_var(PG_BIN_DIR_ENV);
@@ -241,9 +241,9 @@ fn pg_bin_dir_candidates_with_env_override_prepends_valid_env_path() {
 }
 
 /// An empty-string env value is treated as unset — operators can
-/// disable the override via `export HHAGENT_PG_BIN_DIR=""` without
+/// disable the override via `export KASTELLAN_PG_BIN_DIR=""` without
 /// having to `unset`. This also tolerates a shell expression like
-/// `export HHAGENT_PG_BIN_DIR=$(some_lookup)` evaluating to empty
+/// `export KASTELLAN_PG_BIN_DIR=$(some_lookup)` evaluating to empty
 /// rather than poisoning every test run with an obviously-bogus
 /// "" → `PathBuf::from("")` first candidate.
 #[test]
@@ -267,7 +267,7 @@ fn pg_bin_dir_candidates_with_env_override_treats_empty_string_as_unset() {
 
 /// Whitespace-only env value is treated as unset for the same
 /// reasons as the empty-string case — defensive against shell
-/// quoting accidents like `export HHAGENT_PG_BIN_DIR=" "`.
+/// quoting accidents like `export KASTELLAN_PG_BIN_DIR=" "`.
 #[test]
 fn pg_bin_dir_candidates_with_env_override_treats_whitespace_as_unset() {
     let _guard = crate::env_lock();
@@ -306,7 +306,7 @@ fn find_pg_bin_dir_picks_first_candidate_with_both_binaries() {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     let tmp = std::env::temp_dir().join(format!(
-        "hhagent-db-find-{}-{}",
+        "kastellan-db-find-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -333,7 +333,7 @@ fn find_pg_bin_dir_picks_first_candidate_with_both_binaries() {
 #[test]
 fn is_data_dir_initialized_returns_false_for_empty_dir() {
     let tmp = std::env::temp_dir().join(format!(
-        "hhagent-db-empty-{}-{}",
+        "kastellan-db-empty-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -349,7 +349,7 @@ fn is_data_dir_initialized_returns_false_for_empty_dir() {
 fn is_data_dir_initialized_returns_true_when_pg_version_present() {
     use std::io::Write;
     let tmp = std::env::temp_dir().join(format!(
-        "hhagent-db-populated-{}-{}",
+        "kastellan-db-populated-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -374,7 +374,7 @@ fn require_absolute_rejects_relative_paths() {
     assert!(matches!(err, DbError::RelativePath(_)));
 }
 
-/// Default data dir lives under `$HOME/.local/share/hhagent/pg/data`
+/// Default data dir lives under `$HOME/.local/share/kastellan/pg/data`
 /// — same on Linux and macOS. Pinned so a refactor doesn't silently
 /// move existing users' data.
 #[test]
@@ -384,11 +384,11 @@ fn default_data_dir_is_under_xdg_data_home() {
     // process-wide env (currently the `$USER` tests in `conn`).
     let _guard = env_lock();
     let prev = std::env::var_os("HOME");
-    std::env::set_var("HOME", "/tmp/fakehome-hhagent-db-test");
+    std::env::set_var("HOME", "/tmp/fakehome-kastellan-db-test");
     let dd = default_data_dir().unwrap();
     assert_eq!(
         dd,
-        PathBuf::from("/tmp/fakehome-hhagent-db-test/.local/share/hhagent/pg/data")
+        PathBuf::from("/tmp/fakehome-kastellan-db-test/.local/share/kastellan/pg/data")
     );
     match prev {
         Some(v) => std::env::set_var("HOME", v),
@@ -398,6 +398,6 @@ fn default_data_dir_is_under_xdg_data_home() {
 
 #[test]
 fn default_socket_dir_lives_inside_data_dir() {
-    let sock = default_socket_dir(Path::new("/srv/hhagent/pg/data"));
-    assert_eq!(sock, PathBuf::from("/srv/hhagent/pg/data/sockets"));
+    let sock = default_socket_dir(Path::new("/srv/kastellan/pg/data"));
+    assert_eq!(sock, PathBuf::from("/srv/kastellan/pg/data/sockets"));
 }

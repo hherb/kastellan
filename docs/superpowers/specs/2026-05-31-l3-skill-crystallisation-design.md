@@ -14,7 +14,7 @@
 `MemoryLayer::Skill` (L3) has shipped as a storage primitive (the enum variant + `insert_memory_at_layer` + `load_layer`), but — exactly as L1 was before its writer landed — there is **no writer**. As of `main` at `98a5be0`:
 
 ```
-$ psql -d hhagent -c "SELECT COUNT(*) FROM memories WHERE layer = 3"
+$ psql -d kastellan -c "SELECT COUNT(*) FROM memories WHERE layer = 3"
  count
 -------
      0
@@ -43,7 +43,7 @@ In scope (this slice):
   - `ACTION_L3_REMOVED = "l3.removed"` (operator path via CLI)
 - One new pure helper `build_l3_write_payload(outcome: &L3WriteOutcome, source: &L3Source, skill_name: &str, body_sha256: &str) -> serde_json::Value`.
 - New `core::cli_audit::l3_remove_and_audit` helper (emits an `actor='cli'` row). Mirrors `l1_remove_and_audit`.
-- New `hhagent-cli memory l3 {list, remove}` subcommand tree, hand-rolled (no clap dep), mirroring the `memory l1` precedent. **No `add`** — skills are agent-crystallised, never operator-authored.
+- New `kastellan-cli memory l3 {list, remove}` subcommand tree, hand-rolled (no clap dep), mirroring the `memory l1` precedent. **No `add`** — skills are agent-crystallised, never operator-authored.
 
 Out of scope (filed as follow-ups, listed at the end of this doc):
 
@@ -190,8 +190,8 @@ Agent-raised path (the only writer):
 
 Operator path (read-only + prune):
 
-  hhagent-cli memory l3 list            → load_layer(pool, MemoryLayer::Skill, ..)   (no audit row)
-  hhagent-cli memory l3 remove <id>
+  kastellan-cli memory l3 list            → load_layer(pool, MemoryLayer::Skill, ..)   (no audit row)
+  kastellan-cli memory l3 remove <id>
     └── cli_audit::l3_remove_and_audit(pool, id)
          └── db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Skill)   (layer-guarded; fires deleted_memories trigger)
          └── audit::insert(pool, "cli", "l3.removed", { memory_id, deleted })
@@ -214,7 +214,7 @@ MODIFIED (~10):
 - `core/src/scheduler/runner.rs` — `drain_lane` hook after the existing L1 hook (`write_l3_crystallised_row` helper, mirroring `write_l1_promoted_row`).
 - `core/src/scheduler/audit.rs` — `ACTION_L3_CRYSTALLISED` + `ACTION_L3_REMOVED` constants + `build_l3_write_payload` helper + unit tests.
 - `core/src/cli_audit.rs` — `l3_remove_and_audit` helper.
-- `core/src/bin/hhagent-cli/memory_l3.rs` (NEW sibling to `memory_l1.rs`) + `core/src/bin/hhagent-cli/main.rs` dispatch wiring for the `memory l3 {list, remove}` subtree.
+- `core/src/bin/kastellan-cli/memory_l3.rs` (NEW sibling to `memory_l1.rs`) + `core/src/bin/kastellan-cli/main.rs` dispatch wiring for the `memory l3 {list, remove}` subtree.
 - Scheduler e2e test literals (`core/tests/scheduler_inner_loop_e2e.rs`, `cli_ask_e2e.rs`, `router_agent_mock_e2e.rs`, `scheduler_lanes_e2e.rs`) — `InnerLoopResult { .. }` / `FormulationMeta { .. }` literals gain `terminal_l3_skill: None`; the mid-tier audit-payload gate test in `scheduler_inner_loop_e2e` gains an assertion on the new `l3_skill` key.
 
 DOCS (2):
@@ -227,7 +227,7 @@ No new `db/` helper is required: `insert_memory_at_layer`, `delete_memory_at_lay
 | Actor       | Action            | Payload keys                                                    | When                                                                            |
 |-------------|-------------------|----------------------------------------------------------------|---------------------------------------------------------------------------------|
 | `scheduler` | `l3.crystallised` | `{source, task_id, skill_name, body_sha256, action, memory_id?}` | `drain_lane` — `Outcome::Completed` + cumulative `total_steps_executed >= 1` + valid candidate |
-| `cli`       | `l3.removed`      | `{memory_id, deleted}`                                          | `hhagent-cli memory l3 remove` — DELETE … WHERE id AND layer = 3                |
+| `cli`       | `l3.removed`      | `{memory_id, deleted}`                                          | `kastellan-cli memory l3 remove` — DELETE … WHERE id AND layer = 3                |
 | `agent`     | `plan.formulate`  | gains compact `l3_skill` key `{name, step_count, param_count}` \| `null` — **pure-additive (+1 key)** | every plan formulation                                |
 
 Where `action` is one of:
@@ -274,7 +274,7 @@ If any of these turn out wrong during implementation, file the correction inline
 
 - [x] No placeholders / TBD / TODO in body text.
 - [x] `plan.formulate` payload bump described as pure-additive (+1 key); the exact running count is deferred to implementation-time re-derivation rather than hardcoded (intervening slices may have changed it since the L1 spec's 21/22).
-- [x] File-touch list cross-checked against the precedent (`l1_promote.rs`, `cassandra/types.rs::Plan`, `inner_loop.rs::InnerLoopResult`, `runner.rs::drain_lane`, `audit.rs`, `cli_audit.rs`, `bin/hhagent-cli/memory_l1.rs`).
+- [x] File-touch list cross-checked against the precedent (`l1_promote.rs`, `cassandra/types.rs::Plan`, `inner_loop.rs::InnerLoopResult`, `runner.rs::drain_lane`, `audit.rs`, `cli_audit.rs`, `bin/kastellan-cli/memory_l1.rs`).
 - [x] No new `db/` helper claimed — `insert_memory_at_layer` / `delete_memory_at_layer` / `load_layer` confirmed already shipped.
 - [x] No contradiction between "audit-row `source` is writer-side, never producer" and "`Plan.l3_skill` is producer-supplied" — the producer supplies the **content**, the writer supplies the **provenance**.
 - [x] Writer-only boundary is explicit and consistent: stored skills are non-executable; no invocation path is introduced; `trust: "untrusted"` is inert this slice.

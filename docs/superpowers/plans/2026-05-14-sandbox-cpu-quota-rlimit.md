@@ -4,7 +4,7 @@
 
 **Goal:** Make `cpu_quota_pct` / `tasks_max` cgroup ceilings driven from `SandboxPolicy` (Linux), and enforce `policy.cpu_ms` cross-platform via `setrlimit(RLIMIT_CPU)` applied from the worker prelude before `lock_down()`.
 
-**Architecture:** Two parallel tracks: (1) Linux cgroup wiring — pure plumbing of two `Option<T>` fields through `build_systemd_run_argv`; (2) cross-platform rlimit — new `workers/prelude/src/rlimit.rs` module reads `HHAGENT_CPU_MS` env var (set by `core::tool_host::derive_lockdown_env`) and applies `RLIMIT_CPU` before lock-down. The two tracks compose at the `serve_stdio` entry point.
+**Architecture:** Two parallel tracks: (1) Linux cgroup wiring — pure plumbing of two `Option<T>` fields through `build_systemd_run_argv`; (2) cross-platform rlimit — new `workers/prelude/src/rlimit.rs` module reads `KASTELLAN_CPU_MS` env var (set by `core::tool_host::derive_lockdown_env`) and applies `RLIMIT_CPU` before lock-down. The two tracks compose at the `serve_stdio` entry point.
 
 **Tech Stack:** Rust 2021. `libc 0.2` for `setrlimit` FFI. `seccompiler` + `landlock` Linux-only (unchanged). `systemd-run --user --scope` for cgroup invocation (unchanged).
 
@@ -20,7 +20,7 @@
 | `workers/prelude/src/rlimit.rs` | CREATE | New module — `cpu_ms_to_seconds` pure helper, `RlimitReport`, `RlimitError`, `apply_from_env` |
 | [`workers/prelude/src/lib.rs`](../../../workers/prelude/src/lib.rs) | MODIFY | `mod rlimit;`; `LockdownReport` restructure (`SkippedNonLinux` → `NonLinux { rlimit }`, `Linux { …, rlimit }`); `serve_stdio` composes rlimit + lock-down |
 | [`workers/prelude/src/bin/lockdown_probe.rs`](../../../workers/prelude/src/bin/lockdown_probe.rs) | MODIFY | Call `rlimit::apply_from_env` at top alongside `lock_down`; new `cpu-burner` subcommand |
-| `workers/prelude/tests/rlimit_smoke.rs` | CREATE | Integration test — spawn `lockdown-probe cpu-burner` with `HHAGENT_CPU_MS=200`, assert SIGXCPU/SIGKILL within wall-clock tolerance |
+| `workers/prelude/tests/rlimit_smoke.rs` | CREATE | Integration test — spawn `lockdown-probe cpu-burner` with `KASTELLAN_CPU_MS=200`, assert SIGXCPU/SIGKILL within wall-clock tolerance |
 | [`core/src/tool_host.rs`](../../../core/src/tool_host.rs) | MODIFY | + `pub const ENV_CPU_MS`; extend `derive_lockdown_env`; 2 new unit tests |
 
 Each task below produces a self-contained commit. TDD red→green→commit on every task.
@@ -54,7 +54,7 @@ fn sandbox_policy_default_leaves_cpu_quota_and_tasks_max_unset() {
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-sandbox --lib sandbox_policy_default_leaves_cpu_quota_and_tasks_max_unset 2>&1 | tail -10
+  cargo test -p kastellan-sandbox --lib sandbox_policy_default_leaves_cpu_quota_and_tasks_max_unset 2>&1 | tail -10
 ```
 
 Expected: compile error `no field cpu_quota_pct on type SandboxPolicy` (or `tasks_max`).
@@ -128,7 +128,7 @@ impl Default for SandboxPolicy {
 - [ ] **Step 4: Run the new test + all sandbox tests to verify green**
 
 ```bash
-source "$HOME/.cargo/env" && cargo test -p hhagent-sandbox --lib 2>&1 | tail -20
+source "$HOME/.cargo/env" && cargo test -p kastellan-sandbox --lib 2>&1 | tail -20
 ```
 
 Expected: all sandbox-lib tests pass (existing 30+ + 1 new = 31+). Zero warnings.
@@ -228,7 +228,7 @@ fn argv_uses_policy_tasks_max_when_set() {
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-sandbox --lib argv_uses_policy_ 2>&1 | tail -15
+  cargo test -p kastellan-sandbox --lib argv_uses_policy_ 2>&1 | tail -15
 ```
 
 Expected: 2 failures — both new tests fail because the current code is hardcoded to `DEFAULT_CPU_QUOTA_PCT=200` and `DEFAULT_TASKS_MAX=64`, ignoring the policy override.
@@ -272,14 +272,14 @@ Also update the module-level doc comment that says "Hardcoded defense-in-depth d
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-sandbox --lib argv_uses_policy_ 2>&1 | tail -10
+  cargo test -p kastellan-sandbox --lib argv_uses_policy_ 2>&1 | tail -10
 ```
 
 Expected: 2 pass. Also re-run the existing default-path tests to confirm they still pin the fallback:
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-sandbox --lib argv_sets_default_ 2>&1 | tail -10
+  cargo test -p kastellan-sandbox --lib argv_sets_default_ 2>&1 | tail -10
 ```
 
 Expected: 2 pass (`argv_sets_default_cpu_quota_percent`, `argv_sets_default_tasks_max`).
@@ -287,7 +287,7 @@ Expected: 2 pass (`argv_sets_default_cpu_quota_percent`, `argv_sets_default_task
 - [ ] **Step 5: Run the full sandbox unit suite to confirm no regression**
 
 ```bash
-source "$HOME/.cargo/env" && cargo test -p hhagent-sandbox --lib 2>&1 | tail -5
+source "$HOME/.cargo/env" && cargo test -p kastellan-sandbox --lib 2>&1 | tail -5
 ```
 
 Expected: all sandbox-lib tests pass; zero warnings.
@@ -324,7 +324,7 @@ In `workers/prelude/Cargo.toml`, move `libc = "0.2"` from the Linux-cfg target t
 
 ```toml
 [dependencies]
-hhagent-protocol = { path = "../../protocol" }
+kastellan-protocol = { path = "../../protocol" }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 thiserror        = { workspace = true }
@@ -342,7 +342,7 @@ Replace with:
 
 ```toml
 [dependencies]
-hhagent-protocol = { path = "../../protocol" }
+kastellan-protocol = { path = "../../protocol" }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 thiserror        = { workspace = true }
@@ -362,7 +362,7 @@ seccompiler = { workspace = true }
 - [ ] **Step 2: Build to verify nothing breaks**
 
 ```bash
-source "$HOME/.cargo/env" && cargo build -p hhagent-worker-prelude 2>&1 | tail -5
+source "$HOME/.cargo/env" && cargo build -p kastellan-worker-prelude 2>&1 | tail -5
 ```
 
 Expected: clean build.
@@ -422,9 +422,9 @@ Create `workers/prelude/src/rlimit.rs`:
 use std::env;
 
 /// Env var read by [`apply_from_env`]. Set by
-/// `hhagent_core::tool_host::derive_lockdown_env` from
+/// `kastellan_core::tool_host::derive_lockdown_env` from
 /// `policy.cpu_ms`.
-pub const ENV_CPU_MS: &str = "HHAGENT_CPU_MS";
+pub const ENV_CPU_MS: &str = "KASTELLAN_CPU_MS";
 
 /// Status of the rlimit layer after [`apply_from_env`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,7 +442,7 @@ pub enum RlimitReport {
 /// before serving any request.
 #[derive(Debug, thiserror::Error)]
 pub enum RlimitError {
-    /// `HHAGENT_CPU_MS` was set but couldn't be parsed as `u64`.
+    /// `KASTELLAN_CPU_MS` was set but couldn't be parsed as `u64`.
     #[error("env {ENV_CPU_MS}: {0}")]
     Env(String),
     /// `setrlimit(RLIMIT_CPU, …)` returned a non-zero error code.
@@ -540,7 +540,7 @@ pub mod rlimit;
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-worker-prelude --lib rlimit:: 2>&1 | tail -10
+  cargo test -p kastellan-worker-prelude --lib rlimit:: 2>&1 | tail -10
 ```
 
 Expected: 6 pass.
@@ -580,9 +580,9 @@ EOF
     /// Tests in this module mutate the process-wide env block, which
     /// cargo's per-binary test harness runs in parallel by default.
     /// Take this mutex while inside any `apply_from_env` test so two
-    /// tests don't trample each other's `HHAGENT_CPU_MS` setting.
+    /// tests don't trample each other's `KASTELLAN_CPU_MS` setting.
     ///
-    /// Pattern lifted from `hhagent_tests_common::serial::serial_lock`.
+    /// Pattern lifted from `kastellan_tests_common::serial::serial_lock`.
     fn env_lock() -> MutexGuard<'static, ()> {
         static M: OnceLock<Mutex<()>> = OnceLock::new();
         // unwrap_or_else handles the rare poisoned-mutex case: a test
@@ -593,7 +593,7 @@ EOF
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Helper: temporarily set HHAGENT_CPU_MS, run a closure, then
+    /// Helper: temporarily set KASTELLAN_CPU_MS, run a closure, then
     /// restore the prior value. Returns the closure's value.
     ///
     /// Workspace is on Rust 2021 edition where `set_var` /
@@ -661,7 +661,7 @@ EOF
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-worker-prelude --lib rlimit::tests::apply_from_env 2>&1 | tail -15
+  cargo test -p kastellan-worker-prelude --lib rlimit::tests::apply_from_env 2>&1 | tail -15
 ```
 
 Expected: compile error — `apply_from_env` is not defined.
@@ -671,7 +671,7 @@ Expected: compile error — `apply_from_env` is not defined.
 Add to `workers/prelude/src/rlimit.rs`, immediately after `cpu_ms_to_seconds`:
 
 ```rust
-/// Read `HHAGENT_CPU_MS` and apply `RLIMIT_CPU` if set and non-zero.
+/// Read `KASTELLAN_CPU_MS` and apply `RLIMIT_CPU` if set and non-zero.
 ///
 /// Returns `Disabled` if the env var is unset, empty, or `"0"`. Returns
 /// an error if the value is set but not parseable as `u64`, or if
@@ -731,7 +731,7 @@ fn apply_cpu_seconds(cpu_seconds: u64) -> Result<(), RlimitError> {
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-worker-prelude --lib rlimit::tests::apply_from_env 2>&1 | tail -10
+  cargo test -p kastellan-worker-prelude --lib rlimit::tests::apply_from_env 2>&1 | tail -10
 ```
 
 Expected: 4 pass. Note `apply_from_env_with_generous_budget_applies` actually calls `setrlimit` on the test process — that's fine; 30 s is more than the test suite uses, and `setrlimit(RLIMIT_CPU)` doesn't reset on test-process exit (process-scoped).
@@ -739,7 +739,7 @@ Expected: 4 pass. Note `apply_from_env_with_generous_budget_applies` actually ca
 - [ ] **Step 5: Run the full prelude unit suite to confirm no regression**
 
 ```bash
-source "$HOME/.cargo/env" && cargo test -p hhagent-worker-prelude --lib 2>&1 | tail -10
+source "$HOME/.cargo/env" && cargo test -p kastellan-worker-prelude --lib 2>&1 | tail -10
 ```
 
 Expected: ~21 tests pass (11 existing + 10 new for rlimit), zero warnings.
@@ -748,9 +748,9 @@ Expected: ~21 tests pass (11 existing + 10 new for rlimit), zero warnings.
 
 ```bash
 git add workers/prelude/src/rlimit.rs && git commit -m "$(cat <<'EOF'
-workers/prelude(rlimit): apply_from_env reads HHAGENT_CPU_MS + setrlimit
+workers/prelude(rlimit): apply_from_env reads KASTELLAN_CPU_MS + setrlimit
 
-apply_from_env reads HHAGENT_CPU_MS, parses to u64 milliseconds, converts
+apply_from_env reads KASTELLAN_CPU_MS, parses to u64 milliseconds, converts
 via cpu_ms_to_seconds (ceiling-div with 1-second floor), and calls
 libc::setrlimit(RLIMIT_CPU, …) with soft = hard. Failure modes:
 - unset / "0" / empty → Disabled (no rlimit applied)
@@ -782,7 +782,7 @@ The `SkippedNonLinux` variant becomes `NonLinux { rlimit }`; the `Linux` variant
 - [ ] **Step 1: Read the current `lock_down` + `serve_stdio` for context**
 
 ```bash
-sed -n '46,156p' /home/hherb/src/hhagent/workers/prelude/src/lib.rs
+sed -n '46,156p' /home/hherb/src/kastellan/workers/prelude/src/lib.rs
 ```
 
 Expected: shows `LockdownReport`, `lock_down`, `serve_stdio` definitions.
@@ -843,10 +843,10 @@ Then replace the existing `lock_down` body (which currently returns the old `Loc
 /// Reads its policy from environment variables set by the parent process
 /// (`core::tool_host`):
 ///
-///   * `HHAGENT_LANDLOCK_RW`  — JSON array of absolute paths the worker may
+///   * `KASTELLAN_LANDLOCK_RW`  — JSON array of absolute paths the worker may
 ///     write to (its scratch dir). Read-only access to `/usr`, `/lib*`,
 ///     `/etc/ld.so.cache` is implicit so dynamic-linker + libc still work.
-///   * `HHAGENT_SECCOMP_PROFILE` — `"strict"`, `"net_client"`, or `"none"`.
+///   * `KASTELLAN_SECCOMP_PROFILE` — `"strict"`, `"net_client"`, or `"none"`.
 ///     `"none"` disables seccomp entirely (used in tests).
 ///
 /// The function only fails on programmer error (malformed env, kernel ABI
@@ -883,7 +883,7 @@ pub fn lock_down() -> Result<LockdownReport, LockdownError> {
 And replace `serve_stdio`:
 
 ```rust
-/// Drop-in replacement for `hhagent_protocol::server::serve_stdio` that
+/// Drop-in replacement for `kastellan_protocol::server::serve_stdio` that
 /// applies `rlimit::apply_from_env` and [`lock_down`] before entering
 /// the request loop. This is the recommended entry point for tool
 /// workers.
@@ -919,9 +919,9 @@ pub fn serve_stdio<H: Handler>(handler: &mut H) -> io::Result<()> {
     // for the audit log without parsing JSON. Workers that want
     // richer logging can call `rlimit::apply_from_env` + `lock_down`
     // themselves and skip this.
-    eprintln!("hhagent-worker-prelude: lockdown {report:?}");
+    eprintln!("kastellan-worker-prelude: lockdown {report:?}");
 
-    hhagent_protocol::server::serve_stdio(handler)
+    kastellan_protocol::server::serve_stdio(handler)
 }
 ```
 
@@ -937,8 +937,8 @@ Expected: clean build. Grep confirms no other caller pattern-matches on the old 
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-worker-prelude --lib 2>&1 | tail -5 && \
-  cargo test -p hhagent-sandbox --lib 2>&1 | tail -5
+  cargo test -p kastellan-worker-prelude --lib 2>&1 | tail -5 && \
+  cargo test -p kastellan-sandbox --lib 2>&1 | tail -5
 ```
 
 Expected: all pass; zero warnings.
@@ -968,7 +968,7 @@ EOF
 
 ---
 
-### Task 7: Add `HHAGENT_CPU_MS` to `derive_lockdown_env`
+### Task 7: Add `KASTELLAN_CPU_MS` to `derive_lockdown_env`
 
 **Files:**
 - Modify: `core/src/tool_host.rs` (const, function, tests)
@@ -1012,7 +1012,7 @@ In `core/src/tool_host.rs`'s `#[cfg(test)] mod tests`, add after `derive_does_no
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-core --lib derive_ 2>&1 | tail -10
+  cargo test -p kastellan-core --lib derive_ 2>&1 | tail -10
 ```
 
 Expected: compile error — `ENV_CPU_MS` is not defined.
@@ -1022,12 +1022,12 @@ Expected: compile error — `ENV_CPU_MS` is not defined.
 In `core/src/tool_host.rs`, find the existing `ENV_LANDLOCK_RW` / `ENV_SECCOMP_PROFILE` const block (around line 222–228) and add immediately after:
 
 ```rust
-/// Env var name read by `hhagent-worker-prelude::rlimit` for the
+/// Env var name read by `kastellan-worker-prelude::rlimit` for the
 /// `policy.cpu_ms` budget. Plumbed cross-platform — applied via
 /// `setrlimit(RLIMIT_CPU)` from the worker prelude before lock-down.
 /// Omitted (not set to `"0"`) when `policy.cpu_ms == 0` so the prelude
 /// can treat "unset" as the canonical `Disabled` signal.
-pub const ENV_CPU_MS: &str = "HHAGENT_CPU_MS";
+pub const ENV_CPU_MS: &str = "KASTELLAN_CPU_MS";
 ```
 
 Then find `derive_lockdown_env` and extend it. Replace:
@@ -1098,7 +1098,7 @@ pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo test -p hhagent-core --lib derive_ 2>&1 | tail -10
+  cargo test -p kastellan-core --lib derive_ 2>&1 | tail -10
 ```
 
 Expected: 6 pass (4 existing + 2 new). All `derive_*` tests green.
@@ -1107,13 +1107,13 @@ Expected: 6 pass (4 existing + 2 new). All `derive_*` tests green.
 
 ```bash
 git add core/src/tool_host.rs && git commit -m "$(cat <<'EOF'
-core(tool_host): plumb HHAGENT_CPU_MS via derive_lockdown_env
+core(tool_host): plumb KASTELLAN_CPU_MS via derive_lockdown_env
 
-derive_lockdown_env now appends HHAGENT_CPU_MS = policy.cpu_ms when
+derive_lockdown_env now appends KASTELLAN_CPU_MS = policy.cpu_ms when
 policy.cpu_ms > 0 (omitted when 0 so the prelude's apply_from_env sees
 "unset" and returns Disabled — the canonical "no rlimit" signal).
 
-Symmetric with the existing HHAGENT_LANDLOCK_RW + HHAGENT_SECCOMP_PROFILE
+Symmetric with the existing KASTELLAN_LANDLOCK_RW + KASTELLAN_SECCOMP_PROFILE
 plumbing: same caller-supplied-wins pattern, same chokepoint property
 (spawn_worker always calls derive_lockdown_env first).
 
@@ -1143,7 +1143,7 @@ a) Update the doc comment in the file header to describe the new subcommand and 
 ```rust
 //! lockdown-probe cpu-burner
 //!     Call rlimit::apply_from_env() and lock_down(), then enter a
-//!     CPU-bound busy loop. If HHAGENT_CPU_MS was set, the kernel kills
+//!     CPU-bound busy loop. If KASTELLAN_CPU_MS was set, the kernel kills
 //!     the process via SIGXCPU/SIGKILL within `cpu_seconds`. Used by
 //!     `rlimit_smoke.rs` to verify worker-side cpu_ms enforcement.
 //!     Exits 0 if the loop runs for > 10 wall-clock seconds (the test
@@ -1153,7 +1153,7 @@ a) Update the doc comment in the file header to describe the new subcommand and 
 b) In `main`, after the existing `lock_down()` call (around line 67 with `eprintln!("LOCKDOWN_REPORT: {report:?}");`), insert the rlimit application. Replace this section:
 
 ```rust
-    let report = match hhagent_worker_prelude::lock_down() {
+    let report = match kastellan_worker_prelude::lock_down() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("LOCKDOWN_ERROR: {e}");
@@ -1167,7 +1167,7 @@ With:
 
 ```rust
     // Apply rlimit first, matching serve_stdio's order. Cross-platform.
-    let rlimit_report = match hhagent_worker_prelude::rlimit::apply_from_env() {
+    let rlimit_report = match kastellan_worker_prelude::rlimit::apply_from_env() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("RLIMIT_ERROR: {e}");
@@ -1176,7 +1176,7 @@ With:
     };
     eprintln!("RLIMIT_REPORT: {rlimit_report:?}");
 
-    let report = match hhagent_worker_prelude::lock_down() {
+    let report = match kastellan_worker_prelude::lock_down() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("LOCKDOWN_ERROR: {e}");
@@ -1201,7 +1201,7 @@ d) Add the helper at the end of the file:
 ///
 /// Used by `rlimit_smoke.rs` to verify the worker-side rlimit layer
 /// actually enforces the CPU budget the parent encoded in
-/// HHAGENT_CPU_MS. Volatile reads + writes defend against the loop
+/// KASTELLAN_CPU_MS. Volatile reads + writes defend against the loop
 /// being optimised away under release builds.
 fn probe_cpu_burner() -> ExitCode {
     use std::time::Instant;
@@ -1225,7 +1225,7 @@ fn probe_cpu_burner() -> ExitCode {
 - [ ] **Step 2: Build the probe binary to confirm it compiles**
 
 ```bash
-source "$HOME/.cargo/env" && cargo build --bin hhagent-lockdown-probe 2>&1 | tail -5
+source "$HOME/.cargo/env" && cargo build --bin kastellan-lockdown-probe 2>&1 | tail -5
 ```
 
 Expected: clean build.
@@ -1233,7 +1233,7 @@ Expected: clean build.
 - [ ] **Step 3: Smoke-test the new subcommand by hand**
 
 ```bash
-HHAGENT_CPU_MS=200 ./target/debug/hhagent-lockdown-probe cpu-burner ; echo "exit=$?"
+KASTELLAN_CPU_MS=200 ./target/debug/kastellan-lockdown-probe cpu-burner ; echo "exit=$?"
 ```
 
 Expected: process exits via signal (exit code 137 = SIGKILL after SIGXCPU, or 152 = SIGXCPU directly, depending on libc + handler), in well under 10 seconds. Look for the `RLIMIT_REPORT: Applied { cpu_seconds: 1 }` line on stderr.
@@ -1243,15 +1243,15 @@ Note: the exit code shape can vary by shell — `bash` reports `128+signum` for 
 - [ ] **Step 4: Verify the no-env baseline runs unbounded**
 
 ```bash
-( ./target/debug/hhagent-lockdown-probe cpu-burner ) & sleep 2 ; kill $! 2>/dev/null ; wait $! 2>/dev/null ; echo done
+( ./target/debug/kastellan-lockdown-probe cpu-burner ) & sleep 2 ; kill $! 2>/dev/null ; wait $! 2>/dev/null ; echo done
 ```
 
-Expected: process is still alive after 2 seconds when we kill it (because `HHAGENT_CPU_MS` was unset → `RLIMIT_REPORT: Disabled` → loop runs unmolested until our `kill`). The `done` message prints.
+Expected: process is still alive after 2 seconds when we kill it (because `KASTELLAN_CPU_MS` was unset → `RLIMIT_REPORT: Disabled` → loop runs unmolested until our `kill`). The `done` message prints.
 
 - [ ] **Step 5: Run the full prelude suite to confirm no regression**
 
 ```bash
-source "$HOME/.cargo/env" && cargo test -p hhagent-worker-prelude 2>&1 | tail -10
+source "$HOME/.cargo/env" && cargo test -p kastellan-worker-prelude 2>&1 | tail -10
 ```
 
 Expected: all green; zero warnings.
@@ -1265,7 +1265,7 @@ workers/prelude(probe): add cpu-burner subcommand + apply rlimit at top
 The probe binary now applies rlimit::apply_from_env at the top alongside
 lock_down (same order as serve_stdio). New cpu-burner subcommand enters
 a CPU-bound busy loop with a 10 s wall-clock safety cap; if rlimit::
-apply_from_env actually applied an RLIMIT_CPU budget via HHAGENT_CPU_MS,
+apply_from_env actually applied an RLIMIT_CPU budget via KASTELLAN_CPU_MS,
 the kernel kills the process via SIGXCPU/SIGKILL before the cap hits.
 
 Loop uses ptr::{read_volatile, write_volatile} so the compiler can't
@@ -1283,7 +1283,7 @@ EOF
 **Files:**
 - Create: `workers/prelude/tests/rlimit_smoke.rs`
 
-Run the `lockdown-probe cpu-burner` binary as a subprocess with `HHAGENT_CPU_MS=200`, verify it's killed by signal in well under 10 seconds. Mirrors the pattern of `seccomp_smoke.rs` and `landlock_smoke.rs`.
+Run the `lockdown-probe cpu-burner` binary as a subprocess with `KASTELLAN_CPU_MS=200`, verify it's killed by signal in well under 10 seconds. Mirrors the pattern of `seccomp_smoke.rs` and `landlock_smoke.rs`.
 
 - [ ] **Step 1: Create the new test file**
 
@@ -1292,7 +1292,7 @@ Create `workers/prelude/tests/rlimit_smoke.rs`:
 ```rust
 //! Cross-platform integration test for `workers/prelude/src/rlimit.rs`.
 //!
-//! Spawns the `lockdown-probe cpu-burner` binary with `HHAGENT_CPU_MS=200`
+//! Spawns the `lockdown-probe cpu-burner` binary with `KASTELLAN_CPU_MS=200`
 //! and verifies the kernel kills it via signal (SIGXCPU → SIGKILL)
 //! within a generous wall-clock budget. The regression we're guarding
 //! against is "rlimit was not applied at all" — which would let the
@@ -1306,9 +1306,9 @@ use std::time::{Duration, Instant};
 
 /// Cargo provides this env var at compile time for tests in the same
 /// crate as the binary target. Resolves to the absolute path of the
-/// built `hhagent-lockdown-probe` binary in the workspace target dir.
+/// built `kastellan-lockdown-probe` binary in the workspace target dir.
 /// Same pattern `seccomp_smoke.rs` uses.
-const PROBE: &str = env!("CARGO_BIN_EXE_hhagent-lockdown-probe");
+const PROBE: &str = env!("CARGO_BIN_EXE_kastellan-lockdown-probe");
 
 #[test]
 fn cpu_burner_under_short_budget_is_killed_promptly() {
@@ -1320,7 +1320,7 @@ fn cpu_burner_under_short_budget_is_killed_promptly() {
     let status = Command::new(PROBE)
         .arg("cpu-burner")
         .env_clear()
-        .env("HHAGENT_CPU_MS", "200")
+        .env("KASTELLAN_CPU_MS", "200")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -1334,7 +1334,7 @@ fn cpu_burner_under_short_budget_is_killed_promptly() {
     // process died via signal — which is the load-bearing fact.
     assert!(
         status.code().is_none(),
-        "expected cpu-burner to be killed by signal under HHAGENT_CPU_MS=200, \
+        "expected cpu-burner to be killed by signal under KASTELLAN_CPU_MS=200, \
          got exit code {:?} after {:?}",
         status.code(),
         elapsed
@@ -1352,7 +1352,7 @@ fn cpu_burner_under_short_budget_is_killed_promptly() {
 
 #[test]
 fn cpu_burner_with_no_env_runs_past_one_second() {
-    // Positive control: without HHAGENT_CPU_MS the burner runs
+    // Positive control: without KASTELLAN_CPU_MS the burner runs
     // unmolested. A future regression that silently disables
     // apply_from_env (e.g. always returns Disabled regardless of env)
     // would still pass the first test alone — this test catches that.
@@ -1379,7 +1379,7 @@ fn cpu_burner_with_no_env_runs_past_one_second() {
 
     assert!(
         still_running,
-        "expected cpu-burner with no HHAGENT_CPU_MS to still be running after 2s; \
+        "expected cpu-burner with no KASTELLAN_CPU_MS to still be running after 2s; \
          it exited early, which suggests apply_from_env is incorrectly applying a default cap"
     );
 }
@@ -1389,8 +1389,8 @@ fn cpu_burner_with_no_env_runs_past_one_second() {
 
 ```bash
 source "$HOME/.cargo/env" && \
-  cargo build -p hhagent-worker-prelude --bin hhagent-lockdown-probe 2>&1 | tail -3 && \
-  cargo test -p hhagent-worker-prelude --test rlimit_smoke 2>&1 | tail -15
+  cargo build -p kastellan-worker-prelude --bin kastellan-lockdown-probe 2>&1 | tail -3 && \
+  cargo test -p kastellan-worker-prelude --test rlimit_smoke 2>&1 | tail -15
 ```
 
 Expected: 2 tests pass. First test should complete in ~1–3 seconds; second in ~2 seconds.
@@ -1414,13 +1414,13 @@ workers/prelude(test): rlimit_smoke cross-platform integration test
 Two tests pin the worker-side cpu_ms enforcement end-to-end:
 
 1. cpu_burner_under_short_budget_is_killed_promptly — spawns the
-   probe binary with HHAGENT_CPU_MS=200 and asserts the process is
+   probe binary with KASTELLAN_CPU_MS=200 and asserts the process is
    killed by signal within 8 wall-clock seconds (status.code() is None).
    Defends against "rlimit was not applied at all" regression where
    the burner would run to its own 10s safety cap.
 
 2. cpu_burner_with_no_env_runs_past_one_second — positive control;
-   spawns without HHAGENT_CPU_MS and asserts the process is still
+   spawns without KASTELLAN_CPU_MS and asserts the process is still
    alive after 2 seconds. Defends against a regression where
    apply_from_env silently applies a default cap.
 
@@ -1480,7 +1480,7 @@ f) Update the "Open follow-up issues" table: mark issue #6 as closed by this ses
 In `docs/devel/ROADMAP.md`, find the "Phase 0 hardening" section's cgroup line (around line 38) — append:
 
 ```
-- [x] **Issue #6 main body — policy-driven `cpu_quota_pct` / `tasks_max` + `setrlimit(RLIMIT_CPU)`-based `cpu_ms` enforcement** — landed 2026-05-14 on branch `feat/sandbox-cpu-rlimit-quota`. Two new `SandboxPolicy` fields (both `Option`, defaulted None) drive `build_systemd_run_argv`'s `CPUQuota` and `TasksMax` properties when set; otherwise fall back to the existing 200% / 64 defense-in-depth defaults. New cross-platform `workers/prelude/src/rlimit.rs` module reads `HHAGENT_CPU_MS` (set by `tool_host::derive_lockdown_env` from `policy.cpu_ms`) and applies `RLIMIT_CPU` (soft = hard for clean kill) before lock-down. Cross-platform via POSIX; the same code path runs on Linux and macOS. Test count: 429 → ~447 (+18). Closes issue #6.
+- [x] **Issue #6 main body — policy-driven `cpu_quota_pct` / `tasks_max` + `setrlimit(RLIMIT_CPU)`-based `cpu_ms` enforcement** — landed 2026-05-14 on branch `feat/sandbox-cpu-rlimit-quota`. Two new `SandboxPolicy` fields (both `Option`, defaulted None) drive `build_systemd_run_argv`'s `CPUQuota` and `TasksMax` properties when set; otherwise fall back to the existing 200% / 64 defense-in-depth defaults. New cross-platform `workers/prelude/src/rlimit.rs` module reads `KASTELLAN_CPU_MS` (set by `tool_host::derive_lockdown_env` from `policy.cpu_ms`) and applies `RLIMIT_CPU` (soft = hard for clean kill) before lock-down. Cross-platform via POSIX; the same code path runs on Linux and macOS. Test count: 429 → ~447 (+18). Closes issue #6.
 ```
 
 If the section structure differs, find the equivalent right place — the cgroup CPU/memory caps line is the parent context.

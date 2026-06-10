@@ -12,13 +12,13 @@
 //! functions live in the parent's sibling `tests.rs` (they reach these
 //! symbols via the re-export through `use super::*`).
 
-use hhagent_protocol::{client::ClientError, codes};
+use kastellan_protocol::{client::ClientError, codes};
 
 use crate::scheduler::inner_loop::StepOutcome;
 use crate::tool_host::ToolHostError;
 
 /// Map a JSON-RPC numeric error code to its mnemonic. The mnemonics
-/// match the constants in [`hhagent_protocol::codes`]; an unknown code
+/// match the constants in [`kastellan_protocol::codes`]; an unknown code
 /// surfaces as `"RPC_ERROR"` so the inner loop sees *something*
 /// usable without a magic number.
 ///

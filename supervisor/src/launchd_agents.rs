@@ -33,7 +33,7 @@
 //! <plist version="1.0">
 //! <dict>
 //!     <key>Label</key>
-//!     <string>hhagent-core</string>
+//!     <string>kastellan-core</string>
 //!     <key>ProgramArguments</key>
 //!     <array>
 //!         <string>/abs/program</string>
@@ -85,7 +85,7 @@
 //! launchd has no inter-agent ordering and no target/aggregation
 //! concept. The [`crate::Supervisor`] default `*_target` methods install
 //! and start members in declared order, but launchd may still race their
-//! startup. hhagent tolerates this because core fail-closed-restarts
+//! startup. kastellan tolerates this because core fail-closed-restarts
 //! until Postgres is reachable (`KeepAlive=true`), so the bundle
 //! converges regardless of launchd start order. `ServiceSpec.after` and
 //! `ServiceSpec.part_of` are therefore **ignored** by `build_plist`.

@@ -1,17 +1,17 @@
-//! End-to-end integration test for the `hhagent-cli ask` happy path
+//! End-to-end integration test for the `kastellan-cli ask` happy path
 //! and the plan-iteration-cap failure path (Task 4.4).
 //!
 //! This is the regression pin that none of the other scheduler tests
-//! satisfy: it spawns the **real `hhagent-cli` subprocess**, which
+//! satisfy: it spawns the **real `kastellan-cli` subprocess**, which
 //! INSERTs a `tasks` row and LISTENs for the completion NOTIFY, while
-//! the **real `hhagent` daemon** runs under `systemd --user` (Linux)
+//! the **real `kastellan` daemon** runs under `systemd --user` (Linux)
 //! or `launchctl` (macOS), the **real sandboxed worker** runs under
 //! bwrap (Linux) or sandbox-exec (macOS), and only the **LLM is
 //! mocked** behind a queued multi-shot HTTP listener.
 //!
 //! Bring-up scaffolding (PG cluster, supervisor + sandbox skip
 //! helpers, RAII guards, binary discovery, macOS launchd serial lock)
-//! now lives in `hhagent-tests-common` as of issue #15.
+//! now lives in `kastellan-tests-common` as of issue #15.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
@@ -21,16 +21,16 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hhagent_supervisor::specs::core_service_spec;
-use hhagent_supervisor::{default_supervisor, ServiceStatus};
-use hhagent_tests_common::{
+use kastellan_supervisor::specs::core_service_spec;
+use kastellan_supervisor::{default_supervisor, ServiceStatus};
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, core_binary, current_username, pg_bin_dir_or_skip,
     seed_tool_allowlist, shell_exec_worker_binary, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, unique_temp_root, wait_for_log_match,
     wait_for_status, PathGuard, PgCluster, ServiceGuard,
 };
 #[cfg(target_os = "macos")]
-use hhagent_tests_common::serial_lock;
+use kastellan_tests_common::serial_lock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -43,9 +43,9 @@ const ECHO_PATH: &str = "/bin/echo";
 /// of the three workspace binaries this e2e exercises is missing.
 fn skip_if_any_binary_missing() -> bool {
     for (label, p) in &[
-        ("hhagent", core_binary()),
-        ("hhagent-cli", cli_binary()),
-        ("hhagent-worker-shell-exec", shell_exec_worker_binary()),
+        ("kastellan", core_binary()),
+        ("kastellan-cli", cli_binary()),
+        ("kastellan-worker-shell-exec", shell_exec_worker_binary()),
     ] {
         if !p.exists() {
             eprintln!(
@@ -393,7 +393,7 @@ fn embedding_envelope() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Daemon bring-up — wires the `hhagent` core service to the per-test
+// Daemon bring-up — wires the `kastellan` core service to the per-test
 // PG cluster + mock LLM + workspace prompts + per-test allowlist.
 // ---------------------------------------------------------------------------
 
@@ -424,7 +424,7 @@ fn bring_up_daemon(
 
     let binary = core_binary();
     let mut spec = core_service_spec(&binary, &core_log_dir);
-    spec.name = format!("hhagent-supervisor-test-core-cliask-{suffix}");
+    spec.name = format!("kastellan-supervisor-test-core-cliask-{suffix}");
     assert!(spec.name.len() <= 200);
     let stdout_path = core_log_dir.join(format!("{}.out", spec.name));
     let stderr_path = core_log_dir.join(format!("{}.err", spec.name));
@@ -433,12 +433,12 @@ fn bring_up_daemon(
 
     // Required env — see the spec doc for why each one is needed.
     spec.env.push((
-        "HHAGENT_DATA_DIR".into(),
+        "KASTELLAN_DATA_DIR".into(),
         data_dir.to_string_lossy().into_owned(),
     ));
     spec.env.push(("USER".into(), user.to_string()));
     spec.env.push((
-        "HHAGENT_STATE_DIR".into(),
+        "KASTELLAN_STATE_DIR".into(),
         state_dir.to_string_lossy().into_owned(),
     ));
 
@@ -449,7 +449,7 @@ fn bring_up_daemon(
         .expect("workspace root")
         .join("prompts");
     spec.env.push((
-        "HHAGENT_PROMPTS_DIR".into(),
+        "KASTELLAN_PROMPTS_DIR".into(),
         workspace_prompts.to_string_lossy().into_owned(),
     ));
 
@@ -457,23 +457,23 @@ fn bring_up_daemon(
     // `/chat/completions` to the base. Use `<mock>/v1` so the on-wire
     // URL matches the production OpenAI-compat shape.
     spec.env.push((
-        "HHAGENT_LLM_LOCAL_URL".into(),
+        "KASTELLAN_LLM_LOCAL_URL".into(),
         format!("{mock_base_url}/v1"),
     ));
     spec.env.push((
-        "HHAGENT_LLM_LOCAL_MODEL".into(),
+        "KASTELLAN_LLM_LOCAL_MODEL".into(),
         "test-local-model".into(),
     ));
     // 5 s is loose enough for slow CI runners — the mock responds
     // synchronously on accept, so on a healthy host this is sub-ms.
-    spec.env.push(("HHAGENT_LLM_TIMEOUT_MS".into(), "5000".into()));
+    spec.env.push(("KASTELLAN_LLM_TIMEOUT_MS".into(), "5000".into()));
 
     // Tool registry: register shell-exec. The argv allowlist is now
     // loaded from the DB at daemon start — see build_tool_registry.
     // Tests seed the allowlist via seed_tool_allowlist() before
     // calling bring_up_daemon so the daemon sees the correct entries.
     spec.env.push((
-        "HHAGENT_SHELL_EXEC_BIN".into(),
+        "KASTELLAN_SHELL_EXEC_BIN".into(),
         shell_exec_worker_binary().to_string_lossy().into_owned(),
     ));
 
@@ -580,7 +580,7 @@ fn cluster_for(suffix: &str) -> PgCluster {
         &bin_dir,
         "cli-d",
         "cli-l",
-        &format!("hhagent-supervisor-test-pg-cliask-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-cliask-{suffix}"),
     )
 }
 
@@ -646,7 +646,7 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
     // allowlist from the DB now. The daemon's own probe will
     // idempotently re-apply migrations.
     rt.block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "test",
             "setup",
@@ -654,7 +654,7 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         )
         .await
         .expect("probe run");
-        let seed_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let seed_pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("seed pool");
         seed_tool_allowlist(&seed_pool, "shell-exec", &[ECHO_PATH])
@@ -674,9 +674,9 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("USER", &user)
-        .env("HHAGENT_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
         .output()
-        .expect("spawn hhagent-cli ask");
+        .expect("spawn kastellan-cli ask");
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -703,7 +703,7 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
 
     // ---------- DB assertions ----------
     rt.block_on(async {
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 
@@ -729,7 +729,7 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         assert_eq!(m.get(&("core".into(), "registry.loaded".into())), Some(&1),
                    "expected 1× core/registry.loaded (build_tool_registry summary row); multiset = {m:?}");
         assert_eq!(m.get(&("cli".into(), "task.submitted".into())), Some(&1),
-                   "expected 1× cli/task.submitted (producer-side row from hhagent-cli ask); multiset = {m:?}");
+                   "expected 1× cli/task.submitted (producer-side row from kastellan-cli ask); multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&2),
                    "expected 2× agent/plan.formulate (one per LLM call); multiset = {m:?}");
         // PgRecallBuilder calls embed_query once per plan iteration before
@@ -926,7 +926,7 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
     // surface POLICY_DENIED, which is the failure-path's assertion
     // target.
     rt.block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "test",
             "setup",
@@ -946,9 +946,9 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("USER", &user)
-        .env("HHAGENT_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
         .output()
-        .expect("spawn hhagent-cli ask");
+        .expect("spawn kastellan-cli ask");
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -973,7 +973,7 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
     );
 
     rt.block_on(async {
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 
@@ -1027,7 +1027,7 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         assert_eq!(m.get(&("core".into(), "registry.loaded".into())), Some(&1),
                    "expected 1× core/registry.loaded (build_tool_registry summary row); multiset = {m:?}");
         assert_eq!(m.get(&("cli".into(), "task.submitted".into())), Some(&1),
-                   "expected 1× cli/task.submitted (producer-side row from hhagent-cli ask); multiset = {m:?}");
+                   "expected 1× cli/task.submitted (producer-side row from kastellan-cli ask); multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&3),
                    "expected 3× agent/plan.formulate (one per LLM call before cap); multiset = {m:?}");
         // PgRecallBuilder calls embed_query once per plan iteration before

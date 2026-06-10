@@ -40,7 +40,7 @@ find the right place to make a change.
 
 ## Processes and their roles
 
-**Agent core** (`hhagent` binary)  
+**Agent core** (`kastellan` binary)  
 The only process that touches Postgres or makes LLM calls. It holds all state,
 schedules work, reviews plans, and manages the lifetime of worker processes.
 
@@ -88,8 +88,8 @@ Workers and the core communicate using the
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io) wire format:
 newline-delimited JSON-RPC 2.0 messages over stdin/stdout.
 
-The `hhagent-protocol` crate provides typed `Client` and `Server` objects.
-Workers import `hhagent-worker-prelude` which wraps `serve_stdio` — the
+The `kastellan-protocol` crate provides typed `Client` and `Server` objects.
+Workers import `kastellan-worker-prelude` which wraps `serve_stdio` — the
 single function that installs the self-sandbox and then starts serving
 JSON-RPC requests.
 
@@ -133,7 +133,7 @@ Postgres role but `UPDATE`, `DELETE`, and `TRUNCATE` are revoked — rows are
 immutable once written, enforced by the database.
 
 A background task mirrors every row to a date-named JSONL file under
-`~/.local/state/hhagent/audit-YYYY-MM-DD.jsonl`. You can tail this file
+`~/.local/state/kastellan/audit-YYYY-MM-DD.jsonl`. You can tail this file
 directly without a running daemon.
 
 ---
@@ -165,7 +165,7 @@ pipeline.
 | Type of feature | Where to start |
 |-----------------|---------------|
 | New tool worker (Rust) | New crate under `workers/`; add to `[workspace.members]`; spawn from `core/src/tool_host.rs` |
-| New CLI subcommand | New file under `core/src/bin/hhagent-cli/`; register in `main.rs` |
+| New CLI subcommand | New file under `core/src/bin/kastellan-cli/`; register in `main.rs` |
 | New DB table | New migration in `db/migrations/`; new helpers in `db/src/` |
 | New CASSANDRA pre-spawn rule | Extend `core/src/cassandra/constitutional.rs` or `deterministic.rs` |
 | New injection pattern | Add an entry to the catalogue in `core/src/cassandra/injection_guard.rs` |

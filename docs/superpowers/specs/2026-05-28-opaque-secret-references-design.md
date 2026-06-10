@@ -36,7 +36,7 @@ Planner-visible references have the shape `secret://<8-hex>` (e.g. `secret://abc
 
 These are deliberately deferred to later slices to keep the slice scope tight; each is tracked in §9 below.
 
-- Operator-on-demand `hhagent-cli secrets materialize` (needs CLI ↔ daemon IPC; Slice 2).
+- Operator-on-demand `kastellan-cli secrets materialize` (needs CLI ↔ daemon IPC; Slice 2).
 - Per-task vault lifetime (today: per-daemon-process with 1h TTL).
 - Embedded-substring substitution (today: exact-string match only).
 - Re-encrypt-with-session-key vault (today: plaintext in `Zeroizing<Vec<u8>>` in process memory).
@@ -84,7 +84,7 @@ impl Vault {
     pub async fn materialize(
         &self,
         pool: &sqlx::PgPool,
-        key_provider: &dyn hhagent_db::secrets::KeyProvider,
+        key_provider: &dyn kastellan_db::secrets::KeyProvider,
         name: &str,
         actor: &str,                  // who is asking ("core:bootstrap", etc.)
     ) -> Result<SecretRef, VaultError>;
@@ -192,7 +192,7 @@ impl MissingReason {
 
 6. **Exact-match only — embedded refs left alone.** A string like `"Bearer secret://abc12345"` is passed through verbatim. Minimises leak surface; Slice 2 may relax (see §9 limitation 3).
 
-7. **No depth guard in Slice 1.** Matches the injection-guard precedent — Issue [#143](https://github.com/hherb/hhagent/issues/143) tracks the equivalent gap there; both walkers would adopt a shared depth helper if one ever lands.
+7. **No depth guard in Slice 1.** Matches the injection-guard precedent — Issue [#143](https://github.com/hherb/kastellan/issues/143) tracks the equivalent gap there; both walkers would adopt a shared depth helper if one ever lands.
 
 ### Walker test seam
 
@@ -200,7 +200,7 @@ A `pub(crate)` `FakeVault` test fixture implementing `RedeemFromVault` is constr
 
 ## 4. Audit-row shapes
 
-Three new `(actor, action)` pairs, all written through `hhagent_db::audit::insert`. Same posture as `injection_guard`: each insert is **best-effort** unless explicitly noted — transient DB failures are logged via `tracing::error!` but do not propagate. The materialize-time row is the **only exception**: it is hard-fail (see §5.4).
+Three new `(actor, action)` pairs, all written through `kastellan_db::audit::insert`. Same posture as `injection_guard`: each insert is **best-effort** unless explicitly noted — transient DB failures are logged via `tracing::error!` but do not propagate. The materialize-time row is the **only exception**: it is hard-fail (see §5.4).
 
 ### 4.1 `policy / secret.materialized`
 
@@ -269,14 +269,14 @@ This ordering is a deliberate choice and pinned by integration tests in §7.2.
 ```rust
 pub enum VaultError {
     #[error("vault: secret lookup failed: {0}")]
-    Secrets(#[from] hhagent_db::secrets::SecretsError),
+    Secrets(#[from] kastellan_db::secrets::SecretsError),
 
     /// Hard-fail on audit write — see §5.4. Wraps the existing
-    /// `hhagent_db::DbError` returned by `audit::insert` (the audit
+    /// `kastellan_db::DbError` returned by `audit::insert` (the audit
     /// module shares the crate-level DbError; there is no dedicated
     /// AuditError type).
     #[error("vault: audit row insert failed during materialize: {0}")]
-    Audit(#[from] hhagent_db::DbError),
+    Audit(#[from] kastellan_db::DbError),
 
     #[error("vault: materialized plaintext is empty")]
     EmptyPlaintext,
@@ -324,10 +324,10 @@ This creates an **asymmetry: materialize-time audit is hard-fail; redeem-time au
 ```rust
 let vault = Arc::new(core::secrets::Vault::new());
 
-// HHAGENT_BOOTSTRAP_SECRETS = "name1,name2,name3"
+// KASTELLAN_BOOTSTRAP_SECRETS = "name1,name2,name3"
 // Each must exist in the `secrets` table; missing ones fail bring-up.
-if let Some(names) = std::env::var("HHAGENT_BOOTSTRAP_SECRETS").ok() {
-    let key_provider = hhagent_db::secrets::OsKeyringProvider::ensure_initialized()?;
+if let Some(names) = std::env::var("KASTELLAN_BOOTSTRAP_SECRETS").ok() {
+    let key_provider = kastellan_db::secrets::OsKeyringProvider::ensure_initialized()?;
     for name in names.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let secret_ref = vault.materialize(&pool, &key_provider, name, "core:bootstrap").await?;
         tracing::info!(name = %name, ref_hash = %secret_ref.ref_hash(), "secret materialized at bootstrap");
@@ -389,7 +389,7 @@ let redemption_events = match substitute_refs_in_params(&mut params, vault) {
             "reason": reason, "ms": elapsed_ms,
         });
         if let Err(audit_err) =
-            hhagent_db::audit::insert(pool, "policy", "secret.redemption_failed", payload).await
+            kastellan_db::audit::insert(pool, "policy", "secret.redemption_failed", payload).await
         {
             tracing::error!(tool = %tool, error = %audit_err, "secret.redemption_failed audit insert failed");
         }
@@ -414,7 +414,7 @@ for event in &redemption_events {
     let payload = serde_json::json!({
         "tool": tool, "method": method, "ref_hash": event.ref_hash, "ms": elapsed_ms,
     });
-    if let Err(e) = hhagent_db::audit::insert(pool, "policy", "secret.redeemed", payload).await {
+    if let Err(e) = kastellan_db::audit::insert(pool, "policy", "secret.redeemed", payload).await {
         tracing::error!(tool = %tool, ref_hash = %event.ref_hash, error = %e, "secret.redeemed audit insert failed");
     }
 }
@@ -444,7 +444,7 @@ Every `Vault::redeem` call:
 
 ## 7. Test seam
 
-PG is fully available on this Mac (Postgres.app v18 on :5532, v16 on :5432, both running). With `HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"` exported, the full integration suite runs locally with no source-tree edits. **Slice 1 is implemented and verified with PG live** — including the 7 new integration tests.
+PG is fully available on this Mac (Postgres.app v18 on :5532, v16 on :5432, both running). With `KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"` exported, the full integration suite runs locally with no source-tree edits. **Slice 1 is implemented and verified with PG live** — including the 7 new integration tests.
 
 ### 7.1 Pure unit tests (no PG, no keyring)
 
@@ -473,7 +473,7 @@ If implementation budget allows, an 8th case: `dispatch_substitutes_multiple_ref
 ### 7.3 Run posture during implementation
 
 ```sh
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"
 cargo test --workspace
 ```
 
@@ -504,7 +504,7 @@ Every commit must show all tests green. The 7 new integration tests are not allo
 |---|---|---|
 | `core/src/lib.rs` | `pub mod secrets;` declaration. | +1 |
 | `core/src/tool_host.rs` | Add `vault: &Vault` parameter to `dispatch`; insert substitution block before `worker.call`; emit `secret.redeemed` rows; new `ToolHostError::SecretRedemptionFailed` variant. | ~+70 LOC. Currently 767 LOC (263 over the 500-LOC cap); after this slice ~837 LOC (337 over). |
-| `core/src/main.rs` | Construct `Vault`; read `HHAGENT_BOOTSTRAP_SECRETS`; materialize loop; pass to `spawn_scheduler`. | ~+30 |
+| `core/src/main.rs` | Construct `Vault`; read `KASTELLAN_BOOTSTRAP_SECRETS`; materialize loop; pass to `spawn_scheduler`. | ~+30 |
 | `core/src/scheduler/tool_dispatch.rs` | `ToolHostStepDispatcher` carries `Arc<Vault>`; new constructor param; forward to `tool_host::dispatch`. | ~+15 |
 | `core/src/scheduler/runner.rs` (or wherever `spawn_scheduler` lives) | Accept `Arc<Vault>`; thread through to `ToolHostStepDispatcher`. | ~+5 |
 
@@ -514,7 +514,7 @@ Every commit must show all tests green. The 7 new integration tests are not allo
 
 ### Cargo.toml
 
-`sha2`, `zeroize`, `tokio::sync` are all already in `hhagent-core`'s deps. `aes_gcm::aead::OsRng` (re-exported from `db::secrets`'s dep `aes-gcm`) is available transitively but for cleanliness Slice 1 will add `rand = { workspace = true, features = ["std"] }` to `core/Cargo.toml` and use `rand::RngCore` directly. **Action item during Task 1: confirm `rand` is already in `Cargo.lock` via transitive deps and add the direct dep if needed.**
+`sha2`, `zeroize`, `tokio::sync` are all already in `kastellan-core`'s deps. `aes_gcm::aead::OsRng` (re-exported from `db::secrets`'s dep `aes-gcm`) is available transitively but for cleanliness Slice 1 will add `rand = { workspace = true, features = ["std"] }` to `core/Cargo.toml` and use `rand::RngCore` directly. **Action item during Task 1: confirm `rand` is already in `Cargo.lock` via transitive deps and add the direct dep if needed.**
 
 ### File-size watch
 
@@ -532,15 +532,15 @@ Every commit must show all tests green. The 7 new integration tests are not allo
 
 3. **Exact-string substitution only.** Embedded substrings (`"Bearer secret://..."`) pass through verbatim. Slice 2 may relax with explicit object-shape opt-in.
 
-4. **No walker depth guard.** Matches the injection-guard gap tracked as [#143](https://github.com/hherb/hhagent/issues/143). A shared depth helper would close both walkers at once.
+4. **No walker depth guard.** Matches the injection-guard gap tracked as [#143](https://github.com/hherb/kastellan/issues/143). A shared depth helper would close both walkers at once.
 
 5. **Per-process (not per-task) vault scope.** A ref materialized for task A is redeemable in task B until TTL expiry. Per-task scoping needs `Vault` task-lifetime + dispatch-side task-ID plumbing.
 
-6. **No CLI surface.** Operators can't `hhagent-cli secrets materialize <name>`. Slice 2 builds the CLI ↔ daemon IPC.
+6. **No CLI surface.** Operators can't `kastellan-cli secrets materialize <name>`. Slice 2 builds the CLI ↔ daemon IPC.
 
 7. **No revocation.** Once materialized, a ref is valid until TTL or daemon restart. Slice 3 if leak-incident drives need.
 
-8. **OS keyring access at daemon-startup only.** `HHAGENT_BOOTSTRAP_SECRETS` is the only path. Closed simultaneously with #6 in Slice 2.
+8. **OS keyring access at daemon-startup only.** `KASTELLAN_BOOTSTRAP_SECRETS` is the only path. Closed simultaneously with #6 in Slice 2.
 
 9. **Binary secrets unsupported.** Walker rejects non-UTF-8 plaintext with `PlaintextNotUtf8`. A typed binary-secret channel is a separate (much bigger) slice.
 
@@ -550,10 +550,10 @@ Every commit must show all tests green. The 7 new integration tests are not allo
 
 | Priority | Slice | Why next |
 |---|---|---|
-| H | CLI ↔ daemon IPC + `hhagent-cli secrets materialize <name>` | Closes #6 + #8. Likely DB-mediated unless something else needs IPC. |
+| H | CLI ↔ daemon IPC + `kastellan-cli secrets materialize <name>` | Closes #6 + #8. Likely DB-mediated unless something else needs IPC. |
 | H | `tool_host.rs` sibling-lift | The 500-LOC residual is load-bearing; collapse screening + substitution into a `chokepoint.rs` seam. |
 | M | Per-task vault scoping | Principle of least privilege; blocks on empirical evidence of cross-task reuse. |
-| M | Shared walker depth guard (with injection-guard) | Closes #4 + [#143](https://github.com/hherb/hhagent/issues/143). Cheap. |
+| M | Shared walker depth guard (with injection-guard) | Closes #4 + [#143](https://github.com/hherb/kastellan/issues/143). Cheap. |
 | M | Frontier-router secret integration (Phase 5 prep) | The originally-motivating consumer. Demonstrates real use. |
 | L | Embedded substitution with explicit opt-in | Only if a real use case (`Bearer <ref>` headers) materialises. |
 | L | Binary-secret channel | Only if TLS/binary tokens become an actual consumer. |
@@ -567,5 +567,5 @@ Every commit must show all tests green. The 7 new integration tests are not allo
   - [`../plans/2026-05-28-worker-output-prompt-injection-guard-slice-1.md`](../plans/2026-05-28-worker-output-prompt-injection-guard-slice-1.md)
 - Threat model — `docs/threat-model.md`.
 - `db::secrets` module — `db/src/secrets.rs` (848 LOC, shipped pre-Phase-1).
-- Issue [#143](https://github.com/hherb/hhagent/issues/143) — walker depth guard (filed 2026-05-28 from injection-guard `e81b079`).
+- Issue [#143](https://github.com/hherb/kastellan/issues/143) — walker depth guard (filed 2026-05-28 from injection-guard `e81b079`).
 - Pattern inspiration: openhuman `docs/MCP_SETUP_AGENT.md` opaque-ref pattern (GPL-3.0; re-implemented to keep AGPL-3.0 one-way compatibility ambiguity-free).

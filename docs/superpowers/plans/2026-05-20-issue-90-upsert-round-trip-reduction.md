@@ -59,7 +59,7 @@ async fn upsert_preserves_operator_unquarantine_decision() {
     assert_eq!(out1.entity_ids.len(), 1);
     let entity_id = out1.entity_ids[0];
 
-    // Simulate `hhagent-cli entities approve <id>` — operator approves
+    // Simulate `kastellan-cli entities approve <id>` — operator approves
     // the entity, flipping quarantine to FALSE.
     sqlx::query("UPDATE entities SET quarantine = FALSE WHERE id = $1")
         .bind(entity_id)
@@ -96,7 +96,7 @@ async fn upsert_preserves_operator_unquarantine_decision() {
 Run:
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test entity_extraction_e2e upsert_preserves_operator_unquarantine_decision -- --nocapture
+cargo test -p kastellan-core --test entity_extraction_e2e upsert_preserves_operator_unquarantine_decision -- --nocapture
 ```
 
 **Expected:** PASS (yes, PASS — not fail).
@@ -220,7 +220,7 @@ async fn upsert_counts_new_inserts_correctly_in_mixed_batch() {
 Run:
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test entity_extraction_e2e upsert_counts_new_inserts_correctly_in_mixed_batch -- --nocapture
+cargo test -p kastellan-core --test entity_extraction_e2e upsert_counts_new_inserts_correctly_in_mixed_batch -- --nocapture
 ```
 
 **Expected:** PASS against current code (characterisation pin — current code already returns the right counters via the two-statement path; the Task 3 rewrite must preserve this).
@@ -279,7 +279,7 @@ Open `core/src/entity_extraction/gliner_relex.rs`. The per-entity for-loop body 
         .bind(&name_norm)
         .fetch_optional(pool)
         .await
-        .map_err(|e| hhagent_db::DbError::Query(format!("upsert entity: {e}")))?;
+        .map_err(|e| kastellan_db::DbError::Query(format!("upsert entity: {e}")))?;
 
         let id = match inserted_id {
             Some(id) => {
@@ -295,7 +295,7 @@ Open `core/src/entity_extraction/gliner_relex.rs`. The per-entity for-loop body 
                 .bind(&name_norm)
                 .fetch_one(pool)
                 .await
-                .map_err(|e| hhagent_db::DbError::Query(format!("resolve entity id: {e}")))?
+                .map_err(|e| kastellan_db::DbError::Query(format!("resolve entity id: {e}")))?
             }
         };
         entity_ids.push(id);
@@ -344,7 +344,7 @@ Replace the entire for-loop body (from the `// Per-entity upsert.` comment throu
         .bind(&name_norm)
         .fetch_one(pool)
         .await
-        .map_err(|e| hhagent_db::DbError::Query(format!("upsert entity: {e}")))?;
+        .map_err(|e| kastellan_db::DbError::Query(format!("upsert entity: {e}")))?;
         if row.1 {
             n_new += 1;
         }
@@ -359,7 +359,7 @@ The pre-loop variables (`entity_ids`, `n_new`) and the post-loop code (the `by_k
 Run:
 ```sh
 source "$HOME/.cargo/env"
-cargo build -p hhagent-core 2>&1 | tail -20
+cargo build -p kastellan-core 2>&1 | tail -20
 ```
 
 **Expected:** clean compile, no warnings on the touched file. If sqlx complains about `query_as` and the `(i64, bool)` tuple type, the most likely cause is a missing import — sqlx auto-derives `FromRow` for tuples up to 16 elements via the `sqlx::FromRow` blanket impls, but if a specific `use sqlx::FromRow;` was added at the top of the file at some point, leave it untouched. Otherwise no new imports are needed.
@@ -369,7 +369,7 @@ cargo build -p hhagent-core 2>&1 | tail -20
 Run:
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test entity_extraction_e2e \
+cargo test -p kastellan-core --test entity_extraction_e2e \
     upsert_preserves_operator_unquarantine_decision \
     upsert_counts_new_inserts_correctly_in_mixed_batch \
     -- --nocapture
@@ -388,10 +388,10 @@ If either fails, do NOT proceed to Step 4. Investigate. Most likely failure mode
 Run:
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test entity_extraction_e2e -- --nocapture
+cargo test -p kastellan-core --test entity_extraction_e2e -- --nocapture
 ```
 
-**Expected:** all 12 tests in the file pass (10 pre-existing + 2 new from Tasks 1-2). The 2 real-model tests (`extractor_extract_against_real_worker_returns_seeds`, `extractor_chunking_path_against_real_worker`) will `[SKIP]` unless `HHAGENT_GLINER_RELEX_ENABLE=1` is set and the venv + weights are staged — that's expected. Look for `test result: ok. N passed; 0 failed; M ignored` at the bottom.
+**Expected:** all 12 tests in the file pass (10 pre-existing + 2 new from Tasks 1-2). The 2 real-model tests (`extractor_extract_against_real_worker_returns_seeds`, `extractor_chunking_path_against_real_worker`) will `[SKIP]` unless `KASTELLAN_GLINER_RELEX_ENABLE=1` is set and the venv + weights are staged — that's expected. Look for `test result: ok. N passed; 0 failed; M ignored` at the bottom.
 
 If a previously-passing test now fails, the most likely cause is a parens / column-order typo in the new SQL. Revert the Task 3 edit and re-apply more carefully.
 
@@ -482,7 +482,7 @@ Open `docs/devel/handovers/HANDOVER.md` and update the header. Replace the three
 
 **Last commit on `<branch>`:** `<HASH>` (`perf(entity_extraction): halve upsert round-trips via xmax=0 discriminator (Issue #90)`).
 
-**Session-end verification:** **Rust workspace: 883 passed / 0 failed / 4 ignored / 0 warnings on Linux** (`cargo test --workspace` on the DGX, branch `<branch>`). 4 `[SKIP]` lines on `--nocapture` are all GLiNER-Relex real-model tests gated on `HHAGENT_GLINER_RELEX_ENABLE=1` (operator-driven skip-as-pass).
+**Session-end verification:** **Rust workspace: 883 passed / 0 failed / 4 ignored / 0 warnings on Linux** (`cargo test --workspace` on the DGX, branch `<branch>`). 4 `[SKIP]` lines on `--nocapture` are all GLiNER-Relex real-model tests gated on `KASTELLAN_GLINER_RELEX_ENABLE=1` (operator-driven skip-as-pass).
 ```
 
 Replace `<HASH>` with the actual commit hash from Task 3's commit (use `git log --oneline -1` to find it). Replace `<branch>` with the current branch name (use `git branch --show-current`).
@@ -531,7 +531,7 @@ Before:
 
 After:
 ```
-**`cargo test --workspace` on Linux: 883 tests passed, 0 failed, 4 ignored, 0 warnings** on `<branch>` at `<HASH>` (Issue #90 entity-upsert round-trip reduction, Layer A). 4 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on `HHAGENT_GLINER_RELEX_ENABLE=1`. The +2 jump from the 881 baseline is Issue #90's two TDD-ordered tests. Earlier checkpoints: **881 on `main` at `028e541`** (PR #93 merged + post-merge polish `6e6e85f`); ...
+**`cargo test --workspace` on Linux: 883 tests passed, 0 failed, 4 ignored, 0 warnings** on `<branch>` at `<HASH>` (Issue #90 entity-upsert round-trip reduction, Layer A). 4 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on `KASTELLAN_GLINER_RELEX_ENABLE=1`. The +2 jump from the 881 baseline is Issue #90's two TDD-ordered tests. Earlier checkpoints: **881 on `main` at `028e541`** (PR #93 merged + post-merge polish `6e6e85f`); ...
 ```
 
 (Keep the rest of the existing "Earlier checkpoints" chain intact — only update the leading line and the immediate predecessor reference.)
@@ -542,12 +542,12 @@ In the "Next TODO (pick one)" section, find item #8 (Issue #90) under "Next conc
 
 Before:
 ```markdown
-    8. **[Issue #90](https://github.com/hherb/hhagent/issues/90) — `upsert_entities_and_relations` per-entity round-trip reduction** (engineering, filed in `2cf2a0a`) — current per-entity `INSERT … ON CONFLICT DO NOTHING RETURNING id` followed by `SELECT` on miss is 2× round-trips for existing entities. Needs `xmax = 0` discriminator pattern + audit-row contract update.
+    8. **[Issue #90](https://github.com/hherb/kastellan/issues/90) — `upsert_entities_and_relations` per-entity round-trip reduction** (engineering, filed in `2cf2a0a`) — current per-entity `INSERT … ON CONFLICT DO NOTHING RETURNING id` followed by `SELECT` on miss is 2× round-trips for existing entities. Needs `xmax = 0` discriminator pattern + audit-row contract update.
 ```
 
 After:
 ```markdown
-    8. ~~**[Issue #90](https://github.com/hherb/hhagent/issues/90) — `upsert_entities_and_relations` per-entity round-trip reduction**~~ **SHIPPED 2026-05-20** on branch `<branch>` — Layer A (`xmax = 0` discriminator + no-op `SET name_norm = entities.name_norm` to force RETURNING on conflict). Workspace 881 → **883** (+2). Audit-row contract unchanged (turned out to need no update). Layer B (full-batch unnest) deferred per brainstorming. See "Recently completed (this session)" entry above.
+    8. ~~**[Issue #90](https://github.com/hherb/kastellan/issues/90) — `upsert_entities_and_relations` per-entity round-trip reduction**~~ **SHIPPED 2026-05-20** on branch `<branch>` — Layer A (`xmax = 0` discriminator + no-op `SET name_norm = entities.name_norm` to force RETURNING on conflict). Workspace 881 → **883** (+2). Audit-row contract unchanged (turned out to need no update). Layer B (full-batch unnest) deferred per brainstorming. See "Recently completed (this session)" entry above.
 ```
 
 Renumber the remaining items if you prefer (not load-bearing).
@@ -606,4 +606,4 @@ Ran the self-review against the spec:
 
 **3. Type consistency:** All call sites use `(i64, bool)` for the new RETURNING tuple. `n_new` stays `u32`. `entity_ids` stays `Vec<i64>`. `query_as` (not `query_scalar`) is the correct sqlx call for the multi-column return. No drift across tasks.
 
-**4. Test names:** Both new tests use distinct `bring_up_pg("<label>")` labels (`"preserve-quar"`, `"mixed"`) so they get distinct Postgres cluster directory names and can run in parallel under `cargo test`. Existing tests use 4-letter labels (`"quar"`, `"idem"`, `"dedup"`) so longer labels are also fine; checked against the cluster-name length (`hhagent-supervisor-test-pg-extract-{label}-{suffix}` — generous limit).
+**4. Test names:** Both new tests use distinct `bring_up_pg("<label>")` labels (`"preserve-quar"`, `"mixed"`) so they get distinct Postgres cluster directory names and can run in parallel under `cargo test`. Existing tests use 4-letter labels (`"quar"`, `"idem"`, `"dedup"`) so longer labels are also fine; checked against the cluster-name length (`kastellan-supervisor-test-pg-extract-{label}-{suffix}` — generous limit).

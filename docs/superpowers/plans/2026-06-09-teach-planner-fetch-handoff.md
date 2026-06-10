@@ -6,7 +6,7 @@
 
 **Architecture:** One pure helper `render_handoff_block()` in `core/src/prompt_assembly/assemble.rs` emits an always-present `<handoff>` block, positioned between `<recalled>` and `<base>`. The block interpolates the source-of-truth constants `HANDOFF_TOOL` / `HANDOFF_METHOD_FETCH` so the instruction and the mechanism cannot drift. Pure-function change; unit tests only.
 
-**Tech Stack:** Rust (hhagent-core crate), `cargo test`, `cargo clippy`.
+**Tech Stack:** Rust (kastellan-core crate), `cargo test`, `cargo clippy`.
 
 **Spec:** [`docs/superpowers/specs/2026-06-09-teach-planner-fetch-handoff-design.md`](../specs/2026-06-09-teach-planner-fetch-handoff-design.md)
 
@@ -109,7 +109,7 @@
 
 - [ ] **Step 2: Run the new tests, verify they fail (block doesn't exist yet)**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib prompt_assembly::assemble::tests::handoff_ 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib prompt_assembly::assemble::tests::handoff_ 2>&1 | tail -20`
 Expected: FAIL — `handoff_block_present_even_when_all_layers_empty` and the others fail their `assert!`/`find` on the missing `<handoff>` tag. (Compilation succeeds — they only reference existing public items.)
 
 - [ ] **Step 3: Commit the failing tests**
@@ -231,7 +231,7 @@ to:
 
 - [ ] **Step 4: Run the new tests, verify they now pass**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib prompt_assembly::assemble::tests::handoff_ 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib prompt_assembly::assemble::tests::handoff_ 2>&1 | tail -20`
 Expected: PASS — all four `handoff_*` tests green.
 
 - [ ] **Step 5: Commit the implementation**
@@ -252,7 +252,7 @@ The always-present `<handoff>` block changes four existing tests that asserted "
 
 - [ ] **Step 1: Confirm exactly these four tests now fail**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib prompt_assembly 2>&1 | tail -30`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib prompt_assembly 2>&1 | tail -30`
 Expected: FAIL in `empty_l0_l1_recalled_emits_base_block_only`, `skills_block_absent_when_empty_is_byte_identical`, `both_layers_assembled_in_order_with_blank_separators`, `base_trailing_newlines_are_normalized_to_exactly_one`. All other `prompt_assembly` tests (including the Task 1 four) pass.
 
 - [ ] **Step 2: Update `empty_l0_l1_recalled_emits_base_block_only`**
@@ -352,7 +352,7 @@ Each expected string now carries the handoff block prefix. Replace the four `ass
 
 - [ ] **Step 6: Run the whole prompt_assembly suite, verify all green**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib prompt_assembly 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib prompt_assembly 2>&1 | tail -20`
 Expected: PASS — every `prompt_assembly` test green (the four updated pins + the four new handoff tests + all untouched ones).
 
 - [ ] **Step 7: Commit the pin updates**
@@ -388,7 +388,7 @@ The lifted `tests.rs` begins with the same `use super::*;` and other `use` lines
 
 - [ ] **Step 3 (only if lifted): Verify the suite still passes from the new location**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib prompt_assembly 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib prompt_assembly 2>&1 | tail -20`
 Expected: PASS — identical test set, now compiled from `assemble/tests.rs`.
 
 - [ ] **Step 4: Commit (only if a lift happened)**
@@ -406,7 +406,7 @@ git commit -m "refactor(prompt): lift assemble.rs test module to a sibling (unde
 
 - [ ] **Step 1: Clippy with warnings-as-errors**
 
-Run: `source "$HOME/.cargo/env" && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -15`
+Run: `source "$HOME/.cargo/env" && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -15`
 Expected: exit 0, no warnings.
 
 - [ ] **Step 2: Full workspace build**
@@ -416,7 +416,7 @@ Expected: `Finished` — clean build of all crates.
 
 - [ ] **Step 3: Full core lib test count**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib 2>&1 | tail -5`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib 2>&1 | tail -5`
 Expected: PASS — the prior baseline (715) **+4** new handoff tests = **719 / 0 / 0** (the four updated pins are modified-in-place, not added, so they don't change the count).
 
 - [ ] **Step 4: Record the result** — note the final lib test count and whether the test-lift fired, for the HANDOVER update.

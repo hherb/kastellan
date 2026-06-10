@@ -1,4 +1,4 @@
--- 0001_init.sql — initial schema for hhagent.
+-- 0001_init.sql — initial schema for kastellan.
 --
 -- See docs/devel/handovers/HANDOVER.md "Option C2.2" and
 -- docs/devel/ROADMAP.md "Phase 0 cont. — Postgres bring-up" for the

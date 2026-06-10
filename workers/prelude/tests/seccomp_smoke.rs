@@ -1,8 +1,8 @@
-//! Integration tests for the seccomp-bpf layer of `hhagent-worker-prelude`.
+//! Integration tests for the seccomp-bpf layer of `kastellan-worker-prelude`.
 //!
 //! Verifies the deny-list does what it says — denied syscalls trigger
 //! SIGSYS-kill, allowed syscalls survive. Like `landlock_smoke`, each test
-//! runs the `hhagent-lockdown-probe` binary as a subprocess so the
+//! runs the `kastellan-lockdown-probe` binary as a subprocess so the
 //! one-way filter doesn't poison sibling tests.
 //!
 //! ## Skip pattern
@@ -10,14 +10,14 @@
 //! seccomp-bpf has been in mainline Linux since 3.5 (2012), so on any
 //! reasonable contemporary host these tests run. We still detect a
 //! `Disabled` report on stderr — surfaces the case where the test
-//! environment forgot to set `HHAGENT_SECCOMP_PROFILE`.
+//! environment forgot to set `KASTELLAN_SECCOMP_PROFILE`.
 
 #![cfg(target_os = "linux")]
 
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output};
 
-const PROBE: &str = env!("CARGO_BIN_EXE_hhagent-lockdown-probe");
+const PROBE: &str = env!("CARGO_BIN_EXE_kastellan-lockdown-probe");
 
 /// SIGSYS = 31 on Linux. The kernel sends this when seccomp's
 /// `KillProcess` action fires. We use the libc constant so a future arch
@@ -36,7 +36,7 @@ fn run_probe(env: &[(&str, &str)], args: &[&str]) -> Output {
 fn seccomp_enforced() -> bool {
     // No-op invocation just to read the LOCKDOWN_REPORT line on stderr.
     let out = run_probe(
-        &[("HHAGENT_SECCOMP_PROFILE", "strict")],
+        &[("KASTELLAN_SECCOMP_PROFILE", "strict")],
         &["seccomp-getpid"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -53,7 +53,7 @@ fn unshare_is_killed_by_sigsys() {
         return;
     }
     let out = run_probe(
-        &[("HHAGENT_SECCOMP_PROFILE", "strict")],
+        &[("KASTELLAN_SECCOMP_PROFILE", "strict")],
         &["seccomp-unshare"],
     );
 
@@ -79,7 +79,7 @@ fn mount_is_killed_by_sigsys() {
         return;
     }
     let out = run_probe(
-        &[("HHAGENT_SECCOMP_PROFILE", "strict")],
+        &[("KASTELLAN_SECCOMP_PROFILE", "strict")],
         &["seccomp-mount"],
     );
     assert_eq!(
@@ -99,7 +99,7 @@ fn getpid_survives_lockdown() {
     // Innocent syscall — must be in the allow-list. If this test starts
     // failing, the allow-list dropped a runtime-essential syscall.
     let out = run_probe(
-        &[("HHAGENT_SECCOMP_PROFILE", "strict")],
+        &[("KASTELLAN_SECCOMP_PROFILE", "strict")],
         &["seccomp-getpid"],
     );
     assert_eq!(
@@ -122,7 +122,7 @@ fn socket_is_killed_under_strict() {
         return;
     }
     let out = run_probe(
-        &[("HHAGENT_SECCOMP_PROFILE", "strict")],
+        &[("KASTELLAN_SECCOMP_PROFILE", "strict")],
         &["seccomp-socket"],
     );
     assert_eq!(
@@ -144,7 +144,7 @@ fn socket_survives_under_net_client() {
         return;
     }
     let out = run_probe(
-        &[("HHAGENT_SECCOMP_PROFILE", "net_client")],
+        &[("KASTELLAN_SECCOMP_PROFILE", "net_client")],
         &["seccomp-socket"],
     );
     assert!(
@@ -171,7 +171,7 @@ fn unshare_is_killed_under_net_client() {
         return;
     }
     let out = run_probe(
-        &[("HHAGENT_SECCOMP_PROFILE", "net_client")],
+        &[("KASTELLAN_SECCOMP_PROFILE", "net_client")],
         &["seccomp-unshare"],
     );
     assert_eq!(

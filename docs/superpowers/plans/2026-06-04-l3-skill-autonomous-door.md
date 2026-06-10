@@ -6,7 +6,7 @@
 
 **Architecture:** The agent emits an optional `Plan.invoke_skill` directive. In `run_to_terminal`, *before* the existing CASSANDRA review, a present directive is loaded (newest pinned skill by name), re-validated against the daemon's **live** `ToolRegistry` via the reused `prepare_invocation`, and expanded into `PlannedStep`s (`classification = plan.data_ceiling`) that **populate `plan.steps`**. The reviewer then sees concrete steps; dispatch/audit are unchanged. A refused directive is audited and fed back as a block so the agent replans. Autonomy is gated on a new `pinned` tier (new `pin` command + `is_autonomously_invocable`); re-crystallisation is suppressed for invoke-driven tasks.
 
-**Tech Stack:** Rust (workspace crates `hhagent-core`, `hhagent-db`), `sqlx`/Postgres, `serde_json`, `async-trait`, `thiserror`. Tests: `cargo test`, live-PG e2e gated on `HHAGENT_PG_BIN_DIR` (skip-as-pass otherwise).
+**Tech Stack:** Rust (workspace crates `kastellan-core`, `kastellan-db`), `sqlx`/Postgres, `serde_json`, `async-trait`, `thiserror`. Tests: `cargo test`, live-PG e2e gated on `KASTELLAN_PG_BIN_DIR` (skip-as-pass otherwise).
 
 **Spec:** `docs/superpowers/specs/2026-06-04-l3-skill-autonomous-door-design.md`
 
@@ -16,7 +16,7 @@ source "$HOME/.cargo/env"
 ```
 Live-PG e2e on this Mac uses Postgres.app v18 — set the session-local override before running PG-gated tests:
 ```sh
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
 ```
 
 ---
@@ -101,7 +101,7 @@ fn plan_without_invoke_skill_round_trips_without_the_key() {
 
 - [ ] **Step 2: Run tests to verify they fail (do not compile / type missing)**
 
-Run: `cargo test -p hhagent-core --lib cassandra::types 2>&1 | head -30`
+Run: `cargo test -p kastellan-core --lib cassandra::types 2>&1 | head -30`
 Expected: compile errors — `InvokeDirective`, `MalformedInvoke`, `validate_invoke`, and the `invoke_skill` field don't exist yet.
 
 - [ ] **Step 3: Add `InvokeDirective` + `MalformedInvoke`** — insert after `L3SkillCandidate` (after line 126) in `core/src/cassandra/types.rs`. Ensure `use std::collections::BTreeMap;` is present at the top of the file (add it if missing):
@@ -192,18 +192,18 @@ impl std::fmt::Display for MalformedInvoke {
 
 - [ ] **Step 6: Add `invoke_skill: None` to every `Plan { … }` literal** — build the workspace; the compiler lists each missing-field site. Add `invoke_skill: None,` after the `l3_skill: None,` line in each (production + tests). Known sites include `core/tests/scheduler_inner_loop_e2e.rs` (`task_complete_plan`, `one_step_plan`), `core/src/scheduler/inner_loop_audit.rs` (test plans ~lines 301/347), and any others surfaced.
 
-Run: `cargo build -p hhagent-core --tests 2>&1 | grep -A2 "missing field" | head -40`
+Run: `cargo build -p kastellan-core --tests 2>&1 | grep -A2 "missing field" | head -40`
 Fix each listed site, then re-run until clean.
 
 - [ ] **Step 7: Run tests to verify they pass**
 
-Run: `cargo test -p hhagent-core --lib cassandra::types 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --lib cassandra::types 2>&1 | tail -20`
 Expected: the 5 new tests PASS.
 
 - [ ] **Step 8: Clippy + commit**
 
 ```sh
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/cassandra/types.rs core/tests/scheduler_inner_loop_e2e.rs core/src/scheduler/inner_loop_audit.rs
 # add any other files the compiler flagged in Step 6
 git commit -m "feat(l3): Plan.invoke_skill directive + validate_invoke (autonomous door)
@@ -233,7 +233,7 @@ In `build_plan_formulate_payload_cli_inferred_source_has_27_keys_with_signals` (
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p hhagent-core --lib inner_loop_audit 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --lib inner_loop_audit 2>&1 | tail -20`
 Expected: the two key-count tests FAIL (payload still has the old count; `invoke_skill` key absent).
 
 - [ ] **Step 3: Add the `invoke_skill` key to the payload** — in `build_plan_formulate_payload`, immediately after the block that inserts `"l3_skill"` (~line 147-150), add (compact form: name + arg_count, explicit null when absent, mirroring the `l3_skill` `{name, step_count}` compaction):
@@ -257,13 +257,13 @@ Expected: the two key-count tests FAIL (payload still has the old count; `invoke
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `cargo test -p hhagent-core --lib inner_loop_audit 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --lib inner_loop_audit 2>&1 | tail -20`
 Expected: all `inner_loop_audit` tests PASS, including the renamed 27/28-key pins.
 
 - [ ] **Step 5: Clippy + commit**
 
 ```sh
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/scheduler/inner_loop_audit.rs
 git commit -m "feat(l3): plan.formulate payload carries compact invoke_skill key (27/28 keys)
 
@@ -376,7 +376,7 @@ fn expand_for_agent_refuses_tool_absent_from_live_registry() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p hhagent-core --lib memory::l3_invoke 2>&1 | head -30`
+Run: `cargo test -p kastellan-core --lib memory::l3_invoke 2>&1 | head -30`
 Expected: compile errors — `is_autonomously_invocable`, `planned_step_from_l3_with_class`, `expand_for_agent` don't exist.
 
 - [ ] **Step 3: Add the autonomy predicate** — in `core/src/memory/l3_invoke.rs`, after `is_runnable` (after line 236):
@@ -459,13 +459,13 @@ pub fn expand_for_agent(
 
 - [ ] **Step 6: Run to verify they pass**
 
-Run: `cargo test -p hhagent-core --lib memory::l3_invoke 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --lib memory::l3_invoke 2>&1 | tail -20`
 Expected: the 6 new tests PASS; existing `l3_invoke` tests stay green.
 
 - [ ] **Step 7: Clippy + commit**
 
 ```sh
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/memory/l3_invoke.rs core/src/memory/l3_invoke/tests.rs
 git commit -m "feat(l3): is_autonomously_invocable + expand_for_agent (pinned-only, data_ceiling class)
 
@@ -484,7 +484,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 1: Add `PinnedSkill` + the loader** — in `core/src/memory/l3_invoke.rs`. First extend the imports at the top: change the `l3_approval` import to also bring in `from_metadata_str` usage (it's a `SkillTrust` assoc fn, already reachable) and add the db imports:
 
 ```rust
-use hhagent_db::memories::{load_layer_by_trust, MemoryLayer};
+use kastellan_db::memories::{load_layer_by_trust, MemoryLayer};
 ```
 (place beside the existing `use sqlx::PgPool;`). Then add near the loader region:
 
@@ -508,7 +508,7 @@ pub struct PinnedSkill {
 pub async fn load_pinned_skill_by_name(
     pool: &PgPool,
     name: &str,
-) -> Result<Option<PinnedSkill>, hhagent_db::DbError> {
+) -> Result<Option<PinnedSkill>, kastellan_db::DbError> {
     // Cap: a generous bound on how many pinned skills could share a name.
     // Newest-first, so the first name match is the newest.
     const SCAN_CAP: usize = 64;
@@ -548,7 +548,7 @@ pub async fn load_pinned_skill_by_name(
 
 - [ ] **Step 2: Build + clippy**
 
-Run: `cargo build -p hhagent-core 2>&1 | tail -5 && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
+Run: `cargo build -p kastellan-core 2>&1 | tail -5 && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
 Expected: clean build, exit 0.
 
 - [ ] **Step 3: Commit**
@@ -609,13 +609,13 @@ pub trait StepDispatcher: Send + Sync {
 
 - [ ] **Step 4: Build + verify all StepDispatcher impls still compile**
 
-Run: `cargo build -p hhagent-core --tests 2>&1 | tail -10`
+Run: `cargo build -p kastellan-core --tests 2>&1 | tail -10`
 Expected: clean (the default method covers `ScriptedDispatcher`, the CLI's `DryRunNeverDispatches`, and any other doubles).
 
 - [ ] **Step 5: Clippy + commit**
 
 ```sh
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/scheduler/inner_loop.rs core/src/scheduler/tool_dispatch.rs
 git commit -m "feat(l3): StepDispatcher::known_tools() for live-registry invoke re-validation
 
@@ -669,7 +669,7 @@ fn build_l3_invoke_rejected_agent_payload_allows_null_ids() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p hhagent-core --lib scheduler::audit 2>&1 | head -20`
+Run: `cargo test -p kastellan-core --lib scheduler::audit 2>&1 | head -20`
 Expected: compile errors — the three builders don't exist.
 
 - [ ] **Step 3: Add the constants** — in `core/src/scheduler/audit.rs`, after `ACTION_L3_INVOKE_REJECTED` (line 136):
@@ -731,13 +731,13 @@ pub fn build_l3_invoke_rejected_agent_payload(
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `cargo test -p hhagent-core --lib scheduler::audit 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --lib scheduler::audit 2>&1 | tail -20`
 Expected: the 3 new tests PASS.
 
 - [ ] **Step 6: Clippy + commit**
 
 ```sh
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/scheduler/audit.rs
 git commit -m "feat(l3): l3.pinned / l3.pin_rejected audit + agent-path invoke_rejected builder
 
@@ -764,12 +764,12 @@ pub async fn l3_pin_and_audit(
     memory_id: i64,
     skill_name: &str,
     body_sha256: &str,
-) -> Result<i64, hhagent_db::DbError> {
+) -> Result<i64, kastellan_db::DbError> {
     use crate::memory::l3_approval::SkillTrust;
 
-    hhagent_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Pinned.as_str()).await?;
+    kastellan_db::memories::set_skill_trust(pool, memory_id, SkillTrust::Pinned.as_str()).await?;
     let payload = build_l3_pinned_payload(memory_id, skill_name, body_sha256);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_PINNED, payload,
     ).await {
         Ok(id) => id,
@@ -790,7 +790,7 @@ pub async fn l3_pin_rejected_audit(
     reasons: &[String],
 ) -> i64 {
     let payload = build_l3_pin_rejected_payload(memory_id, skill_name, reasons);
-    match hhagent_db::audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_L3_PIN_REJECTED, payload).await {
+    match kastellan_db::audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_L3_PIN_REJECTED, payload).await {
         Ok(id) => id,
         Err(e) => {
             tracing::warn!(error = %e, "l3.pin_rejected audit insert failed (best-effort)");
@@ -802,7 +802,7 @@ pub async fn l3_pin_rejected_audit(
 
 - [ ] **Step 2: Build + clippy**
 
-Run: `cargo build -p hhagent-core 2>&1 | tail -5 && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
+Run: `cargo build -p kastellan-core 2>&1 | tail -5 && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
 Expected: clean, exit 0.
 
 - [ ] **Step 3: Commit**
@@ -853,12 +853,12 @@ Update the existing `ScriptedDispatcher { table: Default::default() }` construct
 Add a helper to build + pin + insert a pinned skill row, and an invoke plan factory, near the other plan helpers (~line 200):
 
 ```rust
-use hhagent_core::cassandra::types::{InvokeDirective, L3Param, L3SkillCandidate, L3TemplateStep};
+use kastellan_core::cassandra::types::{InvokeDirective, L3Param, L3SkillCandidate, L3TemplateStep};
 
 /// Insert a `pinned` L3 skill row directly (bypassing crystallise/approve
 /// for test focus). Returns its memory id.
 async fn seed_pinned_skill(pool: &sqlx::PgPool, name: &str, tool: &str, method: &str) -> i64 {
-    use hhagent_db::memories::{insert_memory_at_layer, set_skill_trust, MemoryLayer};
+    use kastellan_db::memories::{insert_memory_at_layer, set_skill_trust, MemoryLayer};
     let template = serde_json::json!({
         "name": name, "description": "d",
         "parameters": [{"name":"p","description":"d"}],
@@ -918,7 +918,7 @@ async fn agent_invoke_pinned_skill_expands_and_dispatches() {
     assert!(matches!(result.outcome, Outcome::Completed(_)), "got {:?}", result.outcome);
     assert_eq!(result.dispatch_count, 1, "the expanded template's single step dispatched");
 
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
     let has = |actor: &str, action: &str| rows.iter().any(|r| r.actor == actor && r.action == action);
     assert!(has("scheduler", "l3.invoked"), "l3.invoked row (scheduler) present");
     assert!(has("scheduler", "l3.invoke_outcome"), "l3.invoke_outcome row present");
@@ -949,7 +949,7 @@ async fn agent_invoke_unknown_skill_refuses_then_replans() {
         o => panic!("expected Completed after replan, got {:?}", o),
     }
     assert_eq!(result.dispatch_count, 0, "refused invoke dispatched nothing");
-    let rows = hhagent_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
+    let rows = kastellan_db::audit::fetch_since(&pool, 0, 500).await.unwrap();
     assert!(rows.iter().any(|r| r.actor == "scheduler" && r.action == "l3.invoke_rejected"),
         "refusal audited");
 }
@@ -957,7 +957,7 @@ async fn agent_invoke_unknown_skill_refuses_then_replans() {
 
 - [ ] **Step 2: Run the new e2e to verify it fails** (with PG configured)
 
-Run: `cargo test -p hhagent-core --test scheduler_inner_loop_e2e agent_invoke 2>&1 | tail -30`
+Run: `cargo test -p kastellan-core --test scheduler_inner_loop_e2e agent_invoke 2>&1 | tail -30`
 Expected: FAIL — the loop ignores `invoke_skill` today (the unknown-skill plan would proceed as a non-terminal empty-steps plan and loop; the pinned-invoke plan would dispatch nothing). Confirm the assertions fail (no `l3.invoked` rows).
 
 - [ ] **Step 3: Wire the expansion into `run_to_terminal`** — in `core/src/scheduler/inner_loop.rs`:
@@ -1005,7 +1005,7 @@ Inside the loop, **between** `write_audit_plan_formulate(...).await?;` (line 290
                     let payload = build_l3_invoke_rejected_agent_payload(
                         $name, $mem, $sha, &reasons_v,
                     );
-                    if let Err(e) = hhagent_db::audit::insert(
+                    if let Err(e) = kastellan_db::audit::insert(
                         pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKE_REJECTED, payload,
                     ).await {
                         tracing::warn!(task_id = ctx.task_id, error = %e,
@@ -1059,7 +1059,7 @@ Inside the loop, **between** `write_audit_plan_formulate(...).await?;` (line 290
                                     pinned.memory_id, &name, &pinned.body_sha256,
                                     &arg_names, steps.len(),
                                 );
-                                if let Err(e) = hhagent_db::audit::insert(
+                                if let Err(e) = kastellan_db::audit::insert(
                                     pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
                                 ).await {
                                     tracing::warn!(task_id = ctx.task_id, error = %e,
@@ -1083,7 +1083,7 @@ Inside the loop, **between** `write_audit_plan_formulate(...).await?;` (line 290
             let payload = build_l3_invoke_outcome_payload(
                 *memory_id, skill_name, steps_executed, steps_total, any_err,
             );
-            if let Err(e) = hhagent_db::audit::insert(
+            if let Err(e) = kastellan_db::audit::insert(
                 pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKE_OUTCOME, payload,
             ).await {
                 tracing::warn!(task_id = ctx.task_id, error = %e,
@@ -1105,12 +1105,12 @@ Inside the loop, **between** `write_audit_plan_formulate(...).await?;` (line 290
 
 - [ ] **Step 6: Run the e2e to verify it passes** (with PG configured)
 
-Run: `cargo test -p hhagent-core --test scheduler_inner_loop_e2e 2>&1 | tail -30`
+Run: `cargo test -p kastellan-core --test scheduler_inner_loop_e2e 2>&1 | tail -30`
 Expected: all scenarios PASS (the existing 4 + the 2 new invoke ones). Zero `[SKIP]` with PG configured.
 
 - [ ] **Step 7: Full lib tests + clippy**
 
-Run: `cargo test -p hhagent-core --lib 2>&1 | tail -8 && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
+Run: `cargo test -p kastellan-core --lib 2>&1 | tail -8 && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
 Expected: green; clippy exit 0.
 
 - [ ] **Step 8: Commit**
@@ -1127,32 +1127,32 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ## Task 9: `pin` CLI command
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli/memory_l3.rs` (dispatch table ~line 12; usage; new `memory_l3_pin` handler)
+- Modify: `core/src/bin/kastellan-cli/memory_l3.rs` (dispatch table ~line 12; usage; new `memory_l3_pin` handler)
 - Modify: `core/tests/cli_memory_l3_e2e.rs` (pin happy + reject scenarios)
 
 - [ ] **Step 1: Write failing e2e** — read `core/tests/cli_memory_l3_e2e.rs` to learn its harness (how it spawns the CLI binary, seeds rows, asserts). Following the existing `approve`/`revoke` scenario pattern, add a `pin` scenario: seed an L3 skill, write a `registry.loaded` snapshot containing its tool, `approve` it, then `pin` it; assert exit 0, stdout mentions `pinned`, and the row's `metadata.trust == "pinned"` + an `l3.pinned` audit row exists. Add a reject scenario: `pin` a skill that is still `untrusted` (never approved) → non-zero exit, trust unchanged, `l3.pin_rejected` row. (Mirror the exact bring-up + binary-invocation helpers already in the file — do not invent new ones.)
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p hhagent-core --test cli_memory_l3_e2e pin 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --test cli_memory_l3_e2e pin 2>&1 | tail -20`
 Expected: FAIL — `pin` is an unknown subcommand (exit 2).
 
-- [ ] **Step 3: Add the dispatch entry + usage** — in `core/src/bin/hhagent-cli/memory_l3.rs`, update `run_memory_l3` (lines 12-28): add `"pin" => with_runtime("memory l3", memory_l3_pin(&args[1..])),` and update both usage strings to `<list|approve|pin|revoke|remove|run>` and the unknown-action message to include `pin`.
+- [ ] **Step 3: Add the dispatch entry + usage** — in `core/src/bin/kastellan-cli/memory_l3.rs`, update `run_memory_l3` (lines 12-28): add `"pin" => with_runtime("memory l3", memory_l3_pin(&args[1..])),` and update both usage strings to `<list|approve|pin|revoke|remove|run>` and the unknown-action message to include `pin`.
 
 - [ ] **Step 4: Add the `memory_l3_pin` handler** — add after `memory_l3_revoke`. It mirrors `memory_l3_approve` (load + layer-guard + parse template + snapshot gate) but additionally requires current trust `user_approved` and flips to `pinned`:
 
 ```rust
 async fn memory_l3_pin(args: &[String]) -> ExitCode {
-    use hhagent_core::cassandra::types::L3SkillCandidate;
-    use hhagent_core::cli_audit::{l3_pin_and_audit, l3_pin_rejected_audit};
-    use hhagent_core::memory::l3_approval::{evaluate_approval, ApprovalDecision, RejectReason, SkillTrust};
-    use hhagent_db::memories::{fetch_by_ids, MemoryLayer};
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cassandra::types::L3SkillCandidate;
+    use kastellan_core::cli_audit::{l3_pin_and_audit, l3_pin_rejected_audit};
+    use kastellan_core::memory::l3_approval::{evaluate_approval, ApprovalDecision, RejectReason, SkillTrust};
+    use kastellan_db::memories::{fetch_by_ids, MemoryLayer};
+    use kastellan_db::pool::connect_runtime_pool;
 
     let id_str = match args {
         [s] => s,
         _ => {
-            eprintln!("usage: hhagent-cli memory l3 pin <id>");
+            eprintln!("usage: kastellan-cli memory l3 pin <id>");
             return ExitCode::from(2);
         }
     };
@@ -1234,14 +1234,14 @@ async fn memory_l3_pin(args: &[String]) -> ExitCode {
 
 - [ ] **Step 5: Run to verify it passes** (with PG configured)
 
-Run: `cargo test -p hhagent-core --test cli_memory_l3_e2e 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --test cli_memory_l3_e2e 2>&1 | tail -20`
 Expected: pin scenarios PASS; existing list/approve/revoke/remove/run scenarios stay green.
 
 - [ ] **Step 6: Clippy + commit**
 
 ```sh
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
-git add core/src/bin/hhagent-cli/memory_l3.rs core/tests/cli_memory_l3_e2e.rs
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+git add core/src/bin/kastellan-cli/memory_l3.rs core/tests/cli_memory_l3_e2e.rs
 git commit -m "feat(l3): memory l3 pin command (user_approved -> pinned, gated re-validation)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
@@ -1296,7 +1296,7 @@ fn parse_surfaced_skill_marks_invocable_from_pinned_trust() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p hhagent-core --lib memory::l3_surface 2>&1 | head -20`
+Run: `cargo test -p kastellan-core --lib memory::l3_surface 2>&1 | head -20`
 Expected: compile errors — `SurfacedSkill` has no `invocable` field.
 
 - [ ] **Step 3: Add the field** — in `core/src/memory/l3_surface.rs`, `SurfacedSkill` (line 36):
@@ -1351,18 +1351,18 @@ use crate::memory::l3_invoke::is_autonomously_invocable;
 
 - [ ] **Step 6: Fix the loader** — `load_l3_skills_for_prompt` calls `parse_surfaced_skill(&row.metadata)` which now carries trust through, so no signature change is needed there. Confirm it still compiles. If any other `SurfacedSkill { … }` literal exists (e.g. in tests or `cap_surfaced` tests), add `invocable: false` (or the appropriate value). Build to find them:
 
-Run: `cargo build -p hhagent-core --tests 2>&1 | grep -A2 "missing field" | head -20`
+Run: `cargo build -p kastellan-core --tests 2>&1 | grep -A2 "missing field" | head -20`
 Fix each.
 
 - [ ] **Step 7: Run to verify they pass**
 
-Run: `cargo test -p hhagent-core --lib memory::l3_surface 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --lib memory::l3_surface 2>&1 | tail -20`
 Expected: the 3 new tests PASS; existing l3_surface tests green.
 
 - [ ] **Step 8: Clippy + commit**
 
 ```sh
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/memory/l3_surface.rs
 # add the l3_surface/tests.rs path if tests live in a sibling
 git commit -m "feat(l3): surface [invocable] tag on pinned skills (SurfacedSkill.invocable)
@@ -1447,7 +1447,7 @@ iteration and can continue planning (e.g. emit `task_complete`).
 
 - [ ] **Step 4: Verify no prompt-shape test breaks** — some tests assert prompt content or the assembled-prompt sha. Run the prompt-adjacent suites:
 
-Run: `cargo test -p hhagent-core --lib prompt_assembly 2>&1 | tail -10 && cargo test -p hhagent-core --test prompt_assembly_e2e 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core --lib prompt_assembly 2>&1 | tail -10 && cargo test -p kastellan-core --test prompt_assembly_e2e 2>&1 | tail -10`
 Expected: green (the prompt file is loaded at runtime, not hashed into a pinned constant; if any test pins `agent_planner` content, update its expectation to match).
 
 - [ ] **Step 5: Commit**
@@ -1466,17 +1466,17 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - [ ] **Full workspace test + clippy + doc-links** (with PG configured for the live e2e):
 
 ```sh
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
 cargo test --workspace 2>&1 | tail -15
 cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tail -5
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc -p hhagent-core --no-deps --document-private-items 2>&1 | grep -c "unresolved" || true
+RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc -p kastellan-core --no-deps --document-private-items 2>&1 | grep -c "unresolved" || true
 ```
 Expected: all tests pass (baseline 1293 + new); clippy exit 0; doc-links count == main's 21.
 
 - [ ] **Live-PG L3 regression sweep** (zero `[SKIP]`):
 
 ```sh
-cargo test -p hhagent-core --test cli_memory_l3_e2e --test cli_memory_l3_run_e2e \
+cargo test -p kastellan-core --test cli_memory_l3_e2e --test cli_memory_l3_run_e2e \
   --test memory_l3_crystallise_e2e --test l3_surface_e2e \
   --test scheduler_inner_loop_e2e --test prompt_assembly_e2e 2>&1 | tail -20
 ```

@@ -13,7 +13,7 @@ What is missing is the mechanism that converts a captured plan into a test for a
 This spec covers two slices, shipped as separate PRs in one session:
 
 - **Slice A** — audit-payload bump: `agent/plan.formulate` audit rows must carry the full `Plan` JSON and the task's `classification_floor` so the reviewer pipeline can be replayed from captures alone.
-- **Slice B** — the harness itself: a pure-Rust library + a thin `hhagent-cli` subcommand that loads captures, replays them through the production chain, and prints a per-fixture verdict-delta report.
+- **Slice B** — the harness itself: a pure-Rust library + a thin `kastellan-cli` subcommand that loads captures, replays them through the production chain, and prints a per-fixture verdict-delta report.
 
 After this spec ships and Slice A's audit-payload change merges, the operator recaptures (one-time action against their local LLM) and the harness becomes the iteration loop for every future real rule.
 
@@ -147,15 +147,15 @@ pub fn format_report_table(results: &[ReplayResult]) -> String;
   - `plan_count` → `capture.plans[i].iter`.
 - **Async surface**: `replay_capture` is `async` because `ReviewStage::review` is async (trait contract). No actual async work happens for stubs; real rules might use async DB queries against a future side-table.
 
-### CLI subcommand: `hhagent-cli observation replay`
+### CLI subcommand: `kastellan-cli observation replay`
 
 New top-level subcommand `observation`, with a single sub-subcommand `replay`. Pattern follows the existing `tools allowlist add|remove|list` (hand-rolled dispatcher, no `clap`).
 
 ```
-hhagent-cli observation replay [--captures-dir PATH] [--model SLUG]
+kastellan-cli observation replay [--captures-dir PATH] [--model SLUG]
 ```
 
-- `--captures-dir PATH`: defaults to `tests/observation/captures` resolved relative to `CARGO_MANIFEST_DIR` (for `cargo run`-style invocation) with a fallback to the CWD-relative path for an installed binary. The fallback is the same posture as `HHAGENT_PROMPTS_DIR` in the daemon (see open issue #24 — operator wires this explicitly in production unit files).
+- `--captures-dir PATH`: defaults to `tests/observation/captures` resolved relative to `CARGO_MANIFEST_DIR` (for `cargo run`-style invocation) with a fallback to the CWD-relative path for an installed binary. The fallback is the same posture as `KASTELLAN_PROMPTS_DIR` in the daemon (see open issue #24 — operator wires this explicitly in production unit files).
 - `--model SLUG`: filter to one model's captures. When omitted, every `<fixture_id>/*.json` is replayed; when present, only files matching `*_<SLUG>.json` are replayed. No "newest per fixture" auto-selection — explicit choice or replay-all.
 - **Exit codes**:
   - `0` — replay completed; one or more results emitted. Deltas being present is *not* an error; that is the harness's reason to exist.
@@ -211,7 +211,7 @@ Pinned via the library API (`replay_capture` direct call). No CLI subprocess at 
 
 ### CLI integration test: `core/tests/observation_replay_cli_e2e.rs`
 
-Spawns `hhagent-cli observation replay --captures-dir <tempdir>` against a hand-crafted tempdir. Asserts:
+Spawns `kastellan-cli observation replay --captures-dir <tempdir>` against a hand-crafted tempdir. Asserts:
 - Exit code 0.
 - Stdout contains the expected fixture row.
 - Stderr empty on the happy path.
@@ -247,7 +247,7 @@ Predicted ~300–400 LOC for `core/src/observation/replay.rs`, well under the 50
 - New library tests in `core/src/observation/replay.rs::tests` (~8–10).
 - New integration test `core/tests/observation_replay_e2e.rs` (2 cases).
 - New CLI integration test `core/tests/observation_replay_cli_e2e.rs` (2 cases — happy + malformed JSON).
-- New CLI subcommand `hhagent-cli observation replay` reachable from the dispatcher; help text reflects it.
+- New CLI subcommand `kastellan-cli observation replay` reachable from the dispatcher; help text reflects it.
 - HANDOVER + ROADMAP updated.
 
 ## TDD ordering
@@ -268,7 +268,7 @@ Per CLAUDE.md rule #2, each task lands RED → GREEN → commit.
 3. Implement `replay_capture` against `ChainReviewStage` — GREEN.
 4. Write integration test for `replay_capture` against the two synthetic captures — GREEN.
 5. Write `load_captures_from_dir` — GREEN.
-6. Wire CLI subcommand into `hhagent-cli`'s dispatcher.
+6. Wire CLI subcommand into `kastellan-cli`'s dispatcher.
 7. Write CLI integration test — GREEN.
 8. Update help text, HANDOVER, ROADMAP.
 9. Commit + open PR.

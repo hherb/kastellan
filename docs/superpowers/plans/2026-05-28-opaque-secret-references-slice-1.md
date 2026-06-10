@@ -4,9 +4,9 @@
 
 **Goal:** Ship the in-process `Vault` + chokepoint substitution that lets the planner see only opaque `secret://<8-hex>` references; core substitutes refs → plaintext in `tool_host::dispatch` immediately before the worker call, and writes three new audit-row kinds (`secret.materialized`, `secret.redeemed`, `secret.redemption_failed`) — never the plaintext.
 
-**Architecture:** New module `core::secrets` (sibling to `cassandra`, `memory`). Public surface: `Vault` (TTL'd `std::sync::RwLock<HashMap<SecretRef, Entry>>`), `SecretRef` opaque type, `RedeemResult` (Hit/Expired/NotFound), `substitute_refs_in_params` walker. Bootstrap-time materialization via `HHAGENT_BOOTSTRAP_SECRETS` env var. Substitution wires before the just-shipped injection guard in the dispatch body; orthogonal screens at opposite ends. Per-process daemon-owned `Arc<Vault>` threaded into dispatch and scheduler as a new parameter.
+**Architecture:** New module `core::secrets` (sibling to `cassandra`, `memory`). Public surface: `Vault` (TTL'd `std::sync::RwLock<HashMap<SecretRef, Entry>>`), `SecretRef` opaque type, `RedeemResult` (Hit/Expired/NotFound), `substitute_refs_in_params` walker. Bootstrap-time materialization via `KASTELLAN_BOOTSTRAP_SECRETS` env var. Substitution wires before the just-shipped injection guard in the dispatch body; orthogonal screens at opposite ends. Per-process daemon-owned `Arc<Vault>` threaded into dispatch and scheduler as a new parameter.
 
-**Tech Stack:** Rust workspace (hhagent-core crate). `sha2` already in workspace deps (injection-guard). `zeroize`/`aes-gcm`/`tokio::sync` already pulled in via `db::secrets` and existing deps. `rand` already in `Cargo.lock` transitively via `aes-gcm`; will add direct dep if not.
+**Tech Stack:** Rust workspace (kastellan-core crate). `sha2` already in workspace deps (injection-guard). `zeroize`/`aes-gcm`/`tokio::sync` already pulled in via `db::secrets` and existing deps. `rand` already in `Cargo.lock` transitively via `aes-gcm`; will add direct dep if not.
 
 **Spec:** [docs/superpowers/specs/2026-05-28-opaque-secret-references-design.md](../specs/2026-05-28-opaque-secret-references-design.md)
 
@@ -18,7 +18,7 @@
 
 ```sh
 source "$HOME/.cargo/env"
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"
 cargo test --workspace 2>&1 | grep -E "^test result:" | awk '{ p+=$4; f+=$6; i+=$8 } END { print "passed:" p, "failed:" f, "ignored:" i }'
 ```
 
@@ -134,7 +134,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use zeroize::Zeroizing;
 
-use hhagent_db::secrets::KeyProvider;
+use kastellan_db::secrets::KeyProvider;
 
 use super::{DEFAULT_TTL, REF_HEX_LEN, REF_PREFIX};
 
@@ -194,12 +194,12 @@ pub enum RedeemResult {
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
     #[error("vault: secret lookup failed: {0}")]
-    Secrets(#[from] hhagent_db::secrets::SecretsError),
+    Secrets(#[from] kastellan_db::secrets::SecretsError),
 
     /// Hard-fail on audit write — see spec §5.4. Wraps the existing
-    /// `hhagent_db::DbError` returned by `audit::insert`.
+    /// `kastellan_db::DbError` returned by `audit::insert`.
     #[error("vault: audit row insert failed during materialize: {0}")]
-    Audit(hhagent_db::DbError),
+    Audit(kastellan_db::DbError),
 
     #[error("vault: materialized plaintext is empty")]
     EmptyPlaintext,
@@ -409,13 +409,13 @@ Create `core/src/secrets/substitute/tests.rs`:
 - [ ] **Step 7: Build and run the module-level tests**
 
 ```sh
-cargo build -p hhagent-core 2>&1 | tail -20
+cargo build -p kastellan-core 2>&1 | tail -20
 ```
 
 Expected: clean build (the stubs panic on call but no function exercises them yet).
 
 ```sh
-cargo test -p hhagent-core secrets:: 2>&1 | grep -E "test result:" | head -5
+cargo test -p kastellan-core secrets:: 2>&1 | grep -E "test result:" | head -5
 ```
 
 Expected: `test result: ok. 7 passed; 0 failed; 0 ignored` for `core::secrets::tests`.
@@ -480,7 +480,7 @@ If MISSING, edit `core/Cargo.toml` to add `rand = { workspace = true, features =
 grep '^rand' Cargo.toml
 ```
 
-If the workspace root also lacks it, add `rand = "0.8"` to the workspace `[workspace.dependencies]`. Run `cargo build -p hhagent-core` to confirm.
+If the workspace root also lacks it, add `rand = "0.8"` to the workspace `[workspace.dependencies]`. Run `cargo build -p kastellan-core` to confirm.
 
 - [ ] **Step 2: Write the failing vault tests**
 
@@ -631,7 +631,7 @@ fn vault_redeem_concurrent_readers_dont_block_each_other() {
 Run the tests now to verify they FAIL with `unimplemented!()` panics:
 
 ```sh
-cargo test -p hhagent-core secrets::vault::tests 2>&1 | tail -20
+cargo test -p kastellan-core secrets::vault::tests 2>&1 | tail -20
 ```
 
 Expected: 8 tests, several panicking at `Vault::redeem — filled in Task 2`. `new_uses_default_ttl`, `with_ttl_overrides`, `default_constructs_with_default_ttl`, and `vault_drop_zeroes_plaintext` should PASS already (they don't call `redeem`). The 4 redeem tests should panic. Exactly 4 panics is the expected failure mode.
@@ -676,7 +676,7 @@ pub fn redeem(&self, r: &SecretRef) -> RedeemResult {
 Run the redeem tests:
 
 ```sh
-cargo test -p hhagent-core secrets::vault::tests::redeem 2>&1 | tail -10
+cargo test -p kastellan-core secrets::vault::tests::redeem 2>&1 | tail -10
 ```
 
 Expected: 4 PASS (`redeem_hits_within_ttl`, `redeem_returns_not_found_when_absent`, `redeem_returns_expired_past_ttl_and_gcs_entry`, `redeem_returns_owned_zeroizing_clone`).
@@ -702,7 +702,7 @@ pub async fn materialize(
 ) -> Result<SecretRef, VaultError> {
     // 1. Decrypt the secret at the host boundary.
     let plaintext: Zeroizing<Vec<u8>> =
-        hhagent_db::secrets::get(pool, key_provider, name, None).await?;
+        kastellan_db::secrets::get(pool, key_provider, name, None).await?;
 
     if plaintext.is_empty() {
         return Err(VaultError::EmptyPlaintext);
@@ -738,7 +738,7 @@ pub async fn materialize(
         "ttl_secs": ttl_secs,
         "actor":    actor,
     });
-    hhagent_db::audit::insert(pool, "policy", "secret.materialized", payload)
+    kastellan_db::audit::insert(pool, "policy", "secret.materialized", payload)
         .await
         .map_err(VaultError::Audit)?;
 
@@ -773,7 +773,7 @@ Edit all occurrences in `vault.rs` and `vault/tests.rs`. After the rename, the t
 - [ ] **Step 6: Run all Task 2 tests**
 
 ```sh
-cargo test -p hhagent-core secrets::vault 2>&1 | tail -15
+cargo test -p kastellan-core secrets::vault 2>&1 | tail -15
 ```
 
 Expected: 9 tests, all PASS (the 8 from step 2 + the const pin compile is at module level).
@@ -1075,7 +1075,7 @@ fn multiple_distinct_refs_in_one_value_all_substituted() {
 Run the tests now to verify they FAIL with `unimplemented!()`:
 
 ```sh
-cargo test -p hhagent-core secrets::substitute::tests 2>&1 | tail -10
+cargo test -p kastellan-core secrets::substitute::tests 2>&1 | tail -10
 ```
 
 Expected: 14 test panics at `substitute_refs_in_params — filled in Task 3`.
@@ -1192,7 +1192,7 @@ This lets the chokepoint call `substitute_refs_in_params(&mut params, &*vault)` 
 - [ ] **Step 5: Run all walker tests**
 
 ```sh
-cargo test -p hhagent-core secrets::substitute 2>&1 | tail -10
+cargo test -p kastellan-core secrets::substitute 2>&1 | tail -10
 ```
 
 Expected: 14 PASS.
@@ -1249,7 +1249,7 @@ EOF
 - Modify: `core/src/tool_host.rs` (new param + substitution block + new error variant)
 - Modify: `core/src/scheduler/tool_dispatch.rs` (carry `Arc<Vault>`)
 - Modify: `core/src/scheduler/runner.rs` (accept `Arc<Vault>` in `spawn_scheduler`)
-- Modify: `core/src/main.rs` (bootstrap `HHAGENT_BOOTSTRAP_SECRETS`)
+- Modify: `core/src/main.rs` (bootstrap `KASTELLAN_BOOTSTRAP_SECRETS`)
 - Create: `core/tests/secret_vault_e2e.rs` (8 integration tests)
 - Modify: `core/src/main.rs` callers if `spawn_scheduler`'s arity changed elsewhere
 
@@ -1283,7 +1283,7 @@ pub enum ToolHostError {
 - [ ] **Step 2: Build and surface all match-on-ToolHostError sites**
 
 ```sh
-cargo build -p hhagent-core 2>&1 | grep -E "non-exhaustive|missing match arm" | head -10
+cargo build -p kastellan-core 2>&1 | grep -E "non-exhaustive|missing match arm" | head -10
 ```
 
 Expected: the `#[non_exhaustive]` change may surface match arms across the workspace that need an `_ =>` fallback. Check `core/src/scheduler/tool_dispatch.rs::map_dispatch_result` first — it handles every existing variant explicitly:
@@ -1353,7 +1353,7 @@ Insert the substitution block at the very top of the body, before the existing `
                 "ms":       elapsed_ms,
             });
             if let Err(audit_err) =
-                hhagent_db::audit::insert(pool, "policy", "secret.redemption_failed", payload).await
+                kastellan_db::audit::insert(pool, "policy", "secret.redemption_failed", payload).await
             {
                 tracing::error!(
                     tool = %tool,
@@ -1386,7 +1386,7 @@ Now insert the `secret.redeemed` rows BEFORE the existing tool row's audit inser
 
 ```rust
     if let Err(audit_err) =
-        hhagent_db::audit::insert(pool, &actor, method, audit_payload).await
+        kastellan_db::audit::insert(pool, &actor, method, audit_payload).await
     {
 ```
 
@@ -1409,7 +1409,7 @@ Insert immediately above it:
             "ms":       elapsed_ms,
         });
         if let Err(e) =
-            hhagent_db::audit::insert(pool, "policy", "secret.redeemed", payload).await
+            kastellan_db::audit::insert(pool, "policy", "secret.redeemed", payload).await
         {
             tracing::error!(
                 tool = %tool,
@@ -1504,22 +1504,22 @@ grep -rn "spawn_scheduler" core/src/ core/tests/ 2>&1 | head -10
 
 Each caller (`main.rs`, e2e tests like `scheduler_inner_loop_e2e`, `cli_ask_e2e`) needs to construct an `Arc<Vault>` and pass it. For test callers, an empty `Arc::new(Vault::new())` is the right default (no bootstrap secrets, no substitution will fire because no params include refs).
 
-- [ ] **Step 7: Wire `HHAGENT_BOOTSTRAP_SECRETS` into `main.rs`**
+- [ ] **Step 7: Wire `KASTELLAN_BOOTSTRAP_SECRETS` into `main.rs`**
 
 Read [core/src/main.rs](core/src/main.rs) and find the sequence around `connect_runtime_pool` / `spawn_mirror` / `spawn_scheduler`. Insert:
 
 ```rust
 // ── Bootstrap secret materialization vault (Item 31, slice 1). ──
 //
-// HHAGENT_BOOTSTRAP_SECRETS = "name1,name2,name3" — comma-separated
+// KASTELLAN_BOOTSTRAP_SECRETS = "name1,name2,name3" — comma-separated
 // names that must each exist in the `secrets` table. Missing names
 // fail bring-up (fail-closed: a configured-but-missing secret is
 // operator error). The ref string itself is NOT logged — only the
 // ref_hash. Test fixtures reconstruct refs via their own
 // Vault::materialize calls.
-let vault = std::sync::Arc::new(hhagent_core::secrets::Vault::new());
-if let Ok(names_csv) = std::env::var("HHAGENT_BOOTSTRAP_SECRETS") {
-    let key_provider = hhagent_db::secrets::OsKeyringProvider::ensure_initialized()?;
+let vault = std::sync::Arc::new(kastellan_core::secrets::Vault::new());
+if let Ok(names_csv) = std::env::var("KASTELLAN_BOOTSTRAP_SECRETS") {
+    let key_provider = kastellan_db::secrets::OsKeyringProvider::ensure_initialized()?;
     for name in names_csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let secret_ref = vault
             .materialize(&pool, &key_provider, name, "core:bootstrap")
@@ -1555,7 +1555,7 @@ cargo test --workspace --no-run 2>&1 | tail -10
 Expected: every test compiles. Then:
 
 ```sh
-cargo test -p hhagent-core --lib secrets:: 2>&1 | tail -5
+cargo test -p kastellan-core --lib secrets:: 2>&1 | tail -5
 ```
 
 Expected: 30 PASS (7 mod + 9 vault + 14 substitute). Now the full workspace:
@@ -1576,18 +1576,18 @@ This is the load-bearing end-to-end pin. Build the file in one go. It mirrors `i
 //! Mirrors `injection_guard_e2e.rs` shape: per-test PG cluster via
 //! tests_common, real shell-exec worker, real sandbox, real audit log.
 //! Skip-as-pass on hosts without PG/supervisor/sandbox/worker; on this
-//! Mac set `HHAGENT_PG_BIN_DIR` to run live.
+//! Mac set `KASTELLAN_PG_BIN_DIR` to run live.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use hhagent_core::secrets::{
+use kastellan_core::secrets::{
     substitute_refs_in_params, MissingReason, RedeemFromVault, RedemptionEvent, SecretRef,
     SubstituteError, Vault, VaultError,
 };
-use hhagent_core::tool_host::{self, ToolHostError, WorkerSpec};
-use hhagent_db::secrets::{KeyProvider, MapKeyProvider, SecretsError, KEY_LEN};
-use hhagent_tests_common::{
+use kastellan_core::tool_host::{self, ToolHostError, WorkerSpec};
+use kastellan_db::secrets::{KeyProvider, MapKeyProvider, SecretsError, KEY_LEN};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, sandbox_factory_or_skip,
     shell_exec_binary_or_skip, skip_if_no_supervisor, unique_suffix,
 };
@@ -1608,14 +1608,14 @@ async fn materialize_writes_audit_row_and_returns_ref() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("hhagent-test-{suffix}"),
-        &format!("hhagent-test-{suffix}.log"),
-        &format!("hhagent-test-{suffix}"),
+        &format!("kastellan-test-{suffix}"),
+        &format!("kastellan-test-{suffix}.log"),
+        &format!("kastellan-test-{suffix}"),
     );
     let pool = cluster.runtime_pool().await;
 
     let kp = test_key_provider();
-    hhagent_db::secrets::put(&pool, &kp, "test-secret-X", b"plaintext-XYZ", None)
+    kastellan_db::secrets::put(&pool, &kp, "test-secret-X", b"plaintext-XYZ", None)
         .await
         .expect("put");
 
@@ -1660,9 +1660,9 @@ async fn materialize_fails_when_secret_missing() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("hhagent-test-{suffix}"),
-        &format!("hhagent-test-{suffix}.log"),
-        &format!("hhagent-test-{suffix}"),
+        &format!("kastellan-test-{suffix}"),
+        &format!("kastellan-test-{suffix}.log"),
+        &format!("kastellan-test-{suffix}"),
     );
     let pool = cluster.runtime_pool().await;
     let kp = test_key_provider();
@@ -1697,19 +1697,19 @@ async fn redeem_returns_plaintext_within_ttl() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("hhagent-test-{suffix}"),
-        &format!("hhagent-test-{suffix}.log"),
-        &format!("hhagent-test-{suffix}"),
+        &format!("kastellan-test-{suffix}"),
+        &format!("kastellan-test-{suffix}.log"),
+        &format!("kastellan-test-{suffix}"),
     );
     let pool = cluster.runtime_pool().await;
     let kp = test_key_provider();
-    hhagent_db::secrets::put(&pool, &kp, "X", b"plaintext-abc", None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "X", b"plaintext-abc", None).await.unwrap();
 
     let vault = Vault::new();
     let secret_ref = vault.materialize(&pool, &kp, "X", "test").await.unwrap();
 
     let result = <Vault as RedeemFromVault>::redeem(&vault, &secret_ref);
-    use hhagent_core::secrets::RedeemResult;
+    use kastellan_core::secrets::RedeemResult;
     match result {
         RedeemResult::Hit(z) => assert_eq!(z.as_slice(), b"plaintext-abc"),
         other => panic!("expected Hit, got {other:?}"),
@@ -1724,20 +1724,20 @@ async fn redeem_returns_expired_past_ttl() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("hhagent-test-{suffix}"),
-        &format!("hhagent-test-{suffix}.log"),
-        &format!("hhagent-test-{suffix}"),
+        &format!("kastellan-test-{suffix}"),
+        &format!("kastellan-test-{suffix}.log"),
+        &format!("kastellan-test-{suffix}"),
     );
     let pool = cluster.runtime_pool().await;
     let kp = test_key_provider();
-    hhagent_db::secrets::put(&pool, &kp, "X", b"plaintext-exp", None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "X", b"plaintext-exp", None).await.unwrap();
 
     let vault = Vault::with_ttl(Duration::from_millis(100));
     let secret_ref = vault.materialize(&pool, &kp, "X", "test").await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    use hhagent_core::secrets::RedeemResult;
+    use kastellan_core::secrets::RedeemResult;
     match <Vault as RedeemFromVault>::redeem(&vault, &secret_ref) {
         RedeemResult::Expired => (),
         other => panic!("expected Expired, got {other:?}"),
@@ -1758,9 +1758,9 @@ async fn dispatch_substitutes_and_writes_redeemed_row() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("hhagent-test-{suffix}"),
-        &format!("hhagent-test-{suffix}.log"),
-        &format!("hhagent-test-{suffix}"),
+        &format!("kastellan-test-{suffix}"),
+        &format!("kastellan-test-{suffix}.log"),
+        &format!("kastellan-test-{suffix}"),
     );
     let pool = cluster.runtime_pool().await;
     let kp = test_key_provider();
@@ -1769,7 +1769,7 @@ async fn dispatch_substitutes_and_writes_redeemed_row() {
     // the privacy-invariant test (test 7) can search the audit log
     // for it.
     let marker = "SECRET_LEAK_MARKER_xyz789";
-    hhagent_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None)
+    kastellan_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None)
         .await
         .unwrap();
 
@@ -1782,7 +1782,7 @@ async fn dispatch_substitutes_and_writes_redeemed_row() {
     // Build a shell-exec worker policy that allows /usr/bin/printf so
     // the worker can echo our substituted plaintext to stdout.
     let printf_bin = "/usr/bin/printf";
-    let policy = hhagent_tests_common::worker_strict_policy_allow(printf_bin);
+    let policy = kastellan_tests_common::worker_strict_policy_allow(printf_bin);
     let spec = WorkerSpec {
         policy: &policy,
         program: std::path::Path::new(&worker_bin),
@@ -1837,9 +1837,9 @@ async fn dispatch_fails_closed_on_missing_ref() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("hhagent-test-{suffix}"),
-        &format!("hhagent-test-{suffix}.log"),
-        &format!("hhagent-test-{suffix}"),
+        &format!("kastellan-test-{suffix}"),
+        &format!("kastellan-test-{suffix}.log"),
+        &format!("kastellan-test-{suffix}"),
     );
     let pool = cluster.runtime_pool().await;
 
@@ -1847,7 +1847,7 @@ async fn dispatch_fails_closed_on_missing_ref() {
     let vault = Arc::new(Vault::new());
 
     let printf_bin = "/usr/bin/printf";
-    let policy = hhagent_tests_common::worker_strict_policy_allow(printf_bin);
+    let policy = kastellan_tests_common::worker_strict_policy_allow(printf_bin);
     let spec = WorkerSpec {
         policy: &policy,
         program: std::path::Path::new(&worker_bin),
@@ -1904,21 +1904,21 @@ async fn policy_rows_contain_no_substring_of_redeemed_plaintext() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("hhagent-test-{suffix}"),
-        &format!("hhagent-test-{suffix}.log"),
-        &format!("hhagent-test-{suffix}"),
+        &format!("kastellan-test-{suffix}"),
+        &format!("kastellan-test-{suffix}.log"),
+        &format!("kastellan-test-{suffix}"),
     );
     let pool = cluster.runtime_pool().await;
     let kp = test_key_provider();
 
     let marker = "SECRET_LEAK_MARKER_xyz789";
-    hhagent_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None).await.unwrap();
 
     let vault = Arc::new(Vault::new());
     let secret_ref = vault.materialize(&pool, &kp, "marker-secret", "test").await.unwrap();
 
     let printf_bin = "/usr/bin/printf";
-    let policy = hhagent_tests_common::worker_strict_policy_allow(printf_bin);
+    let policy = kastellan_tests_common::worker_strict_policy_allow(printf_bin);
     let spec = WorkerSpec {
         policy: &policy,
         program: std::path::Path::new(&worker_bin),
@@ -1966,22 +1966,22 @@ async fn dispatch_substitutes_multiple_refs_in_one_params() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir,
-        &format!("hhagent-test-{suffix}"),
-        &format!("hhagent-test-{suffix}.log"),
-        &format!("hhagent-test-{suffix}"),
+        &format!("kastellan-test-{suffix}"),
+        &format!("kastellan-test-{suffix}.log"),
+        &format!("kastellan-test-{suffix}"),
     );
     let pool = cluster.runtime_pool().await;
     let kp = test_key_provider();
 
-    hhagent_db::secrets::put(&pool, &kp, "a", b"alpha", None).await.unwrap();
-    hhagent_db::secrets::put(&pool, &kp, "b", b"bravo", None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "a", b"alpha", None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "b", b"bravo", None).await.unwrap();
 
     let vault = Arc::new(Vault::new());
     let ref_a = vault.materialize(&pool, &kp, "a", "test").await.unwrap();
     let ref_b = vault.materialize(&pool, &kp, "b", "test").await.unwrap();
 
     let printf_bin = "/usr/bin/printf";
-    let policy = hhagent_tests_common::worker_strict_policy_allow(printf_bin);
+    let policy = kastellan_tests_common::worker_strict_policy_allow(printf_bin);
     let spec = WorkerSpec {
         policy: &policy,
         program: std::path::Path::new(&worker_bin),
@@ -2004,7 +2004,7 @@ async fn dispatch_substitutes_multiple_refs_in_one_params() {
 }
 ```
 
-**Important — tests_common helper availability check.** This test file uses `worker_strict_policy_allow` and assumes it exists in `hhagent_tests_common`. If it doesn't, the test file won't compile. Verify:
+**Important — tests_common helper availability check.** This test file uses `worker_strict_policy_allow` and assumes it exists in `kastellan_tests_common`. If it doesn't, the test file won't compile. Verify:
 
 ```sh
 grep -n "worker_strict_policy_allow\|sandbox_factory_or_skip\|shell_exec_binary_or_skip" tests-common/src/lib.rs 2>&1 | head -10
@@ -2019,7 +2019,7 @@ The pattern in `injection_guard_e2e.rs` is the authoritative reference — repli
 - [ ] **Step 11: Verify the integration tests run live**
 
 ```sh
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"
 cargo test --test secret_vault_e2e 2>&1 | tail -20
 ```
 
@@ -2061,7 +2061,7 @@ ToolHostError is now `#[non_exhaustive]` (first variant addition since
 Option M / 2026-05-10); scheduler::tool_dispatch::map_dispatch_result
 gains a SecretRedemptionFailed -> POLICY_DENIED arm.
 
-main.rs adds an `HHAGENT_BOOTSTRAP_SECRETS` env-var loop that
+main.rs adds an `KASTELLAN_BOOTSTRAP_SECRETS` env-var loop that
 materializes each named secret at startup via OsKeyringProvider. The
 ref string itself is NOT logged — only the ref_hash via
 tracing::info!.
@@ -2102,7 +2102,7 @@ EOF
 With PG (live integration tests):
 
 ```sh
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"
 cargo test --workspace 2>&1 | grep -E "^test result:" | awk '{ p+=$4; f+=$6; i+=$8 } END { print "passed:" p, "failed:" f, "ignored:" i }'
 ```
 
@@ -2111,13 +2111,13 @@ Expected: `passed:1134 failed:0 ignored:3`.
 Without PG (skip-as-pass posture for CI):
 
 ```sh
-unset HHAGENT_PG_BIN_DIR
+unset KASTELLAN_PG_BIN_DIR
 cargo test --workspace 2>&1 | grep -E "^test result:" | awk '{ p+=$4; f+=$6; i+=$8 } END { print "passed:" p, "failed:" f, "ignored:" i }'
 ```
 
 Expected: `passed:1134 failed:0 ignored:3` (integration tests skip-as-pass silently — same posture as `injection_guard_e2e`).
 
-Re-export `HHAGENT_PG_BIN_DIR` before continuing.
+Re-export `KASTELLAN_PG_BIN_DIR` before continuing.
 
 - [ ] **Step 2: Clippy check — no new warnings**
 
@@ -2125,7 +2125,7 @@ Re-export `HHAGENT_PG_BIN_DIR` before continuing.
 cargo clippy --workspace --all-targets 2>&1 | grep -E "warning:|error:" | head -30
 ```
 
-Expected: every warning matches a pre-existing one documented in Item 30's verification step (the 10 `hhagent-core` constant-assertion warnings, 4 `MutexGuard`-across-await in `worker_lifecycle::manager::_test_slot_*`, 3 doc-list-indent in `db::probe`, 2 `io_other_error` in `hhagent-protocol`, 1 `mem_burner` `set_len()`-after-`reserve`). No new warnings introduced.
+Expected: every warning matches a pre-existing one documented in Item 30's verification step (the 10 `kastellan-core` constant-assertion warnings, 4 `MutexGuard`-across-await in `worker_lifecycle::manager::_test_slot_*`, 3 doc-list-indent in `db::probe`, 2 `io_other_error` in `kastellan-protocol`, 1 `mem_burner` `set_len()`-after-`reserve`). No new warnings introduced.
 
 If any new warning appears, fix it before continuing.
 
@@ -2134,7 +2134,7 @@ If any new warning appears, fix it before continuing.
 Read the top of [docs/devel/handovers/HANDOVER.md](docs/devel/handovers/HANDOVER.md) (lines 1-15). Bump the `Last updated:` header to include a new opening paragraph for this slice. The shape mirrors Item 30's:
 
 ```markdown
-**Last updated:** 2026-05-28 (★ **Opaque secret references — Slice 1** — shipped on branch `feat/opaque-secret-refs-slice-1`, PR pending, closes HANDOVER Item 31. New module `core::secrets` with `Vault` (TTL'd in-process cache, default 1h, `std::sync::RwLock<HashMap>`), `SecretRef` opaque type, `RedeemResult` (Hit/Expired/NotFound), `substitute_refs_in_params` recursive walker (exact-match only). Wired into `tool_host::dispatch` chokepoint BEFORE `worker.call`: on miss/expired/non-UTF-8, fail-closed with `ToolHostError::SecretRedemptionFailed` + one `policy / secret.redemption_failed` row, **worker not called, no tool row**. On Hit, substitute in place and emit one `policy / secret.redeemed` row per ref (best-effort). Materialize writes one `policy / secret.materialized` row carrying `{name, ref_hash, ttl_secs, actor}` — **hard-fail on audit error** (asymmetric vs redeem: no materialized-but-unaudited ref can exist). `HHAGENT_BOOTSTRAP_SECRETS=name1,name2` env var drives bootstrap-time materialization in `main.rs`. `ToolHostError` widened to `#[non_exhaustive]` (first variant addition since Option M / 2026-05-10); scheduler maps `SecretRedemptionFailed` → `POLICY_DENIED`. 4 substantive commits TDD-ordered: Task 1 module skeleton at `<HASH>`, Task 2 Vault impl at `<HASH>`, Task 3 walker at `<HASH>`, Task 4 dispatch wiring + 8 integration tests at `<HASH>`. **Workspace 1096 → 1134 (+38) on macOS with PG live**, all green; no new clippy warnings. 8 integration tests pin end-to-end audit shape; privacy invariant (`policy_rows_contain_no_substring_of_redeemed_plaintext`) mirrors injection-guard's `45627fd` precedent. Item 31 closed; **next pickup TBD from the operator-picks bucket** (Slice 2: CLI ↔ daemon IPC + `hhagent-cli secrets materialize`; `tool_host.rs` sibling-lift bundling Items 30 + 31). — earlier 2026-05-28:
+**Last updated:** 2026-05-28 (★ **Opaque secret references — Slice 1** — shipped on branch `feat/opaque-secret-refs-slice-1`, PR pending, closes HANDOVER Item 31. New module `core::secrets` with `Vault` (TTL'd in-process cache, default 1h, `std::sync::RwLock<HashMap>`), `SecretRef` opaque type, `RedeemResult` (Hit/Expired/NotFound), `substitute_refs_in_params` recursive walker (exact-match only). Wired into `tool_host::dispatch` chokepoint BEFORE `worker.call`: on miss/expired/non-UTF-8, fail-closed with `ToolHostError::SecretRedemptionFailed` + one `policy / secret.redemption_failed` row, **worker not called, no tool row**. On Hit, substitute in place and emit one `policy / secret.redeemed` row per ref (best-effort). Materialize writes one `policy / secret.materialized` row carrying `{name, ref_hash, ttl_secs, actor}` — **hard-fail on audit error** (asymmetric vs redeem: no materialized-but-unaudited ref can exist). `KASTELLAN_BOOTSTRAP_SECRETS=name1,name2` env var drives bootstrap-time materialization in `main.rs`. `ToolHostError` widened to `#[non_exhaustive]` (first variant addition since Option M / 2026-05-10); scheduler maps `SecretRedemptionFailed` → `POLICY_DENIED`. 4 substantive commits TDD-ordered: Task 1 module skeleton at `<HASH>`, Task 2 Vault impl at `<HASH>`, Task 3 walker at `<HASH>`, Task 4 dispatch wiring + 8 integration tests at `<HASH>`. **Workspace 1096 → 1134 (+38) on macOS with PG live**, all green; no new clippy warnings. 8 integration tests pin end-to-end audit shape; privacy invariant (`policy_rows_contain_no_substring_of_redeemed_plaintext`) mirrors injection-guard's `45627fd` precedent. Item 31 closed; **next pickup TBD from the operator-picks bucket** (Slice 2: CLI ↔ daemon IPC + `kastellan-cli secrets materialize`; `tool_host.rs` sibling-lift bundling Items 30 + 31). — earlier 2026-05-28:
 ```
 
 Replace the `<HASH>` placeholders by running:
@@ -2205,13 +2205,13 @@ gh pr create --title "feat(secrets): opaque secret references slice 1" --body "$
 ## Architecture
 
 - New `core::secrets` module: `Vault` (TTL'd `std::sync::RwLock<HashMap>` with lazy GC), `SecretRef` opaque type, `RedeemResult` (Hit/Expired/NotFound), `substitute_refs_in_params` walker (exact-match only).
-- `HHAGENT_BOOTSTRAP_SECRETS=name1,name2` env var materializes each named secret at daemon startup via `OsKeyringProvider`. The ref string itself is never logged; only `ref_hash` (SHA-256).
+- `KASTELLAN_BOOTSTRAP_SECRETS=name1,name2` env var materializes each named secret at daemon startup via `OsKeyringProvider`. The ref string itself is never logged; only `ref_hash` (SHA-256).
 - `ToolHostError` widened to `#[non_exhaustive]`; new variant `SecretRedemptionFailed`. Scheduler maps to `POLICY_DENIED`.
 - Asymmetry documented inline: materialize-time audit is hard-fail (no materialized-but-unaudited ref); redeem-time audit is best-effort (don't kill a tool call with plaintext already in process memory).
 
 ## Verification
 
-- `cargo test --workspace` on macOS with `HHAGENT_PG_BIN_DIR=/Applications/Postgres 2.app/Contents/Versions/18/bin/`: **1134 / 0 / 3** (1096 → 1134, +38).
+- `cargo test --workspace` on macOS with `KASTELLAN_PG_BIN_DIR=/Applications/Postgres 2.app/Contents/Versions/18/bin/`: **1134 / 0 / 3** (1096 → 1134, +38).
 - `cargo clippy --workspace --all-targets`: no new warnings.
 - Skip-as-pass posture preserved on hosts without PG.
 
@@ -2232,7 +2232,7 @@ gh pr create --title "feat(secrets): opaque secret references slice 1" --body "$
 
 ## Known limitations (deferred to Slice 2)
 
-- No CLI surface yet — operators can only stage secrets via `HHAGENT_BOOTSTRAP_SECRETS`. Slice 2 builds CLI ↔ daemon IPC.
+- No CLI surface yet — operators can only stage secrets via `KASTELLAN_BOOTSTRAP_SECRETS`. Slice 2 builds CLI ↔ daemon IPC.
 - Per-process (not per-task) vault scope.
 - Exact-match substitution only (no embedded `"Bearer <ref>"`).
 - `tool_host.rs` 767 → ~837 LOC (337 over the 500-LOC cap); sibling-lift should bundle Item 30 + Item 31.
@@ -2271,7 +2271,7 @@ This plan ships Item 31 (opaque secret references) as 4 substantive TDD-ordered 
 - [ ] Task 2: +9 unit tests (`core::secrets::vault::tests`) → 1112.
 - [ ] Task 3: +14 unit tests (`core::secrets::substitute::tests`) → 1126.
 - [ ] Task 4: +8 integration tests (`core/tests/secret_vault_e2e.rs`) → 1134.
-- [ ] Task 5: full workspace, both with and without `HHAGENT_PG_BIN_DIR` → both 1134 / 0 / 3.
+- [ ] Task 5: full workspace, both with and without `KASTELLAN_PG_BIN_DIR` → both 1134 / 0 / 3.
 - [ ] Task 5: `cargo clippy --workspace --all-targets` no new warnings.
 
 ---
@@ -2293,7 +2293,7 @@ This plan ships Item 31 (opaque secret references) as 4 substantive TDD-ordered 
 
 ## Notes for the executor
 
-- **PG env override is mandatory** during this slice. Set `HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"` at the start of every implementing session; PG-required integration tests must pass live (not skip-as-pass).
+- **PG env override is mandatory** during this slice. Set `KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin/"` at the start of every implementing session; PG-required integration tests must pass live (not skip-as-pass).
 - **`#[non_exhaustive]` on `ToolHostError` may surface match-arm errors elsewhere.** Task 4 Step 2 finds them; the most likely site is `scheduler::tool_dispatch::map_dispatch_result`. Add an `_ =>` fallback OR an explicit `SecretRedemptionFailed =>` arm — the latter is cleaner because the scheduler genuinely wants to map it to `POLICY_DENIED`.
 - **`worker_strict_policy_allow` may not exist in `tests-common`.** Task 4 Step 10 says so explicitly; verify before writing the test file and adapt if needed (copy the policy-construction shape from `injection_guard_e2e.rs`).
 - **`printf` path on macOS.** This Mac has `/usr/bin/printf`. The integration tests assume that path; verify with `which printf` before running.

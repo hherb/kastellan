@@ -9,7 +9,7 @@
 //! from extractor variance into one canonical row).
 //!
 //! This module owns the SQL surface for those operations. The CLI
-//! consumer lives in `core/src/bin/hhagent-cli.rs` under the
+//! consumer lives in `core/src/bin/kastellan-cli.rs` under the
 //! `entities` subcommand tree; the audit wrapper lives in
 //! `core::cli_audit`. Layout mirrors `db::tool_allowlists`.
 //!

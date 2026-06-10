@@ -19,7 +19,7 @@
 ## File Structure
 
 **New crate `workers/egress-proxy`:**
-- `Cargo.toml` — bin crate; deps `hhagent-worker-web-common`, `hhagent-worker-prelude`, `serde`, `serde_json`, `anyhow`.
+- `Cargo.toml` — bin crate; deps `kastellan-worker-web-common`, `kastellan-worker-prelude`, `serde`, `serde_json`, `anyhow`.
 - `src/ssrf.rs` — pure `is_denied_range(IpAddr) -> bool` + tests.
 - `src/request_line.rs` — pure CONNECT-line parse → `(host, port)` + tests.
 - `src/report.rs` — `Decision` + `Verdict` enums, JSON-line serialization, `Reporter` seam + tests.
@@ -63,7 +63,7 @@ In root `Cargo.toml`, the `members` array currently ends with `"workers/web-sear
 
 ```toml
 [package]
-name        = "hhagent-worker-egress-proxy"
+name        = "kastellan-worker-egress-proxy"
 description = "Per-worker egress proxy: host-allowlist + SSRF/IP-pinning boundary enforcement over a UDS. Slice #1 (no TLS interception)."
 version.workspace      = true
 edition.workspace      = true
@@ -74,12 +74,12 @@ repository.workspace   = true
 readme.workspace       = true
 
 [[bin]]
-name = "hhagent-worker-egress-proxy"
+name = "kastellan-worker-egress-proxy"
 path = "src/main.rs"
 
 [dependencies]
-hhagent-worker-prelude    = { path = "../prelude" }
-hhagent-worker-web-common = { path = "../web-common" }
+kastellan-worker-prelude    = { path = "../prelude" }
+kastellan-worker-web-common = { path = "../web-common" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
@@ -100,7 +100,7 @@ fn main() -> anyhow::Result<()> {
 
 - [ ] **Step 4: Build the workspace**
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-worker-egress-proxy`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-worker-egress-proxy`
 Expected: compiles clean (one `unused` warning is fine for the placeholder).
 
 - [ ] **Step 5: Commit**
@@ -249,12 +249,12 @@ mod ssrf;
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-egress-proxy ssrf`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-egress-proxy ssrf`
 Expected: FAIL — actually, since the implementation is written alongside the tests in this file, this task is a special case. Run the build first: if `is_denied_range` had a typo it would fail to compile. (For strict TDD, you may comment out the function bodies to `todo!()` first, watch them panic, then restore.)
 
 - [ ] **Step 3: Run the tests to verify they pass**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-egress-proxy ssrf`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-egress-proxy ssrf`
 Expected: PASS — 6 tests.
 
 - [ ] **Step 4: Commit**
@@ -379,7 +379,7 @@ Add `mod request_line;` to `main.rs`.
 
 - [ ] **Step 2: Run the tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-egress-proxy request_line`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-egress-proxy request_line`
 Expected: PASS — 7 tests.
 
 - [ ] **Step 3: Commit**
@@ -511,7 +511,7 @@ Add `mod report;` to `main.rs`.
 
 - [ ] **Step 2: Run the tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-egress-proxy report`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-egress-proxy report`
 Expected: PASS — 3 tests.
 
 - [ ] **Step 3: Commit**
@@ -546,7 +546,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
 
 use crate::report::{Decision, Reporter, Verdict};
 use crate::request_line::parse_connect;
@@ -715,7 +715,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
 
 use super::*;
 use crate::report::{Decision, Reporter, Verdict};
@@ -850,7 +850,7 @@ Add `mod proxy;` to `main.rs`.
 
 - [ ] **Step 3: Run the tests to verify they pass**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-egress-proxy proxy`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-egress-proxy proxy`
 Expected: PASS — 6 tests (4 `decide` + 2 `handle_conn`).
 
 - [ ] **Step 4: Confirm `proxy.rs` is under the 500-LOC cap**
@@ -883,9 +883,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 //! Design: docs/superpowers/specs/2026-06-10-egress-proxy-boundary-enforcement-design.md
 //!
 //! Env contract (set by the host-side `core::egress::spawn_sidecar`):
-//!   HHAGENT_EGRESS_PROXY_UDS       — absolute path of the UDS to bind.
-//!   HHAGENT_EGRESS_PROXY_ALLOWLIST — JSON array of allowed host strings.
-//!   HHAGENT_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
+//!   KASTELLAN_EGRESS_PROXY_UDS       — absolute path of the UDS to bind.
+//!   KASTELLAN_EGRESS_PROXY_ALLOWLIST — JSON array of allowed host strings.
+//!   KASTELLAN_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
 
 mod proxy;
 mod report;
@@ -894,17 +894,17 @@ mod ssrf;
 
 use std::os::unix::net::UnixListener;
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
 
 use proxy::{handle_conn, StdResolve};
 use report::LineReporter;
 
 fn main() -> anyhow::Result<()> {
-    let uds = std::env::var("HHAGENT_EGRESS_PROXY_UDS")
-        .map_err(|_| anyhow::anyhow!("HHAGENT_EGRESS_PROXY_UDS unset"))?;
-    let allow_json = std::env::var("HHAGENT_EGRESS_PROXY_ALLOWLIST")
-        .map_err(|_| anyhow::anyhow!("HHAGENT_EGRESS_PROXY_ALLOWLIST unset"))?;
-    let worker = std::env::var("HHAGENT_EGRESS_PROXY_WORKER").unwrap_or_else(|_| "unknown".into());
+    let uds = std::env::var("KASTELLAN_EGRESS_PROXY_UDS")
+        .map_err(|_| anyhow::anyhow!("KASTELLAN_EGRESS_PROXY_UDS unset"))?;
+    let allow_json = std::env::var("KASTELLAN_EGRESS_PROXY_ALLOWLIST")
+        .map_err(|_| anyhow::anyhow!("KASTELLAN_EGRESS_PROXY_ALLOWLIST unset"))?;
+    let worker = std::env::var("KASTELLAN_EGRESS_PROXY_WORKER").unwrap_or_else(|_| "unknown".into());
     let allow = HostAllowlist::from_env_json(&allow_json)?;
 
     // Bind the UDS *before* lock-down (Landlock will forbid fs mutation after).
@@ -917,7 +917,7 @@ fn main() -> anyhow::Result<()> {
     // NOTE (Linux verification, run on the DGX): confirm the seccomp profile
     // permits AF_UNIX bind/listen/accept *and* AF_INET connect for a process
     // that both serves and dials; widen `seccomp_lock` if `accept` is refused.
-    let _report = hhagent_worker_prelude::lock_down()?;
+    let _report = kastellan_worker_prelude::lock_down()?;
 
     let resolver = StdResolve;
     for conn in listener.incoming() {
@@ -940,12 +940,12 @@ fn main() -> anyhow::Result<()> {
 
 - [ ] **Step 2: Build + run the full crate test suite**
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-worker-egress-proxy && cargo test -p hhagent-worker-egress-proxy`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-worker-egress-proxy && cargo test -p kastellan-worker-egress-proxy`
 Expected: builds clean; all unit tests pass.
 
 - [ ] **Step 3: Clippy the crate**
 
-Run: `source "$HOME/.cargo/env" && cargo clippy -p hhagent-worker-egress-proxy --all-targets -- -D warnings`
+Run: `source "$HOME/.cargo/env" && cargo clippy -p kastellan-worker-egress-proxy --all-targets -- -D warnings`
 Expected: exit 0.
 
 - [ ] **Step 4: Commit**
@@ -1066,12 +1066,12 @@ In `sandbox/src/macos_container/tests.rs`, add (mirroring the `Net::Allowlist` a
 
 - [ ] **Step 6: Build + test the sandbox crate on macOS**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-sandbox`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-sandbox`
 Expected: PASS — the macOS Seatbelt + container builder tests, including the two new ones.
 
 - [ ] **Step 7: Cross-clippy the Linux-gated bwrap arm (Mac-side pre-CI check)**
 
-Run: `source "$HOME/.cargo/env" && cargo clippy -p hhagent-sandbox --target aarch64-unknown-linux-gnu --all-targets -- -D warnings`
+Run: `source "$HOME/.cargo/env" && cargo clippy -p kastellan-sandbox --target aarch64-unknown-linux-gnu --all-targets -- -D warnings`
 Expected: exit 0 (sandbox is pure-Rust — this verifies the `linux_bwrap` arm compiles for Linux without a linker; see the memory note on cross-clippy).
 
 - [ ] **Step 8: Commit**
@@ -1141,7 +1141,7 @@ struct DecisionLine {
     reason: String,
 }
 
-/// An audit row ready for `hhagent_db::audit::insert` (actor + action + payload).
+/// An audit row ready for `kastellan_db::audit::insert` (actor + action + payload).
 #[derive(Debug, PartialEq, Eq)]
 pub struct EgressAuditRow {
     pub actor: &'static str,
@@ -1214,7 +1214,7 @@ Create `core/src/egress/spawn.rs`:
 
 - [ ] **Step 5: Run the tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib egress::audit`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib egress::audit`
 Expected: PASS — 3 tests.
 
 - [ ] **Step 6: Commit**
@@ -1246,12 +1246,12 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
 
-use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
 /// Env keys the sidecar binary reads (must match `egress-proxy::main`).
-const ENV_UDS: &str = "HHAGENT_EGRESS_PROXY_UDS";
-const ENV_ALLOWLIST: &str = "HHAGENT_EGRESS_PROXY_ALLOWLIST";
-const ENV_WORKER: &str = "HHAGENT_EGRESS_PROXY_WORKER";
+const ENV_UDS: &str = "KASTELLAN_EGRESS_PROXY_UDS";
+const ENV_ALLOWLIST: &str = "KASTELLAN_EGRESS_PROXY_ALLOWLIST";
+const ENV_WORKER: &str = "KASTELLAN_EGRESS_PROXY_WORKER";
 
 /// How long `spawn_sidecar` waits for the proxy to `bind()` its UDS.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1360,12 +1360,12 @@ mod tests {
 
 - [ ] **Step 2: Run the unit test**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib egress::spawn`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib egress::spawn`
 Expected: PASS — 1 test (`policy_uses_proxy_egress_and_net_client`).
 
 - [ ] **Step 3: Build + clippy core**
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-core && cargo clippy -p hhagent-core --all-targets -- -D warnings`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-core && cargo clippy -p kastellan-core --all-targets -- -D warnings`
 Expected: builds clean, clippy exit 0.
 
 - [ ] **Step 4: Commit**
@@ -1403,15 +1403,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 
-use hhagent_core::egress::audit::decision_to_audit;
-use hhagent_core::egress::spawn::spawn_sidecar;
-use hhagent_tests_common::{
+use kastellan_core::egress::audit::decision_to_audit;
+use kastellan_core::egress::spawn::spawn_sidecar;
+use kastellan_tests_common::{
     backend, skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary,
 };
 
 /// Locate the built proxy binary; `[SKIP]` if absent.
 fn proxy_binary_or_skip() -> Option<std::path::PathBuf> {
-    workspace_target_binary("hhagent-worker-egress-proxy")
+    workspace_target_binary("kastellan-worker-egress-proxy")
 }
 
 #[test]
@@ -1517,7 +1517,7 @@ fn real_host_round_trips_through_sidecar() {
 ```
 
 > **Verification notes for the implementer:**
-> - Confirm `hhagent_tests_common` actually exports `workspace_target_binary` and `backend` (it does per `tests-common/src/lib.rs`; if the helper name differs, grep `tests-common/src/` and match it).
+> - Confirm `kastellan_tests_common` actually exports `workspace_target_binary` and `backend` (it does per `tests-common/src/lib.rs`; if the helper name differs, grep `tests-common/src/` and match it).
 > - **macOS (dev box):** the e2e runs the proxy under Seatbelt; the scratch dir is `fs_write`, so the UDS is created at the literal path and the host test client connects directly. Landlock/seccomp are no-ops here, so the server-socket seccomp question does **not** gate this run.
 > - **Linux (DGX/CI):** verify (a) the bind-mounted scratch path is identical host-side and in-jail so the test client can reach the UDS, and (b) the `net_client` seccomp profile permits AF_UNIX `accept` (see the note in Task 6 / main.rs). If `accept` is killed, widen `workers/prelude/src/seccomp_lock.rs` in a focused follow-up commit and pin it with a `prelude` smoke test.
 
@@ -1526,14 +1526,14 @@ fn real_host_round_trips_through_sidecar() {
 Run:
 ```bash
 source "$HOME/.cargo/env"
-cargo build -p hhagent-worker-egress-proxy
-cargo test -p hhagent-core --test egress_proxy_e2e
+cargo build -p kastellan-worker-egress-proxy
+cargo test -p kastellan-core --test egress_proxy_e2e
 ```
 Expected: PASS on macOS — `allowed_literal_origin_round_trips_and_blocks_off_allowlist` passes; the `#[ignore]` test is listed but not run.
 
 - [ ] **Step 3: (Optional, when on a network) run the ignored real-net test**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --test egress_proxy_e2e -- --ignored --nocapture`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --test egress_proxy_e2e -- --ignored --nocapture`
 Expected: PASS (tunnels to `example.com:443`).
 
 - [ ] **Step 4: Commit**
@@ -1556,22 +1556,22 @@ Proves a decision row actually lands in `audit_log` (skip-as-pass without PG on 
 
 - [ ] **Step 1: Add a PG-gated audit-insert test**
 
-Append to `core/tests/egress_proxy_e2e.rs` (model the PG bring-up on `web_fetch_e2e.rs`'s `bring_up_pg_cluster` + `pg_bin_dir_or_skip` idiom — read it for the exact helper signatures). The test: build an `EgressAuditRow` from a sample decision line via `decision_to_audit`, insert it with `hhagent_db::audit::insert`, and read it back asserting `actor='egress_proxy'` and the `action`.
+Append to `core/tests/egress_proxy_e2e.rs` (model the PG bring-up on `web_fetch_e2e.rs`'s `bring_up_pg_cluster` + `pg_bin_dir_or_skip` idiom — read it for the exact helper signatures). The test: build an `EgressAuditRow` from a sample decision line via `decision_to_audit`, insert it with `kastellan_db::audit::insert`, and read it back asserting `actor='egress_proxy'` and the `action`.
 
 ```rust
 #[test]
 fn decision_row_persists_to_audit_log() {
     // PG-gated: [SKIP] without a usable PG bin dir (macOS skip-as-pass posture).
-    let Some(_pg_bin) = hhagent_tests_common::pg_bin_dir_or_skip() else { return };
+    let Some(_pg_bin) = kastellan_tests_common::pg_bin_dir_or_skip() else { return };
     // ... bring up the cluster (see web_fetch_e2e.rs probe_and_pool), then:
     //   let row = decision_to_audit(SAMPLE_ALLOWED_LINE).unwrap();
-    //   hhagent_db::audit::insert(&pool, row.actor, &row.action, &row.payload).await?;
+    //   kastellan_db::audit::insert(&pool, row.actor, &row.action, &row.payload).await?;
     //   read back the latest row and assert actor + action.
-    // Use the exact hhagent_db::audit::insert signature (grep db/src/audit.rs).
+    // Use the exact kastellan_db::audit::insert signature (grep db/src/audit.rs).
 }
 ```
 
-> **Implementer:** fill the body using the real `hhagent_db::audit::insert` signature and the `web_fetch_e2e.rs` PG harness. Keep it skip-as-pass: a missing PG bin dir returns early. Do not block the macOS workspace run on PG.
+> **Implementer:** fill the body using the real `kastellan_db::audit::insert` signature and the `web_fetch_e2e.rs` PG harness. Keep it skip-as-pass: a missing PG bin dir returns early. Do not block the macOS workspace run on PG.
 
 - [ ] **Step 2: Run the full workspace test suite (macOS skip-as-pass)**
 
@@ -1646,4 +1646,4 @@ EOF
 
 - **Spec coverage:** every Goal maps to a task — proxy binary (T1–6), allowlist enforcement (T5 `decide`), SSRF resolve-then-pin (T2 + T5), audit without DB-in-proxy (T4 + T8), sandboxed proxy / `Net::ProxyEgress` (T7 + T9), reusable `core/src/egress` + e2e via test client (T8–11). Deferred items (worker transport, force-routing, TLS) are explicitly out of scope per the spec.
 - **Placeholder scan:** the only deliberate stubs are the Task 8 `spawn.rs` placeholder (filled in T9) and the two test-body sketches (T7 container test, T11 PG test) that point at an existing sibling to copy exactly — flagged with read-the-sibling notes because their precise signatures live in files the implementer must match rather than ones invented here.
-- **Type consistency:** `Decision`/`Verdict` (snake_case wire form) are defined in T4 and consumed verbatim by `decision_to_audit` in T8; `Net::ProxyEgress` defined in T7 and used in T9's `proxy_policy`; `spawn_sidecar`/`SidecarHandle` defined in T9 and used in T10. The proxy env keys (`HHAGENT_EGRESS_PROXY_{UDS,ALLOWLIST,WORKER}`) match between `main.rs` (T6) and `spawn.rs` (T9).
+- **Type consistency:** `Decision`/`Verdict` (snake_case wire form) are defined in T4 and consumed verbatim by `decision_to_audit` in T8; `Net::ProxyEgress` defined in T7 and used in T9's `proxy_policy`; `spawn_sidecar`/`SidecarHandle` defined in T9 and used in T10. The proxy env keys (`KASTELLAN_EGRESS_PROXY_{UDS,ALLOWLIST,WORKER}`) match between `main.rs` (T6) and `spawn.rs` (T9).

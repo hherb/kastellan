@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use hhagent_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
-use hhagent_core::cassandra::types::{DataClass, Plan};
-use hhagent_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
-use hhagent_core::observation::replay::{load_captures_from_dir, replay_capture};
+use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
+use kastellan_core::cassandra::types::{DataClass, Plan};
+use kastellan_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
+use kastellan_core::observation::replay::{load_captures_from_dir, replay_capture};
 
 fn approve_baseline_capture() -> CaptureJson {
     let plan = Plan {

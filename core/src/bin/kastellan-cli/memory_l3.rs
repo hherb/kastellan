@@ -34,7 +34,7 @@ use trust::{memory_l3_approve, memory_l3_pin};
 
 pub(crate) fn run_memory_l3(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli memory l3 <list|approve|pin|revoke|remove|run> ...");
+        eprintln!("usage: kastellan-cli memory l3 <list|approve|pin|revoke|remove|run> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {

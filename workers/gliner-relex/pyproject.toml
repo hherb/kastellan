@@ -1,11 +1,11 @@
 [project]
-name = "hhagent-worker-gliner-relex"
+name = "kastellan-worker-gliner-relex"
 version = "0.0.1"
-description = "GLiNER-Relex inference worker for hhagent (Apache 2.0 model; JSON-RPC stdio)"
+description = "GLiNER-Relex inference worker for kastellan (Apache 2.0 model; JSON-RPC stdio)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }
-authors = [{ name = "hhagent contributors" }]
+authors = [{ name = "kastellan contributors" }]
 dependencies = [
     # GLiNER pulls the upstream `gliner` library (Apache 2.0). The
     # Knowledgator gliner-relex-* model weights load via this same lib;
@@ -26,18 +26,18 @@ dev = [
 ]
 
 [project.scripts]
-# uv generates an executable shim at .venv/bin/hhagent-worker-gliner-relex
-# equivalent to: python -m hhagent_worker_gliner_relex
+# uv generates an executable shim at .venv/bin/kastellan-worker-gliner-relex
+# equivalent to: python -m kastellan_worker_gliner_relex
 # The manifest's `binary: PathBuf` field points at this shim — keeps
 # the existing ToolEntry schema unchanged (no `args` field needed).
-hhagent-worker-gliner-relex = "hhagent_worker_gliner_relex.__main__:main"
+kastellan-worker-gliner-relex = "kastellan_worker_gliner_relex.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hhagent_worker_gliner_relex"]
+packages = ["src/kastellan_worker_gliner_relex"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

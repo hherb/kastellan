@@ -14,7 +14,7 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_entities(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli entities <list|show|approve|reject|merge|kinds> ...");
+        eprintln!("usage: kastellan-cli entities <list|show|approve|reject|merge|kinds> ...");
         return ExitCode::from(2);
     }
     // Per-action dispatch. `with_runtime` is called only from the known
@@ -35,8 +35,8 @@ pub(crate) fn run_entities(args: &[String]) -> ExitCode {
 }
 
 /// Parse the `--state` flag value. Case-insensitive.
-fn parse_entity_state(s: &str) -> Result<hhagent_db::entities::EntityState, String> {
-    use hhagent_db::entities::EntityState;
+fn parse_entity_state(s: &str) -> Result<kastellan_db::entities::EntityState, String> {
+    use kastellan_db::entities::EntityState;
     match s.trim().to_ascii_lowercase().as_str() {
         "quarantined" => Ok(EntityState::Quarantined),
         "approved"    => Ok(EntityState::Approved),
@@ -72,8 +72,8 @@ fn parse_id_list(s: &str) -> Result<Vec<i64>, String> {
 }
 
 async fn entities_list(args: &[String]) -> ExitCode {
-    use hhagent_db::entities::{list_entities, ListFilter};
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_db::entities::{list_entities, ListFilter};
+    use kastellan_db::pool::connect_runtime_pool;
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
 
@@ -190,13 +190,13 @@ async fn entities_list(args: &[String]) -> ExitCode {
 }
 
 async fn entities_show(args: &[String]) -> ExitCode {
-    use hhagent_db::entities::get_entity_with_mentions;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_db::entities::get_entity_with_mentions;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let id_str = match args {
         [s] => s,
         _ => {
-            eprintln!("usage: hhagent-cli entities show <id>");
+            eprintln!("usage: kastellan-cli entities show <id>");
             return ExitCode::from(2);
         }
     };
@@ -261,12 +261,12 @@ async fn entities_show(args: &[String]) -> ExitCode {
 }
 
 async fn entities_approve(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entities_approve_and_audit;
-    use hhagent_db::entities::ApproveOutcome;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::entities_approve_and_audit;
+    use kastellan_db::entities::ApproveOutcome;
+    use kastellan_db::pool::connect_runtime_pool;
 
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli entities approve <id> [<id>...]");
+        eprintln!("usage: kastellan-cli entities approve <id> [<id>...]");
         return ExitCode::from(2);
     }
     let mut ids: Vec<i64> = Vec::with_capacity(args.len());
@@ -319,12 +319,12 @@ async fn entities_approve(args: &[String]) -> ExitCode {
 }
 
 async fn entities_reject(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entities_reject_and_audit;
-    use hhagent_db::entities::RejectOutcome;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::entities_reject_and_audit;
+    use kastellan_db::entities::RejectOutcome;
+    use kastellan_db::pool::connect_runtime_pool;
 
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli entities reject <id> [<id>...]");
+        eprintln!("usage: kastellan-cli entities reject <id> [<id>...]");
         return ExitCode::from(2);
     }
     let mut ids: Vec<i64> = Vec::with_capacity(args.len());
@@ -374,9 +374,9 @@ async fn entities_reject(args: &[String]) -> ExitCode {
 }
 
 async fn entities_merge(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entities_merge_and_audit;
-    use hhagent_db::entities::EntitiesError;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::entities_merge_and_audit;
+    use kastellan_db::entities::EntitiesError;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let mut keep: Option<i64> = None;
     let mut drop_ids: Option<Vec<i64>> = None;
@@ -462,7 +462,7 @@ mod entities_parser_tests {
 
     #[test]
     fn parse_entity_state_accepts_canonical_lowercase_and_case_insensitive() {
-        use hhagent_db::entities::EntityState;
+        use kastellan_db::entities::EntityState;
         assert_eq!(parse_entity_state("quarantined").unwrap(), EntityState::Quarantined);
         assert_eq!(parse_entity_state("APPROVED").unwrap(),    EntityState::Approved);
         assert_eq!(parse_entity_state("Any").unwrap(),         EntityState::Any);

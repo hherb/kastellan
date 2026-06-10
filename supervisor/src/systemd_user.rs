@@ -185,7 +185,7 @@ impl Supervisor for SystemdUser {
     }
 
     /// Install the target the systemd-native way: write each member unit,
-    /// then a `hhagent.target` unit that `Wants=` them.
+    /// then a `kastellan.target` unit that `Wants=` them.
     ///
     /// Overrides the generic-bundle default. Member unit files are written
     /// in order (inheriting the same name/absolute-path validation as
@@ -226,7 +226,7 @@ impl Supervisor for SystemdUser {
         Ok(())
     }
 
-    /// Start the native `hhagent.target`; systemd resolves member start
+    /// Start the native `kastellan.target`; systemd resolves member start
     /// order from each member unit's `After=`.
     fn start_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         validate_service_name(&target.name)?;
@@ -234,7 +234,7 @@ impl Supervisor for SystemdUser {
         run_systemctl_user(&["start", &format!("{}.target", target.name)]).map(|_| ())
     }
 
-    /// Stop the native `hhagent.target`; the stop propagates to members
+    /// Stop the native `kastellan.target`; the stop propagates to members
     /// via their `PartOf=`.
     fn stop_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         validate_service_name(&target.name)?;

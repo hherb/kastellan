@@ -3,20 +3,20 @@
 //! Mirrors `injection_guard_e2e.rs` shape: per-test PG cluster via
 //! tests_common, real shell-exec worker, real sandbox, real audit log.
 //! Skip-as-pass on hosts without PG/supervisor/sandbox/worker; on this
-//! Mac set `HHAGENT_PG_BIN_DIR` to run live.
+//! Mac set `KASTELLAN_PG_BIN_DIR` to run live.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use hhagent_core::secrets::{
+use kastellan_core::secrets::{
     MissingReason, RedeemFromVault, SubstituteError, Vault, VaultError,
 };
-use hhagent_core::tool_host::{AuditSink, dispatch, dispatch_with_sink, spawn_worker, WorkerSpec};
-use hhagent_db::secrets::{MapKeyProvider, SecretsError, KEY_LEN};
-use hhagent_db::DbError;
-use hhagent_tests_common::{
+use kastellan_core::tool_host::{AuditSink, dispatch, dispatch_with_sink, spawn_worker, WorkerSpec};
+use kastellan_db::secrets::{MapKeyProvider, SecretsError, KEY_LEN};
+use kastellan_db::DbError;
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, policy_for_shell_exec,
     shell_exec_worker_binary, skip_if_no_supervisor, skip_if_sandbox_unavailable, unique_suffix,
 };
@@ -33,8 +33,8 @@ fn test_key_provider() -> MapKeyProvider {
 }
 
 /// Shared probe + pool setup for tests that bring up a PG cluster.
-async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
-    hhagent_db::probe::run(
+async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
         conn_spec,
         "core",
         "startup",
@@ -42,7 +42,7 @@ async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPo
     )
     .await
     .expect("probe run");
-    hhagent_db::pool::connect_runtime_pool(conn_spec)
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
         .await
         .expect("connect runtime pool")
 }
@@ -59,12 +59,12 @@ async fn materialize_writes_audit_row_and_returns_ref() {
         &bin_dir,
         "svault-1",
         "svault-1-log",
-        &format!("hhagent-test-svault-1-{suffix}"),
+        &format!("kastellan-test-svault-1-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
 
     let kp = test_key_provider();
-    hhagent_db::secrets::put(&pool, &kp, "test-secret-X", b"plaintext-XYZ", None)
+    kastellan_db::secrets::put(&pool, &kp, "test-secret-X", b"plaintext-XYZ", None)
         .await
         .expect("put");
 
@@ -115,7 +115,7 @@ async fn materialize_fails_when_secret_missing() {
         &bin_dir,
         "svault-2",
         "svault-2-log",
-        &format!("hhagent-test-svault-2-{suffix}"),
+        &format!("kastellan-test-svault-2-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
     let kp = test_key_provider();
@@ -156,16 +156,16 @@ async fn redeem_returns_plaintext_within_ttl() {
         &bin_dir,
         "svault-3",
         "svault-3-log",
-        &format!("hhagent-test-svault-3-{suffix}"),
+        &format!("kastellan-test-svault-3-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
     let kp = test_key_provider();
-    hhagent_db::secrets::put(&pool, &kp, "X", b"plaintext-abc", None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "X", b"plaintext-abc", None).await.unwrap();
 
     let vault = Vault::new();
     let secret_ref = vault.materialize(&pool, &kp, "X", "test").await.unwrap();
 
-    use hhagent_core::secrets::RedeemResult;
+    use kastellan_core::secrets::RedeemResult;
     let result = <Vault as RedeemFromVault>::redeem(&vault, &secret_ref);
     match result {
         RedeemResult::Hit(z) => assert_eq!(z.as_slice(), b"plaintext-abc"),
@@ -187,18 +187,18 @@ async fn redeem_returns_expired_past_ttl() {
         &bin_dir,
         "svault-4",
         "svault-4-log",
-        &format!("hhagent-test-svault-4-{suffix}"),
+        &format!("kastellan-test-svault-4-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
     let kp = test_key_provider();
-    hhagent_db::secrets::put(&pool, &kp, "X", b"plaintext-exp", None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "X", b"plaintext-exp", None).await.unwrap();
 
     let vault = Vault::with_ttl(Duration::from_millis(100));
     let secret_ref = vault.materialize(&pool, &kp, "X", "test").await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    use hhagent_core::secrets::RedeemResult;
+    use kastellan_core::secrets::RedeemResult;
     match <Vault as RedeemFromVault>::redeem(&vault, &secret_ref) {
         RedeemResult::Expired => (),
         other => panic!("expected Expired, got {other:?}"),
@@ -229,7 +229,7 @@ async fn dispatch_substitutes_and_writes_redeemed_row() {
         &bin_dir,
         "svault-5",
         "svault-5-log",
-        &format!("hhagent-test-svault-5-{suffix}"),
+        &format!("kastellan-test-svault-5-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
     let kp = test_key_provider();
@@ -237,7 +237,7 @@ async fn dispatch_substitutes_and_writes_redeemed_row() {
     // The plaintext we want the worker to receive — a unique marker so
     // the privacy-invariant test (test 7) can search the audit log for it.
     let marker = "SECRET_LEAK_MARKER_xyz789";
-    hhagent_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None)
+    kastellan_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None)
         .await
         .unwrap();
 
@@ -317,7 +317,7 @@ async fn dispatch_fails_closed_on_missing_ref() {
         &bin_dir,
         "svault-6",
         "svault-6-log",
-        &format!("hhagent-test-svault-6-{suffix}"),
+        &format!("kastellan-test-svault-6-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
 
@@ -342,7 +342,7 @@ async fn dispatch_fails_closed_on_missing_ref() {
         .await
         .expect_err("dispatch must fail");
 
-    use hhagent_core::tool_host::ToolHostError;
+    use kastellan_core::tool_host::ToolHostError;
     match err {
         ToolHostError::SecretRedemptionFailed(SubstituteError::MissingRef { reason, .. }) => {
             assert_eq!(reason, MissingReason::NotFound);
@@ -396,13 +396,13 @@ async fn policy_rows_contain_no_substring_of_redeemed_plaintext() {
         &bin_dir,
         "svault-7",
         "svault-7-log",
-        &format!("hhagent-test-svault-7-{suffix}"),
+        &format!("kastellan-test-svault-7-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
     let kp = test_key_provider();
 
     let marker = "SECRET_LEAK_MARKER_xyz789";
-    hhagent_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None).await.unwrap();
 
     let vault = Arc::new(Vault::new());
     let secret_ref = vault.materialize(&pool, &kp, "marker-secret", "test").await.unwrap();
@@ -497,13 +497,13 @@ async fn dispatch_substitutes_multiple_refs_in_one_params() {
         &bin_dir,
         "svault-8",
         "svault-8-log",
-        &format!("hhagent-test-svault-8-{suffix}"),
+        &format!("kastellan-test-svault-8-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
     let kp = test_key_provider();
 
-    hhagent_db::secrets::put(&pool, &kp, "a", b"alpha", None).await.unwrap();
-    hhagent_db::secrets::put(&pool, &kp, "b", b"bravo", None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "a", b"alpha", None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "b", b"bravo", None).await.unwrap();
 
     let vault = Arc::new(Vault::new());
     let ref_a = vault.materialize(&pool, &kp, "a", "test").await.unwrap();
@@ -561,13 +561,13 @@ async fn tool_row_req_shows_opaque_ref_not_plaintext() {
         &bin_dir,
         "svault-9",
         "svault-9-log",
-        &format!("hhagent-test-svault-9-{suffix}"),
+        &format!("kastellan-test-svault-9-{suffix}"),
     );
     let pool = probe_and_pool(&cluster.conn_spec).await;
     let kp = test_key_provider();
 
     let marker = "SECRET_REQ_MARKER_qrs456";
-    hhagent_db::secrets::put(&pool, &kp, "req-secret", marker.as_bytes(), None).await.unwrap();
+    kastellan_db::secrets::put(&pool, &kp, "req-secret", marker.as_bytes(), None).await.unwrap();
 
     let vault = Arc::new(Vault::new());
     let secret_ref = vault.materialize(&pool, &kp, "req-secret", "test").await.unwrap();
@@ -688,7 +688,7 @@ async fn dispatch_swallows_redeemed_audit_insert_failure() {
         &bin_dir,
         "svault-10",
         "svault-10-log",
-        &format!("hhagent-test-svault-10-{suffix}"),
+        &format!("kastellan-test-svault-10-{suffix}"),
     );
     // PG is needed only to materialize a real ref (which the empty-vault
     // path of test 11 avoids). Dispatch's own audit goes through the mock.
@@ -696,7 +696,7 @@ async fn dispatch_swallows_redeemed_audit_insert_failure() {
     let kp = test_key_provider();
 
     let marker = "REDEEMED_SWALLOW_MARKER_148a";
-    hhagent_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None)
+    kastellan_db::secrets::put(&pool, &kp, "marker-secret", marker.as_bytes(), None)
         .await
         .unwrap();
     let vault = Arc::new(Vault::new());
@@ -794,7 +794,7 @@ async fn dispatch_swallows_redemption_failed_audit_insert_failure() {
     // The original substitution error is preserved — not masked by the
     // swallowed audit failure (the scheduler maps this to POLICY_DENIED).
     match err {
-        hhagent_core::tool_host::ToolHostError::SecretRedemptionFailed(_) => (),
+        kastellan_core::tool_host::ToolHostError::SecretRedemptionFailed(_) => (),
         other => panic!("expected SecretRedemptionFailed, got {other:?}"),
     }
 

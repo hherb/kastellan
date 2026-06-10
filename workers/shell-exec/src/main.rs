@@ -2,7 +2,7 @@
 //! returns stdout/stderr/exit code over JSON-RPC stdio. **No shell interpretation.**
 //!
 //! The allowlist is read once at startup from environment variable
-//! `HHAGENT_SHELL_ALLOWLIST` as a JSON array of `[argv0, argv1, ...]` patterns.
+//! `KASTELLAN_SHELL_ALLOWLIST` as a JSON array of `[argv0, argv1, ...]` patterns.
 //! Each pattern is exact-match on `argv[0]` and is the *only* allowed entry
 //! point. The agent core is responsible for keeping that env var deny-by-default.
 //!
@@ -14,8 +14,8 @@
 use std::collections::HashSet;
 use std::process::Command;
 
-use hhagent_protocol::{codes, server::Handler, RpcError};
-use hhagent_worker_prelude::serve_stdio;
+use kastellan_protocol::{codes, server::Handler, RpcError};
+use kastellan_worker_prelude::serve_stdio;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -29,9 +29,9 @@ struct ShellExecHandler {
 
 impl ShellExecHandler {
     fn from_env() -> anyhow::Result<Self> {
-        let raw = std::env::var("HHAGENT_SHELL_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
+        let raw = std::env::var("KASTELLAN_SHELL_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
         let allowed: Vec<String> = serde_json::from_str(&raw).map_err(|e| {
-            anyhow::anyhow!("HHAGENT_SHELL_ALLOWLIST is not a valid JSON array of strings: {e}")
+            anyhow::anyhow!("KASTELLAN_SHELL_ALLOWLIST is not a valid JSON array of strings: {e}")
         })?;
         Ok(Self {
             allowed_argv0: allowed.into_iter().collect(),

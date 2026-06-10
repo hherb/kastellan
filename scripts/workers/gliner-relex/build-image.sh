@@ -5,12 +5,12 @@
 # builds the host venv (native Seatbelt/bwrap mode); this builds the
 # container image (macOS container mode).
 #
-# Tag default: hhagent/gliner-relex:dev (overridable via
-# HHAGENT_GLINER_RELEX_IMAGE env, matching the daemon-side knob).
+# Tag default: kastellan/gliner-relex:dev (overridable via
+# KASTELLAN_GLINER_RELEX_IMAGE env, matching the daemon-side knob).
 #
 # Usage:
 #     scripts/workers/gliner-relex/build-image.sh
-#     HHAGENT_GLINER_RELEX_IMAGE=hhagent/gliner-relex:v0.0.1 \
+#     KASTELLAN_GLINER_RELEX_IMAGE=kastellan/gliner-relex:v0.0.1 \
 #         scripts/workers/gliner-relex/build-image.sh
 #
 # Exits non-zero with a clear message if `container` CLI is missing or
@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-IMAGE_TAG="${HHAGENT_GLINER_RELEX_IMAGE:-hhagent/gliner-relex:dev}"
+IMAGE_TAG="${KASTELLAN_GLINER_RELEX_IMAGE:-kastellan/gliner-relex:dev}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_DIR="$(cd "$SCRIPT_DIR/../../../workers/gliner-relex" && pwd)"
@@ -49,9 +49,9 @@ container build -t "$IMAGE_TAG" "$WORKER_DIR"
 cat <<EOF
 
 Done. To enable container-mode in the daemon, set both:
-    export HHAGENT_GLINER_RELEX_ENABLE=1
-    export HHAGENT_GLINER_RELEX_USE_CONTAINER=1
+    export KASTELLAN_GLINER_RELEX_ENABLE=1
+    export KASTELLAN_GLINER_RELEX_USE_CONTAINER=1
 
 If you used a non-default image tag, also set:
-    export HHAGENT_GLINER_RELEX_IMAGE=$IMAGE_TAG
+    export KASTELLAN_GLINER_RELEX_IMAGE=$IMAGE_TAG
 EOF

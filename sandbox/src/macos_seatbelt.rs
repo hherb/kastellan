@@ -248,7 +248,7 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
     out.push_str("(allow sysctl-read)\n");
     // mach-lookup is *intentionally not granted* (issue #1, fixed in this
     // profile). Empirical methodology used to set this baseline: every
-    // shipping hhagent worker today (`hhagent-worker-shell-exec`,
+    // shipping kastellan worker today (`kastellan-worker-shell-exec`,
     // `sid_probe`, `net_probe`, `mach_probe`, `/bin/echo`, `/bin/sh`,
     // `/bin/cat`, `/bin/ls`, `/usr/bin/true`) was test-spawned under a
     // probe profile with `(deny mach-lookup)` on macOS 26.4 ARM64; all

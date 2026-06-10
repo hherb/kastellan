@@ -29,12 +29,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use hhagent_db::{
+use kastellan_db::{
     build_initdb_argv, build_postgresql_auto_conf, default_socket_dir, InitDbOptions,
     PgConfigOptions,
 };
-use hhagent_supervisor::specs::postgres_service_spec;
-use hhagent_supervisor::{default_supervisor, ServiceStatus, Supervisor};
+use kastellan_supervisor::specs::postgres_service_spec;
+use kastellan_supervisor::{default_supervisor, ServiceStatus, Supervisor};
 
 use crate::guards::{PathGuard, ServiceGuard};
 use crate::temp::{current_username, unique_temp_root};
@@ -53,7 +53,7 @@ use crate::wait::{wait_for_socket, wait_for_status};
 /// per-session bring-up of a Postgres.app-installed `postgres` binary
 /// overshoots 15 s consistently (operator memory
 /// `postgres-app-bin-paths.md` documented 12 expected timeouts when
-/// the `HHAGENT_PG_BIN_DIR` env override was set to Postgres.app's
+/// the `KASTELLAN_PG_BIN_DIR` env override was set to Postgres.app's
 /// `bin/`). 30 s leaves ample headroom for the launchd-cold-cache case
 /// without slowing healthy runs (which short-circuit on the first
 /// successful poll).
@@ -105,7 +105,7 @@ fn check_socket_path_fits(socket_dir: &Path) -> Result<(), String> {
 // up would wipe the data dir while `sup` still holds a handle to
 // a running postgres reading from it.
 pub struct PgCluster {
-    pub conn_spec: hhagent_db::conn::ConnectSpec,
+    pub conn_spec: kastellan_db::conn::ConnectSpec,
     pub data_dir: PathBuf,
     pub socket_dir: PathBuf,
     pub sup: Box<dyn Supervisor>,
@@ -168,7 +168,7 @@ pub fn bring_up_pg_cluster(
 ///   fit in `sockaddr_un.sun_path` (108 bytes on Linux).
 /// * `log_label` — short label for the per-test log dir.
 /// * `service_name` — full systemd unit / launchd label, e.g.
-///   `"hhagent-supervisor-test-pg-dispatch-<suffix>"`. Asserted ≤
+///   `"kastellan-supervisor-test-pg-dispatch-<suffix>"`. Asserted ≤
 ///   200 chars — comfortably under both the launchd label cap
 ///   (255) and the systemd unit-file basename limit, with headroom
 ///   for the `.service` suffix and any per-backend wrapping. (This
@@ -286,7 +286,7 @@ pub fn bring_up_pg_cluster_with_timeout(
 
     // Serialize the launchd gui/<uid> registration window against every
     // other daemon-spawning test in this process (issue #130). When the
-    // full workspace runs under `HHAGENT_PG_BIN_DIR`, parallel `#[test]`
+    // full workspace runs under `KASTELLAN_PG_BIN_DIR`, parallel `#[test]`
     // threads racing to `bootstrap` distinct service labels can exceed even
     // the 30 s cap once the domain is churn-degraded; holding the shared
     // serial lock from `install` through the readiness waits caps peak
@@ -321,10 +321,10 @@ pub fn bring_up_pg_cluster_with_timeout(
         spec.name,
     );
 
-    let conn_spec = hhagent_db::conn::ConnectSpec {
+    let conn_spec = kastellan_db::conn::ConnectSpec {
         socket_dir: socket_dir.clone(),
         user: user.clone(),
-        database: hhagent_db::conn::DEFAULT_APPLICATION_DB.to_string(),
+        database: kastellan_db::conn::DEFAULT_APPLICATION_DB.to_string(),
     };
 
     PgCluster {
@@ -397,7 +397,7 @@ mod tests {
     /// false-positive on the common case.
     #[test]
     fn check_socket_path_fits_accepts_short_path() {
-        let dir = PathBuf::from("/tmp/hhagent-ig-x-d-12345-1780000000000000000/data/sockets");
+        let dir = PathBuf::from("/tmp/kastellan-ig-x-d-12345-1780000000000000000/data/sockets");
         assert!(
             check_socket_path_fits(&dir).is_ok(),
             "a short socket path must be accepted"

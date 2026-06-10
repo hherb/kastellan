@@ -1,9 +1,9 @@
 //! End-to-end smoke for the per-user Postgres bring-up + every
-//! `hhagent-db` runtime module.
+//! `kastellan-db` runtime module.
 //!
 //! Five tests share one PG cluster bring-up recipe (initdb → auto.conf
 //! → supervisor install/start → wait Active + socket). The recipe
-//! itself lives in [`hhagent_tests_common::bring_up_pg_cluster`]; this
+//! itself lives in [`kastellan_tests_common::bring_up_pg_cluster`]; this
 //! file's tests pin downstream behaviour against fresh clusters.
 //!
 //! Skips silently with `[SKIP]` lines on hosts that can't run the test
@@ -14,8 +14,8 @@
 
 use std::time::Duration;
 
-use hhagent_supervisor::ServiceStatus;
-use hhagent_tests_common::{
+use kastellan_supervisor::ServiceStatus;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, wait_for_status,
 };
 
@@ -34,7 +34,7 @@ fn postgres_install_start_select_one_uninstall() {
         &bin_dir,
         "pg-d",
         "pg-l",
-        &format!("hhagent-supervisor-test-pg-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-{suffix}"),
     );
 
     // SELECT 1 over the UDS. This is the proof that the whole stack
@@ -107,8 +107,8 @@ fn postgres_install_start_select_one_uninstall() {
 ///   1. Bring up a per-test PG cluster.
 ///   2. Run `db::probe::run` once. This exercises:
 ///        * The maintenance-DB connect.
-///        * `CREATE DATABASE hhagent` (first-boot branch).
-///        * Reconnect to `hhagent`.
+///        * `CREATE DATABASE kastellan` (first-boot branch).
+///        * Reconnect to `kastellan`.
 ///        * `MIGRATOR.run` — pulls in `0001_init.sql`.
 ///        * The `audit_log` insert.
 ///   3. Run `db::probe::run` a *second* time. The CREATE DATABASE
@@ -142,7 +142,7 @@ fn probe_runs_migrations_and_graph_happy_path() {
         &bin_dir,
         "probe-d",
         "probe-l",
-        &format!("hhagent-supervisor-test-pg-probe-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-probe-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -152,7 +152,7 @@ fn probe_runs_migrations_and_graph_happy_path() {
 
     rt.block_on(async {
         // First run — exercises the CREATE DATABASE + migrations branches.
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -162,7 +162,7 @@ fn probe_runs_migrations_and_graph_happy_path() {
         .expect("first probe run");
 
         // Second run — must be a no-op except for the audit row.
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -172,7 +172,7 @@ fn probe_runs_migrations_and_graph_happy_path() {
         .expect("second probe run (idempotency)");
 
         // ---------- Graph trait round-trip ----------
-        use hhagent_db::graph::{Graph, PgGraph};
+        use kastellan_db::graph::{Graph, PgGraph};
         let pool = sqlx::postgres::PgPool::connect_with(cluster.conn_spec.to_pg_connect_options())
             .await
             .expect("pool connect");
@@ -245,7 +245,7 @@ fn probe_runs_migrations_and_graph_happy_path() {
 
 /// Verify the runtime-role split from migration `0002_runtime_role.sql`.
 ///
-/// The migration creates `hhagent_runtime` (NOSUPERUSER, NOCREATEROLE,
+/// The migration creates `kastellan_runtime` (NOSUPERUSER, NOCREATEROLE,
 /// NOCREATEDB, NOLOGIN, NOINHERIT), grants membership to the OS user,
 /// grants `SELECT, INSERT` on `audit_log`, and explicitly REVOKEs
 /// `UPDATE, DELETE, TRUNCATE` from it. After `db::probe::run` applies
@@ -277,7 +277,7 @@ fn runtime_role_audit_log_revoke_is_enforced() {
         &bin_dir,
         "runrole-d",
         "runrole-l",
-        &format!("hhagent-supervisor-test-pg-runtime-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-runtime-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -288,7 +288,7 @@ fn runtime_role_audit_log_revoke_is_enforced() {
     rt.block_on(async {
         // Probe applies migrations 0001 + 0002 and writes one audit row
         // already under SET ROLE. The role + grants now exist.
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -312,28 +312,28 @@ fn runtime_role_audit_log_revoke_is_enforced() {
         // a code-review catch.
         let row: (String, bool, bool, bool, bool, bool) = sqlx::query_as(
             "SELECT rolname, rolcanlogin, rolsuper, rolinherit, rolcreaterole, rolcreatedb \
-             FROM pg_roles WHERE rolname = 'hhagent_runtime'",
+             FROM pg_roles WHERE rolname = 'kastellan_runtime'",
         )
         .fetch_one(&pool)
         .await
-        .expect("hhagent_runtime row in pg_roles");
-        assert_eq!(row.0, "hhagent_runtime");
-        assert!(!row.1, "hhagent_runtime must be NOLOGIN (rolcanlogin=false)");
-        assert!(!row.2, "hhagent_runtime must be NOSUPERUSER (rolsuper=false)");
-        assert!(!row.3, "hhagent_runtime must be NOINHERIT (rolinherit=false)");
-        assert!(!row.4, "hhagent_runtime must be NOCREATEROLE (rolcreaterole=false)");
-        assert!(!row.5, "hhagent_runtime must be NOCREATEDB (rolcreatedb=false)");
+        .expect("kastellan_runtime row in pg_roles");
+        assert_eq!(row.0, "kastellan_runtime");
+        assert!(!row.1, "kastellan_runtime must be NOLOGIN (rolcanlogin=false)");
+        assert!(!row.2, "kastellan_runtime must be NOSUPERUSER (rolsuper=false)");
+        assert!(!row.3, "kastellan_runtime must be NOINHERIT (rolinherit=false)");
+        assert!(!row.4, "kastellan_runtime must be NOCREATEROLE (rolcreaterole=false)");
+        assert!(!row.5, "kastellan_runtime must be NOCREATEDB (rolcreatedb=false)");
 
         // The OS user (cluster superuser) MUST be a member of the
         // runtime role — otherwise SET ROLE fails for the daemon. The
         // join walks the role-membership graph: r1 = role being granted
-        // (hhagent_runtime), r2 = role receiving the grant (= current_user
+        // (kastellan_runtime), r2 = role receiving the grant (= current_user
         // in our setup, which is the OS user under peer auth).
         let (member_count,): (i64,) = sqlx::query_as(
             "SELECT count(*) FROM pg_auth_members am \
              JOIN pg_roles r1 ON am.roleid = r1.oid \
              JOIN pg_roles r2 ON am.member = r2.oid \
-             WHERE r1.rolname = 'hhagent_runtime' \
+             WHERE r1.rolname = 'kastellan_runtime' \
                AND r2.rolname = current_user",
         )
         .fetch_one(&pool)
@@ -341,15 +341,15 @@ fn runtime_role_audit_log_revoke_is_enforced() {
         .expect("pg_auth_members lookup");
         assert_eq!(
             member_count, 1,
-            "OS user must be a member of hhagent_runtime so SET ROLE works"
+            "OS user must be a member of kastellan_runtime so SET ROLE works"
         );
 
         // ---------- SET ROLE on a held connection ----------
         let mut held = pool.acquire().await.expect("acquire connection");
-        sqlx::query(&hhagent_db::conn::set_role_runtime_statement())
+        sqlx::query(&kastellan_db::conn::set_role_runtime_statement())
             .execute(&mut *held)
             .await
-            .expect("SET ROLE hhagent_runtime");
+            .expect("SET ROLE kastellan_runtime");
 
         // ---------- positive path: INSERT into audit_log ----------
         let inserted: (i64,) = sqlx::query_as(
@@ -440,7 +440,7 @@ fn runtime_role_audit_log_revoke_is_enforced() {
 ///
 /// What this proves end-to-end:
 ///   * `pool::connect_runtime_pool` opens a pool whose `after_connect`
-///     hook runs `SET ROLE hhagent_runtime`. UPDATE/DELETE on
+///     hook runs `SET ROLE kastellan_runtime`. UPDATE/DELETE on
 ///     `audit_log` via the pool fail with `permission denied` —
 ///     proof that role drop actually happened.
 ///   * The 0003 trigger fires AFTER INSERT and emits a NOTIFY on
@@ -467,7 +467,7 @@ fn audit_helpers_pool_and_notify_round_trip() {
         &bin_dir,
         "audpool-d",
         "audpool-l",
-        &format!("hhagent-supervisor-test-pg-audit-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-audit-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -476,7 +476,7 @@ fn audit_helpers_pool_and_notify_round_trip() {
         .expect("build tokio runtime");
 
     rt.block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -486,7 +486,7 @@ fn audit_helpers_pool_and_notify_round_trip() {
         .expect("probe run");
 
         // Pool with after_connect SET ROLE.
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 
@@ -517,7 +517,7 @@ fn audit_helpers_pool_and_notify_round_trip() {
             .expect("LISTEN audit_log_inserted");
 
         // ---------- write a row via audit::insert ----------
-        let inserted_id = hhagent_db::audit::insert(
+        let inserted_id = kastellan_db::audit::insert(
             &pool,
             "tool:test",
             "call",
@@ -543,7 +543,7 @@ fn audit_helpers_pool_and_notify_round_trip() {
         );
 
         // ---------- fetch_by_id round-trip ----------
-        let row = hhagent_db::audit::fetch_by_id(&pool, inserted_id)
+        let row = kastellan_db::audit::fetch_by_id(&pool, inserted_id)
             .await
             .expect("fetch_by_id");
         assert_eq!(row.id, inserted_id);
@@ -556,7 +556,7 @@ fn audit_helpers_pool_and_notify_round_trip() {
 
         // ---------- truncation: an 8 KiB payload is replaced ----------
         let big = "x".repeat(8192);
-        let truncated_id = hhagent_db::audit::insert(
+        let truncated_id = kastellan_db::audit::insert(
             &pool,
             "tool:test",
             "call",
@@ -564,7 +564,7 @@ fn audit_helpers_pool_and_notify_round_trip() {
         )
         .await
         .expect("audit::insert with big payload");
-        let truncated = hhagent_db::audit::fetch_by_id(&pool, truncated_id)
+        let truncated = kastellan_db::audit::fetch_by_id(&pool, truncated_id)
             .await
             .expect("fetch_by_id for truncated row");
         let env = truncated
@@ -620,11 +620,11 @@ async fn tasks_lifecycle_e2e() {
         &bin_dir,
         "lc-d",
         "lc-l",
-        &format!("hhagent-supervisor-test-pg-lc-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-lc-{suffix}"),
     );
 
     // Probe applies migrations 0001–0006 (tasks table + triggers).
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -633,11 +633,11 @@ async fn tasks_lifecycle_e2e() {
     .await
     .expect("probe run");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("connect runtime pool");
 
-    use hhagent_db::tasks::{
+    use kastellan_db::tasks::{
         any_live_worker, claim_one, finalize, get, insert_pending, mark_cancelled,
         mark_cancelled_if_pending, observe_state, sweep_crashed, Lane,
     };
@@ -884,7 +884,7 @@ fn secrets_put_get_list_delete_round_trip() {
         &bin_dir,
         "secrets-d",
         "secrets-l",
-        &format!("hhagent-supervisor-test-pg-secrets-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-secrets-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -893,7 +893,7 @@ fn secrets_put_get_list_delete_round_trip() {
         .expect("build tokio runtime");
 
     rt.block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -902,29 +902,29 @@ fn secrets_put_get_list_delete_round_trip() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 
-        let key_provider = hhagent_db::secrets::MapKeyProvider::new(
+        let key_provider = kastellan_db::secrets::MapKeyProvider::new(
             "test-key-id-v1",
-            [0x42u8; hhagent_db::secrets::KEY_LEN],
+            [0x42u8; kastellan_db::secrets::KEY_LEN],
         );
 
         // ---------- 1. put + get round-trip ----------
         let pt_a: &[u8] = b"super-secret-token-A";
-        hhagent_db::secrets::put(&pool, &key_provider, "imap_password", pt_a, None)
+        kastellan_db::secrets::put(&pool, &key_provider, "imap_password", pt_a, None)
             .await
             .expect("put initial secret");
 
         let recovered =
-            hhagent_db::secrets::get(&pool, &key_provider, "imap_password", None)
+            kastellan_db::secrets::get(&pool, &key_provider, "imap_password", None)
                 .await
                 .expect("get round-trip");
         assert_eq!(&*recovered, pt_a, "round-trip plaintext mismatch");
 
         // ---------- 2. list returns metadata only ----------
-        hhagent_db::secrets::put(
+        kastellan_db::secrets::put(
             &pool,
             &key_provider,
             "anthropic_api_key",
@@ -933,7 +933,7 @@ fn secrets_put_get_list_delete_round_trip() {
         )
         .await
         .expect("put second secret");
-        let listing = hhagent_db::secrets::list(&pool).await.expect("list");
+        let listing = kastellan_db::secrets::list(&pool).await.expect("list");
         assert_eq!(listing.len(), 2);
         // ORDER BY name ASC: "anthropic_api_key" < "imap_password"
         assert_eq!(listing[0].name, "anthropic_api_key");
@@ -943,39 +943,39 @@ fn secrets_put_get_list_delete_round_trip() {
 
         // ---------- 3. UPSERT semantics ----------
         let pt_a2: &[u8] = b"super-secret-token-A-rotated";
-        hhagent_db::secrets::put(&pool, &key_provider, "imap_password", pt_a2, None)
+        kastellan_db::secrets::put(&pool, &key_provider, "imap_password", pt_a2, None)
             .await
             .expect("upsert second time");
         let recovered2 =
-            hhagent_db::secrets::get(&pool, &key_provider, "imap_password", None)
+            kastellan_db::secrets::get(&pool, &key_provider, "imap_password", None)
                 .await
                 .expect("get after upsert");
         assert_eq!(&*recovered2, pt_a2, "upsert did not replace plaintext");
-        let listing_after = hhagent_db::secrets::list(&pool).await.unwrap();
+        let listing_after = kastellan_db::secrets::list(&pool).await.unwrap();
         assert_eq!(listing_after.len(), 2, "upsert must not duplicate");
 
         // ---------- 4. delete ----------
-        let removed = hhagent_db::secrets::delete(&pool, "imap_password")
+        let removed = kastellan_db::secrets::delete(&pool, "imap_password")
             .await
             .expect("delete");
         assert!(removed, "delete reported no row removed");
-        let removed_again = hhagent_db::secrets::delete(&pool, "imap_password")
+        let removed_again = kastellan_db::secrets::delete(&pool, "imap_password")
             .await
             .expect("delete idempotent");
         assert!(
             !removed_again,
             "delete of absent row must return false (idempotent)"
         );
-        let err = hhagent_db::secrets::get(&pool, &key_provider, "imap_password", None)
+        let err = kastellan_db::secrets::get(&pool, &key_provider, "imap_password", None)
             .await
             .unwrap_err();
         assert!(
-            matches!(err, hhagent_db::secrets::SecretsError::NotFound(_)),
+            matches!(err, kastellan_db::secrets::SecretsError::NotFound(_)),
             "expected NotFound after delete: {err:?}"
         );
 
         // ---------- 5. AAD-mismatch detection ----------
-        hhagent_db::secrets::put(
+        kastellan_db::secrets::put(
             &pool,
             &key_provider,
             "swap_target",
@@ -990,7 +990,7 @@ fn secrets_put_get_list_delete_round_trip() {
             .execute(&pool)
             .await
             .expect("simulate row rename");
-        let mismatch_err = hhagent_db::secrets::get(
+        let mismatch_err = kastellan_db::secrets::get(
             &pool,
             &key_provider,
             "swap_target_renamed",
@@ -1001,13 +1001,13 @@ fn secrets_put_get_list_delete_round_trip() {
         assert!(
             matches!(
                 mismatch_err,
-                hhagent_db::secrets::SecretsError::AadMismatch
+                kastellan_db::secrets::SecretsError::AadMismatch
             ),
             "renamed row must surface AadMismatch, got: {mismatch_err:?}"
         );
 
         // ---------- 6. ciphertext-tamper detection ----------
-        hhagent_db::secrets::put(
+        kastellan_db::secrets::put(
             &pool,
             &key_provider,
             "tamper_target",
@@ -1025,7 +1025,7 @@ fn secrets_put_get_list_delete_round_trip() {
         .execute(&pool)
         .await
         .expect("flip ciphertext byte");
-        let tamper_err = hhagent_db::secrets::get(
+        let tamper_err = kastellan_db::secrets::get(
             &pool,
             &key_provider,
             "tamper_target",
@@ -1036,7 +1036,7 @@ fn secrets_put_get_list_delete_round_trip() {
         assert!(
             matches!(
                 tamper_err,
-                hhagent_db::secrets::SecretsError::DecryptFailed
+                kastellan_db::secrets::SecretsError::DecryptFailed
             ),
             "tampered ciphertext must surface DecryptFailed, got: {tamper_err:?}"
         );
@@ -1080,10 +1080,10 @@ async fn memory_entities_link_round_trip_and_idempotency() {
         &bin_dir,
         "mel-d",
         "mel-l",
-        &format!("hhagent-pg-mel-{suffix}"),
+        &format!("kastellan-pg-mel-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -1092,14 +1092,14 @@ async fn memory_entities_link_round_trip_and_idempotency() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
 
     // Seed: 1 memory, 3 entities.
-    let mem_id = hhagent_db::memories::insert_memory(
+    let mem_id = kastellan_db::memories::insert_memory(
         &pool,
         "alpha body",
         &serde_json::json!({}),
@@ -1108,7 +1108,7 @@ async fn memory_entities_link_round_trip_and_idempotency() {
     .await
     .expect("insert memory");
 
-    let graph = hhagent_db::graph::PgGraph::new(&pool);
+    let graph = kastellan_db::graph::PgGraph::new(&pool);
     let e1 = graph
         .upsert_entity("person", "alice", &serde_json::json!({}))
         .await
@@ -1123,19 +1123,19 @@ async fn memory_entities_link_round_trip_and_idempotency() {
         .expect("upsert e3");
 
     // First link: both new.
-    let n = hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
+    let n = kastellan_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
         .await
         .expect("link 1");
     assert_eq!(n, 2, "first link of 2 fresh entities must insert 2 rows");
 
     // Re-link same pair: idempotent.
-    let n = hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
+    let n = kastellan_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e2])
         .await
         .expect("link 2");
     assert_eq!(n, 0, "re-link of existing pairs must insert 0 rows");
 
     // Mixed (one new, one dupe): only the new one counts.
-    let n = hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e3])
+    let n = kastellan_db::memories::link_memory_to_entities(&pool, mem_id, &[e1, e3])
         .await
         .expect("link 3");
     assert_eq!(n, 1, "mixed re-link + new must insert 1 row");
@@ -1168,10 +1168,10 @@ async fn memory_entities_cascade_on_entity_delete() {
         &bin_dir,
         "mec-d",
         "mec-l",
-        &format!("hhagent-pg-mec-{suffix}"),
+        &format!("kastellan-pg-mec-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -1180,13 +1180,13 @@ async fn memory_entities_cascade_on_entity_delete() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
 
-    let mem_id = hhagent_db::memories::insert_memory(
+    let mem_id = kastellan_db::memories::insert_memory(
         &pool,
         "bravo body",
         &serde_json::json!({}),
@@ -1194,13 +1194,13 @@ async fn memory_entities_cascade_on_entity_delete() {
     )
     .await
     .expect("insert memory");
-    let graph = hhagent_db::graph::PgGraph::new(&pool);
+    let graph = kastellan_db::graph::PgGraph::new(&pool);
     let e_id = graph
         .upsert_entity("person", "alice", &serde_json::json!({}))
         .await
         .expect("upsert");
 
-    hhagent_db::memories::link_memory_to_entities(&pool, mem_id, &[e_id])
+    kastellan_db::memories::link_memory_to_entities(&pool, mem_id, &[e_id])
         .await
         .expect("link");
 
@@ -1255,10 +1255,10 @@ async fn memory_delete_writes_deleted_memories_row() {
         &bin_dir,
         "mda-d",
         "mda-l",
-        &format!("hhagent-pg-mda-{suffix}"),
+        &format!("kastellan-pg-mda-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -1267,15 +1267,15 @@ async fn memory_delete_writes_deleted_memories_row() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
     // Build a memory with an embedding so we exercise the full row shape.
     // Deterministic seeded vector via tests-common.
-    let emb = hhagent_tests_common::text_to_embedding("delete-audit-fixture");
+    let emb = kastellan_tests_common::text_to_embedding("delete-audit-fixture");
     let metadata = serde_json::json!({"k": "v"});
-    let mem_id = hhagent_db::memories::insert_memory(
+    let mem_id = kastellan_db::memories::insert_memory(
         &pool,
         "audit body",
         &metadata,
@@ -1373,13 +1373,13 @@ async fn memory_delete_writes_deleted_memories_row() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_allowlists_round_trip_and_grant_shape() {
-    use hhagent_db::pool::connect_runtime_pool;
-    use hhagent_db::probe::run as probe_run;
-    use hhagent_db::tool_allowlists::{
+    use kastellan_db::pool::connect_runtime_pool;
+    use kastellan_db::probe::run as probe_run;
+    use kastellan_db::tool_allowlists::{
         add, list_all, list_for_tool, list_for_tool_full, remove, AllowlistEntry,
         ToolAllowlistError,
     };
-    use hhagent_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix};
+    use kastellan_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix};
 
     if skip_if_no_supervisor() { return; }
     let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
@@ -1389,7 +1389,7 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
         &bin_dir,
         "ta-d",
         "ta-l",
-        &format!("hhagent-postgres-tool-allowlists-e2e-{suffix}"),
+        &format!("kastellan-postgres-tool-allowlists-e2e-{suffix}"),
     );
 
     probe_run(
@@ -1461,11 +1461,11 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     let removed2 = remove(&pool, "shell-exec", "/usr/bin/echo").await.unwrap();
     assert!(!removed2, "second remove must be a no-op");
 
-    // (6) GRANT shape: UPDATE on tool_allowlists denied to hhagent_runtime.
+    // (6) GRANT shape: UPDATE on tool_allowlists denied to kastellan_runtime.
     // SET ROLE explicitly in the same transaction so the test isn't
     // sensitive to pool reuse.
     let mut conn = pool.acquire().await.unwrap();
-    sqlx::query("SET ROLE hhagent_runtime")
+    sqlx::query("SET ROLE kastellan_runtime")
         .execute(&mut *conn)
         .await
         .unwrap();
@@ -1559,11 +1559,11 @@ async fn tasks_state_refused_passes_check_constraint() {
         &bin_dir,
         "ref-d",
         "ref-l",
-        &format!("hhagent-supervisor-test-pg-refused-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-refused-{suffix}"),
     );
 
     // Probe applies all migrations (0001–0012) and sets up roles/grants.
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -1572,7 +1572,7 @@ async fn tasks_state_refused_passes_check_constraint() {
     .await
     .expect("probe run");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("connect runtime pool");
 
@@ -1637,10 +1637,10 @@ async fn memories_layer_default_is_stable() {
         &bin_dir,
         "ml-d",
         "ml-l",
-        &format!("hhagent-pg-mlayer-default-{suffix}"),
+        &format!("kastellan-pg-mlayer-default-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -1649,11 +1649,11 @@ async fn memories_layer_default_is_stable() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    let mem_id = hhagent_db::memories::insert_memory(
+    let mem_id = kastellan_db::memories::insert_memory(
         &pool,
         "default-layer body",
         &serde_json::json!({}),
@@ -1683,7 +1683,7 @@ async fn memories_layer_default_is_stable() {
 /// short-circuits before any SQL is issued).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn insert_memory_at_layer_round_trip() {
-    use hhagent_db::memories::{
+    use kastellan_db::memories::{
         insert_memory_at_layer, load_layer, seed_meta_memory, MemoryLayer,
     };
 
@@ -1699,10 +1699,10 @@ async fn insert_memory_at_layer_round_trip() {
         &bin_dir,
         "mr-d",
         "mr-l",
-        &format!("hhagent-pg-mlayer-round-trip-{suffix}"),
+        &format!("kastellan-pg-mlayer-round-trip-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -1711,7 +1711,7 @@ async fn insert_memory_at_layer_round_trip() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -1775,7 +1775,7 @@ async fn insert_memory_at_layer_round_trip() {
     )
     .await;
     match rejected {
-        Err(hhagent_db::DbError::PolicyViolation(msg)) => {
+        Err(kastellan_db::DbError::PolicyViolation(msg)) => {
             assert!(
                 msg.contains("L0") && msg.contains("seed_meta_memory"),
                 "PolicyViolation message must name L0 and the correct admin path; got: {msg}"
@@ -1805,8 +1805,8 @@ async fn insert_memory_at_layer_round_trip() {
 /// second cluster — same pattern as `insert_memory_at_layer_round_trip`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn insert_memory_light_round_trip_and_rejects_l0() {
-    use hhagent_db::memories::{insert_memory_light, MemoryLayer};
-    use hhagent_tests_common::{
+    use kastellan_db::memories::{insert_memory_light, MemoryLayer};
+    use kastellan_tests_common::{
         bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
     };
 
@@ -1822,10 +1822,10 @@ async fn insert_memory_light_round_trip_and_rejects_l0() {
         &bin_dir,
         "mlight-d",
         "mlight-l",
-        &format!("hhagent-pg-mlight-round-trip-{suffix}"),
+        &format!("kastellan-pg-mlight-round-trip-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -1834,7 +1834,7 @@ async fn insert_memory_light_round_trip_and_rejects_l0() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -1871,7 +1871,7 @@ async fn insert_memory_light_round_trip_and_rejects_l0() {
     )
     .await;
     match rejected {
-        Err(hhagent_db::DbError::PolicyViolation(msg)) => {
+        Err(kastellan_db::DbError::PolicyViolation(msg)) => {
             assert!(
                 msg.contains("L0") && msg.contains("seed_meta_memory"),
                 "PolicyViolation must name L0 and the admin path; got: {msg}"
@@ -1901,11 +1901,11 @@ async fn insert_memory_light_round_trip_and_rejects_l0() {
 /// not an empty query).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn insert_memory_light_degrades_gracefully_across_lanes() {
-    use hhagent_db::memories::{
+    use kastellan_db::memories::{
         insert_memory_at_layer, insert_memory_light, lexical_search, semantic_search,
         MemoryLayer, EMBEDDING_DIM,
     };
-    use hhagent_tests_common::{
+    use kastellan_tests_common::{
         bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
     };
 
@@ -1921,10 +1921,10 @@ async fn insert_memory_light_degrades_gracefully_across_lanes() {
         &bin_dir,
         "mdegrad-d",
         "mdegrad-l",
-        &format!("hhagent-pg-mlight-degrade-{suffix}"),
+        &format!("kastellan-pg-mlight-degrade-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -1933,7 +1933,7 @@ async fn insert_memory_light_degrades_gracefully_across_lanes() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -2008,7 +2008,7 @@ async fn insert_memory_light_degrades_gracefully_across_lanes() {
 /// pointer or a routine L2 fact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn memory_delete_preserves_layer_in_audit() {
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 
     if skip_if_no_supervisor() {
         return;
@@ -2022,10 +2022,10 @@ async fn memory_delete_preserves_layer_in_audit() {
         &bin_dir,
         "md-d",
         "md-l",
-        &format!("hhagent-pg-mlayer-delete-{suffix}"),
+        &format!("kastellan-pg-mlayer-delete-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2034,7 +2034,7 @@ async fn memory_delete_preserves_layer_in_audit() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -2076,7 +2076,7 @@ async fn memory_delete_preserves_layer_in_audit() {
 /// deletion into `deleted_memories`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delete_memory_at_layer_happy_path() {
-    use hhagent_db::memories::{delete_memory_at_layer, insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::memories::{delete_memory_at_layer, insert_memory_at_layer, MemoryLayer};
 
     if skip_if_no_supervisor() {
         return;
@@ -2090,10 +2090,10 @@ async fn delete_memory_at_layer_happy_path() {
         &bin_dir,
         "dml-d",
         "dml-l",
-        &format!("hhagent-pg-del-at-layer-{suffix}"),
+        &format!("kastellan-pg-del-at-layer-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2102,7 +2102,7 @@ async fn delete_memory_at_layer_happy_path() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -2152,7 +2152,7 @@ async fn delete_memory_at_layer_happy_path() {
 /// must return `false` and leave the row untouched in `memories`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delete_memory_at_layer_rejects_wrong_layer() {
-    use hhagent_db::memories::{delete_memory_at_layer, fetch_by_ids, insert_memory, MemoryLayer};
+    use kastellan_db::memories::{delete_memory_at_layer, fetch_by_ids, insert_memory, MemoryLayer};
 
     if skip_if_no_supervisor() {
         return;
@@ -2166,10 +2166,10 @@ async fn delete_memory_at_layer_rejects_wrong_layer() {
         &bin_dir,
         "dwl-d",
         "dwl-l",
-        &format!("hhagent-pg-del-wrong-layer-{suffix}"),
+        &format!("kastellan-pg-del-wrong-layer-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2178,7 +2178,7 @@ async fn delete_memory_at_layer_rejects_wrong_layer() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -2257,10 +2257,10 @@ async fn migration_0015_seeds_entity_kinds_and_adds_quarantine() {
         &bin_dir,
         "m15-d",
         "m15-l",
-        &format!("hhagent-pg-m15-shape-{suffix}"),
+        &format!("kastellan-pg-m15-shape-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2269,7 +2269,7 @@ async fn migration_0015_seeds_entity_kinds_and_adds_quarantine() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -2350,10 +2350,10 @@ async fn entities_upsert_dedup_by_name_norm() {
         &bin_dir,
         "m15-d",
         "m15-l",
-        &format!("hhagent-pg-m15-dedup-{suffix}"),
+        &format!("kastellan-pg-m15-dedup-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2362,7 +2362,7 @@ async fn entities_upsert_dedup_by_name_norm() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -2428,10 +2428,10 @@ async fn kind_delete_sets_default_to_undefined() {
         &bin_dir,
         "m15-d",
         "m15-l",
-        &format!("hhagent-pg-m15-fkdef-{suffix}"),
+        &format!("kastellan-pg-m15-fkdef-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2494,10 +2494,10 @@ async fn entities_kind_fk_blocks_unknown_kind() {
         &bin_dir,
         "m15-d",
         "m15-l",
-        &format!("hhagent-pg-m15-fkblk-{suffix}"),
+        &format!("kastellan-pg-m15-fkblk-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2506,7 +2506,7 @@ async fn entities_kind_fk_blocks_unknown_kind() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -2547,10 +2547,10 @@ async fn entity_kinds_writes_denied_to_runtime_role() {
         &bin_dir,
         "m16-d",
         "m16-l",
-        &format!("hhagent-pg-m16-revoke-{suffix}"),
+        &format!("kastellan-pg-m16-revoke-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2559,7 +2559,7 @@ async fn entity_kinds_writes_denied_to_runtime_role() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -2617,10 +2617,10 @@ async fn relation_persists_when_endpoints_quarantined() {
         &bin_dir,
         "m15-d",
         "m15-l",
-        &format!("hhagent-pg-m15-relq-{suffix}"),
+        &format!("kastellan-pg-m15-relq-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2629,7 +2629,7 @@ async fn relation_persists_when_endpoints_quarantined() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -2732,10 +2732,10 @@ async fn entity_kinds_cache_returns_seeded_list() {
         &bin_dir,
         "ek-d",
         "ek-l",
-        &format!("hhagent-pg-ek-seeded-{suffix}"),
+        &format!("kastellan-pg-ek-seeded-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2744,11 +2744,11 @@ async fn entity_kinds_cache_returns_seeded_list() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
-    let cache = hhagent_db::entity_kinds::KindsCache::new();
+    let cache = kastellan_db::entity_kinds::KindsCache::new();
     let kinds = cache.list_kinds(&pool).await.expect("list_kinds");
 
     assert_eq!(
@@ -2788,10 +2788,10 @@ async fn entity_kinds_fetch_kinds_orders_alphabetically() {
         &bin_dir,
         "ek-d",
         "ek-l",
-        &format!("hhagent-pg-ek-order-{suffix}"),
+        &format!("kastellan-pg-ek-order-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2800,11 +2800,11 @@ async fn entity_kinds_fetch_kinds_orders_alphabetically() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
-    let kinds = hhagent_db::entity_kinds::fetch_kinds(&pool)
+    let kinds = kastellan_db::entity_kinds::fetch_kinds(&pool)
         .await
         .expect("fetch_kinds");
 
@@ -2832,10 +2832,10 @@ async fn entity_kinds_cache_hits_warm_does_not_re_query() {
         &bin_dir,
         "ek-d",
         "ek-l",
-        &format!("hhagent-pg-ek-warm-{suffix}"),
+        &format!("kastellan-pg-ek-warm-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2844,11 +2844,11 @@ async fn entity_kinds_cache_hits_warm_does_not_re_query() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
-    let cache = hhagent_db::entity_kinds::KindsCache::new();
+    let cache = kastellan_db::entity_kinds::KindsCache::new();
     let first = cache.list_kinds(&pool).await.expect("list_kinds #1");
     let second = cache.list_kinds(&pool).await.expect("list_kinds #2");
     assert_eq!(
@@ -2879,10 +2879,10 @@ async fn graph_search_excludes_quarantined_by_default() {
         &bin_dir,
         "gsq-d",
         "gsq-l",
-        &format!("hhagent-pg-gsq-excl-{suffix}"),
+        &format!("kastellan-pg-gsq-excl-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2891,7 +2891,7 @@ async fn graph_search_excludes_quarantined_by_default() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -2918,7 +2918,7 @@ async fn graph_search_excludes_quarantined_by_default() {
     .expect("insert quarantined entity");
 
     // Two memories, one linked to each entity.
-    let mem_promoted = hhagent_db::memories::insert_memory(
+    let mem_promoted = kastellan_db::memories::insert_memory(
         &pool,
         "memory linked to promoted entity",
         &serde_json::json!({}),
@@ -2927,7 +2927,7 @@ async fn graph_search_excludes_quarantined_by_default() {
     .await
     .expect("insert mem_promoted");
 
-    let mem_quar = hhagent_db::memories::insert_memory(
+    let mem_quar = kastellan_db::memories::insert_memory(
         &pool,
         "memory linked to quarantined entity",
         &serde_json::json!({}),
@@ -2936,15 +2936,15 @@ async fn graph_search_excludes_quarantined_by_default() {
     .await
     .expect("insert mem_quar");
 
-    hhagent_db::memories::link_memory_to_entities(&pool, mem_promoted, &[ent_promoted])
+    kastellan_db::memories::link_memory_to_entities(&pool, mem_promoted, &[ent_promoted])
         .await
         .expect("link mem_promoted");
-    hhagent_db::memories::link_memory_to_entities(&pool, mem_quar, &[ent_quar])
+    kastellan_db::memories::link_memory_to_entities(&pool, mem_quar, &[ent_quar])
         .await
         .expect("link mem_quar");
 
     // Production call: include_quarantined=false.
-    let hits = hhagent_db::memories::graph_search(
+    let hits = kastellan_db::memories::graph_search(
         &pool,
         &[ent_promoted, ent_quar],
         10,
@@ -2981,10 +2981,10 @@ async fn graph_search_includes_quarantined_when_flag_true() {
         &bin_dir,
         "gsq-d",
         "gsq-l",
-        &format!("hhagent-pg-gsq-incl-{suffix}"),
+        &format!("kastellan-pg-gsq-incl-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -2993,7 +2993,7 @@ async fn graph_search_includes_quarantined_when_flag_true() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -3006,7 +3006,7 @@ async fn graph_search_includes_quarantined_when_flag_true() {
     .await
     .expect("insert quarantined entity");
 
-    let mem = hhagent_db::memories::insert_memory(
+    let mem = kastellan_db::memories::insert_memory(
         &pool,
         "memory linked to quarantined entity (operator path)",
         &serde_json::json!({}),
@@ -3015,12 +3015,12 @@ async fn graph_search_includes_quarantined_when_flag_true() {
     .await
     .expect("insert mem");
 
-    hhagent_db::memories::link_memory_to_entities(&pool, mem, &[ent_quar])
+    kastellan_db::memories::link_memory_to_entities(&pool, mem, &[ent_quar])
         .await
         .expect("link mem");
 
     // Operator path: include_quarantined=true.
-    let hits = hhagent_db::memories::graph_search(&pool, &[ent_quar], 10, true)
+    let hits = kastellan_db::memories::graph_search(&pool, &[ent_quar], 10, true)
         .await
         .expect("graph_search");
 
@@ -3050,10 +3050,10 @@ async fn entities_list_filters_by_state_kind_and_since() {
         &bin_dir,
         "elf-d",
         "elf-l",
-        &format!("hhagent-pg-elf-{suffix}"),
+        &format!("kastellan-pg-elf-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3062,11 +3062,11 @@ async fn entities_list_filters_by_state_kind_and_since() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::entities::{list_entities, EntityState, ListFilter};
+    use kastellan_db::entities::{list_entities, EntityState, ListFilter};
     use time::OffsetDateTime;
 
     // Seed 4 entities — 2 quarantined (different kinds), 1 approved, 1 old.
@@ -3166,10 +3166,10 @@ async fn entities_list_min_mentions_filter_uses_join_count() {
         &bin_dir,
         "emm-d",
         "emm-l",
-        &format!("hhagent-pg-emm-{suffix}"),
+        &format!("kastellan-pg-emm-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3178,11 +3178,11 @@ async fn entities_list_min_mentions_filter_uses_join_count() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::entities::{list_entities, ListFilter};
+    use kastellan_db::entities::{list_entities, ListFilter};
 
     // Seed 1 entity with 0 mentions and 1 entity with 2 mentions.
     sqlx::query(
@@ -3200,7 +3200,7 @@ async fn entities_list_min_mentions_filter_uses_join_count() {
         .unwrap();
 
     // Two memories linked only to the 'Two' entity.
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
     let mem1 = insert_memory_at_layer(
         &pool,
         "body 1",
@@ -3265,10 +3265,10 @@ async fn entities_approve_flips_quarantine_and_is_idempotent() {
         &bin_dir,
         "eaf-d",
         "eaf-l",
-        &format!("hhagent-pg-eaf-{suffix}"),
+        &format!("kastellan-pg-eaf-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3277,11 +3277,11 @@ async fn entities_approve_flips_quarantine_and_is_idempotent() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::entities::{approve_entity, ApproveOutcome};
+    use kastellan_db::entities::{approve_entity, ApproveOutcome};
 
     sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES ('person', 'Approve Me', 'approve me')")
         .execute(&pool).await.unwrap();
@@ -3324,10 +3324,10 @@ async fn entities_reject_cascades_memory_entities_and_returns_count() {
         &bin_dir,
         "erc-d",
         "erc-l",
-        &format!("hhagent-pg-erc-{suffix}"),
+        &format!("kastellan-pg-erc-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3336,12 +3336,12 @@ async fn entities_reject_cascades_memory_entities_and_returns_count() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::entities::{reject_entity, RejectOutcome};
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::entities::{reject_entity, RejectOutcome};
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 
     sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES ('person', 'Reject Me', 'reject me')")
         .execute(&pool).await.unwrap();
@@ -3394,10 +3394,10 @@ async fn entities_reject_returns_not_found_on_unknown_id() {
         &bin_dir,
         "ernf-d",
         "ernf-l",
-        &format!("hhagent-pg-ernf-{suffix}"),
+        &format!("kastellan-pg-ernf-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3406,11 +3406,11 @@ async fn entities_reject_returns_not_found_on_unknown_id() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::entities::{reject_entity, RejectOutcome};
+    use kastellan_db::entities::{reject_entity, RejectOutcome};
     assert!(matches!(
         reject_entity(&pool, 999_999).await.unwrap(),
         RejectOutcome::NotFound
@@ -3433,10 +3433,10 @@ async fn entities_merge_retargets_links_and_drops_duplicates() {
         &bin_dir,
         "emr-d",
         "emr-l",
-        &format!("hhagent-pg-emr-{suffix}"),
+        &format!("kastellan-pg-emr-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3445,12 +3445,12 @@ async fn entities_merge_retargets_links_and_drops_duplicates() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::entities::merge_entities;
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::entities::merge_entities;
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 
     // 3 person entities: 'Smith' is the canonical row; 'SMITH' is a
     // near-duplicate the operator wants to merge in. The (kind, name_norm)
@@ -3527,10 +3527,10 @@ async fn entities_merge_dup_count_sums_rows_across_multiple_drops() {
         &bin_dir,
         "emd-d",
         "emd-l",
-        &format!("hhagent-pg-emd-{suffix}"),
+        &format!("kastellan-pg-emd-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3539,12 +3539,12 @@ async fn entities_merge_dup_count_sums_rows_across_multiple_drops() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::entities::merge_entities;
-    use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+    use kastellan_db::entities::merge_entities;
+    use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 
     sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES
         ('person', 'Smith',  'smith'),
@@ -3592,10 +3592,10 @@ async fn entities_merge_refuses_cross_kind_and_keep_in_drop_list() {
         &bin_dir,
         "emx-d",
         "emx-l",
-        &format!("hhagent-pg-emx-{suffix}"),
+        &format!("kastellan-pg-emx-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3604,11 +3604,11 @@ async fn entities_merge_refuses_cross_kind_and_keep_in_drop_list() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
-    use hhagent_db::entities::{merge_entities, EntitiesError};
+    use kastellan_db::entities::{merge_entities, EntitiesError};
 
     sqlx::query("INSERT INTO entities (kind, name, name_norm) VALUES
         ('person', 'Alice',  'alice'),
@@ -3689,10 +3689,10 @@ async fn migration_0017_seeds_relation_kinds_and_adds_fk() {
         &bin_dir,
         "m17-d",
         "m17-l",
-        &format!("hhagent-pg-m17-shape-{suffix}"),
+        &format!("kastellan-pg-m17-shape-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3701,7 +3701,7 @@ async fn migration_0017_seeds_relation_kinds_and_adds_fk() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -3750,7 +3750,7 @@ async fn migration_0017_seeds_relation_kinds_and_adds_fk() {
     // `fetch_relation_kinds` is the source-of-truth for the
     // `RelationKindsCache`. Pin it returns the same 19 seeds the
     // direct COUNT(*) saw and includes the load-bearing ones.
-    let kinds = hhagent_db::relation_kinds::fetch_relation_kinds(&pool)
+    let kinds = kastellan_db::relation_kinds::fetch_relation_kinds(&pool)
         .await
         .expect("fetch_relation_kinds");
     assert_eq!(kinds.len(), 19, "fetch returned {} kinds, want 19", kinds.len());
@@ -3787,10 +3787,10 @@ async fn relation_kinds_fk_rejects_unknown_kind_and_sets_default_on_delete() {
         &bin_dir,
         "m17-d",
         "m17-l",
-        &format!("hhagent-pg-m17-fk-{suffix}"),
+        &format!("kastellan-pg-m17-fk-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3799,7 +3799,7 @@ async fn relation_kinds_fk_rejects_unknown_kind_and_sets_default_on_delete() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -3886,10 +3886,10 @@ async fn relation_kinds_writes_denied_to_runtime_role() {
         &bin_dir,
         "m17-d",
         "m17-l",
-        &format!("hhagent-pg-m17-revoke-{suffix}"),
+        &format!("kastellan-pg-m17-revoke-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -3898,7 +3898,7 @@ async fn relation_kinds_writes_denied_to_runtime_role() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
@@ -3944,7 +3944,7 @@ async fn relation_kinds_writes_denied_to_runtime_role() {
 
 // ─── relation_kinds operator CLI surface ───────────────────────────────
 //
-// The next four tests cover the `hhagent-cli relations kinds {add,
+// The next four tests cover the `kastellan-cli relations kinds {add,
 // remove, list}` substrate (`db::relation_kinds::{add, remove, list_all}`
 // + `db::pool::connect_admin_pool`). They pin three load-bearing
 // invariants:
@@ -3988,10 +3988,10 @@ async fn admin_pool_can_write_relation_kinds_while_runtime_pool_cannot() {
         &bin_dir,
         "rk-ap-d",
         "rk-ap-l",
-        &format!("hhagent-pg-relation-kinds-admin-pool-{suffix}"),
+        &format!("kastellan-pg-relation-kinds-admin-pool-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4001,7 +4001,7 @@ async fn admin_pool_can_write_relation_kinds_while_runtime_pool_cannot() {
     .expect("probe");
 
     // Runtime-role pool: SELECT works, INSERT denied.
-    let runtime_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let runtime_pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relation_kinds")
@@ -4010,7 +4010,7 @@ async fn admin_pool_can_write_relation_kinds_while_runtime_pool_cannot() {
         .expect("runtime SELECT");
     assert!(n >= 19, "expected at least the 19 seed rows; got {n}");
 
-    let runtime_add = hhagent_db::relation_kinds::add(
+    let runtime_add = kastellan_db::relation_kinds::add(
         &runtime_pool,
         "operator-only-kind",
         Some("should be denied to runtime role"),
@@ -4023,10 +4023,10 @@ async fn admin_pool_can_write_relation_kinds_while_runtime_pool_cannot() {
     );
 
     // Admin-pool: same call succeeds.
-    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+    let admin_pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
         .await
         .expect("admin pool");
-    let inserted = hhagent_db::relation_kinds::add(
+    let inserted = kastellan_db::relation_kinds::add(
         &admin_pool,
         "operator-only-kind",
         Some("operator-added via admin pool"),
@@ -4064,10 +4064,10 @@ async fn relation_kinds_add_is_idempotent_and_persists_description() {
         &bin_dir,
         "rk-add-d",
         "rk-add-l",
-        &format!("hhagent-pg-relation-kinds-add-{suffix}"),
+        &format!("kastellan-pg-relation-kinds-add-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4076,12 +4076,12 @@ async fn relation_kinds_add_is_idempotent_and_persists_description() {
     .await
     .expect("probe");
 
-    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+    let admin_pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
         .await
         .expect("admin pool");
 
     // First add — description present.
-    let first = hhagent_db::relation_kinds::add(
+    let first = kastellan_db::relation_kinds::add(
         &admin_pool,
         "supervises",
         Some("management relation: subject supervises object"),
@@ -4091,7 +4091,7 @@ async fn relation_kinds_add_is_idempotent_and_persists_description() {
     assert!(first, "first add must INSERT");
 
     // Re-add — idempotent: no second INSERT, no description rewrite.
-    let second = hhagent_db::relation_kinds::add(&admin_pool, "supervises", None)
+    let second = kastellan_db::relation_kinds::add(&admin_pool, "supervises", None)
         .await
         .expect("idempotent re-add");
     assert!(!second, "re-add must be a no-op");
@@ -4111,7 +4111,7 @@ async fn relation_kinds_add_is_idempotent_and_persists_description() {
     );
 
     // Add a different kind with no description.
-    let third = hhagent_db::relation_kinds::add(&admin_pool, "tagged_with", None)
+    let third = kastellan_db::relation_kinds::add(&admin_pool, "tagged_with", None)
         .await
         .expect("add nondesc");
     assert!(third);
@@ -4145,10 +4145,10 @@ async fn relation_kinds_remove_rejects_undefined_sentinel() {
         &bin_dir,
         "rk-rm-d",
         "rk-rm-l",
-        &format!("hhagent-pg-relation-kinds-remove-{suffix}"),
+        &format!("kastellan-pg-relation-kinds-remove-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4157,20 +4157,20 @@ async fn relation_kinds_remove_rejects_undefined_sentinel() {
     .await
     .expect("probe");
 
-    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+    let admin_pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
         .await
         .expect("admin pool");
 
-    let r = hhagent_db::relation_kinds::remove(
+    let r = kastellan_db::relation_kinds::remove(
         &admin_pool,
-        hhagent_db::relation_kinds::RELATION_KIND_UNDEFINED,
+        kastellan_db::relation_kinds::RELATION_KIND_UNDEFINED,
     )
     .await;
     let err = r.expect_err("undefined removal must be rejected");
     assert!(
         matches!(
             err,
-            hhagent_db::relation_kinds::RelationKindError::RemovalOfUndefinedRejected
+            kastellan_db::relation_kinds::RelationKindError::RemovalOfUndefinedRejected
         ),
         "expected RemovalOfUndefinedRejected; got: {err:?}",
     );
@@ -4190,17 +4190,17 @@ async fn relation_kinds_remove_rejects_undefined_sentinel() {
     // must still work (proves the rejection is targeted, not a
     // permission/wiring problem masquerading as a sentinel reject).
     let inserted =
-        hhagent_db::relation_kinds::add(&admin_pool, "throwaway_kind_for_remove_e2e", None)
+        kastellan_db::relation_kinds::add(&admin_pool, "throwaway_kind_for_remove_e2e", None)
             .await
             .expect("seed throwaway");
     assert!(inserted);
     let removed =
-        hhagent_db::relation_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
+        kastellan_db::relation_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
             .await
             .expect("remove throwaway");
     assert!(removed, "real remove must succeed");
     let removed_again =
-        hhagent_db::relation_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
+        kastellan_db::relation_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
             .await
             .expect("idempotent re-remove");
     assert!(!removed_again, "second remove of same kind must be no-op");
@@ -4226,10 +4226,10 @@ async fn relation_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
         &bin_dir,
         "rk-ls-d",
         "rk-ls-l",
-        &format!("hhagent-pg-relation-kinds-list-{suffix}"),
+        &format!("kastellan-pg-relation-kinds-list-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4238,12 +4238,12 @@ async fn relation_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
     .await
     .expect("probe");
 
-    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+    let admin_pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
         .await
         .expect("admin pool");
 
     // Seed-only baseline: 19 rows.
-    let baseline = hhagent_db::relation_kinds::list_all(&admin_pool)
+    let baseline = kastellan_db::relation_kinds::list_all(&admin_pool)
         .await
         .expect("list_all baseline");
     assert_eq!(baseline.len(), 19, "0017 seeds 19 kinds");
@@ -4260,11 +4260,11 @@ async fn relation_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
 
     // Add a kind that sorts mid-alphabet so the ordering check is
     // not a tautology of the static seed list.
-    hhagent_db::relation_kinds::add(&admin_pool, "mentions", Some("test-only marker"))
+    kastellan_db::relation_kinds::add(&admin_pool, "mentions", Some("test-only marker"))
         .await
         .expect("seed marker kind");
 
-    let after = hhagent_db::relation_kinds::list_all(&admin_pool)
+    let after = kastellan_db::relation_kinds::list_all(&admin_pool)
         .await
         .expect("list_all after");
     assert_eq!(after.len(), 20, "post-add count must be 20");
@@ -4281,7 +4281,7 @@ async fn relation_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
 // ─── entity_kinds operator CLI surface ─────────────────────────────────
 //
 // Mirror of the relation_kinds tests above, covering the same four
-// load-bearing invariants for the `hhagent-cli entities kinds
+// load-bearing invariants for the `kastellan-cli entities kinds
 // {add,remove,list}` substrate (`db::entity_kinds::{add, remove,
 // list_all}` + the shared `db::pool::connect_admin_pool`):
 //
@@ -4316,10 +4316,10 @@ async fn admin_pool_can_write_entity_kinds_while_runtime_pool_cannot() {
         &bin_dir,
         "ek-ap-d",
         "ek-ap-l",
-        &format!("hhagent-pg-entity-kinds-admin-pool-{suffix}"),
+        &format!("kastellan-pg-entity-kinds-admin-pool-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4329,7 +4329,7 @@ async fn admin_pool_can_write_entity_kinds_while_runtime_pool_cannot() {
     .expect("probe");
 
     // Runtime-role pool: SELECT works, INSERT denied.
-    let runtime_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let runtime_pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity_kinds")
@@ -4339,7 +4339,7 @@ async fn admin_pool_can_write_entity_kinds_while_runtime_pool_cannot() {
     // Migration 0015 seeds 20 rows (1 undefined + 19 starters).
     assert!(n >= 20, "expected at least the 20 seed rows; got {n}");
 
-    let runtime_add = hhagent_db::entity_kinds::add(
+    let runtime_add = kastellan_db::entity_kinds::add(
         &runtime_pool,
         "operator-only-entity-kind",
         Some("should be denied to runtime role"),
@@ -4352,10 +4352,10 @@ async fn admin_pool_can_write_entity_kinds_while_runtime_pool_cannot() {
     );
 
     // Admin-pool: same call succeeds.
-    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+    let admin_pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
         .await
         .expect("admin pool");
-    let inserted = hhagent_db::entity_kinds::add(
+    let inserted = kastellan_db::entity_kinds::add(
         &admin_pool,
         "operator-only-entity-kind",
         Some("operator-added via admin pool"),
@@ -4393,10 +4393,10 @@ async fn entity_kinds_add_is_idempotent_and_persists_description() {
         &bin_dir,
         "ek-add-d",
         "ek-add-l",
-        &format!("hhagent-pg-entity-kinds-add-{suffix}"),
+        &format!("kastellan-pg-entity-kinds-add-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4405,11 +4405,11 @@ async fn entity_kinds_add_is_idempotent_and_persists_description() {
     .await
     .expect("probe");
 
-    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+    let admin_pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
         .await
         .expect("admin pool");
 
-    let first = hhagent_db::entity_kinds::add(
+    let first = kastellan_db::entity_kinds::add(
         &admin_pool,
         "research_subject",
         Some("clinical-trial-context individual"),
@@ -4420,7 +4420,7 @@ async fn entity_kinds_add_is_idempotent_and_persists_description() {
 
     // Re-add with None description — must NOT overwrite the original
     // Some(...).
-    let second = hhagent_db::entity_kinds::add(&admin_pool, "research_subject", None)
+    let second = kastellan_db::entity_kinds::add(&admin_pool, "research_subject", None)
         .await
         .expect("idempotent re-add");
     assert!(!second, "re-add must be a no-op");
@@ -4438,7 +4438,7 @@ async fn entity_kinds_add_is_idempotent_and_persists_description() {
     );
 
     // None description from the start persists as SQL NULL.
-    let third = hhagent_db::entity_kinds::add(&admin_pool, "site_visit", None)
+    let third = kastellan_db::entity_kinds::add(&admin_pool, "site_visit", None)
         .await
         .expect("add nondesc");
     assert!(third);
@@ -4471,10 +4471,10 @@ async fn entity_kinds_remove_rejects_undefined_sentinel() {
         &bin_dir,
         "ek-rm-d",
         "ek-rm-l",
-        &format!("hhagent-pg-entity-kinds-remove-{suffix}"),
+        &format!("kastellan-pg-entity-kinds-remove-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4483,20 +4483,20 @@ async fn entity_kinds_remove_rejects_undefined_sentinel() {
     .await
     .expect("probe");
 
-    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+    let admin_pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
         .await
         .expect("admin pool");
 
-    let r = hhagent_db::entity_kinds::remove(
+    let r = kastellan_db::entity_kinds::remove(
         &admin_pool,
-        hhagent_db::entity_kinds::ENTITY_KIND_UNDEFINED,
+        kastellan_db::entity_kinds::ENTITY_KIND_UNDEFINED,
     )
     .await;
     let err = r.expect_err("undefined removal must be rejected");
     assert!(
         matches!(
             err,
-            hhagent_db::entity_kinds::EntityKindError::RemovalOfUndefinedRejected
+            kastellan_db::entity_kinds::EntityKindError::RemovalOfUndefinedRejected
         ),
         "expected RemovalOfUndefinedRejected; got: {err:?}",
     );
@@ -4516,17 +4516,17 @@ async fn entity_kinds_remove_rejects_undefined_sentinel() {
     // assertions in other tests if they shared the cluster, which
     // they don't, but defence-in-depth is cheap).
     let inserted =
-        hhagent_db::entity_kinds::add(&admin_pool, "throwaway_kind_for_remove_e2e", None)
+        kastellan_db::entity_kinds::add(&admin_pool, "throwaway_kind_for_remove_e2e", None)
             .await
             .expect("seed throwaway");
     assert!(inserted);
     let removed =
-        hhagent_db::entity_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
+        kastellan_db::entity_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
             .await
             .expect("remove throwaway");
     assert!(removed, "real remove must succeed");
     let removed_again =
-        hhagent_db::entity_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
+        kastellan_db::entity_kinds::remove(&admin_pool, "throwaway_kind_for_remove_e2e")
             .await
             .expect("idempotent re-remove");
     assert!(!removed_again);
@@ -4553,10 +4553,10 @@ async fn entity_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
         &bin_dir,
         "ek-ls-d",
         "ek-ls-l",
-        &format!("hhagent-pg-entity-kinds-list-{suffix}"),
+        &format!("kastellan-pg-entity-kinds-list-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4565,12 +4565,12 @@ async fn entity_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
     .await
     .expect("probe");
 
-    let admin_pool = hhagent_db::pool::connect_admin_pool(&cluster.conn_spec)
+    let admin_pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
         .await
         .expect("admin pool");
 
     // Seed-only baseline: 20 rows (1 undefined + 19 starters per 0015).
-    let baseline = hhagent_db::entity_kinds::list_all(&admin_pool)
+    let baseline = kastellan_db::entity_kinds::list_all(&admin_pool)
         .await
         .expect("list_all baseline");
     assert_eq!(baseline.len(), 20, "0015 seeds 20 entity kinds");
@@ -4585,11 +4585,11 @@ async fn entity_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
     }
 
     // Mid-alphabet add proves ordering is dynamic.
-    hhagent_db::entity_kinds::add(&admin_pool, "intermediate", Some("test-only marker"))
+    kastellan_db::entity_kinds::add(&admin_pool, "intermediate", Some("test-only marker"))
         .await
         .expect("seed marker kind");
 
-    let after = hhagent_db::entity_kinds::list_all(&admin_pool)
+    let after = kastellan_db::entity_kinds::list_all(&admin_pool)
         .await
         .expect("list_all after");
     assert_eq!(after.len(), 21, "post-add count must be 21");
@@ -4622,7 +4622,7 @@ async fn entity_kinds_list_all_returns_seeded_rows_ordered_by_kind() {
 
 /// Runtime-role pool can read the full `relation_kinds` table via
 /// `list_all`. Pins the SELECT-via-runtime-pool path used by
-/// `hhagent-cli relations kinds list` post-#111 item 1.
+/// `kastellan-cli relations kinds list` post-#111 item 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn relation_kinds_list_all_via_runtime_pool_returns_seed_rows() {
     if skip_if_no_supervisor() {
@@ -4637,10 +4637,10 @@ async fn relation_kinds_list_all_via_runtime_pool_returns_seed_rows() {
         &bin_dir,
         "rk-rl-d",
         "rk-rl-l",
-        &format!("hhagent-pg-relation-kinds-runtime-list-{suffix}"),
+        &format!("kastellan-pg-relation-kinds-runtime-list-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4649,11 +4649,11 @@ async fn relation_kinds_list_all_via_runtime_pool_returns_seed_rows() {
     .await
     .expect("probe");
 
-    let runtime_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let runtime_pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
-    let entries = hhagent_db::relation_kinds::list_all(&runtime_pool)
+    let entries = kastellan_db::relation_kinds::list_all(&runtime_pool)
         .await
         .expect("list_all via runtime pool must succeed (GRANT SELECT covers it)");
     assert_eq!(entries.len(), 19, "0017 seeds 19 relation kinds");
@@ -4669,7 +4669,7 @@ async fn relation_kinds_list_all_via_runtime_pool_returns_seed_rows() {
 
 /// Runtime-role pool can read the full `entity_kinds` table via
 /// `list_all`. Pins the SELECT-via-runtime-pool path used by
-/// `hhagent-cli entities kinds list` post-#111 item 1. Twin of
+/// `kastellan-cli entities kinds list` post-#111 item 1. Twin of
 /// `relation_kinds_list_all_via_runtime_pool_returns_seed_rows`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entity_kinds_list_all_via_runtime_pool_returns_seed_rows() {
@@ -4685,10 +4685,10 @@ async fn entity_kinds_list_all_via_runtime_pool_returns_seed_rows() {
         &bin_dir,
         "ek-rl-d",
         "ek-rl-l",
-        &format!("hhagent-pg-entity-kinds-runtime-list-{suffix}"),
+        &format!("kastellan-pg-entity-kinds-runtime-list-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4697,11 +4697,11 @@ async fn entity_kinds_list_all_via_runtime_pool_returns_seed_rows() {
     .await
     .expect("probe");
 
-    let runtime_pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let runtime_pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("runtime pool");
 
-    let entries = hhagent_db::entity_kinds::list_all(&runtime_pool)
+    let entries = kastellan_db::entity_kinds::list_all(&runtime_pool)
         .await
         .expect("list_all via runtime pool must succeed (GRANT SELECT covers it)");
     assert_eq!(entries.len(), 20, "0015 seeds 20 entity kinds");
@@ -4716,7 +4716,7 @@ async fn entity_kinds_list_all_via_runtime_pool_returns_seed_rows() {
 // ─── Graph::walk_outbound_edges / walk_inbound_edges (Next-TODO Item 21) ───
 //
 // These tests pin the shape of the new operator-facing graph-walking
-// methods that back `hhagent-cli relations show <entity-id>`. The
+// methods that back `kastellan-cli relations show <entity-id>`. The
 // fixture builds a small clinical-style graph:
 //
 //     dr_smith --[treats]----> asthma --[has_symptom]--> wheezing
@@ -4738,10 +4738,10 @@ async fn bring_up_pg_for_walk_test(test_label: &str) -> (PgClusterGuard, sqlx::P
         &bin_dir,
         &format!("{test_label}-d"),
         &format!("{test_label}-l"),
-        &format!("hhagent-pg-{test_label}-{suffix}"),
+        &format!("kastellan-pg-{test_label}-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -4750,7 +4750,7 @@ async fn bring_up_pg_for_walk_test(test_label: &str) -> (PgClusterGuard, sqlx::P
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -4759,8 +4759,8 @@ async fn bring_up_pg_for_walk_test(test_label: &str) -> (PgClusterGuard, sqlx::P
 
 /// Local re-alias of the cluster type so the helper above has a
 /// concrete return type. The actual struct lives in
-/// `hhagent_tests_common`; we don't move it.
-type PgClusterGuard = hhagent_tests_common::PgCluster;
+/// `kastellan_tests_common`; we don't move it.
+type PgClusterGuard = kastellan_tests_common::PgCluster;
 
 /// Empty seed (no outbound edges) returns an empty Vec — no
 /// `Option::None` ambiguity, no SQL-level NULL row, no panic.
@@ -4774,9 +4774,9 @@ async fn walk_outbound_edges_empty_seed_returns_empty() {
     }
 
     let (_cluster, pool) = bring_up_pg_for_walk_test("walk-empty").await;
-    let g = hhagent_db::graph::PgGraph::new(&pool);
+    let g = kastellan_db::graph::PgGraph::new(&pool);
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
     let lonely = g
         .upsert_entity("person", "loner", &serde_json::json!({}))
         .await
@@ -4819,9 +4819,9 @@ async fn walk_outbound_edges_max_depth_zero_returns_empty() {
     }
 
     let (_cluster, pool) = bring_up_pg_for_walk_test("walk-d0").await;
-    let g = hhagent_db::graph::PgGraph::new(&pool);
+    let g = kastellan_db::graph::PgGraph::new(&pool);
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
     // Seed a real edge so the test would fail noisily if max_depth=0
     // *did* somehow surface a row.
     let a = g.upsert_entity("person", "a", &serde_json::json!({})).await.unwrap();
@@ -4857,9 +4857,9 @@ async fn walk_outbound_edges_one_hop_returns_direct_edges() {
     }
 
     let (_cluster, pool) = bring_up_pg_for_walk_test("walk-1hop").await;
-    let g = hhagent_db::graph::PgGraph::new(&pool);
+    let g = kastellan_db::graph::PgGraph::new(&pool);
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
     // Seed in deterministic insertion order so edge_id ordering is
     // predictable.
     // All kinds used here are pre-seeded vocabulary: `person` /
@@ -4933,9 +4933,9 @@ async fn walk_outbound_edges_respects_max_depth_bound() {
     }
 
     let (_cluster, pool) = bring_up_pg_for_walk_test("walk-depth").await;
-    let g = hhagent_db::graph::PgGraph::new(&pool);
+    let g = kastellan_db::graph::PgGraph::new(&pool);
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
     // All entity/relation kinds are pre-seeded vocabulary.
     let a = g.upsert_entity("person", "Dr Smith", &serde_json::json!({})).await.unwrap();
     let b = g.upsert_entity("disease", "asthma", &serde_json::json!({})).await.unwrap();
@@ -4974,9 +4974,9 @@ async fn walk_outbound_edges_terminates_on_cycle() {
     }
 
     let (_cluster, pool) = bring_up_pg_for_walk_test("walk-cycle").await;
-    let g = hhagent_db::graph::PgGraph::new(&pool);
+    let g = kastellan_db::graph::PgGraph::new(&pool);
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
     let alice = g.upsert_entity("person", "alice", &serde_json::json!({})).await.unwrap();
     let bob = g.upsert_entity("person", "bob", &serde_json::json!({})).await.unwrap();
 
@@ -5010,9 +5010,9 @@ async fn walk_inbound_edges_preserves_canonical_orientation() {
     }
 
     let (_cluster, pool) = bring_up_pg_for_walk_test("walk-inbound").await;
-    let g = hhagent_db::graph::PgGraph::new(&pool);
+    let g = kastellan_db::graph::PgGraph::new(&pool);
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
     // `associated with` + `refers to` are pre-seeded relation kinds.
     // `patient` is a pre-seeded entity kind.
     let dr = g.upsert_entity("person", "Dr Smith", &serde_json::json!({})).await.unwrap();
@@ -5058,9 +5058,9 @@ async fn walk_outbound_edges_honours_limit_argument() {
     }
 
     let (_cluster, pool) = bring_up_pg_for_walk_test("walk-limit").await;
-    let g = hhagent_db::graph::PgGraph::new(&pool);
+    let g = kastellan_db::graph::PgGraph::new(&pool);
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
     let hub = g.upsert_entity("person", "hub", &serde_json::json!({})).await.unwrap();
     for i in 0..20 {
         let other = g
@@ -5080,7 +5080,7 @@ async fn walk_outbound_edges_honours_limit_argument() {
 }
 
 /// Diamond-topology regression pin for [issue
-/// #114](https://github.com/hherb/hhagent/issues/114): a unique
+/// #114](https://github.com/hherb/kastellan/issues/114): a unique
 /// `edge_id` reachable by *multiple* paths from the seed must appear
 /// exactly once in the result, anchored to its **shortest-path
 /// depth**.
@@ -5121,9 +5121,9 @@ async fn walk_edges_dedupes_diamond_topology_to_shortest_depth() {
     }
 
     let (_cluster, pool) = bring_up_pg_for_walk_test("walk-dmnd").await;
-    let g = hhagent_db::graph::PgGraph::new(&pool);
+    let g = kastellan_db::graph::PgGraph::new(&pool);
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
     let a = g.upsert_entity("person", "a", &serde_json::json!({})).await.unwrap();
     let b = g.upsert_entity("person", "b", &serde_json::json!({})).await.unwrap();
     let c = g.upsert_entity("person", "c", &serde_json::json!({})).await.unwrap();
@@ -5150,7 +5150,7 @@ async fn walk_edges_dedupes_diamond_topology_to_shortest_depth() {
     // The diamond's "bottom" edge C→D is reachable by two paths
     // (A-C-D shortest, A-B-C-D longest). The kept row must carry the
     // shortest depth.
-    let cd_rows: Vec<&hhagent_db::graph::WalkedEdge> =
+    let cd_rows: Vec<&kastellan_db::graph::WalkedEdge> =
         outbound.iter().filter(|e| e.edge_id == e_cd).collect();
     assert_eq!(cd_rows.len(), 1, "edge_CD must appear exactly once");
     assert_eq!(
@@ -5186,7 +5186,7 @@ async fn walk_edges_dedupes_diamond_topology_to_shortest_depth() {
     pool.close().await;
 }
 
-/// [Issue #115](https://github.com/hherb/hhagent/issues/115) regression
+/// [Issue #115](https://github.com/hherb/kastellan/issues/115) regression
 /// pin: `Graph::walk_edges_around` issues a single UNION ALL query
 /// that returns the same byte-equivalent content as separate
 /// `walk_outbound_edges` + `walk_inbound_edges` calls.
@@ -5218,9 +5218,9 @@ async fn walk_edges_around_matches_separate_walks_and_clips_per_direction() {
     }
 
     let (_cluster, pool) = bring_up_pg_for_walk_test("walk-arnd").await;
-    let g = hhagent_db::graph::PgGraph::new(&pool);
+    let g = kastellan_db::graph::PgGraph::new(&pool);
 
-    use hhagent_db::graph::Graph;
+    use kastellan_db::graph::Graph;
 
     // Build a fixture with non-trivial structure in both directions
     // around a single seed (`hub`). Each of `a`, `b`, `c` points at
@@ -5318,10 +5318,10 @@ async fn set_skill_trust_flips_and_is_layer_guarded() {
         &bin_dir,
         "sst-d",
         "sst-l",
-        &format!("hhagent-pg-sst-{suffix}"),
+        &format!("kastellan-pg-sst-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -5330,34 +5330,34 @@ async fn set_skill_trust_flips_and_is_layer_guarded() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
     // Seed one L3 row (trust starts "untrusted") and one L1 row.
     let meta = serde_json::json!({ "trust": "untrusted", "template": {"name": "s"} });
-    let l3_id = hhagent_db::memories::insert_memory_at_layer(
+    let l3_id = kastellan_db::memories::insert_memory_at_layer(
         &pool,
         "body",
         &meta,
         None,
-        hhagent_db::memories::MemoryLayer::Skill,
+        kastellan_db::memories::MemoryLayer::Skill,
     )
     .await
     .expect("insert L3");
-    let l1_id = hhagent_db::memories::insert_memory_at_layer(
+    let l1_id = kastellan_db::memories::insert_memory_at_layer(
         &pool,
         "idxbody",
         &serde_json::json!({"trust": "untrusted"}),
         None,
-        hhagent_db::memories::MemoryLayer::Index,
+        kastellan_db::memories::MemoryLayer::Index,
     )
     .await
     .expect("insert L1");
 
     // Flip the L3 row → returns true, metadata.trust becomes user_approved,
     // and the rest of metadata is preserved.
-    let updated = hhagent_db::memories::set_skill_trust(&pool, l3_id, "user_approved")
+    let updated = kastellan_db::memories::set_skill_trust(&pool, l3_id, "user_approved")
         .await
         .expect("set_skill_trust");
     assert!(updated, "existing L3 row must report updated=true");
@@ -5377,7 +5377,7 @@ async fn set_skill_trust_flips_and_is_layer_guarded() {
     );
 
     // Layer guard: the same id on the wrong layer (L1) is a no-op.
-    let l1_updated = hhagent_db::memories::set_skill_trust(&pool, l1_id, "user_approved")
+    let l1_updated = kastellan_db::memories::set_skill_trust(&pool, l1_id, "user_approved")
         .await
         .expect("set_skill_trust L1");
     assert!(
@@ -5386,7 +5386,7 @@ async fn set_skill_trust_flips_and_is_layer_guarded() {
     );
 
     // Non-existent id → false.
-    let ghost = hhagent_db::memories::set_skill_trust(&pool, 999_999, "user_approved")
+    let ghost = kastellan_db::memories::set_skill_trust(&pool, 999_999, "user_approved")
         .await
         .expect("set_skill_trust ghost");
     assert!(!ghost);

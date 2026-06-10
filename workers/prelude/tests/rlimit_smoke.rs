@@ -1,6 +1,6 @@
 //! Cross-platform integration test for `workers/prelude/src/rlimit.rs`.
 //!
-//! Spawns the `lockdown-probe cpu-burner` binary with `HHAGENT_CPU_MS=200`
+//! Spawns the `lockdown-probe cpu-burner` binary with `KASTELLAN_CPU_MS=200`
 //! and verifies the kernel kills it via signal (SIGXCPU → SIGKILL)
 //! within a generous wall-clock budget. The regression we're guarding
 //! against is "rlimit was not applied at all" — which would let the
@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 /// Cargo provides this env var at compile time for tests in the same
 /// crate as the binary target. Resolves to the absolute path of the
-/// built `hhagent-lockdown-probe` binary in the workspace target dir.
+/// built `kastellan-lockdown-probe` binary in the workspace target dir.
 /// Same pattern `seccomp_smoke.rs` uses.
-const PROBE: &str = env!("CARGO_BIN_EXE_hhagent-lockdown-probe");
+const PROBE: &str = env!("CARGO_BIN_EXE_kastellan-lockdown-probe");
 
 #[test]
 fn cpu_burner_under_short_budget_is_killed_promptly() {
@@ -28,7 +28,7 @@ fn cpu_burner_under_short_budget_is_killed_promptly() {
     let status = Command::new(PROBE)
         .arg("cpu-burner")
         .env_clear()
-        .env("HHAGENT_CPU_MS", "200")
+        .env("KASTELLAN_CPU_MS", "200")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -42,7 +42,7 @@ fn cpu_burner_under_short_budget_is_killed_promptly() {
     // process died via signal — which is the load-bearing fact.
     assert!(
         status.code().is_none(),
-        "expected cpu-burner to be killed by signal under HHAGENT_CPU_MS=200, \
+        "expected cpu-burner to be killed by signal under KASTELLAN_CPU_MS=200, \
          got exit code {:?} after {:?}",
         status.code(),
         elapsed
@@ -60,7 +60,7 @@ fn cpu_burner_under_short_budget_is_killed_promptly() {
 
 #[test]
 fn cpu_burner_with_no_env_runs_past_one_second() {
-    // Positive control: without HHAGENT_CPU_MS the burner runs
+    // Positive control: without KASTELLAN_CPU_MS the burner runs
     // unmolested. A future regression that silently disables
     // apply_from_env (e.g. always returns Disabled regardless of env)
     // would still pass the first test alone — this test catches that.
@@ -87,7 +87,7 @@ fn cpu_burner_with_no_env_runs_past_one_second() {
 
     assert!(
         still_running,
-        "expected cpu-burner with no HHAGENT_CPU_MS to still be running after 2s; \
+        "expected cpu-burner with no KASTELLAN_CPU_MS to still be running after 2s; \
          it exited early, which suggests apply_from_env is incorrectly applying a default cap"
     );
 }

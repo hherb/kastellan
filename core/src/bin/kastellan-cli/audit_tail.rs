@@ -1,12 +1,12 @@
 //! `audit tail` subcommand — streams the daemon's
 //! `audit-YYYY-MM-DD.jsonl` mirror files under
-//! `~/.local/state/hhagent/`. Needs no Postgres connection.
+//! `~/.local/state/kastellan/`. Needs no Postgres connection.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use hhagent_core::audit_mirror;
-use hhagent_core::audit_tail::{tail_loop, TailConfig};
+use kastellan_core::audit_mirror;
+use kastellan_core::audit_tail::{tail_loop, TailConfig};
 
 pub(crate) fn run_audit_tail(args: &[String]) -> ExitCode {
     let mut from_start = false;
@@ -89,7 +89,7 @@ pub(crate) fn run_audit_tail(args: &[String]) -> ExitCode {
         // perspective. Match BSD `tail`'s behaviour.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::from(0),
         Err(e) => {
-            eprintln!("hhagent-cli audit tail: {e}");
+            eprintln!("kastellan-cli audit tail: {e}");
             ExitCode::from(1)
         }
     }

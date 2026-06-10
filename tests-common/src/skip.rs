@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
-use hhagent_db::{find_pg_bin_dir, pg_bin_dir_candidates_with_env_override};
-use hhagent_supervisor::default_probe;
+use kastellan_db::{find_pg_bin_dir, pg_bin_dir_candidates_with_env_override};
+use kastellan_supervisor::default_probe;
 
 /// Returns `true` if the user-level supervisor probe fails. Caller
 /// should `return` immediately so the test body never runs.
@@ -30,7 +30,7 @@ pub fn skip_if_no_supervisor() -> bool {
 /// Returns the discovered Postgres `bin/` directory, or `None` if no
 /// known PGDG / Homebrew layout was found on this host.
 ///
-/// Honours the `HHAGENT_PG_BIN_DIR` env var via
+/// Honours the `KASTELLAN_PG_BIN_DIR` env var via
 /// [`pg_bin_dir_candidates_with_env_override`] so operators running on
 /// Postgres.app or any non-standard install can opt in by exporting the
 /// bin-dir path; see that helper's doc-comment for semantics.

@@ -354,16 +354,16 @@ fn fs_read_emits_readonly_bind_mount_per_path() {
 #[test]
 fn fs_write_emits_writable_bind_mount_per_path() {
     let mut p = strict_policy();
-    p.fs_write = vec![PathBuf::from("/var/lib/hhagent/scratch")];
+    p.fs_write = vec![PathBuf::from("/var/lib/kastellan/scratch")];
     let argv = build_container_argv(&p, DEFAULT_IMAGE, "/bin/true", &[]);
     let joined = argv.join(" ");
     assert!(
-        joined.contains("--mount type=bind,source=/var/lib/hhagent/scratch,target=/var/lib/hhagent/scratch"),
+        joined.contains("--mount type=bind,source=/var/lib/kastellan/scratch,target=/var/lib/kastellan/scratch"),
         "got: {argv:?}"
     );
     // The fs_write path must NOT emit a separate `,readonly` mount.
     assert!(
-        !joined.contains("type=bind,source=/var/lib/hhagent/scratch,target=/var/lib/hhagent/scratch,readonly"),
+        !joined.contains("type=bind,source=/var/lib/kastellan/scratch,target=/var/lib/kastellan/scratch,readonly"),
         "fs_write path was emitted as readonly; got: {argv:?}"
     );
 }
@@ -373,11 +373,11 @@ fn env_entries_emit_dash_e_kv() {
     let mut p = strict_policy();
     p.env = vec![
         ("FOO".into(), "bar".into()),
-        ("HHAGENT_CPU_MS".into(), "5000".into()),
+        ("KASTELLAN_CPU_MS".into(), "5000".into()),
     ];
     let argv = build_container_argv(&p, DEFAULT_IMAGE, "/bin/true", &[]);
     // -e flags appear as adjacent pairs; locate by value.
-    for needle in &["FOO=bar", "HHAGENT_CPU_MS=5000"] {
+    for needle in &["FOO=bar", "KASTELLAN_CPU_MS=5000"] {
         let i = argv
             .iter()
             .position(|s| s == needle)
@@ -457,10 +457,10 @@ fn default_constructor_uses_default_image() {
 /// spawn), so a deliberate test update is the right friction.
 #[test]
 fn build_image_inspect_argv_shape() {
-    let argv = build_image_inspect_argv("hhagent/gliner-relex:dev");
+    let argv = build_image_inspect_argv("kastellan/gliner-relex:dev");
     assert_eq!(
         argv,
-        vec!["container", "image", "inspect", "hhagent/gliner-relex:dev"]
+        vec!["container", "image", "inspect", "kastellan/gliner-relex:dev"]
     );
 }
 

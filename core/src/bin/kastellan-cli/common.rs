@@ -1,4 +1,4 @@
-//! Helpers shared across more than one `hhagent-cli` subcommand.
+//! Helpers shared across more than one `kastellan-cli` subcommand.
 //!
 //! Kept deliberately small. If a helper is used by exactly one subcommand
 //! it belongs in that subcommand's module, not here.
@@ -6,16 +6,16 @@
 use std::fmt::Write;
 use std::process::ExitCode;
 
-/// Build a [`hhagent_db::conn::ConnectSpec`] from `$HHAGENT_DATA_DIR`
+/// Build a [`kastellan_db::conn::ConnectSpec`] from `$KASTELLAN_DATA_DIR`
 /// (if set) or the XDG default. Fails with a human-readable error string
 /// when `$HOME` is unset (needed by `ConnectSpec::default_for`).
-pub(crate) fn resolve_connect_spec() -> Result<hhagent_db::conn::ConnectSpec, String> {
-    let data_dir = match std::env::var_os("HHAGENT_DATA_DIR") {
+pub(crate) fn resolve_connect_spec() -> Result<kastellan_db::conn::ConnectSpec, String> {
+    let data_dir = match std::env::var_os("KASTELLAN_DATA_DIR") {
         Some(p) => std::path::PathBuf::from(p),
-        None => hhagent_db::default_data_dir()
+        None => kastellan_db::default_data_dir()
             .ok_or_else(|| "$HOME unset; cannot resolve cluster data dir".to_string())?,
     };
-    hhagent_db::conn::ConnectSpec::default_for(&data_dir)
+    kastellan_db::conn::ConnectSpec::default_for(&data_dir)
         .map_err(|e| format!("resolving Postgres connection: {e}"))
 }
 
@@ -32,8 +32,8 @@ pub(crate) fn resolve_connect_spec() -> Result<hhagent_db::conn::ConnectSpec, St
 /// one step.
 pub(crate) fn parse_classification_floor(
     raw: &str,
-) -> Result<hhagent_core::cassandra::DataClass, String> {
-    use hhagent_core::cassandra::DataClass;
+) -> Result<kastellan_core::cassandra::DataClass, String> {
+    use kastellan_core::cassandra::DataClass;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(
@@ -118,7 +118,7 @@ pub(crate) struct KindRow<'a> {
 /// first two columns; `DESCRIPTION` is the last column and not
 /// padded. Replaces the original `{:<24}` fixed-width formatter
 /// flagged as a truncation footgun by
-/// [#111](https://github.com/hherb/hhagent/issues/111) item 2 — with
+/// [#111](https://github.com/hherb/kastellan/issues/111) item 2 — with
 /// `MAX_{ENTITY,RELATION}_KIND_LEN = 64`, a 64-byte kind under the
 /// old code crowded the `CREATED_AT` column out of alignment. The
 /// dynamic widths absorb the longest row cleanly.
@@ -292,7 +292,7 @@ mod format_kinds_table_tests {
 #[cfg(test)]
 mod parse_classification_floor_tests {
     use super::parse_classification_floor;
-    use hhagent_core::cassandra::DataClass;
+    use kastellan_core::cassandra::DataClass;
 
     #[test]
     fn accepts_canonical_pascal_case() {

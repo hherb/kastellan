@@ -38,9 +38,9 @@ fn build_plist_starts_with_xml_preamble_and_doctype() {
 
 #[test]
 fn build_plist_emits_label_matching_name() {
-    let s = build_plist(&minimal_spec("hhagent-core"));
+    let s = build_plist(&minimal_spec("kastellan-core"));
     assert!(
-        s.contains("<key>Label</key>\n    <string>hhagent-core</string>"),
+        s.contains("<key>Label</key>\n    <string>kastellan-core</string>"),
         "{s}"
     );
 }
@@ -94,10 +94,10 @@ fn build_plist_omits_environment_variables_when_empty() {
 #[test]
 fn build_plist_emits_working_directory_when_set() {
     let mut spec = minimal_spec("svc");
-    spec.working_dir = Some(PathBuf::from("/var/lib/hhagent"));
+    spec.working_dir = Some(PathBuf::from("/var/lib/kastellan"));
     let s = build_plist(&spec);
     assert!(
-        s.contains("<key>WorkingDirectory</key>\n    <string>/var/lib/hhagent</string>"),
+        s.contains("<key>WorkingDirectory</key>\n    <string>/var/lib/kastellan</string>"),
         "{s}"
     );
 }
@@ -189,10 +189,10 @@ fn build_plist_label_is_xml_escaped() {
 #[test]
 fn validate_service_name_accepts_typical_names() {
     for n in &[
-        "hhagent",
-        "hhagent-core",
-        "hhagent.core",
-        "org.hhagent.core",
+        "kastellan",
+        "kastellan-core",
+        "kastellan.core",
+        "org.kastellan.core",
         "a_b",
         "abc123",
     ] {
@@ -255,10 +255,10 @@ fn build_plist_ignores_after_and_part_of() {
     // launchd has no ordering / target concept: setting these fields
     // must not change the emitted plist. This pins the documented
     // "ignored on launchd" contract.
-    let base = minimal_spec("hhagent-core");
-    let mut with_ordering = minimal_spec("hhagent-core");
-    with_ordering.after = vec!["hhagent-postgres".into()];
-    with_ordering.part_of = Some("hhagent".into());
+    let base = minimal_spec("kastellan-core");
+    let mut with_ordering = minimal_spec("kastellan-core");
+    with_ordering.after = vec!["kastellan-postgres".into()];
+    with_ordering.part_of = Some("kastellan".into());
     assert_eq!(build_plist(&base), build_plist(&with_ordering));
 }
 

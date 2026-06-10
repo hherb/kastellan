@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land automatic classification-floor inference so `hhagent-cli ask` no longer requires `--classification-floor` for clinical work, plus a defence-in-depth `Plan.floor_request` channel that lets the agent raise (never lower) the floor mid-task.
+**Goal:** Land automatic classification-floor inference so `kastellan-cli ask` no longer requires `--classification-floor` for clinical work, plus a defence-in-depth `Plan.floor_request` channel that lets the agent raise (never lower) the floor mid-task.
 
 **Architecture:** Three additions in one branch.
 (1) NEW pure module `core/src/classification_inference.rs` exporting `InferredFloor { class, signals }` + `infer_floor(instruction) -> InferredFloor`. Tiered per-class keyword scan (Secret > Clinical > Personal > Public); first class with a matching signal wins; `contains_word` whole-word matching mirrors the `ConstitutionalGuard` post-review precedent.
@@ -24,13 +24,13 @@
 - **Modify:** `core/src/cassandra/types.rs` — add `Plan.floor_request: Option<DataClass>` field with `#[serde(default, skip_serializing_if = "Option::is_none")]`. Update all existing `Plan { ... }` struct-literal sites across the workspace to include `floor_request: None,`. +2 unit tests.
 - **Modify:** `core/src/scheduler/inner_loop.rs` — widen `TaskContext` with `classification_floor_source: ClassificationFloorSource` and `classification_floor_signals: Vec<String>` fields; add floor-raise check before `write_audit_plan_formulate`; widen `build_plan_formulate_payload` to emit the two new keys; +6 unit tests.
 - **Modify:** `core/src/scheduler/runner.rs` — read `classification_floor_source` (default `"default"`) and `classification_floor_signals` (default empty) from `task.payload`; fail-closed on unrecognised source string; thread into `TaskContext`.
-- **Modify:** `core/src/bin/hhagent-cli.rs` — wire `infer_floor` into `run_ask`/`ask_async`; emit `tracing::warn!` on operator-explicit-suppression-with-elevation; thread source + signals into the submitted payload; +3 unit tests.
+- **Modify:** `core/src/bin/kastellan-cli.rs` — wire `infer_floor` into `run_ask`/`ask_async`; emit `tracing::warn!` on operator-explicit-suppression-with-elevation; thread source + signals into the submitted payload; +3 unit tests.
 - **Modify:** `core/tests/scheduler_inner_loop_e2e.rs` — +1 integration test for agent-raise → DP-block chain.
 - **Modify:** `core/tests/cli_ask_e2e.rs` — extend happy-path assertions for the new payload keys.
 - **Modify:** `prompts/agent_planner.md` — add `floor_request: null` to JSON-schema example + one explanatory paragraph.
 - **Modify:** `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — end-of-session update.
 
-**File-size watch:** `core/src/classification_inference.rs` ≤ 500 LOC. `core/src/scheduler/inner_loop.rs` was 700 LOC before this slice (pre-existing soft-cap breach); this slice adds ~80 LOC. `core/src/bin/hhagent-cli.rs` was 1089 LOC (pre-existing breach); this slice adds ~50 LOC. No splits warranted today.
+**File-size watch:** `core/src/classification_inference.rs` ≤ 500 LOC. `core/src/scheduler/inner_loop.rs` was 700 LOC before this slice (pre-existing soft-cap breach); this slice adds ~80 LOC. `core/src/bin/kastellan-cli.rs` was 1089 LOC (pre-existing breach); this slice adds ~50 LOC. No splits warranted today.
 
 ---
 
@@ -44,7 +44,7 @@ Before starting, skim these in order so the surrounding contract is in context:
 4. **Inner-loop floor read path:** [core/src/scheduler/inner_loop.rs:202-213](../../../core/src/scheduler/inner_loop.rs#L202-L213) — `write_audit_plan_formulate` + `ReviewStageContext` construction. The floor-raise check lands between `plan_count += 1` (line 191) and `write_audit_plan_formulate` (line 203) so the audit row + reviewer both see the elevated floor.
 5. **Audit-payload builder:** [core/src/scheduler/inner_loop.rs:332-395](../../../core/src/scheduler/inner_loop.rs#L332-L395) — the existing pure `build_plan_formulate_payload` (13 keys post-Slice-A). Add the two new keys per spec §5.
 6. **Runner payload-read pattern:** [core/src/scheduler/runner.rs:278-298](../../../core/src/scheduler/runner.rs#L278-L298) — the existing `classification_floor` reader is the template. Read `classification_floor_source` and `classification_floor_signals` with the same fail-closed shape.
-7. **CLI flag wiring pattern:** [core/src/bin/hhagent-cli.rs:271-310](../../../core/src/bin/hhagent-cli.rs#L271-L310) (`run_ask` arg loop) + [core/src/bin/hhagent-cli.rs:329-378](../../../core/src/bin/hhagent-cli.rs#L329-L378) (`ask_async` payload builder).
+7. **CLI flag wiring pattern:** [core/src/bin/kastellan-cli.rs:271-310](../../../core/src/bin/kastellan-cli.rs#L271-L310) (`run_ask` arg loop) + [core/src/bin/kastellan-cli.rs:329-378](../../../core/src/bin/kastellan-cli.rs#L329-L378) (`ask_async` payload builder).
 8. **`Plan` struct-literal call sites:** run `grep -rn "Plan {" core/ workspace/` (also check `core/tests/`) and update every literal to include `floor_request: None,` in Task 1. Don't miss any — the build will fail loudly if you do, but the iteration is faster if you find them up front.
 
 **Build/test:**
@@ -52,9 +52,9 @@ Before starting, skim these in order so the surrounding contract is in context:
 source "$HOME/.cargo/env"
 cargo build --workspace
 cargo test --workspace                            # 557 expected at start
-cargo test -p hhagent-core classification_inference  # fast inner loop
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e
-cargo test -p hhagent-core --test cli_ask_e2e
+cargo test -p kastellan-core classification_inference  # fast inner loop
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e
+cargo test -p kastellan-core --test cli_ask_e2e
 ```
 
 **Branch already created and currently checked out; the spec commit `02638c5` is its tip.**
@@ -130,7 +130,7 @@ fn plan_floor_request_round_trips_when_set() {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core cassandra::types::tests::plan_floor_request 2>&1 | tail -20
+cargo test -p kastellan-core cassandra::types::tests::plan_floor_request 2>&1 | tail -20
 ```
 Expected: build fails with `no field 'floor_request' on type 'Plan'`.
 
@@ -205,7 +205,7 @@ Create `core/src/classification_inference.rs` with this exact content (productio
 ```rust
 //! CLI-side automatic classification-floor inference.
 //!
-//! Pure tiered keyword classifier called from `hhagent-cli ask` before
+//! Pure tiered keyword classifier called from `kastellan-cli ask` before
 //! task submission. Maps the user instruction to a [`DataClass`] floor
 //! plus a list of grep-friendly signal tags that explain WHY the
 //! floor was elevated.
@@ -420,7 +420,7 @@ pub mod classification_inference;
 - [ ] **Step 2: Run the tests; verify failures (RED)**
 
 ```sh
-cargo test -p hhagent-core classification_inference:: 2>&1 | grep -E "test result|FAIL" | tail -20
+cargo test -p kastellan-core classification_inference:: 2>&1 | grep -E "test result|FAIL" | tail -20
 ```
 Expected: most tests fail (only `empty_input` / `whitespace_only` / `benign_coding_question` / `passworded_passive_form_does_not_match_secret` pass because the placeholder returns Public).
 
@@ -581,7 +581,7 @@ fn match_catalogue(instruction: &str, catalogue: &[CatalogueEntry]) -> Vec<&'sta
 - [ ] **Step 5: Run tests; verify GREEN**
 
 ```sh
-cargo test -p hhagent-core classification_inference:: 2>&1 | grep -E "test result|FAIL" | tail -10
+cargo test -p kastellan-core classification_inference:: 2>&1 | grep -E "test result|FAIL" | tail -10
 ```
 Expected: all tests pass (≥ 19 new tests added: 3 default + 4 Secret + 6 Clinical + 2 Personal + 3 tiered priority + 1 case-insensitive + 5 contains_word; total 21–24 in classification_inference module). Workspace total ~580.
 
@@ -621,7 +621,7 @@ Pattern catalogues per non-Public class seed initial coverage:
 insensitivity + contains_word edge cases + alias collapse).
 
 The classifier has no in-tree caller yet; subsequent tasks wire it
-into `hhagent-cli ask` and add the `floor_request` consumer.
+into `kastellan-cli ask` and add the `floor_request` consumer.
 
 Workspace test count 559 → 580.
 
@@ -730,7 +730,7 @@ fn build_plan_formulate_payload_agent_raised_source_omits_signals() {
 - [ ] **Step 2: Run tests; verify compile-fail (RED)**
 
 ```sh
-cargo test -p hhagent-core scheduler::inner_loop::tests::build_plan_formulate_payload 2>&1 | tail -10
+cargo test -p kastellan-core scheduler::inner_loop::tests::build_plan_formulate_payload 2>&1 | tail -10
 ```
 Expected: build fails — `ClassificationFloorSource` not yet defined; `build_plan_formulate_payload` signature doesn't match.
 
@@ -780,7 +780,7 @@ In the existing `TaskContext` struct (around line 19), add two new fields:
 ```rust
 pub struct TaskContext {
     pub task_id: i64,
-    pub lane: hhagent_db::tasks::Lane,
+    pub lane: kastellan_db::tasks::Lane,
     pub instruction: String,
     pub classification_floor: DataClass,
     /// Provenance of `classification_floor`. Set at task entry by
@@ -875,7 +875,7 @@ async fn write_audit_plan_formulate(
         plan,
         meta,
     );
-    hhagent_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
+    kastellan_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())
 }
 ```
@@ -964,7 +964,7 @@ fn apply_floor_raise_for_test(ctx: &mut TaskContext, plan: &Plan) -> bool {
 #[test]
 fn agent_floor_request_higher_than_producer_elevates_ctx() {
     let mut ctx = TaskContext {
-        task_id: 1, lane: hhagent_db::tasks::Lane::Fast,
+        task_id: 1, lane: kastellan_db::tasks::Lane::Fast,
         instruction: "".into(),
         classification_floor: DataClass::Public,
         classification_floor_source: ClassificationFloorSource::Default,
@@ -988,7 +988,7 @@ fn agent_floor_request_higher_than_producer_elevates_ctx() {
 #[test]
 fn agent_floor_request_lower_than_producer_is_ignored() {
     let mut ctx = TaskContext {
-        task_id: 1, lane: hhagent_db::tasks::Lane::Fast,
+        task_id: 1, lane: kastellan_db::tasks::Lane::Fast,
         instruction: "".into(),
         classification_floor: DataClass::ClinicalConfidential,
         classification_floor_source: ClassificationFloorSource::Operator,
@@ -1011,7 +1011,7 @@ fn agent_floor_request_lower_than_producer_is_ignored() {
 #[test]
 fn agent_floor_request_equal_to_producer_is_no_op() {
     let mut ctx = TaskContext {
-        task_id: 1, lane: hhagent_db::tasks::Lane::Fast,
+        task_id: 1, lane: kastellan_db::tasks::Lane::Fast,
         instruction: "".into(),
         classification_floor: DataClass::Personal,
         classification_floor_source: ClassificationFloorSource::CliInferred,
@@ -1036,7 +1036,7 @@ fn agent_floor_request_equal_to_producer_is_no_op() {
 - [ ] **Step 2: Run; verify RED**
 
 ```sh
-cargo test -p hhagent-core scheduler::inner_loop::tests::agent_floor 2>&1 | tail -10
+cargo test -p kastellan-core scheduler::inner_loop::tests::agent_floor 2>&1 | tail -10
 ```
 Expected: build fails — `apply_floor_raise_for_test` not yet a thing. Actually it IS defined inside the tests block, so the failure is in the test bodies themselves if the production code doesn't honor the elevation. Wait — the test helper IS in tests, so the test will compile and pass trivially (the helper just does the right thing). RED comes from a different angle: we need a pin that the PRODUCTION code calls the same logic.
 
@@ -1092,7 +1092,7 @@ In `core/src/scheduler/inner_loop.rs::run_to_terminal`, find the section right a
 - [ ] **Step 4: Run tests; verify GREEN**
 
 ```sh
-cargo test -p hhagent-core scheduler::inner_loop:: 2>&1 | grep -E "test result|FAIL" | tail -5
+cargo test -p kastellan-core scheduler::inner_loop:: 2>&1 | grep -E "test result|FAIL" | tail -5
 cargo test --workspace 2>&1 | grep -E "test result" | awk '
   /test result/ { match($0, /[0-9]+ passed/); p += substr($0, RSTART, RLENGTH-7)+0
                   match($0, /[0-9]+ failed/); f += substr($0, RSTART, RLENGTH-7)+0 }
@@ -1239,16 +1239,16 @@ EOF
 
 ---
 
-### Task 6: `hhagent-cli ask` — wire `infer_floor` into the producer path
+### Task 6: `kastellan-cli ask` — wire `infer_floor` into the producer path
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli.rs` (`ask_async` payload builder + `tracing::warn!` + 3 unit tests)
+- Modify: `core/src/bin/kastellan-cli.rs` (`ask_async` payload builder + `tracing::warn!` + 3 unit tests)
 
 This task wires the classifier into the CLI submission path. After this, real prompts run through `infer_floor` and the resulting source + signals land in `task.payload`.
 
 - [ ] **Step 1: Write the failing unit tests**
 
-Add a new `cfg(test) mod ask_payload_tests` at the bottom of `core/src/bin/hhagent-cli.rs`. The CLI is a binary, so testing the payload-building logic in isolation is the cleanest seam. Refactor the floor-resolution + payload-key write into a pure helper first:
+Add a new `cfg(test) mod ask_payload_tests` at the bottom of `core/src/bin/kastellan-cli.rs`. The CLI is a binary, so testing the payload-building logic in isolation is the cleanest seam. Refactor the floor-resolution + payload-key write into a pure helper first:
 
 ```rust
 /// Pure builder for the producer-side payload entries that this slice
@@ -1266,16 +1266,16 @@ Add a new `cfg(test) mod ask_payload_tests` at the bottom of `core/src/bin/hhage
 /// callback fires (in production: a `tracing::warn!`).
 fn resolve_floor_for_submission(
     instruction: &str,
-    operator_flag: Option<hhagent_core::cassandra::DataClass>,
-    warn_on_suppress: &mut dyn FnMut(hhagent_core::cassandra::DataClass, &[&'static str]),
+    operator_flag: Option<kastellan_core::cassandra::DataClass>,
+    warn_on_suppress: &mut dyn FnMut(kastellan_core::cassandra::DataClass, &[&'static str]),
 ) -> (
-    hhagent_core::cassandra::DataClass,
-    hhagent_core::scheduler::inner_loop::ClassificationFloorSource,
+    kastellan_core::cassandra::DataClass,
+    kastellan_core::scheduler::inner_loop::ClassificationFloorSource,
     Vec<&'static str>,
 ) {
-    use hhagent_core::cassandra::DataClass;
-    use hhagent_core::classification_inference::infer_floor;
-    use hhagent_core::scheduler::inner_loop::ClassificationFloorSource as Src;
+    use kastellan_core::cassandra::DataClass;
+    use kastellan_core::classification_inference::infer_floor;
+    use kastellan_core::scheduler::inner_loop::ClassificationFloorSource as Src;
 
     if let Some(op) = operator_flag {
         // Operator wins. Optionally warn if inference would have elevated.
@@ -1295,8 +1295,8 @@ fn resolve_floor_for_submission(
 #[cfg(test)]
 mod ask_payload_tests {
     use super::resolve_floor_for_submission;
-    use hhagent_core::cassandra::DataClass;
-    use hhagent_core::scheduler::inner_loop::ClassificationFloorSource as Src;
+    use kastellan_core::cassandra::DataClass;
+    use kastellan_core::scheduler::inner_loop::ClassificationFloorSource as Src;
 
     #[test]
     fn no_operator_flag_no_signals_returns_default() {
@@ -1361,11 +1361,11 @@ mod ask_payload_tests {
 - [ ] **Step 2: Run; verify RED**
 
 ```sh
-cargo test -p hhagent-core --bin hhagent-cli ask_payload_tests 2>&1 | tail -10
+cargo test -p kastellan-core --bin kastellan-cli ask_payload_tests 2>&1 | tail -10
 ```
 Expected: build fails — `resolve_floor_for_submission` doesn't exist yet.
 
-- [ ] **Step 3: Add `resolve_floor_for_submission` to `core/src/bin/hhagent-cli.rs`**
+- [ ] **Step 3: Add `resolve_floor_for_submission` to `core/src/bin/kastellan-cli.rs`**
 
 Add the helper above the `ask_async` function. Just paste the implementation from the test block above (the production code is identical to what the test imports).
 
@@ -1386,7 +1386,7 @@ In `ask_async`, replace the existing payload-building block (lines ~359-378). Fi
 Replace with:
 ```rust
     let mut payload = serde_json::json!({"instruction": instruction, "kind": "ask"});
-    let mut suppression_fires: Option<(hhagent_core::cassandra::DataClass, Vec<&'static str>)> = None;
+    let mut suppression_fires: Option<(kastellan_core::cassandra::DataClass, Vec<&'static str>)> = None;
     let (resolved_floor, resolved_source, resolved_signals) =
         resolve_floor_for_submission(&instruction, floor, &mut |c, s| {
             suppression_fires = Some((c, s.to_vec()));
@@ -1415,7 +1415,7 @@ Replace with:
 
 ```sh
 cargo build --workspace 2>&1 | tail -5
-cargo test -p hhagent-core --bin hhagent-cli 2>&1 | grep -E "test result" | tail -3
+cargo test -p kastellan-core --bin kastellan-cli 2>&1 | grep -E "test result" | tail -3
 cargo test --workspace 2>&1 | grep -E "test result|FAIL" | tail -5
 ```
 Expected: 0 failed; +4 new tests. Total ~590.
@@ -1423,9 +1423,9 @@ Expected: 0 failed; +4 new tests. Total ~590.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli.rs
+git add core/src/bin/kastellan-cli.rs
 git commit -m "$(cat <<'EOF'
-feat(cli): wire classification_inference into `hhagent-cli ask`
+feat(cli): wire classification_inference into `kastellan-cli ask`
 
 Adds `resolve_floor_for_submission` pure helper that maps
 (instruction, operator_flag) to (floor, source, signals):
@@ -1566,7 +1566,7 @@ Engineer note: the file currently has multiple integration scenarios; mirror one
 - [ ] **Step 2: Run the new scenario; verify RED (or skip on no-PG)**
 
 ```sh
-cargo test -p hhagent-core --test scheduler_inner_loop_e2e agent_floor_raise 2>&1 | tail -15
+cargo test -p kastellan-core --test scheduler_inner_loop_e2e agent_floor_raise 2>&1 | tail -15
 ```
 Expected on a host with PG: test fails because some assertion needs the production code to be correct — confirm the failure is in the assertion path, not in compile/setup.
 

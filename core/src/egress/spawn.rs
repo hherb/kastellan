@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
 
-use hhagent_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
 /// Env keys the sidecar binary reads (must match `egress-proxy::main`).
-const ENV_UDS: &str = "HHAGENT_EGRESS_PROXY_UDS";
-const ENV_ALLOWLIST: &str = "HHAGENT_EGRESS_PROXY_ALLOWLIST";
-const ENV_WORKER: &str = "HHAGENT_EGRESS_PROXY_WORKER";
+const ENV_UDS: &str = "KASTELLAN_EGRESS_PROXY_UDS";
+const ENV_ALLOWLIST: &str = "KASTELLAN_EGRESS_PROXY_ALLOWLIST";
+const ENV_WORKER: &str = "KASTELLAN_EGRESS_PROXY_WORKER";
 
 /// How long `spawn_sidecar` waits for the proxy to `bind()` its UDS.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);

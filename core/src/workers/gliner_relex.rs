@@ -15,7 +15,7 @@
 //! - [`wire`] — serde shape types matching the Python worker's wire
 //!   contract: [`ExtractRequest`] / [`ExtractResponse`] / [`Entity`] /
 //!   [`TripleEntity`] / [`Triple`] plus the `MAX_*` request-size limits
-//!   (see `workers/gliner-relex/src/hhagent_worker_gliner_relex/server.py`
+//!   (see `workers/gliner-relex/src/kastellan_worker_gliner_relex/server.py`
 //!   for the producing side + `workers/gliner-relex/README.md` for the
 //!   field-by-field shape table).
 //! - [`resolve`] — [`GlinerRelexEnv`] (resolved weights/venv/model/device

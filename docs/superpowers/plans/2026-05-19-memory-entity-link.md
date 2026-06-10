@@ -24,7 +24,7 @@
 - `core/src/memory/l1_promote.rs` — widen `promote_l1` signature; widen `L1WriteOutcome::Inserted` variant
 - `core/src/scheduler/runner.rs` — widen `write_l1_promoted_row`, `drain_lane`, `lane_loop`, `spawn_scheduler`
 - `core/src/cli_audit.rs` — widen `l1_add_and_audit` (takes extractor; CLI passes NoOp)
-- `core/src/bin/hhagent-cli.rs` — construct NoOp + pass to `l1_add_and_audit`
+- `core/src/bin/kastellan-cli.rs` — construct NoOp + pass to `l1_add_and_audit`
 - `core/src/main.rs` — move entity_extractor construction BEFORE L0 seed; pass to `seed_l0_from_file` and `spawn_scheduler`
 - `core/tests/memory_l0_seed_e2e.rs` — pass NoOp/Static to writers; +1 new assertion
 - `core/tests/memory_l1_promote_e2e.rs` — pass NoOp/Static to writers; +1 new assertion
@@ -78,7 +78,7 @@ use sqlx::PgPool;
 use crate::entity_extraction::{
     EntityExtractionError, EntityExtractor, EntitySeeds, SeedSource,
 };
-use hhagent_db::{audit, memories::link_memory_to_entities, DbError};
+use kastellan_db::{audit, memories::link_memory_to_entities, DbError};
 
 /// What the auto-linker did, for caller telemetry. Returned on success
 /// only; on failure the caller receives [`LinkError`] and decides
@@ -86,7 +86,7 @@ use hhagent_db::{audit, memories::link_memory_to_entities, DbError};
 #[derive(Clone, Debug)]
 pub struct LinkOutcome {
     /// Post-`ON CONFLICT DO NOTHING` row count from
-    /// [`hhagent_db::memories::link_memory_to_entities`]. May be smaller
+    /// [`kastellan_db::memories::link_memory_to_entities`]. May be smaller
     /// than `seeds.ids.len()` when some entities were already linked to
     /// this memory (re-run idempotency path).
     pub n_entities_linked: u64,
@@ -118,7 +118,7 @@ pub enum LinkError {
 /// `layer_label` is a stringly-typed identifier of the calling layer
 /// (`"L0"`, `"L1"`, future `"L2"`/`"L3"`/`"L4"`). It goes straight into
 /// the audit payload's `layer` key. Stringly avoids a circular dep on
-/// `hhagent_db::memories::MemoryLayer` from this module.
+/// `kastellan_db::memories::MemoryLayer` from this module.
 ///
 /// The function calls `extract` unconditionally; the NoOp-extractor
 /// case is a path optimisation (empty `seeds.ids` short-circuits at the
@@ -270,7 +270,7 @@ mod recall;
 Run:
 ```bash
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib memory::entity_link
+cargo test -p kastellan-core --lib memory::entity_link
 ```
 
 Expected: 6 tests pass (the unit tests exercise pure helpers that ARE implemented; the only stubbed function is `link_memory_entities`, which has no unit-test coverage in this task). Compilation succeeds.
@@ -326,20 +326,20 @@ Create `core/tests/memory_entity_link_e2e.rs`:
 //!   * Real-model tier (Task 3) — live gliner-relex worker against the
 //!     `multi-v1.0` weights. Gated on venv + weights presence (skip-as-pass).
 //!
-//! All tests use the shared `hhagent-tests-common` PG bring-up helper +
+//! All tests use the shared `kastellan-tests-common` PG bring-up helper +
 //! the standard skip-without-PG convention.
 
 use std::sync::Arc;
 
-use hhagent_core::entity_extraction::{
+use kastellan_core::entity_extraction::{
     EntitySeeds, NoOpEntityExtractor, SeedSource, StaticEntityExtractor,
 };
-use hhagent_core::memory::entity_link::{link_memory_entities, LinkError};
-use hhagent_db::audit::fetch_since;
-use hhagent_db::memories::{seed_meta_memory, MemoryLayer};
-use hhagent_db::pool::connect_runtime_pool;
+use kastellan_core::memory::entity_link::{link_memory_entities, LinkError};
+use kastellan_db::audit::fetch_since;
+use kastellan_db::memories::{seed_meta_memory, MemoryLayer};
+use kastellan_db::pool::connect_runtime_pool;
 
-use hhagent_tests_common::{bring_up_pg_cluster, skip_if_no_pg_binaries};
+use kastellan_tests_common::{bring_up_pg_cluster, skip_if_no_pg_binaries};
 
 /// Build a Tokio runtime for sync-style tests. Mirrors the convention
 /// in `memory_recall_e2e.rs` and `entity_extraction_e2e.rs`.
@@ -357,7 +357,7 @@ async fn upsert_test_entity(
     kind: &str,
     name: &str,
 ) -> i64 {
-    use hhagent_db::graph::{Graph, PgGraph};
+    use kastellan_db::graph::{Graph, PgGraph};
     let graph = PgGraph::new(pool.clone());
     let e = graph
         .upsert_entity(kind, name, /* embedding */ None)
@@ -554,7 +554,7 @@ fn link_is_idempotent_on_rerun_with_same_seeds() {
 
 Run:
 ```bash
-cargo test -p hhagent-core --test memory_entity_link_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --test memory_entity_link_e2e 2>&1 | tail -10
 ```
 
 Expected: 3 tests FAIL with `unimplemented!()` panic from the stubbed `link_memory_entities`.
@@ -635,7 +635,7 @@ pub async fn link_memory_entities(
 
 Run:
 ```bash
-cargo test -p hhagent-core --test memory_entity_link_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --test memory_entity_link_e2e 2>&1 | tail -10
 ```
 
 Expected: `test result: ok. 3 passed; 0 failed; 0 ignored; ...`
@@ -685,7 +685,7 @@ Read the skip helpers from `core/tests/entity_extraction_e2e.rs`:
 grep -n "skip_if_no\|resolve_worker_script\|resolve_weights" core/tests/entity_extraction_e2e.rs | head -10
 ```
 
-Expected: helpers like `skip_if_no_gliner_relex_setup()` or equivalent. Note the exact import path and the env-var conventions used (`HHAGENT_GLINER_RELEX_VENV_DIR`, `HHAGENT_GLINER_RELEX_WEIGHTS_DIR`).
+Expected: helpers like `skip_if_no_gliner_relex_setup()` or equivalent. Note the exact import path and the env-var conventions used (`KASTELLAN_GLINER_RELEX_VENV_DIR`, `KASTELLAN_GLINER_RELEX_WEIGHTS_DIR`).
 
 - [ ] **Step 2: Add the real-model tests at the end of `memory_entity_link_e2e.rs`**
 
@@ -694,21 +694,21 @@ Append to `core/tests/memory_entity_link_e2e.rs` (verify imports + helper paths 
 ```rust
 // --- Real-model tier (skip-as-pass without venv + weights) ---
 
-use hhagent_core::entity_extraction::gliner_relex::GlinerRelexExtractor;
-use hhagent_core::workers::gliner_relex::Client;
+use kastellan_core::entity_extraction::gliner_relex::GlinerRelexExtractor;
+use kastellan_core::workers::gliner_relex::Client;
 use std::sync::Arc as StdArc;
 
 /// Same skip-helper convention as `core/tests/entity_extraction_e2e.rs` —
 /// returns Some(extractor) if the venv + weights are staged, None +
 /// stderr [SKIP] line otherwise.
 async fn build_real_extractor(pool: &sqlx::PgPool)
-    -> Option<StdArc<dyn hhagent_core::entity_extraction::EntityExtractor>>
+    -> Option<StdArc<dyn kastellan_core::entity_extraction::EntityExtractor>>
 {
     // Import + reuse the skip helper from entity_extraction_e2e.rs's
     // module — exact name to be verified in Step 1 above (likely
     // `crate::skip_if_no_gliner_relex_setup` or similar).
     //
-    // Helper resolves HHAGENT_GLINER_RELEX_VENV_DIR + WEIGHTS_DIR,
+    // Helper resolves KASTELLAN_GLINER_RELEX_VENV_DIR + WEIGHTS_DIR,
     // returns None + prints `[SKIP] memory_entity_link_e2e: ...` when
     // either is missing. The body below assumes that helper exists at
     // the existing path in entity_extraction_e2e.rs — if it lives in a
@@ -824,13 +824,13 @@ fn link_extends_to_l0_seed_path_end_to_end() {
 }
 ```
 
-**Note on the `build_real_extractor` helper:** if `core/tests/entity_extraction_e2e.rs` already contains a usable real-extractor builder, refactor it into a shared `mod common;` or `hhagent-tests-common` helper so this test file can reuse it cleanly. If duplication is the simpler path, duplicate (mark with `// duplicated from entity_extraction_e2e.rs; consider lifting if a third caller appears`).
+**Note on the `build_real_extractor` helper:** if `core/tests/entity_extraction_e2e.rs` already contains a usable real-extractor builder, refactor it into a shared `mod common;` or `kastellan-tests-common` helper so this test file can reuse it cleanly. If duplication is the simpler path, duplicate (mark with `// duplicated from entity_extraction_e2e.rs; consider lifting if a third caller appears`).
 
 - [ ] **Step 3: Run the tests to verify they pass (or [SKIP])**
 
 Run:
 ```bash
-cargo test -p hhagent-core --test memory_entity_link_e2e -- --nocapture 2>&1 | tail -15
+cargo test -p kastellan-core --test memory_entity_link_e2e -- --nocapture 2>&1 | tail -15
 ```
 
 Expected on hosts with venv + weights: 5 passed (3 mock + 2 real-model).
@@ -962,7 +962,7 @@ pub async fn seed_l0_from_rules(
 
         let metadata = build_l0_metadata(&rule.id, &body_sha256, &rule.tags, source_path);
         let memory_id =
-            hhagent_db::memories::seed_meta_memory(pool, &rule.body, &metadata, None).await?;
+            kastellan_db::memories::seed_meta_memory(pool, &rule.body, &metadata, None).await?;
         report.new_rows_written += 1;
 
         // Auto-link entities. Degrade-and-warn posture — a failure here
@@ -1020,7 +1020,7 @@ Replace lines 60-95 (the prompts + L0 block) by moving them DOWN — and the ent
 Find the block starting:
 ```rust
     // Load every prompts/*.md, hash, upsert into agent_prompts.
-    let prompts_dir = std::env::var("HHAGENT_PROMPTS_DIR")
+    let prompts_dir = std::env::var("KASTELLAN_PROMPTS_DIR")
 ```
 
 and ending with the L0 seed block ending at:
@@ -1036,10 +1036,10 @@ Then modify the L0 seed call line:
 
 ```rust
 // before
-let report = hhagent_core::memory::l0_seed::seed_l0_from_file(&pool, &l0_path)
+let report = kastellan_core::memory::l0_seed::seed_l0_from_file(&pool, &l0_path)
 
 // after
-let report = hhagent_core::memory::l0_seed::seed_l0_from_file(
+let report = kastellan_core::memory::l0_seed::seed_l0_from_file(
     &pool, &*entity_extractor, &l0_path,
 )
 ```
@@ -1054,7 +1054,7 @@ Open `core/tests/memory_l0_seed_e2e.rs`. There are ~10 call sites for `seed_l0_f
 
 At the top of the file, add the import:
 ```rust
-use hhagent_core::entity_extraction::NoOpEntityExtractor;
+use kastellan_core::entity_extraction::NoOpEntityExtractor;
 ```
 
 Then for every `seed_l0_from_rules(&pool, seed_path(), ...)`:
@@ -1130,7 +1130,7 @@ EOF
 - Modify: `core/src/memory/l1_promote.rs` (widen `promote_l1`; widen `L1WriteOutcome::Inserted`)
 - Modify: `core/src/scheduler/runner.rs` (widen `write_l1_promoted_row`, `drain_lane`, `lane_loop`, `spawn_scheduler`)
 - Modify: `core/src/cli_audit.rs` (widen `l1_add_and_audit`)
-- Modify: `core/src/bin/hhagent-cli.rs` (construct + pass `NoOpEntityExtractor`)
+- Modify: `core/src/bin/kastellan-cli.rs` (construct + pass `NoOpEntityExtractor`)
 - Modify: `core/src/main.rs` (pass `entity_extractor.clone()` to `spawn_scheduler`)
 - Modify: `core/tests/memory_l1_promote_e2e.rs` (pass `NoOpEntityExtractor` to all `promote_l1` calls; match new `Inserted` shape)
 - Modify: `core/tests/scheduler_lanes_e2e.rs` (pass `entity_extractor` to `spawn_scheduler`)
@@ -1201,7 +1201,7 @@ pub async fn promote_l1(
     .bind(&body_sha256)
     .fetch_optional(pool)
     .await
-    .map_err(|e| L1Error::Db(hhagent_db::DbError::Query(
+    .map_err(|e| L1Error::Db(kastellan_db::DbError::Query(
         format!("promote_l1 EXISTS-check body_sha256={body_sha256}: {e}")
     )))?;
 
@@ -1258,7 +1258,7 @@ pub async fn l1_add_and_audit(
     let body_sha256 = compute_body_sha256(&trimmed);
 
     let payload = build_l1_write_payload(&outcome, &source, &body_sha256);
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L1_ADDED, payload,
     ).await {
         Ok(id) => id,
@@ -1428,7 +1428,7 @@ fn write_l1_promoted_row_signature_compile_pin() {
 In `core/src/main.rs` around line 232:
 
 ```rust
-    let scheduler = hhagent_core::scheduler::spawn_scheduler(
+    let scheduler = kastellan_core::scheduler::spawn_scheduler(
         pool.clone(),
         formulator,
         review,
@@ -1439,19 +1439,19 @@ In `core/src/main.rs` around line 232:
 
 - [ ] **Step 5: Update CLI bin to construct + pass NoOp**
 
-In `core/src/bin/hhagent-cli.rs` around line 988-1009:
+In `core/src/bin/kastellan-cli.rs` around line 988-1009:
 
 ```rust
 async fn memory_l1_add(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::l1_add_and_audit;
-    use hhagent_core::entity_extraction::NoOpEntityExtractor;
-    use hhagent_core::memory::l1_promote::L1WriteOutcome;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::l1_add_and_audit;
+    use kastellan_core::entity_extraction::NoOpEntityExtractor;
+    use kastellan_core::memory::l1_promote::L1WriteOutcome;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let body = match args {
         [b] => b,
         _ => {
-            eprintln!("usage: hhagent-cli memory l1 add <body>");
+            eprintln!("usage: kastellan-cli memory l1 add <body>");
             return ExitCode::from(2);
         }
     };
@@ -1466,7 +1466,7 @@ async fn memory_l1_add(args: &[String]) -> ExitCode {
     };
 
     // CLI L1 add path uses NoOp extractor — operator-explicit additions
-    // are not auto-linked. A future `hhagent-cli memory relink` subcommand
+    // are not auto-linked. A future `kastellan-cli memory relink` subcommand
     // would do batch re-linking against the real extractor.
     let extractor = NoOpEntityExtractor::new();
 
@@ -1495,7 +1495,7 @@ In `core/tests/memory_l1_promote_e2e.rs`:
 
 At the top, add the import:
 ```rust
-use hhagent_core::entity_extraction::NoOpEntityExtractor;
+use kastellan_core::entity_extraction::NoOpEntityExtractor;
 ```
 
 For every `promote_l1(...)` call, insert the extractor argument:
@@ -1531,10 +1531,10 @@ Also check `l1_add_and_audit` callers — same destructuring change applies.
 In `core/tests/scheduler_lanes_e2e.rs` around line 455:
 
 ```rust
-    use hhagent_core::entity_extraction::NoOpEntityExtractor;
+    use kastellan_core::entity_extraction::NoOpEntityExtractor;
     // ...
 
-    let extractor: std::sync::Arc<dyn hhagent_core::entity_extraction::EntityExtractor> =
+    let extractor: std::sync::Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
         std::sync::Arc::new(NoOpEntityExtractor::new());
 
     let scheduler = spawn_scheduler(
@@ -1567,7 +1567,7 @@ Expected: `test result: ok. 845 passed; 0 failed; 4 ignored; ...` (unchanged —
 
 ```bash
 git add core/src/memory/l1_promote.rs core/src/scheduler/runner.rs \
-        core/src/cli_audit.rs core/src/bin/hhagent-cli.rs core/src/main.rs \
+        core/src/cli_audit.rs core/src/bin/kastellan-cli.rs core/src/main.rs \
         core/tests/memory_l1_promote_e2e.rs core/tests/scheduler_lanes_e2e.rs
 git commit -m "$(cat <<'EOF'
 feat(core/memory/l1_promote,scheduler/runner): wire auto-linker through L1 writers
@@ -1580,7 +1580,7 @@ call. L1WriteOutcome::Inserted widens additively with
 link_outcome: Option<LinkOutcome>; callers that don't care match { .. }.
 
 CLI memory l1 add path passes NoOpEntityExtractor: operator-explicit
-L1 additions are not auto-linked (a future hhagent-cli memory relink
+L1 additions are not auto-linked (a future kastellan-cli memory relink
 subcommand would handle batch re-linking).
 
 Spec: docs/superpowers/specs/2026-05-19-memory-entity-link-design.md
@@ -1608,8 +1608,8 @@ fn seed_l0_auto_links_entities_via_extractor() {
     if skip_if_no_pg_binaries() {
         return;
     }
-    use hhagent_core::entity_extraction::StaticEntityExtractor;
-    use hhagent_db::graph::{Graph, PgGraph};
+    use kastellan_core::entity_extraction::StaticEntityExtractor;
+    use kastellan_db::graph::{Graph, PgGraph};
 
     rt().block_on(async {
         let cluster = bring_up_pg_cluster().await;
@@ -1658,9 +1658,9 @@ fn promote_l1_inserted_outcome_carries_link_outcome() {
     if skip_if_no_pg_binaries() {
         return;
     }
-    use hhagent_core::entity_extraction::StaticEntityExtractor;
-    use hhagent_core::memory::l1_promote::{L1Source, L1WriteOutcome};
-    use hhagent_db::graph::{Graph, PgGraph};
+    use kastellan_core::entity_extraction::StaticEntityExtractor;
+    use kastellan_core::memory::l1_promote::{L1Source, L1WriteOutcome};
+    use kastellan_db::graph::{Graph, PgGraph};
 
     rt().block_on(async {
         let cluster = bring_up_pg_cluster().await;
@@ -1762,9 +1762,9 @@ Add a "Recently completed (this session, 2026-05-19 — Memory-write-time entity
 - Branch name (suggest `feat/memory-entity-link`).
 - Commit chain (Task 1 → Task 6 hashes from `git log --oneline -7`).
 - New module `core::memory::entity_link` (~LOC), new test file.
-- Cascade: 7 files modified (`l0_seed.rs`, `l1_promote.rs`, `runner.rs`, `cli_audit.rs`, `bin/hhagent-cli.rs`, `main.rs`, three e2e files).
+- Cascade: 7 files modified (`l0_seed.rs`, `l1_promote.rs`, `runner.rs`, `cli_audit.rs`, `bin/kastellan-cli.rs`, `main.rs`, three e2e files).
 - Workspace test count 834 → 847 (+13).
-- What's deliberately NOT in this slice: operator quarantine-review CLI, `hhagent-cli memory relink` backfill subcommand, entities.embedding population, per-link provenance columns.
+- What's deliberately NOT in this slice: operator quarantine-review CLI, `kastellan-cli memory relink` backfill subcommand, entities.embedding population, per-link provenance columns.
 
 Bump the header:
 - `**Last updated:** 2026-05-19 (Memory-write-time entity auto-linker — branch `feat/memory-entity-link`, N commits, workspace 834 → 847 (+13)...)`

@@ -12,7 +12,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use hhagent_protocol::client::ClientError as ProtocolClientError;
+use kastellan_protocol::client::ClientError as ProtocolClientError;
 use sqlx::PgPool;
 
 use super::wire::{ExtractRequest, ExtractResponse};
@@ -218,7 +218,7 @@ fn empty_vault() -> &'static crate::secrets::Vault {
 ///
 /// [cd]: crate::worker_lifecycle::idle_timeout::dispatch_indicates_worker_dead
 /// [rc]: crate::worker_lifecycle::WorkerHandle::report_crash
-/// [readme]: https://github.com/hherb/hhagent/blob/main/workers/gliner-relex/README.md
+/// [readme]: https://github.com/hherb/kastellan/blob/main/workers/gliner-relex/README.md
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("encode error: {0}")]

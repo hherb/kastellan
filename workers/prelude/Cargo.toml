@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-worker-prelude"
+name        = "kastellan-worker-prelude"
 description = "Worker-side defence-in-depth: Landlock + seccomp-bpf, applied from inside the worker process before serving any request."
 version.workspace      = true
 edition.workspace      = true
@@ -10,7 +10,7 @@ repository.workspace   = true
 readme.workspace       = true
 
 [dependencies]
-hhagent-protocol = { path = "../../protocol" }
+kastellan-protocol = { path = "../../protocol" }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 thiserror        = { workspace = true }
@@ -27,5 +27,5 @@ landlock    = { workspace = true }
 seccompiler = { workspace = true }
 
 [[bin]]
-name = "hhagent-lockdown-probe"
+name = "kastellan-lockdown-probe"
 path = "src/bin/lockdown_probe.rs"

@@ -1,7 +1,7 @@
-//! Subprocess-level pin for `hhagent-cli relations show <entity-id>`.
+//! Subprocess-level pin for `kastellan-cli relations show <entity-id>`.
 //!
 //! Boots a per-test PG cluster, seeds a small clinical-style subgraph
-//! directly via the `Graph` trait, then runs the real `hhagent-cli`
+//! directly via the `Graph` trait, then runs the real `kastellan-cli`
 //! binary as a subprocess and inspects exit code + stdout + stderr.
 //!
 //! Key invariants pinned end-to-end (mirror of `cli_relations_e2e.rs`
@@ -42,10 +42,10 @@
 
 use std::process::Command;
 
-use hhagent_db::graph::{Graph, PgGraph};
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_db::graph::{Graph, PgGraph};
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, current_username, pg_bin_dir_or_skip, skip_if_no_supervisor,
     unique_suffix,
 };
@@ -76,7 +76,7 @@ fn contains_edge_row(haystack: &str, kind: &str, dst_suffix: &str) -> bool {
 /// so `$USER` must reach the subprocess intact.
 fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env = vec![
-        ("HHAGENT_DATA_DIR".to_string(), data_dir.display().to_string()),
+        ("KASTELLAN_DATA_DIR".to_string(), data_dir.display().to_string()),
     ];
     if let Some(home) = std::env::var_os("HOME") {
         env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
@@ -101,7 +101,7 @@ async fn cli_relations_show_renders_outbound_inbound_walks_and_quarantine_tags()
     if !bin.exists() {
         eprintln!(
             "[SKIP] cli_relations_show_renders_outbound_inbound_walks_and_quarantine_tags: \
-             hhagent-cli binary not built at {}",
+             kastellan-cli binary not built at {}",
             bin.display(),
         );
         return;
@@ -112,7 +112,7 @@ async fn cli_relations_show_renders_outbound_inbound_walks_and_quarantine_tags()
         &bin_dir,
         "rs-d",
         "rs-l",
-        &format!("hhagent-postgres-cli-relations-show-e2e-{suffix}"),
+        &format!("kastellan-postgres-cli-relations-show-e2e-{suffix}"),
     );
 
     probe_run(

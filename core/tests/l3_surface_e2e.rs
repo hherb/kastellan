@@ -9,15 +9,15 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::memory::l3_surface::{
+use kastellan_core::memory::l3_surface::{
     load_l3_skills_default, load_l3_skills_for_prompt, L3_SKILLS_CAP_BYTES,
 };
-use hhagent_core::prompt_assembly::{PgSystemPromptBuilder, SystemPromptBuilder};
-use hhagent_core::recall_assembly::RecalledContext;
-use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
-use hhagent_db::pool::connect_runtime_pool;
-use hhagent_db::probe::run as probe_run;
-use hhagent_tests_common::{
+use kastellan_core::prompt_assembly::{PgSystemPromptBuilder, SystemPromptBuilder};
+use kastellan_core::recall_assembly::RecalledContext;
+use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
+use kastellan_db::pool::connect_runtime_pool;
+use kastellan_db::probe::run as probe_run;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 use serde_json::json;
@@ -51,7 +51,7 @@ async fn surfaces_only_approved_and_pinned() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "l3s-tg-d", "l3s-tg-l",
-        &format!("hhagent-postgres-l3-surface-trust-{suffix}"),
+        &format!("kastellan-postgres-l3-surface-trust-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         json!({"test": "l3_surface_trust_gate"})).await.expect("probe");
@@ -78,7 +78,7 @@ async fn malformed_template_row_is_skipped_not_surfaced() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "l3s-mf-d", "l3s-mf-l",
-        &format!("hhagent-postgres-l3-surface-malformed-{suffix}"),
+        &format!("kastellan-postgres-l3-surface-malformed-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         json!({"test": "l3_surface_malformed"})).await.expect("probe");
@@ -109,7 +109,7 @@ async fn row_cap_is_honoured() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "l3s-rc-d", "l3s-rc-l",
-        &format!("hhagent-postgres-l3-surface-rowcap-{suffix}"),
+        &format!("kastellan-postgres-l3-surface-rowcap-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         json!({"test": "l3_surface_rowcap"})).await.expect("probe");
@@ -137,7 +137,7 @@ async fn build_with_recalled_emits_skills_block_and_counts() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "l3s-e2e-d", "l3s-e2e-l",
-        &format!("hhagent-postgres-l3-surface-build-{suffix}"),
+        &format!("kastellan-postgres-l3-surface-build-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         serde_json::json!({"test": "l3_surface_build"})).await.expect("probe");
@@ -169,7 +169,7 @@ async fn large_untrusted_pile_surfaces_nothing() {
     let suffix = unique_suffix();
     let cluster = bring_up_pg_cluster(
         &bin_dir, "l3s-pile-d", "l3s-pile-l",
-        &format!("hhagent-postgres-l3-surface-pile-{suffix}"),
+        &format!("kastellan-postgres-l3-surface-pile-{suffix}"),
     );
     probe_run(&cluster.conn_spec, "core", "startup",
         json!({"test": "l3_surface_untrusted_pile"})).await.expect("probe");

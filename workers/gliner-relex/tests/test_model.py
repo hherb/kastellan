@@ -15,7 +15,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from hhagent_worker_gliner_relex.model import GlinerModel
+from kastellan_worker_gliner_relex.model import GlinerModel
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def fake_gliner_class():
     matching the upstream gliner API (per spike correction #1); tests
     configure its return value per case.
     """
-    with patch("hhagent_worker_gliner_relex.model.GLiNER") as mock_cls:
+    with patch("kastellan_worker_gliner_relex.model.GLiNER") as mock_cls:
         instance = MagicMock(name="GliNERInstance")
         mock_cls.from_pretrained.return_value = instance
         yield mock_cls, instance

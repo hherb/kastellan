@@ -6,7 +6,7 @@
 
 **Architecture:** A new pure-ish module `core/src/memory/l3_surface.rs` holds a typed `SurfacedSkill` projection, a fail-safe metadata parser, a trust-gate predicate, the rendered-entry formatter, a pure cap helper, and a query-independent PG loader. The pure renderer `assemble_system_prompt` gains a `skills` slice and emits the `<skills>` block between `<l1_insights>` and `<recalled>`. `PgSystemPromptBuilder` loads skills and threads them; `AssembledPrompt` and `FormulationMeta` gain a `skill_count` audit field. The planner prompt documents the block as reference-only with an explicit no-invoke instruction.
 
-**Tech Stack:** Rust (workspace), sqlx + Postgres, serde_json, `hhagent-core` + `hhagent-db` crates, `tests-common` PG harness.
+**Tech Stack:** Rust (workspace), sqlx + Postgres, serde_json, `kastellan-core` + `kastellan-db` crates, `tests-common` PG harness.
 
 **Spec:** [`docs/superpowers/specs/2026-06-01-l3-skill-recall-surfacing-design.md`](../specs/2026-06-01-l3-skill-recall-surfacing-design.md)
 
@@ -16,7 +16,7 @@ source "$HOME/.cargo/env"
 ```
 Live-PG tests use the session-local override (Postgres.app v18, deliberately excluded from the default candidates):
 ```sh
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
 ```
 
 **Commit discipline:** stage only the files each task names (`git add <files>`). NEVER `git add -A` — the untracked `docs/essay-medium-draft.md` must stay out of every commit.
@@ -191,7 +191,7 @@ mod tests {
 
 Run:
 ```sh
-cargo test -p hhagent-core memory::l3_surface::tests -- --nocapture
+cargo test -p kastellan-core memory::l3_surface::tests -- --nocapture
 ```
 Expected: 5 tests pass (`parse_well_formed_projects_name_desc_params`, `parse_zero_param_skill_yields_empty_params`, `parse_missing_template_key_is_none`, `parse_undeserialisable_template_is_none`, `is_surfaceable_only_approved_and_pinned`).
 
@@ -201,7 +201,7 @@ Expected: 5 tests pass (`parse_well_formed_projects_name_desc_params`, `parse_ze
 
 Run:
 ```sh
-cargo clippy -p hhagent-core --all-targets -- -D warnings
+cargo clippy -p kastellan-core --all-targets -- -D warnings
 ```
 Expected: exit 0.
 
@@ -363,7 +363,7 @@ pub fn cap_surfaced(
 
 Run:
 ```sh
-cargo test -p hhagent-core memory::l3_surface::tests -- --nocapture
+cargo test -p kastellan-core memory::l3_surface::tests -- --nocapture
 ```
 Expected: 11 tests pass (5 from Task 1 + 6 new).
 
@@ -371,7 +371,7 @@ Expected: 11 tests pass (5 from Task 1 + 6 new).
 
 Run:
 ```sh
-cargo clippy -p hhagent-core --all-targets -- -D warnings
+cargo clippy -p kastellan-core --all-targets -- -D warnings
 ```
 Expected: exit 0.
 
@@ -397,8 +397,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 Extend the top-of-file imports:
 
 ```rust
-use hhagent_db::memories::{load_layer, MemoryLayer};
-use hhagent_db::DbError;
+use kastellan_db::memories::{load_layer, MemoryLayer};
+use kastellan_db::DbError;
 use sqlx::PgPool;
 ```
 
@@ -457,17 +457,17 @@ Create `core/tests/l3_surface_e2e.rs`. Mirror the existing L3 e2e harness conven
 //!
 //! Verifies the trust gate (only user_approved/pinned surface), fail-safe
 //! skip of a malformed-template row, and the row/byte caps — against a real
-//! Postgres cluster. Skips-as-pass without `HHAGENT_PG_BIN_DIR`.
+//! Postgres cluster. Skips-as-pass without `KASTELLAN_PG_BIN_DIR`.
 
-use hhagent_core::memory::l3_surface::{
+use kastellan_core::memory::l3_surface::{
     load_l3_skills_default, load_l3_skills_for_prompt, L3_SKILLS_CAP_BYTES,
 };
-use hhagent_db::memories::{insert_memory_at_layer, MemoryLayer};
+use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 use serde_json::json;
 
 // --- COPY the cluster bring-up + skip guard from core/tests/memory_recall_e2e.rs ---
-// (helper imports from hhagent_tests_common; e.g. bring_up_pg_cluster, a guard
-//  that returns early when HHAGENT_PG_BIN_DIR is unset). Use the SAME names the
+// (helper imports from kastellan_tests_common; e.g. bring_up_pg_cluster, a guard
+//  that returns early when KASTELLAN_PG_BIN_DIR is unset). Use the SAME names the
 //  sibling test uses.
 
 /// Insert an L3 row with the given trust + a one-step template naming `tool`.
@@ -550,8 +550,8 @@ async fn row_cap_is_honoured() {
 
 First confirm it compiles against the loader you added in Step 1, then run live:
 ```sh
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
-cargo test -p hhagent-core --test l3_surface_e2e -- --nocapture
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
+cargo test -p kastellan-core --test l3_surface_e2e -- --nocapture
 ```
 Expected: 3 tests pass, **zero `[SKIP]` lines** (the override is set). If you see `[SKIP]`, the env var is not exported into the test process — fix before proceeding.
 
@@ -559,15 +559,15 @@ Expected: 3 tests pass, **zero `[SKIP]` lines** (the override is set). If you se
 
 Run (no override):
 ```sh
-unset HHAGENT_PG_BIN_DIR
-cargo test -p hhagent-core --test l3_surface_e2e -- --nocapture
+unset KASTELLAN_PG_BIN_DIR
+cargo test -p kastellan-core --test l3_surface_e2e -- --nocapture
 ```
 Expected: tests skip-as-pass (the guard prints `[SKIP]` and returns).
 
 - [ ] **Step 5: Clippy + commit**
 
 ```sh
-cargo clippy -p hhagent-core --all-targets -- -D warnings
+cargo clippy -p kastellan-core --all-targets -- -D warnings
 git add core/src/memory/l3_surface.rs core/tests/l3_surface_e2e.rs
 git commit -m "feat(memory): load_l3_skills_for_prompt loader + live e2e (trust gate, skip, caps)
 
@@ -587,7 +587,7 @@ Add to the `#[cfg(test)] mod tests` block in `assemble.rs`. Use the `SurfacedSki
 
 ```rust
     use crate::memory::l3_surface::SurfacedSkill;
-    use hhagent_db::memories::MemoryLayer; // if not already imported for fixtures
+    use kastellan_db::memories::MemoryLayer; // if not already imported for fixtures
 
     fn surfaced(name: &str, desc: &str) -> SurfacedSkill {
         SurfacedSkill { name: name.into(), description: desc.into(), params: vec![] }
@@ -632,7 +632,7 @@ Add to the `#[cfg(test)] mod tests` block in `assemble.rs`. Use the `SurfacedSki
 
 Run:
 ```sh
-cargo test -p hhagent-core --lib prompt_assembly::assemble 2>&1 | head -30
+cargo test -p kastellan-core --lib prompt_assembly::assemble 2>&1 | head -30
 ```
 Expected: COMPILE FAIL — `assemble_system_prompt` takes 4 args, the new tests pass 5. This is the RED that drives the signature change.
 
@@ -684,7 +684,7 @@ Update each (they are all in `#[cfg(test)]`). The non-test caller in `pg_builder
 
 Run:
 ```sh
-cargo test -p hhagent-core --lib prompt_assembly::assemble -- --nocapture
+cargo test -p kastellan-core --lib prompt_assembly::assemble -- --nocapture
 ```
 Expected: all existing assemble tests + the 3 new skills tests pass.
 
@@ -772,7 +772,7 @@ In the `FormulationMeta { … }` construction (`:209`), after `l1_count: assembl
 
 Run:
 ```sh
-cargo build -p hhagent-core
+cargo build -p kastellan-core
 ```
 Expected: clean build. If any other `FormulationMeta { … }` or `AssembledPrompt { … }` literal exists (e.g. in tests), the compiler names it — add the new field there too. Find them:
 ```sh
@@ -790,8 +790,8 @@ async fn build_with_recalled_emits_skills_block_and_counts() {
     // <bring up cluster + obtain `pool`, or return early without PG>
     seed_l3(&pool, "approved_skill", "user_approved", "shell-exec").await;
 
-    let builder = hhagent_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone());
-    let recalled = hhagent_core::recall_assembly::RecalledContext::empty();
+    let builder = kastellan_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone());
+    let recalled = kastellan_core::recall_assembly::RecalledContext::empty();
     let assembled = builder
         .build_with_recalled("BASE", &recalled)
         .await
@@ -803,21 +803,21 @@ async fn build_with_recalled_emits_skills_block_and_counts() {
 }
 ```
 
-> Confirm `PgSystemPromptBuilder::new` and the `SystemPromptBuilder` trait import paths via `grep -n "impl PgSystemPromptBuilder" core/src/prompt_assembly/pg_builder.rs` and the trait's `build_with_recalled` location; adjust `use` lines to match. The trait method may require `use hhagent_core::prompt_assembly::SystemPromptBuilder;` in scope.
+> Confirm `PgSystemPromptBuilder::new` and the `SystemPromptBuilder` trait import paths via `grep -n "impl PgSystemPromptBuilder" core/src/prompt_assembly/pg_builder.rs` and the trait's `build_with_recalled` location; adjust `use` lines to match. The trait method may require `use kastellan_core::prompt_assembly::SystemPromptBuilder;` in scope.
 
 - [ ] **Step 7: Run the full e2e + the crate test suite**
 
 ```sh
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
-cargo test -p hhagent-core --test l3_surface_e2e -- --nocapture
-cargo test -p hhagent-core --lib prompt_assembly -- --nocapture
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
+cargo test -p kastellan-core --test l3_surface_e2e -- --nocapture
+cargo test -p kastellan-core --lib prompt_assembly -- --nocapture
 ```
 Expected: 4 e2e tests pass (3 from Task 3 + 1 new), zero `[SKIP]`; all prompt_assembly lib tests pass.
 
 - [ ] **Step 8: Clippy + commit**
 
 ```sh
-cargo clippy -p hhagent-core --all-targets -- -D warnings
+cargo clippy -p kastellan-core --all-targets -- -D warnings
 git add core/src/prompt_assembly/mod.rs core/src/prompt_assembly/pg_builder.rs core/src/scheduler/agent.rs core/tests/l3_surface_e2e.rs
 git commit -m "feat(prompt): wire l3 skill loader + skill_count audit field through assembly
 
@@ -865,8 +865,8 @@ Expected: `no literal-hash pin — safe` (or any matches are runtime reads, not 
 - [ ] **Step 4: Build + the agent_prompts e2e (smoke that the prompt still loads)**
 
 ```sh
-cargo test -p hhagent-core --test scheduler_agent_prompts_e2e -- --nocapture 2>/dev/null \
-  || cargo test -p hhagent-core agent_prompts -- --nocapture
+cargo test -p kastellan-core --test scheduler_agent_prompts_e2e -- --nocapture 2>/dev/null \
+  || cargo test -p kastellan-core agent_prompts -- --nocapture
 ```
 Expected: passes (or skip-as-pass without PG). If the exact test name differs, find it: `grep -rln "agent_planner" core/tests/`.
 
@@ -886,7 +886,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - [ ] **Full workspace test (no PG): skip-as-pass posture**
 
 ```sh
-unset HHAGENT_PG_BIN_DIR
+unset KASTELLAN_PG_BIN_DIR
 cargo test --workspace 2>&1 | tail -20
 ```
 Expected: **all pass / 0 failed / 3 ignored**; count ≈ 1220 baseline + new non-PG unit tests (l3_surface 11 + assemble 3 ≈ +14). Record the exact number for HANDOVER.
@@ -901,17 +901,17 @@ Expected: exit 0.
 - [ ] **Live-PG suites (override set)**
 
 ```sh
-export HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
-cargo test -p hhagent-core --test l3_surface_e2e -- --nocapture
-cargo test -p hhagent-core --test cli_memory_l3_e2e -- --nocapture       # writer/gate regression
-cargo test -p hhagent-core --test memory_l3_crystallise_e2e -- --nocapture
+export KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"
+cargo test -p kastellan-core --test l3_surface_e2e -- --nocapture
+cargo test -p kastellan-core --test cli_memory_l3_e2e -- --nocapture       # writer/gate regression
+cargo test -p kastellan-core --test memory_l3_crystallise_e2e -- --nocapture
 ```
 Expected: `l3_surface_e2e` 4/4 zero `[SKIP]`; the two regression suites unchanged (8/8 and 7/7 per the gate-slice baseline).
 
 - [ ] **Doc-link check (no new broken intra-doc links)**
 
 ```sh
-RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links cargo doc -p hhagent-core --no-deps --document-private-items 2>&1 | grep -c "unresolved" || true
+RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links cargo doc -p kastellan-core --no-deps --document-private-items 2>&1 | grep -c "unresolved" || true
 ```
 Expected: **21** (matches `main`). If higher, the new module's `[`...`]` intra-doc links need repointing (e.g. `super::` or full paths).
 

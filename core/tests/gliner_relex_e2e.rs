@@ -1,18 +1,18 @@
 //! End-to-end integration tests for the gliner-relex worker.
 //!
 //! These tests spawn the real Python worker
-//! (`workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex`) on
+//! (`workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex`) on
 //! the real model weights staged under
-//! `$HHAGENT_DATA_DIR/workers/gliner-relex/weights/multi-v1.0/`. They
+//! `$KASTELLAN_DATA_DIR/workers/gliner-relex/weights/multi-v1.0/`. They
 //! exercise the full Slice 2 wiring chain: [`gliner_relex_entry`] →
-//! [`IdleTimeoutLifecycle::acquire`] → [`hhagent_core::tool_host::dispatch`]
+//! [`IdleTimeoutLifecycle::acquire`] → [`kastellan_core::tool_host::dispatch`]
 //! → JSON-RPC over stdio → Python `extract` dispatch → response decode
-//! through [`hhagent_core::workers::gliner_relex::ExtractResponse`].
+//! through [`kastellan_core::workers::gliner_relex::ExtractResponse`].
 //!
 //! Without the venv + weights (and without a running Postgres, and
 //! without bwrap/Seatbelt), every test in this file `[SKIP]`s cleanly.
 //! That matches the default deployment posture: gliner-relex is opt-in
-//! via `HHAGENT_GLINER_RELEX_ENABLE=1` and operators run
+//! via `KASTELLAN_GLINER_RELEX_ENABLE=1` and operators run
 //! `scripts/workers/gliner-relex/install.sh` before flipping the flag.
 //!
 //! See `docs/superpowers/specs/2026-05-18-gliner-relex-worker-design.md`
@@ -25,15 +25,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hhagent_core::scheduler::ToolEntry;
-use hhagent_core::secrets::Vault;
-use hhagent_core::tool_host::{self, ToolHostError};
-use hhagent_core::worker_lifecycle::{IdleTimeoutLifecycle, WorkerLifecycleManager};
-use hhagent_core::workers::gliner_relex::{
+use kastellan_core::scheduler::ToolEntry;
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{self, ToolHostError};
+use kastellan_core::worker_lifecycle::{IdleTimeoutLifecycle, WorkerLifecycleManager};
+use kastellan_core::workers::gliner_relex::{
     gliner_relex_entry, ExtractRequest, ExtractResponse, GlinerRelexEnv,
 };
-use hhagent_protocol::client::ClientError;
-use hhagent_tests_common::{
+use kastellan_protocol::client::ClientError;
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, PgCluster,
 };
@@ -43,7 +43,7 @@ use hhagent_tests_common::{
 /// Returns `None` (with a `[SKIP]` print on stderr) when the path
 /// doesn't exist. Mirrors the resolution `resolve_env` (wrapped by
 /// `GlinerRelexManifest::resolve`) does in production except that this
-/// helper never honours the daemon's `HHAGENT_GLINER_RELEX_VENV_DIR`
+/// helper never honours the daemon's `KASTELLAN_GLINER_RELEX_VENV_DIR`
 /// override — tests always run against the in-tree
 /// `workers/gliner-relex/.venv/`.
 fn resolve_worker_script() -> Option<PathBuf> {
@@ -53,7 +53,7 @@ fn resolve_worker_script() -> Option<PathBuf> {
         .expect("CARGO_MANIFEST_DIR has no parent — broken workspace layout")
         .to_path_buf();
     let script = workspace_root
-        .join("workers/gliner-relex/.venv/bin/hhagent-worker-gliner-relex");
+        .join("workers/gliner-relex/.venv/bin/kastellan-worker-gliner-relex");
     if !script.exists() {
         eprintln!(
             "\n[SKIP] gliner-relex venv shim not built at {} — run scripts/workers/gliner-relex/install.sh\n",
@@ -66,17 +66,17 @@ fn resolve_worker_script() -> Option<PathBuf> {
 
 /// Resolve the weights snapshot dir for `multi-v1.0`.
 ///
-/// Honours `HHAGENT_DATA_DIR` first, falls back to
-/// `$HOME/.local/share/hhagent` (mirrors `resolve_env`'s resolution).
+/// Honours `KASTELLAN_DATA_DIR` first, falls back to
+/// `$HOME/.local/share/kastellan` (mirrors `resolve_env`'s resolution).
 /// Skip-as-pass when the dir is missing on disk.
 fn resolve_weights_dir() -> Option<PathBuf> {
-    let data_dir = std::env::var("HHAGENT_DATA_DIR")
+    let data_dir = std::env::var("KASTELLAN_DATA_DIR")
         .ok()
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var("HOME")
                 .ok()
-                .map(|h| PathBuf::from(h).join(".local/share/hhagent"))
+                .map(|h| PathBuf::from(h).join(".local/share/kastellan"))
         })?;
     let weights = data_dir.join("workers/gliner-relex/weights/multi-v1.0");
     if !weights.is_dir() {
@@ -93,7 +93,7 @@ fn resolve_weights_dir() -> Option<PathBuf> {
 /// image. Mirrors the venv-staged `resolve_worker_script` skip pattern.
 #[cfg(target_os = "macos")]
 fn skip_if_no_container() -> bool {
-    if let Err(e) = hhagent_sandbox::macos_container::MacosContainer::probe() {
+    if let Err(e) = kastellan_sandbox::macos_container::MacosContainer::probe() {
         eprintln!(
             "\n[SKIP] container CLI / system service unavailable: {e} — install via 'brew install container' and 'container system start'\n"
         );
@@ -115,7 +115,7 @@ fn skip_if_no_container() -> bool {
 /// class of bug structurally impossible.
 #[cfg(target_os = "macos")]
 fn skip_if_image_missing(image_tag: &str) -> bool {
-    use hhagent_sandbox::macos_container::MacosContainer;
+    use kastellan_sandbox::macos_container::MacosContainer;
     if let Err(e) = MacosContainer::probe_image(image_tag) {
         eprintln!(
             "\n[SKIP] {image_tag} image not present — run scripts/workers/gliner-relex/build-image.sh: {e}\n"
@@ -140,7 +140,7 @@ fn build_test_entry_container() -> Option<ToolEntry> {
     if skip_if_no_container() {
         return None;
     }
-    if skip_if_image_missing("hhagent/gliner-relex:dev") {
+    if skip_if_image_missing("kastellan/gliner-relex:dev") {
         return None;
     }
     let weights = resolve_weights_dir()?;
@@ -211,9 +211,9 @@ async fn bring_up_pg(label: &str) -> Option<(PgCluster, sqlx::PgPool)> {
         &bin_dir,
         &format!("glr-{label}-d"),
         &format!("glr-{label}-l"),
-        &format!("hhagent-supervisor-test-pg-gliner-{label}-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-gliner-{label}-{suffix}"),
     );
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -221,7 +221,7 @@ async fn bring_up_pg(label: &str) -> Option<(PgCluster, sqlx::PgPool)> {
     )
     .await
     .expect("probe run");
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("connect runtime pool");
     Some((cluster, pool))
@@ -242,7 +242,7 @@ async fn happy_path_extract_returns_entities_and_triples() {
         return;
     };
 
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle = IdleTimeoutLifecycle::new(sandboxes);
 
     let mut handle = lifecycle
@@ -314,7 +314,7 @@ async fn warm_reuse_two_calls_keep_one_worker_warm() {
         return;
     };
 
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle = IdleTimeoutLifecycle::new(sandboxes);
 
     // A small request that won't strain the model — we're testing the
@@ -393,7 +393,7 @@ async fn invalid_input_returns_rpc_error_and_worker_stays_alive() {
         return;
     };
 
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle = IdleTimeoutLifecycle::new(sandboxes);
 
     let mut handle = lifecycle
@@ -496,15 +496,15 @@ async fn happy_path_container_extract_returns_entities_and_triples() {
     // a future refactor that silently regresses build_test_entry_container).
     assert_eq!(
         entry.sandbox_backend,
-        Some(hhagent_sandbox::SandboxBackendKind::Container),
+        Some(kastellan_sandbox::SandboxBackendKind::Container),
         "build_test_entry_container must produce a Container-backend entry"
     );
     assert_eq!(
         entry.container_image.as_deref(),
-        Some("hhagent/gliner-relex:dev"),
+        Some("kastellan/gliner-relex:dev"),
     );
 
-    let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+    let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle = IdleTimeoutLifecycle::new(sandboxes);
 
     let mut handle = lifecycle

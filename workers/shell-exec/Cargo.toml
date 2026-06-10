@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-worker-shell-exec"
+name        = "kastellan-worker-shell-exec"
 description = "Tool worker: run an argv from a strict allowlist. No shell interpretation."
 version.workspace      = true
 edition.workspace      = true
@@ -10,12 +10,12 @@ repository.workspace   = true
 readme.workspace       = true
 
 [[bin]]
-name = "hhagent-worker-shell-exec"
+name = "kastellan-worker-shell-exec"
 path = "src/main.rs"
 
 [dependencies]
-hhagent-protocol       = { path = "../../protocol" }
-hhagent-worker-prelude = { path = "../prelude" }
+kastellan-protocol       = { path = "../../protocol" }
+kastellan-worker-prelude = { path = "../prelude" }
 serde                  = { workspace = true }
 serde_json             = { workspace = true }
 anyhow                 = { workspace = true }

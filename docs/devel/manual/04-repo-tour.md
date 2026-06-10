@@ -91,7 +91,7 @@ core/src/
   audit_mirror.rs        Background JSONL mirror of audit_log rows
   audit_tail.rs          CLI audit log viewer helpers
   cli_audit.rs           Audit write helpers used by CLI subcommands
-  bin/hhagent-cli/       All CLI subcommands (ask, audit, tasks, entities, …)
+  bin/kastellan-cli/       All CLI subcommands (ask, audit, tasks, entities, …)
 ```
 
 The `tool_host.rs` file is especially important. It is the **only** place that
@@ -154,7 +154,7 @@ built by `cargo build --workspace`. When you make one ready, add it to
 `[workspace.members]` in the top-level `Cargo.toml` and update this list.
 
 Workers communicate with the core exclusively over stdin/stdout using
-JSON-RPC 2.0 (`hhagent-protocol`). They never talk to Postgres. They
+JSON-RPC 2.0 (`kastellan-protocol`). They never talk to Postgres. They
 never talk to each other.
 
 ---
@@ -182,7 +182,7 @@ db/src/
   agent_prompts.rs    Versioned system-prompt store
   secrets.rs          AES-256-GCM-at-rest secret store (decrypt on demand)
   tests.rs            Cross-module DB integration tests
-  bin/                hhagent-db-init and other admin binaries
+  bin/                kastellan-db-init and other admin binaries
 db/migrations/        Embedded *.sql migrations baked in via sqlx::migrate!
 ```
 
@@ -232,7 +232,7 @@ The JSON-RPC 2.0 line-delimited wire format used between the core and every
 worker. Provides typed `Client` and `Server` types and is MCP-stdio
 compatible — a future MCP-based tool can plug in without re-implementing the
 transport. Workers don't import this directly; they import
-`hhagent-worker-prelude` which wraps it.
+`kastellan-worker-prelude` which wraps it.
 
 ---
 
@@ -256,7 +256,7 @@ their own crate keeps the test pattern uniform across `core/tests/`,
 | Threat model | `docs/threat-model.md` |
 | CASSANDRA design plan | `docs/cassandra_design_plan.md` |
 | Postgres migrations | `db/migrations/` |
-| CLI subcommand implementations | `core/src/bin/hhagent-cli/` |
+| CLI subcommand implementations | `core/src/bin/kastellan-cli/` |
 | Integration tests (per-test PG cluster) | `core/tests/` and `db/tests/` |
 | Setup scripts | `scripts/linux/` |
 | Worker-output injection guard | `core/src/cassandra/injection_guard.rs` |

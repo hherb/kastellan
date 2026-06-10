@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When `hhagent-cli memory l3 run <id>` refuses because a needed tool is absent from its in-process registry rebuild, print an actionable hint that distinguishes "your env var is unset (the daemon has it)" from "the tool is genuinely unknown" — resolving the confusing failure mode in issue #179.
+**Goal:** When `kastellan-cli memory l3 run <id>` refuses because a needed tool is absent from its in-process registry rebuild, print an actionable hint that distinguishes "your env var is unset (the daemon has it)" from "the tool is genuinely unknown" — resolving the confusing failure mode in issue #179.
 
 **Architecture:** A pure classifier `diagnose_registry_divergence` in `core/src/memory/l3_invoke.rs` compares three tool-name sets (needed / live / daemon-snapshot) and returns a `Vec<RegistryDivergence>`; its `Display` renders each into an operator hint. The CLI `memory_l3_run` handler calls it on the existing `InvokeReport::Refused` arm — fetching the daemon snapshot via the existing `latest_registry_tools` helper — and prints any hints to stderr. No change to security posture or to what is runnable; the diagnostic is advisory output only.
 
@@ -14,7 +14,7 @@
 
 - **Modify** `core/src/memory/l3_invoke.rs` — add `RegistryDivergence` enum + `Display` impl + `diagnose_registry_divergence` pure fn. (~390 → ~440 LOC, under cap.)
 - **Modify** `core/src/memory/l3_invoke/tests.rs` — add unit tests for the classifier + `Display`.
-- **Modify** `core/src/bin/hhagent-cli/memory_l3.rs` — call the classifier in the `InvokeReport::Refused` arm; update the operator-prerequisite doc comment.
+- **Modify** `core/src/bin/kastellan-cli/memory_l3.rs` — call the classifier in the `InvokeReport::Refused` arm; update the operator-prerequisite doc comment.
 - **Modify** `docs/devel/ROADMAP.md` — sub-note on line 165 (autonomous door subsumes #179's structural remainder).
 - **Modify** `docs/devel/handovers/HANDOVER.md` + `docs/devel/ROADMAP.md` — session-end state update.
 
@@ -46,7 +46,7 @@ fn diagnose_missing_in_snapshot_is_env_hint() {
     // needed shell-exec is absent from the live rebuild but present in the
     // daemon snapshot ⇒ classic "env var unset" cliff.
     let needed = set(&["shell-exec"]);
-    let live = set(&[]); // operator shell lacked HHAGENT_SHELL_EXEC_BIN
+    let live = set(&[]); // operator shell lacked KASTELLAN_SHELL_EXEC_BIN
     let snapshot = set(&["shell-exec"]);
     let got = diagnose_registry_divergence(&needed, &live, Some(&snapshot));
     assert_eq!(
@@ -127,7 +127,7 @@ fn display_renders_actionable_hint_naming_the_tool() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib memory::l3_invoke::tests::diagnose 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib memory::l3_invoke::tests::diagnose 2>&1 | tail -20`
 Expected: compile error — `cannot find function diagnose_registry_divergence` / `cannot find type RegistryDivergence` in `super`.
 
 - [ ] **Step 3: Implement the enum, `Display`, and the classifier**
@@ -143,7 +143,7 @@ In `core/src/memory/l3_invoke.rs`, after the `prepare_invocation` function (befo
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryDivergence {
     /// In the daemon's snapshot but missing from the live rebuild — almost
-    /// always an unset env var (e.g. `HHAGENT_SHELL_EXEC_BIN`) in the
+    /// always an unset env var (e.g. `KASTELLAN_SHELL_EXEC_BIN`) in the
     /// operator's shell. THIS is the #179 usability cliff.
     MissingLocallyButInSnapshot { tool: String },
     /// Missing locally and no daemon snapshot exists to compare against —
@@ -160,7 +160,7 @@ impl std::fmt::Display for RegistryDivergence {
             RegistryDivergence::MissingLocallyButInSnapshot { tool } => write!(
                 f,
                 "'{tool}' is registered by the daemon but missing from your \
-                 environment — is the tool's env var (e.g. HHAGENT_SHELL_EXEC_BIN) \
+                 environment — is the tool's env var (e.g. KASTELLAN_SHELL_EXEC_BIN) \
                  set? Run with the same environment the daemon uses."
             ),
             RegistryDivergence::MissingLocallyNoSnapshot { tool } => write!(
@@ -207,12 +207,12 @@ pub fn diagnose_registry_divergence(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --lib memory::l3_invoke::tests 2>&1 | tail -20`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib memory::l3_invoke::tests 2>&1 | tail -20`
 Expected: all `l3_invoke::tests` pass, including the 6 new `diagnose_*` / `display_*` tests; existing `l3_invoke` unit tests still green.
 
 - [ ] **Step 5: Clippy the crate**
 
-Run: `source "$HOME/.cargo/env" && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -15`
+Run: `source "$HOME/.cargo/env" && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -15`
 Expected: exit 0, no warnings.
 
 - [ ] **Step 6: Commit**
@@ -237,7 +237,7 @@ EOF
 ## Task 2: Wire the diagnostic into the `memory l3 run` refusal path
 
 **Files:**
-- Modify: `core/src/bin/hhagent-cli/memory_l3.rs` (the `InvokeReport::Refused` arm, currently ~line 430; and the doc comment at ~line 316)
+- Modify: `core/src/bin/kastellan-cli/memory_l3.rs` (the `InvokeReport::Refused` arm, currently ~line 430; and the doc comment at ~line 316)
 
 - [ ] **Step 1: Add the diagnostic call to the `Refused` arm**
 
@@ -265,7 +265,7 @@ with one that adds the divergence hints. This uses `live_tools` (already in scop
             let needed: BTreeSet<String> =
                 template.steps.iter().map(|s| s.tool.clone()).collect();
             let snapshot = latest_registry_tools(&pool).await.ok().flatten();
-            let hints = hhagent_core::memory::l3_invoke::diagnose_registry_divergence(
+            let hints = kastellan_core::memory::l3_invoke::diagnose_registry_divergence(
                 &needed, &live_tools, snapshot.as_ref(),
             );
             for h in &hints {
@@ -301,23 +301,23 @@ with:
 
 - [ ] **Step 3: Build the CLI binary**
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-core --bin hhagent-cli 2>&1 | tail -15`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-core --bin kastellan-cli 2>&1 | tail -15`
 Expected: compiles clean (no `moved value` / unused-import errors).
 
 - [ ] **Step 4: Clippy**
 
-Run: `source "$HOME/.cargo/env" && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -15`
+Run: `source "$HOME/.cargo/env" && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -15`
 Expected: exit 0.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli/memory_l3.rs
+git add core/src/bin/kastellan-cli/memory_l3.rs
 git commit -m "$(cat <<'EOF'
 feat(l3,#179): print registry-divergence hint on memory l3 run refusal
 
 On InvokeReport::Refused, classify needed-vs-live-vs-daemon-snapshot tools
-and print an actionable `hint:` line so an unset HHAGENT_SHELL_EXEC_BIN
+and print an actionable `hint:` line so an unset KASTELLAN_SHELL_EXEC_BIN
 no longer reads as a cryptic "tool not in registry". Snapshot read is
 best-effort — never changes the exit path. Doc comment updated to point at
 the hint + the Opt-3 long-term direction (ROADMAP line 165).
@@ -334,7 +334,7 @@ EOF
 **Files:**
 - Modify: `core/tests/cli_memory_l3_run_e2e.rs` (the unknown-tool-refuses scenario)
 
-> This task requires a live Postgres (Postgres.app v18). If PG is unavailable the suite skips-as-pass; run it once PG is up. See `~/.claude/.../memory/postgres-app-bin-paths.md` for the session-local `HHAGENT_PG_BIN_DIR` override.
+> This task requires a live Postgres (Postgres.app v18). If PG is unavailable the suite skips-as-pass; run it once PG is up. See `~/.claude/.../memory/postgres-app-bin-paths.md` for the session-local `KASTELLAN_PG_BIN_DIR` override.
 
 - [ ] **Step 1: Read the existing unknown-tool scenario**
 
@@ -361,8 +361,8 @@ If the scenario unregisters the tool by removing it from BOTH the live rebuild a
 Run (adjust the bin dir per the memory note):
 ```sh
 source "$HOME/.cargo/env"
-HHAGENT_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin" \
-  cargo test -p hhagent-core --test cli_memory_l3_run_e2e -- --nocapture 2>&1 | tail -30
+KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin" \
+  cargo test -p kastellan-core --test cli_memory_l3_run_e2e -- --nocapture 2>&1 | tail -30
 ```
 Expected: all scenarios pass (5/5), zero `[SKIP]` lines, including the augmented unknown-tool case.
 
@@ -429,7 +429,7 @@ Run:
 source "$HOME/.cargo/env"
 cargo test --workspace 2>&1 | tail -15
 cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tail -5
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc -p hhagent-core --no-deps --document-private-items 2>&1 | grep -c "unresolved" || true
+RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc -p kastellan-core --no-deps --document-private-items 2>&1 | grep -c "unresolved" || true
 ```
 Expected: `cargo test --workspace` green (baseline 1276 + 6 new unit tests = 1282, +1 if the e2e assertion counts as a new test — it does not add a test fn, so 1282; the e2e count is unchanged). Clippy exit 0. Doc-links unresolved count = `main`'s 21 (zero new).
 

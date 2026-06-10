@@ -1,7 +1,7 @@
 # Design: distinguish constitutional refusal from completion in `tasks.state`
 
 **Date:** 2026-05-14
-**Issue:** [#23](https://github.com/hherb/hhagent/issues/23) — _scheduler: constitutional refusals are recorded as state='completed', not 'blocked'_
+**Issue:** [#23](https://github.com/hherb/kastellan/issues/23) — _scheduler: constitutional refusals are recorded as state='completed', not 'blocked'_
 **Status:** Approved (spec). Implementation plan to follow.
 
 ---
@@ -193,7 +193,7 @@ TDD ordering follows the CLAUDE.md rule #2 (red → green per layer):
 ## Deliberate non-goals
 
 - **Real `ConstitutionalGuard` reviewer rules.** Still waiting on observation-phase dataset. This slice ships the rails (state, types, audit-row shape, prompt hook) so real rules can land cleanly afterwards.
-- **CLI-side "show refusals" surface.** `hhagent-cli tasks list --state refused` works for free with the new state value; no special-case viewer.
+- **CLI-side "show refusals" surface.** `kastellan-cli tasks list --state refused` works for free with the new state value; no special-case viewer.
 - **Channel-bus refusal notifications.** No channel-bus exists.
 - **Retroactive migration of older rows.** No `state='completed'` row is currently a constitutional refusal (CASSANDRA stubs always Approve; no operator-side refusals captured).
 - **`Plan::refused` validation that `principle ∈ 1..=5`.** Field-shape validation could be added at the deserialiser, but the value is operator-visible in the audit log either way; preferring "fail loud at observation time" over "fail loud at runtime" for a debug-only signal.

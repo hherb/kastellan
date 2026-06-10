@@ -1,7 +1,7 @@
 //! Canonical form for `entities.name_norm` — the dedup key column
 //! added by migration `0015`.
 //!
-//! Lives in `hhagent-db` (not `hhagent-core`) because the schema
+//! Lives in `kastellan-db` (not `kastellan-core`) because the schema
 //! that depends on it lives here: `PgGraph::upsert_entity` and the
 //! v2 entity extractor's `upsert_entities_and_relations` both need
 //! to compute the same value for the same input, and a single source

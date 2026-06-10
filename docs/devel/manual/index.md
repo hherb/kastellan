@@ -1,6 +1,6 @@
-# hhagent — Developer Onboarding Manual
+# kastellan — Developer Onboarding Manual
 
-Welcome. This manual walks you through contributing to hhagent from scratch.
+Welcome. This manual walks you through contributing to kastellan from scratch.
 The project is a Rust-based personal AI agent with an unusually strong focus on
 OS-level security. You do not need to be a Rust expert or a security engineer
 to contribute — but you do need to understand a handful of non-negotiable rules
@@ -25,7 +25,7 @@ before writing your first line of code.
 
 | # | File | What you will learn |
 |---|------|---------------------|
-| 1 | [What is hhagent?](./01-what-is-hhagent.md) | Goals, current status, why it exists |
+| 1 | [What is kastellan?](./01-what-is-kastellan.md) | Goals, current status, why it exists |
 | 2 | [Dev environment — Linux](./02-dev-env-linux.md) | Install Rust, Postgres, bwrap; first build |
 | 3 | [Dev environment — macOS](./03-dev-env-macos.md) | Install Rust, Postgres, sandbox-exec; first build |
 | 4 | [Repository tour](./04-repo-tour.md) | Where everything lives |

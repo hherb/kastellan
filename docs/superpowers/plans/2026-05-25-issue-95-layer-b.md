@@ -16,13 +16,13 @@
 
 ## Working environment for every task
 
-All work happens in worktree **`/Users/hherb/src/hhagent-issue-95`** on branch **`feat/issue-95-upsert-layer-b`**. Every Bash command in this plan assumes that worktree is the cwd. Source the cargo env once per shell:
+All work happens in worktree **`/Users/hherb/src/kastellan-issue-95`** on branch **`feat/issue-95-upsert-layer-b`**. Every Bash command in this plan assumes that worktree is the cwd. Source the cargo env once per shell:
 
 ```sh
 source "$HOME/.cargo/env"
 ```
 
-When in doubt, `cd /Users/hherb/src/hhagent-issue-95`.
+When in doubt, `cd /Users/hherb/src/kastellan-issue-95`.
 
 ---
 
@@ -52,7 +52,7 @@ Create `core/src/entity_extraction/batch_upsert.rs`:
 //! for design rationale.
 
 use crate::workers::gliner_relex::Entity;
-use hhagent_db::normalize_entity_name;
+use kastellan_db::normalize_entity_name;
 
 /// One unique entity input position in the batch. The `Vec<DedupedEntity>`
 /// returned by `dedup_entity_inputs` carries no original-input index; the
@@ -163,8 +163,8 @@ pub mod batch_upsert;
 - [ ] **Step 2: Run the tests to verify they pass on first compile**
 
 ```sh
-cd /Users/hherb/src/hhagent-issue-95
-cargo test -p hhagent-core --lib entity_extraction::batch_upsert::tests -- --nocapture
+cd /Users/hherb/src/kastellan-issue-95
+cargo test -p kastellan-core --lib entity_extraction::batch_upsert::tests -- --nocapture
 ```
 
 Expected: `test result: ok. 3 passed; 0 failed`. (The tests are not strictly "failing first" — they describe pure helper behaviour that the helper implements correctly. The TDD discipline here is "write tests + implementation together in one file" — there's no separate red phase because there's no pre-existing code to be wrong about.)
@@ -283,7 +283,7 @@ Add to the `#[cfg(test)] mod tests` block (before the closing brace):
 - [ ] **Step 2: Run the tests**
 
 ```sh
-cargo test -p hhagent-core --lib entity_extraction::batch_upsert::tests -- --nocapture
+cargo test -p kastellan-core --lib entity_extraction::batch_upsert::tests -- --nocapture
 ```
 
 Expected: `test result: ok. 5 passed; 0 failed` (3 from Task 1 + 2 new).
@@ -403,7 +403,7 @@ Add to the `#[cfg(test)] mod tests` block:
 - [ ] **Step 2: Run the tests**
 
 ```sh
-cargo test -p hhagent-core --lib entity_extraction::batch_upsert::tests -- --nocapture
+cargo test -p kastellan-core --lib entity_extraction::batch_upsert::tests -- --nocapture
 ```
 
 Expected: `test result: ok. 8 passed; 0 failed`.
@@ -517,7 +517,7 @@ Add to the `#[cfg(test)] mod tests` block:
 - [ ] **Step 2: Run the tests**
 
 ```sh
-cargo test -p hhagent-core --lib entity_extraction::batch_upsert::tests -- --nocapture
+cargo test -p kastellan-core --lib entity_extraction::batch_upsert::tests -- --nocapture
 ```
 
 Expected: `test result: ok. 10 passed; 0 failed`.
@@ -619,7 +619,7 @@ async fn upsert_batch_happy_path_returns_same_outcome_shape_as_layer_a() {
 - [ ] **Step 2: Run it to verify it fails**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e \
+cargo test -p kastellan-core --test entity_extraction_e2e \
   upsert_batch_happy_path_returns_same_outcome_shape_as_layer_a \
   -- --nocapture
 ```
@@ -635,7 +635,7 @@ Append to `core/src/entity_extraction/batch_upsert.rs`:
 ```rust
 use crate::entity_extraction::EntityExtractionError;
 use crate::workers::gliner_relex::ExtractResponse;
-use hhagent_db::DbError;
+use kastellan_db::DbError;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
@@ -858,7 +858,7 @@ pub(crate) async fn upsert_relations_per_row_legacy(
         .bind(&relation_norm)
         .execute(pool)
         .await
-        .map_err(|e| hhagent_db::DbError::Query(format!("insert relation: {e}")))?
+        .map_err(|e| kastellan_db::DbError::Query(format!("insert relation: {e}")))?
         .rows_affected();
         n_relations_inserted += n as u32;
     }
@@ -869,7 +869,7 @@ pub(crate) async fn upsert_relations_per_row_legacy(
 - [ ] **Step 5: Run the new integration test**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e \
+cargo test -p kastellan-core --test entity_extraction_e2e \
   upsert_batch_happy_path_returns_same_outcome_shape_as_layer_a \
   -- --nocapture
 ```
@@ -879,7 +879,7 @@ Expected: `test result: ok. 1 passed; 0 failed` (or `[SKIP]` on hosts without PG
 - [ ] **Step 6: Run all existing entity_extraction_e2e tests to verify no regression**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e -- --nocapture
+cargo test -p kastellan-core --test entity_extraction_e2e -- --nocapture
 ```
 
 Expected: all 5 existing tests + 1 new = 6 passed.
@@ -1020,7 +1020,7 @@ async fn upsert_batch_dedup_input_returns_same_id_for_duplicates() {
 - [ ] **Step 2: Run them**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e \
+cargo test -p kastellan-core --test entity_extraction_e2e \
   upsert_batch_preserves_entity_id_order_for_unique_inputs \
   upsert_batch_dedup_input_returns_same_id_for_duplicates \
   -- --nocapture
@@ -1146,7 +1146,7 @@ async fn upsert_batch_preserves_operator_unquarantine_decision() {
 - [ ] **Step 2: Run it**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e \
+cargo test -p kastellan-core --test entity_extraction_e2e \
   upsert_batch_preserves_operator_unquarantine_decision \
   -- --nocapture
 ```
@@ -1258,7 +1258,7 @@ async fn upsert_batch_falls_back_to_per_row_on_entity_kind_fk_violation() {
 - [ ] **Step 2: Run it**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e \
+cargo test -p kastellan-core --test entity_extraction_e2e \
   upsert_batch_falls_back_to_per_row_on_entity_kind_fk_violation \
   -- --nocapture
 ```
@@ -1374,7 +1374,7 @@ async fn upsert_batch_relations_inserts_dedups_and_skips_unknown_entities() {
 - [ ] **Step 2: Run it to verify it fails (or passes — currently delegates to the legacy per-row loop in `gliner_relex.rs` which behaves identically)**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e \
+cargo test -p kastellan-core --test entity_extraction_e2e \
   upsert_batch_relations_inserts_dedups_and_skips_unknown_entities \
   -- --nocapture
 ```
@@ -1533,7 +1533,7 @@ Replace with:
 - [ ] **Step 6: Run the new test + all entity_extraction_e2e tests**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e -- --nocapture
+cargo test -p kastellan-core --test entity_extraction_e2e -- --nocapture
 ```
 
 Expected: 9 passed (5 existing Layer A + 4 new Layer B from Tasks 5-9).
@@ -1652,7 +1652,7 @@ async fn upsert_batch_falls_back_to_per_row_on_relation_kind_fk_violation() {
 - [ ] **Step 2: Run it**
 
 ```sh
-cargo test -p hhagent-core --test entity_extraction_e2e \
+cargo test -p kastellan-core --test entity_extraction_e2e \
   upsert_batch_falls_back_to_per_row_on_relation_kind_fk_violation \
   -- --nocapture
 ```
@@ -1698,7 +1698,7 @@ EOF
 - [ ] **Step 1: Full workspace + Python**
 
 ```sh
-cd /Users/hherb/src/hhagent-issue-95
+cd /Users/hherb/src/kastellan-issue-95
 source "$HOME/.cargo/env"
 cargo test --workspace 2>&1 | tee /tmp/layer-b-final.txt | tail -10
 ```
@@ -1738,12 +1738,12 @@ If either file is over cap, flag for follow-up in the HANDOVER tech-debt section
 cargo clippy --workspace --all-targets 2>&1 | grep -E "^warning|^error" | grep -v "^warning: unused" | head -20
 ```
 
-Expected: no NEW warnings beyond the 5 pre-existing in `db/src/probe.rs` (3 doc-list-indent) and `hhagent-protocol` (2 io_other_error). If new warnings appear, fix them before the commit.
+Expected: no NEW warnings beyond the 5 pre-existing in `db/src/probe.rs` (3 doc-list-indent) and `kastellan-protocol` (2 io_other_error). If new warnings appear, fix them before the commit.
 
 - [ ] **Step 4: Verify the audit-payload 8-key contract is unchanged**
 
 ```sh
-cargo test -p hhagent-core --lib scheduler::audit::tests build_extract_entities_payload -- --nocapture
+cargo test -p kastellan-core --lib scheduler::audit::tests build_extract_entities_payload -- --nocapture
 ```
 
 Expected: pass. (The Layer B change does not modify `build_extract_entities_payload`; this is a defensive re-check.)

@@ -40,7 +40,7 @@ impl crate::worker_manifest::WorkerManifest for GlinerRelexManifest {
         ) {
             Ok(env) => Resolution::Register(gliner_relex_entry(&env)),
             Err(ResolveSkipReason::Disabled) => Resolution::Disabled {
-                detail: "HHAGENT_GLINER_RELEX_ENABLE != \"1\"".to_string(),
+                detail: "KASTELLAN_GLINER_RELEX_ENABLE != \"1\"".to_string(),
             },
             Err(other) => Resolution::Misconfigured {
                 detail: gliner_skip_detail(&other),
@@ -56,17 +56,17 @@ fn gliner_skip_detail(reason: &ResolveSkipReason) -> String {
     match reason {
         ResolveSkipReason::Disabled => {
             // Handled by the Disabled arm above; included for exhaustiveness.
-            "HHAGENT_GLINER_RELEX_ENABLE != \"1\"".to_string()
+            "KASTELLAN_GLINER_RELEX_ENABLE != \"1\"".to_string()
         }
         ResolveSkipReason::WeightsDirEnvMissing => {
-            "HHAGENT_GLINER_RELEX_WEIGHTS_DIR unset".to_string()
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR unset".to_string()
         }
         ResolveSkipReason::WeightsDirNotADir { path } => {
             format!("weights dir missing on disk: {}", path.display())
         }
         ResolveSkipReason::VenvDirUnresolvable => {
-            "venv dir unresolvable (HHAGENT_GLINER_RELEX_VENV_DIR, \
-             HHAGENT_DATA_DIR, and HOME all unset)"
+            "venv dir unresolvable (KASTELLAN_GLINER_RELEX_VENV_DIR, \
+             KASTELLAN_DATA_DIR, and HOME all unset)"
                 .to_string()
         }
         ResolveSkipReason::ScriptShimMissing { path } => {

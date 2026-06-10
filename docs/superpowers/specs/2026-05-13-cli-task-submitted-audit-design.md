@@ -1,4 +1,4 @@
-# Producer-side `task.submitted` audit row from `hhagent-cli ask`
+# Producer-side `task.submitted` audit row from `kastellan-cli ask`
 
 **Date:** 2026-05-13
 **Author:** session driven by HANDOVER "Immediate next pickups"
@@ -13,7 +13,7 @@ was never claimed left no trace in `audit_log` (the scheduler only writes
 lifecycle rows when it *observes* a transition, and a never-claimed task is
 invisible to it).
 
-`hhagent-cli ask` has the same shape of gap, only in the other direction:
+`kastellan-cli ask` has the same shape of gap, only in the other direction:
 
 1. CLI calls `tasks::insert_pending` → row appears in `tasks` with `state='pending'`.
 2. Scheduler eventually claims the row → writes `scheduler/task.running`.
@@ -34,7 +34,7 @@ which row.
 
 | When                                    | actor | action          | payload keys                       |
 | --------------------------------------- | ----- | --------------- | ---------------------------------- |
-| `hhagent-cli ask "..."` inserts a row   | `cli` | `task.submitted`| `{task_id, lane, plan_count: 0}`   |
+| `kastellan-cli ask "..."` inserts a row   | `cli` | `task.submitted`| `{task_id, lane, plan_count: 0}`   |
 
 Payload shape is `build_lifecycle_payload(id, lane, 0)` — byte-shape-identical
 to the scheduler's existing lifecycle rows except for the `actor` column.
@@ -65,7 +65,7 @@ does not apply here.
 Add next to the existing `ACTION_TASK_RUNNING` / `ACTION_TASK_FINALIZE` / `ACTION_TASK_PREFIX` block:
 
 ```rust
-/// `action` column for the producer-side row written by `hhagent-cli ask`
+/// `action` column for the producer-side row written by `kastellan-cli ask`
 /// after `tasks::insert_pending` succeeds. Pairs with `CLI_AUDIT_ACTOR` from
 /// `core::cli_audit`. Observation queries grouping by `(actor, action)` see
 /// `('cli', 'task.submitted')` rows that share the `task.<state>` family's
@@ -95,7 +95,7 @@ chokepoint logging on failure):
 ///
 /// # Two-row-on-one-event note (for callers who care about double-counting)
 ///
-/// `hhagent-cli ask` will produce two rows for one logical task entry:
+/// `kastellan-cli ask` will produce two rows for one logical task entry:
 /// the producer row here at submit time, and the scheduler's later
 /// `task.running` observation row on claim. Observation queries asking
 /// "who submitted" use `actor='cli'`; queries asking "what did the
@@ -108,7 +108,7 @@ pub async fn submit_and_audit(
     let id = tasks::insert_pending(pool, lane, payload).await?;
 
     let row_payload = scheduler::audit::build_lifecycle_payload(id, lane, 0);
-    if let Err(e) = hhagent_db::audit::insert(
+    if let Err(e) = kastellan_db::audit::insert(
         pool,
         CLI_AUDIT_ACTOR,
         scheduler::audit::ACTION_TASK_SUBMITTED,
@@ -127,7 +127,7 @@ pub async fn submit_and_audit(
 }
 ```
 
-### 4. `core/src/bin/hhagent-cli.rs::ask_async` — one-line rewiring
+### 4. `core/src/bin/kastellan-cli.rs::ask_async` — one-line rewiring
 
 Line 267 currently calls `insert_pending` directly:
 
@@ -159,8 +159,8 @@ let id = match submit_and_audit(
 };
 ```
 
-The `use hhagent_db::tasks::{get, insert_pending};` line drops `insert_pending`
-and the existing `use hhagent_core::cli_audit::cancel_and_audit;` line widens
+The `use kastellan_db::tasks::{get, insert_pending};` line drops `insert_pending`
+and the existing `use kastellan_core::cli_audit::cancel_and_audit;` line widens
 to `cancel_and_audit, submit_and_audit`. No other call-site changes.
 
 ## Test plan
@@ -194,7 +194,7 @@ Assertions:
 
 ### Bumped test — `core/tests/cli_ask_e2e.rs`
 
-Today's `cli_ask_e2e` asserts an exact audit multiset on every `hhagent-cli
+Today's `cli_ask_e2e` asserts an exact audit multiset on every `kastellan-cli
 ask` invocation. After this slice, every `ask` call emits one new
 `cli/task.submitted` row. Two multiset bumps:
 
@@ -225,14 +225,14 @@ don't add `#[test]` functions.
   today. When one lands, the helper can be promoted (take `actor: &str`) or a
   separate `CHANNEL_AUDIT_ACTOR` const added in the same module — the wire
   shape is identical. YAGNI today.
-- **No producer `task.failed` row from `hhagent-cli tasks fail`.** Operator
+- **No producer `task.failed` row from `kastellan-cli tasks fail`.** Operator
   escape hatch; rare; scheduler's `task.crashed` lifecycle row already covers
   the running→crashed-after-restart case.
 - **No DB transaction wrapping `insert_pending` + audit insert.** Best-effort
   matches the chokepoint and cancel-slice posture. Documented at the helper
   doc-comment level (the cancel slice has the same trade-off documented in
   post-review commit `8840e34`).
-- **No `submit_and_audit` callers other than `hhagent-cli ask`.** Only one
+- **No `submit_and_audit` callers other than `kastellan-cli ask`.** Only one
   production `insert_pending` call site exists; no other callers to wire.
 
 ## Rollback plan
@@ -240,7 +240,7 @@ don't add `#[test]` functions.
 If the producer row turns out to interfere with an existing observation
 consumer (unlikely — the `actor='cli'` namespace is new):
 
-1. Revert `core/src/bin/hhagent-cli.rs::ask_async` back to direct
+1. Revert `core/src/bin/kastellan-cli.rs::ask_async` back to direct
    `insert_pending`.
 2. Leave `submit_and_audit` + `ACTION_TASK_SUBMITTED` in place — neither has
    external callers; both are inert.
@@ -252,7 +252,7 @@ The DB-layer surface is unchanged so no migration churn.
 
 - `core/src/scheduler/audit.rs` — `ACTION_TASK_SUBMITTED` const added.
 - `core/src/cli_audit.rs` — `submit_and_audit` helper added.
-- `core/src/bin/hhagent-cli.rs` — one-line rewiring at `ask_async:267`; use
+- `core/src/bin/kastellan-cli.rs` — one-line rewiring at `ask_async:267`; use
   statement widened to import `submit_and_audit`.
 - NEW `core/tests/cli_submit_audit_e2e.rs` — single integration test (~180 LOC).
 - `core/tests/cli_ask_e2e.rs` — multiset bumps (+1 in happy path, +1 in

@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-sandbox"
+name        = "kastellan-sandbox"
 description = "Cross-platform sandbox abstraction: bwrap+Landlock+seccomp on Linux, sandbox-exec (Seatbelt) on macOS."
 version.workspace      = true
 edition.workspace      = true

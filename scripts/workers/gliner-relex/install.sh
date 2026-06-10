@@ -22,11 +22,11 @@ fi
 # ----- paths -----
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 WORKER_DIR="$REPO_ROOT/workers/gliner-relex"
-DATA_DIR="${HHAGENT_DATA_DIR:-$HOME/.local/share/hhagent}"
+DATA_DIR="${KASTELLAN_DATA_DIR:-$HOME/.local/share/kastellan}"
 WEIGHTS_DIR="$DATA_DIR/workers/gliner-relex/weights"
 
 if [ ! -d "$WORKER_DIR" ]; then
-  echo "error: $WORKER_DIR not found; run from a checkout of the hhagent repo" >&2
+  echo "error: $WORKER_DIR not found; run from a checkout of the kastellan repo" >&2
   exit 1
 fi
 
@@ -40,7 +40,7 @@ echo ">>> downloading multi-v1.0 to $WEIGHTS_DIR/multi-v1.0"
 "$HF" download knowledgator/gliner-relex-multi-v1.0 \
   --local-dir "$WEIGHTS_DIR/multi-v1.0"
 
-if [ "${HHAGENT_GLINER_RELEX_INSTALL_LARGE:-0}" = "1" ]; then
+if [ "${KASTELLAN_GLINER_RELEX_INSTALL_LARGE:-0}" = "1" ]; then
   echo ">>> downloading large-v0.5 to $WEIGHTS_DIR/large-v0.5"
   "$HF" download knowledgator/gliner-relex-large-v0.5 \
     --local-dir "$WEIGHTS_DIR/large-v0.5"
@@ -59,4 +59,4 @@ done
 echo
 echo "ok: gliner-relex weights at $WEIGHTS_DIR"
 echo "ok: venv at $WORKER_DIR/.venv"
-echo "To enable in the daemon, export HHAGENT_GLINER_RELEX_ENABLE=1 before starting hhagent."
+echo "To enable in the daemon, export KASTELLAN_GLINER_RELEX_ENABLE=1 before starting kastellan."

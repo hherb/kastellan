@@ -4,9 +4,9 @@
 
 **Goal:** Add a sandboxed `web-fetch` tool worker exposing JSON-RPC `web.fetch` (HTTPS-only, host-allowlist self-enforced per redirect hop) that returns extracted readable text from HTML / PDF / text / JSON, and register it with the daemon.
 
-**Architecture:** A new `hhagent-worker-web-fetch` bin crate mirroring `workers/shell-exec`: it calls `hhagent_worker_prelude::serve_stdio` (which `lock_down()`s before serving). Pure logic (allowlist matching, content extraction, redirect-drive loop, request validation) lives in small focused modules with hermetic unit tests; networking is behind an `HttpGet` trait so the redirect/allowlist orchestration is testable with a fake. A host-side `WebFetchManifest` in `core/src/workers/web_fetch.rs` declares the `SandboxPolicy` (`Profile::WorkerNetClient` + `Net::Allowlist`) and is registered in the static `WORKER_MANIFESTS` list.
+**Architecture:** A new `kastellan-worker-web-fetch` bin crate mirroring `workers/shell-exec`: it calls `kastellan_worker_prelude::serve_stdio` (which `lock_down()`s before serving). Pure logic (allowlist matching, content extraction, redirect-drive loop, request validation) lives in small focused modules with hermetic unit tests; networking is behind an `HttpGet` trait so the redirect/allowlist orchestration is testable with a fake. A host-side `WebFetchManifest` in `core/src/workers/web_fetch.rs` declares the `SandboxPolicy` (`Profile::WorkerNetClient` + `Net::Allowlist`) and is registered in the static `WORKER_MANIFESTS` list.
 
-**Tech Stack:** Rust; `reqwest::blocking` + rustls (already in tree, add only the `blocking` feature); `url`; `readable_html` (alias of `dom_smoothie` 0.18, MIT) for HTML readability; `pdf-extract` 0.10 (MIT) for PDF text; `hhagent-protocol` JSON-RPC; `hhagent-worker-prelude` lockdown + stdio.
+**Tech Stack:** Rust; `reqwest::blocking` + rustls (already in tree, add only the `blocking` feature); `url`; `readable_html` (alias of `dom_smoothie` 0.18, MIT) for HTML readability; `pdf-extract` 0.10 (MIT) for PDF text; `kastellan-protocol` JSON-RPC; `kastellan-worker-prelude` lockdown + stdio.
 
 **Design doc:** [docs/superpowers/specs/2026-06-08-web-fetch-worker-design.md](../specs/2026-06-08-web-fetch-worker-design.md)
 
@@ -50,7 +50,7 @@ Branch is already `feat/web-fetch-worker`. Source the cargo env first in any she
 `workers/web-fetch/Cargo.toml`:
 ```toml
 [package]
-name        = "hhagent-worker-web-fetch"
+name        = "kastellan-worker-web-fetch"
 description = "Tool worker: fetch a URL (HTTPS-only, host allowlist) and return extracted readable text. GET-only."
 version.workspace      = true
 edition.workspace      = true
@@ -61,12 +61,12 @@ repository.workspace   = true
 readme.workspace       = true
 
 [[bin]]
-name = "hhagent-worker-web-fetch"
+name = "kastellan-worker-web-fetch"
 path = "src/main.rs"
 
 [dependencies]
-hhagent-protocol       = { path = "../../protocol" }
-hhagent-worker-prelude = { path = "../prelude" }
+kastellan-protocol       = { path = "../../protocol" }
+kastellan-worker-prelude = { path = "../prelude" }
 serde                  = { workspace = true }
 serde_json             = { workspace = true }
 anyhow                 = { workspace = true }
@@ -99,7 +99,7 @@ In root `Cargo.toml`, add the line after `"workers/shell-exec",`:
 
 - [ ] **Step 4: Build to verify the crate resolves and deps download**
 
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-worker-web-fetch`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-worker-web-fetch`
 Expected: compiles clean (downloads `dom_smoothie`, `pdf-extract`, `url`, reqwest `blocking`).
 If `dom_smoothie 0.18` or `pdf-extract 0.10` fails to resolve, run `cargo search dom_smoothie` / `cargo search pdf-extract` and pin the latest compatible published version, keeping the `package = "dom_smoothie"` alias. If a dep raises the effective MSRV above the workspace's declared `rust-version = "1.78"`, note it (the dev toolchain is 1.96, so the build still succeeds) — do not silently bump the workspace MSRV.
 
@@ -134,7 +134,7 @@ Add `#[allow(dead_code)]` is **not** needed — the test module references the i
 ```rust
 //! Host allowlist matching for web-fetch.
 //!
-//! Entries come from the `HHAGENT_WEB_FETCH_ALLOWLIST` env (a JSON array of
+//! Entries come from the `KASTELLAN_WEB_FETCH_ALLOWLIST` env (a JSON array of
 //! strings), injected by the host-side manifest from the `tool_allowlists` DB
 //! table. Two forms:
 //!   - `"en.wikipedia.org"` — exact host match only.
@@ -158,7 +158,7 @@ impl HostAllowlist {
     /// Parse from the JSON-array env string. Empty/blank entries are skipped.
     pub fn from_env_json(raw: &str) -> anyhow::Result<Self> {
         let entries: Vec<String> = serde_json::from_str(raw).map_err(|e| {
-            anyhow::anyhow!("HHAGENT_WEB_FETCH_ALLOWLIST is not a JSON array of strings: {e}")
+            anyhow::anyhow!("KASTELLAN_WEB_FETCH_ALLOWLIST is not a JSON array of strings: {e}")
         })?;
         let mut rules = Vec::new();
         for entry in entries {
@@ -243,7 +243,7 @@ mod tests {
 
 - [ ] **Step 3: Run the tests to verify they pass (implementation is included above)**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-fetch allowlist`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-fetch allowlist`
 Expected: PASS — 6 tests in `allowlist::tests`.
 (Implementation and tests are written together here because the logic is small and self-evidently TDD-shaped; the assertions are the spec. If you prefer strict red-green, delete the `impl HostAllowlist` bodies, watch it fail to compile, then restore.)
 
@@ -457,7 +457,7 @@ mod tests {
 
 - [ ] **Step 4: Run the tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-fetch extract`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-fetch extract`
 Expected: PASS — 7 tests in `extract::tests`.
 If `html_yields_title_and_main_text` fails with a GrabFailed-style error, lengthen `ARTICLE_HTML` and re-run. If `pdf_is_extracted` fails, regenerate `hello.pdf` (Step 1) with another producer.
 
@@ -595,7 +595,7 @@ impl ReqwestGet {
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .user_agent("hhagent-web-fetch/0")
+            .user_agent("kastellan-web-fetch/0")
             .build()?;
         Ok(Self { client })
     }
@@ -749,7 +749,7 @@ mod tests {
 
 - [ ] **Step 3: Run the tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-fetch fetch`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-fetch fetch`
 Expected: PASS — 6 tests in `fetch::tests`.
 
 - [ ] **Step 4: Commit**
@@ -781,7 +781,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 //! / OPERATION_FAILED / METHOD_NOT_FOUND). No silent fallbacks: any failure is
 //! an error, never an empty-but-success result.
 
-use hhagent_protocol::{codes, server::Handler, RpcError};
+use kastellan_protocol::{codes, server::Handler, RpcError};
 use serde::Deserialize;
 use url::Url;
 
@@ -866,7 +866,7 @@ pub struct WebFetchHandler<T: HttpGet> {
 impl WebFetchHandler<ReqwestGet> {
     /// Build from env: allowlist JSON + real reqwest transport.
     pub fn from_env() -> anyhow::Result<Self> {
-        let raw = std::env::var("HHAGENT_WEB_FETCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
+        let raw = std::env::var("KASTELLAN_WEB_FETCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
         let allowlist = HostAllowlist::from_env_json(&raw)?;
         let transport = ReqwestGet::new()?;
         Ok(Self { allowlist, transport })
@@ -1018,7 +1018,7 @@ NOTE on `err.code`: this assumes `RpcError` exposes a public `code` field. Verif
 
 - [ ] **Step 2: Run the handler tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-fetch handler`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-fetch handler`
 Expected: PASS — 6 tests in `handler::tests`. (If `err.code` doesn't compile, switch to the message-substring assertions noted above and re-run.)
 
 - [ ] **Step 3: Wire the handler into `main.rs`**
@@ -1035,7 +1035,7 @@ mod extract;
 mod fetch;
 mod handler;
 
-use hhagent_worker_prelude::serve_stdio;
+use kastellan_worker_prelude::serve_stdio;
 
 fn main() -> anyhow::Result<()> {
     let mut handler = handler::WebFetchHandler::from_env()?;
@@ -1046,7 +1046,7 @@ fn main() -> anyhow::Result<()> {
 
 - [ ] **Step 4: Build the whole crate and run all its tests**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-worker-web-fetch`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-worker-web-fetch`
 Expected: PASS — all unit tests (allowlist 6 + extract 7 + fetch 6 + handler 6), no dead-code warnings.
 
 - [ ] **Step 5: Commit**
@@ -1075,7 +1075,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 use std::path::PathBuf;
 
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
 use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerManifest};
@@ -1083,9 +1083,9 @@ use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerMani
 /// Tool name the registry keys web-fetch on.
 const TOOL_NAME: &str = "web-fetch";
 /// Operator override for the worker binary path.
-const BIN_ENV: &str = "HHAGENT_WEB_FETCH_BIN";
+const BIN_ENV: &str = "KASTELLAN_WEB_FETCH_BIN";
 /// Exe-relative sibling default.
-const DEFAULT_BIN_NAME: &str = "hhagent-worker-web-fetch";
+const DEFAULT_BIN_NAME: &str = "kastellan-worker-web-fetch";
 
 /// Build the [`ToolEntry`] for the web-fetch worker.
 ///
@@ -1093,7 +1093,7 @@ const DEFAULT_BIN_NAME: &str = "hhagent-worker-web-fetch";
 /// `tool_allowlists` DB table by the daemon, keyed `"web-fetch"`); the
 /// LLM-supplied `step.parameters` cannot widen it. The same allowlist is
 /// represented twice from one source:
-///   - injected verbatim as the `HHAGENT_WEB_FETCH_ALLOWLIST` env JSON for the
+///   - injected verbatim as the `KASTELLAN_WEB_FETCH_ALLOWLIST` env JSON for the
 ///     worker's own per-hop check (which understands the `.domain` wildcard), and
 ///   - mapped to `host:443` entries for `Net::Allowlist`, so the policy is
 ///     correct for the future egress proxy. (Wildcard `.domain` entries map to
@@ -1126,7 +1126,7 @@ pub fn web_fetch_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         cpu_ms: 10_000,
         mem_mb: 512,
         profile: Profile::WorkerNetClient,
-        env: vec![("HHAGENT_WEB_FETCH_ALLOWLIST".to_string(), allow_json)],
+        env: vec![("KASTELLAN_WEB_FETCH_ALLOWLIST".to_string(), allow_json)],
         cpu_quota_pct: None,
         tasks_max: None,
     };
@@ -1141,9 +1141,9 @@ pub fn web_fetch_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
 }
 
 /// web-fetch's manifest. Discovery mirrors shell-exec: a set
-/// `HHAGENT_WEB_FETCH_BIN` override is authoritative (honoured iff it names a
+/// `KASTELLAN_WEB_FETCH_BIN` override is authoritative (honoured iff it names a
 /// runnable file, else fails closed); only when unset do we fall back to the
-/// exe-relative sibling `hhagent-worker-web-fetch`. See [`discover_binary`].
+/// exe-relative sibling `kastellan-worker-web-fetch`. See [`discover_binary`].
 pub struct WebFetchManifest;
 
 impl WorkerManifest for WebFetchManifest {
@@ -1223,7 +1223,7 @@ mod tests {
                 }
                 // Env carries the verbatim domain list (wildcard preserved).
                 let (k, v) = &entry.policy.env[0];
-                assert_eq!(k, "HHAGENT_WEB_FETCH_ALLOWLIST");
+                assert_eq!(k, "KASTELLAN_WEB_FETCH_ALLOWLIST");
                 assert_eq!(v, r#"["en.wikipedia.org",".example.com"]"#);
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
@@ -1239,7 +1239,7 @@ mod tests {
 
         match WebFetchManifest.resolve(&c) {
             Resolution::Misconfigured { detail } => {
-                assert!(detail.contains("hhagent-worker-web-fetch"), "detail: {detail}");
+                assert!(detail.contains("kastellan-worker-web-fetch"), "detail: {detail}");
             }
             other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
         }
@@ -1271,9 +1271,9 @@ In `core/src/registry_build.rs`, add a line inside the `WORKER_MANIFESTS` array 
 
 - [ ] **Step 4: Run the manifest tests + confirm the registry still builds**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core web_fetch`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core web_fetch`
 Expected: PASS — 2 tests in `workers::web_fetch::tests`.
-Run: `source "$HOME/.cargo/env" && cargo build -p hhagent-core`
+Run: `source "$HOME/.cargo/env" && cargo build -p kastellan-core`
 Expected: compiles (web-fetch now in `WORKER_MANIFESTS`).
 
 - [ ] **Step 5: Commit**
@@ -1318,17 +1318,17 @@ This mirrors `core/tests/shell_exec_e2e.rs`'s harness (PG cluster + real sandbox
 
 use std::path::PathBuf;
 
-use hhagent_core::secrets::Vault;
-use hhagent_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use hhagent_core::workers::web_fetch::web_fetch_entry;
-use hhagent_protocol::codes;
-use hhagent_tests_common::{
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::workers::web_fetch::web_fetch_entry;
+use kastellan_protocol::codes;
+use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
 };
 
-async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
-    hhagent_db::probe::run(
+async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
         conn_spec,
         "core",
         "startup",
@@ -1336,7 +1336,7 @@ async fn probe_and_pool(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPo
     )
     .await
     .expect("probe run");
-    hhagent_db::pool::connect_runtime_pool(conn_spec)
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
         .await
         .expect("connect runtime pool")
 }
@@ -1363,7 +1363,7 @@ fn ready_or_skip(allowlist: &[&str]) -> Option<TestEnv> {
         return None;
     }
     let bin_dir = pg_bin_dir_or_skip()?;
-    let worker_path = workspace_target_binary("hhagent-worker-web-fetch");
+    let worker_path = workspace_target_binary("kastellan-worker-web-fetch");
     if !worker_path.exists() {
         eprintln!("\n[SKIP] web-fetch worker binary not built; run cargo build --workspace\n");
         return None;
@@ -1374,7 +1374,7 @@ fn ready_or_skip(allowlist: &[&str]) -> Option<TestEnv> {
         &bin_dir,
         "wf-d",
         "wf-l",
-        &format!("hhagent-supervisor-test-pg-webfetch-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-webfetch-{suffix}"),
     );
 
     Some(TestEnv {
@@ -1475,12 +1475,12 @@ fn real_fetch_extracts_readable_text() {
 - [ ] **Step 2: Run the hermetic e2e**
 
 Run (macOS, live Seatbelt; no PG bin dir ⇒ skip-as-pass is acceptable):
-`source "$HOME/.cargo/env" && cargo build --workspace && cargo test -p hhagent-core --test web_fetch_e2e -- --nocapture`
-Expected: `host_outside_allowlist_is_denied` PASSES (or prints a `[SKIP]` line if PG/sandbox/supervisor unavailable — then run on a host that has them, e.g. the DGX, or set `HHAGENT_PG_BIN_DIR` per the memory note). `real_fetch_extracts_readable_text` shows as `ignored`.
+`source "$HOME/.cargo/env" && cargo build --workspace && cargo test -p kastellan-core --test web_fetch_e2e -- --nocapture`
+Expected: `host_outside_allowlist_is_denied` PASSES (or prints a `[SKIP]` line if PG/sandbox/supervisor unavailable — then run on a host that has them, e.g. the DGX, or set `KASTELLAN_PG_BIN_DIR` per the memory note). `real_fetch_extracts_readable_text` shows as `ignored`.
 
 - [ ] **Step 3: Run the ignored real-network test manually to validate DNS-in-jail**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p hhagent-core --test web_fetch_e2e -- --ignored --nocapture`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --test web_fetch_e2e -- --ignored --nocapture`
 Expected: `real_fetch_extracts_readable_text` PASSES.
 **If it fails with a DNS resolution error** (the flagged risk): the resolver files in `fs_read` weren't enough. First confirm `/etc/resolv.conf` exists on the host. If glibc NSS is the problem, switch the worker to reqwest's pure-Rust resolver: in `workers/web-fetch/Cargo.toml` change the reqwest features to `["blocking", "hickory-dns"]`, rebuild, and re-run. Record whichever path worked in the handover. (This step requires network; skip in offline/CI-restricted environments and run it where outbound HTTPS is allowed.)
 
@@ -1506,7 +1506,7 @@ Run:
 ```bash
 source "$HOME/.cargo/env"
 cargo build --workspace
-cargo clippy -p hhagent-worker-web-fetch -p hhagent-core --all-targets --locked -- -D warnings
+cargo clippy -p kastellan-worker-web-fetch -p kastellan-core --all-targets --locked -- -D warnings
 cargo test --workspace
 ```
 Expected: build clean; clippy exit 0 (no warnings); tests green (macOS skip-as-pass for PG-required suites is acceptable per the project posture — the new worker's unit tests must all pass unconditionally). On the dev Mac, `core`'s Linux-gated paths cannot be cross-tested (the #144 `ring` wall); that's expected and CI-covered.

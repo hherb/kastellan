@@ -4,9 +4,9 @@
 
 **Goal:** Introduce a `WorkerLifecycleManager` abstraction over the spawn-per-request path so the production dispatcher routes through it. Slice 1 ships only the `single_use` runtime (byte-equivalent to today's shell-exec behaviour) plus the type-level definitions for `idle_timeout`. Slice 2 (the GLiNER-Relex prereq) fills in `idle_timeout` runtime.
 
-**Architecture:** New module `core::worker_lifecycle` carries `Lifecycle` enum + `WorkerLifecycleManager` trait + `SingleUseLifecycle` impl + `IdleTimeoutLifecycle` stub (panics at `acquire`). `ToolEntry` gains a `lifecycle: Lifecycle` field defaulting to `SingleUse`. `ToolHostStepDispatcher` swaps its `sandbox: Arc<dyn SandboxBackend>` field for `lifecycle: Arc<dyn WorkerLifecycleManager>` and delegates spawning. The `hhagent-supervisor` crate (OS-unit installer for systemd/launchd) is untouched — its name collision with the spec's "supervisor" wording is purely conceptual.
+**Architecture:** New module `core::worker_lifecycle` carries `Lifecycle` enum + `WorkerLifecycleManager` trait + `SingleUseLifecycle` impl + `IdleTimeoutLifecycle` stub (panics at `acquire`). `ToolEntry` gains a `lifecycle: Lifecycle` field defaulting to `SingleUse`. `ToolHostStepDispatcher` swaps its `sandbox: Arc<dyn SandboxBackend>` field for `lifecycle: Arc<dyn WorkerLifecycleManager>` and delegates spawning. The `kastellan-supervisor` crate (OS-unit installer for systemd/launchd) is untouched — its name collision with the spec's "supervisor" wording is purely conceptual.
 
-**Tech Stack:** Rust 2021, `async_trait`, `tokio`, `hhagent_sandbox::SandboxBackend`, `hhagent_protocol` JSON-RPC, existing `tool_host::{spawn_worker, dispatch, SupervisedWorker, ToolHostError, WorkerSpec}`.
+**Tech Stack:** Rust 2021, `async_trait`, `tokio`, `kastellan_sandbox::SandboxBackend`, `kastellan_protocol` JSON-RPC, existing `tool_host::{spawn_worker, dispatch, SupervisedWorker, ToolHostError, WorkerSpec}`.
 
 ---
 
@@ -160,7 +160,7 @@ mod tests {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core worker_lifecycle::types 2>&1 | tail -30
+cargo test -p kastellan-core worker_lifecycle::types 2>&1 | tail -30
 ```
 
 Expected: compile error — `cannot find type Lifecycle in this scope` (production types not yet defined).
@@ -303,7 +303,7 @@ pub struct Contract {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core worker_lifecycle::types 2>&1 | tail -20
+cargo test -p kastellan-core worker_lifecycle::types 2>&1 | tail -20
 ```
 
 Expected: `test result: ok. 5 passed; 0 failed`.
@@ -312,11 +312,11 @@ Expected: `test result: ok. 5 passed; 0 failed`.
 
 ```sh
 source "$HOME/.cargo/env"
-cargo build -p hhagent-core 2>&1 | tail -10
-cargo test -p hhagent-core --lib 2>&1 | tail -5
+cargo build -p kastellan-core 2>&1 | tail -10
+cargo test -p kastellan-core --lib 2>&1 | tail -5
 ```
 
-Expected: clean build + all `hhagent-core` library unit tests green (no integration / e2e tests yet — those run in Task 6).
+Expected: clean build + all `kastellan-core` library unit tests green (no integration / e2e tests yet — those run in Task 6).
 
 - [ ] **Step 8: Commit**
 
@@ -366,27 +366,27 @@ mod tests {
     use std::sync::Arc;
 
     // A no-op sandbox backend that lets us construct a `SingleUseLifecycle` without
-    // pulling in `hhagent-sandbox`'s integration-test setup. We never call `acquire` on
+    // pulling in `kastellan-sandbox`'s integration-test setup. We never call `acquire` on
     // it here — Task 6's existing `scheduler_step_dispatch_e2e` integration test is the
     // real spawn-path regression pin.
     struct NoopBackend;
-    impl hhagent_sandbox::SandboxBackend for NoopBackend {
-        fn probe(&self) -> Result<(), hhagent_sandbox::SandboxError> {
+    impl kastellan_sandbox::SandboxBackend for NoopBackend {
+        fn probe(&self) -> Result<(), kastellan_sandbox::SandboxError> {
             Ok(())
         }
         fn spawn_under_policy(
             &self,
-            _policy: &hhagent_sandbox::SandboxPolicy,
+            _policy: &kastellan_sandbox::SandboxPolicy,
             _program: &str,
             _args: &[String],
-        ) -> Result<std::process::Child, hhagent_sandbox::SandboxError> {
+        ) -> Result<std::process::Child, kastellan_sandbox::SandboxError> {
             unreachable!("test fixture: acquire never called against NoopBackend")
         }
     }
 
     #[test]
     fn single_use_lifecycle_constructor_holds_the_sandbox_backend() {
-        let sandbox: Arc<dyn hhagent_sandbox::SandboxBackend> = Arc::new(NoopBackend);
+        let sandbox: Arc<dyn kastellan_sandbox::SandboxBackend> = Arc::new(NoopBackend);
         let _mgr = SingleUseLifecycle::new(sandbox);
         // The presence of a constructor that compiles is the assertion; the manager's
         // production path is exercised by `scheduler_step_dispatch_e2e` after slice 1's
@@ -413,7 +413,7 @@ mod tests {
         // panics before reading any field of the entry, so the dummy is safe.
         let entry = crate::scheduler::tool_dispatch::ToolEntry {
             binary: std::path::PathBuf::from("/nope"),
-            policy: hhagent_sandbox::SandboxPolicy::default(),
+            policy: kastellan_sandbox::SandboxPolicy::default(),
             wall_clock_ms: None,
             lifecycle: lc,
         };
@@ -436,7 +436,7 @@ mod tests {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core worker_lifecycle::manager 2>&1 | tail -30
+cargo test -p kastellan-core worker_lifecycle::manager 2>&1 | tail -30
 ```
 
 Expected: compile errors — `SingleUseLifecycle`, `IdleTimeoutLifecycle`, `WorkerHandle`, the `lifecycle` field on `ToolEntry`, etc. are all unresolved. Task 2 fills in the manager surface; Task 3 adds the `lifecycle` field on `ToolEntry`. Until Task 3 the failing assertion will be on the unknown `lifecycle` field of `ToolEntry`. That's expected.
@@ -449,7 +449,7 @@ Insert above the `#[cfg(test)] mod tests { … }` block in `core/src/worker_life
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hhagent_sandbox::SandboxBackend;
+use kastellan_sandbox::SandboxBackend;
 
 use crate::scheduler::tool_dispatch::ToolEntry;
 use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
@@ -574,7 +574,7 @@ impl WorkerLifecycleManager for IdleTimeoutLifecycle {
 
 ```sh
 source "$HOME/.cargo/env"
-cargo build -p hhagent-core 2>&1 | tail -20
+cargo build -p kastellan-core 2>&1 | tail -20
 ```
 
 Expected: ONE failure — the test module refers to `ToolEntry { ..., lifecycle: lc }` but `ToolEntry` doesn't yet carry the `lifecycle` field. That's Task 3's work. The production code in `manager.rs` itself should compile clean (it only refers to `ToolEntry`'s existing fields). If you see other compile errors, fix them before proceeding.
@@ -683,8 +683,8 @@ In the in-module `tests` module of `core/src/scheduler/tool_dispatch.rs`, somewh
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --lib scheduler::tool_dispatch 2>&1 | tail -15
-cargo test -p hhagent-core --lib worker_lifecycle 2>&1 | tail -15
+cargo test -p kastellan-core --lib scheduler::tool_dispatch 2>&1 | tail -15
+cargo test -p kastellan-core --lib worker_lifecycle 2>&1 | tail -15
 ```
 
 Expected for `tool_dispatch`: all existing tests pass + the new `shell_exec_entry_declares_single_use_lifecycle` passes. Expected for `worker_lifecycle::manager`: now the `idle_timeout_lifecycle_acquire_panics_until_slice_2` test runs and the `#[should_panic]` assertion turns green; `single_use_lifecycle_constructor_holds_the_sandbox_backend` and the `worker_handle_exposes_worker_mut` shape pin pass.
@@ -830,7 +830,7 @@ Replace it with:
                     Some(&err_string),
                     elapsed_ms,
                 );
-                if let Err(audit_err) = hhagent_db::audit::insert(
+                if let Err(audit_err) = kastellan_db::audit::insert(
                     &self.pool,
                     SCHEDULER_AUDIT_ACTOR,
                     ACTION_STEP_SPAWN_FAILED,
@@ -868,7 +868,7 @@ The lines further down (`// Drop closes stdio + cancels the watchdog.` etc.) sta
 After the rewrite, `spawn_worker` and `WorkerSpec` are no longer referenced in `tool_dispatch.rs` (the manager owns them). Check the imports at the top of the file:
 
 ```sh
-grep -n "use crate::tool_host" /home/hherb/src/hhagent/core/src/scheduler/tool_dispatch.rs
+grep -n "use crate::tool_host" /home/hherb/src/kastellan/core/src/scheduler/tool_dispatch.rs
 ```
 
 If it shows the previous line `use crate::tool_host::{dispatch, spawn_worker, ToolHostError, WorkerSpec};`, narrow it to:
@@ -897,7 +897,7 @@ In `core/tests/scheduler_step_dispatch_e2e.rs`, find the `broken-tool` `ToolEntr
                     ..SandboxPolicy::default()
                 },
                 wall_clock_ms: Some(5_000),
-                lifecycle: hhagent_core::worker_lifecycle::Lifecycle::SingleUse,
+                lifecycle: kastellan_core::worker_lifecycle::Lifecycle::SingleUse,
             },
         );
 ```
@@ -917,8 +917,8 @@ Replace it with:
 
 ```rust
         let sandbox = sandbox_arc();
-        let lifecycle: std::sync::Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
-            std::sync::Arc::new(hhagent_core::worker_lifecycle::SingleUseLifecycle::new(
+        let lifecycle: std::sync::Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> =
+            std::sync::Arc::new(kastellan_core::worker_lifecycle::SingleUseLifecycle::new(
                 sandbox,
             ));
         let dispatcher = ToolHostStepDispatcher::new(
@@ -972,9 +972,9 @@ EOF
 In `core/src/main.rs`, find the existing dispatcher block (lines 147-154):
 
 ```rust
-    let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
+    let dispatcher: Arc<dyn kastellan_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
-            hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
+            kastellan_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
                 pool.clone(),
                 sandbox.clone(),
                 tool_registry,
@@ -990,14 +990,14 @@ Replace it with:
     // puts the spawn-per-request path behind a manager. `SingleUseLifecycle` is
     // the only impl shipped in slice 1; shell-exec declares
     // `Lifecycle::SingleUse` so behaviour is byte-equivalent to pre-slice main.
-    let lifecycle: Arc<dyn hhagent_core::worker_lifecycle::WorkerLifecycleManager> =
-        Arc::new(hhagent_core::worker_lifecycle::SingleUseLifecycle::new(
+    let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> =
+        Arc::new(kastellan_core::worker_lifecycle::SingleUseLifecycle::new(
             sandbox.clone(),
         ));
 
-    let dispatcher: Arc<dyn hhagent_core::scheduler::inner_loop::StepDispatcher> =
+    let dispatcher: Arc<dyn kastellan_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
-            hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
+            kastellan_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
                 pool.clone(),
                 lifecycle,
                 tool_registry,
@@ -1021,7 +1021,7 @@ git add core/src/main.rs
 git commit -m "$(cat <<'EOF'
 feat(core,main): wire SingleUseLifecycle into the daemon's dispatcher
 
-`hhagent`'s main now constructs `SingleUseLifecycle` from the existing
+`kastellan`'s main now constructs `SingleUseLifecycle` from the existing
 sandbox backend and passes it to `ToolHostStepDispatcher::new`. Behaviour
 for shell-exec is byte-equivalent to pre-slice main — `SingleUseLifecycle::acquire`
 calls the same `spawn_worker` the dispatcher used to call inline.
@@ -1062,7 +1062,7 @@ Expected: `0`.
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test scheduler_step_dispatch_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --test scheduler_step_dispatch_e2e 2>&1 | tail -10
 ```
 
 Expected: all 4 dispatch scenarios pass (happy path, POLICY_DENIED, UNKNOWN_TOOL, SPAWN_FAILED).
@@ -1071,10 +1071,10 @@ Expected: all 4 dispatch scenarios pass (happy path, POLICY_DENIED, UNKNOWN_TOOL
 
 ```sh
 source "$HOME/.cargo/env"
-cargo test -p hhagent-core --test cli_ask_e2e 2>&1 | tail -10
+cargo test -p kastellan-core --test cli_ask_e2e 2>&1 | tail -10
 ```
 
-Expected: both `cli_ask_e2e` scenarios pass. This is the strongest regression pin slice 1 has — it exercises the full production chain (real `hhagent-cli` → real `hhagent` daemon → real `SingleUseLifecycle::acquire` → real `hhagent-worker-shell-exec` → real Postgres → mock LLM only).
+Expected: both `cli_ask_e2e` scenarios pass. This is the strongest regression pin slice 1 has — it exercises the full production chain (real `kastellan-cli` → real `kastellan` daemon → real `SingleUseLifecycle::acquire` → real `kastellan-worker-shell-exec` → real Postgres → mock LLM only).
 
 ---
 
@@ -1155,7 +1155,7 @@ Section-by-section against `docs/superpowers/specs/2026-05-18-worker-lifecycle-p
 **4. Risk register**
 
 - **`async_trait` macro**: already a dependency (`scheduler::tool_dispatch::StepDispatcher` uses it). No new dep needed.
-- **`SandboxBackend` trait**: pub-exported from `hhagent_sandbox`; both `SingleUseLifecycle` and the existing `tool_host::spawn_worker` consume `&dyn SandboxBackend`, so no boxing/lifetime issues.
+- **`SandboxBackend` trait**: pub-exported from `kastellan_sandbox`; both `SingleUseLifecycle` and the existing `tool_host::spawn_worker` consume `&dyn SandboxBackend`, so no boxing/lifetime issues.
 - **Drop order on `WorkerHandle`**: Rust drops fields in declaration order, then runs the struct's own `Drop`. With one field (`worker: SupervisedWorker`), the default Drop is byte-equivalent to today's `let mut worker = …; … // worker drops at end of scope` behaviour.
 - **`tool_host::dispatch` chokepoint**: unchanged. `WorkerHandle::worker_mut` exposes `&mut SupervisedWorker`, not the module-private `WorkerCommand` constructor. The seal still holds.
 
@@ -1166,12 +1166,12 @@ Section-by-section against `docs/superpowers/specs/2026-05-18-worker-lifecycle-p
 This slice modifies several files in `core/` plus tests. Per the project convention, work happens in a git worktree off `main`. The shape:
 
 ```sh
-# From the main repo at /home/hherb/src/hhagent
+# From the main repo at /home/hherb/src/kastellan
 git fetch origin
 git checkout -b feat/worker-lifecycle-slice-1 main
 # Or use a worktree if preferred:
-# git worktree add ../hhagent-feat-worker-lifecycle-slice-1 -b feat/worker-lifecycle-slice-1 main
-# cd ../hhagent-feat-worker-lifecycle-slice-1
+# git worktree add ../kastellan-feat-worker-lifecycle-slice-1 -b feat/worker-lifecycle-slice-1 main
+# cd ../kastellan-feat-worker-lifecycle-slice-1
 ```
 
 Verify clean baseline before starting:
@@ -1193,5 +1193,5 @@ If the baseline isn't clean, fix or skip the failing test before starting slice 
 - **Worker manifest plumbing.** Whether manifests are TOML files on disk or Rust consts is open question 1 in the spec. Slice 1 ships `Lifecycle` directly on `ToolEntry`; slice 2 (or a parallel slice) can add a `WorkerManifest` struct and a registration pipeline.
 - **GLiNER-Relex worker.** Per the spec's "Next slice" section, this is the next-next slice that consumes slice 2's `idle_timeout` runtime.
 - **macOS `container` micro-VM spike** (issue #55). Independent of this slice.
-- **`hhagent-cli.rs` (1419 LOC) split**. Independent of this slice.
-- **Migrating `hhagent-supervisor`** (the OS-unit-installer crate) into anything resembling worker lifecycle management. The naming overlap with the spec's "supervisor" wording is irrelevant; the OS-unit crate stays untouched.
+- **`kastellan-cli.rs` (1419 LOC) split**. Independent of this slice.
+- **Migrating `kastellan-supervisor`** (the OS-unit-installer crate) into anything resembling worker lifecycle management. The naming overlap with the spec's "supervisor" wording is irrelevant; the OS-unit crate stays untouched.

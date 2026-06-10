@@ -27,8 +27,8 @@ the test fails loudly if the LLM is unreachable.
    port. Override either with env vars before invoking:
 
    ```sh
-   export HHAGENT_LLM_LOCAL_URL=http://127.0.0.1:11434/v1
-   export HHAGENT_LLM_LOCAL_MODEL='gemma4:26b-a4b-it-q8_0'
+   export KASTELLAN_LLM_LOCAL_URL=http://127.0.0.1:11434/v1
+   export KASTELLAN_LLM_LOCAL_MODEL='gemma4:26b-a4b-it-q8_0'
    ```
 
 2. Build the workspace once so the daemon, CLI, and worker binaries
@@ -42,7 +42,7 @@ the test fails loudly if the LLM is unreachable.
 3. Run the orchestrator:
 
    ```sh
-   cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture
+   cargo test -p kastellan-core --test observation_capture -- --ignored --nocapture
    ```
 
 4. Captures land under `tests/observation/captures/<id>/`. **The
@@ -52,7 +52,7 @@ the test fails loudly if the LLM is unreachable.
 
 ## Dry-run mode
 
-Set `HHAGENT_OBSERVATION_DRY_RUN=1` to walk the fixture tree, parse
+Set `KASTELLAN_OBSERVATION_DRY_RUN=1` to walk the fixture tree, parse
 each `prompt.md` + `meta.toml`, and print the work plan without
 dialing the LLM or writing files. Useful for adding a new fixture and
 verifying the meta parses.
@@ -63,7 +63,7 @@ verifying the meta parses.
 mkdir tests/observation/fixtures/<new-id>
 $EDITOR tests/observation/fixtures/<new-id>/prompt.md
 $EDITOR tests/observation/fixtures/<new-id>/meta.toml
-HHAGENT_OBSERVATION_DRY_RUN=1 cargo test -p hhagent-core \
+KASTELLAN_OBSERVATION_DRY_RUN=1 cargo test -p kastellan-core \
   --test observation_capture -- --ignored --nocapture
 ```
 

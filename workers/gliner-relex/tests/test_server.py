@@ -7,8 +7,8 @@ pytest without spawning a subprocess.
 import io
 import json
 
-from hhagent_worker_gliner_relex.server import Server
-from hhagent_worker_gliner_relex.errors import (
+from kastellan_worker_gliner_relex.server import Server
+from kastellan_worker_gliner_relex.errors import (
     METHOD_NOT_FOUND,
     INVALID_INPUT,
     PARSE_ERROR,

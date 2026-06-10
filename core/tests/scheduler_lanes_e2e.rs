@@ -20,19 +20,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use hhagent_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
-use hhagent_core::cassandra::types::{DataClass, Plan, PlannedStep};
-use hhagent_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
-use hhagent_core::scheduler::inner_loop::{StepDispatcher, StepOutcome, TaskContext};
-use hhagent_core::scheduler::spawn_scheduler;
-use hhagent_db::tasks::{insert_pending, Lane};
-use hhagent_tests_common::{
+use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
+use kastellan_core::cassandra::types::{DataClass, Plan, PlannedStep};
+use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
+use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome, TaskContext};
+use kastellan_core::scheduler::spawn_scheduler;
+use kastellan_db::tasks::{insert_pending, Lane};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, PgCluster,
 };
 use sqlx::postgres::PgListener;
 
 /// Async helper: bring up a PG cluster (via the shared
-/// [`hhagent_tests_common::bring_up_pg_cluster`]), run migrations,
+/// [`kastellan_tests_common::bring_up_pg_cluster`]), run migrations,
 /// return pool + cluster handle. The `PgCluster` carries the cleanup
 /// guards internally and drops them in the right order at end of scope.
 /// Returns `None` when PG or supervisor is unavailable (skip).
@@ -42,12 +42,12 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     }
     let bin_dir = pg_bin_dir_or_skip()?;
     let suffix = format!("{}-{}", label, unique_suffix());
-    let service_name = format!("hhagent-sched-test-pg-ln-{suffix}");
+    let service_name = format!("kastellan-sched-test-pg-ln-{suffix}");
     let cluster = tokio::task::block_in_place(|| {
         bring_up_pg_cluster(&bin_dir, "lnd", "lnl", &service_name)
     });
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -56,7 +56,7 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     .await
     .ok()?;
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .ok()?;
 
@@ -119,7 +119,7 @@ impl PlanFormulator for ScriptedFormulator {
                 recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
                 graph_seed_entity_ids: Vec::new(),
                 graph_seed_count: 0,
-                graph_seed_source: hhagent_core::entity_extraction::SeedSource::None,
+                graph_seed_source: kastellan_core::entity_extraction::SeedSource::None,
             },
         ))
     }
@@ -249,8 +249,8 @@ async fn two_lanes_run_concurrently() {
         delay: Duration::from_millis(800),
     });
 
-    let entity_extractor: Arc<dyn hhagent_core::entity_extraction::EntityExtractor> =
-        Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new());
+    let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
+        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new());
     let scheduler = spawn_scheduler(
         pool.clone(),
         formulator,

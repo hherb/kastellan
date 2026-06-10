@@ -2,7 +2,7 @@
 //! free-text-to-recall flow.
 //!
 //! Bring-up scaffolding + deterministic embedding seed now live in
-//! `hhagent-tests-common` (issue #15). The mock LLM TCP listener
+//! `kastellan-tests-common` (issue #15). The mock LLM TCP listener
 //! remains in-file because its `ServedRequest` shape varies by site
 //! (path field here; absent in other mocks); folding it into the
 //! shared crate would force a single shape on every consumer.
@@ -28,10 +28,10 @@
 
 use std::time::Duration;
 
-use hhagent_core::memory::{embed_query, recall, MemoryError, RecallModes, RecallParams};
-use hhagent_db::memories::{insert_memory, EMBEDDING_DIM};
-use hhagent_llm_router::{Router, RouterConfig};
-use hhagent_tests_common::{
+use kastellan_core::memory::{embed_query, recall, MemoryError, RecallModes, RecallParams};
+use kastellan_db::memories::{insert_memory, EMBEDDING_DIM};
+use kastellan_llm_router::{Router, RouterConfig};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, text_to_embedding,
     unique_suffix,
 };
@@ -185,8 +185,8 @@ fn build_router_pointing_at(base_url: &str) -> Router {
     Router::new(cfg).expect("build router")
 }
 
-async fn setup_pg(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
-    hhagent_db::probe::run(
+async fn setup_pg(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
         conn_spec,
         "core",
         "startup",
@@ -195,7 +195,7 @@ async fn setup_pg(conn_spec: &hhagent_db::conn::ConnectSpec) -> sqlx::PgPool {
     .await
     .expect("probe run");
 
-    hhagent_db::pool::connect_runtime_pool(conn_spec)
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
         .await
         .expect("connect runtime pool")
 }
@@ -223,7 +223,7 @@ fn embed_query_returns_vec_of_expected_dim() {
         &bin_dir,
         "embr-d",
         "embr-l",
-        &format!("hhagent-supervisor-test-pg-embr-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-embr-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -282,7 +282,7 @@ fn embed_query_writes_llm_router_audit_row() {
         &bin_dir,
         "embr-d",
         "embr-l",
-        &format!("hhagent-supervisor-test-pg-embr-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-embr-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -363,7 +363,7 @@ fn embed_query_dim_mismatch_surfaces_typed_error_and_writes_no_audit_row() {
         &bin_dir,
         "embr-d",
         "embr-l",
-        &format!("hhagent-supervisor-test-pg-embr-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-embr-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -437,7 +437,7 @@ fn full_text_to_recall_flow_uses_embed_query_then_recall() {
         &bin_dir,
         "embr-d",
         "embr-l",
-        &format!("hhagent-supervisor-test-pg-embr-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-embr-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()

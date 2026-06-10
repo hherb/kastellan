@@ -6,7 +6,7 @@
 
 **Architecture:** A new `worker_manifest` module defines a `WorkerManifest` trait whose pure `resolve(ctx)` returns `Register(ToolEntry)` / `Disabled` / `Misconfigured`. Each worker provides an impl in its own host-side module. A pure `assemble_registry` helper iterates a static `WORKER_MANIFESTS` list and builds the `ToolRegistry`; the async `build_tool_registry` shell pre-fetches DB allowlists and constructs the real `ResolveCtx` around it. Behaviour-preserving: every produced `ToolEntry` is byte-identical to today's.
 
-**Tech Stack:** Rust (hhagent-core lib+bin), `sqlx`/Postgres for the allowlist fetch, `tracing` for logs. Tests are closure-injected pure units plus the existing PG-backed integration pins.
+**Tech Stack:** Rust (kastellan-core lib+bin), `sqlx`/Postgres for the allowlist fetch, `tracing` for logs. Tests are closure-injected pure units plus the existing PG-backed integration pins.
 
 **Spec:** [`docs/superpowers/specs/2026-06-05-worker-manifest-plumbing-design.md`](../specs/2026-06-05-worker-manifest-plumbing-design.md)
 
@@ -40,7 +40,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         cpu_ms: 5_000,
         mem_mb: 256,
         profile: Profile::WorkerStrict,
-        env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
+        env: vec![("KASTELLAN_SHELL_ALLOWLIST".to_string(), allow_json)],
         cpu_quota_pct: None,
         tasks_max: None,
     };
@@ -137,7 +137,7 @@ pub struct ResolveCtx<'a> {
     pub exists: &'a dyn Fn(&Path) -> bool,
     /// Probe: is this path a directory?
     pub is_dir: &'a dyn Fn(&Path) -> bool,
-    /// Directory of the running `hhagent` binary, for `current_exe()`-relative
+    /// Directory of the running `kastellan` binary, for `current_exe()`-relative
     /// worker discovery. `None` when it can't be determined (fail-soft).
     pub exe_dir: Option<&'a Path>,
     /// Operational argv allowlist, pre-fetched from the DB by the builder,
@@ -147,7 +147,7 @@ pub struct ResolveCtx<'a> {
 }
 
 /// Locate a worker binary. Precedence:
-///   1. the explicit override env var (e.g. `"HHAGENT_SHELL_EXEC_BIN"`) if it
+///   1. the explicit override env var (e.g. `"KASTELLAN_SHELL_EXEC_BIN"`) if it
 ///      names an existing file — preserves every current deployment/test;
 ///   2. else the exe-relative sibling default `<exe_dir>/<default_name>`, if
 ///      it exists.
@@ -251,12 +251,12 @@ mod tests {
 
 - [ ] **Step 3: Run the tests to verify they fail to compile / fail**
 
-Run: `cargo test -p hhagent-core --lib worker_manifest`
+Run: `cargo test -p kastellan-core --lib worker_manifest`
 Expected: at this point the module is new and complete, so it should COMPILE and PASS. If a prior partial edit left it failing, fix until green. (The "failing first" discipline is satisfied by writing tests alongside the first real behavior; `discover_binary` is the unit under test.)
 
 - [ ] **Step 4: Run the full lib build + clippy to confirm no dead-code/warning regressions**
 
-Run: `cargo build -p hhagent-core && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings`
+Run: `cargo build -p kastellan-core && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings`
 Expected: exit 0. (`Resolution`/`ResolveCtx`/`WorkerManifest` are `pub` lib API, so they are not flagged as dead code despite having no consumer yet.)
 
 - [ ] **Step 5: Commit**
@@ -283,7 +283,7 @@ Create `core/src/workers/shell_exec.rs`:
 
 use std::path::PathBuf;
 
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
 use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerManifest};
@@ -291,9 +291,9 @@ use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerMani
 /// Tool name the registry keys shell-exec on.
 const TOOL_NAME: &str = "shell-exec";
 /// Operator override for the worker binary path.
-const BIN_ENV: &str = "HHAGENT_SHELL_EXEC_BIN";
+const BIN_ENV: &str = "KASTELLAN_SHELL_EXEC_BIN";
 /// Exe-relative sibling default (cargo `target/debug` + flat installs).
-const DEFAULT_BIN_NAME: &str = "hhagent-worker-shell-exec";
+const DEFAULT_BIN_NAME: &str = "kastellan-worker-shell-exec";
 
 /// Build the [`ToolEntry`] for the shell-exec worker. The administrator
 /// controls the argv allowlist (sourced from the `tool_allowlists` DB table by
@@ -311,7 +311,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         cpu_ms: 5_000,
         mem_mb: 256,
         profile: Profile::WorkerStrict,
-        env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
+        env: vec![("KASTELLAN_SHELL_ALLOWLIST".to_string(), allow_json)],
         cpu_quota_pct: None,
         tasks_max: None,
     };
@@ -325,8 +325,8 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
     }
 }
 
-/// shell-exec's manifest. Discovery: `HHAGENT_SHELL_EXEC_BIN` override wins,
-/// else the exe-relative sibling `hhagent-worker-shell-exec`.
+/// shell-exec's manifest. Discovery: `KASTELLAN_SHELL_EXEC_BIN` override wins,
+/// else the exe-relative sibling `kastellan-worker-shell-exec`.
 pub struct ShellExecManifest;
 
 impl WorkerManifest for ShellExecManifest {
@@ -391,7 +391,7 @@ mod tests {
                 assert_eq!(entry.wall_clock_ms, Some(30_000));
                 // Allowlist packed as JSON into the env, key unchanged.
                 let (k, v) = &entry.policy.env[0];
-                assert_eq!(k, "HHAGENT_SHELL_ALLOWLIST");
+                assert_eq!(k, "KASTELLAN_SHELL_ALLOWLIST");
                 assert_eq!(v, r#"["ls","cat"]"#);
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
@@ -407,7 +407,7 @@ mod tests {
 
         match ShellExecManifest.resolve(&c) {
             Resolution::Misconfigured { detail } => {
-                assert!(detail.contains("hhagent-worker-shell-exec"), "detail: {detail}");
+                assert!(detail.contains("kastellan-worker-shell-exec"), "detail: {detail}");
             }
             other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
         }
@@ -448,12 +448,12 @@ Leave the `result_mapping` and `SCHEDULER_AUDIT_ACTOR` items that follow untouch
 
 - [ ] **Step 4: Run the new tests to verify they pass**
 
-Run: `cargo test -p hhagent-core --lib workers::shell_exec`
+Run: `cargo test -p kastellan-core --lib workers::shell_exec`
 Expected: PASS (2 tests).
 
 - [ ] **Step 5: Run the lib build + clippy to confirm the relocation didn't break paths**
 
-Run: `cargo build -p hhagent-core && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings`
+Run: `cargo build -p kastellan-core && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings`
 Expected: exit 0. (Watch for unused-import warnings in `tool_dispatch.rs` — remove any import that the deleted body owned.)
 
 - [ ] **Step 6: Commit**
@@ -576,7 +576,7 @@ In `core/src/registry_build.rs`, extend the existing `#[cfg(test)] mod tests` wi
 
 - [ ] **Step 2: Run to verify the tests fail (function not defined)**
 
-Run: `cargo test -p hhagent-core --lib registry_build::tests::assemble`
+Run: `cargo test -p kastellan-core --lib registry_build::tests::assemble`
 Expected: FAIL — `cannot find function assemble_registry in this scope`.
 
 - [ ] **Step 3: Implement `assemble_registry`**
@@ -632,7 +632,7 @@ pub fn assemble_registry(
 
 - [ ] **Step 4: Run to verify the tests pass**
 
-Run: `cargo test -p hhagent-core --lib registry_build::tests`
+Run: `cargo test -p kastellan-core --lib registry_build::tests`
 Expected: PASS (the two new assemble tests + the pre-existing `sha256_argv0_list...` and `build_registry_loaded_payload...` tests).
 
 - [ ] **Step 5: Commit**
@@ -681,20 +681,20 @@ In `core/src/workers/gliner_relex/tests.rs`, add:
         let c = gliner_ctx(&get_env, &is_dir, &exists);
         match GlinerRelexManifest.resolve(&c) {
             Resolution::Disabled { .. } => {}
-            _ => panic!("expected Disabled when HHAGENT_GLINER_RELEX_ENABLE unset"),
+            _ => panic!("expected Disabled when KASTELLAN_GLINER_RELEX_ENABLE unset"),
         }
     }
 
     #[test]
     fn manifest_misconfigured_when_weights_dir_env_missing() {
         let get_env =
-            |k: &str| (k == "HHAGENT_GLINER_RELEX_ENABLE").then(|| "1".to_string());
+            |k: &str| (k == "KASTELLAN_GLINER_RELEX_ENABLE").then(|| "1".to_string());
         let is_dir = |_p: &Path| false;
         let exists = |_p: &Path| false;
         let c = gliner_ctx(&get_env, &is_dir, &exists);
         match GlinerRelexManifest.resolve(&c) {
             Resolution::Misconfigured { detail } => {
-                assert!(detail.contains("HHAGENT_GLINER_RELEX_WEIGHTS_DIR"), "detail: {detail}");
+                assert!(detail.contains("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR"), "detail: {detail}");
             }
             _ => panic!("expected Misconfigured when weights dir env missing"),
         }
@@ -704,14 +704,14 @@ In `core/src/workers/gliner_relex/tests.rs`, add:
     fn manifest_registers_on_happy_path() {
         // enable=1, weights dir is a dir, explicit venv dir, shim exists.
         let get_env = |k: &str| match k {
-            "HHAGENT_GLINER_RELEX_ENABLE" => Some("1".to_string()),
-            "HHAGENT_GLINER_RELEX_WEIGHTS_DIR" => Some("/weights".to_string()),
-            "HHAGENT_GLINER_RELEX_VENV_DIR" => Some("/data/.venv".to_string()),
+            "KASTELLAN_GLINER_RELEX_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR" => Some("/weights".to_string()),
+            "KASTELLAN_GLINER_RELEX_VENV_DIR" => Some("/data/.venv".to_string()),
             _ => None,
         };
         let is_dir = |p: &Path| p == Path::new("/weights");
-        // resolve_env checks the shim path `<venv>/bin/hhagent-worker-gliner-relex`.
-        let exists = |p: &Path| p == Path::new("/data/.venv/bin/hhagent-worker-gliner-relex");
+        // resolve_env checks the shim path `<venv>/bin/kastellan-worker-gliner-relex`.
+        let exists = |p: &Path| p == Path::new("/data/.venv/bin/kastellan-worker-gliner-relex");
         let c = gliner_ctx(&get_env, &is_dir, &exists);
         match GlinerRelexManifest.resolve(&c) {
             Resolution::Register(entry) => {
@@ -725,11 +725,11 @@ In `core/src/workers/gliner_relex/tests.rs`, add:
         }
     }
 ```
-> Note: confirm the exact shim sub-path `resolve_env` checks (`<venv_dir>/bin/hhagent-worker-gliner-relex`) by reading `core/src/workers/gliner_relex.rs` around the `ScriptShimMissing` construction, and match the `exists` closure to it.
+> Note: confirm the exact shim sub-path `resolve_env` checks (`<venv_dir>/bin/kastellan-worker-gliner-relex`) by reading `core/src/workers/gliner_relex.rs` around the `ScriptShimMissing` construction, and match the `exists` closure to it.
 
 - [ ] **Step 2: Run to verify the tests fail**
 
-Run: `cargo test -p hhagent-core --lib workers::gliner_relex::tests::manifest`
+Run: `cargo test -p kastellan-core --lib workers::gliner_relex::tests::manifest`
 Expected: FAIL — `cannot find ... GlinerRelexManifest`.
 
 - [ ] **Step 3: Implement the manifest**
@@ -761,7 +761,7 @@ impl crate::worker_manifest::WorkerManifest for GlinerRelexManifest {
         ) {
             Ok(env) => Resolution::Register(gliner_relex_entry(&env)),
             Err(ResolveSkipReason::Disabled) => Resolution::Disabled {
-                detail: "HHAGENT_GLINER_RELEX_ENABLE != \"1\"".to_string(),
+                detail: "KASTELLAN_GLINER_RELEX_ENABLE != \"1\"".to_string(),
             },
             Err(other) => Resolution::Misconfigured {
                 detail: gliner_skip_detail(&other),
@@ -777,17 +777,17 @@ fn gliner_skip_detail(reason: &ResolveSkipReason) -> String {
     match reason {
         ResolveSkipReason::Disabled => {
             // Handled by the Disabled arm above; included for exhaustiveness.
-            "HHAGENT_GLINER_RELEX_ENABLE != \"1\"".to_string()
+            "KASTELLAN_GLINER_RELEX_ENABLE != \"1\"".to_string()
         }
         ResolveSkipReason::WeightsDirEnvMissing => {
-            "HHAGENT_GLINER_RELEX_WEIGHTS_DIR unset".to_string()
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR unset".to_string()
         }
         ResolveSkipReason::WeightsDirNotADir { path } => {
             format!("weights dir missing on disk: {}", path.display())
         }
         ResolveSkipReason::VenvDirUnresolvable => {
-            "venv dir unresolvable (HHAGENT_GLINER_RELEX_VENV_DIR, \
-             HHAGENT_DATA_DIR, and HOME all unset)"
+            "venv dir unresolvable (KASTELLAN_GLINER_RELEX_VENV_DIR, \
+             KASTELLAN_DATA_DIR, and HOME all unset)"
                 .to_string()
         }
         ResolveSkipReason::ScriptShimMissing { path } => {
@@ -799,7 +799,7 @@ fn gliner_skip_detail(reason: &ResolveSkipReason) -> String {
 
 - [ ] **Step 4: Run to verify the tests pass**
 
-Run: `cargo test -p hhagent-core --lib workers::gliner_relex::tests`
+Run: `cargo test -p kastellan-core --lib workers::gliner_relex::tests`
 Expected: PASS (3 new manifest tests + the existing gliner unit tests).
 
 - [ ] **Step 5: Commit**
@@ -839,7 +839,7 @@ Replace the entire existing `pub async fn build_tool_registry(...)` body with:
 /// manifest's argv allowlist from the `tool_allowlists` DB table (the only
 /// async step), then delegates to the pure [`assemble_registry`].
 ///
-/// `exe_dir` (the directory of the running `hhagent` binary, from
+/// `exe_dir` (the directory of the running `kastellan` binary, from
 /// `current_exe()`) seeds the exe-relative sibling discovery default; pass
 /// `None` to disable that fallback (override-env-only).
 ///
@@ -848,7 +848,7 @@ Replace the entire existing `pub async fn build_tool_registry(...)` body with:
 pub async fn build_tool_registry(
     pool: &sqlx::PgPool,
     exe_dir: Option<std::path::PathBuf>,
-) -> Result<(ToolRegistry, Vec<LoadedToolRecord>), hhagent_db::DbError> {
+) -> Result<(ToolRegistry, Vec<LoadedToolRecord>), kastellan_db::DbError> {
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -856,20 +856,20 @@ pub async fn build_tool_registry(
     let mut allowlists: HashMap<String, Vec<String>> = HashMap::new();
     for m in WORKER_MANIFESTS {
         if let Some(tool) = m.allowlist_tool() {
-            let al = hhagent_db::tool_allowlists::list_for_tool(pool, tool)
+            let al = kastellan_db::tool_allowlists::list_for_tool(pool, tool)
                 .await
                 .map_err(|e| {
-                    hhagent_db::DbError::Query(format!("loading {tool} allowlist: {e}"))
+                    kastellan_db::DbError::Query(format!("loading {tool} allowlist: {e}"))
                 })?;
             allowlists.insert(tool.to_string(), al);
         }
     }
 
     // Preserve the deprecation breadcrumb for the retired env-var allowlist.
-    if std::env::var_os("HHAGENT_SHELL_EXEC_ALLOWLIST").is_some() {
+    if std::env::var_os("KASTELLAN_SHELL_EXEC_ALLOWLIST").is_some() {
         tracing::warn!(
-            "HHAGENT_SHELL_EXEC_ALLOWLIST is no longer honored; \
-             use 'hhagent-cli tools allowlist add <tool> <argv0>' to populate the DB"
+            "KASTELLAN_SHELL_EXEC_ALLOWLIST is no longer honored; \
+             use 'kastellan-cli tools allowlist add <tool> <argv0>' to populate the DB"
         );
     }
 
@@ -897,42 +897,42 @@ Delete `build_gliner_relex_entry` and `log_gliner_relex_skip` entirely (their lo
 
 In `core/src/main.rs`:
 
-Delete the `let gliner_relex_entry = hhagent_core::registry_build::build_gliner_relex_entry();` line (and shrink the surrounding comment block that explained the double-use, since the entry is no longer pre-resolved here).
+Delete the `let gliner_relex_entry = kastellan_core::registry_build::build_gliner_relex_entry();` line (and shrink the surrounding comment block that explained the double-use, since the entry is no longer pre-resolved here).
 
 Compute the exe dir and call the new builder signature:
 ```rust
-    // Directory of the running `hhagent` binary — seeds exe-relative sibling
+    // Directory of the running `kastellan` binary — seeds exe-relative sibling
     // discovery so plain workers (e.g. shell-exec) are found in a flat install
-    // with no HHAGENT_*_BIN env set. None (rare current_exe() failure) ⇒
+    // with no KASTELLAN_*_BIN env set. None (rare current_exe() failure) ⇒
     // override-env-only discovery.
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
     let (registry, loaded_tool_records) =
-        hhagent_core::registry_build::build_tool_registry(&pool, exe_dir).await?;
+        kastellan_core::registry_build::build_tool_registry(&pool, exe_dir).await?;
     let tool_registry = Arc::new(registry);
 ```
 
 Replace the extractor `match gliner_relex_entry { ... }` (around line 182) with a read-back from the now-authoritative registry:
 ```rust
-    let entity_extractor: Arc<dyn hhagent_core::entity_extraction::EntityExtractor> =
+    let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
         match tool_registry
-            .lookup(hhagent_core::workers::gliner_relex::Client::TOOL_NAME)
+            .lookup(kastellan_core::workers::gliner_relex::Client::TOOL_NAME)
             .cloned()
         {
             Some(entry) => {
                 tracing::info!(
-                    target: "hhagent::main",
+                    target: "kastellan::main",
                     "gliner-relex configured; constructing v2 entity extractor",
                 );
-                let client = hhagent_core::workers::gliner_relex::Client::new(
+                let client = kastellan_core::workers::gliner_relex::Client::new(
                     lifecycle.clone(),
                     pool.clone(),
                     entry,
                 );
                 Arc::new(
-                    hhagent_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
+                    kastellan_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
                         client,
                         pool.clone(),
                     ),
@@ -940,10 +940,10 @@ Replace the extractor `match gliner_relex_entry { ... }` (around line 182) with 
             }
             None => {
                 tracing::warn!(
-                    target: "hhagent::main",
+                    target: "kastellan::main",
                     "gliner-relex not configured; using NoOpEntityExtractor (graph lane disabled)",
                 );
-                Arc::new(hhagent_core::entity_extraction::NoOpEntityExtractor::new())
+                Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new())
             }
         };
 ```
@@ -955,10 +955,10 @@ Expected: exit 0. Fix any remaining references to the deleted `build_gliner_rele
 
 - [ ] **Step 4: Run the core lib + the registry/registry-reading integration tests**
 
-Run: `cargo test -p hhagent-core --lib`
+Run: `cargo test -p kastellan-core --lib`
 Expected: PASS.
 
-Run (live PG required; on the DGX): `cargo test -p hhagent-core --test cli_ask_e2e`
+Run (live PG required; on the DGX): `cargo test -p kastellan-core --test cli_ask_e2e`
 Expected: PASS — the `registry.loaded` summary-row assertions still see exactly one row, proving the audit payload is unchanged.
 
 - [ ] **Step 5: Commit**
@@ -977,15 +977,15 @@ git commit -m "feat(core): drive registry build from WORKER_MANIFESTS; read glin
 
 - [ ] **Step 1: Write the failing test**
 
-This proves the headline payoff: with `HHAGENT_SHELL_EXEC_BIN` unset, shell-exec still registers via the exe-relative sibling default. It is pure (no PG): it calls `assemble_registry` directly against the real manifest list with an injected ctx whose `exe_dir` holds a fake sibling.
+This proves the headline payoff: with `KASTELLAN_SHELL_EXEC_BIN` unset, shell-exec still registers via the exe-relative sibling default. It is pure (no PG): it calls `assemble_registry` directly against the real manifest list with an injected ctx whose `exe_dir` holds a fake sibling.
 
 Add to `core/src/registry_build.rs`'s `mod tests`:
 ```rust
     #[test]
     fn shell_exec_registers_with_no_override_env_via_exe_sibling() {
         let exe_dir = PathBuf::from("/install/bin");
-        let sibling = exe_dir.join("hhagent-worker-shell-exec");
-        // No HHAGENT_SHELL_EXEC_BIN; only the sibling exists.
+        let sibling = exe_dir.join("kastellan-worker-shell-exec");
+        // No KASTELLAN_SHELL_EXEC_BIN; only the sibling exists.
         let get_env = |_k: &str| None;
         let exists = {
             let sibling = sibling.clone();
@@ -1015,7 +1015,7 @@ Add to `core/src/registry_build.rs`'s `mod tests`:
 
 - [ ] **Step 2: Run to verify it passes**
 
-Run: `cargo test -p hhagent-core --lib registry_build::tests::shell_exec_registers_with_no_override_env_via_exe_sibling`
+Run: `cargo test -p kastellan-core --lib registry_build::tests::shell_exec_registers_with_no_override_env_via_exe_sibling`
 Expected: PASS. (If it fails because `WORKER_MANIFESTS`/`assemble_registry` aren't in scope of the test module, add `use super::*;` — already present in the existing `mod tests`.)
 
 - [ ] **Step 3: Commit**

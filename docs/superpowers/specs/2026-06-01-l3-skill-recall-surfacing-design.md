@@ -8,7 +8,7 @@
 ## Pre-reqs (all shipped)
 
 - **L3 writer** (spec [`2026-05-31-l3-skill-crystallisation-design.md`](2026-05-31-l3-skill-crystallisation-design.md), PR #173, merged at `6eb966e`). It populates `MemoryLayer::Skill` (L3) rows whose `body` is the skill *description* and whose `metadata` is `{source, task_id, trust, body_sha256, created_at, template}`. The `template` value is exactly a serialised [`L3SkillCandidate`](../../../core/src/cassandra/types.rs#L96) — `{name, description, parameters:[{name, description}], steps:[…]}`.
-- **L3 approval gate + `SkillTrust`** (spec [`2026-05-31-l3-skill-approval-gate-design.md`](2026-05-31-l3-skill-approval-gate-design.md), PR #176, merged at `bbcc7b3`). [`core/src/memory/l3_approval.rs`](../../../core/src/memory/l3_approval.rs) ships the `SkillTrust` enum (`Untrusted | UserApproved | Pinned`) with a **total, fail-safe** `from_metadata_str` (unknown/absent ⇒ `Untrusted`) and `as_str`. `hhagent-cli memory l3 approve <id>` is the only path that flips a row to `user_approved`.
+- **L3 approval gate + `SkillTrust`** (spec [`2026-05-31-l3-skill-approval-gate-design.md`](2026-05-31-l3-skill-approval-gate-design.md), PR #176, merged at `bbcc7b3`). [`core/src/memory/l3_approval.rs`](../../../core/src/memory/l3_approval.rs) ships the `SkillTrust` enum (`Untrusted | UserApproved | Pinned`) with a **total, fail-safe** `from_metadata_str` (unknown/absent ⇒ `Untrusted`) and `as_str`. `kastellan-cli memory l3 approve <id>` is the only path that flips a row to `user_approved`.
 - **The `<l1_insights>` surfacing pattern** — the exact precedent this slice mirrors one layer over:
   - Pure renderer [`assemble_system_prompt`](../../../core/src/prompt_assembly/assemble.rs#L75): `L0 → L1 → recalled → base`, each block omitted when its slice is empty.
   - Query-independent loader [`load_l1_default`](../../../core/src/memory/layers.rs#L124) → [`load_l1`](../../../core/src/memory/layers.rs#L73) with `L1_DEFAULT_CAP_ROWS = 32` / `L1_DEFAULT_CAP_BYTES = 4096` and a byte-accumulate loop. **L1 is a separate unconditional load, not a fourth recall lane** (see the `layers.rs` module docstring).
@@ -52,7 +52,7 @@ This is encoded at the type level: `SurfacedSkill` carries only `{name, descript
 
 ```rust
 // core/src/memory/l3_surface.rs
-use hhagent_db::memories::{Memory, MemoryLayer};
+use kastellan_db::memories::{Memory, MemoryLayer};
 use crate::cassandra::types::{L3Param, L3SkillCandidate};
 use crate::memory::l3_approval::SkillTrust;
 

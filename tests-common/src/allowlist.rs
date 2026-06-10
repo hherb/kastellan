@@ -1,6 +1,6 @@
 //! Seed `tool_allowlists` rows for integration tests.
 //!
-//! Tests that bring up the `hhagent` daemon and want it to see a
+//! Tests that bring up the `kastellan` daemon and want it to see a
 //! populated argv allowlist can call this between PG cluster bring-up
 //! and daemon start. Bypasses the CLI binary for setup speed.
 

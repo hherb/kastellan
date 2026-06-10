@@ -1,4 +1,4 @@
-//! hhagent-supervisor: emit and manage user-level service units across OSes.
+//! kastellan-supervisor: emit and manage user-level service units across OSes.
 //!
 //! Linux  -> systemd `--user` unit files in  `~/.config/systemd/user/`
 //! macOS  -> launchd LaunchAgents plists in   `~/Library/LaunchAgents/`
@@ -10,7 +10,7 @@
 //! back to a `NotYetImplemented` placeholder only on other Unixes.
 //!
 //! Why user-level only:
-//!   - hhagent runs entirely in one OS user's account; system-level units
+//!   - kastellan runs entirely in one OS user's account; system-level units
 //!     would need root and would expand the attack surface.
 //!   - `systemctl --user` and `launchctl bootstrap gui/<uid>` are the
 //!     standard cross-platform pair for per-user always-on services.
@@ -65,7 +65,7 @@ pub struct ServiceSpec {
     /// Unit/agent name. Used as the file stem (`<name>.service` on
     /// Linux, `<name>.plist` on macOS) and as the launchd `Label`.
     /// The caller chooses any naming scheme they want (e.g.
-    /// `hhagent-core` or reverse-DNS `org.hhagent.core`) — the
+    /// `kastellan-core` or reverse-DNS `org.kastellan.core`) — the
     /// backends only enforce character-class validation, not a forced
     /// prefix. Validated by the backend on install.
     pub name: String,
@@ -116,7 +116,7 @@ pub struct ServiceSpec {
 ///
 /// `members` are service names listed in **start order** (dependencies
 /// first); teardown reverses the order. On systemd this compiles to a
-/// real `hhagent.target` unit; on launchd (which has no target concept)
+/// real `kastellan.target` unit; on launchd (which has no target concept)
 /// the [`Supervisor`] default methods install and start the members in
 /// this order, relying on each service's own readiness behaviour for
 /// correctness.
@@ -357,7 +357,7 @@ mod default_target_tests {
             stdout_log: None,
             stderr_log: None,
             after: vec![],
-            part_of: Some("hhagent".into()),
+            part_of: Some("kastellan".into()),
             restart_backoff: None,
         }
     }
@@ -366,20 +366,20 @@ mod default_target_tests {
     fn default_bundle_installs_then_starts_in_member_order() {
         let sup = RecordingSupervisor::default();
         let target = TargetSpec {
-            name: "hhagent".into(),
-            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+            name: "kastellan".into(),
+            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
         };
-        let members = [spec("hhagent-postgres"), spec("hhagent-core")];
+        let members = [spec("kastellan-postgres"), spec("kastellan-core")];
         sup.install_target(&target, &members).unwrap();
         sup.start_target(&target).unwrap();
         let calls = sup.calls.borrow().clone();
         assert_eq!(
             calls,
             vec![
-                "install:hhagent-postgres",
-                "install:hhagent-core",
-                "start:hhagent-postgres",
-                "start:hhagent-core",
+                "install:kastellan-postgres",
+                "install:kastellan-core",
+                "start:kastellan-postgres",
+                "start:kastellan-core",
             ]
         );
     }
@@ -388,13 +388,13 @@ mod default_target_tests {
     fn default_bundle_stops_in_reverse_member_order() {
         let sup = RecordingSupervisor::default();
         let target = TargetSpec {
-            name: "hhagent".into(),
-            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+            name: "kastellan".into(),
+            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
         };
         sup.stop_target(&target).unwrap();
         assert_eq!(
             sup.calls.borrow().clone(),
-            vec!["stop:hhagent-core", "stop:hhagent-postgres"]
+            vec!["stop:kastellan-core", "stop:kastellan-postgres"]
         );
     }
 
@@ -402,13 +402,13 @@ mod default_target_tests {
     fn default_bundle_uninstalls_in_reverse_member_order() {
         let sup = RecordingSupervisor::default();
         let target = TargetSpec {
-            name: "hhagent".into(),
-            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+            name: "kastellan".into(),
+            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
         };
         sup.uninstall_target(&target).unwrap();
         assert_eq!(
             sup.calls.borrow().clone(),
-            vec!["uninstall:hhagent-core", "uninstall:hhagent-postgres"]
+            vec!["uninstall:kastellan-core", "uninstall:kastellan-postgres"]
         );
     }
 }
@@ -420,11 +420,11 @@ mod spec_ordering_tests {
     #[test]
     fn target_spec_holds_name_and_ordered_members() {
         let t = TargetSpec {
-            name: "hhagent".into(),
-            members: vec!["hhagent-postgres".into(), "hhagent-core".into()],
+            name: "kastellan".into(),
+            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
         };
-        assert_eq!(t.name, "hhagent");
-        assert_eq!(t.members, vec!["hhagent-postgres", "hhagent-core"]);
+        assert_eq!(t.name, "kastellan");
+        assert_eq!(t.members, vec!["kastellan-postgres", "kastellan-core"]);
     }
 
     #[test]

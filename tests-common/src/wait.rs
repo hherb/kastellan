@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use hhagent_supervisor::{ServiceStatus, Supervisor};
+use kastellan_supervisor::{ServiceStatus, Supervisor};
 
 /// Block until `predicate(status)` returns `true` or `timeout`
 /// elapses. The supervisor is polled every 50 ms via `status(name)`;

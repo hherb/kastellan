@@ -46,7 +46,7 @@ Out of scope (filed as follow-ups, listed at the end of this doc):
 - **Entity vocabulary seeder.** No TOML / CLI for populating `entities`. Operator works via direct SQL (or waits for the seeder slice). Mirrors the L0 seed loader shape exactly.
 - **Memory-write-time entity linking.** No hook into L1 promote / L0 seed / future writers to populate `memory_entities`.
 - **`entities.embedding` population.** Column stays NULL. The embedding-similarity extractor (Option C from brainstorming) is a separate slice.
-- **Operator CLI for entities.** No `hhagent-cli entities {add, link, list}`. Future slice.
+- **Operator CLI for entities.** No `kastellan-cli entities {add, link, list}`. Future slice.
 - **Explicit cache invalidation API.** Cache TTL is 60s; explicit invalidation is deferred until the operator CLI lands and has a write event to invalidate on.
 - **Per-task agent-raised entity hint channel.** Agent cannot self-declare entities in its Plan. No `Plan.entities_referenced: Vec<EntityRef>` field. Could be a future slice if observation phase shows the system-side extractor under-recalls and the agent has signal the system doesn't.
 
@@ -328,7 +328,7 @@ impl LlmEntityExtractor {
             latency_ms,
         );
         // Best-effort insert; WARN on failure.
-        if let Err(e) = hhagent_db::audit::insert(
+        if let Err(e) = kastellan_db::audit::insert(
             pool, "llm:router", ACTION_EXTRACT_ENTITIES, payload,
         ).await {
             tracing::warn!(error = %e, "extract_entities audit insert failed");
@@ -460,10 +460,10 @@ Estimate: **+25-30 tests**, workspace 721 → ~746-751.
 - **Entity vocabulary seeder.** No TOML loader for `entities`. Mirror the L0 seed loader shape (`seeds/entities/vocab.toml` + `core::entity_seed` module + audit row at startup) when this slice lands.
 - **Memory-write-time entity linking.** No hook into L1 promote / L0 seed / future writers to write `memory_entities` rows. Even with seeded entities, the graph lane returns zero hits until this lands.
 - **`entities.embedding` population.** Column stays NULL. The embedding-similarity extractor (faster than LLM, robust to paraphrase) is a separate slice once embeddings are seeded.
-- **Operator CLI for entities.** No `hhagent-cli entities {add, link, list}`. Operator works via direct SQL or waits for the CLI slice.
+- **Operator CLI for entities.** No `kastellan-cli entities {add, link, list}`. Operator works via direct SQL or waits for the CLI slice.
 - **Explicit cache invalidation.** 60s TTL only. Explicit `invalidate()` is a 5-line addition once the operator CLI exists (called from `cli_audit::entities_add_and_audit`).
 - **Per-task agent-raised entity hint channel.** Agent cannot supply `Plan.entities_referenced`. The agent extracts at plan time; the system extracts at query time. If observation phase shows the system extractor under-recalls and the agent has signal the system doesn't, a future hybrid is a separate slice.
-- **Per-extractor LLM model override.** The hybrid uses `router.config().local_model` by default. No `HHAGENT_LLM_ENTITY_MODEL` env var; could be added if the local-model is too slow for the gating heuristic + observation phase shows latency pressure.
+- **Per-extractor LLM model override.** The hybrid uses `router.config().local_model` by default. No `KASTELLAN_LLM_ENTITY_MODEL` env var; could be added if the local-model is too slow for the gating heuristic + observation phase shows latency pressure.
 
 ## Risk surface
 

@@ -1,5 +1,5 @@
 [package]
-name        = "hhagent-db"
+name        = "kastellan-db"
 description = "Postgres bring-up: idempotent initdb + UDS-only config + per-user data dir."
 version.workspace      = true
 edition.workspace      = true
@@ -67,8 +67,8 @@ keyring = { version = "3", default-features = false, features = ["apple-native"]
 # top. Pure helpers in `lib.rs` are exercised independently via unit tests
 # (no Postgres binaries required).
 [[bin]]
-name = "hhagent-db-init"
-path = "src/bin/hhagent-db-init.rs"
+name = "kastellan-db-init"
+path = "src/bin/kastellan-db-init.rs"
 
 [dev-dependencies]
 # Integration test in `tests/postgres_e2e.rs` drives the real `postgres`
@@ -76,7 +76,7 @@ path = "src/bin/hhagent-db-init.rs"
 # launchd LaunchAgent on macOS) and then connects over the UDS to issue
 # a `SELECT 1`. Skips with a `[SKIP]` line when Postgres is not on the
 # host (mirrors the sandbox/supervisor smoke-test pattern).
-hhagent-supervisor   = { path = "../supervisor" }
+kastellan-supervisor   = { path = "../supervisor" }
 # Shared test fixtures: PG cluster bring-up, RAII guards, skip helpers
 # (issue #15 hoist). dev-only — never linked into a runtime binary.
-hhagent-tests-common = { path = "../tests-common" }
+kastellan-tests-common = { path = "../tests-common" }

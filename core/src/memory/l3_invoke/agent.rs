@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::PgPool;
 
-use hhagent_db::memories::{load_layer_by_trust, MemoryLayer};
+use kastellan_db::memories::{load_layer_by_trust, MemoryLayer};
 
 use crate::cassandra::types::{DataClass, L3SkillCandidate, PlannedStep};
 use crate::memory::l3_approval::SkillTrust;
@@ -74,7 +74,7 @@ pub struct PinnedSkill {
 pub async fn load_pinned_skill_by_name(
     pool: &PgPool,
     name: &str,
-) -> Result<Option<PinnedSkill>, hhagent_db::DbError> {
+) -> Result<Option<PinnedSkill>, kastellan_db::DbError> {
     // Caps the TOTAL pinned rows scanned (newest-first), not same-name
     // collisions: a pinned skill older than the 64 newest pinned rows
     // would not resolve and would surface to the agent as "unknown skill".

@@ -11,19 +11,19 @@
 //! This stand-in is used to exercise the pgvector path without
 //! dragging the real embedding-router HTTP dependency into a unit-
 //! style integration test. Production embeddings come from
-//! `hhagent_core::memory::embed_query` (the LLM router).
+//! `kastellan_core::memory::embed_query` (the LLM router).
 
 use sha2::Digest;
 
 /// Returns a deterministic L2-normalised f32 vector of length
-/// `hhagent_db::memories::EMBEDDING_DIM` seeded by `text`.
+/// `kastellan_db::memories::EMBEDDING_DIM` seeded by `text`.
 ///
 /// The same input always yields the same output (no randomness
 /// beyond the SHA-256 of the input). A zero seed (vanishingly
 /// unlikely from a real SHA-256) is OR-coerced to 1 to defend
 /// xorshift64's invalid-seed corner.
 pub fn text_to_embedding(text: &str) -> Vec<f32> {
-    let dim = hhagent_db::memories::EMBEDDING_DIM;
+    let dim = kastellan_db::memories::EMBEDDING_DIM;
     let digest = sha2::Sha256::digest(text.as_bytes());
 
     // Pack the first 8 bytes of the digest little-endian into u64.

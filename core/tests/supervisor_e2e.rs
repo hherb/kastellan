@@ -7,10 +7,10 @@
 //! contract end-to-end:
 //!
 //!   1. `initdb` a per-test temp cluster (peer-auth, UDS only).
-//!   2. Install + start `hhagent-postgres` via `default_supervisor()`.
+//!   2. Install + start `kastellan-postgres` via `default_supervisor()`.
 //!      Wait for Active and the listening socket.
-//!   3. Build the `core_service_spec` for the freshly-built `hhagent`
-//!      binary, override `HHAGENT_DATA_DIR` to point at the temp
+//!   3. Build the `core_service_spec` for the freshly-built `kastellan`
+//!      binary, override `KASTELLAN_DATA_DIR` to point at the temp
 //!      cluster, install + start the service, wait for Active, hold
 //!      500 ms and re-check (no flapping under `Restart=on-failure`).
 //!   4. Sanity-check the daemon's stdout log for the startup JSON
@@ -18,10 +18,10 @@
 //!   5. Connect via `psql` and assert the bring-up `audit_log` row
 //!      (actor=`core`, action=`startup`) is present — proves the
 //!      probe ran end-to-end through migrations.
-//!   6. Stop hhagent → wait Inactive → uninstall.
+//!   6. Stop kastellan → wait Inactive → uninstall.
 //!
 //! Bring-up scaffolding + skip helpers + RAII guards now live in
-//! `hhagent-tests-common` (issue #15).
+//! `kastellan-tests-common` (issue #15).
 //!
 //! Skips silently with `[SKIP]` lines on hosts where any precondition
 //! is missing; `cargo test -- --nocapture` to see them.
@@ -32,15 +32,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hhagent_core::STARTUP_READY_MSG;
-use hhagent_supervisor::specs::core_service_spec;
-use hhagent_supervisor::{default_supervisor, ServiceStatus};
-use hhagent_tests_common::{
+use kastellan_core::STARTUP_READY_MSG;
+use kastellan_supervisor::specs::core_service_spec;
+use kastellan_supervisor::{default_supervisor, ServiceStatus};
+use kastellan_tests_common::{
     bring_up_pg_cluster, core_binary, current_username, pg_bin_dir_or_skip, skip_if_no_supervisor,
     unique_suffix, unique_temp_root, wait_for_log_match, wait_for_status, PathGuard, ServiceGuard,
 };
 #[cfg(target_os = "macos")]
-use hhagent_tests_common::serial_lock;
+use kastellan_tests_common::serial_lock;
 
 /// Read every `audit-*.jsonl` file under `state_dir` (concatenated)
 /// and return the body once `predicate(&body)` is true, or fail with
@@ -50,7 +50,7 @@ use hhagent_tests_common::serial_lock;
 /// written row. The audit-mirror writes to a date-named file inside
 /// `state_dir`, so we don't know the exact filename a priori — but
 /// every existing audit file under the dir is fair game. Kept here
-/// (not in `hhagent-tests-common`) because no other test reads the
+/// (not in `kastellan-tests-common`) because no other test reads the
 /// state-dir mirror today.
 fn wait_for_state_dir_match<F: Fn(&str) -> bool>(
     state_dir: &Path,
@@ -115,7 +115,7 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
     let binary = core_binary();
     if !binary.exists() {
         eprintln!(
-            "\n[SKIP] hhagent binary not found at {}; run `cargo build --workspace` first\n",
+            "\n[SKIP] kastellan binary not found at {}; run `cargo build --workspace` first\n",
             binary.display()
         );
         return;
@@ -128,7 +128,7 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
         &bin_dir,
         "pg-d",
         "pg-l",
-        &format!("hhagent-supervisor-test-pg-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-{suffix}"),
     );
 
     // ---------- step 2: build the core service spec ----------
@@ -139,18 +139,18 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
     };
 
     let mut spec = core_service_spec(&binary, &core_log_dir);
-    spec.name = format!("hhagent-supervisor-test-core-{suffix}");
+    spec.name = format!("kastellan-supervisor-test-core-{suffix}");
     assert!(spec.name.len() <= 200);
     let stdout_path = core_log_dir.join(format!("{}.out", spec.name));
     let stderr_path = core_log_dir.join(format!("{}.err", spec.name));
     spec.stdout_log = Some(stdout_path.clone());
     spec.stderr_log = Some(stderr_path.clone());
 
-    // The daemon resolves its data dir from `HHAGENT_DATA_DIR` before
+    // The daemon resolves its data dir from `KASTELLAN_DATA_DIR` before
     // falling back to `default_data_dir()`. Pointing it at our temp
     // cluster avoids touching the operator's installed cluster.
     spec.env.push((
-        "HHAGENT_DATA_DIR".to_string(),
+        "KASTELLAN_DATA_DIR".to_string(),
         cluster.data_dir.to_string_lossy().into_owned(),
     ));
     // `$USER` is what `ConnectSpec::default_for` reads to assemble the
@@ -164,12 +164,12 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
         path: state_dir.clone(),
     };
     spec.env.push((
-        "HHAGENT_STATE_DIR".to_string(),
+        "KASTELLAN_STATE_DIR".to_string(),
         state_dir.to_string_lossy().into_owned(),
     ));
 
     // The daemon's prompt loader resolves its directory from
-    // `HHAGENT_PROMPTS_DIR` and falls back to a cwd-relative `prompts/`.
+    // `KASTELLAN_PROMPTS_DIR` and falls back to a cwd-relative `prompts/`.
     // systemd's working directory is not the workspace root, so without
     // this override the daemon exits before the audit-mirror would have
     // written its bring-up row.
@@ -178,7 +178,7 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
         .expect("workspace root")
         .join("prompts");
     spec.env.push((
-        "HHAGENT_PROMPTS_DIR".to_string(),
+        "KASTELLAN_PROMPTS_DIR".to_string(),
         workspace_prompts.to_string_lossy().into_owned(),
     ));
 
@@ -189,12 +189,12 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
     };
 
     // ---------- step 3: install + start core ----------
-    sup_core.install(&spec).expect("install hhagent core service");
+    sup_core.install(&spec).expect("install kastellan core service");
     assert_eq!(
         sup_core.status(&spec.name).expect("status pre-start"),
         ServiceStatus::Inactive,
     );
-    sup_core.start(&spec.name).expect("start hhagent core");
+    sup_core.start(&spec.name).expect("start kastellan core");
 
     wait_for_status(
         sup_core.as_ref(),
@@ -224,7 +224,7 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
     }
 
     // ---------- step 4: sanity-check log lines ----------
-    // Pin the readiness signal to the constant exported by hhagent-core so
+    // Pin the readiness signal to the constant exported by kastellan-core so
     // a future rename fails to compile rather than silently timing out.
     wait_for_log_match(
         &stdout_path,
@@ -242,7 +242,7 @@ fn core_starts_runs_db_probe_writes_audit_row_and_shuts_down_cleanly() {
         .arg("-U")
         .arg(&user)
         .arg("-d")
-        .arg("hhagent")
+        .arg("kastellan")
         .arg("-At")
         .arg("-c")
         .arg("SELECT count(*) FROM audit_log WHERE actor = 'core' AND action = 'startup'")

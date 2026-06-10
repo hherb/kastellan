@@ -33,7 +33,7 @@ use std::process::ExitCode;
 /// can be added without restructuring.
 pub(crate) fn run_relations(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli relations <kinds|show> ...");
+        eprintln!("usage: kastellan-cli relations <kinds|show> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {

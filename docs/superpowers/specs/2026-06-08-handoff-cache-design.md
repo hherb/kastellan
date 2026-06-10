@@ -18,7 +18,7 @@ result can dwarf the planner's remaining context budget.
 openhuman solves this with an in-memory `ResultHandoffCache`
 (`docs/agent-subagent-tool-flow.md`): oversized tool results are replaced by a
 placeholder and stashed; the agent fetches slices on demand. This design adapts
-that pattern to hhagent, keeping the existing dispatcher chokepoint and audit
+that pattern to kastellan, keeping the existing dispatcher chokepoint and audit
 invariants intact.
 
 ## Goals / non-goals
@@ -164,7 +164,7 @@ in the dispatcher).
 
 The `tool:<name>` audit row written *inside* `dispatch` is unaffected — it
 already records the full result subject to the existing 4 KiB SHA-envelope
-truncation in `hhagent_db::audit::insert`, so forensics keep (a hash of) the
+truncation in `kastellan_db::audit::insert`, so forensics keep (a hash of) the
 full body.
 
 ### `fetch_handoff` built-in (`ToolHostStepDispatcher::dispatch_step`)
@@ -314,6 +314,6 @@ the behaviour with scripted doubles.
 
 ## Verification
 
-`cargo build --workspace`; `cargo test -p hhagent-core` green (macOS
-skip-as-pass); `cargo clippy -p hhagent-core --all-targets --locked -- -D
+`cargo build --workspace`; `cargo test -p kastellan-core` green (macOS
+skip-as-pass); `cargo clippy -p kastellan-core --all-targets --locked -- -D
 warnings` exit 0. New `handoff.rs` under the 500-LOC soft cap.

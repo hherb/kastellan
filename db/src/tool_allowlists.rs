@@ -3,7 +3,7 @@
 //! The `tool_allowlists` table (migration `0009_tool_allowlists.sql`) is
 //! the source-of-truth for which absolute `argv[0]` paths each registered
 //! tool worker may exec. Replaces the previous
-//! `HHAGENT_SHELL_EXEC_ALLOWLIST` env-var-driven shape.
+//! `KASTELLAN_SHELL_EXEC_ALLOWLIST` env-var-driven shape.
 //!
 //! Validators here are the user-facing gate — they produce typed errors
 //! that surface as readable CLI messages. The SQL-layer CHECK constraints
@@ -164,7 +164,7 @@ pub async fn list_for_tool(
 
 /// Like [`list_for_tool`] but returns the full [`AllowlistEntry`] shape
 /// (`tool`, `argv0`, `created_at`, `created_by`). Used by the
-/// `hhagent-cli tools allowlist list --tool <name>` path so the WHERE
+/// `kastellan-cli tools allowlist list --tool <name>` path so the WHERE
 /// predicate runs on the PK-indexed server side instead of the CLI
 /// filtering client-side over [`list_all`].
 pub async fn list_for_tool_full(
@@ -256,7 +256,7 @@ mod tests {
     fn validate_argv0_accepts_typical_absolute_paths() {
         validate_argv0("/usr/bin/echo").unwrap();
         validate_argv0("/bin/sh").unwrap();
-        validate_argv0("/opt/hhagent/bin/web-fetch-worker").unwrap();
+        validate_argv0("/opt/kastellan/bin/web-fetch-worker").unwrap();
         validate_argv0("/").unwrap(); // odd but technically absolute
     }
 

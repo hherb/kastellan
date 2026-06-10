@@ -2,7 +2,7 @@
 //!
 //! What this test pins (against a per-test PG cluster):
 //!
-//! 1. [`hhagent_core::cli_audit::submit_and_audit`] on `Lane::Fast` and
+//! 1. [`kastellan_core::cli_audit::submit_and_audit`] on `Lane::Fast` and
 //!    `Lane::Long`:
 //!    * inserts a `pending` row in `tasks` with the input payload,
 //!    * writes one `actor='cli' action='task.submitted'` row in
@@ -15,7 +15,7 @@
 //!
 //! ## Why the test exists
 //!
-//! Before this slice, `hhagent-cli ask` called `tasks::insert_pending`
+//! Before this slice, `kastellan-cli ask` called `tasks::insert_pending`
 //! directly and emitted no producer-side audit row — the lifecycle
 //! stream visible in `audit_log` started at the scheduler's
 //! `task.running` observation on claim. "Submitted but never claimed"
@@ -31,9 +31,9 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::cli_audit::{submit_and_audit, CLI_AUDIT_ACTOR};
-use hhagent_db::tasks::{get, Lane};
-use hhagent_tests_common::{
+use kastellan_core::cli_audit::{submit_and_audit, CLI_AUDIT_ACTOR};
+use kastellan_db::tasks::{get, Lane};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -55,7 +55,7 @@ fn submit_and_audit_emits_producer_task_submitted_row() {
         &bin_dir,
         "csa-d",
         "csa-l",
-        &format!("hhagent-supervisor-test-pg-csa-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-csa-{suffix}"),
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -65,7 +65,7 @@ fn submit_and_audit_emits_producer_task_submitted_row() {
         .expect("build multi-thread tokio runtime");
 
     rt.block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -74,7 +74,7 @@ fn submit_and_audit_emits_producer_task_submitted_row() {
         .await
         .expect("probe run");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("connect runtime pool");
 

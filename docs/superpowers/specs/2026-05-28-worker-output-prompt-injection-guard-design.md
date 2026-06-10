@@ -37,7 +37,7 @@ The chokepoint already exists — Option M's sealed `dispatch` (issue #16) is th
 - **Leetspeak fold.** The minimal normalisation is lowercase + zero-width strip. Leetspeak-folding deferred.
 - **Multilingual coverage.** Catalogue is English-only — matches the constitutional guard's existing scope (the user is an anglophone emergency physician).
 - **Per-tool policy.** Today every tool's output is screened identically. Future slices may want to relax for known-safe-shape workers (e.g. `gliner-relex` returns only entity tuples) or tighten for known-risky workers.
-- **Operator-facing surface for blocked rows.** `hhagent-cli policy show injection` is a natural follow-up but not load-bearing for the slice — the audit row is the operator artifact.
+- **Operator-facing surface for blocked rows.** `kastellan-cli policy show injection` is a natural follow-up but not load-bearing for the slice — the audit row is the operator artifact.
 
 ## 3. Public surface (`core::cassandra::injection_guard`)
 
@@ -196,7 +196,7 @@ if let Some((verdict, body, truncated)) = blocked_meta {
         "body_byte_len":           body.len(),
         "body_truncated_at_64kib": truncated,
     });
-    if let Err(e) = hhagent_db::audit::insert(pool, "policy", "injection.blocked", policy_payload).await {
+    if let Err(e) = kastellan_db::audit::insert(pool, "policy", "injection.blocked", policy_payload).await {
         tracing::error!(tool = %tool, method = %method, error = %e, "policy audit insert failed");
     }
 }
@@ -316,12 +316,12 @@ These were considered and explicitly rejected for Slice 1:
 - **Per-tool policy** ("`gliner-relex` returns only entity tuples, never plain text — skip the screen"). The chokepoint pattern argues for uniform application; one tool's "shouldn't need it" is exactly the argument that introduces bypass paths.
 - **Whitelisting known-safe phrases.** The catalogue is a deny-list; adding allow-list overrides would create a parallel rule surface with unclear precedence.
 - **Active rewriting.** Even if the guard could "strip the malicious phrase and pass the rest through", the cleaner contract is Allow-or-Block. Mutation would also lose the audit-row simplicity.
-- **Operator override (`HHAGENT_INJECTION_GUARD_ENABLE=0`).** An off-switch is a foot-gun; if the guard turns out to mis-fire, the answer is to fix the catalogue, not to disable the screen.
+- **Operator override (`KASTELLAN_INJECTION_GUARD_ENABLE=0`).** An off-switch is a foot-gun; if the guard turns out to mis-fire, the answer is to fix the catalogue, not to disable the screen.
 
 ## 9. Open questions
 
 None blocking Slice 1. For future slices:
 
-- **Where does the Review tier surface?** A new `hhagent-cli policy review` subcommand or an `audit-tail --verdict=review` filter — defer until the catalogue's false-positive rate is observable.
+- **Where does the Review tier surface?** A new `kastellan-cli policy review` subcommand or an `audit-tail --verdict=review` filter — defer until the catalogue's false-positive rate is observable.
 - **Should the scheduler treat Block as a step-class failure for retry-budget purposes?** Today the planner gets a normal tool result with `injection_blocked = true`; whether the scheduler's `MAX_STEP_RETRIES` should treat that as a consumed retry or not is a question for the `inner_loop` slice that lands the planner side of this contract.
 - **Catalogue iteration cadence.** Rule additions, weight tuning, and false-positive correction should ride on a similar pattern-catalogue lifecycle to `classification_inference` (HANDOVER Next-TODO Item 9).

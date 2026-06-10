@@ -16,12 +16,12 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_tests_common::{
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, PgCluster,
 };
 
 /// Async helper: bring up a PG cluster (via the shared
-/// [`hhagent_tests_common::bring_up_pg_cluster`]), run migrations,
+/// [`kastellan_tests_common::bring_up_pg_cluster`]), run migrations,
 /// return pool + cluster handle. The `PgCluster` carries the cleanup
 /// guards internally and drops them in the right order at end of scope.
 /// Returns `None` when PG or supervisor is unavailable (skip).
@@ -31,12 +31,12 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     }
     let bin_dir = pg_bin_dir_or_skip()?;
     let suffix = format!("{}-{}", label, unique_suffix());
-    let service_name = format!("hhagent-sched-test-pg-cr-{suffix}");
+    let service_name = format!("kastellan-sched-test-pg-cr-{suffix}");
     let cluster = tokio::task::block_in_place(|| {
         bring_up_pg_cluster(&bin_dir, "crd", "crl", &service_name)
     });
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -45,7 +45,7 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     .await
     .ok()?;
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .ok()?;
 
@@ -67,7 +67,7 @@ async fn back_dated_lease_is_swept_to_crashed() {
         return; // [SKIP]
     };
 
-    use hhagent_db::tasks::{self, insert_pending, Lane};
+    use kastellan_db::tasks::{self, insert_pending, Lane};
 
     // Insert a task and claim it (pending → running).
     let id = insert_pending(&pool, Lane::Fast, serde_json::json!({}))
@@ -111,7 +111,7 @@ async fn back_dated_lease_is_swept_to_crashed() {
 }
 
 /// Pins the audit-row contract for the startup sweep, as a regression
-/// against [`hhagent_core::scheduler::crash_recovery::sweep_and_audit`].
+/// against [`kastellan_core::scheduler::crash_recovery::sweep_and_audit`].
 /// Two crashed tasks are planted (one on Fast, one on Long) so the
 /// per-row emission and lane preservation are both pinned in one test.
 ///
@@ -139,7 +139,7 @@ async fn sweep_and_audit_emits_one_task_crashed_row_per_recovered_task() {
         return; // [SKIP]
     };
 
-    use hhagent_db::tasks::{self, insert_pending, Lane};
+    use kastellan_db::tasks::{self, insert_pending, Lane};
 
     // ── Plant two running-and-expired tasks on distinct lanes ────────
     async fn plant_expired(pool: &sqlx::PgPool, lane: Lane) -> i64 {
@@ -170,7 +170,7 @@ async fn sweep_and_audit_emits_one_task_crashed_row_per_recovered_task() {
     assert_eq!(baseline_crashed_rows, 0, "no task.crashed rows before the sweep");
 
     // ── Act ──────────────────────────────────────────────────────────
-    let n = hhagent_core::scheduler::crash_recovery::sweep_and_audit(&pool)
+    let n = kastellan_core::scheduler::crash_recovery::sweep_and_audit(&pool)
         .await
         .expect("sweep_and_audit");
 
@@ -275,7 +275,7 @@ async fn sweep_and_audit_emits_one_task_crashed_row_per_recovered_task() {
     }
 
     // ── Idempotency: a second call sweeps nothing and writes nothing ──
-    let second = hhagent_core::scheduler::crash_recovery::sweep_and_audit(&pool)
+    let second = kastellan_core::scheduler::crash_recovery::sweep_and_audit(&pool)
         .await
         .expect("sweep_and_audit idempotent");
     assert_eq!(second, 0, "second call: nothing to sweep");

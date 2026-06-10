@@ -4,7 +4,7 @@
 
 **Goal:** Add per-worker sandbox-backend selection so a `ToolEntry` can opt into `MacosContainer` instead of the per-OS default (Seatbelt on darwin, Bwrap on linux).
 
-**Architecture:** New cfg-gated `SandboxBackendKind` enum + `SandboxBackends` struct in `hhagent_sandbox`; new optional `sandbox_backend` field on `ToolEntry`; lifecycle managers switch from `Arc<dyn SandboxBackend>` to `Arc<SandboxBackends>` and resolve per-call. No `gliner-relex` migration in this slice — that's Slice 2.5.
+**Architecture:** New cfg-gated `SandboxBackendKind` enum + `SandboxBackends` struct in `kastellan_sandbox`; new optional `sandbox_backend` field on `ToolEntry`; lifecycle managers switch from `Arc<dyn SandboxBackend>` to `Arc<SandboxBackends>` and resolve per-call. No `gliner-relex` migration in this slice — that's Slice 2.5.
 
 **Tech Stack:** Rust workspace (sandbox + core crates), tokio async, async-trait, Apple `container` 0.12.3 (darwin only, via `MacosContainer` from Slice 1).
 
@@ -21,7 +21,7 @@
 - `core/src/worker_lifecycle/manager.rs` (342 → ~390 LOC): `SingleUseLifecycle.sandbox` → `sandboxes: Arc<SandboxBackends>`; mirror for `IdleTimeoutLifecycle`; add counter-backend routing test
 - `core/src/worker_lifecycle/composite.rs`: `CompositeLifecycle::new` + `with_backoff` switch to `Arc<SandboxBackends>`; update inline tests
 - `core/src/worker_lifecycle/idle_timeout.rs`: `acquire_impl` signature flips from `sandbox: &dyn SandboxBackend` to receiving the already-resolved `Arc<dyn SandboxBackend>` from the caller
-- `core/src/main.rs`: daemon swaps `Arc::from(hhagent_sandbox::default_backend())` → `Arc::new(SandboxBackends::default_for_current_os())`
+- `core/src/main.rs`: daemon swaps `Arc::from(kastellan_sandbox::default_backend())` → `Arc::new(SandboxBackends::default_for_current_os())`
 - `core/tests/scheduler_step_dispatch_e2e.rs`: update `ToolEntry { ... }` literal + lifecycle-manager construction
 - `core/tests/worker_lifecycle_idle_timeout_e2e.rs`: update `ToolEntry { ... }` literal + 5 lifecycle-manager constructions
 - `core/tests/gliner_relex_e2e.rs`: update 3 lifecycle-manager constructions
@@ -45,7 +45,7 @@
 - [ ] **Step 1: Branch off main**
 
   ```bash
-  cd /Users/hherb/src/hhagent
+  cd /Users/hherb/src/kastellan
   source "$HOME/.cargo/env"
   git checkout main && git pull --ff-only
   git checkout -b feat/macos-container-backend-slice-2
@@ -61,7 +61,7 @@
 
 ---
 
-### Task 1: Add `SandboxBackendKind` enum to `hhagent_sandbox`
+### Task 1: Add `SandboxBackendKind` enum to `kastellan_sandbox`
 
 **Files:**
 - Modify: `sandbox/src/lib.rs`
@@ -98,7 +98,7 @@
 - [ ] **Step 2: Run test to verify it fails**
 
   ```bash
-  cargo test -p hhagent-sandbox sandbox_backend_kind_is_copy_and_eq 2>&1 | tail -10
+  cargo test -p kastellan-sandbox sandbox_backend_kind_is_copy_and_eq 2>&1 | tail -10
   ```
 
   Expected: compile error like `error[E0433]: failed to resolve: use of undeclared type 'SandboxBackendKind'`.
@@ -135,7 +135,7 @@
 - [ ] **Step 4: Run test to verify it passes**
 
   ```bash
-  cargo test -p hhagent-sandbox sandbox_backend_kind_is_copy_and_eq 2>&1 | tail -5
+  cargo test -p kastellan-sandbox sandbox_backend_kind_is_copy_and_eq 2>&1 | tail -5
   ```
 
   Expected: `test result: ok. 1 passed; 0 failed; ...`.
@@ -207,7 +207,7 @@
 - [ ] **Step 2: Run tests to verify they fail**
 
   ```bash
-  cargo test -p hhagent-sandbox sandbox_backends 2>&1 | tail -10
+  cargo test -p kastellan-sandbox sandbox_backends 2>&1 | tail -10
   ```
 
   Expected: compile errors (`SandboxBackends`, `default_for_current_os`, `resolve` not found).
@@ -310,7 +310,7 @@
 - [ ] **Step 4: Run tests to verify they pass**
 
   ```bash
-  cargo test -p hhagent-sandbox sandbox_backends 2>&1 | tail -10
+  cargo test -p kastellan-sandbox sandbox_backends 2>&1 | tail -10
   ```
 
   Expected: `test result: ok. N passed; 0 failed; ...` where N is 2 on linux or 3 on darwin (the cfg-gated tests).
@@ -318,7 +318,7 @@
 - [ ] **Step 5: Run full sandbox-crate tests + workspace build**
 
   ```bash
-  cargo test -p hhagent-sandbox 2>&1 | grep "test result:"
+  cargo test -p kastellan-sandbox 2>&1 | grep "test result:"
   cargo build --workspace 2>&1 | tail -3
   ```
 
@@ -368,7 +368,7 @@ This task cascades through every `ToolEntry { ... }` struct literal in the works
 - [ ] **Step 2: Run test to verify it fails**
 
   ```bash
-  cargo test -p hhagent-core shell_exec_entry_defaults_sandbox_backend_to_none 2>&1 | tail -10
+  cargo test -p kastellan-core shell_exec_entry_defaults_sandbox_backend_to_none 2>&1 | tail -10
   ```
 
   Expected: compile error like `no field 'sandbox_backend' on type 'ToolEntry'`.
@@ -394,7 +394,7 @@ This task cascades through every `ToolEntry { ... }` struct literal in the works
       /// memory enforcement (Seatbelt has no memory primitive). All
       /// other workers stay on `None` until they have a concrete
       /// reason to diverge.
-      pub sandbox_backend: Option<hhagent_sandbox::SandboxBackendKind>,
+      pub sandbox_backend: Option<kastellan_sandbox::SandboxBackendKind>,
   }
   ```
 
@@ -453,7 +453,7 @@ This task cascades through every `ToolEntry { ... }` struct literal in the works
   ```rust
           let entry = crate::scheduler::tool_dispatch::ToolEntry {
               binary: std::path::PathBuf::from("/nope"),
-              policy: hhagent_sandbox::SandboxPolicy::default(),
+              policy: kastellan_sandbox::SandboxPolicy::default(),
               wall_clock_ms: None,
               lifecycle: Lifecycle::SingleUse,
               sandbox_backend: None,
@@ -474,7 +474,7 @@ This task cascades through every `ToolEntry { ... }` struct literal in the works
 
   ```bash
   cargo build --workspace 2>&1 | tail -5
-  cargo test -p hhagent-core shell_exec_entry_defaults_sandbox_backend_to_none 2>&1 | tail -5
+  cargo test -p kastellan-core shell_exec_entry_defaults_sandbox_backend_to_none 2>&1 | tail -5
   ```
 
   Expected: workspace builds clean (no `missing field` errors); targeted test passes.
@@ -534,7 +534,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
       #[cfg(target_os = "macos")]
       #[tokio::test]
       async fn single_use_lifecycle_acquire_routes_via_entry_sandbox_backend_kind() {
-          use hhagent_sandbox::{SandboxBackend, SandboxBackends, SandboxBackendKind, SandboxError, SandboxPolicy};
+          use kastellan_sandbox::{SandboxBackend, SandboxBackends, SandboxBackendKind, SandboxError, SandboxPolicy};
           use std::sync::atomic::{AtomicU32, Ordering};
 
           struct CountingBackend {
@@ -591,7 +591,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
 - [ ] **Step 2: Run test to verify it fails (compile-error)**
 
   ```bash
-  cargo test -p hhagent-core single_use_lifecycle_acquire_routes_via_entry_sandbox_backend_kind 2>&1 | tail -10
+  cargo test -p kastellan-core single_use_lifecycle_acquire_routes_via_entry_sandbox_backend_kind 2>&1 | tail -10
   ```
 
   Expected: compile error — `SingleUseLifecycle::new` still expects `Arc<dyn SandboxBackend>`, not `Arc<SandboxBackends>`.
@@ -612,11 +612,11 @@ Another cascade — every lifecycle-manager constructor changes signature simult
   /// `entry.sandbox_backend`. Existing entries default to `None` so the
   /// per-OS default backend keeps being used (byte-equivalent).
   pub struct SingleUseLifecycle {
-      sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
+      sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
   }
 
   impl SingleUseLifecycle {
-      pub fn new(sandboxes: Arc<hhagent_sandbox::SandboxBackends>) -> Self {
+      pub fn new(sandboxes: Arc<kastellan_sandbox::SandboxBackends>) -> Self {
           Self { sandboxes }
       }
   }
@@ -658,18 +658,18 @@ Another cascade — every lifecycle-manager constructor changes signature simult
   /// `WarmRegistry` is keyed by tool name, so two tools that select
   /// different backends still get separate slots.
   pub struct IdleTimeoutLifecycle {
-      sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
+      sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
       backoff: super::idle_timeout::RestartBackoff,
       registry: super::idle_timeout::WarmRegistry,
   }
 
   impl IdleTimeoutLifecycle {
-      pub fn new(sandboxes: Arc<hhagent_sandbox::SandboxBackends>) -> Self {
+      pub fn new(sandboxes: Arc<kastellan_sandbox::SandboxBackends>) -> Self {
           Self::with_backoff(sandboxes, super::idle_timeout::RestartBackoff::default())
       }
 
       pub fn with_backoff(
-          sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
+          sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
           backoff: super::idle_timeout::RestartBackoff,
       ) -> Self {
           Self {
@@ -733,17 +733,17 @@ Another cascade — every lifecycle-manager constructor changes signature simult
   ```rust
       #[test]
       fn single_use_lifecycle_constructor_holds_the_sandbox_backend() {
-          let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+          let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
           let _mgr = SingleUseLifecycle::new(sandboxes);
       }
 
       #[tokio::test]
       async fn idle_timeout_acquire_on_single_use_entry_returns_wiring_error() {
-          let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+          let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
           let mgr = IdleTimeoutLifecycle::new(sandboxes);
           let entry = crate::scheduler::tool_dispatch::ToolEntry {
               binary: std::path::PathBuf::from("/nope"),
-              policy: hhagent_sandbox::SandboxPolicy::default(),
+              policy: kastellan_sandbox::SandboxPolicy::default(),
               wall_clock_ms: None,
               lifecycle: Lifecycle::SingleUse,
               sandbox_backend: None,
@@ -753,7 +753,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
       }
   ```
 
-  Remove the now-unused `use hhagent_sandbox::SandboxBackend;` import at the top of `manager.rs` if it's only referenced by the test module (the `acquire` body uses `self.sandboxes.resolve` which returns `Arc<dyn SandboxBackend>`, so the import may still be needed for the spawn_worker call — check the imports list and remove only if it's now unused, otherwise leave it).
+  Remove the now-unused `use kastellan_sandbox::SandboxBackend;` import at the top of `manager.rs` if it's only referenced by the test module (the `acquire` body uses `self.sandboxes.resolve` which returns `Arc<dyn SandboxBackend>`, so the import may still be needed for the spawn_worker call — check the imports list and remove only if it's now unused, otherwise leave it).
 
 - [ ] **Step 6: Update `CompositeLifecycle` constructors**
 
@@ -761,7 +761,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
 
   ```rust
   impl CompositeLifecycle {
-      pub fn new(sandboxes: Arc<hhagent_sandbox::SandboxBackends>) -> Self {
+      pub fn new(sandboxes: Arc<kastellan_sandbox::SandboxBackends>) -> Self {
           Self {
               single_use: SingleUseLifecycle::new(Arc::clone(&sandboxes)),
               idle_timeout: IdleTimeoutLifecycle::new(sandboxes),
@@ -769,7 +769,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
       }
 
       pub fn with_backoff(
-          sandboxes: Arc<hhagent_sandbox::SandboxBackends>,
+          sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
           backoff: super::idle_timeout::RestartBackoff,
       ) -> Self {
           Self {
@@ -785,7 +785,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
   In `composite.rs` around lines 149 + 167:
 
   ```rust
-      let sbs = Arc::new(hhagent_sandbox::SandboxBackends {
+      let sbs = Arc::new(kastellan_sandbox::SandboxBackends {
           #[cfg(target_os = "linux")]
           bwrap: Arc::new(NeverSpawnsBackend),
           #[cfg(target_os = "macos")]
@@ -803,17 +803,17 @@ Another cascade — every lifecycle-manager constructor changes signature simult
   In `core/src/main.rs` find the line constructing the sandbox + CompositeLifecycle. There's currently:
 
   ```rust
-  let sandbox = Arc::from(hhagent_sandbox::default_backend());
+  let sandbox = Arc::from(kastellan_sandbox::default_backend());
   // ...
-  hhagent_core::worker_lifecycle::CompositeLifecycle::new(sandbox.clone()),
+  kastellan_core::worker_lifecycle::CompositeLifecycle::new(sandbox.clone()),
   ```
 
   Replace with:
 
   ```rust
-  let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+  let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
   // ...
-  hhagent_core::worker_lifecycle::CompositeLifecycle::new(Arc::clone(&sandboxes)),
+  kastellan_core::worker_lifecycle::CompositeLifecycle::new(Arc::clone(&sandboxes)),
   ```
 
   (The `Arc::clone` may not be necessary if `sandboxes` is not used after this line — keep simple. If `sandbox.clone()` was the only consumer, just pass `sandboxes` directly.)
@@ -830,7 +830,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
   Replace the `let sandbox: Arc<dyn SandboxBackend> = ...;` line with:
 
   ```rust
-  let sandboxes = Arc::new(hhagent_sandbox::SandboxBackends::default_for_current_os());
+  let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
   ```
 
   And the manager construction with the same variable name (the local `sandbox` rename to `sandboxes` is mechanical — search-replace `sandbox` → `sandboxes` within each test, being careful not to mangle the `tests_common::sandbox` import or unrelated identifiers).
@@ -841,7 +841,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
 
   ```bash
   cargo build --workspace 2>&1 | tail -10
-  cargo test -p hhagent-core single_use_lifecycle_acquire_routes_via_entry_sandbox_backend_kind 2>&1 | tail -10
+  cargo test -p kastellan-core single_use_lifecycle_acquire_routes_via_entry_sandbox_backend_kind 2>&1 | tail -10
   ```
 
   Expected: workspace builds; the routing test passes.
@@ -896,8 +896,8 @@ Another cascade — every lifecycle-manager constructor changes signature simult
   use std::path::PathBuf;
   use std::sync::Arc;
 
-  use hhagent_core::worker_lifecycle::{Lifecycle, SingleUseLifecycle, WorkerLifecycleManager};
-  use hhagent_sandbox::{
+  use kastellan_core::worker_lifecycle::{Lifecycle, SingleUseLifecycle, WorkerLifecycleManager};
+  use kastellan_sandbox::{
       macos_container::MacosContainer, Net, Profile, SandboxBackendKind, SandboxBackends,
       SandboxPolicy,
   };
@@ -946,7 +946,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
       let sbs = Arc::new(SandboxBackends::default_for_current_os());
       let mgr = SingleUseLifecycle::new(Arc::clone(&sbs));
 
-      let entry = hhagent_core::scheduler::tool_dispatch::ToolEntry {
+      let entry = kastellan_core::scheduler::tool_dispatch::ToolEntry {
           binary: PathBuf::from("/sbin/apk"),
           policy: minimal_policy(),
           wall_clock_ms: Some(5_000),
@@ -971,7 +971,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
       let sbs = Arc::new(SandboxBackends::default_for_current_os());
       let mgr = SingleUseLifecycle::new(Arc::clone(&sbs));
 
-      let entry = hhagent_core::scheduler::tool_dispatch::ToolEntry {
+      let entry = kastellan_core::scheduler::tool_dispatch::ToolEntry {
           binary: PathBuf::from("/sbin/apk"),
           policy: minimal_policy(),
           wall_clock_ms: Some(5_000),
@@ -990,7 +990,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
 - [ ] **Step 2: Run the new tests**
 
   ```bash
-  cargo test -p hhagent-core --test lifecycle_container_routing_e2e 2>&1 | tail -20
+  cargo test -p kastellan-core --test lifecycle_container_routing_e2e 2>&1 | tail -20
   ```
 
   Expected on macOS with container installed: 2 passed. On macOS without container: 1 passed (negative) + 1 `[SKIP]` printed (positive). On linux: tests are cfg-gated out — `running 0 tests`.
@@ -1057,7 +1057,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
   git push -u origin feat/macos-container-backend-slice-2
   gh pr create --title "feat(sandbox): MacosContainer Slice 2 — per-worker backend selection" --body "$(cat <<'EOF'
   ## Summary
-  - Add `SandboxBackendKind` (cfg-gated per-OS) + `SandboxBackends` resolver in `hhagent_sandbox`.
+  - Add `SandboxBackendKind` (cfg-gated per-OS) + `SandboxBackends` resolver in `kastellan_sandbox`.
   - Add `sandbox_backend: Option<SandboxBackendKind>` to `ToolEntry`; existing entries default to `None` (per-OS default backend, byte-equivalent behaviour).
   - Lifecycle managers (`SingleUseLifecycle`, `IdleTimeoutLifecycle`, `CompositeLifecycle`) switch from `Arc<dyn SandboxBackend>` to `Arc<SandboxBackends>`; `acquire` resolves per call.
   - Daemon `main.rs` builds `SandboxBackends::default_for_current_os()` once at startup.
@@ -1105,7 +1105,7 @@ Another cascade — every lifecycle-manager constructor changes signature simult
 - `SandboxBackends` struct fields are `pub` and accessible from outside the crate. ✓
 - `SandboxBackends::resolve` returns `Arc<dyn SandboxBackend>`. ✓
 - Lifecycle managers take `Arc<SandboxBackends>` (not `Arc<dyn SandboxBackend>`). ✓
-- `ToolEntry.sandbox_backend` is `Option<hhagent_sandbox::SandboxBackendKind>`. ✓
+- `ToolEntry.sandbox_backend` is `Option<kastellan_sandbox::SandboxBackendKind>`. ✓
 
 **Risks called out in spec are tracked here:**
 - Cfg-gating ripples → tasks specify exact cfg attrs per step.

@@ -2,14 +2,14 @@
 //! for the `entity_kinds` lookup table.
 //!
 //! Symmetric to [`crate::relations_kinds`]; both ride on
-//! [`hhagent_db::pool::connect_admin_pool`] for `add` / `remove`
+//! [`kastellan_db::pool::connect_admin_pool`] for `add` / `remove`
 //! because migration 0016 REVOKEs INSERT/UPDATE/DELETE/TRUNCATE on
 //! `entity_kinds` from the runtime role (the daemon must not widen
 //! vocab on its own — a compromised extractor must not be able to add
 //! kinds its operator never approved).
 //!
 //! `list` is SELECT-only; runtime role has SELECT per migration 0015,
-//! so the read path uses [`hhagent_db::pool::connect_runtime_pool`].
+//! so the read path uses [`kastellan_db::pool::connect_runtime_pool`].
 //! Mirror of the same choice in [`crate::relations_kinds::run`]'s
 //! `list` arm — gives operators without admin-pool credentials a
 //! working browse path.
@@ -23,7 +23,7 @@
 //! (`EntityKindError::InvalidKind` / `KindHasNul`) and the
 //! `RemovalOfUndefinedRejected` sentinel-rejection write no row
 //! either. Same posture as
-//! [`hhagent_core::cli_audit::tools_allowlist_add_and_audit`].
+//! [`kastellan_core::cli_audit::tools_allowlist_add_and_audit`].
 //!
 //! Lifted from `entities.rs` per Issue #112 to keep the file under
 //! the 500-LOC soft cap; see also Issue #111 for the kinds-CLI
@@ -35,12 +35,12 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 /// Per-action dispatcher for `entities kinds <add|remove|list>`.
 ///
-/// Per [Issue #97](https://github.com/hherb/hhagent/issues/97)
+/// Per [Issue #97](https://github.com/hherb/kastellan/issues/97)
 /// posture, `with_runtime` is called only from known-action arms;
 /// unknown actions exit 2 *before* any tokio runtime construction.
 pub(crate) fn run(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli entities kinds <add|remove|list> ...");
+        eprintln!("usage: kastellan-cli entities kinds <add|remove|list> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -68,16 +68,16 @@ fn parse_kinds_add_args(args: &[String]) -> Result<(String, Option<String>), Str
             Ok((kind.clone(), Some(value.clone())))
         }
         _ => Err(
-            "usage: hhagent-cli entities kinds add <kind> [--description \"<text>\"]"
+            "usage: kastellan-cli entities kinds add <kind> [--description \"<text>\"]"
                 .to_string(),
         ),
     }
 }
 
 async fn entities_kinds_add(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entity_kinds_add_and_audit;
-    use hhagent_db::entity_kinds::EntityKindError;
-    use hhagent_db::pool::connect_admin_pool;
+    use kastellan_core::cli_audit::entity_kinds_add_and_audit;
+    use kastellan_db::entity_kinds::EntityKindError;
+    use kastellan_db::pool::connect_admin_pool;
 
     let (kind, description) = match parse_kinds_add_args(args) {
         Ok(parsed) => parsed,
@@ -113,7 +113,7 @@ async fn entities_kinds_add(args: &[String]) -> ExitCode {
         }
         // Validation errors exit 2 (operator-correctable input fault).
         // `DescriptionTooLong` joins the family — Issue
-        // [#111](https://github.com/hherb/hhagent/issues/111) item 3.
+        // [#111](https://github.com/hherb/kastellan/issues/111) item 3.
         Err(
             e @ (EntityKindError::InvalidKind
             | EntityKindError::KindHasNul
@@ -130,14 +130,14 @@ async fn entities_kinds_add(args: &[String]) -> ExitCode {
 }
 
 async fn entities_kinds_remove(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::entity_kinds_remove_and_audit;
-    use hhagent_db::entity_kinds::EntityKindError;
-    use hhagent_db::pool::connect_admin_pool;
+    use kastellan_core::cli_audit::entity_kinds_remove_and_audit;
+    use kastellan_db::entity_kinds::EntityKindError;
+    use kastellan_db::pool::connect_admin_pool;
 
     let kind = match args {
         [k] => k.clone(),
         _ => {
-            eprintln!("usage: hhagent-cli entities kinds remove <kind>");
+            eprintln!("usage: kastellan-cli entities kinds remove <kind>");
             return ExitCode::from(2);
         }
     };
@@ -182,11 +182,11 @@ async fn entities_kinds_remove(args: &[String]) -> ExitCode {
 }
 
 async fn entities_kinds_list(args: &[String]) -> ExitCode {
-    use hhagent_db::entity_kinds::list_all;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_db::entity_kinds::list_all;
+    use kastellan_db::pool::connect_runtime_pool;
 
     if !args.is_empty() {
-        eprintln!("usage: hhagent-cli entities kinds list");
+        eprintln!("usage: kastellan-cli entities kinds list");
         return ExitCode::from(2);
     }
 
@@ -200,7 +200,7 @@ async fn entities_kinds_list(args: &[String]) -> ExitCode {
     // `list_all` is SELECT-only on `entity_kinds`. The runtime role has
     // SELECT (migration 0015), so use the runtime pool so this action
     // works for operators without cluster-superuser peer-auth (Issue
-    // [#111](https://github.com/hherb/hhagent/issues/111) item 1).
+    // [#111](https://github.com/hherb/kastellan/issues/111) item 1).
     // `add` / `remove` continue to use `connect_admin_pool` because
     // 0016 REVOKEs writes from the runtime role.
     let pool = match connect_runtime_pool(&spec).await {
@@ -219,7 +219,7 @@ async fn entities_kinds_list(args: &[String]) -> ExitCode {
         }
     };
     // Dynamic column widths via the shared `format_kinds_table`
-    // helper — see Issue [#111](https://github.com/hherb/hhagent/issues/111)
+    // helper — see Issue [#111](https://github.com/hherb/kastellan/issues/111)
     // item 2 for the truncation footgun the previous `{:<24}`
     // formatter shipped with. Identical column shape to
     // `relations kinds list` for symmetric operator UX (same helper).

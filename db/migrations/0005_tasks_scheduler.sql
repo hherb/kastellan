@@ -18,7 +18,7 @@
 -- Three NOTIFY triggers (mirroring 0003_audit_log_notify.sql):
 --   tasks_inserted   — wakes lane runners on new pending row
 --   tasks_cancelled  — wakes the inner loop's cancellation poller
---   tasks_completed  — wakes hhagent-cli ask subscribers on terminal transition
+--   tasks_completed  — wakes kastellan-cli ask subscribers on terminal transition
 
 ALTER TABLE tasks
     ADD COLUMN lane TEXT NOT NULL DEFAULT 'fast'
@@ -92,11 +92,11 @@ CREATE TRIGGER tasks_notify_completed
     AFTER UPDATE OF state ON tasks FOR EACH ROW
     EXECUTE FUNCTION notify_task_completed();
 
-GRANT SELECT, INSERT, UPDATE ON tasks TO hhagent_runtime;
-GRANT USAGE, SELECT ON SEQUENCE tasks_id_seq TO hhagent_runtime;
+GRANT SELECT, INSERT, UPDATE ON tasks TO kastellan_runtime;
+GRANT USAGE, SELECT ON SEQUENCE tasks_id_seq TO kastellan_runtime;
 
 -- Tasks have no DELETE in the lifecycle (rows transition through
 -- terminal states and stay). REVOKE DELETE at the role layer mirrors
 -- the audit_log + agent_prompts append-only-by-GRANT pattern from
 -- 0002_runtime_role.sql.
-REVOKE DELETE ON tasks FROM hhagent_runtime;
+REVOKE DELETE ON tasks FROM kastellan_runtime;

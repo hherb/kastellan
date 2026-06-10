@@ -1,4 +1,4 @@
-# hhagent — Session Handover
+# kastellan — Session Handover
 
 > Rolling document. Updated at the end of every working session so the next
 > session (likely a fresh Claude Code) can resume cold. See
@@ -8,18 +8,18 @@
 
 **Last updated:** 2026-06-10 (egress proxy **slice #1** — ROADMAP:141, branch `feat/egress-proxy-boundary`, PR pending; on macOS).
 
-**Current state.** `main` is at `bd6d7a9` (PR [#239](https://github.com/hherb/hhagent/pull/239) **injection-guard per-tool profiles MERGED**;
-PR [#238](https://github.com/hherb/hhagent/pull/238) **web-search worker + `web-common` crate MERGED**;
-PR [#200](https://github.com/hherb/hhagent/pull/200) **planner fetch_handoff surfacing MERGED**;
-PR [#199](https://github.com/hherb/hhagent/pull/199) **handoff cache MERGED**;
-PR [#197](https://github.com/hherb/hhagent/pull/197) **web-fetch worker MERGED**). This session is on branch
+**Current state.** `main` is at `bd6d7a9` (PR [#239](https://github.com/hherb/kastellan/pull/239) **injection-guard per-tool profiles MERGED**;
+PR [#238](https://github.com/hherb/kastellan/pull/238) **web-search worker + `web-common` crate MERGED**;
+PR [#200](https://github.com/hherb/kastellan/pull/200) **planner fetch_handoff surfacing MERGED**;
+PR [#199](https://github.com/hherb/kastellan/pull/199) **handoff cache MERGED**;
+PR [#197](https://github.com/hherb/kastellan/pull/197) **web-fetch worker MERGED**). This session is on branch
 **`feat/egress-proxy-boundary`** (spec + plan + 14 code/test commits `df51c5c`..`29240eb` on top of `main`), PR pending.
 Working tree clean except untracked `docs/essay-medium-draft.md`
 (intentionally never committed — see memory note). Dev box on **macOS**.
 
 **This session shipped — egress proxy SLICE #1: boundary host-allowlist enforcement + SSRF/IP defense (ROADMAP:141).**
 The ROADMAP:141 "egress proxy" line was decomposed into **4 independent subsystems**; this session built the first.
-New crate [`workers/egress-proxy`](../../../workers/egress-proxy/) (`hhagent-worker-egress-proxy`): a **sandboxed,
+New crate [`workers/egress-proxy`](../../../workers/egress-proxy/) (`kastellan-worker-egress-proxy`): a **sandboxed,
 per-worker** CONNECT proxy that listens on a per-worker UDS and, per `CONNECT host:port`, (1) checks the worker's
 host allowlist at the boundary reusing `web-common::HostAllowlist` (single source of truth — not re-implemented),
 (2) **resolves DNS itself**, rejects private/loopback/link-local/ULA/CGNAT/multicast resolved IPs — with a
@@ -50,21 +50,21 @@ CONNECT-over-UDS connector, hyper+tokio-rustls) and the **unbypassable force-rou
 Next TODO. Until #2, live containment for net workers is unchanged (the worker's self-enforced allowlist).
 **`/review` follow-up (this session):** added a 10 s upstream `connect_timeout` (`proxy::decide`); documented the
 slice-#1 scope boundaries in code (allowlist is **host-only — port unconstrained**; tunnel idle/resolve timeouts
-deferred) and lodged three tracking issues for slice #2: **[#241](https://github.com/hherb/hhagent/issues/241)**
-port-scope the allowlist, **[#242](https://github.com/hherb/hhagent/issues/242)** tunnel idle/resolve-timeout
-hardening, **[#243](https://github.com/hherb/hhagent/issues/243)** DGX seccomp `accept`/UDS-path verification.
+deferred) and lodged three tracking issues for slice #2: **[#241](https://github.com/hherb/kastellan/issues/241)**
+port-scope the allowlist, **[#242](https://github.com/hherb/kastellan/issues/242)** tunnel idle/resolve-timeout
+hardening, **[#243](https://github.com/hherb/kastellan/issues/243)** DGX seccomp `accept`/UDS-path verification.
 
-**Prior session — injection-guard per-tool profiles ([#142](https://github.com/hherb/hhagent/issues/142), PR [#239](https://github.com/hherb/hhagent/pull/239) MERGED).**
+**Prior session — injection-guard per-tool profiles ([#142](https://github.com/hherb/kastellan/issues/142), PR [#239](https://github.com/hherb/kastellan/pull/239) MERGED).**
 `GuardProfile { Strict | Relaxed }` (`#[non_exhaustive]`) + `GuardProfile::for_tool` (fail-closed: only
 `web-fetch`/`web-search` relax) + `screen_with_profile` in `core/src/cassandra/injection_guard.rs`. Relaxed collapses
 all chat-template matches (`<|im_start|>` etc.) into one capped 0.40 sub-threshold contribution so legit model-card
 fetches Allow but corroborated attacks still Block; wired at the `tool_host` dispatch chokepoint. Deferred: Review
 tier; manifest-declared profiles; the catalogue-completeness evasion (Slice-1 limitation, documented).
 
-**Prior session — `web-search` worker + shared `web-common` crate (ROADMAP:146, PR [#238](https://github.com/hherb/hhagent/pull/238) MERGED).**
+**Prior session — `web-search` worker + shared `web-common` crate (ROADMAP:146, PR [#238](https://github.com/hherb/kastellan/pull/238) MERGED).**
 Second net-egress worker (`web.search` finds, `web-fetch` reads). New crate `workers/web-search` exposes
 `web.search { query, count? }` → ranked `{title,url,snippet,engine}` hits from a SearxNG `/search?format=json`
-endpoint (operator-configured `HHAGENT_WEB_SEARCH_ENDPOINT`; LLM supplies only the query, so `http://` loopback-only,
+endpoint (operator-configured `KASTELLAN_WEB_SEARCH_ENDPOINT`; LLM supplies only the query, so `http://` loopback-only,
 `https://` elsewhere; `Net::Allowlist` from the endpoint host:port; `cpu_ms=5_000`/`mem_mb=256`/`SingleUse`).
 Carries the shared `workers/web-common` lib crate extracted from web-fetch (`HostAllowlist` + `HttpGet`/`ReqwestGet`
 transport + feature-gated `FakeGet`); web-fetch re-pointed, behaviour byte-preserved. Deferred: category/language/
@@ -100,10 +100,10 @@ summary_head, truncated}` placeholder + a `handoff.stashed` audit row; a reserve
 `MAX_TRACKED_TASKS` backstop. Security invariants (injection-blocked outputs never stashed; no cross-task leak;
 reserved name unshadowable; operator `task_id <= 0` passthrough) verified by review. In-memory (the per-task
 `Workspace` scratch is unwired in the live scheduler). Review follow-ups (PR #199): real-worker dispatcher
-coverage closing [#198](https://github.com/hherb/hhagent/issues/198); backstop now `warn!`s on eviction; fetch
+coverage closing [#198](https://github.com/hherb/kastellan/issues/198); backstop now `warn!`s on eviction; fetch
 intercept asymmetry documented. Full detail in ROADMAP:129.
 
-**Most recently shipped — `web-fetch` worker (Phase 3, ROADMAP:145, PR [#197](https://github.com/hherb/hhagent/pull/197) MERGED).**
+**Most recently shipped — `web-fetch` worker (Phase 3, ROADMAP:145, PR [#197](https://github.com/hherb/kastellan/pull/197) MERGED).**
 First net-egress worker and the first consumer of the `Net::Allowlist` policy data. New crate
 `workers/web-fetch` (HTTPS-only `web.fetch` JSON-RPC method):
 - **Host allowlist matcher** (`allowlist.rs`) — exact + `.domain` subdomain-wildcard, case-insensitive;
@@ -118,10 +118,10 @@ First net-egress worker and the first consumer of the `Net::Allowlist` policy da
   `cpu_ms=10_000`, `mem_mb=512`, `wall_clock_ms=30_000`, `SingleUse`; `fs_read` includes
   `/etc/{resolv.conf,hosts,nsswitch.conf}` so DNS works under `--unshare-all`. Registered in
   `WORKER_MANIFESTS`.
-- **Cross-cutting fix (5c3359d):** `HHAGENT_LANDLOCK_RO` propagation — bwrap binds `fs_read` paths
+- **Cross-cutting fix (5c3359d):** `KASTELLAN_LANDLOCK_RO` propagation — bwrap binds `fs_read` paths
   read-only, but the worker-side Landlock layer was derived only from `fs_write`, so reads to
   `fs_read` paths (e.g. `/etc/resolv.conf`) were `EACCES`'d after `lock_down()`. Now mirrors the RW
-  plumbing: `lockdown_env.rs` derives `HHAGENT_LANDLOCK_RO` from `fs_read`, `landlock_lock.rs` adds
+  plumbing: `lockdown_env.rs` derives `KASTELLAN_LANDLOCK_RO` from `fs_read`, `landlock_lock.rs` adds
   read-only rules. Fixes DNS-in-jail on Linux; generalizes for future net workers.
 - **threat-model.md** gained a "Network egress" note: the allowlist matches host **names not resolved
   IPs**, so it does **not** contain SSRF / DNS-rebinding to internal addresses until the egress proxy
@@ -137,31 +137,31 @@ metadata, layer)`, a thin named delegate to `insert_memory_at_layer` with `embed
 SQL/migration), inheriting the L0 `PolicyViolation` guard. Degradation contract: lexical + `metadata
 @>` work; semantic lane silently skips (`WHERE embedding IS NOT NULL`); graph lane never surfaces it.
 **Deferred:** core-side caller wiring; per-namespace caps + oldest-eviction; a graph-lane degradation
-test ([#196](https://github.com/hherb/hhagent/issues/196)).
+test ([#196](https://github.com/hherb/kastellan/issues/196)).
 
 Recent merged history: Option K restart backoff (PR #194); three clean test-lifts (PR #193);
 `macos_seatbelt.rs` test-lift (PR #192); `systemd_user.rs` prod-split (PR #191); Phase-0
-`hhagent.target` bring-up (PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker
+`kastellan.target` bring-up (PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker
 manifest plumbing item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
 **Session-end verification (macOS, `feat/egress-proxy-boundary`):**
 `cargo build --workspace` clean (**13 crates** — `egress-proxy` is new); `cargo clippy --workspace --all-targets
 --locked -- -D warnings` exit 0; `cargo test --workspace` green (skip-as-pass, no PG — **0 failed across all
 suites**). Changed/new suites: **`core --lib` 734/0/0** (was 730 on `main`+injection-guard; +4: 3 `egress::audit`
-+ 1 `egress::spawn`), **`hhagent-worker-egress-proxy` unit 23/0/0** (ssrf 7, request_line 7, report 3, proxy 6 —
++ 1 `egress::spawn`), **`kastellan-worker-egress-proxy` unit 23/0/0** (ssrf 7, request_line 7, report 3, proxy 6 —
 incl. 2 real-UDS `handle_conn` round-trips), **`core --test egress_proxy_e2e` 2 passed / 1 ignored**
 (allowed-round-trip+off-allowlist-block via real sandboxed sidecar; `decision_row_persists_to_audit_log` PG-gated
-[SKIP]; `real_host_round_trips_through_sidecar` `#[ignore]` real-net), **`hhagent-sandbox` 59/0/0** (+3
+[SKIP]; `real_host_round_trips_through_sidecar` `#[ignore]` real-net), **`kastellan-sandbox` 59/0/0** (+3
 `Net::ProxyEgress` builder-shape tests across bwrap/seatbelt/container; bwrap arm cross-clippy'd for
 `aarch64-unknown-linux-gnu`). All egress-proxy files < 500 LOC. Final whole-implementation security review: APPROVED,
 no Critical, no allowlist/SSRF bypass found.
-**Linux verification still owed (run on the DGX — tracked in [#243](https://github.com/hherb/hhagent/issues/243)):**
+**Linux verification still owed (run on the DGX — tracked in [#243](https://github.com/hherb/kastellan/issues/243)):**
 the proxy is a UDS *server* + outbound *client*; confirm the
 `net_client` seccomp profile (`workers/prelude/src/seccomp_lock.rs`) permits AF_UNIX `bind`/`listen`/`accept` (it
 was authored for an outbound-only HTTP client) — flagged in `egress-proxy/src/main.rs`; widen + pin if `accept` is
 killed. Also confirm host↔jail path identity for the bind-mounted `<scratch>/egress.sock` under bwrap.
 **Standing macOS test-infra gotcha (not a regression):**
-a *full-workspace* run under `HHAGENT_PG_BIN_DIR` flakes ~4 tests in
+a *full-workspace* run under `KASTELLAN_PG_BIN_DIR` flakes ~4 tests in
 `core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs`) — parallel
 `initdb`/launchd churn (issue #130 territory); they pass single-threaded and in isolation. Use
 skip-as-pass for the whole workspace on the Mac; run live-PG suites individually or on the DGX.
@@ -191,7 +191,7 @@ CI-verified, and the `linux-check` CI is **compile + clippy only** (no
 **natively**, so a full native-Linux `cargo test --workspace` +
 `cargo clippy --workspace --all-targets -D warnings` are both runnable there.
 The current native-Linux test baseline is **1327 / 0 / 4**
-(`feat/hhagent-target-bring-up`; was 1311 on `main` at `cdadea1`).
+(`feat/kastellan-target-bring-up`; was 1311 on `main` at `cdadea1`).
 
 ---
 
@@ -201,34 +201,34 @@ The current native-Linux test baseline is **1327 / 0 / 4**
 2. [`docs/threat-model.md`](../../threat-model.md) — invariant, scenarios in scope, defence-in-depth layers
 3. [`docs/devel/ROADMAP.md`](../ROADMAP.md) — the master sequenced TODO list with commit hashes for shipped items
 4. The design plan (outside the repo) — `~/.claude/plans/i-d-like-to-design-logical-starlight.md`
-5. Memory notes (auto-loaded) — see `~/.claude/projects/-home-hherb-src-hhagent/memory/MEMORY.md`
+5. Memory notes (auto-loaded) — see `~/.claude/projects/-home-hherb-src-kastellan/memory/MEMORY.md`
 6. Older handovers — `archive/handover_<timestamp>.md` (one snapshot per pruning event; full historical detail lives there). Most recent: [`archive/handover_20260605_pre-prune.md`](archive/handover_20260605_pre-prune.md).
 
 ## Working state (what's green right now)
 
 ```
-hhagent (Rust workspace, 13 crates, AGPL-3.0)
-├── core               hhagent-core: lib + 2 bins (`hhagent` daemon + `hhagent-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue as `Rule`s + per-tool `GuardProfile` Strict/Relaxed via `for_tool` + `screen`/`screen_with_profile` + extract_scannable_text; Relaxed caps the chat-template family at one sub-threshold contribution — #142), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `hhagent-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; web_search.rs WebSearchManifest + web_search_entry [Net::Allowlist derived from the endpoint host:port; injects HHAGENT_WEB_SEARCH_ENDPOINT + allowlist]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS [shell-exec, web-fetch, web-search, gliner-relex] + pure assemble_registry [skips the reserved `handoff` name] + async build_tool_registry(pool, exe_dir)), handoff (in-memory per-task content-addressed HandoffCache: stash_if_oversized → placeholder, fetch → clamped slice, per-task byte budget + MAX_TRACKED_TASKS backstop, purge_task at terminal; wired into ToolHostStepDispatcher after dispatch returns + the `handoff`/`fetch` built-in intercept), egress/ (host-side egress-proxy integration, NOT yet wired into tool_host — slice #2: spawn.rs `spawn_sidecar`/`SidecarHandle`/`proxy_policy` [Net::ProxyEgress + WorkerNetClient, bounded UDS wait] + audit.rs pure `decision_to_audit` proxy-stdout-line → audit_log row)
-├── db                 hhagent-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, insert_memory_at_layer, insert_memory_light (embedding-skipping light write path), semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + hhagent-db-init bin
-├── llm-router         hhagent-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads HHAGENT_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
-├── sandbox            hhagent-sandbox: SandboxPolicy + `Net` enum {Deny | Allowlist(hosts) | ProxyEgress (the egress proxy's own policy — real netns, self-enforcing; #141 slice #1)} + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
-├── supervisor         hhagent-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, hhagent_target_spec} + default_probe. ServiceSpec carries after/part_of ordering + optional restart_backoff (RestartBackoff{max_delay_sec,steps}: systemd → RestartSteps/RestartMaxDelaySec, launchd → warn-and-ignore); TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native hhagent.target unit). Names screened by validate_service_name before unit-file write
-├── protocol           hhagent-protocol: JSON-RPC 2.0 over stdio (working)
-├── tests-common       hhagent-tests-common: shared dev-dep crate (publish = false) — PgCluster + bring_up_pg_cluster(+_with_timeout), RAII guards, skip helpers, sandbox factory, binary discovery, macOS launchd serial lock (reentrant), deterministic SHA-256-seeded embedding seed. Consumed only from [dev-dependencies]; never linked into a runtime binary.
-├── workers/prelude      hhagent-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS) + cross-platform setrlimit(RLIMIT_CPU). Landlock now derives BOTH RW (from fs_write) and RO (from fs_read, env HHAGENT_LANDLOCK_RO) rules so net workers can read /etc/resolv.conf in-jail
-├── workers/shell-exec   hhagent-worker-shell-exec: uses prelude::serve_stdio
-├── workers/web-common   hhagent-worker-web-common: shared lib for net-egress workers. allowlist.rs (HostAllowlist: exact + .domain wildcard host matcher, case-insensitive — single source of truth) + http.rs (HttpGet seam + RawResponse + ReqwestGet: redirect-disabled reqwest::blocking+rustls, 5 MiB body cap, caller-supplied per-worker UA — `hhagent-web-fetch/0` / `hhagent-web-search/0`) + testing.rs (FakeGet + al/ok_resp/redirect_to/json_resp, behind the `testing` feature). Consumed by web-fetch + web-search.
-├── workers/web-fetch    hhagent-worker-web-fetch: first net-egress worker. HTTPS-only web.fetch JSON-RPC method. Consumes HostAllowlist + the HttpGet transport from web-common. extract.rs (HTML readability via dom_smoothie / PDF via pdf-extract / text+JSON, char-boundary text cap) + fetch.rs (the drive() redirect-follow loop — strict https-only per hop, 5-redirect cap) + handler.rs (web.fetch dispatch). Host-side manifest in core/src/workers/web_fetch.rs
-├── workers/web-search   hhagent-worker-web-search: second net-egress worker. web.search JSON-RPC method (query → ranked {title,url,snippet,engine} hits from a SearxNG /search?format=json endpoint). Consumes HostAllowlist + transport from web-common. parse.rs (lenient SearxNG-JSON → Vec<Hit>) + search.rs (validate_endpoint [https everywhere, http loopback-only via is_loopback] + build_query_url + one-GET search() drive, count.clamp(1,20)) + handler.rs (dispatch + fail-closed from_env). Operator-configured HHAGENT_WEB_SEARCH_ENDPOINT; LLM supplies only the query. Host-side manifest in core/src/workers/web_search.rs. Dev setup: scripts/web-search/setup-searxng.sh
-└── workers/egress-proxy hhagent-worker-egress-proxy: per-worker egress boundary (ROADMAP:141 slice #1). Sandboxed CONNECT proxy on a per-worker UDS; per CONNECT: HostAllowlist check (reuses web-common) → resolve DNS itself → ssrf.rs is_denied_range (reject private/loopback/link-local/ULA/CGNAT/multicast, IPv4-mapped+compatible unwrapped; literal-IP carve-out for an allowlisted address) → pin+dial surviving IP → tunnel. Modules: ssrf.rs, request_line.rs (CONNECT parse incl. bracketed IPv6), report.rs (Decision/Verdict snake_case → stdout JSON line), proxy.rs (decide + handle_conn, 8 KiB request-head cap), main.rs (env parse HHAGENT_EGRESS_PROXY_{UDS,ALLOWLIST,WORKER}, UDS bind, prelude::lock_down, accept loop). NOT routed by real workers yet (slice #2). Host side = core/src/egress
+kastellan (Rust workspace, 13 crates, AGPL-3.0)
+├── core               kastellan-core: lib + 2 bins (`kastellan` daemon + `kastellan-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue as `Rule`s + per-tool `GuardProfile` Strict/Relaxed via `for_tool` + `screen`/`screen_with_profile` + extract_scannable_text; Relaxed caps the chat-template family at one sub-threshold contribution — #142), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `kastellan-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; web_search.rs WebSearchManifest + web_search_entry [Net::Allowlist derived from the endpoint host:port; injects KASTELLAN_WEB_SEARCH_ENDPOINT + allowlist]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS [shell-exec, web-fetch, web-search, gliner-relex] + pure assemble_registry [skips the reserved `handoff` name] + async build_tool_registry(pool, exe_dir)), handoff (in-memory per-task content-addressed HandoffCache: stash_if_oversized → placeholder, fetch → clamped slice, per-task byte budget + MAX_TRACKED_TASKS backstop, purge_task at terminal; wired into ToolHostStepDispatcher after dispatch returns + the `handoff`/`fetch` built-in intercept), egress/ (host-side egress-proxy integration, NOT yet wired into tool_host — slice #2: spawn.rs `spawn_sidecar`/`SidecarHandle`/`proxy_policy` [Net::ProxyEgress + WorkerNetClient, bounded UDS wait] + audit.rs pure `decision_to_audit` proxy-stdout-line → audit_log row)
+├── db                 kastellan-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, insert_memory_at_layer, insert_memory_light (embedding-skipping light write path), semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + kastellan-db-init bin
+├── llm-router         kastellan-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads KASTELLAN_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
+├── sandbox            kastellan-sandbox: SandboxPolicy + `Net` enum {Deny | Allowlist(hosts) | ProxyEgress (the egress proxy's own policy — real netns, self-enforcing; #141 slice #1)} + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
+├── supervisor         kastellan-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, kastellan_target_spec} + default_probe. ServiceSpec carries after/part_of ordering + optional restart_backoff (RestartBackoff{max_delay_sec,steps}: systemd → RestartSteps/RestartMaxDelaySec, launchd → warn-and-ignore); TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native kastellan.target unit). Names screened by validate_service_name before unit-file write
+├── protocol           kastellan-protocol: JSON-RPC 2.0 over stdio (working)
+├── tests-common       kastellan-tests-common: shared dev-dep crate (publish = false) — PgCluster + bring_up_pg_cluster(+_with_timeout), RAII guards, skip helpers, sandbox factory, binary discovery, macOS launchd serial lock (reentrant), deterministic SHA-256-seeded embedding seed. Consumed only from [dev-dependencies]; never linked into a runtime binary.
+├── workers/prelude      kastellan-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS) + cross-platform setrlimit(RLIMIT_CPU). Landlock now derives BOTH RW (from fs_write) and RO (from fs_read, env KASTELLAN_LANDLOCK_RO) rules so net workers can read /etc/resolv.conf in-jail
+├── workers/shell-exec   kastellan-worker-shell-exec: uses prelude::serve_stdio
+├── workers/web-common   kastellan-worker-web-common: shared lib for net-egress workers. allowlist.rs (HostAllowlist: exact + .domain wildcard host matcher, case-insensitive — single source of truth) + http.rs (HttpGet seam + RawResponse + ReqwestGet: redirect-disabled reqwest::blocking+rustls, 5 MiB body cap, caller-supplied per-worker UA — `kastellan-web-fetch/0` / `kastellan-web-search/0`) + testing.rs (FakeGet + al/ok_resp/redirect_to/json_resp, behind the `testing` feature). Consumed by web-fetch + web-search.
+├── workers/web-fetch    kastellan-worker-web-fetch: first net-egress worker. HTTPS-only web.fetch JSON-RPC method. Consumes HostAllowlist + the HttpGet transport from web-common. extract.rs (HTML readability via dom_smoothie / PDF via pdf-extract / text+JSON, char-boundary text cap) + fetch.rs (the drive() redirect-follow loop — strict https-only per hop, 5-redirect cap) + handler.rs (web.fetch dispatch). Host-side manifest in core/src/workers/web_fetch.rs
+├── workers/web-search   kastellan-worker-web-search: second net-egress worker. web.search JSON-RPC method (query → ranked {title,url,snippet,engine} hits from a SearxNG /search?format=json endpoint). Consumes HostAllowlist + transport from web-common. parse.rs (lenient SearxNG-JSON → Vec<Hit>) + search.rs (validate_endpoint [https everywhere, http loopback-only via is_loopback] + build_query_url + one-GET search() drive, count.clamp(1,20)) + handler.rs (dispatch + fail-closed from_env). Operator-configured KASTELLAN_WEB_SEARCH_ENDPOINT; LLM supplies only the query. Host-side manifest in core/src/workers/web_search.rs. Dev setup: scripts/web-search/setup-searxng.sh
+└── workers/egress-proxy kastellan-worker-egress-proxy: per-worker egress boundary (ROADMAP:141 slice #1). Sandboxed CONNECT proxy on a per-worker UDS; per CONNECT: HostAllowlist check (reuses web-common) → resolve DNS itself → ssrf.rs is_denied_range (reject private/loopback/link-local/ULA/CGNAT/multicast, IPv4-mapped+compatible unwrapped; literal-IP carve-out for an allowlisted address) → pin+dial surviving IP → tunnel. Modules: ssrf.rs, request_line.rs (CONNECT parse incl. bracketed IPv6), report.rs (Decision/Verdict snake_case → stdout JSON line), proxy.rs (decide + handle_conn, 8 KiB request-head cap), main.rs (env parse KASTELLAN_EGRESS_PROXY_{UDS,ALLOWLIST,WORKER}, UDS bind, prelude::lock_down, accept loop). NOT routed by real workers yet (slice #2). Host side = core/src/egress
 ```
 
 **Test baselines.** Native-Linux (DGX, PG 18.4 live, rustc 1.96.0): **1327 / 0 / 4**
-on `feat/hhagent-target-bring-up` (+16 over the `cdadea1` baseline of 1311).
-macOS skip-as-pass posture (no `HHAGENT_PG_BIN_DIR`): **1319 / 0 / 3** on `main`
+on `feat/kastellan-target-bring-up` (+16 over the `cdadea1` baseline of 1311).
+macOS skip-as-pass posture (no `KASTELLAN_PG_BIN_DIR`): **1319 / 0 / 3** on `main`
 at `f695a46` (L3 over-cap-split baseline). 3–4 ignored = explicit doctest markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
-`HHAGENT_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the
+`KASTELLAN_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the
 archive snapshots; the suite table below lists what each integration suite verifies.)
 
 | Suite | Tests | What's verified |
@@ -258,7 +258,7 @@ archive snapshots; the suite table below lists what each integration suite verif
 | `core` integration (`injection_guard_e2e`) | 6 | **PG-required**: placeholder shape, one policy row, privacy invariant, SHA shape, benign passthrough, error-path bypass |
 | `core` integration (`injection_guard_fixtures`) | 4 | per-tool profiles (#142): benign chat-template docs Allow under Relaxed + Block under Strict; corroborated attacks Block under both; full `extract_scannable_text`→`screen_with_profile` pipeline on a web-fetch-shaped value |
 | `core` integration (`secret_vault_e2e`) | 9 | **PG-required**: materialize/redeem rows, fail-closed redemption, opaque-ref-not-plaintext (#147), no plaintext in policy rows |
-| `core` integration (`cli_memory_l3_run_daemon_e2e`) | 2 | **PG + real daemon**: `--execute` succeeds against the daemon registry with `env_clear()` + NO `HHAGENT_SHELL_EXEC_BIN` (the #179 regression pin) + no-daemon cancels & errors |
+| `core` integration (`cli_memory_l3_run_daemon_e2e`) | 2 | **PG + real daemon**: `--execute` succeeds against the daemon registry with `env_clear()` + NO `KASTELLAN_SHELL_EXEC_BIN` (the #179 regression pin) + no-daemon cancels & errors |
 | `core` integration (`cli_memory_l3_e2e` / `_run_e2e`) | 10 / 5 | **PG-required**: L3 list/remove/approve/revoke/pin + operator `run` (dry-run / execute / refuse paths) |
 | `db` unit | 71+ | initdb/auto_conf/bin-dir builders, ConnectSpec, graph pins, probe SQL pin, RUNTIME_ROLE pins, audit truncate, secrets AES-GCM, memory pins, kinds validation |
 | `db` integration (`postgres_e2e`) | 8+ | probe idempotency, PgGraph, runtime-role REVOKE, audit NOTIFY, secrets, memory_entities cascade, deleted_memories journalling, walk-edges dedupe |
@@ -270,9 +270,9 @@ archive snapshots; the suite table below lists what each integration suite verif
 **Build & test:**
 ```sh
 source "$HOME/.cargo/env"
-cargo build --workspace          # produces ./target/debug/hhagent + workers (macOS; see #144 for Linux)
+cargo build --workspace          # produces ./target/debug/kastellan + workers (macOS; see #144 for Linux)
 cargo test --workspace           # all green on macOS (skip-as-pass) / DGX (live PG)
-./target/debug/hhagent           # runs the core daemon, emits one JSON log line
+./target/debug/kastellan           # runs the core daemon, emits one JSON log line
 ```
 
 **Required one-time host setup (Ubuntu 24.04+ only):** the AppArmor profile that lets `bwrap` create unprivileged user namespaces is already installed on the user's DGX Spark. Other Linux hosts may need `sudo scripts/linux/install-bwrap-apparmor-profile.sh`. macOS uses `sandbox-exec` (no setup needed).
@@ -290,55 +290,55 @@ sessions 2026-05-10 → 2026-05-29 in
 sessions 2026-05-06 → 2026-05-09 in
 [`archive/handover_20260510_pre-prune.md`](archive/handover_20260510_pre-prune.md).
 
-- **2026-06-09 — injection-guard per-tool profiles (#142, PR [#239](https://github.com/hherb/hhagent/pull/239) MERGED):** `GuardProfile{Strict|Relaxed}` + `for_tool` (only web-fetch/web-search relax) + `screen_with_profile`; Relaxed caps the chat-template family at one 0.40 sub-threshold contribution so legit model-card fetches Allow but corroborated attacks Block. (Detailed in this session's header "Prior session".)
-- **2026-06-09 — `web-search` worker + shared `web-common` crate (ROADMAP:146, PR [#238](https://github.com/hherb/hhagent/pull/238) MERGED):** second net worker (`web.search` → SearxNG JSON hits; operator-set `HHAGENT_WEB_SEARCH_ENDPOINT`, http loopback-only). Extracted `workers/web-common` (`HostAllowlist` + `HttpGet`/`ReqwestGet`) as the single source of truth; web-fetch re-pointed byte-preserved.
-- **2026-06-08 — `web-fetch` worker (ROADMAP:145, PR [#197](https://github.com/hherb/hhagent/pull/197) MERGED):** first net-egress worker (`web.fetch`, HTTPS-only, host-allowlisted self-enforced per redirect hop, `dom_smoothie`/`pdf-extract` extraction, 5 MiB/5-redirect caps). Host manifest `Net::Allowlist`+`WorkerNetClient`. Cross-cutting Landlock-RO fix (`HHAGENT_LANDLOCK_RO` from `fs_read`) so DNS works in-jail. Full detail in `archive/`.
-- **2026-06-07 — `insert_memory_light` two-tier write path (ROADMAP:130, PR [#195](https://github.com/hherb/hhagent/pull/195) MERGED at `4918b60`):** `db::memories::insert_memory_light(executor, body, metadata, layer)` — thin delegate to `insert_memory_at_layer` with `embedding = None`, no new SQL/migration, inherits the L0 `PolicyViolation` guard. Degradation contract: lexical + `metadata @>` work; semantic skips (`WHERE embedding IS NOT NULL`); graph never surfaces it. 2 PG e2e + 1 PG-free L0-guard unit test. Deferred: caller wiring; per-namespace caps; graph-lane degradation test ([#196](https://github.com/hherb/hhagent/issues/196)).
-- **2026-06-07 — Option K: cross-platform exponential restart backoff (ROADMAP:61, PR [#194](https://github.com/hherb/hhagent/pull/194) MERGED):** `ServiceSpec.restart_backoff: Option<RestartBackoff{max_delay_sec,steps}>` (additive, `#[serde(default)]`, `None`=old constant-`RestartSec=5`). systemd emits `RestartSteps`/`RestartMaxDelaySec` (252+; older warns-but-loads); macOS launchd warns-and-ignores (no equivalent knob). core+postgres specs wired 5s→300s/8-step. Builder test modules lifted to siblings to stay under cap. Residual: `launchd_agents.rs` 508 LOC (+8, deferred per ≤27-over policy).
-- **2026-06-07 — three clean test-lifts batch (item 9b-a, PR [#193](https://github.com/hherb/hhagent/pull/193) MERGED):** scripted byte-identity lifts of inline `mod tests` blocks — `cassandra/types.rs` 897→336, `scheduler/inner_loop_audit.rs` 655→304, `entity_extraction/gliner_relex.rs` 570→386. Residual: `cassandra/types/tests.rs` 568 (over-cap test file, bucket-c).
-- **2026-06-07 — `macos_seatbelt.rs` test-lift (item 9b-a, PR [#192](https://github.com/hherb/hhagent/pull/192) MERGED):** inline `#[cfg(test)] mod tests` → sibling `macos_seatbelt/tests.rs`; parent 604 → 332 LOC, production byte-identical, 16 unit tests pass from the new location.
-- **2026-06-06 — `systemd_user.rs` production split (item 9b-b, PR [#191](https://github.com/hherb/hhagent/pull/191) MERGED):** the most over-cap file (1069 LOC after the `hhagent.target` slice) → 427-LOC `systemctl --user` driver parent + `systemd_user/builder.rs` (478, pure builders+tests, re-exported via `pub use`) + `systemd_user/tests.rs` (216, driver tests); mirrors the `launchd_agents.rs` precedent. Behaviour-preserving (workspace 1327/0/4).
-- **2026-06-06 — `gliner_relex.rs` production split (item 9b, PR [#189](https://github.com/hherb/hhagent/pull/189) MERGED):** 921-LOC monolith → 51-LOC re-export facade + five cohesive siblings (`wire`/`resolve`/`entry`/`client`/`manifest`, all under cap); public API byte-identical via `pub use`. Reconciled same session: `recall.rs` test-lift (PR [#188](https://github.com/hherb/hhagent/pull/188), 622→406). Residual: `workers/gliner_relex/tests.rs` 851 (bucket-c).
-- **2026-06-05 — worker manifest plumbing (item 11, PR [#187](https://github.com/hherb/hhagent/pull/187) MERGED at `2e3d0c5`):** `trait WorkerManifest` + `Resolution` enum + `ResolveCtx` + pure `discover_binary` — each worker self-describes; `registry_build.rs` reduced to `assemble_registry(manifests, ctx)`. Plain workers resolve as a sibling of the `hhagent` binary (`current_exe()`-relative; `HHAGENT_*_BIN` override wins, fail-closed if set-but-invalid; gliner exempt). Every produced `ToolEntry` byte-identical; containment shape stays compiled-in. Workspace 1311/0/4.
-- **2026-06-05 — #179 Opt-3 daemon reroute of `memory l3 run` (PR [#186](https://github.com/hherb/hhagent/pull/186) at `67bc474`, #179 CLOSED):** `run` now enqueues an `l3_run` task the daemon executes against its single live `ToolRegistry` (the Postgres `tasks` queue + `LISTEN/NOTIFY` IS the operator→daemon command channel — `ask`'s second user, zero new IPC). New `scheduler/l3_run.rs`; `drain_lane` routing; CLI rewrite waits on `tasks_completed` with busy-vs-absent daemon detection (`tasks::any_live_worker`, pending-only cancel). Deleted the interim `diagnose_registry_divergence` (PR #180). TOCTOU re-validation now strictly stronger (live registry); all 7 security invariants PASS. Workspace 1297/0/4.
-- **2026-06-04 — `capture.rs` test-lift + `secret_vault_e2e` `sun_path` fix (PR [#185](https://github.com/hherb/hhagent/pull/185) at `ef01ae3`):** clean over-cap test-lift → `observation/capture/tests.rs`; parent 715 → 373 LOC, production L1–371 byte-identical. Bundled: dropped the redundant doubled `{suffix}` from `secret_vault_e2e` data/log labels (108-byte `sun_path` overflow under the harness `TMPDIR`; #104 systemic sweep stays open). First DGX native-Linux verification in a while; toolchain bumped 1.95→1.96 to match CI; workspace 1290/0/4.
-- **2026-06-04 — `l0_seed.rs` test-lift (PR [#183](https://github.com/hherb/hhagent/pull/183) at `305b927`):** clean over-cap test-lift → `l0_seed/tests.rs`; parent 730 → 462 LOC, behaviour-preserving (production L1–459 byte-identical; 19 unit tests pass from new location).
-- **2026-06-04 — L3 over-cap file splits, the #181 follow-up (PR [#182](https://github.com/hherb/hhagent/pull/182) at `f695a46`):** production-split `l3_invoke.rs` (569 → 38-line facade + `pure`/`operator`/`agent` siblings) and `memory_l3.rs` (692 → 52-line dispatcher + per-subcommand siblings + `shared.rs` approve/pin DRY); all L3 files under the 500-LOC cap, behaviour-preserving (workspace 1319/0/3 unchanged; live PG L3 suites green).
-- **2026-06-03 — #179 interim diagnostic, Approach C (PR [#180](https://github.com/hherb/hhagent/pull/180) at `fdfd0a8`):** pure `diagnose_registry_divergence` classifier + actionable CLI `hint:` for the `Refused` arm (since DELETED by this session's Opt-3 reroute). #179 re-scoped to the Opt-3 structural fix.
-- **2026-06-03 — L3 operator-triggered invocation, "the DOOR" (PR [#178](https://github.com/hherb/hhagent/pull/178) at `d862e6e`):** `hhagent-cli memory l3 run <id>` executes an approved skill — substitute `{{params}}` → live `ToolRegistry` re-validation → sandboxed dispatch → audit; dry-run by default. Filed #179 (the registry-parity question this session resolved).
-- **2026-06-04 — L3 autonomous door, agent-path (PR [#181](https://github.com/hherb/hhagent/pull/181) at `6e10a81`):** `Plan.invoke_skill` directive the inner loop expands (pinned-only; reuses `prepare_invocation` live re-validation; CASSANDRA review on the agent path) + the `pin` command (real `Pinned`-vs-`UserApproved`). Completes the L3 arc bar #179's IPC reroute.
-- **2026-06-01 — L3 recall surfacing, the `<skills>` block (PR [#177](https://github.com/hherb/hhagent/pull/177) at `4b978d8`):** new `core/src/memory/l3_surface.rs` surfaces only `UserApproved`/`Pinned` skills to the planner (L0 → L1 → skills → recalled → base); `skill_count` threaded + audited. Surfacing-only, no invocation. Carries SQL trust push-down `load_layer_by_trust` (`a53b4bc`).
-- **2026-05-31 — L3 skill trust enum + approval gate (PR [#176](https://github.com/hherb/hhagent/pull/176) at `bbcc7b3`):** `SkillTrust{Untrusted|UserApproved|Pinned}` (fail-safe parse); pure `evaluate_approval` (re-validate + `secret://` scan + tool-existence vs the `registry.loaded` snapshot, fail-closed); `set_skill_trust` db helper; `memory l3 {approve,revoke}` + audit rows. Trust flips → `user_approved` ONLY on `Approve`. No execution.
-- **2026-05-31 — `l3_crystallise.rs` test-lift (PR [#175](https://github.com/hherb/hhagent/pull/175) at `55b212e`):** inline `mod tests` → sibling; 676 → 467 LOC.
-- **2026-05-31 — L3 skill crystallisation writer (PR [#173](https://github.com/hherb/hhagent/pull/173) at `6eb966e`):** first writer for `MemoryLayer::Skill` (L3) — agent emits `Plan.l3_skill` template → `drain_lane` validates → canonical-SHA-256 dedup → stores `layer=3 trust:"untrusted"`; `dispatch_count >= 1` grounding gate; `memory l3 {list,remove}`. Writer-only, non-executable. New `core/src/memory/l3_crystallise.rs`.
-- **2026-05-31 — `inner_loop.rs` test-lift, closes [#81](https://github.com/hherb/hhagent/issues/81) (PR [#172](https://github.com/hherb/hhagent/pull/172) at `98a5be0`):** 655 → 438 LOC.
-- **2026-05-30 — `replay.rs` test-lift (PR [#171](https://github.com/hherb/hhagent/pull/171) at `30aa52e`):** 804 → 422 LOC.
-- **2026-05-30 — `tool_dispatch.rs` split (PR [#170](https://github.com/hherb/hhagent/pull/170) at `4e401cc`):** test-lift + re-exported `result_mapping.rs` seam; 828 → 442 LOC.
-- **2026-05-30 — `db/memories.rs` split (PR [#169](https://github.com/hherb/hhagent/pull/169) at `e1be537`):** real prod split into re-exported `write.rs` + `search.rs`; 961 → 360 LOC.
-- **2026-05-30 — `launchd_agents.rs` split (PR [#168](https://github.com/hherb/hhagent/pull/168) at `5bf010b`):** `builders.rs` + `tests.rs` siblings; 1093 → 485 LOC.
-- **2026-05-30 — `scheduler/audit.rs` split (PR [#167](https://github.com/hherb/hhagent/pull/167) at `79fcc27`):** `extract_entities.rs` + `tests.rs` siblings; 1106 → 500 LOC.
-- **2026-05-30 — #99 CLI `with_runtime` migration (PR [#166](https://github.com/hherb/hhagent/pull/166) at `75e9039`):** all six `hhagent-cli` dispatchers share one idiom; #99 CLOSED.
-- **2026-05-30 — `macos_container.rs` test-lift (PR [#165](https://github.com/hherb/hhagent/pull/165) at `48c0396`):** 983 → 491 LOC.
-- **2026-05-30 — #130 launchd bring-up serialization + #163 `sun_path` fix (PR [#164](https://github.com/hherb/hhagent/pull/164) at `091e53d`):** reentrant `serial_lock` around the macOS launchd window; bundled `injection_guard_e2e` label shorten + `check_socket_path_fits` guard. Both CLOSED.
-- **2026-05-30 — #162 graph-lane seed-thread regression test (PR [#162](https://github.com/hherb/hhagent/pull/162) at `a83be4a`):** found item-12 wiring already shipped (Slice F, 2026-05-19); reconciled + pinned the seed thread; zero production change.
-- **2026-05-30 — #153 clippy `-D warnings` gate (PR [#161](https://github.com/hherb/hhagent/pull/161) at `12b080c`):** cleared the whole workspace, flipped `linux-check` to `-D warnings`. CLOSED.
-- **2026-05-29 — #5 `tool_host.rs` sibling-lift (PR [#160](https://github.com/hherb/hhagent/pull/160) at `fd7dd7a`):** watchdog + lockdown_env + seal tests → child modules; 911 → 519 LOC (trust-boundary residual).
-- **2026-05-29 — #4b `injection_guard.rs` test-lift (PR [#159](https://github.com/hherb/hhagent/pull/159) at `1106145`):** 667 → 338 LOC.
-- **2026-05-29 — #156 `walk()` sibling-continue (PR [#158](https://github.com/hherb/hhagent/pull/158) at `f3c380f`):** depth-skip now continues siblings. CLOSED.
-- **2026-05-29 — #148/#149 secret-vault test gaps (PR [#157](https://github.com/hherb/hhagent/pull/157) at `53e68ed`):** `AuditSink` seam + `insert_fresh` extraction. Both CLOSED.
-- **2026-05-29 — #143 `walk()` recursion-depth guard (PR [#155](https://github.com/hherb/hhagent/pull/155) at `6e82252`):** `MAX_WALK_DEPTH = 256`. CLOSED.
-- **2026-05-29 — #144/#150 Linux build + clippy gate (PR [#152](https://github.com/hherb/hhagent/pull/152) at `560d845`):** `linux-check` CI green.
-- **2026-05-29 — #147 redact secret plaintext in tool audit row (PR [#151](https://github.com/hherb/hhagent/pull/151) at `54e8885`).**
-- **2026-05-29 — ★ Opaque secret references slice 1 (PR [#146](https://github.com/hherb/hhagent/pull/146) at `bc36e4c`):** `SecretRef` opaque newtype + `substitute_refs_in_params` walker + Vault. Closes openhuman Item 31.
-- **2026-05-28 — ★ Worker-output prompt-injection guard slice 1 (PR [#141](https://github.com/hherb/hhagent/pull/141) at `62905ae`):** 22-entry substring catalogue + screen + `extract_scannable_text`. Closes openhuman Item 30.
-- **2026-05-28 — `idle_timeout/release.rs` sibling-lift + #89 `/tmp` tmpfs pin** (PRs [#138](https://github.com/hherb/hhagent/pull/138)/[#139](https://github.com/hherb/hhagent/pull/139)/[#140](https://github.com/hherb/hhagent/pull/140)).
+- **2026-06-09 — injection-guard per-tool profiles (#142, PR [#239](https://github.com/hherb/kastellan/pull/239) MERGED):** `GuardProfile{Strict|Relaxed}` + `for_tool` (only web-fetch/web-search relax) + `screen_with_profile`; Relaxed caps the chat-template family at one 0.40 sub-threshold contribution so legit model-card fetches Allow but corroborated attacks Block. (Detailed in this session's header "Prior session".)
+- **2026-06-09 — `web-search` worker + shared `web-common` crate (ROADMAP:146, PR [#238](https://github.com/hherb/kastellan/pull/238) MERGED):** second net worker (`web.search` → SearxNG JSON hits; operator-set `KASTELLAN_WEB_SEARCH_ENDPOINT`, http loopback-only). Extracted `workers/web-common` (`HostAllowlist` + `HttpGet`/`ReqwestGet`) as the single source of truth; web-fetch re-pointed byte-preserved.
+- **2026-06-08 — `web-fetch` worker (ROADMAP:145, PR [#197](https://github.com/hherb/kastellan/pull/197) MERGED):** first net-egress worker (`web.fetch`, HTTPS-only, host-allowlisted self-enforced per redirect hop, `dom_smoothie`/`pdf-extract` extraction, 5 MiB/5-redirect caps). Host manifest `Net::Allowlist`+`WorkerNetClient`. Cross-cutting Landlock-RO fix (`KASTELLAN_LANDLOCK_RO` from `fs_read`) so DNS works in-jail. Full detail in `archive/`.
+- **2026-06-07 — `insert_memory_light` two-tier write path (ROADMAP:130, PR [#195](https://github.com/hherb/kastellan/pull/195) MERGED at `4918b60`):** `db::memories::insert_memory_light(executor, body, metadata, layer)` — thin delegate to `insert_memory_at_layer` with `embedding = None`, no new SQL/migration, inherits the L0 `PolicyViolation` guard. Degradation contract: lexical + `metadata @>` work; semantic skips (`WHERE embedding IS NOT NULL`); graph never surfaces it. 2 PG e2e + 1 PG-free L0-guard unit test. Deferred: caller wiring; per-namespace caps; graph-lane degradation test ([#196](https://github.com/hherb/kastellan/issues/196)).
+- **2026-06-07 — Option K: cross-platform exponential restart backoff (ROADMAP:61, PR [#194](https://github.com/hherb/kastellan/pull/194) MERGED):** `ServiceSpec.restart_backoff: Option<RestartBackoff{max_delay_sec,steps}>` (additive, `#[serde(default)]`, `None`=old constant-`RestartSec=5`). systemd emits `RestartSteps`/`RestartMaxDelaySec` (252+; older warns-but-loads); macOS launchd warns-and-ignores (no equivalent knob). core+postgres specs wired 5s→300s/8-step. Builder test modules lifted to siblings to stay under cap. Residual: `launchd_agents.rs` 508 LOC (+8, deferred per ≤27-over policy).
+- **2026-06-07 — three clean test-lifts batch (item 9b-a, PR [#193](https://github.com/hherb/kastellan/pull/193) MERGED):** scripted byte-identity lifts of inline `mod tests` blocks — `cassandra/types.rs` 897→336, `scheduler/inner_loop_audit.rs` 655→304, `entity_extraction/gliner_relex.rs` 570→386. Residual: `cassandra/types/tests.rs` 568 (over-cap test file, bucket-c).
+- **2026-06-07 — `macos_seatbelt.rs` test-lift (item 9b-a, PR [#192](https://github.com/hherb/kastellan/pull/192) MERGED):** inline `#[cfg(test)] mod tests` → sibling `macos_seatbelt/tests.rs`; parent 604 → 332 LOC, production byte-identical, 16 unit tests pass from the new location.
+- **2026-06-06 — `systemd_user.rs` production split (item 9b-b, PR [#191](https://github.com/hherb/kastellan/pull/191) MERGED):** the most over-cap file (1069 LOC after the `kastellan.target` slice) → 427-LOC `systemctl --user` driver parent + `systemd_user/builder.rs` (478, pure builders+tests, re-exported via `pub use`) + `systemd_user/tests.rs` (216, driver tests); mirrors the `launchd_agents.rs` precedent. Behaviour-preserving (workspace 1327/0/4).
+- **2026-06-06 — `gliner_relex.rs` production split (item 9b, PR [#189](https://github.com/hherb/kastellan/pull/189) MERGED):** 921-LOC monolith → 51-LOC re-export facade + five cohesive siblings (`wire`/`resolve`/`entry`/`client`/`manifest`, all under cap); public API byte-identical via `pub use`. Reconciled same session: `recall.rs` test-lift (PR [#188](https://github.com/hherb/kastellan/pull/188), 622→406). Residual: `workers/gliner_relex/tests.rs` 851 (bucket-c).
+- **2026-06-05 — worker manifest plumbing (item 11, PR [#187](https://github.com/hherb/kastellan/pull/187) MERGED at `2e3d0c5`):** `trait WorkerManifest` + `Resolution` enum + `ResolveCtx` + pure `discover_binary` — each worker self-describes; `registry_build.rs` reduced to `assemble_registry(manifests, ctx)`. Plain workers resolve as a sibling of the `kastellan` binary (`current_exe()`-relative; `KASTELLAN_*_BIN` override wins, fail-closed if set-but-invalid; gliner exempt). Every produced `ToolEntry` byte-identical; containment shape stays compiled-in. Workspace 1311/0/4.
+- **2026-06-05 — #179 Opt-3 daemon reroute of `memory l3 run` (PR [#186](https://github.com/hherb/kastellan/pull/186) at `67bc474`, #179 CLOSED):** `run` now enqueues an `l3_run` task the daemon executes against its single live `ToolRegistry` (the Postgres `tasks` queue + `LISTEN/NOTIFY` IS the operator→daemon command channel — `ask`'s second user, zero new IPC). New `scheduler/l3_run.rs`; `drain_lane` routing; CLI rewrite waits on `tasks_completed` with busy-vs-absent daemon detection (`tasks::any_live_worker`, pending-only cancel). Deleted the interim `diagnose_registry_divergence` (PR #180). TOCTOU re-validation now strictly stronger (live registry); all 7 security invariants PASS. Workspace 1297/0/4.
+- **2026-06-04 — `capture.rs` test-lift + `secret_vault_e2e` `sun_path` fix (PR [#185](https://github.com/hherb/kastellan/pull/185) at `ef01ae3`):** clean over-cap test-lift → `observation/capture/tests.rs`; parent 715 → 373 LOC, production L1–371 byte-identical. Bundled: dropped the redundant doubled `{suffix}` from `secret_vault_e2e` data/log labels (108-byte `sun_path` overflow under the harness `TMPDIR`; #104 systemic sweep stays open). First DGX native-Linux verification in a while; toolchain bumped 1.95→1.96 to match CI; workspace 1290/0/4.
+- **2026-06-04 — `l0_seed.rs` test-lift (PR [#183](https://github.com/hherb/kastellan/pull/183) at `305b927`):** clean over-cap test-lift → `l0_seed/tests.rs`; parent 730 → 462 LOC, behaviour-preserving (production L1–459 byte-identical; 19 unit tests pass from new location).
+- **2026-06-04 — L3 over-cap file splits, the #181 follow-up (PR [#182](https://github.com/hherb/kastellan/pull/182) at `f695a46`):** production-split `l3_invoke.rs` (569 → 38-line facade + `pure`/`operator`/`agent` siblings) and `memory_l3.rs` (692 → 52-line dispatcher + per-subcommand siblings + `shared.rs` approve/pin DRY); all L3 files under the 500-LOC cap, behaviour-preserving (workspace 1319/0/3 unchanged; live PG L3 suites green).
+- **2026-06-03 — #179 interim diagnostic, Approach C (PR [#180](https://github.com/hherb/kastellan/pull/180) at `fdfd0a8`):** pure `diagnose_registry_divergence` classifier + actionable CLI `hint:` for the `Refused` arm (since DELETED by this session's Opt-3 reroute). #179 re-scoped to the Opt-3 structural fix.
+- **2026-06-03 — L3 operator-triggered invocation, "the DOOR" (PR [#178](https://github.com/hherb/kastellan/pull/178) at `d862e6e`):** `kastellan-cli memory l3 run <id>` executes an approved skill — substitute `{{params}}` → live `ToolRegistry` re-validation → sandboxed dispatch → audit; dry-run by default. Filed #179 (the registry-parity question this session resolved).
+- **2026-06-04 — L3 autonomous door, agent-path (PR [#181](https://github.com/hherb/kastellan/pull/181) at `6e10a81`):** `Plan.invoke_skill` directive the inner loop expands (pinned-only; reuses `prepare_invocation` live re-validation; CASSANDRA review on the agent path) + the `pin` command (real `Pinned`-vs-`UserApproved`). Completes the L3 arc bar #179's IPC reroute.
+- **2026-06-01 — L3 recall surfacing, the `<skills>` block (PR [#177](https://github.com/hherb/kastellan/pull/177) at `4b978d8`):** new `core/src/memory/l3_surface.rs` surfaces only `UserApproved`/`Pinned` skills to the planner (L0 → L1 → skills → recalled → base); `skill_count` threaded + audited. Surfacing-only, no invocation. Carries SQL trust push-down `load_layer_by_trust` (`a53b4bc`).
+- **2026-05-31 — L3 skill trust enum + approval gate (PR [#176](https://github.com/hherb/kastellan/pull/176) at `bbcc7b3`):** `SkillTrust{Untrusted|UserApproved|Pinned}` (fail-safe parse); pure `evaluate_approval` (re-validate + `secret://` scan + tool-existence vs the `registry.loaded` snapshot, fail-closed); `set_skill_trust` db helper; `memory l3 {approve,revoke}` + audit rows. Trust flips → `user_approved` ONLY on `Approve`. No execution.
+- **2026-05-31 — `l3_crystallise.rs` test-lift (PR [#175](https://github.com/hherb/kastellan/pull/175) at `55b212e`):** inline `mod tests` → sibling; 676 → 467 LOC.
+- **2026-05-31 — L3 skill crystallisation writer (PR [#173](https://github.com/hherb/kastellan/pull/173) at `6eb966e`):** first writer for `MemoryLayer::Skill` (L3) — agent emits `Plan.l3_skill` template → `drain_lane` validates → canonical-SHA-256 dedup → stores `layer=3 trust:"untrusted"`; `dispatch_count >= 1` grounding gate; `memory l3 {list,remove}`. Writer-only, non-executable. New `core/src/memory/l3_crystallise.rs`.
+- **2026-05-31 — `inner_loop.rs` test-lift, closes [#81](https://github.com/hherb/kastellan/issues/81) (PR [#172](https://github.com/hherb/kastellan/pull/172) at `98a5be0`):** 655 → 438 LOC.
+- **2026-05-30 — `replay.rs` test-lift (PR [#171](https://github.com/hherb/kastellan/pull/171) at `30aa52e`):** 804 → 422 LOC.
+- **2026-05-30 — `tool_dispatch.rs` split (PR [#170](https://github.com/hherb/kastellan/pull/170) at `4e401cc`):** test-lift + re-exported `result_mapping.rs` seam; 828 → 442 LOC.
+- **2026-05-30 — `db/memories.rs` split (PR [#169](https://github.com/hherb/kastellan/pull/169) at `e1be537`):** real prod split into re-exported `write.rs` + `search.rs`; 961 → 360 LOC.
+- **2026-05-30 — `launchd_agents.rs` split (PR [#168](https://github.com/hherb/kastellan/pull/168) at `5bf010b`):** `builders.rs` + `tests.rs` siblings; 1093 → 485 LOC.
+- **2026-05-30 — `scheduler/audit.rs` split (PR [#167](https://github.com/hherb/kastellan/pull/167) at `79fcc27`):** `extract_entities.rs` + `tests.rs` siblings; 1106 → 500 LOC.
+- **2026-05-30 — #99 CLI `with_runtime` migration (PR [#166](https://github.com/hherb/kastellan/pull/166) at `75e9039`):** all six `kastellan-cli` dispatchers share one idiom; #99 CLOSED.
+- **2026-05-30 — `macos_container.rs` test-lift (PR [#165](https://github.com/hherb/kastellan/pull/165) at `48c0396`):** 983 → 491 LOC.
+- **2026-05-30 — #130 launchd bring-up serialization + #163 `sun_path` fix (PR [#164](https://github.com/hherb/kastellan/pull/164) at `091e53d`):** reentrant `serial_lock` around the macOS launchd window; bundled `injection_guard_e2e` label shorten + `check_socket_path_fits` guard. Both CLOSED.
+- **2026-05-30 — #162 graph-lane seed-thread regression test (PR [#162](https://github.com/hherb/kastellan/pull/162) at `a83be4a`):** found item-12 wiring already shipped (Slice F, 2026-05-19); reconciled + pinned the seed thread; zero production change.
+- **2026-05-30 — #153 clippy `-D warnings` gate (PR [#161](https://github.com/hherb/kastellan/pull/161) at `12b080c`):** cleared the whole workspace, flipped `linux-check` to `-D warnings`. CLOSED.
+- **2026-05-29 — #5 `tool_host.rs` sibling-lift (PR [#160](https://github.com/hherb/kastellan/pull/160) at `fd7dd7a`):** watchdog + lockdown_env + seal tests → child modules; 911 → 519 LOC (trust-boundary residual).
+- **2026-05-29 — #4b `injection_guard.rs` test-lift (PR [#159](https://github.com/hherb/kastellan/pull/159) at `1106145`):** 667 → 338 LOC.
+- **2026-05-29 — #156 `walk()` sibling-continue (PR [#158](https://github.com/hherb/kastellan/pull/158) at `f3c380f`):** depth-skip now continues siblings. CLOSED.
+- **2026-05-29 — #148/#149 secret-vault test gaps (PR [#157](https://github.com/hherb/kastellan/pull/157) at `53e68ed`):** `AuditSink` seam + `insert_fresh` extraction. Both CLOSED.
+- **2026-05-29 — #143 `walk()` recursion-depth guard (PR [#155](https://github.com/hherb/kastellan/pull/155) at `6e82252`):** `MAX_WALK_DEPTH = 256`. CLOSED.
+- **2026-05-29 — #144/#150 Linux build + clippy gate (PR [#152](https://github.com/hherb/kastellan/pull/152) at `560d845`):** `linux-check` CI green.
+- **2026-05-29 — #147 redact secret plaintext in tool audit row (PR [#151](https://github.com/hherb/kastellan/pull/151) at `54e8885`).**
+- **2026-05-29 — ★ Opaque secret references slice 1 (PR [#146](https://github.com/hherb/kastellan/pull/146) at `bc36e4c`):** `SecretRef` opaque newtype + `substitute_refs_in_params` walker + Vault. Closes openhuman Item 31.
+- **2026-05-28 — ★ Worker-output prompt-injection guard slice 1 (PR [#141](https://github.com/hherb/kastellan/pull/141) at `62905ae`):** 22-entry substring catalogue + screen + `extract_scannable_text`. Closes openhuman Item 30.
+- **2026-05-28 — `idle_timeout/release.rs` sibling-lift + #89 `/tmp` tmpfs pin** (PRs [#138](https://github.com/hherb/kastellan/pull/138)/[#139](https://github.com/hherb/kastellan/pull/139)/[#140](https://github.com/hherb/kastellan/pull/140)).
 - **2026-05-27 — worker_lifecycle hardening (#84/#85/#86) + test-infra slices** (PRs #137/#135/#133/#132/#129; filed #130).
-- **2026-05-26 — graph diamond-dedupe (#114/#115) + `HHAGENT_PG_BIN_DIR` override + entity-upsert Layer B** (PRs #128/#126/#125).
+- **2026-05-26 — graph diamond-dedupe (#114/#115) + `KASTELLAN_PG_BIN_DIR` override + entity-upsert Layer B** (PRs #128/#126/#125).
 - **2026-05-25 — Slice 2.5 follow-ups (#120/#121/#122) + `gliner_relex.rs` test-lift + GLiNER-Relex container** (PRs #124/#123/#118).
 - **2026-05-23 — Item 23(a) test-lifts + Item 22 CLI splits (#111/#112) + `relations show`** (PRs #117/#116/#113).
 - **2026-05-22 — kinds CLIs + `MacosContainer` Slice 2** (PRs #110/#109/#108; NB: the unconditional `Container` ref here is what broke the Linux build, #144).
 - **2026-05-21 — macOS container backend Slice 1 + Apple `container` spike + GLiNER macOS device tree** (PRs #106/#105/#103/#100/#98).
-- **2026-05-20 — quarantine review CLI + `hhagent-cli` split (#66) + entity-upsert Layer A** (PRs #96/#94/#93).
+- **2026-05-20 — quarantine review CLI + `kastellan-cli` split (#66) + entity-upsert Layer A** (PRs #96/#94/#93).
 - **2026-05-19 — entity extraction v2: `memory_entities` auto-linker + GLiNER-Relex + migration 0016** (PRs #92/#91).
 - **2026-05-18 — worker lifecycle managers + GLiNER worker + `inner_loop.rs` split (#81) + L1 promotion writer** (PRs #88/#87/#82).
 - **2026-05-17 — recall-lane wiring into the production scheduler** (PR #79).
@@ -377,23 +377,23 @@ built the proxy *mechanism* but nothing routes through it yet. Slice #2 makes it
 the threat-model win (a compromised worker can no longer reach off-allowlist endpoints). Three pieces that land
 together because each is inert without the others:
 - **`web-common` CONNECT-over-UDS connector** (`workers/web-common/src/http.rs`): a custom connector enabled when
-  `HHAGENT_EGRESS_PROXY_UDS` is set — dials the UDS, issues `CONNECT host:port` (for BOTH https and the loopback-http
+  `KASTELLAN_EGRESS_PROXY_UDS` is set — dials the UDS, issues `CONNECT host:port` (for BOTH https and the loopback-http
   SearxNG case), reads `200`, hands the stream to rustls (https) / uses it directly (http). hyper + tokio-rustls are
   already in the lock graph; ~150 LOC. Both net workers inherit it via `ReqwestGet` — zero change in either worker crate.
 - **`tool_host` auto-spawn hookup**: when bringing up a `Net::Allowlist` worker, call `core::egress::spawn_sidecar`
-  (already built), inject `HHAGENT_EGRESS_PROXY_UDS=<scratch>/egress.sock` into the worker's `policy.env`, tie the
+  (already built), inject `KASTELLAN_EGRESS_PROXY_UDS=<scratch>/egress.sock` into the worker's `policy.env`, tie the
   sidecar to worker-terminal teardown, and ingest its stdout decision stream into `audit_log` via `decision_to_audit`.
 - **Unbypassable routing**: give the worker a **private** netns whose only egress route is the bind-mounted proxy UDS
   (Linux: needs a new bwrap path — `Net::Allowlist` → private netns, `Net::ProxyEgress` → real netns; macOS: pf/Seatbelt
   story, likely weaker — design it honestly). This is the cross-platform-divergent hard part; **needs its own spec
   first.** Verification: a real `web.fetch` round-trips through the spawned sidecar and an off-allowlist host is
   refused even when the worker tries to bypass. (Slices #3 TLS-intercept leak-scanner / #4 TLS-pinning follow.)
-- **Slice-#1 review follow-ups to fold in here:** [#241](https://github.com/hherb/hhagent/issues/241) port-scope the
-  proxy allowlist (currently host-only — settle in the slice-#2 spec), [#242](https://github.com/hherb/hhagent/issues/242)
-  tunnel idle/resolve-timeout tuning against the live workload, [#243](https://github.com/hherb/hhagent/issues/243) DGX
+- **Slice-#1 review follow-ups to fold in here:** [#241](https://github.com/hherb/kastellan/issues/241) port-scope the
+  proxy allowlist (currently host-only — settle in the slice-#2 spec), [#242](https://github.com/hherb/kastellan/issues/242)
+  tunnel idle/resolve-timeout tuning against the live workload, [#243](https://github.com/hherb/kastellan/issues/243) DGX
   seccomp `accept`/UDS-path verification (blocks the Linux force-routing path).
 
-**Natural web-search follow-ups** (cheap, on demand): stand up a local SearxNG with `scripts/web-search/setup-searxng.sh`, set `HHAGENT_WEB_SEARCH_ENDPOINT` + the `web-search` `tool_allowlists` row, and run the `#[ignore]` `core/tests/web_search_e2e.rs::real_search_against_searxng` to validate the real round-trip end to end. If/when a caller needs them: category/language/engine params or pagination on `web.search` (deferred per spec).
+**Natural web-search follow-ups** (cheap, on demand): stand up a local SearxNG with `scripts/web-search/setup-searxng.sh`, set `KASTELLAN_WEB_SEARCH_ENDPOINT` + the `web-search` `tool_allowlists` row, and run the `#[ignore]` `core/tests/web_search_e2e.rs::real_search_against_searxng` to validate the real round-trip end to end. If/when a caller needs them: category/language/engine params or pagination on `web.search` (deferred per spec).
 
 **Remaining handoff-cache follow-ups (ROADMAP:129)** — the cache (PR #199) and the planner-surfacing
 (PR #200, this session) are both done; the mechanism is now live and known to the planner. Still open:
@@ -407,11 +407,11 @@ together because each is inert without the others:
 - **Egress proxy — slice #1 DONE this session** (see TOP PICK above for slice #2). Slices #3 (TLS-intercept + co-located credential-leak scanner, ROADMAP:142 — needs MITM with a per-instance CA the workers trust) and #4 (TLS pinning for the frontier path) follow #2; each needs its own spec.
 - **`browser-driver` worker (ROADMAP:147)** — Playwright headless, dedicated profile, scratch FS. The next Phase-3 worker after web-fetch/web-search; could reuse the `web-common` allowlist + `Net::Allowlist` manifest pattern.
 
-**Older follow-ups (ROADMAP:130, still open):** core-side caller wiring for `insert_memory_light` (lands with the first high-frequency writer — Phase 2 channels / Phase 3 browser); per-namespace caps + oldest-eviction on `memories.metadata` (no schema change); a graph-lane degradation test ([#196](https://github.com/hherb/hhagent/issues/196)).
+**Older follow-ups (ROADMAP:130, still open):** core-side caller wiring for `insert_memory_light` (lands with the first high-frequency writer — Phase 2 channels / Phase 3 browser); per-namespace caps + oldest-eviction on `memories.metadata` (no schema change); a graph-lane degradation test ([#196](https://github.com/hherb/kastellan/issues/196)).
 
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
-- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none meaningfully remaining.** The substantial ones are done — `cassandra/types.rs`, `inner_loop_audit.rs`, `entity_extraction/gliner_relex.rs` (2026-06-07 batch); `macos_seatbelt.rs` (PR #192); `recall.rs`/`l0_seed.rs`/`capture.rs`/`inner_loop.rs`/`replay.rs` (Earlier history). A fresh census shows only files sitting **1–27 LOC over cap** still carry a liftable block (`core/src/main.rs` 527, `db/src/lib.rs` 525, `core/src/bin/hhagent-cli/memory_l3/run.rs` 519, `core/src/tool_host.rs` 519, `core/src/cassandra/constitutional.rs` 502, `core/src/memory/l1_promote.rs` 501) — a lift would save little; defer unless one grows.
+- **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none meaningfully remaining.** The substantial ones are done — `cassandra/types.rs`, `inner_loop_audit.rs`, `entity_extraction/gliner_relex.rs` (2026-06-07 batch); `macos_seatbelt.rs` (PR #192); `recall.rs`/`l0_seed.rs`/`capture.rs`/`inner_loop.rs`/`replay.rs` (Earlier history). A fresh census shows only files sitting **1–27 LOC over cap** still carry a liftable block (`core/src/main.rs` 527, `db/src/lib.rs` 525, `core/src/bin/kastellan-cli/memory_l3/run.rs` 519, `core/src/tool_host.rs` 519, `core/src/cassandra/constitutional.rs` 502, `core/src/memory/l1_promote.rs` 501) — a lift would save little; defer unless one grows.
 - **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `db/secrets.rs` (848, a clean prod-split candidate), `core/src/scheduler/runner.rs` (773), `core/src/scheduler/audit.rs` (701, tests already lifted), `db/src/entities.rs` (653), `workers/prelude/src/seccomp_lock.rs` (650), `core/src/scheduler/inner_loop.rs` (566, tests already lifted). (`systemd_user.rs`/`gliner_relex.rs` done — see history.)
   Also `supervisor/src/launchd_agents.rs` (508, +8) — pushed over by Option K's install-time warn; tests already external, so a fix needs a real prod-split (disproportionate for 8 lines; deferred per this same policy). And `core/src/scheduler/tool_dispatch.rs` (507, +7) — pushed over by the handoff stash + `fetch_handoff` intercept; tests already external (`tool_dispatch/tests.rs`), so deferred per the same ≤27-over policy (a clean split would lift the `fetch_handoff` intercept + stash path into a `handoff_dispatch.rs` sibling if it grows).
 - **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851), `core/src/cassandra/types/tests.rs` (568).
@@ -422,11 +422,11 @@ together because each is inert without the others:
 
 **Test-infra / smaller picks:**
 
-- **[#134](https://github.com/hherb/hhagent/issues/134)** — revise the `bring_up_pg_cluster` doc example or ship a real `_with_timeout` caller.
-- **[#104](https://github.com/hherb/hhagent/issues/104)** — systemic de-doubling of the `pid+nanos` tempdir suffix across all e2e callers (the `secret_vault_e2e` instance was fixed last session; this tracks the broader sweep).
-- **`HHAGENT_GLINER_RELEX_REQUIRE_E2E=1` CI knob** — turn the container e2e's skip-as-pass into a hard fail for any runner with PG + container + image + weights staged.
+- **[#134](https://github.com/hherb/kastellan/issues/134)** — revise the `bring_up_pg_cluster` doc example or ship a real `_with_timeout` caller.
+- **[#104](https://github.com/hherb/kastellan/issues/104)** — systemic de-doubling of the `pid+nanos` tempdir suffix across all e2e callers (the `secret_vault_e2e` instance was fixed last session; this tracks the broader sweep).
+- **`KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1` CI knob** — turn the container e2e's skip-as-pass into a hard fail for any runner with PG + container + image + weights staged.
 
-**Operator actions (no code):** recapture observation fixtures against the current daemon (`cargo test -p hhagent-core --test observation_capture -- --ignored --nocapture`); real-model relation-extraction validation (`HHAGENT_GLINER_RELEX_ENABLE=1 cargo test … entity_extraction_e2e`).
+**Operator actions (no code):** recapture observation fixtures against the current daemon (`cargo test -p kastellan-core --test observation_capture -- --ignored --nocapture`); real-model relation-extraction validation (`KASTELLAN_GLINER_RELEX_ENABLE=1 cargo test … entity_extraction_e2e`).
 
 ---
 
@@ -434,7 +434,7 @@ together because each is inert without the others:
 
 ### Option P — entity↔memory linkage + graph lane (Phase 1 cont.)
 
-The `memory_entities` join table (P1) shipped; the graph lane is wired into `recall` and the **production caller wiring is DONE** (2026-05-19 Slice F, PR #91): `RouterAgent::formulate_plan` populates `seed_entity_ids` from `entity_extractor.extract(&ctx.instruction)` each iteration; `main.rs` wires the real `GlinerRelexExtractor`. For a query carrying `seed_entity_ids`, the lane traverses outbound 1-hop then `SELECT memory_id FROM memory_entities WHERE entity_id = ANY($1)` ranked by neighbour count. **Remaining parked work is the quarantine review gate, not the wiring:** freshly-extracted entities default `quarantine=TRUE` and `graph_search` filters `quarantine=FALSE`, so seed entities surface no memories until an operator un-quarantines them ([#40](https://github.com/hherb/hhagent/issues/40) tracks the graph-default policy question). Secondary deferral: `entities.embedding` is NULL for all entities; a populated column would seed an entity-similarity lane (the `vector(1024)` column already exists).
+The `memory_entities` join table (P1) shipped; the graph lane is wired into `recall` and the **production caller wiring is DONE** (2026-05-19 Slice F, PR #91): `RouterAgent::formulate_plan` populates `seed_entity_ids` from `entity_extractor.extract(&ctx.instruction)` each iteration; `main.rs` wires the real `GlinerRelexExtractor`. For a query carrying `seed_entity_ids`, the lane traverses outbound 1-hop then `SELECT memory_id FROM memory_entities WHERE entity_id = ANY($1)` ranked by neighbour count. **Remaining parked work is the quarantine review gate, not the wiring:** freshly-extracted entities default `quarantine=TRUE` and `graph_search` filters `quarantine=FALSE`, so seed entities surface no memories until an operator un-quarantines them ([#40](https://github.com/hherb/kastellan/issues/40) tracks the graph-default policy question). Secondary deferral: `entities.embedding` is NULL for all entities; a populated column would seed an entity-similarity lane (the `vector(1024)` column already exists).
 
 ---
 
@@ -442,30 +442,30 @@ The `memory_entities` join table (P1) shipped; the graph lane is wired into `rec
 
 Only currently-open issues are listed; closed-issue detail lives in the archive snapshots and git history.
 
-- [#3](https://github.com/hherb/hhagent/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64.
-- [#4](https://github.com/hherb/hhagent/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added (process hygiene).
-- [#8](https://github.com/hherb/hhagent/issues/8) — collapse `default_probe`/`default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears.
-- [#13](https://github.com/hherb/hhagent/issues/13) — write a migration numbering / rename hygiene checklist (sqlx fingerprints version+slug; a rename on a shipped migration silently breaks startup).
-- [#14](https://github.com/hherb/hhagent/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `supervisor_e2e.rs` with a real readiness signal.
-- [#20](https://github.com/hherb/hhagent/issues/20) — `agent_prompts` PK on sha256 means renamed prompt files lose their original name *(0011 changed the PK to `(sha256, name)`; tracks any residual)*.
-- [#21](https://github.com/hherb/hhagent/issues/21) — scheduler per-iteration cancellation poll could be a `watch::Receiver` instead of a DB round-trip.
-- [#24](https://github.com/hherb/hhagent/issues/24) — deployment: `HHAGENT_PROMPTS_DIR` has a cwd-relative fallback; production unit files must set it explicitly.
-- [#37](https://github.com/hherb/hhagent/issues/37) — scheduler crash-recovery sweep+audit is unoptimised for high crash counts.
-- [#39](https://github.com/hherb/hhagent/issues/39) — tests-common optional hardening (PgCluster.sup access, internal self-tests).
-- [#40](https://github.com/hherb/hhagent/issues/40) — design: should `RecallParams::new()` default to graph-off until an entity-extraction step lands? *(partially addressed by `with_seeds`.)*
-- [#42](https://github.com/hherb/hhagent/issues/42) — `deleted_memories` AFTER DELETE trigger uses `SECURITY INVOKER`; deferred until a second DELETE-capable role is proposed.
-- [#47](https://github.com/hherb/hhagent/issues/47) — observation/capture: distinguish 'no verdict row' from a real Approve verdict *(SCHEMA_VERSION 2 made `verdict_today` Optional; tracks residual.)*
-- [#50](https://github.com/hherb/hhagent/issues/50) — unify finalize-payload provenance signal across crashed/producer-cancelled/runtime emitters.
-- [#55](https://github.com/hherb/hhagent/issues/55) — macOS Apple `container` micro-VM backend *(spike + Slices 1/2/2.5 shipped; tracks the broader rollout.)*
-- [#62](https://github.com/hherb/hhagent/issues/62) — audit-payload truncation can silently nuke `agent/plan.formulate` fields.
-- [#63](https://github.com/hherb/hhagent/issues/63) — e2e gap: classification_floor plumbing from `tasks.payload` to the `agent/plan.formulate` audit row.
-- [#73](https://github.com/hherb/hhagent/issues/73) — scheduler/runner e2e integration test + TaskContext-construction reminder for producer-side floor-source validation.
-- [#76](https://github.com/hherb/hhagent/issues/76) — prompt-assembly: verify PromptAssembly error retry semantics in scheduler.
-- [#78](https://github.com/hherb/hhagent/issues/78) — prompt-assembly: global token cap with priority drop for the assembled system prompt.
-- [#104](https://github.com/hherb/hhagent/issues/104) — audit the pid+nanos tempdir pattern across the workspace (follow-up to #101; `secret_vault_e2e` instance fixed 2026-06-04).
-- [#107](https://github.com/hherb/hhagent/issues/107) — `MacosContainer` PID-1 signal-handling posture *(closed in code by always-on `--init`; verify end-to-end before long-lived workers migrate).*
-- [#127](https://github.com/hherb/hhagent/issues/127) — env-var save/restore RAII helper for the `pg_bin_dir_candidates_with_env_override` tests.
-- [#134](https://github.com/hherb/hhagent/issues/134) — tests-common: revise `bring_up_pg_cluster` doc example or ship a real `_with_timeout` caller.
+- [#3](https://github.com/hherb/kastellan/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64.
+- [#4](https://github.com/hherb/kastellan/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added (process hygiene).
+- [#8](https://github.com/hherb/kastellan/issues/8) — collapse `default_probe`/`default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears.
+- [#13](https://github.com/hherb/kastellan/issues/13) — write a migration numbering / rename hygiene checklist (sqlx fingerprints version+slug; a rename on a shipped migration silently breaks startup).
+- [#14](https://github.com/hherb/kastellan/issues/14) — replace the brittle `wait_for_log_match("database probe succeeded")` in `supervisor_e2e.rs` with a real readiness signal.
+- [#20](https://github.com/hherb/kastellan/issues/20) — `agent_prompts` PK on sha256 means renamed prompt files lose their original name *(0011 changed the PK to `(sha256, name)`; tracks any residual)*.
+- [#21](https://github.com/hherb/kastellan/issues/21) — scheduler per-iteration cancellation poll could be a `watch::Receiver` instead of a DB round-trip.
+- [#24](https://github.com/hherb/kastellan/issues/24) — deployment: `KASTELLAN_PROMPTS_DIR` has a cwd-relative fallback; production unit files must set it explicitly.
+- [#37](https://github.com/hherb/kastellan/issues/37) — scheduler crash-recovery sweep+audit is unoptimised for high crash counts.
+- [#39](https://github.com/hherb/kastellan/issues/39) — tests-common optional hardening (PgCluster.sup access, internal self-tests).
+- [#40](https://github.com/hherb/kastellan/issues/40) — design: should `RecallParams::new()` default to graph-off until an entity-extraction step lands? *(partially addressed by `with_seeds`.)*
+- [#42](https://github.com/hherb/kastellan/issues/42) — `deleted_memories` AFTER DELETE trigger uses `SECURITY INVOKER`; deferred until a second DELETE-capable role is proposed.
+- [#47](https://github.com/hherb/kastellan/issues/47) — observation/capture: distinguish 'no verdict row' from a real Approve verdict *(SCHEMA_VERSION 2 made `verdict_today` Optional; tracks residual.)*
+- [#50](https://github.com/hherb/kastellan/issues/50) — unify finalize-payload provenance signal across crashed/producer-cancelled/runtime emitters.
+- [#55](https://github.com/hherb/kastellan/issues/55) — macOS Apple `container` micro-VM backend *(spike + Slices 1/2/2.5 shipped; tracks the broader rollout.)*
+- [#62](https://github.com/hherb/kastellan/issues/62) — audit-payload truncation can silently nuke `agent/plan.formulate` fields.
+- [#63](https://github.com/hherb/kastellan/issues/63) — e2e gap: classification_floor plumbing from `tasks.payload` to the `agent/plan.formulate` audit row.
+- [#73](https://github.com/hherb/kastellan/issues/73) — scheduler/runner e2e integration test + TaskContext-construction reminder for producer-side floor-source validation.
+- [#76](https://github.com/hherb/kastellan/issues/76) — prompt-assembly: verify PromptAssembly error retry semantics in scheduler.
+- [#78](https://github.com/hherb/kastellan/issues/78) — prompt-assembly: global token cap with priority drop for the assembled system prompt.
+- [#104](https://github.com/hherb/kastellan/issues/104) — audit the pid+nanos tempdir pattern across the workspace (follow-up to #101; `secret_vault_e2e` instance fixed 2026-06-04).
+- [#107](https://github.com/hherb/kastellan/issues/107) — `MacosContainer` PID-1 signal-handling posture *(closed in code by always-on `--init`; verify end-to-end before long-lived workers migrate).*
+- [#127](https://github.com/hherb/kastellan/issues/127) — env-var save/restore RAII helper for the `pg_bin_dir_candidates_with_env_override` tests.
+- [#134](https://github.com/hherb/kastellan/issues/134) — tests-common: revise `bring_up_pg_cluster` doc example or ship a real `_with_timeout` caller.
 
 ---
 
@@ -478,7 +478,7 @@ Only currently-open issues are listed; closed-issue detail lives in the archive 
 3. ~~Egress proxy as separate worker vs in-process in `tool_host`~~ **Resolved 2026-05-06:** separate worker, with the credential-leak scanner co-located.
 4. Skill review workflow for *named* agent-authored Python (Phase 4) — see Phase 4 line items: trust enum + per-level capability ceiling. *(The L3 skill arc — crystallise → approve → pin → invoke — is the first concrete implementation of this for templated tool-call skills.)*
 5. Worker keep-alive vs spawn-per-call (idle-timeout lifecycle shipped for GLiNER-Relex; revisit for other workers when latency matters).
-6. ~~Worker binary discovery in production~~ **Advanced 2026-06-05 (item 11):** plain compiled workers default to a sibling of the `hhagent` binary (`current_exe()`-relative; `HHAGENT_*_BIN` override wins; gliner exempt — keeps venv/weights env resolution). Residual: FHS `libexec` layout if/when packaging wants it.
+6. ~~Worker binary discovery in production~~ **Advanced 2026-06-05 (item 11):** plain compiled workers default to a sibling of the `kastellan` binary (`current_exe()`-relative; `KASTELLAN_*_BIN` override wins; gliner exempt — keeps venv/weights env resolution). Residual: FHS `libexec` layout if/when packaging wants it.
 
 ## Inspirations / things to read before each milestone
 
@@ -487,7 +487,7 @@ Two adjacent OpenClaw-derived projects ship code we can read (Apache-2.0/MIT, AG
 - **ZeroClaw** ([`zeroclaw-labs/zeroclaw`](https://github.com/zeroclaw-labs/zeroclaw), 100% Rust): read [`crates/zeroclaw-runtime/src/security/`](https://github.com/zeroclaw-labs/zeroclaw/tree/main/crates/zeroclaw-runtime/src/security) — has working `bubblewrap.rs`, `landlock.rs`, `seatbelt.rs`, `firejail.rs`, `pairing.rs`, `webauthn.rs`, `leak_detector.rs`, `workspace_boundary.rs`. Architectural drawback vs us: tools run as in-process Rust traits, OS sandbox wraps the runtime — weaker boundary than our process-per-worker. Don't copy the in-process tool model.
 - **IronClaw** ([`nearai/ironclaw`](https://github.com/nearai/ironclaw)): read its dispatcher chokepoint pattern (`ToolDispatcher::dispatch()` is the single audit/safety-validation funnel for *every* action, regardless of caller). Drawbacks: WASM-as-boundary is software-only containment; Postgres+libSQL dual backend is overkill at our stage.
 
-The *defining* architectural difference: hhagent enforces **one OS process + one bwrap/Seatbelt jail per worker**. Both reference projects retreated from that. Don't.
+The *defining* architectural difference: kastellan enforces **one OS process + one bwrap/Seatbelt jail per worker**. Both reference projects retreated from that. Don't.
 
 ---
 

@@ -4,10 +4,10 @@
 //!
 //! Operators want to `tail -f` the audit log without bringing up a
 //! Postgres client every time. The DB is the source of truth (and the
-//! only place new rows can land — see [`hhagent_db::audit`]); this
+//! only place new rows can land — see [`kastellan_db::audit`]); this
 //! module is a downstream replicator that turns committed rows into
-//! daily-rotated JSONL files under `~/.local/state/hhagent/`. The
-//! reader [`hhagent-cli audit tail`] then needs no DB connection at
+//! daily-rotated JSONL files under `~/.local/state/kastellan/`. The
+//! reader [`kastellan-cli audit tail`] then needs no DB connection at
 //! all, so it works even when the cluster is down.
 //!
 //! ## Wake-up via LISTEN/NOTIFY
@@ -44,7 +44,7 @@
 
 use std::path::{Path, PathBuf};
 
-use hhagent_db::audit::{self, AuditRow};
+use kastellan_db::audit::{self, AuditRow};
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
 use time::format_description::well_known::Rfc3339;
@@ -57,7 +57,7 @@ use tracing::{debug, info, warn};
 ///
 /// Production deployments leave this unset and rely on
 /// [`default_state_dir`].
-pub const ENV_STATE_DIR: &str = "HHAGENT_STATE_DIR";
+pub const ENV_STATE_DIR: &str = "KASTELLAN_STATE_DIR";
 
 /// How often the mirror task does a fallback catch-up SELECT
 /// (in addition to NOTIFY-driven wake-ups). 5 s is the cadence
@@ -73,18 +73,18 @@ pub const CATCHUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 pub const CATCHUP_BATCH: i64 = 256;
 
 /// XDG-style default for the JSONL state directory:
-/// `$HOME/.local/state/hhagent`.
+/// `$HOME/.local/state/kastellan`.
 ///
 /// On Linux this is the canonical XDG_STATE_HOME location. macOS
 /// doesn't follow XDG by default but supports the path; we use the
 /// same one on both OSes so operator docs stay simple (mirrors the
-/// `default_data_dir` choice in [`hhagent_db`]).
+/// `default_data_dir` choice in [`kastellan_db`]).
 ///
 /// Returns `None` when `$HOME` is unset.
 pub fn default_state_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| {
         let mut p = PathBuf::from(h);
-        p.push(".local/state/hhagent");
+        p.push(".local/state/kastellan");
         p
     })
 }
@@ -447,9 +447,9 @@ mod tests {
     fn default_state_dir_lives_under_xdg_state_home() {
         // Hermetic: don't depend on the test runner's $HOME.
         let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", "/tmp/fakehome-hhagent-mirror");
+        std::env::set_var("HOME", "/tmp/fakehome-kastellan-mirror");
         let p = default_state_dir().unwrap();
-        assert_eq!(p, PathBuf::from("/tmp/fakehome-hhagent-mirror/.local/state/hhagent"));
+        assert_eq!(p, PathBuf::from("/tmp/fakehome-kastellan-mirror/.local/state/kastellan"));
         match prev {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),

@@ -1,6 +1,6 @@
-//! Integration tests for the Landlock layer of `hhagent-worker-prelude`.
+//! Integration tests for the Landlock layer of `kastellan-worker-prelude`.
 //!
-//! Each test runs the `hhagent-lockdown-probe` binary as a subprocess so
+//! Each test runs the `kastellan-lockdown-probe` binary as a subprocess so
 //! the one-way Landlock filter doesn't poison sibling tests in the same
 //! process. The probe binary is built automatically by cargo; its path is
 //! injected via the `CARGO_BIN_EXE_*` env var at compile time.
@@ -16,10 +16,10 @@
 
 use std::process::{Command, Output};
 
-const PROBE: &str = env!("CARGO_BIN_EXE_hhagent-lockdown-probe");
+const PROBE: &str = env!("CARGO_BIN_EXE_kastellan-lockdown-probe");
 
-const TEST_SCRATCH_DIR: &str = "/tmp/hhagent_prelude_landlock_smoke";
-const NEVER_WRITABLE_PATH: &str = "/etc/__hhagent_landlock_test_should_be_blocked";
+const TEST_SCRATCH_DIR: &str = "/tmp/kastellan_prelude_landlock_smoke";
+const NEVER_WRITABLE_PATH: &str = "/etc/__kastellan_landlock_test_should_be_blocked";
 
 /// Run the probe with a clean environment plus the supplied (key, value)
 /// overrides. `env_clear` keeps test runs reproducible regardless of the
@@ -38,7 +38,7 @@ fn run_probe(env: &[(&str, &str)], args: &[&str]) -> Output {
 fn landlock_enforced() -> bool {
     // A no-op invocation: getpid is allowed, seccomp disabled. We only
     // care about the LOCKDOWN_REPORT line on stderr.
-    let out = run_probe(&[("HHAGENT_SECCOMP_PROFILE", "none")], &["seccomp-getpid"]);
+    let out = run_probe(&[("KASTELLAN_SECCOMP_PROFILE", "none")], &["seccomp-getpid"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains("KernelTooOld") {
         eprintln!("\n[SKIP] Landlock not enforced on this kernel: {stderr}");
@@ -63,8 +63,8 @@ fn write_to_unallowed_path_is_blocked() {
     let rw_json = format!("[{:?}]", TEST_SCRATCH_DIR);
     let out = run_probe(
         &[
-            ("HHAGENT_LANDLOCK_RW", rw_json.as_str()),
-            ("HHAGENT_SECCOMP_PROFILE", "none"),
+            ("KASTELLAN_LANDLOCK_RW", rw_json.as_str()),
+            ("KASTELLAN_SECCOMP_PROFILE", "none"),
         ],
         &["landlock-write", NEVER_WRITABLE_PATH],
     );
@@ -93,8 +93,8 @@ fn write_to_allowlisted_scratch_succeeds() {
     let rw_json = format!("[{:?}]", TEST_SCRATCH_DIR);
     let out = run_probe(
         &[
-            ("HHAGENT_LANDLOCK_RW", rw_json.as_str()),
-            ("HHAGENT_SECCOMP_PROFILE", "none"),
+            ("KASTELLAN_LANDLOCK_RW", rw_json.as_str()),
+            ("KASTELLAN_SECCOMP_PROFILE", "none"),
         ],
         &["landlock-write", &target],
     );
@@ -126,8 +126,8 @@ fn write_to_allowlisted_scratch_succeeds() {
 fn v6_abi_yields_fully_enforced_on_modern_kernel() {
     let out = run_probe(
         &[
-            ("HHAGENT_LANDLOCK_RW", "[]"),
-            ("HHAGENT_SECCOMP_PROFILE", "none"),
+            ("KASTELLAN_LANDLOCK_RW", "[]"),
+            ("KASTELLAN_SECCOMP_PROFILE", "none"),
         ],
         &["seccomp-getpid"],
     );
@@ -164,8 +164,8 @@ fn reading_from_usr_still_works_after_lockdown() {
     // unreachable and every worker breaks.
     let out = run_probe(
         &[
-            ("HHAGENT_LANDLOCK_RW", "[]"),
-            ("HHAGENT_SECCOMP_PROFILE", "none"),
+            ("KASTELLAN_LANDLOCK_RW", "[]"),
+            ("KASTELLAN_SECCOMP_PROFILE", "none"),
         ],
         &["landlock-read", "/usr/bin/true"],
     );

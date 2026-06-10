@@ -4,7 +4,7 @@
 
 **Goal:** Add the first writer for `MemoryLayer::Skill` (L3) rows: on a successfully-completed, multi-step task the agent emits a parameterised tool-call template, which `runner::drain_lane` validates, dedups, and stores at L3 marked `trust: "untrusted"` with one typed audit row. Crystallised skills are non-executable in this slice.
 
-**Architecture:** Mirror the shipped L1 promotion writer one layer up. A new pure module `core/src/memory/l3_crystallise.rs` (validator + canonical-SHA + async writer + list/remove) is driven by a new structured `Plan.l3_skill` candidate, captured into `InnerLoopResult.terminal_l3_skill` on the `Outcome::Completed` arm under a `dispatch_count >= 1` grounding gate, and written by a best-effort `drain_lane` hook. Operator visibility via `hhagent-cli memory l3 {list, remove}`. No new `db/` helper — `insert_memory_at_layer` / `delete_memory_at_layer` / `load_layer` all exist.
+**Architecture:** Mirror the shipped L1 promotion writer one layer up. A new pure module `core/src/memory/l3_crystallise.rs` (validator + canonical-SHA + async writer + list/remove) is driven by a new structured `Plan.l3_skill` candidate, captured into `InnerLoopResult.terminal_l3_skill` on the `Outcome::Completed` arm under a `dispatch_count >= 1` grounding gate, and written by a best-effort `drain_lane` hook. Operator visibility via `kastellan-cli memory l3 {list, remove}`. No new `db/` helper — `insert_memory_at_layer` / `delete_memory_at_layer` / `load_layer` all exist.
 
 **Tech Stack:** Rust (workspace), `sqlx` (Postgres), `serde_json`, `sha2`, `time` (RFC3339). TDD throughout; existing tests are the regression pin for the mechanical churn.
 
@@ -12,7 +12,7 @@
 
 **Precedent files to keep open while implementing:**
 - `core/src/memory/l1_promote.rs` (the module template)
-- `core/src/bin/hhagent-cli/memory_l1.rs` (the CLI template)
+- `core/src/bin/kastellan-cli/memory_l1.rs` (the CLI template)
 - `core/src/cli_audit.rs:543-597` (`l1_add_and_audit` / `l1_remove_and_audit`)
 - `core/src/scheduler/audit.rs:385-423` (`build_l1_write_payload`) + `:99-110` (action consts)
 - `core/src/scheduler/runner.rs:233-340` (`drain_lane` L1 hook + `write_l1_promoted_row`)
@@ -24,7 +24,7 @@
 ```sh
 source "$HOME/.cargo/env"
 ```
-PG-gated tests need `HHAGENT_PG_BIN_DIR` set to a Postgres bin dir (e.g. `/Applications/Postgres 2.app/Contents/Versions/18/bin/`); without it they skip-as-pass.
+PG-gated tests need `KASTELLAN_PG_BIN_DIR` set to a Postgres bin dir (e.g. `/Applications/Postgres 2.app/Contents/Versions/18/bin/`); without it they skip-as-pass.
 
 ---
 
@@ -96,7 +96,7 @@ fn l3_skill_candidate_round_trips_through_serde() {
 
 - [ ] **Step 2: Run the tests to verify they fail to compile** (types/field/accessor don't exist yet)
 
-Run: `cargo test -p hhagent-core --lib cassandra::types::tests::completion_skill 2>&1 | head -20`
+Run: `cargo test -p kastellan-core --lib cassandra::types::tests::completion_skill 2>&1 | head -20`
 Expected: FAIL — `cannot find type L3SkillCandidate` / `no field l3_skill` / `no method completion_skill`.
 
 - [ ] **Step 3: Add the three types** (in `core/src/cassandra/types.rs`, immediately after the `RefusedReason` struct)
@@ -181,7 +181,7 @@ For each flagged literal, add `l3_skill: None,` alongside the existing `l1_insig
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
-Run: `cargo test -p hhagent-core --lib cassandra::types::tests 2>&1 | tail -15`
+Run: `cargo test -p kastellan-core --lib cassandra::types::tests 2>&1 | tail -15`
 Expected: PASS (all `completion_skill_*` + `l3_skill_*` green; pre-existing types tests still green).
 
 - [ ] **Step 8: Commit**
@@ -219,7 +219,7 @@ pub mod l3_crystallise;
 //! closed-world integrity + reserved-tag + caps), dedups on a
 //! canonical SHA-256 over the template, and inserts at `layer = 3`
 //! marked `trust: "untrusted"` via
-//! [`hhagent_db::memories::insert_memory_at_layer`].
+//! [`kastellan_db::memories::insert_memory_at_layer`].
 //!
 //! **Crystallised skills are non-executable in this slice.** There is
 //! no invocation path; `trust: "untrusted"` is a forward-compatible
@@ -230,8 +230,8 @@ pub mod l3_crystallise;
 
 use std::collections::BTreeSet;
 
-use hhagent_db::memories::{insert_memory_at_layer, load_layer, Memory, MemoryLayer};
-use hhagent_db::DbError;
+use kastellan_db::memories::{insert_memory_at_layer, load_layer, Memory, MemoryLayer};
+use kastellan_db::DbError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -643,7 +643,7 @@ mod tests {
 
 - [ ] **Step 3: Run the tests to verify they fail** (compile error — `canonical_json` not defined yet)
 
-Run: `cargo test -p hhagent-core --lib memory::l3_crystallise 2>&1 | head -20`
+Run: `cargo test -p kastellan-core --lib memory::l3_crystallise 2>&1 | head -20`
 Expected: FAIL — `cannot find function canonical_json`. (Defined in Task 3.) This is expected; proceed to Task 3 which makes the module compile, then re-run.
 
 - [ ] **Step 4: Commit (WIP — module compiles after Task 3)**
@@ -783,7 +783,7 @@ pub(crate) fn build_l3_metadata(
 
 - [ ] **Step 3: Run the module's unit tests** (now compiles)
 
-Run: `cargo test -p hhagent-core --lib memory::l3_crystallise 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --lib memory::l3_crystallise 2>&1 | tail -20`
 Expected: PASS (validator + canonical/SHA/metadata tests all green).
 
 - [ ] **Step 4: Commit (Tasks 2+3)**
@@ -829,7 +829,7 @@ pub async fn crystallise_l3(
     .fetch_optional(pool)
     .await
     .map_err(|e| {
-        L3Error::Db(hhagent_db::DbError::Query(format!(
+        L3Error::Db(kastellan_db::DbError::Query(format!(
             "crystallise_l3 EXISTS-check body_sha256={body_sha256}: {e}"
         )))
     })?;
@@ -861,10 +861,10 @@ pub async fn list_l3(pool: &PgPool) -> Result<Vec<Memory>, DbError> {
 }
 
 /// Operator-facing remove, layer-guarded via
-/// `hhagent_db::memories::delete_memory_at_layer` (cannot delete an
+/// `kastellan_db::memories::delete_memory_at_layer` (cannot delete an
 /// L0/L1/L2 row even on a typoed id). Returns `true` iff a row was deleted.
 pub async fn remove_l3(pool: &PgPool, id: i64) -> Result<bool, DbError> {
-    hhagent_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Skill).await
+    kastellan_db::memories::delete_memory_at_layer(pool, id, MemoryLayer::Skill).await
 }
 ```
 
@@ -895,7 +895,7 @@ pub async fn remove_l3(pool: &PgPool, id: i64) -> Result<bool, DbError> {
 
 - [ ] **Step 3: Build + run module tests + clippy**
 
-Run: `cargo test -p hhagent-core --lib memory::l3_crystallise 2>&1 | tail -10 && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
+Run: `cargo test -p kastellan-core --lib memory::l3_crystallise 2>&1 | tail -10 && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
 Expected: tests PASS; clippy exit 0.
 
 - [ ] **Step 4: Commit**
@@ -949,7 +949,7 @@ git commit -m "feat(memory): crystallise_l3 writer + list_l3/remove_l3"
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p hhagent-core --lib scheduler::audit::tests::build_l3 2>&1 | head -15`
+Run: `cargo test -p kastellan-core --lib scheduler::audit::tests::build_l3 2>&1 | head -15`
 Expected: FAIL — `cannot find function build_l3_write_payload` + `ACTION_L3_*`.
 
 - [ ] **Step 3: Add the imports, constants, and helper**
@@ -997,7 +997,7 @@ pub fn build_l3_write_payload(
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `cargo test -p hhagent-core --lib scheduler::audit::tests::build_l3 2>&1 | tail -8`
+Run: `cargo test -p kastellan-core --lib scheduler::audit::tests::build_l3 2>&1 | tail -8`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1067,12 +1067,12 @@ Replace the macro body so the primary form takes `($outcome, $insight, $skill)` 
 
 - [ ] **Step 4: Build and fix the flagged `InnerLoopResult` literals**
 
-Run: `cargo build -p hhagent-core 2>&1 | grep -A2 "missing field \`terminal_l3_skill\`" | head -30`
+Run: `cargo build -p kastellan-core 2>&1 | grep -A2 "missing field \`terminal_l3_skill\`" | head -30`
 Expected: literals in `core/src/scheduler/runner.rs` (~L433, a test) and `core/src/scheduler/inner_loop/tests.rs`. Add `terminal_l3_skill: None,` next to each `terminal_l1_insight: None,`.
 
 - [ ] **Step 5: Run the inner-loop unit tests**
 
-Run: `cargo test -p hhagent-core --lib scheduler::inner_loop 2>&1 | tail -12`
+Run: `cargo test -p kastellan-core --lib scheduler::inner_loop 2>&1 | tail -12`
 Expected: PASS (22/22 — unchanged; the macro change is behaviour-preserving for every non-Completed arm, and the Completed arm now also captures the skill).
 
 - [ ] **Step 6: Commit**
@@ -1130,7 +1130,7 @@ Add a new shape pin:
 
 - [ ] **Step 2: Run to verify the count pins now fail** (key not added to production yet)
 
-Run: `cargo test -p hhagent-core --lib scheduler::inner_loop_audit 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core --lib scheduler::inner_loop_audit 2>&1 | tail -20`
 Expected: FAIL — the renamed `..._twenty_five_keys_...` test reports `l3_skill` missing; the new shape pin fails.
 
 - [ ] **Step 3: Add the `l3_skill` key to `build_plan_formulate_payload`** (immediately after the `l1_insight` insertion, ~L128)
@@ -1156,7 +1156,7 @@ Expected: FAIL — the renamed `..._twenty_five_keys_...` test reports `l3_skill
 
 - [ ] **Step 4: Run to verify all pins pass**
 
-Run: `cargo test -p hhagent-core --lib scheduler::inner_loop_audit 2>&1 | tail -12`
+Run: `cargo test -p kastellan-core --lib scheduler::inner_loop_audit 2>&1 | tail -12`
 Expected: PASS (count pins at 25/26; new shape pin green).
 
 - [ ] **Step 5: Commit**
@@ -1229,7 +1229,7 @@ async fn write_l3_crystallised_row(
     let skill_name = skill.name.trim();
     let payload = build_l3_write_payload(&outcome, &source, skill_name, &body_sha256);
 
-    if let Err(e) = hhagent_db::audit::insert(
+    if let Err(e) = kastellan_db::audit::insert(
         pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_CRYSTALLISED, payload,
     ).await {
         tracing::warn!(
@@ -1246,7 +1246,7 @@ Search the top-of-file `use crate::scheduler::audit::{` block and add `ACTION_L3
 
 - [ ] **Step 4: Build + clippy**
 
-Run: `cargo build -p hhagent-core 2>&1 | tail -5 && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
+Run: `cargo build -p kastellan-core 2>&1 | tail -5 && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
 Expected: builds clean; clippy exit 0.
 
 - [ ] **Step 5: Commit**
@@ -1269,7 +1269,7 @@ git commit -m "feat(scheduler): drain_lane L3 crystallisation hook + write_l3_cr
     #[test]
     fn l3_remove_and_audit_signature_compile_pin() {
         fn _pin<'a>(pool: &'a sqlx::PgPool, id: i64)
-            -> impl std::future::Future<Output = Result<(bool, i64), hhagent_db::DbError>> + 'a {
+            -> impl std::future::Future<Output = Result<(bool, i64), kastellan_db::DbError>> + 'a {
             super::l3_remove_and_audit(pool, id)
         }
         let _ = _pin;
@@ -1278,7 +1278,7 @@ git commit -m "feat(scheduler): drain_lane L3 crystallisation hook + write_l3_cr
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p hhagent-core --lib cli_audit::tests::l3_remove 2>&1 | head -12`
+Run: `cargo test -p kastellan-core --lib cli_audit::tests::l3_remove 2>&1 | head -12`
 Expected: FAIL — `cannot find function l3_remove_and_audit`.
 
 - [ ] **Step 3: Add `ACTION_L3_REMOVED` to the audit-consts import** (the `use crate::scheduler::audit::{ ... }` block ~L97-103)
@@ -1294,13 +1294,13 @@ Add `ACTION_L3_REMOVED,` to the imported set.
 pub async fn l3_remove_and_audit(
     pool: &PgPool,
     memory_id: i64,
-) -> Result<(bool, i64), hhagent_db::DbError> {
+) -> Result<(bool, i64), kastellan_db::DbError> {
     use crate::memory::l3_crystallise::remove_l3;
 
     let deleted = remove_l3(pool, memory_id).await?;
     let payload = serde_json::json!({"memory_id": memory_id, "deleted": deleted});
 
-    let audit_id = match hhagent_db::audit::insert(
+    let audit_id = match kastellan_db::audit::insert(
         pool, CLI_AUDIT_ACTOR, ACTION_L3_REMOVED, payload,
     ).await {
         Ok(id) => id,
@@ -1316,7 +1316,7 @@ pub async fn l3_remove_and_audit(
 
 - [ ] **Step 5: Run to verify it passes + clippy**
 
-Run: `cargo test -p hhagent-core --lib cli_audit::tests::l3_remove 2>&1 | tail -6 && cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -3`
+Run: `cargo test -p kastellan-core --lib cli_audit::tests::l3_remove 2>&1 | tail -6 && cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -3`
 Expected: PASS; clippy exit 0.
 
 - [ ] **Step 6: Commit**
@@ -1331,11 +1331,11 @@ git commit -m "feat(cli_audit): l3_remove_and_audit"
 ## Task 10: CLI — `memory l3 {list, remove}`
 
 **Files:**
-- Create: `core/src/bin/hhagent-cli/memory_l3.rs`
-- Modify: `core/src/bin/hhagent-cli/main.rs` (add `mod memory_l3;` near `mod memory_l1;` ~L124)
-- Modify: `core/src/bin/hhagent-cli/memory_l1.rs` (extend `run_memory` dispatch to route `l3`)
+- Create: `core/src/bin/kastellan-cli/memory_l3.rs`
+- Modify: `core/src/bin/kastellan-cli/main.rs` (add `mod memory_l3;` near `mod memory_l1;` ~L124)
+- Modify: `core/src/bin/kastellan-cli/memory_l1.rs` (extend `run_memory` dispatch to route `l3`)
 
-- [ ] **Step 1: Create the CLI module** (`core/src/bin/hhagent-cli/memory_l3.rs`)
+- [ ] **Step 1: Create the CLI module** (`core/src/bin/kastellan-cli/memory_l3.rs`)
 
 ```rust
 //! `memory l3 {list,remove}` — operator-facing inspection + pruning of
@@ -1349,7 +1349,7 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_memory_l3(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: hhagent-cli memory l3 <list|remove> ...");
+        eprintln!("usage: kastellan-cli memory l3 <list|remove> ...");
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -1363,8 +1363,8 @@ pub(crate) fn run_memory_l3(args: &[String]) -> ExitCode {
 }
 
 async fn memory_l3_list(args: &[String]) -> ExitCode {
-    use hhagent_core::memory::l3_crystallise::list_l3;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::memory::l3_crystallise::list_l3;
+    use kastellan_db::pool::connect_runtime_pool;
 
     if !args.is_empty() {
         eprintln!("memory l3 list: takes no arguments");
@@ -1397,13 +1397,13 @@ async fn memory_l3_list(args: &[String]) -> ExitCode {
 }
 
 async fn memory_l3_remove(args: &[String]) -> ExitCode {
-    use hhagent_core::cli_audit::l3_remove_and_audit;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::cli_audit::l3_remove_and_audit;
+    use kastellan_db::pool::connect_runtime_pool;
 
     let id_str = match args {
         [s] => s,
         _ => {
-            eprintln!("usage: hhagent-cli memory l3 remove <id>");
+            eprintln!("usage: kastellan-cli memory l3 remove <id>");
             return ExitCode::from(2);
         }
     };
@@ -1441,7 +1441,7 @@ async fn memory_l3_remove(args: &[String]) -> ExitCode {
 mod memory_l3;
 ```
 
-- [ ] **Step 3: Route `l3` in the `run_memory` dispatcher** (`core/src/bin/hhagent-cli/memory_l1.rs`, the `run_memory` match ~L17-23)
+- [ ] **Step 3: Route `l3` in the `run_memory` dispatcher** (`core/src/bin/kastellan-cli/memory_l1.rs`, the `run_memory` match ~L17-23)
 
 Replace the match in `run_memory` with:
 ```rust
@@ -1454,20 +1454,20 @@ Replace the match in `run_memory` with:
         }
     }
 ```
-And update the two `usage:` lines in `run_memory` / `run_memory_l1` that say `memory l1 <add|list|remove>` to keep them accurate (the top-level one should read `usage: hhagent-cli memory <l1|l3> ...`).
+And update the two `usage:` lines in `run_memory` / `run_memory_l1` that say `memory l1 <add|list|remove>` to keep them accurate (the top-level one should read `usage: kastellan-cli memory <l1|l3> ...`).
 
 - [ ] **Step 4: Build + smoke-test the dispatch (no PG needed for arg-parse paths)**
 
-Run: `cargo build -p hhagent-core --bin hhagent-cli 2>&1 | tail -5`
-Then: `./target/debug/hhagent-cli memory l3 2>&1; echo "exit=$?"`
+Run: `cargo build -p kastellan-core --bin kastellan-cli 2>&1 | tail -5`
+Then: `./target/debug/kastellan-cli memory l3 2>&1; echo "exit=$?"`
 Expected: prints the `usage: ... memory l3 <list|remove>` line, `exit=2`.
-Then: `./target/debug/hhagent-cli memory l3 bogus 2>&1; echo "exit=$?"`
+Then: `./target/debug/kastellan-cli memory l3 bogus 2>&1; echo "exit=$?"`
 Expected: `unknown action 'bogus'`, `exit=2`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add core/src/bin/hhagent-cli/memory_l3.rs core/src/bin/hhagent-cli/main.rs core/src/bin/hhagent-cli/memory_l1.rs
+git add core/src/bin/kastellan-cli/memory_l3.rs core/src/bin/kastellan-cli/main.rs core/src/bin/kastellan-cli/memory_l1.rs
 git commit -m "feat(cli): memory l3 {list,remove} subcommands"
 ```
 
@@ -1532,14 +1532,14 @@ git commit -m "docs(prompt): teach planner to emit l3_skill on terminal multi-st
 **Files:**
 - Create: `core/tests/memory_l3_crystallise_e2e.rs`
 
-> **Harness:** copy the scaffolding (PgCluster bring-up via `hhagent_tests_common::bring_up_pg_cluster`, the scripted-`PlanFormulator`/scheduler driver, and the `pg_bin_dir_or_skip` skip-as-pass guard) from `core/tests/memory_l1_promote_e2e.rs` — specifically its agent-raised test (`agent_raised_*`). Reuse that file's helper that runs a task end-to-end through `run_to_terminal` + `drain_lane` with a scripted terminal plan. Substitute the `l3_skill` candidate + assertions below. Where the L1 test sets `plan.l1_insight = Some(...)`, set `plan.l3_skill = Some(...)` instead; where it asserts a layer-1 row + `l1.promoted` audit row, assert a layer-3 row + `l3.crystallised` row.
+> **Harness:** copy the scaffolding (PgCluster bring-up via `kastellan_tests_common::bring_up_pg_cluster`, the scripted-`PlanFormulator`/scheduler driver, and the `pg_bin_dir_or_skip` skip-as-pass guard) from `core/tests/memory_l1_promote_e2e.rs` — specifically its agent-raised test (`agent_raised_*`). Reuse that file's helper that runs a task end-to-end through `run_to_terminal` + `drain_lane` with a scripted terminal plan. Substitute the `l3_skill` candidate + assertions below. Where the L1 test sets `plan.l1_insight = Some(...)`, set `plan.l3_skill = Some(...)` instead; where it asserts a layer-1 row + `l1.promoted` audit row, assert a layer-3 row + `l3.crystallised` row.
 
 - [ ] **Step 1: Write the tests** (one fixture builder + the scenarios)
 
 ```rust
 // Shared fixture builder (top of the test file):
-fn valid_skill() -> hhagent_core::cassandra::types::L3SkillCandidate {
-    use hhagent_core::cassandra::types::{L3Param, L3SkillCandidate, L3TemplateStep};
+fn valid_skill() -> kastellan_core::cassandra::types::L3SkillCandidate {
+    use kastellan_core::cassandra::types::{L3Param, L3SkillCandidate, L3TemplateStep};
     L3SkillCandidate {
         name: "summarise_repo_readme".into(),
         description: "Read a repo README and summarise".into(),
@@ -1564,7 +1564,7 @@ Scenarios (each `#[tokio::test]`, each guarded by the file's `pg_bin_dir_or_skip
 
 4. **`invalid_skill_writes_nothing`** — terminal plan with ≥1 step executed, but `l3_skill` has an undeclared placeholder (`parameters` reference `{{missing}}`). Assert: zero `layer = 3` rows; zero `l3.crystallised` audit rows (validation failure is WARN-only).
 
-5. **`remove_deletes_and_journals`** — insert one skill (scenario 1), then call `hhagent_core::cli_audit::l3_remove_and_audit(&pool, id)`. Assert: returns `(true, _)`; zero `layer = 3` rows remain; one row appears in `deleted_memories`; one `actor='cli' action='l3.removed'` audit row with `payload->>'deleted' == "true"`.
+5. **`remove_deletes_and_journals`** — insert one skill (scenario 1), then call `kastellan_core::cli_audit::l3_remove_and_audit(&pool, id)`. Assert: returns `(true, _)`; zero `layer = 3` rows remain; one row appears in `deleted_memories`; one `actor='cli' action='l3.removed'` audit row with `payload->>'deleted' == "true"`.
 
 6. **`remove_wrong_layer_is_noop`** — insert an L1 row (via `memory::l1_promote::promote_l1` with a `NoOpEntityExtractor`), capture its id, then `l3_remove_and_audit(&pool, that_l1_id)`. Assert: returns `(false, _)`; the L1 row still exists; one `l3.removed` audit row with `payload->>'deleted' == "false"`.
 
@@ -1576,8 +1576,8 @@ Scenarios (each `#[tokio::test]`, each guarded by the file's `pg_bin_dir_or_skip
 
 Run:
 ```sh
-HHAGENT_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin' \
-  cargo test -p hhagent-core --test memory_l3_crystallise_e2e -- --nocapture 2>&1 | tail -30
+KASTELLAN_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin' \
+  cargo test -p kastellan-core --test memory_l3_crystallise_e2e -- --nocapture 2>&1 | tail -30
 ```
 Expected: all 7 PASS (no `[SKIP]` since PG bin dir is set).
 
@@ -1595,11 +1595,11 @@ git commit -m "test(e2e): L3 crystallisation DB integration (happy/dedup/groundi
 **Files:**
 - Create: `core/tests/cli_memory_l3_e2e.rs`
 
-> **Harness:** copy the scaffolding from `core/tests/cli_memory_l1_e2e.rs` (it brings up PG, sets `HHAGENT_DB_*` env for the spawned `hhagent-cli` binary via `hhagent_tests_common::workspace_target_binary("hhagent-cli")`, and asserts on stdout/exit). Substitute the `l3` subcommand + assertions.
+> **Harness:** copy the scaffolding from `core/tests/cli_memory_l1_e2e.rs` (it brings up PG, sets `KASTELLAN_DB_*` env for the spawned `kastellan-cli` binary via `kastellan_tests_common::workspace_target_binary("kastellan-cli")`, and asserts on stdout/exit). Substitute the `l3` subcommand + assertions.
 
 - [ ] **Step 1: Write the tests** (each guarded by the skip helper)
 
-1. **`cli_memory_l3_list_empty_then_populated`** — `memory l3 list` on an empty DB exits 0 with just the header. Then insert one skill via `hhagent_core::memory::l3_crystallise::crystallise_l3` directly against the test pool; `memory l3 list` now prints a row containing `untrusted` and the skill name; exit 0.
+1. **`cli_memory_l3_list_empty_then_populated`** — `memory l3 list` on an empty DB exits 0 with just the header. Then insert one skill via `kastellan_core::memory::l3_crystallise::crystallise_l3` directly against the test pool; `memory l3 list` now prints a row containing `untrusted` and the skill name; exit 0.
 
 2. **`cli_memory_l3_remove_existing`** — insert a skill, capture id; `memory l3 remove <id>` prints `removed id=<id>`, exit 0; `list` is empty afterwards.
 
@@ -1611,8 +1611,8 @@ git commit -m "test(e2e): L3 crystallisation DB integration (happy/dedup/groundi
 
 Run:
 ```sh
-HHAGENT_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin' \
-  cargo test -p hhagent-core --test cli_memory_l3_e2e -- --nocapture 2>&1 | tail -20
+KASTELLAN_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin' \
+  cargo test -p kastellan-core --test cli_memory_l3_e2e -- --nocapture 2>&1 | tail -20
 ```
 Expected: all PASS.
 
@@ -1620,7 +1620,7 @@ Expected: all PASS.
 
 ```bash
 git add core/tests/cli_memory_l3_e2e.rs
-git commit -m "test(e2e): hhagent-cli memory l3 list/remove"
+git commit -m "test(e2e): kastellan-cli memory l3 list/remove"
 ```
 
 ---
@@ -1643,8 +1643,8 @@ If the test's scripted plan does set a skill, assert the compact `{name, step_co
 
 Run:
 ```sh
-HHAGENT_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin' \
-  cargo test -p hhagent-core --test scheduler_inner_loop_e2e -- --nocapture 2>&1 | tail -15
+KASTELLAN_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin' \
+  cargo test -p kastellan-core --test scheduler_inner_loop_e2e -- --nocapture 2>&1 | tail -15
 ```
 Expected: PASS.
 
@@ -1657,7 +1657,7 @@ Expected: zero `FAILED`; aggregate passed should be **1157 + ~27 new** ≈ 1184 
 
 Run:
 ```sh
-HHAGENT_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin' \
+KASTELLAN_PG_BIN_DIR='/Applications/Postgres 2.app/Contents/Versions/18/bin' \
   cargo test --workspace 2>&1 | grep -E "test result:|FAILED" | grep -v "0 passed; 0 failed" | tail -50
 ```
 Expected: zero `FAILED`; the new `memory_l3_crystallise_e2e` (7) + `cli_memory_l3_e2e` (4) run for real. (Pre-existing `embedding_recall_e2e` + `gliner_relex_e2e` PG races may flake identically to `main` — confirm they match the baseline, not new.)
@@ -1669,7 +1669,7 @@ Expected: exit 0, no warnings.
 
 - [ ] **Step 6: Doc-link check (core crate)**
 
-Run: `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc -p hhagent-core --no-deps --document-private-items 2>&1 | grep -c "unresolved link"`
+Run: `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc -p kastellan-core --no-deps --document-private-items 2>&1 | grep -c "unresolved link"`
 Expected: the SAME count as `main` (no NEW broken links from the new module's doc-comments). If a new one appears, fix the offending `[\`Type\`]` link (qualify the path) before committing.
 
 - [ ] **Step 7: Commit**

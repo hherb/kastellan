@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use crate::common::resolve_connect_spec;
 
 pub(super) async fn memory_l3_list(args: &[String]) -> ExitCode {
-    use hhagent_core::memory::l3_crystallise::list_l3;
-    use hhagent_db::pool::connect_runtime_pool;
+    use kastellan_core::memory::l3_crystallise::list_l3;
+    use kastellan_db::pool::connect_runtime_pool;
 
     if !args.is_empty() {
         eprintln!("memory l3 list: takes no arguments");
@@ -30,7 +30,7 @@ pub(super) async fn memory_l3_list(args: &[String]) -> ExitCode {
 
     println!("{:<8}  {:<24}  {:<10}  NAME / DESCRIPTION", "ID", "CREATED_AT", "TRUST");
     for r in rows {
-        let trust = hhagent_core::memory::l3_approval::SkillTrust::from_metadata_str(
+        let trust = kastellan_core::memory::l3_approval::SkillTrust::from_metadata_str(
             r.metadata.get("trust").and_then(|v| v.as_str()).unwrap_or(""),
         )
         .as_str();

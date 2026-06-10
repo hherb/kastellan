@@ -20,7 +20,7 @@ SHA-256-seeded helper, and the only existing `Router` consumer is
 `RouterAgent::formulate_plan` (chat completions, no embedding).
 
 This slice ships the embedding HTTP path through the existing
-`hhagent-llm-router` crate, plus a thin caller helper
+`kastellan-llm-router` crate, plus a thin caller helper
 `core::memory::embed_query` that writes the **first
 `actor='llm:router'` audit-log row** in the system. After this slice,
 a caller with `query_text` only can call `embed_query` to materialize
@@ -136,9 +136,9 @@ Defaults:
   set it explicitly).
 
 New env vars:
-- `HHAGENT_LLM_EMBEDDING_URL` (falls back to `HHAGENT_LLM_LOCAL_URL`,
+- `KASTELLAN_LLM_EMBEDDING_URL` (falls back to `KASTELLAN_LLM_LOCAL_URL`,
   then per-OS default)
-- `HHAGENT_LLM_EMBEDDING_MODEL` (`"embedding-default"`)
+- `KASTELLAN_LLM_EMBEDDING_MODEL` (`"embedding-default"`)
 
 ### `llm-router/src/policy.rs` (modified, ~10 LOC added)
 
@@ -349,7 +349,7 @@ Each commit lands as its own message of the form
 - Deterministic SHA-256-seeded embeddings in the full-flow test → no
   reliance on a real embedding model.
 - 5-runs determinism check before merging (`for i in 1..=5; do cargo
-  test -p hhagent-core --test embedding_recall_e2e; done`), matching
+  test -p kastellan-core --test embedding_recall_e2e; done`), matching
   the cli_ask_e2e precedent.
 
 ## Files added / modified

@@ -1,4 +1,4 @@
-//! End-to-end smoke for [`hhagent_core::prompt_assembly::PgSystemPromptBuilder`].
+//! End-to-end smoke for [`kastellan_core::prompt_assembly::PgSystemPromptBuilder`].
 //!
 //! Each scenario brings up its own per-test Postgres cluster (same
 //! recipe as `memory_l0_seed_e2e.rs` and `memory_layers_e2e.rs`) so
@@ -9,9 +9,9 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::prompt_assembly::{PgSystemPromptBuilder, SystemPromptBuilder};
-use hhagent_db::memories::{insert_memory_at_layer, seed_meta_memory, MemoryLayer};
-use hhagent_tests_common::{
+use kastellan_core::prompt_assembly::{PgSystemPromptBuilder, SystemPromptBuilder};
+use kastellan_db::memories::{insert_memory_at_layer, seed_meta_memory, MemoryLayer};
+use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
@@ -37,11 +37,11 @@ fn pg_builder_build_against_seeded_db() {
         &bin_dir,
         "pas-d",
         "pas-l",
-        &format!("hhagent-supervisor-test-pg-pa-seeded-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-pa-seeded-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -50,7 +50,7 @@ fn pg_builder_build_against_seeded_db() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -124,11 +124,11 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
         &bin_dir,
         "pae-d",
         "pae-l",
-        &format!("hhagent-supervisor-test-pg-pa-empty-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-pa-empty-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -137,7 +137,7 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
@@ -171,11 +171,11 @@ fn pg_builder_with_recalled_renders_block_against_seeded_db() {
         &bin_dir,
         "par-d",
         "par-l",
-        &format!("hhagent-supervisor-test-pg-par-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-par-{suffix}"),
     );
 
     rt().block_on(async {
-        hhagent_db::probe::run(
+        kastellan_db::probe::run(
             &cluster.conn_spec,
             "core",
             "startup",
@@ -184,14 +184,14 @@ fn pg_builder_with_recalled_renders_block_against_seeded_db() {
         .await
         .expect("probe");
 
-        let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
             .await
             .expect("pool");
 
         // Empty DB → no L0/L1 sections; recalled context supplied
         // directly so we exercise the <recalled> rendering without
         // going through the real recall lane.
-        let recalled = hhagent_core::recall_assembly::RecalledContext::new(
+        let recalled = kastellan_core::recall_assembly::RecalledContext::new(
             vec![10, 20],
             vec!["RECALL ALPHA".into(), "RECALL BETA".into()],
             "a".repeat(64),
@@ -217,7 +217,7 @@ fn pg_builder_with_recalled_renders_block_against_seeded_db() {
         let r_via_explicit_empty = builder
             .build_with_recalled(
                 "BASE BODY",
-                &hhagent_core::recall_assembly::RecalledContext::empty(),
+                &kastellan_core::recall_assembly::RecalledContext::empty(),
             )
             .await
             .expect("explicit empty build");

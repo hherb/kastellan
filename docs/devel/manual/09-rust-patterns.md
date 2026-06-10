@@ -99,7 +99,7 @@ impl WorkerCommand {
 }
 ```
 
-`pub(crate)` means "visible only inside this crate". Code outside `hhagent-core`
+`pub(crate)` means "visible only inside this crate". Code outside `kastellan-core`
 cannot construct a `WorkerCommand`. This is how the dispatcher chokepoint is
 enforced at the compiler level — it is not a convention; it is a type-system
 guarantee.

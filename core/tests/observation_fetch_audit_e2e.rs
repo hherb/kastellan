@@ -1,4 +1,4 @@
-//! Integration test for hhagent_core::observation::capture::fetch_audit_rows_for_task.
+//! Integration test for kastellan_core::observation::capture::fetch_audit_rows_for_task.
 //!
 //! Brings up a per-test PG cluster (skips cleanly without it), runs the
 //! probe, opens the runtime-role pool, inserts a handful of audit rows
@@ -7,10 +7,10 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use hhagent_core::observation::capture::{
+use kastellan_core::observation::capture::{
     fetch_audit_rows_for_task, CapturedAuditRow,
 };
-use hhagent_tests_common::{
+use kastellan_tests_common::{
     bring_up_pg_cluster, current_username, pg_bin_dir_or_skip, skip_if_no_supervisor,
     unique_suffix,
 };
@@ -27,10 +27,10 @@ async fn fetch_audit_rows_for_task_filters_by_task_id_in_payload() {
         &bin_dir,
         "obs-fetch-d",
         "obs-fetch-l",
-        &format!("hhagent-supervisor-test-pg-obsfetch-{suffix}"),
+        &format!("kastellan-supervisor-test-pg-obsfetch-{suffix}"),
     );
 
-    hhagent_db::probe::run(
+    kastellan_db::probe::run(
         &cluster.conn_spec,
         "core",
         "startup",
@@ -39,7 +39,7 @@ async fn fetch_audit_rows_for_task_filters_by_task_id_in_payload() {
     .await
     .expect("probe");
 
-    let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
         .await
         .expect("pool");
 
@@ -54,7 +54,7 @@ async fn fetch_audit_rows_for_task_filters_by_task_id_in_payload() {
         ("scheduler", "task.completed", task_id_other),
     ] {
         let payload = serde_json::json!({"task_id": tid, "lane": "fast", "plan_count": 0});
-        hhagent_db::audit::insert(&pool, actor, action, payload)
+        kastellan_db::audit::insert(&pool, actor, action, payload)
             .await
             .expect("audit insert");
     }

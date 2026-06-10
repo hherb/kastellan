@@ -6,7 +6,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
-use hhagent_sandbox::{linux_bwrap::LinuxBwrap, SandboxBackend, SandboxPolicy};
+use kastellan_sandbox::{linux_bwrap::LinuxBwrap, SandboxBackend, SandboxPolicy};
 
 /// Skip the test if this host's kernel won't let us create an unprivileged
 /// user namespace. Ubuntu 24.04+ requires an AppArmor profile for bwrap;
@@ -177,7 +177,7 @@ fn worker_with_low_mem_max_is_oom_killed() {
     let mem_burner = mem_burner_binary();
     if !mem_burner.exists() {
         eprintln!(
-            "\n[SKIP] mem_burner fixture not built at {}; run `cargo build -p hhagent-sandbox`",
+            "\n[SKIP] mem_burner fixture not built at {}; run `cargo build -p kastellan-sandbox`",
             mem_burner.display()
         );
         return;
@@ -305,6 +305,6 @@ fn relative_policy_paths_are_rejected() {
     let res = backend.spawn_under_policy(&policy, "/usr/bin/true", &[]);
     assert!(matches!(
         res,
-        Err(hhagent_sandbox::SandboxError::Backend(_))
+        Err(kastellan_sandbox::SandboxError::Backend(_))
     ));
 }

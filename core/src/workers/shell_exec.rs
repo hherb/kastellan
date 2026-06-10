@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use hhagent_sandbox::{Net, Profile, SandboxPolicy};
+use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
 use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerManifest};
@@ -10,9 +10,9 @@ use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerMani
 /// Tool name the registry keys shell-exec on.
 const TOOL_NAME: &str = "shell-exec";
 /// Operator override for the worker binary path.
-const BIN_ENV: &str = "HHAGENT_SHELL_EXEC_BIN";
+const BIN_ENV: &str = "KASTELLAN_SHELL_EXEC_BIN";
 /// Exe-relative sibling default (cargo `target/debug` + flat installs).
-const DEFAULT_BIN_NAME: &str = "hhagent-worker-shell-exec";
+const DEFAULT_BIN_NAME: &str = "kastellan-worker-shell-exec";
 
 /// Build the [`ToolEntry`] for the shell-exec worker. The administrator
 /// controls the argv allowlist (sourced from the `tool_allowlists` DB table by
@@ -30,7 +30,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         cpu_ms: 5_000,
         mem_mb: 256,
         profile: Profile::WorkerStrict,
-        env: vec![("HHAGENT_SHELL_ALLOWLIST".to_string(), allow_json)],
+        env: vec![("KASTELLAN_SHELL_ALLOWLIST".to_string(), allow_json)],
         cpu_quota_pct: None,
         tasks_max: None,
     };
@@ -44,10 +44,10 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
     }
 }
 
-/// shell-exec's manifest. Discovery: a set `HHAGENT_SHELL_EXEC_BIN` override is
+/// shell-exec's manifest. Discovery: a set `KASTELLAN_SHELL_EXEC_BIN` override is
 /// authoritative (honoured iff it names a runnable file, else fails closed);
 /// only when it is unset do we fall back to the exe-relative sibling
-/// `hhagent-worker-shell-exec`. See [`discover_binary`].
+/// `kastellan-worker-shell-exec`. See [`discover_binary`].
 pub struct ShellExecManifest;
 
 impl WorkerManifest for ShellExecManifest {
@@ -111,7 +111,7 @@ mod tests {
                 assert_eq!(entry.policy.mem_mb, 256);
                 assert_eq!(entry.wall_clock_ms, Some(30_000));
                 let (k, v) = &entry.policy.env[0];
-                assert_eq!(k, "HHAGENT_SHELL_ALLOWLIST");
+                assert_eq!(k, "KASTELLAN_SHELL_ALLOWLIST");
                 assert_eq!(v, r#"["ls","cat"]"#);
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
@@ -127,7 +127,7 @@ mod tests {
 
         match ShellExecManifest.resolve(&c) {
             Resolution::Misconfigured { detail } => {
-                assert!(detail.contains("hhagent-worker-shell-exec"), "detail: {detail}");
+                assert!(detail.contains("kastellan-worker-shell-exec"), "detail: {detail}");
             }
             other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
         }

@@ -264,11 +264,11 @@ mod tests {
     #[test]
     fn fs_write_uses_bind_try() {
         let mut p = strict_policy();
-        p.fs_write = vec![PathBuf::from("/var/lib/hhagent/scratch")];
+        p.fs_write = vec![PathBuf::from("/var/lib/kastellan/scratch")];
         let argv = build_argv(&p, "/bin/true", &[]);
         let joined = argv.join(" ");
-        assert!(joined.contains("--bind-try /var/lib/hhagent/scratch /var/lib/hhagent/scratch"));
-        assert!(!joined.contains("--ro-bind-try /var/lib/hhagent/scratch"));
+        assert!(joined.contains("--bind-try /var/lib/kastellan/scratch /var/lib/kastellan/scratch"));
+        assert!(!joined.contains("--ro-bind-try /var/lib/kastellan/scratch"));
     }
 
     #[test]

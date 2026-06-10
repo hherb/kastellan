@@ -23,7 +23,7 @@
 //! ## Module layout
 //!
 //! * [`pg_builder::PgRecallBuilder`] — production impl. Holds a
-//!   [`sqlx::PgPool`] and an [`hhagent_llm_router::Router`]; composes
+//!   [`sqlx::PgPool`] and an [`kastellan_llm_router::Router`]; composes
 //!   [`crate::memory::embed_query`] + [`crate::memory::recall`].
 //! * [`pg_builder::StaticRecallBuilder`] — test impl. Returns a fixed
 //!   [`RecalledContext`] regardless of the query string.
@@ -42,7 +42,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::memory::MemoryError;
-use hhagent_db::DbError;
+use kastellan_db::DbError;
 
 pub mod pg_builder;
 

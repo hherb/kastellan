@@ -1,10 +1,10 @@
-# `hhagent-db`
+# `kastellan-db`
 
 Postgres schema, migrations, and connection layer for the agent core.
 
 ## Migration hygiene
 
-`hhagent-db` embeds the migration set at compile time via
+`kastellan-db` embeds the migration set at compile time via
 `sqlx::migrate!("./migrations")` and stores applied-migration metadata in the
 cluster's `_sqlx_migrations` table. sqlx fingerprints each migration by
 **version number + slug + body hash**, so once a migration has shipped (i.e.
@@ -55,7 +55,7 @@ on a personal/dev cluster (not production), two options:
 Don't do either against a shared/production cluster without confirming the
 state with the operator first.
 
-See issue [#13](https://github.com/hherb/hhagent/issues/13) for the
+See issue [#13](https://github.com/hherb/kastellan/issues/13) for the
 filing context.
 
 ## Cross-role contracts
@@ -92,5 +92,5 @@ forget when wiring up a new role.
    the new role can `DELETE FROM memories` and the row lands in
    `deleted_memories`.
 
-See issue [#42](https://github.com/hherb/hhagent/issues/42) for the design
+See issue [#42](https://github.com/hherb/kastellan/issues/42) for the design
 discussion.

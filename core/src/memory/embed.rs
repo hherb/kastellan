@@ -4,7 +4,7 @@
 //! `core::memory::recall`'s semantic lane requires a pre-computed
 //! [`EMBEDDING_DIM`]-length vector. This module owns the helper that
 //! turns a query string into that vector via
-//! [`hhagent_llm_router::Router::embed`], and pins down the audit-row
+//! [`kastellan_llm_router::Router::embed`], and pins down the audit-row
 //! shape that every embedding call writes.
 //!
 //! ## Why `embed_query` is separate from `recall`
@@ -31,11 +31,11 @@
 //! signal), and HTTP failure context (failures don't write a row at
 //! all; matches `Router::send` and `tool_host::dispatch` precedent).
 
-use hhagent_db::audit;
-use hhagent_db::memories::EMBEDDING_DIM;
-use hhagent_db::DbError;
-use hhagent_llm_router::embeddings::EmbeddingRequest;
-use hhagent_llm_router::{Router, RouterError};
+use kastellan_db::audit;
+use kastellan_db::memories::EMBEDDING_DIM;
+use kastellan_db::DbError;
+use kastellan_llm_router::embeddings::EmbeddingRequest;
+use kastellan_llm_router::{Router, RouterError};
 use sqlx::PgPool;
 use std::time::Instant;
 
@@ -165,7 +165,7 @@ pub async fn embed_query(
         build_embed_audit_payload(&req.model, 1, EMBEDDING_DIM, backend_tag, latency_ms);
     if let Err(e) = audit::insert(pool, "llm:router", "embed", payload).await {
         tracing::error!(
-            target: "hhagent::memory",
+            target: "kastellan::memory",
             error = %e,
             "embed_query audit insert failed; embedding result preserved"
         );

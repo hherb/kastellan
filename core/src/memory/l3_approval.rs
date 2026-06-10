@@ -4,7 +4,7 @@
 //! Crystallised skills land `trust:"untrusted"` and non-executable (see
 //! [`crate::memory::l3_crystallise`]). This module adds the typed
 //! [`SkillTrust`] read boundary and the pure [`evaluate_approval`] gate
-//! an operator runs (via `hhagent-cli memory l3 approve`) before a skill
+//! an operator runs (via `kastellan-cli memory l3 approve`) before a skill
 //! is promoted to `user_approved`. **Nothing here executes a skill** —
 //! `UserApproved`/`Pinned` are inert until the invocation slice lands.
 //!

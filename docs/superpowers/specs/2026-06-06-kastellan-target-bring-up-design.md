@@ -1,7 +1,7 @@
-# `hhagent.target` — supervise Postgres + core as one unit (Phase 0)
+# `kastellan.target` — supervise Postgres + core as one unit (Phase 0)
 
 **Status:** design approved 2026-06-06. Implements ROADMAP.md Phase-0
-("Service supervisor") line: *"`hhagent.target` that brings up Postgres,
+("Service supervisor") line: *"`kastellan.target` that brings up Postgres,
 inference, core, workers."*
 
 ## Problem
@@ -11,9 +11,9 @@ The supervisor crate already ships the building blocks — `core_service_spec`,
 (`SystemdUser`, `LaunchAgents`) — but there is **no orchestrating target** that
 brings the canonical services up together with the right ordering. An operator
 must install and start each unit by hand, in the right order, with no single
-"bring up hhagent" handle.
+"bring up kastellan" handle.
 
-This slice adds that handle: one `hhagent.target` (systemd) / equivalent bundle
+This slice adds that handle: one `kastellan.target` (systemd) / equivalent bundle
 (launchd) that brings up **Postgres → core** in dependency order.
 
 ## Scope decisions (resolved during brainstorming)
@@ -24,7 +24,7 @@ This slice adds that handle: one `hhagent.target` (systemd) / equivalent bundle
    llm-router endpoint and fails closed if unreachable. No inference
    `ServiceSpec` is added.
 
-2. **"Workers" drop out of the target.** In hhagent's architecture workers are
+2. **"Workers" drop out of the target.** In kastellan's architecture workers are
    not long-lived supervised units — `tool_host` spawns them on-demand per call,
    each in its own sandbox, and GLiNER-Relex is idle-timeout-managed *inside*
    core. They come up implicitly when core does. So target membership is
@@ -36,14 +36,14 @@ This slice adds that handle: one `hhagent.target` (systemd) / equivalent bundle
    `Wants=` ordering; launchd has **no target/aggregation concept and no
    reliable inter-agent ordering**. We use each OS's idiomatic mechanism rather
    than forcing symmetry:
-   - **Linux:** a real `hhagent.target` unit; `systemctl --user start
-     hhagent.target` pulls in the members and orders them via `After=`.
+   - **Linux:** a real `kastellan.target` unit; `systemctl --user start
+     kastellan.target` pulls in the members and orders them via `After=`.
    - **macOS:** no target unit; the supervisor bootstraps the members in order.
      Inter-service ordering is **not** enforced by launchd — it relies on core's
      existing fail-closed-restart-until-Postgres-ready loop (`KeepAlive=true`).
      This asymmetry is documented honestly, not hidden.
 
-4. **Slice scope: supervisor library layer + e2e.** No `hhagent-cli` command
+4. **Slice scope: supervisor library layer + e2e.** No `kastellan-cli` command
    this session (an operator drives the target via `systemctl`/`launchctl`, or a
    later "Slice 3 operator surface" adds the CLI). The slice lands the ROADMAP
    item end-to-end at the library level.
@@ -79,13 +79,13 @@ pub struct TargetSpec {
 
 ### Pure builders (`supervisor/src/specs.rs`)
 
-- `HHAGENT_TARGET_NAME: &str = "hhagent"`.
+- `KASTELLAN_TARGET_NAME: &str = "kastellan"`.
 - `postgres_service_spec(...)` sets `after: vec![]`, `part_of:
-  Some(HHAGENT_TARGET_NAME)` — the dependency leaf.
+  Some(KASTELLAN_TARGET_NAME)` — the dependency leaf.
 - `core_service_spec(...)` sets `after: vec![POSTGRES_SERVICE_NAME.into()]`,
-  `part_of: Some(HHAGENT_TARGET_NAME)` — core genuinely must start after
+  `part_of: Some(KASTELLAN_TARGET_NAME)` — core genuinely must start after
   Postgres.
-- New `hhagent_target_spec() -> TargetSpec` → `{ name: HHAGENT_TARGET_NAME,
+- New `kastellan_target_spec() -> TargetSpec` → `{ name: KASTELLAN_TARGET_NAME,
   members: vec![POSTGRES_SERVICE_NAME, CORE_SERVICE_NAME] }`.
 
 All pure: no I/O, same call → same value.
@@ -120,20 +120,20 @@ on launchd.
 
 `SystemdUser` overrides the four methods to use the native target:
 - `install_target`: write each member unit (via the existing `install` path) and
-  write a `hhagent.target` unit file via a new pure `build_target_unit(&TargetSpec)
+  write a `kastellan.target` unit file via a new pure `build_target_unit(&TargetSpec)
   -> String` that emits:
   ```
   [Unit]
-  Description=hhagent service bundle
-  Wants=hhagent-postgres.service hhagent-core.service
+  Description=kastellan service bundle
+  Wants=kastellan-postgres.service kastellan-core.service
 
   [Install]
   WantedBy=default.target
   ```
   then `daemon-reload`.
-- `start_target`: `systemctl --user start hhagent.target` (systemd resolves
+- `start_target`: `systemctl --user start kastellan.target` (systemd resolves
   member ordering from each member unit's `After=`).
-- `stop_target`: `systemctl --user stop hhagent.target`.
+- `stop_target`: `systemctl --user stop kastellan.target`.
 - `uninstall_target`: stop the target, remove the `.target` unit and member unit
   files, `daemon-reload`.
 
@@ -146,12 +146,12 @@ emits exactly today's output.
 
 **Pure unit tests:**
 - `build_target_unit` emits `Wants=` listing both member services.
-- `build_unit_file` emits `After=hhagent-postgres.service` and
-  `PartOf=hhagent.target` when those fields are set.
+- `build_unit_file` emits `After=kastellan-postgres.service` and
+  `PartOf=kastellan.target` when those fields are set.
 - `build_unit_file` omits both and keeps `WantedBy=default.target` when they are
   unset — the **behaviour-preserving pin** for existing single-service installs.
 - `specs.rs`: `postgres_service_spec`/`core_service_spec` carry the expected
-  `after`/`part_of`; `hhagent_target_spec` lists `[postgres, core]` in order.
+  `after`/`part_of`; `kastellan_target_spec` lists `[postgres, core]` in order.
 - launchd `build_plist` is unchanged (it ignores `after`/`part_of`) — an
   assertion pins that the plist body is identical with/without those fields set.
 
@@ -162,7 +162,7 @@ failure pattern):
   `/bin/sleep <large>` or a tiny script) installed into temp unit/agent dirs.
 - `install_target` → `start_target` → assert both members reach
   `ServiceStatus::Active`.
-- On systemd, assert the written `hhagent.target` contains `Wants=` for both
+- On systemd, assert the written `kastellan.target` contains `Wants=` for both
   members and the core unit contains `After=`.
 - `stop_target` → `uninstall_target` → assert both members report
   `NotInstalled`.
@@ -187,6 +187,6 @@ failure pattern):
 ## Out of scope (explicit)
 
 - Inference-server lifecycle management (external dependency by decision 1).
-- An `hhagent-cli supervisor up/down` operator command (decision 4).
+- An `kastellan-cli supervisor up/down` operator command (decision 4).
 - Exponential restart backoff (tracked separately as Option K / ROADMAP line 61).
 - Real Postgres+core system-level bring-up test.

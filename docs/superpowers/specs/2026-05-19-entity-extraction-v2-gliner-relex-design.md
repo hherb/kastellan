@@ -54,7 +54,7 @@ GLiNER-Relex's joint zero-shot NER+RE encoder (`knowledgator/gliner-relex-multi-
 
 **Out of scope (filed as follow-ups; full list in §11):**
 
-- Operator maintenance UI / CLI (`hhagent-cli entities review`).
+- Operator maintenance UI / CLI (`kastellan-cli entities review`).
 - Memory-write-time `memory_entities` auto-linker.
 - `entities.embedding` population.
 - Relation-label vocabulary (v2 ships `relation_labels = vec![]`).
@@ -177,7 +177,7 @@ CREATE INDEX entities_unquarantined_idx
 --     extractor's startup label-list resolution. INSERT on entity_kinds
 --     is operator-only by GRANT default — adding a kind is a deliberate
 --     act, not something the agent or extractor does.
-GRANT SELECT ON entity_kinds TO hhagent_runtime;
+GRANT SELECT ON entity_kinds TO kastellan_runtime;
 
 COMMIT;
 ```
@@ -255,7 +255,7 @@ pub enum SeedSource {
 #[derive(Debug, thiserror::Error)]
 pub enum EntityExtractionError {
     #[error("db error: {0}")]
-    Db(#[from] hhagent_db::DbError),
+    Db(#[from] kastellan_db::DbError),
     #[error("client error: {0}")]
     Client(String),
 }
@@ -484,7 +484,7 @@ let extractor: Arc<dyn EntityExtractor> = match build_gliner_relex_entry() {
     None => {
         tracing::warn!(
             "gliner-relex worker not configured \
-             (HHAGENT_GLINER_RELEX_ENABLE=0 or preconditions failed); \
+             (KASTELLAN_GLINER_RELEX_ENABLE=0 or preconditions failed); \
              using NoOpEntityExtractor — graph lane will return empty results"
         );
         Arc::new(NoOpEntityExtractor::new())
@@ -621,7 +621,7 @@ Two degrade paths (extraction, recall); one fail-closed step (prompt assembly). 
 
 | Failure | Origin | Effect on extraction | Effect on daemon |
 |---|---|---|---|
-| `HHAGENT_GLINER_RELEX_ENABLE=0` (default) or weights missing | startup | NoOpEntityExtractor returns empty seeds; no extraction audit row | Daemon starts; one WARN line at startup. |
+| `KASTELLAN_GLINER_RELEX_ENABLE=0` (default) or weights missing | startup | NoOpEntityExtractor returns empty seeds; no extraction audit row | Daemon starts; one WARN line at startup. |
 | `Client::extract` fails on first chunk | runtime | Loop continues to next chunk; if all chunks fail, extractor returns empty seeds with WARN | Daemon stays up; recall degrades to semantic + lexical only. |
 | Worker crash mid-chunk (Io / EarlyExit / Decode / IdMismatch) | runtime | `handle.report_crash()` runs (next acquire cold-spawns); current chunk's extraction degrades to empty | Daemon stays up; worker auto-recovers via lifecycle. |
 | `INVALID_INPUT` (-32001) RPC error | runtime | Bug in extractor (sent bad data — should never happen given chunking + label normalization). WARN; chunk degrades. | Daemon stays up; surfaces in `extract_entities` audit row's `n_entities_out=0`. |
@@ -651,7 +651,7 @@ Skip-as-pass posture for real-model tests follows the established `gliner_relex_
 
 ## Scope-out — follow-up surfaces
 
-- **Operator maintenance UI / CLI for quarantine review.** `hhagent-cli entities review` lists quarantined entities, supports `unquarantine` / `delete` / `merge` actions. User-stated as "yet to be designed" — separate slice.
+- **Operator maintenance UI / CLI for quarantine review.** `kastellan-cli entities review` lists quarantined entities, supports `unquarantine` / `delete` / `merge` actions. User-stated as "yet to be designed" — separate slice.
 - **Memory-write-time `memory_entities` auto-linker.** v2 ships READ-side wiring only. Without a write-side hook (in L0 seed / L1 promote / future writers) that calls the same extractor and inserts `memory_entities` rows, the graph lane still returns zero hits in production. Follow-up slice.
 - **`entities.embedding` population.** Column stays NULL. Embedding-similarity entity matching is a separate slice (would let recall surface graph seeds via cosine similarity to memory embeddings, no GLiNER call needed).
 - **Relation-label vocabulary.** v2 ships `relation_labels = vec![]` (entities-only mode). GLiNER pays the relation-inference cost regardless. Future slice: a `relation_kinds` lookup table (symmetric to `entity_kinds`) + plumbing through `relation_labels` parameter + triple-upsert via the same `upsert_entities_and_relations` helper. Migration would mirror `0015`.

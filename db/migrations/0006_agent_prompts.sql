@@ -10,7 +10,7 @@
 -- table.
 --
 -- Append-only by GRANT, same shape as audit_log:
---   • SELECT, INSERT granted to hhagent_runtime
+--   • SELECT, INSERT granted to kastellan_runtime
 --   • UPDATE, DELETE never granted — old rows persist forever.
 
 CREATE TABLE agent_prompts (
@@ -23,5 +23,5 @@ CREATE TABLE agent_prompts (
 CREATE INDEX agent_prompts_name_idx
     ON agent_prompts (name, first_loaded_at DESC);
 
-GRANT SELECT, INSERT ON agent_prompts TO hhagent_runtime;
+GRANT SELECT, INSERT ON agent_prompts TO kastellan_runtime;
 -- Intentionally NO UPDATE, DELETE grants. Append-only by GRANT.

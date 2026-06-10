@@ -56,8 +56,8 @@ The router is configured from environment variables (see `config.rs`):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `HHAGENT_LLM_LOCAL_URL` | `http://127.0.0.1:8000/v1` (Linux), `http://127.0.0.1:11434/v1` (macOS) | OpenAI-compatible base URL |
-| `HHAGENT_LLM_LOCAL_MODEL` | `""` | Model name to pass in the request body |
+| `KASTELLAN_LLM_LOCAL_URL` | `http://127.0.0.1:8000/v1` (Linux), `http://127.0.0.1:11434/v1` (macOS) | OpenAI-compatible base URL |
+| `KASTELLAN_LLM_LOCAL_MODEL` | `""` | Model name to pass in the request body |
 | Frontier vars (Phase 5) | — | Endpoint + secret-store key; gated by `PolicyGate` |
 
 Only `rustls-tls` and `json` features of `reqwest` are enabled
@@ -130,8 +130,8 @@ themselves — see [chapter 3](./03-dev-env-macos.md#optional-local-llm-for-inte
 for the macOS Ollama recipe.
 
 ```sh
-cargo test -p hhagent-llm-router            # mock tests
-cargo test -p hhagent-llm-router -- --ignored
+cargo test -p kastellan-llm-router            # mock tests
+cargo test -p kastellan-llm-router -- --ignored
                                             # live local-LLM tests (need backend running)
 ```
 

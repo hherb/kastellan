@@ -3,7 +3,7 @@
 //! Today the only check is per-`container_image` presence on macOS:
 //! walk the registered `ToolEntry`s, collect every distinct image tag
 //! used by a `MacosContainer`-backed worker, and probe each tag via
-//! [`hhagent_sandbox::macos_container::MacosContainer::probe_image`].
+//! [`kastellan_sandbox::macos_container::MacosContainer::probe_image`].
 //!
 //! Why a one-shot health check rather than per-acquire probing? The
 //! resolver hot path runs once per dispatch; spawning a `container
@@ -16,7 +16,7 @@
 //! Cross-platform shape: the entire module compiles to a thin shim on
 //! Linux because `SandboxBackendKind::Container` does not exist on
 //! Linux (the variant is `#[cfg(target_os = "macos")]`-gated in
-//! `hhagent-sandbox`). The pure target-collection helper still
+//! `kastellan-sandbox`). The pure target-collection helper still
 //! compiles cross-platform (it just always returns empty on Linux);
 //! only the probe-and-log driver is macOS-only.
 //!
@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 /// inventory if the tag name alone isn't obvious.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContainerImageTarget {
-    /// Image tag (e.g. `"hhagent/gliner-relex:dev"`).
+    /// Image tag (e.g. `"kastellan/gliner-relex:dev"`).
     pub image_tag: String,
     /// Tool names that reference this image tag, sorted ascending for
     /// deterministic logging.
@@ -94,7 +94,7 @@ pub fn collect_container_image_targets<'a>(
 fn is_container_backend(entry: &ToolEntry) -> bool {
     matches!(
         entry.sandbox_backend,
-        Some(hhagent_sandbox::SandboxBackendKind::Container)
+        Some(kastellan_sandbox::SandboxBackendKind::Container)
     )
 }
 
@@ -125,7 +125,7 @@ fn is_container_backend(_entry: &ToolEntry) -> bool {
 #[cfg(target_os = "macos")]
 pub fn probe_registered_container_images<'a>(
     entries: impl Iterator<Item = (&'a str, &'a ToolEntry)>,
-) -> Vec<(String, Result<(), hhagent_sandbox::SandboxError>)> {
+) -> Vec<(String, Result<(), kastellan_sandbox::SandboxError>)> {
     let targets = collect_container_image_targets(entries);
     if targets.is_empty() {
         return Vec::new();
@@ -140,13 +140,13 @@ pub fn probe_registered_container_images<'a>(
     // registered). The downstream worker spawn will still fail
     // through the normal lifecycle-manager error path on first
     // dispatch — the operator has been warned at boot regardless.
-    if let Err(e) = hhagent_sandbox::macos_container::MacosContainer::probe() {
+    if let Err(e) = kastellan_sandbox::macos_container::MacosContainer::probe() {
         let affected_tools: Vec<String> = targets
             .iter()
             .flat_map(|t| t.tool_names.iter().cloned())
             .collect();
         tracing::warn!(
-            target: "hhagent::sandbox_health",
+            target: "kastellan::sandbox_health",
             error = %e,
             affected_tools = %affected_tools.join(", "),
             "Apple `container` unavailable; skipping image health check \
@@ -158,7 +158,7 @@ pub fn probe_registered_container_images<'a>(
     }
     let mut results = Vec::with_capacity(targets.len());
     for target in targets {
-        let probe = hhagent_sandbox::macos_container::MacosContainer::probe_image(
+        let probe = kastellan_sandbox::macos_container::MacosContainer::probe_image(
             &target.image_tag,
         );
         // Render tools as a comma-joined string rather than Debug
@@ -169,7 +169,7 @@ pub fn probe_registered_container_images<'a>(
         match &probe {
             Ok(()) => {
                 tracing::info!(
-                    target: "hhagent::sandbox_health",
+                    target: "kastellan::sandbox_health",
                     image_tag = %target.image_tag,
                     tools = %tools_joined,
                     "container image present in local store",
@@ -177,7 +177,7 @@ pub fn probe_registered_container_images<'a>(
             }
             Err(e) => {
                 tracing::warn!(
-                    target: "hhagent::sandbox_health",
+                    target: "kastellan::sandbox_health",
                     image_tag = %target.image_tag,
                     tools = %tools_joined,
                     error = %e,
@@ -196,7 +196,7 @@ mod tests {
     use super::*;
     use crate::scheduler::tool_dispatch::ToolEntry;
     use crate::worker_lifecycle::Lifecycle;
-    use hhagent_sandbox::{SandboxPolicy, SandboxBackendKind};
+    use kastellan_sandbox::{SandboxPolicy, SandboxBackendKind};
     use std::path::PathBuf;
 
     /// Build a minimal `ToolEntry` with all fields explicit so a future
@@ -251,14 +251,14 @@ mod tests {
             "gliner-relex",
             make_entry(
                 Some(SandboxBackendKind::Container),
-                Some("hhagent/gliner-relex:dev"),
+                Some("kastellan/gliner-relex:dev"),
             ),
         )];
         let targets = collect_container_image_targets(
             entries.iter().map(|(n, e)| (*n, e)),
         );
         assert_eq!(targets.len(), 1, "expected exactly one target; got {targets:?}");
-        assert_eq!(targets[0].image_tag, "hhagent/gliner-relex:dev");
+        assert_eq!(targets[0].image_tag, "kastellan/gliner-relex:dev");
         assert_eq!(targets[0].tool_names, vec!["gliner-relex".to_string()]);
     }
 

@@ -2,7 +2,7 @@
 //! router can reach and what to call by default.
 //!
 //! The config is populated from environment variables (test-friendly
-//! seam, same shape as `HHAGENT_DATA_DIR` / `HHAGENT_STATE_DIR` in
+//! seam, same shape as `KASTELLAN_DATA_DIR` / `KASTELLAN_STATE_DIR` in
 //! `core`) with a per-OS default for the local backend so a fresh
 //! checkout works without any setup on a machine that has the
 //! expected runtime installed:
@@ -18,13 +18,13 @@
 //!
 //! | Var | Purpose | Default |
 //! | --- | --- | --- |
-//! | `HHAGENT_LLM_LOCAL_URL` | Base URL of the local backend (no trailing `/`) | per-OS, see above |
-//! | `HHAGENT_LLM_LOCAL_MODEL` | Default model name passed to the local backend | `local-default` |
-//! | `HHAGENT_LLM_EMBEDDING_URL` | Base URL of the embedding backend | falls back to local URL |
-//! | `HHAGENT_LLM_EMBEDDING_MODEL` | Default model name passed to the embedding backend | `embedding-default` |
-//! | `HHAGENT_LLM_FRONTIER_URL` | Base URL of the frontier backend | unset (frontier disabled) |
-//! | `HHAGENT_LLM_FRONTIER_MODEL` | Default model on the frontier backend | unset |
-//! | `HHAGENT_LLM_TIMEOUT_MS` | Request timeout, milliseconds | 30_000 |
+//! | `KASTELLAN_LLM_LOCAL_URL` | Base URL of the local backend (no trailing `/`) | per-OS, see above |
+//! | `KASTELLAN_LLM_LOCAL_MODEL` | Default model name passed to the local backend | `local-default` |
+//! | `KASTELLAN_LLM_EMBEDDING_URL` | Base URL of the embedding backend | falls back to local URL |
+//! | `KASTELLAN_LLM_EMBEDDING_MODEL` | Default model name passed to the embedding backend | `embedding-default` |
+//! | `KASTELLAN_LLM_FRONTIER_URL` | Base URL of the frontier backend | unset (frontier disabled) |
+//! | `KASTELLAN_LLM_FRONTIER_MODEL` | Default model on the frontier backend | unset |
+//! | `KASTELLAN_LLM_TIMEOUT_MS` | Request timeout, milliseconds | 30_000 |
 //!
 //! The frontier URL/model are deliberately *not* defaulted. Phase 0
 //! refuses to dispatch to the frontier even when set; setting the
@@ -76,7 +76,7 @@ pub struct RouterConfig {
     /// Default model name passed in the `model` field of
     /// `POST /embeddings`. Defaults to `"embedding-default"` — a
     /// placeholder that vLLM will reject with 4xx in production,
-    /// forcing the operator to set `HHAGENT_LLM_EMBEDDING_MODEL`
+    /// forcing the operator to set `KASTELLAN_LLM_EMBEDDING_MODEL`
     /// explicitly (loud failure preferred to silent fallback).
     pub embedding_model: String,
     /// Set if and only if the operator has expressed intent to use a
@@ -107,33 +107,33 @@ impl RouterConfig {
     /// [`RouterConfig::default`] on any unset key.
     ///
     /// Returns [`RouterError::Config`] only for **invalid** values
-    /// (e.g. a non-numeric `HHAGENT_LLM_TIMEOUT_MS`); an *unset* var
+    /// (e.g. a non-numeric `KASTELLAN_LLM_TIMEOUT_MS`); an *unset* var
     /// is always fine and just means "use the default".
     pub fn from_env() -> Result<Self, RouterError> {
         let mut cfg = Self::default();
 
-        if let Some(v) = read_env("HHAGENT_LLM_LOCAL_URL")? {
+        if let Some(v) = read_env("KASTELLAN_LLM_LOCAL_URL")? {
             cfg.local_url = v.clone();
             // local_url change also drives the embedding fallback —
             // re-sync embedding_url unless the operator has already
             // overridden it explicitly below.
             cfg.embedding_url = v;
         }
-        if let Some(v) = read_env("HHAGENT_LLM_LOCAL_MODEL")? {
+        if let Some(v) = read_env("KASTELLAN_LLM_LOCAL_MODEL")? {
             cfg.local_model = v;
         }
-        if let Some(v) = read_env("HHAGENT_LLM_EMBEDDING_URL")? {
+        if let Some(v) = read_env("KASTELLAN_LLM_EMBEDDING_URL")? {
             cfg.embedding_url = v;
         }
-        if let Some(v) = read_env("HHAGENT_LLM_EMBEDDING_MODEL")? {
+        if let Some(v) = read_env("KASTELLAN_LLM_EMBEDDING_MODEL")? {
             cfg.embedding_model = v;
         }
-        cfg.frontier_url = read_env("HHAGENT_LLM_FRONTIER_URL")?;
-        cfg.frontier_model = read_env("HHAGENT_LLM_FRONTIER_MODEL")?;
-        if let Some(v) = read_env("HHAGENT_LLM_TIMEOUT_MS")? {
+        cfg.frontier_url = read_env("KASTELLAN_LLM_FRONTIER_URL")?;
+        cfg.frontier_model = read_env("KASTELLAN_LLM_FRONTIER_MODEL")?;
+        if let Some(v) = read_env("KASTELLAN_LLM_TIMEOUT_MS")? {
             let ms: u64 = v.parse().map_err(|_| {
                 RouterError::Config(format!(
-                    "HHAGENT_LLM_TIMEOUT_MS must be a non-negative integer, got {v:?}"
+                    "KASTELLAN_LLM_TIMEOUT_MS must be a non-negative integer, got {v:?}"
                 ))
             })?;
             cfg.timeout = Duration::from_millis(ms);
@@ -145,10 +145,10 @@ impl RouterConfig {
 /// Read an env var, treating *unset* and *empty* both as "absent".
 ///
 /// Empty-string is treated as absent so a stray `export
-/// HHAGENT_LLM_FRONTIER_URL=` (common when an operator clears a value
+/// KASTELLAN_LLM_FRONTIER_URL=` (common when an operator clears a value
 /// without unsetting it) does not poison the config with an unusable
 /// empty URL. The fail-loudly path is the typed parse in
-/// [`RouterConfig::from_env`] for `HHAGENT_LLM_TIMEOUT_MS`.
+/// [`RouterConfig::from_env`] for `KASTELLAN_LLM_TIMEOUT_MS`.
 fn read_env(key: &str) -> Result<Option<String>, RouterError> {
     match std::env::var(key) {
         Ok(v) if !v.is_empty() => Ok(Some(v)),
@@ -209,13 +209,13 @@ mod tests {
 
     fn clear_all() -> EnvScope {
         EnvScope::new(&[
-            ("HHAGENT_LLM_LOCAL_URL", None),
-            ("HHAGENT_LLM_LOCAL_MODEL", None),
-            ("HHAGENT_LLM_EMBEDDING_URL", None),
-            ("HHAGENT_LLM_EMBEDDING_MODEL", None),
-            ("HHAGENT_LLM_FRONTIER_URL", None),
-            ("HHAGENT_LLM_FRONTIER_MODEL", None),
-            ("HHAGENT_LLM_TIMEOUT_MS", None),
+            ("KASTELLAN_LLM_LOCAL_URL", None),
+            ("KASTELLAN_LLM_LOCAL_MODEL", None),
+            ("KASTELLAN_LLM_EMBEDDING_URL", None),
+            ("KASTELLAN_LLM_EMBEDDING_MODEL", None),
+            ("KASTELLAN_LLM_FRONTIER_URL", None),
+            ("KASTELLAN_LLM_FRONTIER_MODEL", None),
+            ("KASTELLAN_LLM_TIMEOUT_MS", None),
         ])
     }
 
@@ -263,11 +263,11 @@ mod tests {
     fn from_env_overrides_each_field() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _scope = EnvScope::new(&[
-            ("HHAGENT_LLM_LOCAL_URL", Some("http://10.0.0.1:9000/v1")),
-            ("HHAGENT_LLM_LOCAL_MODEL", Some("Qwen/Qwen2.5-7B-Instruct")),
-            ("HHAGENT_LLM_FRONTIER_URL", Some("https://api.anthropic.com/v1")),
-            ("HHAGENT_LLM_FRONTIER_MODEL", Some("claude-opus-4-7")),
-            ("HHAGENT_LLM_TIMEOUT_MS", Some("5000")),
+            ("KASTELLAN_LLM_LOCAL_URL", Some("http://10.0.0.1:9000/v1")),
+            ("KASTELLAN_LLM_LOCAL_MODEL", Some("Qwen/Qwen2.5-7B-Instruct")),
+            ("KASTELLAN_LLM_FRONTIER_URL", Some("https://api.anthropic.com/v1")),
+            ("KASTELLAN_LLM_FRONTIER_MODEL", Some("claude-opus-4-7")),
+            ("KASTELLAN_LLM_TIMEOUT_MS", Some("5000")),
         ]);
         let cfg = RouterConfig::from_env().unwrap();
         assert_eq!(cfg.local_url, "http://10.0.0.1:9000/v1");
@@ -281,11 +281,11 @@ mod tests {
     fn from_env_treats_empty_string_as_absent() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _scope = EnvScope::new(&[
-            ("HHAGENT_LLM_LOCAL_URL", Some("")),
-            ("HHAGENT_LLM_LOCAL_MODEL", None),
-            ("HHAGENT_LLM_FRONTIER_URL", Some("")),
-            ("HHAGENT_LLM_FRONTIER_MODEL", None),
-            ("HHAGENT_LLM_TIMEOUT_MS", Some("")),
+            ("KASTELLAN_LLM_LOCAL_URL", Some("")),
+            ("KASTELLAN_LLM_LOCAL_MODEL", None),
+            ("KASTELLAN_LLM_FRONTIER_URL", Some("")),
+            ("KASTELLAN_LLM_FRONTIER_MODEL", None),
+            ("KASTELLAN_LLM_TIMEOUT_MS", Some("")),
         ]);
         let cfg = RouterConfig::from_env().unwrap();
         // Empty fell back to the per-OS default rather than producing an
@@ -299,16 +299,16 @@ mod tests {
     fn from_env_rejects_non_numeric_timeout() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _scope = EnvScope::new(&[
-            ("HHAGENT_LLM_LOCAL_URL", None),
-            ("HHAGENT_LLM_LOCAL_MODEL", None),
-            ("HHAGENT_LLM_FRONTIER_URL", None),
-            ("HHAGENT_LLM_FRONTIER_MODEL", None),
-            ("HHAGENT_LLM_TIMEOUT_MS", Some("not-a-number")),
+            ("KASTELLAN_LLM_LOCAL_URL", None),
+            ("KASTELLAN_LLM_LOCAL_MODEL", None),
+            ("KASTELLAN_LLM_FRONTIER_URL", None),
+            ("KASTELLAN_LLM_FRONTIER_MODEL", None),
+            ("KASTELLAN_LLM_TIMEOUT_MS", Some("not-a-number")),
         ]);
         let err = RouterConfig::from_env().unwrap_err();
         match err {
             RouterError::Config(msg) => {
-                assert!(msg.contains("HHAGENT_LLM_TIMEOUT_MS"), "msg={msg}");
+                assert!(msg.contains("KASTELLAN_LLM_TIMEOUT_MS"), "msg={msg}");
                 assert!(msg.contains("not-a-number"), "msg={msg}");
             }
             other => panic!("expected RouterError::Config, got {other:?}"),
@@ -334,10 +334,10 @@ mod tests {
     fn router_config_from_env_reads_embedding_url_when_set() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _scope = EnvScope::new(&[
-            ("HHAGENT_LLM_LOCAL_URL", None),
-            ("HHAGENT_LLM_EMBEDDING_URL", Some("http://127.0.0.1:9999/v1")),
-            ("HHAGENT_LLM_LOCAL_MODEL", None),
-            ("HHAGENT_LLM_EMBEDDING_MODEL", None),
+            ("KASTELLAN_LLM_LOCAL_URL", None),
+            ("KASTELLAN_LLM_EMBEDDING_URL", Some("http://127.0.0.1:9999/v1")),
+            ("KASTELLAN_LLM_LOCAL_MODEL", None),
+            ("KASTELLAN_LLM_EMBEDDING_MODEL", None),
         ]);
         let cfg = RouterConfig::from_env().expect("env parse");
         assert_eq!(cfg.embedding_url, "http://127.0.0.1:9999/v1");
@@ -347,10 +347,10 @@ mod tests {
     fn router_config_from_env_reads_embedding_model_when_set() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _scope = EnvScope::new(&[
-            ("HHAGENT_LLM_LOCAL_URL", None),
-            ("HHAGENT_LLM_EMBEDDING_URL", None),
-            ("HHAGENT_LLM_LOCAL_MODEL", None),
-            ("HHAGENT_LLM_EMBEDDING_MODEL", Some("BAAI/bge-m3")),
+            ("KASTELLAN_LLM_LOCAL_URL", None),
+            ("KASTELLAN_LLM_EMBEDDING_URL", None),
+            ("KASTELLAN_LLM_LOCAL_MODEL", None),
+            ("KASTELLAN_LLM_EMBEDDING_MODEL", Some("BAAI/bge-m3")),
         ]);
         let cfg = RouterConfig::from_env().expect("env parse");
         assert_eq!(cfg.embedding_model, "BAAI/bge-m3");
@@ -364,10 +364,10 @@ mod tests {
         // would break this contract silently otherwise.
         let _lock = ENV_LOCK.lock().unwrap();
         let _scope = EnvScope::new(&[
-            ("HHAGENT_LLM_LOCAL_URL", Some("http://local:8080/v1")),
-            ("HHAGENT_LLM_EMBEDDING_URL", Some("http://embed:9999/v1")),
-            ("HHAGENT_LLM_LOCAL_MODEL", None),
-            ("HHAGENT_LLM_EMBEDDING_MODEL", None),
+            ("KASTELLAN_LLM_LOCAL_URL", Some("http://local:8080/v1")),
+            ("KASTELLAN_LLM_EMBEDDING_URL", Some("http://embed:9999/v1")),
+            ("KASTELLAN_LLM_LOCAL_MODEL", None),
+            ("KASTELLAN_LLM_EMBEDDING_MODEL", None),
         ]);
         let cfg = RouterConfig::from_env().expect("env parse");
         assert_eq!(cfg.local_url, "http://local:8080/v1");
@@ -381,10 +381,10 @@ mod tests {
         // makes Ollama-on-macOS work with one env var set).
         let _lock = ENV_LOCK.lock().unwrap();
         let _scope = EnvScope::new(&[
-            ("HHAGENT_LLM_LOCAL_URL", Some("http://local:8080/v1")),
-            ("HHAGENT_LLM_EMBEDDING_URL", None),
-            ("HHAGENT_LLM_LOCAL_MODEL", None),
-            ("HHAGENT_LLM_EMBEDDING_MODEL", None),
+            ("KASTELLAN_LLM_LOCAL_URL", Some("http://local:8080/v1")),
+            ("KASTELLAN_LLM_EMBEDDING_URL", None),
+            ("KASTELLAN_LLM_LOCAL_MODEL", None),
+            ("KASTELLAN_LLM_EMBEDDING_MODEL", None),
         ]);
         let cfg = RouterConfig::from_env().expect("env parse");
         assert_eq!(cfg.local_url, "http://local:8080/v1");

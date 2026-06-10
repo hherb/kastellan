@@ -264,12 +264,12 @@ mod tests {
 
 - [ ] **Step 3: Run tests to verify they fail (module not yet wired) then pass**
 
-Run: `cargo test -p hhagent-core handoff:: 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core handoff:: 2>&1 | tail -20`
 Expected: compiles after Step 1's lib.rs edit; the six tests PASS.
 
 - [ ] **Step 4: Clippy**
 
-Run: `cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
+Run: `cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5`
 Expected: exit 0.
 
 - [ ] **Step 5: Commit**
@@ -329,7 +329,7 @@ Add inside `mod tests` in `core/src/handoff.rs`:
 
 - [ ] **Step 2: Run tests**
 
-Run: `cargo test -p hhagent-core handoff:: 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core handoff:: 2>&1 | tail -20`
 Expected: PASS (production from Task 1 already satisfies these).
 
 - [ ] **Step 3: Commit**
@@ -435,7 +435,7 @@ Add inside `mod tests` in `core/src/handoff.rs`:
 
 - [ ] **Step 2: Run tests to verify they fail (helpers undefined)**
 
-Run: `cargo test -p hhagent-core handoff:: 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core handoff:: 2>&1 | tail -20`
 Expected: FAIL — `build_handoff_placeholder`, `stash_if_oversized`, `fetch`, `StashOutcome`, `FetchResult` not found.
 
 - [ ] **Step 3: Implement the helpers**
@@ -553,13 +553,13 @@ Add the two methods inside `impl HandoffCache` (after `purge_task`):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p hhagent-core handoff:: 2>&1 | tail -20`
+Run: `cargo test -p kastellan-core handoff:: 2>&1 | tail -20`
 Expected: all handoff tests PASS.
 
 - [ ] **Step 5: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/handoff.rs
 git commit -m "feat(handoff): placeholder builder + stash_if_oversized + fetch helpers
 
@@ -680,15 +680,15 @@ name; only prepend `_task_id: i64`.)
 
 - [ ] **Step 6: Build + test**
 
-Run: `cargo build -p hhagent-core --all-targets 2>&1 | tail -5`
+Run: `cargo build -p kastellan-core --all-targets 2>&1 | tail -5`
 Expected: compiles clean.
-Run: `cargo test -p hhagent-core --lib 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core --lib 2>&1 | tail -10`
 Expected: PASS (no behaviour change; signatures only).
 
 - [ ] **Step 7: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/scheduler/inner_loop.rs core/src/scheduler/runner.rs \
         core/src/scheduler/tool_dispatch.rs core/src/memory/l3_invoke/tests.rs \
         core/tests/memory_l3_crystallise_e2e.rs core/tests/scheduler_lanes_e2e.rs \
@@ -797,7 +797,7 @@ with:
                         "handoff_ref": stash.handoff_ref.as_str(),
                         "byte_len": stash.byte_len,
                     });
-                    if let Err(e) = hhagent_db::audit::insert(
+                    if let Err(e) = kastellan_db::audit::insert(
                         &self.pool, "policy", ACTION_HANDOFF_STASHED, payload,
                     ).await {
                         tracing::error!(
@@ -824,13 +824,13 @@ Note: the `Ok(v) if task_id > 0` guard means the catch-all also matches `Ok(v)` 
 In `core/src/main.rs`, just before the `ToolHostStepDispatcher::new(` at line ~293, construct the shared cache (place it next to where the registry `Arc` is built; one instance for the daemon's lifetime):
 
 ```rust
-            let handoff_cache = std::sync::Arc::new(hhagent_core::handoff::HandoffCache::new());
+            let handoff_cache = std::sync::Arc::new(kastellan_core::handoff::HandoffCache::new());
 ```
 
 and add it as the final argument to `ToolHostStepDispatcher::new(`:
 
 ```rust
-            hhagent_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
+            kastellan_core::scheduler::tool_dispatch::ToolHostStepDispatcher::new(
                 pool.clone(),
                 vault.clone(),
                 lifecycle.clone(),
@@ -849,7 +849,7 @@ and add it as the final argument to `ToolHostStepDispatcher::new(`:
             vault.clone(),
             lifecycle,
             registry,
-            std::sync::Arc::new(hhagent_core::handoff::HandoffCache::new()),
+            std::sync::Arc::new(kastellan_core::handoff::HandoffCache::new()),
         );
 ```
 (Keep the first four arguments exactly as they already appear in that file; only append the cache arg. Add a `use` or fully-qualify as shown.)
@@ -861,21 +861,21 @@ and add it as the final argument to `ToolHostStepDispatcher::new(`:
         vault,
         lifecycle,
         registry,
-        std::sync::Arc::new(hhagent_core::handoff::HandoffCache::new()),
+        std::sync::Arc::new(kastellan_core::handoff::HandoffCache::new()),
     )
 ```
 
 - [ ] **Step 5: Build + test**
 
-Run: `cargo build -p hhagent-core --all-targets 2>&1 | tail -5`
+Run: `cargo build -p kastellan-core --all-targets 2>&1 | tail -5`
 Expected: compiles.
-Run: `cargo test -p hhagent-core --lib 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core --lib 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 6: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/scheduler/tool_dispatch.rs core/src/main.rs \
         core/tests/scheduler_step_dispatch_e2e.rs core/tests/cli_memory_l3_run_e2e.rs
 git commit -m "feat(handoff): stash oversized tool results in the dispatcher + audit row
@@ -936,7 +936,7 @@ In `core/src/scheduler/tool_dispatch.rs`, at the very top of `dispatch_step` (im
                 "outcome": outcome_label,
                 "ms": elapsed_ms,
             });
-            if let Err(e) = hhagent_db::audit::insert(
+            if let Err(e) = kastellan_db::audit::insert(
                 &self.pool, "policy", ACTION_HANDOFF_FETCHED, payload,
             ).await {
                 tracing::error!(
@@ -950,15 +950,15 @@ In `core/src/scheduler/tool_dispatch.rs`, at the very top of `dispatch_step` (im
 
 - [ ] **Step 3: Build + test**
 
-Run: `cargo build -p hhagent-core --all-targets 2>&1 | tail -5`
+Run: `cargo build -p kastellan-core --all-targets 2>&1 | tail -5`
 Expected: compiles.
-Run: `cargo test -p hhagent-core --lib 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core --lib 2>&1 | tail -10`
 Expected: PASS. (The `fetch` behaviour itself is unit-tested on `HandoffCache` in Task 3; this step wires it to the chokepoint.)
 
 - [ ] **Step 4: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/scheduler/tool_dispatch.rs
 git commit -m "feat(handoff): fetch_handoff built-in intercept + handoff.fetched audit
 
@@ -995,7 +995,7 @@ In `core/src/registry_build.rs` `mod tests`, add (the `FakeManifest`/`test_ctx` 
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p hhagent-core registry_build:: 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core registry_build:: 2>&1 | tail -10`
 Expected: FAIL — the reserved manifest currently registers.
 
 - [ ] **Step 3: Implement the guard**
@@ -1022,13 +1022,13 @@ use crate::scheduler::tool_dispatch::HANDOFF_TOOL;
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cargo test -p hhagent-core registry_build:: 2>&1 | tail -10`
+Run: `cargo test -p kastellan-core registry_build:: 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 5: Clippy + commit**
 
 ```bash
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -5
 git add core/src/registry_build.rs
 git commit -m "feat(handoff): reserve \"handoff\" tool name in registry assembly
 
@@ -1047,8 +1047,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 Run:
 ```bash
 cargo build --workspace 2>&1 | tail -3
-cargo test -p hhagent-core --lib 2>&1 | tail -5
-cargo clippy -p hhagent-core --all-targets --locked -- -D warnings 2>&1 | tail -3
+cargo test -p kastellan-core --lib 2>&1 | tail -5
+cargo clippy -p kastellan-core --all-targets --locked -- -D warnings 2>&1 | tail -3
 ```
 Expected: build clean; lib tests PASS; clippy exit 0.
 

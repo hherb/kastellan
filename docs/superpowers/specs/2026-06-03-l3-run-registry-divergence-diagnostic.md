@@ -2,21 +2,21 @@
 
 **Date:** 2026-06-03
 **Status:** design approved, pre-implementation
-**Issue:** [#179](https://github.com/hherb/hhagent/issues/179) — *memory l3 run: live registry rebuilt from operator env diverges from daemon's `registry.loaded` snapshot (approve/run parity)*
+**Issue:** [#179](https://github.com/hherb/kastellan/issues/179) — *memory l3 run: live registry rebuilt from operator env diverges from daemon's `registry.loaded` snapshot (approve/run parity)*
 **Roadmap:** interim slice of the L3 arc; the structural fix is folded into ROADMAP line 165 (the autonomous door).
 
 ---
 
 ## Problem
 
-`hhagent-cli memory l3 run <id>` and `hhagent-cli memory l3 approve <id>` disagree about *which tools exist*:
+`kastellan-cli memory l3 run <id>` and `kastellan-cli memory l3 approve <id>` disagree about *which tools exist*:
 
 | Path | Source of "which tools exist" | Where |
 | ---- | ----------------------------- | ----- |
 | `memory l3 approve` | daemon's recorded `registry.loaded` **snapshot** (a DB audit row) | `latest_registry_tools` → `evaluate_approval` |
-| `memory l3 run` | **in-process rebuild from the operator's shell env** (`HHAGENT_SHELL_EXEC_BIN`, the gliner-relex env, …) | `registry_build::build_tool_registry` |
+| `memory l3 run` | **in-process rebuild from the operator's shell env** (`KASTELLAN_SHELL_EXEC_BIN`, the gliner-relex env, …) | `registry_build::build_tool_registry` |
 
-`build_tool_registry` only registers `shell-exec` when `HHAGENT_SHELL_EXEC_BIN` resolves to a file *in the CLI's own environment* (`core/src/registry_build.rs:105`). Run `memory l3 run` from a plain shell that lacks the daemon's unit env → empty/reduced registry → a legitimately-approved skill is **refused** with a cryptic `tool 'shell-exec' not in registry`.
+`build_tool_registry` only registers `shell-exec` when `KASTELLAN_SHELL_EXEC_BIN` resolves to a file *in the CLI's own environment* (`core/src/registry_build.rs:105`). Run `memory l3 run` from a plain shell that lacks the daemon's unit env → empty/reduced registry → a legitimately-approved skill is **refused** with a cryptic `tool 'shell-exec' not in registry`.
 
 - **Not a security issue.** It fails *safe*: the worst outcome is a refusal, and under `--execute` the sandbox still contains anything that does run. No skill runs that shouldn't.
 - **It is a usability cliff,** and the failure message is confusing — it names a tool that "should" be registered without explaining why the local view differs.
@@ -59,7 +59,7 @@ A pure, unit-testable function comparing three name-sets, with a typed result wh
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryDivergence {
     /// In the daemon's snapshot but missing from the live rebuild — almost
-    /// always an unset env var (e.g. `HHAGENT_SHELL_EXEC_BIN`) in the
+    /// always an unset env var (e.g. `KASTELLAN_SHELL_EXEC_BIN`) in the
     /// operator's shell. THIS is the #179 usability cliff.
     MissingLocallyButInSnapshot { tool: String },
     /// Missing locally and no daemon snapshot exists to compare against —
@@ -96,13 +96,13 @@ Output order is deterministic (iteration over the sorted `BTreeSet`).
 
 **`Display`** renders each variant into a single actionable line, e.g.:
 
-- `MissingLocallyButInSnapshot { tool }` → `'{tool}' is registered by the daemon but missing from your environment — is the tool's env var (e.g. HHAGENT_SHELL_EXEC_BIN) set? Run with the same environment the daemon uses.`
+- `MissingLocallyButInSnapshot { tool }` → `'{tool}' is registered by the daemon but missing from your environment — is the tool's env var (e.g. KASTELLAN_SHELL_EXEC_BIN) set? Run with the same environment the daemon uses.`
 - `MissingLocallyNoSnapshot { tool }` → `'{tool}' is missing from your environment and no daemon registry snapshot exists to compare against (has the daemon run at least once?).`
 - `UnknownEverywhere { tool }` → `'{tool}' is unknown to both your environment and the daemon's last snapshot — the skill references a tool that is no longer registered.`
 
 (Exact wording is finalised in implementation; the variants and their *meaning* are the contract.)
 
-### Component 2 — CLI integration (`core/src/bin/hhagent-cli/memory_l3.rs`)
+### Component 2 — CLI integration (`core/src/bin/kastellan-cli/memory_l3.rs`)
 
 In `memory_l3_run`'s `InvokeReport::Refused` arm (currently `memory_l3.rs:430`), after printing the existing refusal reasons:
 

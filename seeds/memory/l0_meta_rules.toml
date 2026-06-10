@@ -3,7 +3,7 @@
 #
 # The loader is idempotent on (rule_id, body_sha256); old versions of
 # edited rules stay in the database for audit. Removing a rule from
-# this file does NOT delete it from the database — `hhagent-cli`
+# this file does NOT delete it from the database — `kastellan-cli`
 # tooling (future slice) will surface and prune stale rules.
 #
 # Each rule needs:

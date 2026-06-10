@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlinerRelexEnv {
     /// Absolute path to the uv-generated console-script shim:
-    /// `<worker_dir>/.venv/bin/hhagent-worker-gliner-relex`. This is
+    /// `<worker_dir>/.venv/bin/kastellan-worker-gliner-relex`. This is
     /// the binary the dispatcher spawns under sandbox; `pyproject.toml`
-    /// declares `[project.scripts] hhagent-worker-gliner-relex` so
+    /// declares `[project.scripts] kastellan-worker-gliner-relex` so
     /// `uv sync` creates the file.
     pub script_path: PathBuf,
     /// Absolute path to the worker venv root: `<worker_dir>/.venv/`.
@@ -44,7 +44,7 @@ pub struct GlinerRelexEnv {
     /// worker loads from `weights_dir` directly.
     pub model_id: String,
     /// One of `auto` / `cpu` / `cuda` / `mps`. Forwarded verbatim
-    /// via `HHAGENT_GLINER_RELEX_DEVICE`; per-platform legality is
+    /// via `KASTELLAN_GLINER_RELEX_DEVICE`; per-platform legality is
     /// enforced by the Python `__main__._resolve_device` helper, not
     /// here.
     ///
@@ -63,7 +63,7 @@ pub struct GlinerRelexEnv {
     ///   from the worker at startup so the operator sees the
     ///   misconfig immediately.
     pub device: String,
-    /// True when the operator set `HHAGENT_GLINER_RELEX_USE_CONTAINER=1`
+    /// True when the operator set `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1`
     /// (strict: only `"1"` after trim counts).
     /// [`gliner_relex_entry`](super::entry::gliner_relex_entry) branches
     /// on this field to emit the container-mode `ToolEntry` shape
@@ -73,14 +73,14 @@ pub struct GlinerRelexEnv {
     ///
     /// In container mode `resolve_env` also skips the host-venv
     /// existence check — the worker shim lives inside the image at
-    /// `/usr/local/bin/hhagent-worker-gliner-relex`, so requiring a
+    /// `/usr/local/bin/kastellan-worker-gliner-relex`, so requiring a
     /// host venv would be a footgun for container-mode-only operators.
     pub use_container_backend: bool,
     /// Operator-supplied container image tag override, read from
-    /// `HHAGENT_GLINER_RELEX_IMAGE`. `None` (default) falls back to
+    /// `KASTELLAN_GLINER_RELEX_IMAGE`. `None` (default) falls back to
     /// the `CONTAINER_IMAGE_DEFAULT` constant at the
     /// `gliner_relex_entry` callsite. Symmetric to
-    /// `HHAGENT_GLINER_RELEX_MODEL` override behaviour.
+    /// `KASTELLAN_GLINER_RELEX_MODEL` override behaviour.
     ///
     /// This field is **orthogonal to `use_container_backend`** — the
     /// env var is read unconditionally so that operators can stage an
@@ -101,24 +101,24 @@ pub struct GlinerRelexEnv {
 /// each branch directly without touching process-wide environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveSkipReason {
-    /// `HHAGENT_GLINER_RELEX_ENABLE` is unset, empty, or anything other
+    /// `KASTELLAN_GLINER_RELEX_ENABLE` is unset, empty, or anything other
     /// than `"1"` (after trim). This is the production default — every
     /// deployment that hasn't run `scripts/workers/gliner-relex/install.sh`
     /// and explicitly enabled the worker lands here.
     Disabled,
-    /// `HHAGENT_GLINER_RELEX_ENABLE=1` but
-    /// `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` is unset.
+    /// `KASTELLAN_GLINER_RELEX_ENABLE=1` but
+    /// `KASTELLAN_GLINER_RELEX_WEIGHTS_DIR` is unset.
     WeightsDirEnvMissing,
-    /// `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` is set but the path doesn't
+    /// `KASTELLAN_GLINER_RELEX_WEIGHTS_DIR` is set but the path doesn't
     /// resolve to a directory on disk at daemon-startup time.
     WeightsDirNotADir { path: PathBuf },
-    /// None of `HHAGENT_GLINER_RELEX_VENV_DIR`, `HHAGENT_DATA_DIR`, or
+    /// None of `KASTELLAN_GLINER_RELEX_VENV_DIR`, `KASTELLAN_DATA_DIR`, or
     /// `HOME` is set — there is no anchor to default the venv path
     /// against. This is the failure mode that previously fell through
     /// to `/tmp` silently; surfacing it explicitly so the operator log
     /// shows the misconfiguration.
     VenvDirUnresolvable,
-    /// Resolved `<venv_dir>/bin/hhagent-worker-gliner-relex` doesn't
+    /// Resolved `<venv_dir>/bin/kastellan-worker-gliner-relex` doesn't
     /// exist on disk.
     ScriptShimMissing { path: PathBuf },
 }
@@ -133,32 +133,32 @@ pub enum ResolveSkipReason {
 ///
 /// Env vars consulted (same names + semantics as the production helper):
 ///
-/// - `HHAGENT_GLINER_RELEX_ENABLE` — must be `"1"` (whitespace-trimmed)
+/// - `KASTELLAN_GLINER_RELEX_ENABLE` — must be `"1"` (whitespace-trimmed)
 ///   to register the worker. Anything else (unset / `0` / `true` / `on`)
 ///   returns [`ResolveSkipReason::Disabled`].
-/// - `HHAGENT_GLINER_RELEX_WEIGHTS_DIR` — required; absolute path to the
+/// - `KASTELLAN_GLINER_RELEX_WEIGHTS_DIR` — required; absolute path to the
 ///   model snapshot.
-/// - `HHAGENT_GLINER_RELEX_MODEL` — optional; default
+/// - `KASTELLAN_GLINER_RELEX_MODEL` — optional; default
 ///   `knowledgator/gliner-relex-multi-v1.0`.
-/// - `HHAGENT_GLINER_RELEX_DEVICE` — optional; default `auto`.
-/// - `HHAGENT_GLINER_RELEX_USE_CONTAINER` — optional; `"1"` (strict,
+/// - `KASTELLAN_GLINER_RELEX_DEVICE` — optional; default `auto`.
+/// - `KASTELLAN_GLINER_RELEX_USE_CONTAINER` — optional; `"1"` (strict,
 ///   whitespace-trimmed) opts into container mode. Anything else (unset /
 ///   `0` / `true` / `on`) uses host mode (the default). In container mode
 ///   the venv-anchor cascade below is skipped — the worker shim lives
 ///   inside the container image at `/usr/local/bin/...`.
-/// - `HHAGENT_GLINER_RELEX_IMAGE` — optional container image tag override;
+/// - `KASTELLAN_GLINER_RELEX_IMAGE` — optional container image tag override;
 ///   `None` defers to the `CONTAINER_IMAGE_DEFAULT` constant at the
 ///   `gliner_relex_entry` callsite (added in Task 6).
-/// - `HHAGENT_GLINER_RELEX_VENV_DIR` — optional; if set, used verbatim.
-/// - `HHAGENT_DATA_DIR` — optional anchor for the venv default
+/// - `KASTELLAN_GLINER_RELEX_VENV_DIR` — optional; if set, used verbatim.
+/// - `KASTELLAN_DATA_DIR` — optional anchor for the venv default
 ///   (`<data>/workers/gliner-relex/.venv`).
-/// - `HOME` — last-resort anchor (`<home>/.local/share/hhagent/...`).
-///   If neither `HHAGENT_DATA_DIR` nor `HOME` is set and the operator
-///   didn't pass `HHAGENT_GLINER_RELEX_VENV_DIR`, returns
+/// - `HOME` — last-resort anchor (`<home>/.local/share/kastellan/...`).
+///   If neither `KASTELLAN_DATA_DIR` nor `HOME` is set and the operator
+///   didn't pass `KASTELLAN_GLINER_RELEX_VENV_DIR`, returns
 ///   [`ResolveSkipReason::VenvDirUnresolvable`] rather than silently
 ///   defaulting to `/tmp` — that earlier silent fallback hid
 ///   misconfiguration on minimal-env hosts (containers, system
-///   services) where the operator usually meant `HHAGENT_DATA_DIR` to
+///   services) where the operator usually meant `KASTELLAN_DATA_DIR` to
 ///   be set.
 pub fn resolve_env<EnvLookup, IsDir, Exists>(
     env_lookup: EnvLookup,
@@ -170,7 +170,7 @@ where
     IsDir: Fn(&Path) -> bool,
     Exists: Fn(&Path) -> bool,
 {
-    let enable = env_lookup("HHAGENT_GLINER_RELEX_ENABLE").unwrap_or_default();
+    let enable = env_lookup("KASTELLAN_GLINER_RELEX_ENABLE").unwrap_or_default();
     // `trim` so a stray newline from `echo "1" > envfile` doesn't fail
     // the opt-in silently. Strict on the value itself: only `"1"`
     // counts. Inviting `true` / `yes` / `on` would surface the next
@@ -179,7 +179,7 @@ where
         return Err(ResolveSkipReason::Disabled);
     }
 
-    let weights_dir = match env_lookup("HHAGENT_GLINER_RELEX_WEIGHTS_DIR") {
+    let weights_dir = match env_lookup("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR") {
         Some(v) => PathBuf::from(v),
         None => return Err(ResolveSkipReason::WeightsDirEnvMissing),
     };
@@ -187,31 +187,31 @@ where
         return Err(ResolveSkipReason::WeightsDirNotADir { path: weights_dir });
     }
 
-    let model_id = env_lookup("HHAGENT_GLINER_RELEX_MODEL")
+    let model_id = env_lookup("KASTELLAN_GLINER_RELEX_MODEL")
         .unwrap_or_else(|| "knowledgator/gliner-relex-multi-v1.0".to_string());
-    let device = env_lookup("HHAGENT_GLINER_RELEX_DEVICE")
+    let device = env_lookup("KASTELLAN_GLINER_RELEX_DEVICE")
         .unwrap_or_else(|| "auto".to_string());
 
     // New env knobs (Slice 2.5):
-    //   * `HHAGENT_GLINER_RELEX_USE_CONTAINER=1` → container-mode (strict on "1").
-    //   * `HHAGENT_GLINER_RELEX_IMAGE=<tag>` → operator-supplied image override.
+    //   * `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1` → container-mode (strict on "1").
+    //   * `KASTELLAN_GLINER_RELEX_IMAGE=<tag>` → operator-supplied image override.
     //
     // Container mode is macOS-only — the Apple `container` micro-VM
     // backend (`SandboxBackendKind::Container`) doesn't exist on Linux.
     // On non-macOS targets the flag is forced `false` at compile time so
     // the build never references the macOS-only variant (issue #144); an
-    // operator who sets `HHAGENT_GLINER_RELEX_USE_CONTAINER=1` on Linux
+    // operator who sets `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1` on Linux
     // gets host-mode + bwrap silently (the env var isn't even read).
     #[cfg(target_os = "macos")]
-    let use_container_backend = env_lookup("HHAGENT_GLINER_RELEX_USE_CONTAINER")
+    let use_container_backend = env_lookup("KASTELLAN_GLINER_RELEX_USE_CONTAINER")
         .map(|v| {
-            // trim() rationale: matches HHAGENT_GLINER_RELEX_ENABLE strictness; see comment above.
+            // trim() rationale: matches KASTELLAN_GLINER_RELEX_ENABLE strictness; see comment above.
             v.trim() == "1"
         })
         .unwrap_or(false);
     #[cfg(not(target_os = "macos"))]
     let use_container_backend = false;
-    let container_image = env_lookup("HHAGENT_GLINER_RELEX_IMAGE");
+    let container_image = env_lookup("KASTELLAN_GLINER_RELEX_IMAGE");
 
     // Host venv resolution is skipped in container mode — the worker
     // shim lives inside the image, so no host venv is required.
@@ -221,17 +221,17 @@ where
         // Anchor priority: explicit override > data-dir > home. No
         // `/tmp` fallback — see ResolveSkipReason::VenvDirUnresolvable
         // for the rationale.
-        let venv_dir = if let Some(v) = env_lookup("HHAGENT_GLINER_RELEX_VENV_DIR") {
+        let venv_dir = if let Some(v) = env_lookup("KASTELLAN_GLINER_RELEX_VENV_DIR") {
             PathBuf::from(v)
-        } else if let Some(data_dir) = env_lookup("HHAGENT_DATA_DIR") {
+        } else if let Some(data_dir) = env_lookup("KASTELLAN_DATA_DIR") {
             PathBuf::from(data_dir).join("workers/gliner-relex/.venv")
         } else if let Some(home) = env_lookup("HOME") {
             PathBuf::from(home)
-                .join(".local/share/hhagent/workers/gliner-relex/.venv")
+                .join(".local/share/kastellan/workers/gliner-relex/.venv")
         } else {
             return Err(ResolveSkipReason::VenvDirUnresolvable);
         };
-        let script_path = venv_dir.join("bin").join("hhagent-worker-gliner-relex");
+        let script_path = venv_dir.join("bin").join("kastellan-worker-gliner-relex");
         if !exists(&script_path) {
             return Err(ResolveSkipReason::ScriptShimMissing { path: script_path });
         }

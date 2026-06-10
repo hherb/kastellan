@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use hhagent_worker_web_common::allowlist::HostAllowlist;
+use kastellan_worker_web_common::allowlist::HostAllowlist;
 
 use super::*;
 use crate::report::{Decision, Reporter, Verdict};

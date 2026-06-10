@@ -81,6 +81,6 @@ CREATE INDEX entities_unquarantined_idx
 --     extractor's startup label-list resolution. INSERT on entity_kinds
 --     is operator-only by GRANT default — adding a kind is a deliberate
 --     act, not something the agent or extractor does.
-GRANT SELECT ON entity_kinds TO hhagent_runtime;
+GRANT SELECT ON entity_kinds TO kastellan_runtime;
 
 COMMIT;

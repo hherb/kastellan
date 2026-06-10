@@ -1,7 +1,7 @@
 -- Phase 1 — per-tool argv allowlist hygiene.
 --
 -- Source-of-truth for which absolute `argv[0]` paths each registered
--- tool worker may exec. Replaces the previous `HHAGENT_SHELL_EXEC_ALLOWLIST`
+-- tool worker may exec. Replaces the previous `KASTELLAN_SHELL_EXEC_ALLOWLIST`
 -- env var: env-var-driven means a host restart with a typo can silently
 -- widen the allowlist with no audit trail. With this table, every change
 -- writes one row in `audit_log` via the chokepoint in `core::cli_audit`.
@@ -13,7 +13,7 @@
 --   * Per-entry audit rows (one row per add/remove) rather than
 --     whole-list replacement diffs
 --
--- GRANT shape: SELECT/INSERT/DELETE for hhagent_runtime, deliberately
+-- GRANT shape: SELECT/INSERT/DELETE for kastellan_runtime, deliberately
 -- NO UPDATE. Changing an entry means DELETE + INSERT, preserving the
 -- audit trail of both the old and new shapes. Mirrors audit_log's
 -- append-only discipline from migration 0002, but applied as
@@ -46,5 +46,5 @@ CREATE TABLE tool_allowlists (
     )
 );
 
-GRANT SELECT, INSERT, DELETE ON tool_allowlists TO hhagent_runtime;
-REVOKE UPDATE, TRUNCATE ON tool_allowlists FROM hhagent_runtime;
+GRANT SELECT, INSERT, DELETE ON tool_allowlists TO kastellan_runtime;
+REVOKE UPDATE, TRUNCATE ON tool_allowlists FROM kastellan_runtime;
