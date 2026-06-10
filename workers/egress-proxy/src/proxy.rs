@@ -2,7 +2,7 @@
 //! pin the resolved IP, and tunnel. Pure decision logic is separated from I/O
 //! so the policy paths are unit-testable; `handle_conn` does the byte-shuffling.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
 
@@ -123,10 +123,19 @@ fn blocked(worker: &str, host: &str, port: u16, verdict: Verdict, reason: &str) 
     }
 }
 
+/// Hard cap on the bytes we read for the whole CONNECT request head (line +
+/// header block). A legitimate CONNECT request is well under this; the cap stops
+/// a malicious UDS client from growing the heap with an endless line before the
+/// sandbox memory limit would otherwise have to step in (defense-in-depth).
+const MAX_REQUEST_HEAD_BYTES: u64 = 8 * 1024;
+
 /// Read just the CONNECT request line (up to the first CRLF), then drain the
 /// remaining header block up to the blank line so the tunnel starts clean.
+/// The total bytes read are capped at [`MAX_REQUEST_HEAD_BYTES`]; if the line
+/// is truncated by the cap it simply fails to parse downstream and is blocked.
 fn read_request_line(client: &mut UnixStream) -> std::io::Result<String> {
-    let mut reader = BufReader::new(client.try_clone()?);
+    // `Read::take` bounds total bytes across every `read_line` below.
+    let mut reader = BufReader::new(client.try_clone()?.take(MAX_REQUEST_HEAD_BYTES));
     let mut line = String::new();
     reader.read_line(&mut line)?;
     // Drain the rest of the header block (CONNECT requests may carry headers).
