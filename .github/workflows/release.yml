@@ -1,0 +1,77 @@
+# crates.io release via Trusted Publishing (OIDC) — no stored tokens.
+#
+# Publishing 0.1.0 was done by hand with a throwaway API token (see
+# HANDOVER, 2026-06-10). This workflow replaces that: GitHub mints an
+# OIDC token proving "this is hherb/kastellan running release.yml",
+# crates.io exchanges it for a 30-minute publish token, and `cargo
+# publish` uses it. Nothing long-lived exists to leak — the repo holds
+# NO crates.io secret.
+#
+# One-time setup on crates.io (manual, per crate, all 12): crate page →
+# Settings → Trusted Publishing → New → repository owner `hherb`,
+# repository name `kastellan`, workflow filename `release.yml`,
+# environment left empty. Until a crate has that config, its publish
+# step here fails with an auth error — that's the expected signal that
+# the binding is missing, not a workflow bug.
+#
+# Trigger: pushing a version tag (`v0.2.0`), matching the convention
+# started with v0.1.0. The guard step refuses to publish if the tag
+# doesn't equal the workspace version, so a mistagged release dies
+# before anything is uploaded. `workflow_dispatch` is for re-runs after
+# a partial failure (e.g. rate limit): `cargo publish --workspace`
+# skips already-published versions, so re-running is safe.
+#
+# `cargo publish --workspace` (stable since 1.90) resolves the publish
+# order from the dependency graph (protocol/supervisor/sandbox/… before
+# core) and skips `publish = false` members (kastellan-tests-common).
+# Rate limits are a non-issue for version updates (burst 30, then
+# 1/min) — only brand-new crate NAMES crawl at 1 per 10 minutes.
+#
+# Scope: this job publishes, it does not gate. Correctness gating is
+# linux-check (every push/PR) plus the operator-driven full test run on
+# the DGX (see HANDOVER). `cargo publish` still verify-builds each
+# crate from its packaged sources before uploading, with `--locked`
+# pinning the committed Cargo.lock.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for crates.io Trusted Publishing
+
+jobs:
+  publish:
+    name: cargo publish --workspace (crates.io)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Guard — tag must match workspace version
+        if: github.ref_type == 'tag'
+        run: |
+          ws_version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$ws_version" != "$tag_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME != workspace version $ws_version — bump [workspace.package] version first"
+            exit 1
+          fi
+
+      - name: Authenticate with crates.io (OIDC)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: cargo publish (workspace, dependency order)
+        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
