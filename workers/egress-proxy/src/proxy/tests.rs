@@ -15,6 +15,12 @@ fn al(entries: &[&str]) -> HostAllowlist {
     HostAllowlist::from_env_json(&serde_json::to_string(entries).unwrap()).unwrap()
 }
 
+/// Port-scoped allowlist (the live proxy path — `host:port` entries).
+fn eps(entries: &[&str]) -> HostAllowlist {
+    let owned: Vec<String> = entries.iter().map(|s| s.to_string()).collect();
+    HostAllowlist::from_endpoints(&owned)
+}
+
 struct StubResolve(Vec<IpAddr>);
 impl Resolve for StubResolve {
     fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<IpAddr>> {
@@ -134,4 +140,46 @@ fn handle_conn_reports_block_for_off_allowlist() {
     let decisions = proxy_thread.join().unwrap();
     assert_eq!(decisions[0].verdict, Verdict::BlockedAllowlist);
     let _ = std::fs::remove_file(&sock);
+}
+
+// ---- port-scoping (#241) ------------------------------------------------
+
+#[test]
+fn decide_blocks_allowed_host_on_wrong_port() {
+    let r = StubResolve(vec!["93.184.216.34".parse().unwrap()]);
+    match decide("example.com", 22, &eps(&["example.com:443"]), &r) {
+        Target::Block(Verdict::BlockedAllowlist, _) => {}
+        _ => panic!("allowed host on undeclared port must be blocked"),
+    }
+}
+
+#[test]
+fn decide_allows_host_on_declared_port() {
+    let r = StubResolve(vec!["93.184.216.34".parse().unwrap()]);
+    match decide("example.com", 443, &eps(&["example.com:443"]), &r) {
+        Target::Dial(_) => {}
+        _ => panic!("allowed host on its declared port must dial"),
+    }
+}
+
+#[test]
+fn decide_blocks_literal_ip_on_wrong_port() {
+    // The literal carve-out is now port-scoped too: 127.0.0.1:8888 pins both.
+    let r = StubResolve(vec![]); // resolver must not be consulted for a literal.
+    match decide("127.0.0.1", 443, &eps(&["127.0.0.1:8888"]), &r) {
+        Target::Block(Verdict::BlockedAllowlist, _) => {}
+        _ => panic!("literal IP on undeclared port must be blocked"),
+    }
+}
+
+#[test]
+fn decide_allowed_via_bare_host_entry_is_flagged() {
+    // A bare host:port-scoped entry yields the plain "ok" reason; a bare
+    // host-only entry yields the distinct port-unconstrained marker so the
+    // weaker grant is visible in the audit trail.
+    assert_eq!(allowed_reason(&eps(&["a.com:443"]), "a.com"), "ok");
+    assert_eq!(
+        allowed_reason(&eps(&["a.com"]), "a.com"),
+        "allowed:host-only-entry"
+    );
 }
