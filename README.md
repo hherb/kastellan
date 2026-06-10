@@ -1,4 +1,4 @@
-# Kastellan
+# Kastellan - the *trustworthy* personal autonomous agent
 
 <p align="center">
   <img src="assets/kastellan_logo_transparent.png" alt="kastellan logo" width="280">
