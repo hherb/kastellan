@@ -141,6 +141,19 @@ mod tests {
     }
 
     #[test]
+    fn connect_line_brackets_ipv6_literal() {
+        // `url::Url::host_str()` returns IPv6 WITH brackets, so a bracketed host
+        // is what we receive and what the proxy's request-line parser (slice #1,
+        // bracketed-IPv6 aware) expects. Pass it through verbatim — do NOT
+        // double-bracket and do NOT strip.
+        let line = build_connect_request("[2606:4700::1111]", 443);
+        assert_eq!(
+            line,
+            "CONNECT [2606:4700::1111]:443 HTTP/1.1\r\nHost: [2606:4700::1111]:443\r\n\r\n"
+        );
+    }
+
+    #[test]
     fn parse_status_accepts_200() {
         assert_eq!(parse_status_line("HTTP/1.1 200 Connection Established\r\n").unwrap(), 200);
     }
@@ -171,7 +184,10 @@ Expected: FAIL — `build_connect_request`/`parse_status_line` not found.
 //! out. TLS stays end-to-end worker↔origin (the proxy tunnels ciphertext).
 
 /// Build the CONNECT request head for `host:port`. Host is passed verbatim
-/// (a name, never a resolved IP — the proxy resolves + range-checks).
+/// (a name, never a resolved IP — the proxy resolves + range-checks). Pass the
+/// host exactly as `url::Url::host_str()` yields it: IPv6 literals arrive
+/// already bracketed (`[2606:4700::1111]`), which is the form both this request
+/// line and the proxy's bracketed-IPv6 parser require — do not re-bracket.
 fn build_connect_request(host: &str, port: u16) -> String {
     format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n")
 }
@@ -189,7 +205,7 @@ fn parse_status_line(line: &str) -> Result<u16, String> {
 - [ ] **Step 5: Run to verify pass**
 
 Run: `cargo test -p kastellan-worker-web-common proxy_connect::tests -- --nocapture`
-Expected: 4 passed.
+Expected: 5 passed.
 
 - [ ] **Step 6: Commit**
 
@@ -270,7 +286,7 @@ Implementation notes for the engineer:
 - It implements `crate::http::HttpGet` and returns `crate::http::RawResponse`.
 - Owns a `tokio` current-thread runtime built once; each `get` does `rt.block_on(async { ... })`.
 - Async flow: `tokio::net::UnixStream::connect(uds)` → write `build_connect_request(host, port)` → read+parse the proxy status line (require `200`, cap the head read at 8 KiB) → then:
-  - scheme `https` → `tokio_rustls::TlsConnector` (roots = `webpki_roots::TLS_SERVER_ROOTS`) handshake with `ServerName::try_from(host)`; run hyper HTTP/1.1 over the TLS stream.
+  - scheme `https` → `tokio_rustls::TlsConnector` (roots = `webpki_roots::TLS_SERVER_ROOTS`) handshake; build the `ServerName` from `url.host()` (NOT the raw `host_str()`): `Host::Domain(d)` → `ServerName::try_from(d.to_owned())`, `Host::Ipv4/Ipv6(ip)` → `ServerName::IpAddress(ip.into())`. Feeding the bracketed `host_str()` IPv6 form straight into `ServerName::try_from` fails — brackets are a URL-authority artifact, not part of the SNI/cert identity. Then run hyper HTTP/1.1 over the TLS stream.
   - scheme `http` → run hyper HTTP/1.1 over the raw stream.
 - Request: `GET <path?query>` with headers `Host: <host>`, `User-Agent: <ua>`, `Accept-Encoding: identity`, `Connection: close`.
 - Response: read status, `Location`, `Content-Type`; body via `http_body_util::BodyExt::collect` with a running cap — abort if it exceeds `crate::http::MAX_BODY_BYTES` (return `Err`), mirroring `ReqwestGet`.
@@ -567,10 +583,16 @@ fn allowlist_with_proxy_uds_uses_private_netns_and_binds_socket() {
     // No host-net sharing — private netns only.
     assert!(!argv.contains(&"--share-net".to_string()),
         "Net::Allowlist with proxy_uds must NOT --share-net; got: {argv:?}");
-    // The proxy UDS is bind-mounted in (rw) at an identical path.
-    let bind_idx = argv.iter().position(|a| a == "--bind").expect("a --bind");
-    assert_eq!(argv[bind_idx + 1], "/scratch/egress.sock");
-    assert_eq!(argv[bind_idx + 2], "/scratch/egress.sock");
+    // The proxy UDS is bind-mounted in (rw) at an identical path. Scan for the
+    // `--bind <src> <dst>` triple matching the UDS anywhere in argv — do NOT
+    // assume the *first* `--bind` is the proxy socket: fs_write binds can
+    // precede it, so a `position(|a| a == "--bind")` on the first match would
+    // assert against the wrong entry once a worker has fs_write paths.
+    let has_uds_bind = argv.windows(3).any(|w| {
+        w[0] == "--bind" && w[1] == "/scratch/egress.sock" && w[2] == "/scratch/egress.sock"
+    });
+    assert!(has_uds_bind,
+        "proxy UDS must be --bind'd at an identical host↔jail path; got: {argv:?}");
 }
 
 #[test]
@@ -792,9 +814,23 @@ fn endpoint_match_wildcard_host_any_declared_port() {
 
 #[test]
 fn endpoint_without_port_in_entry_allows_any_port_back_compat() {
-    // A bare host entry (no :port) keeps host-only semantics.
+    // A bare host entry (no :port) keeps host-only semantics. NOTE: this is the
+    // port-UNCONSTRAINED grant — it exists only for the literal-IP carve-out
+    // and legacy entries. Force-routed worker allowlists are always host:port
+    // (see Task 4.x), so this weaker form must not be reachable for them.
     let al = HostAllowlist::from_endpoints(&["legacy.example.com".into()]);
     assert!(al.is_allowed_endpoint("legacy.example.com", 8443));
+}
+
+#[test]
+fn entry_kind_distinguishes_port_scoped_from_host_only() {
+    // The matcher must be able to report WHY it matched so the proxy can flag
+    // a port-unconstrained grant in the audit trail (Task 3.2) rather than
+    // letting the weaker grant pass silently.
+    let scoped = HostAllowlist::from_endpoints(&["a.com:443".into()]);
+    let bare = HostAllowlist::from_endpoints(&["a.com".into()]);
+    assert!(scoped.is_port_scoped("a.com"));
+    assert!(!bare.is_port_scoped("a.com"));
 }
 ```
 
@@ -803,7 +839,7 @@ fn endpoint_without_port_in_entry_allows_any_port_back_compat() {
 Run: `cargo test -p kastellan-worker-web-common endpoint_match -- --nocapture`
 Expected: FAIL — `from_endpoints`/`is_allowed_endpoint` not found.
 
-- [ ] **Step 3: Implement** — parse entries into `(host_matcher, Option<u16>)`; `is_allowed_endpoint(host, port)` matches the host via the existing exact/`.domain` logic AND (`port_entry.is_none()` OR `port_entry == Some(port)`). Keep the existing `is_allowed(host)` for the literal-IP carve-out and back-compat. Reuse the existing host-matching internals — do not duplicate the wildcard logic.
+- [ ] **Step 3: Implement** — parse entries into `(host_matcher, Option<u16>)`; `is_allowed_endpoint(host, port)` matches the host via the existing exact/`.domain` logic AND (`port_entry.is_none()` OR `port_entry == Some(port)`). Keep the existing `is_allowed(host)` for the literal-IP carve-out and back-compat. Reuse the existing host-matching internals — do not duplicate the wildcard logic. Also add `is_port_scoped(host) -> bool` (true iff the matching entry carried an explicit port) so the proxy can surface a port-unconstrained grant in the audit reason (Task 3.2) instead of letting it pass silently.
 
 - [ ] **Step 4: Run to verify pass + clippy**
 
@@ -848,7 +884,7 @@ fn decide_allows_host_on_declared_port() {
 Run: `cargo test -p kastellan-worker-egress-proxy decide_blocks_allowed_host_on_wrong_port -- --nocapture`
 Expected: FAIL — `decide` still host-only.
 
-- [ ] **Step 3: Implement** — change `decide`'s first guard from `allow.is_allowed(host)` to `allow.is_allowed_endpoint(host, port)`; keep the literal-IP carve-out using `is_allowed_endpoint` too (so a literal `127.0.0.1:8888` entry pins both). Update `main.rs` to build the allowlist with `HostAllowlist::from_endpoints(...)`. Update the `proxy.rs` rustdoc that currently says "host-only — port unconstrained" to describe port-scoping; remove the slice-#1 "#241 deferred" note.
+- [ ] **Step 3: Implement** — change `decide`'s first guard from `allow.is_allowed(host)` to `allow.is_allowed_endpoint(host, port)`; keep the literal-IP carve-out using `is_allowed_endpoint` too (so a literal `127.0.0.1:8888` entry pins both). Update `main.rs` to build the allowlist with `HostAllowlist::from_endpoints(...)`. Update the `proxy.rs` rustdoc that currently says "host-only — port unconstrained" to describe port-scoping; remove the slice-#1 "#241 deferred" note. **Audit visibility for the weaker grant:** when the match succeeds via a bare-host (port-unconstrained) entry — `!allow.is_port_scoped(host)` — set the allowed `Decision.reason` to a distinct marker (e.g. `"allowed:host-only-entry"`) instead of the plain `"allowed"`, so a port-unconstrained grant is visible in `audit_log` rather than indistinguishable from a port-scoped one. Add a `decide_allowed_via_bare_host_entry_is_flagged` test asserting the reason marker.
 
 - [ ] **Step 4: Run + clippy + cross-clippy**
 
@@ -1016,13 +1052,26 @@ Expected: FAIL — `spawn_net_worker` missing.
 
 - [ ] **Step 3: Implement `spawn_net_worker`**
 
-Signature + flow (uses the already-built `spawn_sidecar` from `spawn.rs`):
+**Handle shape — extend `SupervisedWorker`, do NOT introduce a wrapper type.** Per the spec
+(Component 2), `SupervisedWorker` gains one optional, additive field so every existing teardown /
+scheduler path that already operates on `SupervisedWorker` tears the sidecar down uniformly — a
+parallel `NetWorker` wrapper would force every net-worker call site to special-case a second type.
+Plain (`Net::Deny`) workers leave the field `None`; `spawn_net_worker` returns a `SupervisedWorker`
+exactly like `spawn_worker` does.
+
 ```rust
-pub struct NetWorker {
-    pub worker: kastellan_core::tool_host::SupervisedWorker, // adjust path
-    _sidecar: super::spawn::SidecarHandle,
-    _ingest: tokio::task::JoinHandle<()>,
+/// Sidecar + decision-ingest bundle carried by a force-routed net worker.
+/// Field order encodes drop order: `sidecar` (kills the proxy → its stdout
+/// hits EOF) drops before `ingest` (drains the last rows, then exits).
+struct EgressSidecar {
+    sidecar: super::spawn::SidecarHandle,
+    ingest: tokio::task::JoinHandle<()>,
 }
+
+// In tool_host.rs, SupervisedWorker gains (additive; None for plain workers):
+//     egress: Option<EgressSidecar>,
+// Place the field AFTER the worker's own client/pipes so on drop the worker
+// closes first (pipes close) → sidecar (proxy dies) → ingest (sees EOF).
 
 pub fn spawn_net_worker(
     backend: &dyn SandboxBackend,
@@ -1031,23 +1080,29 @@ pub fn spawn_net_worker(
     allowlist: &[String],
     scratch: &Path,
     worker_name: &str,
-) -> Result<NetWorker, ToolHostError> {
+) -> Result<crate::tool_host::SupervisedWorker, ToolHostError> {
     // 1. Sidecar first; fail-closed on its Err (no worker without a proxy).
     let mut sidecar = super::spawn::spawn_sidecar(backend, proxy_bin, allowlist, scratch, worker_name)
         .map_err(|e| ToolHostError::from(/* wrap */ e))?;
     // 2. Rewrite the worker policy onto the sidecar UDS.
     let uds = sidecar.uds_path.clone();
     let forced = rewrite_worker_policy(spec.policy.clone(), &uds);
-    let forced_spec = WorkerSpec { policy: &forced, ..*spec };
-    // 3. Spawn the worker under the forced policy.
-    let worker = kastellan_core::tool_host::spawn_worker(backend, &forced_spec)?;
-    // 4. Decision-ingest task on the sidecar stdout.
+    // Rebuild the spec with the forced policy. `WorkerSpec` borrows its policy,
+    // so `..*spec` only compiles if WorkerSpec: Copy — it is not (it holds a
+    // &SandboxPolicy). Construct it explicitly, copying the other fields:
+    let forced_spec = WorkerSpec { policy: &forced, ..spec.clone() }; // or list fields
+    // 3. Spawn the worker under the forced policy (same in-crate fn as plain workers).
+    let mut worker = crate::tool_host::spawn_worker(backend, &forced_spec)?;
+    // 4. Decision-ingest task on the sidecar stdout; attach the bundle.
     let stdout = sidecar.stdout();
     let ingest = spawn_ingest(stdout /*, pool */);
-    Ok(NetWorker { worker, _sidecar: sidecar, _ingest: ingest })
+    worker.egress = Some(EgressSidecar { sidecar, ingest });
+    Ok(worker)
 }
 ```
-Drop order in `NetWorker`: `worker` (closes pipes) → `_sidecar` (kills proxy) → `_ingest` (sees EOF, finishes). Document it on the struct.
+Drop order is encoded by field position (worker pipes → `sidecar` → `ingest`); document it on
+both the `SupervisedWorker.egress` field and `EgressSidecar`. If `WorkerSpec` is not `Clone`,
+list its fields explicitly in the `forced_spec` literal rather than `..spec.clone()`.
 
 - [ ] **Step 4: Run to verify pass + clippy**
 
@@ -1158,4 +1213,4 @@ git commit -m "test(core): DGX e2e — force-routing kernel barrier + off-allowl
 
 - **Spec coverage:** Stage 1 = spec Component 1 (connector + factory + worker swap); Stage 2 = spec Component 2 Linux enforcement + Component 3 macOS enforcement + probe; Stage 3 = spec Component 3 port-scoping (#241); Stage 4 = spec Component 2 hookup/lifecycle + Component 3 decision-ingest + the DGX/macOS acceptance gates. Deferrals (#242, slice #3/#4, transparent decompression, optional seccomp belt) carried verbatim.
 - **One scaffold marker** (`todo_replace_with_real_harness()` in Task 2.4) is intentional and explicitly flagged because the macOS probe harness must be copied from the existing `macos_smoke.rs` convention the implementer reads at that step — the implementer MUST replace + not commit it. Every other step carries real code.
-- **Type consistency:** `make_get -> anyhow::Result<Box<dyn HttpGet>>`, `HttpGet::transport_kind`, `is_allowed_endpoint`/`from_endpoints`, `rewrite_worker_policy`, `spawn_net_worker`/`NetWorker`, `ingest_decisions_into`/`ingest_decisions`, `SandboxPolicy.proxy_uds` — names used consistently across tasks.
+- **Type consistency:** `make_get -> anyhow::Result<Box<dyn HttpGet>>`, `HttpGet::transport_kind`, `is_allowed_endpoint`/`from_endpoints`, `rewrite_worker_policy`, `spawn_net_worker -> SupervisedWorker` (with the additive `SupervisedWorker.egress: Option<EgressSidecar>` field — no wrapper type, matches spec Component 2), `ingest_decisions_into`/`ingest_decisions`, `SandboxPolicy.proxy_uds` — names used consistently across tasks.

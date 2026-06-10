@@ -123,13 +123,17 @@ surface**). Per `get(url)`:
 1. **Dial** the UDS at `KASTELLAN_EGRESS_PROXY_UDS` (`tokio::net::UnixStream::connect`).
 2. **Write** `CONNECT <host>:<port> HTTP/1.1\r\nHost: <host>:<port>\r\n\r\n`. `host` is the
    URL host **verbatim** (name, not a resolved IP — the proxy resolves + range-checks). `port`
-   from the URL (443 https default; explicit for loopback http).
+   from the URL (443 https default; explicit for loopback http). IPv6 literals arrive bracketed
+   from `Url::host_str()` (`[2606:4700::1111]`) — the form both the CONNECT line and the proxy's
+   bracketed-IPv6 parser want; pass it through, do not re-bracket.
 3. **Read** the proxy's status line; require exactly `200`. Any non-200 (the `403`/`502`/`400`
    the proxy already emits) → `Err` surfaced to the worker as a fetch failure. Cap the
    response-head read (mirror the proxy's 8 KiB head cap) so a misbehaving peer can't grow the heap.
 4. **Layer transport over the tunneled stream:**
-   - `https` → `tokio-rustls` client handshake against `host` (SNI + cert verification against
-     the worker's root store — unchanged; the proxy never sees plaintext).
+   - `https` → `tokio-rustls` client handshake (SNI + cert verification against the worker's root
+     store — unchanged; the proxy never sees plaintext). Build the rustls `ServerName` from
+     `url.host()` (domain → `try_from(name)`, IP literal → `ServerName::IpAddress`), **not** from
+     the bracketed `host_str()` string — brackets are a URL-authority artifact, not an SNI identity.
    - `http` (loopback SearxNG only) → use the stream raw.
 5. **Issue the GET** (hyper client, HTTP/1.1), enforce the same `TIMEOUT_SECS` (per-phase) and
    `MAX_BODY_BYTES` cap-while-reading, decode into the existing
@@ -152,15 +156,18 @@ compatible; all already in the lock graph from the slice-#1 work.
 ## Component 2 — `tool_host` hookup, lifecycle coupling & Linux force-routing
 
 **Where it hooks.** `spawn_worker` is the structural chokepoint, but it is generic over backend
-and policy-agnostic today. Add a coupling wrapper so a `Net::Allowlist` worker **cannot** be
+and policy-agnostic today. Add a coupling helper so a `Net::Allowlist` worker **cannot** be
 spawned without its proxy:
 
 - New `core::egress::spawn_net_worker(backend, proxy_bin, spec, allowlist, shared_dir)` runs the
   5-step flow above and returns a `SupervisedWorker` whose teardown also fells the sidecar.
   Plain (`Net::Deny`) workers keep the existing `spawn_worker` path untouched.
-- `SupervisedWorker` gains an `Option<SidecarHandle>` + the decision-ingest task handle, dropped
-  / awaited on `close()`. Field drop order: client → sidecar → ingest task (pipes close, proxy
-  dies, ingest sees EOF and finishes its last audit rows).
+- `SupervisedWorker` gains one additive field — `egress: Option<EgressSidecar>` bundling the
+  `SidecarHandle` + the decision-ingest task handle — dropped / awaited on `close()`; `None` for
+  plain workers. **No wrapper type** (a parallel `NetWorker` would force every net-worker call
+  site to special-case a second type; extending `SupervisedWorker` keeps one uniform teardown
+  path). Field drop order: worker client/pipes → sidecar (proxy dies) → ingest task (sees EOF,
+  finishes its last audit rows).
 - **Fail-closed:** if `spawn_sidecar` errors or times out, the net worker is **never** spawned
   (slice-#1 `spawn_sidecar` already bounded-waits and returns `Err`). No
   "spawn-without-proxy" path — same posture as the no-unsandboxed-escape-hatch invariant.
@@ -207,7 +214,11 @@ proxy matches **host-only**; the worker's `Net::Allowlist` entries are `host:por
 threads the full `host:port` endpoints to the proxy and tightens `proxy::decide` to also
 constrain the port, so an allowlisted web host is reachable **only** on its declared port (e.g.
 `:443`), closing the "allowlisted host → SSH on :22" gap. A small, well-contained tightening of
-the already-tested `decide` + `HostAllowlist`.
+the already-tested `decide` + `HostAllowlist`. A **bare-host entry** (no `:port`) stays
+port-unconstrained for the literal-IP carve-out + legacy back-compat; force-routed worker
+allowlists are always `host:port`, so the weaker form is unreachable for them, and when a
+bare-host entry *does* match, `decide` flags it in the audit reason (`allowed:host-only-entry`)
+so the port-unconstrained grant is visible rather than silent.
 
 **Decision-ingest (closing the slice-#1 loop).**
 A core-side async task per sidecar reads `SidecarHandle::stdout()` line-by-line, maps each via
