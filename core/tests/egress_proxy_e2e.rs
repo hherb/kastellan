@@ -15,7 +15,8 @@ use std::os::unix::net::UnixStream;
 use hhagent_core::egress::audit::decision_to_audit;
 use hhagent_core::egress::spawn::spawn_sidecar;
 use hhagent_tests_common::{
-    backend, skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary,
+    backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_sandbox_unavailable, unique_suffix,
+    workspace_target_binary,
 };
 
 /// Locate the built proxy binary; `[SKIP]` if absent.
@@ -129,4 +130,72 @@ fn real_host_round_trips_through_sidecar() {
 
     handle.shutdown();
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// PG-gated: insert an egress decision row into `audit_log` and read it back.
+///
+/// Proves the `decision_to_audit` → `hhagent_db::audit::insert` →
+/// `hhagent_db::audit::fetch_by_id` pipeline is wired correctly end-to-end.
+/// `[SKIP]`s cleanly when no Postgres bin dir is available (macOS without
+/// Postgres.app, CI without a PG install) — same skip-as-pass posture as
+/// `web_fetch_e2e.rs`.
+#[test]
+fn decision_row_persists_to_audit_log() {
+    // Step 1: Skip early if no PG is available — mandatory for macOS.
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+
+    // Step 2: Bring up a throwaway cluster (RAII — dropped at end of scope).
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ea-d",
+        "ea-l",
+        &format!("hhagent-egress-audit-test-pg-{suffix}"),
+    );
+
+    // Step 3: Build a sample blocked-ssrf decision line.
+    let line = r#"{"worker":"web-fetch","host":"api.example.com","port":443,"resolved_ip":"203.0.113.5","verdict":"blocked_ssrf","reason":"rebind"}"#;
+    let row = decision_to_audit(line).expect("blocked_ssrf line must parse");
+
+    // Step 4: Probe the schema, get a pool, insert, and read back.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+        .block_on(async {
+            // Probe runs migrations (creates audit_log table).
+            hhagent_db::probe::run(
+                &cluster.conn_spec,
+                "core",
+                "startup",
+                serde_json::json!({"version": "test", "purpose": "egress-audit-e2e"}),
+            )
+            .await
+            .expect("probe run");
+
+            let pool = hhagent_db::pool::connect_runtime_pool(&cluster.conn_spec)
+                .await
+                .expect("connect runtime pool");
+
+            // Insert the egress decision row.
+            let inserted_id = hhagent_db::audit::insert(&pool, row.actor, &row.action, row.payload)
+                .await
+                .expect("audit insert");
+
+            // Step 5: Read it back and assert the fields we care about.
+            let fetched = hhagent_db::audit::fetch_by_id(&pool, inserted_id)
+                .await
+                .expect("fetch_by_id");
+
+            assert_eq!(fetched.actor, "egress_proxy");
+            assert_eq!(fetched.action, "egress.blocked.ssrf");
+
+            pool.close().await;
+        });
+
+    // cluster dropped here — RAII teardown.
 }
