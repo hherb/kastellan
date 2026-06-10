@@ -5,6 +5,7 @@
 //! client — callers that need them drive redirects themselves so they can
 //! re-check their allowlist on every hop. The body is capped while reading.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use url::Url;
@@ -25,6 +26,18 @@ pub struct RawResponse {
 /// The transport seam. One GET, no redirect following.
 pub trait HttpGet {
     fn get(&self, url: &Url) -> Result<RawResponse, String>;
+    /// Stable identifier of the concrete transport (for tests + diagnostics).
+    fn transport_kind(&self) -> &'static str;
+}
+
+impl HttpGet for Box<dyn HttpGet> {
+    fn get(&self, url: &Url) -> Result<RawResponse, String> {
+        (**self).get(url)
+    }
+
+    fn transport_kind(&self) -> &'static str {
+        (**self).transport_kind()
+    }
 }
 
 /// Real transport over `reqwest::blocking` + rustls. Redirects disabled; body
@@ -49,6 +62,10 @@ impl ReqwestGet {
 }
 
 impl HttpGet for ReqwestGet {
+    fn transport_kind(&self) -> &'static str {
+        "reqwest"
+    }
+
     fn get(&self, url: &Url) -> Result<RawResponse, String> {
         use std::io::Read;
 
@@ -76,5 +93,39 @@ impl HttpGet for ReqwestGet {
         }
 
         Ok(RawResponse { status, location, content_type, body })
+    }
+}
+
+/// Build the appropriate `HttpGet` for the current environment. When
+/// `KASTELLAN_EGRESS_PROXY_UDS` is set (force-routing active), egress MUST go
+/// through the proxy, so return [`crate::proxy_connect::ProxyConnectGet`];
+/// otherwise the direct [`ReqwestGet`] for dev/no-proxy runs.
+pub fn make_get(user_agent: &str) -> anyhow::Result<Box<dyn HttpGet>> {
+    match std::env::var("KASTELLAN_EGRESS_PROXY_UDS") {
+        Ok(uds) if !uds.is_empty() => Ok(Box::new(
+            crate::proxy_connect::ProxyConnectGet::new(user_agent, PathBuf::from(uds)),
+        )),
+        _ => Ok(Box::new(ReqwestGet::new(user_agent)?)),
+    }
+}
+
+#[cfg(test)]
+mod make_get_tests {
+    use super::*;
+
+    /// Run both env branches sequentially in one test to avoid interleaving
+    /// when the test harness runs tests in parallel threads.
+    #[test]
+    fn make_get_selects_transport_from_env() {
+        // Branch 1: no env var → reqwest.
+        std::env::remove_var("KASTELLAN_EGRESS_PROXY_UDS");
+        let g = make_get("kastellan-test/0").unwrap();
+        assert_eq!(g.transport_kind(), "reqwest");
+
+        // Branch 2: env var set → proxy-connect.
+        std::env::set_var("KASTELLAN_EGRESS_PROXY_UDS", "/tmp/does-not-need-to-exist.sock");
+        let g = make_get("kastellan-test/0").unwrap();
+        assert_eq!(g.transport_kind(), "proxy-connect");
+        std::env::remove_var("KASTELLAN_EGRESS_PROXY_UDS");
     }
 }

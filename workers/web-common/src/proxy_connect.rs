@@ -79,6 +79,10 @@ impl HttpGet for ProxyConnectGet {
             }
         })
     }
+
+    fn transport_kind(&self) -> &'static str {
+        "proxy-connect"
+    }
 }
 
 /// Read from `stream` until `\r\n\r\n` or EOF, bounded by `MAX_PROXY_HEAD_BYTES`.
