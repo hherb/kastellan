@@ -3,6 +3,7 @@
 //! IP. Slice #1: no TLS interception, no live worker routing.
 //! Design: docs/superpowers/specs/2026-06-10-egress-proxy-boundary-enforcement-design.md
 
+mod request_line;
 mod ssrf;
 
 fn main() -> anyhow::Result<()> {
