@@ -114,7 +114,16 @@ impl SandboxBackend for MacosSeatbelt {
         program: &str,
         args: &[&str],
     ) -> Result<Child, SandboxError> {
-        for p in policy.fs_read.iter().chain(policy.fs_write.iter()) {
+        // proxy_uds is interpolated into the profile as a `(path-literal ...)`
+        // rule just like fs_read/fs_write, so it must pass the same absolute +
+        // injection-foreclosing checks — otherwise it would be the one policy
+        // path that skips the guard the comment below promises.
+        for p in policy
+            .fs_read
+            .iter()
+            .chain(policy.fs_write.iter())
+            .chain(policy.proxy_uds.iter())
+        {
             if !p.is_absolute() {
                 return Err(SandboxError::Backend(format!(
                     "policy paths must be absolute, got {p:?}"
@@ -357,9 +366,13 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
             // Seatbelt's job here is to make the netns-less routing unbypassable
             // by closing every AF_INET/AF_INET6 socket call.
             out.push_str("(deny network-outbound)\n");
+            // `{uds:?}` emits the path Rust-debug-quoted (escaping `"` and `\`).
+            // The disallowed-char guard in `spawn_under_policy` already rejects
+            // structural chars before we get here; debug-quoting is belt-and-
+            // braces and, unlike `.display().to_string()`, is not lossy for a
+            // non-UTF8 path (which would otherwise silently mis-match the rule).
             out.push_str(&format!(
-                "(allow network-outbound (remote unix-socket (path-literal {:?})))\n",
-                uds.display().to_string()
+                "(allow network-outbound (remote unix-socket (path-literal {uds:?})))\n",
             ));
         }
         (crate::Net::Allowlist(_), None) | (crate::Net::ProxyEgress, _) => {

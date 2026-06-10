@@ -6,7 +6,9 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-11 (**egress proxy SLICE #2 force-routing MECHANISM SHIPPED** — connector + OS force-routing + port-scoping #241 + coupled spawn, branch `feat/egress-proxy-slice2-impl`; on macOS).
+**Last updated:** 2026-06-11 (**egress proxy SLICE #2 force-routing MECHANISM SHIPPED** — connector + OS force-routing + port-scoping #241 + coupled spawn, branch `feat/egress-proxy-slice2-impl`; on macOS). **PR #249 review-hardening pass applied** (see below).
+
+**PR #249 review fixes (2026-06-11, same branch).** Addressed a code-review pass on the slice-#2 mechanism, all hardening (no behaviour change to the shipped mechanism): (1) `proxy_uds` now flows through the **same TinyScheme injection-foreclosing + absolute-path guard** as `fs_read`/`fs_write` in `MacosSeatbelt::spawn_under_policy` (it was the one policy path skipping the guard) + a rejection test; (2) the Seatbelt `(path-literal …)` rule uses `{uds:?}` (non-lossy for non-UTF8 paths) instead of `.display().to_string()`; (3) documented + test-locked the **fail-closed** behaviour of `HostAllowlist::from_endpoints` for an out-of-range `:port` (becomes a dead rule, never widens); (4) comment pinning the deliberate one-byte-at-a-time `read_proxy_head` (chunked reads would over-consume the tunnelled TLS stream); (5) back-pressure note on `pg_decision_sink`'s synchronous insert to revisit before the Task 4.4 live flip. Real Seatbelt gating probe still **PASSES** (AF_INET denied / UDS allowed); sandbox + web-common + core test suites green; clippy `-D warnings` clean.
 
 **crates.io release (2026-06-10, same day, after the rename below).** All **12 publishable crates are
 live on crates.io at v0.1.0** (`kastellan-{core,db,llm-router,sandbox,supervisor,protocol}` +

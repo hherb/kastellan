@@ -201,6 +201,22 @@ fn policy_paths_with_tinyscheme_specials_are_rejected_by_spawn() {
         msg.contains("disallowed character"),
         "expected 'disallowed character' error, got: {msg}"
     );
+
+    // And proxy_uds — it is interpolated into the profile as a
+    // `(path-literal ...)` rule, so it must pass the SAME guard. A UDS path
+    // carrying a structural char would otherwise let a crafted policy rewrite
+    // the force-routing rule.
+    let mut p = strict_policy();
+    p.net = crate::Net::Allowlist(vec!["api.example.com:443".into()]);
+    p.proxy_uds = Some(PathBuf::from("/tmp/egress\")(allow network*)(literal \"/x.sock"));
+    let err = backend
+        .spawn_under_policy(&p, "/usr/bin/true", &[])
+        .expect_err("proxy_uds path with injection chars must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("disallowed character"),
+        "expected 'disallowed character' error for proxy_uds, got: {msg}"
+    );
 }
 
 /// Force-routed profile (`Net::Allowlist` + `proxy_uds`): must deny all

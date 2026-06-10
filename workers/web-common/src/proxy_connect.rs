@@ -107,6 +107,13 @@ impl HttpGet for ProxyConnectGet {
 /// terminator (`\r\n\r\n`) arrives — a truncated head must not be parsed as
 /// success.
 async fn read_proxy_head(stream: &mut tokio::net::UnixStream) -> Result<String, String> {
+    // Read ONE byte at a time on purpose: the CONNECT response head is
+    // immediately followed by the tunnelled stream (the origin's TLS
+    // ClientHello/records). A buffered/chunked read would over-consume bytes
+    // belonging to that tunnel and corrupt the handshake. Stopping exactly at
+    // the `\r\n\r\n` terminator leaves the tunnel byte-aligned for `tls_connect`.
+    // Heads are ~40 bytes, so the syscall count is trivial — do NOT "optimise"
+    // this into a chunked read.
     let mut buf = [0u8; 1];
     let mut acc: Vec<u8> = Vec::new();
     let mut terminated = false;

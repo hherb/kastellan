@@ -133,6 +133,14 @@ where
 /// (a dropped audit row must never kill the worker). The proxy itself never
 /// touches Postgres (core-only-DB invariant); decisions flow proxy → core
 /// stdout-ingest → PG here.
+///
+/// **Back-pressure note (revisit before Task 4.4 goes live):** the insert is
+/// synchronous per row, so a slow `audit_log` write stalls the ingest thread,
+/// which stops draining the proxy's stdout, which back-pressures the proxy on
+/// its decision write. That can't lose security (egress is already gated by the
+/// OS barrier, not by audit throughput) but could throttle a chatty worker. If
+/// that shows up under load, decouple via a bounded channel + a dedicated
+/// async writer task rather than blocking the ingest thread here.
 pub fn pg_decision_sink(
     pool: sqlx::PgPool,
     handle: tokio::runtime::Handle,

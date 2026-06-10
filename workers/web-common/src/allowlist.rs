@@ -111,7 +111,16 @@ impl HostAllowlist {
     /// Parse `host[:port]` endpoint entries. A `:port` suffix scopes the grant
     /// to that exact port; a bare host matches any port (the weaker grant —
     /// flagged by [`HostAllowlist::is_port_scoped`]). Empty/blank entries are
-    /// skipped. Parsing is infallible (bad entries are dropped).
+    /// skipped.
+    ///
+    /// Parsing is infallible and **fail-closed**: an entry whose `:port` suffix
+    /// is not a valid `u16` (e.g. a typo like `api.example.com:99999`) is *not*
+    /// split — the whole string becomes the host token, yielding a dead
+    /// `Exact("api.example.com:99999")` rule that no real host lookup can ever
+    /// match. The grant is silently dropped rather than widened, so a malformed
+    /// port can never over-permit; it can only fail to permit. (Callers that
+    /// want to surface such typos to an operator should validate before calling
+    /// — the egress-proxy allowlist is operator-authored, not attacker-supplied.)
     pub fn from_endpoints(entries: &[String]) -> Self {
         let rules = entries
             .iter()
@@ -302,5 +311,22 @@ mod tests {
     fn is_port_scoped_false_when_no_match() {
         let al = eps(&["a.com:443"]);
         assert!(!al.is_port_scoped("other.com"));
+    }
+
+    #[test]
+    fn endpoint_out_of_range_port_is_a_dead_rule_fail_closed() {
+        // A typo'd port (> u16::MAX) is NOT split; the whole string becomes an
+        // exact host token that no real lookup matches. The grant is dropped,
+        // never widened — fail-closed. (99999 can't even be expressed as a u16
+        // at a call site, underscoring that no reachable port is granted.)
+        let al = eps(&["api.example.com:99999"]);
+        assert!(
+            !al.is_allowed_endpoint("api.example.com", 443),
+            "the malformed entry must NOT silently grant a real port"
+        );
+        assert!(
+            !al.is_allowed("api.example.com"),
+            "host-only check must not match the host either — it's a dead rule"
+        );
     }
 }
