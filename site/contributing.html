@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contributing — Kastellan</title>
+  <meta name="description" content="A security-first project needs adversarial eyes as much as feature hands. How to build Kastellan, where help is wanted, and the house rules.">
+  <meta property="og:title" content="Contributing — Kastellan">
+  <meta property="og:description" content="A security-first project needs adversarial eyes as much as feature hands. How to build Kastellan, where help is wanted, and the house rules.">
+  <meta property="og:image" content="https://kastellan.dev/assets/og-image.png">
+  <meta property="og:url" content="https://kastellan.dev/contributing.html">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header class="nav">
+    <div class="wrap">
+      <a class="nav-logo" href="index.html"><img src="assets/favicon.png" alt="" width="28" height="28"> kastellan</a>
+      <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+      <nav class="nav-links" aria-label="Main">
+        <a href="roadmap.html">Roadmap</a>
+        <a href="security.html">Security</a>
+        <a href="contributing.html" aria-current="page">Contributing</a>
+        <a class="nav-cta" href="https://github.com/hherb/kastellan">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- 1. Page head -->
+    <div class="page-head wrap">
+      <h1>Help hold the walls</h1>
+      <p class="subtitle">A security-first project needs adversarial eyes as much as feature hands.</p>
+    </div>
+
+    <!-- 2. Contribution areas -->
+    <section class="section wrap" aria-label="Contribution areas">
+      <div class="grid-2">
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">🦀</span> Rust development</h3>
+          <p class="card-text">Workers, channel adapters, and the macOS sandbox-parity work. The codebase is a 13-crate workspace with a strict no-unsandboxed-spawn rule.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">🔍</span> Security review</h3>
+          <p class="card-text">Red-team the sandbox policies, the threat model, the egress proxy. Finding a hole is a contribution, not a nuisance.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">📝</span> Docs &amp; testing</h3>
+          <p class="card-text">The onboarding manual, cross-distro testing, macOS coverage. If a setup step surprised you, that&#8217;s a bug in the docs.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">💬</span> Ideas &amp; issues</h3>
+          <p class="card-text">Design discussions and issue triage happen in the open on GitHub. <a href="https://github.com/hherb/kastellan/issues">Issues →</a></p>
+        </article>
+      </div>
+    </section>
+
+    <!-- 3. Build section -->
+    <section class="section wrap" aria-label="Build instructions">
+      <h2>Build it in three commands</h2>
+      <pre class="chip" role="region" tabindex="0" aria-label="Build commands"><code>git clone https://github.com/hherb/kastellan
+cd kastellan &amp;&amp; cargo build --workspace
+cargo test --workspace</code></pre>
+      <p>Ubuntu 24.04+ needs one extra step — an AppArmor profile so bubblewrap can create user namespaces (<code>sudo scripts/linux/install-bwrap-apparmor-profile.sh</code>). macOS works out of the box.</p>
+    </section>
+
+    <!-- 4. House rules -->
+    <section class="section wrap" aria-label="House rules">
+      <h2>House rules</h2>
+      <ul class="rules">
+        <li>AGPL-3.0, and AGPL-compatible dependencies only — license hygiene is part of the security boundary.</li>
+        <li>Linux and macOS are both first-class: no platform-specific feature lands without a counterpart of equivalent guarantee.</li>
+        <li>Every worker is sandboxed before it runs. There is no unsandboxed escape hatch, and reviewers refuse PRs that try to add one.</li>
+        <li>The repo&#8217;s handover convention (docs/devel/handovers/) means any contributor — or any AI session — can pick up exactly where the last one left off.</li>
+      </ul>
+    </section>
+
+    <!-- 5. Closing CTA -->
+    <section class="section wrap center" aria-label="Get started">
+      <p>Start with the repo:</p>
+      <a class="btn" href="https://github.com/hherb/kastellan">github.com/hherb/kastellan</a>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="wrap">
+      <p>AGPL-3.0-only · © 2026 Horst Herb</p>
+      <nav aria-label="Footer">
+        <a href="https://github.com/hherb/kastellan">GitHub</a> ·
+        <a href="https://crates.io/crates/kastellan-core">crates.io</a> ·
+        <a href="roadmap.html">Roadmap</a> ·
+        <a href="security.html">Security</a> ·
+        <a href="contributing.html">Contributing</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script>
+    const t = document.querySelector('.nav-toggle');
+    t?.addEventListener('click', () => {
+      const links = document.querySelector('.nav-links');
+      const open = links.classList.toggle('open');
+      t.setAttribute('aria-expanded', open);
+    });
+  </script>
+</body>
+</html>

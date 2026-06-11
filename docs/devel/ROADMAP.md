@@ -176,5 +176,6 @@ items unlock later ones.
 - [ ] Architecture doc kept in sync with shipped components
 - [ ] License audit on every new dependency (AGPL-compatible only)
 - [ ] CI: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace` — both Linux and macOS. (Clippy `-D warnings` gate live on `linux-check`, #153; `cargo fmt` still TODO.)
+- [x] **Public website `kastellan.dev`** — landing + roadmap + security + contributing pages, hand-rolled static `site/` (no build step) served by Cloudflare Pages free tier; kastellan-branded SVG diagrams; `scripts/site/check-site.sh` verification suite; curated content kept fresh via HANDOVER checklist item 7; CF-side wiring is an operator step in `site/README.md` — branch `claude/relaxed-davinci-ddf2ed`, 2026-06-11
 - [x] **Shared `kastellan-tests-common` dev-dep crate** — `PgCluster` + `bring_up_pg_cluster`, RAII guards, skip helpers, sandbox factory, binary discovery, macOS launchd serial lock, deterministic SHA-256-seeded embeddings — closes #15, 2026-05-12
 - [x] **Memory deletion audit infrastructure** — `deleted_memories` table + AFTER DELETE trigger on `memories` (migration 0008), append-only by GRANT; preserves body/metadata/embedding/timestamps. Preventive infra for a future GDPR-style forgetting path — 2026-05-12

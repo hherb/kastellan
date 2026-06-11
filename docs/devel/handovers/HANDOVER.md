@@ -6,6 +6,19 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
+**Last updated:** 2026-06-11 (public website **kastellan.dev** — `site/` static pages + Cloudflare Pages docs; branch `claude/relaxed-davinci-ddf2ed`, PR pending; on macOS).
+
+**This session — public website kastellan.dev (`site/`, Cloudflare Pages).** Brainstormed (operator-approved
+wireframes), spec'd, and built the public site: `site/{index,roadmap,security,contributing}.html` + shared
+`style.css` (light "B1 Pure Clean" system, indigo accent, one dark band; AA-contrast audited) + retitled **SVG**
+security diagrams (the PNG exports still said "hhagent" — the site now serves kastellan-branded SVGs from
+`docs/*.svg` sources, −1.2 MB) + `scripts/site/check-site.sh` (page/meta/nav/local-link suite; hard-fails if tidy
+is absent, loud-`[SKIP]`s Apple's pre-HTML5 tidy) + `site/README.md` (**operator action after merge:** Cloudflare
+Pages → connect `hherb/kastellan`, preset None, no build command, output dir `site`, branch `main`, then attach
+`kastellan.dev`). Content is curated by hand — checklist item 7 below keeps `site/roadmap.html` fresh. Spec/plan:
+`docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
+architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
+
 **Last updated:** 2026-06-11 (**egress proxy SLICE #2 Task 4.4 — the live auto-flip — SHIPPED (opt-in, default OFF)** on
 branch `feat/egress-force-routing-autoflip`, off `main` `1c42e89`; on macOS). The slice-#2 force-routing *mechanism* was
 merged via PR [#249](https://github.com/hherb/kastellan/pull/249); this session wires it into the live worker-spawn path
@@ -108,6 +121,28 @@ DGX gating e2e (4.6). Highlights:
   `pg_decision_sink`. `SidecarHandle::terminate(&mut)`. DGX kernel-barrier probe `sandbox/tests/linux_force_routing.rs`
   written (cfg-linux — **run on the DGX**).
 
+**Prior session — egress proxy SLICE #2 DESIGN (spec + plan only, NO code — ROADMAP:141).** Brainstormed and wrote
+the design + the bite-sized TDD implementation plan to make the slice-#1 proxy **live and unbypassable**. Locked-in
+decisions:
+- **Transport:** two `HttpGet` impls behind an env-selected `web-common::http::make_get` factory — keep `ReqwestGet`
+  for dev/no-proxy, add `ProxyConnectGet` (hyper + tokio-rustls, CONNECT-over-UDS) when `KASTELLAN_EGRESS_PROXY_UDS`
+  is set. (Single-hyper rejected: loses reqwest's gzip/brotli decompression — a `web-fetch` correctness risk — and
+  reqwest/tokio stay in the lock graph via `llm-router` anyway. v1 pins `Accept-Encoding: identity`.)
+- **Linux force-routing:** `Net::Allowlist` worker → **private netns** (`--unshare-all` minus `--share-net`, no route
+  out) + bind-mounted proxy UDS (AF_UNIX is mount-ns-scoped, not net-ns); new additive `SandboxPolicy.proxy_uds`.
+  `Net::ProxyEgress` (the proxy) keeps `--share-net`.
+- **macOS (equal guarantee, container fallback):** Seatbelt `(deny network-outbound)` + allow **only** the proxy UDS,
+  **gated by a real on-host probe**; if the probe can't prove AF_INET is denied, net workers fall back to the
+  `MacosContainer` backend (real VM netns).
+- **#241 folded in:** the proxy's `decide` is tightened to constrain `host:port`, not just host.
+- **Hookup:** coupled `core::egress::spawn_net_worker` (sidecar-first + **fail-closed**; rewrite policy: inject env,
+  bind UDS, drop `/etc/resolv.conf`; decision-ingest → `audit_log`; 1:1 teardown). The **DGX force-routing e2e**
+  (kernel-barrier proof: worker netns has no route off-allowlist) + the **#243** proxy seccomp `accept`/UDS-path
+  checks are **in-band acceptance gates**, runnable natively on the DGX over WireGuard SSH (not parked).
+Spec: [`…specs/2026-06-10-egress-proxy-slice2-force-routing-design.md`](../../superpowers/specs/2026-06-10-egress-proxy-slice2-force-routing-design.md);
+plan: [`…plans/2026-06-10-egress-proxy-slice2-force-routing.md`](../../superpowers/plans/2026-06-10-egress-proxy-slice2-force-routing.md).
+**No code shipped** — implementation is the next session (execute the plan, Stage 1 → 4). **CLAUDE.md follow-up when
+it ships:** the "When `Net::Allowlist`, also pass `--share-net`" invariant note becomes "→ private netns + proxy UDS".
 
 **Prior session — egress proxy SLICE #1 (boundary host-allowlist + SSRF/IP defense, ROADMAP:141, PR [#240](https://github.com/hherb/kastellan/pull/240) MERGED).**
 New crate `workers/egress-proxy` (`kastellan-worker-egress-proxy`): a sandboxed per-worker CONNECT proxy on a UDS —
@@ -581,6 +616,9 @@ sessions even when the prose is correct. Follow the steps in this order:
 4. **Refresh "Working state"** — anything new under stubs, anything that became real.
 5. **Tick the matching items off in [`../ROADMAP.md`](../ROADMAP.md)** with the commit hash.
 6. **Commit both files together** with a `docs(handover): ...` message.
+7. **If a milestone shipped:** does `site/roadmap.html` (timeline + "Last
+   updated" stamp, and the landing-page status numbers) need a one-line
+   update? See `site/README.md`.
 
 ### Pruning convention
 

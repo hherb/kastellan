@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Security architecture — Kastellan</title>
+  <meta name="description" content="The threat-model invariant and every mechanism that enforces it: kernel sandboxes, double containment, the dispatcher chokepoint, CASSANDRA, the egress boundary, and an append-only audit log.">
+  <meta property="og:title" content="Security architecture — Kastellan">
+  <meta property="og:description" content="The threat-model invariant and every mechanism that enforces it: kernel sandboxes, double containment, the dispatcher chokepoint, CASSANDRA, the egress boundary, and an append-only audit log.">
+  <meta property="og:image" content="https://kastellan.dev/assets/og-image.png">
+  <meta property="og:url" content="https://kastellan.dev/security.html">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header class="nav">
+    <div class="wrap">
+      <a class="nav-logo" href="index.html"><img src="assets/favicon.png" alt="" width="28" height="28"> kastellan</a>
+      <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+      <nav class="nav-links" aria-label="Main">
+        <a href="roadmap.html">Roadmap</a>
+        <a href="security.html" aria-current="page">Security</a>
+        <a href="contributing.html">Contributing</a>
+        <a class="nav-cta" href="https://github.com/hherb/kastellan">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- 1. Page head -->
+    <div class="page-head wrap">
+      <h1>The walls, layer by layer</h1>
+      <p class="subtitle">The threat-model invariant first — then every mechanism that enforces it.</p>
+    </div>
+
+    <!-- 2. Invariant callout -->
+    <section class="section wrap" aria-label="Threat-model invariant">
+      <div class="callout">
+        <span class="callout-label">The Invariant</span>
+        <p>Worst-case compromise — of the LLM, a tool, a dependency, or agent-authored code — reaches at most the agent&#8217;s own OS user, its own Postgres role, its own scratch filesystem, and the explicitly allowlisted endpoints of the one tool that was compromised. Nothing else.</p>
+      </div>
+    </section>
+
+    <!-- 3. Diagram 1 -->
+    <section class="section wrap" aria-label="Architecture diagram">
+      <figure class="diagram">
+        <img src="assets/security-architecture.svg"
+             alt="Kastellan security architecture: the core, CASSANDRA, and per-worker sandboxes"
+             width="1600" height="1240"
+             loading="lazy" decoding="async">
+        <figcaption>The architecture at a glance — mechanical walls below, semantic oversight alongside.</figcaption>
+      </figure>
+    </section>
+
+    <!-- 4. Defence in depth -->
+    <section class="section wrap" aria-label="Defence in depth">
+      <h2>Defence in depth</h2>
+      <ol class="defence">
+        <li>
+          <p><strong>One process, one sandbox per tool.</strong> Every tool invocation gets its own OS process inside its own kernel jail — bubblewrap on Linux, Seatbelt on macOS, optionally an Apple container micro-VM. Workers never share a sandbox with each other or with the core.</p>
+        </li>
+        <li>
+          <p><strong>Double containment.</strong> The parent installs the OS sandbox at spawn; the worker then locks itself down again with Landlock and seccomp before serving a single request. A kernel bug in either layer alone does not breach the worker.</p>
+        </li>
+        <li>
+          <p><strong>The dispatcher chokepoint.</strong> One function authors every worker command, consults policy, and writes the audit row. Channels and schedulers call it — they can never spawn workers themselves.</p>
+        </li>
+        <li>
+          <p><strong>CASSANDRA.</strong> Semantic oversight on top of mechanical sandboxing: every plan is reviewed before any tool runs, against five constitutional constraints — no physical harm, no fraud or impersonation, no irreversible action without a verified human in the loop, no power concentration, no oversight suppression — that no user, admin, or configuration change can override.</p>
+        </li>
+        <li>
+          <p><strong>The egress boundary.</strong> Outbound traffic goes through a per-worker proxy that enforces host allowlists, resolves DNS itself, and rejects private and link-local addresses — with every allow and block decision audited.</p>
+        </li>
+        <li>
+          <p><strong>An append-only audit log.</strong> Postgres role grants make audit rows append-only at the database layer, mirrored to disk. The agent cannot rewrite its own history.</p>
+        </li>
+      </ol>
+    </section>
+
+    <!-- 5. Diagram 2 -->
+    <section class="section wrap" aria-label="Request flow diagram">
+      <figure class="diagram">
+        <img src="assets/security-request-flow.svg"
+             alt="A single request traced through every security gate, from channel ingress to sandboxed execution"
+             width="1500" height="2280"
+             loading="lazy" decoding="async">
+        <figcaption>One instruction traced through every gate — blocks and escalations drawn explicitly.</figcaption>
+      </figure>
+    </section>
+
+    <!-- 6. Honesty note -->
+    <section class="wrap" aria-label="Limitations and honesty">
+      <div class="note">
+        <h2>What we don&#8217;t claim</h2>
+        <p>macOS Seatbelt is weaker than the Linux stack — a documented asymmetry, not a footnote. The egress proxy does not force-route workers yet (that work is in design). CASSANDRA&#8217;s LLM review stages are still deterministic stubs. The full, current threat model lives in the repo: <a href="https://github.com/hherb/kastellan/blob/main/docs/threat-model.md">docs/threat-model.md</a></p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="wrap">
+      <p>AGPL-3.0-only · © 2026 Horst Herb</p>
+      <nav aria-label="Footer">
+        <a href="https://github.com/hherb/kastellan">GitHub</a> ·
+        <a href="https://crates.io/crates/kastellan-core">crates.io</a> ·
+        <a href="roadmap.html">Roadmap</a> ·
+        <a href="security.html">Security</a> ·
+        <a href="contributing.html">Contributing</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script>
+    const t = document.querySelector('.nav-toggle');
+    t?.addEventListener('click', () => {
+      const links = document.querySelector('.nav-links');
+      const open = links.classList.toggle('open');
+      t.setAttribute('aria-expanded', open);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kastellan — the trustworthy personal AI agent</title>
+  <meta name="description" content="A personal, always-on AI agent built so that security is its foundational property. Every tool in its own kernel sandbox; every plan reviewed before it runs. Open source, AGPL, runs on your hardware.">
+  <meta property="og:title" content="Kastellan — the trustworthy personal AI agent">
+  <meta property="og:description" content="Full authority within the walls. None to act beyond them. A security-first personal AI agent in Rust.">
+  <meta property="og:image" content="https://kastellan.dev/assets/og-image.png">
+  <meta property="og:url" content="https://kastellan.dev/">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header class="nav">
+    <div class="wrap">
+      <a class="nav-logo" href="index.html"><img src="assets/favicon.png" alt="" width="28" height="28"> kastellan</a>
+      <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+      <nav class="nav-links" aria-label="Main">
+        <a href="roadmap.html">Roadmap</a>
+        <a href="security.html">Security</a>
+        <a href="contributing.html">Contributing</a>
+        <a class="nav-cta" href="https://github.com/hherb/kastellan">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- 1. Hero -->
+    <section class="hero wrap">
+      <div>
+        <h1>Your personal AI agent.<br><span class="accent">Trustworthy by construction.</span></h1>
+        <p>Kastellan reads your mail, searches the web, runs code, and remembers what matters — and it cannot reach anything you didn’t explicitly allow. Every tool runs in its own kernel sandbox. Every plan is reviewed before a single tool fires.</p>
+        <blockquote>
+          <p>A castellan is the officer a lord entrusts to hold a stronghold: full authority within the walls, none to act beyond them.</p>
+        </blockquote>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin: 1.75rem 0 0.5rem;">
+          <a class="btn" href="https://github.com/hherb/kastellan">View on GitHub</a>
+          <a class="btn-ghost" href="security.html">How it’s secured →</a>
+        </div>
+        <pre class="chip" role="region" tabindex="0" aria-label="Install command: cargo install kastellan-core">$ cargo install kastellan-core
+<span class="chip-comment"># v0.1.0 on crates.io</span></pre>
+      </div>
+      <div>
+        <img src="assets/logo.png" alt="The Kastellan robot mascot holding mail, calendar, chat, and code icons" width="280" height="280" fetchpriority="high" decoding="async">
+      </div>
+    </section>
+
+    <!-- 2. Trust strip -->
+    <section class="wrap" aria-label="Project facts">
+      <div class="pills">
+        <span class="pill"><span aria-hidden="true">🦀</span> Rust core</span>
+        <span class="pill"><span aria-hidden="true">⚖️</span> AGPL-3.0</span>
+        <span class="pill"><span aria-hidden="true">🖥️</span> Linux + macOS first-class</span>
+        <span class="pill"><span aria-hidden="true">🔌</span> No vendor lock-in</span>
+        <span class="pill"><span aria-hidden="true">🏠</span> Runs on your hardware</span>
+      </div>
+    </section>
+
+    <!-- 3. Security band -->
+    <section class="band">
+      <div class="wrap">
+        <span class="band-label">WHY IT’S DIFFERENT</span>
+        <h2 class="band-title">Two kinds of walls: mechanical and semantic</h2>
+        <div class="band-cards">
+          <div class="band-card">
+            <h3 class="band-card-title">Kernel sandboxes</h3>
+            <p>One OS process and one kernel jail per tool — bubblewrap, Landlock, and seccomp on Linux; Seatbelt on macOS. A compromised tool reaches its own short allowlist. Never the next tool’s. Never the core.</p>
+          </div>
+          <div class="band-card">
+            <h3 class="band-card-title">CASSANDRA oversight</h3>
+            <p>Every plan the agent forms is reviewed before any tool runs — against five constitutional constraints that no user, admin, or configuration change can override.</p>
+          </div>
+        </div>
+        <a class="band-link" href="security.html">Read the full security architecture →</a>
+      </div>
+    </section>
+
+    <!-- 4. Capabilities -->
+    <section class="section wrap">
+      <h2>What it does <span style="font-size: 0.55em; font-weight: 400; letter-spacing: 0; color: var(--muted);">— each capability inside its own walls</span></h2>
+      <div class="grid-3">
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">💬</span> Talks to you <span class="badge-plan">planned</span></h3>
+          <p class="card-text">Telegram, Signal, and its own email account.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">🌐</span> Works the web <span class="badge-done">today</span></h3>
+          <p class="card-text">Web search and page fetch, host-allowlisted; a sandboxed browser is next.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">🐍</span> Runs code <span class="badge-plan">planned</span></h3>
+          <p class="card-text">Python in a no-network scratch jail.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">🧠</span> Remembers <span class="badge-done">today</span></h3>
+          <p class="card-text">Postgres memory with semantic, lexical, and graph recall.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">📈</span> Learns skills <span class="badge-done">today</span></h3>
+          <p class="card-text">Distils successful runs into reusable skills — gated on your approval.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">📜</span> Accountable <span class="badge-done">today</span></h3>
+          <p class="card-text">An append-only audit log of every action, enforced by the database itself.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- 5. Status snapshot -->
+    <section class="section wrap">
+      <div style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem 2rem;">
+        <h2>Where it stands today</h2>
+        <a href="roadmap.html">Full roadmap →</a>
+      </div>
+      <div class="stats">
+        <div class="stat">
+          <span>v0.1.0</span>
+          <span>on crates.io</span>
+        </div>
+        <div class="stat">
+          <span>~1,500</span>
+          <span>tests green</span>
+        </div>
+        <div class="stat">
+          <span>13</span>
+          <span>workspace crates</span>
+        </div>
+        <div class="stat">
+          <span>2</span>
+          <span>OS sandboxes, first-class</span>
+        </div>
+      </div>
+      <p>
+        <span class="dot-done"></span> Phase 0 — Sandboxed core (done) &nbsp;·&nbsp;
+        <span class="dot-done"></span> Phase 1 — Memory &amp; agent loop (done) &nbsp;·&nbsp;
+        <span class="dot-wip"></span> Phase 3 — Web egress (in progress) &nbsp;·&nbsp;
+        <span class="dot-plan"></span> Channels · python-exec · frontier gate (planned)
+      </p>
+    </section>
+
+    <!-- 6. Get involved -->
+    <section class="section wrap center">
+      <h2>Built in the open. Help hold the walls.</h2>
+      <p>Rust, security review, docs, red-teaming — contributions welcome.</p>
+      <a class="btn" href="contributing.html">Start contributing</a>
+    </section>
+
+  </main>
+
+  <!-- 7. Footer -->
+  <footer class="footer">
+    <div class="wrap">
+      <p>AGPL-3.0-only · © 2026 Horst Herb</p>
+      <nav aria-label="Footer">
+        <a href="https://github.com/hherb/kastellan">GitHub</a> ·
+        <a href="https://crates.io/crates/kastellan-core">crates.io</a> ·
+        <a href="roadmap.html">Roadmap</a> ·
+        <a href="security.html">Security</a> ·
+        <a href="contributing.html">Contributing</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script>
+    const t = document.querySelector('.nav-toggle');
+    t?.addEventListener('click', () => {
+      const links = document.querySelector('.nav-links');
+      const open = links.classList.toggle('open');
+      t.setAttribute('aria-expanded', open);
+    });
+  </script>
+</body>
+</html>

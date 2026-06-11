@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Roadmap &amp; status — Kastellan</title>
+  <meta name="description" content="Where Kastellan stands today: what’s shipped, what’s in progress, what’s planned — honestly marked.">
+  <meta property="og:title" content="Roadmap &amp; status — Kastellan">
+  <meta property="og:description" content="Where Kastellan stands today: what’s shipped, what’s in progress, what’s planned — honestly marked.">
+  <meta property="og:image" content="https://kastellan.dev/assets/og-image.png">
+  <meta property="og:url" content="https://kastellan.dev/roadmap.html">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header class="nav">
+    <div class="wrap">
+      <a class="nav-logo" href="index.html"><img src="assets/favicon.png" alt="" width="28" height="28"> kastellan</a>
+      <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+      <nav class="nav-links" aria-label="Main">
+        <a href="roadmap.html" aria-current="page">Roadmap</a>
+        <a href="security.html">Security</a>
+        <a href="contributing.html">Contributing</a>
+        <a class="nav-cta" href="https://github.com/hherb/kastellan">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- 1. Page head -->
+    <div class="page-head wrap">
+      <h1>Where Kastellan stands</h1>
+      <p class="subtitle">Curated by hand, updated as milestones ship. Last updated: <time datetime="2026-06">June 2026</time>.</p>
+    </div>
+
+    <!-- 2. Stat cards -->
+    <section class="section wrap" aria-label="Project stats">
+      <div class="grid-3">
+        <div class="card">
+          <div class="stat">
+            <span>v0.1.0</span>
+            <span>published on crates.io</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="stat">
+            <span>~1,500</span>
+            <span>tests green on Linux + macOS</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="stat">
+            <span>Phase 3</span>
+            <span>web egress, in progress</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. Timeline -->
+    <section class="section wrap" aria-label="Development timeline">
+      <h2>Development phases, in build order</h2>
+      <ul class="timeline" role="list">
+
+        <li class="timeline-item">
+          <span class="dot-done"></span>
+          <h3 class="timeline-title">Phase 0 — A core that can jail things <span class="badge-done">SHIPPED</span></h3>
+          <p class="timeline-text">Cross-platform kernel sandboxing (bubblewrap + Landlock + seccomp on Linux, Seatbelt on macOS) with negative tests proving that denials deny. JSON-RPC workers, service supervision, Postgres with an append-only audit log.</p>
+        </li>
+
+        <li class="timeline-item">
+          <span class="dot-done"></span>
+          <h3 class="timeline-title">Phase 1 — Memory &amp; the agent loop <span class="badge-done">SHIPPED</span></h3>
+          <p class="timeline-text">Three-lane memory recall (semantic, lexical, graph), the task scheduler, CASSANDRA plan review, a prompt-injection guard on worker output, encrypted secrets, and an operator-approved skill system.</p>
+        </li>
+
+        <li class="timeline-item">
+          <span class="dot-wip"></span>
+          <h3 class="timeline-title">Phase 3 — Web egress <span class="badge-wip">IN PROGRESS</span></h3>
+          <p class="timeline-text">Web search and web fetch shipped behind host allowlists. The egress proxy — the single chokepoint all worker traffic will be forced through — has its first slice shipped and force-routing in design. <span aria-hidden="true">←</span> currently being built</p>
+        </li>
+
+        <li class="timeline-item">
+          <span class="dot-plan"></span>
+          <h3 class="timeline-title">Phase 2 — Channels <span class="badge-plan">PLANNED</span></h3>
+          <p class="timeline-text">Telegram, Signal, and email — how you’ll actually talk to it. Inbound first (read-only), outbound after the egress proxy hardens.</p>
+        </li>
+
+        <li class="timeline-item">
+          <span class="dot-plan"></span>
+          <h3 class="timeline-title">Phase 4 — python-exec &amp; agent-authored skills <span class="badge-plan">PLANNED</span></h3>
+          <p class="timeline-text">Python in a no-network scratch jail, and a catalog of named skills with trust tiers and human approval gates.</p>
+        </li>
+
+        <li class="timeline-item">
+          <span class="dot-plan"></span>
+          <h3 class="timeline-title">Phase 5 — Frontier escalation &amp; hardening <span class="badge-plan">PLANNED</span></h3>
+          <p class="timeline-text">A policy gate deciding when a frontier LLM may be consulted, TLS-pinned egress, and a 7-day adversarial soak test.</p>
+        </li>
+
+      </ul>
+    </section>
+
+    <!-- 4. Note box -->
+    <section class="wrap" aria-label="Further reading">
+      <div class="note">
+        <p><span aria-hidden="true">ℹ️</span> The development-grade roadmap — every item, every commit hash — lives in the repo: <a href="https://github.com/hherb/kastellan/blob/main/docs/devel/ROADMAP.md">docs/devel/ROADMAP.md</a></p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="wrap">
+      <p>AGPL-3.0-only · © 2026 Horst Herb</p>
+      <nav aria-label="Footer">
+        <a href="https://github.com/hherb/kastellan">GitHub</a> ·
+        <a href="https://crates.io/crates/kastellan-core">crates.io</a> ·
+        <a href="roadmap.html">Roadmap</a> ·
+        <a href="security.html">Security</a> ·
+        <a href="contributing.html">Contributing</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script>
+    const t = document.querySelector('.nav-toggle');
+    t?.addEventListener('click', () => {
+      const links = document.querySelector('.nav-links');
+      const open = links.classList.toggle('open');
+      t.setAttribute('aria-expanded', open);
+    });
+  </script>
+</body>
+</html>
