@@ -11,6 +11,7 @@
 //!       reason). See `proxy::decide` / `proxy::allowed_reason`.
 //!   KASTELLAN_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
 
+mod ca;
 mod mitm;
 mod proxy;
 mod report;
