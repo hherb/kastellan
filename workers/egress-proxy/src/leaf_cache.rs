@@ -24,12 +24,11 @@ impl LeafCache {
         Self { map: HashMap::new() }
     }
 
+    /// Number of distinct host leaves currently cached. Used by the cache's
+    /// own unit tests to assert reuse + the bound; the proxy never needs it.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.map.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
     }
 
     /// Return the server config for `host`, issuing + caching it on first use.

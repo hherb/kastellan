@@ -19,7 +19,6 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 /// here. The CA `KeyPair` never leaves this process.
 pub struct CaMaterial {
     cert_pem: String,
-    cert_der: CertificateDer<'static>,
     cert: Certificate,
     key_pair: KeyPair,
 }
@@ -28,11 +27,6 @@ impl CaMaterial {
     /// Public CA certificate, PEM-encoded — the only thing exported off-process.
     pub fn cert_pem(&self) -> &str {
         &self.cert_pem
-    }
-
-    /// Public CA certificate, DER — for building a leaf chain if ever needed.
-    pub fn cert_der(&self) -> &CertificateDer<'static> {
-        &self.cert_der
     }
 }
 
@@ -44,9 +38,15 @@ pub struct LeafCert {
 }
 
 impl LeafCert {
+    /// The leaf certificate DER. Test-only accessor (the proxy consumes the
+    /// fields via [`Self::into_rustls`]); exposed so `ca/tests.rs` can assert the
+    /// SAN encoding.
+    #[cfg(test)]
     pub fn cert_der(&self) -> &CertificateDer<'static> {
         &self.cert_der
     }
+    /// The leaf's private key DER. Test-only accessor (see [`Self::cert_der`]).
+    #[cfg(test)]
     pub fn key_der(&self) -> &PrivateKeyDer<'static> {
         &self.key_der
     }
@@ -76,8 +76,7 @@ pub fn generate_ca() -> Result<CaMaterial, rcgen::Error> {
     // issuer DN + authority-key-id.
     let cert = params.self_signed(&key_pair)?;
     let cert_pem = cert.pem();
-    let cert_der = cert.der().clone();
-    Ok(CaMaterial { cert_pem, cert_der, cert, key_pair })
+    Ok(CaMaterial { cert_pem, cert, key_pair })
 }
 
 /// Issue a leaf for `host`, signed by `ca`. `host` becomes the sole SAN and the
