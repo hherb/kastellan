@@ -29,15 +29,13 @@ pub struct ProxyConnectGet {
 }
 
 impl ProxyConnectGet {
-    /// Back-compat constructor: webpki public roots, infallible. Used where no
-    /// MITM CA is configured (slice #1/#2 posture, dev/no-proxy). `uds` is the
-    /// proxy socket path (`KASTELLAN_EGRESS_PROXY_UDS`).
-    ///
-    /// `allow(dead_code)`: this is a published back-compat shim for external
-    /// callers (and the round-trip/EOF/403 unit tests below). The crate's own
-    /// `make_get_inner` now routes through `with_trust`, so the lib target has
-    /// no non-test caller — that's the intended posture, not dead code.
-    #[allow(dead_code)]
+    /// Webpki-public-roots constructor, infallible. The `proxy_connect` module is
+    /// `pub(crate)`, and `make_get_inner` now builds the transport via
+    /// `with_trust` (threading the optional MITM CA), so this convenience shim has
+    /// no production caller — it is only used by the round-trip/EOF/403 unit tests
+    /// below, hence `#[cfg(test)]`. `uds` is the proxy socket path
+    /// (`KASTELLAN_EGRESS_PROXY_UDS`).
+    #[cfg(test)]
     pub fn new(user_agent: &str, uds: PathBuf) -> Self {
         // Delegating to `with_trust(.., None)` keeps a single TLS-build path.
         // The `None` branch is infallible (it can only `extend` webpki roots),
