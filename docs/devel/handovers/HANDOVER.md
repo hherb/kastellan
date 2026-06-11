@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-12 (**`browser-driver` worker — feasibility SPIKE (GREEN, both platforms) + slice #1 scaffold
-COMPLETE**; branch `feat/browser-driver-worker`, PR pending. Prior: egress slice #3a MERGED via
+COMPLETE**; branch `feat/browser-driver-worker`, PR [#262](https://github.com/hherb/kastellan/pull/262). Prior: egress slice #3a MERGED via
 PR [#259](https://github.com/hherb/kastellan/pull/259) at `e2a7b2b`.)
 **Session-end verification:** Mac `cargo test --workspace` **1562 / 0 / 8**; `clippy --workspace --all-targets -D warnings`
 clean; worker `pytest` **14 / 0**.
@@ -79,7 +79,7 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
 **Current state.** `main` is at `e2a7b2b` (egress slice #3a, PR [#259](https://github.com/hherb/kastellan/pull/259)
-MERGED). **This session's work is on branch `feat/browser-driver-worker` (PR pending):** the `browser-driver` worker
+MERGED). **This session's work is on branch `feat/browser-driver-worker` (PR [#262](https://github.com/hherb/kastellan/pull/262)):** the `browser-driver` worker
 (ROADMAP:147) **spike is GREEN on both platforms** and the **slice #1 scaffold is COMPLETE** — a Playwright-Python
 `browser.render` worker (post-JS readable text + final HTML), built spike-independent TDD against a fake browser; the real
 Playwright launch + the `Profile::BrowserClient` seccomp profile + Seatbelt browser-profile extension + an e2e are **Phase
@@ -295,7 +295,7 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy SLICE #1 (PR #240) + SLICE #2 (force-routing, PR #256 MERGED) are COMPLETE; SLICE #3a (TLS-intercept mechanism, branch `feat/egress-slice3-tls-intercept`, PR pending) is COMPLETE.** Next egress work is slice #3b (the co-located credential-leak scanner, on top of #3a's now-visible plaintext) and slice #4 (TLS pinning). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy SLICE #1 (PR #240) + SLICE #2 (force-routing, PR #256 MERGED) are COMPLETE; SLICE #3a (TLS-intercept mechanism, PR #259 MERGED at `e2a7b2b`) is COMPLETE.** Next egress work is slice #3b (the co-located credential-leak scanner, on top of #3a's now-visible plaintext) and slice #4 (TLS pinning). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
 **★ TOP PICK — egress proxy SLICE #3b: co-located credential-leak scanner (ROADMAP:142).** Slice #3a already
 MITM-terminates worker TLS, so the proxy now sees plaintext request/response bodies. 3b adds the **scanner**: each
