@@ -56,12 +56,18 @@ Slice #3a builds and proves that mechanism. It surfaces **no** new plaintext to 
    trusting only-the-CA means TLS fails closed if anything but the proxy terminates it.
    (Rejected: additive CA + webpki — only creates a way to *not* fail closed, no benefit here.)
 
-3. **TLS stack — sync `rustls` inside the existing proxy.** The proxy stays synchronous
-   (`std::net`, thread-per-connection). `rustls`'s blocking API (`StreamOwned<ServerConnection,
-   S>` / `StreamOwned<ClientConnection, S>`) needs no async runtime. (Rejected: rewrite onto
-   `tokio-rustls` — bigger change to a working component; `native-tls`/OpenSSL — adds a C dep
-   that worsens the `ring`/#144 cross-compile wall.) The worker's `ProxyConnectGet` keeps its
-   existing `tokio-rustls` async client — separate process, no need to match.
+3. **TLS stack — async `tokio-rustls` for the MITM path; the rest of the proxy stays sync.**
+   The proxy keeps its synchronous accept loop, CONNECT parse, and `decide()`. Only the
+   post-`200` termination + bidirectional copy runs async, on a **per-connection current-thread
+   tokio runtime** — exactly the pattern already in the tree (`web-common::ProxyConnectGet`,
+   `proxy_connect.rs:34`). This is required because sync `rustls` `StreamOwned` is **not
+   splittable** into independent read/write halves, so the "one thread per direction with
+   `std::io::copy`" shape the proxy uses today cannot bridge two TLS endpoints; async
+   `tokio::io::copy_bidirectional(&mut client_tls, &mut upstream_tls)` does it in a few lines.
+   (Rejected: hand-rolled sync non-blocking poll pump over two rustls `Connection`s — materially
+   more complex and deadlock-prone, no precedent in the tree; `native-tls`/OpenSSL — adds a C
+   dep that worsens the `ring`/#144 cross-compile wall.) `tokio` + `tokio-rustls` are added to
+   the proxy's deps (already pinned in `web-common`). The worker keeps its existing async client.
 
 4. **Always-MITM for TLS targets; pass-through for plaintext.** Every allowlisted CONNECT whose
    first tunnel byte is `0x16` is terminated+re-originated. Non-TLS bytes (plain-HTTP-over-
@@ -70,21 +76,24 @@ Slice #3a builds and proves that mechanism. It surfaces **no** new plaintext to 
 
 ## Architecture
 
-Per connection, inside the egress-proxy worker (all synchronous):
+Per connection, inside the egress-proxy worker (sync up to the `200`, async after):
 
 1. Read CONNECT line → `(host, port)`; run existing `decide()` (allowlist + DNS + SSRF/IP-pin
-   in `ssrf::is_denied_range`). **unchanged**
-2. On allow, write `HTTP/1.1 200 Connection Established`. **unchanged**
-3. **Peek the first byte** of the tunnel. `0x16` → MITM path. Else → pass-through (existing
-   `tunnel()` raw copy).
-4. **MITM path:**
+   in `ssrf::is_denied_range`). **unchanged, sync**
+2. On allow, write `HTTP/1.1 200 Connection Established`. **unchanged, sync**
+3. **Peek the first byte** of the tunnel (`UnixStream::peek`, non-consuming). `0x16` → MITM
+   path. Else → pass-through (existing sync `tunnel()` raw copy). The CONNECT round-trip
+   guarantees the worker has not yet sent the ClientHello when steps 1–2 run, so the byte is
+   the first tunnel byte.
+4. **MITM path** (on a per-connection current-thread tokio runtime; convert the accepted
+   `std` `UnixStream` via `set_nonblocking(true)` + `tokio::net::UnixStream::from_std`):
    a. Fetch-or-issue a leaf cert for `host` (signed by the in-proxy CA), cached by host.
-   b. Sync `rustls` **server** handshake over the client `UnixStream` → decrypted client stream.
-   c. Dial the pinned origin IP:port (existing SSRF-checked dial) → sync `rustls` **client**
-      handshake with SNI=`host`, validating the real origin cert against `webpki-roots` →
-      decrypted upstream stream.
-   d. Copy plaintext bidirectionally between the two decrypted streams (existing `tunnel()`
-      shape, now over TLS streams). **3a surfaces nothing from inside; 3b scans here.**
+   b. `tokio-rustls` `TlsAcceptor` over the client stream → decrypted client `TlsStream`.
+   c. Dial the pinned origin IP:port (`tokio::net::TcpStream`, SSRF-checked IP) → `tokio-rustls`
+      `TlsConnector` with SNI=`host`, validating the real origin cert against `webpki-roots` →
+      decrypted upstream `TlsStream`.
+   d. `tokio::io::copy_bidirectional(&mut client_tls, &mut upstream_tls)`. **3a surfaces
+      nothing from inside; 3b scans here.**
 
 CA lifecycle: at startup the proxy `generate_ca()`s, holds the private key in-process (zeroized
 on exit), and writes only the public CA PEM to `scratch/ca.pem` before the accept loop.
@@ -104,10 +113,13 @@ Worker trust (`web-common::proxy_connect`): when `KASTELLAN_EGRESS_PROXY_CA` is 
 - `ca.rs` — `generate_ca() -> CaMaterial` (CA cert + key via `rcgen`) and
   `issue_leaf(&CaMaterial, host) -> CertifiedKey`. Pure/unit-testable: a generated leaf chains
   to the CA; the leaf's SAN matches `host`; the CA cert PEM round-trips (parse → serialize).
-- `mitm.rs` — `looks_like_tls(first_byte: u8) -> bool` (pure; `== 0x16`) and
-  `intercept(client, dial_upstream, host, &CaMaterial, &mut LeafCache)`: the sync
-  server-handshake + client-handshake + plaintext copy. The byte-peek + branch decision is
-  separated from the I/O so the branch logic is unit-testable.
+- `mitm.rs` — `looks_like_tls(first_byte: u8) -> bool` (pure; `== 0x16`) and an async
+  `intercept(...)`: convert the client `UnixStream`, `TlsAcceptor` server-handshake +
+  `TlsConnector` client-handshake + `copy_bidirectional`. `intercept` takes the **upstream trust
+  config (`Arc<rustls::ClientConfig>`) as a parameter** so the in-crate round-trip test can wire
+  a test-origin CA while production wires `webpki-roots`. The pure byte-peek/branch decision is
+  separated from the I/O so the branch logic is unit-testable; the async copy runs on the
+  per-connection current-thread runtime built in `handle_conn`.
 - `leaf_cache.rs` — `LeafCache(HashMap<String, Arc<CertifiedKey>>)`, bounded with the existing
   `MAX_TRACKED_*` idiom; `get_or_issue(host, &CaMaterial)`.
 
@@ -141,17 +153,34 @@ would have to walk back.
 
 ## Test plan (TDD — write the test first)
 
+**Why the full TLS round-trip is proven in-crate, not through the sandbox e2e:** the proxy MUST
+validate the *real* origin cert against `webpki-roots` on the re-origination leg — dropping that
+would reintroduce exactly the SSRF / origin-impersonation risk the proxy exists to stop. A
+self-signed loopback test origin therefore can't be validated through a real spawned sidecar
+without adding a test-only upstream-trust env var (production surface we don't want in 3a). So
+the *mechanism* is proven by an in-crate test where `intercept()` takes the **upstream trust
+config as a parameter** (production wires webpki; the test wires the loopback origin's CA — no
+env, no process boundary), and the sandbox e2e proves the *host wiring* rather than a hermetic
+TLS round-trip.
+
 - **Proxy units:** `looks_like_tls` truth table; `generate_ca`/`issue_leaf` chaining + SAN
   match + PEM round-trip; `LeafCache` hit/issue/eviction; MITM-vs-pass-through branch selection.
-- **Worker unit:** `ProxyConnectGet` builds an only-CA `RootCertStore` when the env var is set,
-  webpki-only otherwise.
-- **Proxy integration (real, cross-platform):** a real sandboxed sidecar + a loopback `rustls`
-  test origin; a client routed through the proxy completes a request **only** when trusting the
-  per-instance CA; the two-leg termination is exercised; off-allowlist still 403s; plain-HTTP-
-  over-CONNECT still passes through. Skip-as-pass without sandbox/proxy-bin.
-- **Force-routing e2e extension** (`core/tests/egress_force_routing_e2e.rs`): the existing
-  allow-round-trip now traverses a *terminated + re-originated* TLS path end-to-end (Seatbelt on
-  the Mac, bwrap on the DGX) and asserts `tls_intercepted: true` reaches the `on_decision` sink.
+- **Proxy in-crate MITM round-trip (hermetic, no sandbox):** a loopback `rustls` origin (test
+  CA) + an in-process call into `intercept()` with the upstream trust set to that test CA; a
+  `rustls` client trusting the per-instance CA drives an HTTP/1.1 request through the proxy and
+  gets the origin's response back — proving termination + re-origination + plaintext visibility,
+  and that the emitted `Decision` carries `tls_intercepted: true`.
+- **Worker unit:** `ProxyConnectGet` builds an only-CA `RootCertStore` when the CA path is set,
+  webpki-only otherwise; `make_get_inner` selects only-CA trust when the CA override is present.
+- **Force-routing e2e extension** (`core/tests/egress_force_routing_e2e.rs`, real, cross-
+  platform): the existing plaintext allow-round-trip keeps passing (now exercising the
+  *pass-through* branch — first byte ≠ `0x16`); add assertions that, under the real sandbox, the
+  spawned sidecar wrote `ca.pem` into its minted scratch dir and the force-routed worker's policy
+  received that CA path (`fs_read` + `KASTELLAN_EGRESS_PROXY_CA`). Skip-as-pass without sandbox/
+  proxy-bin.
+- **`#[ignore]` real-net MITM:** a real public HTTPS origin (validates against webpki) fetched
+  through a real sandboxed sidecar via `ProxyConnectGet` trusting the per-instance CA — the true
+  end-to-end, run on demand like the existing `#[ignore]` real-net tests.
 - **Risks to verify, not assume:**
   1. `rcgen`'s `ring` backend needs no syscall the `WorkerNetClient` seccomp profile denies
      (cert gen = getrandom + CPU; #243 already cleared AF_UNIX). Verify on the DGX; if a syscall
@@ -162,8 +191,10 @@ would have to walk back.
 ## Acceptance (slice #3a done when)
 
 - Workspace builds + `clippy --workspace --all-targets -D warnings` clean (Mac + DGX).
-- The proxy integration + force-routing e2e pass with **real containment** (no `[SKIP]`) on the
-  DGX: a worker fetch round-trips through the MITM path and `tls_intercepted: true` is audited.
+- The in-crate MITM round-trip passes (termination + re-origination + `tls_intercepted: true`),
+  and the force-routing e2e passes with **real containment** (no `[SKIP]`) on the DGX: the
+  spawned sidecar wrote `ca.pem` and the worker received the CA path; the plaintext pass-through
+  round-trip still works. The `#[ignore]` real-net MITM fetch is verified manually once.
 - Mac skip-as-pass posture green; new units pass on both.
 - No new plaintext in any audit row beyond the `tls_intercepted` boolean.
 - New/changed files under the 500-LOC cap.
