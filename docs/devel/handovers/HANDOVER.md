@@ -6,7 +6,7 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-11 (**egress proxy SLICE #2 — DGX acceptance COMPLETE + force-routing flipped ON by default**; branch `feat/egress-slice2-dgx-acceptance`, PR pending; verified natively on the DGX over WireGuard SSH).
+**Last updated:** 2026-06-11 (**egress proxy SLICE #2 — DGX acceptance COMPLETE + force-routing flipped ON by default**; PR [#256](https://github.com/hherb/kastellan/pull/256) **MERGED** to `main` at `f0464d7`; verified natively on the DGX over WireGuard SSH).
 
 **This session — egress proxy SLICE #2: DGX acceptance + flip-on (ROADMAP:141 — SLICE #2 COMPLETE).** Drove the DGX
 (aarch64) natively from the Mac over WireGuard SSH (`ssh dgx` alias, ssh-agent auth — see memory
@@ -71,9 +71,9 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** `main` is at `d704f80` (the HANDOVER prune, on top of secrets-split #253 / Cloudflare Workers #254 /
-egress slice #2 auto-flip #250 / website #252 — see Earlier history). **This session's work is on branch
-`feat/egress-slice2-dgx-acceptance` (PR pending).** Egress proxy **slice #2 is now COMPLETE**: force-routing is
+**Current state.** `main` is at `f0464d7` (egress slice #2 DGX-acceptance, PR [#256](https://github.com/hherb/kastellan/pull/256) MERGED, on top of the
+HANDOVER prune #d704f80 / secrets-split #253 / Cloudflare Workers #254 / egress slice #2 auto-flip #250 / website #252 —
+see Earlier history). Egress proxy **slice #2 is now COMPLETE and merged**: force-routing is
 DGX-accepted (real kernel-barrier containment, new live e2e green) and **ON by default** in the supervised deployment
 (`core_service_spec` sets `KASTELLAN_EGRESS_FORCE_ROUTING=1`, **fail-closed** if the proxy binary is missing). Every
 `Net::Allowlist` worker is force-routed through a per-worker egress-proxy sidecar with no direct network route. Working
