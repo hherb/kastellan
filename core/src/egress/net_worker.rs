@@ -18,8 +18,18 @@ use std::thread::JoinHandle;
 use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
 use super::audit::{ingest_decisions_into, EgressAuditRow};
-use super::spawn::{spawn_sidecar, SidecarHandle};
+use super::spawn::{spawn_sidecar, SidecarHandle, UDS_FILE_NAME};
 use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
+
+/// Maximum byte length of a Unix-domain-socket path. `sockaddr_un.sun_path` is
+/// 104 bytes on macOS and 108 on Linux; the path must fit including its NUL
+/// terminator. The sidecar `bind()`s `<scratch>/egress.sock`, so a force-routing
+/// scratch dir must be short enough that the projected socket path still fits —
+/// see [`make_worker_scratch_dir`].
+#[cfg(target_os = "macos")]
+const SUN_PATH_MAX: usize = 104;
+#[cfg(not(target_os = "macos"))]
+const SUN_PATH_MAX: usize = 108;
 
 /// Env key the worker-side transport reads to switch onto CONNECT-over-UDS
 /// (`kastellan_worker_web_common::http::make_get`). Must match that constant.
@@ -165,7 +175,17 @@ where
             match worker.egress.as_mut() {
                 Some(egress) => egress.scratch = Some(scratch),
                 None => {
-                    let _ = std::fs::remove_dir_all(&scratch);
+                    // Unreachable: a successful `spawn_net_worker` always sets
+                    // `egress`. If that invariant were ever broken the worker is
+                    // *live* and its UDS lives inside `scratch`, so we LEAK the
+                    // dir (log it) rather than `remove_dir_all` a directory the
+                    // running worker still depends on. A leaked scratch dir is
+                    // harmless; pulling one out from under a live worker is not.
+                    tracing::warn!(
+                        scratch = %scratch.display(),
+                        "force-routed worker has no egress bundle to own its scratch dir; \
+                         leaking it (unreachable — spawn_net_worker should always attach one)"
+                    );
                 }
             }
             Ok(worker)
@@ -186,6 +206,24 @@ fn make_worker_scratch_dir(scratch_root: &Path) -> Result<PathBuf, ToolHostError
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = scratch_root.join(format!("egress-{}-{}", std::process::id(), seq));
+    // Reject up front if the sidecar's `<dir>/egress.sock` would overflow
+    // `sockaddr_un.sun_path`. The default scratch root (`std::env::temp_dir()`)
+    // is short; only a deep `KASTELLAN_EGRESS_SCRATCH_DIR` override can hit this.
+    // Failing here with a clear message beats an opaque `bind()` failure from
+    // inside the sandboxed sidecar after the dir is already created.
+    let projected_uds = dir.join(UDS_FILE_NAME);
+    let uds_len = projected_uds.as_os_str().len();
+    if uds_len + 1 > SUN_PATH_MAX {
+        return Err(ToolHostError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "egress sidecar socket path is {uds_len} bytes (+NUL), over the \
+                 {SUN_PATH_MAX}-byte sockaddr_un.sun_path limit — shorten \
+                 KASTELLAN_EGRESS_SCRATCH_DIR (projected: {})",
+                projected_uds.display()
+            ),
+        )));
+    }
     std::fs::create_dir_all(&dir).map_err(ToolHostError::Io)?;
     Ok(dir)
 }
@@ -348,6 +386,20 @@ mod tests {
             |_row| {},
         );
         assert!(res.is_err(), "no proxy => no net worker (fail-closed)");
+    }
+
+    #[test]
+    fn make_worker_scratch_dir_rejects_overlong_socket_path() {
+        // A deep scratch root whose projected `<dir>/egress.sock` overflows
+        // sockaddr_un.sun_path must be rejected up front with a clear Io error,
+        // not deferred to an opaque bind() failure inside the sidecar. The guard
+        // runs before any mkdir, so the (nonexistent) root needs no setup.
+        let long_root = PathBuf::from(format!("/{}", "x".repeat(2 * SUN_PATH_MAX)));
+        let res = make_worker_scratch_dir(&long_root);
+        assert!(
+            matches!(res, Err(ToolHostError::Io(_))),
+            "overlong scratch root must be rejected with an Io error, got {res:?}"
+        );
     }
 
     #[test]

@@ -215,11 +215,25 @@ fn discover_egress_proxy_bin(exe_dir: Option<&Path>) -> Option<PathBuf> {
     let get_env = |k: &str| std::env::var(k).ok();
     let exists = |p: &Path| p.exists();
     let is_dir = |p: &Path| p.is_dir();
+    discover_egress_proxy_bin_with(&get_env, &exists, &is_dir, exe_dir)
+}
+
+/// Dependency-injected core of [`discover_egress_proxy_bin`]: the env + path
+/// probes arrive as closures so the discovery semantics (override wins;
+/// fail-closed if the override is set-but-not-a-runnable-file; else the
+/// exe-relative sibling) are unit-testable without touching the process
+/// environment or filesystem.
+fn discover_egress_proxy_bin_with(
+    get_env: &dyn Fn(&str) -> Option<String>,
+    exists: &dyn Fn(&Path) -> bool,
+    is_dir: &dyn Fn(&Path) -> bool,
+    exe_dir: Option<&Path>,
+) -> Option<PathBuf> {
     let allowlist = |_t: &str| Vec::new();
     let ctx = ResolveCtx {
-        get_env: &get_env,
-        exists: &exists,
-        is_dir: &is_dir,
+        get_env,
+        exists,
+        is_dir,
         exe_dir,
         allowlist: &allowlist,
     };
@@ -382,5 +396,54 @@ mod tests {
             assert!(!env_flag_enabled(Some(v.to_string())), "{v:?} should disable");
         }
         assert!(!env_flag_enabled(None), "unset should disable");
+    }
+
+    #[test]
+    fn proxy_bin_override_pointing_at_a_runnable_file_wins() {
+        // KASTELLAN_EGRESS_PROXY_BIN set to a runnable file is authoritative,
+        // even when a sibling default also exists.
+        let get_env =
+            |k: &str| (k == ENV_PROXY_BIN).then(|| "/opt/custom/egress-proxy".to_string());
+        let exists = |_p: &Path| true;
+        let is_dir = |_p: &Path| false;
+        let exe = PathBuf::from("/usr/lib/kastellan");
+        let out = discover_egress_proxy_bin_with(&get_env, &exists, &is_dir, Some(exe.as_path()));
+        assert_eq!(out, Some(PathBuf::from("/opt/custom/egress-proxy")));
+    }
+
+    #[test]
+    fn proxy_bin_override_set_but_invalid_fails_closed_without_sibling_fallback() {
+        // The override is set but names a non-existent path. A set-but-invalid
+        // override is fail-closed: we must NOT silently substitute the
+        // exe-relative sibling (which would route through a *different* binary
+        // than the operator named) — `from_env` then maps the `None` to
+        // ProxyBinaryNotFound and the daemon refuses to start.
+        let get_env =
+            |k: &str| (k == ENV_PROXY_BIN).then(|| "/opt/typo/egress-proxy".to_string());
+        // The override path does NOT exist; the sibling default WOULD.
+        let exists = |p: &Path| p != Path::new("/opt/typo/egress-proxy");
+        let is_dir = |_p: &Path| false;
+        let exe = PathBuf::from("/usr/lib/kastellan");
+        let out = discover_egress_proxy_bin_with(&get_env, &exists, &is_dir, Some(exe.as_path()));
+        assert_eq!(
+            out, None,
+            "set-but-invalid override must fail closed, not fall through to the sibling"
+        );
+    }
+
+    #[test]
+    fn proxy_bin_falls_back_to_exe_sibling_when_override_unset() {
+        // No override → the exe-relative `kastellan-worker-egress-proxy` sibling
+        // is used iff it is a runnable file.
+        let get_env = |_k: &str| None;
+        let exists = |_p: &Path| true;
+        let is_dir = |_p: &Path| false;
+        let exe = PathBuf::from("/usr/lib/kastellan");
+        let out = discover_egress_proxy_bin_with(&get_env, &exists, &is_dir, Some(exe.as_path()));
+        assert_eq!(
+            out,
+            Some(exe.join(PROXY_BIN_DEFAULT)),
+            "unset override must use the exe-relative sibling default"
+        );
     }
 }

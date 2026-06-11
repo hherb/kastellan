@@ -41,8 +41,20 @@ planner #200 / handoff #199 / web-fetch #197 merges). This session is on branch 
 (Task 4.4 — the live auto-flip, opt-in default OFF). With the flag unset, the worker-spawn path is **byte-identical** to
 the merged mechanism (existing deployments + Mac e2e unaffected); set `KASTELLAN_EGRESS_FORCE_ROUTING=1` and every
 `Net::Allowlist` worker is force-routed through a per-worker egress-proxy sidecar. Working tree otherwise clean (only
-untracked `docs/essay-medium-draft.md`). Dev box on **macOS**. **Session-end: 1533 / 0 / 7 (workspace, macOS
-skip-as-pass; +12 force-route tests over the 1521 baseline); clippy `-D warnings` clean.**
+untracked `docs/essay-medium-draft.md`). Dev box on **macOS**. **Session-end: 1537 / 0 / 7 (workspace, macOS
+skip-as-pass; +16 force-route tests over the 1521 baseline — +12 in the auto-flip + 4 from the PR #250 review-hardening
+pass); clippy `-D warnings` clean.**
+
+**PR #250 review-hardening (2026-06-11, same branch — `/fixall` on the code-review pass).** Four low-severity findings
+addressed, no behaviour change to the default-OFF path: (1) the defensive `worker.egress == None` arm in
+`spawn_forced_net_worker` now **leaks + logs** the scratch dir instead of `remove_dir_all`-ing one a live worker still
+binds (unreachable, but the safe fallback); (2) **UDS path-length guard** — `make_worker_scratch_dir` rejects up front if
+`<scratch>/egress.sock` would overflow `sockaddr_un.sun_path` (104 macOS / 108 Linux), so a deep
+`KASTELLAN_EGRESS_SCRATCH_DIR` fails with a clear message, not an opaque `bind()`; (3) `discover_egress_proxy_bin`
+refactored into a DI inner (`_with`) so the override-wins / set-but-invalid-fail-closed / sibling-fallback semantics are
+unit-tested (+3); (4) shared `spawn::UDS_FILE_NAME` const removes the duplicated `"egress.sock"` literal. Stale-scratch
+sweep on crash-restart deferred to **[#251](https://github.com/hherb/kastellan/issues/251)** (needs cross-platform
+pid-liveness — land with the DGX in the loop).
 
 **This session — egress proxy SLICE #2 Task 4.4: the live auto-flip (ROADMAP:141; opt-in, default OFF).** Wired the
 merged force-routing mechanism into the live worker-spawn path, gated behind `KASTELLAN_EGRESS_FORCE_ROUTING`. TDD,
@@ -200,12 +212,13 @@ Recent merged history: Option K restart backoff (PR #194); three clean test-lift
 `kastellan.target` bring-up (PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker
 manifest plumbing item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
-**Session-end verification (`feat/egress-force-routing-autoflip`):** `cargo test --workspace --locked` = **1533 / 0 / 7**
-(macOS skip-as-pass; +12 over the slice-#2-mechanism baseline of 1521). `cargo clippy --workspace --all-targets --locked
--D warnings` = clean. New tests this session: `worker_lifecycle::force_route` (9 — force-routable predicate,
-resolve None/Some/fail-closed, env-flag truth-table, routing-by-error-discriminant) + `egress::net_worker` (2 —
-`spawn_forced_net_worker` fails-closed + cleans scratch on failure). The live force-routed happy path is the still-owed
-DGX e2e (Task 4.6, see TOP PICK).
+**Session-end verification (`feat/egress-force-routing-autoflip`):** `cargo test --workspace --locked` = **1537 / 0 / 7**
+(macOS skip-as-pass; +16 over the slice-#2-mechanism baseline of 1521). `cargo clippy --workspace --all-targets --locked
+-D warnings` = clean. New tests this session: `worker_lifecycle::force_route` (12 — force-routable predicate,
+resolve None/Some/fail-closed, env-flag truth-table, routing-by-error-discriminant, + proxy-bin discovery
+override-wins/set-but-invalid-fail-closed/sibling-fallback) + `egress::net_worker` (3 — `spawn_forced_net_worker`
+fails-closed + cleans scratch on failure + rejects an overlong UDS socket path). The live force-routed happy path is the
+still-owed DGX e2e (Task 4.6, see TOP PICK).
 **DGX acceptance still owed (run natively on the DGX over WireGuard SSH — see TOP PICK for the exact commands):** the
 force-routing kernel barrier (`sandbox/tests/linux_force_routing.rs` — worker private netns has no off-allowlist
 route); host↔jail path identity for the bind-mounted `<scratch>/egress.sock` under bwrap; and **#243** — confirm the
@@ -276,7 +289,7 @@ kastellan (Rust workspace, 13 crates, AGPL-3.0)
 
 **Test baselines.** Native-Linux (DGX, PG 18.4 live, rustc 1.96.0): **1327 / 0 / 4**
 on `feat/kastellan-target-bring-up` (+16 over the `cdadea1` baseline of 1311).
-macOS skip-as-pass posture (no `KASTELLAN_PG_BIN_DIR`): **1533 / 0 / 7** on
+macOS skip-as-pass posture (no `KASTELLAN_PG_BIN_DIR`): **1537 / 0 / 7** on
 `feat/egress-force-routing-autoflip` (slice #2 Task 4.4 auto-flip). 3–7 ignored = explicit doctest/real-net markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
 `KASTELLAN_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the
