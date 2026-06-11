@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use http_body_util::BodyExt;
 use hyper::Request;
-use rustls_pki_types::ServerName;
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::{Host, Url};
 
@@ -28,25 +29,70 @@ pub struct ProxyConnectGet {
 }
 
 impl ProxyConnectGet {
-    /// Build the transport. `uds` is the proxy socket path
+    /// Webpki-public-roots constructor, infallible. The `proxy_connect` module is
+    /// `pub(crate)`, and `make_get_inner` now builds the transport via
+    /// `with_trust` (threading the optional MITM CA), so this convenience shim has
+    /// no production caller — it is only used by the round-trip/EOF/403 unit tests
+    /// below, hence `#[cfg(test)]`. `uds` is the proxy socket path
     /// (`KASTELLAN_EGRESS_PROXY_UDS`).
+    #[cfg(test)]
     pub fn new(user_agent: &str, uds: PathBuf) -> Self {
+        // Delegating to `with_trust(.., None)` keeps a single TLS-build path.
+        // The `None` branch is infallible (it can only `extend` webpki roots),
+        // so the `expect` here can never fire — proven by `new_without_ca_uses_webpki`.
+        Self::with_trust(user_agent, uds, None).expect("webpki-only config is infallible")
+    }
+
+    /// Build the transport with an explicit trust posture. When `ca_path` is
+    /// `Some`, the worker trusts ONLY that CA (the per-instance MITM CA) and
+    /// public roots are dropped — egress fails closed unless the proxy
+    /// terminates the TLS. A set-but-unreadable/invalid CA is an error (fail
+    /// closed; never silently fall back to webpki). When `None`, webpki roots
+    /// (slice #1/#2 back-compat, dev/no-proxy).
+    pub fn with_trust(
+        user_agent: &str,
+        uds: PathBuf,
+        ca_path: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("current-thread runtime");
 
-        // Build TLS config once — cloning ~150 webpki roots on every HTTPS call
-        // is measurably expensive; store it behind an Arc.
+        // Build the trust anchors once — cloning the root set on every HTTPS
+        // call is measurably expensive; the resulting config lives behind an Arc.
         let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        match ca_path {
+            Some(path) => {
+                // MITM posture: trust ONLY this per-instance CA. Any failure to
+                // read/parse/add it is fatal — we must NOT fall back to webpki,
+                // or the fail-closed guarantee (egress only via the proxy that
+                // terminates TLS) would silently degrade to "trust the world".
+                let pem = std::fs::read(&path)
+                    .map_err(|e| anyhow::anyhow!("read MITM CA {path:?}: {e}"))?;
+                let mut added = 0usize;
+                for der in CertificateDer::pem_slice_iter(&pem) {
+                    let der = der.map_err(|e| anyhow::anyhow!("parse MITM CA {path:?}: {e}"))?;
+                    root_store
+                        .add(der)
+                        .map_err(|e| anyhow::anyhow!("add MITM CA {path:?}: {e}"))?;
+                    added += 1;
+                }
+                if added == 0 {
+                    anyhow::bail!("MITM CA {path:?} contained no certificates");
+                }
+            }
+            None => {
+                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            }
+        }
         let tls = Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(root_store)
                 .with_no_client_auth(),
         );
 
-        Self { user_agent: user_agent.to_string(), uds, tls, rt }
+        Ok(Self { user_agent: user_agent.to_string(), uds, tls, rt })
     }
 
     async fn get_async(&self, url: &Url) -> Result<RawResponse, String> {
@@ -328,6 +374,23 @@ mod tests {
             let _ = conn.read(&mut req).unwrap();
             conn.write_all(origin_response).unwrap();
         });
+    }
+
+    #[test]
+    fn new_with_unreadable_ca_fails_closed() {
+        let res = ProxyConnectGet::with_trust(
+            "kastellan-test/0",
+            PathBuf::from("/tmp/x.sock"),
+            Some(PathBuf::from("/nonexistent/ca.pem")),
+        );
+        assert!(res.is_err(), "set-but-unreadable CA must fail closed");
+    }
+
+    #[test]
+    fn new_without_ca_uses_webpki() {
+        // No CA → infallible webpki path (back-compat with slice #1/#2).
+        let g = ProxyConnectGet::with_trust("kastellan-test/0", PathBuf::from("/tmp/x.sock"), None);
+        assert!(g.is_ok());
     }
 
     #[test]

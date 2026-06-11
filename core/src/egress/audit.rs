@@ -17,6 +17,10 @@ struct DecisionLine {
     resolved_ip: Option<String>,
     verdict: String,
     reason: String,
+    /// Whether the proxy MITM-terminated this connection's TLS (slice #3a).
+    /// Absent on slice #1/#2 lines → defaults false, so old streams still parse.
+    #[serde(default)]
+    tls_intercepted: bool,
 }
 
 /// An audit row ready for `kastellan_db::audit::insert` (actor + action + payload).
@@ -69,6 +73,7 @@ pub fn decision_to_audit(line: &str) -> Option<EgressAuditRow> {
             "port": d.port,
             "resolved_ip": d.resolved_ip,
             "reason": d.reason,
+            "tls_intercepted": d.tls_intercepted,
         }),
     })
 }
@@ -85,6 +90,21 @@ mod tests {
         assert_eq!(row.action, "egress.allowed");
         assert_eq!(row.payload["host"], "a.example.com");
         assert_eq!(row.payload["resolved_ip"], "203.0.113.5");
+    }
+
+    #[test]
+    fn allowed_row_carries_tls_intercepted_flag() {
+        let line = r#"{"worker":"web-fetch","host":"a.com","port":443,"resolved_ip":"1.2.3.4","verdict":"allowed","reason":"ok","tls_intercepted":true}"#;
+        let row = decision_to_audit(line).unwrap();
+        assert_eq!(row.payload["tls_intercepted"], true);
+    }
+
+    #[test]
+    fn missing_tls_intercepted_defaults_false() {
+        // Slice #1/#2 lines (no field) must still parse, defaulting to false.
+        let line = r#"{"worker":"w","host":"h","port":443,"resolved_ip":null,"verdict":"allowed","reason":"ok"}"#;
+        let row = decision_to_audit(line).unwrap();
+        assert_eq!(row.payload["tls_intercepted"], false);
     }
 
     #[test]

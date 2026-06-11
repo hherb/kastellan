@@ -1,6 +1,6 @@
 [package]
 name        = "kastellan-worker-egress-proxy"
-description = "Per-worker egress proxy: host-allowlist + SSRF/IP-pinning boundary enforcement over a UDS. Slice #1 (no TLS interception)."
+description = "Per-worker egress proxy: host-allowlist + SSRF/IP-pinning boundary + TLS interception over a UDS."
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -19,3 +19,12 @@ kastellan-worker-web-common = { path = "../web-common", version = "0.1.0" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
+tokio        = { version = "1",    features = ["rt", "net", "io-util", "time", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls       = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+rcgen        = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+webpki-roots = "1"
+# POSIX recv(MSG_PEEK) for the non-consuming first-tunnel-byte peek (std's
+# UnixStream::peek is still unstable). MIT OR Apache-2.0.
+libc         = "0.2"
