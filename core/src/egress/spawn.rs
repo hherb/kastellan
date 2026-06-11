@@ -13,6 +13,11 @@ const ENV_UDS: &str = "KASTELLAN_EGRESS_PROXY_UDS";
 const ENV_ALLOWLIST: &str = "KASTELLAN_EGRESS_PROXY_ALLOWLIST";
 const ENV_WORKER: &str = "KASTELLAN_EGRESS_PROXY_WORKER";
 
+/// Basename of the per-worker sidecar UDS under the scratch dir. Shared so the
+/// force-routing scratch-dir guard (`net_worker::make_worker_scratch_dir`) can
+/// project the exact socket path the sidecar will `bind()`.
+pub(crate) const UDS_FILE_NAME: &str = "egress.sock";
+
 /// How long `spawn_sidecar` waits for the proxy to `bind()` its UDS.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(25);
@@ -27,6 +32,14 @@ pub struct SidecarHandle {
 impl SidecarHandle {
     /// Kill the sidecar and reap it. Idempotent-ish (errors ignored).
     pub fn shutdown(mut self) {
+        self.terminate();
+    }
+
+    /// Kill + reap the sidecar and remove its UDS, in place. Idempotent-ish
+    /// (errors ignored). Shared by [`shutdown`](Self::shutdown) and by the
+    /// coupled-teardown `Drop` of `egress::net_worker::EgressSidecar`, which
+    /// holds the handle by value and cannot consume `self`.
+    pub fn terminate(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.uds_path);
@@ -43,7 +56,7 @@ impl SidecarHandle {
 /// the DNS resolver files + the binary, fs_write for the scratch dir (to create
 /// the UDS), and the env contract.
 pub fn proxy_policy(binary: &Path, allowlist: &[String], scratch: &Path, worker: &str) -> SandboxPolicy {
-    let uds = scratch.join("egress.sock");
+    let uds = scratch.join(UDS_FILE_NAME);
     let allow_json = serde_json::to_string(allowlist).expect("Vec<String> serializes");
     SandboxPolicy {
         fs_read: vec![
@@ -64,6 +77,7 @@ pub fn proxy_policy(binary: &Path, allowlist: &[String], scratch: &Path, worker:
             (ENV_ALLOWLIST.to_string(), allow_json),
             (ENV_WORKER.to_string(), worker.to_string()),
         ],
+        proxy_uds: None,
     }
 }
 
@@ -77,7 +91,7 @@ pub fn spawn_sidecar(
     worker: &str,
 ) -> anyhow::Result<SidecarHandle> {
     let policy = proxy_policy(binary, allowlist, scratch, worker);
-    let uds_path = scratch.join("egress.sock");
+    let uds_path = scratch.join(UDS_FILE_NAME);
     let _ = std::fs::remove_file(&uds_path);
 
     let program = binary.to_string_lossy();

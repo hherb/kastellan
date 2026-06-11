@@ -45,20 +45,25 @@ pub enum Target {
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Decide what to do with `host:port`, given the allowlist and a resolver.
-/// - Literal-IP target: allowed iff the allowlist accepts the literal string;
-///   the SSRF range check is **skipped** (operator allowlisted that exact addr).
-/// - Hostname target: allowed iff the allowlist accepts the name; then every
-///   resolved IP is range-checked and the first non-denied one is pinned.
+/// - Literal-IP target: allowed iff the allowlist accepts the literal `host:port`
+///   endpoint; the SSRF range check is **skipped** (operator allowlisted that
+///   exact addr).
+/// - Hostname target: allowed iff the allowlist accepts the `host:port`
+///   endpoint; then every resolved IP is range-checked and the first non-denied
+///   one is pinned.
 ///
-/// **Port scope (slice #1):** the allowlist matches the *host* only — `port` is
-/// parsed and pinned for the dial but is **not** itself constrained, so an
-/// allowlisted host is reachable on any port. Port-scoped endpoints (e.g.
-/// `host:443`) are deferred to slice #2, where the proxy goes live and the
-/// `tool_allowlists` → proxy plumbing is built (needs its own design — tracked
-/// in #241). Until then nothing routes through the proxy, so this is inert.
+/// **Port scope (#241):** the allowlist matches the `host:port` *endpoint* — an
+/// allowlisted host is reachable only on its declared port(s). A bare-host
+/// entry (no `:port`) still grants any port (the weaker, back-compat form); when
+/// the match succeeds via such an entry, the allowed decision's reason is
+/// flagged via [`allowed_reason`] so a port-unconstrained grant is visible in
+/// the audit trail rather than silent.
 pub fn decide(host: &str, port: u16, allow: &HostAllowlist, resolver: &dyn Resolve) -> Target {
-    if !allow.is_allowed(host) {
-        return Target::Block(Verdict::BlockedAllowlist, format!("{host} not on allowlist"));
+    if !allow.is_allowed_endpoint(host, port) {
+        return Target::Block(
+            Verdict::BlockedAllowlist,
+            format!("{host}:{port} not on allowlist"),
+        );
     }
     if let Ok(literal) = host.parse::<IpAddr>() {
         // Operator-allowlisted literal address — intent is explicit; no DNS,
@@ -73,6 +78,19 @@ pub fn decide(host: &str, port: u16, allow: &HostAllowlist, resolver: &dyn Resol
     match ips.into_iter().find(|ip| !is_denied_range(*ip)) {
         Some(ip) => Target::Dial(ip),
         None => Target::Block(Verdict::BlockedSsrf, format!("{host} resolves only to denied ranges")),
+    }
+}
+
+/// The audit reason for an allowed CONNECT. When `host` was permitted by a
+/// port-scoped entry the reason is the plain `"ok"`; when it was permitted only
+/// by a bare host-only (port-unconstrained) entry the reason is the distinct
+/// marker `"allowed:host-only-entry"`, so the weaker grant is visible in
+/// `audit_log` rather than indistinguishable from a port-scoped allow.
+pub fn allowed_reason(allow: &HostAllowlist, host: &str) -> &'static str {
+    if allow.is_port_scoped(host) {
+        "ok"
+    } else {
+        "allowed:host-only-entry"
     }
 }
 
@@ -123,7 +141,8 @@ pub fn handle_conn(
             };
             reporter.report(Decision {
                 worker: worker.into(), host: host.clone(), port,
-                resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed, reason: "ok".into(),
+                resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
+                reason: allowed_reason(allow, &host).into(),
             });
             if client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").is_ok() {
                 tunnel(client, upstream);

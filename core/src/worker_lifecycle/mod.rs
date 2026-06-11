@@ -17,11 +17,13 @@
 //!   - `RestartBackoff` — operator-tunable exponential backoff configuration.
 
 pub mod composite;
+pub mod force_route;
 pub mod idle_timeout;
 pub mod manager;
 pub mod types;
 
 pub use composite::CompositeLifecycle;
+pub use force_route::{resolve_force_routing, ForceRoutingConfig, ProxyBinaryNotFound};
 pub use idle_timeout::RestartBackoff;
 pub use manager::{IdleTimeoutLifecycle, SingleUseLifecycle, WorkerHandle, WorkerLifecycleManager};
 pub use types::{Contract, IdleTimeoutCaps, Lifecycle, LifecycleValidationError};

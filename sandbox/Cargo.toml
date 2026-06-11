@@ -54,3 +54,13 @@ name = "mach_probe"
 path = "tests/fixtures/mach_probe.rs"
 test = false
 doc = false
+
+# Test fixture: Unix-domain-socket connectivity probe used by
+# seatbelt_uds_probe's gating test (egress-proxy slice #2 / ROADMAP:141).
+# Connects to the UDS path given as argv[1]; exits 0 on success, 1 on failure.
+# Built into target/debug/uds_probe by `cargo build`.
+[[bin]]
+name = "uds_probe"
+path = "tests/fixtures/uds_probe.rs"
+test = false
+doc = false

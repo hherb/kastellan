@@ -11,7 +11,7 @@ use serde::Deserialize;
 use url::Url;
 
 use kastellan_worker_web_common::allowlist::HostAllowlist;
-use kastellan_worker_web_common::http::{HttpGet, ReqwestGet};
+use kastellan_worker_web_common::http::{make_get, HttpGet};
 
 use crate::extract::{extract, main_type};
 use crate::fetch::{drive, FetchError};
@@ -94,12 +94,14 @@ pub struct WebFetchHandler<T: HttpGet> {
     transport: T,
 }
 
-impl WebFetchHandler<ReqwestGet> {
-    /// Build from env: allowlist JSON + real reqwest transport.
+impl WebFetchHandler<Box<dyn HttpGet>> {
+    /// Build from env: allowlist JSON + env-selected transport.
+    /// When `KASTELLAN_EGRESS_PROXY_UDS` is set, uses `ProxyConnectGet`;
+    /// otherwise uses `ReqwestGet`.
     pub fn from_env() -> anyhow::Result<Self> {
         let raw = std::env::var("KASTELLAN_WEB_FETCH_ALLOWLIST").unwrap_or_else(|_| "[]".to_string());
         let allowlist = HostAllowlist::from_env_json(&raw)?;
-        let transport = ReqwestGet::new("kastellan-web-fetch/0")?;
+        let transport = make_get("kastellan-web-fetch/0")?;
         Ok(Self { allowlist, transport })
     }
 }

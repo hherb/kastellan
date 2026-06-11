@@ -467,6 +467,7 @@ where
     Ok(SupervisedWorker {
         client,
         _watchdog: watchdog,
+        egress: None,
     })
 }
 
@@ -477,10 +478,17 @@ where
 /// closing stdio pipes. `_watchdog` drops second, setting the watchdog's
 /// cancel flag. The watchdog thread checks the flag at most every 50 ms
 /// and exits without firing SIGKILL — so closing a worker normally never
-/// produces a kill on a reused PID.
+/// produces a kill on a reused PID. `egress` drops last: for a force-routed
+/// net worker (slice #2) it kills the egress-proxy sidecar *after* the
+/// worker's pipes have closed, so the worker stops talking to the proxy
+/// before the proxy dies. Plain (`Net::Deny` / legacy) workers leave it `None`.
 pub struct SupervisedWorker {
     client: Client,
     _watchdog: Option<watchdog::WatchdogGuard>,
+    /// `Some` only for a force-routed net worker; set by
+    /// `crate::egress::net_worker::spawn_net_worker`. Additive — its `Drop`
+    /// tears the coupled egress-proxy sidecar down 1:1 with this worker.
+    pub(crate) egress: Option<crate::egress::net_worker::EgressSidecar>,
 }
 
 impl SupervisedWorker {
@@ -513,7 +521,11 @@ impl SupervisedWorker {
         let SupervisedWorker {
             client,
             _watchdog: _drop_at_scope_end,
+            egress: _drop_egress_at_scope_end,
         } = self;
+        // `client.close()` runs first (waits for the worker to exit, closing
+        // its pipes); `_drop_egress_at_scope_end` then drops at end of scope,
+        // killing the sidecar *after* the worker has stopped.
         client.close()
     }
 

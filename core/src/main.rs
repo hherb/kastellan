@@ -105,10 +105,6 @@ async fn main() -> Result<()> {
     // that register only `SingleUse` entries (the default — gliner-relex
     // is opt-in via env), behaviour is byte-equivalent to the prior
     // single-use-only wiring.
-    let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
-        kastellan_core::worker_lifecycle::CompositeLifecycle::new(Arc::clone(&sandboxes)),
-    );
-
     // Directory of the running `kastellan` binary — seeds exe-relative sibling
     // discovery so plain workers (e.g. shell-exec) are found in a flat install
     // with no KASTELLAN_*_BIN env set. None (rare current_exe() failure) ⇒
@@ -116,6 +112,32 @@ async fn main() -> Result<()> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+    // Egress force-routing (slice #2 Task 4.4) — opt-in via
+    // KASTELLAN_EGRESS_FORCE_ROUTING. Off ⇒ `None` ⇒ the lifecycle's spawn path
+    // is byte-identical to the legacy direct-spawn behaviour (existing
+    // deployments + the Mac e2e are unaffected). On ⇒ every `Net::Allowlist`
+    // worker is force-routed through a per-worker egress-proxy sidecar. Built
+    // here because it needs the runtime pool + handle (decision audit sink) and
+    // exe_dir (proxy-binary discovery). Fail-closed: enabled-but-no-proxy-binary
+    // returns Err and aborts startup rather than running net workers unrouted.
+    let force_routing = kastellan_core::worker_lifecycle::force_route::from_env(
+        pool.clone(),
+        tokio::runtime::Handle::current(),
+        exe_dir.as_deref(),
+    )
+    .context("building egress force-routing config")?;
+    if force_routing.is_some() {
+        info!("egress force-routing ENABLED — Net::Allowlist workers route through the egress proxy");
+    }
+
+    let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
+        kastellan_core::worker_lifecycle::CompositeLifecycle::with_backoff_and_force_routing(
+            Arc::clone(&sandboxes),
+            kastellan_core::worker_lifecycle::RestartBackoff::default(),
+            force_routing,
+        ),
+    );
 
     // Tool registry: each tool the scheduler may dispatch is opted in via its
     // WorkerManifest (see kastellan_core::registry_build::WORKER_MANIFESTS). The

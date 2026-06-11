@@ -28,6 +28,10 @@ impl HttpGet for FakeGet {
             .pop_front()
             .ok_or_else(|| "no more canned responses".to_string())
     }
+
+    fn transport_kind(&self) -> &'static str {
+        "fake"
+    }
 }
 
 /// Build a [`HostAllowlist`] from bare string entries.

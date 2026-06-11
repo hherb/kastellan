@@ -368,6 +368,7 @@ fn macos_container_argv_with_init_runs_alpine_cleanly() {
         cpu_quota_pct: None,
         tasks_max: None,
         env: vec![],
+        proxy_uds: None,
     };
     let mut child = match backend.spawn_under_policy(
         &policy,
