@@ -121,9 +121,10 @@ impl GuardProfile {
     /// Fail-closed mapping from a worker name to its guard profile. Only
     /// the doc-fetching net workers relax; `shell-exec` and every
     /// unrecognised tool stay [`GuardProfile::Strict`]. Adding a worker to
-    /// the `Relaxed` arm is the whole change needed when (e.g.)
-    /// `browser-driver` or an `mcp` worker ships; forgetting to is safe
-    /// (it over-blocks, never under-blocks).
+    /// the `Relaxed` arm is the whole change needed when (e.g.) an `mcp`
+    /// worker ships; forgetting to is safe (it over-blocks, never
+    /// under-blocks). `browser-driver` joined the `Relaxed` arm in slice #1:
+    /// rendered page DOMs legitimately carry chat-template-like tokens.
     ///
     /// Residual risk: `Relaxed` lets a lone chat-template token through, so
     /// an attacker who delivers a payload via fetched content using only
@@ -134,7 +135,7 @@ impl GuardProfile {
     /// fetching workers because they carry an arbitrary-content channel.
     pub fn for_tool(tool: &str) -> GuardProfile {
         match tool {
-            "web-fetch" | "web-search" => GuardProfile::Relaxed,
+            "web-fetch" | "web-search" | "browser-driver" => GuardProfile::Relaxed,
             _ => GuardProfile::Strict,
         }
     }

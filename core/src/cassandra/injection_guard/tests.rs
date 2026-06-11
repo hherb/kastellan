@@ -416,6 +416,8 @@ fn strict_still_blocks_lone_chat_template_token() {
 fn for_tool_relaxes_doc_fetching_net_workers() {
     assert_eq!(GuardProfile::for_tool("web-fetch"), GuardProfile::Relaxed);
     assert_eq!(GuardProfile::for_tool("web-search"), GuardProfile::Relaxed);
+    // browser-driver joined in slice #1: rendered DOMs carry chat-template tokens.
+    assert_eq!(GuardProfile::for_tool("browser-driver"), GuardProfile::Relaxed);
 }
 
 #[test]
@@ -423,6 +425,5 @@ fn for_tool_defaults_to_strict_fail_closed() {
     // shell-exec, every unrecognised worker, and the empty string all
     // stay Strict — a new worker is strict-by-default until listed.
     assert_eq!(GuardProfile::for_tool("shell-exec"), GuardProfile::Strict);
-    assert_eq!(GuardProfile::for_tool("browser-driver"), GuardProfile::Strict);
     assert_eq!(GuardProfile::for_tool(""), GuardProfile::Strict);
 }
