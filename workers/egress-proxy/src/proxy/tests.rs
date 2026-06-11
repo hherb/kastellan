@@ -11,6 +11,22 @@ use kastellan_worker_web_common::allowlist::HostAllowlist;
 use super::*;
 use crate::report::{Decision, Reporter, Verdict};
 
+/// rustls needs a process-default CryptoProvider before any ClientConfig/ServerConfig
+/// builder runs. Idempotent across the test binary.
+fn install_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+fn test_ca() -> crate::ca::CaMaterial {
+    crate::ca::generate_ca().unwrap()
+}
+fn webpki_upstream() -> std::sync::Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    std::sync::Arc::new(
+        rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth(),
+    )
+}
+
 fn al(entries: &[&str]) -> HostAllowlist {
     HostAllowlist::from_env_json(&serde_json::to_string(entries).unwrap()).unwrap()
 }
@@ -94,7 +110,13 @@ fn handle_conn_tunnels_allowed_literal_origin() {
     let proxy_thread = std::thread::spawn(move || {
         let (conn, _) = listener.accept().unwrap();
         let mut reporter = VecReporter::default();
-        handle_conn(conn, "web-fetch", &allow, &StdResolve, &mut reporter);
+        // Construct CA/cache/ctx inside the thread so they own their lifetime
+        // across the spawned proxy thread (no cross-thread borrow).
+        install_provider();
+        let ca = test_ca();
+        let mut cache = crate::leaf_cache::LeafCache::new();
+        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream() };
+        handle_conn(conn, "web-fetch", &allow, &StdResolve, &mut reporter, &mut mitm);
         reporter.0
     });
 
@@ -113,6 +135,7 @@ fn handle_conn_tunnels_allowed_literal_origin() {
     let decisions = proxy_thread.join().unwrap();
     assert_eq!(decisions.len(), 1);
     assert_eq!(decisions[0].verdict, Verdict::Allowed);
+    assert!(!decisions[0].tls_intercepted, "plaintext tunnel is pass-through, not MITM");
     let _ = std::fs::remove_file(&sock);
 }
 
@@ -127,7 +150,11 @@ fn handle_conn_reports_block_for_off_allowlist() {
     let proxy_thread = std::thread::spawn(move || {
         let (conn, _) = listener.accept().unwrap();
         let mut reporter = VecReporter::default();
-        handle_conn(conn, "web-fetch", &allow, &StdResolve, &mut reporter);
+        install_provider();
+        let ca = test_ca();
+        let mut cache = crate::leaf_cache::LeafCache::new();
+        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream() };
+        handle_conn(conn, "web-fetch", &allow, &StdResolve, &mut reporter, &mut mitm);
         reporter.0
     });
 

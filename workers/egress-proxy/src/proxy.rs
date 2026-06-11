@@ -94,15 +94,28 @@ pub fn allowed_reason(allow: &HostAllowlist, host: &str) -> &'static str {
     }
 }
 
+/// The TLS-interception context threaded into `handle_conn`: the per-instance CA
+/// (signs leaves), the per-connection leaf cache, and the upstream trust config
+/// (the REAL origin roots — webpki in production). Bundled so the handler arg
+/// count stays sane.
+pub struct MitmCtx<'a> {
+    pub ca: &'a crate::ca::CaMaterial,
+    pub leaf_cache: &'a mut crate::leaf_cache::LeafCache,
+    pub upstream_tls: std::sync::Arc<rustls::ClientConfig>,
+}
+
 /// Handle one accepted UDS connection end-to-end. Reads the CONNECT line,
-/// decides, and on `Dial` pins the IP, replies 200, and bidi-copies until EOF.
-/// Always emits exactly one decision to `reporter`.
+/// decides, and on `Dial` pins the IP, replies 200, peeks the first tunnel byte,
+/// then branches: MITM-terminate (TLS ClientHello) or plaintext pass-through.
+/// Always emits exactly one decision to `reporter` (transport failures after an
+/// allow may emit an additional allowed-but-failed record).
 pub fn handle_conn(
     mut client: UnixStream,
     worker: &str,
     allow: &HostAllowlist,
     resolver: &dyn Resolve,
     reporter: &mut dyn Reporter,
+    mitm: &mut MitmCtx<'_>,
 ) {
     let line = match read_request_line(&mut client) {
         Ok(l) => l,
@@ -126,6 +139,8 @@ pub fn handle_conn(
             let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n");
         }
         Target::Dial(ip) => {
+            // Connect upstream FIRST (preserves the 502-on-connect-fail behaviour
+            // and the pinned-IP SSRF guarantee), THEN reply 200, THEN peek.
             let upstream = match TcpStream::connect_timeout(&SocketAddr::new(ip, port), CONNECT_TIMEOUT) {
                 Ok(s) => s,
                 Err(e) => {
@@ -133,28 +148,97 @@ pub fn handle_conn(
                     reporter.report(Decision {
                         worker: worker.into(), host: host.clone(), port,
                         resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
-                        reason: format!("connect_failed: {e}"),
+                        reason: format!("connect_failed: {e}"), tls_intercepted: false,
                     });
                     let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n");
                     return;
                 }
             };
-            reporter.report(Decision {
-                worker: worker.into(), host: host.clone(), port,
-                resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
-                reason: allowed_reason(allow, &host).into(),
-            });
-            if client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").is_ok() {
+            if client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").is_err() {
+                return;
+            }
+            // Peek the first tunnel byte (non-consuming). The CONNECT round-trip
+            // guarantees the worker only sends after the 200, so this is the
+            // first tunnel byte. EOF / error → treat as pass-through.
+            let is_tls = peek_first_byte(&client)
+                .map(crate::mitm::looks_like_tls)
+                .unwrap_or(false);
+            if is_tls {
+                // MITM branch: the sync `upstream` proved reachability + the 502
+                // path; `intercept` re-dials a tokio stream itself, so drop it.
+                let _ = upstream;
+                reporter.report(Decision {
+                    worker: worker.into(), host: host.clone(), port,
+                    resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
+                    reason: allowed_reason(allow, &host).into(), tls_intercepted: true,
+                });
+                run_mitm(client, ip, port, &host, mitm, worker, reporter);
+            } else {
+                reporter.report(Decision {
+                    worker: worker.into(), host: host.clone(), port,
+                    resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
+                    reason: allowed_reason(allow, &host).into(), tls_intercepted: false,
+                });
                 tunnel(client, upstream);
             }
         }
     }
 }
 
+/// Bridge the sync accept path to the async MITM. Builds a per-connection
+/// current-thread runtime (mirrors web-common's ProxyConnectGet) and runs
+/// `mitm::intercept`. A handshake/copy error is reported as an allowed-but-failed
+/// decision (the policy verdict was Allowed; this is a transport failure).
+fn run_mitm(
+    client: UnixStream,
+    ip: IpAddr,
+    port: u16,
+    host: &str,
+    mitm: &mut MitmCtx<'_>,
+    worker: &str,
+    reporter: &mut dyn Reporter,
+) {
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            reporter.report(Decision {
+                worker: worker.into(), host: host.into(), port,
+                resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
+                reason: format!("mitm_runtime_failed: {e}"), tls_intercepted: true,
+            });
+            return;
+        }
+    };
+    let upstream_tls = std::sync::Arc::clone(&mitm.upstream_tls);
+    let res = rt.block_on(async move {
+        // Convert the accepted std UnixStream into a tokio handle inside the
+        // runtime (requires nonblocking + an active reactor).
+        client.set_nonblocking(true).map_err(|e| format!("client nonblocking: {e}"))?;
+        let client = tokio::net::UnixStream::from_std(client)
+            .map_err(|e| format!("client from_std: {e}"))?;
+        crate::mitm::intercept(
+            client,
+            SocketAddr::new(ip, port),
+            host,
+            mitm.ca,
+            mitm.leaf_cache,
+            upstream_tls,
+        )
+        .await
+    });
+    if let Err(e) = res {
+        reporter.report(Decision {
+            worker: worker.into(), host: host.into(), port,
+            resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
+            reason: format!("mitm_failed: {e}"), tls_intercepted: true,
+        });
+    }
+}
+
 fn blocked(worker: &str, host: &str, port: u16, verdict: Verdict, reason: &str) -> Decision {
     Decision {
         worker: worker.into(), host: host.into(), port,
-        resolved_ip: None, verdict, reason: reason.into(),
+        resolved_ip: None, verdict, reason: reason.into(), tls_intercepted: false,
     }
 }
 
@@ -183,6 +267,30 @@ fn read_request_line(client: &mut UnixStream) -> std::io::Result<String> {
         }
     }
     Ok(line)
+}
+
+/// Non-consuming peek of the first tunnel byte via `recv(MSG_PEEK)` on the raw
+/// fd (std's `UnixStream::peek` is still unstable). Blocks until ≥1 byte is
+/// available or the peer half-closes. Returns `Some(byte)` on a 1-byte peek,
+/// `None` on EOF / error (caller treats that as plaintext pass-through).
+fn peek_first_byte(client: &UnixStream) -> Option<u8> {
+    use std::os::unix::io::AsRawFd;
+    let mut byte = 0u8;
+    // SAFETY: `client` owns the fd for the duration of this call; we pass a valid
+    // 1-byte buffer and read the return value before trusting `byte`.
+    let n = unsafe {
+        libc::recv(
+            client.as_raw_fd(),
+            &mut byte as *mut u8 as *mut libc::c_void,
+            1,
+            libc::MSG_PEEK,
+        )
+    };
+    if n == 1 {
+        Some(byte)
+    } else {
+        None
+    }
 }
 
 /// Bidirectional copy between the client UDS and the upstream TCP stream until

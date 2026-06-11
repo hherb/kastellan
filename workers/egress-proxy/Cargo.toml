@@ -24,3 +24,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls       = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 rcgen        = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+webpki-roots = "1"
+# POSIX recv(MSG_PEEK) for the non-consuming first-tunnel-byte peek (std's
+# UnixStream::peek is still unstable). MIT OR Apache-2.0.
+libc         = "0.2"
+
+[dev-dependencies]
+webpki-roots = "1"
