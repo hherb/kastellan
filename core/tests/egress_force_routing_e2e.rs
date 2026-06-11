@@ -4,21 +4,18 @@
 //! force-routes the worker onto it (private netns / Seatbelt deny-outbound +
 //! the bound proxy UDS), and tears the pair down 1:1.
 //!
-//! This is the live twin of the lower-level probes:
-//!   - `sandbox/tests/linux_force_routing.rs` proves the kernel barrier with a
-//!     hand-built policy via the raw backend;
-//!   - `core/tests/egress_proxy_e2e.rs` proves the proxy's allow/block/audit via
-//!     `spawn_sidecar` + a host CONNECT client.
-//! Here we go through the **production coupling** (`spawn_forced_net_worker` —
-//! the path the Task 4.4 auto-flip wires into the live worker-spawn sites) and
-//! assert, end to end:
-//!   (a) an allowlisted loopback origin round-trips through the coupling's
-//!       sidecar;
-//!   (c) an off-allowlist CONNECT is blocked with `403`;
-//!       + each decision reaches the bundle's `on_decision` ingest sink;
-//!       + dropping the worker tears the sidecar down 1:1 (its UDS stops serving);
-//!   (b) a force-routed worker's private netns has **no direct route** (Linux);
-//!   (d) the live `pg_decision_sink` persists decisions to `audit_log` (PG-gated).
+//! This is the live twin of the lower-level probes. `sandbox/tests/linux_force_routing.rs`
+//! proves the kernel barrier with a hand-built policy via the raw backend;
+//! `core/tests/egress_proxy_e2e.rs` proves the proxy's allow/block/audit via
+//! `spawn_sidecar` + a host CONNECT client. Here we go through the **production
+//! coupling** (`spawn_forced_net_worker` — the path the Task 4.4 auto-flip wires
+//! into the live worker-spawn sites) and assert, end to end (single-line items
+//! so the doc stays a flat list):
+//!
+//! - (a) an allowlisted loopback origin round-trips through the coupling's sidecar;
+//! - (c) an off-allowlist CONNECT is blocked with `403`, each decision reaches the bundle's `on_decision` ingest sink, and dropping the worker tears the sidecar down 1:1 (its UDS stops serving);
+//! - (b) a force-routed worker's private netns has **no direct route** (Linux);
+//! - (d) the live `pg_decision_sink` persists decisions to `audit_log` (PG-gated).
 //!
 //! `[SKIP]`s cleanly when the sandbox / proxy binary / Postgres are missing —
 //! same skip-as-pass posture as `egress_proxy_e2e.rs`. Compiled on Linux + macOS
