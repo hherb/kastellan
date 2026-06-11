@@ -430,12 +430,14 @@ mod tests {
     fn default_scratch_root_is_short_on_macos() {
         let root = default_egress_scratch_root();
         assert_eq!(root, PathBuf::from("/tmp"));
-        // Worst-case projected UDS (max pid + max seq) must fit sun_path.
+        // Worst-case projected UDS (max pid + max seq), plus the NUL
+        // terminator, must fit the 104-byte `sun_path` — i.e. the path itself
+        // must be < 104 bytes (`len + 1 <= 104`).
         let projected = root
             .join("egress-4294967295-18446744073709551615")
             .join("egress.sock");
         assert!(
-            projected.as_os_str().len() + 1 <= 104,
+            projected.as_os_str().len() < 104,
             "default macOS scratch root too deep for sockaddr_un.sun_path: {}",
             projected.display()
         );

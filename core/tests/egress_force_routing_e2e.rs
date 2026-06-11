@@ -138,7 +138,11 @@ fn forced_coupling_enforces_allowlist_and_ingests_decisions() {
         // A long-lived program keeps the worker (and so the sidecar) up while we
         // drive the proxy from the host. The worker itself doesn't use the UDS
         // here — assertion (b) covers the in-jail no-route path separately.
-        program: "/usr/bin/sleep",
+        // `/bin/sleep` (not `/usr/bin/sleep`) so the path resolves on both
+        // macOS (sleep lives in `/bin`) and Linux (usrmerge symlinks `/bin`);
+        // otherwise the worker can't exec on macOS and this test would only
+        // pass by accident (it drives the proxy host-side, not via the worker).
+        program: "/bin/sleep",
         args: &["30"],
         wall_clock_ms: None,
     };

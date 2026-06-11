@@ -33,6 +33,13 @@
   spawn would fail-closed); now `/tmp` on macOS (Linux `temp_dir()` is already `/tmp`), pinned by a macOS unit test.
 - **CLAUDE.md** bwrap-argv invariant updated: force-routed `Net::Allowlist` + `proxy_uds` (the new default) → private
   netns + bound UDS, not `--share-net`.
+- **Review follow-up (two macOS-only gaps the DGX-only verification missed):** (1) the cross-platform e2e hard-coded the
+  worker program as `/usr/bin/sleep`, which doesn't exist on macOS (it's `/bin/sleep`) — so the worker couldn't exec there
+  and the test only passed by accident (it drives the proxy host-side); now `/bin/sleep` (resolves on both, via Linux
+  usrmerge), and the `forced_coupling_…` e2e now genuinely runs the worker-alive path on macOS (verified locally with the
+  proxy bin built). (2) the new `#[cfg(macos)]` `sun_path` unit test tripped clippy `int_plus_one` (`len() + 1 <= 104`),
+  never caught because the acceptance clippy ran on the DGX where that test isn't compiled; rewritten as `len() < 104`.
+  `cargo clippy -p kastellan-core --all-targets -D warnings` is now clean on macOS too.
 
 **Prior session — HANDOVER prune** (archived pre-prune snapshot at
 [`archive/handover_20260611_pre-prune.md`](archive/handover_20260611_pre-prune.md); compressed 2026-06-08…06-11 sessions
