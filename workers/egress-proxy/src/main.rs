@@ -12,6 +12,7 @@
 //!   KASTELLAN_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
 
 mod ca;
+mod leaf_cache;
 mod mitm;
 mod proxy;
 mod report;
