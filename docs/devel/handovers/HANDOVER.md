@@ -6,6 +6,19 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
+**Last updated:** 2026-06-11 (public website **kastellan.dev** — `site/` static pages + Cloudflare Pages docs; branch `claude/relaxed-davinci-ddf2ed`, PR pending; on macOS).
+
+**This session — public website kastellan.dev (`site/`, Cloudflare Pages).** Brainstormed (operator-approved
+wireframes), spec'd, and built the public site: `site/{index,roadmap,security,contributing}.html` + shared
+`style.css` (light "B1 Pure Clean" system, indigo accent, one dark band; AA-contrast audited) + retitled **SVG**
+security diagrams (the PNG exports still said "hhagent" — the site now serves kastellan-branded SVGs from
+`docs/*.svg` sources, −1.2 MB) + `scripts/site/check-site.sh` (page/meta/nav/local-link suite; hard-fails if tidy
+is absent, loud-`[SKIP]`s Apple's pre-HTML5 tidy) + `site/README.md` (**operator action after merge:** Cloudflare
+Pages → connect `hherb/kastellan`, preset None, no build command, output dir `site`, branch `main`, then attach
+`kastellan.dev`). Content is curated by hand — checklist item 7 below keeps `site/roadmap.html` fresh. Spec/plan:
+`docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
+architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
+
 **Last updated:** 2026-06-10 (rename merged as PR #244; **crates.io 0.1.0 release published**, tag `v0.1.0`; on macOS).
 
 **crates.io release (2026-06-10, same day, after the rename below).** All **12 publishable crates are
@@ -34,7 +47,7 @@ redirect), update local checkout dir + remote, and move the Claude memory dir
 This session is on branch **`feat/egress-proxy-slice2-force-routing`** (2 **docs-only** commits: spec `a7e2ee6` + plan `89c0ff6` on top of `main`), **PR pending — spec-only scope, no code this session.**
 Work was done in the isolated worktree `.claude/worktrees/egress-slice2` because the **primary worktree (`/Users/hherb/src/kastellan`) had concurrent crates.io-publish activity** (branch `chore/crates-io-publish-metadata`) hopping `HEAD`. Working tree clean. Dev box on **macOS**.
 
-**This session — egress proxy SLICE #2 DESIGN (spec + plan only, NO code — ROADMAP:141).** Brainstormed and wrote
+**Prior session — egress proxy SLICE #2 DESIGN (spec + plan only, NO code — ROADMAP:141).** Brainstormed and wrote
 the design + the bite-sized TDD implementation plan to make the slice-#1 proxy **live and unbypassable**. Locked-in
 decisions:
 - **Transport:** two `HttpGet` impls behind an env-selected `web-common::http::make_get` factory — keep `ReqwestGet`
