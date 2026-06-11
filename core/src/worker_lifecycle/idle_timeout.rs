@@ -18,7 +18,8 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
 
 use crate::scheduler::tool_dispatch::ToolEntry;
-use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
+use crate::tool_host::{SupervisedWorker, ToolHostError, WorkerSpec};
+use crate::worker_lifecycle::force_route::{spawn_worker_maybe_forced, ForceRoutingConfig};
 use crate::worker_lifecycle::manager::WorkerHandle;
 use crate::worker_lifecycle::types::Lifecycle;
 
@@ -368,6 +369,7 @@ pub(crate) async fn acquire_impl(
     registry: &WarmRegistry,
     tool_name: &str,
     entry: &ToolEntry,
+    force: Option<&ForceRoutingConfig>,
 ) -> Result<WorkerHandle, ToolHostError> {
     let caps = match &entry.lifecycle {
         Lifecycle::IdleTimeout { caps, contract: _ } => caps.clone(),
@@ -464,7 +466,11 @@ pub(crate) async fn acquire_impl(
         args: &[],
         wall_clock_ms: entry.wall_clock_ms,
     };
-    let worker = spawn_worker(sandbox, &spec)?;
+    // Force-route `Net::Allowlist` workers through an egress-proxy sidecar when
+    // configured; otherwise byte-identical to the legacy `spawn_worker`. A
+    // warm-reused worker (above) keeps the sidecar it was first spawned with —
+    // only this cold-spawn path attaches one.
+    let worker = spawn_worker_maybe_forced(force, sandbox, &spec, tool_name)?;
     let spawned_at = Instant::now();
     Ok(WorkerHandle::idle_timeout(
         worker,
