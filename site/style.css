@@ -691,7 +691,7 @@ figure.diagram figcaption {
 }
 
 /* ---- Defence-in-depth ordered list (security.html) --------------------------------- */
-/* Gives the <ol> breathing room and nudges the counter out of the text flow */
+/* Gives the <ol> breathing room; padding-left on li adds a gap between marker and text */
 
 ol.defence {
   margin: 1.75rem 0;
@@ -701,7 +701,6 @@ ol.defence {
 ol.defence li {
   margin-bottom: 1.25rem;
   padding-left: 0.5rem;
-  color: var(--body);
 }
 
 ol.defence li:last-child {

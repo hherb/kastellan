@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 2280" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <title>kastellan — Request flow through the security layers</title>
+  <desc>Vertical flowchart of a user instruction from channel ingress through plan formulation, CASSANDRA review pipeline (Stages -1..4), dispatcher chokepoint, sandboxed worker execution, egress proxy, and response — with block, advisory, and escalation branches.</desc>
+
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#234e7e"/>
+    </marker>
+    <marker id="arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b22222"/>
+    </marker>
+    <marker id="arrAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b8860b"/>
+    </marker>
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#246b3a"/>
+    </marker>
+    <marker id="arrGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+    </marker>
+    <linearGradient id="cassGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff7d6"/>
+      <stop offset="100%" stop-color="#ffe9a8"/>
+    </linearGradient>
+    <linearGradient id="coreGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#eaf3fb"/>
+      <stop offset="100%" stop-color="#d3e6f5"/>
+    </linearGradient>
+    <linearGradient id="sandGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fde6e6"/>
+      <stop offset="100%" stop-color="#f5c2c2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Title -->
+  <text x="750" y="32" text-anchor="middle" font-size="22" font-weight="bold">kastellan — Request flow</text>
+  <text x="750" y="56" text-anchor="middle" font-size="14" fill="#555">from user instruction to final output (or CASSANDRA blockage)</text>
+
+  <!-- Column headers -->
+  <text x="220" y="90" text-anchor="middle" font-size="12" font-weight="bold" fill="#555">audit / data classification</text>
+  <text x="700" y="90" text-anchor="middle" font-size="12" font-weight="bold" fill="#234e7e">happy path  (main flow)</text>
+  <text x="1240" y="90" text-anchor="middle" font-size="12" font-weight="bold" fill="#b22222">block / escalate branches</text>
+
+  <!-- Background lanes (subtle) -->
+  <rect x="40" y="100" width="360" height="2100" fill="#fafafa" stroke="none"/>
+  <rect x="1080" y="100" width="380" height="2100" fill="#fff6f6" stroke="none"/>
+
+  <!-- ===== Node 1: User sends instruction ===== -->
+  <ellipse cx="700" cy="140" rx="160" ry="28" fill="#eef2ee" stroke="#557755" stroke-width="2"/>
+  <text x="700" y="138" text-anchor="middle" font-weight="bold">User sends instruction</text>
+  <text x="700" y="154" text-anchor="middle" font-size="11" fill="#555">Telegram / Signal / email / webhook</text>
+
+  <line x1="700" y1="168" x2="700" y2="200" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ===== Node 2: Channel adapter ===== -->
+  <rect x="540" y="200" width="320" height="64" rx="8" fill="#eef2ee" stroke="#557755" stroke-width="1.5"/>
+  <text x="700" y="226" text-anchor="middle" font-weight="bold">Channel adapter (own process)</text>
+  <text x="700" y="244" text-anchor="middle" font-size="11" fill="#555">authenticate sender, normalise, forward to core</text>
+
+  <!-- Audit note -->
+  <rect x="60" y="200" width="320" height="64" rx="6" fill="#fff" stroke="#999" stroke-dasharray="3,3"/>
+  <text x="220" y="222" text-anchor="middle" font-size="11" font-weight="bold">audit_log: channel_in</text>
+  <text x="220" y="240" text-anchor="middle" font-size="11" fill="#555">sender, payload hash, classification</text>
+  <text x="220" y="256" text-anchor="middle" font-size="11" fill="#555">(append-only, UPDATE/DELETE denied)</text>
+
+  <line x1="700" y1="264" x2="700" y2="294" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ===== Node 3: Scheduler / plan formulation ===== -->
+  <rect x="540" y="294" width="320" height="86" rx="8" fill="url(#coreGrad)" stroke="#234e7e" stroke-width="1.5"/>
+  <text x="700" y="318" text-anchor="middle" font-weight="bold">Core: scheduler builds context</text>
+  <text x="700" y="336" text-anchor="middle" font-size="11" fill="#555">recall memory (classification inherits),</text>
+  <text x="700" y="352" text-anchor="middle" font-size="11" fill="#555">read prior session handoff doc</text>
+  <text x="700" y="370" text-anchor="middle" font-size="11" font-weight="bold" fill="#234e7e">agent (LLM) emits Plan</text>
+
+  <rect x="60" y="294" width="320" height="86" rx="6" fill="#fff" stroke="#999" stroke-dasharray="3,3"/>
+  <text x="220" y="316" text-anchor="middle" font-size="11" font-weight="bold">data ceiling computed</text>
+  <text x="220" y="334" text-anchor="middle" font-size="11" fill="#555">Public · Personal · ClinicalConfidential</text>
+  <text x="220" y="350" text-anchor="middle" font-size="11" fill="#555">· Secret  (max across all inputs)</text>
+  <text x="220" y="368" text-anchor="middle" font-size="11" fill="#555">propagates forward through every step</text>
+
+  <line x1="700" y1="380" x2="700" y2="410" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ===== CASSANDRA pipeline band ===== -->
+  <rect x="480" y="410" width="440" height="930" rx="12" fill="url(#cassGrad)" stroke="#b8860b" stroke-width="2"/>
+  <text x="700" y="436" text-anchor="middle" font-weight="bold" font-size="15" fill="#7a5a00">CASSANDRA  —  plan review pipeline</text>
+  <text x="700" y="454" text-anchor="middle" font-size="11" fill="#7a5a00" font-style="italic">each stage may exit early; one verdict per plan</text>
+
+  <!-- Stage -1 Constitutional Guard (decision) -->
+  <polygon points="700,476 880,556 700,636 520,556" fill="#fff" stroke="#b8860b" stroke-width="1.5"/>
+  <text x="700" y="540" text-anchor="middle" font-weight="bold">Stage −1</text>
+  <text x="700" y="558" text-anchor="middle" font-weight="bold">Constitutional Guard</text>
+  <text x="700" y="576" text-anchor="middle" font-size="11">(deterministic, Rust)</text>
+
+  <!-- Side exit: Tier 0 -->
+  <line x1="880" y1="556" x2="1100" y2="556" stroke="#b22222" stroke-width="2" marker-end="url(#arrRed)"/>
+  <text x="990" y="548" text-anchor="middle" font-size="11" fill="#b22222" font-weight="bold">violates a principle</text>
+  <rect x="1100" y="528" width="320" height="60" rx="8" fill="#222" stroke="#000"/>
+  <text x="1260" y="552" text-anchor="middle" font-weight="bold" fill="#fff">Tier 0  Constitutional Block</text>
+  <text x="1260" y="572" text-anchor="middle" font-size="11" fill="#ddd">notify user; NO override · ever</text>
+
+  <line x1="700" y1="636" x2="700" y2="668" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <text x="712" y="658" font-size="11" fill="#7a5a00">PASS</text>
+
+  <!-- Stage 0 Deterministic Policy -->
+  <polygon points="700,668 880,748 700,828 520,748" fill="#fff" stroke="#b8860b" stroke-width="1.5"/>
+  <text x="700" y="732" text-anchor="middle" font-weight="bold">Stage 0</text>
+  <text x="700" y="750" text-anchor="middle" font-weight="bold">Deterministic Policy</text>
+  <text x="700" y="768" text-anchor="middle" font-size="11">allow / deny lists</text>
+
+  <line x1="880" y1="748" x2="1100" y2="748" stroke="#b22222" stroke-width="2" marker-end="url(#arrRed)"/>
+  <text x="990" y="740" text-anchor="middle" font-size="11" fill="#b22222" font-weight="bold">classification &gt; destination</text>
+  <rect x="1100" y="720" width="320" height="60" rx="8" fill="#c9302c" stroke="#5a0000"/>
+  <text x="1260" y="744" text-anchor="middle" font-weight="bold" fill="#fff">Tier 3  Block</text>
+  <text x="1260" y="764" text-anchor="middle" font-size="11" fill="#fff">user may resubmit a fixed plan</text>
+
+  <line x1="700" y1="828" x2="700" y2="858" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+
+  <!-- Stage 1 Fast Classifier (passthrough) -->
+  <rect x="560" y="858" width="280" height="50" rx="6" fill="#fff" stroke="#b8860b" stroke-dasharray="4,3"/>
+  <text x="700" y="880" text-anchor="middle" font-weight="bold">Stage 1 · Fast Classifier</text>
+  <text x="700" y="896" text-anchor="middle" font-size="11" font-style="italic" fill="#555">(future hook · pass-through today)</text>
+
+  <line x1="700" y1="908" x2="700" y2="938" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+
+  <!-- Stage 2 Privacy Gate -->
+  <polygon points="700,938 880,1018 700,1098 520,1018" fill="#fff" stroke="#b8860b" stroke-width="1.5"/>
+  <text x="700" y="1004" text-anchor="middle" font-weight="bold">Stage 2</text>
+  <text x="700" y="1022" text-anchor="middle" font-weight="bold">Privacy Gate</text>
+  <text x="700" y="1040" text-anchor="middle" font-size="11">touches Clinical data?</text>
+
+  <line x1="880" y1="1018" x2="1100" y2="1018" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <text x="990" y="1010" text-anchor="middle" font-size="11" fill="#7a5a00" font-weight="bold">yes + outbound</text>
+  <rect x="1100" y="980" width="320" height="76" rx="8" fill="#fffbe6" stroke="#b8860b"/>
+  <text x="1260" y="1002" text-anchor="middle" font-weight="bold" fill="#7a5a00">anonymiser worker (BERT)</text>
+  <text x="1260" y="1020" text-anchor="middle" font-size="11">scrub if possible →  reclassify</text>
+  <text x="1260" y="1036" text-anchor="middle" font-size="11">else restrict Stage 3 to LOCAL</text>
+  <text x="1260" y="1052" text-anchor="middle" font-size="11" fill="#555">runs in its own sandbox</text>
+
+  <!-- anonymiser feeds back into Stage 3 -->
+  <path d="M 1260 1056 Q 1000 1110 820 1177" fill="none" stroke="#b8860b" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arrAmber)"/>
+
+  <line x1="700" y1="1098" x2="700" y2="1128" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+
+  <!-- Stage 3 LLM Semantic Review -->
+  <polygon points="700,1128 920,1218 700,1308 480,1218" fill="#fff" stroke="#b8860b" stroke-width="1.5"/>
+  <text x="700" y="1196" text-anchor="middle" font-weight="bold">Stage 3</text>
+  <text x="700" y="1214" text-anchor="middle" font-weight="bold">LLM Semantic Review</text>
+  <text x="700" y="1232" text-anchor="middle" font-size="11">frontier reviewer  ·  local fallback</text>
+  <text x="700" y="1248" text-anchor="middle" font-size="11" fill="#555">user instruction + plan summary</text>
+  <text x="700" y="1264" text-anchor="middle" font-size="11" fill="#555">(no raw clinical data)</text>
+
+  <!-- Stage 3 verdict branches -->
+  <!-- BLOCK -->
+  <line x1="852" y1="1190" x2="1100" y2="1140" stroke="#b22222" stroke-width="2" marker-end="url(#arrRed)"/>
+  <text x="1010" y="1156" text-anchor="middle" font-size="11" fill="#b22222" font-weight="bold">BLOCK / CONSTITUTIONAL</text>
+  <rect x="1100" y="1110" width="320" height="44" rx="8" fill="#c9302c" stroke="#5a0000"/>
+  <text x="1260" y="1138" text-anchor="middle" font-weight="bold" fill="#fff">Tier 3 / Tier 0  →  audit + notify user</text>
+
+  <!-- ESCALATE -->
+  <line x1="920" y1="1218" x2="1100" y2="1218" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <text x="1010" y="1210" text-anchor="middle" font-size="11" fill="#7a5a00" font-weight="bold">ESCALATE</text>
+  <rect x="1100" y="1190" width="320" height="64" rx="8" fill="#f3a536" stroke="#7a4a00"/>
+  <text x="1260" y="1212" text-anchor="middle" font-weight="bold" fill="#3a2300">Tier 2  →  user via channel bus</text>
+  <text x="1260" y="1230" text-anchor="middle" font-size="11" fill="#3a2300">one-tap approve / deny</text>
+  <text x="1260" y="1246" text-anchor="middle" font-size="11" fill="#3a2300">timeout (15 min default) = DENY</text>
+
+  <!-- ADVISORY (loops back to plan rebuild) -->
+  <line x1="852" y1="1246" x2="1100" y2="1290" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <text x="1010" y="1280" text-anchor="middle" font-size="11" fill="#7a5a00" font-weight="bold">ADVISORY</text>
+  <rect x="1100" y="1280" width="320" height="60" rx="8" fill="#f5d76e" stroke="#a07a00"/>
+  <text x="1260" y="1302" text-anchor="middle" font-weight="bold">Tier 1  →  inject concern into agent</text>
+  <text x="1260" y="1320" text-anchor="middle" font-size="11">agent revises plan  OR  proceeds</text>
+  <text x="1260" y="1334" text-anchor="middle" font-size="11" fill="#555">(repeat advisory  →  Tier 2)</text>
+
+  <!-- Loop arrow back to plan formulation (advisory revise) -->
+  <path d="M 1420 1310 L 1470 1310 L 1470 320 L 860 320" fill="none" stroke="#b8860b" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arrAmber)"/>
+  <text x="1450" y="800" font-size="11" fill="#7a5a00" transform="rotate(-90 1450 800)">revise → re-submit plan (full re-review)</text>
+
+  <!-- APPROVE down -->
+  <line x1="700" y1="1308" x2="700" y2="1340" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <text x="712" y="1332" font-size="11" fill="#7a5a00" font-weight="bold">APPROVE</text>
+
+  <!-- Stage 4 (parallel longitudinal) -->
+  <rect x="60" y="1180" width="320" height="100" rx="8" fill="#fffbe6" stroke="#b8860b" stroke-dasharray="4,3"/>
+  <text x="220" y="1204" text-anchor="middle" font-weight="bold" fill="#7a5a00">Stage 4 · Longitudinal (periodic)</text>
+  <text x="220" y="1224" text-anchor="middle" font-size="11">CASSANDRA's own Postgres role</text>
+  <text x="220" y="1240" text-anchor="middle" font-size="11">drift · advisory fatigue · destination</text>
+  <text x="220" y="1256" text-anchor="middle" font-size="11">creep · user-anomaly &amp; fit-state</text>
+  <text x="220" y="1272" text-anchor="middle" font-size="11" font-style="italic" fill="#555">may raise Tier 2 or heighten verify</text>
+  <line x1="380" y1="1230" x2="480" y2="1218" stroke="#b8860b" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arrAmber)"/>
+
+  <!-- ===== Dispatcher chokepoint ===== -->
+  <rect x="500" y="1340" width="400" height="64" rx="8" fill="#234e7e" stroke="#1a3a5c" stroke-width="2"/>
+  <text x="700" y="1366" text-anchor="middle" font-weight="bold" fill="#fff">DISPATCHER CHOKEPOINT</text>
+  <text x="700" y="1386" text-anchor="middle" font-size="11" fill="#dde7f4">tool_host::dispatch()  ·  sealed WorkerCommand</text>
+
+  <line x1="700" y1="1404" x2="700" y2="1434" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Per-step loop header -->
+  <rect x="500" y="1434" width="400" height="36" rx="6" fill="#eef2f7" stroke="#234e7e"/>
+  <text x="700" y="1458" text-anchor="middle" font-weight="bold" fill="#234e7e">for each step in approved plan ↻</text>
+
+  <line x1="700" y1="1470" x2="700" y2="1500" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Runtime verification decision -->
+  <polygon points="700,1500 900,1580 700,1660 500,1580" fill="#fff" stroke="#234e7e" stroke-width="1.5"/>
+  <text x="700" y="1566" text-anchor="middle" font-weight="bold">Runtime verification</text>
+  <text x="700" y="1584" text-anchor="middle" font-size="11">tool + params match</text>
+  <text x="700" y="1600" text-anchor="middle" font-size="11">approved step?</text>
+
+  <!-- Mismatch branch -->
+  <line x1="900" y1="1580" x2="1100" y2="1580" stroke="#b22222" stroke-width="2" marker-end="url(#arrRed)"/>
+  <text x="1000" y="1572" text-anchor="middle" font-size="11" fill="#b22222" font-weight="bold">deviation</text>
+  <rect x="1100" y="1554" width="320" height="56" rx="8" fill="#c9302c" stroke="#5a0000"/>
+  <text x="1260" y="1576" text-anchor="middle" font-weight="bold" fill="#fff">Tier 3  Block  /  re-review</text>
+  <text x="1260" y="1594" text-anchor="middle" font-size="11" fill="#fff">"ship of Theseus" defence</text>
+
+  <line x1="700" y1="1660" x2="700" y2="1690" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="712" y="1682" font-size="11" fill="#234e7e" font-weight="bold">match</text>
+
+  <!-- ===== Spawn worker (sandbox) ===== -->
+  <rect x="480" y="1690" width="440" height="170" rx="10" fill="url(#sandGrad)" stroke="#b22222" stroke-width="2"/>
+  <text x="700" y="1714" text-anchor="middle" font-weight="bold" fill="#5a0000">Spawn tool worker in sandbox</text>
+  <text x="700" y="1734" text-anchor="middle" font-size="11" fill="#5a0000">own OS process · own scratch FS · no Postgres</text>
+  <line x1="490" y1="1746" x2="910" y2="1746" stroke="#b22222" stroke-dasharray="3,3"/>
+  <text x="700" y="1764" text-anchor="middle" font-size="11" font-weight="bold">parent-side: bwrap (Linux) / sandbox-exec (macOS)</text>
+  <text x="700" y="1780" text-anchor="middle" font-size="11" font-weight="bold">worker-side: Landlock (FS) + seccomp-bpf (syscalls)</text>
+  <text x="700" y="1796" text-anchor="middle" font-size="11" font-weight="bold">resource cap: cgroup v2 (MemoryMax, CPUQuota)</text>
+  <text x="700" y="1816" text-anchor="middle" font-size="11" fill="#5a0000">tool executes  →  returns result over JSON-RPC stdio</text>
+  <text x="700" y="1834" text-anchor="middle" font-size="11" font-style="italic" fill="#5a0000">denied syscall  →  SIGSYS · denied FS  →  EACCES</text>
+  <text x="700" y="1850" text-anchor="middle" font-size="11" font-style="italic" fill="#5a0000">OOM under MemoryMax  →  kernel kill</text>
+
+  <!-- Audit row for dispatch -->
+  <rect x="60" y="1690" width="320" height="170" rx="6" fill="#fff" stroke="#999" stroke-dasharray="3,3"/>
+  <text x="220" y="1712" text-anchor="middle" font-size="11" font-weight="bold">audit_log: dispatch</text>
+  <text x="220" y="1730" text-anchor="middle" font-size="11" fill="#555">{req, result|err, ms}</text>
+  <text x="220" y="1748" text-anchor="middle" font-size="11" fill="#555">SHA-256 envelope · NOTIFY mirror</text>
+  <text x="220" y="1772" text-anchor="middle" font-size="11" font-weight="bold">Postgres role: kastellan_runtime</text>
+  <text x="220" y="1790" text-anchor="middle" font-size="11" fill="#555">INSERT ok · UPDATE/DELETE denied</text>
+  <text x="220" y="1814" text-anchor="middle" font-size="11" font-weight="bold" fill="#7a5a00">CASSANDRA role: separate</text>
+  <text x="220" y="1830" text-anchor="middle" font-size="11" fill="#7a5a00">workers see neither role</text>
+
+  <!-- If outbound network step, go through egress proxy -->
+  <line x1="700" y1="1860" x2="700" y2="1890" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Egress proxy decision -->
+  <polygon points="700,1890 900,1970 700,2050 500,1970" fill="#eaf6ee" stroke="#246b3a" stroke-width="2"/>
+  <text x="700" y="1954" text-anchor="middle" font-weight="bold" fill="#246b3a">Egress proxy scan</text>
+  <text x="700" y="1972" text-anchor="middle" font-size="11" fill="#246b3a">host allowlist · TLS pin</text>
+  <text x="700" y="1988" text-anchor="middle" font-size="11" fill="#246b3a">credential-leak scan</text>
+  <text x="700" y="2004" text-anchor="middle" font-size="11" fill="#246b3a">declassifier (final PII net)</text>
+
+  <line x1="900" y1="1970" x2="1100" y2="1970" stroke="#b22222" stroke-width="2" marker-end="url(#arrRed)"/>
+  <text x="1000" y="1962" text-anchor="middle" font-size="11" fill="#b22222" font-weight="bold">leak / unanonymised</text>
+  <rect x="1100" y="1942" width="320" height="56" rx="8" fill="#c9302c" stroke="#5a0000"/>
+  <text x="1260" y="1964" text-anchor="middle" font-weight="bold" fill="#fff">Block at trust boundary</text>
+  <text x="1260" y="1982" text-anchor="middle" font-size="11" fill="#fff">audit + Tier 2 alert to user</text>
+
+  <line x1="700" y1="2050" x2="700" y2="2080" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="712" y="2072" font-size="11" fill="#246b3a" font-weight="bold">clean</text>
+
+  <!-- Loop back if more steps -->
+  <path d="M 500 1970 Q 420 1970 420 1452 Q 420 1452 500 1452" fill="none" stroke="#234e7e" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <text x="406" y="1700" font-size="11" fill="#234e7e" transform="rotate(-90 406 1700)">more steps  →  next iteration</text>
+
+  <!-- ===== Response composition ===== -->
+  <rect x="540" y="2080" width="320" height="70" rx="8" fill="url(#coreGrad)" stroke="#234e7e" stroke-width="1.5"/>
+  <text x="700" y="2104" text-anchor="middle" font-weight="bold">Core composes response</text>
+  <text x="700" y="2122" text-anchor="middle" font-size="11" fill="#555">LLM router (local · or frontier if</text>
+  <text x="700" y="2138" text-anchor="middle" font-size="11" fill="#555">privacy gate allowed)</text>
+
+  <line x1="700" y1="2150" x2="700" y2="2180" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ===== Final output ===== -->
+  <ellipse cx="700" cy="2210" rx="200" ry="28" fill="#eaf6ee" stroke="#246b3a" stroke-width="2"/>
+  <text x="700" y="2208" text-anchor="middle" font-weight="bold" fill="#246b3a">User receives result</text>
+  <text x="700" y="2224" text-anchor="middle" font-size="11" fill="#246b3a">via same channel adapter</text>
+
+  <!-- Final audit -->
+  <rect x="60" y="2082" width="320" height="68" rx="6" fill="#fff" stroke="#999" stroke-dasharray="3,3"/>
+  <text x="220" y="2104" text-anchor="middle" font-size="11" font-weight="bold">audit_log: channel_out</text>
+  <text x="220" y="2122" text-anchor="middle" font-size="11" fill="#555">CASSANDRA writes session-handoff</text>
+  <text x="220" y="2138" text-anchor="middle" font-size="11" fill="#555">document (data lineage preserved)</text>
+
+  <!-- ===== Legend ===== -->
+  <rect x="1080" y="2080" width="380" height="180" rx="8" fill="#fff" stroke="#999"/>
+  <text x="1270" y="2102" text-anchor="middle" font-weight="bold">Legend</text>
+
+  <ellipse cx="1110" cy="2122" rx="14" ry="8" fill="#eef2ee" stroke="#557755"/>
+  <text x="1135" y="2126" font-size="11">terminal · user-facing channel</text>
+
+  <rect x="1098" y="2138" width="28" height="14" rx="4" fill="url(#coreGrad)" stroke="#234e7e"/>
+  <text x="1135" y="2150" font-size="11">core process (Rust, trusted)</text>
+
+  <polygon points="1110,2162 1126,2174 1110,2186 1094,2174" fill="#fff" stroke="#b8860b"/>
+  <text x="1135" y="2178" font-size="11">CASSANDRA decision point</text>
+
+  <rect x="1098" y="2192" width="28" height="14" rx="4" fill="url(#sandGrad)" stroke="#b22222"/>
+  <text x="1135" y="2204" font-size="11">sandboxed worker (untrusted)</text>
+
+  <rect x="1098" y="2214" width="28" height="14" rx="4" fill="#c9302c" stroke="#5a0000"/>
+  <text x="1135" y="2226" font-size="11">block · request stops here</text>
+
+  <rect x="1098" y="2236" width="28" height="14" rx="4" fill="#eaf6ee" stroke="#246b3a"/>
+  <text x="1135" y="2248" font-size="11">trust-boundary scanner</text>
+
+</svg>
