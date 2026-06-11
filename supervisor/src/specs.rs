@@ -80,7 +80,19 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
         name: CORE_SERVICE_NAME.into(),
         program: binary.to_path_buf(),
         args: vec![],
-        env: vec![],
+        // Egress force-routing is on by default in the supervised deployment
+        // (egress proxy slice #2): every `Net::Allowlist` worker is routed
+        // through a per-worker egress-proxy sidecar with no direct network
+        // route. **Fail-closed** — the daemon refuses to start if the
+        // `kastellan-worker-egress-proxy` binary isn't installed beside it
+        // (see `worker_lifecycle::force_route::from_env`), so a packaged
+        // deployment must ship the proxy alongside the core binary. Operators
+        // can override via the unit's `EnvironmentFile` (set to `0`) for a
+        // bring-up without the proxy.
+        env: vec![(
+            "KASTELLAN_EGRESS_FORCE_ROUTING".to_string(),
+            "1".to_string(),
+        )],
         working_dir: None,
         keep_alive: true,
         stdout_log: Some(log_dir.join(format!("{CORE_SERVICE_NAME}.out"))),
@@ -212,15 +224,22 @@ mod tests {
         assert!(spec.args.is_empty(), "daemon takes no flags yet");
     }
 
-    /// Defends against accidentally injecting env that would override
-    /// the daemon's RUST_LOG default or leak host config.
+    /// The unit injects exactly one env var: the egress force-routing
+    /// opt-in (slice #2), on by default in the supervised deployment. Pin
+    /// that it is present and is the *only* injected var — so a regression
+    /// that drops the secure default (or starts leaking other host config)
+    /// trips this test.
     #[test]
-    fn core_service_spec_env_is_empty() {
+    fn core_service_spec_enables_egress_force_routing() {
         let spec = core_service_spec(
             Path::new("/usr/local/bin/kastellan"),
             Path::new("/tmp"),
         );
-        assert!(spec.env.is_empty(), "no env injection by default");
+        assert_eq!(
+            spec.env,
+            vec![("KASTELLAN_EGRESS_FORCE_ROUTING".to_string(), "1".to_string())],
+            "the core unit must enable egress force-routing by default, and inject nothing else"
+        );
     }
 
     /// The daemon doesn't depend on cwd; not setting one keeps the

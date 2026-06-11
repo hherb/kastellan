@@ -200,11 +200,33 @@ pub fn from_env(
     let proxy_bin = discover_egress_proxy_bin(exe_dir);
     let scratch_root = std::env::var_os(ENV_SCRATCH_DIR)
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+        .unwrap_or_else(default_egress_scratch_root);
     let make_sink: DecisionSinkFactory = Box::new(move || {
         Box::new(pg_decision_sink(pool.clone(), handle.clone()))
     });
     Ok(resolve_force_routing(true, proxy_bin, scratch_root, make_sink)?.map(Arc::new))
+}
+
+/// Default per-worker sidecar scratch root (when `KASTELLAN_EGRESS_SCRATCH_DIR`
+/// is unset).
+///
+/// The sidecar binds its UDS at `<root>/egress-<pid>-<seq>/egress.sock`, which
+/// must fit `sockaddr_un.sun_path` (104 bytes on macOS, 108 on Linux). macOS's
+/// `std::env::temp_dir()` (`$TMPDIR`, e.g. `/var/folders/…/T/`) is ~50 chars
+/// deep and overflows once that nesting is added — so a force-routed spawn there
+/// would fail-closed at the UDS-path-length guard. Default to the short, stable
+/// `/tmp` on macOS instead (operators can still override with
+/// `KASTELLAN_EGRESS_SCRATCH_DIR`). On Linux `temp_dir()` is already `/tmp`, so
+/// the default is unchanged there.
+fn default_egress_scratch_root() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/tmp")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::temp_dir()
+    }
 }
 
 /// Resolve the egress-proxy binary path the same way plain workers are found:
@@ -396,6 +418,29 @@ mod tests {
             assert!(!env_flag_enabled(Some(v.to_string())), "{v:?} should disable");
         }
         assert!(!env_flag_enabled(None), "unset should disable");
+    }
+
+    /// macOS: the default scratch root must be short enough that the nested
+    /// `egress-<pid>-<seq>/egress.sock` still fits the 104-byte
+    /// `sockaddr_un.sun_path`. macOS's `$TMPDIR` is too deep, so we default to
+    /// `/tmp`; pin that so a regression back to `temp_dir()` (which would make
+    /// every force-routed spawn fail-closed on macOS) trips here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_scratch_root_is_short_on_macos() {
+        let root = default_egress_scratch_root();
+        assert_eq!(root, PathBuf::from("/tmp"));
+        // Worst-case projected UDS (max pid + max seq), plus the NUL
+        // terminator, must fit the 104-byte `sun_path` — i.e. the path itself
+        // must be < 104 bytes (`len + 1 <= 104`).
+        let projected = root
+            .join("egress-4294967295-18446744073709551615")
+            .join("egress.sock");
+        assert!(
+            projected.as_os_str().len() < 104,
+            "default macOS scratch root too deep for sockaddr_un.sun_path: {}",
+            projected.display()
+        );
     }
 
     #[test]

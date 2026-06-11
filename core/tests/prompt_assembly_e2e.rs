@@ -148,10 +148,27 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
         assert_eq!(result.l1_count, 0, "no rows seeded: {result:?}");
         assert_eq!(result.recalled_count, 0,
                    "build() with no recall context defaults to recalled_count = 0; got: {result:?}");
-        assert_eq!(
-            result.system_prompt, "<base>\nBASE BODY\n</base>\n",
-            "empty-DB build must return just the <base> block"
+        // The `<handoff>` block is always present (PR #200 — planner
+        // fetch_handoff surfacing), so "empty DB" no longer means a bare
+        // `<base>`; it means no *memory-derived* blocks precede `<base>`.
+        // Assert that structurally rather than byte-pinning the handoff text:
+        // the unit tests in `assemble/tests.rs` already byte-pin it against the
+        // source-of-truth `render_handoff_block()` helper, which is crate-private
+        // and so not reachable from this integration test.
+        assert!(
+            result.system_prompt.starts_with("<handoff>\n"),
+            "the always-present <handoff> block must lead the prompt; got: {result:?}"
         );
+        assert!(
+            result.system_prompt.ends_with("<base>\nBASE BODY\n</base>\n"),
+            "the <base> block must be terminal; got: {result:?}"
+        );
+        for absent in ["<l0_meta_rules>", "<l1_insights>", "<skills>", "<recalled>"] {
+            assert!(
+                !result.system_prompt.contains(absent),
+                "empty-DB build must contain no memory-derived blocks, found {absent}; got: {result:?}"
+            );
+        }
 
         pool.close().await;
     });
