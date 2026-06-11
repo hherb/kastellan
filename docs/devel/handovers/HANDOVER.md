@@ -513,6 +513,9 @@ sessions even when the prose is correct. Follow the steps in this order:
 4. **Refresh "Working state"** — anything new under stubs, anything that became real.
 5. **Tick the matching items off in [`../ROADMAP.md`](../ROADMAP.md)** with the commit hash.
 6. **Commit both files together** with a `docs(handover): ...` message.
+7. **If a milestone shipped:** does `site/roadmap.html` (timeline + "Last
+   updated" stamp, and the landing-page status numbers) need a one-line
+   update? See `site/README.md`.
 
 ### Pruning convention
 
