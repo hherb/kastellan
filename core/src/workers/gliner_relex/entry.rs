@@ -149,6 +149,7 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         cpu_quota_pct: Some(400),
         tasks_max: Some(64),
         env: build_runtime_env(env),
+        proxy_uds: None,
     };
 
     ToolEntry {
@@ -202,6 +203,7 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         cpu_quota_pct: Some(400),
         tasks_max: Some(64),
         env: build_runtime_env(env),
+        proxy_uds: None,
     };
 
     let image = env

@@ -114,7 +114,16 @@ impl SandboxBackend for MacosSeatbelt {
         program: &str,
         args: &[&str],
     ) -> Result<Child, SandboxError> {
-        for p in policy.fs_read.iter().chain(policy.fs_write.iter()) {
+        // proxy_uds is interpolated into the profile as a `(path-literal ...)`
+        // rule just like fs_read/fs_write, so it must pass the same absolute +
+        // injection-foreclosing checks — otherwise it would be the one policy
+        // path that skips the guard the comment below promises.
+        for p in policy
+            .fs_read
+            .iter()
+            .chain(policy.fs_write.iter())
+            .chain(policy.proxy_uds.iter())
+        {
             if !p.is_absolute() {
                 return Err(SandboxError::Backend(format!(
                     "policy paths must be absolute, got {p:?}"
@@ -196,29 +205,61 @@ impl SandboxBackend for MacosSeatbelt {
     }
 }
 
-/// Return a clone of `policy` with each fs_read / fs_write path canonicalized
-/// (symlinks resolved). `NotFound` errors fall back to the original path
-/// (legitimate for fs_write of a not-yet-created scratch dir). Any other
-/// `io::Error` — most importantly `PermissionDenied` on a parent directory
-/// — propagates as a `SandboxError::Backend`, because emitting a rule for an
-/// unresolved path would silently produce a non-functional Seatbelt rule and
-/// mask user errors as "the sandbox is just too strict."
+/// Canonicalize a single path, resolving symlinks. For a path whose final
+/// component does not exist yet (e.g. a not-yet-created socket or scratch
+/// file), the parent directory is canonicalized and the filename appended —
+/// this correctly resolves `/tmp/foo.sock` to `/private/tmp/foo.sock` on
+/// macOS even before the socket file exists. Any other `io::Error`
+/// (PermissionDenied on a parent, etc.) propagates so callers don't silently
+/// emit a non-functional Seatbelt rule.
+fn canonicalize_one(p: &std::path::Path) -> Result<std::path::PathBuf, SandboxError> {
+    match std::fs::canonicalize(p) {
+        Ok(resolved) => Ok(resolved),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // The path itself doesn't exist yet; canonicalize the parent to
+            // resolve any symlinks there (e.g. /tmp -> /private/tmp on macOS),
+            // then reattach the filename so Seatbelt sees the real path.
+            match p.parent().zip(p.file_name()) {
+                Some((parent, name)) => {
+                    match std::fs::canonicalize(parent) {
+                        Ok(canon_parent) => Ok(canon_parent.join(name)),
+                        Err(pe) if pe.kind() == std::io::ErrorKind::NotFound => Ok(p.to_path_buf()),
+                        Err(pe) => Err(SandboxError::Backend(format!(
+                            "could not canonicalize policy path {p:?}: {pe}"
+                        ))),
+                    }
+                }
+                // No parent (root path) or no filename — keep as-is.
+                None => Ok(p.to_path_buf()),
+            }
+        }
+        Err(e) => Err(SandboxError::Backend(format!(
+            "could not canonicalize policy path {p:?}: {e}"
+        ))),
+    }
+}
+
+/// Return a clone of `policy` with each fs_read / fs_write / proxy_uds path
+/// canonicalized (symlinks resolved). `NotFound` errors fall back to the
+/// original path for fs_read / fs_write (legitimate for not-yet-created
+/// scratch dirs); for proxy_uds the parent-dir canonicalization approach in
+/// [`canonicalize_one`] additionally resolves e.g. `/tmp` → `/private/tmp`
+/// on macOS even before the socket file exists. Any other `io::Error` —
+/// most importantly `PermissionDenied` on a parent directory — propagates as
+/// a `SandboxError::Backend`, because emitting a rule for an unresolved path
+/// would silently produce a non-functional Seatbelt rule and mask user errors
+/// as "the sandbox is just too strict."
 fn canonicalize_policy_paths(policy: &SandboxPolicy) -> Result<SandboxPolicy, SandboxError> {
-    let canon = |paths: &[std::path::PathBuf]| -> Result<Vec<std::path::PathBuf>, SandboxError> {
-        paths
-            .iter()
-            .map(|p| match std::fs::canonicalize(p) {
-                Ok(resolved) => Ok(resolved),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(p.clone()),
-                Err(e) => Err(SandboxError::Backend(format!(
-                    "could not canonicalize policy path {p:?}: {e}"
-                ))),
-            })
-            .collect()
-    };
+    let canon_list =
+        |paths: &[std::path::PathBuf]| -> Result<Vec<std::path::PathBuf>, SandboxError> {
+            paths.iter().map(|p| canonicalize_one(p)).collect()
+        };
     let mut out = policy.clone();
-    out.fs_read = canon(&policy.fs_read)?;
-    out.fs_write = canon(&policy.fs_write)?;
+    out.fs_read = canon_list(&policy.fs_read)?;
+    out.fs_write = canon_list(&policy.fs_write)?;
+    if let Some(uds) = &policy.proxy_uds {
+        out.proxy_uds = Some(canonicalize_one(uds)?);
+    }
     Ok(out)
 }
 
@@ -318,11 +359,29 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
         ));
     }
 
-    if matches!(policy.net, crate::Net::Allowlist(_) | crate::Net::ProxyEgress) {
-        // The host allowlist itself is enforced by the future egress proxy
-        // (see docs/architecture.md invariant 5), not by Seatbelt — same
-        // split as bwrap's --share-net.
-        out.push_str("(allow network*)\n");
+    match (&policy.net, &policy.proxy_uds) {
+        (crate::Net::Allowlist(_), Some(uds)) => {
+            // Force-routed: deny all outbound, then re-allow ONLY the proxy UDS.
+            // The host-level allowlist is enforced by the egress proxy itself;
+            // Seatbelt's job here is to make the netns-less routing unbypassable
+            // by closing every AF_INET/AF_INET6 socket call.
+            out.push_str("(deny network-outbound)\n");
+            // `{uds:?}` emits the path Rust-debug-quoted (escaping `"` and `\`).
+            // The disallowed-char guard in `spawn_under_policy` already rejects
+            // structural chars before we get here; debug-quoting is belt-and-
+            // braces and, unlike `.display().to_string()`, is not lossy for a
+            // non-UTF8 path (which would otherwise silently mis-match the rule).
+            out.push_str(&format!(
+                "(allow network-outbound (remote unix-socket (path-literal {uds:?})))\n",
+            ));
+        }
+        (crate::Net::Allowlist(_), None) | (crate::Net::ProxyEgress, _) => {
+            // The host allowlist itself is enforced by the future egress proxy
+            // (see docs/architecture.md invariant 5), not by Seatbelt — same
+            // split as bwrap's --share-net.
+            out.push_str("(allow network*)\n");
+        }
+        (crate::Net::Deny, _) => { /* no network rules */ }
     }
 
     out

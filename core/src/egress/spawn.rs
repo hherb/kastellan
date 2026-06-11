@@ -27,6 +27,14 @@ pub struct SidecarHandle {
 impl SidecarHandle {
     /// Kill the sidecar and reap it. Idempotent-ish (errors ignored).
     pub fn shutdown(mut self) {
+        self.terminate();
+    }
+
+    /// Kill + reap the sidecar and remove its UDS, in place. Idempotent-ish
+    /// (errors ignored). Shared by [`shutdown`](Self::shutdown) and by the
+    /// coupled-teardown `Drop` of `egress::net_worker::EgressSidecar`, which
+    /// holds the handle by value and cannot consume `self`.
+    pub fn terminate(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.uds_path);
@@ -64,6 +72,7 @@ pub fn proxy_policy(binary: &Path, allowlist: &[String], scratch: &Path, worker:
             (ENV_ALLOWLIST.to_string(), allow_json),
             (ENV_WORKER.to_string(), worker.to_string()),
         ],
+        proxy_uds: None,
     }
 }
 

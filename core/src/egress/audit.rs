@@ -27,6 +27,28 @@ pub struct EgressAuditRow {
     pub payload: serde_json::Value,
 }
 
+/// Drive an egress-proxy decision stream: read it line by line, map each valid
+/// decision line to an [`EgressAuditRow`] via [`decision_to_audit`], and hand
+/// the row to `on_row`. Lines that aren't valid decision JSON are skipped (a
+/// compromised proxy emitting garbage can never widen anything — it only fails
+/// to produce a row). Returns when the reader hits EOF or a read error.
+///
+/// Pure over its I/O source + sink, so the loop is unit-testable without
+/// Postgres or a live proxy; the live wrapper ([`super::net_worker`]) supplies
+/// an `on_row` that inserts into `audit_log`.
+pub fn ingest_decisions_into<R, F>(reader: R, mut on_row: F)
+where
+    R: std::io::BufRead,
+    F: FnMut(EgressAuditRow),
+{
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if let Some(row) = decision_to_audit(&line) {
+            on_row(row);
+        }
+    }
+}
+
 /// Parse one decision line into an audit row. Returns `None` for a line that
 /// isn't valid decision JSON (logged-and-skipped by the caller — never trusted
 /// to widen anything).
@@ -76,5 +98,29 @@ mod tests {
     fn garbage_line_is_none() {
         assert!(decision_to_audit("not json").is_none());
         assert!(decision_to_audit(r#"{"verdict":"wat"}"#).is_none());
+    }
+
+    #[test]
+    fn ingest_maps_each_line_to_an_audit_row() {
+        let input: &[u8] = b"{\"worker\":\"web-fetch\",\"host\":\"a.com\",\"port\":443,\"resolved_ip\":\"1.2.3.4\",\"verdict\":\"allowed\",\"reason\":\"ok\"}\n\
+                             {\"worker\":\"web-fetch\",\"host\":\"b.com\",\"port\":443,\"resolved_ip\":null,\"verdict\":\"blocked_allowlist\",\"reason\":\"x\"}\n";
+        let mut rows = Vec::new();
+        ingest_decisions_into(input, |row| rows.push(row));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].action, "egress.allowed");
+        assert_eq!(rows[1].action, "egress.blocked.allowlist");
+    }
+
+    #[test]
+    fn ingest_skips_garbage_and_unknown_verdict_lines() {
+        // A compromised proxy emitting noise produces no rows for the noise —
+        // it can never widen anything, only fail to record.
+        let input: &[u8] = b"not json\n\
+                             {\"verdict\":\"wat\"}\n\
+                             {\"worker\":\"w\",\"host\":\"h\",\"port\":443,\"resolved_ip\":null,\"verdict\":\"blocked_ssrf\",\"reason\":\"r\"}\n";
+        let mut rows = Vec::new();
+        ingest_decisions_into(input, |row| rows.push(row));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "egress.blocked.ssrf");
     }
 }

@@ -77,7 +77,7 @@ the best containment available without entitlements.
 | Parent-side sandbox (bwrap / Seatbelt) | Namespace isolation, FS bind-mount, network unshare. Applied by `core::tool_host`. |
 | Worker-side sandbox (Landlock + seccomp-bpf) | Second, finer kernel filter installed by the worker on itself via [`kastellan-worker-prelude`](../workers/prelude/). One-way: cannot be relaxed once `restrict_self`/`apply_filter` returns. |
 | Resource caps (Linux: cgroup v2 via `systemd-run --user --scope`) | Hard `MemoryMax` + `MemorySwapMax=0` from `policy.mem_mb`; defense-in-depth `CPUQuota=200%` and `TasksMax=64` defaults. Wraps `bwrap` so the cgroup is in place before the worker namespace is created. Applied by [`sandbox::linux_cgroup`](../sandbox/src/linux_cgroup.rs). |
-| Egress proxy       | Per-worker host allowlist, SSRF/IP-pinning, TLS pinning, audit-log every request. **Slice #1 built** (boundary allowlist + SSRF/IP defense, `workers/egress-proxy`); not yet live-wired — see "Network egress" below. Force-routing + TLS-intercept leak-scanner + TLS-pinning are slices #2–4. |
+| Egress proxy       | Per-worker host:port allowlist, SSRF/IP-pinning, TLS pinning, audit-log every request. **Slices #1+#2 built** (boundary allowlist + SSRF/IP defense + unbypassable OS force-routing + CONNECT-over-UDS transport + port-scoping #241, `workers/egress-proxy`); the scheduler auto-flip that makes force-routing the default live path is the remaining wire-up — see "Network egress" below. TLS-intercept leak-scanner + TLS-pinning are slices #3–4. |
 | Postgres role isolation | Workers cannot reach Postgres at all; only the core has the DB connection |
 | Append-only audit log   | Every tool call, LLM call, channel message, memory write |
 
@@ -107,22 +107,45 @@ rebinding on a record they control — would still be connected to.
 **Host-allowlist ≠ IP-level containment.**
 
 **Egress-proxy slice #1 (2026-06-10) builds the mechanism that closes this gap**
-([`workers/egress-proxy`](../workers/egress-proxy/), branch
-`feat/egress-proxy-boundary`): a sandboxed per-worker CONNECT proxy that resolves
-DNS *itself*, rejects private/loopback/link-local/ULA/CGNAT/multicast resolved
-IPs (with a literal-IP carve-out for an operator-allowlisted address such as a
-local SearxNG `127.0.0.1`), **pins** the surviving IP, dials it, and audits every
-decision. So the SSRF/IP-pinning + boundary-allowlist logic now *exists and is
-tested* (e2e via a test CONNECT client). **It is not yet live**, however: slice
-#1 does not route the real `web-fetch`/`web-search` workers through the proxy and
-does not modify `tool_host`. The worker→proxy transport (a `web-common`
-CONNECT-over-UDS connector) and the **unbypassable force-routing** (a private
-netns whose only route out is the proxy UDS) that make a *compromised* worker
-actually unable to bypass it are **slice #2**. Until #2, the live containment for
-`web-fetch`/`web-search` remains the worker's self-enforced allowlist — so do not
-yet treat the proxy as protection against egress to internal IP ranges from a
-compromised worker. `Net::ProxyEgress` is the policy variant the proxy runs under;
-`Net::Allowlist` workers keep real netns until #2 moves them to a private one.
+([`workers/egress-proxy`](../workers/egress-proxy/)): a sandboxed per-worker
+CONNECT proxy that resolves DNS *itself*, rejects
+private/loopback/link-local/ULA/CGNAT/multicast resolved IPs (with a literal-IP
+carve-out for an operator-allowlisted address such as a local SearxNG
+`127.0.0.1`), **pins** the surviving IP, dials it, and audits every decision.
+
+**Egress-proxy slice #2 (2026-06-11) builds the unbypassable force-routing**
+([`feat/egress-proxy-slice2-impl`](../workers/egress-proxy/)). Three layers now
+make a *compromised* worker unable to bypass the proxy:
+- **OS-level barrier (the kernel does the enforcing, not the worker).** A
+  `Net::Allowlist` worker with `proxy_uds` set is placed in a **private network
+  namespace** on Linux (`bwrap`: `--unshare-all` minus `--share-net`, the proxy
+  UDS bind-mounted in — AF_UNIX is mount-ns-scoped, not net-ns) and a
+  **deny-all-outbound-except-the-UDS** Seatbelt filter on macOS. The worker has
+  *no route off the allowlist*; its only egress is the proxy UDS. The macOS
+  filter is gated by a real on-host probe (`seatbelt_uds_probe.rs`, AF_INET
+  denied / UDS allowed — **confirmed** on the dev Mac); if a host can't prove
+  AF_INET is denied, net workers fall back to the `MacosContainer` (real VM
+  netns) backend. The Linux kernel barrier is proven by `linux_force_routing.rs`
+  (run on the DGX).
+- **Worker transport.** The worker reaches origins only by speaking
+  `CONNECT host:port` to the proxy over the UDS (`web-common::ProxyConnectGet`,
+  selected by `make_get` when `KASTELLAN_EGRESS_PROXY_UDS` is set). TLS stays
+  end-to-end worker↔origin.
+- **Port-scoped boundary (#241).** The proxy's allowlist now matches the
+  `host:port` *endpoint*, not just the host; a bare-host (port-unconstrained)
+  grant is flagged distinctly in `audit_log`.
+
+The coupled host-side spawn (`core::egress::spawn_net_worker`: sidecar-first +
+**fail-closed** — no proxy ⇒ no worker — policy rewrite, 1:1 teardown,
+decision-ingest → `audit_log`) is **built and unit-tested**. The remaining step
+to make this the *default live path* is wiring `spawn_net_worker` into the
+scheduler's worker-lifecycle spawn site (a shared-trait change, landing with the
+DGX force-routing acceptance run). Until that flip ships and the operator enables
+it, the live containment for `web-fetch`/`web-search` remains the worker's
+self-enforced allowlist — so do not yet treat the proxy as protection against
+egress to internal IP ranges from a compromised worker in the running daemon,
+even though the mechanism that provides it is now complete and tested.
+`Net::ProxyEgress` is the policy variant the proxy itself runs under.
 
 ## Negative tests (CI-enforced as backends land)
 

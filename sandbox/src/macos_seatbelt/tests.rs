@@ -201,6 +201,53 @@ fn policy_paths_with_tinyscheme_specials_are_rejected_by_spawn() {
         msg.contains("disallowed character"),
         "expected 'disallowed character' error, got: {msg}"
     );
+
+    // And proxy_uds — it is interpolated into the profile as a
+    // `(path-literal ...)` rule, so it must pass the SAME guard. A UDS path
+    // carrying a structural char would otherwise let a crafted policy rewrite
+    // the force-routing rule.
+    let mut p = strict_policy();
+    p.net = crate::Net::Allowlist(vec!["api.example.com:443".into()]);
+    p.proxy_uds = Some(PathBuf::from("/tmp/egress\")(allow network*)(literal \"/x.sock"));
+    let err = backend
+        .spawn_under_policy(&p, "/usr/bin/true", &[])
+        .expect_err("proxy_uds path with injection chars must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("disallowed character"),
+        "expected 'disallowed character' error for proxy_uds, got: {msg}"
+    );
+}
+
+/// Force-routed profile (`Net::Allowlist` + `proxy_uds`): must deny all
+/// outbound then re-allow only the proxy UDS, and must NOT emit the broad
+/// `(allow network*)` rule that would bypass the force-routing.
+#[test]
+fn allowlist_with_proxy_uds_denies_outbound_except_uds() {
+    let p = SandboxPolicy {
+        net: crate::Net::Allowlist(vec!["api.example.com:443".into()]),
+        proxy_uds: Some(std::path::PathBuf::from("/scratch/egress.sock")),
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(prof.contains("(deny network-outbound)"),
+        "force-routed worker must deny outbound; got:\n{prof}");
+    assert!(prof.contains("(allow network-outbound (remote unix-socket (path-literal \"/scratch/egress.sock\")))"),
+        "must allow only the proxy UDS; got:\n{prof}");
+    assert!(!prof.contains("(allow network*)"),
+        "must NOT broadly allow network; got:\n{prof}");
+}
+
+/// Legacy `Net::Allowlist` without a proxy UDS keeps the old broad
+/// `(allow network*)` rule — no regression on the slice #1 posture.
+#[test]
+fn allowlist_without_proxy_uds_keeps_legacy_allow_network() {
+    let p = SandboxPolicy {
+        net: crate::Net::Allowlist(vec!["api.example.com:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(prof.contains("(allow network*)"));
 }
 
 // This test runs a real sandbox-exec invocation. It only meaningfully runs

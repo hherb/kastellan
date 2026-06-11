@@ -1,14 +1,14 @@
 //! egress-proxy: a per-worker egress boundary. Listens on a UDS, enforces the
 //! worker's host allowlist + SSRF/IP defense per CONNECT, tunnels to the pinned
-//! IP. Slice #1: no TLS interception, no live worker routing.
+//! IP. No TLS interception (TLS stays end-to-end worker↔origin).
 //! Design: docs/superpowers/specs/2026-06-10-egress-proxy-boundary-enforcement-design.md
 //!
 //! Env contract (set by the host-side `core::egress::spawn_sidecar`):
 //!   KASTELLAN_EGRESS_PROXY_UDS       — absolute path of the UDS to bind.
-//!   KASTELLAN_EGRESS_PROXY_ALLOWLIST — JSON array of allowed host strings. Slice
-//!       #1 matches the *host* only — an allowlisted host is reachable on any
-//!       port. Port-scoped endpoints (`host:443`) land with slice #2's live
-//!       routing (see `proxy::decide`).
+//!   KASTELLAN_EGRESS_PROXY_ALLOWLIST — JSON array of `host[:port]` endpoint
+//!       strings. A `:port` suffix scopes the grant to that port (#241); a bare
+//!       host grants any port (the weaker back-compat form, flagged in the audit
+//!       reason). See `proxy::decide` / `proxy::allowed_reason`.
 //!   KASTELLAN_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
 
 mod proxy;
@@ -29,7 +29,11 @@ fn main() -> anyhow::Result<()> {
     let allow_json = std::env::var("KASTELLAN_EGRESS_PROXY_ALLOWLIST")
         .map_err(|_| anyhow::anyhow!("KASTELLAN_EGRESS_PROXY_ALLOWLIST unset"))?;
     let worker = std::env::var("KASTELLAN_EGRESS_PROXY_WORKER").unwrap_or_else(|_| "unknown".into());
-    let allow = HostAllowlist::from_env_json(&allow_json)?;
+    // Parse `host[:port]` endpoint entries so the boundary check is port-scoped
+    // (#241), not host-only.
+    let entries: Vec<String> = serde_json::from_str(&allow_json)
+        .map_err(|e| anyhow::anyhow!("KASTELLAN_EGRESS_PROXY_ALLOWLIST is not a JSON array: {e}"))?;
+    let allow = HostAllowlist::from_endpoints(&entries);
 
     // Bind the UDS *before* lock-down (Landlock will forbid fs mutation after).
     let _ = std::fs::remove_file(&uds);

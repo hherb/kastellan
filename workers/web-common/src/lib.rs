@@ -6,6 +6,7 @@
 
 pub mod allowlist;
 pub mod http;
+pub(crate) mod proxy_connect;
 
 #[cfg(feature = "testing")]
 pub mod testing;

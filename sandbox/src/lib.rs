@@ -108,6 +108,13 @@ pub struct SandboxPolicy {
     /// applied, so the jail sees only what's listed here.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// When `Net::Allowlist` and this is `Some(path)`, the worker's only egress
+    /// is the egress-proxy UDS at `path`: Linux puts the worker in a private
+    /// netns (no route out) with the socket bind-mounted; macOS Seatbelt denies
+    /// all outbound except this UDS. `None` keeps the legacy `--share-net`
+    /// behaviour (slice #1 posture). Additive.
+    #[serde(default)]
+    pub proxy_uds: Option<PathBuf>,
 }
 
 impl Default for SandboxPolicy {
@@ -127,6 +134,7 @@ impl Default for SandboxPolicy {
             cpu_quota_pct: None,
             tasks_max: None,
             env: Vec::new(),
+            proxy_uds: None,
         }
     }
 }
@@ -458,6 +466,14 @@ mod tests {
             !Arc::ptr_eq(&backend, &cached_default),
             "resolve with custom image must return a fresh backend, not the cached default-image slot"
         );
+    }
+
+    #[test]
+    fn proxy_uds_defaults_none_and_is_settable() {
+        let mut p = SandboxPolicy::default();
+        assert!(p.proxy_uds.is_none());
+        p.proxy_uds = Some(std::path::PathBuf::from("/scratch/egress.sock"));
+        assert_eq!(p.proxy_uds.as_deref(), Some(std::path::Path::new("/scratch/egress.sock")));
     }
 
     #[cfg(target_os = "macos")]
