@@ -34,7 +34,7 @@
     <!-- 1. Page head -->
     <div class="page-head wrap">
       <h1>Where Kastellan stands</h1>
-      <p class="subtitle">Curated by hand, updated as milestones ship. Last updated: June 2026.</p>
+      <p class="subtitle">Curated by hand, updated as milestones ship. Last updated: <time datetime="2026-06">June 2026</time>.</p>
     </div>
 
     <!-- 2. Stat cards -->
@@ -63,42 +63,42 @@
 
     <!-- 3. Timeline -->
     <section class="section wrap" aria-label="Development timeline">
-      <h2>Development phases</h2>
+      <h2>Development phases, in build order</h2>
       <ul class="timeline" role="list">
 
         <li class="timeline-item">
           <span class="dot-done"></span>
-          <span class="timeline-title">Phase 0 — A core that can jail things <span class="badge-done">SHIPPED</span></span>
+          <h3 class="timeline-title">Phase 0 — A core that can jail things <span class="badge-done">SHIPPED</span></h3>
           <p class="timeline-text">Cross-platform kernel sandboxing (bubblewrap + Landlock + seccomp on Linux, Seatbelt on macOS) with negative tests proving that denials deny. JSON-RPC workers, service supervision, Postgres with an append-only audit log.</p>
         </li>
 
         <li class="timeline-item">
           <span class="dot-done"></span>
-          <span class="timeline-title">Phase 1 — Memory &amp; the agent loop <span class="badge-done">SHIPPED</span></span>
+          <h3 class="timeline-title">Phase 1 — Memory &amp; the agent loop <span class="badge-done">SHIPPED</span></h3>
           <p class="timeline-text">Three-lane memory recall (semantic, lexical, graph), the task scheduler, CASSANDRA plan review, a prompt-injection guard on worker output, encrypted secrets, and an operator-approved skill system.</p>
         </li>
 
         <li class="timeline-item">
           <span class="dot-wip"></span>
-          <span class="timeline-title">Phase 3 — Web egress <span class="badge-wip">IN PROGRESS</span></span>
-          <p class="timeline-text">Web search and web fetch shipped behind host allowlists. The egress proxy — the single chokepoint all worker traffic will be forced through — has its first slice shipped and force-routing in design. ← currently being built</p>
+          <h3 class="timeline-title">Phase 3 — Web egress <span class="badge-wip">IN PROGRESS</span></h3>
+          <p class="timeline-text">Web search and web fetch shipped behind host allowlists. The egress proxy — the single chokepoint all worker traffic will be forced through — has its first slice shipped and force-routing in design. <span aria-hidden="true">←</span> currently being built</p>
         </li>
 
         <li class="timeline-item">
           <span class="dot-plan"></span>
-          <span class="timeline-title">Phase 2 — Channels <span class="badge-plan">PLANNED</span></span>
+          <h3 class="timeline-title">Phase 2 — Channels <span class="badge-plan">PLANNED</span></h3>
           <p class="timeline-text">Telegram, Signal, and email — how you'll actually talk to it. Inbound first (read-only), outbound after the egress proxy hardens.</p>
         </li>
 
         <li class="timeline-item">
           <span class="dot-plan"></span>
-          <span class="timeline-title">Phase 4 — python-exec &amp; agent-authored skills <span class="badge-plan">PLANNED</span></span>
+          <h3 class="timeline-title">Phase 4 — python-exec &amp; agent-authored skills <span class="badge-plan">PLANNED</span></h3>
           <p class="timeline-text">Python in a no-network scratch jail, and a catalog of named skills with trust tiers and human approval gates.</p>
         </li>
 
         <li class="timeline-item">
           <span class="dot-plan"></span>
-          <span class="timeline-title">Phase 5 — Frontier escalation &amp; hardening <span class="badge-plan">PLANNED</span></span>
+          <h3 class="timeline-title">Phase 5 — Frontier escalation &amp; hardening <span class="badge-plan">PLANNED</span></h3>
           <p class="timeline-text">A policy gate deciding when a frontier LLM may be consulted, TLS-pinned egress, and a 7-day adversarial soak test.</p>
         </li>
 
