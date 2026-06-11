@@ -18,9 +18,9 @@
 
   <header class="nav">
     <div class="wrap">
-      <a class="nav-logo" href="index.html"><img src="assets/logo.png" alt="" width="28" height="28"> kastellan</a>
-      <button class="nav-toggle" aria-label="Menu" aria-expanded="false">☰</button>
-      <nav class="nav-links">
+      <a class="nav-logo" href="index.html"><img src="assets/favicon.png" alt="" width="28" height="28"> kastellan</a>
+      <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+      <nav class="nav-links" aria-label="Main">
         <a href="roadmap.html">Roadmap</a>
         <a href="security.html">Security</a>
         <a href="contributing.html">Contributing</a>
@@ -43,22 +43,22 @@
           <a class="btn" href="https://github.com/hherb/kastellan">View on GitHub</a>
           <a class="btn-ghost" href="security.html">How it’s secured →</a>
         </div>
-        <pre class="chip" tabindex="0" aria-label="Install command: cargo install kastellan-core">$ cargo install kastellan-core
+        <pre class="chip" role="region" tabindex="0" aria-label="Install command: cargo install kastellan-core">$ cargo install kastellan-core
 <span class="chip-comment"># v0.1.0 on crates.io</span></pre>
       </div>
       <div>
-        <img src="assets/logo.png" alt="The Kastellan robot mascot holding mail, calendar, chat, and code icons" width="280" height="280">
+        <img src="assets/logo.png" alt="The Kastellan robot mascot holding mail, calendar, chat, and code icons" width="280" height="280" fetchpriority="high" decoding="async">
       </div>
     </section>
 
     <!-- 2. Trust strip -->
     <section class="wrap" aria-label="Project facts">
       <div class="pills">
-        <span class="pill">🦀 Rust core</span>
-        <span class="pill">⚖️ AGPL-3.0</span>
-        <span class="pill">🖥️ Linux + macOS first-class</span>
-        <span class="pill">🔌 No vendor lock-in</span>
-        <span class="pill">🏠 Runs on your hardware</span>
+        <span class="pill"><span aria-hidden="true">🦀</span> Rust core</span>
+        <span class="pill"><span aria-hidden="true">⚖️</span> AGPL-3.0</span>
+        <span class="pill"><span aria-hidden="true">🖥️</span> Linux + macOS first-class</span>
+        <span class="pill"><span aria-hidden="true">🔌</span> No vendor lock-in</span>
+        <span class="pill"><span aria-hidden="true">🏠</span> Runs on your hardware</span>
       </div>
     </section>
 
@@ -86,27 +86,27 @@
       <h2>What it does <span style="font-size: 0.55em; font-weight: 400; letter-spacing: 0; color: var(--muted);">— each capability inside its own walls</span></h2>
       <div class="grid-3">
         <article class="card">
-          <h3 class="card-title">💬 Talks to you <span class="badge-plan">planned</span></h3>
+          <h3 class="card-title"><span aria-hidden="true">💬</span> Talks to you <span class="badge-plan">planned</span></h3>
           <p class="card-text">Telegram, Signal, and its own email account.</p>
         </article>
         <article class="card">
-          <h3 class="card-title">🌐 Works the web <span class="badge-done">today</span></h3>
+          <h3 class="card-title"><span aria-hidden="true">🌐</span> Works the web <span class="badge-done">today</span></h3>
           <p class="card-text">Web search and page fetch, host-allowlisted; a sandboxed browser is next.</p>
         </article>
         <article class="card">
-          <h3 class="card-title">🐍 Runs code <span class="badge-plan">planned</span></h3>
+          <h3 class="card-title"><span aria-hidden="true">🐍</span> Runs code <span class="badge-plan">planned</span></h3>
           <p class="card-text">Python in a no-network scratch jail.</p>
         </article>
         <article class="card">
-          <h3 class="card-title">🧠 Remembers <span class="badge-done">today</span></h3>
+          <h3 class="card-title"><span aria-hidden="true">🧠</span> Remembers <span class="badge-done">today</span></h3>
           <p class="card-text">Postgres memory with semantic, lexical, and graph recall.</p>
         </article>
         <article class="card">
-          <h3 class="card-title">📈 Learns skills <span class="badge-done">today</span></h3>
+          <h3 class="card-title"><span aria-hidden="true">📈</span> Learns skills <span class="badge-done">today</span></h3>
           <p class="card-text">Distils successful runs into reusable skills — gated on your approval.</p>
         </article>
         <article class="card">
-          <h3 class="card-title">📜 Accountable <span class="badge-done">today</span></h3>
+          <h3 class="card-title"><span aria-hidden="true">📜</span> Accountable <span class="badge-done">today</span></h3>
           <p class="card-text">An append-only audit log of every action, enforced by the database itself.</p>
         </article>
       </div>
@@ -156,7 +156,7 @@
   <!-- 7. Footer -->
   <footer class="footer">
     <div class="wrap">
-      <p style="margin: 0;">AGPL-3.0-only · © 2026 Horst Herb</p>
+      <p>AGPL-3.0-only · © 2026 Horst Herb</p>
       <nav aria-label="Footer">
         <a href="https://github.com/hherb/kastellan">GitHub</a> ·
         <a href="https://crates.io/crates/kastellan-core">crates.io</a> ·
@@ -169,7 +169,7 @@
 
   <script>
     const t = document.querySelector('.nav-toggle');
-    t.addEventListener('click', () => {
+    t?.addEventListener('click', () => {
       const links = document.querySelector('.nav-links');
       const open = links.classList.toggle('open');
       t.setAttribute('aria-expanded', open);

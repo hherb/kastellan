@@ -253,9 +253,9 @@ Shared nav (identical markup on all four pages; `aria-current="page"` moves):
 ```html
 <header class="nav">
   <div class="wrap">
-    <a class="nav-logo" href="index.html"><img src="assets/logo.png" alt="" width="28" height="28"> kastellan</a>
-    <button class="nav-toggle" aria-label="Menu" aria-expanded="false">☰</button>
-    <nav class="nav-links">
+    <a class="nav-logo" href="index.html"><img src="assets/favicon.png" alt="" width="28" height="28"> kastellan</a>
+    <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+    <nav class="nav-links" aria-label="Main">
       <a href="roadmap.html">Roadmap</a>
       <a href="security.html">Security</a>
       <a href="contributing.html">Contributing</a>
@@ -297,7 +297,7 @@ Body sections in order, with this copy verbatim:
 
 6. **Get involved** (centered): Heading `Built in the open. Help hold the walls.`; text `Rust, security review, docs, red-teaming — contributions welcome.`; button `Start contributing` → `contributing.html`.
 
-7. **Footer** (`.footer`, identical on all pages):
+7. **Footer** (`.footer`, identical on all pages): (footer `<p>` margins are handled by `.footer p` in style.css — no inline styles)
    - Left: `AGPL-3.0-only · © 2026 Horst Herb`
    - Right links: `GitHub` → `https://github.com/hherb/kastellan` · `crates.io` → `https://crates.io/crates/kastellan-core` · `Roadmap` · `Security` · `Contributing` (relative hrefs)
 
@@ -306,7 +306,7 @@ Before `</body>`, the only JS on the site:
 ```html
 <script>
   const t = document.querySelector('.nav-toggle');
-  t.addEventListener('click', () => {
+  t?.addEventListener('click', () => {
     const links = document.querySelector('.nav-links');
     const open = links.classList.toggle('open');
     t.setAttribute('aria-expanded', open);

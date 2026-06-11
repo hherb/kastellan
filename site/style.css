@@ -708,6 +708,10 @@ figure.diagram figcaption {
   color: var(--muted);
 }
 
+.footer p {
+  margin: 0;
+}
+
 .footer a {
   color: var(--muted);
 }
