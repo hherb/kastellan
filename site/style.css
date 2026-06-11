@@ -690,6 +690,28 @@ figure.diagram figcaption {
   color: var(--muted);
 }
 
+/* ---- Defence-in-depth ordered list (security.html) --------------------------------- */
+/* Gives the <ol> breathing room and nudges the counter out of the text flow */
+
+ol.defence {
+  margin: 1.75rem 0;
+  padding-left: 2.25rem;
+}
+
+ol.defence li {
+  margin-bottom: 1.25rem;
+  padding-left: 0.5rem;
+  color: var(--body);
+}
+
+ol.defence li:last-child {
+  margin-bottom: 0;
+}
+
+ol.defence li p {
+  margin: 0;
+}
+
 /* ---- Footer ------------------------------------------------------------------------ */
 
 .footer {
