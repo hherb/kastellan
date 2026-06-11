@@ -28,6 +28,3 @@ webpki-roots = "1"
 # POSIX recv(MSG_PEEK) for the non-consuming first-tunnel-byte peek (std's
 # UnixStream::peek is still unstable). MIT OR Apache-2.0.
 libc         = "0.2"
-
-[dev-dependencies]
-webpki-roots = "1"

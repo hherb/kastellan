@@ -82,20 +82,25 @@ fn main() -> anyhow::Result<()> {
     let _report = kastellan_worker_prelude::lock_down()?;
 
     let resolver = StdResolve;
+    // One leaf cache for the life of the proxy: connections are handled serially
+    // (`thread::scope` joins each before the next `incoming()`), so a single
+    // `&mut` borrow into each scope is sound, and repeat CONNECTs to the same
+    // host across separate connections reuse the issued leaf.
+    let mut cache = leaf_cache::LeafCache::new();
     for conn in listener.incoming() {
         let Ok(conn) = conn else { continue };
         let allow = &allow;
         let worker = worker.clone();
         let ca = &ca;
         let upstream_tls = &upstream_tls;
+        let cache = &mut cache;
         // One thread per connection; the proxy is SingleUse + short-lived.
         std::thread::scope(|s| {
             s.spawn(|| {
                 let mut reporter = LineReporter { out: std::io::stdout().lock() };
-                let mut cache = leaf_cache::LeafCache::new();
                 let mut mitm = MitmCtx {
                     ca: ca.as_ref(),
-                    leaf_cache: &mut cache,
+                    leaf_cache: cache,
                     upstream_tls: std::sync::Arc::clone(upstream_tls),
                 };
                 handle_conn(conn, &worker, allow, &resolver, &mut reporter, &mut mitm);

@@ -306,11 +306,17 @@ the scanner pays off when a secret-bearing egress worker lands. References: Iron
 **Egress deferrals carried forward:** [#242](https://github.com/hherb/kastellan/issues/242) tunnel idle/resolve timeouts;
 [#251](https://github.com/hherb/kastellan/issues/251) stale-scratch crash-sweep (needs cross-platform pid-liveness);
 transparent gzip/brotli if an origin refuses `Accept-Encoding: identity`; the `pg_decision_sink` back-pressure decoupling
-(bounded channel + async writer) before high-rate production load. **Slice #3a minor deferrals:** the MITM path re-dials
-the origin inside `intercept` (one extra connect; the sync pre-200 connect only proves reachability — a later opt can
-thread the converted tokio stream through); a rare `EINTR`/`recv` error on the first-byte peek routes a TLS connection to
-transparent pass-through (graceful — it still tunnels — but skips interception; tighten before 3b's scanner relies on
-every TLS flow being terminated).
+(bounded channel + async writer) before high-rate production load. **Slice #3a review follow-ups (PR #259, addressed
+2026-06-12):** `peek_first_byte` now **retries on `EINTR`** rather than downgrading a TLS flow to pass-through (the
+silent-interception-escape hole is closed — matters for 3b's scanner); `mitm::intercept`'s upstream re-dial is now
+bounded by `ORIGIN_CONNECT_TIMEOUT` (10s, mirrors `proxy::CONNECT_TIMEOUT`); the 200-write-fail path now still emits an
+`allowed_but_200_write_failed` audit decision (restores slice #1's always-log-an-allowed-Dial invariant); the
+`LeafCache` is hoisted to proxy lifetime (was per-connection); redundant `webpki-roots` dev-dep dropped. **Slice #3a
+minor deferrals still open:** the MITM path re-dials the origin inside `intercept` (one extra connect; the sync pre-200
+connect only proves reachability — a later opt can thread the converted tokio stream through); the `copy_bidirectional`
+relay + the blocking `peek_first_byte` still lack **read** idle-deadlines (folded into
+[#242](https://github.com/hherb/kastellan/issues/242)); literal-IP **HTTPS** origins now require an IP-SAN cert under
+MITM upstream validation (behaviour-change decision — needs a tracking issue; see PR #259 review).
 
 **★ Alternative TOP PICK — `browser-driver` worker (ROADMAP:147).** A more self-contained next worker: Playwright
 headless under a dedicated profile + scratch FS, reusing the `web-common` allowlist + `Net::Allowlist` manifest pattern

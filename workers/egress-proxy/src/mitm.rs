@@ -12,12 +12,20 @@ pub fn looks_like_tls(first_byte: u8) -> bool {
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustls::pki_types::ServerName;
 use tokio::net::{TcpStream, UnixStream};
 
 use crate::ca::CaMaterial;
 use crate::leaf_cache::LeafCache;
+
+/// Bound on the re-origination TCP connect so an origin that becomes unreachable
+/// between the sync reachability check and this async re-dial cannot pin the MITM
+/// thread open indefinitely. Mirrors `proxy::CONNECT_TIMEOUT`. (The bidirectional
+/// copy itself is still not idle-capped — that is workload-dependent and tracked
+/// in #242.)
+const ORIGIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build the SNI `ServerName` for the upstream leg from the CONNECT authority
 /// host. Domains go through `try_from`; IP literals (incl. bracketed IPv6) are
@@ -56,8 +64,9 @@ pub async fn intercept(
         .map_err(|e| format!("worker TLS handshake: {e}"))?;
 
     // 2. Client-side: re-originate to the pinned origin, validating its real cert.
-    let upstream_tcp = TcpStream::connect(upstream_addr)
+    let upstream_tcp = tokio::time::timeout(ORIGIN_CONNECT_TIMEOUT, TcpStream::connect(upstream_addr))
         .await
+        .map_err(|_| format!("dial origin {upstream_addr}: timed out after {ORIGIN_CONNECT_TIMEOUT:?}"))?
         .map_err(|e| format!("dial origin {upstream_addr}: {e}"))?;
     let connector = tokio_rustls::TlsConnector::from(upstream_tls);
     let sni = upstream_server_name(host)?;

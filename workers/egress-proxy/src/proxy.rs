@@ -155,6 +155,15 @@ pub fn handle_conn(
                 }
             };
             if client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").is_err() {
+                // The policy verdict was Allowed; the client vanished before we
+                // could deliver the 200. Still emit the allowed decision so the
+                // audit trail stays complete (slice #1 always logged an allowed
+                // Dial) — nothing was intercepted, so tls_intercepted is false.
+                reporter.report(Decision {
+                    worker: worker.into(), host: host.clone(), port,
+                    resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
+                    reason: "allowed_but_200_write_failed".into(), tls_intercepted: false,
+                });
                 return;
             }
             // Peek the first tunnel byte (non-consuming). The CONNECT round-trip
@@ -272,24 +281,33 @@ fn read_request_line(client: &mut UnixStream) -> std::io::Result<String> {
 /// Non-consuming peek of the first tunnel byte via `recv(MSG_PEEK)` on the raw
 /// fd (std's `UnixStream::peek` is still unstable). Blocks until ≥1 byte is
 /// available or the peer half-closes. Returns `Some(byte)` on a 1-byte peek,
-/// `None` on EOF / error (caller treats that as plaintext pass-through).
+/// `None` on EOF / a genuine error (caller treats that as plaintext pass-through).
+///
+/// A blocking `recv` can be interrupted by a signal (`EINTR`) before any byte is
+/// observed; we **retry** rather than fall through to `None`, so a TLS flow can't
+/// silently escape interception just because a signal arrived mid-peek (slice
+/// #3b's leak scanner relies on every TLS flow being terminated).
 fn peek_first_byte(client: &UnixStream) -> Option<u8> {
     use std::os::unix::io::AsRawFd;
     let mut byte = 0u8;
-    // SAFETY: `client` owns the fd for the duration of this call; we pass a valid
-    // 1-byte buffer and read the return value before trusting `byte`.
-    let n = unsafe {
-        libc::recv(
-            client.as_raw_fd(),
-            &mut byte as *mut u8 as *mut libc::c_void,
-            1,
-            libc::MSG_PEEK,
-        )
-    };
-    if n == 1 {
-        Some(byte)
-    } else {
-        None
+    loop {
+        // SAFETY: `client` owns the fd for the duration of this call; we pass a
+        // valid 1-byte buffer and read the return value before trusting `byte`.
+        let n = unsafe {
+            libc::recv(
+                client.as_raw_fd(),
+                &mut byte as *mut u8 as *mut libc::c_void,
+                1,
+                libc::MSG_PEEK,
+            )
+        };
+        if n == 1 {
+            return Some(byte);
+        }
+        if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue; // EINTR: signal interrupted the peek before a byte — retry.
+        }
+        return None; // EOF (n == 0) or a genuine error → plaintext pass-through.
     }
 }
 
