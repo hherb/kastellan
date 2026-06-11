@@ -711,6 +711,24 @@ ol.defence li p {
   margin: 0;
 }
 
+/* ---- House rules list (contributing.html) ------------------------------------------ */
+/* Gives the <ul> breathing room matching the defence-in-depth ol above it */
+
+ul.rules {
+  margin: 1.75rem 0;
+  padding-left: 2.25rem;
+}
+
+ul.rules li {
+  margin-bottom: 1rem;
+  padding-left: 0.5rem;
+  line-height: 1.6;
+}
+
+ul.rules li:last-child {
+  margin-bottom: 0;
+}
+
 /* ---- Footer ------------------------------------------------------------------------ */
 
 .footer {
