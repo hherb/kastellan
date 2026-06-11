@@ -6,44 +6,46 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-11 (**egress proxy SLICE #2 — DGX acceptance COMPLETE + force-routing flipped ON by default**; PR [#256](https://github.com/hherb/kastellan/pull/256) **MERGED** to `main` at `f0464d7`; verified natively on the DGX over WireGuard SSH).
+**Last updated:** 2026-06-12 (**egress proxy SLICE #3a — TLS-intercept (MITM) mechanism COMPLETE**; branch
+`feat/egress-slice3-tls-intercept`, PR pending; Mac green + DGX-accepted under real bwrap over WireGuard SSH).
 
-**This session — egress proxy SLICE #2: DGX acceptance + flip-on (ROADMAP:141 — SLICE #2 COMPLETE).** Drove the DGX
-(aarch64) natively from the Mac over WireGuard SSH (`ssh dgx` alias, ssh-agent auth — see memory
-[[dgx-native-linux-verification-over-ssh]]) and closed out slice #2:
-- **Acceptance gates — all green with real containment (no `[SKIP]`):** the kernel-barrier probe
-  `force_routed_allowlist_worker_has_no_direct_route` (a force-routed worker's private netns has no direct route);
-  **#243** confirmed (the `NetClient` seccomp profile permits AF_UNIX `bind`/`listen`/`accept`/`connect` — proxy + worker);
-  full workspace **1523 / 0 / 9** (native Linux, live PG 18, worker binaries built so the real-sandbox e2e suites actually
-  ran, not skip-as-pass); `clippy --workspace --all-targets -D warnings` clean.
-- **New live e2e** `core/tests/egress_force_routing_e2e.rs` (3 tests, through the production coupling
-  `spawn_forced_net_worker`): (a) an allowlisted loopback origin round-trips through the sidecar; (c) off-allowlist
-  CONNECT → 403, each decision reaches the `on_decision` ingest sink, and dropping the worker tears the sidecar down 1:1;
-  (b) Linux-only — a force-routed worker has **no direct route** via the live coupling; (d) PG-gated — the live
-  `pg_decision_sink` persists decisions to `audit_log`. Skip-as-pass without sandbox/proxy-bin/PG; passes on the Mac
-  (Seatbelt) too.
-- **Flipped force-routing ON by default** — `supervisor::specs::core_service_spec` now injects
-  `KASTELLAN_EGRESS_FORCE_ROUTING=1`, so every supervised `Net::Allowlist` worker force-routes. **Fail-closed**: the
-  daemon refuses to start without the `kastellan-worker-egress-proxy` binary beside it (packaged deploys must ship it;
-  operators can override via the unit `EnvironmentFile`).
-- **Two real fixes found en route:** (1) a **pre-existing stale pin** in `prompt_assembly_e2e` (latent since PR #200 added
-  the always-present `<handoff>` block — that e2e only runs under live PG, so it had never failed until this DGX run);
-  now asserts structurally. (2) a **macOS `sun_path` overflow** — `force_route::from_env` defaulted the per-worker scratch
-  root to `$TMPDIR`, too deep on macOS once the `egress-<pid>-<seq>/egress.sock` nesting is added (every force-routed
-  spawn would fail-closed); now `/tmp` on macOS (Linux `temp_dir()` is already `/tmp`), pinned by a macOS unit test.
-- **CLAUDE.md** bwrap-argv invariant updated: force-routed `Net::Allowlist` + `proxy_uds` (the new default) → private
-  netns + bound UDS, not `--share-net`.
-- **Review follow-up (two macOS-only gaps the DGX-only verification missed):** (1) the cross-platform e2e hard-coded the
-  worker program as `/usr/bin/sleep`, which doesn't exist on macOS (it's `/bin/sleep`) — so the worker couldn't exec there
-  and the test only passed by accident (it drives the proxy host-side); now `/bin/sleep` (resolves on both, via Linux
-  usrmerge), and the `forced_coupling_…` e2e now genuinely runs the worker-alive path on macOS (verified locally with the
-  proxy bin built). (2) the new `#[cfg(macos)]` `sun_path` unit test tripped clippy `int_plus_one` (`len() + 1 <= 104`),
-  never caught because the acceptance clippy ran on the DGX where that test isn't compiled; rewritten as `len() < 104`.
-  `cargo clippy -p kastellan-core --all-targets -D warnings` is now clean on macOS too.
+**This session — egress proxy SLICE #3a: TLS-intercept (MITM) mechanism (ROADMAP:142).** The per-worker proxy now
+**terminates each worker's TLS** (presenting a per-instance-CA-signed leaf the worker trusts) and **re-originates a
+webpki-validated TLS session** to the pinned origin — so slice #3b can scan the plaintext. **Zero new plaintext is
+surfaced in 3a**: only an additive `tls_intercepted` audit boolean. Brainstormed + spec'd + planned first
+(`docs/superpowers/{specs,plans}/2026-06-11-egress-proxy-slice3-tls-intercept*`), then built TDD across 9 tasks via
+subagent-driven development. Locked design:
+- **In-proxy ephemeral per-instance CA** (`rcgen` 0.13) generated at startup; the CA *private* key never leaves the
+  sandboxed proxy — only the public `ca.pem` is exported beside the UDS. A CA compromise is scoped to one worker's one
+  short-lived proxy.
+- **Worker trusts ONLY that CA** (fail-closed): when `KASTELLAN_EGRESS_PROXY_CA` is set, `web-common::ProxyConnectGet`
+  builds a `RootCertStore` from only that PEM (webpki dropped); a set-but-unreadable CA errors rather than falling back.
+- **Always-MITM for TLS / pass-through for plaintext:** after the CONNECT `200`, the proxy peeks the first tunnel byte
+  (`recv(MSG_PEEK)` — std `UnixStream::peek` is unstable); `0x16` → MITM, else transparent tunnel (plain-HTTP unchanged).
+- **Async MITM path** on a per-connection current-thread tokio runtime (`tokio-rustls` `TlsAcceptor`+`TlsConnector` +
+  `copy_bidirectional`); the proxy's accept loop + CONNECT parse + `decide()` stay sync. (Sync `rustls` `StreamOwned`
+  can't split for a bidirectional copy — that's why this leg is async.)
+- **Host wiring:** `spawn_sidecar` now gates readiness on `ca.pem` (not just the UDS); `rewrite_worker_policy` binds the
+  CA into the jail (`fs_read`) + sets `KASTELLAN_EGRESS_PROXY_CA`; `tls_intercepted` flows proxy→`audit_log`.
+- **New egress-proxy modules:** `ca.rs` (CA + leaf issuance), `leaf_cache.rs` (bounded per-host server-config cache),
+  `mitm.rs` (`looks_like_tls` + async `intercept`). New dep `rcgen` (MIT OR Apache-2.0, ring-backed — AGPL-OK).
+- **Verification:** hermetic in-crate MITM round-trip (real two-leg TLS, only-CA trust) green Mac+DGX; **live**
+  `real_mitm_fetch_through_sidecar` `#[ignore]` → **200 from example.com through the MITM on macOS**; DGX **under real
+  bwrap**: `forced_coupling_*` + `no_direct_route` + `pg_decision_sink` all green (proves the sidecar generates the CA +
+  `MSG_PEEK`-peeks **without SIGSYS** under the `NetClient` seccomp profile — the rcgen/recvfrom risks are **resolved**;
+  `recvfrom` was already in the allowlist). Mac `cargo test --workspace` **1555 / 0 / 8**; DGX (live PG 18, real bwrap)
+  **1538 / 0 / 10**; `clippy --workspace --all-targets -D warnings` clean both.
+- **Known DGX-environment caveat (NOT a #3a defect):** the real-net `#[ignore]` MITM smoke test fails *on the DGX* with a
+  proxy `403` because the DGX's resolver returns Cloudflare anycast for `example.com` and the sidecar can't resolve/route
+  it from its netns — the **pre-existing slice-#2 `real_host_round_trips_through_sidecar` fails identically** (no MITM
+  involved), confirming it's the DGX's DNS/WireGuard environment, not slice #3a. The `403` is the slice-#1 `decide()`
+  boundary, before any interception. Run the real-net MITM smoke test from a box with normal outbound DNS (it passes on
+  the Mac).
 
-**Prior session — HANDOVER prune** (archived pre-prune snapshot at
-[`archive/handover_20260611_pre-prune.md`](archive/handover_20260611_pre-prune.md); compressed 2026-06-08…06-11 sessions
-into Earlier history; docs-only).
+**Prior session — egress proxy SLICE #2** (force-routing DGX-accepted + ON by default; PR
+[#256](https://github.com/hherb/kastellan/pull/256) MERGED to `main` at `f0464d7`): every supervised `Net::Allowlist`
+worker force-routes through its own egress-proxy sidecar (private netns, no direct route), fail-closed if the proxy
+binary is missing. Pre-prune snapshot: [`archive/handover_20260611_pre-prune.md`](archive/handover_20260611_pre-prune.md).
 
 **Prior session — `db/src/secrets.rs` prod split (refactor bucket item 9b-b, PR [#253](https://github.com/hherb/kastellan/pull/253) MERGED).** The most-over-cap clean prod-split
 candidate (848 LOC) → a parent facade + three cohesive siblings, every file under the 500-LOC cap, public API
@@ -71,15 +73,18 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** `main` is at `f0464d7` (egress slice #2 DGX-acceptance, PR [#256](https://github.com/hherb/kastellan/pull/256) MERGED, on top of the
-HANDOVER prune #d704f80 / secrets-split #253 / Cloudflare Workers #254 / egress slice #2 auto-flip #250 / website #252 —
-see Earlier history). Egress proxy **slice #2 is now COMPLETE and merged**: force-routing is
-DGX-accepted (real kernel-barrier containment, new live e2e green) and **ON by default** in the supervised deployment
-(`core_service_spec` sets `KASTELLAN_EGRESS_FORCE_ROUTING=1`, **fail-closed** if the proxy binary is missing). Every
-`Net::Allowlist` worker is force-routed through a per-worker egress-proxy sidecar with no direct network route. Working
-tree clean apart from untracked `docs/essay-medium-draft.md`. Dev box **macOS**; the DGX (aarch64) is driven natively
-over WireGuard SSH (`ssh dgx`). **Session-end: DGX full workspace `cargo test --workspace` = 1523 / 0 / 9 (native
-Linux, live PG 18, real-sandbox e2e suites running), `clippy --workspace --all-targets -D warnings` clean.**
+**Current state.** `main` is at `f0464d7` (egress slice #2, PR #256 MERGED). **This session's work is on branch
+`feat/egress-slice3-tls-intercept` (PR pending).** Egress proxy **slice #3a (TLS-intercept mechanism) is COMPLETE**: the
+per-worker proxy MITM-terminates each worker's TLS with an in-proxy ephemeral per-instance CA the worker trusts (only),
+re-originates a webpki-validated TLS session to the pinned origin, and surfaces nothing new but a `tls_intercepted` audit
+flag — so slice #3b can scan the now-visible plaintext. Slice #2 (force-routing ON by default, fail-closed) remains the
+substrate. Working tree clean apart from untracked `docs/essay-medium-draft.md`. Dev box **macOS**; the DGX (aarch64) is
+driven natively over WireGuard SSH (`ssh dgx`). **Session-end: Mac `cargo test --workspace` = 1555 / 0 / 8; DGX full
+workspace = 1538 / 0 / 10 (native Linux, live PG 18, real bwrap e2e running — `forced_coupling`/`no_direct_route`/
+`pg_decision_sink` green; the rcgen-keygen + `recvfrom`/`MSG_PEEK` peek survive the `NetClient` seccomp profile);
+`clippy --workspace --all-targets -D warnings` clean both. The only non-green test is the real-net `#[ignore]` MITM smoke
+test on the DGX — a pre-existing DGX DNS/WireGuard caveat (slice #2's `real_host_round_trips_through_sidecar` fails
+identically), not a #3a defect; it passes on the Mac.**
 **Standing macOS test-infra gotcha (not a regression):** a *full-workspace* run under `KASTELLAN_PG_BIN_DIR` flakes ~4
 tests in `core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs`) — parallel `initdb`/launchd
 churn (issue #130 territory); they pass single-threaded and in isolation. Use skip-as-pass for the whole workspace on
@@ -93,8 +98,8 @@ CI-verified, and the `linux-check` CI is **compile + clippy only** (no
 `cargo test`). On the **DGX Spark** (aarch64), `core` compiles/tests/clippies
 **natively**, so a full native-Linux `cargo test --workspace` +
 `cargo clippy --workspace --all-targets -D warnings` are both runnable there.
-The current native-Linux test baseline is **1523 / 0 / 9**
-(`feat/egress-slice2-dgx-acceptance`, 2026-06-11 — full `cargo test --workspace` with live PG 18 + worker binaries built
+The current native-Linux test baseline is **1538 / 0 / 10**
+(`feat/egress-slice3-tls-intercept`, 2026-06-12 — full `cargo test --workspace` with live PG 18 + worker binaries built
 so the real-sandbox e2e suites run, not skip; clippy `-D warnings` clean. The older 1327 figure predated the
 web-fetch/web-search/egress/handoff/secrets work).
 
@@ -125,13 +130,13 @@ kastellan (Rust workspace, 13 crates, AGPL-3.0)
 ├── workers/web-common   kastellan-worker-web-common: shared lib for net-egress workers. allowlist.rs (HostAllowlist: host-only `from_env_json`/`is_allowed` + **port-scoped `from_endpoints`/`is_allowed_endpoint`/`is_port_scoped`** [host:port, IPv6-aware — #241]) + http.rs (HttpGet seam [+`transport_kind`] + RawResponse + ReqwestGet + **env-selected `make_get` factory**) + proxy_connect.rs (**ProxyConnectGet**: CONNECT-over-UDS HttpGet, hyper+tokio-rustls/ring, end-to-end TLS — used when `KASTELLAN_EGRESS_PROXY_UDS` set) + testing.rs (FakeGet, `testing` feature). Consumed by web-fetch + web-search + egress-proxy.
 ├── workers/web-fetch    kastellan-worker-web-fetch: first net-egress worker. HTTPS-only web.fetch JSON-RPC method. Consumes HostAllowlist + the HttpGet transport from web-common. extract.rs (HTML readability via dom_smoothie / PDF via pdf-extract / text+JSON, char-boundary text cap) + fetch.rs (the drive() redirect-follow loop — strict https-only per hop, 5-redirect cap) + handler.rs (web.fetch dispatch). Host-side manifest in core/src/workers/web_fetch.rs
 ├── workers/web-search   kastellan-worker-web-search: second net-egress worker. web.search JSON-RPC method (query → ranked {title,url,snippet,engine} hits from a SearxNG /search?format=json endpoint). Consumes HostAllowlist + transport from web-common. parse.rs (lenient SearxNG-JSON → Vec<Hit>) + search.rs (validate_endpoint [https everywhere, http loopback-only via is_loopback] + build_query_url + one-GET search() drive, count.clamp(1,20)) + handler.rs (dispatch + fail-closed from_env). Operator-configured KASTELLAN_WEB_SEARCH_ENDPOINT; LLM supplies only the query. Host-side manifest in core/src/workers/web_search.rs. Dev setup: scripts/web-search/setup-searxng.sh
-└── workers/egress-proxy kastellan-worker-egress-proxy: per-worker egress boundary (ROADMAP:141 slice #1). Sandboxed CONNECT proxy on a per-worker UDS; per CONNECT: HostAllowlist check (reuses web-common) → resolve DNS itself → ssrf.rs is_denied_range (reject private/loopback/link-local/ULA/CGNAT/multicast, IPv4-mapped+compatible unwrapped; literal-IP carve-out for an allowlisted address) → pin+dial surviving IP → tunnel. Modules: ssrf.rs, request_line.rs (CONNECT parse incl. bracketed IPv6), report.rs (Decision/Verdict snake_case → stdout JSON line), proxy.rs (decide + handle_conn, 8 KiB request-head cap), main.rs (env parse KASTELLAN_EGRESS_PROXY_{UDS,ALLOWLIST,WORKER}, UDS bind, prelude::lock_down, accept loop). NOT routed by real workers yet (slice #2). Host side = core/src/egress
+└── workers/egress-proxy kastellan-worker-egress-proxy: per-worker egress boundary (ROADMAP:141/142; slice #1 allowlist+SSRF, slice #2 force-routing, slice #3a TLS-intercept). Sandboxed CONNECT proxy on a per-worker UDS; per CONNECT: HostAllowlist check (reuses web-common) → resolve DNS itself → ssrf.rs is_denied_range (reject private/loopback/link-local/ULA/CGNAT/multicast, IPv4-mapped+compatible unwrapped; literal-IP carve-out) → pin+dial → write 200 → peek first tunnel byte (recv MSG_PEEK; 0x16 → MITM, else transparent tunnel). **Slice #3a MITM:** in-proxy ephemeral per-instance CA (ca.rs, rcgen; private key never leaves the sandbox, public ca.pem exported beside the UDS), per-host CA-signed leaf cache (leaf_cache.rs), async terminate+re-originate (mitm.rs: looks_like_tls + intercept — tokio-rustls TlsAcceptor/TlsConnector + copy_bidirectional on a per-connection current-thread runtime; upstream validated against webpki). Decision carries tls_intercepted. Modules: ssrf.rs, request_line.rs, report.rs, proxy.rs (decide + handle_conn connect→200→peek→branch + MitmCtx + run_mitm), ca.rs, leaf_cache.rs, mitm.rs, main.rs (install ring provider, generate CA + write ca.pem before lock_down, accept loop). Host side = core/src/egress
 ```
 
-**Test baselines.** Native-Linux (DGX, PG 18 live, rustc 1.96.0, worker bins built): **1523 / 0 / 9**
-on `feat/egress-slice2-dgx-acceptance` (2026-06-11 slice-#2 acceptance; the real-sandbox e2e suites actually run here,
-unlike the older 1327 figure). macOS skip-as-pass posture (no `KASTELLAN_PG_BIN_DIR`): **~1540 / 0 / 7** range (the
-secrets split + force-routing e2e added tests over the 1537 auto-flip figure). 7–9 ignored = explicit doctest/real-net markers;
+**Test baselines.** Native-Linux (DGX, PG 18 live, rustc 1.96.0, worker bins built): **1538 / 0 / 10**
+on `feat/egress-slice3-tls-intercept` (2026-06-12 slice-#3a acceptance; the real-sandbox e2e suites actually run here,
+unlike the older 1327 figure). macOS skip-as-pass posture (no `KASTELLAN_PG_BIN_DIR`): **1555 / 0 / 8** (the slice-#3a
+ca/leaf_cache/mitm units + the hermetic round-trip added tests). 8–10 ignored = explicit doctest/real-net markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
 `KASTELLAN_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the
 archive snapshots; the suite table below lists what each integration suite verifies.)
@@ -152,10 +157,10 @@ archive snapshots; the suite table below lists what each integration suite verif
 | `web-search` unit | 24 | parse (SearxNG-JSON happy/url-less-skip/defaults/empty/missing-key/malformed), search (parsed hits, count truncate+clamp, empty-query, non-200, redirect, loopback truth table incl. `[::1]`, scheme rule https/http-loopback/http-remote-denied, host-not-allowlisted, request-URL build), handler (method-not-found, missing/empty query, happy path, operation-failed) |
 | `core` integration (`web_search_e2e`) | 1 (+1 ignored) | **real** sandbox fail-closed deny-path: endpoint host off allowlist → worker refuses at startup (hermetic); `real_search_against_searxng` `#[ignore]` (live SearxNG, DNS/TLS/loopback in-jail) |
 | `core` unit (`web_search` manifest) | 3 | resolve registers `WorkerNetClient` + endpoint-derived `Net::Allowlist` (loopback `:8888` + https `:443`); `Misconfigured` when no binary |
-| `egress-proxy` unit | 23 | ssrf (every denied range v4/v6 + mapped + compatible) 7, request_line (CONNECT + bracketed IPv6 + malformed) 7, report (JSON line shape) 3, proxy (`decide` carve-out/pin/block 4 + real-UDS `handle_conn` round-trip+403 2) 6 |
+| `egress-proxy` unit | 37 | ssrf (denied ranges v4/v6 + mapped + compatible) 7, request_line 7, report (JSON line + `tls_intercepted`) 4, proxy (`decide` + real-UDS `handle_conn` pass-through round-trip + `tls_intercepted=false` + 403) ~9, **slice #3a:** `ca` (CA PEM round-trip + leaf SAN + uniqueness) 3, `leaf_cache` (Arc reuse + distinct + bounded) 3, `mitm` (`looks_like_tls` 2 + **hermetic two-leg TLS round-trip** with only-CA worker trust 1) 3 |
 | `core` integration (`egress_proxy_e2e`) | 2 (+1 ignored) | **real** sandboxed sidecar via `spawn_sidecar` + test CONNECT client: allowed literal-loopback round-trip + off-allowlist 403 + `decision_to_audit` mapping; PG-gated `audit_log` persistence (skip-as-pass); `#[ignore]` real-net round-trip |
-| `core` integration (`egress_force_routing_e2e`) | 3 | **real** live force-routing via the production coupling `spawn_forced_net_worker` (slice #2 Task 4.6): allow round-trip + 403 + `on_decision` ingest + 1:1 teardown; Linux-only no-direct-route from the jail; PG-gated `pg_decision_sink`→`audit_log`. Skip-as-pass without sandbox/proxy-bin/PG; runs on macOS (Seatbelt) + DGX (bwrap) |
-| `core` unit (`egress::audit`/`egress::spawn`) | 4 | `decision_to_audit` verdict→action mapping + garbage-None (3); `proxy_policy` Net::ProxyEgress+WorkerNetClient+env-keys (1) |
+| `core` integration (`egress_force_routing_e2e`) | 3 (+1 ignored) | **real** live force-routing via `spawn_forced_net_worker`: allow round-trip + 403 + `on_decision` ingest + 1:1 teardown + **slice #3a `ca.pem` export asserted under the real sandbox**; Linux-only no-direct-route; PG-gated `pg_decision_sink`→`audit_log`. `#[ignore]` `real_mitm_fetch_through_sidecar` (live HTTPS origin through the MITM, only-CA worker trust — 200 on the Mac; fails on the DGX for a pre-existing DNS/env reason). Skip-as-pass without sandbox/proxy-bin/PG; runs on macOS (Seatbelt) + DGX (bwrap) |
+| `core` unit (`egress::audit`/`egress::spawn`) | 5 | `decision_to_audit` verdict→action + garbage-None + **`tls_intercepted` carry/default** (4); `proxy_policy` Net::ProxyEgress+WorkerNetClient+env-keys (1). Plus `rewrite_worker_policy` injects CA `fs_read`+env (in `net_worker` tests) |
 | `core` unit (`handoff`) | 19 | HandoffRef parse, put/get_slice round-trip + offset/len/eof, per-task budget eviction, global MAX_TRACKED_TASKS backstop, purge isolation, placeholder fields, stash passthrough/over-cap/exact-cap, fetch utf8/clamp/not-found/invalid/cross-task |
 | `core` integration (`handoff_dispatch_e2e`) | 3 | **hermetic** (lazy pool, fake lifecycle) dispatcher-level `fetch_handoff` intercept: stashed slice returned, unknown-ref → HANDOFF_NOT_FOUND, missing param → INVALID_PARAMS |
 | `core` unit (`registry_build`) | 6 | assemble_registry Register/Disabled/Misconfigured + the reserved-`handoff`-name skip |
@@ -284,21 +289,28 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy SLICE #1 (PR #240) + SLICE #2 (force-routing, DGX-accepted + ON by default, branch `feat/egress-slice2-dgx-acceptance`, PR pending) are COMPLETE.** Next egress work is slice #3 (TLS-intercept + credential-leak scanner) and slice #4 (TLS pinning), each needing its own spec. The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy SLICE #1 (PR #240) + SLICE #2 (force-routing, PR #256 MERGED) are COMPLETE; SLICE #3a (TLS-intercept mechanism, branch `feat/egress-slice3-tls-intercept`, PR pending) is COMPLETE.** Next egress work is slice #3b (the co-located credential-leak scanner, on top of #3a's now-visible plaintext) and slice #4 (TLS pinning). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**★ TOP PICK — egress proxy SLICE #3: TLS-intercept + co-located credential-leak scanner (ROADMAP:142).** With slice #2
-done (force-routing live + on by default), the proxy now sees every worker's egress as a CONNECT tunnel — but the bytes
-are end-to-end TLS, so it can't yet scan them. Slice #3 adds **MITM at the proxy** with a per-instance CA the workers
-trust, then a **leak scanner**: every outbound request/inbound response body is scanned for the SHA-256 prefix of each
-secret currently materialized for the calling worker; hits are blocked + audited (scanning at the trust boundary, not in
-the possibly-compromised worker). **Needs a spec first** — brainstorm the CA-trust model (per-worker CA injected into the
-jail's trust store; how `web-fetch`/`web-search` rustls clients pick it up), the scan surface (reuse the `Vault`'s
-materialized-secret hashes), and the `decide`/tunnel changes in `workers/egress-proxy`. References: IronClaw
-`safety::leak_detector`, ZeroClaw `security/leak_detector.rs`. Then slice #4 (TLS pinning for the frontier/LLM path).
+**★ TOP PICK — egress proxy SLICE #3b: co-located credential-leak scanner (ROADMAP:142).** Slice #3a already
+MITM-terminates worker TLS, so the proxy now sees plaintext request/response bodies. 3b adds the **scanner**: each
+outbound request / inbound response body is scanned for the SHA-256 (or a prefix) of each secret currently materialized
+for the calling worker; hits are blocked + audited (carrying only the hash + offset, never plaintext), mirroring the
+`cassandra::injection_guard` `screen`/catalogue + redacted-audit pattern. **Needs the new piece the code does NOT have
+yet:** the `Vault` (`core/src/secrets/vault.rs`) exposes no introspection, and the audit log carries only
+`SecretRef::ref_hash()` — the SHA-256 of the opaque `secret://…` *ref string*, **not** a hash of the secret *value*. 3b
+must add a host→proxy provisioning path for the per-worker secret-*value* hashes (passed into the per-worker sidecar at
+spawn), then scan the plaintext relayed in `mitm::intercept`. **Spec it first** (the 3a spec's "Follow-up — slice #3b"
+section scopes it). NB its payoff is forward-looking: no current egress worker (web-fetch/web-search) carries secrets, so
+the scanner pays off when a secret-bearing egress worker lands. References: IronClaw `safety::leak_detector`, ZeroClaw
+`security/leak_detector.rs`. Then slice #4 (TLS pinning for the frontier/LLM path).
 **Egress deferrals carried forward:** [#242](https://github.com/hherb/kastellan/issues/242) tunnel idle/resolve timeouts;
 [#251](https://github.com/hherb/kastellan/issues/251) stale-scratch crash-sweep (needs cross-platform pid-liveness);
 transparent gzip/brotli if an origin refuses `Accept-Encoding: identity`; the `pg_decision_sink` back-pressure decoupling
-(bounded channel + async writer) before high-rate production load.
+(bounded channel + async writer) before high-rate production load. **Slice #3a minor deferrals:** the MITM path re-dials
+the origin inside `intercept` (one extra connect; the sync pre-200 connect only proves reachability — a later opt can
+thread the converted tokio stream through); a rare `EINTR`/`recv` error on the first-byte peek routes a TLS connection to
+transparent pass-through (graceful — it still tunnels — but skips interception; tighten before 3b's scanner relies on
+every TLS flow being terminated).
 
 **★ Alternative TOP PICK — `browser-driver` worker (ROADMAP:147).** A more self-contained next worker: Playwright
 headless under a dedicated profile + scratch FS, reusing the `web-common` allowlist + `Net::Allowlist` manifest pattern
