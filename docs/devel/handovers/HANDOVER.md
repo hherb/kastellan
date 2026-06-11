@@ -6,8 +6,9 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-12 (**egress proxy SLICE #3a — TLS-intercept (MITM) mechanism COMPLETE**; branch
-`feat/egress-slice3-tls-intercept`, PR pending; Mac green + DGX-accepted under real bwrap over WireGuard SSH).
+**Last updated:** 2026-06-12 (**egress proxy SLICE #3a — TLS-intercept (MITM) mechanism COMPLETE & MERGED** via
+PR [#259](https://github.com/hherb/kastellan/pull/259) at `e2a7b2b`; Mac green + DGX-accepted under real bwrap over
+WireGuard SSH). Next pick = slice #3b credential-leak scanner.
 
 **This session — egress proxy SLICE #3a: TLS-intercept (MITM) mechanism (ROADMAP:142).** The per-worker proxy now
 **terminates each worker's TLS** (presenting a per-instance-CA-signed leaf the worker trusts) and **re-originates a
@@ -73,8 +74,8 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** `main` is at `f0464d7` (egress slice #2, PR #256 MERGED). **This session's work is on branch
-`feat/egress-slice3-tls-intercept` (PR pending).** Egress proxy **slice #3a (TLS-intercept mechanism) is COMPLETE**: the
+**Current state.** `main` is at `e2a7b2b` (egress slice #3a, PR [#259](https://github.com/hherb/kastellan/pull/259)
+MERGED). Egress proxy **slice #3a (TLS-intercept mechanism) is COMPLETE and on `main`**: the
 per-worker proxy MITM-terminates each worker's TLS with an in-proxy ephemeral per-instance CA the worker trusts (only),
 re-originates a webpki-validated TLS session to the pinned origin, and surfaces nothing new but a `tls_intercepted` audit
 flag — so slice #3b can scan the now-visible plaintext. Slice #2 (force-routing ON by default, fail-closed) remains the
