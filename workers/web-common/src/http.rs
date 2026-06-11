@@ -97,46 +97,65 @@ impl HttpGet for ReqwestGet {
 }
 
 /// Inner selection logic for `make_get`. `uds_override` is the value of
-/// `KASTELLAN_EGRESS_PROXY_UDS` (already extracted by the caller), or `None`
-/// when the variable is absent or empty.
+/// `KASTELLAN_EGRESS_PROXY_UDS` and `ca_override` the value of
+/// `KASTELLAN_EGRESS_PROXY_CA` (both already extracted by the caller), or
+/// `None` when the respective variable is absent or empty.
 ///
-/// Extracted so tests can exercise both branches **without touching process
-/// env** (env mutation is a data race when other threads read the same var).
-pub(crate) fn make_get_inner(
+/// When a UDS is set, `ca_override` selects the worker's trust posture: `Some`
+/// → trust ONLY that per-instance MITM CA (fail closed if it can't be
+/// read/parsed — never a silent webpki fallback); `None` → webpki public roots
+/// (slice #1/#2 back-compat). When no UDS is set the CA is irrelevant — the
+/// direct `ReqwestGet` carries its own rustls roots.
+///
+/// `pub` (not `pub(crate)`) on purpose: it is the documented DI seam that the
+/// `core` crate's e2e tests drive directly so they can exercise every branch
+/// **without touching process env** (env mutation is a data race when other
+/// threads read the same var).
+pub fn make_get_inner(
     user_agent: &str,
     uds_override: Option<&str>,
+    ca_override: Option<&str>,
 ) -> anyhow::Result<Box<dyn HttpGet>> {
     match uds_override {
-        Some(uds) if !uds.is_empty() => Ok(Box::new(
-            crate::proxy_connect::ProxyConnectGet::new(user_agent, PathBuf::from(uds)),
-        )),
+        Some(uds) if !uds.is_empty() => {
+            let ca = ca_override.filter(|s| !s.is_empty()).map(PathBuf::from);
+            Ok(Box::new(crate::proxy_connect::ProxyConnectGet::with_trust(
+                user_agent,
+                PathBuf::from(uds),
+                ca,
+            )?))
+        }
         _ => Ok(Box::new(ReqwestGet::new(user_agent)?)),
     }
 }
 
 /// Build the appropriate `HttpGet` for the current environment. When
 /// `KASTELLAN_EGRESS_PROXY_UDS` is set (force-routing active), egress MUST go
-/// through the proxy, so return [`crate::proxy_connect::ProxyConnectGet`];
-/// otherwise the direct [`ReqwestGet`] for dev/no-proxy runs.
+/// through the proxy, so return [`crate::proxy_connect::ProxyConnectGet`] —
+/// trusting only `KASTELLAN_EGRESS_PROXY_CA` when that is set (MITM posture),
+/// else webpki roots. Otherwise the direct [`ReqwestGet`] for dev/no-proxy runs.
 pub fn make_get(user_agent: &str) -> anyhow::Result<Box<dyn HttpGet>> {
     // Treat absent *and* empty the same way (empty = effectively unset).
     let uds = std::env::var("KASTELLAN_EGRESS_PROXY_UDS").ok();
-    make_get_inner(user_agent, uds.as_deref())
+    let ca = std::env::var("KASTELLAN_EGRESS_PROXY_CA").ok();
+    make_get_inner(user_agent, uds.as_deref(), ca.as_deref())
 }
 
 #[cfg(test)]
 mod make_get_tests {
     use super::*;
 
-    /// Both branches exercised via `make_get_inner` — no env mutation, no race.
+    /// All branches exercised via `make_get_inner` — no env mutation, no race.
     #[test]
-    fn make_get_inner_selects_transport_by_uds() {
-        // No UDS → reqwest.
-        let g = make_get_inner("kastellan-test/0", None).unwrap();
+    fn make_get_inner_threads_ca_override_into_proxy_connect() {
+        // No UDS → reqwest (CA ignored).
+        let g = make_get_inner("kastellan-test/0", None, None).unwrap();
         assert_eq!(g.transport_kind(), "reqwest");
-
-        // UDS set → proxy-connect (socket doesn't need to exist for construction).
-        let g = make_get_inner("kastellan-test/0", Some("/tmp/x.sock")).unwrap();
+        // UDS, no CA → proxy-connect (webpki; socket needn't exist to construct).
+        let g = make_get_inner("kastellan-test/0", Some("/tmp/x.sock"), None).unwrap();
         assert_eq!(g.transport_kind(), "proxy-connect");
+        // UDS + a set-but-unreadable CA path → FAIL CLOSED (no silent webpki fallback).
+        let err = make_get_inner("kastellan-test/0", Some("/tmp/x.sock"), Some("/nonexistent/ca.pem"));
+        assert!(err.is_err(), "a set-but-unreadable CA must fail closed, not fall back");
     }
 }
