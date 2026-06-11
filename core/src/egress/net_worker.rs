@@ -35,6 +35,10 @@ const SUN_PATH_MAX: usize = 108;
 /// (`kastellan_worker_web_common::http::make_get`). Must match that constant.
 const ENV_UDS: &str = "KASTELLAN_EGRESS_PROXY_UDS";
 
+/// Env key the worker-side transport reads to load the per-instance MITM CA
+/// (`kastellan_worker_web_common::http::make_get`). Must match that constant.
+const ENV_CA: &str = "KASTELLAN_EGRESS_PROXY_CA";
+
 /// Sidecar + decision-ingest bundle carried by a force-routed net worker, held
 /// in [`SupervisedWorker`]'s additive `egress` field. Its [`Drop`] kills the
 /// proxy; the ingest thread then sees EOF on the proxy stdout and exits on its
@@ -71,16 +75,24 @@ impl Drop for EgressSidecar {
 /// drop its direct DNS file (the proxy resolves now), and inject the UDS env so
 /// the worker's transport switches onto CONNECT-over-UDS. Pure — no spawn,
 /// fully testable.
-pub fn rewrite_worker_policy(mut policy: SandboxPolicy, uds: &Path) -> SandboxPolicy {
+pub fn rewrite_worker_policy(mut policy: SandboxPolicy, uds: &Path, ca: &Path) -> SandboxPolicy {
     policy.proxy_uds = Some(uds.to_path_buf());
     // The worker no longer resolves DNS (the proxy does); revoke the file so a
     // compromised worker can't even read the resolver config.
     policy.fs_read.retain(|p| p != Path::new("/etc/resolv.conf"));
-    // Inject the UDS env (overwrite any stale entry).
-    policy.env.retain(|(k, _)| k != ENV_UDS);
+    // Make the per-instance CA readable in-jail (the sandbox layer binds every
+    // fs_read path into the worker) and announce it to the worker.
+    if !policy.fs_read.iter().any(|p| p == ca) {
+        policy.fs_read.push(ca.to_path_buf());
+    }
+    // Inject the UDS + CA env (overwrite any stale entries first).
+    policy.env.retain(|(k, _)| k != ENV_UDS && k != ENV_CA);
     policy
         .env
         .push((ENV_UDS.to_string(), uds.to_string_lossy().into_owned()));
+    policy
+        .env
+        .push((ENV_CA.to_string(), ca.to_string_lossy().into_owned()));
     policy
 }
 
@@ -114,7 +126,12 @@ where
     let stdout = sidecar.stdout();
     // 2. Rewrite the worker policy onto the sidecar UDS.
     let uds = sidecar.uds_path.clone();
-    let forced = rewrite_worker_policy(spec.policy.clone(), &uds);
+    // The sidecar exports its CA next to the UDS (same scratch dir).
+    let ca = uds
+        .parent()
+        .map(|d| d.join(super::spawn::CA_FILE_NAME))
+        .unwrap_or_else(|| PathBuf::from(super::spawn::CA_FILE_NAME));
+    let forced = rewrite_worker_policy(spec.policy.clone(), &uds, &ca);
     let forced_spec = WorkerSpec {
         policy: &forced,
         program: spec.program,
@@ -289,7 +306,7 @@ mod tests {
             ..SandboxPolicy::default()
         };
         let uds = std::path::PathBuf::from("/scratch/egress.sock");
-        let out = rewrite_worker_policy(base, &uds);
+        let out = rewrite_worker_policy(base, &uds, std::path::Path::new("/scratch/ca.pem"));
         // proxy_uds set → bwrap/Seatbelt force-route.
         assert_eq!(out.proxy_uds.as_deref(), Some(uds.as_path()));
         // resolv.conf removed (worker no longer resolves directly).
@@ -304,13 +321,35 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_worker_policy_injects_ca_trust() {
+        let base = SandboxPolicy {
+            net: Net::Allowlist(vec!["api.example.com:443".into()]),
+            fs_read: vec!["/etc/resolv.conf".into(), "/bin/worker".into()],
+            env: vec![],
+            ..SandboxPolicy::default()
+        };
+        let uds = std::path::PathBuf::from("/scratch/egress.sock");
+        let ca = std::path::PathBuf::from("/scratch/ca.pem");
+        let out = rewrite_worker_policy(base, &uds, &ca);
+        assert!(out.fs_read.contains(&ca));
+        assert!(out
+            .env
+            .iter()
+            .any(|(k, v)| k == "KASTELLAN_EGRESS_PROXY_CA" && v == "/scratch/ca.pem"));
+    }
+
+    #[test]
     fn rewrite_overwrites_stale_uds_env() {
         let base = SandboxPolicy {
             net: Net::Allowlist(vec!["api.example.com:443".into()]),
             env: vec![(ENV_UDS.to_string(), "/old/stale.sock".to_string())],
             ..SandboxPolicy::default()
         };
-        let out = rewrite_worker_policy(base, std::path::Path::new("/scratch/egress.sock"));
+        let out = rewrite_worker_policy(
+            base,
+            std::path::Path::new("/scratch/egress.sock"),
+            std::path::Path::new("/scratch/ca.pem"),
+        );
         let uds_entries: Vec<&String> = out
             .env
             .iter()

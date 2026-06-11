@@ -18,6 +18,10 @@ const ENV_WORKER: &str = "KASTELLAN_EGRESS_PROXY_WORKER";
 /// project the exact socket path the sidecar will `bind()`.
 pub(crate) const UDS_FILE_NAME: &str = "egress.sock";
 
+/// Basename of the per-worker CA cert the sidecar exports for the host to inject
+/// into the worker's trust store (slice #3a). Lives beside the UDS in scratch.
+pub(crate) const CA_FILE_NAME: &str = "ca.pem";
+
 /// How long `spawn_sidecar` waits for the proxy to `bind()` its UDS.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(25);
@@ -99,13 +103,19 @@ pub fn spawn_sidecar(
         .spawn_under_policy(&policy, &program, &[])
         .map_err(|e| anyhow::anyhow!("spawn egress-proxy sidecar: {e}"))?;
 
+    // Slice #3a: the sidecar also exports its per-instance MITM CA next to the
+    // UDS. Wait for BOTH so the host never binds a worker before the CA it must
+    // trust exists on disk.
+    let ca_path = scratch.join(CA_FILE_NAME);
     let deadline = Instant::now() + READY_TIMEOUT;
-    while !uds_path.exists() {
+    while !(uds_path.exists() && ca_path.exists()) {
         if Instant::now() >= deadline {
             let mut handle = SidecarHandle { child, uds_path: uds_path.clone() };
             handle.child.kill().ok();
             handle.child.wait().ok();
-            anyhow::bail!("egress-proxy sidecar did not bind {uds_path:?} within {READY_TIMEOUT:?}");
+            anyhow::bail!(
+                "egress-proxy sidecar did not bind {uds_path:?} + write {ca_path:?} within {READY_TIMEOUT:?}"
+            );
         }
         std::thread::sleep(READY_POLL);
     }
