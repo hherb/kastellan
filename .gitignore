@@ -39,3 +39,8 @@ venv/
 # Local agent artefacts
 audit-*.jsonl
 2026-05-09-000520-since-a-system-reboot-after-update-to-newest-apt.txt
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
