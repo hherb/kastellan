@@ -33,7 +33,8 @@ use async_trait::async_trait;
 use crate::scheduler::ToolEntry;
 use crate::tool_host::ToolHostError;
 use crate::worker_lifecycle::{
-    IdleTimeoutLifecycle, Lifecycle, SingleUseLifecycle, WorkerHandle, WorkerLifecycleManager,
+    ForceRoutingConfig, IdleTimeoutLifecycle, Lifecycle, SingleUseLifecycle, WorkerHandle,
+    WorkerLifecycleManager,
 };
 
 /// Multi-policy manager. Holds one [`SingleUseLifecycle`] and one
@@ -51,24 +52,40 @@ pub struct CompositeLifecycle {
 }
 
 impl CompositeLifecycle {
-    /// Build with default exponential restart backoff (1 s → 60 s cap).
+    /// Build with default exponential restart backoff (1 s → 60 s cap) and no
+    /// egress force-routing (legacy byte-identical spawn path).
     pub fn new(sandboxes: Arc<kastellan_sandbox::SandboxBackends>) -> Self {
-        Self {
-            single_use: SingleUseLifecycle::new(Arc::clone(&sandboxes)),
-            idle_timeout: IdleTimeoutLifecycle::new(sandboxes),
-        }
+        Self::with_backoff(sandboxes, super::idle_timeout::RestartBackoff::default())
     }
 
-    /// Build with operator-supplied restart backoff. The backoff
-    /// applies to the idle-timeout side only — `SingleUseLifecycle`
+    /// Build with operator-supplied restart backoff (no force-routing). The
+    /// backoff applies to the idle-timeout side only — `SingleUseLifecycle`
     /// has no warm-cache to back off from.
     pub fn with_backoff(
         sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
     ) -> Self {
+        Self::with_backoff_and_force_routing(sandboxes, backoff, None)
+    }
+
+    /// Build with operator-supplied restart backoff and an optional egress
+    /// force-routing config (slice #2 Task 4.4). The same `Arc` config is shared
+    /// by both inner managers, so every `Net::Allowlist` worker is force-routed
+    /// regardless of which lifecycle it declares. `None` force is equivalent to
+    /// [`Self::with_backoff`].
+    pub fn with_backoff_and_force_routing(
+        sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
+        backoff: super::idle_timeout::RestartBackoff,
+        force: Option<Arc<ForceRoutingConfig>>,
+    ) -> Self {
         Self {
-            single_use: SingleUseLifecycle::new(Arc::clone(&sandboxes)),
-            idle_timeout: IdleTimeoutLifecycle::with_backoff(sandboxes, backoff),
+            single_use: SingleUseLifecycle::with_force_routing(
+                Arc::clone(&sandboxes),
+                force.clone(),
+            ),
+            idle_timeout: IdleTimeoutLifecycle::with_backoff_and_force_routing(
+                sandboxes, backoff, force,
+            ),
         }
     }
 }

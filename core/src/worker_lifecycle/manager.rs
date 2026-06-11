@@ -8,7 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::scheduler::tool_dispatch::ToolEntry;
-use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
+use crate::tool_host::{SupervisedWorker, ToolHostError, WorkerSpec};
+use crate::worker_lifecycle::force_route::{spawn_worker_maybe_forced, ForceRoutingConfig};
 
 /// Holder of an exclusively-owned, live `SupervisedWorker` lent out by a lifecycle
 /// manager.
@@ -188,11 +189,28 @@ pub trait WorkerLifecycleManager: Send + Sync {
 /// the per-OS default backend keeps being used (byte-equivalent).
 pub struct SingleUseLifecycle {
     sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
+    /// Egress force-routing config (slice #2 Task 4.4). `None` ⇒ the cold-spawn
+    /// path is byte-identical to pre-4.4; `Some` ⇒ `Net::Allowlist` workers are
+    /// routed through a per-worker egress-proxy sidecar.
+    force: Option<Arc<ForceRoutingConfig>>,
 }
 
 impl SingleUseLifecycle {
+    /// Construct without force-routing (legacy byte-identical spawn path).
     pub fn new(sandboxes: Arc<kastellan_sandbox::SandboxBackends>) -> Self {
-        Self { sandboxes }
+        Self {
+            sandboxes,
+            force: None,
+        }
+    }
+
+    /// Construct with an optional egress force-routing config. `None` is
+    /// equivalent to [`Self::new`].
+    pub fn with_force_routing(
+        sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
+        force: Option<Arc<ForceRoutingConfig>>,
+    ) -> Self {
+        Self { sandboxes, force }
     }
 }
 
@@ -200,12 +218,13 @@ impl SingleUseLifecycle {
 impl WorkerLifecycleManager for SingleUseLifecycle {
     async fn acquire(
         &self,
-        _tool_name: &str,
+        tool_name: &str,
         entry: &ToolEntry,
     ) -> Result<WorkerHandle, ToolHostError> {
-        // `_tool_name` is unused: single-use never caches, so there is no per-tool slot
-        // to key by. The parameter exists on the trait for `IdleTimeoutLifecycle`'s
-        // warm-cache key (see trait doc).
+        // `tool_name` is not a warm-cache key here (single-use never caches),
+        // but it labels the egress-proxy sidecar's audit rows when this entry is
+        // force-routed (see `spawn_worker_maybe_forced`). The parameter also
+        // serves `IdleTimeoutLifecycle`'s warm-cache key (see trait doc).
         //
         // Per-call clone of the base policy so concurrent dispatches against the same
         // `ToolEntry` cannot mutate each other's policy. The clone matches the
@@ -228,7 +247,14 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
         let backend = self
             .sandboxes
             .resolve(entry.sandbox_backend, entry.container_image.as_deref());
-        let worker = spawn_worker(backend.as_ref(), &spec)?;
+        // Force-route `Net::Allowlist` workers through an egress-proxy sidecar
+        // when configured; otherwise byte-identical to the legacy `spawn_worker`.
+        let worker = spawn_worker_maybe_forced(
+            self.force.as_deref(),
+            backend.as_ref(),
+            &spec,
+            tool_name,
+        )?;
         Ok(WorkerHandle::single_use(worker))
     }
 }
@@ -248,6 +274,10 @@ pub struct IdleTimeoutLifecycle {
     sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
     backoff: super::idle_timeout::RestartBackoff,
     registry: super::idle_timeout::WarmRegistry,
+    /// Egress force-routing config (slice #2 Task 4.4). Applied on the
+    /// cold-spawn path only; a warm-reused worker keeps the sidecar it was
+    /// spawned with. `None` ⇒ byte-identical to pre-4.4.
+    force: Option<Arc<ForceRoutingConfig>>,
 }
 
 impl IdleTimeoutLifecycle {
@@ -256,15 +286,26 @@ impl IdleTimeoutLifecycle {
         Self::with_backoff(sandboxes, super::idle_timeout::RestartBackoff::default())
     }
 
-    /// Construct with operator-supplied backoff configuration.
+    /// Construct with operator-supplied backoff configuration (no force-routing).
     pub fn with_backoff(
         sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
+    ) -> Self {
+        Self::with_backoff_and_force_routing(sandboxes, backoff, None)
+    }
+
+    /// Construct with operator-supplied backoff and an optional egress
+    /// force-routing config. `None` force is equivalent to [`Self::with_backoff`].
+    pub fn with_backoff_and_force_routing(
+        sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
+        backoff: super::idle_timeout::RestartBackoff,
+        force: Option<Arc<ForceRoutingConfig>>,
     ) -> Self {
         Self {
             sandboxes,
             backoff,
             registry: super::idle_timeout::empty_registry(),
+            force,
         }
     }
 
@@ -369,6 +410,7 @@ impl WorkerLifecycleManager for IdleTimeoutLifecycle {
             &self.registry,
             tool_name,
             entry,
+            self.force.as_deref(),
         )
         .await
     }

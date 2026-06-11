@@ -11,7 +11,8 @@
 //!      [`SupervisedWorker`] so teardown is 1:1 with the worker.
 
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
 use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
@@ -34,13 +35,25 @@ pub struct EgressSidecar {
     /// The decision-ingest thread. Dropped (detached) on teardown; it exits
     /// when the killed sidecar's stdout reaches EOF.
     _ingest: JoinHandle<()>,
+    /// Per-worker scratch dir holding the sidecar UDS, owned for RAII cleanup
+    /// when force-routing created it (see [`spawn_forced_net_worker`]). `None`
+    /// when the caller manages the scratch dir itself (e.g. the raw
+    /// [`spawn_net_worker`] used by tests/e2e, which pass a borrowed path).
+    scratch: Option<PathBuf>,
 }
 
 impl Drop for EgressSidecar {
     fn drop(&mut self) {
-        // Kill + reap the proxy. Its stdout EOFs → the ingest thread drains any
-        // buffered decisions and exits. We do NOT join the thread here.
+        // Kill + reap the proxy (also removes the UDS file). Its stdout EOFs →
+        // the ingest thread drains any buffered decisions and exits. We do NOT
+        // join the thread here.
         self.sidecar.terminate();
+        // Remove the per-worker scratch dir we own (now that the UDS is gone).
+        // Best-effort — a left-behind scratch dir is a leak, never a safety
+        // issue, and must not wedge worker teardown.
+        if let Some(dir) = self.scratch.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -107,8 +120,74 @@ where
     worker.egress = Some(EgressSidecar {
         sidecar,
         _ingest: ingest,
+        scratch: None,
     });
     Ok(worker)
+}
+
+/// Force-route a net worker, owning its scratch dir for RAII cleanup.
+///
+/// Thin wrapper over [`spawn_net_worker`] for the live auto-flip (Task 4.4): it
+/// mints a **unique per-worker scratch subdir** under `scratch_root` to hold the
+/// sidecar UDS, spawns the coupled worker+sidecar in it, and ties the scratch
+/// dir's lifetime to the returned worker (the [`EgressSidecar`]'s `Drop` removes
+/// it once the worker — and any warm reuse of it — is finally torn down). On the
+/// fail-closed path (sidecar unavailable ⇒ no worker) the freshly-created
+/// scratch dir is removed immediately, since no worker exists to own it.
+pub fn spawn_forced_net_worker<F>(
+    backend: &dyn SandboxBackend,
+    proxy_bin: &Path,
+    spec: &WorkerSpec<'_>,
+    allowlist: &[String],
+    scratch_root: &Path,
+    worker_name: &str,
+    on_decision: F,
+) -> Result<SupervisedWorker, ToolHostError>
+where
+    F: FnMut(EgressAuditRow) + Send + 'static,
+{
+    let scratch = make_worker_scratch_dir(scratch_root)?;
+    match spawn_net_worker(
+        backend,
+        proxy_bin,
+        spec,
+        allowlist,
+        &scratch,
+        worker_name,
+        on_decision,
+    ) {
+        Ok(mut worker) => {
+            // Hand scratch ownership to the worker's sidecar bundle so it is
+            // cleaned exactly when the worker is finally dropped. `egress` is
+            // always `Some` on a successful `spawn_net_worker`, but guard
+            // defensively rather than `expect` — a missing bundle just means the
+            // dir is cleaned eagerly below instead of at teardown.
+            match worker.egress.as_mut() {
+                Some(egress) => egress.scratch = Some(scratch),
+                None => {
+                    let _ = std::fs::remove_dir_all(&scratch);
+                }
+            }
+            Ok(worker)
+        }
+        Err(e) => {
+            // No worker to own the scratch dir — remove it now (fail-closed).
+            let _ = std::fs::remove_dir_all(&scratch);
+            Err(e)
+        }
+    }
+}
+
+/// Create a unique scratch subdir under `scratch_root` for one force-routed
+/// worker's sidecar UDS. The name is `egress-<pid>-<seq>` — `pid` scopes it to
+/// this daemon process, `seq` (a process-lifetime atomic) guarantees uniqueness
+/// across concurrent spawns without needing a wall clock or RNG.
+fn make_worker_scratch_dir(scratch_root: &Path) -> Result<PathBuf, ToolHostError> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = scratch_root.join(format!("egress-{}-{}", std::process::id(), seq));
+    std::fs::create_dir_all(&dir).map_err(ToolHostError::Io)?;
+    Ok(dir)
 }
 
 /// Spawn the decision-ingest thread over the proxy's stdout. Reads decision
@@ -240,5 +319,64 @@ mod tests {
             |_row| {},
         );
         assert!(res.is_err(), "no proxy => no net worker (fail-closed)");
+    }
+
+    fn allowlist_spec(policy: &SandboxPolicy) -> WorkerSpec<'_> {
+        WorkerSpec {
+            policy,
+            program: "/bin/worker",
+            args: &[],
+            wall_clock_ms: None,
+        }
+    }
+
+    #[test]
+    fn spawn_forced_net_worker_fails_closed_when_sidecar_unavailable() {
+        let backend = FailBackend;
+        let policy = SandboxPolicy {
+            net: Net::Allowlist(vec!["api.example.com:443".into()]),
+            ..SandboxPolicy::default()
+        };
+        let scratch_root = tempfile::tempdir().expect("scratch root");
+        let res = spawn_forced_net_worker(
+            &backend,
+            Path::new("/nonexistent/egress-proxy"),
+            &allowlist_spec(&policy),
+            &["api.example.com:443".to_string()],
+            scratch_root.path(),
+            "web-fetch",
+            |_row| {},
+        );
+        assert!(res.is_err(), "no proxy => no net worker (fail-closed)");
+    }
+
+    #[test]
+    fn spawn_forced_net_worker_cleans_scratch_on_failure() {
+        // When the sidecar can't spawn, the per-worker scratch subdir created
+        // under `scratch_root` must NOT leak — there is no worker to own it, so
+        // the wrapper removes it on the failure path.
+        let backend = FailBackend;
+        let policy = SandboxPolicy {
+            net: Net::Allowlist(vec!["api.example.com:443".into()]),
+            ..SandboxPolicy::default()
+        };
+        let scratch_root = tempfile::tempdir().expect("scratch root");
+        let _ = spawn_forced_net_worker(
+            &backend,
+            Path::new("/nonexistent/egress-proxy"),
+            &allowlist_spec(&policy),
+            &["api.example.com:443".to_string()],
+            scratch_root.path(),
+            "web-fetch",
+            |_row| {},
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(scratch_root.path())
+            .expect("read scratch root")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed force-route spawn left {} scratch entries behind",
+            leftovers.len()
+        );
     }
 }

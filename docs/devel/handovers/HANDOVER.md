@@ -6,7 +6,10 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-11 (**egress proxy SLICE #2 force-routing MECHANISM SHIPPED** — connector + OS force-routing + port-scoping #241 + coupled spawn, branch `feat/egress-proxy-slice2-impl`; on macOS). **PR #249 review-hardening pass applied** (see below).
+**Last updated:** 2026-06-11 (**egress proxy SLICE #2 Task 4.4 — the live auto-flip — SHIPPED (opt-in, default OFF)** on
+branch `feat/egress-force-routing-autoflip`, off `main` `1c42e89`; on macOS). The slice-#2 force-routing *mechanism* was
+merged via PR [#249](https://github.com/hherb/kastellan/pull/249); this session wires it into the live worker-spawn path
+behind `KASTELLAN_EGRESS_FORCE_ROUTING`. **Remaining for slice #2: the DGX acceptance run + flipping the opt-in on.**
 
 **PR #249 review fixes (2026-06-11, same branch).** Addressed a code-review pass on the slice-#2 mechanism, all hardening (no behaviour change to the shipped mechanism): (1) `proxy_uds` now flows through the **same TinyScheme injection-foreclosing + absolute-path guard** as `fs_read`/`fs_write` in `MacosSeatbelt::spawn_under_policy` (it was the one policy path skipping the guard) + a rejection test; (2) the Seatbelt `(path-literal …)` rule uses `{uds:?}` (non-lossy for non-UTF8 paths) instead of `.display().to_string()`; (3) documented + test-locked the **fail-closed** behaviour of `HostAllowlist::from_endpoints` for an out-of-range `:port` (becomes a dead rule, never widens); (4) comment pinning the deliberate one-byte-at-a-time `read_proxy_head` (chunked reads would over-consume the tunnelled TLS stream); (5) back-pressure note on `pg_decision_sink`'s synchronous insert to revisit before the Task 4.4 live flip. Real Seatbelt gating probe still **PASSES** (AF_INET denied / UDS allowed); sandbox + web-common + core test suites green; clippy `-D warnings` clean.
 
@@ -32,15 +35,46 @@ systemd unit `kastellan-core`. After merge: rename the GitHub repo to `hherb/kas
 redirect), update local checkout dir + remote, and move the Claude memory dir
 (`~/.claude/projects/-home-hherb-src-hhagent` → `…-kastellan`; same for the Mac path).
 
-**Current state.** `main` is at `f0feac7` (slice #2 **design** PR #246 + crates.io 0.1.0 release PRs #247/#248 on
-top of the rename #244 / slice #1 #240 / injection-guard #239 / web-search #238 / planner #200 / handoff #199 /
-web-fetch #197 merges). This session is on branch **`feat/egress-proxy-slice2-impl`** (17 commits on top of `main`;
-**SLICE #2 force-routing MECHANISM**). Working tree clean (only untracked `docs/essay-medium-draft.md`). Dev box on
-**macOS**. **Session-end: 1521 / 0 / 7 (workspace, macOS skip-as-pass); clippy `-D warnings` clean.**
+**Current state.** `main` is at `1c42e89` (**slice #2 force-routing MECHANISM merged**, PR #249, on top of the slice #2
+design #246 / crates.io 0.1.0 #247/#248 / rename #244 / slice #1 #240 / injection-guard #239 / web-search #238 /
+planner #200 / handoff #199 / web-fetch #197 merges). This session is on branch **`feat/egress-force-routing-autoflip`**
+(Task 4.4 — the live auto-flip, opt-in default OFF). With the flag unset, the worker-spawn path is **byte-identical** to
+the merged mechanism (existing deployments + Mac e2e unaffected); set `KASTELLAN_EGRESS_FORCE_ROUTING=1` and every
+`Net::Allowlist` worker is force-routed through a per-worker egress-proxy sidecar. Working tree otherwise clean (only
+untracked `docs/essay-medium-draft.md`). Dev box on **macOS**. **Session-end: 1533 / 0 / 7 (workspace, macOS
+skip-as-pass; +12 force-route tests over the 1521 baseline); clippy `-D warnings` clean.**
 
-**This session — egress proxy SLICE #2: force-routing MECHANISM SHIPPED (ROADMAP:141; executed the slice-#2 plan).**
+**This session — egress proxy SLICE #2 Task 4.4: the live auto-flip (ROADMAP:141; opt-in, default OFF).** Wired the
+merged force-routing mechanism into the live worker-spawn path, gated behind `KASTELLAN_EGRESS_FORCE_ROUTING`. TDD,
+Mac-verified (1533/0/7, clippy clean). Design = the slice-#2 plan's Task 4.4 (the previously-deferred item). Shape:
+- **Pure decision layer** — new `core/src/worker_lifecycle/force_route.rs`: `ForceRoutingConfig` (proxy_bin +
+  scratch_root + a boxed `DecisionSinkFactory` so the routing decision is unit-testable with **no live pool**);
+  `policy_net_is_force_routable` (only `Net::Allowlist`; `Deny`/`ProxyEgress` ⇒ false); `resolve_force_routing`
+  (**fail-closed**: enabled-but-no-proxy-binary ⇒ `Err(ProxyBinaryNotFound)`); `spawn_worker_maybe_forced` (the single
+  chokepoint both managers call — `None` config OR non-allowlist net ⇒ byte-identical `spawn_worker`); `env_flag_enabled`
+  + `from_env` (reads the flag, discovers the proxy binary via `worker_manifest::discover_binary` with override
+  `KASTELLAN_EGRESS_PROXY_BIN` / default-sibling `kastellan-worker-egress-proxy`, builds the `pg_decision_sink` factory).
+- **Scratch-owning spawn** — `egress::net_worker::spawn_forced_net_worker`: mints a unique per-worker scratch subdir
+  (`egress-<pid>-<seq>`) for the sidecar UDS and ties its lifetime to the worker (new `EgressSidecar.scratch: Option<PathBuf>`,
+  removed in `Drop` after the sidecar is reaped). Fail-closed path cleans the dir eagerly (no worker to own it).
+- **Lifecycle threading** — `Option<Arc<ForceRoutingConfig>>` added to `SingleUseLifecycle`/`IdleTimeoutLifecycle`/
+  `CompositeLifecycle` (+ `with_force_routing` / `with_backoff_and_force_routing` constructors; old `new`/`with_backoff` =
+  `None` = legacy). Both cold-spawn sites (`SingleUseLifecycle::acquire`, `idle_timeout::acquire_impl`) call
+  `spawn_worker_maybe_forced`; warm-reused idle workers keep the sidecar they were spawned with.
+- **main.rs** builds the config via `force_route::from_env(pool, Handle::current(), exe_dir)` (fail-closed `?`) and
+  passes it to `CompositeLifecycle::with_backoff_and_force_routing`; logs an `ENABLED` line when on.
+- **Tests (+12):** 9 in `force_route` (predicate truth-table, resolve None/Some/fail-closed, env-flag truthy/falsy,
+  routing-by-error-discriminant: None→Sandbox, Some+Allowlist→Io, Some+Deny→Sandbox) + 2 in `net_worker`
+  (forced fails-closed, scratch cleaned on failure). Real-sandbox happy path is the DGX e2e (Task 4.6), still owed.
+
+**Why default OFF + DGX still owed:** the live force-routed path is **Linux-only + unverifiable on the Mac** (core can't
+cross-compile — the `ring` #144 wall). Default-off keeps the merged-mechanism behaviour byte-identical until the DGX
+acceptance gates (Task 4.6 `linux_force_routing.rs` kernel barrier + #243 seccomp) confirm real containment, after which
+the operator flips `KASTELLAN_EGRESS_FORCE_ROUTING=1`. See TOP PICK.
+
+**Prior session — egress proxy SLICE #2: force-routing MECHANISM SHIPPED (ROADMAP:141; PR #249 MERGED).**
 Built + Mac-verified the unbypassable force-routing mechanism (Stages 1–3 + Tasks 4.1–4.3/4.5 of the plan), wrote the
-DGX gating e2e (4.6), and **deferred only the live scheduler auto-flip (Task 4.4)** — see TOP PICK. Highlights:
+DGX gating e2e (4.6). Highlights:
 - **Stage 1 — worker transport.** `web-common/src/proxy_connect.rs::ProxyConnectGet` (`HttpGet` over CONNECT-over-UDS,
   hyper + tokio-rustls, **ring** not aws-lc-rs; strict CONNECT-head parse, per-instance TLS config, end-to-end TLS,
   `Accept-Encoding: identity`, body cap before-extend) + env-selected `http::make_get` factory; `web-fetch`/`web-search`
@@ -62,13 +96,6 @@ DGX gating e2e (4.6), and **deferred only the live scheduler auto-flip (Task 4.4
   `pg_decision_sink`. `SidecarHandle::terminate(&mut)`. DGX kernel-barrier probe `sandbox/tests/linux_force_routing.rs`
   written (cfg-linux — **run on the DGX**).
 
-**Why Task 4.4 (live auto-flip) was deferred, NOT skipped:** wiring `spawn_net_worker` into the lifecycle spawn site
-(`worker_lifecycle/manager.rs` `acquire`) is a **shared-trait change touching every worker type**, and the live
-force-routed path is **Linux-only + unverifiable on the Mac** (core can't cross-compile to Linux — the `ring` #144
-wall). Landing that blind — without the DGX in-loop and (this session) without the two-stage review subagents (blocked
-mid-session by a monthly **spend-limit** hit) — would risk the daemon's entire net-worker path. The mechanism is
-complete, fail-closed, and unit-tested; the flip lands next with DGX verification. This mirrors how slice #1
-deliberately landed "mechanism only — did NOT route real workers."
 
 **Prior session — egress proxy SLICE #1 (boundary host-allowlist + SSRF/IP defense, ROADMAP:141, PR [#240](https://github.com/hherb/kastellan/pull/240) MERGED).**
 New crate `workers/egress-proxy` (`kastellan-worker-egress-proxy`): a sandboxed per-worker CONNECT proxy on a UDS —
@@ -173,12 +200,12 @@ Recent merged history: Option K restart backoff (PR #194); three clean test-lift
 `kastellan.target` bring-up (PR #190); L3 invocation arc COMPLETE (PR #186, #179 CLOSED); worker
 manifest plumbing item 11 (PR #187). Full detail in Earlier history + archive snapshots.
 
-**Session-end verification (`feat/egress-proxy-slice2-impl`):** `cargo test --workspace --locked` = **1521 / 0 / 7**
-(macOS skip-as-pass; +30 over the rename baseline of 1491). `cargo clippy --workspace --all-targets --locked -D
-warnings` = clean. The macOS Seatbelt gating probe (`sandbox/tests/seatbelt_uds_probe.rs`) **passes — AF_INET denied,
-UDS allowed**. New tests: web-common proxy_connect (7) + port-aware allowlist (7); sandbox bwrap/Seatbelt force-route
-arms (5) + `seatbelt_uds_probe` (1); egress-proxy port-scope `decide` (4); core egress `ingest` (2) + `net_worker`
-(3); plus the cfg-linux `linux_force_routing.rs` (run on the DGX).
+**Session-end verification (`feat/egress-force-routing-autoflip`):** `cargo test --workspace --locked` = **1533 / 0 / 7**
+(macOS skip-as-pass; +12 over the slice-#2-mechanism baseline of 1521). `cargo clippy --workspace --all-targets --locked
+-D warnings` = clean. New tests this session: `worker_lifecycle::force_route` (9 — force-routable predicate,
+resolve None/Some/fail-closed, env-flag truth-table, routing-by-error-discriminant) + `egress::net_worker` (2 —
+`spawn_forced_net_worker` fails-closed + cleans scratch on failure). The live force-routed happy path is the still-owed
+DGX e2e (Task 4.6, see TOP PICK).
 **DGX acceptance still owed (run natively on the DGX over WireGuard SSH — see TOP PICK for the exact commands):** the
 force-routing kernel barrier (`sandbox/tests/linux_force_routing.rs` — worker private netns has no off-allowlist
 route); host↔jail path identity for the bind-mounted `<scratch>/egress.sock` under bwrap; and **#243** — confirm the
@@ -232,7 +259,7 @@ The current native-Linux test baseline is **1327 / 0 / 4**
 
 ```
 kastellan (Rust workspace, 13 crates, AGPL-3.0)
-├── core               kastellan-core: lib + 2 bins (`kastellan` daemon + `kastellan-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue as `Rule`s + per-tool `GuardProfile` Strict/Relaxed via `for_tool` + `screen`/`screen_with_profile` + extract_scannable_text; Relaxed caps the chat-template family at one sub-threshold contribution — #142), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `kastellan-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; web_search.rs WebSearchManifest + web_search_entry [Net::Allowlist derived from the endpoint host:port; injects KASTELLAN_WEB_SEARCH_ENDPOINT + allowlist]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS [shell-exec, web-fetch, web-search, gliner-relex] + pure assemble_registry [skips the reserved `handoff` name] + async build_tool_registry(pool, exe_dir)), handoff (in-memory per-task content-addressed HandoffCache: stash_if_oversized → placeholder, fetch → clamped slice, per-task byte budget + MAX_TRACKED_TASKS backstop, purge_task at terminal; wired into ToolHostStepDispatcher after dispatch returns + the `handoff`/`fetch` built-in intercept), egress/ (host-side egress-proxy integration — slice #2 mechanism built, live auto-flip pending: spawn.rs `spawn_sidecar`/`SidecarHandle` [+`terminate(&mut)`]/`proxy_policy`; audit.rs pure `decision_to_audit` + runtime-free `ingest_decisions_into`; net_worker.rs pure `rewrite_worker_policy` + `spawn_net_worker` [sidecar-first fail-closed, 1:1 teardown via `SupervisedWorker.egress`] + `pg_decision_sink`)
+├── core               kastellan-core: lib + 2 bins (`kastellan` daemon + `kastellan-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker), cassandra/injection_guard (22-entry substring catalogue as `Rule`s + per-tool `GuardProfile` Strict/Relaxed via `for_tool` + `screen`/`screen_with_profile` + extract_scannable_text; Relaxed caps the chat-template family at one sub-threshold contribution — #142), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `kastellan-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path; force_route.rs egress force-routing — `ForceRoutingConfig` + pure `policy_net_is_force_routable`/`resolve_force_routing`/`spawn_worker_maybe_forced` + env-glue `from_env`/`env_flag_enabled`, the opt-in `KASTELLAN_EGRESS_FORCE_ROUTING` default-OFF auto-flip; both cold-spawn sites route Net::Allowlist workers through it), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; web_search.rs WebSearchManifest + web_search_entry [Net::Allowlist derived from the endpoint host:port; injects KASTELLAN_WEB_SEARCH_ENDPOINT + allowlist]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest), registry_build (static WORKER_MANIFESTS [shell-exec, web-fetch, web-search, gliner-relex] + pure assemble_registry [skips the reserved `handoff` name] + async build_tool_registry(pool, exe_dir)), handoff (in-memory per-task content-addressed HandoffCache: stash_if_oversized → placeholder, fetch → clamped slice, per-task byte budget + MAX_TRACKED_TASKS backstop, purge_task at terminal; wired into ToolHostStepDispatcher after dispatch returns + the `handoff`/`fetch` built-in intercept), egress/ (host-side egress-proxy integration — slice #2 mechanism + live auto-flip (opt-in) both shipped: spawn.rs `spawn_sidecar`/`SidecarHandle` [+`terminate(&mut)`]/`proxy_policy`; audit.rs pure `decision_to_audit` + runtime-free `ingest_decisions_into`; net_worker.rs pure `rewrite_worker_policy` + `spawn_net_worker` [sidecar-first fail-closed, 1:1 teardown via `SupervisedWorker.egress`] + `spawn_forced_net_worker` [scratch-owning wrapper, `EgressSidecar.scratch` RAII-cleaned] + `pg_decision_sink`)
 ├── db                 kastellan-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, insert_memory_at_layer, insert_memory_light (embedding-skipping light write path), semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets (AES-256-GCM at rest + OS keyring) + kastellan-db-init bin
 ├── llm-router         kastellan-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads KASTELLAN_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
 ├── sandbox            kastellan-sandbox: SandboxPolicy (+ additive `proxy_uds: Option<PathBuf>` — slice #2 force-routing target) + `Net` enum {Deny | Allowlist(hosts) | ProxyEgress (the egress proxy's own policy — real netns, self-enforcing; #141 slice #1)}; `Net::Allowlist + proxy_uds` ⇒ bwrap private netns + UDS bind / Seatbelt deny-outbound-except-UDS (slice #2). + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
@@ -249,8 +276,8 @@ kastellan (Rust workspace, 13 crates, AGPL-3.0)
 
 **Test baselines.** Native-Linux (DGX, PG 18.4 live, rustc 1.96.0): **1327 / 0 / 4**
 on `feat/kastellan-target-bring-up` (+16 over the `cdadea1` baseline of 1311).
-macOS skip-as-pass posture (no `KASTELLAN_PG_BIN_DIR`): **1521 / 0 / 7** on
-`feat/egress-proxy-slice2-impl` (slice #2 mechanism). 3–7 ignored = explicit doctest/real-net markers;
+macOS skip-as-pass posture (no `KASTELLAN_PG_BIN_DIR`): **1533 / 0 / 7** on
+`feat/egress-force-routing-autoflip` (slice #2 Task 4.4 auto-flip). 3–7 ignored = explicit doctest/real-net markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
 `KASTELLAN_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the
 archive snapshots; the suite table below lists what each integration suite verifies.)
@@ -394,12 +421,11 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy SLICE #1 MERGED (PR #240); SLICE #2 force-routing MECHANISM shipped this session (branch `feat/egress-proxy-slice2-impl`, PR pending) — only the live auto-flip + DGX acceptance remain.** The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy SLICE #1 MERGED (PR #240); SLICE #2 force-routing MECHANISM MERGED (PR #249); Task 4.4 (the live auto-flip, opt-in default OFF) shipped this session (branch `feat/egress-force-routing-autoflip`, PR pending) — only the DGX acceptance + flipping the flag on remain.** The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**★ TOP PICK — egress proxy SLICE #2: the live auto-flip + DGX acceptance (ROADMAP:141).** The whole force-routing
-**mechanism is built, Mac-verified, and PR-pending** (connector, OS force-routing, #241 port-scoping, coupled
-`spawn_net_worker`). Two things finish the slice — do them with the DGX in the loop (and the two-stage review once the
-spend limit is restored):
+**★ TOP PICK — egress proxy SLICE #2: DGX acceptance, then flip force-routing ON (ROADMAP:141).** The mechanism is
+merged (PR #249) and the live auto-flip is wired this session behind `KASTELLAN_EGRESS_FORCE_ROUTING` (default OFF =
+byte-identical legacy). Two things close the slice, both needing the DGX in the loop:
 1. **Run the DGX acceptance gates** (native aarch64 over WireGuard SSH — they don't run on the Mac):
    ```sh
    source "$HOME/.cargo/env"
@@ -412,17 +438,21 @@ spend limit is restored):
    `net_client` seccomp profile permits AF_UNIX `bind`/`listen`/`accept` (proxy) + `connect` (worker), widening
    `workers/prelude/src/seccomp_lock.rs` if anything is killed. If the netns no-route assertion fails, STOP and debug
    the bwrap netns/UDS bind before flipping.
-2. **Wire `spawn_net_worker` into the live spawn path (Task 4.4, deferred this session).** The spawn site is
-   `core/src/worker_lifecycle/manager.rs::SingleUseLifecycle::acquire` (line ~231; also `idle_timeout.rs:467`). Branch:
-   when `entry.policy.net` is `Net::Allowlist(_)` **and** the egress-proxy binary resolves (mirror `worker_manifest`
-   discovery) **and** force-routing is enabled, call `core::egress::net_worker::spawn_net_worker(...)` with the entry's
-   allowlist + a per-call scratch dir + a `pg_decision_sink(pool, Handle::current())`; else keep `spawn_worker`. This is
-   a **shared-trait signature change** (thread the proxy-bin + scratch + pool/handle in — they're available at
-   `main.rs:108` where `CompositeLifecycle::new` is built) — recommend **gating it behind an explicit opt-in** (default
-   off ⇒ byte-identical legacy behavior, so existing Mac e2e stay green) and flipping it on only after gate #1 passes.
-   Update CLAUDE.md's "When `Net::Allowlist`, also pass `--share-net`" invariant to the proxy_uds split.
+2. **Write + run the live force-routing e2e (Task 4.6) and flip the flag on.** Add `core/tests/egress_force_routing_e2e.rs`
+   (`#![cfg(target_os = "linux")]`, skip-as-pass without bwrap/userns): spawn a `web-fetch`-shaped worker via
+   `core::egress::net_worker::spawn_forced_net_worker` against a sidecar whose allowlist is a literal loopback origin you
+   stand up in-test; assert (a) the allowed origin round-trips through the sidecar, (b) from **inside the worker's netns**
+   a direct connect to an off-allowlist address has no route, (c) an off-allowlist/off-port CONNECT gets `403`, and
+   (d) PG-gated, the decision rows land in `audit_log`. Once green on the DGX, set `KASTELLAN_EGRESS_FORCE_ROUTING=1` in
+   the production `kastellan-core` unit env so net workers force-route by default, and update CLAUDE.md's "When
+   `Net::Allowlist`, also pass `--share-net`" invariant to the `proxy_uds` split. **Do NOT flip the flag in CI/Mac** —
+   the live path is Linux-only.
+   *Wiring reference (this session):* the opt-in decision lives in `core/src/worker_lifecycle/force_route.rs`
+   (`from_env` / `resolve_force_routing` / `spawn_worker_maybe_forced`), consumed at the two cold-spawn sites
+   (`worker_lifecycle/manager.rs::SingleUseLifecycle::acquire` + `idle_timeout::acquire_impl`) and built in `main.rs`.
 **Deferred (named in the plan):** [#242](https://github.com/hherb/kastellan/issues/242) tunnel idle/resolve timeouts;
-slice #3 (TLS-intercept + leak scanner); slice #4 (TLS pinning); transparent gzip/brotli if an origin refuses `identity`.
+slice #3 (TLS-intercept + leak scanner); slice #4 (TLS pinning); transparent gzip/brotli if an origin refuses `identity`;
+the `pg_decision_sink` back-pressure decoupling (bounded channel + async writer) before high-rate production load.
 
 **Natural web-search follow-ups** (cheap, on demand): stand up a local SearxNG with `scripts/web-search/setup-searxng.sh`, set `KASTELLAN_WEB_SEARCH_ENDPOINT` + the `web-search` `tool_allowlists` row, and run the `#[ignore]` `core/tests/web_search_e2e.rs::real_search_against_searxng` to validate the real round-trip end to end. If/when a caller needs them: category/language/engine params or pagination on `web.search` (deferred per spec).
 
