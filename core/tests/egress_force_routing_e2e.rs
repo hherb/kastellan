@@ -160,6 +160,21 @@ fn forced_coupling_enforces_allowlist_and_ingests_decisions() {
 
     let uds = minted_uds(&scratch_root);
 
+    // Slice #3a: the sidecar must have exported its per-instance CA beside the
+    // UDS for the host to inject into the worker's trust store. spawn_sidecar
+    // already gates readiness on ca.pem, but assert it explicitly under the real
+    // sandbox so a regression in the proxy's startup export is caught here.
+    let ca_pem = uds.parent().unwrap().join("ca.pem");
+    {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ca_pem.exists() {
+            assert!(Instant::now() < deadline, "sidecar never wrote ca.pem at {ca_pem:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let pem = std::fs::read_to_string(&ca_pem).expect("read exported CA");
+    assert!(pem.contains("BEGIN CERTIFICATE"), "exported CA is not a PEM cert");
+
     // (a) Allowed loopback origin round-trips through the coupling's sidecar.
     let mut client = UnixStream::connect(&uds).expect("connect coupling UDS");
     write!(client, "CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\n\r\n").unwrap();
@@ -335,4 +350,50 @@ fn pg_decision_sink_persists_decisions_to_audit_log() {
 
     rt.block_on(async { pool.close().await });
     // cluster dropped here — RAII teardown.
+}
+
+/// Real end-to-end MITM: fetch a real HTTPS origin through a real sandboxed
+/// sidecar, with the worker transport trusting ONLY the sidecar's per-instance
+/// CA. Proves termination + webpki-validated re-origination on the live path.
+/// `#[ignore]`: requires outbound network + DNS.
+#[test]
+#[ignore = "real network: validates live MITM against a public HTTPS origin"]
+fn real_mitm_fetch_through_sidecar() {
+    if skip_if_sandbox_unavailable() {
+        return;
+    }
+    let Some(proxy) = proxy_binary_or_skip() else {
+        eprintln!("[SKIP] egress-proxy binary not built");
+        return;
+    };
+    let scratch_root = short_scratch_root(&format!("mitm-{}", unique_suffix()));
+    let policy = allowlist_policy(&["example.com:443"]);
+    let spec = WorkerSpec {
+        policy: &policy,
+        program: "/bin/sleep",
+        args: &["30"],
+        wall_clock_ms: None,
+    };
+    let backend = backend();
+    let worker = spawn_forced_net_worker(
+        backend.as_ref(), &proxy, &spec, &["example.com:443".to_string()],
+        &scratch_root, "web-fetch", |_row| {},
+    )
+    .expect("force-routed worker + sidecar");
+    let uds = minted_uds(&scratch_root);
+    let ca_pem = uds.parent().unwrap().join("ca.pem");
+
+    let get = kastellan_worker_web_common::http::make_get_inner(
+        "kastellan-mitm-e2e/0",
+        Some(uds.to_str().unwrap()),
+        Some(ca_pem.to_str().unwrap()),
+    )
+    .expect("build only-CA proxy transport");
+    let resp = get
+        .get(&url::Url::parse("https://example.com/").unwrap())
+        .expect("MITM fetch should succeed against a real origin");
+    assert_eq!(resp.status, 200, "expected 200 from example.com through MITM");
+
+    drop(worker);
+    let _ = std::fs::remove_dir_all(&scratch_root);
 }

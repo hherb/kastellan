@@ -1361,6 +1361,7 @@ dependencies = [
  "kastellan-sandbox",
  "kastellan-supervisor",
  "kastellan-tests-common",
+ "kastellan-worker-web-common",
  "libc",
  "rand 0.8.6",
  "serde",
