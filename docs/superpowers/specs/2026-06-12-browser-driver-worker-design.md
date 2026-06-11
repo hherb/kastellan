@@ -73,6 +73,82 @@ jail on **Mac AND DGX**, with the working `--flags` + seccomp-allow delta +
 acceptable flags) re-opens the driver-stack decision (Rust-CDP, or the
 container backend) before any worker code.
 
+## 3.1 Spike findings — GREEN (executed 2026-06-12, Mac Seatbelt + DGX bwrap)
+
+**Verdict: GREEN on both platforms.** Headless **Chromium** (Playwright's
+`chromium-headless-shell`, build v1223 / Chrome 148) rendered the hermetic
+`file://` fixture (JS executed — `js-ran` paragraph present) from inside the
+real jail on macOS (Seatbelt) **and** the DGX (aarch64, bwrap). No engine
+fallback to Firefox was needed. Proceed to Phase 1. Throwaway harness:
+`scripts/spikes/browser-driver/{probe.py,fixture.html,run.sh,seatbelt-run.sh,seatbelt-bisect.sh,dgx-bwrap-run.sh}`.
+
+**Engine + launch flags (both platforms):** `chromium.launch(headless=True,
+args=["--no-sandbox", "--disable-dev-shm-usage"])`. `--no-sandbox` disables
+Chromium's *own* user-namespace sandbox (our OS jail is the boundary);
+`--disable-dev-shm-usage` makes Chromium use the profile dir instead of
+`/dev/shm` (so the jail needs **no** writable `/dev/shm`). `--single-process`
+was **not** required on either platform.
+
+**Writable scratch (both):** Chromium needs **one** writable dir for its
+`--user-data-dir`; Playwright places it under `$TMPDIR`. Map to
+`policy.fs_write = [scratch]` + set `TMPDIR=<scratch>`. On bwrap the `--tmpfs
+/tmp` already provides this if `TMPDIR=/tmp`.
+
+**macOS Seatbelt — minimal additions over `macos_seatbelt::build_profile`:**
+the base strict profile (deny-default, no `mach-lookup`) renders only after
+adding **all three** of these clusters (bisected — dropping any one → child
+`SIGSEGV`):
+- `(allow ipc-posix-shm*)` — shared-memory IPC between browser processes.
+- `(allow iokit-open)` + `(allow iokit-get-properties)` — GPU/graphics probing
+  (even under SwiftShader software rendering).
+- `(allow mach-lookup)` + `(allow mach-register)` — Mach IPC bootstrap.
+
+  This is a **real threat-model widening**: the base profile deliberately denies
+  `mach-lookup` (issue #1). browser-driver must re-grant it. **Phase-2 hardening:**
+  try narrowing `mach-lookup` to specific `(global-name …)` services rather than
+  the unrestricted form; record the actual service set Chromium needs. `fs_read`
+  additions: the venv, the Playwright browser cache
+  (`~/Library/Caches/ms-playwright`), system + user `Fonts`. **Packaging gotcha:**
+  a uv-created venv symlinks `python` to an *external* uv-managed CPython, whose
+  `libpython` lives outside `venv_dir` — the jail blocked it. The production
+  worker venv must be **self-contained** (system-`python3 -m venv`, which copies/
+  symlinks within a stable interpreter under `/usr`) **or** mount the interpreter
+  root. `resolve_env` should prefer a self-contained venv so only `venv_dir`
+  needs binding.
+
+**DGX bwrap — renders under `build_argv`'s invariants** (`--unshare-all
+--share-net --die-with-parent --new-session --as-pid-1 --clearenv`, `--proc
+/proc --dev /dev --tmpfs /tmp`, `--ro-bind /usr` + the `/bin`/`/lib` symlinks)
+plus `--ro-bind` of the venv + `~/.cache/ms-playwright` + `/etc`. The aarch64
+headless-shell exists and works.
+
+**DGX seccomp — additions over the `net_client` allow-list** (enumerated by
+`strace -f -c` of the full bwrapped process tree, then diffed; the prelude's
+default is `KillProcess`, so every syscall Chromium issues must be listed). The
+genuine browser additions are:
+`fallocate`, `ftruncate`, `getresgid`, `getresuid`, `inotify_add_watch`,
+`inotify_init1`, `memfd_create`, `pidfd_open`, `restart_syscall`.
+(`capget`/`capset`/`pivot_root`/`umount2` also appeared but are **bwrap's own
+container setup**, executed before the worker self-applies the filter — *not*
+added.) **Security decision — `io_uring_setup`/`io_uring_enter`:** Chromium
+probes io_uring, but it is a well-known sandbox-escape primitive. Do **not**
+`Allow` it; add it as an explicit **`Errno(EPERM)`** rule (not the default
+`KillProcess`) so Chromium falls back gracefully instead of being killed. This
+needs a new `Profile::BrowserClient` (or a `net_client`+browser superset) in
+`workers/prelude/src/seccomp_lock.rs` with an `Errno`-action carve-out — a small
+Phase-2 change. **Landlock:** RW = the scratch/user-data-dir (from `fs_write`);
+RO = venv + browser cache + fonts (from `fs_read` via `KASTELLAN_LANDLOCK_RO`),
+identical to the web-fetch/web-search RO derivation.
+
+**Resource footprint:** headless-shell resident is ~150–300 MB for a single
+page; the plan's `mem_mb = 1024` slice-1 cap is comfortably safe (tune later).
+
+**Net new Phase-2 work surfaced by the spike** (folded into §9 / the Phase-2
+plan): a `Profile::BrowserClient` seccomp profile with the 9 additions + an
+`io_uring` `Errno(EPERM)` carve-out; a macOS Seatbelt browser-profile extension
+(the shm/iokit/mach clusters) gated to the browser-driver tool; a self-contained
+venv install script; the `TMPDIR`→scratch wiring.
+
 ## 4. Worker package (`workers/browser-driver/`) — [shape spike-gated]
 
 uv package `kastellan_worker_browser_driver`, `[project.scripts]
