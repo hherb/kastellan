@@ -11,12 +11,26 @@
 `519d029` — which carries the parallel-machine arcs: egress slice #3b leak scanner PR
 [#269](https://github.com/hherb/kastellan/pull/269), browser-driver PR [#262](https://github.com/hherb/kastellan/pull/262),
 Matrix comms PR [#265](https://github.com/hherb/kastellan/pull/265).)
-**Session-end verification (remote Linux container, root):** `cargo test --workspace` **918 / 1 / 1** pre-merge — the 1
+**Session-end verification (remote Linux container, root):** `cargo test --workspace` **928 / 1 / 1** — the 1
 failure is the **pre-existing** root-container artifact
 `egress_force_routing_e2e::pg_decision_sink_persists_decisions_to_audit_log` (`initdb: cannot be run as root`; fails
 identically on clean base, verified by stash); `clippy --workspace --all-targets -D warnings` clean, re-verified after the
 merge of `main`. Sandbox/PG suites skip-as-pass here; **DGX/Mac acceptance of `python_exec_e2e` is the follow-up.** (The
 Mac 1644/0/8 baseline below is from the parallel Mac and NOT comparable to the container count.)
+
+**PR #267 review pass (2026-06-12, same session):** self-review found + fixed three things. (1) **macOS clippy break:**
+the e2e scratch test's darwin early-return sat after `ready_or_skip()` → unused `env` binding → `-D warnings` fails on
+the Mac acceptance run; gate hoisted above the binding. (2) **Streaming capped capture:** `run_code` no longer uses
+`wait_with_output` (unbounded buffering — on macOS, where Seatbelt has no memory cap, a `print('x'*10**9)` payload would
+balloon the worker's own RSS); two concurrent reader threads buffer ≤ `MAX_CAPTURE_BYTES` each then drain-discard to EOF
+(O(cap) memory, no pipe-stall deadlock; runaway CPU stays bounded by the policy's cpu/wall caps). (3) **Interpreter
+symlink canonicalization:** new `ResolveCtx::canonicalize` probe (`fs::canonicalize` in `build_tool_registry`; `None`
+stub in test ctxs — 12 mechanical ctx-literal updates); the python-exec manifest canonicalizes the resolved interpreter
+so an update-alternatives chain (`/usr/bin/python3 → /etc/alternatives/python3`, unreachable in-jail since
+`/etc/alternatives` isn't bound) can't break the spawn — this container has exactly that layout, so the DGX-acceptance
+watch item is closed by construction. Also merged `main` (slice #3b leak scanner) into the branch — Cargo/ROADMAP
+auto-merged, HANDOVER resolved keeping both parallel session blocks. +5 tests (13 worker unit / 8 real-interpreter incl.
+a dual-stream flood pin / 8 manifest).
 
 **This session — Phase 4 entry: `python-exec` worker slice #1 (ROADMAP:202).** The first executor for agent-authored
 Python; everything later in Phase 4 (skill catalog, trust ceilings, delegation) invokes code through it. Spec'd

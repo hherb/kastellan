@@ -2,7 +2,7 @@
 //! capture + cap the output. The pure pieces ([`python_args`],
 //! [`truncate_lossy`]) are unit-testable without an interpreter.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -46,9 +46,43 @@ pub struct ExecOutcome {
     pub stderr_truncated: bool,
 }
 
+/// Read at most `cap` bytes from `r` into a buffer, then keep draining
+/// (discarding) to EOF so the child never blocks on a full pipe. Worker
+/// memory stays O(cap) no matter how much the child prints — the
+/// runaway-print payload is bounded by the policy's CPU/wall caps, not
+/// by this process's heap. Returns the captured bytes and whether
+/// anything beyond `cap` was discarded.
+pub fn read_capped<R: Read>(mut r: R, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        let n = r.read(&mut chunk)?;
+        if n == 0 {
+            return Ok((buf, truncated));
+        }
+        if buf.len() < cap {
+            let take = (cap - buf.len()).min(n);
+            buf.extend_from_slice(&chunk[..take]);
+            if take < n {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+}
+
 /// Lossy-decode `bytes` and cap the result at `cap` bytes without
 /// splitting a UTF-8 sequence. Returns the (possibly shortened) string
 /// and whether truncation happened.
+///
+/// Capping happens at *both* stages: [`read_capped`] bounds the raw
+/// bytes buffered from the child, and this bounds the decoded string —
+/// necessary because lossy decoding can inflate (each invalid byte
+/// becomes the 3-byte U+FFFD), so `cap` raw bytes may decode to up to
+/// `3 × cap` string bytes. The result is therefore always ≤ `cap`
+/// bytes, and the reported flag is the OR of the two stages.
 pub fn truncate_lossy(bytes: &[u8], cap: usize) -> (String, bool) {
     let s = String::from_utf8_lossy(bytes);
     if s.len() <= cap {
@@ -89,17 +123,32 @@ pub fn run_code(python: &Path, code: &str) -> std::io::Result<ExecOutcome> {
         let _ = stdin.write_all(&code_owned);
         // stdin drops here → EOF.
     });
-    let output = child.wait_with_output()?;
-    let _ = feeder.join();
 
-    let (stdout, stdout_truncated) = truncate_lossy(&output.stdout, MAX_CAPTURE_BYTES);
-    let (stderr, stderr_truncated) = truncate_lossy(&output.stderr, MAX_CAPTURE_BYTES);
+    // Capped concurrent capture (NOT wait_with_output, which buffers the
+    // child's entire output unbounded — on macOS, where Seatbelt has no
+    // memory cap, a `print('x' * 10**9)` payload would balloon the
+    // worker's own RSS). Both pipes are drained in parallel so neither
+    // can fill and stall the child.
+    let out_pipe = child.stdout.take().expect("stdout was piped");
+    let err_pipe = child.stderr.take().expect("stderr was piped");
+    let out_reader = std::thread::spawn(move || read_capped(out_pipe, MAX_CAPTURE_BYTES));
+    let err_reader = std::thread::spawn(move || read_capped(err_pipe, MAX_CAPTURE_BYTES));
+
+    let status = child.wait()?;
+    let _ = feeder.join();
+    let (out_bytes, out_raw_truncated) =
+        out_reader.join().expect("stdout reader thread panicked")?;
+    let (err_bytes, err_raw_truncated) =
+        err_reader.join().expect("stderr reader thread panicked")?;
+
+    let (stdout, out_decode_truncated) = truncate_lossy(&out_bytes, MAX_CAPTURE_BYTES);
+    let (stderr, err_decode_truncated) = truncate_lossy(&err_bytes, MAX_CAPTURE_BYTES);
     Ok(ExecOutcome {
-        exit_code: output.status.code(),
+        exit_code: status.code(),
         stdout,
         stderr,
-        stdout_truncated,
-        stderr_truncated,
+        stdout_truncated: out_raw_truncated || out_decode_truncated,
+        stderr_truncated: err_raw_truncated || err_decode_truncated,
     })
 }
 
@@ -146,5 +195,32 @@ mod tests {
         let (s, t) = truncate_lossy(&[0x61, 0xFF, 0x62], 64);
         assert_eq!(s, "a\u{FFFD}b");
         assert!(!t);
+    }
+
+    #[test]
+    fn read_capped_under_cap_returns_everything_unflagged() {
+        let (bytes, truncated) = read_capped(std::io::Cursor::new(b"hello".to_vec()), 16).unwrap();
+        assert_eq!(bytes, b"hello");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn read_capped_over_cap_keeps_prefix_drains_rest_and_flags() {
+        // 100 KiB source, 4 KiB cap: the buffer must hold exactly the
+        // first 4 KiB (multiple-chunk path), the flag must be set, and
+        // the read must run to EOF (drain) rather than stopping at cap.
+        let data: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
+        let cap = 4 * 1024;
+        let (bytes, truncated) = read_capped(std::io::Cursor::new(data.clone()), cap).unwrap();
+        assert_eq!(bytes, &data[..cap]);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn read_capped_at_exact_cap_is_unflagged() {
+        let data = vec![7u8; 64];
+        let (bytes, truncated) = read_capped(std::io::Cursor::new(data.clone()), 64).unwrap();
+        assert_eq!(bytes, data);
+        assert!(!truncated);
     }
 }

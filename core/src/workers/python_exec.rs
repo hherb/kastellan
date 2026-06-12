@@ -151,7 +151,14 @@ impl WorkerManifest for PythonExecManifest {
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
         let is_runnable = |p: &Path| (ctx.exists)(p) && !(ctx.is_dir)(p);
         let python = match resolve_env(|k| (ctx.get_env)(k), is_runnable) {
-            Ok(p) => p,
+            // Canonicalize host-side: a symlink-chain interpreter (e.g.
+            // `/usr/bin/python3 → /etc/alternatives/python3` on
+            // update-alternatives distros) is unreachable *inside* the jail
+            // when the link's intermediate dir isn't bound. The policy and
+            // the injected env must carry the real path. Best-effort: when
+            // canonicalization fails we keep the raw path (it passed the
+            // existence probe, so the common direct-file case still works).
+            Ok(p) => (ctx.canonicalize)(&p).unwrap_or(p),
             Err(ResolveSkipReason::Disabled) => {
                 return Resolution::Disabled {
                     detail: format!("{ENABLE_ENV} != 1 — python-exec not registered"),
@@ -202,6 +209,7 @@ mod tests {
             exists,
             is_dir: &|_p| false,
             exe_dir: None,
+            canonicalize: &|_p| None,
             allowlist: &|_t| Vec::new(),
         }
     }
@@ -314,6 +322,47 @@ mod tests {
             prefix_lib(&python),
             Some(PathBuf::from("/opt/homebrew/lib"))
         );
+    }
+
+    #[test]
+    fn interpreter_symlink_is_canonicalized_into_policy_and_env() {
+        // /usr/bin/python3 → /etc/alternatives/python3 → /usr/bin/python3.11
+        // (update-alternatives layout). The jail binds /usr but NOT
+        // /etc/alternatives, so the policy + injected env must carry the
+        // canonical target, not the symlink.
+        let get_env = |k: &str| match k {
+            "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_PYTHON_EXEC_BIN" => Some("/opt/python-exec".to_string()),
+            _ => None,
+        };
+        let exists = |p: &Path| {
+            p == Path::new("/opt/python-exec") || p == Path::new("/usr/bin/python3")
+        };
+        let canonicalize = |p: &Path| {
+            (p == Path::new("/usr/bin/python3")).then(|| PathBuf::from("/usr/bin/python3.11"))
+        };
+        let c = ResolveCtx {
+            get_env: &get_env,
+            exists: &exists,
+            is_dir: &|_p| false,
+            exe_dir: None,
+            canonicalize: &canonicalize,
+            allowlist: &|_t| Vec::new(),
+        };
+        match PythonExecManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                assert!(entry.policy.fs_read.contains(&PathBuf::from("/usr/bin/python3.11")));
+                assert!(
+                    !entry.policy.fs_read.contains(&PathBuf::from("/usr/bin/python3")),
+                    "the symlink path must be replaced by its canonical target"
+                );
+                assert!(entry
+                    .policy
+                    .env
+                    .contains(&(PYTHON_ENV.to_string(), "/usr/bin/python3.11".to_string())));
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
     }
 
     #[test]

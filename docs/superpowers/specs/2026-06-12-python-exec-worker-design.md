@@ -74,6 +74,14 @@ worker).
 * Child env is **cleared** (`env_clear`), then exactly `TMPDIR=/tmp` +
   `HOME=/tmp`; cwd `/tmp`. The lockdown env vars the jail carries
   (`KASTELLAN_*`) are not the child's business.
+* **Streaming capped capture** (PR #267 review hardening): both pipes are
+  drained by concurrent reader threads that buffer at most
+  `MAX_CAPTURE_BYTES` each and then discard to EOF — worker memory is
+  O(cap) no matter how much the child prints (matters on macOS, where
+  Seatbelt has no memory cap), and neither pipe can fill and stall the
+  child. The cap applies at both stages: raw bytes buffered, then the
+  decoded string (lossy decoding inflates invalid bytes 1→3), so the
+  returned field is always ≤ cap bytes; `*_truncated` is the OR.
 
 ### 2.3 Containment (the roadmap line, mechanism by mechanism)
 
@@ -110,6 +118,13 @@ serves the next.
   2. Candidate cascade: `/usr/bin/python3`, `/usr/local/bin/python3`,
      `/opt/homebrew/bin/python3` — first existing non-dir wins.
   3. None found → `Misconfigured`.
+  4. The resolved path is **canonicalized host-side** (new
+     `ResolveCtx::canonicalize` probe, PR #267 review hardening): a
+     symlink-chain interpreter (`/usr/bin/python3 →
+     /etc/alternatives/python3` on update-alternatives distros) is
+     unreachable *inside* the jail when the intermediate dir isn't
+     bound, so the policy + injected env carry the real path.
+     Best-effort — on canonicalization failure the raw path is kept.
 * **Worker binary:** standard `discover_binary` (`KASTELLAN_PYTHON_EXEC_BIN`
   override → exe-relative sibling `kastellan-worker-python-exec`).
 * **Policy `fs_read`:** worker binary + interpreter + the interpreter's

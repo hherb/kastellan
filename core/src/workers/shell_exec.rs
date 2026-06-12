@@ -92,6 +92,7 @@ mod tests {
             exists,
             is_dir: &|_p| false,
             exe_dir: None,
+            canonicalize: &|_p| None,
             allowlist,
         }
     }

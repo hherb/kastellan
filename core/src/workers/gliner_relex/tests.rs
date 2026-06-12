@@ -760,6 +760,7 @@ fn gliner_ctx<'a>(
         exists,
         is_dir,
         exe_dir: None,
+        canonicalize: &|_p| None,
         allowlist: &|_t| Vec::new(),
     }
 }

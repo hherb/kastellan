@@ -106,11 +106,13 @@ pub async fn build_tool_registry(
     let exists = |p: &Path| p.exists();
     let is_dir = |p: &Path| p.is_dir();
     let allowlist = |tool: &str| allowlists.get(tool).cloned().unwrap_or_default();
+    let canonicalize = |p: &Path| std::fs::canonicalize(p).ok();
     let ctx = ResolveCtx {
         get_env: &get_env,
         exists: &exists,
         is_dir: &is_dir,
         exe_dir: exe_dir.as_deref(),
+        canonicalize: &canonicalize,
         allowlist: &allowlist,
     };
 
@@ -221,6 +223,7 @@ mod tests {
             exists: &|_p: &Path| false,
             is_dir: &|_p: &Path| false,
             exe_dir: None,
+            canonicalize: &|_p| None,
             allowlist,
         }
     }
@@ -330,6 +333,7 @@ mod tests {
             exists: &exists,
             is_dir: &|_p: &Path| false,
             exe_dir: Some(exe_dir.as_path()),
+            canonicalize: &|_p| None,
             allowlist: &allowlist,
         };
 

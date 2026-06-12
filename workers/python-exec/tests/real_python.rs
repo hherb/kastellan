@@ -91,6 +91,29 @@ fn oversized_stdout_is_capped_and_flagged() {
 }
 
 #[test]
+fn flooding_both_streams_is_capped_without_deadlock() {
+    let Some(py) = find_python() else { return };
+    // Both pipes far past the kernel pipe buffer simultaneously: pins
+    // that the two reader threads drain concurrently (a sequential read
+    // would deadlock once the unread pipe fills and stalls the child)
+    // and that worker memory stays O(cap) rather than O(output).
+    // concat! (not a `\`-continued literal, which strips the block
+    // indentation Python needs).
+    let code = concat!(
+        "import sys\n",
+        "for _ in range(200):\n",
+        "    sys.stdout.write('o' * 4096)\n",
+        "    sys.stderr.write('e' * 4096)\n",
+    );
+    let r = call(py, code);
+    assert_eq!(r["exit_code"], 0);
+    assert_eq!(r["stdout"].as_str().unwrap().len(), MAX_CAPTURE_BYTES);
+    assert_eq!(r["stderr"].as_str().unwrap().len(), MAX_CAPTURE_BYTES);
+    assert_eq!(r["stdout_truncated"], true);
+    assert_eq!(r["stderr_truncated"], true);
+}
+
+#[test]
 fn large_code_over_the_pipe_buffer_still_runs() {
     let Some(py) = find_python() else { return };
     // > 64 KiB of source exercises the stdin feeder thread past the
