@@ -1357,6 +1357,7 @@ dependencies = [
  "futures",
  "kastellan-db",
  "kastellan-llm-router",
+ "kastellan-matrix-wire",
  "kastellan-protocol",
  "kastellan-sandbox",
  "kastellan-supervisor",
@@ -1409,6 +1410,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "kastellan-matrix-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1471,6 +1480,19 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "webpki-roots",
+]
+
+[[package]]
+name = "kastellan-worker-matrix"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kastellan-matrix-wire",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
