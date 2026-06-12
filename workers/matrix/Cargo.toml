@@ -1,0 +1,28 @@
+[package]
+name        = "kastellan-worker-matrix"
+description = "Sandboxed channel worker: wraps matrix-rust-sdk (login + E2E sync + buffered inbound) behind a JSON-RPC stdio surface (matrix.init/poll/send)."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+[[bin]]
+name = "kastellan-worker-matrix"
+path = "src/main.rs"
+
+[features]
+# The heavy matrix-rust-sdk integration is opt-in so the default build (and CI)
+# stays light + hermetic. Phase D (DGX) builds with `--features live-matrix`.
+live-matrix = []
+
+[dependencies]
+kastellan-protocol       = { path = "../../protocol" }
+kastellan-worker-prelude = { path = "../prelude" }
+kastellan-matrix-wire    = { path = "../matrix-wire" }
+serde                    = { workspace = true }
+serde_json               = { workspace = true }
+anyhow                   = { workspace = true }
+tokio                    = { workspace = true }

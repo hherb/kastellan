@@ -1,0 +1,49 @@
+# conduwuit configuration template for kastellan's single-user Matrix homeserver.
+#
+# Rendered by scripts/matrix/setup-conduwuit.sh (which substitutes the {{...}}
+# placeholders) and validated by scripts/matrix/check-conduwuit-config.sh, which
+# HARD-FAILS unless the security-critical invariants below hold. Keep this file
+# the source of truth for those invariants.
+#
+# Security invariants (enforced by the check script):
+#   * allow_federation = false   — no untrusted remote homeservers ever talk to
+#     this server. This removes the entire federation attack surface (where most
+#     homeserver CVEs live) and turns it into a private two-party appliance.
+#   * address = 127.0.0.1        — bind loopback only. A TLS-terminating reverse
+#     proxy (Caddy/nginx) is the only thing that faces the network; conduwuit
+#     itself is never directly exposed.
+#   * registration is NOT open   — either allow_registration = false, or
+#     allow_registration = true WITH a non-empty registration_token (token-gated,
+#     for the one-time creation of the bot + operator accounts). Open registration
+#     (true with no token) is rejected.
+#
+# After you have created the two accounts (operator + kastellan bot) using the
+# registration token, set `allow_registration = false` and restart — the server
+# is then fully closed.
+
+[global]
+server_name = "{{SERVER_NAME}}"
+database_path = "{{DB_PATH}}"
+
+# Loopback bind: only the reverse proxy reaches conduwuit (see docs/deploy).
+address = "127.0.0.1"
+port = {{PORT}}
+
+# Token-gated registration for the one-time account creation. DISABLE
+# (set false) once the operator + bot accounts exist.
+allow_registration = true
+registration_token = "{{REGISTRATION_TOKEN}}"
+
+# Federation OFF — the single biggest attack-surface reduction. Do not enable.
+allow_federation = false
+allow_incoming_federation = false
+allow_outgoing_federation = false
+
+# Don't phone home.
+allow_check_for_updates = false
+
+# No trusted key servers (federation is off anyway).
+trusted_servers = []
+
+# Conservative request cap.
+max_request_size = 20_000_000

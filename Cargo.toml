@@ -14,6 +14,8 @@ members = [
     "workers/web-fetch",
     "workers/web-search",
     "workers/egress-proxy",
+    "workers/matrix-wire",
+    "workers/matrix",
 ]
 
 [workspace.package]

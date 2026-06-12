@@ -1,0 +1,56 @@
+# Hardened SYSTEM systemd unit for kastellan's conduwuit homeserver (Tiers B/C).
+#
+# Install as ROOT (e.g. /etc/systemd/system/kastellan-matrix.service), NOT under
+# `systemd --user`: the homeserver must run as a DEDICATED unprivileged user
+# (`matrix`), which a user-level manager cannot provide. This is why the
+# kastellan user-level supervisor does NOT manage the homeserver — see
+# docs/deploy/matrix-homeserver.md.
+#
+# Substitute the {{...}} placeholders (or edit in place) before installing:
+#   {{CONDUWUIT_BIN}} — absolute path to the conduwuit binary
+#   {{CONFIG_PATH}}   — absolute path to the rendered conduwuit.toml
+#   {{STATE_DIR}}     — the matrix user's data dir (RocksDB store etc.)
+#
+# Hardening mirrors the posture kastellan applies to its own workers: dedicated
+# user, no new privileges, read-only system, private tmp, restricted syscalls,
+# and writable access ONLY to the data dir. This contains a homeserver RCE to the
+# matrix user + its store — it does not reach the WireGuard keys (Tier B) or the
+# kastellan agent (Tier C). Defense-in-depth: it reduces, not eliminates,
+# shared-host blast radius — a dedicated VPS (Tier A) is the clean separation.
+
+[Unit]
+Description=kastellan Matrix homeserver (conduwuit, federation-off)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=matrix
+Group=matrix
+ExecStart={{CONDUWUIT_BIN}} --config {{CONFIG_PATH}}
+Environment=CONDUWUIT_CONFIG={{CONFIG_PATH}}
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Writable ONLY to the data dir; everything else is read-only.
+ReadWritePaths={{STATE_DIR}}
+
+[Install]
+WantedBy=multi-user.target

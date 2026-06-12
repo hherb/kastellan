@@ -13,6 +13,7 @@
 pub mod audit_mirror;
 pub mod audit_tail;
 pub mod cassandra;
+pub mod channel;
 pub mod classification_inference;
 pub mod cli_audit;
 pub mod egress;

@@ -147,6 +147,49 @@ egress to internal IP ranges from a compromised worker in the running daemon,
 even though the mechanism that provides it is now complete and tested.
 `Net::ProxyEgress` is the policy variant the proxy itself runs under.
 
+## Communication channel (adversary #5)
+
+The primary user↔kastellan channel is **Matrix, self-hosted, single-user, federation OFF**
+(E2E via `matrix-rust-sdk`), with **email as a cross-transport, low-trust fallback**
+(decision 2026-06-12 —
+[`docs/superpowers/specs/2026-06-12-primary-communication-channel-design.md`](superpowers/specs/2026-06-12-primary-communication-channel-design.md)).
+The channel defends adversary #5 ("a messaging-channel peer impersonates the user") in three
+separable layers, because transport security and peer identity are distinct problems:
+
+1. **Transport confidentiality + integrity (E2E).** Matrix E2E stops the homeserver/provider or
+   any MITM from *reading or injecting* message content. The pairing layer below does **not**
+   cover this — only E2E does. Federation-off shrinks the homeserver attack surface to a
+   near-private two-party appliance.
+2. **Peer authentication (pairing).** Built (slice #3): a `DbPeerAuthorizer` gates the bus on an
+   active `(channel, peer)` row in the `pairings` table (fail-closed on any DB error). A new peer
+   pairs by presenting a **single-use, short-lived, operator-issued code** (`kastellan-cli pair
+   issue`, hash-only storage); the bus's pairing carve-out is the **only** path that touches
+   unpaired input, and it is **compare-only** — it matches the body's SHA-256 against an active code,
+   never enqueues/echoes it — gated on the operator having minted a code (`any_active_code`), atomic
+   single-use (`claim_code`), and audited (`channel.paired` / `channel.rejected_unpaired`). Revoke is
+   operator-only (admin UPDATE; runtime is REVOKEd). WebAuthn is deferred (no browser/CLI client
+   surface yet). Matrix device cross-signing reinforces it channel-natively (slice #2 Phase D).
+3. **Untrusted-input screening + audit.** Every inbound channel message is screened by
+   `cassandra::injection_guard` exactly like worker output — a channel peer is no more trusted
+   than a fetched web page — and every inbound/outbound message lands in `audit_log`.
+
+**Channel-worker network containment:** the Matrix/IMAP/SMTP client runs under `Net::Allowlist`
+scoped to only its configured server endpoint(s), force-routed through the per-worker egress
+proxy, so a compromised channel worker reaches its one server and nothing else.
+
+**Homeserver hosting blast radius (Tiers B/C).** Co-hosting conduwuit on the WireGuard/ingress
+VPS (Tier B) or on the kastellan host (Tier C, "poor man's") places the larger public-facing
+surface adjacent to, respectively, the network tunnel into the home/DGX network or the agent's
+own user/Postgres/scratch/vault. A homeserver RCE then has shared-host adjacency to those
+assets. Tier A (a dedicated VPS) is preferred for this reason; Tiers B/C require systemd
+hardening (dedicated unprivileged user, `NoNewPrivileges`/`ProtectSystem=strict`/tight
+`SystemCallFilter`, loopback-bound behind a TLS reverse proxy, no federation port) as the
+minimum bar — defense-in-depth that reduces but does not eliminate shared-host blast radius.
+**Email is the fallback because Matrix has no single-user homeserver failover** — redundancy is
+cross-transport, not a second homeserver. Email is treated as **low-trust** (spoofable):
+notifications only, never commands, surfaced only after SPF/DKIM/DMARC pass + a per-pairing
+in-body token.
+
 ## Negative tests (CI-enforced as backends land)
 
 - `python-exec` attempts `socket.connect` → blocked.
@@ -154,6 +197,10 @@ even though the mechanism that provides it is now complete and tested.
 - `shell-exec` attempts a non-allowlisted argv → rejected before spawn.
 - `browser-driver` attempts to read `~/.ssh/` → blocked by sandbox.
 - Adversarial web page in agent context tries to exfiltrate via `web-fetch` → request blocked, audit log shows attempt.
+- `channel`: a message from an **unpaired** peer → dropped (never enqueued as a task), audit row `channel.rejected_unpaired`. (Shipped: `core/src/channel` `handle_inbound` + the hermetic/PG e2e; the unpaired peer's body is never even screened/echoed — authorize-before-screen.)
+- `channel`: an inbound message carrying a catalogued prompt-injection → blocked (never enqueued), audit row `channel.injection_blocked` carrying only the SHA-256 + reason codes (never the body). (Shipped: `classify_inbound` under `GuardProfile::Strict`.)
+- `channel` (Matrix): an inbound message from a peer **not** in `KASTELLAN_MATRIX_PEERS` → dropped, no task enqueued, no reply sent. (Shipped: `core/tests/matrix_channel_e2e.rs::unpaired_inbound_is_dropped_no_reply` — a real worker process driven through `MatrixChannel` + the bus, hermetic; the live sandboxed matrix-rust-sdk client + egress routing is slice #2 Phase D.)
+- `channel` pairing (slice #3): with **no active code**, an unpaired peer's message is dropped (`channel.rejected_unpaired`), the carve-out inert. With an active code, a **wrong** body is dropped (`channel.rejected_unpaired`) and **never enqueued/echoed** (compare-only). A **correct** code binds the peer (`pairings` row + `channel.paired`), consumes the code single-use (`claim_code` atomic UPDATE), and returns only a fixed ack — the code body itself never reaches the agent. (Shipped: `bus::handle_inbound` carve-out tests + `db::pairings` PG e2e single-use claim.)
 
 Already shipped (Phase 0 + Phase 0 hardening stage 1):
 

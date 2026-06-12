@@ -131,10 +131,51 @@ items unlock later ones.
 
 ## Phase 2 — Channels (read-only)
 
-- [ ] IMAP inbound worker (sandbox: net allowlist = configured IMAP server only)
-- [ ] Telegram inbound adapter (`grammers`, Rust)
-- [ ] Channel-bus fan-in into core conversation queue
-- [ ] DM pairing flow: short-lived pairing code (TOTP/HOTP) issued via a separate trusted channel; WebAuthn for browser/CLI pairings where available; pairings recorded in `audit_log` with revocation. Static contact allowlists rejected (forgeable). (Pattern: ZeroClaw `security/{pairing,webauthn,otp}.rs`.)
+> **Primary channel decided 2026-06-12 (operator brainstorm):** **Matrix, self-hosted,
+> single-user, federation OFF** (E2E via `matrix-rust-sdk` + `vodozemac`, vendor-neutral, zero
+> marginal cost, all platforms via Element). **Email is the cross-transport fallback** (separate
+> failure domain), used for low-trust async notifications, never commands. Signal (`presage`
+> fragility + ban risk) and Telegram (no bot E2E, centralized) rejected as primary. Homeserver
+> runs as a supervised **conduwuit** unit; hosting is operator-selectable, fail-down: Tier A
+> dedicated VPS (preferred) → Tier B existing WireGuard VPS (co-host = shared blast radius with
+> network ingress) → Tier C the kastellan host itself ("poor man's" default). Matrix has **no
+> single-user homeserver failover** — redundancy is the cross-transport email fallback, not a
+> second homeserver. Full design + co-hosting security analysis + slice decomposition:
+> `docs/superpowers/specs/2026-06-12-primary-communication-channel-design.md`.
+
+- [x] **Channel-bus abstraction (build first)** — `core/src/channel`: `Channel` trait (inbound
+  `IncomingMessage` stream + outbound `send`, dyn-safe) + pure security core — fail-closed
+  `PeerAuthorizer`/`StaticPairings` (`auth.rs`), `classify_inbound` (authorize→`injection_guard`
+  screen under `GuardProfile::Strict`→`tasks` payload, `ingest.rs`), `reply_for_completed_task`
+  (finalized task→user reply, `route.rs`) — plus the `ChannelBus` runtime (`bus.rs`) over four
+  seams (`Channel`/`PeerAuthorizer`/`ChannelEvents`/`CompletedTasks`; real `PgChannelEvents` +
+  `PgCompletedTasks` over the `tasks` queue + `tasks_completed` NOTIFY, no new IPC). Channel tasks
+  mirror the `ask` payload so the scheduler is unchanged; unpaired peers + injection are dropped +
+  audited (hash only). 18 unit tests + hermetic `FakeChannel` full-loop e2e + PG-gated real-queue
+  e2e; clippy `-D warnings` clean. No live transport / no `main.rs` wiring (slice #2). Branch
+  `claude/zen-bell-6bn2ze`, 2026-06-12. Plan: `docs/superpowers/plans/2026-06-12-channel-bus-abstraction.md`.
+- [~] **Matrix inbound** (`MatrixChannel`, `matrix-rust-sdk`, E2E) — net allowlist scoped to the
+  homeserver host:port only, force-routed through the egress proxy; single-user homeserver
+  bring-up. (Slice #2.) **Phases A–C+E done** (branch `claude/zen-bell-6bn2ze`, 2026-06-12,
+  hermetic + verified anywhere): `kastellan-matrix-wire` + sandboxed-worker JSON-RPC surface
+  (`matrix.init/poll/send` over the SDK seam), core `MatrixChannel` (blocking driver thread
+  bridging the synchronous protocol Client to the async `Channel` trait — keeps the protocol pure
+  request/response), `build_matrix_policy` (pure), config-gated `main.rs` hook (byte-identical when
+  unset), and `matrix_channel_e2e` (full loop against a real fake-worker process; paired round-trip
+  + unpaired-dropped). **Phase D pending (DGX):** the real `matrix-rust-sdk` worker impl + egress
+  coupling + persistent encrypted E2E store + restart supervision + `#[ignore]` live test (gated on
+  the `live-matrix` feature; the matrix-rust-sdk-through-MITM-egress-proxy spike is the top risk).
+  Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-matrix-inbound-sandboxed-worker*`.
+- [x] **Homeserver supervisor unit + hardening** — conduwuit (federation OFF, loopback bind,
+  token-gated→closed registration): hardened **system** systemd unit template + config template +
+  `setup-conduwuit.sh` (dev/Tier-C) + `check-conduwuit-config.sh` (security-invariant verifier,
+  `--self-test` green) + `docs/deploy/matrix-homeserver.md` (Tier A/B/C + co-hosting blast-radius +
+  operator steps). Deliberately **not** a kastellan `ServiceSpec`: the user-level supervisor can't run
+  conduwuit as the dedicated unprivileged `matrix` user, so the homeserver is a root/system unit (or
+  a separate host), installed independently. Branch `claude/zen-bell-6bn2ze`, 2026-06-12. (Slice #6.)
+- [ ] IMAP inbound worker (fallback channel; sandbox: net allowlist = configured IMAP server only). Low-trust async notifications only; require SPF/DKIM/DMARC pass + per-pairing in-body token before surfacing. (Slice #5.)
+- [x] DM pairing flow: short-lived single-use pairing code issued out-of-band (`kastellan-cli pair issue`, hash-only storage); the new peer presents it in-channel; binding recorded in `pairings` (migration 0018), revocable, audited. Static contact allowlists rejected (forgeable) — `DbPeerAuthorizer` gates the bus on active `(channel,peer)` rows; the pairing carve-out is compare-only + operator-gated + single-use (`claim_code` atomic). **WebAuthn deferred** (no browser/CLI client surface yet). Daemon wiring (swap `StaticPairings`→`DbPeerAuthorizer` + pass `DbPairingService`) rides slice #2 Phase D. Branch `claude/zen-bell-6bn2ze`, 2026-06-12. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-channel-pairing*`. (Pattern: ZeroClaw `security/{pairing,otp}.rs`.) (Slice #3.)
+- [ ] ~~Telegram inbound adapter (`grammers`, Rust)~~ — **rejected as primary 2026-06-12** (no bot E2E, centralized, ban risk). Could return later as an additional `Channel` impl if a need arises.
 
 ## Phase 3 — Channels outbound + browser + web
 
@@ -145,8 +186,8 @@ items unlock later ones.
   - [ ] **Slice #3b — credential-leak scanner** co-located on #3a's now-visible plaintext (line below).
   - [ ] **Slice #4 — TLS pinning** for the frontier/LLM egress path.
 - [ ] **Credential-leak scanner co-located in the egress proxy** (egress-proxy slice **#3b**; #3a above already MITM-terminates so the proxy now sees plaintext) — every outbound request body and inbound response body scanned for the SHA-256 (prefix) of every secret currently materialized for the calling worker; hits are blocked and audited (hash + offset only, never plaintext). Scanning happens at the trust boundary, not inside the worker (which may itself be compromised). **Needs a new host→proxy provisioning path for secret-*value* hashes** (the Vault exposes none today; the audit log carries only the ref-string hash, not the value hash) — see the 3a spec's "Follow-up — slice #3b" section. (Pattern: IronClaw `safety::leak_detector`, ZeroClaw `security/leak_detector.rs`.)
-- [ ] Telegram outbound; Signal in/out (presage) 
-- [ ] SMTP outbound in mail worker
+- [~] **Matrix outbound** (agent → user replies over the E2E `MatrixChannel`) — primary outbound path (decision 2026-06-12; slice #4). **Reply mapping shipped** (2026-06-12): `route::reply_body` surfaces the agent's real completion `plan.result` (`{"kind":"text","body":...}` → the body; `message` alias; compact fallback) and maps `error`/`blocked`/`refused` to safe sentences — fixing the slice-#1 stub that mis-handled the real shape. Live delivery rides slice #2 Phase D. (~~Telegram/Signal outbound~~ rejected as primary — see Phase 2 note.)
+- [ ] SMTP outbound in mail worker (`lettre`) — fallback-channel outbound; low-trust notifications, never the primary command path (slice #5)
 - [x] `web-fetch` worker: HTTPS-only, host allowlist (self-enforced per redirect hop) + `Net::Allowlist` policy data for the egress proxy, 5 MiB body cap, 5-redirect cap, extracted readable text (HTML readability via `dom_smoothie`/`pdf-extract`/text+JSON), `Profile::WorkerNetClient` + `reqwest::blocking`+rustls — branch `feat/web-fetch-worker`, 2026-06-08. Deferred: egress-proxy enforcement (its consumer is now this worker); `web-search`; hermetic TLS happy-path e2e (waits on the proxy test-CA).
 - [x] `web-search` worker (SearxNG default) — new crate `workers/web-search` exposing `web.search` (query → ranked `{title,url,snippet,engine}` hits from a SearxNG `/search?format=json` endpoint; web-search finds, web-fetch reads). Operator-configures `KASTELLAN_WEB_SEARCH_ENDPOINT`; the LLM supplies only the query (no URL-injection surface), so `http://` is allowed for loopback only, `https://` mandatory elsewhere. `Net::Allowlist` derived from the endpoint host:port; `cpu_ms=5_000`/`mem_mb=256`/`SingleUse`; fail-closed `from_env`. Carries the **shared `workers/web-common` crate** extracted from web-fetch (`HostAllowlist` + `HttpGet`/`ReqwestGet` transport + feature-gated `FakeGet`) — single source of truth for the security-critical allowlist matcher; web-fetch re-pointed, behaviour byte-preserved (its strict HTTPS-only rule unchanged). `scripts/web-search/setup-searxng.sh` stands up a local SearxNG with the JSON format enabled. — branch `feat/web-search-worker`, 2026-06-09. Deferred: category/language/engine params; pagination; hermetic SearxNG mock e2e (real round-trip stays `#[ignore]`); egress-proxy enforcement (shared with web-fetch).
 - [x] **injection-guard per-tool profiles ([#142](https://github.com/hherb/kastellan/issues/142))** — chat-template tokens (`<|im_start|>`/`<|system|>`) no longer false-positive on fetched documentation. `GuardProfile { Strict (default, fail-closed) | Relaxed }` chosen per worker via `GuardProfile::for_tool` at the dispatch chokepoint; only `web-fetch`/`web-search` relax. Strict is byte-for-byte the Slice-1 algorithm; Relaxed collapses all chat-template matches to a single capped 0.40 sub-threshold contribution (handles the two-token tutorial case) so a lone token Allows but corroboration still Blocks. Committed benign/attack fixtures + full `extract_scannable_text`→`screen_with_profile` pipeline pin; `#[ignore]` live HuggingFace spot-check. — branch `feat/injection-guard-per-tool-profiles`, 2026-06-09. Deferred: Review tier; manifest-declared profiles; the catalogue-completeness evasion (Slice-1 limitation, documented).

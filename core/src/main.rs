@@ -331,6 +331,22 @@ async fn main() -> Result<()> {
     );
     info!("scheduler spawned (lane_fast + lane_long)");
 
+    // ── Channel bus (comms slice #2). ──
+    // The Matrix channel's live worker requires the `live-matrix` build + the
+    // sandbox/egress/persistent-store spawn path, both landing in slice #2
+    // Phase D (verified on the DGX). Until then a configured homeserver is logged
+    // but no channel is spawned, so the default daemon is byte-identical to a
+    // Matrix-less build. Phase D replaces this block with the real
+    // `spawn_matrix_worker` + `ChannelBus::spawn` wiring + shutdown teardown.
+    if let Some(cfg) = kastellan_core::channel::matrix::MatrixConfig::from_env() {
+        tracing::warn!(
+            homeserver = %cfg.homeserver,
+            recognised_peers = cfg.peers.len(),
+            "KASTELLAN_MATRIX_HOMESERVER is set, but the Matrix channel worker is not yet \
+             wired (comms slice #2 Phase D requires the live-matrix build); no channel started"
+        );
+    }
+
     wait_for_shutdown().await?;
 
     // Stop the scheduler before the audit-mirror so any final audit
