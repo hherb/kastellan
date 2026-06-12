@@ -12,5 +12,6 @@
 //! proxy → core stdout-ingest → PG.
 
 pub mod audit;
+pub mod leak_provision;
 pub mod net_worker;
 pub mod spawn;
