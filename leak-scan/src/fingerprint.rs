@@ -11,6 +11,14 @@ use sha2::{Digest, Sha256};
 /// egress traffic and are not real credentials.
 pub const MIN_SECRET_LEN: usize = 8;
 
+/// Secrets longer than this are never fingerprinted/provisioned. Generous enough
+/// for any real credential (API keys, JWTs, full PEM private keys all sit well
+/// under 16 KiB), while bounding `len`: the scanning side sizes its rolling-window
+/// ring buffer at `maxLen + 1`, so capping here keeps a corrupt/oversized
+/// provisioning entry from driving a large allocation (defense-in-depth — the
+/// file is host-owned, but [`crate::parse_hashes`] also re-checks this bound).
+pub const MAX_SECRET_LEN: usize = 16 * 1024;
+
 /// Base of the Rabin-Karp polynomial rolling hash. MUST be identical on the
 /// provisioning side ([`fingerprint_value`]) and the scanning side
 /// ([`super::matcher::RollingMatcher`]) — they live in this one crate so they
@@ -40,9 +48,10 @@ pub(crate) fn poly(bytes: &[u8]) -> u64 {
     h
 }
 
-/// Fingerprint `value`. Returns `None` if it is below [`MIN_SECRET_LEN`].
+/// Fingerprint `value`. Returns `None` if its length is outside
+/// `[MIN_SECRET_LEN, MAX_SECRET_LEN]`.
 pub fn fingerprint_value(value: &[u8]) -> Option<SecretFingerprint> {
-    if value.len() < MIN_SECRET_LEN {
+    if value.len() < MIN_SECRET_LEN || value.len() > MAX_SECRET_LEN {
         return None;
     }
     let mut h = Sha256::new();
@@ -77,6 +86,12 @@ mod tests {
         assert!(fingerprint_value(b"").is_none());
         assert!(fingerprint_value(b"1234567").is_none()); // 7 < 8
         assert!(fingerprint_value(b"12345678").is_some()); // 8 == MIN
+    }
+
+    #[test]
+    fn rejects_values_above_max_len() {
+        assert!(fingerprint_value(&vec![b'x'; MAX_SECRET_LEN]).is_some()); // == MAX
+        assert!(fingerprint_value(&vec![b'x'; MAX_SECRET_LEN + 1]).is_none()); // > MAX
     }
 
     #[test]

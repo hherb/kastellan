@@ -12,6 +12,6 @@ mod fingerprint;
 mod matcher;
 mod wire;
 
-pub use fingerprint::{fingerprint_value, SecretFingerprint, MIN_SECRET_LEN};
+pub use fingerprint::{fingerprint_value, SecretFingerprint, MAX_SECRET_LEN, MIN_SECRET_LEN};
 pub use matcher::{LeakHit, RollingMatcher};
 pub use wire::{parse_hashes, serialize_hashes};

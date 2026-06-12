@@ -9,9 +9,19 @@
 **Last updated:** 2026-06-12 (**egress proxy SLICE #3b — credential-leak scanner COMPLETE**; branch
 `feat/egress-slice3b-leak-scanner`, PR [#269](https://github.com/hherb/kastellan/pull/269). Prior on `main`: `browser-driver` slice #1 (PR
 [#262](https://github.com/hherb/kastellan/pull/262)) + Matrix comms channel (PR [#265](https://github.com/hherb/kastellan/pull/265)) both MERGED.)
-**Session-end verification:** Mac `cargo test --workspace` **1641 / 0 / 8**; `clippy --workspace --all-targets -D warnings`
+**Session-end verification:** Mac `cargo test --workspace` **1644 / 0 / 8**; `clippy --workspace --all-targets -D warnings`
 clean (+ cross-clippy Linux on the new pure `kastellan-leak-scan` crate). No DGX run this session — all new code is
 platform-agnostic (pure crate + host file-IO + the existing MITM relay path, which the DGX already exercises under real bwrap).
+
+**PR #269 review pass (2026-06-13):** addressed the code-review findings in place. (1) `mitm/relay.rs::scan_relay`
+rewritten as two independent per-direction `pump` futures driven by one `select!` — a direction's `write_all` no longer
+head-of-line-stalls the peer direction's reads (the old single-`read`-loop awaited `write_all` inside the arm); preserves
+scan-before-forward + kill-on-hit, adds a 256 KiB full-duplex no-stall test. (2) New `MAX_SECRET_LEN` (16 KiB) caps the
+fingerprintable range, enforced in both `fingerprint_value` and `wire::decode_one` so a corrupt/oversized
+`secret_hashes.json` `len` can't drive a large ring-buffer allocation. (3) `net_worker` now warns (not silently skips) if
+the sidecar UDS has no parent dir. Findings #3 (`provision_audit_row` has no live caller) + #4 (double audit line per
+blocked leak) are by-design for the mechanism-only slice — tracked on [#268](https://github.com/hherb/kastellan/issues/268)
+to land with the dispatch-time live-append. +3 tests (1641 → 1644).
 
 **This session — egress proxy SLICE #3b: co-located credential-leak scanner (ROADMAP:142).** Brainstormed → spec'd →
 planned → executed via subagent-driven TDD (13 tasks, 2-stage review per batch + an opus whole-branch review that confirmed
@@ -110,7 +120,7 @@ credential-leak scanner is COMPLETE** (ROADMAP:142) — see the "This session" b
 the scanner is **forward-looking** (no current egress worker carries secrets, so spawn-wiring provisions an empty set today)
 and dispatch-time live-append is deferred ([#268](https://github.com/hherb/kastellan/issues/268)). Working tree carries only
 the slice-#3b work + untracked `docs/essay-medium-draft.md`. Dev box **macOS**; the DGX (aarch64) is driven natively over
-WireGuard SSH (`ssh dgx`). **Session-end: Mac `cargo test --workspace` = 1641 / 0 / 8; `clippy --workspace --all-targets -D
+WireGuard SSH (`ssh dgx`). **Session-end: Mac `cargo test --workspace` = 1644 / 0 / 8 (after the PR #269 review pass); `clippy --workspace --all-targets -D
 warnings` clean; cross-clippy `kastellan-leak-scan` for `aarch64-unknown-linux-gnu` clean. (No DGX full-workspace run this
 session — all new code is platform-agnostic [pure crate + host file-IO + the existing MITM relay path, which the DGX already
 exercises under real bwrap]; the native-Linux baseline is unchanged from slice #3a's 1538/0/10 modulo the additive
@@ -168,7 +178,7 @@ kastellan (Rust workspace, 14 crates [+ `matrix`/`matrix-wire` from PR #265 not 
 **Test baselines.** Native-Linux (DGX, PG 18 live, rustc 1.96.0, worker bins built): **1538 / 0 / 10**
 on `feat/egress-slice3-tls-intercept` (2026-06-12 slice-#3a acceptance; the real-sandbox e2e suites actually run here,
 unlike the older 1327 figure; predates the Matrix #265 + leak-scan #3b tests). macOS skip-as-pass posture (no
-`KASTELLAN_PG_BIN_DIR`): **1641 / 0 / 8** (2026-06-12, after Matrix #265 + egress slice-#3b leak-scan). 8–10 ignored =
+`KASTELLAN_PG_BIN_DIR`): **1644 / 0 / 8** (2026-06-13, after Matrix #265 + egress slice-#3b leak-scan + the PR #269 review pass). 8–10 ignored =
 explicit doctest/real-net markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
 `KASTELLAN_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the

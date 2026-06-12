@@ -58,6 +58,12 @@ pub fn parse_hashes(s: &str) -> Vec<SecretFingerprint> {
 }
 
 fn decode_one(w: WireFp) -> Option<SecretFingerprint> {
+    // Reject any entry whose length is outside the fingerprintable range. `len`
+    // sizes the scanning side's ring buffer (`maxLen + 1`), so a corrupt/oversized
+    // value must not drive a large allocation — degrade to skipping the entry.
+    if w.len < crate::fingerprint::MIN_SECRET_LEN || w.len > crate::fingerprint::MAX_SECRET_LEN {
+        return None;
+    }
     let fp64 = u64::from_str_radix(&w.fp64, 16).ok()?;
     let sha256 = dehex32(&w.sha256)?;
     Some(SecretFingerprint {
@@ -117,5 +123,16 @@ mod tests {
     fn malformed_entry_is_skipped_not_fatal() {
         let s = r#"{"version":1,"secrets":[{"len":5,"fp64":"zz","sha256":"short"}]}"#;
         assert!(parse_hashes(s).is_empty());
+    }
+
+    #[test]
+    fn oversized_len_entry_is_skipped_not_allocated() {
+        // A corrupt/hostile file claiming a huge len (which would size the
+        // scanner's ring buffer) is dropped before it can drive an allocation.
+        let sha = "ab".repeat(32);
+        let s = format!(
+            r#"{{"version":1,"secrets":[{{"len":9999999999,"fp64":"0000000000000001","sha256":"{sha}"}}]}}"#
+        );
+        assert!(parse_hashes(&s).is_empty());
     }
 }

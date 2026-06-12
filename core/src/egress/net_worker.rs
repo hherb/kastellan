@@ -141,9 +141,17 @@ where
     // not abort an otherwise-healthy worker — it only disables leak scanning,
     // which is defense-in-depth, not a containment boundary. Today's callers
     // pass an empty slice (no egress worker carries secrets yet).
-    if let Some(scratch_dir) = sidecar.uds_path.parent() {
-        if let Err(e) = provision_secret_hashes(scratch_dir, secret_fingerprints) {
-            tracing::warn!(error = %e, "egress leak-scan provisioning write failed; scanning disabled for this worker");
+    match sidecar.uds_path.parent() {
+        Some(scratch_dir) => {
+            if let Err(e) = provision_secret_hashes(scratch_dir, secret_fingerprints) {
+                tracing::warn!(error = %e, "egress leak-scan provisioning write failed; scanning disabled for this worker");
+            }
+        }
+        None => {
+            tracing::warn!(
+                uds = %sidecar.uds_path.display(),
+                "egress sidecar UDS path has no parent dir; leak-scan provisioning skipped, scanning disabled for this worker"
+            );
         }
     }
     // 2. Rewrite the worker policy onto the sidecar UDS.
