@@ -147,6 +147,43 @@ egress to internal IP ranges from a compromised worker in the running daemon,
 even though the mechanism that provides it is now complete and tested.
 `Net::ProxyEgress` is the policy variant the proxy itself runs under.
 
+## Communication channel (adversary #5)
+
+The primary user↔kastellan channel is **Matrix, self-hosted, single-user, federation OFF**
+(E2E via `matrix-rust-sdk`), with **email as a cross-transport, low-trust fallback**
+(decision 2026-06-12 —
+[`docs/superpowers/specs/2026-06-12-primary-communication-channel-design.md`](superpowers/specs/2026-06-12-primary-communication-channel-design.md)).
+The channel defends adversary #5 ("a messaging-channel peer impersonates the user") in three
+separable layers, because transport security and peer identity are distinct problems:
+
+1. **Transport confidentiality + integrity (E2E).** Matrix E2E stops the homeserver/provider or
+   any MITM from *reading or injecting* message content. The pairing layer below does **not**
+   cover this — only E2E does. Federation-off shrinks the homeserver attack surface to a
+   near-private two-party appliance.
+2. **Peer authentication (pairing).** The Phase-2 DM pairing flow (TOTP/HOTP + WebAuthn, revocable,
+   audited) authenticates the *peer principal* above the channel-bus, transport-agnostic;
+   Matrix device cross-signing reinforces it channel-natively.
+3. **Untrusted-input screening + audit.** Every inbound channel message is screened by
+   `cassandra::injection_guard` exactly like worker output — a channel peer is no more trusted
+   than a fetched web page — and every inbound/outbound message lands in `audit_log`.
+
+**Channel-worker network containment:** the Matrix/IMAP/SMTP client runs under `Net::Allowlist`
+scoped to only its configured server endpoint(s), force-routed through the per-worker egress
+proxy, so a compromised channel worker reaches its one server and nothing else.
+
+**Homeserver hosting blast radius (Tiers B/C).** Co-hosting conduwuit on the WireGuard/ingress
+VPS (Tier B) or on the kastellan host (Tier C, "poor man's") places the larger public-facing
+surface adjacent to, respectively, the network tunnel into the home/DGX network or the agent's
+own user/Postgres/scratch/vault. A homeserver RCE then has shared-host adjacency to those
+assets. Tier A (a dedicated VPS) is preferred for this reason; Tiers B/C require systemd
+hardening (dedicated unprivileged user, `NoNewPrivileges`/`ProtectSystem=strict`/tight
+`SystemCallFilter`, loopback-bound behind a TLS reverse proxy, no federation port) as the
+minimum bar — defense-in-depth that reduces but does not eliminate shared-host blast radius.
+**Email is the fallback because Matrix has no single-user homeserver failover** — redundancy is
+cross-transport, not a second homeserver. Email is treated as **low-trust** (spoofable):
+notifications only, never commands, surfaced only after SPF/DKIM/DMARC pass + a per-pairing
+in-body token.
+
 ## Negative tests (CI-enforced as backends land)
 
 - `python-exec` attempts `socket.connect` → blocked.
