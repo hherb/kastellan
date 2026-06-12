@@ -22,6 +22,7 @@ pub mod auth;
 pub mod bus;
 pub mod ingest;
 pub mod matrix;
+pub mod pairing;
 pub mod route;
 
 pub use bus::ChannelBus;
@@ -90,6 +91,8 @@ pub mod actions {
     pub const RECEIVED: &str = "channel.received";
     /// A message from an unrecognised/unpaired peer was dropped (fail-closed).
     pub const REJECTED_UNPAIRED: &str = "channel.rejected_unpaired";
+    /// An unpaired peer presented a valid pairing code and was bound (slice #3).
+    pub const PAIRED: &str = "channel.paired";
     /// A recognised peer's message was blocked by the injection guard.
     pub const INJECTION_BLOCKED: &str = "channel.injection_blocked";
     /// A reply was delivered back to a peer.
