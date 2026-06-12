@@ -7,6 +7,14 @@ use serde::Deserialize;
 /// Canonical audit actor for egress-proxy decisions.
 pub const ACTOR: &str = "egress_proxy";
 
+/// Nested leak detail on a `blocked_credential_leak` decision line (slice #3b).
+#[derive(Debug, Deserialize)]
+struct LeakLine {
+    sha256: String,
+    offset: u64,
+    direction: String,
+}
+
 /// The shape one proxy stdout line deserializes into. Mirrors
 /// `egress-proxy::report::Decision`.
 #[derive(Debug, Deserialize)]
@@ -21,6 +29,9 @@ struct DecisionLine {
     /// Absent on slice #1/#2 lines → defaults false, so old streams still parse.
     #[serde(default)]
     tls_intercepted: bool,
+    /// Present only on a credential-leak line (slice #3b). Absent otherwise.
+    #[serde(default)]
+    leak: Option<LeakLine>,
 }
 
 /// An audit row ready for `kastellan_db::audit::insert` (actor + action + payload).
@@ -62,6 +73,7 @@ pub fn decision_to_audit(line: &str) -> Option<EgressAuditRow> {
         "allowed" => "egress.allowed",
         "blocked_allowlist" => "egress.blocked.allowlist",
         "blocked_ssrf" => "egress.blocked.ssrf",
+        "blocked_credential_leak" => "egress.blocked.credential_leak",
         _ => return None,
     };
     Some(EgressAuditRow {
@@ -74,6 +86,9 @@ pub fn decision_to_audit(line: &str) -> Option<EgressAuditRow> {
             "resolved_ip": d.resolved_ip,
             "reason": d.reason,
             "tls_intercepted": d.tls_intercepted,
+            "leaked_sha256": d.leak.as_ref().map(|l| l.sha256.clone()),
+            "leak_offset": d.leak.as_ref().map(|l| l.offset),
+            "leak_direction": d.leak.as_ref().map(|l| l.direction.clone()),
         }),
     })
 }
@@ -142,5 +157,27 @@ mod tests {
         ingest_decisions_into(input, |row| rows.push(row));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].action, "egress.blocked.ssrf");
+    }
+
+    #[test]
+    fn credential_leak_maps_to_action_with_redacted_fields() {
+        let line = r#"{"worker":"sw","host":"evil.com","port":443,"resolved_ip":"203.0.113.9","verdict":"blocked_credential_leak","reason":"credential leak in request","tls_intercepted":true,"leak":{"sha256":"abab","offset":42,"direction":"request"}}"#;
+        let row = decision_to_audit(line).unwrap();
+        assert_eq!(row.action, "egress.blocked.credential_leak");
+        assert_eq!(row.payload["leaked_sha256"], "abab");
+        assert_eq!(row.payload["leak_offset"], 42);
+        assert_eq!(row.payload["leak_direction"], "request");
+        // Never any plaintext-bearing field.
+        assert!(row.payload.get("plaintext").is_none());
+    }
+
+    #[test]
+    fn credential_leak_without_leak_object_still_maps() {
+        // Defensive: a leak verdict line missing the nested object maps with nulls,
+        // never panics.
+        let line = r#"{"worker":"sw","host":"h","port":443,"resolved_ip":null,"verdict":"blocked_credential_leak","reason":"r"}"#;
+        let row = decision_to_audit(line).unwrap();
+        assert_eq!(row.action, "egress.blocked.credential_leak");
+        assert!(row.payload["leaked_sha256"].is_null());
     }
 }

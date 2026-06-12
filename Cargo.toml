@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "core",
     "db",
+    "leak-scan",
     "llm-router",
     "sandbox",
     "supervisor",

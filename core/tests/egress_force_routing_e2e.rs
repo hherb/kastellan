@@ -154,6 +154,7 @@ fn forced_coupling_enforces_allowlist_and_ingests_decisions() {
         &["127.0.0.1".to_string()],
         &scratch_root,
         "web-fetch",
+        &[], // secret_fingerprints — none for this e2e test
         sink,
     )
     .expect("force-routed worker + sidecar spawn (fail-closed if the proxy is missing)");
@@ -261,6 +262,7 @@ fn forced_coupling_worker_has_no_direct_route() {
         &["example.com:443".to_string()],
         &scratch_root,
         "web-fetch",
+        &[], // secret_fingerprints — none for this e2e test
         |_row| {},
     )
     .expect("force-routed getent worker + sidecar spawn");
@@ -377,7 +379,8 @@ fn real_mitm_fetch_through_sidecar() {
     let backend = backend();
     let worker = spawn_forced_net_worker(
         backend.as_ref(), &proxy, &spec, &["example.com:443".to_string()],
-        &scratch_root, "web-fetch", |_row| {},
+        &scratch_root, "web-fetch", &[], // secret_fingerprints — none for this e2e test
+        |_row| {},
     )
     .expect("force-routed worker + sidecar");
     let uds = minted_uds(&scratch_root);
