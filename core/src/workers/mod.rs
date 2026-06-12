@@ -8,6 +8,7 @@
 
 pub mod browser_driver;
 pub mod gliner_relex;
+pub mod python_exec;
 pub mod shell_exec;
 pub mod web_fetch;
 pub mod web_search;

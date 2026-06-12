@@ -1520,6 +1520,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kastellan-worker-python-exec"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kastellan-worker-shell-exec"
 version = "0.1.0"
 dependencies = [

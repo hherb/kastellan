@@ -1,0 +1,25 @@
+[package]
+name        = "kastellan-worker-python-exec"
+description = "Tool worker: run agent-authored Python (stdlib only) in a no-net, scratch-only jail."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme      = "../../README.md"
+
+[lib]
+name = "kastellan_worker_python_exec"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kastellan-worker-python-exec"
+path = "src/main.rs"
+
+[dependencies]
+kastellan-protocol       = { path = "../../protocol", version = "0.1.0" }
+kastellan-worker-prelude = { path = "../prelude", version = "0.1.0" }
+serde                  = { workspace = true }
+serde_json             = { workspace = true }
+anyhow                 = { workspace = true }
