@@ -200,6 +200,27 @@ items unlock later ones.
 ## Phase 4 — python-exec & agent-authored skills
 
 - [ ] `python-exec` worker: scratch FS only, no net, hard CPU/mem/wallclock; curated stdlib bind
+  - [x] **Slice #1 — worker + manifest + containment pins — 2026-06-12** (branch `claude/compassionate-shannon-3jeh31`).
+    New Rust crate `workers/python-exec` mirroring shell-exec: `python.exec` pipes the source over stdin to
+    `<python> -I -S -B -` (child env cleared; a Python exception returns as `exit_code` + traceback, **not** an RPC
+    error, so the planner can iterate on its own code), 256 KiB code/capture caps (char-boundary-safe truncation +
+    flags). Host manifest `core/src/workers/python_exec.rs`: **opt-in `KASTELLAN_PYTHON_EXEC_ENABLE=1`** (the
+    deny-by-default posture moves to registration — there is no argv-allowlist equivalent for arbitrary code),
+    interpreter discovery via `KASTELLAN_PYTHON_EXEC_PYTHON` override (set-but-invalid **fails closed**) → candidate
+    cascade (`/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`), registered in `WORKER_MANIFESTS`. Strictest policy of
+    any worker: `Net::Deny`, `Profile::WorkerStrict` (the seccomp filter survives `execve` into the CPython child —
+    pinned empirically by a new `coreutils_smoke::python3_survives_strict` case), **`fs_write = []`** — scratch is the
+    jail's per-spawn ephemeral `/tmp` tmpfs (#89) granted through Landlock by an explicit
+    `KASTELLAN_LANDLOCK_RW=["/tmp"]` in `policy.env` (never a host bind), cpu 10 s / mem 512 MiB / wall 30 s,
+    `SingleUse`; "curated stdlib" = `-I -S` (no site-/dist-packages — determinism measure, the jail is the security
+    boundary). Tests: 10 worker unit + 7 real-interpreter integration + 7 manifest unit + 3-test
+    `core/tests/python_exec_e2e.rs` (production-policy jailed round-trip, socket-containment negative, scratch
+    round-trip; skip-as-pass without PG/sandbox). Spec:
+    `docs/superpowers/specs/2026-06-12-python-exec-worker-design.md`.
+  - [ ] **Follow-ups:** DGX (bwrap) + Mac (Seatbelt) acceptance run of `python_exec_e2e` (built on a Linux container
+    where sandbox suites skip); macOS writable scratch (Seatbelt deny-default leaves slice #1 with none — tighter, not
+    looser; shares the per-spawn scratch wiring browser-driver Phase 2 needs); curated-wheels RO dir if/when the skill
+    catalog demands packages; planner-prompt surfacing (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
 - [ ] **Skill trust enum** — `Untrusted | UserApproved | Pinned`, each level mapping to an explicit capability ceiling (which workers it may invoke, which net allowlists, which fs paths). Authorship and approval recorded in `audit_log`; promotion requires re-approval. (Pattern: IronClaw skill trust model — user-placed vs registry-installed. The L3 templated-skill arc above is the first concrete implementation of this shape.)
 - [ ] Optional micro-VM backend for `python-exec` (Firecracker on Linux, Apple `container` on macOS — discovery spike completed 2026-05-21, verdict COMMIT; see [`docs/superpowers/specs/2026-05-21-macos-container-spike-notes.md`](../superpowers/specs/2026-05-21-macos-container-spike-notes.md))

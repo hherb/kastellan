@@ -9,6 +9,7 @@ members = [
     "protocol",
     "tests-common",
     "workers/prelude",
+    "workers/python-exec",
     "workers/shell-exec",
     "workers/web-common",
     "workers/web-fetch",

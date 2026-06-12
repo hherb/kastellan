@@ -20,6 +20,7 @@ use crate::worker_manifest::{ResolveCtx, Resolution, WorkerManifest};
 pub static WORKER_MANIFESTS: &[&dyn WorkerManifest] = &[
     &crate::workers::shell_exec::ShellExecManifest,
     &crate::workers::gliner_relex::GlinerRelexManifest,
+    &crate::workers::python_exec::PythonExecManifest,
     &crate::workers::web_fetch::WebFetchManifest,
     &crate::workers::web_search::WebSearchManifest,
     &crate::workers::browser_driver::BrowserDriverManifest,

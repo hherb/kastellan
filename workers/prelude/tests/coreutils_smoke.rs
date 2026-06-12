@@ -494,3 +494,56 @@ fn sh_true_survives_strict() {
     let out = run_under_lockdown(bin, &["-c", "true"], &dir);
     assert_no_sigsys(bin, &out);
 }
+
+#[test]
+fn python3_survives_strict() {
+    if !lockdown_enforces() {
+        return;
+    }
+    // The python-exec worker (Phase 4) spawns CPython as a child under
+    // seccomp `strict` + Landlock — exactly what this runs. The script
+    // exercises the startup path (getrandom, mmap, ioctl-on-stdio) plus
+    // a scratch write/read round-trip, so a BASE_ALLOW gap for CPython
+    // is found here deterministically instead of in a worker SIGSYS
+    // crash log. Flags mirror the worker's invocation (`-I -S -B`,
+    // exec.rs::python_args); `-c` instead of stdin-`-` because the
+    // probe has no stdin plumbing — the syscall surface is the same.
+    let bin = "/usr/bin/python3";
+    if !binary_present(bin) {
+        return;
+    }
+    let dir = prepare_scratch("python3");
+    let script = "import os, tempfile\n\
+                  fd, p = tempfile.mkstemp()\n\
+                  os.write(fd, b'scratch-ok')\n\
+                  os.close(fd)\n\
+                  print(open(p).read())\n";
+    let out = Command::new(PROBE)
+        .args(["exec-after-lockdown", bin, "-I", "-S", "-B", "-c", script])
+        .env_clear()
+        .env("KASTELLAN_SECCOMP_PROFILE", "strict")
+        .env(
+            "KASTELLAN_LANDLOCK_RW",
+            serde_json::to_string(&[&dir]).expect("serialize rw_dir"),
+        )
+        // The worker sets TMPDIR to its scratch; mirror that so
+        // tempfile.mkstemp targets the Landlock-RW dir.
+        .env("TMPDIR", &dir)
+        .output()
+        .expect("failed to spawn lockdown-probe");
+    assert_no_sigsys(bin, &out);
+    // Stronger than the coreutils convention (no-SIGSYS only): CPython
+    // must complete the whole round-trip, proving Landlock RW + the
+    // syscall set cover real interpreter work, not just startup.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "python3 under lockdown exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        out.status
+    );
+    assert!(
+        stdout.contains("scratch-ok"),
+        "expected scratch round-trip marker\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}

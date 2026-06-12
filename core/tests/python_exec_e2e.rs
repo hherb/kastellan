@@ -1,0 +1,206 @@
+//! End-to-end test: agent core spawns the `python-exec` worker under the
+//! platform's real sandbox backend and round-trips `python.exec` calls
+//! **through `tool_host::dispatch`** (the sealed chokepoint — see
+//! `shell_exec_e2e.rs` for why dispatch and not `worker.call`).
+//!
+//! What this pins beyond the worker's own `real_python.rs` suite: the
+//! **production policy inside the real jail** — `python_exec_entry`'s
+//! `Net::Deny` + `Profile::WorkerStrict` actually contain the CPython
+//! child (a socket attempt dies), and the explicit
+//! `KASTELLAN_LANDLOCK_RW=["/tmp"]` grant really lets code write the
+//! jail's ephemeral scratch.
+//!
+//! `[SKIP]`s cleanly when PG, the supervisor, the sandbox, the worker
+//! binary, or a python3 interpreter is missing.
+
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+
+use std::path::PathBuf;
+
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::workers::python_exec::python_exec_entry;
+use kastellan_tests_common::{
+    backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
+    skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
+};
+
+/// Same candidate cascade as the manifest; the e2e needs a real host
+/// interpreter to inject into the jail.
+fn find_python() -> Option<PathBuf> {
+    for c in ["/usr/bin/python3", "/usr/local/bin/python3", "/opt/homebrew/bin/python3"] {
+        let p = PathBuf::from(c);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    eprintln!("\n[SKIP] no python3 interpreter on this host\n");
+    None
+}
+
+async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
+        conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "python-exec-e2e"}),
+    )
+    .await
+    .expect("probe run");
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
+        .await
+        .expect("connect runtime pool")
+}
+
+fn dispatch_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("build multi-threaded tokio runtime")
+}
+
+struct TestEnv {
+    cluster: PgCluster,
+    worker_path: PathBuf,
+    python: PathBuf,
+}
+
+fn ready_or_skip() -> Option<TestEnv> {
+    if skip_if_no_supervisor() {
+        return None;
+    }
+    if skip_if_sandbox_unavailable() {
+        return None;
+    }
+    let bin_dir = pg_bin_dir_or_skip()?;
+    let worker_path = workspace_target_binary("kastellan-worker-python-exec");
+    if !worker_path.exists() {
+        eprintln!("\n[SKIP] worker binary not built; run cargo build --workspace\n");
+        return None;
+    }
+    let python = find_python()?;
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "pyx-d",
+        "pyx-l",
+        &format!("kastellan-supervisor-test-pg-pythonexec-{suffix}"),
+    );
+
+    Some(TestEnv {
+        cluster,
+        worker_path,
+        python,
+    })
+}
+
+/// One jailed `python.exec` dispatch under the **production** policy
+/// (`python_exec_entry`), returning the result value.
+async fn exec_in_jail(
+    pool: &sqlx::PgPool,
+    env: &TestEnv,
+    code: &str,
+) -> Result<serde_json::Value, kastellan_core::tool_host::ToolHostError> {
+    let entry = python_exec_entry(env.worker_path.clone(), env.python.clone());
+    let backend = backend();
+    let worker_str = env.worker_path.to_string_lossy().into_owned();
+    let spec = WorkerSpec {
+        policy: &entry.policy,
+        program: &worker_str,
+        args: &[],
+        wall_clock_ms: None,
+    };
+    let mut sworker = spawn_worker(&*backend, &spec).expect("spawn python-exec under sandbox");
+    let result = dispatch(
+        pool,
+        &Vault::new(),
+        &mut sworker,
+        "python-exec",
+        "python.exec",
+        serde_json::json!({ "code": code }),
+    )
+    .await;
+    let _ = sworker.close();
+    result
+}
+
+#[test]
+fn print_round_trip_through_sandboxed_worker() {
+    let env = match ready_or_skip() {
+        Some(e) => e,
+        None => return,
+    };
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        let r = exec_in_jail(&pool, &env, "print(6 * 7)")
+            .await
+            .expect("python.exec round trip");
+        assert_eq!(r["exit_code"], 0, "stderr: {}", r["stderr"]);
+        assert_eq!(r["stdout"].as_str().unwrap().trim_end(), "42");
+        pool.close().await;
+    });
+}
+
+#[test]
+fn socket_attempt_is_contained_by_the_jail() {
+    let env = match ready_or_skip() {
+        Some(e) => e,
+        None => return,
+    };
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        // Under seccomp `strict` the socket(2) syscall is not in the
+        // allow-list → CPython dies with SIGSYS (exit_code null); under
+        // Seatbelt the connect is denied → OSError (exit_code 1). Either
+        // way: anything but success.
+        let r = exec_in_jail(
+            &pool,
+            &env,
+            "import socket\ns = socket.socket()\ns.connect(('127.0.0.1', 9))\nprint('escaped')",
+        )
+        .await
+        .expect("dispatch itself must succeed");
+        assert_ne!(r["exit_code"], 0, "socket attempt must not succeed: {r}");
+        assert!(
+            !r["stdout"].as_str().unwrap_or("").contains("escaped"),
+            "network reached from inside the jail: {r}"
+        );
+        pool.close().await;
+    });
+}
+
+#[test]
+fn scratch_tmp_write_round_trip_inside_jail() {
+    let env = match ready_or_skip() {
+        Some(e) => e,
+        None => return,
+    };
+    // macOS slice #1 has no writable scratch (Seatbelt deny-default with
+    // fs_write = []) — the Linux jail's /tmp is an ephemeral tmpfs with
+    // an explicit Landlock RW grant. See the design spec §2.3/§5.
+    #[cfg(target_os = "macos")]
+    {
+        eprintln!("\n[SKIP] no writable scratch under Seatbelt in slice #1\n");
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        let code = concat!(
+            "import tempfile\n",
+            "with tempfile.NamedTemporaryFile('w+', delete=True) as f:\n",
+            "    f.write('jail-scratch-ok')\n",
+            "    f.flush()\n",
+            "    f.seek(0)\n",
+            "    print(f.read())\n",
+        );
+        let r = exec_in_jail(&pool, &env, code)
+            .await
+            .expect("python.exec round trip");
+        assert_eq!(r["exit_code"], 0, "stderr: {}", r["stderr"]);
+        assert_eq!(r["stdout"].as_str().unwrap().trim_end(), "jail-scratch-ok");
+        pool.close().await;
+    });
+}
