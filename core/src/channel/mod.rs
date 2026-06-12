@@ -21,6 +21,7 @@
 pub mod auth;
 pub mod bus;
 pub mod ingest;
+pub mod matrix;
 pub mod route;
 
 pub use bus::ChannelBus;
