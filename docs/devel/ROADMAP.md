@@ -154,9 +154,18 @@ items unlock later ones.
   audited (hash only). 18 unit tests + hermetic `FakeChannel` full-loop e2e + PG-gated real-queue
   e2e; clippy `-D warnings` clean. No live transport / no `main.rs` wiring (slice #2). Branch
   `claude/zen-bell-6bn2ze`, 2026-06-12. Plan: `docs/superpowers/plans/2026-06-12-channel-bus-abstraction.md`.
-- [ ] **Matrix inbound** (`MatrixChannel`, `matrix-rust-sdk`, E2E) — net allowlist scoped to the
+- [~] **Matrix inbound** (`MatrixChannel`, `matrix-rust-sdk`, E2E) — net allowlist scoped to the
   homeserver host:port only, force-routed through the egress proxy; single-user homeserver
-  bring-up. (Slice #2.)
+  bring-up. (Slice #2.) **Phases A–C+E done** (branch `claude/zen-bell-6bn2ze`, 2026-06-12,
+  hermetic + verified anywhere): `kastellan-matrix-wire` + sandboxed-worker JSON-RPC surface
+  (`matrix.init/poll/send` over the SDK seam), core `MatrixChannel` (blocking driver thread
+  bridging the synchronous protocol Client to the async `Channel` trait — keeps the protocol pure
+  request/response), `build_matrix_policy` (pure), config-gated `main.rs` hook (byte-identical when
+  unset), and `matrix_channel_e2e` (full loop against a real fake-worker process; paired round-trip
+  + unpaired-dropped). **Phase D pending (DGX):** the real `matrix-rust-sdk` worker impl + egress
+  coupling + persistent encrypted E2E store + restart supervision + `#[ignore]` live test (gated on
+  the `live-matrix` feature; the matrix-rust-sdk-through-MITM-egress-proxy spike is the top risk).
+  Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-matrix-inbound-sandboxed-worker*`.
 - [ ] **Homeserver supervisor unit + hardening** — conduwuit unit (federation OFF, closed
   registration), dedicated unprivileged user, systemd hardening (`NoNewPrivileges`/`ProtectSystem`/
   tight `SystemCallFilter`), Caddy TLS on loopback bind; Tier A/B/C install path. (Slice #6.)

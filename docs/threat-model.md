@@ -193,6 +193,7 @@ in-body token.
 - Adversarial web page in agent context tries to exfiltrate via `web-fetch` → request blocked, audit log shows attempt.
 - `channel`: a message from an **unpaired** peer → dropped (never enqueued as a task), audit row `channel.rejected_unpaired`. (Shipped: `core/src/channel` `handle_inbound` + the hermetic/PG e2e; the unpaired peer's body is never even screened/echoed — authorize-before-screen.)
 - `channel`: an inbound message carrying a catalogued prompt-injection → blocked (never enqueued), audit row `channel.injection_blocked` carrying only the SHA-256 + reason codes (never the body). (Shipped: `classify_inbound` under `GuardProfile::Strict`.)
+- `channel` (Matrix): an inbound message from a peer **not** in `KASTELLAN_MATRIX_PEERS` → dropped, no task enqueued, no reply sent. (Shipped: `core/tests/matrix_channel_e2e.rs::unpaired_inbound_is_dropped_no_reply` — a real worker process driven through `MatrixChannel` + the bus, hermetic; the live sandboxed matrix-rust-sdk client + egress routing is slice #2 Phase D.)
 
 Already shipped (Phase 0 + Phase 0 hardening stage 1):
 
