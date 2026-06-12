@@ -62,6 +62,15 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(&ca_path, ca.cert_pem())
         .map_err(|e| anyhow::anyhow!("write CA cert {ca_path:?}: {e}"))?;
 
+    // The host provisions the credential-leak scanner's fingerprints here (slice
+    // #3b), a sibling of the UDS + CA. Derived once from the same already-
+    // validated parent dir so the per-connection accept path never re-derives it
+    // (and never panics) after lock-down.
+    let secret_hashes_path = std::path::Path::new(&uds)
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("UDS path has no parent dir"))?
+        .join("secret_hashes.json");
+
     // Upstream trust for the re-origination leg: the REAL public roots. The
     // proxy validates the true origin here (the worker only trusts our CA).
     let mut upstream_roots = rustls::RootCertStore::empty();
@@ -94,6 +103,7 @@ fn main() -> anyhow::Result<()> {
         let ca = &ca;
         let upstream_tls = &upstream_tls;
         let cache = &mut cache;
+        let secret_hashes_path = &secret_hashes_path;
         // One thread per connection; the proxy is SingleUse + short-lived.
         std::thread::scope(|s| {
             s.spawn(|| {
@@ -102,6 +112,7 @@ fn main() -> anyhow::Result<()> {
                     ca: ca.as_ref(),
                     leaf_cache: cache,
                     upstream_tls: std::sync::Arc::clone(upstream_tls),
+                    secret_hashes_path: Some(secret_hashes_path.clone()),
                 };
                 handle_conn(conn, &worker, allow, &resolver, &mut reporter, &mut mitm);
             });

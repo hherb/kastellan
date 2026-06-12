@@ -115,7 +115,7 @@ fn handle_conn_tunnels_allowed_literal_origin() {
         install_provider();
         let ca = test_ca();
         let mut cache = crate::leaf_cache::LeafCache::new();
-        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream() };
+        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream(), secret_hashes_path: None };
         handle_conn(conn, "web-fetch", &allow, &StdResolve, &mut reporter, &mut mitm);
         reporter.0
     });
@@ -153,7 +153,7 @@ fn handle_conn_reports_block_for_off_allowlist() {
         install_provider();
         let ca = test_ca();
         let mut cache = crate::leaf_cache::LeafCache::new();
-        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream() };
+        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream(), secret_hashes_path: None };
         handle_conn(conn, "web-fetch", &allow, &StdResolve, &mut reporter, &mut mitm);
         reporter.0
     });

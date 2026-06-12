@@ -12,6 +12,22 @@ pub enum Verdict {
     Allowed,
     BlockedAllowlist,
     BlockedSsrf,
+    /// A materialized secret's verbatim bytes were detected in this connection's
+    /// MITM-terminated plaintext (slice #3b). The connection is killed.
+    BlockedCredentialLeak,
+}
+
+/// Leak detail attached to a [`Verdict::BlockedCredentialLeak`] decision. Carries
+/// only the leaked secret's value-hash (hex), the byte offset, and the direction
+/// — never any plaintext.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LeakDecision {
+    /// SHA-256 of the leaked secret value (hex). Matches the provisioned hash.
+    pub sha256: String,
+    /// Byte offset of the secret's first byte in the scanned direction.
+    pub offset: u64,
+    /// `"request"` (worker→origin) or `"response"` (origin→worker).
+    pub direction: String,
 }
 
 /// One decision, serialized as a single JSON line on stdout.
@@ -30,6 +46,10 @@ pub struct Decision {
     /// backward-compatible. (Slice #3a — the only new plaintext-adjacent signal.)
     #[serde(default)]
     pub tls_intercepted: bool,
+    /// Present only on [`Verdict::BlockedCredentialLeak`]. Omitted from the wire
+    /// otherwise so slice #1/#2/#3a lines are byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leak: Option<LeakDecision>,
 }
 
 impl Decision {
@@ -71,6 +91,7 @@ mod tests {
             verdict: Verdict::Allowed,
             reason: "ok".into(),
             tls_intercepted: false,
+            leak: None,
         };
         let v: serde_json::Value = serde_json::from_str(&d.to_line()).unwrap();
         assert_eq!(v["verdict"], "allowed");
@@ -88,6 +109,7 @@ mod tests {
             verdict,
             reason: "r".into(),
             tls_intercepted: false,
+            leak: None,
         };
         assert!(mk(Verdict::BlockedAllowlist).to_line().contains("\"blocked_allowlist\""));
         assert!(mk(Verdict::BlockedSsrf).to_line().contains("\"blocked_ssrf\""));
@@ -101,7 +123,7 @@ mod tests {
             r.report(Decision {
                 worker: "w".into(), host: "h".into(), port: 1,
                 resolved_ip: None, verdict: Verdict::Allowed, reason: "ok".into(),
-                tls_intercepted: false,
+                tls_intercepted: false, leak: None,
             });
         }
         let s = String::from_utf8(buf).unwrap();
@@ -113,11 +135,43 @@ mod tests {
         let mut d = Decision {
             worker: "web-fetch".into(), host: "h".into(), port: 443,
             resolved_ip: None, verdict: Verdict::Allowed, reason: "ok".into(),
-            tls_intercepted: true,
+            tls_intercepted: true, leak: None,
         };
         assert!(d.to_line().contains("\"tls_intercepted\":true"));
         d.tls_intercepted = false;
         let v: serde_json::Value = serde_json::from_str(&d.to_line()).unwrap();
         assert_eq!(v["tls_intercepted"], false);
+    }
+
+    #[test]
+    fn credential_leak_verdict_and_fields_serialize() {
+        let d = Decision {
+            worker: "secret-worker".into(),
+            host: "evil.example.com".into(),
+            port: 443,
+            resolved_ip: Some("203.0.113.9".into()),
+            verdict: Verdict::BlockedCredentialLeak,
+            reason: "credential leak in request".into(),
+            tls_intercepted: true,
+            leak: Some(LeakDecision {
+                sha256: "ab".repeat(32),
+                offset: 42,
+                direction: "request".into(),
+            }),
+        };
+        let v: serde_json::Value = serde_json::from_str(&d.to_line()).unwrap();
+        assert_eq!(v["verdict"], "blocked_credential_leak");
+        assert_eq!(v["leak"]["offset"], 42);
+        assert_eq!(v["leak"]["direction"], "request");
+    }
+
+    #[test]
+    fn leak_absent_when_none() {
+        let d = Decision {
+            worker: "w".into(), host: "h".into(), port: 1, resolved_ip: None,
+            verdict: Verdict::Allowed, reason: "ok".into(), tls_intercepted: false,
+            leak: None,
+        };
+        assert!(!d.to_line().contains("\"leak\""));
     }
 }

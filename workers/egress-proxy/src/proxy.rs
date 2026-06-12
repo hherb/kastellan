@@ -102,6 +102,10 @@ pub struct MitmCtx<'a> {
     pub ca: &'a crate::ca::CaMaterial,
     pub leaf_cache: &'a mut crate::leaf_cache::LeafCache,
     pub upstream_tls: std::sync::Arc<rustls::ClientConfig>,
+    /// Path to the host-provisioned `secret_hashes.json` (slice #3b). Re-read
+    /// per MITM connection so dispatch-time additions are picked up. `None`
+    /// disables scanning entirely.
+    pub secret_hashes_path: Option<std::path::PathBuf>,
 }
 
 /// Handle one accepted UDS connection end-to-end. Reads the CONNECT line,
@@ -149,6 +153,7 @@ pub fn handle_conn(
                         worker: worker.into(), host: host.clone(), port,
                         resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
                         reason: format!("connect_failed: {e}"), tls_intercepted: false,
+                        leak: None,
                     });
                     let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n");
                     return;
@@ -163,6 +168,7 @@ pub fn handle_conn(
                     worker: worker.into(), host: host.clone(), port,
                     resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
                     reason: "allowed_but_200_write_failed".into(), tls_intercepted: false,
+                    leak: None,
                 });
                 return;
             }
@@ -180,6 +186,7 @@ pub fn handle_conn(
                     worker: worker.into(), host: host.clone(), port,
                     resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
                     reason: allowed_reason(allow, &host).into(), tls_intercepted: true,
+                    leak: None,
                 });
                 run_mitm(client, ip, port, &host, mitm, worker, reporter);
             } else {
@@ -187,6 +194,7 @@ pub fn handle_conn(
                     worker: worker.into(), host: host.clone(), port,
                     resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
                     reason: allowed_reason(allow, &host).into(), tls_intercepted: false,
+                    leak: None,
                 });
                 tunnel(client, upstream);
             }
@@ -214,14 +222,14 @@ fn run_mitm(
                 worker: worker.into(), host: host.into(), port,
                 resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
                 reason: format!("mitm_runtime_failed: {e}"), tls_intercepted: true,
+                leak: None,
             });
             return;
         }
     };
     let upstream_tls = std::sync::Arc::clone(&mitm.upstream_tls);
+    let patterns = load_patterns(&mitm.secret_hashes_path);
     let res = rt.block_on(async move {
-        // Convert the accepted std UnixStream into a tokio handle inside the
-        // runtime (requires nonblocking + an active reactor).
         client.set_nonblocking(true).map_err(|e| format!("client nonblocking: {e}"))?;
         let client = tokio::net::UnixStream::from_std(client)
             .map_err(|e| format!("client from_std: {e}"))?;
@@ -232,15 +240,50 @@ fn run_mitm(
             mitm.ca,
             mitm.leaf_cache,
             upstream_tls,
+            &patterns,
         )
         .await
     });
-    if let Err(e) = res {
-        reporter.report(Decision {
-            worker: worker.into(), host: host.into(), port,
-            resolved_ip: Some(ip.to_string()), verdict: Verdict::Allowed,
-            reason: format!("mitm_failed: {e}"), tls_intercepted: true,
-        });
+    match res {
+        Ok(None) => {} // clean tunnel; the allow decision was already emitted.
+        Ok(Some(report)) => {
+            reporter.report(Decision {
+                worker: worker.into(),
+                host: host.into(),
+                port,
+                resolved_ip: Some(ip.to_string()),
+                verdict: Verdict::BlockedCredentialLeak,
+                reason: format!("credential leak in {}", report.direction.as_str()),
+                tls_intercepted: true,
+                leak: Some(crate::report::LeakDecision {
+                    sha256: report.sha256_hex,
+                    offset: report.offset,
+                    direction: report.direction.as_str().to_string(),
+                }),
+            });
+        }
+        Err(e) => {
+            reporter.report(Decision {
+                worker: worker.into(),
+                host: host.into(),
+                port,
+                resolved_ip: Some(ip.to_string()),
+                verdict: Verdict::Allowed,
+                reason: format!("mitm_failed: {e}"),
+                tls_intercepted: true,
+                leak: None,
+            });
+        }
+    }
+}
+
+/// Lazily load the provisioned secret fingerprints for this connection. A
+/// missing/unreadable/empty file degrades to "no scanning" (never an error).
+fn load_patterns(path: &Option<std::path::PathBuf>) -> Vec<kastellan_leak_scan::SecretFingerprint> {
+    let Some(p) = path else { return Vec::new() };
+    match std::fs::read_to_string(p) {
+        Ok(s) => kastellan_leak_scan::parse_hashes(&s),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -248,6 +291,7 @@ fn blocked(worker: &str, host: &str, port: u16, verdict: Verdict, reason: &str) 
     Decision {
         worker: worker.into(), host: host.into(), port,
         resolved_ip: None, verdict, reason: reason.into(), tls_intercepted: false,
+        leak: None,
     }
 }
 

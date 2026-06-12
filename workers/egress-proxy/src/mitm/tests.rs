@@ -95,6 +95,7 @@ async fn mitm_terminates_and_reoriginates_a_real_tls_session() {
             &ca_for_proxy,
             &mut cache,
             upstream_tls,
+            &[],
         )
         .await
     });

@@ -13,6 +13,7 @@ use sqlx::PgPool;
 use zeroize::Zeroizing;
 
 use kastellan_db::secrets::KeyProvider;
+use kastellan_leak_scan::{fingerprint_value, SecretFingerprint};
 
 use super::{DEFAULT_TTL, REF_HEX_LEN, REF_PREFIX};
 
@@ -255,6 +256,21 @@ impl Vault {
             map.remove(r);
         }
         RedeemResult::Expired
+    }
+
+    /// Compute a one-way [`SecretFingerprint`] of the secret's value for the
+    /// egress credential-leak scanner (slice #3b), **without exposing the
+    /// plaintext**. Returns `None` if the ref is absent/expired or the value is
+    /// below `MIN_SECRET_LEN`. Takes the read lock and fingerprints in place; the
+    /// plaintext never leaves this method.
+    pub fn value_fingerprint(&self, r: &SecretRef) -> Option<SecretFingerprint> {
+        let now = Instant::now();
+        let map = self.map.read().expect("vault map poisoned");
+        let entry = map.get(r)?;
+        if now >= entry.expires_at {
+            return None;
+        }
+        fingerprint_value(&entry.plaintext)
     }
 }
 

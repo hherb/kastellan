@@ -1356,6 +1356,7 @@ dependencies = [
  "async-trait",
  "futures",
  "kastellan-db",
+ "kastellan-leak-scan",
  "kastellan-llm-router",
  "kastellan-matrix-wire",
  "kastellan-protocol",
@@ -1398,6 +1399,15 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "zeroize",
+]
+
+[[package]]
+name = "kastellan-leak-scan"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -1469,6 +1479,7 @@ name = "kastellan-worker-egress-proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "kastellan-leak-scan",
  "kastellan-worker-prelude",
  "kastellan-worker-web-common",
  "libc",

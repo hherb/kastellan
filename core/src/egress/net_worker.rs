@@ -15,9 +15,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
+use kastellan_leak_scan::SecretFingerprint;
 use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
 use super::audit::{ingest_decisions_into, EgressAuditRow};
+use super::leak_provision::write_secret_hashes;
 use super::spawn::{spawn_sidecar, SidecarHandle, UDS_FILE_NAME};
 use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
 
@@ -71,6 +73,14 @@ impl Drop for EgressSidecar {
     }
 }
 
+/// Write the per-worker secret-value fingerprints into the sidecar scratch dir
+/// for the proxy to read (slice #3b spawn-wiring). Thin wrapper over
+/// [`write_secret_hashes`] kept here so the spawn path has one provisioning
+/// call site.
+fn provision_secret_hashes(scratch: &Path, fps: &[SecretFingerprint]) -> std::io::Result<()> {
+    write_secret_hashes(scratch, fps)
+}
+
 /// Rewrite a net worker's policy for force-routing: point it at the proxy UDS,
 /// drop its direct DNS file (the proxy resolves now), and inject the UDS env so
 /// the worker's transport switches onto CONNECT-over-UDS. Pure — no spawn,
@@ -107,6 +117,7 @@ pub fn rewrite_worker_policy(mut policy: SandboxPolicy, uds: &Path, ca: &Path) -
 /// [`EgressAuditRow`]); the live caller persists it to `audit_log` (see
 /// [`pg_decision_sink`]), tests pass a capturing or no-op closure. Kept generic
 /// so the spawn path itself needs no Postgres.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_net_worker<F>(
     backend: &dyn SandboxBackend,
     proxy_bin: &Path,
@@ -114,6 +125,7 @@ pub fn spawn_net_worker<F>(
     allowlist: &[String],
     scratch: &Path,
     worker_name: &str,
+    secret_fingerprints: &[SecretFingerprint],
     on_decision: F,
 ) -> Result<SupervisedWorker, ToolHostError>
 where
@@ -124,6 +136,24 @@ where
         .map_err(|e| ToolHostError::Io(std::io::Error::other(format!("egress sidecar: {e}"))))?;
     // Capture the proxy stdout for the ingest thread before the handle moves.
     let stdout = sidecar.stdout();
+    // Provision the credential-leak scanner's fingerprints into the sidecar
+    // scratch dir (slice #3b). Best-effort: a provisioning write failure must
+    // not abort an otherwise-healthy worker — it only disables leak scanning,
+    // which is defense-in-depth, not a containment boundary. Today's callers
+    // pass an empty slice (no egress worker carries secrets yet).
+    match sidecar.uds_path.parent() {
+        Some(scratch_dir) => {
+            if let Err(e) = provision_secret_hashes(scratch_dir, secret_fingerprints) {
+                tracing::warn!(error = %e, "egress leak-scan provisioning write failed; scanning disabled for this worker");
+            }
+        }
+        None => {
+            tracing::warn!(
+                uds = %sidecar.uds_path.display(),
+                "egress sidecar UDS path has no parent dir; leak-scan provisioning skipped, scanning disabled for this worker"
+            );
+        }
+    }
     // 2. Rewrite the worker policy onto the sidecar UDS.
     let uds = sidecar.uds_path.clone();
     // The sidecar exports its CA next to the UDS (same scratch dir).
@@ -161,6 +191,7 @@ where
 /// it once the worker — and any warm reuse of it — is finally torn down). On the
 /// fail-closed path (sidecar unavailable ⇒ no worker) the freshly-created
 /// scratch dir is removed immediately, since no worker exists to own it.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_forced_net_worker<F>(
     backend: &dyn SandboxBackend,
     proxy_bin: &Path,
@@ -168,6 +199,7 @@ pub fn spawn_forced_net_worker<F>(
     allowlist: &[String],
     scratch_root: &Path,
     worker_name: &str,
+    secret_fingerprints: &[SecretFingerprint],
     on_decision: F,
 ) -> Result<SupervisedWorker, ToolHostError>
 where
@@ -181,6 +213,7 @@ where
         allowlist,
         &scratch,
         worker_name,
+        secret_fingerprints,
         on_decision,
     ) {
         Ok(mut worker) => {
@@ -393,6 +426,7 @@ mod tests {
             &["api.example.com:443".to_string()],
             Path::new("/tmp/kastellan-net-worker-test"),
             "web-fetch",
+            &[], // secret_fingerprints — none for this fail-closed test
             |_row| {},
         );
         assert!(res.is_err(), "no proxy => no net worker (fail-closed)");
@@ -422,6 +456,7 @@ mod tests {
             &["api.example.com:443".to_string()],
             scratch_root.path(),
             "web-fetch",
+            &[], // secret_fingerprints — none for this fail-closed test
             |_row| {},
         );
         assert!(res.is_err(), "no proxy => no net worker (fail-closed)");
@@ -459,6 +494,7 @@ mod tests {
             &["api.example.com:443".to_string()],
             scratch_root.path(),
             "web-fetch",
+            &[],
             |_row| {},
         );
         let leftovers: Vec<_> = std::fs::read_dir(scratch_root.path())
@@ -469,5 +505,24 @@ mod tests {
             "failed force-route spawn left {} scratch entries behind",
             leftovers.len()
         );
+    }
+
+    #[test]
+    fn provision_writes_secret_hashes_into_scratch() {
+        use kastellan_leak_scan::{fingerprint_value, parse_hashes};
+        let dir = tempfile::tempdir().expect("scratch");
+        let fps = vec![fingerprint_value(b"a-spawn-time-secret").unwrap()];
+        provision_secret_hashes(dir.path(), &fps).expect("write");
+        let s = std::fs::read_to_string(dir.path().join("secret_hashes.json")).unwrap();
+        assert_eq!(parse_hashes(&s), fps);
+    }
+
+    #[test]
+    fn provision_empty_writes_empty_list() {
+        use kastellan_leak_scan::parse_hashes;
+        let dir = tempfile::tempdir().expect("scratch");
+        provision_secret_hashes(dir.path(), &[]).expect("write");
+        let s = std::fs::read_to_string(dir.path().join("secret_hashes.json")).unwrap();
+        assert!(parse_hashes(&s).is_empty());
     }
 }

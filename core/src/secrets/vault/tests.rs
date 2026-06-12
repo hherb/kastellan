@@ -172,3 +172,31 @@ fn vault_redeem_concurrent_readers_dont_block_each_other() {
         h.join().expect("thread panicked");
     }
 }
+
+#[test]
+fn value_fingerprint_matches_plaintext_hash() {
+    use sha2::{Digest, Sha256};
+    let vault = Vault::with_ttl(Duration::from_secs(60));
+    let value = b"a-real-secret-value-1234";
+    let r = SecretRef::from_raw("secret://aabbccdd".to_string());
+    _test_insert(&vault, r.clone(), value.to_vec());
+    let fp = vault.value_fingerprint(&r).expect("fingerprint");
+    let mut h = Sha256::new();
+    h.update(value);
+    let expected: [u8; 32] = h.finalize().into();
+    assert_eq!(fp.sha256, expected);
+    assert_eq!(fp.len, value.len());
+}
+
+#[test]
+fn value_fingerprint_none_for_absent_or_short() {
+    let vault = Vault::with_ttl(Duration::from_secs(60));
+    // Absent ref.
+    assert!(vault
+        .value_fingerprint(&SecretRef::from_raw("secret://00000000".to_string()))
+        .is_none());
+    // Present but below MIN_SECRET_LEN.
+    let r = SecretRef::from_raw("secret://11111111".to_string());
+    _test_insert(&vault, r.clone(), b"short".to_vec());
+    assert!(vault.value_fingerprint(&r).is_none());
+}

@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 kastellan-worker-prelude    = { path = "../prelude", version = "0.1.0" }
 kastellan-worker-web-common = { path = "../web-common", version = "0.1.0" }
+kastellan-leak-scan = { path = "../../leak-scan", version = "0.1.0" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
