@@ -6,19 +6,41 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-12 (**Phase 4 OPENED: `python-exec` worker slice #1 COMPLETE**; branch
-`claude/compassionate-shannon-3jeh31`, PR [#267](https://github.com/hherb/kastellan/pull/267), rebased onto `main` at
-`519d029` — which carries the parallel-machine arcs: egress slice #3b leak scanner PR
-[#269](https://github.com/hherb/kastellan/pull/269), browser-driver PR [#262](https://github.com/hherb/kastellan/pull/262),
-Matrix comms PR [#265](https://github.com/hherb/kastellan/pull/265).)
-**Session-end verification (remote Linux container, root):** `cargo test --workspace` **928 / 1 / 1** — the 1
-failure is the **pre-existing** root-container artifact
-`egress_force_routing_e2e::pg_decision_sink_persists_decisions_to_audit_log` (`initdb: cannot be run as root`; fails
-identically on clean base, verified by stash); `clippy --workspace --all-targets -D warnings` clean, re-verified after the
-merge of `main`. Sandbox/PG suites skip-as-pass here; **DGX/Mac acceptance of `python_exec_e2e` is the follow-up.** (The
-Mac 1644/0/8 baseline below is from the parallel Mac and NOT comparable to the container count.)
+**Last updated:** 2026-06-13 (**Phase 4: Mac (Seatbelt) acceptance of `python_exec_e2e` GREEN 3/3** — required two real
+fixes, the macOS xcrun-shim interpreter bug + the `unique_suffix` collision class; branch `claude/vigorous-feistel-b0c811`.
+PR [#267](https://github.com/hherb/kastellan/pull/267) (python-exec slice #1) is **MERGED** to `main` at `313f6bb`.)
+**Session-end verification (Mac, skip-as-pass posture):** `cargo test --workspace` **1679 / 0 / 8**;
+`clippy --workspace --all-targets -D warnings` clean. The Mac `python_exec_e2e` acceptance run (live PG 18) is **3/3**:
+jailed round-trip with a real framework python under Seatbelt + a now-meaningful socket-containment negative (previously
+it passed *vacuously* — the xcrun shim exited 1 for any code); the scratch test self-skips on darwin by design.
+**DGX (bwrap) acceptance of `python_exec_e2e` is still the open follow-up** — this session's SSH attempt to update the
+DGX checkout was permission-denied by the harness; run it operator-side or re-authorize.
 
-**PR #267 review pass (2026-06-12, same session):** self-review found + fixed three things. (1) **macOS clippy break:**
+**This session (2026-06-13) — Phase 4 acceptance + two cross-cutting macOS fixes (branch `claude/vigorous-feistel-b0c811`).**
+The handover's "acceptance first" step, Mac half. The first run failed twice, each a real bug:
+1. **`tests-common::unique_suffix` collision class FIXED.** The `{pid}-{nanos}` scheme collides on macOS — `CLOCK_REALTIME`
+   is ~µs-resolution, so two parallel test threads computed the **identical** PG data dir; one initdb hit `File exists`,
+   the other had its directory ripped away mid-bootstrap by the first's panic-triggered `PathGuard` drop. Now
+   `{pid}-{nanos}-{counter}` (process-global `AtomicU64`) — uniqueness is clock-independent; likely kills (or shrinks) the
+   standing "parallel initdb churn" flake class (#130 territory, the `embedding_recall_e2e` note below). +1 pinned test
+   (8 threads × 1000 suffixes, no duplicates — deterministically failed pre-fix).
+2. **macOS interpreter cascade FIXED (`core/src/workers/python_exec.rs`).** `/usr/bin/python3` on every Mac is Apple's
+   **xcrun shim** (SIP owns `/usr/bin`): in-jail it dies dlopen'ing `libxcrun.dylib` from the unreadable Xcode/CLT tree
+   (exit 1 for ANY code — the socket negative "passed" vacuously), and even unjailed it **re-injects `SDKROOT`/`CPATH`/
+   `LIBRARY_PATH`/… into the real python child**, breaking the worker's env-isolation contract (caught by
+   `real_python.rs::child_env_is_cleared…` on the first full Mac workspace run since the merge). `PYTHON_CANDIDATES` is
+   now per-OS (`pub`, the e2e probes the same list): Linux `/usr/bin` → `/usr/local/bin`; macOS Homebrew →
+   `/usr/local/bin` → CLT, shim excluded by construction. And since every working macOS python canonicalizes into a
+   **framework** layout (`…/Python*.framework/Versions/<v>/bin/<exe>`) whose `Python` dylib + `Resources/` are *siblings*
+   of `bin/`+`lib/`, the old `<prefix>/lib` fs_read grant could not even load the binary — new `interpreter_extra_fs_read`
+   grants the framework **version root** for that layout (POSIX prefixes keep `<prefix>/lib`). Worker-side
+   `real_python.rs::find_python` mirrors the per-OS list (can't import core — duplicated with a keep-in-sync comment).
+3. **Mac acceptance GREEN:** `KASTELLAN_PG_BIN_DIR=… cargo test -p kastellan-core --test python_exec_e2e` → **3/3**
+   (jailed round-trip on Homebrew python 3.14 under Seatbelt, real socket-containment negative, darwin scratch self-skip).
+   Manifest tests 7→10. **DGX (bwrap) acceptance remains open** — the SSH `git checkout/pull` on the DGX was
+   permission-denied this session (the DGX checkout sits on a pre-#267 commit); run operator-side or re-authorize.
+
+**PR #267 review pass (2026-06-12, prior session):** self-review found + fixed three things. (1) **macOS clippy break:**
 the e2e scratch test's darwin early-return sat after `ready_or_skip()` → unused `env` binding → `-D warnings` fails on
 the Mac acceptance run; gate hoisted above the binding. (2) **Streaming capped capture:** `run_code` no longer uses
 `wait_with_output` (unbounded buffering — on macOS, where Seatbelt has no memory cap, a `print('x'*10**9)` payload would
@@ -32,7 +54,7 @@ watch item is closed by construction. Also merged `main` (slice #3b leak scanner
 auto-merged, HANDOVER resolved keeping both parallel session blocks. +5 tests (13 worker unit / 8 real-interpreter incl.
 a dual-stream flood pin / 8 manifest).
 
-**This session — Phase 4 entry: `python-exec` worker slice #1 (ROADMAP:202).** The first executor for agent-authored
+**Prior session — Phase 4 entry: `python-exec` worker slice #1 (ROADMAP:202), PR [#267](https://github.com/hherb/kastellan/pull/267) MERGED.** The first executor for agent-authored
 Python; everything later in Phase 4 (skill catalog, trust ceilings, delegation) invokes code through it. Spec'd
 (`docs/superpowers/specs/2026-06-12-python-exec-worker-design.md`) then built:
 - **Worker** `workers/python-exec` (Rust, mirrors shell-exec — the CPython process is a *child* so a wedged payload
@@ -50,9 +72,11 @@ Python; everything later in Phase 4 (skill catalog, trust ceilings, delegation) 
   mem 512 MiB cgroup / wall 30 s watchdog; `SingleUse`.
 - **Manifest** `core/src/workers/python_exec.rs`: **opt-in `KASTELLAN_PYTHON_EXEC_ENABLE=1`**, else `Disabled` —
   shell-exec is deny-by-default via its empty argv allowlist, python-exec has no equivalent knob so the posture moves
-  to registration. Interpreter override fails closed; candidate cascade `/usr/bin` → `/usr/local/bin` →
-  `/opt/homebrew/bin`; `fs_read` = worker + interpreter + derived `<prefix>/lib`. Registered in `WORKER_MANIFESTS`.
-  `GuardProfile::Strict` (default) deliberately kept — output may launder fetched content.
+  to registration. Interpreter override fails closed; candidate cascade is **per-OS** (since 2026-06-13: Linux
+  `/usr/bin` → `/usr/local/bin`; macOS Homebrew → `/usr/local/bin` → CLT — `/usr/bin/python3` there is the jail-broken
+  xcrun shim); `fs_read` = worker + interpreter + derived stdlib (`<prefix>/lib`, or the framework **version root** for
+  macOS framework pythons). Registered in `WORKER_MANIFESTS`. `GuardProfile::Strict` (default) deliberately kept —
+  output may launder fetched content.
 - **Tests:** 10 worker unit + 7 real-interpreter integration (`workers/python-exec/tests/real_python.rs` — env
   isolation, no-site-packages, caps, >64 KiB-source feeder, all green vs this container's CPython 3.11) + 7 manifest
   unit + `core/tests/python_exec_e2e.rs` (production-policy jail round-trip / socket-containment negative / scratch
@@ -160,18 +184,14 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** `main` is at `6bf57b7` (Matrix comms channel, PR [#265](https://github.com/hherb/kastellan/pull/265)
-MERGED; browser-driver slice #1 PR [#262](https://github.com/hherb/kastellan/pull/262) + egress slice #3a PR #259 also on
-`main`). **This session's work is on branch `feat/egress-slice3b-leak-scanner` (PR [#269](https://github.com/hherb/kastellan/pull/269)):** egress proxy **slice #3b
-credential-leak scanner is COMPLETE** (ROADMAP:142) — see the "This session" block above. Mechanism + spawn-wiring shipped;
-the scanner is **forward-looking** (no current egress worker carries secrets, so spawn-wiring provisions an empty set today)
-and dispatch-time live-append is deferred ([#268](https://github.com/hherb/kastellan/issues/268)). Working tree carries only
-the slice-#3b work + untracked `docs/essay-medium-draft.md`. Dev box **macOS**; the DGX (aarch64) is driven natively over
-WireGuard SSH (`ssh dgx`). **Session-end: Mac `cargo test --workspace` = 1644 / 0 / 8 (after the PR #269 review pass); `clippy --workspace --all-targets -D
-warnings` clean; cross-clippy `kastellan-leak-scan` for `aarch64-unknown-linux-gnu` clean. (No DGX full-workspace run this
-session — all new code is platform-agnostic [pure crate + host file-IO + the existing MITM relay path, which the DGX already
-exercises under real bwrap]; the native-Linux baseline is unchanged from slice #3a's 1538/0/10 modulo the additive
-matrix/leak-scan tests.)**
+**Current state.** `main` is at `313f6bb` (python-exec slice #1, PR [#267](https://github.com/hherb/kastellan/pull/267)
+MERGED; it carries egress slice #3b PR [#269](https://github.com/hherb/kastellan/pull/269), browser-driver slice #1 PR
+[#262](https://github.com/hherb/kastellan/pull/262), Matrix comms PR [#265](https://github.com/hherb/kastellan/pull/265)).
+**This session's work is on branch `claude/vigorous-feistel-b0c811`:** Mac acceptance of `python_exec_e2e` (3/3) + the
+`unique_suffix` collision fix + the macOS interpreter-cascade/framework-fs_read fix — see the "This session" block above.
+Dev box **macOS**; the DGX (aarch64) is driven natively over WireGuard SSH (`ssh dgx`) — **note: its checkout sits on a
+pre-#267 commit; the DGX `python_exec_e2e` acceptance is the open follow-up.** **Session-end: Mac
+`cargo test --workspace` = 1679 / 0 / 8; `clippy --workspace --all-targets -D warnings` clean.**
 **Standing macOS test-infra gotcha (not a regression):** a *full-workspace* run under `KASTELLAN_PG_BIN_DIR` flakes ~4
 tests in `core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs`) — parallel `initdb`/launchd
 churn (issue #130 territory); they pass single-threaded and in isolation. Use skip-as-pass for the whole workspace on
@@ -225,8 +245,9 @@ kastellan (Rust workspace, 15 crates [+ `matrix`/`matrix-wire` from PR #265 not 
 
 **Test baselines.** Native-Linux (DGX, PG 18 live, rustc 1.96.0, worker bins built): **1538 / 0 / 10**
 on `feat/egress-slice3-tls-intercept` (2026-06-12 slice-#3a acceptance; the real-sandbox e2e suites actually run here,
-unlike the older 1327 figure; predates the Matrix #265 + leak-scan #3b tests). macOS skip-as-pass posture (no
-`KASTELLAN_PG_BIN_DIR`): **1644 / 0 / 8** (2026-06-13, after Matrix #265 + egress slice-#3b leak-scan + the PR #269 review pass). 8–10 ignored =
+unlike the older 1327 figure; predates the Matrix #265 + leak-scan #3b + python-exec #267 tests). macOS skip-as-pass
+posture (no `KASTELLAN_PG_BIN_DIR`): **1679 / 0 / 8** (2026-06-13, after python-exec #267 + this session's
+interpreter/`unique_suffix` fixes). 8–10 ignored =
 explicit doctest/real-net markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
 `KASTELLAN_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the
@@ -455,12 +476,13 @@ sessions 2026-05-06 → 2026-05-09 in
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy SLICE #1 (PR #240) + SLICE #2 (force-routing, PR #256 MERGED) are COMPLETE; SLICE #3a (TLS-intercept mechanism, PR #259 MERGED at `e2a7b2b`) is COMPLETE.** Next egress work is slice #3b (the co-located credential-leak scanner, on top of #3a's now-visible plaintext) and slice #4 (TLS pinning). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**★ TOP PICK — Phase 4 continuation (this branch's arc).** `python-exec` slice #1 shipped this session
-(branch `claude/compassionate-shannon-3jeh31`); the Phase-4 sequence continues:
-1. **Acceptance first:** run `cargo test -p kastellan-core --test python_exec_e2e -- --nocapture` on the DGX (real
-   bwrap + Landlock + PG — this container could only verify seccomp; Landlock reported `KernelTooOld` here) and on the
-   Mac (Seatbelt: round-trip + socket-negative run; the scratch test self-skips on darwin). Then flip
-   `KASTELLAN_PYTHON_EXEC_ENABLE=1` wherever wanted — it is opt-in and unregistered by default.
+**★ TOP PICK — Phase 4 continuation.** `python-exec` slice #1 is MERGED (PR #267); **Mac acceptance is GREEN
+(2026-06-13)**; the Phase-4 sequence continues:
+1. **DGX acceptance (small, do first):** update the DGX checkout to `main` ≥ `313f6bb` (it sits pre-#267), then
+   `cargo test -p kastellan-core --test python_exec_e2e -- --nocapture` (real bwrap + Landlock + PG — the build
+   container could only verify seccomp; Landlock reported `KernelTooOld` there; the Mac verified Seatbelt). This
+   session's SSH attempt was permission-denied by the harness — run operator-side or grant the SSH state-change. Then
+   flip `KASTELLAN_PYTHON_EXEC_ENABLE=1` wherever wanted — it is opt-in and unregistered by default.
 2. **Skill catalog (named/persisted Python skills + optional human-approve gate, ROADMAP:203).** Build on the L3 arc's
    exact shape: the L3 templated-skill chain (crystallise → approve → pin → invoke, `memory l3 *`) is the working
    precedent; a Python skill is the same lifecycle where the payload is `python.exec` code instead of a tool-call

@@ -164,7 +164,7 @@ pub fn bring_up_pg_cluster(
 /// * `data_label` — short label appended to the temp data root, e.g.
 ///   `"disp-d"` or `"pg-data"`. Keep this **short** (≤ 8 chars
 ///   ideally) because the full socket path
-///   `<tmp>/<label>-<pid>-<nanos>/data/sockets/.s.PGSQL.5432` must
+///   `<tmp>/<label>-<pid>-<nanos>-<n>/data/sockets/.s.PGSQL.5432` must
 ///   fit in `sockaddr_un.sun_path` (108 bytes on Linux).
 /// * `log_label` — short label for the per-test log dir.
 /// * `service_name` — full systemd unit / launchd label, e.g.

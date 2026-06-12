@@ -217,8 +217,15 @@ items unlock later ones.
     `core/tests/python_exec_e2e.rs` (production-policy jailed round-trip, socket-containment negative, scratch
     round-trip; skip-as-pass without PG/sandbox). Spec:
     `docs/superpowers/specs/2026-06-12-python-exec-worker-design.md`.
-  - [ ] **Follow-ups:** DGX (bwrap) + Mac (Seatbelt) acceptance run of `python_exec_e2e` (built on a Linux container
-    where sandbox suites skip); macOS writable scratch (Seatbelt deny-default leaves slice #1 with none — tighter, not
+  - [x] **Mac (Seatbelt) acceptance — 2026-06-13** of `python_exec_e2e` (3/3 with the real jail). Required two fixes:
+    (1) per-OS interpreter cascade — macOS `/usr/bin/python3` is Apple's xcrun shim (dlopen's libxcrun from the
+    Xcode/CLT tree, unreadable in-jail → always exit 1), so the macOS candidate list is now
+    Homebrew → `/usr/local/bin` → CLT, and `interpreter_extra_fs_read` grants the *framework version root* (the
+    `Python` dylib is a sibling of `bin/`+`lib/`, so the old `<prefix>/lib` grant couldn't even load the binary);
+    (2) `tests-common::unique_suffix` now mixes in an atomic counter — macOS `CLOCK_REALTIME` is ~µs-resolution, so
+    two parallel test threads got the identical pid+nanos PG data dir and destroyed each other's initdb.
+  - [ ] **Follow-ups:** DGX (bwrap) acceptance run of `python_exec_e2e` (Mac done 2026-06-13; the Linux container
+    build could only verify seccomp); macOS writable scratch (Seatbelt deny-default leaves slice #1 with none — tighter, not
     looser; shares the per-spawn scratch wiring browser-driver Phase 2 needs); curated-wheels RO dir if/when the skill
     catalog demands packages; planner-prompt surfacing (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
