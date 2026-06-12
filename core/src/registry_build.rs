@@ -22,6 +22,7 @@ pub static WORKER_MANIFESTS: &[&dyn WorkerManifest] = &[
     &crate::workers::gliner_relex::GlinerRelexManifest,
     &crate::workers::web_fetch::WebFetchManifest,
     &crate::workers::web_search::WebSearchManifest,
+    &crate::workers::browser_driver::BrowserDriverManifest,
 ];
 
 /// One per-tool record carried in the `registry.loaded` audit-row payload.
