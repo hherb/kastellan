@@ -201,6 +201,15 @@ sessions 2026-05-10 → 2026-05-29 in
 sessions 2026-05-06 → 2026-05-09 in
 [`archive/handover_20260510_pre-prune.md`](archive/handover_20260510_pre-prune.md).
 
+- **2026-06-12 — comms SLICE #4 (outbound reply mapping; code, branch `claude/zen-bell-6bn2ze`):** fixed
+  `channel::route::reply_body` to surface the agent's **real** completion result. A completed task's
+  `tasks.result` is `Outcome::result_payload()` = the agent's `plan.result` (default
+  `{"kind":"text","body":"..."}`), **not** a `{"kind":"completed"}` wrapper — the slice-#1 stub assumed the
+  latter, so a real Matrix reply would have said "Task finished (text)." instead of the answer. Now: any
+  non-`error`/`blocked`/`refused` result is a completion → surface `body` (non-empty), then a `message`
+  alias, then compact JSON; `error`/`blocked`/`refused` map to safe user sentences. +3 route tests (29
+  channel lib tests total); clippy clean. Live delivery still rides slice #2 Phase D. (Isolated fix to
+  existing slice-1 code — git-history-documented per ROADMAP convention; ROADMAP "Matrix outbound" noted.)
 - **2026-06-12 — comms SLICE #3: DM pairing (in-channel single-use code + DB-backed authorizer; code, branch `claude/zen-bell-6bn2ze`):**
   operator decisions = **in-channel code handshake** (with a bounded carve-out) + **defer WebAuthn** (no consumer surface).
   Shipped: migration **0018** (`pairings` + `pairing_codes` + least-privilege grants — runtime can authorize/bind/consume
