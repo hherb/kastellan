@@ -191,6 +191,8 @@ in-body token.
 - `shell-exec` attempts a non-allowlisted argv → rejected before spawn.
 - `browser-driver` attempts to read `~/.ssh/` → blocked by sandbox.
 - Adversarial web page in agent context tries to exfiltrate via `web-fetch` → request blocked, audit log shows attempt.
+- `channel`: a message from an **unpaired** peer → dropped (never enqueued as a task), audit row `channel.rejected_unpaired`. (Shipped: `core/src/channel` `handle_inbound` + the hermetic/PG e2e; the unpaired peer's body is never even screened/echoed — authorize-before-screen.)
+- `channel`: an inbound message carrying a catalogued prompt-injection → blocked (never enqueued), audit row `channel.injection_blocked` carrying only the SHA-256 + reason codes (never the body). (Shipped: `classify_inbound` under `GuardProfile::Strict`.)
 
 Already shipped (Phase 0 + Phase 0 hardening stage 1):
 

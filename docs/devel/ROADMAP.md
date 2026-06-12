@@ -143,12 +143,17 @@ items unlock later ones.
 > second homeserver. Full design + co-hosting security analysis + slice decomposition:
 > `docs/superpowers/specs/2026-06-12-primary-communication-channel-design.md`.
 
-- [ ] **Channel-bus abstraction (build first)** — `Channel` trait (inbound `IncomingMessage`
-  stream + outbound `send`) fanning into the core conversation queue (the existing Postgres
-  `tasks` + `LISTEN`/`NOTIFY` substrate, no new IPC); every inbound message treated as untrusted
-  and screened by `cassandra::injection_guard` (`extract_scannable_text` → `screen_with_profile`)
-  before it influences a plan — a channel peer is exactly as untrusted as a fetched web page.
-  The pairing/auth layer sits *above* the bus (channel-agnostic). (Slice #1.)
+- [x] **Channel-bus abstraction (build first)** — `core/src/channel`: `Channel` trait (inbound
+  `IncomingMessage` stream + outbound `send`, dyn-safe) + pure security core — fail-closed
+  `PeerAuthorizer`/`StaticPairings` (`auth.rs`), `classify_inbound` (authorize→`injection_guard`
+  screen under `GuardProfile::Strict`→`tasks` payload, `ingest.rs`), `reply_for_completed_task`
+  (finalized task→user reply, `route.rs`) — plus the `ChannelBus` runtime (`bus.rs`) over four
+  seams (`Channel`/`PeerAuthorizer`/`ChannelEvents`/`CompletedTasks`; real `PgChannelEvents` +
+  `PgCompletedTasks` over the `tasks` queue + `tasks_completed` NOTIFY, no new IPC). Channel tasks
+  mirror the `ask` payload so the scheduler is unchanged; unpaired peers + injection are dropped +
+  audited (hash only). 18 unit tests + hermetic `FakeChannel` full-loop e2e + PG-gated real-queue
+  e2e; clippy `-D warnings` clean. No live transport / no `main.rs` wiring (slice #2). Branch
+  `claude/zen-bell-6bn2ze`, 2026-06-12. Plan: `docs/superpowers/plans/2026-06-12-channel-bus-abstraction.md`.
 - [ ] **Matrix inbound** (`MatrixChannel`, `matrix-rust-sdk`, E2E) — net allowlist scoped to the
   homeserver host:port only, force-routed through the egress proxy; single-user homeserver
   bring-up. (Slice #2.)
