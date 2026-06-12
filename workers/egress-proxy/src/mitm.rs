@@ -3,6 +3,8 @@
 //! session to the pinned origin. The pure peek predicate is split from the
 //! async I/O so the branch logic is unit-testable without sockets.
 
+pub mod relay;
+
 /// True iff `first_byte` is the TLS record ContentType for `handshake` (0x16),
 /// i.e. the first byte of a ClientHello. Anything else is treated as an
 /// already-plaintext tunnel (plain-HTTP-over-CONNECT) and passed through.
@@ -17,8 +19,11 @@ use std::time::Duration;
 use rustls::pki_types::ServerName;
 use tokio::net::{TcpStream, UnixStream};
 
+use kastellan_leak_scan::SecretFingerprint;
+
 use crate::ca::CaMaterial;
 use crate::leaf_cache::LeafCache;
+use crate::mitm::relay::{scan_relay, LeakReport};
 
 /// Bound on the re-origination TCP connect so an origin that becomes unreachable
 /// between the sync reachability check and this async re-dial cannot pin the MITM
@@ -40,7 +45,8 @@ fn upstream_server_name(host: &str) -> Result<ServerName<'static>, String> {
 
 /// Terminate the worker's TLS (presenting a CA-signed leaf for `host`) and
 /// re-originate a validated TLS session to the already-resolved `upstream_addr`,
-/// then copy plaintext both ways until either side closes.
+/// then relay plaintext both ways — scanning for `patterns` when any are
+/// provisioned (slice #3b), or plain copy when empty.
 ///
 /// `upstream_tls` is the trust config for the **real origin** — production wires
 /// `webpki-roots`; tests wire a test-origin CA. Taking it as a parameter keeps
@@ -52,7 +58,8 @@ pub async fn intercept(
     ca: &CaMaterial,
     leaf_cache: &mut LeafCache,
     upstream_tls: Arc<rustls::ClientConfig>,
-) -> Result<(), String> {
+    patterns: &[SecretFingerprint],
+) -> Result<Option<LeakReport>, String> {
     use tokio::io::copy_bidirectional;
 
     // 1. Server-side: present a leaf for `host`, handshake with the worker.
@@ -75,11 +82,16 @@ pub async fn intercept(
         .await
         .map_err(|e| format!("origin TLS handshake: {e}"))?;
 
-    // 3. Plaintext flows through here. (Slice #3b scans it; 3a only relays.)
-    copy_bidirectional(&mut client_tls, &mut upstream_tls_stream)
-        .await
-        .map_err(|e| format!("tunnel copy: {e}"))?;
-    Ok(())
+    // 3. Plaintext flows here. With no provisioned secrets, use the plain copy
+    //    (zero scan overhead); otherwise scan both directions (slice #3b).
+    if patterns.is_empty() {
+        copy_bidirectional(&mut client_tls, &mut upstream_tls_stream)
+            .await
+            .map_err(|e| format!("tunnel copy: {e}"))?;
+        Ok(None)
+    } else {
+        scan_relay(client_tls, upstream_tls_stream, patterns).await
+    }
 }
 
 #[cfg(test)]

@@ -102,6 +102,9 @@ fn main() -> anyhow::Result<()> {
                     ca: ca.as_ref(),
                     leaf_cache: cache,
                     upstream_tls: std::sync::Arc::clone(upstream_tls),
+                    secret_hashes_path: Some(
+                        std::path::Path::new(&uds).parent().unwrap().join("secret_hashes.json"),
+                    ),
                 };
                 handle_conn(conn, &worker, allow, &resolver, &mut reporter, &mut mitm);
             });
