@@ -132,6 +132,7 @@ mod entities_kinds;
 mod memory_l1;
 mod memory_l3;
 mod observation_replay;
+mod pair;
 mod relations;
 mod relations_kinds;
 mod relations_show;
@@ -159,6 +160,7 @@ fn main() -> ExitCode {
         "entities"    => entities::run_entities(&args[2..]),
         "relations"   => relations::run_relations(&args[2..]),
         "observation" => observation_replay::run_observation(&args[2..]),
+        "pair"        => pair::run(&args[2..]),
         "--help" | "-h" | "help" => {
             println!("{}", help_text());
             ExitCode::from(0)
@@ -202,6 +204,9 @@ usage:
     kastellan-cli relations kinds list
     kastellan-cli relations show         <entity-id> [--depth N] [--format plain|json]
     kastellan-cli observation replay     [--captures-dir PATH] [--model SLUG]
+    kastellan-cli pair issue   [--label <text>] [--ttl-mins <n>]
+    kastellan-cli pair list    [--all]
+    kastellan-cli pair revoke  <channel> <peer>
     kastellan-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 
 flags (ask):

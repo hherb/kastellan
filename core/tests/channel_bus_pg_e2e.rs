@@ -63,7 +63,7 @@ async fn channel_inbound_enqueues_and_completion_routes_a_reply() {
         conversation: ConversationId("!room:srv".into()),
         body: "what's on my calendar?".into(),
     };
-    handle_inbound(&authorizer, &events, &msg).await;
+    handle_inbound(&authorizer, None, &events, &msg).await;
 
     let pending = tasks::list(&pool, Some(Lane::Fast), Some("pending"), 10)
         .await

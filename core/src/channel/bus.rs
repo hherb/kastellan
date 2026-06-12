@@ -120,6 +120,7 @@ impl CompletedTasks for PgCompletedTasks {
 ///      `OutgoingMessage` the caller sends back; otherwise the message is dropped
 ///      + audited and never reaches the agent;
 ///   2. on `Recognised`, **screen** (injection guard) and enqueue or block.
+///
 /// Returns `Some(ack)` only on a successful pairing (the per-channel task delivers
 /// it via the same channel).
 pub async fn handle_inbound(
