@@ -100,6 +100,7 @@ async fn inbound_message_round_trips_to_a_reply() {
     let bus = ChannelBus::spawn(
         vec![Box::new(ch)],
         Arc::new(StaticPairings::from_peers([PeerId("@me:srv".into())])),
+        None,
         Arc::new(events),
         Box::new(completed),
     );

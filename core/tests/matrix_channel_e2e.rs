@@ -102,6 +102,7 @@ async fn paired_inbound_round_trips_to_a_sent_reply() {
     let bus = ChannelBus::spawn(
         vec![Box::new(ch)],
         Arc::new(StaticPairings::from_peers([PeerId("@me:srv".into())])),
+        None,
         Arc::new(events),
         Box::new(completed),
     );
@@ -141,6 +142,7 @@ async fn unpaired_inbound_is_dropped_no_reply() {
     let bus = ChannelBus::spawn(
         vec![Box::new(ch)],
         Arc::new(StaticPairings::from_peers([PeerId("@me:srv".into())])), // stranger not paired
+        None,
         Arc::new(events.clone()),
         Box::new(completed),
     );
