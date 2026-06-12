@@ -173,34 +173,38 @@ fn socket_attempt_is_contained_by_the_jail() {
 
 #[test]
 fn scratch_tmp_write_round_trip_inside_jail() {
-    let env = match ready_or_skip() {
-        Some(e) => e,
-        None => return,
-    };
     // macOS slice #1 has no writable scratch (Seatbelt deny-default with
     // fs_write = []) — the Linux jail's /tmp is an ephemeral tmpfs with
     // an explicit Landlock RW grant. See the design spec §2.3/§5.
+    // The gate sits BEFORE ready_or_skip(): on darwin the `env` binding
+    // must never exist (unused-variable → clippy -D warnings) and a PG
+    // cluster must not be brought up just to be dropped.
     #[cfg(target_os = "macos")]
     {
         eprintln!("\n[SKIP] no writable scratch under Seatbelt in slice #1\n");
-        return;
     }
     #[cfg(target_os = "linux")]
-    dispatch_runtime().block_on(async {
-        let pool = probe_and_pool(&env.cluster.conn_spec).await;
-        let code = concat!(
-            "import tempfile\n",
-            "with tempfile.NamedTemporaryFile('w+', delete=True) as f:\n",
-            "    f.write('jail-scratch-ok')\n",
-            "    f.flush()\n",
-            "    f.seek(0)\n",
-            "    print(f.read())\n",
-        );
-        let r = exec_in_jail(&pool, &env, code)
-            .await
-            .expect("python.exec round trip");
-        assert_eq!(r["exit_code"], 0, "stderr: {}", r["stderr"]);
-        assert_eq!(r["stdout"].as_str().unwrap().trim_end(), "jail-scratch-ok");
-        pool.close().await;
-    });
+    {
+        let env = match ready_or_skip() {
+            Some(e) => e,
+            None => return,
+        };
+        dispatch_runtime().block_on(async {
+            let pool = probe_and_pool(&env.cluster.conn_spec).await;
+            let code = concat!(
+                "import tempfile\n",
+                "with tempfile.NamedTemporaryFile('w+', delete=True) as f:\n",
+                "    f.write('jail-scratch-ok')\n",
+                "    f.flush()\n",
+                "    f.seek(0)\n",
+                "    print(f.read())\n",
+            );
+            let r = exec_in_jail(&pool, &env, code)
+                .await
+                .expect("python.exec round trip");
+            assert_eq!(r["exit_code"], 0, "stderr: {}", r["stderr"]);
+            assert_eq!(r["stdout"].as_str().unwrap().trim_end(), "jail-scratch-ok");
+            pool.close().await;
+        });
+    }
 }
