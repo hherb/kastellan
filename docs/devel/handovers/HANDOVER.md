@@ -324,8 +324,22 @@ relay + the blocking `peek_first_byte` still lack **read** idle-deadlines (folde
 [#242](https://github.com/hherb/kastellan/issues/242)); literal-IP **HTTPS** origins now require an IP-SAN cert under
 MITM upstream validation (behaviour-change decision — needs a tracking issue; see PR #259 review).
 
-**★ TOP PICK — `browser-driver` Phase 2 (ROADMAP:147).** Slice #1 (spike + scaffold) shipped this session; the spike
-**pinned the exact jail shape** (design spec §3.1). Phase 2 makes the worker actually render:
+**★ TOP PICK — `browser-driver` Phase 2 (ROADMAP:147).** Slice #1 (spike + scaffold) shipped this session (PR #262 MERGED);
+the spike **pinned the exact jail shape** (design spec §3.1). Phase 2 makes the worker actually render.
+
+> **⚠ BLOCKER to resolve in Phase 2 — [#263](https://github.com/hherb/kastellan/issues/263) (force-routing collision).**
+> The manifest declares `Net::Allowlist` with `proxy_uds: None` ("legacy direct-net", spec §2), but
+> `policy_net_is_force_routable` ([`worker_lifecycle/force_route.rs:94`](../../../core/src/worker_lifecycle/force_route.rs))
+> matches **all** `Net::Allowlist`, and `KASTELLAN_EGRESS_FORCE_ROUTING=1` is **ON by default** in the supervised
+> deployment. So the moment Phase 2 drops the `NotImplementedError`, enabling the worker in the default deployment will
+> **force-route it into a private netns + `CONNECT`-over-UDS — which a browser cannot speak** → silent network loss.
+> Harmless in slice #1 (renderer is stubbed), real in Phase 2. **Pick one before un-stubbing the renderer:** (a) exempt
+> `browser-driver` from force-routing while it's on the legacy path, or (b) gate the real renderer behind slice #2 so the
+> browser only ever runs with `Net::Allowlist + proxy_uds` (the egress-proxy shim + in-browser per-instance-CA trust).
+> Option (b) is cleaner (never on the host netns with an unenforced allowlist — see §6 defense-in-depth) but couples Phase 2
+> and slice #2; (a) unblocks a render-only Phase 2 sooner. Acceptance: enabling it under force-routing must render or
+> **fail closed with a clear error**, never silently lose the network.
+
 1. **`render.py` real Playwright drive** — replace `__main__._build_renderer`'s `NotImplementedError` with a
    `PlaywrightRenderer` launching `chromium-headless-shell` with `args=["--no-sandbox","--disable-dev-shm-usage"]`,
    per-request `page.goto(url, wait_until=…, timeout=…)` → `page.content()` → `extract_render_result`; set
