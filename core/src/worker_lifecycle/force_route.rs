@@ -132,6 +132,7 @@ pub(crate) fn spawn_worker_maybe_forced(
                 &allowlist,
                 &cfg.scratch_root,
                 worker_name,
+                &[], // secret_fingerprints: dispatch-time provisioning is the deferred follow-up
                 (cfg.make_sink)(),
             )
         }
