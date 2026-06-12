@@ -1,0 +1,14 @@
+[package]
+name        = "kastellan-matrix-wire"
+description = "Shared serde wire types for the Matrix channel worker <-> core JSON-RPC surface."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme.workspace       = true
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
