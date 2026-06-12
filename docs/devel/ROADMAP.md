@@ -166,9 +166,13 @@ items unlock later ones.
   coupling + persistent encrypted E2E store + restart supervision + `#[ignore]` live test (gated on
   the `live-matrix` feature; the matrix-rust-sdk-through-MITM-egress-proxy spike is the top risk).
   Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-matrix-inbound-sandboxed-worker*`.
-- [ ] **Homeserver supervisor unit + hardening** — conduwuit unit (federation OFF, closed
-  registration), dedicated unprivileged user, systemd hardening (`NoNewPrivileges`/`ProtectSystem`/
-  tight `SystemCallFilter`), Caddy TLS on loopback bind; Tier A/B/C install path. (Slice #6.)
+- [x] **Homeserver supervisor unit + hardening** — conduwuit (federation OFF, loopback bind,
+  token-gated→closed registration): hardened **system** systemd unit template + config template +
+  `setup-conduwuit.sh` (dev/Tier-C) + `check-conduwuit-config.sh` (security-invariant verifier,
+  `--self-test` green) + `docs/deploy/matrix-homeserver.md` (Tier A/B/C + co-hosting blast-radius +
+  operator steps). Deliberately **not** a kastellan `ServiceSpec`: the user-level supervisor can't run
+  conduwuit as the dedicated unprivileged `matrix` user, so the homeserver is a root/system unit (or
+  a separate host), installed independently. Branch `claude/zen-bell-6bn2ze`, 2026-06-12. (Slice #6.)
 - [ ] IMAP inbound worker (fallback channel; sandbox: net allowlist = configured IMAP server only). Low-trust async notifications only; require SPF/DKIM/DMARC pass + per-pairing in-body token before surfacing. (Slice #5.)
 - [x] DM pairing flow: short-lived single-use pairing code issued out-of-band (`kastellan-cli pair issue`, hash-only storage); the new peer presents it in-channel; binding recorded in `pairings` (migration 0018), revocable, audited. Static contact allowlists rejected (forgeable) — `DbPeerAuthorizer` gates the bus on active `(channel,peer)` rows; the pairing carve-out is compare-only + operator-gated + single-use (`claim_code` atomic). **WebAuthn deferred** (no browser/CLI client surface yet). Daemon wiring (swap `StaticPairings`→`DbPeerAuthorizer` + pass `DbPairingService`) rides slice #2 Phase D. Branch `claude/zen-bell-6bn2ze`, 2026-06-12. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-channel-pairing*`. (Pattern: ZeroClaw `security/{pairing,otp}.rs`.) (Slice #3.)
 - [ ] ~~Telegram inbound adapter (`grammers`, Rust)~~ — **rejected as primary 2026-06-12** (no bot E2E, centralized, ban risk). Could return later as an additional `Channel` impl if a need arises.
