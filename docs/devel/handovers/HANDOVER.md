@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-12 (**egress proxy SLICE #3b — credential-leak scanner COMPLETE**; branch
-`feat/egress-slice3b-leak-scanner`, PR pending. Prior on `main`: `browser-driver` slice #1 (PR
+`feat/egress-slice3b-leak-scanner`, PR [#269](https://github.com/hherb/kastellan/pull/269). Prior on `main`: `browser-driver` slice #1 (PR
 [#262](https://github.com/hherb/kastellan/pull/262)) + Matrix comms channel (PR [#265](https://github.com/hherb/kastellan/pull/265)) both MERGED.)
 **Session-end verification:** Mac `cargo test --workspace` **1641 / 0 / 8**; `clippy --workspace --all-targets -D warnings`
 clean (+ cross-clippy Linux on the new pure `kastellan-leak-scan` crate). No DGX run this session — all new code is
@@ -105,7 +105,7 @@ architecture/request-flow exports (still "hhagent"-titled; only the site copies 
 
 **Current state.** `main` is at `6bf57b7` (Matrix comms channel, PR [#265](https://github.com/hherb/kastellan/pull/265)
 MERGED; browser-driver slice #1 PR [#262](https://github.com/hherb/kastellan/pull/262) + egress slice #3a PR #259 also on
-`main`). **This session's work is on branch `feat/egress-slice3b-leak-scanner` (PR pending):** egress proxy **slice #3b
+`main`). **This session's work is on branch `feat/egress-slice3b-leak-scanner` (PR [#269](https://github.com/hherb/kastellan/pull/269)):** egress proxy **slice #3b
 credential-leak scanner is COMPLETE** (ROADMAP:142) — see the "This session" block above. Mechanism + spawn-wiring shipped;
 the scanner is **forward-looking** (no current egress worker carries secrets, so spawn-wiring provisions an empty set today)
 and dispatch-time live-append is deferred ([#268](https://github.com/hherb/kastellan/issues/268)). Working tree carries only
