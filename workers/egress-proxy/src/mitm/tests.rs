@@ -134,3 +134,151 @@ async fn mitm_terminates_and_reoriginates_a_real_tls_session() {
     tls.shutdown().await.unwrap();
     proxy.await.unwrap().expect("intercept ok");
 }
+
+/// Compute the `{"origin.test":["sha256/<b64>"]}` pin JSON for a leaf cert DER,
+/// using the same SPKI path production uses (`spki_sha256` already returns the
+/// pin hash — do not double-hash).
+fn pin_json_for(leaf_der: &[u8]) -> String {
+    use base64::Engine;
+    let pin = crate::pins::spki_sha256(leaf_der).expect("origin leaf SPKI");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(pin);
+    format!(r#"{{"origin.test":["sha256/{b64}"]}}"#)
+}
+
+#[tokio::test]
+async fn mitm_succeeds_when_origin_spki_is_pinned() {
+    install_provider();
+    let (origin_addr, upstream_roots, leaf_der) = spawn_tls_origin_with_der().await;
+    let ca = Arc::new(generate_ca().unwrap());
+    // Pin the origin's REAL SPKI. The upstream config trusts the hermetic origin's
+    // roots AND pins it (the public-webpki production path is covered by the
+    // build_upstream_* unit tests in pins::tests).
+    let pins = crate::pins::PinSet::parse(&pin_json_for(&leaf_der)).unwrap();
+    let verifier =
+        Arc::new(crate::pins::PinningVerifier::new(Arc::new((*upstream_roots).clone()), pins).unwrap());
+    let upstream_tls = Arc::new(
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth(),
+    );
+    run_intercept_with_upstream(upstream_tls, origin_addr, ca)
+        .await
+        .expect("pinned origin with matching SPKI should succeed");
+}
+
+#[tokio::test]
+async fn mitm_fails_when_origin_spki_pin_mismatches() {
+    use base64::Engine;
+    install_provider();
+    let (origin_addr, upstream_roots, _leaf_der) = spawn_tls_origin_with_der().await;
+    let ca = Arc::new(generate_ca().unwrap());
+    // Pin a DIFFERENT SPKI than the origin actually presents → fail closed.
+    let wrong = format!(
+        r#"{{"origin.test":["sha256/{}"]}}"#,
+        base64::engine::general_purpose::STANDARD.encode([0x42u8; 32])
+    );
+    let pins = crate::pins::PinSet::parse(&wrong).unwrap();
+    let verifier =
+        Arc::new(crate::pins::PinningVerifier::new(Arc::new((*upstream_roots).clone()), pins).unwrap());
+    let upstream_tls = Arc::new(
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth(),
+    );
+    let err = run_intercept_with_upstream(upstream_tls, origin_addr, ca)
+        .await
+        .expect_err("mismatched pin must fail the upstream handshake");
+    assert!(err.contains(crate::pins::PIN_MISMATCH_MARKER), "got: {err}");
+}
+
+/// Like `spawn_tls_origin`, but also returns the origin leaf cert DER so a test
+/// can compute its SPKI pin. (Identical origin behaviour: read one request line,
+/// reply `PONG`, close.)
+async fn spawn_tls_origin_with_der(
+) -> (std::net::SocketAddr, Arc<rustls::RootCertStore>, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut params = rcgen::CertificateParams::new(vec!["origin.test".to_string()]).unwrap();
+    params
+        .extended_key_usages
+        .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    let cert_der = cert.der().clone();
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()),
+    );
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert_der.clone()).unwrap();
+    let server_cfg = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der.clone()], key_der)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((tcp, _)) = listener.accept().await {
+            if let Ok(mut tls) = acceptor.accept(tcp).await {
+                let mut buf = [0u8; 1024];
+                let _ = tls.read(&mut buf).await;
+                let _ = tls
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nPONG")
+                    .await;
+                let _ = tls.shutdown().await;
+            }
+        }
+    });
+    (addr, Arc::new(roots), cert_der.to_vec())
+}
+
+/// Drive a worker TLS connection through `intercept` with the given upstream
+/// trust config. Returns `intercept`'s result so the test can assert Ok / Err.
+/// The worker trusts only the per-instance CA (as in production).
+async fn run_intercept_with_upstream(
+    upstream_tls: Arc<rustls::ClientConfig>,
+    origin_addr: std::net::SocketAddr,
+    ca: Arc<crate::ca::CaMaterial>,
+) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (worker_end, proxy_end) = tokio::net::UnixStream::pair().unwrap();
+    let ca_for_proxy = Arc::clone(&ca);
+    let proxy = tokio::spawn(async move {
+        let mut cache = crate::leaf_cache::LeafCache::new();
+        super::intercept(
+            proxy_end,
+            origin_addr,
+            "origin.test",
+            &ca_for_proxy,
+            &mut cache,
+            upstream_tls,
+            &[],
+        )
+        .await
+    });
+
+    let mut worker_roots = rustls::RootCertStore::empty();
+    for der in rustls::pki_types::CertificateDer::pem_slice_iter(ca.cert_pem().as_bytes()) {
+        worker_roots.add(der.unwrap()).unwrap();
+    }
+    let worker_tls = Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(worker_roots)
+            .with_no_client_auth(),
+    );
+    let connector = tokio_rustls::TlsConnector::from(worker_tls);
+    let sni = ServerName::try_from("origin.test").unwrap();
+    // If the proxy aborts the upstream leg (pin mismatch), the worker handshake
+    // may itself fail; that is fine — the authoritative signal is `intercept`'s
+    // returned error, which carries the pin-mismatch marker.
+    if let Ok(mut tls) = connector.connect(sni, worker_end).await {
+        let _ = tls
+            .write_all(b"GET / HTTP/1.1\r\nHost: origin.test\r\nConnection: close\r\n\r\n")
+            .await;
+        let mut resp = Vec::new();
+        let _ = tls.read_to_end(&mut resp).await;
+        let _ = tls.shutdown().await;
+    }
+    proxy.await.unwrap().map(|_| ())
+}
