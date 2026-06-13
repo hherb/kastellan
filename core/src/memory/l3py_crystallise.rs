@@ -10,8 +10,13 @@
 //! See `docs/superpowers/specs/2026-06-13-python-exec-skill-catalog-design.md`.
 
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 use crate::cassandra::types::PythonSkillCandidate;
+use crate::memory::l3_crystallise::L3Source;
+use kastellan_db::memories::{insert_memory_at_layer, MemoryLayer};
 
 /// Max bytes for the skill `name` (a stable identifier). Mirrors L3.
 pub const PY_MAX_NAME_BYTES: usize = 64;
@@ -147,6 +152,89 @@ pub fn compute_python_sha256(c: &PythonSkillCandidate) -> String {
     let mut h = Sha256::new();
     h.update(canonical_json(c).as_bytes());
     format!("{:x}", h.finalize())
+}
+
+/// Build the `metadata` JSONB for a new Python-skill row. Schema:
+/// `{source, task_id, trust, kind, body_sha256, created_at, python}`.
+/// `python` is the full normalised candidate. `kind: "python"` is the
+/// discriminator the CLI + (slice-2) surfacing branch on; absent ⇒ templated.
+pub(crate) fn build_python_skill_metadata(
+    source: &L3Source,
+    candidate: &PythonSkillCandidate,
+    body_sha256: &str,
+    created_at_rfc3339: &str,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    match source {
+        L3Source::AgentRaised { task_id } => {
+            obj.insert("source".into(), serde_json::Value::String("agent_raised".into()));
+            obj.insert(
+                "task_id".into(),
+                serde_json::Value::Number(serde_json::Number::from(*task_id)),
+            );
+        }
+    }
+    obj.insert("trust".into(), serde_json::Value::String("untrusted".into()));
+    obj.insert("kind".into(), serde_json::Value::String("python".into()));
+    obj.insert("body_sha256".into(), serde_json::Value::String(body_sha256.into()));
+    obj.insert("created_at".into(), serde_json::Value::String(created_at_rfc3339.into()));
+    obj.insert(
+        "python".into(),
+        serde_json::to_value(candidate).expect("candidate serialises"),
+    );
+    serde_json::Value::Object(obj)
+}
+
+/// Crystallise a single Python skill. Validates, computes the canonical
+/// SHA-256, EXISTS-checks against `layer = 3` rows by
+/// `metadata->>'body_sha256'`, inserts on miss with `body = description`,
+/// `kind: "python"`, `trust: "untrusted"`. Idempotent on the code SHA.
+///
+/// The `body_sha256` EXISTS-check is shared with the templated writer (both
+/// hash into the same key), so a Python skill and a templated skill can never
+/// collide unless their canonical digests coincide — cryptographically absent.
+pub async fn crystallise_python_skill(
+    pool: &PgPool,
+    candidate: &PythonSkillCandidate,
+    source: L3Source,
+) -> Result<PyWriteOutcome, PyError> {
+    let normalised = validate_python_skill(candidate)?;
+    let body_sha256 = compute_python_sha256(&normalised);
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM memories \
+         WHERE layer = $1 AND metadata->>'body_sha256' = $2 \
+         LIMIT 1",
+    )
+    .bind(MemoryLayer::Skill.as_db())
+    .bind(&body_sha256)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        PyError::Db(kastellan_db::DbError::Query(format!(
+            "crystallise_python_skill EXISTS-check body_sha256={body_sha256}: {e}"
+        )))
+    })?;
+
+    if let Some(existing_id) = existing {
+        return Ok(PyWriteOutcome::SkippedDuplicate { memory_id: existing_id });
+    }
+
+    let created_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .expect("rfc3339 format");
+    let metadata = build_python_skill_metadata(&source, &normalised, &body_sha256, &created_at);
+
+    let new_id = insert_memory_at_layer(
+        pool,
+        &normalised.description, // body = the human description
+        &metadata,
+        None, // no embedding for L3 v1
+        MemoryLayer::Skill,
+    )
+    .await?;
+
+    Ok(PyWriteOutcome::Inserted { memory_id: new_id })
 }
 
 #[cfg(test)]
