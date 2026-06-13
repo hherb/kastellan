@@ -31,13 +31,34 @@ pub fn evaluate_python_approval(candidate: &PythonSkillCandidate) -> ApprovalDec
         }
     };
 
+    let reasons = scan_code_secret_refs(&candidate.code);
+    if reasons.is_empty() {
+        ApprovalDecision::Approve
+    } else {
+        ApprovalDecision::Reject { reasons }
+    }
+}
+
+/// Scan Python source for every `secret://` occurrence, returning one
+/// [`RejectReason::CodeSecretRef`] per match (byte `offset` + the matched
+/// token up to the next whitespace/quote). PURE.
+///
+/// Extracted so the scan path is unit-testable directly: in the normal flow
+/// [`evaluate_python_approval`] never reaches a `secret://`-bearing body
+/// (the crystallise validator rejects it first), so this is the only place
+/// the defense-in-depth re-scan logic is exercised.
+///
+/// Terminating + UTF-8-safe: `REF_PREFIX` (`secret://`) is pure ASCII, so
+/// `str::find`'s byte offsets and the `+ prefix.len()` advance always land on
+/// a char boundary, and `search_from` strictly increases each iteration.
+fn scan_code_secret_refs(code: &str) -> Vec<RejectReason> {
     let mut reasons = Vec::new();
     let prefix = crate::secrets::REF_PREFIX;
     let mut search_from = 0;
-    while let Some(rel) = candidate.code[search_from..].find(prefix) {
+    while let Some(rel) = code[search_from..].find(prefix) {
         let offset = search_from + rel;
         // Capture the ref token up to the next whitespace/quote for the message.
-        let tail = &candidate.code[offset..];
+        let tail = &code[offset..];
         let end = tail
             .find(|c: char| c.is_whitespace() || c == '\'' || c == '"')
             .unwrap_or(tail.len());
@@ -47,12 +68,7 @@ pub fn evaluate_python_approval(candidate: &PythonSkillCandidate) -> ApprovalDec
         });
         search_from = offset + prefix.len();
     }
-
-    if reasons.is_empty() {
-        ApprovalDecision::Approve
-    } else {
-        ApprovalDecision::Reject { reasons }
-    }
+    reasons
 }
 
 #[cfg(test)]
@@ -98,5 +114,33 @@ mod tests {
             }
             other => panic!("expected Reject, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn scan_code_secret_refs_finds_all_occurrences_with_offsets() {
+        // Directly exercise the defense-in-depth scan path that
+        // evaluate_python_approval never reaches (the validator rejects
+        // secret:// first). Two refs on one line → two CodeSecretRef reasons
+        // with the correct byte offsets and extracted tokens.
+        let code = "a = 'secret://aaaa1111'\nb = secret://bbbb2222\n";
+        let reasons = scan_code_secret_refs(code);
+        assert_eq!(reasons.len(), 2, "got {reasons:?}");
+        match (&reasons[0], &reasons[1]) {
+            (
+                RejectReason::CodeSecretRef { offset: o0, found: f0 },
+                RejectReason::CodeSecretRef { offset: o1, found: f1 },
+            ) => {
+                assert_eq!(f0, "secret://aaaa1111");
+                assert_eq!(&code[*o0..*o0 + f0.len()], f0, "offset0 points at the token");
+                assert_eq!(f1, "secret://bbbb2222");
+                assert_eq!(&code[*o1..*o1 + f1.len()], f1, "offset1 points at the token");
+            }
+            other => panic!("expected two CodeSecretRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_code_secret_refs_empty_on_clean_code() {
+        assert!(scan_code_secret_refs("print('hello world')\n").is_empty());
     }
 }
