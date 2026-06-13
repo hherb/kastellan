@@ -60,6 +60,15 @@ fn is_snake_ident(s: &str) -> bool {
 /// rejection — serde escapes control chars inside JSON strings, so long
 /// multi-line text passes freely.
 pub fn validate_python_params(params: &Value) -> Result<Value, PyParamError> {
+    // A null params value means "no params" — accept it. `InvokeDirective.params`
+    // defaults to `Value::Null` (and the daemon defaults an absent `params` key to
+    // Null), so the agent/daemon no-param path lands here. `params_is_empty` and
+    // `python_exec_step` already treat null/empty-object identically (the step
+    // omits the `params` key), so returning Null unchanged is correct and keeps a
+    // no-param call byte-identical to the pre-params shape.
+    if params.is_null() {
+        return Ok(params.clone());
+    }
     let obj = params.as_object().ok_or(PyParamError::NotObject)?;
     for key in obj.keys() {
         if !is_snake_ident(key) {
@@ -285,5 +294,19 @@ mod tests {
             step.parameters,
             serde_json::json!({"code": "print(1)\n", "params": {"n": 3}})
         );
+    }
+
+    #[test]
+    fn validate_params_accepts_null_as_no_params() {
+        // InvokeDirective.params defaults to Value::Null — must be accepted,
+        // not refused, so a no-param autonomous python invoke works.
+        let got = validate_python_params(&serde_json::Value::Null).expect("null is no-params");
+        assert!(got.is_null());
+    }
+
+    #[test]
+    fn step_omits_params_when_null() {
+        let step = python_exec_step("print(1)\n", &serde_json::Value::Null);
+        assert_eq!(step.parameters, serde_json::json!({"code": "print(1)\n"}));
     }
 }

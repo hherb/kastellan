@@ -195,4 +195,18 @@ mod tests {
         .unwrap_err();
         assert!(err.reasons.iter().any(|r| r.contains("object")), "{err:?}");
     }
+
+    #[test]
+    fn pinned_with_null_params_expands_without_params_key() {
+        // The agent path forwards InvokeDirective.params (default Value::Null);
+        // a no-param pinned invoke must expand to a bare {"code": ...} step.
+        let c = cand();
+        let sha = compute_python_sha256(&c);
+        let steps = expand_python_for_agent(
+            &c, SkillTrust::Pinned, &sha, DataClass::Public, &serde_json::Value::Null,
+        )
+        .expect("pinned with null params expands");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].parameters, serde_json::json!({"code": "print('hi')\n"}));
+    }
 }
