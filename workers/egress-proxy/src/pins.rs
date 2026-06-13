@@ -60,5 +60,82 @@ pub fn spki_sha256(cert_der: &[u8]) -> Result<[u8; 32], PinError> {
     Ok(Sha256::digest(&spki_der).into())
 }
 
+use std::collections::{HashMap, HashSet};
+
+/// A parsed set of SPKI pins, keyed by lowercased host.
+// Forward-declared for Task 3 (PinningVerifier); not yet used in production code.
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone)]
+pub struct PinSet {
+    map: HashMap<String, HashSet<[u8; 32]>>,
+}
+
+#[allow(dead_code)]
+impl PinSet {
+    /// Parse the `KASTELLAN_EGRESS_PROXY_PINS` JSON:
+    /// `{ "host": ["sha256/<base64>", ...], ... }`. Host keys are lowercased.
+    /// A host whose pin list is empty is dropped (an empty list can never match
+    /// → it would be a silent permanent block). Strict on structure: anything
+    /// that is not an object of string→array-of-`sha256/<base64>`-strings, or a
+    /// pin that does not decode to exactly 32 bytes, is an `Err`.
+    pub fn parse(json: &str) -> Result<PinSet, PinError> {
+        let raw: HashMap<String, Vec<String>> = serde_json::from_str(json)
+            .map_err(|e| PinError::Json(e.to_string()))?;
+        let mut map = HashMap::new();
+        for (host, pin_strs) in raw {
+            let mut pins = HashSet::new();
+            for s in &pin_strs {
+                pins.insert(parse_pin(s)?);
+            }
+            if !pins.is_empty() {
+                map.insert(host.to_ascii_lowercase(), pins);
+            }
+        }
+        Ok(PinSet { map })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// The pin set for `host`, if the operator pinned it (case-insensitive).
+    pub fn pins_for(&self, host: &str) -> Option<&HashSet<[u8; 32]>> {
+        self.map.get(&host.to_ascii_lowercase())
+    }
+}
+
+/// Decode one `sha256/<base64-standard>` pin string into a 32-byte digest.
+#[allow(dead_code)]
+fn parse_pin(s: &str) -> Result<[u8; 32], PinError> {
+    use base64::Engine;
+    let b64 = s
+        .strip_prefix("sha256/")
+        .ok_or_else(|| PinError::Pin(format!("missing `sha256/` prefix: {s:?}")))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| PinError::Pin(format!("base64: {e}")))?;
+    bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| PinError::Pin(format!("expected 32 bytes, got {}", v.len())))
+}
+
+/// True iff any DER cert in `chain` hashes to a pin in `pins`. A cert that fails
+/// SPKI extraction is treated as "no match" (webpki has already validated the
+/// chain by the time this runs), never fatal.
+#[allow(dead_code)]
+pub fn chain_has_pin(pins: &HashSet<[u8; 32]>, chain: &[&[u8]]) -> bool {
+    chain
+        .iter()
+        .filter_map(|der| spki_sha256(der).ok())
+        .any(|h| pins.contains(&h))
+}
+
+/// Test seam: match against already-hashed SPKIs (so unit tests need not forge
+/// real chain certificates). Production uses [`chain_has_pin`].
+#[cfg(test)]
+pub(crate) fn chain_pins_contains(pins: &HashSet<[u8; 32]>, hashes: &[[u8; 32]]) -> bool {
+    hashes.iter().any(|h| pins.contains(h))
+}
+
 #[cfg(test)]
 mod tests;

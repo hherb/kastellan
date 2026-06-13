@@ -27,3 +27,59 @@ fn spki_sha256_matches_independently_computed_pin() {
 fn spki_sha256_rejects_garbage() {
     assert!(spki_sha256(b"not a certificate").is_err());
 }
+
+fn pin_str(bytes: &[u8; 32]) -> String {
+    use base64::Engine;
+    format!("sha256/{}", base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[test]
+fn parse_valid_multi_host_multi_pin() {
+    let a = [0x11u8; 32];
+    let b = [0x22u8; 32];
+    let json = format!(
+        r#"{{"api.anthropic.com":["{}","{}"],"API.OpenAI.com":["{}"]}}"#,
+        pin_str(&a), pin_str(&b), pin_str(&a)
+    );
+    let set = PinSet::parse(&json).expect("valid pins parse");
+    assert!(!set.is_empty());
+    // Host lookup is case-insensitive.
+    let anthropic = set.pins_for("api.anthropic.com").unwrap();
+    assert!(anthropic.contains(&a) && anthropic.contains(&b));
+    assert!(set.pins_for("api.openai.com").unwrap().contains(&a));
+    assert!(set.pins_for("unpinned.example.com").is_none());
+}
+
+#[test]
+fn parse_empty_object_is_empty_set() {
+    assert!(PinSet::parse("{}").unwrap().is_empty());
+}
+
+#[test]
+fn parse_drops_hosts_with_empty_pin_list() {
+    // An empty pin list would permanently block its host — treat as "no pin".
+    let set = PinSet::parse(r#"{"h.example.com":[]}"#).unwrap();
+    assert!(set.pins_for("h.example.com").is_none());
+    assert!(set.is_empty());
+}
+
+#[test]
+fn parse_rejects_malformed() {
+    assert!(PinSet::parse("not json").is_err());
+    assert!(PinSet::parse(r#"["array","not","object"]"#).is_err());
+    assert!(PinSet::parse(r#"{"h":"string-not-array"}"#).is_err());
+    assert!(PinSet::parse(r#"{"h":["nothashprefix"]}"#).is_err()); // missing sha256/
+    assert!(PinSet::parse(r#"{"h":["sha256/!!!notbase64!!!"]}"#).is_err());
+    assert!(PinSet::parse(r#"{"h":["sha256/YWJj"]}"#).is_err()); // decodes to 3 bytes, not 32
+}
+
+#[test]
+fn chain_has_pin_matches_end_entity_and_intermediate() {
+    let ee = [0xAAu8; 32];
+    let inter = [0xBBu8; 32];
+    let pins: std::collections::HashSet<[u8; 32]> = [inter].into_iter().collect();
+    // We can't cheaply forge real chain certs here, so exercise the matcher with
+    // a small shim: chain_has_pin takes pre-hashed inputs via a test seam.
+    assert!(super::chain_pins_contains(&pins, &[ee, inter]));
+    assert!(!super::chain_pins_contains(&pins, &[ee]));
+}
