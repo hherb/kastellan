@@ -84,6 +84,20 @@ fn chain_has_pin_matches_end_entity_and_intermediate() {
     assert!(!super::chain_pins_contains(&pins, &[ee]));
 }
 
+#[test]
+fn server_name_host_renders_dns_and_ip_canonically() {
+    use rustls::pki_types::ServerName;
+    // DNS is lowercased.
+    let dns = ServerName::try_from("API.Anthropic.com").unwrap();
+    assert_eq!(super::server_name_host(&dns), "api.anthropic.com");
+    // IPv4 literal renders as plain dotted-quad (NOT the Debug form).
+    let v4 = ServerName::try_from("203.0.113.7").unwrap();
+    assert_eq!(super::server_name_host(&v4), "203.0.113.7");
+    // IPv6 literal renders bare (no brackets).
+    let v6 = ServerName::IpAddress(std::net::Ipv6Addr::LOCALHOST.into());
+    assert_eq!(super::server_name_host(&v6), "::1");
+}
+
 use std::sync::Arc;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};

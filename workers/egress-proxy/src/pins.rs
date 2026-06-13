@@ -148,7 +148,10 @@ use rustls::{DigitallySignedStruct, Error as RustlsError, RootCertStore, Signatu
 fn server_name_host(name: &ServerName) -> String {
     match name {
         ServerName::DnsName(d) => d.as_ref().to_ascii_lowercase(),
-        ServerName::IpAddress(ip) => format!("{:?}", ip),
+        // Canonical text form (`1.2.3.4` / `::1`) so the key matches what an
+        // operator writes in the pins JSON. IPv6 keys are BARE (no brackets);
+        // operators must pin `"::1"`, not `"[::1]"`.
+        ServerName::IpAddress(ip) => std::net::IpAddr::from(*ip).to_string(),
         // `ServerName` is non_exhaustive; an unknown kind is simply unpinnable.
         _ => String::new(),
     }
