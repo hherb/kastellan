@@ -356,7 +356,7 @@ pub async fn run_to_terminal(
 
             let validated = plan
                 .validate_invoke()
-                .map(|d| (d.name.clone(), d.args.clone()));
+                .map(|d| (d.name.clone(), d.args.clone(), d.params.clone()));
 
             match validated {
                 Err(malformed) => {
@@ -367,7 +367,7 @@ pub async fn run_to_terminal(
                         .unwrap_or_default();
                     refuse_invoke!(&name, None, None, vec![malformed.to_string()]);
                 }
-                Ok((name, args)) => {
+                Ok((name, args, params)) => {
                     match load_pinned_skill_by_name(pool, &name).await? {
                         Some(pinned) => {
                             let live_tools = dispatcher.known_tools();
@@ -411,7 +411,7 @@ pub async fn run_to_terminal(
                                 SkillTrust::Pinned,
                                 &py.body_sha256,
                                 plan.data_ceiling,
-                                &serde_json::json!({}),
+                                &params,
                             ) {
                                 Err(refusal) => refuse_invoke!(
                                     &name,
