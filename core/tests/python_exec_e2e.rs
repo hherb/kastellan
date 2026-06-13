@@ -19,19 +19,22 @@ use std::path::PathBuf;
 
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use kastellan_core::workers::python_exec::python_exec_entry;
+use kastellan_core::workers::python_exec::{python_exec_entry, PYTHON_CANDIDATES};
 use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
 };
 
-/// Same candidate cascade as the manifest; the e2e needs a real host
-/// interpreter to inject into the jail.
+/// The manifest's own per-OS candidate cascade (single source of truth —
+/// on macOS that list deliberately excludes the `/usr/bin/python3` xcrun
+/// shim, which cannot run inside the jail). Canonicalized like the
+/// manifest does, so the framework-layout fs_read derivation sees the
+/// real path.
 fn find_python() -> Option<PathBuf> {
-    for c in ["/usr/bin/python3", "/usr/local/bin/python3", "/opt/homebrew/bin/python3"] {
+    for c in PYTHON_CANDIDATES {
         let p = PathBuf::from(c);
         if p.is_file() {
-            return Some(p);
+            return Some(std::fs::canonicalize(&p).unwrap_or(p));
         }
     }
     eprintln!("\n[SKIP] no python3 interpreter on this host\n");

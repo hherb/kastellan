@@ -11,10 +11,24 @@ use kastellan_protocol::server::Handler;
 use kastellan_worker_python_exec::exec::MAX_CAPTURE_BYTES;
 use kastellan_worker_python_exec::handler::PythonExecHandler;
 
-/// First existing interpreter from the manifest's candidate cascade,
-/// or `None` → `[SKIP]`.
+/// First existing interpreter from the manifest's per-OS candidate
+/// cascade, or `None` → `[SKIP]`. Mirrors
+/// `core/src/workers/python_exec.rs::PYTHON_CANDIDATES` (this crate can't
+/// depend on `core`, so the list is duplicated — keep them in sync). On
+/// macOS `/usr/bin/python3` is deliberately absent: it is Apple's xcrun
+/// shim, which re-injects `SDKROOT`/`CPATH`/etc. into the real python
+/// child and so breaks the env-isolation contract these tests pin (and
+/// cannot run inside the jail at all).
 fn find_python() -> Option<PathBuf> {
-    for c in ["/usr/bin/python3", "/usr/local/bin/python3", "/opt/homebrew/bin/python3"] {
+    #[cfg(target_os = "macos")]
+    let candidates = [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/Library/Developer/CommandLineTools/usr/bin/python3",
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let candidates = ["/usr/bin/python3", "/usr/local/bin/python3"];
+    for c in candidates {
         let p = PathBuf::from(c);
         if p.is_file() {
             return Some(p);
