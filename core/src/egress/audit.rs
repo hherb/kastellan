@@ -74,6 +74,7 @@ pub fn decision_to_audit(line: &str) -> Option<EgressAuditRow> {
         "blocked_allowlist" => "egress.blocked.allowlist",
         "blocked_ssrf" => "egress.blocked.ssrf",
         "blocked_credential_leak" => "egress.blocked.credential_leak",
+        "blocked_tls_pin" => "egress.blocked.tls_pin",
         _ => return None,
     };
     Some(EgressAuditRow {
@@ -179,5 +180,14 @@ mod tests {
         let row = decision_to_audit(line).unwrap();
         assert_eq!(row.action, "egress.blocked.credential_leak");
         assert!(row.payload["leaked_sha256"].is_null());
+    }
+
+    #[test]
+    fn blocked_tls_pin_maps_to_action() {
+        let line = r#"{"worker":"frontier","host":"api.anthropic.com","port":443,"resolved_ip":"203.0.113.7","verdict":"blocked_tls_pin","reason":"pin_mismatch","tls_intercepted":true}"#;
+        let row = decision_to_audit(line).unwrap();
+        assert_eq!(row.action, "egress.blocked.tls_pin");
+        assert_eq!(row.payload["reason"], "pin_mismatch");
+        assert_eq!(row.payload["tls_intercepted"], true);
     }
 }

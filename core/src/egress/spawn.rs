@@ -12,6 +12,7 @@ use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 const ENV_UDS: &str = "KASTELLAN_EGRESS_PROXY_UDS";
 const ENV_ALLOWLIST: &str = "KASTELLAN_EGRESS_PROXY_ALLOWLIST";
 const ENV_WORKER: &str = "KASTELLAN_EGRESS_PROXY_WORKER";
+const ENV_PINS: &str = "KASTELLAN_EGRESS_PROXY_PINS";
 
 /// Basename of the per-worker sidecar UDS under the scratch dir. Shared so the
 /// force-routing scratch-dir guard (`net_worker::make_worker_scratch_dir`) can
@@ -59,9 +60,25 @@ impl SidecarHandle {
 /// DNS, self-enforcing), `WorkerNetClient` (permits `socket(2)`), fs_read for
 /// the DNS resolver files + the binary, fs_write for the scratch dir (to create
 /// the UDS), and the env contract.
-pub fn proxy_policy(binary: &Path, allowlist: &[String], scratch: &Path, worker: &str) -> SandboxPolicy {
+pub fn proxy_policy(
+    binary: &Path,
+    allowlist: &[String],
+    scratch: &Path,
+    worker: &str,
+    cert_pins_json: Option<&str>,
+) -> SandboxPolicy {
     let uds = scratch.join(UDS_FILE_NAME);
     let allow_json = serde_json::to_string(allowlist).expect("Vec<String> serializes");
+    let mut env = vec![
+        (ENV_UDS.to_string(), uds.to_string_lossy().into_owned()),
+        (ENV_ALLOWLIST.to_string(), allow_json),
+        (ENV_WORKER.to_string(), worker.to_string()),
+    ];
+    // Pins are static operator config (slice #4). Omit the key entirely when
+    // absent so the no-pin path is byte-identical to slice #3b.
+    if let Some(pins) = cert_pins_json.filter(|s| !s.trim().is_empty()) {
+        env.push((ENV_PINS.to_string(), pins.to_string()));
+    }
     SandboxPolicy {
         fs_read: vec![
             binary.to_path_buf(),
@@ -76,11 +93,7 @@ pub fn proxy_policy(binary: &Path, allowlist: &[String], scratch: &Path, worker:
         profile: Profile::WorkerNetClient,
         cpu_quota_pct: None,
         tasks_max: None,
-        env: vec![
-            (ENV_UDS.to_string(), uds.to_string_lossy().into_owned()),
-            (ENV_ALLOWLIST.to_string(), allow_json),
-            (ENV_WORKER.to_string(), worker.to_string()),
-        ],
+        env,
         proxy_uds: None,
     }
 }
@@ -93,8 +106,9 @@ pub fn spawn_sidecar(
     allowlist: &[String],
     scratch: &Path,
     worker: &str,
+    cert_pins_json: Option<&str>,
 ) -> anyhow::Result<SidecarHandle> {
-    let policy = proxy_policy(binary, allowlist, scratch, worker);
+    let policy = proxy_policy(binary, allowlist, scratch, worker, cert_pins_json);
     let uds_path = scratch.join(UDS_FILE_NAME);
     let _ = std::fs::remove_file(&uds_path);
 
@@ -128,7 +142,7 @@ mod tests {
 
     #[test]
     fn policy_uses_proxy_egress_and_net_client() {
-        let p = proxy_policy(Path::new("/opt/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch");
+        let p = proxy_policy(Path::new("/opt/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None);
         assert!(matches!(p.net, Net::ProxyEgress));
         assert!(matches!(p.profile, Profile::WorkerNetClient));
         assert!(p.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
@@ -138,5 +152,20 @@ mod tests {
         assert_eq!(env[ENV_UDS], "/scratch/egress.sock");
         assert_eq!(env[ENV_ALLOWLIST], r#"["example.com"]"#);
         assert_eq!(env[ENV_WORKER], "web-fetch");
+    }
+
+    #[test]
+    fn proxy_policy_omits_pins_env_when_none() {
+        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None);
+        let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
+        assert!(!env.contains_key(ENV_PINS));
+    }
+
+    #[test]
+    fn proxy_policy_includes_pins_env_when_set() {
+        let pins = r#"{"api.anthropic.com":["sha256/AAAA"]}"#;
+        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", Some(pins));
+        let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
+        assert_eq!(env[ENV_PINS], pins);
     }
 }

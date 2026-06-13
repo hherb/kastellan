@@ -210,3 +210,18 @@ fn decide_allowed_via_bare_host_entry_is_flagged() {
         "allowed:host-only-entry"
     );
 }
+
+#[test]
+fn classify_mitm_error_detects_pin_mismatch() {
+    let (verdict, reason) =
+        super::classify_mitm_error("origin TLS handshake: certificate pin mismatch");
+    assert_eq!(verdict, crate::report::Verdict::BlockedTlsPin);
+    assert_eq!(reason, "pin_mismatch");
+}
+
+#[test]
+fn classify_mitm_error_generic_failure_is_allowed_mitm_failed() {
+    let (verdict, reason) = super::classify_mitm_error("origin TLS handshake: connection reset");
+    assert_eq!(verdict, crate::report::Verdict::Allowed);
+    assert!(reason.starts_with("mitm_failed:"));
+}
