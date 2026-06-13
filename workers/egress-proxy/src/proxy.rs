@@ -202,6 +202,18 @@ pub fn handle_conn(
     }
 }
 
+/// Classify an `intercept` error string into the decision it should produce.
+/// A pin mismatch (the verifier's marker) is a security *block*
+/// (`BlockedTlsPin` / `pin_mismatch`); anything else is a transport failure on
+/// an already-allowed CONNECT (`Allowed` / `mitm_failed: …`).
+fn classify_mitm_error(err: &str) -> (Verdict, String) {
+    if err.contains(crate::pins::PIN_MISMATCH_MARKER) {
+        (Verdict::BlockedTlsPin, "pin_mismatch".to_string())
+    } else {
+        (Verdict::Allowed, format!("mitm_failed: {err}"))
+    }
+}
+
 /// Bridge the sync accept path to the async MITM. Builds a per-connection
 /// current-thread runtime (mirrors web-common's ProxyConnectGet) and runs
 /// `mitm::intercept`. A handshake/copy error is reported as an allowed-but-failed
@@ -263,13 +275,14 @@ fn run_mitm(
             });
         }
         Err(e) => {
+            let (verdict, reason) = classify_mitm_error(&e);
             reporter.report(Decision {
                 worker: worker.into(),
                 host: host.into(),
                 port,
                 resolved_ip: Some(ip.to_string()),
-                verdict: Verdict::Allowed,
-                reason: format!("mitm_failed: {e}"),
+                verdict,
+                reason,
                 tls_intercepted: true,
                 leak: None,
             });
