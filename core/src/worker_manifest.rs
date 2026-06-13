@@ -65,6 +65,14 @@ pub struct ResolveCtx<'a> {
     /// Directory of the running `kastellan` binary, for `current_exe()`-relative
     /// worker discovery. `None` when it can't be determined (fail-soft).
     pub exe_dir: Option<&'a Path>,
+    /// Probe: resolve symlinks to the real path (`std::fs::canonicalize`
+    /// in production). `None` when resolution fails (broken link, missing
+    /// path) — callers fall back to the raw path. Exists because a policy
+    /// built around a symlink can break *inside* the jail: e.g. an
+    /// interpreter at `/usr/bin/python3 → /etc/alternatives/python3` is
+    /// unreachable in-jail when `/etc/alternatives` isn't bound, even
+    /// though `/usr` is.
+    pub canonicalize: &'a dyn Fn(&Path) -> Option<PathBuf>,
     /// Operational argv allowlist, pre-fetched from the DB by the builder,
     /// keyed by tool name. A worker that declared `allowlist_tool()` looks
     /// itself up here; absent ⇒ empty.
@@ -134,6 +142,7 @@ mod tests {
             exists,
             is_dir: &|_p| false,
             exe_dir,
+            canonicalize: &|_p| None,
             allowlist: &|_t| Vec::new(),
         }
     }
@@ -168,6 +177,7 @@ mod tests {
             exists: &exists,
             is_dir: &is_dir,
             exe_dir: Some(exe.as_path()),
+            canonicalize: &|_p| None,
             allowlist: &|_t| Vec::new(),
         };
         assert_eq!(

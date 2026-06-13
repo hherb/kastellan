@@ -258,6 +258,9 @@ fn discover_egress_proxy_bin_with(
         exists,
         is_dir,
         exe_dir,
+        // discover_binary never canonicalizes; this ctx exists only to
+        // reuse its override-wins/fail-closed discovery semantics.
+        canonicalize: &|_p| None,
         allowlist: &allowlist,
     };
     discover_binary(&ctx, ENV_PROXY_BIN, PROXY_BIN_DEFAULT)
