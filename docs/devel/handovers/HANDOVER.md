@@ -19,6 +19,48 @@ clean. New deps `x509-cert`/`sha2`/`base64` all Apache-2.0/MIT (AGPL-compatible)
 already exercises under real bwrap); egress-proxy can't cross-clippy on the Mac (`ring` C dep, #144 wall), so its Linux
 build is CI/DGX-verified and the macOS workspace clippy covers the logic.
 
+**This session — egress proxy SLICE #4: TLS pinning for the frontier/LLM egress path (ROADMAP:142).** Brainstormed →
+spec'd → planned → executed via subagent-driven TDD (12 tasks, per-task spec+quality review + an opus whole-branch review
+that confirmed **end-to-end coherence + the additive-not-weakening invariant**). The proxy's MITM re-origination leg (slice
+#3a) validated the real origin against the full public webpki root store; #4 lets the operator **pin the SPKI** of specific
+high-value origins so a single compromised/mis-issued public CA can't silently MITM kastellan's own frontier egress.
+**Locked decisions (brainstorm):** seam = the egress-proxy upstream leg (not the in-core llm-router — that's the Phase-5
+router seam); pin type = SPKI-SHA256 **set** (RFC 7469, survives leaf rotation, backup pins); provisioning = the
+`KASTELLAN_EGRESS_PROXY_PINS` env (static operator config, like the allowlist — not a runtime scratch file like #3b);
+dep = `x509-cert` (RustCrypto base already in-tree) over `x509-parser` (smaller audit surface). Shape:
+- **New proxy-local module `workers/egress-proxy/src/pins.rs`** (no shared crate — only the proxy computes/matches SPKI;
+  the host passes the pin JSON through opaque): `spki_sha256` (SHA-256 of the DER `SubjectPublicKeyInfo` via x509-cert
+  `to_der()` — guarded against re-encode drift by an independent-path test), `PinSet` (`{host:["sha256/<b64>"]}` → lowercased
+  host → set of 32-byte digests; a host with an **empty pin list ⇒ Err ⇒ startup aborts** (fail-loud, not silently
+  unpinned); strict-parse), `chain_has_pin` (any chain cert's SPKI ∈ pins),
+  `PinningVerifier` (rustls `ServerCertVerifier` — runs `WebPkiServerVerifier` **first** then, for pinned hosts only, requires
+  a chain SPKI match, else `RustlsError::General(PIN_MISMATCH_MARKER)`), `build_upstream_client_config(Option<&str>)`
+  (None/blank/`{}` ⇒ plain webpki **byte-identical**; valid ⇒ `.dangerous()` custom verifier; **malformed ⇒ Err ⇒ startup
+  aborts**). `main.rs` reads the env once before `lock_down`.
+- **Verdict + audit:** new `Verdict::BlockedTlsPin`; `proxy::classify_mitm_error` maps an intercept error carrying the marker
+  → `BlockedTlsPin`/`pin_mismatch` (else the prior `Allowed`/`mitm_failed`); host `egress/audit.rs` maps
+  `blocked_tls_pin` → `egress.blocked.tls_pin`. (A pin reject emits TWO decisions like #3b: pre-intercept `Allowed
+  (tls_intercepted)` then `BlockedTlsPin`.)
+- **Host pass-through + refactor:** `proxy_policy`/`spawn_sidecar` take `cert_pins_json: Option<&str>` (push
+  `KASTELLAN_EGRESS_PROXY_PINS` only when `Some(non-blank)` ⇒ no-pin path byte-identical). `spawn_net_worker`/
+  `spawn_forced_net_worker` args bundled into a **`NetWorkerSpawn<'a>` params struct** (`backend, proxy_bin, spec, allowlist,
+  worker_name, secret_fingerprints, cert_pins_json`) + explicit `scratch`/`scratch_root` + sink — **both
+  `#[allow(too_many_arguments)]` dropped** (the refactor the #3b handover flagged). All callers (`force_route` live path + the
+  e2e suites) pass `cert_pins_json: None`.
+- **Posture:** pinning is **fail-CLOSED** for a configured pin (the inverse of #3b's fail-open leak scanner — a substituted
+  cert MUST be refused), but absent/unpinned ⇒ webpki-only (graceful, not a bypass). **Additive** — never weakens webpki, never
+  touches the netns/allowlist/SSRF/OS containment boundary. Catches only what a network adversary presents; not the boundary.
+- **Forward-looking** (mirrors #3b): no frontier egress worker exists, so the default deployment provisions **no pins** (env
+  unset ⇒ byte-identical). The wiring that reads the operator's real frontier pin config + routes frontier egress through a
+  **pinned** sidecar lands with the first frontier worker / Phase 5 — the standing slice-#4 follow-up.
+- **Tests:** pins units (spki_sha256 independent-path, PinSet parse/lookup/malformed, chain_has_pin, verifier
+  unpinned/match/mismatch, build_upstream None/empty/valid/malformed, server_name_host IP/DNS canonical); proxy
+  `classify_mitm_error` both directions + `BlockedTlsPin` serialization; **`mitm/tests.rs` real two-leg TLS round-trips**
+  (origin SPKI pinned ⇒ succeeds; wrong SPKI ⇒ fails with the marker); host `proxy_policy` pins-env on/off + `audit` mapping +
+  `NetWorkerSpawn` fail-closed. **IPv6 pin keys are bare** (`::1`, no brackets — documented operator convention).
+- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-13-egress-proxy-slice4-tls-pinning-design.md` /
+  `2026-06-13-egress-proxy-slice4-tls-pinning.md`.
+
 ---
 
 **Parallel arc now on `main` — Phase 4 opened: `python-exec` worker slice #1 (PR #267)** (branch
@@ -46,7 +88,7 @@ watch item is closed by construction. Also merged `main` (slice #3b leak scanner
 auto-merged, HANDOVER resolved keeping both parallel session blocks. +5 tests (13 worker unit / 8 real-interpreter incl.
 a dual-stream flood pin / 8 manifest).
 
-**This session — Phase 4 entry: `python-exec` worker slice #1 (ROADMAP:202).** The first executor for agent-authored
+**Phase 4 entry — `python-exec` worker slice #1 (ROADMAP:202).** The first executor for agent-authored
 Python; everything later in Phase 4 (skill catalog, trust ceilings, delegation) invokes code through it. Spec'd
 (`docs/superpowers/specs/2026-06-12-python-exec-worker-design.md`) then built:
 - **Worker** `workers/python-exec` (Rust, mirrors shell-exec — the CPython process is a *child* so a wedged payload
@@ -84,47 +126,6 @@ Dependabot re-fires when a patched release ships, or dismiss as `tolerable_risk`
 torch > 2.12.0 appears.
 
 ---
-
-**This session — egress proxy SLICE #4: TLS pinning for the frontier/LLM egress path (ROADMAP:142).** Brainstormed →
-spec'd → planned → executed via subagent-driven TDD (12 tasks, per-task spec+quality review + an opus whole-branch review
-that confirmed **end-to-end coherence + the additive-not-weakening invariant**). The proxy's MITM re-origination leg (slice
-#3a) validated the real origin against the full public webpki root store; #4 lets the operator **pin the SPKI** of specific
-high-value origins so a single compromised/mis-issued public CA can't silently MITM kastellan's own frontier egress.
-**Locked decisions (brainstorm):** seam = the egress-proxy upstream leg (not the in-core llm-router — that's the Phase-5
-router seam); pin type = SPKI-SHA256 **set** (RFC 7469, survives leaf rotation, backup pins); provisioning = the
-`KASTELLAN_EGRESS_PROXY_PINS` env (static operator config, like the allowlist — not a runtime scratch file like #3b);
-dep = `x509-cert` (RustCrypto base already in-tree) over `x509-parser` (smaller audit surface). Shape:
-- **New proxy-local module `workers/egress-proxy/src/pins.rs`** (no shared crate — only the proxy computes/matches SPKI;
-  the host passes the pin JSON through opaque): `spki_sha256` (SHA-256 of the DER `SubjectPublicKeyInfo` via x509-cert
-  `to_der()` — guarded against re-encode drift by an independent-path test), `PinSet` (`{host:["sha256/<b64>"]}` → lowercased
-  host → set of 32-byte digests; empty-pin-list dropped; strict-parse), `chain_has_pin` (any chain cert's SPKI ∈ pins),
-  `PinningVerifier` (rustls `ServerCertVerifier` — runs `WebPkiServerVerifier` **first** then, for pinned hosts only, requires
-  a chain SPKI match, else `RustlsError::General(PIN_MISMATCH_MARKER)`), `build_upstream_client_config(Option<&str>)`
-  (None/blank/`{}` ⇒ plain webpki **byte-identical**; valid ⇒ `.dangerous()` custom verifier; **malformed ⇒ Err ⇒ startup
-  aborts**). `main.rs` reads the env once before `lock_down`.
-- **Verdict + audit:** new `Verdict::BlockedTlsPin`; `proxy::classify_mitm_error` maps an intercept error carrying the marker
-  → `BlockedTlsPin`/`pin_mismatch` (else the prior `Allowed`/`mitm_failed`); host `egress/audit.rs` maps
-  `blocked_tls_pin` → `egress.blocked.tls_pin`. (A pin reject emits TWO decisions like #3b: pre-intercept `Allowed
-  (tls_intercepted)` then `BlockedTlsPin`.)
-- **Host pass-through + refactor:** `proxy_policy`/`spawn_sidecar` take `cert_pins_json: Option<&str>` (push
-  `KASTELLAN_EGRESS_PROXY_PINS` only when `Some(non-blank)` ⇒ no-pin path byte-identical). `spawn_net_worker`/
-  `spawn_forced_net_worker` args bundled into a **`NetWorkerSpawn<'a>` params struct** (`backend, proxy_bin, spec, allowlist,
-  worker_name, secret_fingerprints, cert_pins_json`) + explicit `scratch`/`scratch_root` + sink — **both
-  `#[allow(too_many_arguments)]` dropped** (the refactor the #3b handover flagged). All callers (`force_route` live path + the
-  e2e suites) pass `cert_pins_json: None`.
-- **Posture:** pinning is **fail-CLOSED** for a configured pin (the inverse of #3b's fail-open leak scanner — a substituted
-  cert MUST be refused), but absent/unpinned ⇒ webpki-only (graceful, not a bypass). **Additive** — never weakens webpki, never
-  touches the netns/allowlist/SSRF/OS containment boundary. Catches only what a network adversary presents; not the boundary.
-- **Forward-looking** (mirrors #3b): no frontier egress worker exists, so the default deployment provisions **no pins** (env
-  unset ⇒ byte-identical). The wiring that reads the operator's real frontier pin config + routes frontier egress through a
-  **pinned** sidecar lands with the first frontier worker / Phase 5 — the standing slice-#4 follow-up.
-- **Tests:** pins units (spki_sha256 independent-path, PinSet parse/lookup/malformed, chain_has_pin, verifier
-  unpinned/match/mismatch, build_upstream None/empty/valid/malformed, server_name_host IP/DNS canonical); proxy
-  `classify_mitm_error` both directions + `BlockedTlsPin` serialization; **`mitm/tests.rs` real two-leg TLS round-trips**
-  (origin SPKI pinned ⇒ succeeds; wrong SPKI ⇒ fails with the marker); host `proxy_policy` pins-env on/off + `audit` mapping +
-  `NetWorkerSpawn` fail-closed. **IPv6 pin keys are bare** (`::1`, no brackets — documented operator convention).
-- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-13-egress-proxy-slice4-tls-pinning-design.md` /
-  `2026-06-13-egress-proxy-slice4-tls-pinning.md`.
 
 **Prior session — egress proxy SLICE #3b: co-located credential-leak scanner (MERGED, PR [#269](https://github.com/hherb/kastellan/pull/269), ROADMAP:142).** Brainstormed → spec'd →
 planned → executed via subagent-driven TDD (13 tasks, 2-stage review per batch + an opus whole-branch review that confirmed
