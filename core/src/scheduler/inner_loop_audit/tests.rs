@@ -23,6 +23,7 @@ fn make_text_plan() -> Plan {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     }
 }
 
@@ -70,6 +71,7 @@ fn build_plan_formulate_payload_carries_full_plan_and_classification_floor() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let meta = FormulationMeta {
         prompt_sha256: "deadbeef".into(),

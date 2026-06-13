@@ -51,6 +51,7 @@ fn plan_is_terminal_requires_all_three_conditions() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     assert!(p.is_terminal(), "all three present");
 
@@ -87,6 +88,7 @@ fn plan_serialises_skipping_none_result() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let s = serde_json::to_string(&p).unwrap();
 
@@ -123,6 +125,7 @@ fn plan_round_trips_refused_field_some() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let s = serde_json::to_string(&p).unwrap();
     let p2: Plan = serde_json::from_str(&s).unwrap();
@@ -143,6 +146,7 @@ fn plan_omits_refused_key_when_none() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let s = serde_json::to_string(&p).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -172,6 +176,7 @@ fn plan_floor_request_round_trips_when_absent() {
         l1_insight:    None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let s = serde_json::to_string(&p).unwrap();
     assert!(
@@ -196,6 +201,7 @@ fn plan_floor_request_round_trips_when_set() {
         l1_insight:    None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let s = serde_json::to_string(&p).unwrap();
     assert!(
@@ -221,6 +227,7 @@ fn plan_is_refused_is_independent_of_is_terminal() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
 
     // Neither
@@ -274,6 +281,7 @@ fn completion_insight_returns_some_when_terminal_and_insight_present() {
         l1_insight: Some("shell-exec /bin/ls works for dirs".into()),
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     assert_eq!(plan.completion_insight(), Some("shell-exec /bin/ls works for dirs"));
 }
@@ -292,6 +300,7 @@ fn completion_insight_returns_none_when_not_terminal() {
         l1_insight: Some("foo".into()),
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     assert!(plan.completion_insight().is_none());
 }
@@ -310,6 +319,7 @@ fn completion_insight_returns_none_when_insight_absent() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     assert!(plan.completion_insight().is_none());
 }
@@ -328,6 +338,7 @@ fn plan_l1_insight_serde_round_trip_omits_none() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let s = serde_json::to_string(&plan).expect("serialize");
     assert!(!s.contains("l1_insight"), "None should be omitted via skip_serializing_if; got: {s}");
@@ -351,6 +362,7 @@ fn plan_l1_insight_serde_round_trip_carries_some_value() {
         l1_insight: Some("a useful insight".into()),
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let s = serde_json::to_string(&plan).expect("serialize");
     assert!(s.contains("\"l1_insight\":\"a useful insight\""), "Some value should serialize; got: {s}");
@@ -373,6 +385,7 @@ fn completion_insight_returns_none_when_terminal_decision_but_result_missing() {
         l1_insight: Some("insight".into()),
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     assert!(plan.completion_insight().is_none());
 }
@@ -394,6 +407,7 @@ fn make_terminal_plan() -> Plan {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     }
 }
 
@@ -418,6 +432,7 @@ fn make_action_plan() -> Plan {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     }
 }
 
@@ -505,6 +520,7 @@ fn validate_invoke_rejects_invoke_with_nonempty_steps() {
         result: None, data_ceiling: DataClass::Public, refused: None,
         floor_request: None, l1_insight: None, l3_skill: None,
         invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        python_skill: None,
     };
     assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasSteps)));
 }
@@ -517,6 +533,7 @@ fn validate_invoke_rejects_invoke_on_terminal_plan() {
         data_ceiling: DataClass::Public, refused: None, floor_request: None,
         l1_insight: None, l3_skill: None,
         invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        python_skill: None,
     };
     assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::Terminal)));
 }
@@ -532,6 +549,7 @@ fn validate_invoke_rejects_invoke_with_l3_skill() {
             parameters: vec![], steps: vec![],
         }),
         invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        python_skill: None,
     };
     assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasL3Skill)));
 }
@@ -551,6 +569,7 @@ fn validate_invoke_precedence_has_steps_wins_over_terminal() {
         data_ceiling: DataClass::Public, refused: None, floor_request: None,
         l1_insight: None, l3_skill: None,
         invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        python_skill: None,
     };
     assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasSteps)));
 }
@@ -561,8 +580,52 @@ fn plan_without_invoke_skill_round_trips_without_the_key() {
     let plan = Plan {
         context: "c".into(), decision: "act".into(), rationale: "r".into(),
         steps: vec![], result: None, data_ceiling: DataClass::Public, refused: None,
-        floor_request: None, l1_insight: None, l3_skill: None, invoke_skill: None,
+        floor_request: None, l1_insight: None, l3_skill: None, invoke_skill: None, python_skill: None,
     };
     let s = serde_json::to_string(&plan).unwrap();
     assert!(!s.contains("invoke_skill"), "absent directive must not serialize a key");
+}
+
+// ── PythonSkillCandidate / completion_python_skill() tests ─────────────────
+
+#[test]
+fn python_skill_candidate_serde_roundtrips() {
+    let c = PythonSkillCandidate {
+        name: "sum_csv_column".into(),
+        description: "Sum a numeric column of a CSV on stdin".into(),
+        code: "import sys\nprint(sum(int(x) for x in sys.stdin))\n".into(),
+    };
+    let json = serde_json::to_string(&c).unwrap();
+    let back: PythonSkillCandidate = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
+}
+
+#[test]
+fn completion_python_skill_some_only_on_terminal_with_candidate() {
+    let cand = PythonSkillCandidate {
+        name: "noop".into(),
+        description: "d".into(),
+        code: "pass\n".into(),
+    };
+    // Terminal plan carrying a python_skill → Some.
+    let mut p = Plan {
+        context: String::new(),
+        decision: DECISION_TERMINAL.into(),
+        rationale: String::new(),
+        steps: vec![],
+        result: Some(serde_json::json!({"kind":"text","body":"done"})),
+        data_ceiling: DataClass::Public,
+        refused: None,
+        floor_request: None,
+        l1_insight: None,
+        l3_skill: None,
+        python_skill: Some(cand.clone()),
+        invoke_skill: None,
+    };
+    assert_eq!(p.completion_python_skill(), Some(&cand));
+    // Non-terminal (has steps) → None even with a candidate.
+    p.decision = "continue".into();
+    p.steps = vec![];
+    p.result = None;
+    assert_eq!(p.completion_python_skill(), None);
 }

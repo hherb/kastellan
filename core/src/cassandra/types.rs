@@ -126,6 +126,21 @@ pub struct L3SkillCandidate {
     pub steps: Vec<L3TemplateStep>,
 }
 
+/// Agent-emitted candidate for a Python *skill* (L3, `kind = "python"`).
+/// Unlike [`L3SkillCandidate`] (a parameterised tool-call template), this
+/// is a **verbatim** Python snippet the agent ran this task. It carries no
+/// parameters and is stored + later executed byte-for-byte unchanged — the
+/// SHA-256 of the canonical `{name, description, code}` JSON is both the
+/// dedup key and the approval binding.
+///
+/// Validation rules + caps live in [`crate::memory::l3py_crystallise`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PythonSkillCandidate {
+    pub name: String,
+    pub description: String,
+    pub code: String,
+}
+
 /// Agent-emitted directive to autonomously invoke a pinned L3 skill.
 /// Sibling to [`Plan::l3_skill`]: where `l3_skill` *crystallises* a new
 /// skill on a terminal plan, `invoke_skill` *runs* an already-pinned one
@@ -239,6 +254,14 @@ pub struct Plan {
     /// byte-stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invoke_skill: Option<InvokeDirective>,
+    /// Agent-raised **Python** skill candidate (verbatim code). Honoured on
+    /// the same gate as [`Plan::l3_skill`]: terminal + `Outcome::Completed` +
+    /// `dispatch_count >= 1`. Captured into `InnerLoopResult.terminal_python_skill`
+    /// and written to `MemoryLayer::Skill` by `runner::drain_lane` with
+    /// kind `"python"` and trust `"untrusted"`. Round-trips with
+    /// `skip_serializing_if = Option::is_none` so non-emitting plans stay byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_skill: Option<PythonSkillCandidate>,
 }
 
 // Invariant (enforced by Stage 0 / `DeterministicPolicy`, see
@@ -290,6 +313,18 @@ impl Plan {
     pub fn completion_skill(&self) -> Option<&L3SkillCandidate> {
         if self.is_terminal() {
             self.l3_skill.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Returns `Some(candidate)` iff this plan would produce
+    /// `Outcome::Completed` AND carries a `python_skill`. The inner loop
+    /// ANDs in the `dispatch_count >= 1` grounding gate at the call site.
+    /// Mirrors [`Plan::completion_skill`].
+    pub fn completion_python_skill(&self) -> Option<&PythonSkillCandidate> {
+        if self.is_terminal() {
+            self.python_skill.as_ref()
         } else {
             None
         }

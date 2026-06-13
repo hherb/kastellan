@@ -156,6 +156,7 @@ fn task_complete_plan(body: &str) -> Plan {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     }
 }
 
@@ -179,6 +180,7 @@ fn one_step_plan(tool: &str, method: &str) -> Plan {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     }
 }
 
