@@ -60,6 +60,15 @@ Python; everything later in Phase 4 (skill catalog, trust ceilings, delegation) 
 - **macOS notes (slice-1 gaps, both tighter-not-looser):** no writable scratch (Seatbelt deny-default + empty
   `fs_write`) and the standing `mem_mb` gap; Mac runtime validation pending, same posture browser-driver slice #1 had.
 
+**Dependabot torch alert triage (2026-06-13):** alert #1 (GHSA-rrmf-rvhw-rf47 / CVE-2025-3000, low — memory
+corruption via `torch.jit.script` on attacker-supplied TorchScript) is **unfixable by bumping**: the advisory range is
+`<= 2.12.0` with `first_patched_version: null`, `workers/gliner-relex/uv.lock` already pins torch 2.12.0 — the latest
+release on PyPI — and upstream [pytorch#149623](https://github.com/pytorch/pytorch/issues/149623) is still open.
+Verified `uv lock --upgrade-package torch` is a version no-op (only lockfile-format churn from an older local uv;
+reverted). Risk posture: the worker runs jailed and never scripts untrusted TorchScript. Leave the alert open so
+Dependabot re-fires when a patched release ships, or dismiss as `tolerable_risk` (operator's call). Re-check when
+torch > 2.12.0 appears.
+
 **PR #269 review pass (2026-06-13):** addressed the code-review findings in place. (1) `mitm/relay.rs::scan_relay`
 rewritten as two independent per-direction `pump` futures driven by one `select!` — a direction's `write_all` no longer
 head-of-line-stalls the peer direction's reads (the old single-`read`-loop awaited `write_all` inside the arm); preserves
