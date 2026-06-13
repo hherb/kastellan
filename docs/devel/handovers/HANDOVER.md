@@ -6,8 +6,8 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-13 (**Phase 4: python-exec skill catalog SLICE 2 built — invocation + surfacing** — approved/pinned
-Python skills are now *runnable*; branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276). 7 TDD tasks via subagent-driven
+**Last updated:** 2026-06-13 (**Phase 4: python-exec skill catalog SLICE 2 MERGED — invocation + surfacing** — approved/pinned
+Python skills are now *runnable*; branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276) MERGED to `main` at `e478309`. 7 TDD tasks via subagent-driven
 dev with per-task spec+quality review until the subagent pool hit the monthly spend limit at Task 6's review — Tasks 6 (agent
 integration, security-critical) + 7 (e2e) were then self-reviewed by the controller against the design spec's §6 security
 analysis. Slice 1 — crystallise + approve/pin — is MERGED to `main` (PR [#275](https://github.com/hherb/kastellan/pull/275),
@@ -338,8 +338,8 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** **python-exec skill catalog SLICE 2 (invocation + surfacing) is on branch `feat/python-exec-skill-catalog-slice2`,
-PR [#276](https://github.com/hherb/kastellan/pull/276) — NOT yet merged.** `main` carries python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)),
+**Current state.** **python-exec skill catalog SLICE 2 (invocation + surfacing) is MERGED to `main`
+(PR [#276](https://github.com/hherb/kastellan/pull/276), commit `e478309`).** `main` carries python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)),
 **python-exec skill catalog slice 1** (PR [#275](https://github.com/hherb/kastellan/pull/275), commit `0cbddc5` — crystallise +
 approval + operator show/approve/pin CLI), egress slice
 #4 TLS pinning (PR [#272](https://github.com/hherb/kastellan/pull/272)), the Dependabot torch triage (PR
@@ -646,8 +646,8 @@ continues:
 1. **Operator flip (no code):** set `KASTELLAN_PYTHON_EXEC_ENABLE=1` wherever the worker is wanted — it is opt-in and
    unregistered by default. Whether the supervised deployment (`core_service_spec`) should carry it by default is an
    operator decision; the deliberate slice-#1 posture is OFF.
-2. **Skill catalog SLICE 2 — invocation + surfacing — DONE this session** (branch `feat/python-exec-skill-catalog-slice2`, PR
-   pending; see the latest "This session" block). `l3py_invoke/` gate+operator+agent, daemon `l3_run` python branch
+2. **Skill catalog SLICE 2 — invocation + surfacing — MERGED** (branch `feat/python-exec-skill-catalog-slice2`, PR
+   [#276](https://github.com/hherb/kastellan/pull/276), commit `e478309`; see the latest "This session" block). `l3py_invoke/` gate+operator+agent, daemon `l3_run` python branch
    (fail-closed), kind-aware surfacing (code never shown), agent-autonomous `invoke_skill` python resolution, and the
    `cli_memory_l3py_run_daemon_e2e` (live-green on Mac/PG 18). **★ NEXT immediate pick — runtime params** (the only deferred
    skill-catalog piece): a Python skill is verbatim/param-less until `python.exec` grows a structured arg channel (a
