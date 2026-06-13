@@ -17,6 +17,7 @@
 mod ca;
 mod leaf_cache;
 mod mitm;
+mod pins;
 mod proxy;
 mod report;
 mod request_line;
