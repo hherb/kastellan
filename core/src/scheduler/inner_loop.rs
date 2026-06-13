@@ -411,6 +411,7 @@ pub async fn run_to_terminal(
                                 SkillTrust::Pinned,
                                 &py.body_sha256,
                                 plan.data_ceiling,
+                                &serde_json::json!({}),
                             ) {
                                 Err(refusal) => refuse_invoke!(
                                     &name,

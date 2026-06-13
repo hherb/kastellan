@@ -17,7 +17,7 @@ use crate::cassandra::types::{DataClass, PlannedStep, PythonSkillCandidate};
 use crate::memory::l3_approval::SkillTrust;
 use crate::memory::l3_invoke::{is_autonomously_invocable, InvokeRefusal};
 
-use super::pure::{prepare_python_invocation, PY_EXEC_METHOD, PY_EXEC_TOOL};
+use super::pure::{prepare_python_invocation, python_exec_step, validate_python_params};
 
 /// A pinned Python skill loaded for agent-autonomous invocation.
 pub struct PinnedPythonSkill {
@@ -27,15 +27,21 @@ pub struct PinnedPythonSkill {
 }
 
 /// PURE agent expansion: strict pinned-only gate → [`prepare_python_invocation`]
-/// (re-validate + `secret://` re-scan + SHA-drift refuse) → one [`PlannedStep`]
-/// classified at the invoking plan's `data_ceiling` (so the deterministic
-/// policy's I2/I3 invariants hold automatically, exactly as the templated agent
-/// path). Refuses non-pinned trust or SHA drift, collecting every reason.
+/// (re-validate + `secret://` re-scan + SHA-drift refuse) → optional runtime
+/// `params` validation via [`validate_python_params`] → one [`PlannedStep`]
+/// built by [`python_exec_step`], classified at the invoking plan's
+/// `data_ceiling` (so the deterministic policy's I2/I3 invariants hold
+/// automatically, exactly as the templated agent path). Refuses non-pinned
+/// trust, SHA drift, or an invalid params object, collecting every reason.
+/// Empty params (`{}` or `null`) are passed through and omitted from the step's
+/// `parameters` so param-less calls remain byte-identical to the pre-params
+/// shape (back-compat).
 pub fn expand_python_for_agent(
     candidate: &PythonSkillCandidate,
     stored_trust: SkillTrust,
     stored_sha256: &str,
     data_ceiling: DataClass,
+    params: &serde_json::Value,
 ) -> Result<Vec<PlannedStep>, InvokeRefusal> {
     if !matches!(stored_trust, SkillTrust::Pinned) {
         return Err(InvokeRefusal {
@@ -49,10 +55,13 @@ pub fn expand_python_for_agent(
     // + SHA re-hash; pinned satisfies runnable, so this adds the structural +
     // drift checks and returns the verbatim code.
     let code = prepare_python_invocation(candidate, stored_trust, stored_sha256)?;
+    let params = validate_python_params(params)
+        .map_err(|e| InvokeRefusal { reasons: vec![e.to_string()] })?;
+    let step = python_exec_step(&code, &params);
     Ok(vec![PlannedStep {
-        tool: PY_EXEC_TOOL.to_string(),
-        method: PY_EXEC_METHOD.to_string(),
-        parameters: serde_json::json!({ "code": code }),
+        tool: step.tool,
+        method: step.method,
+        parameters: step.parameters,
         returns: String::new(),
         done_when: String::new(),
         classification: data_ceiling,
@@ -129,8 +138,10 @@ mod tests {
     fn user_approved_is_not_autonomously_invocable() {
         let c = cand();
         let sha = compute_python_sha256(&c);
-        let err = expand_python_for_agent(&c, SkillTrust::UserApproved, &sha, DataClass::Public)
-            .unwrap_err();
+        let err = expand_python_for_agent(
+            &c, SkillTrust::UserApproved, &sha, DataClass::Public, &serde_json::json!({}),
+        )
+        .unwrap_err();
         assert!(err.reasons.iter().any(|r| r.contains("pinned")), "{err:?}");
     }
 
@@ -138,8 +149,10 @@ mod tests {
     fn pinned_expands_to_one_python_exec_planned_step() {
         let c = cand();
         let sha = compute_python_sha256(&c);
-        let steps = expand_python_for_agent(&c, SkillTrust::Pinned, &sha, DataClass::Secret)
-            .expect("pinned expands");
+        let steps = expand_python_for_agent(
+            &c, SkillTrust::Pinned, &sha, DataClass::Secret, &serde_json::json!({}),
+        )
+        .expect("pinned expands");
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].tool, "python-exec");
         assert_eq!(steps[0].method, "python.exec");
@@ -150,8 +163,36 @@ mod tests {
     #[test]
     fn pinned_with_sha_drift_refuses() {
         let c = cand();
-        let err = expand_python_for_agent(&c, SkillTrust::Pinned, &"0".repeat(64), DataClass::Secret)
-            .unwrap_err();
+        let err = expand_python_for_agent(
+            &c, SkillTrust::Pinned, &"0".repeat(64), DataClass::Secret, &serde_json::json!({}),
+        )
+        .unwrap_err();
         assert!(err.reasons.iter().any(|r| r.contains("sha")), "{err:?}");
+    }
+
+    #[test]
+    fn pinned_with_params_expands_step_carrying_params() {
+        let c = cand();
+        let sha = compute_python_sha256(&c);
+        let steps = expand_python_for_agent(
+            &c, SkillTrust::Pinned, &sha, DataClass::Secret, &serde_json::json!({"id": 9}),
+        )
+        .expect("pinned expands");
+        assert_eq!(
+            steps[0].parameters,
+            serde_json::json!({"code": "print('hi')\n", "params": {"id": 9}})
+        );
+        assert_eq!(steps[0].classification, DataClass::Secret);
+    }
+
+    #[test]
+    fn bad_params_refuses() {
+        let c = cand();
+        let sha = compute_python_sha256(&c);
+        let err = expand_python_for_agent(
+            &c, SkillTrust::Pinned, &sha, DataClass::Public, &serde_json::json!("flat"),
+        )
+        .unwrap_err();
+        assert!(err.reasons.iter().any(|r| r.contains("object")), "{err:?}");
     }
 }
