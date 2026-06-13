@@ -68,9 +68,12 @@ impl std::fmt::Display for ParamsError {
 pub fn serialize_params(params: &Option<Value>) -> Result<String, ParamsError> {
     match params {
         None => Ok("{}".to_string()),
-        Some(Value::Object(_)) => {
-            // Safe: a `Value` always serializes.
-            let s = serde_json::to_string(params.as_ref().unwrap()).unwrap_or_default();
+        Some(v @ Value::Object(_)) => {
+            // Safe: a `Value` always serializes. serde escapes every control
+            // char as a JSON \uXXXX sequence (so NUL never appears raw),
+            // making the result safe to hand to execve as one C-string env
+            // value.
+            let s = serde_json::to_string(v).unwrap_or_default();
             if s.len() > MAX_PARAMS_BYTES {
                 return Err(ParamsError::TooLarge { got: s.len(), max: MAX_PARAMS_BYTES });
             }
@@ -333,5 +336,18 @@ mod tests {
         assert!(!s.contains('\n'), "raw newline must be escaped inside JSON");
         let back: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(back["text"], "line1\nline2");
+    }
+
+    #[test]
+    fn serialize_params_escapes_nul_no_raw_nul_for_execve() {
+        // The serialized string becomes a single C-string env value handed to
+        // `execve`; a raw NUL would silently truncate it. serde escapes NUL
+        // as the 6-char sequence \u0000, so the output must contain no raw
+        // NUL byte and must still round-trip to the original value.
+        let v = serde_json::json!({ "text": "a\u{0000}b" });
+        let s = serialize_params(&Some(v)).unwrap();
+        assert!(!s.as_bytes().contains(&0), "serialized params must be NUL-free");
+        let back: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(back["text"], "a\u{0000}b");
     }
 }

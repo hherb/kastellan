@@ -12,8 +12,9 @@ plan → subagent-driven TDD: 14 tasks (Slice A worker + Slice B core), per-task
 whole-branch final review** that confirmed all 7 security invariants hold and caught one back-compat bug — `validate_python_params`
 rejected the `Value::Null` default of `InvokeDirective.params`, so a no-param autonomous python invoke was wrongly refused —
 fixed (`11c132d`, null ⇒ no-params) + regression-tested. Skill-catalog slices 1 (`0cbddc5`) + 2 (`e478309`) are MERGED to `main`.)
-**Session-end verification (Mac):** `cargo test --workspace` **1786 / 0 / 8** (skip-as-pass; +107 over the 1679 baseline:
-worker param units + real-interpreter + core pure/operator/agent/l3_run/types/CLI + e2e + the null-fix regressions);
+**Session-end verification (Mac):** `cargo test --workspace` **1787 / 0 / 8** (skip-as-pass; +108 over the 1679 baseline:
+worker param units + real-interpreter + core pure/operator/agent/l3_run/types/CLI + e2e + the null-fix regressions + the
+code-review follow-up `serialize_params_escapes_nul_no_raw_nul_for_execve` test);
 `clippy --workspace --all-targets -D warnings` clean. **`cli_memory_l3py_run_daemon_e2e` LIVE-GREEN on Mac Seatbelt under PG 18**
 (4/4): the param round-trip echoes `GOT:hi` from `KASTELLAN_PYTHON_PARAMS` through the real jail, over-cap params refuse, plus
 the slice-2 round-trip + fail-closed-when-disabled. **No new sandbox/seccomp surface** (only one `.env()` added to `run_code`;
@@ -45,6 +46,12 @@ can't be injected into the code — they arrive on a **side channel** the author
 - **Final-review bug fix** (`11c132d`): `validate_python_params(&Value::Null)` returned `NotObject`, but `InvokeDirective.params`
   + the daemon's absent-`params` default are both `Null`, so an autonomous no-param pinned-python invoke was wrongly refused
   (fail-closed, not a security hole). Now null ⇒ accepted-as-no-params; +3 regression tests (pure gate + agent expansion).
+- **PR-review follow-up** (this commit): the env var is the one new surface, so locked the NUL-safety invariant with an
+  explicit test — `serialize_params` of a NUL-bearing value must produce a NUL-free string (serde escapes NUL as a JSON
+  6-char unicode sequence), so it can not truncate the `execve` C-string env value. Also tidied `serialize_params` (bind the
+  matched object, drop the double `as_ref().unwrap()`). The other review points were no-ops: core-early-vs-worker-late cap
+  placement is correct/documented-deferred, snake_case-at-core-only is intentional, and the null-becomes-NotObject arm is
+  harmless defensive (JSON `null` deserializes to `None`, so it is unreachable over the wire).
 - **Carried debt (flagged):** `core/tests/cli_memory_l3py_run_daemon_e2e.rs` is now **705 LOC** (over the ~500 test-file cap,
   refactor-bucket (c)); `core/src/scheduler/inner_loop.rs` grew +3 lines (still the **priority (b) refactor** — now ~632 LOC).
 - Spec/plan: `docs/superpowers/{specs,plans}/2026-06-14-python-exec-runtime-params*`.
@@ -371,7 +378,7 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** **python-exec RUNTIME PARAMS is on branch `feat/python-exec-runtime-params` (PR [#278](https://github.com/hherb/kastellan/pull/278), not yet merged);** workspace 1786/0/8 + clippy clean + e2e live-green on Mac/PG 18. `main` carries python-exec **skill catalog slice 2**
+**Current state.** **python-exec RUNTIME PARAMS is on branch `feat/python-exec-runtime-params` (PR [#278](https://github.com/hherb/kastellan/pull/278), not yet merged);** workspace 1787/0/8 + clippy clean + e2e live-green on Mac/PG 18. `main` carries python-exec **skill catalog slice 2**
 (invocation + surfacing, PR [#276](https://github.com/hherb/kastellan/pull/276), commit `e478309`), python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)),
 **python-exec skill catalog slice 1** (PR [#275](https://github.com/hherb/kastellan/pull/275), commit `0cbddc5` — crystallise +
 approval + operator show/approve/pin CLI), egress slice
