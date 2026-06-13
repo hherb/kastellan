@@ -33,6 +33,22 @@ pub fn python_exec_step(code: &str) -> L3TemplateStep {
     }
 }
 
+/// Inject `kind:"python"` into an L3 invoke audit payload so the lifecycle
+/// stream distinguishes Python from templated skills without a new action. The
+/// single source of truth for the tag, shared by the operator path
+/// ([`super::operator`]) and the inner-loop agent path so the field name/value
+/// can never drift between them. A non-object payload is returned unchanged
+/// (defensive; the audit builders always produce objects).
+pub fn with_python_kind(mut payload: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "kind".to_string(),
+            serde_json::Value::String("python".to_string()),
+        );
+    }
+    payload
+}
+
 /// PURE decision: may this stored Python skill run, and if so, what code?
 ///
 /// 1. trust must be runnable (`UserApproved | Pinned`);

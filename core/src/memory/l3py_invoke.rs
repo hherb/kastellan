@@ -21,6 +21,3 @@ mod pure;
 pub use agent::*;
 pub use operator::*;
 pub use pure::*;
-
-#[cfg(test)]
-mod tests;

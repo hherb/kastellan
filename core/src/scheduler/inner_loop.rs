@@ -14,7 +14,9 @@ use crate::cassandra::review::{ChainReviewStage, ReviewStage, ReviewStageContext
 use crate::cassandra::types::{DataClass, Plan, PlannedStep, Verdict};
 use crate::memory::l3_approval::SkillTrust;
 use crate::memory::l3_invoke::{expand_for_agent, load_pinned_skill_by_name};
-use crate::memory::l3py_invoke::{expand_python_for_agent, load_pinned_python_skill_by_name};
+use crate::memory::l3py_invoke::{
+    expand_python_for_agent, load_pinned_python_skill_by_name, with_python_kind,
+};
 use crate::scheduler::audit::{
     build_l3_invoke_outcome_payload, build_l3_invoke_rejected_agent_payload,
     build_l3_invoked_payload, ACTION_L3_INVOKED, ACTION_L3_INVOKE_OUTCOME,
@@ -419,16 +421,12 @@ pub async fn run_to_terminal(
                                 Ok(steps) => {
                                     // Python skills take no args. Tag the audit
                                     // row with kind:"python" for a coherent
-                                    // lifecycle stream (mirrors the operator path).
-                                    let mut payload = build_l3_invoked_payload(
+                                    // lifecycle stream (shares `with_python_kind`
+                                    // with the operator path — one source of truth
+                                    // for the tag).
+                                    let payload = with_python_kind(build_l3_invoked_payload(
                                         py.memory_id, &name, &py.body_sha256, &[], steps.len(),
-                                    );
-                                    if let Some(obj) = payload.as_object_mut() {
-                                        obj.insert(
-                                            "kind".to_string(),
-                                            serde_json::Value::String("python".to_string()),
-                                        );
-                                    }
+                                    ));
                                     kastellan_db::audit::insert(
                                         pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
                                     ).await?;

@@ -48,12 +48,18 @@ approved/pinned Python skill **runnable**, mirroring the L3 invocation arc — r
 - **Review note:** subagent pool hit the monthly spend limit mid-Task-6-review; Tasks 6 (security-critical agent integration)
   + 7 (e2e) were controller-self-reviewed against the design spec §6 — all six security invariants verified (containment
   unchanged, approve==execute via SHA, no secret embedding, pinned-only autonomy, fail-closed daemon, code-never-surfaced).
-- **Carried debt (flagged, not done):** `core/src/scheduler/inner_loop.rs` is now **631 LOC** (was 593 pre-slice — already
-  over cap; +38 here). A prod-split is awkward because the `refuse_invoke!` macro uses `continue`; it is the **priority
-  refactor-bucket (b) item** now. `core/tests/cli_memory_l3py_run_daemon_e2e.rs` is 503 (3 over the test-file cap, within
-  tolerance). The vestigial 1-line `l3py_invoke/tests.rs` exists only because the facade declares `#[cfg(test)] mod tests;`
-  (tests are inline in pure/operator/agent). **Deferred to a future slice:** runtime **params** (needs a `python.exec`
-  structured arg channel — a python-exec worker slice-2).
+- **Review fixes (PR #276, post-review pass):** (#1) `with_python_kind` promoted to `l3py_invoke::pure` and shared by the
+  operator path + the inner-loop agent path (was duplicated inline in `inner_loop.rs`) — one source of truth for the
+  `kind:"python"` audit tag; (#3) the vestigial 1-line `l3py_invoke/tests.rs` placeholder + its `#[cfg(test)] mod tests;`
+  declaration removed (tests live inline in pure/operator/agent). Review issue #2 (templated/Python same-name collision is
+  silent to the planner — low, design tradeoff) lodged as [#277](https://github.com/hherb/kastellan/issues/277). Issue #4
+  (empty `body_sha256` default in the loader) verified a no-op: `build_python_skill_metadata` always writes the field, so the
+  default is a genuinely-unreachable fail-closed guard.
+- **Carried debt (flagged, not done):** `core/src/scheduler/inner_loop.rs` is now **629 LOC** (was 593 pre-slice — already
+  over cap; +36 net after the review dedup). A prod-split is awkward because the `refuse_invoke!` macro uses `continue`; it is
+  the **priority refactor-bucket (b) item** now. `core/tests/cli_memory_l3py_run_daemon_e2e.rs` is 503 (3 over the test-file
+  cap, within tolerance). **Deferred to a future slice:** runtime **params** (needs a `python.exec` structured arg channel —
+  a python-exec worker slice-2).
 - Spec/plan: `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*` (design covers both slices).
 
 ---
@@ -646,7 +652,7 @@ continues:
    `cli_memory_l3py_run_daemon_e2e` (live-green on Mac/PG 18). **★ NEXT immediate pick — runtime params** (the only deferred
    skill-catalog piece): a Python skill is verbatim/param-less until `python.exec` grows a structured arg channel (a
    python-exec **worker** slice-2 — `stdin`/`argv` params), then `l3py_invoke` threads named params through with the same
-   per-value guard as the templated path. **And the priority refactor: split `core/src/scheduler/inner_loop.rs` (631 LOC)** —
+   per-value guard as the templated path. **And the priority refactor: split `core/src/scheduler/inner_loop.rs` (629 LOC)** —
    extract the `invoke_skill` expansion (templated+python) into a helper; awkward because `refuse_invoke!` uses `continue`, so
    it needs its own reviewed change (see refactor bucket (b)).
 3. **python-exec worker slice-#2 candidates (on demand):** macOS writable scratch (shares browser-driver Phase 2's per-spawn
@@ -721,7 +727,7 @@ leading Phase-3 pick above. Beyond that, Phase-2 channels (IMAP/Telegram inbound
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
 - **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none meaningfully remaining.** The substantial ones are done — `cassandra/types.rs`, `inner_loop_audit.rs`, `entity_extraction/gliner_relex.rs` (2026-06-07 batch); `macos_seatbelt.rs` (PR #192); `recall.rs`/`l0_seed.rs`/`capture.rs`/`inner_loop.rs`/`replay.rs` (Earlier history). A fresh census shows only files sitting **1–27 LOC over cap** still carry a liftable block (`core/src/main.rs` 527, `db/src/lib.rs` 525, `core/src/bin/kastellan-cli/memory_l3/run.rs` 519, `core/src/tool_host.rs` 519, `core/src/cassandra/constitutional.rs` 502, `core/src/memory/l1_promote.rs` 501) — a lift would save little; defer unless one grows.
-- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `core/src/scheduler/runner.rs` (777), `core/src/scheduler/audit.rs` (701, tests already lifted), `db/src/entities.rs` (653), `workers/prelude/src/seccomp_lock.rs` (650), `core/src/scheduler/inner_loop.rs` (**631**, tests already lifted — grew +38 in the python-exec skill-catalog slice 2; **now the priority split**: extract the `invoke_skill` expansion (templated + python arms) into a helper — awkward because `refuse_invoke!` uses `continue`, so the helper must return a refusal/expansion enum the loop acts on). (`db/secrets.rs` [848 → 252 + crypto/key_provider/error siblings], `systemd_user.rs`, `gliner_relex.rs` done — see history.) Most over-cap production file remains `core/src/cli_audit.rs` (958).
+- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `core/src/scheduler/runner.rs` (777), `core/src/scheduler/audit.rs` (701, tests already lifted), `db/src/entities.rs` (653), `workers/prelude/src/seccomp_lock.rs` (650), `core/src/scheduler/inner_loop.rs` (**629**, tests already lifted — grew +36 net in the python-exec skill-catalog slice 2; **now the priority split**: extract the `invoke_skill` expansion (templated + python arms) into a helper — awkward because `refuse_invoke!` uses `continue`, so the helper must return a refusal/expansion enum the loop acts on). (`db/secrets.rs` [848 → 252 + crypto/key_provider/error siblings], `systemd_user.rs`, `gliner_relex.rs` done — see history.) Most over-cap production file remains `core/src/cli_audit.rs` (958).
   Also `supervisor/src/launchd_agents.rs` (508, +8) — pushed over by Option K's install-time warn; tests already external, so a fix needs a real prod-split (disproportionate for 8 lines; deferred per this same policy). And `core/src/scheduler/tool_dispatch.rs` (507, +7) — pushed over by the handoff stash + `fetch_handoff` intercept; tests already external (`tool_dispatch/tests.rs`), so deferred per the same ≤27-over policy (a clean split would lift the `fetch_handoff` intercept + stash path into a `handoff_dispatch.rs` sibling if it grows).
 - **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851), `core/src/cassandra/types/tests.rs` (568).
 

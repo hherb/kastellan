@@ -23,16 +23,7 @@ use crate::scheduler::audit::{
 };
 use crate::scheduler::inner_loop::StepDispatcher;
 
-use super::pure::{prepare_python_invocation, python_exec_step};
-
-/// Inject `kind:"python"` into an L3 invoke audit payload so the lifecycle
-/// stream distinguishes Python from templated skills without a new action.
-fn with_python_kind(mut payload: Value) -> Value {
-    if let Some(obj) = payload.as_object_mut() {
-        obj.insert("kind".to_string(), Value::String("python".to_string()));
-    }
-    payload
-}
+use super::pure::{prepare_python_invocation, python_exec_step, with_python_kind};
 
 /// Pool-free, unit-testable seam: gate via [`prepare_python_invocation`], and
 /// on success build the single `python.exec` step. Returns an [`InvokeRefusal`]
