@@ -1,10 +1,12 @@
 //! Drive one CPython child: build the argv, pipe the code over stdin,
 //! capture + cap the output. The pure pieces ([`python_args`],
-//! [`truncate_lossy`]) are unit-testable without an interpreter.
+//! [`truncate_lossy`], [`serialize_params`]) are unit-testable without an
+//! interpreter.
 
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use serde_json::Value;
 
 /// Byte cap on the submitted source. Far beyond any sane agent-authored
 /// snippet; exists so a runaway planner can't feed the pipe megabytes.
@@ -19,6 +21,67 @@ pub const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 /// `KASTELLAN_LANDLOCK_RW=["/tmp"]` the host policy carries; on macOS
 /// slice #1 it exists but is not writable (Seatbelt `(deny default)`).
 pub const SCRATCH_DIR: &str = "/tmp";
+
+/// Env var carrying the runtime params JSON object to the skill. The worker
+/// ALWAYS sets it (default `{}`) so the author's
+/// `json.loads(os.environ["KASTELLAN_PYTHON_PARAMS"])` never KeyErrors on the
+/// lookup. Survives `-I` (which drops only `PYTHON*` names).
+pub const PARAMS_ENV: &str = "KASTELLAN_PYTHON_PARAMS";
+
+/// Byte cap on the serialized params object. Sits under the Linux
+/// `MAX_ARG_STRLEN` (128 KiB) per-env-string `execve` wall with headroom;
+/// the host-side `core` enforces the same cap early (keep the two in sync —
+/// see `core/src/memory/l3py_invoke/pure.rs::MAX_PARAMS_BYTES`).
+pub const MAX_PARAMS_BYTES: usize = 64 * 1024;
+
+/// Why a params payload was rejected. The handler maps both arms to
+/// JSON-RPC `INVALID_PARAMS`.
+#[derive(Debug)]
+pub enum ParamsError {
+    /// Present but not a JSON object (array / scalar / null).
+    NotObject,
+    /// Serialized object exceeds [`MAX_PARAMS_BYTES`].
+    TooLarge { got: usize, max: usize },
+}
+
+impl std::fmt::Display for ParamsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParamsError::NotObject => write!(f, "params must be a JSON object"),
+            ParamsError::TooLarge { got, max } => {
+                write!(f, "params is {got} bytes; cap is {max}")
+            }
+        }
+    }
+}
+
+/// Serialize the optional params object to the env-var string.
+///
+/// * `None` ⇒ `"{}"` (the stable empty-default contract).
+/// * `Some(obj)` where `obj` is a JSON object ⇒ its compact serialization,
+///   rejected if it exceeds [`MAX_PARAMS_BYTES`].
+/// * `Some(non-object)` ⇒ [`ParamsError::NotObject`].
+///
+/// Pure (no I/O) so it is unit-testable without an interpreter. The worker is
+/// the AUTHORITATIVE enforcer of these checks — a direct or malformed call must
+/// never reach `execve` with an oversize/garbage env var.
+pub fn serialize_params(params: &Option<Value>) -> Result<String, ParamsError> {
+    match params {
+        None => Ok("{}".to_string()),
+        Some(v @ Value::Object(_)) => {
+            // Safe: a `Value` always serializes. serde escapes every control
+            // char as a JSON \uXXXX sequence (so NUL never appears raw),
+            // making the result safe to hand to execve as one C-string env
+            // value.
+            let s = serde_json::to_string(v).unwrap_or_default();
+            if s.len() > MAX_PARAMS_BYTES {
+                return Err(ParamsError::TooLarge { got: s.len(), max: MAX_PARAMS_BYTES });
+            }
+            Ok(s)
+        }
+        Some(_) => Err(ParamsError::NotObject),
+    }
+}
 
 /// Interpreter flags, pinned by a unit test:
 ///
@@ -98,13 +161,16 @@ pub fn truncate_lossy(bytes: &[u8], cap: usize) -> (String, bool) {
 /// Run `code` under `python`. The child's environment is cleared — the
 /// jail's lockdown vars are not its business — then given exactly
 /// `TMPDIR`/`HOME` pointing at the scratch dir, with cwd there too (when
-/// it exists, which it always does inside the jail).
-pub fn run_code(python: &Path, code: &str) -> std::io::Result<ExecOutcome> {
+/// it exists, which it always does inside the jail). Runtime params arrive
+/// as the JSON string `params_json` in the [`PARAMS_ENV`] env var; the
+/// value has already been validated and serialized by the caller.
+pub fn run_code(python: &Path, code: &str, params_json: &str) -> std::io::Result<ExecOutcome> {
     let mut cmd = Command::new(python);
     cmd.args(python_args())
         .env_clear()
         .env("TMPDIR", SCRATCH_DIR)
         .env("HOME", SCRATCH_DIR)
+        .env(PARAMS_ENV, params_json)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -222,5 +288,66 @@ mod tests {
         let (bytes, truncated) = read_capped(std::io::Cursor::new(data.clone()), 64).unwrap();
         assert_eq!(bytes, data);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn serialize_params_none_is_empty_object() {
+        assert_eq!(serialize_params(&None).unwrap(), "{}");
+    }
+
+    #[test]
+    fn serialize_params_object_round_trips() {
+        let v = serde_json::json!({"a": 1, "b": "x"});
+        let s = serialize_params(&Some(v)).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, serde_json::json!({"a": 1, "b": "x"}));
+    }
+
+    #[test]
+    fn serialize_params_rejects_non_object() {
+        assert!(matches!(
+            serialize_params(&Some(serde_json::json!([1, 2]))),
+            Err(ParamsError::NotObject)
+        ));
+        assert!(matches!(
+            serialize_params(&Some(serde_json::json!("flat"))),
+            Err(ParamsError::NotObject)
+        ));
+        assert!(matches!(
+            serialize_params(&Some(serde_json::Value::Null)),
+            Err(ParamsError::NotObject)
+        ));
+    }
+
+    #[test]
+    fn serialize_params_rejects_over_cap() {
+        let big = "x".repeat(MAX_PARAMS_BYTES);
+        let v = serde_json::json!({ "k": big });
+        assert!(matches!(
+            serialize_params(&Some(v)),
+            Err(ParamsError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn serialize_params_allows_newlines_in_values() {
+        let v = serde_json::json!({ "text": "line1\nline2" });
+        let s = serialize_params(&Some(v)).unwrap();
+        assert!(!s.contains('\n'), "raw newline must be escaped inside JSON");
+        let back: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(back["text"], "line1\nline2");
+    }
+
+    #[test]
+    fn serialize_params_escapes_nul_no_raw_nul_for_execve() {
+        // The serialized string becomes a single C-string env value handed to
+        // `execve`; a raw NUL would silently truncate it. serde escapes NUL
+        // as the 6-char sequence \u0000, so the output must contain no raw
+        // NUL byte and must still round-trip to the original value.
+        let v = serde_json::json!({ "text": "a\u{0000}b" });
+        let s = serialize_params(&Some(v)).unwrap();
+        assert!(!s.as_bytes().contains(&0), "serialized params must be NUL-free");
+        let back: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(back["text"], "a\u{0000}b");
     }
 }

@@ -258,14 +258,34 @@ fn hello_python_skill() -> PythonSkillCandidate {
     }
 }
 
+/// A Python skill that reads runtime params and echoes the `greeting` key,
+/// prefixed with `"GOT:"` so the assertion can distinguish it from other output.
+fn param_echo_skill() -> PythonSkillCandidate {
+    PythonSkillCandidate {
+        name: "param_echo_py".into(),
+        description: "Echo the greeting runtime param".into(),
+        code: "import os, json\np = json.loads(os.environ['KASTELLAN_PYTHON_PARAMS'])\nprint('GOT:' + p['greeting'])\n".into(),
+    }
+}
+
 /// Crystallise → approve a Python skill via the CLI; returns its memory id.
 /// Unlike the templated path, the Python approve gate needs NO `registry.loaded`
 /// snapshot (a python skill dispatches no tools — the jail is its ceiling), so
 /// none is seeded.
 async fn seed_and_approve_python_skill(pool: &sqlx::PgPool, data_dir: &Path, user: &str) -> i64 {
+    seed_and_approve_skill(pool, &hello_python_skill(), data_dir, user).await
+}
+
+/// Generic crystallise → approve helper for any [`PythonSkillCandidate`].
+async fn seed_and_approve_skill(
+    pool: &sqlx::PgPool,
+    skill: &PythonSkillCandidate,
+    data_dir: &Path,
+    user: &str,
+) -> i64 {
     let outcome = crystallise_python_skill(
         pool,
-        &hello_python_skill(),
+        skill,
         L3Source::AgentRaised { task_id: 1 },
     )
     .await
@@ -496,6 +516,188 @@ async fn python_run_fails_closed_when_python_exec_disabled() {
     assert!(
         combined.contains("python-exec") || combined.to_lowercase().contains("not registered"),
         "the failure must name the missing python-exec tool; got:\nstdout={stdout}\nstderr={stderr}",
+    );
+
+    pool.close().await;
+    drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 3 — runtime params round-trip: a skill that reads
+// KASTELLAN_PYTHON_PARAMS receives the submitted {"greeting": "hi"} object
+// and its stdout ("GOT:hi") flows back through the real jail into the
+// InvokeReport rendered by the CLI.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn python_skill_params_round_trip_through_jail() {
+    #[cfg(target_os = "macos")]
+    let _serial = serial_lock();
+
+    if missing_prereqs(true) {
+        return;
+    }
+    let Some(python) = find_python() else {
+        return;
+    };
+    let worker_bin = workspace_target_binary("kastellan-worker-python-exec");
+
+    let suffix = unique_suffix();
+    let user = current_username();
+    let cluster = tokio::task::block_in_place(|| cluster_for(&suffix));
+
+    let pool = prepare_db(&cluster).await;
+    let id = seed_and_approve_skill(&pool, &param_echo_skill(), &cluster.data_dir, &user).await;
+
+    let mock = spawn_inert_mock().await;
+    let (daemon, _daemon_guards) = bring_up_daemon(
+        &suffix,
+        &cluster.data_dir,
+        &mock.base_url,
+        &user,
+        &worker_bin,
+        &python,
+        true, // python-exec enabled
+    );
+
+    // Pass {"greeting": "hi"} as runtime params. The daemon builds a
+    // python.exec step with parameters: {code, params: {"greeting": "hi"}},
+    // which the worker serialises and exposes as KASTELLAN_PYTHON_PARAMS.
+    let output = Command::new(cli_binary())
+        .args([
+            "memory",
+            "l3",
+            "run",
+            &id.to_string(),
+            "--param",
+            "greeting=hi",
+            "--execute",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .env("USER", &user)
+        .env("KASTELLAN_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_L3_RUN_GRACE_SECS", "30")
+        .env("KASTELLAN_L3_RUN_TIMEOUT_SECS", "120")
+        .output()
+        .expect("spawn kastellan-cli memory l3 run --param greeting=hi --execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert!(
+        output.status.success(),
+        "param round-trip run must exit 0; got {:?}\n\
+         --- CLI stdout ---\n{}\n--- CLI stderr ---\n{}\n\
+         --- daemon stdout ({}) ---\n{}\n--- daemon stderr ({}) ---\n{}\n",
+        output.status,
+        stdout,
+        stderr,
+        daemon.stdout_path.display(),
+        std::fs::read_to_string(&daemon.stdout_path).unwrap_or_default(),
+        daemon.stderr_path.display(),
+        std::fs::read_to_string(&daemon.stderr_path).unwrap_or_default(),
+    );
+    assert!(
+        stdout.contains("executed skill"),
+        "stdout must report 'executed skill'; got:\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    // The skill printed "GOT:hi\n"; the InvokeReport embeds the worker's
+    // stdout in the step result JSON, so the rendered CLI output carries it.
+    assert!(
+        stdout.contains("GOT:hi"),
+        "stdout must carry the param-echo marker 'GOT:hi'; got:\n{stdout}",
+    );
+
+    // TODO(params-e2e): secret-param coverage needs the vault harness (deferred).
+    // The recursive substitute_refs_in_params walker is unit-tested in
+    // core/src/secrets/substitute.rs; the e2e confirmation is a nice-to-have.
+
+    pool.close().await;
+    drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 4 — over-cap params rejection: params serialising to >64 KiB are
+// rejected by the core gate (validate_python_params) before dispatch, and the
+// CLI renders a REFUSED outcome (exit non-zero). Asserted at the CLI output
+// layer, matching the fail-closed assertion style of scenario 2.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn python_skill_over_cap_params_refused() {
+    #[cfg(target_os = "macos")]
+    let _serial = serial_lock();
+
+    if missing_prereqs(true) {
+        return;
+    }
+    let Some(python) = find_python() else {
+        return;
+    };
+    let worker_bin = workspace_target_binary("kastellan-worker-python-exec");
+
+    let suffix = unique_suffix();
+    let user = current_username();
+    let cluster = tokio::task::block_in_place(|| cluster_for(&suffix));
+
+    let pool = prepare_db(&cluster).await;
+    // Any approved skill works — the gate fires before execution.
+    let id = seed_and_approve_python_skill(&pool, &cluster.data_dir, &user).await;
+
+    let mock = spawn_inert_mock().await;
+    let (_daemon, _daemon_guards) = bring_up_daemon(
+        &suffix,
+        &cluster.data_dir,
+        &mock.base_url,
+        &user,
+        &worker_bin,
+        &python,
+        true, // python-exec enabled
+    );
+
+    // Build a params JSON object whose serialised form exceeds the 64 KiB cap.
+    // {"greeting": "xxx…"} with 64*1024 x's serialises to ~65551 bytes > 65536.
+    let big_value = "x".repeat(64 * 1024);
+    let big_params = serde_json::json!({ "greeting": big_value });
+    let params_json_str = serde_json::to_string(&big_params).expect("serialise big params");
+
+    let output = Command::new(cli_binary())
+        .args([
+            "memory",
+            "l3",
+            "run",
+            &id.to_string(),
+            "--params-json",
+            &params_json_str,
+            "--execute",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .env("USER", &user)
+        .env("KASTELLAN_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_L3_RUN_GRACE_SECS", "30")
+        .env("KASTELLAN_L3_RUN_TIMEOUT_SECS", "120")
+        .output()
+        .expect("spawn kastellan-cli memory l3 run (over-cap params)");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // The core gate (validate_python_params) fires in the daemon's l3_run
+    // handler before dispatch. It returns InvokeReport::Refused, which the CLI
+    // renders as "REFUSED …" and exits non-zero.
+    assert!(
+        !output.status.success(),
+        "over-cap params must cause a non-zero exit; got {:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status,
+    );
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        combined.to_lowercase().contains("cap") || combined.to_lowercase().contains("refused"),
+        "the failure must mention the cap or REFUSED; got:\nstdout={stdout}\nstderr={stderr}",
     );
 
     pool.close().await;

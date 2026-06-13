@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use kastellan_protocol::server::Handler;
-use kastellan_worker_python_exec::exec::MAX_CAPTURE_BYTES;
+use kastellan_worker_python_exec::exec::{MAX_CAPTURE_BYTES, MAX_PARAMS_BYTES};
 use kastellan_worker_python_exec::handler::PythonExecHandler;
 
 /// First existing interpreter from the manifest's per-OS candidate
@@ -44,6 +44,17 @@ fn call(python: PathBuf, code: &str) -> serde_json::Value {
         .expect("python.exec should return a result, not an RPC error")
 }
 
+/// Like [`call`] but also sends a `params` object and returns the raw
+/// `Result` so a test can assert either success or an `INVALID_PARAMS` error.
+fn call_params(
+    python: PathBuf,
+    code: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, kastellan_protocol::RpcError> {
+    let mut h = PythonExecHandler::with_python(python);
+    h.call("python.exec", serde_json::json!({ "code": code, "params": params }))
+}
+
 #[test]
 fn happy_path_prints_and_exits_zero() {
     let Some(py) = find_python() else { return };
@@ -73,11 +84,19 @@ fn child_env_is_cleared_except_tmpdir_and_home() {
     );
     assert_eq!(r["exit_code"], 0);
     let keys = r["stdout"].as_str().unwrap().trim_end();
-    // Python itself may add LC_CTYPE on some platforms; what must NOT
-    // leak is anything kastellan- or host-shaped.
+    // Python itself may add LC_CTYPE on some platforms; KASTELLAN_PYTHON_PARAMS
+    // is intentionally injected by run_code. What must NOT leak is anything
+    // else kastellan- or host-shaped.
     for k in keys.split(',').filter(|k| !k.is_empty()) {
         assert!(
-            matches!(k, "TMPDIR" | "HOME" | "LC_CTYPE" | "__CF_USER_TEXT_ENCODING"),
+            matches!(
+                k,
+                "TMPDIR"
+                    | "HOME"
+                    | "LC_CTYPE"
+                    | "__CF_USER_TEXT_ENCODING"
+                    | "KASTELLAN_PYTHON_PARAMS"
+            ),
             "unexpected env var leaked into the python child: {k} (full: {keys})"
         );
     }
@@ -163,4 +182,37 @@ fn scratch_write_round_trip_under_tmpdir() {
     let r = call(py, code);
     assert_eq!(r["exit_code"], 0, "stderr: {}", r["stderr"]);
     assert_eq!(r["stdout"].as_str().unwrap().trim_end(), "scratch-ok");
+}
+
+#[test]
+fn params_round_trip_to_stdout() {
+    let Some(py) = find_python() else { return };
+    let code = "import os, json\n\
+                p = json.loads(os.environ['KASTELLAN_PYTHON_PARAMS'])\n\
+                print(p['greeting'], p['n'])\n";
+    let out = call_params(py, code, serde_json::json!({"greeting": "hi", "n": 7}))
+        .expect("dispatch ok");
+    assert_eq!(out["exit_code"], 0);
+    assert_eq!(out["stdout"].as_str().unwrap().trim(), "hi 7");
+}
+
+#[test]
+fn absent_params_defaults_to_empty_object() {
+    let Some(py) = find_python() else { return };
+    // Use the existing `call` helper which sends NO params key.
+    let code = "import os, json\n\
+                p = json.loads(os.environ['KASTELLAN_PYTHON_PARAMS'])\n\
+                print(len(p))\n";
+    let out = call(py, code);
+    assert_eq!(out["exit_code"], 0);
+    assert_eq!(out["stdout"].as_str().unwrap().trim(), "0");
+}
+
+#[test]
+fn over_cap_params_rejected_before_spawn() {
+    let Some(py) = find_python() else { return };
+    let big = "x".repeat(MAX_PARAMS_BYTES);
+    let err = call_params(py, "print(1)", serde_json::json!({"k": big}))
+        .unwrap_err();
+    assert_eq!(err.code, kastellan_protocol::codes::INVALID_PARAMS);
 }

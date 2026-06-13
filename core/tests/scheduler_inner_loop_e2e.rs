@@ -233,7 +233,7 @@ fn invoke_plan(name: &str, arg_key: &str, arg_val: &str) -> Plan {
         context: "c".into(), decision: "act".into(), rationale: "r".into(),
         steps: vec![], result: None, data_ceiling: DataClass::Public, refused: None,
         floor_request: None, l1_insight: None, l3_skill: None,
-        invoke_skill: Some(InvokeDirective { name: name.into(), args }),
+        invoke_skill: Some(InvokeDirective { name: name.into(), args, params: serde_json::Value::Null }),
         python_skill: None,
     }
 }

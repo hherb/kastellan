@@ -260,8 +260,22 @@ items unlock later ones.
     `invoke_skill` resolves a pinned python skill by name (CASSANDRA review applies); CLI `run` resolves the python
     name for its header. `cli_memory_l3py_run_daemon_e2e` (2 scenarios, **live-green on Mac Seatbelt under PG 18**):
     real-jail round-trip via the daemon + `kind:"python"` audit row + fail-closed-when-disabled. Spec/plan:
-    `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`. **Remaining: params** (needs a `python.exec`
-    structured arg channel — a python-exec worker slice-2).
+    `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`.
+  - [x] **Runtime params — 2026-06-14** (branch `feat/python-exec-runtime-params`, PR [#278](https://github.com/hherb/kastellan/pull/278)). A Python skill receives
+    runtime params via the env var `KASTELLAN_PYTHON_PARAMS` (one JSON object the worker always sets, default `{}`) — the
+    code stays verbatim/SHA-bound so params arrive on a side channel, not by mutating the source. **Slice A** (worker):
+    `python.exec` accepts an optional `params` object, `serialize_params` validates object-ness + a **64 KiB serialized cap**
+    (under the Linux `MAX_ARG_STRLEN` execve wall), `run_code` injects it as the env var (survives `-I`). **Slice B** (core):
+    `validate_python_params` (object, snake_case top-level keys, 64 KiB; **null/empty ⇒ no params**, omitted from the step)
+    threads through `l3py_invoke` operator + agent paths, `InvokeDirective.params`, the inner-loop `invoke_skill` arm, the
+    daemon `l3_run` payload, and CLI `memory l3 run --param k=v` / `--params-json '<obj>'`. Values are **arbitrary JSON**;
+    **secret:// refs in params materialise for free** through the existing `tool_host` dispatch chokepoint (recursive
+    `substitute_refs_in_params` walker; `Net::Deny` contains them). **Free-form passthrough** — no declared schema, SHA +
+    approval untouched; a missing key is a runtime `KeyError`. Live-green on Mac Seatbelt/PG 18 (`cli_memory_l3py_run_daemon_e2e`
+    param round-trip `GOT:hi` + over-cap refusal). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-14-python-exec-runtime-params*`.
+    **Follow-up: battle-test free-form passthrough for risk slip-throughs in test mode. Deferred:** scratch-file channel for
+    >64 KiB payloads (rides macOS writable-scratch); declared-param schema (only if free-form proves too loose); structured
+    secret-param e2e (the walker is unit-tested; daemon e2e lacks a vault harness today).
 - [ ] **Skill trust enum** — `Untrusted | UserApproved | Pinned`, each level mapping to an explicit capability ceiling (which workers it may invoke, which net allowlists, which fs paths). Authorship and approval recorded in `audit_log`; promotion requires re-approval. (Pattern: IronClaw skill trust model — user-placed vs registry-installed. The L3 templated-skill arc above is the first concrete implementation of this shape.)
 - [ ] Optional micro-VM backend for `python-exec` (Firecracker on Linux, Apple `container` on macOS — discovery spike completed 2026-05-21, verdict COMMIT; see [`docs/superpowers/specs/2026-05-21-macos-container-spike-notes.md`](../superpowers/specs/2026-05-21-macos-container-spike-notes.md))
 - [ ] **Tiered delegation policy with hard no-recursion ceiling** — when the scheduler grows subagent delegation (today everything is one inner loop), borrow openhuman's `docs/DELEGATION_POLICY.md` four-tier shape: Tier 1 reply-directly (no tools), Tier 2 direct tool, Tier 3 inline subagent (≤5 turns, no new thread), Tier 4 dedicated worker thread (>5 turns). **The structural constraint that matters: workers do not spawn workers.** Encode it in `tool_host` as a compile-time check (`SubagentContext: Sealed` newtype that can only be constructed from the root scheduler) so the spawn tree is provably finite and the audit log has bounded fan-out per task. Maps cleanly onto the existing `Lifecycle::{SingleUse, IdleTimeout}` shape: tier-3 inline subagents are `SingleUse`, tier-4 dedicated threads piggyback on `IdleTimeoutLifecycle`. Pre-req for any meaningful agent-authored-skills work; defines the budget per skill invocation.

@@ -519,7 +519,7 @@ fn validate_invoke_rejects_invoke_with_nonempty_steps() {
         }],
         result: None, data_ceiling: DataClass::Public, refused: None,
         floor_request: None, l1_insight: None, l3_skill: None,
-        invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default(), params: serde_json::Value::Null }),
         python_skill: None,
     };
     assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasSteps)));
@@ -532,7 +532,7 @@ fn validate_invoke_rejects_invoke_on_terminal_plan() {
         steps: vec![], result: Some(serde_json::json!({"body":"x"})),
         data_ceiling: DataClass::Public, refused: None, floor_request: None,
         l1_insight: None, l3_skill: None,
-        invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default(), params: serde_json::Value::Null }),
         python_skill: None,
     };
     assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::Terminal)));
@@ -548,7 +548,7 @@ fn validate_invoke_rejects_invoke_with_l3_skill() {
             name: "s".into(), description: "d".into(),
             parameters: vec![], steps: vec![],
         }),
-        invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default(), params: serde_json::Value::Null }),
         python_skill: None,
     };
     assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasL3Skill)));
@@ -568,7 +568,7 @@ fn validate_invoke_precedence_has_steps_wins_over_terminal() {
         result: Some(serde_json::json!({"body":"x"})),
         data_ceiling: DataClass::Public, refused: None, floor_request: None,
         l1_insight: None, l3_skill: None,
-        invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default() }),
+        invoke_skill: Some(InvokeDirective { name: "s".into(), args: Default::default(), params: serde_json::Value::Null }),
         python_skill: None,
     };
     assert!(matches!(plan.validate_invoke(), Err(MalformedInvoke::HasSteps)));
@@ -584,6 +584,23 @@ fn plan_without_invoke_skill_round_trips_without_the_key() {
     };
     let s = serde_json::to_string(&plan).unwrap();
     assert!(!s.contains("invoke_skill"), "absent directive must not serialize a key");
+}
+
+// ── InvokeDirective.params (python-skill runtime params) tests ────────────
+
+#[test]
+fn invoke_directive_deserializes_optional_params() {
+    let json = r#"{"name":"summarise","params":{"text":"hello"}}"#;
+    let d: InvokeDirective = serde_json::from_str(json).unwrap();
+    assert_eq!(d.name, "summarise");
+    assert_eq!(d.params, serde_json::json!({"text": "hello"}));
+}
+
+#[test]
+fn invoke_directive_params_defaults_to_null_when_absent() {
+    let json = r#"{"name":"summarise"}"#;
+    let d: InvokeDirective = serde_json::from_str(json).unwrap();
+    assert!(d.params.is_null());
 }
 
 // ── PythonSkillCandidate / completion_python_skill() tests ─────────────────

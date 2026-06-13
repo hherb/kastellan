@@ -9,11 +9,16 @@ use crate::common::resolve_connect_spec;
 
 /// Parsed argv for `memory l3 run` (after the `run` subcommand token is
 /// stripped). `arg_tokens` are the raw `name=value` strings, validated later
-/// by [`kastellan_core::memory::l3_invoke::parse_args`].
+/// by [`kastellan_core::memory::l3_invoke::parse_args`]. `param_tokens` are
+/// `name=value` runtime params for PYTHON skills (string-valued sugar);
+/// `params_json` is the full-JSON channel for richer param types. Both merge
+/// into one `params` object sent in the `l3_run` payload.
 #[derive(Debug, PartialEq, Eq)]
 struct RunArgv {
     id: i64,
     arg_tokens: Vec<String>,
+    param_tokens: Vec<String>,
+    params_json: Option<String>,
     execute: bool,
 }
 
@@ -27,6 +32,8 @@ struct RunArgv {
 fn parse_run_argv(args: &[String]) -> Result<RunArgv, String> {
     let mut id_str: Option<&String> = None;
     let mut arg_tokens: Vec<String> = Vec::new();
+    let mut param_tokens: Vec<String> = Vec::new();
+    let mut params_json: Option<String> = None;
     let mut execute = false;
     let mut i = 0;
     while i < args.len() {
@@ -41,6 +48,24 @@ fn parse_run_argv(args: &[String]) -> Result<RunArgv, String> {
             }
             // GNU-style equals form: --arg=name=value
             s if s.starts_with("--arg=") => arg_tokens.push(s["--arg=".len()..].to_string()),
+            "--param" => {
+                i += 1;
+                match args.get(i) {
+                    Some(kv) => param_tokens.push(kv.clone()),
+                    None => return Err("memory l3 run: --param requires a name=value".to_string()),
+                }
+            }
+            s if s.starts_with("--param=") => param_tokens.push(s["--param=".len()..].to_string()),
+            "--params-json" => {
+                i += 1;
+                match args.get(i) {
+                    Some(j) => params_json = Some(j.clone()),
+                    None => return Err("memory l3 run: --params-json requires a JSON object".to_string()),
+                }
+            }
+            s if s.starts_with("--params-json=") => {
+                params_json = Some(s["--params-json=".len()..].to_string())
+            }
             s if id_str.is_none() && !s.starts_with("--") => id_str = Some(&args[i]),
             other => return Err(format!("memory l3 run: unexpected argument '{other}'")),
         }
@@ -52,7 +77,34 @@ fn parse_run_argv(args: &[String]) -> Result<RunArgv, String> {
     let id: i64 = id_str
         .parse()
         .map_err(|e| format!("memory l3 run: invalid id '{id_str}': {e}"))?;
-    Ok(RunArgv { id, arg_tokens, execute })
+    Ok(RunArgv { id, arg_tokens, param_tokens, params_json, execute })
+}
+
+/// Merge `--params-json` (base object) with `--param name=value` overrides into
+/// one validated JSON object. Starts from the parsed `--params-json` (or `{}`),
+/// then applies each `name=value` token as a STRING value (later wins). Rejects
+/// a non-object base, malformed JSON, or a token without `=`. The result is
+/// re-validated host-side by `validate_python_params` before dispatch; this
+/// function only assembles it.
+pub(super) fn build_params(
+    params_json: Option<&str>,
+    param_tokens: &[String],
+) -> Result<serde_json::Value, String> {
+    let mut base = match params_json {
+        None => serde_json::Map::new(),
+        Some(s) => match serde_json::from_str::<serde_json::Value>(s) {
+            Ok(serde_json::Value::Object(m)) => m,
+            Ok(_) => return Err("--params-json must be a JSON object".to_string()),
+            Err(e) => return Err(format!("--params-json is not valid JSON: {e}")),
+        },
+    };
+    for tok in param_tokens {
+        let (name, value) = tok
+            .split_once('=')
+            .ok_or_else(|| format!("--param '{tok}' is not of the form name=value"))?;
+        base.insert(name.to_string(), serde_json::Value::String(value.to_string()));
+    }
+    Ok(serde_json::Value::Object(base))
 }
 
 /// Render an [`InvokeReport`] to operator-facing text + an exit code.
@@ -134,12 +186,16 @@ pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
     use sqlx::postgres::PgListener;
 
     // --- parse argv ----------------------------------------------------
-    let RunArgv { id, arg_tokens, execute } = match parse_run_argv(args) {
+    let RunArgv { id, arg_tokens, param_tokens, params_json, execute } = match parse_run_argv(args) {
         Ok(v) => v,
         Err(msg) => { eprintln!("{msg}"); return ExitCode::from(2); }
     };
     let args_map = match parse_args(&arg_tokens) {
         Ok(m) => m,
+        Err(e) => { eprintln!("memory l3 run: {e}"); return ExitCode::from(2); }
+    };
+    let params = match build_params(params_json.as_deref(), &param_tokens) {
+        Ok(p) => p,
         Err(e) => { eprintln!("memory l3 run: {e}"); return ExitCode::from(2); }
     };
 
@@ -168,6 +224,7 @@ pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
         "kind": "l3_run",
         "memory_id": id,
         "args": args_map,
+        "params": params,
         "execute": execute,
     });
     let task_id = match submit_and_audit(&pool, Lane::Long, payload).await {
@@ -412,9 +469,53 @@ mod tests {
     }
 
     #[test]
+    fn build_params_empty_is_empty_object() {
+        let v = super::build_params(None, &[]).unwrap();
+        assert_eq!(v, serde_json::json!({}));
+    }
+
+    #[test]
+    fn build_params_from_param_tokens_are_string_values() {
+        let v = super::build_params(None, &v(&["greeting=hi", "name=world"])).unwrap();
+        assert_eq!(v, serde_json::json!({"greeting": "hi", "name": "world"}));
+    }
+
+    #[test]
+    fn build_params_json_base_merged_with_param_overrides() {
+        let v = super::build_params(
+            Some(r#"{"n": 5, "greeting": "old"}"#),
+            &v(&["greeting=new"]),
+        )
+        .unwrap();
+        assert_eq!(v, serde_json::json!({"n": 5, "greeting": "new"}));
+    }
+
+    #[test]
+    fn build_params_rejects_non_object_json() {
+        assert!(super::build_params(Some("[1,2]"), &[]).is_err());
+    }
+
+    #[test]
+    fn build_params_rejects_malformed_token() {
+        assert!(super::build_params(None, &v(&["noequals"])).is_err());
+    }
+
+    #[test]
+    fn parse_run_argv_collects_param_and_params_json() {
+        let got = parse_run_argv(&v(&[
+            "5", "--param", "a=b", "--params-json", r#"{"n":1}"#, "--execute",
+        ]))
+        .unwrap();
+        assert_eq!(got.id, 5);
+        assert_eq!(got.param_tokens, v(&["a=b"]));
+        assert_eq!(got.params_json.as_deref(), Some(r#"{"n":1}"#));
+        assert!(got.execute);
+    }
+
+    #[test]
     fn parses_id_args_and_execute() {
         let got = parse_run_argv(&v(&["5", "--arg", "a=b", "--execute"])).unwrap();
-        assert_eq!(got, RunArgv { id: 5, arg_tokens: v(&["a=b"]), execute: true });
+        assert_eq!(got, RunArgv { id: 5, arg_tokens: v(&["a=b"]), param_tokens: vec![], params_json: None, execute: true });
     }
 
     #[test]
@@ -434,7 +535,7 @@ mod tests {
     #[test]
     fn id_may_follow_flags() {
         let got = parse_run_argv(&v(&["--execute", "9"])).unwrap();
-        assert_eq!(got, RunArgv { id: 9, arg_tokens: vec![], execute: true });
+        assert_eq!(got, RunArgv { id: 9, arg_tokens: vec![], param_tokens: vec![], params_json: None, execute: true });
     }
 
     #[test]

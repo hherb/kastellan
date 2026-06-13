@@ -7,6 +7,8 @@
 //! against the stored digest — the TOCTOU close that guarantees the bytes the
 //! operator read and approved are the bytes that run.
 
+use serde_json::Value;
+
 use crate::cassandra::types::{L3TemplateStep, PythonSkillCandidate};
 use crate::memory::l3_approval::ApprovalDecision;
 use crate::memory::l3_approval::SkillTrust;
@@ -24,12 +26,90 @@ pub const PY_EXEC_TOOL: &str = "python-exec";
 /// `workers/python-exec/src/handler.rs`).
 pub const PY_EXEC_METHOD: &str = "python.exec";
 
-/// Build the single `python.exec` step that runs `code` verbatim.
-pub fn python_exec_step(code: &str) -> L3TemplateStep {
+/// Byte cap on serialized runtime params. Keep in sync with the worker's
+/// authoritative cap (`workers/python-exec/src/exec.rs::MAX_PARAMS_BYTES`);
+/// core enforces it early for a clean refusal, the worker enforces it as the
+/// real boundary.
+pub const MAX_PARAMS_BYTES: usize = 64 * 1024;
+
+/// Why a runtime params object was rejected at the core gate.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PyParamError {
+    #[error("params must be a JSON object")]
+    NotObject,
+    #[error("params name '{0}' is not snake_case")]
+    BadKey(String),
+    #[error("params serialize to {got} bytes; cap is {max}")]
+    TooLarge { got: usize, max: usize },
+}
+
+/// `true` iff `s` is a strict snake_case identifier (`[a-z][a-z0-9_]*`).
+fn is_snake_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// PURE gate for a runtime params object: must be a JSON object, every
+/// TOP-LEVEL key snake_case (param names; nested structure is opaque author
+/// data), serialized ≤ [`MAX_PARAMS_BYTES`]. Returns the validated object
+/// unchanged. Unlike the templated arg guard there is NO newline/control-char
+/// rejection — serde escapes control chars inside JSON strings, so long
+/// multi-line text passes freely.
+pub fn validate_python_params(params: &Value) -> Result<Value, PyParamError> {
+    // A null params value means "no params" — accept it. `InvokeDirective.params`
+    // defaults to `Value::Null` (and the daemon defaults an absent `params` key to
+    // Null), so the agent/daemon no-param path lands here. `params_is_empty` and
+    // `python_exec_step` already treat null/empty-object identically (the step
+    // omits the `params` key), so returning Null unchanged is correct and keeps a
+    // no-param call byte-identical to the pre-params shape.
+    if params.is_null() {
+        return Ok(params.clone());
+    }
+    let obj = params.as_object().ok_or(PyParamError::NotObject)?;
+    for key in obj.keys() {
+        if !is_snake_ident(key) {
+            return Err(PyParamError::BadKey(key.clone()));
+        }
+    }
+    let serialized = serde_json::to_string(params).unwrap_or_default();
+    if serialized.len() > MAX_PARAMS_BYTES {
+        return Err(PyParamError::TooLarge { got: serialized.len(), max: MAX_PARAMS_BYTES });
+    }
+    Ok(params.clone())
+}
+
+/// `true` iff `params` carries no values (JSON null or an empty object) — used
+/// to decide whether the `python.exec` step omits the `params` key entirely
+/// (back-compat with param-less rows + their tests).
+pub fn params_is_empty(params: &Value) -> bool {
+    match params {
+        Value::Null => true,
+        Value::Object(m) => m.is_empty(),
+        _ => false,
+    }
+}
+
+/// Build the single `python.exec` step that runs `code` verbatim. When
+/// `params` is non-empty it is added as a `params` key on the step's
+/// `parameters` (where the dispatch chokepoint's recursive secret-ref walker
+/// will materialise any `secret://` leaves); an empty params object is omitted
+/// so a no-param call is byte-identical to the pre-params shape.
+pub fn python_exec_step(code: &str, params: &Value) -> L3TemplateStep {
+    let mut parameters = serde_json::json!({ "code": code });
+    if !params_is_empty(params) {
+        parameters
+            .as_object_mut()
+            .expect("parameters is an object")
+            .insert("params".to_string(), params.clone());
+    }
     L3TemplateStep {
         tool: PY_EXEC_TOOL.to_string(),
         method: PY_EXEC_METHOD.to_string(),
-        parameters: serde_json::json!({ "code": code }),
+        parameters,
     }
 }
 
@@ -154,9 +234,79 @@ mod tests {
 
     #[test]
     fn builds_one_python_exec_step() {
-        let step = python_exec_step("print(1)\n");
+        let step = python_exec_step("print(1)\n", &serde_json::json!({}));
         assert_eq!(step.tool, "python-exec");
         assert_eq!(step.method, "python.exec");
+        assert_eq!(step.parameters, serde_json::json!({"code": "print(1)\n"}));
+    }
+
+    #[test]
+    fn validate_params_accepts_object_with_snake_case_keys() {
+        let v = serde_json::json!({"repo_path": "/tmp/x", "limit": 5, "tags": ["a", "b"]});
+        let got = validate_python_params(&v).expect("valid");
+        assert_eq!(got, v);
+    }
+
+    #[test]
+    fn validate_params_rejects_non_object() {
+        assert!(validate_python_params(&serde_json::json!([1, 2])).is_err());
+        assert!(validate_python_params(&serde_json::json!("flat")).is_err());
+    }
+
+    #[test]
+    fn validate_params_rejects_non_snake_case_top_level_key() {
+        // Top-level keys are param NAMES; nested keys are opaque author data.
+        let v = serde_json::json!({"BadKey": 1});
+        assert!(validate_python_params(&v).is_err());
+    }
+
+    #[test]
+    fn validate_params_allows_arbitrary_nested_keys() {
+        // Nested object keys are data, NOT param names — no snake_case rule.
+        let v = serde_json::json!({"payload": {"CamelCase": 1, "with space": 2}});
+        assert!(validate_python_params(&v).is_ok());
+    }
+
+    #[test]
+    fn validate_params_rejects_over_cap() {
+        let big = "x".repeat(MAX_PARAMS_BYTES);
+        let v = serde_json::json!({"k": big});
+        assert!(validate_python_params(&v).is_err());
+    }
+
+    #[test]
+    fn params_is_empty_is_true_for_null_and_empty_object() {
+        assert!(params_is_empty(&serde_json::Value::Null));
+        assert!(params_is_empty(&serde_json::json!({})));
+        assert!(!params_is_empty(&serde_json::json!({"a": 1})));
+    }
+
+    #[test]
+    fn step_omits_params_when_empty() {
+        let step = python_exec_step("print(1)\n", &serde_json::json!({}));
+        assert_eq!(step.parameters, serde_json::json!({"code": "print(1)\n"}));
+    }
+
+    #[test]
+    fn step_carries_params_when_present() {
+        let step = python_exec_step("print(1)\n", &serde_json::json!({"n": 3}));
+        assert_eq!(
+            step.parameters,
+            serde_json::json!({"code": "print(1)\n", "params": {"n": 3}})
+        );
+    }
+
+    #[test]
+    fn validate_params_accepts_null_as_no_params() {
+        // InvokeDirective.params defaults to Value::Null — must be accepted,
+        // not refused, so a no-param autonomous python invoke works.
+        let got = validate_python_params(&serde_json::Value::Null).expect("null is no-params");
+        assert!(got.is_null());
+    }
+
+    #[test]
+    fn step_omits_params_when_null() {
+        let step = python_exec_step("print(1)\n", &serde_json::Value::Null);
         assert_eq!(step.parameters, serde_json::json!({"code": "print(1)\n"}));
     }
 }
