@@ -23,11 +23,13 @@ use crate::scheduler::audit::{
 };
 use crate::scheduler::inner_loop::StepDispatcher;
 
-use super::pure::{prepare_python_invocation, python_exec_step, with_python_kind};
+use super::pure::{
+    prepare_python_invocation, python_exec_step, validate_python_params, with_python_kind,
+};
 
-/// Pool-free, unit-testable seam: gate via [`prepare_python_invocation`], and
-/// on success build the single `python.exec` step. Returns an [`InvokeRefusal`]
-/// on any gate failure.
+/// Pool-free, unit-testable seam: gate via [`prepare_python_invocation`], validate
+/// `params`, and on success build the single `python.exec` step. Returns an
+/// [`InvokeRefusal`] on any gate failure (trust, SHA drift, or invalid params).
 ///
 /// This is a pure-ish function (no I/O) so the operator logic can be tested
 /// independently of the database.
@@ -35,11 +37,12 @@ pub fn prepare_python_steps(
     candidate: &PythonSkillCandidate,
     stored_trust: SkillTrust,
     stored_sha256: &str,
+    params: &serde_json::Value,
 ) -> Result<Vec<L3TemplateStep>, InvokeRefusal> {
     let code = prepare_python_invocation(candidate, stored_trust, stored_sha256)?;
-    // TODO(B2): thread real runtime params here; empty params preserves the
-    // pre-params wire shape (back-compat stopgap).
-    Ok(vec![python_exec_step(&code, &serde_json::json!({}))])
+    let params = validate_python_params(params)
+        .map_err(|e| InvokeRefusal { reasons: vec![e.to_string()] })?;
+    Ok(vec![python_exec_step(&code, &params)])
 }
 
 /// Orchestrate operator-triggered invocation of an approved Python skill.
@@ -62,10 +65,11 @@ pub async fn invoke_python_skill(
     candidate: &PythonSkillCandidate,
     stored_trust: SkillTrust,
     stored_sha256: &str,
+    params: &serde_json::Value,
     execute: bool,
 ) -> InvokeReport {
     // Gate once — the entire function never retries or re-gates.
-    let steps = match prepare_python_steps(candidate, stored_trust, stored_sha256) {
+    let steps = match prepare_python_steps(candidate, stored_trust, stored_sha256, params) {
         Ok(steps) => steps,
         Err(InvokeRefusal { reasons }) => {
             let payload = with_python_kind(build_l3_invoke_rejected_payload(
@@ -135,7 +139,9 @@ mod tests {
     fn untrusted_yields_refusal() {
         let c = cand();
         let sha = compute_python_sha256(&c);
-        let err = prepare_python_steps(&c, SkillTrust::Untrusted, &sha).unwrap_err();
+        let err =
+            prepare_python_steps(&c, SkillTrust::Untrusted, &sha, &serde_json::json!({}))
+                .unwrap_err();
         assert!(!err.reasons.is_empty());
     }
 
@@ -143,7 +149,9 @@ mod tests {
     fn approved_builds_exactly_one_python_exec_step() {
         let c = cand();
         let sha = compute_python_sha256(&c);
-        let steps = prepare_python_steps(&c, SkillTrust::UserApproved, &sha).unwrap();
+        let steps =
+            prepare_python_steps(&c, SkillTrust::UserApproved, &sha, &serde_json::json!({}))
+                .unwrap();
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].tool, "python-exec");
         assert_eq!(steps[0].method, "python.exec");
@@ -153,8 +161,36 @@ mod tests {
     #[test]
     fn sha_drift_yields_refusal() {
         let c = cand();
-        let err = prepare_python_steps(&c, SkillTrust::Pinned, &"0".repeat(64)).unwrap_err();
+        let err =
+            prepare_python_steps(&c, SkillTrust::Pinned, &"0".repeat(64), &serde_json::json!({}))
+                .unwrap_err();
         assert!(err.reasons.iter().any(|r| r.contains("sha")), "{err:?}");
+    }
+
+    #[test]
+    fn approved_with_params_builds_step_carrying_params() {
+        let c = cand();
+        let sha = compute_python_sha256(&c);
+        let steps = prepare_python_steps(
+            &c, SkillTrust::UserApproved, &sha, &serde_json::json!({"n": 3}),
+        )
+        .unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].parameters,
+            serde_json::json!({"code": "print('hi')\n", "params": {"n": 3}})
+        );
+    }
+
+    #[test]
+    fn bad_params_yields_refusal() {
+        let c = cand();
+        let sha = compute_python_sha256(&c);
+        let err = prepare_python_steps(
+            &c, SkillTrust::UserApproved, &sha, &serde_json::json!([1, 2]),
+        )
+        .unwrap_err();
+        assert!(err.reasons.iter().any(|r| r.contains("object")), "{err:?}");
     }
 
     #[test]

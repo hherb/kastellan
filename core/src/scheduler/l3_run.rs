@@ -131,7 +131,8 @@ pub async fn run_l3_run_task(
         let body_sha256 =
             row.metadata.get("body_sha256").and_then(|v| v.as_str()).unwrap_or("");
         return invoke_python_skill(
-            pool, req.memory_id, dispatcher, &candidate, trust, body_sha256, req.execute,
+            pool, req.memory_id, dispatcher, &candidate, trust, body_sha256,
+            &serde_json::json!({}), req.execute,
         )
         .await;
     }
