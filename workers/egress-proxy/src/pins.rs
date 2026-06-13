@@ -11,13 +11,9 @@ use x509_cert::der::{Decode, Encode};
 /// accept path (`proxy::run_mitm`) can distinguish a pin rejection from a
 /// generic upstream-handshake failure without a typed error channel through
 /// tokio-rustls.
-// Forward-declared for later tasks in slice #4; not wired up yet.
-#[allow(dead_code)]
 pub const PIN_MISMATCH_MARKER: &str = "certificate pin mismatch";
 
 /// Errors from parsing pins or extracting an SPKI. Display-only.
-// Variants used by later slice #4 tasks (pin-set + verifier).
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum PinError {
     /// The `KASTELLAN_EGRESS_PROXY_PINS` JSON did not parse / was the wrong shape.
@@ -46,9 +42,6 @@ impl std::error::Error for PinError {}
 /// DER-encoded `SubjectPublicKeyInfo`. `to_der()` re-encodes; for canonical DER
 /// (every CA-issued cert) that is byte-identical to the original SPKI bytes —
 /// pinned by `spki_sha256_matches_independently_computed_pin`.
-// Used by tests now; pin-set + verifier tasks (later slice #4) will use it from
-// non-test code.
-#[allow(dead_code)]
 pub fn spki_sha256(cert_der: &[u8]) -> Result<[u8; 32], PinError> {
     let cert = x509_cert::Certificate::from_der(cert_der)
         .map_err(|e| PinError::X509(format!("parse cert: {e}")))?;
@@ -63,14 +56,11 @@ pub fn spki_sha256(cert_der: &[u8]) -> Result<[u8; 32], PinError> {
 use std::collections::{HashMap, HashSet};
 
 /// A parsed set of SPKI pins, keyed by lowercased host.
-// Forward-declared for Task 3 (PinningVerifier); not yet used in production code.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub struct PinSet {
     map: HashMap<String, HashSet<[u8; 32]>>,
 }
 
-#[allow(dead_code)]
 impl PinSet {
     /// Parse the `KASTELLAN_EGRESS_PROXY_PINS` JSON:
     /// `{ "host": ["sha256/<base64>", ...], ... }`. Host keys are lowercased.
@@ -105,7 +95,6 @@ impl PinSet {
 }
 
 /// Decode one `sha256/<base64-standard>` pin string into a 32-byte digest.
-#[allow(dead_code)]
 fn parse_pin(s: &str) -> Result<[u8; 32], PinError> {
     use base64::Engine;
     let b64 = s
@@ -122,7 +111,6 @@ fn parse_pin(s: &str) -> Result<[u8; 32], PinError> {
 /// True iff any DER cert in `chain` hashes to a pin in `pins`. A cert that fails
 /// SPKI extraction is treated as "no match" (webpki has already validated the
 /// chain by the time this runs), never fatal.
-#[allow(dead_code)]
 pub fn chain_has_pin(pins: &HashSet<[u8; 32]>, chain: &[&[u8]]) -> bool {
     chain
         .iter()
@@ -161,7 +149,6 @@ fn server_name_host(name: &ServerName) -> String {
 /// then, for hosts in `pins`, additionally requires a chain SPKI to match a pin.
 /// Unpinned hosts are unaffected (webpki only). Signature-verification methods
 /// delegate to the inner webpki verifier unchanged.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct PinningVerifier {
     inner: Arc<WebPkiServerVerifier>,
@@ -170,7 +157,6 @@ pub struct PinningVerifier {
 
 impl PinningVerifier {
     /// Build over `roots`. Returns `Err` only if rustls refuses the roots.
-    #[allow(dead_code)]
     pub fn new(roots: Arc<RootCertStore>, pins: PinSet) -> Result<Self, PinError> {
         let inner = WebPkiServerVerifier::builder(roots)
             .build()
@@ -224,6 +210,42 @@ impl ServerCertVerifier for PinningVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
     }
+}
+
+/// Build the upstream-leg `ClientConfig` for the MITM re-origination.
+///
+/// * `None` / blank / `{}` ⇒ the plain webpki-roots config (byte-identical to
+///   the pre-slice-#4 behaviour, zero added cost).
+/// * a valid non-empty pin set ⇒ the same webpki roots wrapped in a
+///   [`PinningVerifier`].
+/// * a set-but-unparseable value ⇒ `Err` (the caller aborts startup — fail loud,
+///   never silently degrade to no-pinning).
+pub fn build_upstream_client_config(
+    pins_env: Option<&str>,
+) -> Result<Arc<rustls::ClientConfig>, PinError> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let pins = match pins_env.map(str::trim) {
+        None | Some("") => PinSet::default(),
+        Some(json) => PinSet::parse(json)?,
+    };
+
+    if pins.is_empty() {
+        return Ok(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        ));
+    }
+
+    let verifier = Arc::new(PinningVerifier::new(Arc::new(roots), pins)?);
+    Ok(Arc::new(
+        rustls::ClientConfig::builder()
+            .dangerous() // custom verifier — STRENGTHENS validation (webpki + pin overlay)
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth(),
+    ))
 }
 
 #[cfg(test)]

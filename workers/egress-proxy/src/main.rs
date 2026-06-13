@@ -72,15 +72,14 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("UDS path has no parent dir"))?
         .join("secret_hashes.json");
 
-    // Upstream trust for the re-origination leg: the REAL public roots. The
-    // proxy validates the true origin here (the worker only trusts our CA).
-    let mut upstream_roots = rustls::RootCertStore::empty();
-    upstream_roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let upstream_tls = std::sync::Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(upstream_roots)
-            .with_no_client_auth(),
-    );
+    // Upstream trust for the re-origination leg: the REAL public roots, plus an
+    // optional operator-provided SPKI pin overlay for high-value origins (slice
+    // #4). A malformed pin set aborts startup (fail-closed) rather than silently
+    // disabling pinning. Unset ⇒ plain webpki, byte-identical to slice #3b.
+    let upstream_tls = pins::build_upstream_client_config(
+        std::env::var("KASTELLAN_EGRESS_PROXY_PINS").ok().as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("build upstream TLS config: {e}"))?;
 
     // Worker-side defense-in-depth (Linux Landlock+seccomp; no-op on macOS,
     // where the parent Seatbelt profile contains us). Outbound socket(2) +

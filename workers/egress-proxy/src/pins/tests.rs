@@ -157,3 +157,30 @@ fn pinned_host_with_wrong_spki_is_rejected() {
     let err = verify(&verifier, "origin.test", &ee).unwrap_err();
     assert!(err.to_string().contains(PIN_MISMATCH_MARKER), "got: {err}");
 }
+
+#[test]
+fn build_upstream_none_is_plain_webpki() {
+    install_provider();
+    assert!(build_upstream_client_config(None).is_ok());
+}
+
+#[test]
+fn build_upstream_empty_string_is_plain_webpki() {
+    install_provider();
+    assert!(build_upstream_client_config(Some("   ")).is_ok());
+    assert!(build_upstream_client_config(Some("{}")).is_ok());
+}
+
+#[test]
+fn build_upstream_valid_pins_builds() {
+    install_provider();
+    let pin = [0x33u8; 32];
+    let json = format!(r#"{{"api.anthropic.com":["{}"]}}"#, pin_str(&pin));
+    assert!(build_upstream_client_config(Some(&json)).is_ok());
+}
+
+#[test]
+fn build_upstream_malformed_pins_is_err() {
+    install_provider();
+    assert!(build_upstream_client_config(Some("{ this is not json")).is_err());
+}
