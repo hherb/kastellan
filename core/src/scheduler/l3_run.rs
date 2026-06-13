@@ -23,10 +23,11 @@ use kastellan_db::memories::{fetch_by_ids, MemoryLayer};
 pub const L3_RUN_KIND: &str = "l3_run";
 
 /// Parsed `l3_run` task payload.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct L3RunRequest {
     pub memory_id: i64,
     pub args: BTreeMap<String, String>,
+    pub params: Value,
     pub execute: bool,
 }
 
@@ -58,7 +59,12 @@ pub fn parse_l3_run_payload(payload: &Value) -> Result<L3RunRequest, String> {
             args.insert(k.clone(), s.to_string());
         }
     }
-    Ok(L3RunRequest { memory_id, args, execute })
+    let params = match payload.get("params") {
+        None | Some(Value::Null) => Value::Null,
+        Some(v @ Value::Object(_)) => v.clone(),
+        Some(_) => return Err("l3_run payload 'params' is not an object".to_string()),
+    };
+    Ok(L3RunRequest { memory_id, args, params, execute })
 }
 
 /// True iff a stored layer-3 row's `metadata` describes a Python skill
@@ -132,7 +138,7 @@ pub async fn run_l3_run_task(
             row.metadata.get("body_sha256").and_then(|v| v.as_str()).unwrap_or("");
         return invoke_python_skill(
             pool, req.memory_id, dispatcher, &candidate, trust, body_sha256,
-            &serde_json::json!({}), req.execute,
+            &req.params, req.execute,
         )
         .await;
     }
@@ -264,5 +270,28 @@ mod tests {
         assert!(parse_python_candidate(&serde_json::json!({"kind": "python"})).is_none());
         // malformed (missing fields) → None, fail-safe
         assert!(parse_python_candidate(&serde_json::json!({"python": {"name": "x"}})).is_none());
+    }
+
+    #[test]
+    fn parses_python_params_object() {
+        let p = serde_json::json!({
+            "kind": "l3_run", "memory_id": 9,
+            "params": {"greeting": "hi"}, "execute": true
+        });
+        let got = parse_l3_run_payload(&p).unwrap();
+        assert_eq!(got.params, serde_json::json!({"greeting": "hi"}));
+    }
+
+    #[test]
+    fn params_default_to_null_when_absent() {
+        let p = serde_json::json!({"kind": "l3_run", "memory_id": 7});
+        let got = parse_l3_run_payload(&p).unwrap();
+        assert!(got.params.is_null());
+    }
+
+    #[test]
+    fn rejects_non_object_params() {
+        let p = serde_json::json!({"kind": "l3_run", "memory_id": 1, "params": [1, 2]});
+        assert!(parse_l3_run_payload(&p).unwrap_err().contains("object"));
     }
 }
