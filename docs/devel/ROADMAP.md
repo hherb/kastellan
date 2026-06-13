@@ -224,8 +224,10 @@ items unlock later ones.
     `Python` dylib is a sibling of `bin/`+`lib/`, so the old `<prefix>/lib` grant couldn't even load the binary);
     (2) `tests-common::unique_suffix` now mixes in an atomic counter — macOS `CLOCK_REALTIME` is ~µs-resolution, so
     two parallel test threads got the identical pid+nanos PG data dir and destroyed each other's initdb.
-  - [ ] **Follow-ups:** DGX (bwrap) acceptance run of `python_exec_e2e` (Mac done 2026-06-13; the Linux container
-    build could only verify seccomp); macOS writable scratch (Seatbelt deny-default leaves slice #1 with none — tighter, not
+  - [x] **DGX (bwrap) acceptance — 2026-06-13:** `python_exec_e2e` 3/3 under the real jail (no `[SKIP]` lines —
+    round-trip, socket negative, AND the scratch-tmpfs write all ran; live PG + Landlock + seccomp). Verified on both
+    `main` (`313f6bb`) and the fix branch; native-Linux workspace clippy `-D warnings` clean on the branch.
+  - [ ] **Follow-ups:** macOS writable scratch (Seatbelt deny-default leaves slice #1 with none — tighter, not
     looser; shares the per-spawn scratch wiring browser-driver Phase 2 needs); curated-wheels RO dir if/when the skill
     catalog demands packages; planner-prompt surfacing (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
