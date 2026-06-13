@@ -10,7 +10,10 @@
 use crate::cassandra::types::{L3TemplateStep, PythonSkillCandidate};
 use crate::memory::l3_approval::ApprovalDecision;
 use crate::memory::l3_approval::SkillTrust;
-use crate::memory::l3_invoke::InvokeRefusal;
+// Reuse the templated path's runnable gate verbatim — it is the single source
+// of truth for "which trust levels may run", so the Python and templated paths
+// can never drift (a new trust variant updates one place, not two).
+use crate::memory::l3_invoke::{is_runnable, InvokeRefusal};
 use crate::memory::l3py_approval::evaluate_python_approval;
 use crate::memory::l3py_crystallise::compute_python_sha256;
 
@@ -20,13 +23,6 @@ pub const PY_EXEC_TOOL: &str = "python-exec";
 /// The JSON-RPC method the python-exec worker serves (see
 /// `workers/python-exec/src/handler.rs`).
 pub const PY_EXEC_METHOD: &str = "python.exec";
-
-/// True iff this trust level may run via the operator CLI. Identical
-/// membership to [`crate::memory::l3_invoke::is_runnable`] — reused for the
-/// templated path; spelled here for the Python path so the gate is local.
-fn is_runnable(trust: SkillTrust) -> bool {
-    matches!(trust, SkillTrust::UserApproved | SkillTrust::Pinned)
-}
 
 /// Build the single `python.exec` step that runs `code` verbatim.
 pub fn python_exec_step(code: &str) -> L3TemplateStep {
@@ -45,35 +41,41 @@ pub fn python_exec_step(code: &str) -> L3TemplateStep {
 /// 3. re-compute [`compute_python_sha256`] and confirm it equals
 ///    `stored_sha256` — refuse on drift (the code TOCTOU close).
 ///
-/// Returns the verbatim `code` on success, else an [`InvokeRefusal`]
-/// collecting every reason.
+/// Returns the verbatim `code` on success, else an [`InvokeRefusal`]. The
+/// three checks are sequential short-circuits (the first failure returns), so
+/// each refusal carries exactly its own reason(s) — there is no cross-check
+/// accumulation, mirroring `l3_invoke::pure::prepare_invocation`.
 pub fn prepare_python_invocation(
     candidate: &PythonSkillCandidate,
     stored_trust: SkillTrust,
     stored_sha256: &str,
 ) -> Result<String, InvokeRefusal> {
-    let mut reasons: Vec<String> = Vec::new();
-
+    // 1. Trust gate.
     if !is_runnable(stored_trust) {
-        reasons.push(format!(
-            "skill is not runnable (trust='{}'; requires user_approved or pinned)",
-            stored_trust.as_str()
-        ));
-        return Err(InvokeRefusal { reasons });
+        return Err(InvokeRefusal {
+            reasons: vec![format!(
+                "skill is not runnable (trust='{}'; requires user_approved or pinned)",
+                stored_trust.as_str()
+            )],
+        });
     }
 
-    if let ApprovalDecision::Reject { reasons: rs } = evaluate_python_approval(candidate) {
-        reasons.extend(rs.iter().map(|r| r.to_string()));
-        return Err(InvokeRefusal { reasons });
+    // 2. Structural re-validation + `secret://` re-scan over the code.
+    if let ApprovalDecision::Reject { reasons } = evaluate_python_approval(candidate) {
+        return Err(InvokeRefusal {
+            reasons: reasons.iter().map(|r| r.to_string()).collect(),
+        });
     }
 
+    // 3. SHA-256 re-hash vs the stored digest — the code TOCTOU close.
     let recomputed = compute_python_sha256(candidate);
     if recomputed != stored_sha256 {
-        reasons.push(format!(
-            "body sha256 drift: stored={stored_sha256} recomputed={recomputed} \
-             (the approved code is not the code on disk; refusing)"
-        ));
-        return Err(InvokeRefusal { reasons });
+        return Err(InvokeRefusal {
+            reasons: vec![format!(
+                "body sha256 drift: stored={stored_sha256} recomputed={recomputed} \
+                 (the approved code is not the code on disk; refusing)"
+            )],
+        });
     }
 
     Ok(candidate.code.clone())
