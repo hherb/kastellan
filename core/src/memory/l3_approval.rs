@@ -109,6 +109,10 @@ pub enum RejectReason {
     /// be established. Constructed by the CLI orchestration, NOT by
     /// `evaluate_approval` (which only sees a `known_tools` set).
     NoRegistrySnapshot,
+    /// A Python skill's source embeds a `secret://` reference at `offset`
+    /// bytes. The opaque-code analogue of [`RejectReason::SecretRefPresent`]
+    /// (which keys on a step index a Python skill has none of).
+    CodeSecretRef { offset: usize, found: String },
 }
 
 impl std::fmt::Display for RejectReason {
@@ -129,6 +133,11 @@ impl std::fmt::Display for RejectReason {
                 f,
                 "no registry.loaded snapshot found; start the daemon once \
                  so the tool registry is recorded"
+            ),
+            RejectReason::CodeSecretRef { offset, found } => write!(
+                f,
+                "code embeds a secret reference '{found}' at byte offset {offset} \
+                 (skills must not carry baked-in secrets)"
             ),
         }
     }

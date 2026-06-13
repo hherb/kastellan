@@ -172,6 +172,7 @@ fn complete_plan_with_skill(body: &str, skill: L3SkillCandidate) -> Plan {
         l1_insight: None,
         l3_skill: Some(skill),
         invoke_skill: None,
+        python_skill: None,
     }
 }
 
@@ -196,6 +197,7 @@ fn one_step_plan() -> Plan {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     }
 }
 

@@ -301,6 +301,12 @@ async fn drain_lane(
         if let Some(skill) = result.terminal_l3_skill.as_ref() {
             write_l3_crystallised_row(pool, claimed.id, skill).await;
         }
+
+        // Agent-raised Python-skill crystallisation. Same best-effort posture
+        // as the L1/L3 hooks; Some only on Outcome::Completed + dispatch_count>=1.
+        if let Some(skill) = result.terminal_python_skill.as_ref() {
+            write_python_skill_crystallised_row(pool, claimed.id, skill).await;
+        }
     }
 }
 
@@ -456,6 +462,85 @@ async fn write_l3_crystallised_row(
     }
 }
 
+/// Crystallise the agent-raised Python skill + emit one `actor='scheduler'
+/// action='l3.crystallised'` audit row carrying `kind: "python"`. Best-effort
+/// (validation/DB errors logged at WARN and swallowed), mirroring
+/// [`write_l3_crystallised_row`].
+async fn write_python_skill_crystallised_row(
+    pool: &PgPool,
+    task_id: i64,
+    skill: &crate::cassandra::types::PythonSkillCandidate,
+) {
+    use crate::memory::l3_crystallise::L3Source;
+    use crate::memory::l3py_crystallise::{
+        compute_python_sha256, crystallise_python_skill, validate_python_skill, PyError,
+        PyWriteOutcome,
+    };
+
+    let source = L3Source::AgentRaised { task_id };
+    let outcome = match crystallise_python_skill(pool, skill, source.clone()).await {
+        Ok(o) => o,
+        Err(PyError::Validation(msg)) => {
+            tracing::warn!(
+                task_id,
+                error = %msg,
+                "agent-raised python skill rejected on validation (skipping audit row)"
+            );
+            return;
+        }
+        Err(PyError::Db(e)) => {
+            tracing::warn!(
+                task_id,
+                error = %e,
+                "agent-raised python skill DB error (skipping audit row)"
+            );
+            return;
+        }
+    };
+
+    // Recompute over the SAME normalised candidate the writer stored, so
+    // the audited body_sha256 + skill_name match the stored row exactly.
+    // crystallise_python_skill already validated successfully above, so
+    // this re-validation cannot fail; the Err arm is defensive/unreachable.
+    let normalised = match validate_python_skill(skill) {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    let body_sha256 = compute_python_sha256(&normalised);
+
+    // Reuse the L3 crystallise payload shape; PyWriteOutcome maps 1:1 to
+    // the L3WriteOutcome arms the builder expects. Add `kind: "python"` so
+    // the audit tail can distinguish Python skills from templated ones.
+    let l3_outcome = match outcome {
+        PyWriteOutcome::Inserted { memory_id } => {
+            crate::memory::l3_crystallise::L3WriteOutcome::Inserted { memory_id }
+        }
+        PyWriteOutcome::SkippedDuplicate { memory_id } => {
+            crate::memory::l3_crystallise::L3WriteOutcome::SkippedDuplicate { memory_id }
+        }
+    };
+    let mut payload =
+        build_l3_write_payload(&l3_outcome, &source, &normalised.name, &body_sha256);
+    if let serde_json::Value::Object(ref mut m) = payload {
+        m.insert("kind".into(), serde_json::Value::String("python".into()));
+    }
+
+    if let Err(e) = kastellan_db::audit::insert(
+        pool,
+        SCHEDULER_AUDIT_ACTOR,
+        ACTION_L3_CRYSTALLISED,
+        payload,
+    )
+    .await
+    {
+        tracing::warn!(
+            task_id,
+            error = %e,
+            "audit insert for scheduler python l3.crystallised row failed (best-effort)"
+        );
+    }
+}
+
 async fn run_one(
     pool: &PgPool,
     formulator: Arc<dyn PlanFormulator>,
@@ -553,6 +638,7 @@ fn failed_result(detail: String) -> InnerLoopResult {
         dispatch_count: 0,
         terminal_l1_insight: None,
         terminal_l3_skill: None,
+        terminal_python_skill: None,
     }
 }
 

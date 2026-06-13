@@ -231,6 +231,26 @@ items unlock later ones.
     looser; shares the per-spawn scratch wiring browser-driver Phase 2 needs); curated-wheels RO dir if/when the skill
     catalog demands packages; planner-prompt surfacing (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
+  - [x] **Slice 1 — crystallise + approval + operator CLI — 2026-06-13** (branch `feat/python-exec-skill-catalog`,
+    PR [#275](https://github.com/hherb/kastellan/pull/275)). Agent-authored Python skills mirror the L3 templated arc one payload over: a layer-3 `memories` row
+    with `metadata.kind="python"` + `metadata.python={name,description,code}` (absent kind ⇒ templated, back-compat),
+    deduped by canonical SHA-256, **verbatim code (no params)**. New `core/src/memory/l3py_crystallise.rs`
+    (validate + canonical SHA + `crystallise_python_skill`; code allows only `\n`/`\t`, rejects every other ASCII control
+    byte incl. NUL/CR/ESC + `secret://` + over-64-KiB, `<skills>` reserved-tag guard on the surfaced description) +
+    `l3py_approval.rs` (`evaluate_python_approval` —
+    structural + `secret://` scan, **NO registry/tool-existence check**: a Python skill dispatches no tools, the
+    python-exec jail is the boundary; `RejectReason::CodeSecretRef` added). `Plan.python_skill` directive crystallised
+    by `runner::drain_lane` under the same `dispatch_count>=1 && !invoke_used` grounding gate as `l3_skill`
+    (`InnerLoopResult.terminal_python_skill`, `finish!` 4-arg form). CLI: `memory l3 show <id>` (read source before
+    approving — the human read IS the gate) + kind-aware `list` + kind-aware `approve`/`pin` (Python branch gates via
+    `evaluate_python_approval`, no registry). Post-review hardening: code validation + `show` escaping close a
+    terminal-escape deception of the `show`-then-approve gate. Workspace 1725/0/8, clippy `-D warnings` clean; live-PG verified
+    (writer dedup, scheduler crystallise capture, CLI approve-without-registry, `show` verbatim source). Spec/plan:
+    `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`.
+  - [ ] **Slice 2** — invocation (`l3py_invoke` pure gate w/ SHA-drift refuse + operator `run` dispatching one
+    `python.exec` step + daemon `l3_run` Python branch, fail-closed when python-exec disabled) + surfacing
+    (`l3_surface` kind-aware, code never shown) + agent-autonomous `Plan.invoke_skill` Python resolution + the
+    `cli_memory_l3py_run_daemon_e2e` end-to-end test. Then params (needs a `python.exec` structured arg channel).
 - [ ] **Skill trust enum** — `Untrusted | UserApproved | Pinned`, each level mapping to an explicit capability ceiling (which workers it may invoke, which net allowlists, which fs paths). Authorship and approval recorded in `audit_log`; promotion requires re-approval. (Pattern: IronClaw skill trust model — user-placed vs registry-installed. The L3 templated-skill arc above is the first concrete implementation of this shape.)
 - [ ] Optional micro-VM backend for `python-exec` (Firecracker on Linux, Apple `container` on macOS — discovery spike completed 2026-05-21, verdict COMMIT; see [`docs/superpowers/specs/2026-05-21-macos-container-spike-notes.md`](../superpowers/specs/2026-05-21-macos-container-spike-notes.md))
 - [ ] **Tiered delegation policy with hard no-recursion ceiling** — when the scheduler grows subagent delegation (today everything is one inner loop), borrow openhuman's `docs/DELEGATION_POLICY.md` four-tier shape: Tier 1 reply-directly (no tools), Tier 2 direct tool, Tier 3 inline subagent (≤5 turns, no new thread), Tier 4 dedicated worker thread (>5 turns). **The structural constraint that matters: workers do not spawn workers.** Encode it in `tool_host` as a compile-time check (`SubagentContext: Sealed` newtype that can only be constructed from the root scheduler) so the spawn tree is provably finite and the audit log has bounded fan-out per task. Maps cleanly onto the existing `Lifecycle::{SingleUse, IdleTimeout}` shape: tier-3 inline subagents are `SingleUse`, tier-4 dedicated threads piggyback on `IdleTimeoutLifecycle`. Pre-req for any meaningful agent-authored-skills work; defines the budget per skill invocation.

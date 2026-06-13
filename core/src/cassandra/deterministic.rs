@@ -257,6 +257,7 @@ mod tests {
             l1_insight: None,
             l3_skill: None,
             invoke_skill: None,
+            python_skill: None,
         }
     }
 

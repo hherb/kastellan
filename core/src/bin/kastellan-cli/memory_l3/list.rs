@@ -28,16 +28,23 @@ pub(super) async fn memory_l3_list(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
 
-    println!("{:<8}  {:<24}  {:<10}  NAME / DESCRIPTION", "ID", "CREATED_AT", "TRUST");
+    println!(
+        "{:<8}  {:<24}  {:<10}  {:<10}  NAME / DESCRIPTION",
+        "ID", "CREATED_AT", "TRUST", "KIND"
+    );
     for r in rows {
         let trust = kastellan_core::memory::l3_approval::SkillTrust::from_metadata_str(
             r.metadata.get("trust").and_then(|v| v.as_str()).unwrap_or(""),
         )
         .as_str();
-        let name = r.metadata
-            .get("template").and_then(|t| t.get("name")).and_then(|v| v.as_str())
+        // `kind` absent ⇒ templated (back-compat); "python" for code skills.
+        let kind = r.metadata.get("kind").and_then(|v| v.as_str()).unwrap_or("templated");
+        let name = r
+            .metadata
+            .get("python").and_then(|p| p.get("name")).and_then(|v| v.as_str())
+            .or_else(|| r.metadata.get("template").and_then(|t| t.get("name")).and_then(|v| v.as_str()))
             .unwrap_or("?");
-        println!("{:<8}  {:<24}  {:<10}  {} — {}", r.id, r.created_at, trust, name, r.body);
+        println!("{:<8}  {:<24}  {:<10}  {:<10}  {} — {}", r.id, r.created_at, trust, kind, name, r.body);
     }
     ExitCode::from(0)
 }

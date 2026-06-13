@@ -120,6 +120,7 @@ fn agent_floor_request_higher_than_producer_elevates_ctx() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let raised = apply_floor_raise(&mut c, &plan);
     assert!(raised);
@@ -143,6 +144,7 @@ fn agent_floor_request_lower_than_producer_is_ignored() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let raised = apply_floor_raise(&mut c, &plan);
     assert!(!raised, "lower floor_request must be ignored");
@@ -165,6 +167,7 @@ fn agent_floor_request_equal_to_producer_is_no_op() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let raised = apply_floor_raise(&mut c, &plan);
     assert!(!raised, "equal-rank floor_request must be a no-op");
@@ -188,6 +191,7 @@ fn agent_floor_request_none_is_no_op() {
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,
+        python_skill: None,
     };
     let raised = apply_floor_raise(&mut c, &plan);
     assert!(!raised);
@@ -212,6 +216,7 @@ fn task_context_plans_so_far_summary_is_compact() {
             l1_insight: None,
             l3_skill: None,
             invoke_skill: None,
+            python_skill: None,
         },
         vec![StepOutcome::Ok(serde_json::json!("x")), StepOutcome::Err {
             code: "POLICY_DENIED".into(), detail: "no".into(),
@@ -236,6 +241,234 @@ fn inner_loop_result_terminal_l1_insight_default_is_none() {
         dispatch_count: 0,
         terminal_l1_insight: None,
         terminal_l3_skill: None,
+        terminal_python_skill: None,
     };
     assert!(result.terminal_l1_insight.is_none());
+}
+
+// ── Python-skill grounding gate: unit harness ──────────────────
+
+/// Scripted formulator for use in inner-loop unit tests that need a
+/// PgPool-backed `run_to_terminal`. Mirrors the one in
+/// `scheduler_inner_loop_e2e.rs` but lives here so `inner_loop/tests.rs`
+/// can import it without crossing the integration-test boundary.
+#[cfg(test)]
+mod inner_loop_test_stubs {
+    use super::*;
+    use crate::cassandra::types::{DataClass, Plan, PlannedStep};
+    use crate::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
+    use std::sync::Mutex;
+
+    pub struct ScriptedFormulator {
+        pub script: Mutex<std::collections::VecDeque<Plan>>,
+    }
+
+    impl ScriptedFormulator {
+        pub fn new(script: Vec<Plan>) -> Self {
+            Self { script: Mutex::new(script.into()) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PlanFormulator for ScriptedFormulator {
+        async fn formulate_plan(
+            &self,
+            _ctx: &TaskContext,
+        ) -> Result<(Plan, FormulationMeta), AgentError> {
+            let plan = self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(AgentError::Decode {
+                    detail: "scripted formulator out of plans".into(),
+                    raw: "".into(),
+                })?;
+            Ok((
+                plan,
+                FormulationMeta {
+                    prompt_name: "agent_planner".into(),
+                    prompt_sha256: "test".into(),
+                    llm_model: "test-model".into(),
+                    llm_backend: "local".into(),
+                    latency_ms: 1,
+                    retry_count: 0,
+                    assembled_prompt_sha256:
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                            .into(),
+                    l0_count: 0,
+                    l1_count: 0,
+                    skill_count: 0,
+                    recalled_memory_ids: Vec::new(),
+                    recall_count: 0,
+                    recall_query_sha256:
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                            .into(),
+                    graph_seed_entity_ids: Vec::new(),
+                    graph_seed_count: 0,
+                    graph_seed_source: crate::entity_extraction::SeedSource::None,
+                },
+            ))
+        }
+    }
+
+    pub struct OkDispatcher;
+
+    #[async_trait::async_trait]
+    impl StepDispatcher for OkDispatcher {
+        async fn dispatch_step(
+            &self,
+            _task_id: i64,
+            _step: &PlannedStep,
+        ) -> StepOutcome {
+            StepOutcome::Ok(serde_json::json!("ok"))
+        }
+    }
+
+    /// A non-terminal plan that dispatches one step (increments dispatch_count).
+    pub fn one_step_plan() -> Plan {
+        Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![PlannedStep {
+                tool: "cat".into(),
+                method: "read".into(),
+                parameters: serde_json::json!({}),
+                returns: "content".into(),
+                done_when: "content".into(),
+                classification: DataClass::Public,
+            }],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+            l3_skill: None,
+            invoke_skill: None,
+            python_skill: None,
+        }
+    }
+
+    /// A terminal `task_complete` plan carrying a `python_skill` candidate.
+    pub fn complete_plan_with_python_skill(
+        body: &str,
+        cand: crate::cassandra::types::PythonSkillCandidate,
+    ) -> Plan {
+        Plan {
+            context: "c".into(),
+            decision: "task_complete".into(),
+            rationale: "done".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": body})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+            l3_skill: None,
+            invoke_skill: None,
+            python_skill: Some(cand),
+        }
+    }
+}
+
+/// Python-skill grounding gate: a task that dispatches >= 1 step and
+/// terminates with `python_skill: Some(cand)` must have
+/// `result.terminal_python_skill == Some(cand)`.
+///
+/// Mirrors the l3_skill grounding-gate test in `memory_l3_crystallise_e2e.rs`
+/// but drives `run_to_terminal` directly so the assertion targets the
+/// `InnerLoopResult` field itself (not the downstream writer).
+///
+/// Skips silently when Postgres / the supervisor are unavailable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_python_skill_captured_under_grounding_gate() {
+    use inner_loop_test_stubs::{
+        complete_plan_with_python_skill, one_step_plan, OkDispatcher, ScriptedFormulator,
+    };
+
+    // Skip if PG / supervisor are not available on this host.
+    if kastellan_tests_common::skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = kastellan_tests_common::pg_bin_dir_or_skip() else {
+        return;
+    };
+    let suffix = format!("ilpy-{}", kastellan_tests_common::unique_suffix());
+    let service_name = format!("kastellan-sched-test-pg-{suffix}");
+    let cluster = tokio::task::block_in_place(|| {
+        kastellan_tests_common::bring_up_pg_cluster(&bin_dir, "ip-d", "ip-l", &service_name)
+    });
+    kastellan_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"purpose": "inner-loop-python-skill-unit"}),
+    )
+    .await
+    .ok();
+    let pool = match kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec).await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    // Insert + claim a task so the inner loop can observe its state.
+    let id = kastellan_db::tasks::insert_pending(
+        &pool,
+        kastellan_db::tasks::Lane::Fast,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let _ = kastellan_db::tasks::claim_one(&pool, kastellan_db::tasks::Lane::Fast, 60)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let cand = crate::cassandra::types::PythonSkillCandidate {
+        name: "noop".into(),
+        description: "d".into(),
+        code: "pass\n".into(),
+    };
+
+    // Plan 1: non-terminal, dispatches one step (dispatch_count → 1).
+    // Plan 2: terminal, carries `python_skill: Some(cand)`.
+    let formulator = std::sync::Arc::new(ScriptedFormulator::new(vec![
+        one_step_plan(),
+        complete_plan_with_python_skill("done", cand.clone()),
+    ]));
+    let review = std::sync::Arc::new(crate::cassandra::review::ChainReviewStage::new(vec![
+        std::sync::Arc::new(crate::cassandra::review::NoopReviewStage),
+    ]));
+    let dispatcher = std::sync::Arc::new(OkDispatcher);
+
+    let ctx = TaskContext {
+        task_id: id,
+        lane: kastellan_db::tasks::Lane::Fast,
+        instruction: "ping".into(),
+        classification_floor: crate::cassandra::types::DataClass::Public,
+        classification_floor_source: ClassificationFloorSource::Default,
+        classification_floor_signals: vec![],
+        plans: vec![],
+        advisories: vec![],
+        blocks: vec![],
+        plan_count: 0,
+        max_plans: 5,
+    };
+
+    let result = super::run_to_terminal(&pool, formulator, review, dispatcher, ctx)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(result.outcome, Outcome::Completed(_)),
+        "expected Completed, got {:?}",
+        result.outcome
+    );
+    assert_eq!(
+        result.terminal_python_skill.as_ref(),
+        Some(&cand),
+        "terminal_python_skill must be captured under the grounding gate"
+    );
 }

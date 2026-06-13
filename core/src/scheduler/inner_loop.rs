@@ -142,6 +142,11 @@ pub struct InnerLoopResult {
     /// `drain_lane` and writes one `actor='scheduler'
     /// action='l3.crystallised'` audit row if `Some`. `None` otherwise.
     pub terminal_l3_skill: Option<crate::cassandra::types::L3SkillCandidate>,
+    /// `python_skill` from the terminal plan, captured only when the inner
+    /// loop reaches `Outcome::Completed` AND `dispatch_count >= 1` (the same
+    /// grounding gate as `terminal_l3_skill`). The lane runner writes one
+    /// `action='l3.crystallised'` (`kind: "python"`) audit row if `Some`.
+    pub terminal_python_skill: Option<crate::cassandra::types::PythonSkillCandidate>,
 }
 
 /// Terminal result of the inner loop. The lane runner translates
@@ -252,18 +257,23 @@ pub async fn run_to_terminal(
     /// non-Completed outcomes; the Completed arm passes
     /// `captured_l1_insight` and `captured_l3_skill`.
     macro_rules! finish {
-        ($outcome:expr, $insight:expr, $skill:expr) => {
+        ($outcome:expr, $insight:expr, $skill:expr, $pyskill:expr) => {
             Ok(InnerLoopResult {
                 outcome: $outcome,
                 plan_count: ctx.plan_count,
                 dispatch_count,
                 terminal_l1_insight: $insight,
                 terminal_l3_skill: $skill,
+                terminal_python_skill: $pyskill,
             })
         };
-        // Convenience form for all non-Completed arms: both None.
+        // 3-arg form (existing call sites): python skill None.
+        ($outcome:expr, $insight:expr, $skill:expr) => {
+            finish!($outcome, $insight, $skill, None)
+        };
+        // Convenience form for all non-Completed arms: all None.
         ($outcome:expr) => {
-            finish!($outcome, None, None)
+            finish!($outcome, None, None, None)
         };
     }
 
@@ -508,7 +518,18 @@ pub async fn run_to_terminal(
                 } else {
                     None
                 };
-            return finish!(Outcome::Completed(result), captured_l1_insight, captured_l3_skill);
+            let captured_python_skill: Option<crate::cassandra::types::PythonSkillCandidate> =
+                if dispatch_count >= 1 && !invoke_used {
+                    plan.completion_python_skill().cloned()
+                } else {
+                    None
+                };
+            return finish!(
+                Outcome::Completed(result),
+                captured_l1_insight,
+                captured_l3_skill,
+                captured_python_skill
+            );
         }
 
         // 4. Execute steps
