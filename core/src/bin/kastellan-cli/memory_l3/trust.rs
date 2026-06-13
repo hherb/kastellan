@@ -8,6 +8,13 @@
 //! [`decide_against_registry`]; the only trust flip is on the gate's
 //! `Approve` arm. Every reject/error path leaves trust untouched and audits
 //! the rejection (the security trail).
+//!
+//! **Python skills** (`metadata.kind == "python"`) short-circuit to
+//! `approve_python_skill` / `pin_python_skill`, which gate via the pure
+//! [`kastellan_core::memory::l3py_approval::evaluate_python_approval`]
+//! (structural + `secret://` scan) and DO NOT consult the tool registry —
+//! a Python skill dispatches no tools, so there is nothing to verify against
+//! a `registry.loaded` snapshot.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
