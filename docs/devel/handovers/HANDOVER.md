@@ -6,21 +6,58 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-13 (**Phase 4: `python_exec_e2e` acceptance GREEN on BOTH platforms** — Mac Seatbelt 3/3 +
-DGX bwrap 3/3; required two real fixes, the macOS xcrun-shim interpreter bug + the `unique_suffix` collision class;
-branch `claude/vigorous-feistel-b0c811`, PR [#270](https://github.com/hherb/kastellan/pull/270).
-Now on `main`: egress slice #4 TLS pinning (PR [#272](https://github.com/hherb/kastellan/pull/272)), Dependabot torch triage (PR [#271](https://github.com/hherb/kastellan/pull/271)), python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)).)
-**Session-end verification (Mac, skip-as-pass posture):** `cargo test --workspace` **1679 / 0 / 8**;
-`clippy --workspace --all-targets -D warnings` clean. Mac `python_exec_e2e` (live PG 18): **3/3** — jailed round-trip
-with a real framework python under Seatbelt + a now-meaningful socket-containment negative (previously it passed
-*vacuously* — the xcrun shim exited 1 for any code); the scratch test self-skips on darwin by design. DGX
-`python_exec_e2e` (real bwrap + Landlock + live PG, no `[SKIP]` lines): **3/3 on `main` AND on the PR branch**,
-including the scratch-tmpfs write; native-Linux clippy `-D warnings` clean on the branch; targeted branch suites
-(tests-common 5, worker 13+8, manifest 10) all green natively. (SSH-to-DGX is re-authorized via a
-`Bash(ssh dgx *)` allow rule in the operator's global settings — invoke as exactly `ssh dgx '<command>'`, no flags
-before the hostname, or the prefix rule won't match.)
+**Last updated:** 2026-06-13 (**Phase 4: python-exec skill catalog SLICE 1 built** — agent-authored Python skills
+crystallise → operator approve/pin, mirroring the L3 templated arc one payload over; branch
+`feat/python-exec-skill-catalog`, PR pending. 8 TDD tasks via subagent-driven dev, each spec+quality reviewed; whole-branch
+opus review = READY TO MERGE. Earlier same day: `python_exec_e2e` acceptance green both platforms, PR
+[#270](https://github.com/hherb/kastellan/pull/270) MERGED to `main`.)
+**Session-end verification (Mac, skip-as-pass posture):** `cargo test --workspace` **1723 / 0 / 8** (+44 unit tests over
+the 1679 baseline); `clippy --workspace --all-targets -D warnings` clean. **Live-PG (PG 18) verified** three load-bearing
+paths: the `crystallise_python_skill` writer (dedup + `kind=python` + verbatim code), the scheduler crystallise capture
+(`terminal_python_skill_captured_under_grounding_gate`), and the security-critical CLI path
+(`cli_memory_l3_approve_python_skill_without_registry` — a Python skill approves to `user_approved` with NO
+`registry.loaded` snapshot, exit 0). DGX not exercised this session (pure-Rust + PG paths; no new sandbox/seccomp surface).
 
-**This session (2026-06-13) — Phase 4 acceptance + two cross-cutting macOS fixes (branch `claude/vigorous-feistel-b0c811`).**
+**This session (2026-06-13, later) — Phase 4 python-exec SKILL CATALOG slice 1 (branch `feat/python-exec-skill-catalog`, PR pending).**
+Brainstormed → spec'd → planned → executed via subagent-driven TDD (8 tasks, per-task spec+quality review + a whole-branch
+opus review = READY TO MERGE). **A "Python skill" is the agent-authored, verbatim Python it just ran, promoted through the
+*same* trust lifecycle as L3 templated skills** — the payload is opaque source instead of a tool-call template; everything
+else (SkillTrust enum, layer-3 `memories` storage, SHA-256 dedup, the operator approve/pin/revoke CLI) is reused, not
+duplicated.
+- **Locked design decisions (brainstorm):** agent-authored (mirror L3 crystallise); **no params — verbatim code, SHA-256-bound**
+  (what the operator approves == what runs); stored as a layer-3 `memories` row with `metadata.kind="python"` +
+  `metadata.python={name,description,code}` (**absent `kind` ⇒ templated**, back-compat); approval gate = structural caps +
+  `secret://` scan + **the human reading the source** (NO registry/tool-existence check — a Python skill dispatches no tools,
+  the python-exec jail is the containment boundary).
+- **New pure+DB module `core/src/memory/l3py_crystallise.rs`:** `validate_python_skill` (snake_case name ≤64 B; description no
+  newline/control/`<skills>`-tag ≤512 B; code **allows newlines/tabs**, rejects empty/NUL/`secret://`/>64 KiB), `canonical_json`
+  + `compute_python_sha256` (flat sorted-key SHA), `build_python_skill_metadata`, `crystallise_python_skill` (validate → SHA →
+  `metadata->>'body_sha256'` EXISTS-check → insert `layer=3`/`kind=python`/`trust=untrusted`, idempotent). `PyError`/`PyWriteOutcome`
+  mirror the L3 shapes; reuses `L3Source`.
+- **New pure gate `core/src/memory/l3py_approval.rs`:** `evaluate_python_approval` (validate-first short-circuit, then the pure
+  `scan_code_secret_refs` helper emits one `RejectReason::CodeSecretRef{offset,found}` per `secret://`). `RejectReason` gained the
+  additive `CodeSecretRef` arm (templated path untouched).
+- **Crystallise wiring:** `Plan.python_skill: Option<PythonSkillCandidate>` + `Plan::completion_python_skill()`;
+  `InnerLoopResult.terminal_python_skill`; the `finish!` macro grew a 4-arg form (1/3-arg forms still delegate); captured under
+  the **same `dispatch_count>=1 && !invoke_used` grounding gate** as `l3_skill`; `runner::write_python_skill_crystallised_row`
+  (best-effort, reuses `build_l3_write_payload` + injects `kind:"python"`, action `l3.crystallised`).
+- **CLI (kind-aware):** new `memory l3 show <id>` (prints verbatim source for python / pretty template otherwise — the operator
+  read IS the gate); `list` gains a `KIND` column + reads name from either payload; `approve`/`pin` short-circuit python rows to
+  `approve_python_skill`/`pin_python_skill` which gate via `evaluate_python_approval` (**no registry snapshot**; pin keeps the
+  user_approved ladder guard). `revoke`/`remove` unchanged (already kind-agnostic).
+- **Tests:** unit (8 crystallise + 5 approval + 1 scheduler-capture + types serde/gate) + PG-gated
+  `core/tests/python_skill_crystallise_e2e.rs` + a new `cli_memory_l3_e2e.rs` scenario (python approve without registry).
+  **Workspace 1723/0/8, clippy clean; three paths live-PG verified.**
+- **Deferred to slice 2** (next TODO below): invocation (`l3py_invoke` + daemon `l3_run` python branch, fail-closed), surfacing
+  (kind-aware `l3_surface`), agent-autonomous `invoke_skill` python resolution, the SHA re-hash-at-invoke binding, and params.
+- **Review follow-ups noted (not blocking, not yet done):** (1) `ScriptedFormulator`/`OkDispatcher` test stubs are now declared in
+  ~4 places (unit test can't import from `core/tests/*`) — a shared `test_support` module would de-dup; (2) the
+  `PyWriteOutcome→L3WriteOutcome` map in `runner.rs` is a latent variant-coupling (a `From` impl would relocate, not seal, it).
+- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`.
+
+---
+
+**Prior this-session block — Phase 4 acceptance + two cross-cutting macOS fixes (branch `claude/vigorous-feistel-b0c811`, PR [#270](https://github.com/hherb/kastellan/pull/270) MERGED).**
 The handover's "acceptance first" step, Mac half. The first run failed twice, each a real bug:
 1. **`tests-common::unique_suffix` collision class FIXED.** The `{pid}-{nanos}` scheme collides on macOS — `CLOCK_REALTIME`
    is ~µs-resolution, so two parallel test threads computed the **identical** PG data dir; one initdb hit `File exists`,
@@ -550,14 +587,27 @@ continues:
 1. **Operator flip (no code):** set `KASTELLAN_PYTHON_EXEC_ENABLE=1` wherever the worker is wanted — it is opt-in and
    unregistered by default. Whether the supervised deployment (`core_service_spec`) should carry it by default is an
    operator decision; the deliberate slice-#1 posture is OFF.
-2. **Skill catalog (named/persisted Python skills + optional human-approve gate, ROADMAP:203).** Build on the L3 arc's
-   exact shape: the L3 templated-skill chain (crystallise → approve → pin → invoke, `memory l3 *`) is the working
-   precedent; a Python skill is the same lifecycle where the payload is `python.exec` code instead of a tool-call
-   template. Spec first: storage (L3 `memories` row vs dedicated table), the trust-enum mapping (ROADMAP:204 — per-level
-   capability ceiling), and how `evaluate_approval`'s re-validation generalizes to code payloads (`secret://` scan
-   carries over verbatim).
-3. **python-exec slice-#2 candidates (on demand):** macOS writable scratch (shares browser-driver Phase 2's per-spawn
-   scratch wiring); curated-wheels RO dir if skills demand packages; `stdin`/`argv` params.
+2. **★ Skill catalog SLICE 2 — invocation + surfacing (the immediate next pick; slice 1 is built, see the "This session"
+   block + spec/plan `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`).** Slice 1 shipped
+   crystallise + approval + the operator read/approve/pin CLI; slice 2 makes Python skills *runnable*, mirroring the L3
+   invocation arc:
+   - **`core/src/memory/l3py_invoke.rs`** (pure) — `prepare_python_invocation(candidate, stored_trust, stored_sha256)`:
+     trust-runnable gate → re-run `evaluate_python_approval` → **re-compute `compute_python_sha256` and refuse on drift vs
+     `stored_sha256`** (the TOCTOU close for code) → return the verbatim code. Operator path dispatches ONE `python.exec`
+     step through `ToolHostStepDispatcher`.
+   - **Daemon `l3_run` Python branch** (`core/src/scheduler/l3_run.rs` + CLI `memory l3 run <id>`): a python skill queues
+     an `l3_run` task the daemon runs against its live registry — **fail closed with a clear error if python-exec is not
+     enabled** (`KASTELLAN_PYTHON_EXEC_ENABLE=1`).
+   - **Surfacing** (`l3_surface.rs` kind-aware): a python skill surfaces as name+description+invocable; **code never shown
+     to the planner**. (Today `parse_surfaced_skill` reads only `metadata.template`, so python rows are silently dropped —
+     correct slice-1 inertness, fix in slice 2.)
+   - **Agent-autonomous** `Plan.invoke_skill` resolving a *pinned* python skill by name (`expand_for_agent` → one
+     `python.exec` step; CASSANDRA review applies).
+   - **e2e** `cli_memory_l3py_run_daemon_e2e` (mirror `cli_memory_l3_run_daemon_e2e`). Then **params** (needs a
+     `python.exec` structured arg channel — a python-exec worker slice-2).
+3. **python-exec worker slice-#2 candidates (on demand):** macOS writable scratch (shares browser-driver Phase 2's per-spawn
+   scratch wiring); curated-wheels RO dir if skills demand packages; `stdin`/`argv` params (the channel the skill-catalog
+   params need).
 
 **Egress deferrals carried forward:** [#242](https://github.com/hherb/kastellan/issues/242) tunnel idle/resolve timeouts;
 [#251](https://github.com/hherb/kastellan/issues/251) stale-scratch crash-sweep (needs cross-platform pid-liveness);
