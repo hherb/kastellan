@@ -8,8 +8,8 @@
 
 **Last updated:** 2026-06-13 (**Phase 4: python-exec skill catalog SLICE 1 built** — agent-authored Python skills
 crystallise → operator approve/pin, mirroring the L3 templated arc one payload over; branch
-`feat/python-exec-skill-catalog`, PR [#275](https://github.com/hherb/kastellan/pull/275). 8 TDD tasks via subagent-driven dev, each spec+quality reviewed; whole-branch
-opus review = READY TO MERGE. Earlier same day: `python_exec_e2e` acceptance green both platforms, PR
+`feat/python-exec-skill-catalog`, PR [#275](https://github.com/hherb/kastellan/pull/275) **MERGED to `main`** (commit `0cbddc5`). 8 TDD tasks via subagent-driven dev, each spec+quality reviewed; whole-branch
+opus review = READY TO MERGE → merged. Earlier same day: `python_exec_e2e` acceptance green both platforms, PR
 [#270](https://github.com/hherb/kastellan/pull/270) MERGED to `main`.)
 **Session-end verification (Mac, skip-as-pass posture):** `cargo test --workspace` **1725 / 0 / 8** (+46 unit/e2e tests over
 the 1679 baseline); `clippy --workspace --all-targets -D warnings` clean. **Live-PG (PG 18) verified** four load-bearing
@@ -294,7 +294,9 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** `main` carries python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)), egress slice
+**Current state.** `main` carries python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)),
+**python-exec skill catalog slice 1** (PR [#275](https://github.com/hherb/kastellan/pull/275), commit `0cbddc5` — crystallise +
+approval + operator show/approve/pin CLI), egress slice
 #4 TLS pinning (PR [#272](https://github.com/hherb/kastellan/pull/272)), the Dependabot torch triage (PR
 [#271](https://github.com/hherb/kastellan/pull/271)), egress slice #3b (PR [#269](https://github.com/hherb/kastellan/pull/269)),
 browser-driver slice #1 (PR [#262](https://github.com/hherb/kastellan/pull/262)), and Matrix comms (PR
