@@ -237,6 +237,14 @@ mod tests {
         let templated = serde_json::json!({"template": {"name": "x"}});
         assert!(!is_python_skill_metadata(&templated));
         assert!(!is_python_skill_metadata(&serde_json::json!({})));
+        // A row carrying BOTH kind:"python" and a stray `template` key resolves
+        // as Python — the kind check fires first, so the templated branch is
+        // never consulted (documents the precedence; not a real stored shape).
+        let both = serde_json::json!({
+            "kind": "python", "template": {"name": "x"},
+            "python": {"name": "p", "description": "d", "code": "pass\n"}
+        });
+        assert!(is_python_skill_metadata(&both));
     }
 
     #[test]
