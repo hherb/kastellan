@@ -56,11 +56,16 @@ fn parse_empty_object_is_empty_set() {
 }
 
 #[test]
-fn parse_drops_hosts_with_empty_pin_list() {
-    // An empty pin list would permanently block its host — treat as "no pin".
-    let set = PinSet::parse(r#"{"h.example.com":[]}"#).unwrap();
-    assert!(set.pins_for("h.example.com").is_none());
-    assert!(set.is_empty());
+fn parse_rejects_empty_pin_list() {
+    // A host listed with an empty pin array is a misconfiguration: the operator
+    // intended to pin it but supplied no pins. Fail loud (the proxy aborts
+    // startup) rather than silently degrading that host to webpki-only — and
+    // rather than enforcing an unsatisfiable set that permanently blocks it.
+    let err = PinSet::parse(r#"{"h.example.com":[]}"#).unwrap_err();
+    assert!(
+        err.to_string().contains("h.example.com"),
+        "error should name the offending host: {err}"
+    );
 }
 
 #[test]

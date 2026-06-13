@@ -94,8 +94,11 @@ offline. So all pin logic lives in the proxy.
     `sha256/<base64-standard>` form. Host keys are lowercased on parse. **Lenient on
     content but strict on structure**: a value that is not a JSON object of
     string→array-of-pin-strings is a hard `Err` (so a typo fails loudly at startup).
-    An entry whose pin list is empty is dropped (an empty list cannot match anything →
-    it would be a silent permanent block; treat it as "no pin for this host").
+    An entry whose pin list is **empty** is a hard `Err` (it names the offending host):
+    the operator clearly meant to pin that host but supplied no pins, so we fail loud at
+    startup rather than silently degrade it to webpki-only — and rather than enforce an
+    unsatisfiable set that permanently blocks it. (An empty top-level `{}` is fine and
+    means "no hosts pinned".)
   - `pub fn is_empty(&self) -> bool`
   - `pub fn pins_for(&self, host: &str) -> Option<&HashSet<[u8; 32]>>` — exact,
     case-insensitive host lookup.
@@ -242,7 +245,7 @@ The host **passes pins through**; it does not compute SPKI.
   SPKI bytes for a real cert, this test fails loudly.
 - `PinSet::parse`: valid single pin; multiple pins per host; multiple hosts;
   case-insensitive host key; `sha256/<base64>` decode; **malformed → Err** (not object,
-  wrong value type, bad base64, wrong digest length); empty pin list dropped; empty JSON
+  wrong value type, bad base64, wrong digest length, **empty pin list → Err**); empty JSON
   object → empty set.
 - `chain_has_pin`: end-entity match; intermediate match; no match → false; backup-pin
   (two hashes, the second matches) → true.

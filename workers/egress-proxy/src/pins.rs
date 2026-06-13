@@ -20,6 +20,10 @@ pub enum PinError {
     Json(String),
     /// A pin string was not a valid `sha256/<base64>` 32-byte digest.
     Pin(String),
+    /// A host was listed with an empty pin array — almost certainly a
+    /// misconfiguration (the operator meant to pin it but gave no pins). Carries
+    /// the offending host.
+    EmptyPinList(String),
     /// A certificate could not be parsed for SPKI extraction.
     X509(String),
     /// rustls refused to build the inner webpki verifier from the roots.
@@ -31,6 +35,9 @@ impl std::fmt::Display for PinError {
         match self {
             PinError::Json(s) => write!(f, "pins JSON: {s}"),
             PinError::Pin(s) => write!(f, "pin value: {s}"),
+            PinError::EmptyPinList(host) => {
+                write!(f, "host {host:?} has an empty pin list (omit the host to leave it unpinned, or add at least one sha256/<base64> pin)")
+            }
             PinError::X509(s) => write!(f, "certificate SPKI: {s}"),
             PinError::Verifier(s) => write!(f, "webpki verifier: {s}"),
         }
@@ -64,22 +71,25 @@ pub struct PinSet {
 impl PinSet {
     /// Parse the `KASTELLAN_EGRESS_PROXY_PINS` JSON:
     /// `{ "host": ["sha256/<base64>", ...], ... }`. Host keys are lowercased.
-    /// A host whose pin list is empty is dropped (an empty list can never match
-    /// → it would be a silent permanent block). Strict on structure: anything
-    /// that is not an object of string→array-of-`sha256/<base64>`-strings, or a
-    /// pin that does not decode to exactly 32 bytes, is an `Err`.
+    /// Strict on structure (consistent with the module's fail-loud posture —
+    /// `build_upstream_client_config` aborts proxy startup on any `Err`): anything
+    /// that is not an object of string→array-of-`sha256/<base64>`-strings, a pin
+    /// that does not decode to exactly 32 bytes, or a host listed with an *empty*
+    /// pin array (an unsatisfiable set — almost always a misconfiguration), is an
+    /// `Err`. An empty top-level object (`{}`) is fine and means "no hosts pinned".
     pub fn parse(json: &str) -> Result<PinSet, PinError> {
         let raw: HashMap<String, Vec<String>> = serde_json::from_str(json)
             .map_err(|e| PinError::Json(e.to_string()))?;
         let mut map = HashMap::new();
         for (host, pin_strs) in raw {
+            if pin_strs.is_empty() {
+                return Err(PinError::EmptyPinList(host));
+            }
             let mut pins = HashSet::new();
             for s in &pin_strs {
                 pins.insert(parse_pin(s)?);
             }
-            if !pins.is_empty() {
-                map.insert(host.to_ascii_lowercase(), pins);
-            }
+            map.insert(host.to_ascii_lowercase(), pins);
         }
         Ok(PinSet { map })
     }
