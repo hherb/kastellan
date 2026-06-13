@@ -37,7 +37,9 @@ pub fn prepare_python_steps(
     stored_sha256: &str,
 ) -> Result<Vec<L3TemplateStep>, InvokeRefusal> {
     let code = prepare_python_invocation(candidate, stored_trust, stored_sha256)?;
-    Ok(vec![python_exec_step(&code)])
+    // TODO(B2): thread real runtime params here; empty params preserves the
+    // pre-params wire shape (back-compat stopgap).
+    Ok(vec![python_exec_step(&code, &serde_json::json!({}))])
 }
 
 /// Orchestrate operator-triggered invocation of an approved Python skill.
