@@ -137,5 +137,91 @@ pub(crate) fn chain_pins_contains(pins: &HashSet<[u8; 32]>, hashes: &[[u8; 32]])
     hashes.iter().any(|h| pins.contains(h))
 }
 
+use std::sync::Arc;
+
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::WebPkiServerVerifier;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme};
+
+/// Render a rustls `ServerName` to the host string used as the pin-map key.
+fn server_name_host(name: &ServerName) -> String {
+    match name {
+        ServerName::DnsName(d) => d.as_ref().to_ascii_lowercase(),
+        ServerName::IpAddress(ip) => format!("{:?}", ip),
+        // `ServerName` is non_exhaustive; an unknown kind is simply unpinnable.
+        _ => String::new(),
+    }
+}
+
+/// A rustls server-cert verifier that runs standard webpki chain validation and
+/// then, for hosts in `pins`, additionally requires a chain SPKI to match a pin.
+/// Unpinned hosts are unaffected (webpki only). Signature-verification methods
+/// delegate to the inner webpki verifier unchanged.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct PinningVerifier {
+    inner: Arc<WebPkiServerVerifier>,
+    pins: PinSet,
+}
+
+impl PinningVerifier {
+    /// Build over `roots`. Returns `Err` only if rustls refuses the roots.
+    #[allow(dead_code)]
+    pub fn new(roots: Arc<RootCertStore>, pins: PinSet) -> Result<Self, PinError> {
+        let inner = WebPkiServerVerifier::builder(roots)
+            .build()
+            .map_err(|e| PinError::Verifier(e.to_string()))?;
+        Ok(Self { inner, pins })
+    }
+}
+
+impl ServerCertVerifier for PinningVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        // 1. ALWAYS: standard webpki chain validation. Fail-closed if it fails.
+        self.inner
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
+        // 2. Pin overlay — only for hosts the operator pinned.
+        if let Some(pins) = self.pins.pins_for(&server_name_host(server_name)) {
+            let chain: Vec<&[u8]> = std::iter::once(end_entity.as_ref())
+                .chain(intermediates.iter().map(|c| c.as_ref()))
+                .collect();
+            if !chain_has_pin(pins, &chain) {
+                return Err(RustlsError::General(PIN_MISMATCH_MARKER.to_string()));
+            }
+        }
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
 #[cfg(test)]
 mod tests;

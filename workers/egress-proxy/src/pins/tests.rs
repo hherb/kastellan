@@ -83,3 +83,63 @@ fn chain_has_pin_matches_end_entity_and_intermediate() {
     assert!(super::chain_pins_contains(&pins, &[ee, inter]));
     assert!(!super::chain_pins_contains(&pins, &[ee]));
 }
+
+use std::sync::Arc;
+use rustls::client::danger::ServerCertVerifier;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+fn install_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// A self-signed cert that IS its own root, so the inner webpki verifier accepts
+/// it. Returns (chain-as-roots, end-entity DER, its pin).
+fn trusted_self_signed(host: &str) -> (rustls::RootCertStore, Vec<u8>, [u8; 32]) {
+    use sha2::{Digest, Sha256};
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec![host.to_string()]).unwrap();
+    params.extended_key_usages.push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+    let cert = params.self_signed(&key).unwrap();
+    let der = cert.der().to_vec();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(CertificateDer::from(der.clone())).unwrap();
+    let pin: [u8; 32] = Sha256::digest(key.public_key_der()).into();
+    (roots, der, pin)
+}
+
+fn verify(verifier: &PinningVerifier, host: &str, ee_der: &[u8]) -> Result<(), rustls::Error> {
+    let ee = CertificateDer::from(ee_der.to_vec());
+    let name = ServerName::try_from(host.to_string()).unwrap();
+    verifier
+        .verify_server_cert(&ee, &[], &name, &[], UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_700_000_000)))
+        .map(|_| ())
+}
+
+#[test]
+fn unpinned_host_passes_on_webpki_alone() {
+    install_provider();
+    let (roots, ee, _pin) = trusted_self_signed("origin.test");
+    // No pins at all → behaves like plain webpki.
+    let verifier = PinningVerifier::new(Arc::new(roots), PinSet::default()).unwrap();
+    assert!(verify(&verifier, "origin.test", &ee).is_ok());
+}
+
+#[test]
+fn pinned_host_with_matching_spki_passes() {
+    install_provider();
+    let (roots, ee, pin) = trusted_self_signed("origin.test");
+    let pins = PinSet::parse(&format!(r#"{{"origin.test":["{}"]}}"#, pin_str(&pin))).unwrap();
+    let verifier = PinningVerifier::new(Arc::new(roots), pins).unwrap();
+    assert!(verify(&verifier, "origin.test", &ee).is_ok());
+}
+
+#[test]
+fn pinned_host_with_wrong_spki_is_rejected() {
+    install_provider();
+    let (roots, ee, _pin) = trusted_self_signed("origin.test");
+    let wrong = [0x99u8; 32];
+    let pins = PinSet::parse(&format!(r#"{{"origin.test":["{}"]}}"#, pin_str(&wrong))).unwrap();
+    let verifier = PinningVerifier::new(Arc::new(roots), pins).unwrap();
+    let err = verify(&verifier, "origin.test", &ee).unwrap_err();
+    assert!(err.to_string().contains(PIN_MISMATCH_MARKER), "got: {err}");
+}
