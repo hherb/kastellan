@@ -44,13 +44,16 @@ pub struct SurfacedSkill {
     pub invocable: bool,
 }
 
-/// Project a stored L3 row's `metadata.template` into a [`SurfacedSkill`].
+/// Project a stored L3 row into a [`SurfacedSkill`], kind-aware:
+/// a **Python** skill (`metadata.kind == "python"`) surfaces its
+/// `metadata.python` name + description with NO params and the code never
+/// shown; a **templated** skill (absent `kind`) surfaces its
+/// `metadata.template` name + description + params.
 ///
-/// PURE + fail-safe: a row whose `metadata` lacks a `template` key, or
-/// whose `template` is `null` or otherwise does not deserialise into an
-/// [`L3SkillCandidate`], yields `None` and is silently skipped by the
-/// loader. A malformed skill must never crash prompt assembly or
-/// surface garbage.
+/// PURE + fail-safe: a row whose payload is missing, `null`, or does not
+/// deserialise into the expected candidate type yields `None` and is silently
+/// skipped by the loader. A malformed skill must never crash prompt assembly
+/// or surface garbage.
 pub fn parse_surfaced_skill(metadata: &serde_json::Value) -> Option<SurfacedSkill> {
     let trust = metadata.get("trust").and_then(|v| v.as_str()).unwrap_or("");
     let invocable = is_autonomously_invocable(SkillTrust::from_metadata_str(trust));
