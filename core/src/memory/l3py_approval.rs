@@ -18,9 +18,12 @@ use crate::memory::l3py_crystallise::validate_python_skill;
 ///    exactly one `StructuralInvalid`);
 /// 2. every `secret://` occurrence in the source (one `CodeSecretRef` each).
 ///
-/// Note: `validate_python_skill` already rejects `secret://` in code, so a
-/// stored row that passed crystallisation will not trip (2); the re-scan is
-/// defense-in-depth against a hand-edited SQL row and keeps the gate honest.
+/// Note: step (1) runs `validate_python_skill` FIRST, which itself rejects
+/// `secret://` in code — so within this function step (2) is effectively
+/// unreachable (any secret-bearing body, hand-edited row included, is already
+/// stopped by the structural check with a `StructuralInvalid`). The scan is
+/// kept as belt-and-suspenders and is exercised directly via the extracted
+/// [`scan_code_secret_refs`] helper's own tests, not through this path.
 pub fn evaluate_python_approval(candidate: &PythonSkillCandidate) -> ApprovalDecision {
     let candidate = match validate_python_skill(candidate) {
         Ok(norm) => norm,

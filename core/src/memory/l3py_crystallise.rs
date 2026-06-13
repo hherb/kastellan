@@ -76,8 +76,11 @@ fn is_snake_ident(s: &str) -> bool {
 /// whitespace can be significant in Python) on success.
 ///
 /// Key difference from `validate_l3_skill`: `code` is multi-line source, so
-/// newlines and tabs are allowed; only a NUL byte is rejected (it cannot
-/// occur in legitimate source and would truncate a C string downstream).
+/// newline (`\n`) and tab (`\t`) are allowed; every other ASCII control byte
+/// (incl. NUL, `\r`, and ESC) plus DEL is rejected. NUL would truncate a C
+/// string downstream; the rest matter because the code is shown verbatim to
+/// the operator via `memory l3 show` — the human read IS the approval gate, so
+/// embedded escape/CR sequences could misrepresent the source at review time.
 pub fn validate_python_skill(c: &PythonSkillCandidate) -> Result<PythonSkillCandidate, PyError> {
     // --- name ---
     let name = c.name.trim();
@@ -119,7 +122,7 @@ pub fn validate_python_skill(c: &PythonSkillCandidate) -> Result<PythonSkillCand
         )));
     }
 
-    // --- code (verbatim; multi-line allowed; reject empty / NUL / over-cap) ---
+    // --- code (verbatim; multi-line allowed; reject empty / control / over-cap) ---
     if c.code.is_empty() {
         return Err(PyError::Validation("code is empty".into()));
     }
@@ -129,8 +132,21 @@ pub fn validate_python_skill(c: &PythonSkillCandidate) -> Result<PythonSkillCand
             c.code.len()
         )));
     }
-    if c.code.bytes().any(|b| b == 0) {
-        return Err(PyError::Validation("code contains a NUL byte".into()));
+    // Reject every ASCII control byte except tab (0x09) and newline (0x0A),
+    // and DEL (0x7f). NUL would truncate a C string downstream; ESC/CR/etc.
+    // could inject terminal escape sequences and misrepresent the source when
+    // the operator reads it via `memory l3 show` (the approval gate). Only C0
+    // controls are ASCII single bytes, so this never trips on a UTF-8
+    // continuation/lead byte (>= 0x80).
+    if let Some(b) = c
+        .code
+        .bytes()
+        .find(|&b| (b < 0x20 && b != b'\t' && b != b'\n') || b == 0x7f)
+    {
+        return Err(PyError::Validation(format!(
+            "code contains a disallowed control byte 0x{b:02x} \
+             (only tab and newline are permitted)"
+        )));
     }
     // Defensive: a skill must not bake in a secret reference (mirrors the
     // approval gate; rejecting at crystallise too means it never even lands).
@@ -301,6 +317,25 @@ mod tests {
         let mut c = valid();
         c.code = "token = 'secret://abc12345'\nprint(token)\n".into();
         assert!(validate_python_skill(&c).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_terminal_control_bytes_in_code() {
+        // ESC / CR could inject terminal escape sequences and misrepresent the
+        // source when the operator reads it via `memory l3 show` (the gate).
+        for ctrl in ['\u{1b}', '\r', '\u{7f}', '\u{8}'] {
+            let mut c = valid();
+            c.code = format!("print(1)\n{ctrl}evil\n");
+            assert!(
+                validate_python_skill(&c).is_err(),
+                "control char {:?} must be rejected in code",
+                ctrl
+            );
+        }
+        // ...but tab and newline are legitimate Python source and stay allowed.
+        let mut ok = valid();
+        ok.code = "def f():\n\treturn 1\n".into();
+        assert!(validate_python_skill(&ok).is_ok());
     }
 
     #[test]

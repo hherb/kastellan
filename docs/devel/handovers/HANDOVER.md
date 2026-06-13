@@ -11,12 +11,14 @@ crystallise → operator approve/pin, mirroring the L3 templated arc one payload
 `feat/python-exec-skill-catalog`, PR [#275](https://github.com/hherb/kastellan/pull/275). 8 TDD tasks via subagent-driven dev, each spec+quality reviewed; whole-branch
 opus review = READY TO MERGE. Earlier same day: `python_exec_e2e` acceptance green both platforms, PR
 [#270](https://github.com/hherb/kastellan/pull/270) MERGED to `main`.)
-**Session-end verification (Mac, skip-as-pass posture):** `cargo test --workspace` **1723 / 0 / 8** (+44 unit tests over
-the 1679 baseline); `clippy --workspace --all-targets -D warnings` clean. **Live-PG (PG 18) verified** three load-bearing
+**Session-end verification (Mac, skip-as-pass posture):** `cargo test --workspace` **1725 / 0 / 8** (+46 unit/e2e tests over
+the 1679 baseline); `clippy --workspace --all-targets -D warnings` clean. **Live-PG (PG 18) verified** four load-bearing
 paths: the `crystallise_python_skill` writer (dedup + `kind=python` + verbatim code), the scheduler crystallise capture
-(`terminal_python_skill_captured_under_grounding_gate`), and the security-critical CLI path
+(`terminal_python_skill_captured_under_grounding_gate`), the security-critical CLI approve path
 (`cli_memory_l3_approve_python_skill_without_registry` — a Python skill approves to `user_approved` with NO
-`registry.loaded` snapshot, exit 0). DGX not exercised this session (pure-Rust + PG paths; no new sandbox/seccomp surface).
+`registry.loaded` snapshot, exit 0), and the new `memory l3 show` review-surface path
+(`cli_memory_l3_show_python_prints_verbatim_code` — verbatim source incl. tab indentation). DGX not exercised this session
+(pure-Rust + PG paths; no new sandbox/seccomp surface).
 
 **This session (2026-06-13, later) — Phase 4 python-exec SKILL CATALOG slice 1 (branch `feat/python-exec-skill-catalog`, PR [#275](https://github.com/hherb/kastellan/pull/275)).**
 Brainstormed → spec'd → planned → executed via subagent-driven TDD (8 tasks, per-task spec+quality review + a whole-branch
@@ -30,7 +32,8 @@ duplicated.
   `secret://` scan + **the human reading the source** (NO registry/tool-existence check — a Python skill dispatches no tools,
   the python-exec jail is the containment boundary).
 - **New pure+DB module `core/src/memory/l3py_crystallise.rs`:** `validate_python_skill` (snake_case name ≤64 B; description no
-  newline/control/`<skills>`-tag ≤512 B; code **allows newlines/tabs**, rejects empty/NUL/`secret://`/>64 KiB), `canonical_json`
+  newline/control/`<skills>`-tag ≤512 B; code **allows only `\n`+`\t`**, rejects empty/`secret://`/>64 KiB/**every other ASCII
+  control byte** incl. NUL/CR/ESC/DEL — see review-hardening note below), `canonical_json`
   + `compute_python_sha256` (flat sorted-key SHA), `build_python_skill_metadata`, `crystallise_python_skill` (validate → SHA →
   `metadata->>'body_sha256'` EXISTS-check → insert `layer=3`/`kind=python`/`trust=untrusted`, idempotent). `PyError`/`PyWriteOutcome`
   mirror the L3 shapes; reuses `L3Source`.
@@ -45,9 +48,18 @@ duplicated.
   read IS the gate); `list` gains a `KIND` column + reads name from either payload; `approve`/`pin` short-circuit python rows to
   `approve_python_skill`/`pin_python_skill` which gate via `evaluate_python_approval` (**no registry snapshot**; pin keeps the
   user_approved ladder guard). `revoke`/`remove` unchanged (already kind-agnostic).
-- **Tests:** unit (8 crystallise + 5 approval + 1 scheduler-capture + types serde/gate) + PG-gated
-  `core/tests/python_skill_crystallise_e2e.rs` + a new `cli_memory_l3_e2e.rs` scenario (python approve without registry).
-  **Workspace 1723/0/8, clippy clean; three paths live-PG verified.**
+- **Tests:** unit (9 crystallise + 5 approval + 1 scheduler-capture + types serde/gate) + PG-gated
+  `core/tests/python_skill_crystallise_e2e.rs` + two `cli_memory_l3_e2e.rs` scenarios (python approve without registry; `show`
+  prints verbatim source). **Workspace 1725/0/8, clippy clean; four paths live-PG verified.**
+- **Post-review hardening (this session, after the opus review of PR #275):** addressed the review's findings on the
+  `show`-then-approve trust surface. (1) **Terminal-escape deception of the review gate** — `validate_python_skill` now rejects
+  every ASCII control byte in `code` except `\n`/`\t` (was: NUL only), so an embedded ESC/CR cannot inject escape sequences into
+  the source the operator reads via `memory l3 show`; `show` additionally renders any residual control char (hand-edited SQL row)
+  as a visible `\xNN` escape — defense-in-depth, the description line too. (2) **Coverage gap** — added
+  `cli_memory_l3_show_python_prints_verbatim_code` (the first automated test of `show`'s stdout). (3) Clarified the
+  `evaluate_python_approval` doc: the `secret://` re-scan is unreachable within that fn (validate runs first); it's exercised via
+  `scan_code_secret_refs`' own tests. The two non-blocking nits (double-validate in `runner.rs`; test-stub duplication) were left
+  as-is — still tracked below.
 - **Deferred to slice 2** (next TODO below): invocation (`l3py_invoke` + daemon `l3_run` python branch, fail-closed), surfacing
   (kind-aware `l3_surface`), agent-autonomous `invoke_skill` python resolution, the SHA re-hash-at-invoke binding, and params.
 - **Review follow-ups noted (not blocking, not yet done):** (1) `ScriptedFormulator`/`OkDispatcher` test stubs are now declared in

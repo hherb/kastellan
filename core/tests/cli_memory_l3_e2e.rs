@@ -2,8 +2,9 @@
 //!
 //! ## What this file pins
 //!
-//! Ten independent scenarios, each bringing up its own per-test PG cluster
-//! and spawning the real `kastellan-cli` binary as a subprocess:
+//! Twelve independent scenarios, each bringing up its own per-test PG cluster
+//! and spawning the real `kastellan-cli` binary as a subprocess (scenarios 1–8c
+//! cover the templated arc; 9 + 10 cover Python skills):
 //!
 //! 1. **`cli_memory_l3_list_empty_then_populated`** — `memory l3 list` against
 //!    an empty DB exits 0 with just the header; after seeding one skill via
@@ -40,6 +41,14 @@
 //! 8c. **`cli_memory_l3_pin_rejects_not_approved`** — seed a skill left
 //!    `untrusted` (NOT approved); pin refuses (non-zero exit), trust stays
 //!    `untrusted`, and an `l3.pin_rejected` audit row exists.
+//!
+//! 9. **`cli_memory_l3_approve_python_skill_without_registry`** — a
+//!    `kind=python` skill approves to `user_approved` with NO `registry.loaded`
+//!    snapshot (the inverse of the templated fail-closed path).
+//!
+//! 10. **`cli_memory_l3_show_python_prints_verbatim_code`** — `memory l3 show`
+//!     surfaces a Python skill's verbatim source (the operator review gate),
+//!     tab indentation preserved.
 //!
 //! ## Skip semantics
 //!
@@ -802,6 +811,59 @@ async fn cli_memory_l3_approve_python_skill_without_registry() {
         .bind(id).fetch_one(&pool).await.expect("fetch trust");
     assert_eq!(trust, "user_approved",
         "metadata.trust must be user_approved after Python skill approval");
+
+    drop(pool); drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 10 — `memory l3 show` prints the verbatim Python source
+// ---------------------------------------------------------------------------
+
+/// `memory l3 show <id>` is the operator's review surface — the human read IS
+/// the approval gate — so it must print the stored skill's verbatim source.
+/// Pins: exit 0, the `kind=python` header, the description, and every code
+/// line surfaced byte-for-byte (including a tab-indented body line).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_memory_l3_show_python_prints_verbatim_code() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "cml3-shw-d", "cml3-shw-l",
+        &format!("kastellan-postgres-cli-memory-l3-show-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "cli_memory_l3_show_python_prints_verbatim_code"}))
+        .await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    // --- Seed a Python skill with a multi-line, tab-indented body ----------
+    let cand = PythonSkillCandidate {
+        name: "double_stdin".into(),
+        description: "Double each integer line from stdin".into(),
+        code: "import sys\nfor line in sys.stdin:\n\tprint(int(line) * 2)\n".into(),
+    };
+    let id = crystallise_python_skill(&pool, &cand, L3Source::AgentRaised { task_id: 1 })
+        .await.expect("crystallise_python_skill").memory_id();
+
+    let bin = cli_binary();
+    let env = cli_env(&cluster.data_dir);
+
+    // --- Show the skill ----------------------------------------------------
+    let out = Command::new(&bin)
+        .args(["memory", "l3", "show", &id.to_string()])
+        .env_clear().envs(env.clone()).output().expect("spawn show");
+    let so = String::from_utf8_lossy(&out.stdout).into_owned();
+    let se = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "show must exit 0; stdout={so}\nstderr={se}");
+
+    assert!(so.contains("kind=python"), "header must mark kind=python; got {so}");
+    assert!(so.contains(&cand.description), "must surface the description; got {so}");
+    // Verbatim code: every line present, tab indentation preserved.
+    assert!(so.contains("import sys"), "code line 1 missing; got {so}");
+    assert!(so.contains("for line in sys.stdin:"), "code line 2 missing; got {so}");
+    assert!(so.contains("\tprint(int(line) * 2)"), "tab-indented body missing; got {so}");
 
     drop(pool); drop(cluster);
 }
