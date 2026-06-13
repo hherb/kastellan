@@ -6,18 +6,51 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-13 (**Phase 4: python-exec skill catalog SLICE 2 MERGED — invocation + surfacing** — approved/pinned
-Python skills are now *runnable*; branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276) MERGED to `main` at `e478309`. 7 TDD tasks via subagent-driven
-dev with per-task spec+quality review until the subagent pool hit the monthly spend limit at Task 6's review — Tasks 6 (agent
-integration, security-critical) + 7 (e2e) were then self-reviewed by the controller against the design spec's §6 security
-analysis. Slice 1 — crystallise + approve/pin — is MERGED to `main` (PR [#275](https://github.com/hherb/kastellan/pull/275),
-`0cbddc5`).)
-**Session-end verification (Mac):** `cargo test --workspace` **all green / 0 failed** (skip-as-pass; +22 tests over the 1725
-baseline: 6 pure gate + 4 operator + 3 l3_run + 4 surface + 3 agent + 2 e2e); `clippy --workspace --all-targets -D warnings`
-clean. **`cli_memory_l3py_run_daemon_e2e` LIVE-GREEN on Mac Seatbelt under PG 18** (2/2): an approved Python skill executes in
-the real jail via the daemon (exit 0, snippet stdout round-trips, `l3.invoke_outcome` row carries `kind:"python"`), and the
-fail-closed path (python-exec disabled → exit non-zero, tool-not-registered) holds. **No new sandbox/seccomp surface** (reuses
-the slice-#1 python-exec jail, already DGX-accepted) — DGX not required this session.
+**Last updated:** 2026-06-14 (**Phase 4: python-exec RUNTIME PARAMS built** — approved/pinned Python skills can now receive
+runtime params; branch `feat/python-exec-runtime-params`, **PR pending** [not yet opened at write time]. Brainstorm → spec →
+plan → subagent-driven TDD: 14 tasks (Slice A worker + Slice B core), per-task review inline/dispatched, + an **opus
+whole-branch final review** that confirmed all 7 security invariants hold and caught one back-compat bug — `validate_python_params`
+rejected the `Value::Null` default of `InvokeDirective.params`, so a no-param autonomous python invoke was wrongly refused —
+fixed (`11c132d`, null ⇒ no-params) + regression-tested. Skill-catalog slices 1 (`0cbddc5`) + 2 (`e478309`) are MERGED to `main`.)
+**Session-end verification (Mac):** `cargo test --workspace` **1786 / 0 / 8** (skip-as-pass; +107 over the 1679 baseline:
+worker param units + real-interpreter + core pure/operator/agent/l3_run/types/CLI + e2e + the null-fix regressions);
+`clippy --workspace --all-targets -D warnings` clean. **`cli_memory_l3py_run_daemon_e2e` LIVE-GREEN on Mac Seatbelt under PG 18**
+(4/4): the param round-trip echoes `GOT:hi` from `KASTELLAN_PYTHON_PARAMS` through the real jail, over-cap params refuse, plus
+the slice-2 round-trip + fail-closed-when-disabled. **No new sandbox/seccomp surface** (only one `.env()` added to `run_code`;
+`Net::Deny`/`WorkerStrict`/`fs_write=[]` byte-untouched — DGX not required).
+
+**This session (2026-06-14, latest) — Phase 4 python-exec RUNTIME PARAMS (branch `feat/python-exec-runtime-params`, PR pending).**
+The deferred "params" piece of the skill catalog. A Python skill is verbatim, SHA-256-bound source (approve == execute), so params
+can't be injected into the code — they arrive on a **side channel** the author reads. Locked design (brainstorm):
+- **Channel = env var `KASTELLAN_PYTHON_PARAMS`** (one JSON object; survives `-I`; off `/proc/*/cmdline` unlike argv; worker
+  ALWAYS sets it, default `{}` → stable `json.loads(os.environ["KASTELLAN_PYTHON_PARAMS"])` contract). **64 KiB serialized cap**
+  (under the Linux `MAX_ARG_STRLEN` 128 KiB per-env-string execve wall). **Arbitrary-JSON** values. **Secret:// refs allowed** —
+  they materialise for free through the existing `tool_host` dispatch chokepoint's recursive `substitute_refs_in_params` walker
+  (`Net::Deny` is the containment). **Free-form passthrough** — no declared schema, `PythonSkillCandidate`/crystallise/approval/SHA
+  untouched; a missing key is a runtime `KeyError`→traceback→nonzero exit (the established philosophy).
+- **Slice A — worker** (`workers/python-exec`): `exec.rs` `serialize_params` (None⇒`{}`, non-object⇒reject, >64 KiB⇒reject —
+  **worker is the authoritative pre-`execve` enforcer**) + `PARAMS_ENV`/`MAX_PARAMS_BYTES`; `run_code(python, code, params_json)`
+  adds one `.env(PARAMS_ENV, …)`; handler `ExecParams.params: Option<Value>` → `INVALID_PARAMS` on bad params; real-interpreter
+  test round-trips a param to stdout + empty-default + over-cap. The env-isolation test now allows the intentional new var.
+- **Slice B — core**: `l3py_invoke::pure` `validate_python_params` (object, **snake_case TOP-LEVEL keys only** [nested = opaque
+  data], 64 KiB; **null/empty ⇒ no params**) + `params_is_empty` + 2-arg `python_exec_step(code, params)` (**omits the `params`
+  key when empty** → byte-identical to the pre-params shape). Threaded through `operator::{prepare_python_steps,invoke_python_skill}`,
+  `agent::expand_python_for_agent` (Pinned-only gate still FIRST), `InvokeDirective.params` (`#[serde(default)]` ⇒ `Value::Null`),
+  the inner-loop `invoke_skill` python arm (`d.params.clone()` → expansion), the daemon `l3_run` payload (`L3RunRequest.params`,
+  non-object⇒reject; dropped `Eq` since `Value` isn't `Eq`), and CLI `memory l3 run --param k=v` (string sugar) / `--params-json
+  '<obj>'` (full JSON; `--param` wins on key collision) via pure `build_params`.
+- **e2e** `cli_memory_l3py_run_daemon_e2e.rs` (+2 scenarios, live-green Mac/PG 18): CLI `--param greeting=hi --execute` →
+  `GOT:hi` round-trip through the real jail; over-cap (`--params-json` 64 KiB value) refuses. **Secret-param e2e DEFERRED** —
+  the daemon e2e harness has no vault-materialisation path; the walker is unit-tested in `core/src/secrets/substitute.rs`.
+- **Final-review bug fix** (`11c132d`): `validate_python_params(&Value::Null)` returned `NotObject`, but `InvokeDirective.params`
+  + the daemon's absent-`params` default are both `Null`, so an autonomous no-param pinned-python invoke was wrongly refused
+  (fail-closed, not a security hole). Now null ⇒ accepted-as-no-params; +3 regression tests (pure gate + agent expansion).
+- **Carried debt (flagged):** `core/tests/cli_memory_l3py_run_daemon_e2e.rs` is now **705 LOC** (over the ~500 test-file cap,
+  refactor-bucket (c)); `core/src/scheduler/inner_loop.rs` grew +3 lines (still the **priority (b) refactor** — now ~632 LOC).
+- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-14-python-exec-runtime-params*`.
+
+**Prior this-session block — Phase 4 python-exec SKILL CATALOG slice 2: invocation + surfacing (branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276) MERGED `e478309`).**
+Brainstorm/design were already locked in the slice-1 design spec (§4.5/4.6, build-seq steps 5–9); wrote a slice-2 plan
 
 **This session (2026-06-13, latest) — Phase 4 python-exec SKILL CATALOG slice 2: invocation + surfacing (branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276)).**
 Brainstorm/design were already locked in the slice-1 design spec (§4.5/4.6, build-seq steps 5–9); wrote a slice-2 plan
@@ -338,8 +371,9 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** **python-exec skill catalog SLICE 2 (invocation + surfacing) is MERGED to `main`
-(PR [#276](https://github.com/hherb/kastellan/pull/276), commit `e478309`).** `main` carries python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)),
+**Current state.** **python-exec RUNTIME PARAMS is on branch `feat/python-exec-runtime-params` (PR pending — not yet opened/merged
+at write time);** workspace 1786/0/8 + clippy clean + e2e live-green on Mac/PG 18. `main` carries python-exec **skill catalog slice 2**
+(invocation + surfacing, PR [#276](https://github.com/hherb/kastellan/pull/276), commit `e478309`), python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)),
 **python-exec skill catalog slice 1** (PR [#275](https://github.com/hherb/kastellan/pull/275), commit `0cbddc5` — crystallise +
 approval + operator show/approve/pin CLI), egress slice
 #4 TLS pinning (PR [#272](https://github.com/hherb/kastellan/pull/272)), the Dependabot torch triage (PR
@@ -646,18 +680,17 @@ continues:
 1. **Operator flip (no code):** set `KASTELLAN_PYTHON_EXEC_ENABLE=1` wherever the worker is wanted — it is opt-in and
    unregistered by default. Whether the supervised deployment (`core_service_spec`) should carry it by default is an
    operator decision; the deliberate slice-#1 posture is OFF.
-2. **Skill catalog SLICE 2 — invocation + surfacing — MERGED** (branch `feat/python-exec-skill-catalog-slice2`, PR
-   [#276](https://github.com/hherb/kastellan/pull/276), commit `e478309`; see the latest "This session" block). `l3py_invoke/` gate+operator+agent, daemon `l3_run` python branch
-   (fail-closed), kind-aware surfacing (code never shown), agent-autonomous `invoke_skill` python resolution, and the
-   `cli_memory_l3py_run_daemon_e2e` (live-green on Mac/PG 18). **★ NEXT immediate pick — runtime params** (the only deferred
-   skill-catalog piece): a Python skill is verbatim/param-less until `python.exec` grows a structured arg channel (a
-   python-exec **worker** slice-2 — `stdin`/`argv` params), then `l3py_invoke` threads named params through with the same
-   per-value guard as the templated path. **And the priority refactor: split `core/src/scheduler/inner_loop.rs` (629 LOC)** —
-   extract the `invoke_skill` expansion (templated+python) into a helper; awkward because `refuse_invoke!` uses `continue`, so
-   it needs its own reviewed change (see refactor bucket (b)).
+2. **Skill catalog SLICE 2 (invocation + surfacing) — MERGED** (`e478309`) and **RUNTIME PARAMS — built this session** (branch
+   `feat/python-exec-runtime-params`, PR pending; see the latest "This session" block). The skill-catalog arc is now
+   functionally complete: crystallise/approve/pin + invoke/surface + runtime params (env-var channel, 64 KiB, free-form,
+   secret-aware). **★ NEXT immediate pick — the priority refactor: split `core/src/scheduler/inner_loop.rs` (~632 LOC)** —
+   extract the `invoke_skill` expansion (templated+python arms) into a helper; awkward because `refuse_invoke!` uses `continue`,
+   so the helper must return a refusal/expansion enum the loop acts on (refactor bucket (b), now the most-over-cap *touched*
+   production file in this arc). **Then:** battle-test the params free-form passthrough for risk slip-throughs in test mode
+   (the recorded follow-up); and `core/tests/cli_memory_l3py_run_daemon_e2e.rs` (705 LOC) test-lift (bucket (c)).
 3. **python-exec worker slice-#2 candidates (on demand):** macOS writable scratch (shares browser-driver Phase 2's per-spawn
-   scratch wiring); curated-wheels RO dir if skills demand packages; `stdin`/`argv` params (the channel the skill-catalog
-   params need).
+   scratch wiring) — also unblocks the deferred **scratch-file param channel** for >64 KiB payloads; curated-wheels RO dir if
+   skills demand packages. **Other Phase-4 picks:** micro-VM backend (ROADMAP), tiered delegation policy (ROADMAP).
 
 **Egress deferrals carried forward:** [#242](https://github.com/hherb/kastellan/issues/242) tunnel idle/resolve timeouts;
 [#251](https://github.com/hherb/kastellan/issues/251) stale-scratch crash-sweep (needs cross-platform pid-liveness);
