@@ -15,6 +15,10 @@ pub enum Verdict {
     /// A materialized secret's verbatim bytes were detected in this connection's
     /// MITM-terminated plaintext (slice #3b). The connection is killed.
     BlockedCredentialLeak,
+    /// The re-originated upstream cert did not match the operator's configured
+    /// SPKI pin for this host (slice #4). The connection is refused — a possible
+    /// MITM of kastellan's own egress.
+    BlockedTlsPin,
 }
 
 /// Leak detail attached to a [`Verdict::BlockedCredentialLeak`] decision. Carries
@@ -173,5 +177,22 @@ mod tests {
             leak: None,
         };
         assert!(!d.to_line().contains("\"leak\""));
+    }
+
+    #[test]
+    fn blocked_tls_pin_serializes_snake_case() {
+        let d = Decision {
+            worker: "frontier".into(),
+            host: "api.anthropic.com".into(),
+            port: 443,
+            resolved_ip: Some("203.0.113.7".into()),
+            verdict: Verdict::BlockedTlsPin,
+            reason: "pin_mismatch".into(),
+            tls_intercepted: true,
+            leak: None,
+        };
+        let v: serde_json::Value = serde_json::from_str(&d.to_line()).unwrap();
+        assert_eq!(v["verdict"], "blocked_tls_pin");
+        assert_eq!(v["reason"], "pin_mismatch");
     }
 }

@@ -6,12 +6,26 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-12 (**Phase 4 OPENED: `python-exec` worker slice #1 COMPLETE**; branch
-`claude/compassionate-shannon-3jeh31`, PR [#267](https://github.com/hherb/kastellan/pull/267), rebased onto `main` at
-`519d029` — which carries the parallel-machine arcs: egress slice #3b leak scanner PR
-[#269](https://github.com/hherb/kastellan/pull/269), browser-driver PR [#262](https://github.com/hherb/kastellan/pull/262),
-Matrix comms PR [#265](https://github.com/hherb/kastellan/pull/265).)
-**Session-end verification (remote Linux container, root):** `cargo test --workspace` **928 / 1 / 1** — the 1
+**Last updated:** 2026-06-13 (**egress proxy SLICE #4 — TLS pinning COMPLETE**; branch `feat/egress-slice4-tls-pinning`,
+PR [#272](https://github.com/hherb/kastellan/pull/272). Egress proxy is now **all 4 slices done** (#1 boundary/SSRF, #2 force-routing, #3a MITM, #3b leak scanner,
+#4 TLS pinning). Landed on `main` in parallel this period: **`python-exec` worker slice #1 — Phase 4 opened** (PR
+[#267](https://github.com/hherb/kastellan/pull/267)) and the **Dependabot torch alert triage** (PR
+[#271](https://github.com/hherb/kastellan/pull/271)) — both detailed below. Earlier on `main`: slice #3b (PR
+[#269](https://github.com/hherb/kastellan/pull/269)), `browser-driver`
+slice #1 (PR [#262](https://github.com/hherb/kastellan/pull/262)), Matrix comms (PR [#265](https://github.com/hherb/kastellan/pull/265)).)
+**Session-end verification:** Mac `cargo test --workspace` **1668 / 0 / 8**; `clippy --workspace --all-targets -D warnings`
+clean. New deps `x509-cert`/`sha2`/`base64` all Apache-2.0/MIT (AGPL-compatible). No DGX run this session — slice #4 adds
+**no OS-gated code** (pure SPKI/pin logic + a rustls verifier + host env plumbing, on the existing MITM relay path the DGX
+already exercises under real bwrap); egress-proxy can't cross-clippy on the Mac (`ring` C dep, #144 wall), so its Linux
+build is CI/DGX-verified and the macOS workspace clippy covers the logic.
+
+---
+
+**Parallel arc now on `main` — Phase 4 opened: `python-exec` worker slice #1 (PR #267)** (branch
+`claude/compassionate-shannon-3jeh31`, rebased onto `main` at `519d029` — which carries the parallel-machine arcs: egress
+slice #3b leak scanner PR [#269](https://github.com/hherb/kastellan/pull/269), browser-driver PR
+[#262](https://github.com/hherb/kastellan/pull/262), Matrix comms PR [#265](https://github.com/hherb/kastellan/pull/265).)
+**Its session-end verification (remote Linux container, root):** `cargo test --workspace` **928 / 1 / 1** — the 1
 failure is the **pre-existing** root-container artifact
 `egress_force_routing_e2e::pg_decision_sink_persists_decisions_to_audit_log` (`initdb: cannot be run as root`; fails
 identically on clean base, verified by stash); `clippy --workspace --all-targets -D warnings` clean, re-verified after the
@@ -69,17 +83,50 @@ reverted). Risk posture: the worker runs jailed and never scripts untrusted Torc
 Dependabot re-fires when a patched release ships, or dismiss as `tolerable_risk` (operator's call). Re-check when
 torch > 2.12.0 appears.
 
-**PR #269 review pass (2026-06-13):** addressed the code-review findings in place. (1) `mitm/relay.rs::scan_relay`
-rewritten as two independent per-direction `pump` futures driven by one `select!` — a direction's `write_all` no longer
-head-of-line-stalls the peer direction's reads (the old single-`read`-loop awaited `write_all` inside the arm); preserves
-scan-before-forward + kill-on-hit, adds a 256 KiB full-duplex no-stall test. (2) New `MAX_SECRET_LEN` (16 KiB) caps the
-fingerprintable range, enforced in both `fingerprint_value` and `wire::decode_one` so a corrupt/oversized
-`secret_hashes.json` `len` can't drive a large ring-buffer allocation. (3) `net_worker` now warns (not silently skips) if
-the sidecar UDS has no parent dir. Findings #3 (`provision_audit_row` has no live caller) + #4 (double audit line per
-blocked leak) are by-design for the mechanism-only slice — tracked on [#268](https://github.com/hherb/kastellan/issues/268)
-to land with the dispatch-time live-append. +3 tests (1641 → 1644).
+---
 
-**Prior session (parallel machine) — egress proxy SLICE #3b: co-located credential-leak scanner (ROADMAP:142).** Brainstormed → spec'd →
+**This session — egress proxy SLICE #4: TLS pinning for the frontier/LLM egress path (ROADMAP:142).** Brainstormed →
+spec'd → planned → executed via subagent-driven TDD (12 tasks, per-task spec+quality review + an opus whole-branch review
+that confirmed **end-to-end coherence + the additive-not-weakening invariant**). The proxy's MITM re-origination leg (slice
+#3a) validated the real origin against the full public webpki root store; #4 lets the operator **pin the SPKI** of specific
+high-value origins so a single compromised/mis-issued public CA can't silently MITM kastellan's own frontier egress.
+**Locked decisions (brainstorm):** seam = the egress-proxy upstream leg (not the in-core llm-router — that's the Phase-5
+router seam); pin type = SPKI-SHA256 **set** (RFC 7469, survives leaf rotation, backup pins); provisioning = the
+`KASTELLAN_EGRESS_PROXY_PINS` env (static operator config, like the allowlist — not a runtime scratch file like #3b);
+dep = `x509-cert` (RustCrypto base already in-tree) over `x509-parser` (smaller audit surface). Shape:
+- **New proxy-local module `workers/egress-proxy/src/pins.rs`** (no shared crate — only the proxy computes/matches SPKI;
+  the host passes the pin JSON through opaque): `spki_sha256` (SHA-256 of the DER `SubjectPublicKeyInfo` via x509-cert
+  `to_der()` — guarded against re-encode drift by an independent-path test), `PinSet` (`{host:["sha256/<b64>"]}` → lowercased
+  host → set of 32-byte digests; empty-pin-list dropped; strict-parse), `chain_has_pin` (any chain cert's SPKI ∈ pins),
+  `PinningVerifier` (rustls `ServerCertVerifier` — runs `WebPkiServerVerifier` **first** then, for pinned hosts only, requires
+  a chain SPKI match, else `RustlsError::General(PIN_MISMATCH_MARKER)`), `build_upstream_client_config(Option<&str>)`
+  (None/blank/`{}` ⇒ plain webpki **byte-identical**; valid ⇒ `.dangerous()` custom verifier; **malformed ⇒ Err ⇒ startup
+  aborts**). `main.rs` reads the env once before `lock_down`.
+- **Verdict + audit:** new `Verdict::BlockedTlsPin`; `proxy::classify_mitm_error` maps an intercept error carrying the marker
+  → `BlockedTlsPin`/`pin_mismatch` (else the prior `Allowed`/`mitm_failed`); host `egress/audit.rs` maps
+  `blocked_tls_pin` → `egress.blocked.tls_pin`. (A pin reject emits TWO decisions like #3b: pre-intercept `Allowed
+  (tls_intercepted)` then `BlockedTlsPin`.)
+- **Host pass-through + refactor:** `proxy_policy`/`spawn_sidecar` take `cert_pins_json: Option<&str>` (push
+  `KASTELLAN_EGRESS_PROXY_PINS` only when `Some(non-blank)` ⇒ no-pin path byte-identical). `spawn_net_worker`/
+  `spawn_forced_net_worker` args bundled into a **`NetWorkerSpawn<'a>` params struct** (`backend, proxy_bin, spec, allowlist,
+  worker_name, secret_fingerprints, cert_pins_json`) + explicit `scratch`/`scratch_root` + sink — **both
+  `#[allow(too_many_arguments)]` dropped** (the refactor the #3b handover flagged). All callers (`force_route` live path + the
+  e2e suites) pass `cert_pins_json: None`.
+- **Posture:** pinning is **fail-CLOSED** for a configured pin (the inverse of #3b's fail-open leak scanner — a substituted
+  cert MUST be refused), but absent/unpinned ⇒ webpki-only (graceful, not a bypass). **Additive** — never weakens webpki, never
+  touches the netns/allowlist/SSRF/OS containment boundary. Catches only what a network adversary presents; not the boundary.
+- **Forward-looking** (mirrors #3b): no frontier egress worker exists, so the default deployment provisions **no pins** (env
+  unset ⇒ byte-identical). The wiring that reads the operator's real frontier pin config + routes frontier egress through a
+  **pinned** sidecar lands with the first frontier worker / Phase 5 — the standing slice-#4 follow-up.
+- **Tests:** pins units (spki_sha256 independent-path, PinSet parse/lookup/malformed, chain_has_pin, verifier
+  unpinned/match/mismatch, build_upstream None/empty/valid/malformed, server_name_host IP/DNS canonical); proxy
+  `classify_mitm_error` both directions + `BlockedTlsPin` serialization; **`mitm/tests.rs` real two-leg TLS round-trips**
+  (origin SPKI pinned ⇒ succeeds; wrong SPKI ⇒ fails with the marker); host `proxy_policy` pins-env on/off + `audit` mapping +
+  `NetWorkerSpawn` fail-closed. **IPv6 pin keys are bare** (`::1`, no brackets — documented operator convention).
+- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-13-egress-proxy-slice4-tls-pinning-design.md` /
+  `2026-06-13-egress-proxy-slice4-tls-pinning.md`.
+
+**Prior session — egress proxy SLICE #3b: co-located credential-leak scanner (MERGED, PR [#269](https://github.com/hherb/kastellan/pull/269), ROADMAP:142).** Brainstormed → spec'd →
 planned → executed via subagent-driven TDD (13 tasks, 2-stage review per batch + an opus whole-branch review that confirmed
 the **"never plaintext" invariant holds end-to-end**). The per-worker egress proxy already MITM-terminates worker TLS (slice
 #3a), so it sees plaintext; #3b scans that plaintext for the verbatim bytes of secrets materialized for the calling worker,
@@ -169,18 +216,20 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** `main` is at `6bf57b7` (Matrix comms channel, PR [#265](https://github.com/hherb/kastellan/pull/265)
-MERGED; browser-driver slice #1 PR [#262](https://github.com/hherb/kastellan/pull/262) + egress slice #3a PR #259 also on
-`main`). **This session's work is on branch `feat/egress-slice3b-leak-scanner` (PR [#269](https://github.com/hherb/kastellan/pull/269)):** egress proxy **slice #3b
-credential-leak scanner is COMPLETE** (ROADMAP:142) — see the "This session" block above. Mechanism + spawn-wiring shipped;
-the scanner is **forward-looking** (no current egress worker carries secrets, so spawn-wiring provisions an empty set today)
-and dispatch-time live-append is deferred ([#268](https://github.com/hherb/kastellan/issues/268)). Working tree carries only
-the slice-#3b work + untracked `docs/essay-medium-draft.md`. Dev box **macOS**; the DGX (aarch64) is driven natively over
-WireGuard SSH (`ssh dgx`). **Session-end: Mac `cargo test --workspace` = 1644 / 0 / 8 (after the PR #269 review pass); `clippy --workspace --all-targets -D
-warnings` clean; cross-clippy `kastellan-leak-scan` for `aarch64-unknown-linux-gnu` clean. (No DGX full-workspace run this
-session — all new code is platform-agnostic [pure crate + host file-IO + the existing MITM relay path, which the DGX already
-exercises under real bwrap]; the native-Linux baseline is unchanged from slice #3a's 1538/0/10 modulo the additive
-matrix/leak-scan tests.)**
+**Current state.** `main` is at `519d029`; **this session's work is on branch `feat/egress-slice4-tls-pinning` (PR [#272](https://github.com/hherb/kastellan/pull/272)):**
+egress proxy **slice #4 TLS pinning is COMPLETE** (ROADMAP:142) — see the "This session" block above — making the egress proxy
+**all 4 slices done**. The pinning is **forward-looking** (no frontier egress worker exists, so every host caller passes
+`cert_pins_json: None` and the default deployment provisions no pins ⇒ byte-identical behaviour); operator pin-config wiring +
+routing frontier egress through a **pinned** sidecar is the standing slice-#4 follow-up (lands with the first frontier worker /
+Phase 5). On `main`: slice #3b (PR [#269](https://github.com/hherb/kastellan/pull/269)), Matrix comms (PR [#265](https://github.com/hherb/kastellan/pull/265)),
+browser-driver slice #1 (PR [#262](https://github.com/hherb/kastellan/pull/262)), egress slice #3a (PR #259). Working tree
+carries only the slice-#4 work + untracked `docs/essay-medium-draft.md` (gitignored) + `assets/agent_with_the_keys.png`.
+Dev box **macOS**; the DGX (aarch64) is driven natively over WireGuard SSH (`ssh dgx`). **Session-end: Mac `cargo test
+--workspace` = 1668 / 0 / 8; `clippy --workspace --all-targets -D warnings` clean; new deps `x509-cert`/`sha2`/`base64` all
+Apache-2.0/MIT. (No DGX run this session — slice #4 adds NO OS-gated code [pure SPKI/pin logic + a rustls verifier + host env
+plumbing, on the existing MITM relay path the DGX already exercises under real bwrap]; egress-proxy can't cross-clippy on the
+Mac [`ring` C dep, #144], so its Linux build is CI/DGX-verified and the macOS workspace clippy covers the logic. Native-Linux
+baseline unchanged from slice #3a's 1538/0/10 modulo the additive matrix/leak-scan/pinning tests.)**
 **Standing macOS test-infra gotcha (not a regression):** a *full-workspace* run under `KASTELLAN_PG_BIN_DIR` flakes ~4
 tests in `core/tests/embedding_recall_e2e.rs` at PG bring-up (`tests-common/src/pg.rs`) — parallel `initdb`/launchd
 churn (issue #130 territory); they pass single-threaded and in isolation. Use skip-as-pass for the whole workspace on
@@ -214,7 +263,7 @@ web-fetch/web-search/egress/handoff/secrets work).
 
 ```
 kastellan (Rust workspace, 15 crates [+ `matrix`/`matrix-wire` from PR #265 not yet folded into this tree], AGPL-3.0)
-├── core               kastellan-core: lib + 2 bins (`kastellan` daemon + `kastellan-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker + value_fingerprint [one-way hash of a secret value for the egress #3b leak scanner — never exposes plaintext]), cassandra/injection_guard (22-entry substring catalogue as `Rule`s + per-tool `GuardProfile` Strict/Relaxed via `for_tool` + `screen`/`screen_with_profile` + extract_scannable_text; Relaxed caps the chat-template family at one sub-threshold contribution — #142), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `kastellan-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path; force_route.rs egress force-routing — `ForceRoutingConfig` + pure `policy_net_is_force_routable`/`resolve_force_routing`/`spawn_worker_maybe_forced` + env-glue `from_env`/`env_flag_enabled` [default scratch root `/tmp` on macOS for sun_path], the `KASTELLAN_EGRESS_FORCE_ROUTING` flip — **ON by default** in the supervised deployment via `core_service_spec`, fail-closed; both cold-spawn sites route Net::Allowlist workers through it), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; web_search.rs WebSearchManifest + web_search_entry [Net::Allowlist derived from the endpoint host:port; injects KASTELLAN_WEB_SEARCH_ENDPOINT + allowlist]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest; browser_driver.rs BrowserDriverManifest + browser_driver_entry + pure resolve_env [ENABLE-gated, WorkerNetClient + legacy direct-net Net::Allowlist, no proxy_uds; slice #1 scaffold — real Playwright render is Phase 2]; python_exec.rs PythonExecManifest + python_exec_entry + pure resolve_env [ENABLE-gated, Net::Deny + WorkerStrict, scratch = jail /tmp tmpfs via explicit KASTELLAN_LANDLOCK_RW]), registry_build (static WORKER_MANIFESTS [shell-exec, gliner-relex, python-exec, web-fetch, web-search, browser-driver] + pure assemble_registry [skips the reserved `handoff` name] + async build_tool_registry(pool, exe_dir)), handoff (in-memory per-task content-addressed HandoffCache: stash_if_oversized → placeholder, fetch → clamped slice, per-task byte budget + MAX_TRACKED_TASKS backstop, purge_task at terminal; wired into ToolHostStepDispatcher after dispatch returns + the `handoff`/`fetch` built-in intercept), egress/ (host-side egress-proxy integration — slice #2 COMPLETE: DGX-accepted, force-routing ON by default: spawn.rs `spawn_sidecar`/`SidecarHandle` [+`terminate(&mut)`]/`proxy_policy`; audit.rs pure `decision_to_audit` + runtime-free `ingest_decisions_into`; net_worker.rs pure `rewrite_worker_policy` + `spawn_net_worker` [sidecar-first fail-closed, 1:1 teardown via `SupervisedWorker.egress`] + `spawn_forced_net_worker` [scratch-owning wrapper, `EgressSidecar.scratch` RAII-cleaned] + `pg_decision_sink`; **slice #3b leak scanner:** `leak_provision.rs` [atomic `write_secret_hashes` + `provision_audit_row`], both spawn fns take `secret_fingerprints` [callers pass `&[]` today], `audit.rs` maps `egress.blocked.credential_leak` redacted [hash+offset+direction])
+├── core               kastellan-core: lib + 2 bins (`kastellan` daemon + `kastellan-cli` audit-tail viewer). Daemon blocks on SIGTERM/SIGINT via tokio::signal::unix; main.rs runs db::probe::run → connect_runtime_pool → spawn_mirror before wait_for_shutdown (fail-closed startup; mirror failures are logged but non-fatal). lib modules: tool_host (spawn_worker, dispatch chokepoint, lockdown-env derivation, wall-clock watchdog, sealed WorkerCommand, secret-ref substitution on input + injection-guard screen on output), secrets (Vault TTL'd RwLock<HashMap> + SecretRef opaque newtype + substitute_refs_in_params walker + value_fingerprint [one-way hash of a secret value for the egress #3b leak scanner — never exposes plaintext]), cassandra/injection_guard (22-entry substring catalogue as `Rule`s + per-tool `GuardProfile` Strict/Relaxed via `for_tool` + `screen`/`screen_with_profile` + extract_scannable_text; Relaxed caps the chat-template family at one sub-threshold contribution — #142), workspace (per-task scratch with RAII cleanup), audit_mirror (PgListener-driven JSONL writer with daily rotation + fsync per write), audit_tail (`tail -f`-style follower used by `kastellan-cli audit tail`), scheduler/ (audit.rs pure helpers + canonical SCHEDULER_AUDIT_ACTOR; runner.rs spec §7 lifecycle rows + l3_run routing; tool_dispatch.rs short-circuit rows; crash_recovery.rs sweep_and_audit; l3_run.rs daemon-side L3 skill execution), memory/ (mod.rs facade + recall.rs three-lane RRF-fused recall + embed.rs embed_query + l0_seed/l1_promote/l3_crystallise/l3_approval/l3_invoke/l3_surface), worker_lifecycle/ (Lifecycle enum + SingleUse/IdleTimeout/Composite managers; idle_timeout.rs acquire path + idle_timeout/release.rs release path; force_route.rs egress force-routing — `ForceRoutingConfig` + pure `policy_net_is_force_routable`/`resolve_force_routing`/`spawn_worker_maybe_forced` + env-glue `from_env`/`env_flag_enabled` [default scratch root `/tmp` on macOS for sun_path], the `KASTELLAN_EGRESS_FORCE_ROUTING` flip — **ON by default** in the supervised deployment via `core_service_spec`, fail-closed; both cold-spawn sites route Net::Allowlist workers through it), entity_extraction/ (batch_upsert.rs two-phase unnest + per-row attribution), worker_manifest (WorkerManifest trait + Resolution + ResolveCtx + discover_binary — the uniform self-description each worker registers behind), workers/ (shell_exec.rs ShellExecManifest + shell_exec_entry; web_fetch.rs WebFetchManifest + web_fetch_entry [Net::Allowlist + WorkerNetClient host-side manifest]; web_search.rs WebSearchManifest + web_search_entry [Net::Allowlist derived from the endpoint host:port; injects KASTELLAN_WEB_SEARCH_ENDPOINT + allowlist]; gliner_relex/ facade re-exporting wire.rs serde shapes + resolve.rs GlinerRelexEnv/resolve_env + entry.rs gliner_relex_entry/host+container builders + client.rs Client + manifest.rs GlinerRelexManifest; browser_driver.rs BrowserDriverManifest + browser_driver_entry + pure resolve_env [ENABLE-gated, WorkerNetClient + legacy direct-net Net::Allowlist, no proxy_uds; slice #1 scaffold — real Playwright render is Phase 2]; python_exec.rs PythonExecManifest + python_exec_entry + pure resolve_env [ENABLE-gated, Net::Deny + WorkerStrict, scratch = jail /tmp tmpfs via explicit KASTELLAN_LANDLOCK_RW]), registry_build (static WORKER_MANIFESTS [shell-exec, gliner-relex, python-exec, web-fetch, web-search, browser-driver] + pure assemble_registry [skips the reserved `handoff` name] + async build_tool_registry(pool, exe_dir)), handoff (in-memory per-task content-addressed HandoffCache: stash_if_oversized → placeholder, fetch → clamped slice, per-task byte budget + MAX_TRACKED_TASKS backstop, purge_task at terminal; wired into ToolHostStepDispatcher after dispatch returns + the `handoff`/`fetch` built-in intercept), egress/ (host-side egress-proxy integration — slice #2 COMPLETE: DGX-accepted, force-routing ON by default: spawn.rs `spawn_sidecar`/`SidecarHandle` [+`terminate(&mut)`]/`proxy_policy`; audit.rs pure `decision_to_audit` + runtime-free `ingest_decisions_into`; net_worker.rs pure `rewrite_worker_policy` + `spawn_net_worker` [sidecar-first fail-closed, 1:1 teardown via `SupervisedWorker.egress`] + `spawn_forced_net_worker` [scratch-owning wrapper, `EgressSidecar.scratch` RAII-cleaned] + `pg_decision_sink`; **slice #3b leak scanner:** `leak_provision.rs` [atomic `write_secret_hashes` + `provision_audit_row`], `audit.rs` maps `egress.blocked.credential_leak` redacted [hash+offset+direction]; **slice #4 TLS pinning:** `proxy_policy`/`spawn_sidecar` take `cert_pins_json: Option<&str>` [push `KASTELLAN_EGRESS_PROXY_PINS` only when Some(non-blank) ⇒ no-pin path byte-identical], the two spawn fns now take a **`NetWorkerSpawn<'a>` params struct** [`backend, proxy_bin, spec, allowlist, worker_name, secret_fingerprints, cert_pins_json`] + explicit scratch/scratch_root + sink [dropped both `#[allow(too_many_arguments)]`], `audit.rs` maps `egress.blocked.tls_pin`; **all callers pass `secret_fingerprints: &[]` + `cert_pins_json: None` today**)
 ├── db                 kastellan-db: pure helpers (build_initdb_argv, build_postgresql_auto_conf, find_pg_bin_dir, pg_bin_dir_candidates_with_env_override) + conn::ConnectSpec + RUNTIME_ROLE/set_role_runtime_statement + probe::run (ensure DB → migrate as superuser → SET ROLE → audit, fail-closed) + graph::{Graph trait, PgGraph; recursive-CTE path() + walk_outbound/inbound_edges + walk_edges_around with DISTINCT ON diamond-dedupe} + audit::{insert, fetch_by_id, fetch_since, truncate_payload} + memories::{insert, insert_memory_at_layer, insert_memory_light (embedding-skipping light write path), semantic/lexical/graph search, link_memory_to_entities, set_skill_trust, load_layer_by_trust} + entity_kinds + relation_kinds lookup caches + pool::{connect_runtime_pool, connect_admin_pool} + MIGRATOR (0001..0017) + memory_entities join table + deleted_memories audit table + secrets/ (AES-256-GCM at rest + OS keyring; prod-split into `crypto.rs` pure helpers [constants + validate_name/compute_aad/encrypt/decrypt] + `key_provider.rs` [KeyProvider trait + MapKeyProvider/OsKeyringProvider] + `error.rs` [SecretsError] + parent async DB I/O put/get/list/delete, all re-exported flat) + kastellan-db-init bin
 ├── leak-scan          kastellan-leak-scan: pure shared credential-leak scanner (egress #3b single source of truth; deps serde/serde_json/sha2 only). fingerprint.rs (`SecretFingerprint{len,fp64,sha256}` + `fingerprint_value` [Rabin fp64 + SHA-256] + `MIN_SECRET_LEN`=8 + `RABIN_BASE`), matcher.rs (`RollingMatcher` — per-length Rabin rolling pre-filter + SHA-256 confirm + `(maxLen+1)`-byte ring-buffer carry-over; `feed`→first `LeakHit{sha256_hex,offset}`; O(maxLen) mem ⇒ no body cap), wire.rs (`serialize_hashes`/`parse_hashes` for `secret_hashes.json`, hex-encoded, lenient). Consumed by `core` (provision) + `egress-proxy` (detect)
 ├── llm-router         kastellan-llm-router: sole egress for LLM calls. Router::send + Router::embed over reqwest+rustls; Backend::{Local, Frontier} closed enum; PolicyGate trait (DefaultLocalPolicy always Local — Phase-5 seam). RouterConfig::from_env reads KASTELLAN_LLM_* env. Per-OS default URL: vLLM/SGLang on Linux (:8000), Ollama on macOS (:11434). Frontier dispatch returns PolicyDeniedFrontier until Phase 5
@@ -229,13 +278,13 @@ kastellan (Rust workspace, 15 crates [+ `matrix`/`matrix-wire` from PR #265 not 
 ├── workers/web-search   kastellan-worker-web-search: second net-egress worker. web.search JSON-RPC method (query → ranked {title,url,snippet,engine} hits from a SearxNG /search?format=json endpoint). Consumes HostAllowlist + transport from web-common. parse.rs (lenient SearxNG-JSON → Vec<Hit>) + search.rs (validate_endpoint [https everywhere, http loopback-only via is_loopback] + build_query_url + one-GET search() drive, count.clamp(1,20)) + handler.rs (dispatch + fail-closed from_env). Operator-configured KASTELLAN_WEB_SEARCH_ENDPOINT; LLM supplies only the query. Host-side manifest in core/src/workers/web_search.rs. Dev setup: scripts/web-search/setup-searxng.sh
 ├── workers/browser-driver kastellan-worker-browser-driver: Playwright-Python read-only render worker (ROADMAP:147; slice #1 scaffold — opt-in KASTELLAN_BROWSER_DRIVER_ENABLE=1). `browser.render` JSON-RPC stdio: navigate https URL headless → settle (wait_until) → post-JS readable text (readability-lxml) + final HTML, byte/char-capped. GLiNER-shaped: __main__.py (env/startup) + server.py (stdio dispatch + url/timeout/wait_until validation) + render.py (pure extract_render_result + Phase-2 Playwright drive behind a duck-typed renderer seam) + errors.py. Real browser launch = Phase 2 (spike pinned the flags/seccomp — design spec §3.1). Host manifest = core/src/workers/browser_driver.rs
 ├── workers/python-exec  kastellan-worker-python-exec: Phase-4 executor for agent-authored Python (opt-in KASTELLAN_PYTHON_EXEC_ENABLE=1). `python.exec` {code} → {exit_code, stdout, stderr, *_truncated}: source piped over stdin to `<python> -I -S -B -` (curated stdlib = no site-packages), child env cleared, 256 KiB code/capture caps; Python exceptions return as exit_code+traceback, not RPC errors. Strictest policy of any worker: Net::Deny + WorkerStrict seccomp (inherited by the CPython child; pinned by coreutils_smoke::python3_survives_strict) + fs_write=[] (scratch = jail's ephemeral /tmp tmpfs via explicit KASTELLAN_LANDLOCK_RW=["/tmp"]) + cpu 10 s / mem 512 MiB / wall 30 s, SingleUse. lib: exec.rs (python_args, truncate_lossy, run_code) + handler.rs. Host manifest = core/src/workers/python_exec.rs
-└── workers/egress-proxy kastellan-worker-egress-proxy: per-worker egress boundary (ROADMAP:141/142; slice #1 allowlist+SSRF, slice #2 force-routing, slice #3a TLS-intercept). Sandboxed CONNECT proxy on a per-worker UDS; per CONNECT: HostAllowlist check (reuses web-common) → resolve DNS itself → ssrf.rs is_denied_range (reject private/loopback/link-local/ULA/CGNAT/multicast, IPv4-mapped+compatible unwrapped; literal-IP carve-out) → pin+dial → write 200 → peek first tunnel byte (recv MSG_PEEK; 0x16 → MITM, else transparent tunnel). **Slice #3a MITM:** in-proxy ephemeral per-instance CA (ca.rs, rcgen; private key never leaves the sandbox, public ca.pem exported beside the UDS), per-host CA-signed leaf cache (leaf_cache.rs), async terminate+re-originate (mitm.rs: looks_like_tls + intercept — tokio-rustls TlsAcceptor/TlsConnector + copy_bidirectional on a per-connection current-thread runtime; upstream validated against webpki). Decision carries tls_intercepted. **Slice #3b leak scanner:** `MitmCtx.secret_hashes_path` + `load_patterns` (lazy per-connection read of `secret_hashes.json`; missing/corrupt ⇒ no scan, fail-OPEN); `mitm/relay.rs` `scan_relay` replaces `copy_bidirectional` when patterns present — splits both halves, one `kastellan-leak-scan::RollingMatcher` per direction, **scans each chunk before forwarding**, kills on hit; `intercept` returns `Result<Option<LeakReport>,String>`; `report::Verdict::BlockedCredentialLeak` + `Decision.leak`. Modules: ssrf.rs, request_line.rs, report.rs, proxy.rs (decide + handle_conn connect→200→peek→branch + MitmCtx + run_mitm + load_patterns), ca.rs, leaf_cache.rs, mitm.rs (+ mitm/relay.rs), main.rs (install ring provider, generate CA + write ca.pem before lock_down, accept loop). Host side = core/src/egress
+└── workers/egress-proxy kastellan-worker-egress-proxy: per-worker egress boundary (ROADMAP:141/142; ALL 4 slices done — #1 allowlist+SSRF, #2 force-routing, #3a TLS-intercept, #3b leak scanner, #4 TLS pinning). Sandboxed CONNECT proxy on a per-worker UDS; per CONNECT: HostAllowlist check (reuses web-common) → resolve DNS itself → ssrf.rs is_denied_range (reject private/loopback/link-local/ULA/CGNAT/multicast, IPv4-mapped+compatible unwrapped; literal-IP carve-out) → pin+dial → write 200 → peek first tunnel byte (recv MSG_PEEK; 0x16 → MITM, else transparent tunnel). **Slice #3a MITM:** in-proxy ephemeral per-instance CA (ca.rs, rcgen; private key never leaves the sandbox, public ca.pem exported beside the UDS), per-host CA-signed leaf cache (leaf_cache.rs), async terminate+re-originate (mitm.rs: looks_like_tls + intercept — tokio-rustls TlsAcceptor/TlsConnector + copy_bidirectional on a per-connection current-thread runtime; upstream validated against webpki). Decision carries tls_intercepted. **Slice #3b leak scanner:** `MitmCtx.secret_hashes_path` + `load_patterns` (lazy per-connection read of `secret_hashes.json`; missing/corrupt ⇒ no scan, fail-OPEN); `mitm/relay.rs` `scan_relay` replaces `copy_bidirectional` when patterns present — splits both halves, one `kastellan-leak-scan::RollingMatcher` per direction, **scans each chunk before forwarding**, kills on hit; `intercept` returns `Result<Option<LeakReport>,String>`; `report::Verdict::BlockedCredentialLeak` + `Decision.leak`. **Slice #4 TLS pinning:** new `pins.rs` (`spki_sha256` [SHA-256 of DER SubjectPublicKeyInfo via x509-cert], `PinSet` [`KASTELLAN_EGRESS_PROXY_PINS` JSON `{host:["sha256/<b64>"]}` → lowercased host → 32-byte digests; **a host with an empty pin list ⇒ Err ⇒ startup aborts**], `chain_has_pin`, `PinningVerifier` [rustls `ServerCertVerifier`: webpki FIRST then SPKI-pin overlay for pinned hosts, else `RustlsError::General(PIN_MISMATCH_MARKER)`], `build_upstream_client_config` [None/blank/`{}` ⇒ plain webpki byte-identical; valid ⇒ `.dangerous()` custom verifier; malformed ⇒ Err ⇒ startup aborts]); `main.rs` reads the pins env once before lock_down; `proxy::classify_mitm_error` maps the marker → `Verdict::BlockedTlsPin`/`pin_mismatch`. **Fail-CLOSED** for a configured pin; additive over webpki (never weakens netns/allowlist/SSRF). Forward-looking: no pins provisioned today. Modules: pins.rs, ssrf.rs, request_line.rs, report.rs, proxy.rs (decide + handle_conn connect→200→peek→branch + MitmCtx + run_mitm + load_patterns + classify_mitm_error), ca.rs, leaf_cache.rs, mitm.rs (+ mitm/relay.rs), main.rs (install ring provider, generate CA + write ca.pem before lock_down, build pin-aware upstream config, accept loop). Host side = core/src/egress
 ```
 
 **Test baselines.** Native-Linux (DGX, PG 18 live, rustc 1.96.0, worker bins built): **1538 / 0 / 10**
 on `feat/egress-slice3-tls-intercept` (2026-06-12 slice-#3a acceptance; the real-sandbox e2e suites actually run here,
 unlike the older 1327 figure; predates the Matrix #265 + leak-scan #3b tests). macOS skip-as-pass posture (no
-`KASTELLAN_PG_BIN_DIR`): **1644 / 0 / 8** (2026-06-13, after Matrix #265 + egress slice-#3b leak-scan + the PR #269 review pass). 8–10 ignored =
+`KASTELLAN_PG_BIN_DIR`): **1668 / 0 / 8** (2026-06-13, after egress slice-#4 TLS pinning). 8–10 ignored =
 explicit doctest/real-net markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
 `KASTELLAN_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the
@@ -462,10 +511,14 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy SLICE #1 (PR #240) + SLICE #2 (force-routing, PR #256 MERGED) are COMPLETE; SLICE #3a (TLS-intercept mechanism, PR #259 MERGED at `e2a7b2b`) is COMPLETE.** Next egress work is slice #3b (the co-located credential-leak scanner, on top of #3a's now-visible plaintext) and slice #4 (TLS pinning). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
+Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**★ TOP PICK — Phase 4 continuation (this branch's arc).** `python-exec` slice #1 shipped this session
-(branch `claude/compassionate-shannon-3jeh31`); the Phase-4 sequence continues:
+**★ TOP PICK — `browser-driver` Phase 2 (ROADMAP:147)** is the leading egress/Phase-3 pick (see its block below); Phase-2 channels (IMAP/Telegram inbound) are the next phase boundary.
+
+**Egress follow-ups now that the proxy is feature-complete (each small, on demand):** (1) **slice #4 frontier wiring** — read the operator's real frontier pin config on the daemon + route frontier LLM egress through a **pinned** sidecar (lands with the first frontier worker / the Phase-5 escalation path; today's callers pass `cert_pins_json: None`). (2) **slice #3b dispatch-time live-append** ([#268](https://github.com/hherb/kastellan/issues/268)) — provision per-worker secret hashes at dispatch (today's callers pass `&[]`). Both share the `NetWorkerSpawn` params struct that slice #4 introduced.
+
+**★ TOP PICK — Phase 4 continuation (`python-exec` arc, now on `main`).** `python-exec` slice #1 shipped
+(PR [#267](https://github.com/hherb/kastellan/pull/267)); the Phase-4 sequence continues:
 1. **Acceptance first:** run `cargo test -p kastellan-core --test python_exec_e2e -- --nocapture` on the DGX (real
    bwrap + Landlock + PG — this container could only verify seccomp; Landlock reported `KernelTooOld` here) and on the
    Mac (Seatbelt: round-trip + socket-negative run; the scratch test self-skips on darwin). Then flip
@@ -479,14 +532,6 @@ Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 
 3. **python-exec slice-#2 candidates (on demand):** macOS writable scratch (shares browser-driver Phase 2's per-spawn
    scratch wiring); curated-wheels RO dir if skills demand packages; `stdin`/`argv` params.
 
-**★ TOP PICK — egress proxy SLICE #4: TLS pinning for the frontier/LLM egress path (ROADMAP:142).** Slices #1–#3b are
-COMPLETE (boundary + force-routing + MITM + credential-leak scanner). #4 pins the upstream certificate/SPKI for the
-high-value frontier/LLM egress (the Phase-5 path) so a compromised public-CA trust store can't silently MITM kastellan's
-own egress. The MITM re-origination leg already validates against webpki-roots (`egress-proxy::main` `upstream_tls`); #4
-narrows that to a pinned key/cert for the specific frontier origin(s). **Spec it first.** Note slice #3b's **dispatch-time
-live-append is the standing #3b follow-up** ([#268](https://github.com/hherb/kastellan/issues/268)) — it lands with the
-first secret-bearing egress worker (which will also bundle the now-8-arg `spawn_net_worker`/`spawn_forced_net_worker`
-signatures into a params struct, dropping the `#[allow(too_many_arguments)]`).
 **Egress deferrals carried forward:** [#242](https://github.com/hherb/kastellan/issues/242) tunnel idle/resolve timeouts;
 [#251](https://github.com/hherb/kastellan/issues/251) stale-scratch crash-sweep (needs cross-platform pid-liveness);
 transparent gzip/brotli if an origin refuses `Accept-Encoding: identity`; the `pg_decision_sink` back-pressure decoupling
@@ -547,8 +592,8 @@ force-routes through the egress proxy. **The other standing TOP PICK is egress s
   confirm the planner expands a stash via the `<handoff>` instruction in a real `cli_ask`-style run; if the
   prompt wording needs tuning, that's a cheap iteration on `render_handoff_block()`. (Optional / on demand.)
 
-**Other Phase-3 natural picks:** egress slices #3/#4 and `browser-driver` are the two TOP PICKs above. Beyond those,
-Phase-2 channels (IMAP/Telegram inbound) are the next phase boundary once Phase-3 egress is judged complete.
+**Other Phase-3 natural picks:** the egress proxy is feature-complete (all 4 slices), so `browser-driver` Phase 2 is the
+leading Phase-3 pick above. Beyond that, Phase-2 channels (IMAP/Telegram inbound) are the next phase boundary.
 
 **Older follow-ups (ROADMAP:130, still open):** core-side caller wiring for `insert_memory_light` (lands with the first high-frequency writer — Phase 2 channels / Phase 3 browser); per-namespace caps + oldest-eviction on `memories.metadata` (no schema change); a graph-lane degradation test ([#196](https://github.com/hherb/kastellan/issues/196)).
 
