@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-14 (**Phase 4: python-exec RUNTIME PARAMS built** — approved/pinned Python skills can now receive
-runtime params; branch `feat/python-exec-runtime-params`, **PR pending** [not yet opened at write time]. Brainstorm → spec →
+runtime params; branch `feat/python-exec-runtime-params`, PR [#278](https://github.com/hherb/kastellan/pull/278) [opened, awaiting review]. Brainstorm → spec →
 plan → subagent-driven TDD: 14 tasks (Slice A worker + Slice B core), per-task review inline/dispatched, + an **opus
 whole-branch final review** that confirmed all 7 security invariants hold and caught one back-compat bug — `validate_python_params`
 rejected the `Value::Null` default of `InvokeDirective.params`, so a no-param autonomous python invoke was wrongly refused —
@@ -19,7 +19,7 @@ worker param units + real-interpreter + core pure/operator/agent/l3_run/types/CL
 the slice-2 round-trip + fail-closed-when-disabled. **No new sandbox/seccomp surface** (only one `.env()` added to `run_code`;
 `Net::Deny`/`WorkerStrict`/`fs_write=[]` byte-untouched — DGX not required).
 
-**This session (2026-06-14, latest) — Phase 4 python-exec RUNTIME PARAMS (branch `feat/python-exec-runtime-params`, PR pending).**
+**This session (2026-06-14, latest) — Phase 4 python-exec RUNTIME PARAMS (branch `feat/python-exec-runtime-params`, PR [#278](https://github.com/hherb/kastellan/pull/278)).**
 The deferred "params" piece of the skill catalog. A Python skill is verbatim, SHA-256-bound source (approve == execute), so params
 can't be injected into the code — they arrive on a **side channel** the author reads. Locked design (brainstorm):
 - **Channel = env var `KASTELLAN_PYTHON_PARAMS`** (one JSON object; survives `-I`; off `/proc/*/cmdline` unlike argv; worker
@@ -371,8 +371,7 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** **python-exec RUNTIME PARAMS is on branch `feat/python-exec-runtime-params` (PR pending — not yet opened/merged
-at write time);** workspace 1786/0/8 + clippy clean + e2e live-green on Mac/PG 18. `main` carries python-exec **skill catalog slice 2**
+**Current state.** **python-exec RUNTIME PARAMS is on branch `feat/python-exec-runtime-params` (PR [#278](https://github.com/hherb/kastellan/pull/278), not yet merged);** workspace 1786/0/8 + clippy clean + e2e live-green on Mac/PG 18. `main` carries python-exec **skill catalog slice 2**
 (invocation + surfacing, PR [#276](https://github.com/hherb/kastellan/pull/276), commit `e478309`), python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)),
 **python-exec skill catalog slice 1** (PR [#275](https://github.com/hherb/kastellan/pull/275), commit `0cbddc5` — crystallise +
 approval + operator show/approve/pin CLI), egress slice
@@ -681,7 +680,7 @@ continues:
    unregistered by default. Whether the supervised deployment (`core_service_spec`) should carry it by default is an
    operator decision; the deliberate slice-#1 posture is OFF.
 2. **Skill catalog SLICE 2 (invocation + surfacing) — MERGED** (`e478309`) and **RUNTIME PARAMS — built this session** (branch
-   `feat/python-exec-runtime-params`, PR pending; see the latest "This session" block). The skill-catalog arc is now
+   `feat/python-exec-runtime-params`, PR [#278](https://github.com/hherb/kastellan/pull/278); see the latest "This session" block). The skill-catalog arc is now
    functionally complete: crystallise/approve/pin + invoke/surface + runtime params (env-var channel, 64 KiB, free-form,
    secret-aware). **★ NEXT immediate pick — the priority refactor: split `core/src/scheduler/inner_loop.rs` (~632 LOC)** —
    extract the `invoke_skill` expansion (templated+python arms) into a helper; awkward because `refuse_invoke!` uses `continue`,

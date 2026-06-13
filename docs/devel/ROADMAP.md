@@ -261,7 +261,7 @@ items unlock later ones.
     name for its header. `cli_memory_l3py_run_daemon_e2e` (2 scenarios, **live-green on Mac Seatbelt under PG 18**):
     real-jail round-trip via the daemon + `kind:"python"` audit row + fail-closed-when-disabled. Spec/plan:
     `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`.
-  - [x] **Runtime params — 2026-06-14** (branch `feat/python-exec-runtime-params`, PR pending). A Python skill receives
+  - [x] **Runtime params — 2026-06-14** (branch `feat/python-exec-runtime-params`, PR [#278](https://github.com/hherb/kastellan/pull/278)). A Python skill receives
     runtime params via the env var `KASTELLAN_PYTHON_PARAMS` (one JSON object the worker always sets, default `{}`) — the
     code stays verbatim/SHA-bound so params arrive on a side channel, not by mutating the source. **Slice A** (worker):
     `python.exec` accepts an optional `params` object, `serialize_params` validates object-ness + a **64 KiB serialized cap**
