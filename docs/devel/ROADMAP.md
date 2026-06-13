@@ -247,7 +247,7 @@ items unlock later ones.
     terminal-escape deception of the `show`-then-approve gate. Workspace 1725/0/8, clippy `-D warnings` clean; live-PG verified
     (writer dedup, scheduler crystallise capture, CLI approve-without-registry, `show` verbatim source). Spec/plan:
     `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`.
-  - [x] **Slice 2 — invocation + surfacing — 2026-06-13** (branch `feat/python-exec-skill-catalog-slice2`).
+  - [x] **Slice 2 — invocation + surfacing — 2026-06-13** (branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276)).
     Makes approved/pinned Python skills runnable, mirroring the L3 invocation arc. New `core/src/memory/l3py_invoke/`
     (facade + `pure`/`operator`/`agent`, mirroring `l3_invoke/`): `prepare_python_invocation` pure gate (trust →
     re-validate → **SHA-256 re-hash vs stored digest = the code TOCTOU close**, returns verbatim code);

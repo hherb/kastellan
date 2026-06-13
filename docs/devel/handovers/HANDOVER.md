@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-13 (**Phase 4: python-exec skill catalog SLICE 2 built — invocation + surfacing** — approved/pinned
-Python skills are now *runnable*; branch `feat/python-exec-skill-catalog-slice2`, PR pending. 7 TDD tasks via subagent-driven
+Python skills are now *runnable*; branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276). 7 TDD tasks via subagent-driven
 dev with per-task spec+quality review until the subagent pool hit the monthly spend limit at Task 6's review — Tasks 6 (agent
 integration, security-critical) + 7 (e2e) were then self-reviewed by the controller against the design spec's §6 security
 analysis. Slice 1 — crystallise + approve/pin — is MERGED to `main` (PR [#275](https://github.com/hherb/kastellan/pull/275),
@@ -19,7 +19,7 @@ the real jail via the daemon (exit 0, snippet stdout round-trips, `l3.invoke_out
 fail-closed path (python-exec disabled → exit non-zero, tool-not-registered) holds. **No new sandbox/seccomp surface** (reuses
 the slice-#1 python-exec jail, already DGX-accepted) — DGX not required this session.
 
-**This session (2026-06-13, latest) — Phase 4 python-exec SKILL CATALOG slice 2: invocation + surfacing (branch `feat/python-exec-skill-catalog-slice2`, PR pending).**
+**This session (2026-06-13, latest) — Phase 4 python-exec SKILL CATALOG slice 2: invocation + surfacing (branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276)).**
 Brainstorm/design were already locked in the slice-1 design spec (§4.5/4.6, build-seq steps 5–9); wrote a slice-2 plan
 (`docs/superpowers/plans/2026-06-13-python-exec-skill-catalog-slice2.md`) and executed via subagent-driven TDD. Makes an
 approved/pinned Python skill **runnable**, mirroring the L3 invocation arc — reusing, not generalizing, the shared machinery.
@@ -333,7 +333,7 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
 **Current state.** **python-exec skill catalog SLICE 2 (invocation + surfacing) is on branch `feat/python-exec-skill-catalog-slice2`,
-PR pending — NOT yet merged.** `main` carries python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)),
+PR [#276](https://github.com/hherb/kastellan/pull/276) — NOT yet merged.** `main` carries python-exec slice #1 (PR [#267](https://github.com/hherb/kastellan/pull/267)),
 **python-exec skill catalog slice 1** (PR [#275](https://github.com/hherb/kastellan/pull/275), commit `0cbddc5` — crystallise +
 approval + operator show/approve/pin CLI), egress slice
 #4 TLS pinning (PR [#272](https://github.com/hherb/kastellan/pull/272)), the Dependabot torch triage (PR
