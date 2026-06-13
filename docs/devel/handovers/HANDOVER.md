@@ -249,8 +249,8 @@ architecture/request-flow exports (still "hhagent"-titled; only the site copies 
 #4 TLS pinning (PR [#272](https://github.com/hherb/kastellan/pull/272)), the Dependabot torch triage (PR
 [#271](https://github.com/hherb/kastellan/pull/271)), egress slice #3b (PR [#269](https://github.com/hherb/kastellan/pull/269)),
 browser-driver slice #1 (PR [#262](https://github.com/hherb/kastellan/pull/262)), and Matrix comms (PR
-[#265](https://github.com/hherb/kastellan/pull/265)). **This session's work is on branch `claude/vigorous-feistel-b0c811` (PR
-[#270](https://github.com/hherb/kastellan/pull/270)):** Mac acceptance of `python_exec_e2e` (3/3) + the `unique_suffix`
+[#265](https://github.com/hherb/kastellan/pull/265)). **PR [#270](https://github.com/hherb/kastellan/pull/270) is now MERGED
+to `main` (commit `0de4249`):** Mac acceptance of `python_exec_e2e` (3/3) + the `unique_suffix`
 collision fix + the macOS interpreter-cascade/framework-fs_read fix — see the "This session" block above. (The #270 interpreter
 fix also closes the env-leak filed as [#273](https://github.com/hherb/kastellan/issues/273).) Dev box **macOS**; the DGX
 (aarch64) is driven natively over WireGuard SSH (`ssh dgx`, allow-rule form `ssh dgx '<command>'`) — its checkout is back on
