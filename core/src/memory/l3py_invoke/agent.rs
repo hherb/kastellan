@@ -15,7 +15,7 @@ use kastellan_db::memories::{load_layer_by_trust, MemoryLayer};
 
 use crate::cassandra::types::{DataClass, PlannedStep, PythonSkillCandidate};
 use crate::memory::l3_approval::SkillTrust;
-use crate::memory::l3_invoke::InvokeRefusal;
+use crate::memory::l3_invoke::{is_autonomously_invocable, InvokeRefusal};
 
 use super::pure::{prepare_python_invocation, PY_EXEC_METHOD, PY_EXEC_TOOL};
 
@@ -78,6 +78,16 @@ pub async fn load_pinned_python_skill_by_name(
         let meta = &row.metadata;
         if meta.get("kind").and_then(|k| k.as_str()) != Some("python") {
             continue; // not a python skill (templated or other) — skip
+        }
+        // Defense-in-depth: re-check the row's stored trust in Rust even though
+        // SQL already filtered `trust = "pinned"`. Mirrors the templated
+        // resolver — guards against a future SQL/Rust divergence so a
+        // non-pinned row can never reach the agent's autonomous path. The
+        // inner loop passes a hardcoded `SkillTrust::Pinned` to
+        // `expand_python_for_agent`, so this loader IS the trust gate.
+        let trust = meta.get("trust").and_then(|v| v.as_str()).unwrap_or("");
+        if !is_autonomously_invocable(SkillTrust::from_metadata_str(trust)) {
+            continue;
         }
         let candidate: PythonSkillCandidate = match meta
             .get("python")
