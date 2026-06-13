@@ -125,16 +125,16 @@ pub(crate) fn spawn_worker_maybe_forced(
                 // panic if that invariant ever changes.
                 _ => return spawn_worker(backend, spec),
             };
-            spawn_forced_net_worker(
+            let params = crate::egress::net_worker::NetWorkerSpawn {
                 backend,
-                &cfg.proxy_bin,
+                proxy_bin: &cfg.proxy_bin,
                 spec,
-                &allowlist,
-                &cfg.scratch_root,
+                allowlist: &allowlist,
                 worker_name,
-                &[], // secret_fingerprints: dispatch-time provisioning is the deferred follow-up (#268)
-                (cfg.make_sink)(),
-            )
+                secret_fingerprints: &[], // dispatch-time provisioning deferred (#268)
+                cert_pins_json: None,     // operator frontier-pin wiring deferred (slice #4 follow-up)
+            };
+            spawn_forced_net_worker(&params, &cfg.scratch_root, (cfg.make_sink)())
         }
         _ => spawn_worker(backend, spec),
     }

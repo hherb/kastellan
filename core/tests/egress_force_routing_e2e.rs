@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kastellan_core::egress::net_worker::spawn_forced_net_worker;
+use kastellan_core::egress::net_worker::{spawn_forced_net_worker, NetWorkerSpawn};
 use kastellan_core::tool_host::WorkerSpec;
 
 /// The sidecar binds its UDS at `<scratch>/egress.sock` (the crate-private
@@ -147,17 +147,18 @@ fn forced_coupling_enforces_allowlist_and_ingests_decisions() {
         wall_clock_ms: None,
     };
     let backend = backend();
-    let mut worker = spawn_forced_net_worker(
-        backend.as_ref(),
-        &proxy,
-        &spec,
-        &["127.0.0.1".to_string()],
-        &scratch_root,
-        "web-fetch",
-        &[], // secret_fingerprints — none for this e2e test
-        sink,
-    )
-    .expect("force-routed worker + sidecar spawn (fail-closed if the proxy is missing)");
+    let allowlist = ["127.0.0.1".to_string()];
+    let params = NetWorkerSpawn {
+        backend: backend.as_ref(),
+        proxy_bin: &proxy,
+        spec: &spec,
+        allowlist: &allowlist,
+        worker_name: "web-fetch",
+        secret_fingerprints: &[],
+        cert_pins_json: None,
+    };
+    let mut worker = spawn_forced_net_worker(&params, &scratch_root, sink)
+        .expect("force-routed worker + sidecar spawn (fail-closed if the proxy is missing)");
 
     let uds = minted_uds(&scratch_root);
 
@@ -255,17 +256,18 @@ fn forced_coupling_worker_has_no_direct_route() {
         wall_clock_ms: None,
     };
     let backend = backend();
-    let worker = spawn_forced_net_worker(
-        backend.as_ref(),
-        &proxy,
-        &spec,
-        &["example.com:443".to_string()],
-        &scratch_root,
-        "web-fetch",
-        &[], // secret_fingerprints — none for this e2e test
-        |_row| {},
-    )
-    .expect("force-routed getent worker + sidecar spawn");
+    let allowlist = ["example.com:443".to_string()];
+    let params = NetWorkerSpawn {
+        backend: backend.as_ref(),
+        proxy_bin: &proxy,
+        spec: &spec,
+        allowlist: &allowlist,
+        worker_name: "web-fetch",
+        secret_fingerprints: &[],
+        cert_pins_json: None,
+    };
+    let worker = spawn_forced_net_worker(&params, &scratch_root, |_row| {})
+        .expect("force-routed getent worker + sidecar spawn");
 
     // `close()` waits for the worker to exit. getent in a private netns can't
     // resolve DNS (no route), so it exits non-zero.
@@ -377,12 +379,18 @@ fn real_mitm_fetch_through_sidecar() {
         wall_clock_ms: None,
     };
     let backend = backend();
-    let worker = spawn_forced_net_worker(
-        backend.as_ref(), &proxy, &spec, &["example.com:443".to_string()],
-        &scratch_root, "web-fetch", &[], // secret_fingerprints — none for this e2e test
-        |_row| {},
-    )
-    .expect("force-routed worker + sidecar");
+    let allowlist = ["example.com:443".to_string()];
+    let params = NetWorkerSpawn {
+        backend: backend.as_ref(),
+        proxy_bin: &proxy,
+        spec: &spec,
+        allowlist: &allowlist,
+        worker_name: "web-fetch",
+        secret_fingerprints: &[],
+        cert_pins_json: None,
+    };
+    let worker = spawn_forced_net_worker(&params, &scratch_root, |_row| {})
+        .expect("force-routed worker + sidecar");
     let uds = minted_uds(&scratch_root);
     let ca_pem = uds.parent().unwrap().join("ca.pem");
 
