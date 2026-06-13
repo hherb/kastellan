@@ -73,11 +73,19 @@ fn child_env_is_cleared_except_tmpdir_and_home() {
     );
     assert_eq!(r["exit_code"], 0);
     let keys = r["stdout"].as_str().unwrap().trim_end();
-    // Python itself may add LC_CTYPE on some platforms; what must NOT
-    // leak is anything kastellan- or host-shaped.
+    // Python itself may add LC_CTYPE on some platforms; KASTELLAN_PYTHON_PARAMS
+    // is intentionally injected by run_code. What must NOT leak is anything
+    // else kastellan- or host-shaped.
     for k in keys.split(',').filter(|k| !k.is_empty()) {
         assert!(
-            matches!(k, "TMPDIR" | "HOME" | "LC_CTYPE" | "__CF_USER_TEXT_ENCODING"),
+            matches!(
+                k,
+                "TMPDIR"
+                    | "HOME"
+                    | "LC_CTYPE"
+                    | "__CF_USER_TEXT_ENCODING"
+                    | "KASTELLAN_PYTHON_PARAMS"
+            ),
             "unexpected env var leaked into the python child: {k} (full: {keys})"
         );
     }

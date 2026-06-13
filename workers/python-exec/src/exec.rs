@@ -158,13 +158,16 @@ pub fn truncate_lossy(bytes: &[u8], cap: usize) -> (String, bool) {
 /// Run `code` under `python`. The child's environment is cleared — the
 /// jail's lockdown vars are not its business — then given exactly
 /// `TMPDIR`/`HOME` pointing at the scratch dir, with cwd there too (when
-/// it exists, which it always does inside the jail).
-pub fn run_code(python: &Path, code: &str) -> std::io::Result<ExecOutcome> {
+/// it exists, which it always does inside the jail). Runtime params arrive
+/// as the JSON string `params_json` in the [`PARAMS_ENV`] env var; the
+/// value has already been validated and serialized by the caller.
+pub fn run_code(python: &Path, code: &str, params_json: &str) -> std::io::Result<ExecOutcome> {
     let mut cmd = Command::new(python);
     cmd.args(python_args())
         .env_clear()
         .env("TMPDIR", SCRATCH_DIR)
         .env("HOME", SCRATCH_DIR)
+        .env(PARAMS_ENV, params_json)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

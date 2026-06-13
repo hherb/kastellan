@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use kastellan_protocol::{codes, server::Handler, RpcError};
 use serde::Deserialize;
 
-use crate::exec::{run_code, MAX_CODE_BYTES};
+use crate::exec::{run_code, serialize_params, MAX_CODE_BYTES};
 
 /// Env var carrying the absolute interpreter path. Set by the host
 /// manifest (`core/src/workers/python_exec.rs`) via `policy.env`; the
@@ -15,6 +15,8 @@ pub const PYTHON_BIN_ENV: &str = "KASTELLAN_PYTHON_EXEC_PYTHON";
 #[derive(Deserialize)]
 struct ExecParams {
     code: String,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
 }
 
 pub struct PythonExecHandler {
@@ -61,7 +63,10 @@ impl Handler for PythonExecHandler {
             ));
         }
 
-        let outcome = run_code(&self.python, &p.code)
+        let params_json = serialize_params(&p.params)
+            .map_err(|e| RpcError::new(codes::INVALID_PARAMS, e.to_string()))?;
+
+        let outcome = run_code(&self.python, &p.code, &params_json)
             .map_err(|e| RpcError::new(codes::OPERATION_FAILED, format!("spawn failed: {e}")))?;
 
         Ok(serde_json::json!({
@@ -118,6 +123,39 @@ mod tests {
 
     #[test]
     fn unspawnable_interpreter_is_operation_failed() {
+        let err = handler()
+            .call("python.exec", serde_json::json!({"code": "print(1)"}))
+            .unwrap_err();
+        assert_eq!(err.code, codes::OPERATION_FAILED);
+    }
+
+    #[test]
+    fn non_object_params_is_invalid_params() {
+        let err = handler()
+            .call("python.exec", serde_json::json!({"code": "print(1)", "params": [1, 2]}))
+            .unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS);
+        assert!(err.message.contains("object"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn over_cap_params_is_invalid_params() {
+        let big = "x".repeat(crate::exec::MAX_PARAMS_BYTES);
+        let err = handler()
+            .call(
+                "python.exec",
+                serde_json::json!({"code": "print(1)", "params": {"k": big}}),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS);
+        assert!(err.message.contains("cap"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn absent_params_is_accepted_and_reaches_spawn() {
+        // No `params` key: validation passes, so we fall through to the spawn,
+        // which fails on the dummy interpreter → OPERATION_FAILED (not
+        // INVALID_PARAMS). Proves absent params is the `{}` default, not a reject.
         let err = handler()
             .call("python.exec", serde_json::json!({"code": "print(1)"}))
             .unwrap_err();
