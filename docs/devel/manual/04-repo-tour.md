@@ -16,8 +16,8 @@ supervisor/     Service supervisor abstraction (systemd --user / launchd)
 protocol/       JSON-RPC 2.0 over stdio — the IPC wire format
 tests-common/   Shared test helpers (per-test Postgres clusters, etc.)
 workers/        One subdirectory per sandboxed tool worker
-adapters/       Placeholder for channel adapters (Telegram, Signal) — not
-                yet scaffolded as crates; the dirs hold .gitkeep only
+adapters/       Placeholder dir; the Matrix channel lives in workers/matrix
+                + workers/matrix-wire, email failover in workers/mail
 config/         Runtime policy files and per-worker sandbox profiles
 scripts/        Setup scripts (install bwrap profile, install Postgres, etc.)
 docs/           All documentation

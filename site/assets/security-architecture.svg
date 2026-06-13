@@ -38,10 +38,10 @@
   <!-- Inbound channels -->
   <rect x="40" y="125" width="220" height="180" rx="8" fill="#eef2ee" stroke="#557755"/>
   <text x="150" y="148" text-anchor="middle" font-weight="bold">Inbound channels</text>
-  <text x="60" y="172">• Telegram adapter</text>
-  <text x="60" y="192">• Signal adapter</text>
-  <text x="60" y="212">• IMAP / SMTP</text>
-  <text x="60" y="232">• Webhooks</text>
+  <text x="60" y="172">• Matrix (E2E, self-hosted)</text>
+  <text x="60" y="192">• Email (low-trust failover)</text>
+  <text x="60" y="212" font-style="italic" fill="#557755">single-user, federation off</text>
+  <text x="60" y="232" font-style="italic" fill="#557755">peers paired + screened</text>
   <text x="60" y="262" font-style="italic" fill="#557755">one process per channel,</text>
   <text x="60" y="278" font-style="italic" fill="#557755">message-bus to core only</text>
 
@@ -186,8 +186,8 @@
   <path d="M 1222 514 Q 1320 514 1320 240 Q 1320 200 1300 200" fill="none" stroke="#b8860b" stroke-width="2" marker-end="url(#arrAmber)" stroke-dasharray="6,3"/>
   <text x="1330" y="380" font-size="11" fill="#7a5a00">Tier 2 →</text>
   <text x="1330" y="395" font-size="11" fill="#7a5a00">channel bus</text>
-  <text x="1330" y="410" font-size="11" fill="#7a5a00">(Telegram /</text>
-  <text x="1330" y="425" font-size="11" fill="#7a5a00">Signal / email)</text>
+  <text x="1330" y="410" font-size="11" fill="#7a5a00">(Matrix /</text>
+  <text x="1330" y="425" font-size="11" fill="#7a5a00">email failover)</text>
   <text x="1330" y="445" font-size="11" fill="#7a5a00" font-style="italic">timeout → DENY</text>
 
   <!-- Tool worker zone -->

@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 730" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <title>kastellan — Architecture Overview</title>
+  <desc>High-level process model: Matrix/email channels feed the Rust agent core; the dispatcher chokepoint is the only door into per-tool worker processes, each in its own kernel sandbox; networked workers leave the host only through the per-worker egress proxy; Postgres and local inference run as host-local services.</desc>
+
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333"/>
+    </marker>
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#246b3a"/>
+    </marker>
+    <linearGradient id="coreGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#eaf3fb"/>
+      <stop offset="100%" stop-color="#d3e6f5"/>
+    </linearGradient>
+    <linearGradient id="sandGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fde6e6"/>
+      <stop offset="100%" stop-color="#f5c2c2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Title -->
+  <text x="500" y="34" text-anchor="middle" font-size="22" font-weight="bold">kastellan — Architecture Overview</text>
+  <text x="500" y="56" text-anchor="middle" font-size="13" fill="#555">One OS process per worker · one kernel sandbox per worker · everything runs as a single host user</text>
+
+  <!-- Host trust boundary -->
+  <rect x="20" y="78" width="960" height="556" rx="14" fill="#fafcfd" stroke="#234" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="40" y="100" font-weight="bold" fill="#234">HOST  ·  single Linux / macOS user account</text>
+
+  <!-- LLM-router feed line (far-left corridor): core -> local inference -->
+  <path d="M 320 188 L 44 188 L 44 588 L 60 588" fill="none" stroke="#333" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arr)"/>
+  <text x="50" y="360" font-size="11" fill="#555" transform="rotate(-90 50 360)">LLM router</text>
+
+  <!-- Channels -->
+  <rect x="60" y="118" width="180" height="122" rx="8" fill="#eef2ee" stroke="#557755"/>
+  <text x="150" y="144" text-anchor="middle" font-weight="bold">Channels</text>
+  <text x="78" y="172">• Matrix — E2E</text>
+  <text x="92" y="190" font-style="italic" fill="#557755">primary channel</text>
+  <text x="78" y="214">• email</text>
+  <text x="92" y="232" font-style="italic" fill="#557755">low-trust failover</text>
+
+  <!-- Channels -> Core -->
+  <line x1="240" y1="179" x2="320" y2="179" stroke="#333" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Agent Core -->
+  <rect x="320" y="118" width="360" height="122" rx="8" fill="url(#coreGrad)" stroke="#234e7e" stroke-width="2"/>
+  <text x="500" y="144" text-anchor="middle" font-weight="bold">AGENT CORE (Rust)</text>
+  <text x="500" y="170" text-anchor="middle">scheduler · context manager</text>
+  <text x="500" y="190" text-anchor="middle">memory orchestrator · audit log</text>
+  <text x="500" y="212" text-anchor="middle">policy / capability gate</text>
+  <text x="500" y="232" text-anchor="middle">LLM router</text>
+
+  <!-- Core <-> Postgres -->
+  <line x1="680" y1="179" x2="760" y2="179" stroke="#333" stroke-width="2" marker-end="url(#arr)" marker-start="url(#arr)"/>
+
+  <!-- Postgres -->
+  <rect x="760" y="118" width="180" height="122" rx="8" fill="#eef0f5" stroke="#556"/>
+  <text x="850" y="144" text-anchor="middle" font-weight="bold">PostgreSQL</text>
+  <text x="850" y="170" text-anchor="middle" font-size="12">own role · peer auth</text>
+  <text x="850" y="188" text-anchor="middle" font-size="12">UDS only</text>
+  <text x="850" y="212" text-anchor="middle" font-size="12">pgvector · BM25</text>
+  <text x="850" y="230" text-anchor="middle" font-size="12">Apache AGE</text>
+
+  <!-- Core -> chokepoint -->
+  <line x1="500" y1="240" x2="500" y2="256" stroke="#333" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Dispatcher chokepoint -->
+  <rect x="300" y="256" width="400" height="36" rx="6" fill="#234e7e"/>
+  <text x="500" y="280" text-anchor="middle" fill="#fff" font-weight="bold">dispatcher chokepoint — the only door to workers</text>
+
+  <!-- chokepoint -> workers -->
+  <line x1="500" y1="292" x2="500" y2="340" stroke="#333" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="512" y="320" font-size="11" fill="#555">MCP JSON-RPC over Unix domain sockets</text>
+
+  <!-- Worker boxes -->
+  <!-- python-exec -->
+  <rect x="60" y="346" width="150" height="140" rx="8" fill="url(#sandGrad)" stroke="#b22222"/>
+  <text x="135" y="372" text-anchor="middle" font-weight="bold">python-exec</text>
+  <text x="135" y="398" text-anchor="middle" font-size="12">no network</text>
+  <text x="135" y="418" text-anchor="middle" font-size="12">ephemeral scratch</text>
+  <text x="135" y="446" text-anchor="middle" font-size="11" font-style="italic" fill="#7a2222">strictest jail</text>
+
+  <!-- web-fetch -->
+  <rect x="242" y="346" width="150" height="140" rx="8" fill="url(#sandGrad)" stroke="#b22222"/>
+  <text x="317" y="372" text-anchor="middle" font-weight="bold">web-fetch</text>
+  <text x="317" y="398" text-anchor="middle" font-size="12">HTTPS only</text>
+  <text x="317" y="418" text-anchor="middle" font-size="12">host allowlist</text>
+
+  <!-- web-search -->
+  <rect x="424" y="346" width="150" height="140" rx="8" fill="url(#sandGrad)" stroke="#b22222"/>
+  <text x="499" y="372" text-anchor="middle" font-weight="bold">web-search</text>
+  <text x="499" y="398" text-anchor="middle" font-size="12">SearxNG</text>
+  <text x="499" y="418" text-anchor="middle" font-size="12">query only</text>
+
+  <!-- browser-driver -->
+  <rect x="606" y="346" width="150" height="140" rx="8" fill="url(#sandGrad)" stroke="#b22222"/>
+  <text x="681" y="372" text-anchor="middle" font-weight="bold">browser-driver</text>
+  <text x="681" y="398" text-anchor="middle" font-size="12">Playwright</text>
+  <text x="681" y="418" text-anchor="middle" font-size="12">read-only render</text>
+
+  <!-- matrix -->
+  <rect x="788" y="346" width="150" height="140" rx="8" fill="url(#sandGrad)" stroke="#b22222"/>
+  <text x="863" y="372" text-anchor="middle" font-weight="bold">matrix</text>
+  <text x="863" y="398" text-anchor="middle" font-size="12">channel client</text>
+  <text x="863" y="418" text-anchor="middle" font-size="12">E2E</text>
+
+  <text x="938" y="338" text-anchor="end" font-size="11" font-style="italic" fill="#7a2222">… also shell-exec, gliner-relex</text>
+
+  <!-- Sandbox band -->
+  <rect x="60" y="500" width="878" height="30" rx="6" fill="#f3f4f6" stroke="#999"/>
+  <text x="499" y="519" text-anchor="middle" font-size="12">Each worker = one OS process in its own kernel jail — bubblewrap + Landlock + seccomp (Linux)  ·  sandbox-exec Seatbelt (macOS)</text>
+
+  <!-- Local inference -->
+  <rect x="60" y="556" width="400" height="62" rx="8" fill="#eef0f5" stroke="#556"/>
+  <text x="260" y="580" text-anchor="middle" font-weight="bold">Local inference</text>
+  <text x="260" y="602" text-anchor="middle" font-size="11">vLLM / SGLang (Linux) · llama.cpp / Ollama (macOS) · OpenAI HTTP</text>
+
+  <!-- Egress proxy -->
+  <rect x="540" y="556" width="398" height="62" rx="8" fill="#e8f3ec" stroke="#246b3a"/>
+  <text x="739" y="576" text-anchor="middle" font-weight="bold" fill="#246b3a">Egress proxy — per networked worker</text>
+  <text x="739" y="594" text-anchor="middle" font-size="11">force-routed by default · allowlist · SSRF block</text>
+  <text x="739" y="610" text-anchor="middle" font-size="11">TLS intercept + leak scan · cert pin</text>
+
+  <!-- networked workers -> egress proxy -->
+  <path d="M 590 530 L 590 543 L 739 543 L 739 556" fill="none" stroke="#246b3a" stroke-width="2" marker-end="url(#arrGreen)"/>
+  <text x="598" y="540" font-size="11" fill="#246b3a">networked workers only</text>
+
+  <!-- egress proxy -> internet (crosses host boundary) -->
+  <line x1="739" y1="618" x2="739" y2="660" stroke="#246b3a" stroke-width="2" marker-end="url(#arrGreen)"/>
+
+  <!-- Internet (outside host) -->
+  <rect x="540" y="660" width="398" height="56" rx="8" fill="#fff6f6" stroke="#b22222" stroke-dasharray="6,4"/>
+  <text x="739" y="684" text-anchor="middle" font-weight="bold" fill="#7a2222">Internet — allowlisted endpoints only</text>
+  <text x="739" y="704" text-anchor="middle" font-size="11" fill="#7a2222">frontier-LLM gate arrives in Phase 5</text>
+</svg>

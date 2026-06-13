@@ -12,7 +12,7 @@ find the right place to make a change.
  Your message
       │
       ▼
- Channel adapter (Telegram / Signal / IMAP)
+ Channel adapter (Matrix E2E · email failover)
       │  JSON-RPC over Unix socket
       ▼
  AGENT CORE  ───── Postgres (memory, tasks, audit, secrets)
