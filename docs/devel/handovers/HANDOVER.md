@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-13 (**egress proxy SLICE #4 — TLS pinning COMPLETE**; branch `feat/egress-slice4-tls-pinning`,
-PR pending. Egress proxy is now **all 4 slices done** (#1 boundary/SSRF, #2 force-routing, #3a MITM, #3b leak scanner,
+PR [#272](https://github.com/hherb/kastellan/pull/272). Egress proxy is now **all 4 slices done** (#1 boundary/SSRF, #2 force-routing, #3a MITM, #3b leak scanner,
 #4 TLS pinning). Prior on `main`: slice #3b (PR [#269](https://github.com/hherb/kastellan/pull/269)), `browser-driver`
 slice #1 (PR [#262](https://github.com/hherb/kastellan/pull/262)), Matrix comms (PR [#265](https://github.com/hherb/kastellan/pull/265)).)
 **Session-end verification:** Mac `cargo test --workspace` **1668 / 0 / 8**; `clippy --workspace --all-targets -D warnings`
@@ -117,7 +117,7 @@ Pages → connect `hherb/kastellan`, preset None, no build command, output dir `
 `docs/superpowers/{specs,plans}/2026-06-11-kastellan-dev-website*`. Follow-up: regenerate the root `assets/*.png`
 architecture/request-flow exports (still "hhagent"-titled; only the site copies were fixed).
 
-**Current state.** `main` is at `519d029`; **this session's work is on branch `feat/egress-slice4-tls-pinning` (PR pending):**
+**Current state.** `main` is at `519d029`; **this session's work is on branch `feat/egress-slice4-tls-pinning` (PR [#272](https://github.com/hherb/kastellan/pull/272)):**
 egress proxy **slice #4 TLS pinning is COMPLETE** (ROADMAP:142) — see the "This session" block above — making the egress proxy
 **all 4 slices done**. The pinning is **forward-looking** (no frontier egress worker exists, so every host caller passes
 `cert_pins_json: None` and the default deployment provisions no pins ⇒ byte-identical behaviour); operator pin-config wiring +
