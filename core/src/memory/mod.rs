@@ -52,6 +52,7 @@ pub mod l3py_approval;
 pub mod l3_crystallise;
 pub mod l3py_crystallise;
 pub mod l3_invoke;
+pub mod l3py_invoke;
 pub mod l3_surface;
 pub mod layers;
 mod recall;

@@ -252,9 +252,11 @@ fn env_secs(key: &str, default: u64) -> u64 {
 }
 
 /// Best-effort lookup of an L3 skill's display name by id, for operator output
-/// only. Reads the stored memory row's `metadata.template.name`; any miss
+/// only. Reads the stored memory row's name — `metadata.python.name` for a
+/// Python skill, else `metadata.template.name` for a templated skill. Any miss
 /// (DB error, absent row, no name) falls back to `"<skill>"`. Never affects
-/// control flow.
+/// control flow (a name lookup is a memory-row read, NOT a tool-registry
+/// rebuild, so it re-introduces none of the #179 env coupling).
 async fn resolve_skill_name(pool: &sqlx::PgPool, id: i64) -> String {
     use kastellan_db::memories::fetch_by_ids;
     fetch_by_ids(pool, &[id])
@@ -262,9 +264,10 @@ async fn resolve_skill_name(pool: &sqlx::PgPool, id: i64) -> String {
         .ok()
         .and_then(|mut rows| rows.pop())
         .and_then(|row| {
-            row.metadata
-                .get("template")
-                .and_then(|t| t.get("name"))
+            let m = &row.metadata;
+            m.get("python")
+                .and_then(|p| p.get("name"))
+                .or_else(|| m.get("template").and_then(|t| t.get("name")))
                 .and_then(|n| n.as_str())
                 .map(str::to_string)
         })

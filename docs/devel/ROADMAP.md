@@ -247,10 +247,21 @@ items unlock later ones.
     terminal-escape deception of the `show`-then-approve gate. Workspace 1725/0/8, clippy `-D warnings` clean; live-PG verified
     (writer dedup, scheduler crystallise capture, CLI approve-without-registry, `show` verbatim source). Spec/plan:
     `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`.
-  - [ ] **Slice 2** — invocation (`l3py_invoke` pure gate w/ SHA-drift refuse + operator `run` dispatching one
-    `python.exec` step + daemon `l3_run` Python branch, fail-closed when python-exec disabled) + surfacing
-    (`l3_surface` kind-aware, code never shown) + agent-autonomous `Plan.invoke_skill` Python resolution + the
-    `cli_memory_l3py_run_daemon_e2e` end-to-end test. Then params (needs a `python.exec` structured arg channel).
+  - [x] **Slice 2 — invocation + surfacing — 2026-06-13** (branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276)).
+    Makes approved/pinned Python skills runnable, mirroring the L3 invocation arc. New `core/src/memory/l3py_invoke/`
+    (facade + `pure`/`operator`/`agent`, mirroring `l3_invoke/`): `prepare_python_invocation` pure gate (trust →
+    re-validate → **SHA-256 re-hash vs stored digest = the code TOCTOU close**, returns verbatim code);
+    `invoke_python_skill` operator path (reuses `InvokeReport` + `run_steps` + the L3 audit builders with `kind:"python"`
+    injected — one `python.exec` step expressed as a single `L3TemplateStep`, so the daemon→serialize→CLI→render
+    pipeline is unchanged); `expand_python_for_agent` + `load_pinned_python_skill_by_name` (pinned-only, defensive
+    trust re-check). Daemon `l3_run.rs` gained a `kind=="python"` branch (**fail-closed**: an unregistered python-exec
+    surfaces a tool-not-found step error, never a silent no-op); `l3_surface.rs` is kind-aware (python surfaces
+    name+description, **code never shown** — structurally enforced, no code field on `SurfacedSkill`); inner-loop
+    `invoke_skill` resolves a pinned python skill by name (CASSANDRA review applies); CLI `run` resolves the python
+    name for its header. `cli_memory_l3py_run_daemon_e2e` (2 scenarios, **live-green on Mac Seatbelt under PG 18**):
+    real-jail round-trip via the daemon + `kind:"python"` audit row + fail-closed-when-disabled. Spec/plan:
+    `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`. **Remaining: params** (needs a `python.exec`
+    structured arg channel — a python-exec worker slice-2).
 - [ ] **Skill trust enum** — `Untrusted | UserApproved | Pinned`, each level mapping to an explicit capability ceiling (which workers it may invoke, which net allowlists, which fs paths). Authorship and approval recorded in `audit_log`; promotion requires re-approval. (Pattern: IronClaw skill trust model — user-placed vs registry-installed. The L3 templated-skill arc above is the first concrete implementation of this shape.)
 - [ ] Optional micro-VM backend for `python-exec` (Firecracker on Linux, Apple `container` on macOS — discovery spike completed 2026-05-21, verdict COMMIT; see [`docs/superpowers/specs/2026-05-21-macos-container-spike-notes.md`](../superpowers/specs/2026-05-21-macos-container-spike-notes.md))
 - [ ] **Tiered delegation policy with hard no-recursion ceiling** — when the scheduler grows subagent delegation (today everything is one inner loop), borrow openhuman's `docs/DELEGATION_POLICY.md` four-tier shape: Tier 1 reply-directly (no tools), Tier 2 direct tool, Tier 3 inline subagent (≤5 turns, no new thread), Tier 4 dedicated worker thread (>5 turns). **The structural constraint that matters: workers do not spawn workers.** Encode it in `tool_host` as a compile-time check (`SubagentContext: Sealed` newtype that can only be constructed from the root scheduler) so the spawn tree is provably finite and the audit log has bounded fan-out per task. Maps cleanly onto the existing `Lifecycle::{SingleUse, IdleTimeout}` shape: tier-3 inline subagents are `SingleUse`, tier-4 dedicated threads piggyback on `IdleTimeoutLifecycle`. Pre-req for any meaningful agent-authored-skills work; defines the budget per skill invocation.

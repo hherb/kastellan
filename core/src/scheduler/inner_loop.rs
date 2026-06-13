@@ -14,6 +14,9 @@ use crate::cassandra::review::{ChainReviewStage, ReviewStage, ReviewStageContext
 use crate::cassandra::types::{DataClass, Plan, PlannedStep, Verdict};
 use crate::memory::l3_approval::SkillTrust;
 use crate::memory::l3_invoke::{expand_for_agent, load_pinned_skill_by_name};
+use crate::memory::l3py_invoke::{
+    expand_python_for_agent, load_pinned_python_skill_by_name, with_python_kind,
+};
 use crate::scheduler::audit::{
     build_l3_invoke_outcome_payload, build_l3_invoke_rejected_agent_payload,
     build_l3_invoked_payload, ACTION_L3_INVOKED, ACTION_L3_INVOKE_OUTCOME,
@@ -364,44 +367,77 @@ pub async fn run_to_terminal(
                         .unwrap_or_default();
                     refuse_invoke!(&name, None, None, vec![malformed.to_string()]);
                 }
-                Ok((name, args)) => match load_pinned_skill_by_name(pool, &name).await? {
-                    None => {
-                        refuse_invoke!(&name, None, None,
-                            vec![format!("unknown or non-pinned skill: {name}")]);
-                    }
-                    Some(pinned) => {
-                        let live_tools = dispatcher.known_tools();
-                        match expand_for_agent(
-                            &pinned.template,
-                            SkillTrust::Pinned,
-                            &args,
-                            &live_tools,
-                            plan.data_ceiling,
-                        ) {
-                            Err(refusal) => {
-                                refuse_invoke!(
+                Ok((name, args)) => {
+                    match load_pinned_skill_by_name(pool, &name).await? {
+                        Some(pinned) => {
+                            let live_tools = dispatcher.known_tools();
+                            match expand_for_agent(
+                                &pinned.template,
+                                SkillTrust::Pinned,
+                                &args,
+                                &live_tools,
+                                plan.data_ceiling,
+                            ) {
+                                Err(refusal) => refuse_invoke!(
                                     &name,
                                     Some(pinned.memory_id),
                                     Some(pinned.body_sha256.as_str()),
                                     refusal.reasons
-                                );
-                            }
-                            Ok(steps) => {
-                                let arg_names: Vec<String> = args.keys().cloned().collect();
-                                let payload = build_l3_invoked_payload(
-                                    pinned.memory_id, &name, &pinned.body_sha256,
-                                    &arg_names, steps.len(),
-                                );
-                                kastellan_db::audit::insert(
-                                    pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
-                                ).await?;
-                                plan.steps = steps;
-                                invoke_used = true;
-                                current_invoke = Some((pinned.memory_id, name));
+                                ),
+                                Ok(steps) => {
+                                    let arg_names: Vec<String> = args.keys().cloned().collect();
+                                    let payload = build_l3_invoked_payload(
+                                        pinned.memory_id, &name, &pinned.body_sha256,
+                                        &arg_names, steps.len(),
+                                    );
+                                    kastellan_db::audit::insert(
+                                        pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
+                                    ).await?;
+                                    plan.steps = steps;
+                                    invoke_used = true;
+                                    current_invoke = Some((pinned.memory_id, name));
+                                }
                             }
                         }
+                        // No pinned *templated* skill of that name — try a pinned
+                        // *Python* skill before refusing.
+                        None => match load_pinned_python_skill_by_name(pool, &name).await? {
+                            None => refuse_invoke!(
+                                &name, None, None,
+                                vec![format!("unknown or non-pinned skill: {name}")]
+                            ),
+                            Some(py) => match expand_python_for_agent(
+                                &py.candidate,
+                                SkillTrust::Pinned,
+                                &py.body_sha256,
+                                plan.data_ceiling,
+                            ) {
+                                Err(refusal) => refuse_invoke!(
+                                    &name,
+                                    Some(py.memory_id),
+                                    Some(py.body_sha256.as_str()),
+                                    refusal.reasons
+                                ),
+                                Ok(steps) => {
+                                    // Python skills take no args. Tag the audit
+                                    // row with kind:"python" for a coherent
+                                    // lifecycle stream (shares `with_python_kind`
+                                    // with the operator path — one source of truth
+                                    // for the tag).
+                                    let payload = with_python_kind(build_l3_invoked_payload(
+                                        py.memory_id, &name, &py.body_sha256, &[], steps.len(),
+                                    ));
+                                    kastellan_db::audit::insert(
+                                        pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
+                                    ).await?;
+                                    plan.steps = steps;
+                                    invoke_used = true;
+                                    current_invoke = Some((py.memory_id, name));
+                                }
+                            },
+                        },
                     }
-                },
+                }
             }
         }
 

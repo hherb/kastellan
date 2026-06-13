@@ -19,7 +19,7 @@
 //! [`crate::memory::l3_approval::SkillTrust::from_metadata_str`]
 //! downgrades it to `Untrusted`) — never reaches the planner.
 
-use crate::cassandra::types::{L3Param, L3SkillCandidate};
+use crate::cassandra::types::{L3Param, L3SkillCandidate, PythonSkillCandidate};
 use crate::memory::l3_approval::SkillTrust;
 use crate::memory::l3_invoke::is_autonomously_invocable;
 use kastellan_db::memories::{load_layer_by_trust, MemoryLayer};
@@ -44,18 +44,39 @@ pub struct SurfacedSkill {
     pub invocable: bool,
 }
 
-/// Project a stored L3 row's `metadata.template` into a [`SurfacedSkill`].
+/// Project a stored L3 row into a [`SurfacedSkill`], kind-aware:
+/// a **Python** skill (`metadata.kind == "python"`) surfaces its
+/// `metadata.python` name + description with NO params and the code never
+/// shown; a **templated** skill (absent `kind`) surfaces its
+/// `metadata.template` name + description + params.
 ///
-/// PURE + fail-safe: a row whose `metadata` lacks a `template` key, or
-/// whose `template` is `null` or otherwise does not deserialise into an
-/// [`L3SkillCandidate`], yields `None` and is silently skipped by the
-/// loader. A malformed skill must never crash prompt assembly or
-/// surface garbage.
+/// PURE + fail-safe: a row whose payload is missing, `null`, or does not
+/// deserialise into the expected candidate type yields `None` and is silently
+/// skipped by the loader. A malformed skill must never crash prompt assembly
+/// or surface garbage.
 pub fn parse_surfaced_skill(metadata: &serde_json::Value) -> Option<SurfacedSkill> {
-    let template = metadata.get("template")?;
-    let cand: L3SkillCandidate = serde_json::from_value(template.clone()).ok()?;
     let trust = metadata.get("trust").and_then(|v| v.as_str()).unwrap_or("");
     let invocable = is_autonomously_invocable(SkillTrust::from_metadata_str(trust));
+
+    // Python skill (`kind == "python"`): surface name + description only, with
+    // NO params and the code NEVER shown — surfacing summarises a capability,
+    // it does not expose the source (that is an operator-review concern, gated
+    // behind `memory l3 show`). A malformed `metadata.python` yields `None` and
+    // is silently skipped, exactly like a malformed templated row.
+    if metadata.get("kind").and_then(|k| k.as_str()) == Some("python") {
+        let py = metadata.get("python")?;
+        let cand: PythonSkillCandidate = serde_json::from_value(py.clone()).ok()?;
+        return Some(SurfacedSkill {
+            name: cand.name,
+            description: cand.description,
+            params: Vec::new(),
+            invocable,
+        });
+    }
+
+    // Templated skill (back-compat: absent `kind`).
+    let template = metadata.get("template")?;
+    let cand: L3SkillCandidate = serde_json::from_value(template.clone()).ok()?;
     Some(SurfacedSkill {
         name: cand.name,
         description: cand.description,
@@ -423,5 +444,47 @@ mod tests {
     fn caps_pinned_to_documented_defaults() {
         assert_eq!(L3_SKILLS_CAP_ROWS, 16);
         assert_eq!(L3_SKILLS_CAP_BYTES, 4096);
+    }
+
+    #[test]
+    fn surfaces_python_skill_name_description_no_params() {
+        let meta = serde_json::json!({
+            "kind": "python",
+            "trust": "user_approved",
+            "python": {"name": "say_hi", "description": "prints hi", "code": "print('hi')\n"}
+        });
+        let s = parse_surfaced_skill(&meta).expect("python skill surfaces");
+        assert_eq!(s.name, "say_hi");
+        assert_eq!(s.description, "prints hi");
+        assert!(s.params.is_empty(), "python skills have no params");
+        assert!(!s.invocable, "user_approved is not autonomously invocable");
+    }
+
+    #[test]
+    fn pinned_python_skill_is_invocable() {
+        let meta = serde_json::json!({
+            "kind": "python", "trust": "pinned",
+            "python": {"name": "p", "description": "d", "code": "pass\n"}
+        });
+        let s = parse_surfaced_skill(&meta).expect("surfaces");
+        assert!(s.invocable);
+    }
+
+    #[test]
+    fn python_skill_render_never_exposes_code() {
+        let meta = serde_json::json!({
+            "kind": "python", "trust": "pinned",
+            "python": {"name": "p", "description": "d", "code": "SECRET_SOURCE_MARKER\n"}
+        });
+        let s = parse_surfaced_skill(&meta).expect("surfaces");
+        let rendered = render_skill_entry(&s);
+        assert!(!rendered.contains("SECRET_SOURCE_MARKER"), "code must never surface");
+    }
+
+    #[test]
+    fn malformed_python_payload_is_skipped() {
+        // missing description/code → from_value fails → None (fail-safe)
+        let meta = serde_json::json!({"kind": "python", "python": {"name": "x"}});
+        assert!(parse_surfaced_skill(&meta).is_none());
     }
 }

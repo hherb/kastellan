@@ -12,9 +12,10 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::cassandra::types::L3SkillCandidate;
+use crate::cassandra::types::{L3SkillCandidate, PythonSkillCandidate};
 use crate::memory::l3_approval::SkillTrust;
 use crate::memory::l3_invoke::{invoke_l3, InvokeReport};
+use crate::memory::l3py_invoke::invoke_python_skill;
 use crate::scheduler::inner_loop::StepDispatcher;
 use kastellan_db::memories::{fetch_by_ids, MemoryLayer};
 
@@ -60,6 +61,20 @@ pub fn parse_l3_run_payload(payload: &Value) -> Result<L3RunRequest, String> {
     Ok(L3RunRequest { memory_id, args, execute })
 }
 
+/// True iff a stored layer-3 row's `metadata` describes a Python skill
+/// (`kind == "python"`). Absent `kind` ⇒ templated skill (back-compat).
+pub fn is_python_skill_metadata(metadata: &Value) -> bool {
+    metadata.get("kind").and_then(|v| v.as_str()) == Some("python")
+}
+
+/// Parse a Python skill's `{name, description, code}` out of `metadata.python`.
+/// Returns `None` (fail-safe) if the payload is missing or malformed — the
+/// caller turns that into an `InvokeReport::Refused`.
+pub fn parse_python_candidate(metadata: &Value) -> Option<PythonSkillCandidate> {
+    let p = metadata.get("python")?;
+    serde_json::from_value(p.clone()).ok()
+}
+
 /// Execute an operator-submitted `l3_run` task against the daemon's live
 /// dispatcher. Pure-failure cases (bad payload, missing/wrong-layer/unparseable
 /// skill) are surfaced as `InvokeReport::Refused` so the CLI renders a refusal
@@ -92,6 +107,35 @@ pub async fn run_l3_run_task(
             }
         }
     };
+    // Python-skill branch: dispatch one `python.exec` step. A Python skill
+    // dispatches no tools, so there is no live-tool re-validation; the gate is
+    // trust + structural re-validate + SHA re-hash (see l3py_invoke). If
+    // python-exec is NOT registered in the daemon, the single dispatch fails
+    // closed with a clear tool-not-found error surfaced in the outcome — never
+    // a silent no-op.
+    if is_python_skill_metadata(&row.metadata) {
+        let candidate = match parse_python_candidate(&row.metadata) {
+            Some(c) => c,
+            None => {
+                return InvokeReport::Refused {
+                    reasons: vec![format!(
+                        "python skill id={} has no parseable metadata.python",
+                        req.memory_id
+                    )],
+                }
+            }
+        };
+        let trust = SkillTrust::from_metadata_str(
+            row.metadata.get("trust").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        let body_sha256 =
+            row.metadata.get("body_sha256").and_then(|v| v.as_str()).unwrap_or("");
+        return invoke_python_skill(
+            pool, req.memory_id, dispatcher, &candidate, trust, body_sha256, req.execute,
+        )
+        .await;
+    }
+
     let template: L3SkillCandidate = match row
         .metadata
         .get("template")
@@ -181,5 +225,43 @@ mod tests {
     fn rejects_non_object_args() {
         let p = serde_json::json!({"kind": "l3_run", "memory_id": 1, "args": "flat"});
         assert!(parse_l3_run_payload(&p).unwrap_err().contains("not an object"));
+    }
+
+    #[test]
+    fn detects_python_kind_row() {
+        let meta = serde_json::json!({
+            "kind": "python", "trust": "user_approved", "body_sha256": "abc",
+            "python": {"name": "say_hi", "description": "d", "code": "print(1)\n"}
+        });
+        assert!(is_python_skill_metadata(&meta));
+        let templated = serde_json::json!({"template": {"name": "x"}});
+        assert!(!is_python_skill_metadata(&templated));
+        assert!(!is_python_skill_metadata(&serde_json::json!({})));
+        // A row carrying BOTH kind:"python" and a stray `template` key resolves
+        // as Python — the kind check fires first, so the templated branch is
+        // never consulted (documents the precedence; not a real stored shape).
+        let both = serde_json::json!({
+            "kind": "python", "template": {"name": "x"},
+            "python": {"name": "p", "description": "d", "code": "pass\n"}
+        });
+        assert!(is_python_skill_metadata(&both));
+    }
+
+    #[test]
+    fn parses_python_candidate_from_metadata() {
+        let meta = serde_json::json!({
+            "kind": "python",
+            "python": {"name": "say_hi", "description": "d", "code": "print(1)\n"}
+        });
+        let c = parse_python_candidate(&meta).expect("parse");
+        assert_eq!(c.name, "say_hi");
+        assert_eq!(c.code, "print(1)\n");
+    }
+
+    #[test]
+    fn missing_python_payload_is_none() {
+        assert!(parse_python_candidate(&serde_json::json!({"kind": "python"})).is_none());
+        // malformed (missing fields) → None, fail-safe
+        assert!(parse_python_candidate(&serde_json::json!({"python": {"name": "x"}})).is_none());
     }
 }
