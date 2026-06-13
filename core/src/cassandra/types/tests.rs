@@ -623,9 +623,15 @@ fn completion_python_skill_some_only_on_terminal_with_candidate() {
         invoke_skill: None,
     };
     assert_eq!(p.completion_python_skill(), Some(&cand));
-    // Non-terminal (has steps) → None even with a candidate.
+    // Non-terminal (result cleared ⇒ is_terminal() false) → None even with a candidate.
     p.decision = "continue".into();
-    p.steps = vec![];
     p.result = None;
     assert_eq!(p.completion_python_skill(), None);
+}
+
+#[test]
+fn python_skill_none_is_omitted_from_wire_form() {
+    let plan = make_terminal_plan(); // python_skill: None
+    let v = serde_json::to_value(&plan).expect("serialize");
+    assert!(v.get("python_skill").is_none(), "skip_serializing_if must omit None");
 }
