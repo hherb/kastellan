@@ -8,7 +8,7 @@
 
 **Last updated:** 2026-06-13 (**Phase 4: python-exec skill catalog SLICE 1 built** — agent-authored Python skills
 crystallise → operator approve/pin, mirroring the L3 templated arc one payload over; branch
-`feat/python-exec-skill-catalog`, PR pending. 8 TDD tasks via subagent-driven dev, each spec+quality reviewed; whole-branch
+`feat/python-exec-skill-catalog`, PR [#275](https://github.com/hherb/kastellan/pull/275). 8 TDD tasks via subagent-driven dev, each spec+quality reviewed; whole-branch
 opus review = READY TO MERGE. Earlier same day: `python_exec_e2e` acceptance green both platforms, PR
 [#270](https://github.com/hherb/kastellan/pull/270) MERGED to `main`.)
 **Session-end verification (Mac, skip-as-pass posture):** `cargo test --workspace` **1723 / 0 / 8** (+44 unit tests over
@@ -18,7 +18,7 @@ paths: the `crystallise_python_skill` writer (dedup + `kind=python` + verbatim c
 (`cli_memory_l3_approve_python_skill_without_registry` — a Python skill approves to `user_approved` with NO
 `registry.loaded` snapshot, exit 0). DGX not exercised this session (pure-Rust + PG paths; no new sandbox/seccomp surface).
 
-**This session (2026-06-13, later) — Phase 4 python-exec SKILL CATALOG slice 1 (branch `feat/python-exec-skill-catalog`, PR pending).**
+**This session (2026-06-13, later) — Phase 4 python-exec SKILL CATALOG slice 1 (branch `feat/python-exec-skill-catalog`, PR [#275](https://github.com/hherb/kastellan/pull/275)).**
 Brainstormed → spec'd → planned → executed via subagent-driven TDD (8 tasks, per-task spec+quality review + a whole-branch
 opus review = READY TO MERGE). **A "Python skill" is the agent-authored, verbatim Python it just ran, promoted through the
 *same* trust lifecycle as L3 templated skills** — the payload is opaque source instead of a tool-call template; everything

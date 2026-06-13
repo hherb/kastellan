@@ -232,7 +232,7 @@ items unlock later ones.
     catalog demands packages; planner-prompt surfacing (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
   - [x] **Slice 1 — crystallise + approval + operator CLI — 2026-06-13** (branch `feat/python-exec-skill-catalog`,
-    PR pending). Agent-authored Python skills mirror the L3 templated arc one payload over: a layer-3 `memories` row
+    PR [#275](https://github.com/hherb/kastellan/pull/275)). Agent-authored Python skills mirror the L3 templated arc one payload over: a layer-3 `memories` row
     with `metadata.kind="python"` + `metadata.python={name,description,code}` (absent kind ⇒ templated, back-compat),
     deduped by canonical SHA-256, **verbatim code (no params)**. New `core/src/memory/l3py_crystallise.rs`
     (validate + canonical SHA + `crystallise_python_skill`; code allows newlines, rejects NUL/`secret://`/over-64-KiB,
