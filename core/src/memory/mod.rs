@@ -48,6 +48,7 @@ pub mod entity_link;
 pub mod l0_seed;
 pub mod l1_promote;
 pub mod l3_approval;
+pub mod l3py_approval;
 pub mod l3_crystallise;
 pub mod l3py_crystallise;
 pub mod l3_invoke;
