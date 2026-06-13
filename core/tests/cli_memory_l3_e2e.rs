@@ -51,7 +51,8 @@
 use std::process::Command;
 
 use kastellan_core::memory::l3_crystallise::{crystallise_l3, L3Source, L3WriteOutcome};
-use kastellan_core::cassandra::types::{L3SkillCandidate, L3Param, L3TemplateStep};
+use kastellan_core::memory::l3py_crystallise::crystallise_python_skill;
+use kastellan_core::cassandra::types::{L3SkillCandidate, L3Param, L3TemplateStep, PythonSkillCandidate};
 use kastellan_db::pool::connect_runtime_pool;
 use kastellan_db::probe::run as probe_run;
 use kastellan_tests_common::{
@@ -735,3 +736,72 @@ async fn cli_memory_l3_pin_rejects_not_approved() {
     drop(pool); drop(cluster);
 }
 
+// ---------------------------------------------------------------------------
+// Scenario 9 — Python skill approves WITHOUT a registry snapshot
+// ---------------------------------------------------------------------------
+
+/// Security-critical path: a `metadata.kind == "python"` skill MUST be
+/// approvable via the pure `evaluate_python_approval` gate WITHOUT any
+/// `registry.loaded` row in the audit log.  This is the inverse of
+/// `cli_memory_l3_approve_fail_closed_no_snapshot` (a templated skill fails
+/// closed without a snapshot); here a Python skill succeeds because it
+/// dispatches no tools and the registry is irrelevant to its gate.
+///
+/// Steps:
+///   1. Seed a Python skill via `crystallise_python_skill`.
+///   2. Do NOT seed any `registry.loaded` audit row.
+///   3. Run `memory l3 approve <id>` — must exit 0.
+///   4. Re-query the DB — `metadata.trust` must be `user_approved`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_memory_l3_approve_python_skill_without_registry() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "cml3-pyp-d", "cml3-pyp-l",
+        &format!("kastellan-postgres-cli-memory-l3-pyappr-{suffix}"),
+    );
+    probe_run(&cluster.conn_spec, "core", "startup",
+        serde_json::json!({"test": "cli_memory_l3_approve_python_skill_without_registry"}))
+        .await.expect("probe");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    // --- Seed a Python skill -----------------------------------------------
+    let cand = PythonSkillCandidate {
+        name: "sum_stdin".into(),
+        description: "Sum integers from stdin".into(),
+        code: "import sys\nprint(sum(int(x) for x in sys.stdin))\n".into(),
+    };
+    let outcome = crystallise_python_skill(&pool, &cand, L3Source::AgentRaised { task_id: 1 })
+        .await.expect("crystallise_python_skill");
+    let id = outcome.memory_id();
+
+    // NOTE: deliberately NOT seeding registry.loaded — this is the whole point.
+    // A Python skill must succeed without any registry snapshot.
+
+    let bin = cli_binary();
+    let env = cli_env(&cluster.data_dir);
+
+    // --- Approve the Python skill -----------------------------------------
+    let out = Command::new(&bin)
+        .args(["memory", "l3", "approve", &id.to_string()])
+        .env_clear().envs(env.clone()).output().expect("spawn approve");
+    let so = String::from_utf8_lossy(&out.stdout).into_owned();
+    let se = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "Python skill approve must exit 0 without a registry snapshot; \
+         stdout={so}\nstderr={se}",
+    );
+    assert!(so.contains("user_approved"), "approve stdout must confirm user_approved; got {so}");
+
+    // --- Re-query the DB: trust must be user_approved ---------------------
+    let trust: String = sqlx::query_scalar(
+        "SELECT metadata->>'trust' FROM memories WHERE id = $1")
+        .bind(id).fetch_one(&pool).await.expect("fetch trust");
+    assert_eq!(trust, "user_approved",
+        "metadata.trust must be user_approved after Python skill approval");
+
+    drop(pool); drop(cluster);
+}
