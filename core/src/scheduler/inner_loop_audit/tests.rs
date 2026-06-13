@@ -349,6 +349,7 @@ fn build_plan_formulate_payload_invoke_skill_compact_shape() {
     plan.invoke_skill = Some(InvokeDirective {
         name: "summarise_repo_readme".into(),
         args,
+        params: serde_json::Value::Null,
     });
     let payload = build_plan_formulate_payload(
         1, 1, DataClass::Public, ClassificationFloorSource::Default,

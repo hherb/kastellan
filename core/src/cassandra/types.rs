@@ -154,8 +154,14 @@ pub struct InvokeDirective {
     /// Agent-supplied parameter values (param name → literal value). Must
     /// supply exactly the skill's declared parameters; values are guarded
     /// by `substitute_template` (no newline/control/`{{`/`}}`/over-cap).
+    /// Used by the TEMPLATED skill path only.
     #[serde(default)]
     pub args: BTreeMap<String, String>,
+    /// Agent-supplied runtime params for a PYTHON skill (arbitrary JSON
+    /// object). Ignored by the templated path. Defaults to JSON null when the
+    /// agent emits no params; the inner loop treats null/empty as "no params".
+    #[serde(default)]
+    pub params: serde_json::Value,
 }
 
 /// Why a plan carrying an `invoke_skill` directive is structurally
