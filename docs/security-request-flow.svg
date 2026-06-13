@@ -49,7 +49,7 @@
   <!-- ===== Node 1: User sends instruction ===== -->
   <ellipse cx="700" cy="140" rx="160" ry="28" fill="#eef2ee" stroke="#557755" stroke-width="2"/>
   <text x="700" y="138" text-anchor="middle" font-weight="bold">User sends instruction</text>
-  <text x="700" y="154" text-anchor="middle" font-size="11" fill="#555">Telegram / Signal / email / webhook</text>
+  <text x="700" y="154" text-anchor="middle" font-size="11" fill="#555">Matrix (E2E)  ·  email failover</text>
 
   <line x1="700" y1="168" x2="700" y2="200" stroke="#234e7e" stroke-width="2" marker-end="url(#arr)"/>
 

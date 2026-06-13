@@ -4,36 +4,18 @@
 
 ## High-level diagram
 
-```
-                 ┌─────────────── HOST (Linux user account) ───────────────┐
-                 │                                                          │
- messages ─┐     │  ┌───────────────── AGENT CORE (Rust) ─────────────┐    │
- IMAP    ──┼─────┼─►│  scheduler · context manager · memory orch.     │    │
- webhooks  │     │  │  policy/capability gate · LLM router · audit    │    │
- ──────────┘     │  └───────┬────────────┬───────────────┬────────────┘    │
-                 │          │ MCP JSON-RPC over UDS      │                 │
-                 │  ┌───────▼──┐ ┌───────▼──┐ ┌─────────▼─┐ ┌──────────┐  │
-                 │  │ python   │ │ browser  │ │ web-fetch │ │ mail     │  │
-                 │  │ exec     │ │ driver   │ │ (HTTPS    │ │ (IMAP/   │  │
-                 │  │ (no net, │ │ (Playw.) │ │  + host   │ │  SMTP)   │  │
-                 │  │ scratch) │ │          │ │ allowlist)│ │          │  │
-                 │  └──────────┘ └──────────┘ └───────────┘ └──────────┘  │
-                 │   each in bwrap+landlock+seccomp (Linux) /              │
-                 │           sandbox-exec Seatbelt (macOS)                 │
-                 │  ┌────── Postgres (own role, peer auth, UDS only) ─────┐│
-                 │  │  pgvector · pg_search/BM25 · Apache AGE             ││
-                 │  └─────────────────────────────────────────────────────┘│
-                 │  ┌─── Inference (vLLM/SGLang on Linux,                ─┐│
-                 │  │     llama.cpp/Ollama on macOS) — OpenAI HTTP        ││
-                 │  └─────────────────────────────────────────────────────┘│
-                 └──────────────────────────────────────────────────────────┘
-```
+![kastellan architecture overview: Matrix/email channels feed the Rust agent core; the dispatcher chokepoint is the only door into per-tool worker processes, each in its own kernel sandbox; networked workers leave the host only through the per-worker egress proxy; Postgres and local inference are host-local services](architecture-overview.svg)
+
+> Source: [`architecture-overview.svg`](architecture-overview.svg). The
+> [security-architecture.svg](security-architecture.svg) and
+> [security-request-flow.svg](security-request-flow.svg) diagrams add the
+> CASSANDRA review pipeline and trace a single request through every gate.
 
 ## Process model
 
 - One **agent core** binary (`kastellan`).
 - One **tool worker** process per tool, each in its own sandbox.
-- One **channel adapter** process per channel (Telegram, Signal, IMAP).
+- One **channel adapter** process per channel — Matrix (self-hosted, single-user, federation off, E2E) as the primary channel, with email (IMAP/SMTP) as a low-trust cross-transport failover.
 - One **egress proxy** process (TLS-terminating, allowlist-enforcing).
 - One **Postgres** instance (own role, UDS-only, peer auth).
 - One **inference server** (vLLM / SGLang / llama.cpp / Ollama, OpenAI HTTP).

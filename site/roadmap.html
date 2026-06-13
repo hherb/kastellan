@@ -54,8 +54,8 @@
         </div>
         <div class="card">
           <div class="stat">
-            <span>Phase 3</span>
-            <span>web egress, in progress</span>
+            <span>Phases 2–4</span>
+            <span>channels · egress · python-exec, in progress</span>
           </div>
         </div>
       </div>
@@ -81,25 +81,25 @@
         <li class="timeline-item">
           <span class="dot-wip"></span>
           <h3 class="timeline-title">Phase 3 — Web egress <span class="badge-wip">IN PROGRESS</span></h3>
-          <p class="timeline-text">Web search and web fetch shipped behind host allowlists. The egress proxy — the single chokepoint all worker traffic will be forced through — has its first slice shipped and force-routing in design. <span aria-hidden="true">←</span> currently being built</p>
+          <p class="timeline-text">Web search and web fetch shipped behind host allowlists. The egress proxy — the single chokepoint all worker traffic is forced through — now <strong>force-routes every networked worker by default</strong> (private netns, no direct route), terminates and inspects worker TLS, scans the cleartext for the worker&#8217;s own secrets, and pins server certificates. Remaining: wiring it to the first frontier-egress worker. <span aria-hidden="true">←</span> currently being built</p>
         </li>
 
         <li class="timeline-item">
-          <span class="dot-plan"></span>
-          <h3 class="timeline-title">Phase 2 — Channels <span class="badge-plan">PLANNED</span></h3>
-          <p class="timeline-text">Telegram, Signal, and email — how you’ll actually talk to it. Inbound first (read-only), outbound after the egress proxy hardens.</p>
+          <span class="dot-wip"></span>
+          <h3 class="timeline-title">Phase 2 — Channels <span class="badge-wip">IN PROGRESS</span></h3>
+          <p class="timeline-text">Matrix — self-hosted, single-user, federation off, end-to-end encrypted — is how you&#8217;ll actually talk to it, with email as a cross-transport, low-trust failover (notifications only, never commands). The inbound path, peer pairing, and the message bus have shipped; the live sandboxed Matrix client is landing.</p>
         </li>
 
         <li class="timeline-item">
-          <span class="dot-plan"></span>
-          <h3 class="timeline-title">Phase 4 — python-exec &amp; agent-authored skills <span class="badge-plan">PLANNED</span></h3>
-          <p class="timeline-text">Python in a no-network scratch jail, and a catalog of named skills with trust tiers and human approval gates.</p>
+          <span class="dot-wip"></span>
+          <h3 class="timeline-title">Phase 4 — python-exec &amp; agent-authored skills <span class="badge-wip">IN PROGRESS</span></h3>
+          <p class="timeline-text">Python in the strictest jail of any worker — no network, ephemeral scratch only, curated stdlib. The first slice has shipped and passed acceptance on both Linux and macOS; a catalog of named skills with trust tiers and human approval gates follows.</p>
         </li>
 
         <li class="timeline-item">
           <span class="dot-plan"></span>
           <h3 class="timeline-title">Phase 5 — Frontier escalation &amp; hardening <span class="badge-plan">PLANNED</span></h3>
-          <p class="timeline-text">A policy gate deciding when a frontier LLM may be consulted, TLS-pinned egress, and a 7-day adversarial soak test.</p>
+          <p class="timeline-text">A policy gate deciding when a frontier LLM may be consulted (TLS pinning for that egress path is already built), and a 7-day adversarial soak test.</p>
         </li>
 
       </ul>

@@ -73,7 +73,7 @@
           <p><strong>CASSANDRA.</strong> Semantic oversight on top of mechanical sandboxing: every plan is reviewed before any tool runs, against five constitutional constraints — no physical harm, no fraud or impersonation, no irreversible action without a verified human in the loop, no power concentration, no oversight suppression — that no user, admin, or configuration change can override.</p>
         </li>
         <li>
-          <p><strong>The egress boundary.</strong> Outbound traffic goes through a per-worker proxy that enforces host allowlists, resolves DNS itself, and rejects private and link-local addresses — with every allow and block decision audited.</p>
+          <p><strong>The egress boundary.</strong> Every networked worker is force-routed by default through its own egress proxy in a private network namespace — it has no direct route out. The proxy enforces host allowlists, resolves DNS itself and rejects private, loopback, and link-local addresses (SSRF defence), terminates and inspects the worker&#8217;s TLS to scan the cleartext for that worker&#8217;s own secrets, and pins server certificates against operator-configured keys. Every allow and block decision is audited.</p>
         </li>
         <li>
           <p><strong>An append-only audit log.</strong> Postgres role grants make audit rows append-only at the database layer, mirrored to disk. The agent cannot rewrite its own history.</p>
@@ -96,7 +96,7 @@
     <section class="wrap" aria-label="Limitations and honesty">
       <div class="note">
         <h2>What we don&#8217;t claim</h2>
-        <p>macOS Seatbelt is weaker than the Linux stack — a documented asymmetry, not a footnote. The egress proxy does not force-route workers yet (that work is in design). CASSANDRA&#8217;s LLM review stages are still deterministic stubs. The full, current threat model lives in the repo: <a href="https://github.com/hherb/kastellan/blob/main/docs/threat-model.md">docs/threat-model.md</a></p>
+        <p>macOS Seatbelt is weaker than the Linux stack — a documented asymmetry, not a footnote. The credential-leak scan catches only verbatim, contiguous secret bytes — encoding or splitting evades it; it is defence-in-depth, not the containment boundary. No frontier-egress worker is wired up yet, so certificate pinning ships ready but provisioned with no pins by default. CASSANDRA&#8217;s LLM review stages are still deterministic stubs. The full, current threat model lives in the repo: <a href="https://github.com/hherb/kastellan/blob/main/docs/threat-model.md">docs/threat-model.md</a></p>
       </div>
     </section>
 

@@ -8,10 +8,11 @@
 > full authority within the walls, none to act beyond them.
 
 Kastellan is a personal, always-on AI agent built so that security is its
-foundational property, not a layer added later. It talks to you over secure
-messaging (Telegram, Signal) and its own email account, drives a browser,
-searches and fetches the web, executes Python, and maintains persistent
-memory in Postgres with hybrid retrieval. But every tool runs inside its own
+foundational property, not a layer added later. It talks to you over Matrix —
+self-hosted, single-user, federation off, end-to-end encrypted — with email as
+a low-trust failover, drives a browser, searches and fetches the web, executes
+Python, and maintains persistent memory in Postgres with hybrid retrieval. But
+every tool runs inside its own
 kernel sandbox, bounded to that tool's own allowlist, and every plan it forms
 is first reviewed by **CASSANDRA** — a semantic oversight layer enforcing five
 constitutional constraints that no user, admin, or configuration change can
@@ -30,7 +31,7 @@ inside sandboxed workers.
 
 A long-running personal AI agent designed to:
 
-- talk to you over secure messaging (Telegram, Signal) and email (its own IMAP/SMTP account)
+- talk to you over Matrix (self-hosted, single-user, federation off, end-to-end encrypted), with email (its own IMAP/SMTP account) as a low-trust cross-transport failover
 - remote-control a web browser, perform web searches and page fetches
 - execute Python in a strict sandbox
 - maintain persistent memory in Postgres with hybrid retrieval (pgvector + lexical + graph)
@@ -108,8 +109,8 @@ pressure.
 
 - **Dispatcher chokepoint.** A single function authors every
   `WorkerCommand`, consults policy, and writes the audit-log entry.
-  New channels (Telegram, Signal, IMAP) and scheduled routines call
-  into it — they never spawn workers themselves. Borrowed from
+  New channels (the Matrix client, the email failover) and scheduled
+  routines call into it — they never spawn workers themselves. Borrowed from
   IronClaw's `ToolDispatcher::dispatch()` and made non-negotiable.
 
 - **Semantic oversight on top of mechanical sandboxing
@@ -152,10 +153,11 @@ expected to refuse PRs that violate them.
 
 ## Status
 
-**Past scaffold. Phase 1 (Memory & Loop) is essentially complete and Phase 3
-web egress has begun.** The project is a Rust workspace of 10 crates with a
-working agent loop, real cross-platform sandboxing, persistent memory, and the
-first net-egress worker.
+**Past scaffold. Phase 1 (Memory & Loop) is complete; the Phase 3 egress
+boundary is substantially built; and Phase 2 channels and Phase 4 python-exec
+are both in progress.** The project is a Rust workspace of 17 crates with a
+working agent loop, real cross-platform sandboxing, persistent memory, net-egress
+workers behind a hardened egress proxy, and an inbound Matrix channel.
 
 What works today:
 
@@ -179,16 +181,31 @@ What works today:
   recall-surface → re-invoke, with trust tiers and live re-validation at dispatch.
 - **Workers.** `shell-exec` (argv-allowlisted execve), `web-fetch` (HTTPS-only,
   host-allowlisted, redirect/size-capped readable-text extraction — the first
-  `Net::Allowlist` consumer), and `gliner-relex` (Python entity/relation
-  extraction under the sandbox).
+  `Net::Allowlist` consumer), `web-search` (SearxNG-backed query worker),
+  `gliner-relex` (Python entity/relation extraction under the sandbox),
+  `browser-driver` (Playwright read-only render scaffold), and `python-exec`
+  (the strictest jail of any worker — `Net::Deny`, ephemeral scratch only,
+  curated stdlib; shipped and acceptance-green on both Linux and macOS).
+- **Egress boundary.** A per-worker egress proxy that every networked worker is
+  **force-routed through by default** (private network namespace, no direct
+  route): host-allowlist + DNS-resolves-itself + SSRF rejection of
+  private/loopback/link-local IPs, TLS interception that scans the cleartext for
+  the worker's own secrets (credential-leak scanner), and server-certificate
+  pinning — every allow and block decision audited.
+- **Channels.** An inbound Matrix path (self-hosted, single-user, federation off,
+  E2E): the decision/message bus, operator-issued single-use peer pairing
+  (fail-closed), and inbound prompt-injection screening, with email reserved as a
+  low-trust failover. Every inbound and outbound message is audited.
 - **Supporting infrastructure.** OS-native supervisor units (`systemd --user` /
   launchd) including an `kastellan.target`; AES-256-GCM secrets at rest with opaque
   `secret://` references; an OpenAI-compatible, local-first LLM router; a
   `kastellan-cli audit tail` viewer.
 
-Not built yet (see the roadmap): channel adapters (Telegram/Signal/email),
-outbound messaging, the browser worker, `python-exec`, the egress proxy + its
-credential-leak scanner, and the Phase-5 frontier-escalation policy gate.
+Not built yet (see the roadmap): the live sandboxed Matrix client and the email
+failover transport, the real browser render path (only the scaffold exists), the
+agent-authored skill catalog on top of `python-exec`, the frontier-egress worker
+that the certificate-pinning path is waiting on, and the Phase-5
+frontier-escalation policy gate.
 
 Day-to-day state — what's green and the next task — lives in
 [`docs/devel/handovers/HANDOVER.md`](docs/devel/handovers/HANDOVER.md); the
@@ -198,32 +215,41 @@ sequenced build plan is [`docs/devel/ROADMAP.md`](docs/devel/ROADMAP.md). See al
 
 ## Layout
 
-Rust workspace, 10 crates:
+Rust workspace, 17 crates:
 
 ```
-core/                 kastellan-core: agent loop, scheduler, memory, CASSANDRA, audit,
-                      tool-host chokepoint, handoff cache; `kastellan` daemon + `kastellan-cli`
-db/                   kastellan-db: Postgres helpers + embedded migrations (pgvector +
-                      tsvector/GIN + relational graph), secrets-at-rest, audit writer
-llm-router/           kastellan-llm-router: sole egress for LLM calls (OpenAI-compatible HTTP)
-sandbox/              kastellan-sandbox: SandboxPolicy + per-OS backends
-                      (bwrap / Seatbelt / Apple container)
-supervisor/           kastellan-supervisor: systemd --user / launchd unit generation + drivers
-protocol/             kastellan-protocol: JSON-RPC 2.0 over stdio (MCP-stdio compatible)
-tests-common/         kastellan-tests-common: shared dev-dep test harness (Pg cluster, fixtures)
-workers/prelude/      Landlock + seccomp lock-down prelude (worker-side `serve_stdio`)
-workers/shell-exec/   argv-allowlisted execve worker
-workers/web-fetch/    HTTPS-only, host-allowlisted fetch + readable-text extraction
-workers/gliner-relex/ Python entity/relation extraction worker (sandboxed)
+core/                  kastellan-core: agent loop, scheduler, memory, CASSANDRA, audit,
+                       tool-host chokepoint, channel bus, egress integration, handoff cache;
+                       `kastellan` daemon + `kastellan-cli`
+db/                    kastellan-db: Postgres helpers + embedded migrations (pgvector +
+                       tsvector/GIN + relational graph), secrets-at-rest, pairings, audit writer
+leak-scan/             kastellan-leak-scan: shared credential-leak scanner (egress proxy)
+llm-router/            kastellan-llm-router: sole egress for LLM calls (OpenAI-compatible HTTP)
+sandbox/               kastellan-sandbox: SandboxPolicy + per-OS backends
+                       (bwrap / Seatbelt / Apple container)
+supervisor/            kastellan-supervisor: systemd --user / launchd unit generation + drivers
+protocol/              kastellan-protocol: JSON-RPC 2.0 over stdio (MCP-stdio compatible)
+tests-common/          kastellan-tests-common: shared dev-dep test harness (Pg cluster, fixtures)
+workers/prelude/       Landlock + seccomp lock-down prelude (worker-side `serve_stdio`)
+workers/web-common/    shared HTTP/allowlist/proxy-connect lib for net-egress workers
+workers/shell-exec/    argv-allowlisted execve worker
+workers/web-fetch/     HTTPS-only, host-allowlisted fetch + readable-text extraction
+workers/web-search/    SearxNG-backed web.search worker
+workers/egress-proxy/  per-worker egress boundary (allowlist + SSRF + TLS intercept +
+                       credential-leak scan + cert pinning)
+workers/python-exec/   strict no-network Python executor (Net::Deny, ephemeral scratch)
+workers/matrix/        Matrix channel client (matrix-rust-sdk)
+workers/matrix-wire/   shared Matrix wire types
+workers/gliner-relex/  Python entity/relation extraction worker (sandboxed; non-Rust)
+workers/browser-driver/ Playwright read-only render worker (scaffold; non-Rust)
 
-adapters/             channel adapters (Telegram, Signal) — placeholders, Phase 2
-config/               example runtime policy + per-worker sandbox profiles
-seeds/                L0 memory meta-rule seed data
-scripts/              host setup (AppArmor profile, Postgres install)
-docs/                 architecture, threat-model, CASSANDRA design, roadmap, handovers
+config/                example runtime policy + per-worker sandbox profiles
+seeds/                 L0 memory meta-rule seed data
+scripts/               host setup (AppArmor profile, Postgres install, SearxNG, Matrix)
+docs/                  architecture, threat-model, CASSANDRA design, roadmap, handovers
 ```
 
-(`workers/{browser-driver,mail,python-exec}` exist as placeholders for later phases.)
+(`workers/mail` is a placeholder for the email failover transport.)
 
 ## Setup
 

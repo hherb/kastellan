@@ -127,7 +127,7 @@ The agent can acknowledge and adjust, or proceed. The advisory is logged to CASS
 
 ### Tier 2 — Escalation (orange)
 
-CASSANDRA pauses the agent and notifies the user (Horst) via the channel bus — Telegram, Signal, or email, whichever is active. The notification includes:
+CASSANDRA pauses the agent and notifies the user (Horst) via the channel bus — Matrix, or the email failover, whichever is active. The notification includes:
 
 - What the agent wants to do
 - What CASSANDRA's concern is
@@ -391,7 +391,7 @@ CASSANDRA does not need to be built all at once. It grows with the system:
 
 ### When channel bus comes online (Phase 2):
 
-- Implement Tier 2 escalation via Telegram/Signal
+- Implement Tier 2 escalation via the Matrix channel (email failover)
 - Add approve/deny UX
 
 ### When anonymiser is ready:
@@ -1064,7 +1064,7 @@ the user to disable the system.
 
 ### 16.6 Tier 2 Escalation Message Template
 
-This is not an LLM prompt but a structured template for the message sent to the user via Telegram/Signal. Clarity and actionability under time pressure are the design goals — think triage nurse handing off to the attending.
+This is not an LLM prompt but a structured template for the message sent to the user via the Matrix channel (or the email failover). Clarity and actionability under time pressure are the design goals — think triage nurse handing off to the attending.
 
 ```
 CASSANDRA — Plan review requires your attention
@@ -1161,7 +1161,7 @@ Where the choice between specific tool implementations is a technical detail (fi
 |---------------|-------------------|----------------|
 | `document-reader` | PDF, DOCX, plain text, HTML, CSV, image-with-OCR | Markdown or plain text |
 | `web-search` | SearxNG, fallback to alternative backends | Structured search results (title, URL, snippet) |
-| `message-send` | Telegram, Signal, email (based on user preference or availability) | Delivery confirmation |
+| `message-send` | Matrix (primary), email (low-trust failover) | Delivery confirmation |
 
 ### Security implication
 

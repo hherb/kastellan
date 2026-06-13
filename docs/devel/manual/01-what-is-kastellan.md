@@ -12,7 +12,8 @@ acting, and never trusts its own LLM output.
 
 When running, kastellan:
 
-- listens on secure messaging channels (Telegram, Signal) and email (IMAP/SMTP)
+- listens on Matrix (self-hosted, single-user, federation off, E2E), with email
+  (IMAP/SMTP) as a low-trust failover
 - receives a task from you (e.g. "research this topic and draft a summary")
 - formulates a multi-step plan using a locally-running or frontier LLM
 - runs each plan step through **CASSANDRA**, a semantic review pipeline that
