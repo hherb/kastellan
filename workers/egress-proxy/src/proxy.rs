@@ -216,8 +216,10 @@ fn classify_mitm_error(err: &str) -> (Verdict, String) {
 
 /// Bridge the sync accept path to the async MITM. Builds a per-connection
 /// current-thread runtime (mirrors web-common's ProxyConnectGet) and runs
-/// `mitm::intercept`. A handshake/copy error is reported as an allowed-but-failed
-/// decision (the policy verdict was Allowed; this is a transport failure).
+/// `mitm::intercept`. An intercept error is classified by `classify_mitm_error`:
+/// a pin mismatch (slice #4) produces a `BlockedTlsPin` decision; any other
+/// handshake/copy failure is an allowed-but-failed decision (the policy verdict
+/// was Allowed; that is a transport failure).
 fn run_mitm(
     client: UnixStream,
     ip: IpAddr,
