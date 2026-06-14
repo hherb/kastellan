@@ -76,6 +76,32 @@ pub fn out_of_prefix_lib_dirs(
     dirs.into_iter().collect()
 }
 
+/// Parse `otool -L` output into resolved dependency paths. The first line is the
+/// object's own header (`<path>:`); dependency lines are tab-indented as
+/// `\t<abs-path> (compatibility version …)`. We take the path before ` (`.
+fn parse_otool_output(out: &str) -> Vec<PathBuf> {
+    out.lines()
+        .filter_map(|line| line.strip_prefix('\t'))
+        .filter_map(|rest| rest.rsplit_once(" (").map(|(path, _)| path))
+        .filter(|p| p.starts_with('/'))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Parse `ldd` output into resolved dependency paths. Dependency lines look like
+/// `\t<soname> => /resolved/path (0x…)`; we take the path after `=> ` and before
+/// ` (`. Lines without a `=>` (vdso, the loader) and `=> not found` are skipped.
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_ldd_output(out: &str) -> Vec<PathBuf> {
+    out.lines()
+        .filter_map(|line| line.split_once(" => "))
+        .map(|(_, rhs)| rhs.trim())
+        .filter_map(|rhs| rhs.rsplit_once(" (").map(|(path, _)| path).or(Some(rhs)))
+        .filter(|p| p.starts_with('/'))
+        .map(PathBuf::from)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +286,45 @@ mod tests {
             &ident,
         );
         assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn parses_otool_output() {
+        let out = "\
+/px/bin/python3.12:
+\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 4201.0.0)
+\t/px/lib/libpython3.12.dylib (compatibility version 3.12.0, current version 3.12.0)
+\t/opt/hb/opt/gettext/lib/libintl.8.dylib (compatibility version 13.0.0, current version 13.5.0)
+\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+";
+        let deps = parse_otool_output(out);
+        assert_eq!(
+            deps,
+            vec![
+                PathBuf::from("/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"),
+                PathBuf::from("/px/lib/libpython3.12.dylib"),
+                PathBuf::from("/opt/hb/opt/gettext/lib/libintl.8.dylib"),
+                PathBuf::from("/usr/lib/libSystem.B.dylib"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_ldd_output() {
+        let out = "\
+\tlinux-vdso.so.1 (0x0000ffff)
+\tlibpython3.12.so.1.0 => /px/lib/libpython3.12.so.1.0 (0x0000ffff)
+\tlibc.so.6 => /usr/lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff)
+\tlibmissing.so => not found
+\t/lib/ld-linux-aarch64.so.1 (0x0000ffff)
+";
+        let deps = parse_ldd_output(out);
+        assert_eq!(
+            deps,
+            vec![
+                PathBuf::from("/px/lib/libpython3.12.so.1.0"),
+                PathBuf::from("/usr/lib/aarch64-linux-gnu/libc.so.6"),
+            ]
+        );
     }
 }
