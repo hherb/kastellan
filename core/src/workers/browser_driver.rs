@@ -241,7 +241,11 @@ pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> Too
             (crate::tool_host::ENV_LANDLOCK_RW.to_string(), r#"["/tmp"]"#.to_string()),
         ],
         cpu_quota_pct: None,
-        tasks_max: None,
+        // Chromium spawns a process tree (zygote + renderer + gpu + utility),
+        // each multi-threaded — easily >100 tasks. The default cgroup
+        // TasksMax=64 throttles it into a hang (DGX-confirmed: 64 fails, 512
+        // renders). 512 is generous headroom for a single-page render.
+        tasks_max: Some(512),
         proxy_uds: None, // dev-only legacy direct-net (#263); force-routing is slice #2
     };
     ToolEntry {
@@ -508,6 +512,9 @@ mod tests {
             entry.lifecycle,
             crate::worker_lifecycle::Lifecycle::SingleUse
         ));
+        // TasksMax must be raised above the default 64 — Chromium's process
+        // tree needs it (DGX-confirmed).
+        assert_eq!(entry.policy.tasks_max, Some(512));
     }
 
     #[test]
