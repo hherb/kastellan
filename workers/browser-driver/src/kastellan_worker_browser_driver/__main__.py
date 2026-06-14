@@ -1,21 +1,26 @@
 """Entry point for `kastellan-worker-browser-driver`.
 
-Phase 1 wires the stdio server but the real Playwright renderer lands in the
-Phase-2 plan (it depends on the spike's launch flags + a `Profile::BrowserClient`
-seccomp profile — see the design spec §3.1). Until then, starting the worker
-raises a clear error rather than pretending to render.
+Reads the operator allowlist from `KASTELLAN_BROWSER_DRIVER_ALLOWLIST` (a JSON
+array of `host[:port]`, injected by the host manifest), builds the real
+`PlaywrightRenderer`, and runs the stdio JSON-RPC server. The renderer
+self-enforces the allowlist per navigation + subresource (defense in depth; the
+jail is the hard boundary — see the design spec §6 / issue #263).
 """
+import os
 import sys
 
+from .allowlist import HostAllowlist
+from .render import PlaywrightRenderer
 from .server import Server
 
+ALLOWLIST_ENV = "KASTELLAN_BROWSER_DRIVER_ALLOWLIST"
 
-def _build_renderer():
-    # Phase 2: return a PlaywrightRenderer(launch_args=["--no-sandbox",
-    # "--disable-dev-shm-usage"]) per the spike findings (spec §3.1).
-    raise NotImplementedError(
-        "browser-driver real renderer lands in the Phase-2 plan (spike-gated)"
-    )
+
+def _build_renderer() -> PlaywrightRenderer:
+    # A missing/blank env yields an empty allowlist that permits nothing —
+    # fail-closed (every navigation then aborts at the route handler).
+    allowlist = HostAllowlist.from_env_json(os.environ.get(ALLOWLIST_ENV, ""))
+    return PlaywrightRenderer(allowlist=allowlist)
 
 
 def main() -> None:
