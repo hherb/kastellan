@@ -78,3 +78,38 @@ def test_shim_handles_concurrent_connections():
             c.close()
     finally:
         shim.stop()
+
+
+def test_shim_stop_is_idempotent():
+    import tempfile, os, threading, socket
+    tmp = tempfile.mkdtemp()
+    uds_path = os.path.join(tmp, "egress.sock")
+    ready = threading.Event()
+    _fake_uds_echo_server(uds_path, ready)
+    assert ready.wait(timeout=5)
+    shim = ProxyShim(uds_path)
+    shim.start()
+    shim.stop()
+    shim.stop()  # must not raise (idempotent)
+
+
+def test_shim_stop_without_start_is_safe():
+    shim = ProxyShim("/nonexistent/egress.sock")
+    shim.stop()  # never started — must be a no-op, not raise
+
+
+def test_shim_double_start_rejected():
+    import tempfile, os, threading
+    tmp = tempfile.mkdtemp()
+    uds_path = os.path.join(tmp, "egress.sock")
+    ready = threading.Event()
+    _fake_uds_echo_server(uds_path, ready)
+    assert ready.wait(timeout=5)
+    shim = ProxyShim(uds_path)
+    shim.start()
+    try:
+        import pytest
+        with pytest.raises(RuntimeError):
+            shim.start()  # second start must be rejected, not silently leak a thread
+    finally:
+        shim.stop()

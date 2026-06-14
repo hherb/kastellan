@@ -25,6 +25,8 @@ class ProxyShim:
 
     def start(self) -> int:
         """Start the relay on a background thread; return the bound TCP port."""
+        if self._thread is not None:
+            raise RuntimeError("ProxyShim already started")
         ready = threading.Event()
         err: list[BaseException] = []
 
@@ -33,17 +35,18 @@ class ProxyShim:
             self._loop = loop
             asyncio.set_event_loop(loop)
             try:
-                self._server = loop.run_until_complete(
+                server = loop.run_until_complete(
                     asyncio.start_server(self._handle, host="127.0.0.1", port=0)
                 )
-                self._port = self._server.sockets[0].getsockname()[1]
+                self._server = server
+                self._port = server.sockets[0].getsockname()[1]
             except BaseException as e:  # noqa: BLE001 - surface to start()
                 err.append(e)
                 ready.set()
                 return
             ready.set()
             loop.run_forever()
-            loop.run_until_complete(self._server.wait_closed())
+            loop.run_until_complete(server.wait_closed())
             loop.close()
 
         self._thread = threading.Thread(target=run, name="egress-shim", daemon=True)
@@ -56,9 +59,15 @@ class ProxyShim:
         return self._port
 
     def stop(self) -> None:
-        """Stop the relay and join its thread (best-effort, idempotent)."""
+        """Stop the relay and join its thread. Idempotent: safe to call when
+        never started, and safe to call more than once."""
         loop = self._loop
         server = self._server
+        thread = self._thread
+        # Clear first so a concurrent/second stop() is a no-op.
+        self._loop = None
+        self._server = None
+        self._thread = None
         if loop is None:
             return
 
@@ -67,9 +76,13 @@ class ProxyShim:
                 server.close()
             loop.stop()
 
-        loop.call_soon_threadsafe(_shutdown)
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+        if not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(_shutdown)
+            except RuntimeError:
+                pass  # loop already stopped/closed
+        if thread is not None:
+            thread.join(timeout=5)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """One TCP client: open the UDS, splice both directions until either EOF."""
