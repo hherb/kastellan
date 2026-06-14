@@ -12,59 +12,20 @@ use thiserror::Error;
 
 use crate::cassandra::review::{ChainReviewStage, ReviewStage, ReviewStageContext};
 use crate::cassandra::types::{DataClass, Plan, PlannedStep, Verdict};
-use crate::memory::l3_approval::SkillTrust;
-use crate::memory::l3_invoke::{expand_for_agent, load_pinned_skill_by_name};
-use crate::memory::l3py_invoke::{
-    expand_python_for_agent, load_pinned_python_skill_by_name, with_python_kind,
-};
 use crate::scheduler::audit::{
-    build_l3_invoke_outcome_payload, build_l3_invoke_rejected_agent_payload,
-    build_l3_invoked_payload, ACTION_L3_INVOKED, ACTION_L3_INVOKE_OUTCOME,
-    ACTION_L3_INVOKE_REJECTED, SCHEDULER_AUDIT_ACTOR,
+    build_l3_invoke_outcome_payload, ACTION_L3_INVOKE_OUTCOME, SCHEDULER_AUDIT_ACTOR,
 };
 
+use self::floor::apply_floor_raise;
+pub use self::floor::ClassificationFloorSource;
+use self::invoke_expand::{expand_invoke_skill, InvokeExpansion};
 use super::agent::{AgentError, PlanFormulator};
 use super::inner_loop_audit::{
     write_audit_plan_formulate, write_audit_plan_outcome, write_audit_verdict,
 };
 
-/// Provenance of the current `classification_floor` value.
-///
-/// Carried in [`TaskContext`] and emitted into the
-/// `agent/plan.formulate` audit-row payload so operators can trace
-/// any DP-blocked plan back to how the floor was set.
-///
-/// Wire form (lowercase snake_case via serde) matches the
-/// operator-visible audit-log token — renaming any branch is an
-/// audit-trail contract break. Mirrors the `as_pascal_str` shape on
-/// `DataClass`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClassificationFloorSource {
-    /// Operator explicitly passed `--classification-floor X`.
-    Operator,
-    /// CLI keyword classifier elevated above Public.
-    CliInferred,
-    /// Agent raised the floor mid-task via `Plan.floor_request`.
-    AgentRaised,
-    /// No inference matched and no operator flag was set.
-    Default,
-}
-
-impl ClassificationFloorSource {
-    /// Canonical lowercase snake_case string, identical to the serde wire
-    /// form. Used by audit-log payload emitters so the rendered tag is a
-    /// formal contract instead of relying on the de-facto stability of
-    /// `Debug`. Renaming any branch is an audit-trail contract break.
-    pub fn as_snake_str(self) -> &'static str {
-        match self {
-            ClassificationFloorSource::Operator    => "operator",
-            ClassificationFloorSource::CliInferred => "cli_inferred",
-            ClassificationFloorSource::AgentRaised => "agent_raised",
-            ClassificationFloorSource::Default     => "default",
-        }
-    }
-}
+mod floor;
+mod invoke_expand;
 
 /// Per-task accumulator state passed to the agent each iteration.
 #[derive(Debug)]
@@ -340,104 +301,17 @@ pub async fn run_to_terminal(
         // from `validate_invoke` ends before we assign `plan.steps`.
         let mut current_invoke: Option<(i64, String)> = None;
         if plan.invoke_skill.is_some() {
-            macro_rules! refuse_invoke {
-                ($name:expr, $mem:expr, $sha:expr, $reasons:expr) => {{
-                    let reasons_v: Vec<String> = $reasons;
-                    let payload = build_l3_invoke_rejected_agent_payload(
-                        $name, $mem, $sha, &reasons_v,
-                    );
-                    kastellan_db::audit::insert(
-                        pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKE_REJECTED, payload,
-                    ).await?;
-                    for r in &reasons_v { ctx.blocks.push(format!("invoke_rejected: {r}")); }
-                    continue;
-                }};
-            }
-
-            let validated = plan
-                .validate_invoke()
-                .map(|d| (d.name.clone(), d.args.clone(), d.params.clone()));
-
-            match validated {
-                Err(malformed) => {
-                    let name = plan
-                        .invoke_skill
-                        .as_ref()
-                        .map(|d| d.name.clone())
-                        .unwrap_or_default();
-                    refuse_invoke!(&name, None, None, vec![malformed.to_string()]);
-                }
-                Ok((name, args, params)) => {
-                    match load_pinned_skill_by_name(pool, &name).await? {
-                        Some(pinned) => {
-                            let live_tools = dispatcher.known_tools();
-                            match expand_for_agent(
-                                &pinned.template,
-                                SkillTrust::Pinned,
-                                &args,
-                                &live_tools,
-                                plan.data_ceiling,
-                            ) {
-                                Err(refusal) => refuse_invoke!(
-                                    &name,
-                                    Some(pinned.memory_id),
-                                    Some(pinned.body_sha256.as_str()),
-                                    refusal.reasons
-                                ),
-                                Ok(steps) => {
-                                    let arg_names: Vec<String> = args.keys().cloned().collect();
-                                    let payload = build_l3_invoked_payload(
-                                        pinned.memory_id, &name, &pinned.body_sha256,
-                                        &arg_names, steps.len(),
-                                    );
-                                    kastellan_db::audit::insert(
-                                        pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
-                                    ).await?;
-                                    plan.steps = steps;
-                                    invoke_used = true;
-                                    current_invoke = Some((pinned.memory_id, name));
-                                }
-                            }
-                        }
-                        // No pinned *templated* skill of that name — try a pinned
-                        // *Python* skill before refusing.
-                        None => match load_pinned_python_skill_by_name(pool, &name).await? {
-                            None => refuse_invoke!(
-                                &name, None, None,
-                                vec![format!("unknown or non-pinned skill: {name}")]
-                            ),
-                            Some(py) => match expand_python_for_agent(
-                                &py.candidate,
-                                SkillTrust::Pinned,
-                                &py.body_sha256,
-                                plan.data_ceiling,
-                                &params,
-                            ) {
-                                Err(refusal) => refuse_invoke!(
-                                    &name,
-                                    Some(py.memory_id),
-                                    Some(py.body_sha256.as_str()),
-                                    refusal.reasons
-                                ),
-                                Ok(steps) => {
-                                    // Python skills take no args. Tag the audit
-                                    // row with kind:"python" for a coherent
-                                    // lifecycle stream (shares `with_python_kind`
-                                    // with the operator path — one source of truth
-                                    // for the tag).
-                                    let payload = with_python_kind(build_l3_invoked_payload(
-                                        py.memory_id, &name, &py.body_sha256, &[], steps.len(),
-                                    ));
-                                    kastellan_db::audit::insert(
-                                        pool, SCHEDULER_AUDIT_ACTOR, ACTION_L3_INVOKED, payload,
-                                    ).await?;
-                                    plan.steps = steps;
-                                    invoke_used = true;
-                                    current_invoke = Some((py.memory_id, name));
-                                }
-                            },
-                        },
+            match expand_invoke_skill(pool, dispatcher.as_ref(), &plan).await? {
+                InvokeExpansion::Refused(reasons) => {
+                    for r in &reasons {
+                        ctx.blocks.push(format!("invoke_rejected: {r}"));
                     }
+                    continue; // bounded by plan_count cap on next iter
+                }
+                InvokeExpansion::Expanded { steps, memory_id, name } => {
+                    plan.steps = steps;
+                    invoke_used = true;
+                    current_invoke = Some((memory_id, name));
                 }
             }
         }
@@ -601,29 +475,6 @@ pub async fn run_to_terminal(
         ctx.plans.push((plan, outcomes));
         // loop back: agent reflects on the outcomes for the next plan
     }
-}
-
-/// Apply `plan.floor_request` to `ctx` if it raises the current floor.
-/// Pure side-effect on `ctx`. Returns true iff `ctx` was mutated.
-///
-/// Never lowers the floor: a `floor_request` whose rank is ≤ the
-/// current floor is a no-op (pinned by
-/// `agent_floor_request_lower_than_producer_is_ignored`).
-///
-/// On a successful raise, also flips
-/// `ctx.classification_floor_source` to `AgentRaised` and clears
-/// `ctx.classification_floor_signals` (the signals explained the
-/// original CLI inference, not the elevated floor).
-fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
-    if let Some(req) = plan.floor_request {
-        if req.rank() > ctx.classification_floor.rank() {
-            ctx.classification_floor = req;
-            ctx.classification_floor_source = ClassificationFloorSource::AgentRaised;
-            ctx.classification_floor_signals.clear();
-            return true;
-        }
-    }
-    false
 }
 
 #[cfg(test)]
