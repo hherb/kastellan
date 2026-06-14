@@ -28,6 +28,19 @@ MAX_TEXT_CHARS = 200_000           # post-readability text char cap
 # instead of /dev/shm so the jail needs no writable /dev/shm.
 DEFAULT_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 
+def build_launch_args(proxy_port: Optional[int]) -> list[str]:
+    """Chromium launch args. When force-routed (a shim port is given), route all
+    traffic through the in-jail proxy at 127.0.0.1:<port> and remove Chromium's
+    implicit loopback bypass so even loopback destinations go through the proxy
+    (and are allowlist-checked by the sidecar). Without a port: the dev direct
+    path, byte-identical to before."""
+    args = list(DEFAULT_LAUNCH_ARGS)
+    if proxy_port is not None:
+        args.append(f"--proxy-server=127.0.0.1:{proxy_port}")
+        args.append("--proxy-bypass-list=<-loopback>")
+    return args
+
+
 # Default ports per scheme, for the subresource allowlist check.
 _DEFAULT_PORTS = {"https": 443, "http": 80}
 
