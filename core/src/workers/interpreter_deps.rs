@@ -65,7 +65,13 @@ pub fn out_of_prefix_lib_dirs(
             }
             if !c.starts_with(prefix) {
                 if let Some(parent) = c.parent() {
-                    dirs.insert(parent.to_path_buf());
+                    // Never bind the filesystem root: a (pathological) dep
+                    // directly under `/` would otherwise grant a read of `/`.
+                    // Real otool/ldd output never yields this, but the guard is
+                    // free defense-in-depth.
+                    if parent != Path::new("/") {
+                        dirs.insert(parent.to_path_buf());
+                    }
                 }
             }
             if visited.insert(c.clone()) {
@@ -328,6 +334,19 @@ mod tests {
         )]);
         let dirs = out_of_prefix_lib_dirs(&[], Path::new("/px"), &g, &ident);
         assert!(dirs.is_empty(), "empty roots ⇒ no dirs, got {dirs:?}");
+    }
+
+    #[test]
+    fn never_binds_filesystem_root() {
+        // A (pathological) dep directly under `/` must NOT grant a read of `/`.
+        let g = graph(&[("/px/bin/python3.12", &["/libfoo.so"])]);
+        let dirs = out_of_prefix_lib_dirs(
+            &[PathBuf::from("/px/bin/python3.12")],
+            Path::new("/px"),
+            &g,
+            &ident,
+        );
+        assert!(dirs.is_empty(), "root `/` must never be bound, got {dirs:?}");
     }
 
     #[test]
