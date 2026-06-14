@@ -144,11 +144,13 @@ the shim **only when `KASTELLAN_EGRESS_PROXY_UDS` is present** — symmetric wit
   proxy_uds profile contains none of them; the deny-then-UDS-allow structure is preserved.
 
 ### 5.6 `workers/browser-driver` (Python) — the shim + wiring
-- **New `shim.py`** — a pure asyncio loopback-TCP↔UDS relay:
-  - `async start() -> int`: bind `127.0.0.1:0`, return the assigned port; serve in the background.
+- **New `shim.py`** — a pure loopback-TCP↔UDS relay. The worker is **synchronous**
+  (sync Playwright), so the relay runs an asyncio event loop on its **own background thread**
+  and exposes a **sync** API:
+  - `start() -> int`: spawn the background thread, bind `127.0.0.1:0`, return the assigned port.
   - Per accepted TCP connection: `open_unix_connection(uds_path)`, then two splice coroutines
     copying TCP→UDS and UDS→TCP until EOF on either side; close both halves.
-  - `async stop()`: shut the listener + drain.
+  - `stop()`: stop the loop + join the thread (best-effort, idempotent).
   - Reads the UDS path from `KASTELLAN_EGRESS_PROXY_UDS`.
 - **Wire into the worker startup**: if `KASTELLAN_EGRESS_PROXY_UDS` is set, `await shim.start()` and
   pass Chromium launch args `--proxy-server=127.0.0.1:<port>` plus an empty
