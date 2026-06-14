@@ -36,6 +36,9 @@
 
 name: linux-check
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
