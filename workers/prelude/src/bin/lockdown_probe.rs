@@ -103,6 +103,8 @@ fn main() -> ExitCode {
         "seccomp-mount" => probe_mount(),
         #[cfg(target_os = "linux")]
         "seccomp-socket" => probe_socket(),
+        #[cfg(target_os = "linux")]
+        "seccomp-io-uring" => probe_io_uring(),
         "seccomp-getpid" => probe_getpid(),
         #[cfg(target_os = "linux")]
         "exec-after-lockdown" => probe_exec_after_lockdown(&args[1..]),
@@ -215,6 +217,45 @@ fn probe_socket() -> ExitCode {
     }
     eprintln!("socket() returned {fd}, errno={}", errno());
     ExitCode::from(3)
+}
+
+/// Try `io_uring_setup(1, &params)`. Outcomes the test layer cares about:
+///
+///   * Process killed by SIGSYS → the main filter `Kill`ed io_uring (the
+///     bad outcome we explicitly designed against — see `BrowserClient`).
+///   * Exit 0 → io_uring_setup returned a valid fd, i.e. io_uring is actually
+///     *allowed* (also bad under `browser_client`: the EPERM filter didn't apply).
+///   * Exit 5 → -1 with EPERM → the second filter downgraded io_uring to EPERM
+///     (the expected `browser_client` outcome — Chromium falls back gracefully).
+///   * Exit 6 → -1 with some other errno (survived seccomp; profile-dependent).
+#[cfg(target_os = "linux")]
+fn probe_io_uring() -> ExitCode {
+    // `struct io_uring_params` is ~120 bytes; over-allocate a zeroed, 8-byte
+    // aligned buffer. Under `browser_client` the syscall is EPERM'd before the
+    // kernel reads it; the buffer only matters on a kernel that would execute it.
+    let mut params = [0u64; 32];
+    // SAFETY: raw `io_uring_setup(entries, params_ptr)`. `params` outlives the
+    // call and is large enough for the kernel struct. We expect either a SIGSYS
+    // kill, an EPERM return (seccomp), or a real fd — all handled below.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_io_uring_setup,
+            1u32 as libc::c_long,
+            params.as_mut_ptr() as libc::c_long,
+        )
+    };
+    if rc >= 0 {
+        unsafe { libc::close(rc as libc::c_int) };
+        eprintln!("UNEXPECTED: io_uring_setup returned fd={rc}");
+        return ExitCode::from(0);
+    }
+    let e = errno();
+    eprintln!("io_uring_setup returned -1, errno={e}");
+    if e == libc::EPERM {
+        ExitCode::from(5)
+    } else {
+        ExitCode::from(6)
+    }
 }
 
 fn probe_getpid() -> ExitCode {

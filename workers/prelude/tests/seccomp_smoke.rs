@@ -182,3 +182,57 @@ fn unshare_is_killed_under_net_client() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Stage-3 (browser_client) invariant: io_uring is **refused with EPERM**, not
+/// killed and not allowed. The main browser filter `Allow`s io_uring so it
+/// isn't SIGSYS-killed; a second filter downgrades it to `Errno(EPERM)`, which
+/// outranks `Allow` in seccomp precedence. So Chromium falls back gracefully
+/// instead of dying — see `seccomp_lock::Profile::BrowserClient`.
+#[test]
+fn io_uring_is_eperm_under_browser_client() {
+    if !seccomp_enforced() {
+        return;
+    }
+    let out = run_probe(
+        &[("KASTELLAN_SECCOMP_PROFILE", "browser_client")],
+        &["seccomp-io-uring"],
+    );
+    assert!(
+        out.status.signal().is_none(),
+        "io_uring must NOT be SIGSYS-killed under browser_client (it must be \
+         EPERM'd so the browser falls back), got signal {:?}\nstderr: {}",
+        out.status.signal(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Exit 5 == io_uring_setup returned -1/EPERM (the designed outcome).
+    // Exit 0 would mean io_uring is actually allowed (the EPERM filter failed).
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "io_uring_setup under browser_client must return EPERM (probe exit 5), \
+         got {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Symmetric: the catastrophic set stays killed under `browser_client` too —
+/// the browser additions must not have widened the escape surface.
+/// `unshare(CLONE_NEWUSER)` is the canary.
+#[test]
+fn unshare_is_killed_under_browser_client() {
+    if !seccomp_enforced() {
+        return;
+    }
+    let out = run_probe(
+        &[("KASTELLAN_SECCOMP_PROFILE", "browser_client")],
+        &["seccomp-unshare"],
+    );
+    assert_eq!(
+        out.status.signal(),
+        Some(SIGSYS),
+        "expected SIGSYS kill under browser_client, got status {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
