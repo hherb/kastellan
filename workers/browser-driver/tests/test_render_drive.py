@@ -3,8 +3,6 @@
 The real browser launch is exercised only by the `#[ignore] real_render` e2e;
 here a fake Playwright stack drives the orchestration without a browser binary.
 """
-from contextlib import contextmanager
-
 import pytest
 
 from kastellan_worker_browser_driver.allowlist import HostAllowlist
@@ -117,12 +115,20 @@ class FakeChromium:
 class FakePlaywright:
     def __init__(self, browser):
         self.chromium = FakeChromium(browser)
+        self.stopped = False
+
+    def start(self):
+        return self
+
+    def stop(self):
+        self.stopped = True
 
 
 def make_factory(browser):
-    @contextmanager
     def factory():
-        yield FakePlaywright(browser)
+        # Mirrors sync_playwright(): returns an object whose .start() yields the
+        # Playwright handle (here the same object) and whose .stop() tears down.
+        return FakePlaywright(browser)
 
     return factory
 

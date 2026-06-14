@@ -107,10 +107,17 @@ class PlaywrightRenderer:
     allowed or the render fails closed) → `goto` → settle → `content()` →
     `extract_render_result`.
 
-    `playwright_factory` is a seam: a zero-arg callable returning a context
-    manager that yields a Playwright-like object with `.chromium.launch(...)`.
-    It defaults to the real `sync_playwright()`; tests inject a fake so the
-    orchestration is exercised without a browser binary.
+    `playwright_factory` is a seam: a zero-arg callable returning a Playwright
+    "context manager" object with a `.start()` method (yielding a
+    Playwright-like object with `.chromium.launch(...)`); the started object
+    exposes `.stop()`. It defaults to the real `sync_playwright()`; tests inject
+    a fake so the orchestration is exercised without a browser binary.
+
+    We use explicit `.start()`/`.stop()` rather than `with sync_playwright() as
+    pw:` on purpose: the `with` form, when a later call (e.g. `chromium.launch`)
+    fails, raises an unrelated `AttributeError` in `__exit__` that **masks the
+    real error**. Explicit start/stop lets the genuine failure propagate to the
+    `RENDER_FAILED` message.
     """
 
     def __init__(
@@ -124,7 +131,8 @@ class PlaywrightRenderer:
         self._playwright_factory = playwright_factory or _default_playwright_factory
 
     def render(self, *, url: str, timeout_ms: int, wait_until: str) -> dict[str, Any]:
-        with self._playwright_factory() as pw:
+        pw = self._playwright_factory().start()
+        try:
             browser = pw.chromium.launch(headless=True, args=self._launch_args)
             try:
                 page = browser.new_page()
@@ -136,6 +144,8 @@ class PlaywrightRenderer:
                 final_url = page.url
             finally:
                 browser.close()
+        finally:
+            pw.stop()
         return extract_render_result(
             html=html, final_url=final_url, status=status, title=title
         )
