@@ -111,7 +111,7 @@ where
         return Err(ResolveSkipReason::ScriptShimMissing { path: script_path });
     }
     let interpreter_root = resolve_interpreter_root(&venv_dir, &exists, &canonicalize);
-    let interpreter_lib_dirs = resolve_interpreter_lib_dirs(
+    let interpreter_lib_dirs = crate::workers::interpreter_deps::interpreter_lib_dirs(
         &venv_dir,
         interpreter_root.as_deref(),
         &exists,
@@ -172,67 +172,6 @@ fn resolve_interpreter_root(
         return None;
     }
     Some(prefix.to_path_buf())
-}
-
-/// Compute the out-of-prefix shared-lib dirs to bind for the venv interpreter.
-///
-/// Seeds the dependency walk with the real interpreter binary AND its
-/// `libpython` (located at `<prefix>/lib/libpython<X.Y>.{dylib,so}`, version
-/// derived from the real interpreter filename like `python3.12` → `3.12`; seeded
-/// only when present — a miss is harmless because the walk reaches `libpython`
-/// through the binary's own deps anyway). `prefix` is the interpreter prefix when
-/// external, else the venv dir (a self-contained interpreter can still link
-/// out-of-prefix libs). Returns empty when the interpreter can't be located.
-/// A degenerate stem (`python3` → ver `3`, or bare `python` → ver `""`, the
-/// latter skipped by the non-empty guard) just misses the libpython seed
-/// harmlessly — the binary's own deps still reach `libpython` transitively.
-fn resolve_interpreter_lib_dirs(
-    venv_dir: &Path,
-    interpreter_root: Option<&Path>,
-    exists: &dyn Fn(&Path) -> bool,
-    canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,
-    resolve_deps: &dyn Fn(&Path) -> Vec<PathBuf>,
-) -> Vec<PathBuf> {
-    let bin = venv_dir.join("bin");
-    let candidate = match ["python3", "python"]
-        .iter()
-        .map(|n| bin.join(n))
-        .find(|p| exists(p))
-    {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-    let real = match canonicalize(&candidate) {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
-    // The prefix to treat as "already bound in-jail": the external interpreter
-    // root, or (self-contained) the venv dir.
-    let prefix = interpreter_root.unwrap_or(venv_dir);
-
-    let mut roots = vec![real.clone()];
-    // Seed libpython explicitly (belt-and-braces). Derive `<X.Y>` from e.g.
-    // "python3.12" → "3.12"; try `.dylib` then `.so` under `<real-prefix>/lib`.
-    if let (Some(stem), Some(real_prefix)) = (
-        real.file_name().and_then(|n| n.to_str()),
-        real.parent().and_then(|b| b.parent()),
-    ) {
-        let ver = stem.trim_start_matches("python");
-        if !ver.is_empty() {
-            for ext in ["dylib", "so"] {
-                let lib = real_prefix.join("lib").join(format!("libpython{ver}.{ext}"));
-                if exists(&lib) {
-                    roots.push(lib);
-                }
-            }
-        }
-    }
-    crate::workers::interpreter_deps::out_of_prefix_lib_dirs(
-        &roots,
-        prefix,
-        resolve_deps,
-        canonicalize,
-    )
 }
 
 /// Build the [`ToolEntry`] for the browser-driver worker (Phase 2).

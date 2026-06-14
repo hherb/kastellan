@@ -27,9 +27,12 @@ the whole #284 symptom was the dyld gap. Full core suite green (skip-as-pass), `
 (egress-sidecar) macOS acceptance tests now fail with **empty sidecar decisions** — a DISTINCT, pre-existing macOS
 browser-forced-egress issue (Chromium→in-jail `ProxyShim`→UDS→sidecar) that #284 was masking. **Not a regression** (the fix
 only adds read-only binds; DGX forced acceptance stays 2/2 green — the Linux production gate). macOS-only.
-**Follow-ups:** adopt the reusable `interpreter_deps` helper in `python-exec` + `gliner-relex` (same external-interpreter
-footgun); DRY the manifest/e2e libpython-seed mirror (review M2, currently a deliberate crate-boundary copy like
-`resolve_interpreter_root`). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-15-interpreter-lib-dep-autobind*`.
+**Post-review fixes (this branch):** (1) `parse_otool_output` now carries the symmetric
+`#[cfg_attr(all(not(test), not(target_os="macos")), allow(dead_code))]` guard its `parse_ldd_output` sibling already had —
+without it a non-macOS `-D warnings` lib build flags it dead (the macOS-only clippy run never caught it). (2) **M2 RESOLVED** —
+the manifest/e2e libpython-seed logic is now a single shared `interpreter_deps::interpreter_lib_dirs`, so the two can no longer
+drift. **Follow-ups:** adopt the `interpreter_deps` helper in `python-exec` + `gliner-relex` (same external-interpreter
+footgun). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-15-interpreter-lib-dep-autobind*`.
 
 _(Prior session — browser-driver egress slice #2, transparent-tunnel egress routing, #263 + #280 resolved — merged to `main`
 as PR #285 / `76c58d9`; condensed into "Recently merged" below. The python-exec arc is likewise condensed there.)_

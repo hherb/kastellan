@@ -82,9 +82,69 @@ pub fn out_of_prefix_lib_dirs(
     dirs.into_iter().collect()
 }
 
+/// Compute the out-of-prefix shared-lib dirs to bind for a venv's interpreter.
+///
+/// Locates `<venv>/bin/{python3,python}`, canonicalizes it to the real
+/// interpreter, then seeds [`out_of_prefix_lib_dirs`] with that binary AND its
+/// `libpython` (at `<real-prefix>/lib/libpython<X.Y>.{dylib,so}`, version derived
+/// from the binary stem like `python3.12` → `3.12`; seeded only when present — a
+/// miss is harmless because the walk reaches `libpython` through the binary's own
+/// deps anyway). `interpreter_root` is the external interpreter prefix (when the
+/// venv's python lives outside the venv), else `None`; the dep-walk prefix is that
+/// root or, self-contained, the venv dir (a self-contained interpreter can still
+/// link out-of-prefix libs). Returns empty when the interpreter can't be located.
+///
+/// Shared by the browser-driver manifest and its e2e resolver so the seed logic
+/// cannot drift across the crate boundary (review M2). Pure: `exists`,
+/// `canonicalize`, and `resolve_deps` are injected.
+pub fn interpreter_lib_dirs(
+    venv_dir: &Path,
+    interpreter_root: Option<&Path>,
+    exists: &dyn Fn(&Path) -> bool,
+    canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,
+    resolve_deps: &dyn Fn(&Path) -> Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let bin = venv_dir.join("bin");
+    let candidate = match ["python3", "python"]
+        .iter()
+        .map(|n| bin.join(n))
+        .find(|p| exists(p))
+    {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let real = match canonicalize(&candidate) {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    // The prefix to treat as "already bound in-jail": the external interpreter
+    // root, or (self-contained) the venv dir.
+    let prefix = interpreter_root.unwrap_or(venv_dir);
+
+    let mut roots = vec![real.clone()];
+    // Seed libpython explicitly (belt-and-braces). Derive `<X.Y>` from e.g.
+    // "python3.12" → "3.12"; try `.dylib` then `.so` under `<real-prefix>/lib`.
+    if let (Some(stem), Some(real_prefix)) = (
+        real.file_name().and_then(|n| n.to_str()),
+        real.parent().and_then(|b| b.parent()),
+    ) {
+        let ver = stem.trim_start_matches("python");
+        if !ver.is_empty() {
+            for ext in ["dylib", "so"] {
+                let lib = real_prefix.join("lib").join(format!("libpython{ver}.{ext}"));
+                if exists(&lib) {
+                    roots.push(lib);
+                }
+            }
+        }
+    }
+    out_of_prefix_lib_dirs(&roots, prefix, resolve_deps, canonicalize)
+}
+
 /// Parse `otool -L` output into resolved dependency paths. The first line is the
 /// object's own header (`<path>:`); dependency lines are tab-indented as
 /// `\t<abs-path> (compatibility version …)`. We take the path before ` (`.
+#[cfg_attr(all(not(test), not(target_os = "macos")), allow(dead_code))]
 fn parse_otool_output(out: &str) -> Vec<PathBuf> {
     out.lines()
         .filter_map(|line| line.strip_prefix('\t'))

@@ -76,43 +76,15 @@ fn resolve_browser_env() -> Option<BrowserDriverEnv> {
         .collect();
     // Mirror the manifest: bind the interpreter's out-of-prefix shared-lib dirs
     // (issue #284) so a pyenv/Homebrew-linked interpreter dyld-loads in the jail
-    // without a manual KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ.
-    let interpreter_lib_dirs = {
-        let real = ["python3", "python"]
-            .iter()
-            .map(|n| venv_dir.join("bin").join(n))
-            .find(|p| p.exists())
-            .and_then(|p| std::fs::canonicalize(&p).ok());
-        match real {
-            Some(real) => {
-                let prefix = interpreter_root.clone().unwrap_or_else(|| venv_dir.clone());
-                let mut roots = vec![real.clone()];
-                if let (Some(stem), Some(real_prefix)) = (
-                    real.file_name().and_then(|n| n.to_str()),
-                    real.parent().and_then(|b| b.parent()),
-                ) {
-                    let ver = stem.trim_start_matches("python");
-                    if !ver.is_empty() {
-                        for ext in ["dylib", "so"] {
-                            let lib = real_prefix
-                                .join("lib")
-                                .join(format!("libpython{ver}.{ext}"));
-                            if lib.exists() {
-                                roots.push(lib);
-                            }
-                        }
-                    }
-                }
-                kastellan_core::workers::interpreter_deps::out_of_prefix_lib_dirs(
-                    &roots,
-                    &prefix,
-                    &|p| kastellan_core::workers::interpreter_deps::resolve_deps_via_tool(p),
-                    &|p| std::fs::canonicalize(p).ok(),
-                )
-            }
-            None => Vec::new(),
-        }
-    };
+    // without a manual KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ. Shares the
+    // manifest's seed logic so the two can't drift (review M2).
+    let interpreter_lib_dirs = kastellan_core::workers::interpreter_deps::interpreter_lib_dirs(
+        &venv_dir,
+        interpreter_root.as_deref(),
+        &|p| p.exists(),
+        &|p| std::fs::canonicalize(p).ok(),
+        &|p| kastellan_core::workers::interpreter_deps::resolve_deps_via_tool(p),
+    );
     Some(BrowserDriverEnv {
         script_path,
         venv_dir,
