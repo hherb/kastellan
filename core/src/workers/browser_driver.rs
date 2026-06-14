@@ -3,9 +3,11 @@
 //! A Playwright-Python worker (opt-in via `KASTELLAN_BROWSER_DRIVER_ENABLE=1`)
 //! exposing `browser.render`. [`resolve_env`] is the pure core (env + fs probes
 //! → [`BrowserDriverEnv`] | [`ResolveSkipReason`]); [`browser_driver_entry`]
-//! builds the [`ToolEntry`]. Slice #1 runs on the legacy direct-net
-//! `Net::Allowlist` path (no `proxy_uds`); egress-proxy force-routing is slice
-//! #2. The real browser launch lives in the Python worker; the prelude
+//! builds the [`ToolEntry`]. Under the default force-routed deployment the
+//! worker runs in a private netns reaching the net only via its per-worker
+//! egress sidecar (in-jail loopback-TCP↔UDS shim + transparent tunnel —
+//! egress slice #2); force-routing is OFF in dev, where the worker runs
+//! direct-net. The real browser launch lives in the Python worker; the prelude
 //! seccomp/Landlock additions + real-sandbox e2e land in the Phase-2 plan
 //! (their exact shape was settled by the spike — see the design spec §3.1).
 
@@ -158,9 +160,12 @@ fn resolve_interpreter_root(
 
 /// Build the [`ToolEntry`] for the browser-driver worker (Phase 2).
 ///
-/// Posture: `Net::Allowlist` on the **legacy direct-net path** (no `proxy_uds`
-/// — see the #263 decision in the Phase-2 plan; force-routing is egress slice
-/// #2), `Profile::WorkerBrowserClient` (the spike's seccomp + Seatbelt browser
+/// Posture: `Net::Allowlist`; `proxy_uds` is left `None` in the manifest and
+/// SET AT SPAWN by the force-routing path (`rewrite_worker_policy`), exactly
+/// like web-fetch — so under the default force-routed deployment the browser
+/// runs in a private netns reaching the net only via its egress sidecar (the
+/// browser does end-to-end TLS; the sidecar transparently tunnels — egress
+/// slice #2). `Profile::WorkerBrowserClient` (the spike's seccomp + Seatbelt browser
 /// widening, §3.1), `SingleUse` lifecycle. The operator allowlist is injected
 /// verbatim as `KASTELLAN_BROWSER_DRIVER_ALLOWLIST` JSON; the worker
 /// self-enforces it per navigation + subresource. `mem_mb` (1 GiB) is the
@@ -247,7 +252,7 @@ pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> Too
         // TasksMax=64 throttles it into a hang (DGX-confirmed: 64 fails, 512
         // renders). 512 is generous headroom for a single-page render.
         tasks_max: Some(512),
-        proxy_uds: None, // dev-only legacy direct-net (#263); force-routing is slice #2
+        proxy_uds: None, // set at spawn by force-routing (rewrite_worker_policy); same as web-fetch
     };
     ToolEntry {
         binary: env.script_path.clone(),
@@ -471,7 +476,7 @@ mod tests {
         assert_eq!(entry.binary, PathBuf::from("/v/bin/kastellan-worker-browser-driver"));
         // Phase 2: the browser-specific seccomp/Seatbelt profile.
         assert!(matches!(entry.policy.profile, Profile::WorkerBrowserClient));
-        // Dev-only legacy direct-net path, no proxy_uds (#263).
+        // Manifest leaves proxy_uds None; force-routing sets it at spawn.
         assert!(entry.policy.proxy_uds.is_none());
         match &entry.policy.net {
             Net::Allowlist(hosts) => assert_eq!(hosts, &vec!["example.com:443".to_string()]),
