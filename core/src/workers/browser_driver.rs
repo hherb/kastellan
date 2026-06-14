@@ -87,37 +87,77 @@ where
     })
 }
 
-/// Build the [`ToolEntry`] for the browser-driver worker (slice #1).
+/// Build the [`ToolEntry`] for the browser-driver worker (Phase 2).
 ///
-/// Slice #1 posture: `Net::Allowlist` on the **legacy direct-net path** (no
-/// `proxy_uds` — egress-proxy force-routing is slice #2), `WorkerNetClient`
-/// profile, `SingleUse` lifecycle. The operator allowlist is injected verbatim
-/// as `KASTELLAN_BROWSER_DRIVER_ALLOWLIST` JSON; the worker self-enforces it per
-/// navigation + subresource. `mem_mb` (1 GiB) is the spike's safe slice-1 cap
-/// (§3.1); the browser-binary/font `fs_read` paths + the `Profile::BrowserClient`
-/// seccomp profile are finalized from the spike findings in the Phase-2 plan.
+/// Posture: `Net::Allowlist` on the **legacy direct-net path** (no `proxy_uds`
+/// — see the #263 decision in the Phase-2 plan; force-routing is egress slice
+/// #2), `Profile::WorkerBrowserClient` (the spike's seccomp + Seatbelt browser
+/// widening, §3.1), `SingleUse` lifecycle. The operator allowlist is injected
+/// verbatim as `KASTELLAN_BROWSER_DRIVER_ALLOWLIST` JSON; the worker
+/// self-enforces it per navigation + subresource. `mem_mb` (1 GiB) is the
+/// spike's safe cap (§3.1: headless-shell ~150-300 MB).
+///
+/// **Browsers live inside the venv** (`PLAYWRIGHT_BROWSERS_PATH =
+/// <venv>/browsers`, set here + by `install.sh`) so only `venv_dir` needs an
+/// `fs_read` bind — no separate browser-cache path. **Writable scratch** for
+/// Chromium's `--user-data-dir` (Playwright places it under `$TMPDIR`):
+/// `TMPDIR=/tmp` on both OSes; on Linux that's bwrap's per-spawn ephemeral
+/// `/tmp` tmpfs (#89), granted to the in-jail Landlock layer via
+/// `KASTELLAN_LANDLOCK_RW=["/tmp"]` with `fs_write` empty (keeps the host `/tmp`
+/// off the tmpfs); on macOS Seatbelt has no tmpfs, so `fs_write=["/tmp"]` grants
+/// the writable dir (a per-spawn scratch is the deferred follow-up). Fonts:
+/// `/usr` (Linux) and `/System/Library` (macOS) are already readable from the
+/// base sandbox; macOS additionally needs `/Library/Fonts`.
 pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> ToolEntry {
     let allow_json =
         serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
+
+    let mut fs_read = vec![
+        env.venv_dir.clone(),
+        PathBuf::from("/etc/resolv.conf"),
+        PathBuf::from("/etc/hosts"),
+        PathBuf::from("/etc/nsswitch.conf"),
+    ];
+    // macOS: /System/Library/Fonts is covered by the base profile's
+    // /System/Library grant, but user/third-party fonts under /Library/Fonts
+    // are not — add them so Chromium has a font to fall back on.
+    #[cfg(target_os = "macos")]
+    fs_read.push(PathBuf::from("/Library/Fonts"));
+
+    // Writable scratch for Chromium's user-data-dir (see the fn doc).
+    #[cfg(target_os = "linux")]
+    let fs_write = vec![]; // bwrap per-spawn /tmp tmpfs (#89), granted via LANDLOCK_RW below
+    #[cfg(not(target_os = "linux"))]
+    let fs_write = vec![PathBuf::from("/tmp")]; // macOS Seatbelt needs an explicit writable dir
+
     let policy = SandboxPolicy {
-        fs_read: vec![
-            env.venv_dir.clone(),
-            PathBuf::from("/etc/resolv.conf"),
-            PathBuf::from("/etc/hosts"),
-            PathBuf::from("/etc/nsswitch.conf"),
-        ],
-        fs_write: vec![],
+        fs_read,
+        fs_write,
         net: Net::Allowlist(allowlist.to_vec()),
         cpu_ms: 30_000,
-        mem_mb: 1024, // spike §3.1: headless-shell ~150-300 MB; 1 GiB is a safe slice-1 cap
-        profile: Profile::WorkerNetClient,
-        env: vec![(
-            "KASTELLAN_BROWSER_DRIVER_ALLOWLIST".to_string(),
-            allow_json,
-        )],
+        mem_mb: 1024, // spike §3.1: headless-shell ~150-300 MB; 1 GiB is a safe cap
+        profile: Profile::WorkerBrowserClient,
+        env: vec![
+            (
+                "KASTELLAN_BROWSER_DRIVER_ALLOWLIST".to_string(),
+                allow_json,
+            ),
+            // Keep Playwright's browser tree inside the already-bound venv.
+            (
+                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                env.venv_dir.join("browsers").display().to_string(),
+            ),
+            // Chromium writes its --user-data-dir under $TMPDIR.
+            ("TMPDIR".to_string(), "/tmp".to_string()),
+            // Grant the jail's /tmp through the worker-side Landlock layer
+            // (Linux; honoured by derive_lockdown_env, no-op on macOS). MUST
+            // stay out of fs_write on Linux: a /tmp entry there would bind the
+            // host /tmp over bwrap's per-spawn ephemeral tmpfs (#89).
+            (crate::tool_host::ENV_LANDLOCK_RW.to_string(), r#"["/tmp"]"#.to_string()),
+        ],
         cpu_quota_pct: None,
         tasks_max: None,
-        proxy_uds: None, // slice #1: legacy direct-net; force-routing is slice #2
+        proxy_uds: None, // dev-only legacy direct-net (#263); force-routing is slice #2
     };
     ToolEntry {
         binary: env.script_path.clone(),
@@ -241,15 +281,16 @@ mod tests {
     }
 
     #[test]
-    fn entry_has_net_client_policy_and_operator_allowlist() {
+    fn entry_has_browser_client_policy_and_operator_allowlist() {
         let env = BrowserDriverEnv {
             script_path: PathBuf::from("/v/bin/kastellan-worker-browser-driver"),
             venv_dir: PathBuf::from("/v"),
         };
         let entry = browser_driver_entry(&env, &["example.com:443".to_string()]);
         assert_eq!(entry.binary, PathBuf::from("/v/bin/kastellan-worker-browser-driver"));
-        assert!(matches!(entry.policy.profile, Profile::WorkerNetClient));
-        // Slice #1: legacy direct-net path, no proxy_uds.
+        // Phase 2: the browser-specific seccomp/Seatbelt profile.
+        assert!(matches!(entry.policy.profile, Profile::WorkerBrowserClient));
+        // Dev-only legacy direct-net path, no proxy_uds (#263).
         assert!(entry.policy.proxy_uds.is_none());
         match &entry.policy.net {
             Net::Allowlist(hosts) => assert_eq!(hosts, &vec!["example.com:443".to_string()]),
@@ -262,9 +303,28 @@ mod tests {
             .fs_read
             .contains(&PathBuf::from("/etc/resolv.conf")));
         // operator allowlist injected as env JSON.
-        assert!(entry.policy.env.iter().any(|(k, v)| k
-            == "KASTELLAN_BROWSER_DRIVER_ALLOWLIST"
-            && v == r#"["example.com:443"]"#));
+        let env_get = |key: &str| {
+            entry
+                .policy
+                .env
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            env_get("KASTELLAN_BROWSER_DRIVER_ALLOWLIST").as_deref(),
+            Some(r#"["example.com:443"]"#)
+        );
+        // Browsers staged inside the (already-bound) venv; TMPDIR scratch wired.
+        assert_eq!(
+            env_get("PLAYWRIGHT_BROWSERS_PATH").as_deref(),
+            Some("/v/browsers")
+        );
+        assert_eq!(env_get("TMPDIR").as_deref(), Some("/tmp"));
+        assert_eq!(
+            env_get(crate::tool_host::ENV_LANDLOCK_RW).as_deref(),
+            Some(r#"["/tmp"]"#)
+        );
         assert!(matches!(
             entry.lifecycle,
             crate::worker_lifecycle::Lifecycle::SingleUse
