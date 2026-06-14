@@ -6,116 +6,46 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-14 (**browser-driver Phase 2 — the worker now RENDERS on both platforms.** Branch
-`feat/browser-driver-phase2`. Dropped the slice-#1 `NotImplementedError` stub; a headless Chromium (Playwright) renders a
-page under the real OS jail end-to-end. Six TDD slices: **(1)** force-route exemption + **hard production lockout** for the
-#263 collision — pure `force_route_action` decides Sidecar/Direct/DirectInsecureDevExempt/RefuseProductionUnconfined; under
-force-routing (production signal) browser-driver refuses fail-closed (`ToolHostError::ForceRouteUnconfined`→POLICY_DENIED)
-unless `KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET=1` (dev-only, loud warn). **(2)** `Profile::BrowserClient` seccomp (9
-spike syscalls + **io_uring→EPERM via a 2nd filter**: main filter `Allow`s io_uring so it isn't KILLed, a second filter
-downgrades it to ERRNO — which outranks ALLOW in kernel precedence, while KILL still outranks both; install order matters,
-permissive filter first so the 2nd `seccomp(2)` is permitted — DGX-found). **(3)** `Profile::WorkerBrowserClient` +
-Seatbelt browser cluster (shm/iokit/mach + sysctl-write/system-socket — the spike's proven set; the §3.1 bisect
-under-recorded the last two), gated to the browser tool ALONE. **(4)** `render.py` `PlaywrightRenderer` + Python host:port
-allowlist (per-nav + per-subresource interception) + explicit `start()/stop()` (the `with` form masks launch errors).
-**(5)** manifest: WorkerBrowserClient, browsers-in-venv (`PLAYWRIGHT_BROWSERS_PATH=<venv>/browsers`), `TMPDIR`/`HOME=/tmp`
-scratch, **`TasksMax=512`** (Chromium's process tree hangs under the default 64 — DGX-found), interpreter-root +
-`KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ` binds. **(6)** `install.sh` (self-contained system-venv, **non-editable** so the
-package lands inside the bound venv) + `browser_driver_e2e.rs`. Plus a cross-cutting core fix: **`tool_host::spawn_worker`
-now drains worker stderr** in a detached thread (an unread piped stderr deadlocks any chatty worker — Chromium is the first
-to hit it; DGX-found). #263 acceptance met (renders, or fails closed); production routability = #280, python-worker seccomp
-wiring = #281.)
-**Session-end verification:** **macOS Seatbelt + DGX bwrap BOTH render end-to-end through the real dispatch chokepoint** —
-`browser_driver_e2e` `real_render_of_loopback_page` + `off_allowlist_navigation_fails_closed` 2/2 on each platform
-(`--ignored`, PG 18 + staged Chromium). DGX native-Linux `cargo test --workspace` all-green (0 failed, 108 suites ok) +
-`clippy --workspace -D warnings` clean; DGX `seccomp_smoke` 8/8 (incl. `io_uring_is_eperm_under_browser_client`). Mac:
-`clippy --workspace -D warnings` clean; 32 pytest in `workers/browser-driver`; workspace skip-as-pass green.
-**Code-review hardening pass (post-review, same PR):** (1) confirmed on the DGX that `unshare_is_killed_under_browser_client`
-genuinely *enforces* (no `[SKIP]`, real SIGSYS) — so the io_uring 2nd-filter's `Allow`-default does NOT defeat the main
-filter's `KillProcess` precedence. (2) `render.py` now fail-closes on the **final post-redirect URL** too (`RenderNotAllowed`
-→ `RENDER_FAILED`), a backstop against Playwright versions that don't re-intercept redirect hops (+1 pytest, 33 total).
-(3) `tool_host::drain_worker_stderr` reads **raw bytes** (was `BufRead::lines()`, which stopped draining on the first
-non-UTF-8 byte → could re-introduce the deadlock). (4) macOS shared-`/tmp` `fs_write` grant filed as hardening issue
-[#283](https://github.com/hherb/kastellan/issues/283).
+**Last updated:** 2026-06-14 (**browser-driver egress slice #2 — the browser is now egress-proxy-ROUTED in the default
+force-routed deployment; #263 + #280 resolved.** Branch `feat/browser-driver-egress-slice2`. Decision (brainstorm+spec):
+**transparent tunnel, NOT MITM** — the browser keeps end-to-end TLS to the origin (preserves Chromium-grade cert
+validation + smaller blast radius than MITM); MITM-of-browser deferred (needs NSS cert-trust, only once leak-scanning is
+wired). 9 commits: **(1)** egress-proxy **no-MITM mode** (`KASTELLAN_EGRESS_PROXY_DISABLE_MITM`): `MitmCtx.disable_mitm`
+forces transparent-tunnel even on a TLS ClientHello; allowlist+SSRF at CONNECT unchanged. **(2)** core threads
+`disable_mitm` through `NetWorkerSpawn`→`proxy_policy`/`spawn_sidecar` (omit-when-false ⇒ byte-identical legacy).
+**(3)** `force_route.rs`: **removed the browser exemption** — `ForceRouteAction` collapses to `{Sidecar,Direct}`,
+`force_route_action(active,routable)` (dropped worker_name/override), browser flows the generic Sidecar arm with
+`disable_mitm: worker_name==BROWSER_DRIVER_TOOL`; dropped `DirectInsecureDevExempt`/`RefuseProductionUnconfined` +
+`browser_insecure_direct_net` + the `KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET` escape hatch. **(4)** dropped the now-dead
+`ToolHostError::ForceRouteUnconfined` (+ its 2 match arms). **(5)** Seatbelt: loopback-TCP allow (`bind`/`inbound`/`outbound`
+on `localhost`) gated to `WorkerBrowserClient`+`proxy_uds` so the in-jail shim works; other UDS workers stay strict; bwrap
+unchanged (brings `lo` up in the private netns). **(6)** Python **`shim.py`** `ProxyShim` — a dumb loopback-TCP↔UDS
+byte-pipe (Chromium's `CONNECT` over TCP == the sidecar's CONNECT over UDS) on a background asyncio thread, sync
+`start()→port`/`stop()`. **(7)** worker wiring: `build_launch_args` adds `--proxy-server=127.0.0.1:<port>` +
+`--proxy-bypass-list=<-loopback>` when `KASTELLAN_EGRESS_PROXY_UDS` set; `__main__` starts/stops the shim, runs direct
+otherwise. **(8)** manifest docs (proxy_uds stays `None`, set at spawn by `rewrite_worker_policy`) + escape-hatch removal.
+**(9)** acceptance e2e.)
+**Session-end verification:** **DGX (real bwrap + aarch64 Chromium + egress sidecar) acceptance 2/2 GREEN** —
+`browser_driver_e2e::forced_render_of_loopback_page_through_sidecar` (asserts the sidecar emits `egress.allowed` for the
+allowlisted target → the full Chromium→in-jail shim→**loopback-in-netns**→UDS→sidecar→origin path works) +
+`forced_off_allowlist_fails_closed_at_sidecar` (divergent allowlists isolate the sidecar: in-process allows, sidecar blocks
+→ proves egress at the OS boundary, not in-process-only). DGX `cargo test --workspace` **1790 / 0**, `clippy --workspace -D
+warnings` clean. Mac: `clippy --workspace -D warnings` clean, 40 pytest in `workers/browser-driver`.
+**DGX-found during acceptance (shaped the e2e):** (a) http:// URLs make Chromium send an absolute-form GET that the
+CONNECT-only proxy 400s → drive https:// (Chromium uses CONNECT). (b) a transparent tunnel can't complete real TLS to a
+hermetic self-signed loopback origin, so a full 200 render isn't hermetically achievable — assert the sidecar's allow/deny
+DECISION (the direct #280 evidence) instead. (c) the in-process Playwright interception aborts off-allowlist requests
+before the network, so the deny test diverges the worker/sidecar allowlists to isolate the OS boundary.
+**Deferred / filed:** MITM-of-browser + in-Chromium CA trust (NSS import) — a later additive slice once leak-scanning (#3b)
+is wired. **macOS render-under-Seatbelt is currently broken by a PRE-EXISTING regression** (Chromium 148/chromium-1223
+SIGABRTs under Seatbelt on macOS 26.5.1 — the unchanged `real_render_of_loopback_page` baseline fails identically; renders
+fine unsandboxed and on Linux/bwrap) — filed [#284](https://github.com/hherb/kastellan/issues/284), NOT caused by slice #2.
+**Code-review follow-up (this commit):** the Seatbelt `localhost:*` loopback widening is host-shared on macOS (no netns), so a
+*compromised* browser worker could reach host-local services bypassing the sidecar — a Linux/macOS guarantee divergence (Linux's
+private netns isolates loopback). Latent today (Chromium is proxy-routed; macOS render blocked by #284). Filed
+[#286](https://github.com/hherb/kastellan/issues/286); documented in `docs/threat-model.md` + at the code site.
 
-**Prior this-session block — Phase 4 python-exec RUNTIME PARAMS (branch `feat/python-exec-runtime-params`, PR [#278](https://github.com/hherb/kastellan/pull/278) MERGED `02ccb57`).**
-The deferred "params" piece of the skill catalog. A Python skill is verbatim, SHA-256-bound source (approve == execute), so params
-can't be injected into the code — they arrive on a **side channel** the author reads. Locked design (brainstorm):
-- **Channel = env var `KASTELLAN_PYTHON_PARAMS`** (one JSON object; survives `-I`; off `/proc/*/cmdline` unlike argv; worker
-  ALWAYS sets it, default `{}` → stable `json.loads(os.environ["KASTELLAN_PYTHON_PARAMS"])` contract). **64 KiB serialized cap**
-  (under the Linux `MAX_ARG_STRLEN` 128 KiB per-env-string execve wall). **Arbitrary-JSON** values. **Secret:// refs allowed** —
-  they materialise for free through the existing `tool_host` dispatch chokepoint's recursive `substitute_refs_in_params` walker
-  (`Net::Deny` is the containment). **Free-form passthrough** — no declared schema, `PythonSkillCandidate`/crystallise/approval/SHA
-  untouched; a missing key is a runtime `KeyError`→traceback→nonzero exit (the established philosophy).
-- **Slice A — worker** (`workers/python-exec`): `exec.rs` `serialize_params` (None⇒`{}`, non-object⇒reject, >64 KiB⇒reject —
-  **worker is the authoritative pre-`execve` enforcer**) + `PARAMS_ENV`/`MAX_PARAMS_BYTES`; `run_code(python, code, params_json)`
-  adds one `.env(PARAMS_ENV, …)`; handler `ExecParams.params: Option<Value>` → `INVALID_PARAMS` on bad params; real-interpreter
-  test round-trips a param to stdout + empty-default + over-cap. The env-isolation test now allows the intentional new var.
-- **Slice B — core**: `l3py_invoke::pure` `validate_python_params` (object, **snake_case TOP-LEVEL keys only** [nested = opaque
-  data], 64 KiB; **null/empty ⇒ no params**) + `params_is_empty` + 2-arg `python_exec_step(code, params)` (**omits the `params`
-  key when empty** → byte-identical to the pre-params shape). Threaded through `operator::{prepare_python_steps,invoke_python_skill}`,
-  `agent::expand_python_for_agent` (Pinned-only gate still FIRST), `InvokeDirective.params` (`#[serde(default)]` ⇒ `Value::Null`),
-  the inner-loop `invoke_skill` python arm (`d.params.clone()` → expansion), the daemon `l3_run` payload (`L3RunRequest.params`,
-  non-object⇒reject; dropped `Eq` since `Value` isn't `Eq`), and CLI `memory l3 run --param k=v` (string sugar) / `--params-json
-  '<obj>'` (full JSON; `--param` wins on key collision) via pure `build_params`.
-- **e2e** `cli_memory_l3py_run_daemon_e2e.rs` (+2 scenarios, live-green Mac/PG 18): CLI `--param greeting=hi --execute` →
-  `GOT:hi` round-trip through the real jail; over-cap (`--params-json` 64 KiB value) refuses. **Secret-param e2e DEFERRED** —
-  the daemon e2e harness has no vault-materialisation path; the walker is unit-tested in `core/src/secrets/substitute.rs`.
-- **Final-review bug fix** (`11c132d`): `validate_python_params(&Value::Null)` returned `NotObject`, but `InvokeDirective.params`
-  + the daemon's absent-`params` default are both `Null`, so an autonomous no-param pinned-python invoke was wrongly refused
-  (fail-closed, not a security hole). Now null ⇒ accepted-as-no-params; +3 regression tests (pure gate + agent expansion).
-- **PR-review follow-up** (this commit): the env var is the one new surface, so locked the NUL-safety invariant with an
-  explicit test — `serialize_params` of a NUL-bearing value must produce a NUL-free string (serde escapes NUL as a JSON
-  6-char unicode sequence), so it can not truncate the `execve` C-string env value. Also tidied `serialize_params` (bind the
-  matched object, drop the double `as_ref().unwrap()`). The other review points were no-ops: core-early-vs-worker-late cap
-  placement is correct/documented-deferred, snake_case-at-core-only is intentional, and the null-becomes-NotObject arm is
-  harmless defensive (JSON `null` deserializes to `None`, so it is unreachable over the wire).
-- **Carried debt (flagged):** `core/tests/cli_memory_l3py_run_daemon_e2e.rs` is now **705 LOC** (over the ~500 test-file cap,
-  refactor-bucket (c)); `core/src/scheduler/inner_loop.rs` grew +3 lines (still the **priority (b) refactor** — now ~632 LOC).
-- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-14-python-exec-runtime-params*`.
-
-**Prior this-session block — Phase 4 python-exec SKILL CATALOG slice 2: invocation + surfacing (branch `feat/python-exec-skill-catalog-slice2`, PR [#276](https://github.com/hherb/kastellan/pull/276) MERGED `e478309`).**
-Brainstorm/design were already locked in the slice-1 design spec (§4.5/4.6, build-seq steps 5–9); wrote a slice-2 plan
-(`docs/superpowers/plans/2026-06-13-python-exec-skill-catalog-slice2.md`) and executed via subagent-driven TDD. Makes an
-approved/pinned Python skill **runnable**, mirroring the L3 invocation arc — reusing, not generalizing, the shared machinery.
-- **New module `core/src/memory/l3py_invoke/`** (facade + `pure`/`operator`/`agent`, mirroring `l3_invoke/`):
-  - `pure::prepare_python_invocation(candidate, stored_trust, stored_sha256) -> Result<String, InvokeRefusal>` — the gate:
-    runnable-trust → `evaluate_python_approval` re-validate + `secret://` re-scan → **SHA-256 re-hash vs the stored digest
-    (the code TOCTOU close: approved bytes == executed bytes)** → returns verbatim code. `python_exec_step(code)` builds the
-    single `python.exec` `L3TemplateStep` (`tool="python-exec"`, `params={"code":…}`). (`is_runnable` reused from `l3_invoke`,
-    not duplicated — review fix.)
-  - `operator::invoke_python_skill(...)` — reuses the templated `InvokeReport` + `run_steps` + L3 audit builders with
-    `kind:"python"` injected, so the daemon→serialize→CLI→render pipeline is byte-identical to the templated path. Pool-free
-    `prepare_python_steps` is the unit-test seam; gates once (no double-eval).
-  - `agent::expand_python_for_agent(...)` (pinned-only → gate → one PlannedStep at `plan.data_ceiling`) +
-    `load_pinned_python_skill_by_name(...)` (SQL `["pinned"]` filter **+ a defensive `is_autonomously_invocable` re-check** —
-    review fix: the inner loop passes a hardcoded `SkillTrust::Pinned`, so this loader IS the trust gate).
-- **Daemon `l3_run.rs`** grew a `kind=="python"` branch (`is_python_skill_metadata`/`parse_python_candidate`): loads
-  `metadata.python`, dispatches via `invoke_python_skill`. **Fail-closed** — an unregistered python-exec yields a tool-not-found
-  step error (exit 1), never a silent no-op (e2e-verified). Templated path untouched.
-- **`l3_surface.rs` kind-aware** — a Python skill surfaces name+description, **NO params, code NEVER shown** (structurally
-  enforced: `SurfacedSkill` has no code field). `load_layer_by_trust` is kind-agnostic, so python rows surface end-to-end.
-- **Inner loop** — the agent `invoke_skill` directive now resolves a *pinned* Python skill by name when no pinned *templated*
-  skill matches (templated wins on a name tie). Expanded steps flow through the **unchanged CASSANDRA review** → dispatch →
-  audit pipeline. CLI `run` resolves the python name for its header.
-- **e2e** `core/tests/cli_memory_l3py_run_daemon_e2e.rs` (2 scenarios, PG+sandbox gated, **live-green on Mac Seatbelt/PG 18**):
-  real-jail round-trip + `kind:"python"` audit row + fail-closed-when-disabled.
-- **Review note:** subagent pool hit the monthly spend limit mid-Task-6-review; Tasks 6 (security-critical agent integration)
-  + 7 (e2e) were controller-self-reviewed against the design spec §6 — all six security invariants verified (containment
-  unchanged, approve==execute via SHA, no secret embedding, pinned-only autonomy, fail-closed daemon, code-never-surfaced).
-- **Review fixes (PR #276, post-review pass):** (#1) `with_python_kind` promoted to `l3py_invoke::pure` and shared by the
-  operator path + the inner-loop agent path (was duplicated inline in `inner_loop.rs`) — one source of truth for the
-  `kind:"python"` audit tag; (#3) the vestigial 1-line `l3py_invoke/tests.rs` placeholder + its `#[cfg(test)] mod tests;`
-  declaration removed (tests live inline in pure/operator/agent). Review issue #2 (templated/Python same-name collision is
-  silent to the planner — low, design tradeoff) lodged as [#277](https://github.com/hherb/kastellan/issues/277). Issue #4
-  (empty `body_sha256` default in the loader) verified a no-op: `build_python_skill_metadata` always writes the field, so the
-  default is a genuinely-unreachable fail-closed guard.
-- **Carried debt (flagged, not done):** `core/src/scheduler/inner_loop.rs` is now **629 LOC** (was 593 pre-slice — already
-  over cap; +36 net after the review dedup). A prod-split is awkward because the `refuse_invoke!` macro uses `continue`; it is
-  the **priority refactor-bucket (b) item** now. `core/tests/cli_memory_l3py_run_daemon_e2e.rs` is 503 (3 over the test-file
-  cap, within tolerance). **Deferred to a future slice:** runtime **params** (needs a `python.exec` structured arg channel —
-  a python-exec worker slice-2).
-- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*` (design covers both slices).
+_(The full python-exec arc — skill-catalog slice 1/2 + runtime params — is condensed into "Recently merged" below; older verbose blocks pruned to archive convention.)_
 
 ---
 
@@ -169,6 +99,7 @@ duplicated.
 ---
 
 **Recently merged to `main` (condensed, newest first).** Full reasoning in the PRs / `docs/superpowers/specs` / archive snapshots:
+- **`browser-driver` Phase 2 — real render both platforms** (PR [#282](https://github.com/hherb/kastellan/pull/282), `9f2e955`): dropped the slice-#1 `NotImplementedError`; headless Chromium renders under the real jail (Seatbelt + bwrap). Added `Profile::BrowserClient`/`WorkerBrowserClient` seccomp+Seatbelt browser clusters (io_uring→EPERM 2nd-filter; shm/iokit/mach), `render.py` `PlaywrightRenderer` + per-nav/subresource allowlist, manifest (browsers-in-venv, `TasksMax=512`, interpreter-root binds), `install.sh`, `browser_driver_e2e.rs`, and a cross-cutting `tool_host::spawn_worker` stderr-drain (an unread piped stderr deadlocks chatty workers). Was **dev-only** (force-route exemption + `KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET`); slice #2 (this session) makes it egress-proxy-routed and removes the exemption. macOS `/tmp` `fs_write` grant = [#283](https://github.com/hherb/kastellan/issues/283); pure-Python Linux seccomp = [#281](https://github.com/hherb/kastellan/issues/281).
 - **`inner_loop.rs` prod-split** (PR [#279](https://github.com/hherb/kastellan/pull/279), `e16c80e`): behaviour-preserving extraction of the autonomous `invoke_skill` expansion → `inner_loop/invoke_expand.rs` (`InvokeExpansion` enum) + the classification-floor concern → `inner_loop/floor.rs` (re-exported). `inner_loop.rs` 630 → 481 LOC (under cap). The priority refactor-bucket (b) item — DONE.
 - **Phase 4 acceptance + macOS fixes** (PR [#270](https://github.com/hherb/kastellan/pull/270), `0de4249`): `tests-common::unique_suffix` → `{pid}-{nanos}-{counter}` (kills the parallel-`initdb` collision class); the macOS python interpreter cascade is now per-OS (`PYTHON_CANDIDATES` excludes Apple's xcrun shim; the framework version-root is granted for fs_read). `python_exec_e2e` GREEN both platforms (Mac Seatbelt 3/3, DGX bwrap 3/3). Closed env-leak [#273](https://github.com/hherb/kastellan/issues/273).
 - **egress proxy slice #4 — TLS pinning** (PR [#272](https://github.com/hherb/kastellan/pull/272), ROADMAP:142): operator SPKI-pin set (`KASTELLAN_EGRESS_PROXY_PINS`) overlaid on webpki in the proxy upstream leg; new `pins.rs`, `Verdict::BlockedTlsPin`, the `NetWorkerSpawn` params struct (dropped both `#[allow(too_many_arguments)]`). Fail-CLOSED for a pinned host, additive over webpki. **No pins provisioned today** — frontier wiring lands with the first frontier worker / Phase 5.
@@ -195,10 +126,10 @@ CI-verified, and the `linux-check` CI is **compile + clippy only** (no
 `cargo test`). On the **DGX Spark** (aarch64), `core` compiles/tests/clippies
 **natively**, so a full native-Linux `cargo test --workspace` +
 `cargo clippy --workspace --all-targets -D warnings` are both runnable there.
-The current native-Linux test baseline is **1538 / 0 / 10**
-(`feat/egress-slice3-tls-intercept`, 2026-06-12 — full `cargo test --workspace` with live PG 18 + worker binaries built
-so the real-sandbox e2e suites run, not skip; clippy `-D warnings` clean. The older 1327 figure predated the
-web-fetch/web-search/egress/handoff/secrets work).
+The current native-Linux test baseline is **1790 / 0**
+(`feat/browser-driver-egress-slice2`, 2026-06-14 — full `cargo test --workspace` with live PG 18 + worker binaries built
+so the real-sandbox e2e suites run, not skip; clippy `-D warnings` clean. The earlier 1538 figure predated the
+browser-driver Phase 2 + egress slice #2 work).
 
 ---
 
@@ -228,16 +159,17 @@ kastellan (Rust workspace, 15 crates [+ `matrix`/`matrix-wire` from PR #265 not 
 ├── workers/web-common   kastellan-worker-web-common: shared lib for net-egress workers. allowlist.rs (HostAllowlist: host-only `from_env_json`/`is_allowed` + **port-scoped `from_endpoints`/`is_allowed_endpoint`/`is_port_scoped`** [host:port, IPv6-aware — #241]) + http.rs (HttpGet seam [+`transport_kind`] + RawResponse + ReqwestGet + **env-selected `make_get` factory**) + proxy_connect.rs (**ProxyConnectGet**: CONNECT-over-UDS HttpGet, hyper+tokio-rustls/ring, end-to-end TLS — used when `KASTELLAN_EGRESS_PROXY_UDS` set) + testing.rs (FakeGet, `testing` feature). Consumed by web-fetch + web-search + egress-proxy.
 ├── workers/web-fetch    kastellan-worker-web-fetch: first net-egress worker. HTTPS-only web.fetch JSON-RPC method. Consumes HostAllowlist + the HttpGet transport from web-common. extract.rs (HTML readability via dom_smoothie / PDF via pdf-extract / text+JSON, char-boundary text cap) + fetch.rs (the drive() redirect-follow loop — strict https-only per hop, 5-redirect cap) + handler.rs (web.fetch dispatch). Host-side manifest in core/src/workers/web_fetch.rs
 ├── workers/web-search   kastellan-worker-web-search: second net-egress worker. web.search JSON-RPC method (query → ranked {title,url,snippet,engine} hits from a SearxNG /search?format=json endpoint). Consumes HostAllowlist + transport from web-common. parse.rs (lenient SearxNG-JSON → Vec<Hit>) + search.rs (validate_endpoint [https everywhere, http loopback-only via is_loopback] + build_query_url + one-GET search() drive, count.clamp(1,20)) + handler.rs (dispatch + fail-closed from_env). Operator-configured KASTELLAN_WEB_SEARCH_ENDPOINT; LLM supplies only the query. Host-side manifest in core/src/workers/web_search.rs. Dev setup: scripts/web-search/setup-searxng.sh
-├── workers/browser-driver kastellan-worker-browser-driver: Playwright-Python read-only render worker (ROADMAP:147; **Phase 2 — RENDERS on macOS Seatbelt + DGX bwrap**, opt-in KASTELLAN_BROWSER_DRIVER_ENABLE=1, **dev-only** per #263). `browser.render` JSON-RPC stdio: navigate https (http loopback) URL → headless Chromium (`--no-sandbox --disable-dev-shm-usage`) → settle (wait_until) → post-JS readable text (readability-lxml) + final HTML, byte/char-capped. __main__.py (builds PlaywrightRenderer from the allowlist env) + server.py (stdio dispatch + url/timeout/wait_until validation) + render.py (pure extract_render_result + `PlaywrightRenderer` real drive behind a `start()/stop()` playwright-factory seam + host_port_from_url/request_is_allowed) + allowlist.py (HostAllowlist port of web-common: per-nav + per-subresource interception, fail-closed) + errors.py. Host manifest = core/src/workers/browser_driver.rs (`Profile::WorkerBrowserClient`, Net::Allowlist + proxy_uds:None [dev-only legacy path, #263], browsers-in-venv via PLAYWRIGHT_BROWSERS_PATH, TMPDIR/HOME=/tmp scratch, TasksMax=512, interpreter-root + KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ binds). Install: scripts/workers/browser-driver/install.sh (self-contained system-venv, non-editable, chromium into <venv>/browsers). **NB: pure-Python worker ⇒ no Linux seccomp/Landlock today (#281); the browser_client seccomp profile is applied only via Seatbelt on macOS.**
+├── workers/browser-driver kastellan-worker-browser-driver: Playwright-Python read-only render worker (ROADMAP:147; **egress slice #2 — egress-proxy-ROUTED in the default force-routed deployment**, opt-in KASTELLAN_BROWSER_DRIVER_ENABLE=1; #263/#280 resolved). Force-routing rewrites the manifest's `Net::Allowlist` (proxy_uds stays `None` in the manifest, SET at spawn by `rewrite_worker_policy` — like web-fetch) → private netns + per-worker egress sidecar in **no-MITM/transparent-tunnel** mode (`disable_mitm` keyed on the worker name; the browser does end-to-end TLS, can't trust our CA). In-jail **`shim.py` `ProxyShim`** (loopback-TCP↔UDS byte-pipe; Chromium `--proxy-server=127.0.0.1:<port>`) bridges Chromium's CONNECT to the sidecar UDS. macOS Seatbelt grants loopback-TCP for `WorkerBrowserClient`+proxy_uds; bwrap brings `lo` up in the netns. Runs direct-net only when force-routing is OFF (dev). MITM-of-browser (in-Chromium CA trust via NSS) deferred. NB on macOS: render-under-Seatbelt currently blocked by pre-existing #284 (Chromium 148 SIGABRT); Linux/bwrap is green.
+    Modules: `browser.render` JSON-RPC stdio → headless Chromium (`--no-sandbox --disable-dev-shm-usage` + the slice-#2 `--proxy-server`/`--proxy-bypass-list` when force-routed) → post-JS readable text (readability-lxml) + final HTML, byte/char-capped. __main__.py (builds PlaywrightRenderer + starts/stops `ProxyShim` when `KASTELLAN_EGRESS_PROXY_UDS` set) + server.py (stdio dispatch + url/timeout/wait_until validation) + render.py (pure `extract_render_result` + `build_launch_args` + `PlaywrightRenderer` behind a `start()/stop()` seam + host_port_from_url/request_is_allowed) + **shim.py** (`ProxyShim` loopback-TCP↔UDS relay) + allowlist.py (per-nav/subresource interception, fail-closed) + errors.py. Host manifest = core/src/workers/browser_driver.rs (`Profile::WorkerBrowserClient`, Net::Allowlist, proxy_uds:None in-manifest [set at spawn by force-routing], browsers-in-venv via PLAYWRIGHT_BROWSERS_PATH, TMPDIR/HOME=/tmp scratch, TasksMax=512, interpreter-root + KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ binds). Install: scripts/workers/browser-driver/install.sh (self-contained system-venv, non-editable, chromium into <venv>/browsers). **NB: pure-Python worker ⇒ no Linux seccomp/Landlock today (#281); the browser_client seccomp profile is applied only via Seatbelt on macOS.**
 ├── workers/python-exec  kastellan-worker-python-exec: Phase-4 executor for agent-authored Python (opt-in KASTELLAN_PYTHON_EXEC_ENABLE=1). `python.exec` {code} → {exit_code, stdout, stderr, *_truncated}: source piped over stdin to `<python> -I -S -B -` (curated stdlib = no site-packages), child env cleared, 256 KiB code/capture caps; Python exceptions return as exit_code+traceback, not RPC errors. Strictest policy of any worker: Net::Deny + WorkerStrict seccomp (inherited by the CPython child; pinned by coreutils_smoke::python3_survives_strict) + fs_write=[] (scratch = jail's ephemeral /tmp tmpfs via explicit KASTELLAN_LANDLOCK_RW=["/tmp"]) + cpu 10 s / mem 512 MiB / wall 30 s, SingleUse. lib: exec.rs (python_args, truncate_lossy, run_code) + handler.rs. Host manifest = core/src/workers/python_exec.rs
 └── workers/egress-proxy kastellan-worker-egress-proxy: per-worker egress boundary (ROADMAP:141/142; ALL 4 slices done — #1 allowlist+SSRF, #2 force-routing, #3a TLS-intercept, #3b leak scanner, #4 TLS pinning). Sandboxed CONNECT proxy on a per-worker UDS; per CONNECT: HostAllowlist check (reuses web-common) → resolve DNS itself → ssrf.rs is_denied_range (reject private/loopback/link-local/ULA/CGNAT/multicast, IPv4-mapped+compatible unwrapped; literal-IP carve-out) → pin+dial → write 200 → peek first tunnel byte (recv MSG_PEEK; 0x16 → MITM, else transparent tunnel). **Slice #3a MITM:** in-proxy ephemeral per-instance CA (ca.rs, rcgen; private key never leaves the sandbox, public ca.pem exported beside the UDS), per-host CA-signed leaf cache (leaf_cache.rs), async terminate+re-originate (mitm.rs: looks_like_tls + intercept — tokio-rustls TlsAcceptor/TlsConnector + copy_bidirectional on a per-connection current-thread runtime; upstream validated against webpki). Decision carries tls_intercepted. **Slice #3b leak scanner:** `MitmCtx.secret_hashes_path` + `load_patterns` (lazy per-connection read of `secret_hashes.json`; missing/corrupt ⇒ no scan, fail-OPEN); `mitm/relay.rs` `scan_relay` replaces `copy_bidirectional` when patterns present — splits both halves, one `kastellan-leak-scan::RollingMatcher` per direction, **scans each chunk before forwarding**, kills on hit; `intercept` returns `Result<Option<LeakReport>,String>`; `report::Verdict::BlockedCredentialLeak` + `Decision.leak`. **Slice #4 TLS pinning:** new `pins.rs` (`spki_sha256` [SHA-256 of DER SubjectPublicKeyInfo via x509-cert], `PinSet` [`KASTELLAN_EGRESS_PROXY_PINS` JSON `{host:["sha256/<b64>"]}` → lowercased host → 32-byte digests; **a host with an empty pin list ⇒ Err ⇒ startup aborts**], `chain_has_pin`, `PinningVerifier` [rustls `ServerCertVerifier`: webpki FIRST then SPKI-pin overlay for pinned hosts, else `RustlsError::General(PIN_MISMATCH_MARKER)`], `build_upstream_client_config` [None/blank/`{}` ⇒ plain webpki byte-identical; valid ⇒ `.dangerous()` custom verifier; malformed ⇒ Err ⇒ startup aborts]); `main.rs` reads the pins env once before lock_down; `proxy::classify_mitm_error` maps the marker → `Verdict::BlockedTlsPin`/`pin_mismatch`. **Fail-CLOSED** for a configured pin; additive over webpki (never weakens netns/allowlist/SSRF). Forward-looking: no pins provisioned today. Modules: pins.rs, ssrf.rs, request_line.rs, report.rs, proxy.rs (decide + handle_conn connect→200→peek→branch + MitmCtx + run_mitm + load_patterns + classify_mitm_error), ca.rs, leaf_cache.rs, mitm.rs (+ mitm/relay.rs), main.rs (install ring provider, generate CA + write ca.pem before lock_down, build pin-aware upstream config, accept loop). Host side = core/src/egress
 ```
 
-**Test baselines.** Native-Linux (DGX, PG 18 live, rustc 1.96.0, worker bins built): **1538 / 0 / 10**
-on `feat/egress-slice3-tls-intercept` (2026-06-12 slice-#3a acceptance; the real-sandbox e2e suites actually run here,
-unlike the older 1327 figure; predates the Matrix #265 + leak-scan #3b + python-exec #267 + slice-#4 tests). macOS
-skip-as-pass posture (no `KASTELLAN_PG_BIN_DIR`): **1679 / 0 / 8** (2026-06-13, after egress slice-#4 TLS pinning +
-python-exec #267 + this session's interpreter/`unique_suffix` fixes). 8–10 ignored =
+**Test baselines.** Native-Linux (DGX, PG 18 live, rustc 1.96.0, worker bins built): **1790 / 0**
+on `feat/browser-driver-egress-slice2` (2026-06-14 slice-#2 acceptance; the real-sandbox e2e suites actually run here;
++ the 2 `#[ignore]` forced-render acceptance tests pass under bwrap with a staged Chromium). macOS
+skip-as-pass posture (no `KASTELLAN_PG_BIN_DIR`): **~1690 / 0** (2026-06-14; clippy `-D warnings` clean; 40 pytest in
+`workers/browser-driver`; render-under-Seatbelt e2e blocked by #284). 8–10 ignored =
 explicit doctest/real-net markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
 `KASTELLAN_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the
@@ -465,7 +397,7 @@ sessions 2026-05-06 → 2026-05-09 in
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**`browser-driver` Phase 2 (ROADMAP:147) shipped this session** (renders on both platforms; see its block below). Leading remaining picks: browser-driver egress slice #2 ([#280](https://github.com/hherb/kastellan/issues/280)), the python-worker seccomp wiring ([#281](https://github.com/hherb/kastellan/issues/281)), or Phase-2 channels (IMAP/Telegram inbound) as the next phase boundary.
+**`browser-driver` is now egress-proxy-routed (slice #2 done this session; #263 + #280 CLOSED; see the top block).** Leading remaining picks: the **python-worker Linux seccomp/Landlock wiring** ([#281](https://github.com/hherb/kastellan/issues/281), affects browser-driver + gliner-relex), **MITM-of-browser** (in-Chromium CA trust via NSS — the deferred slice #2 follow-up, once leak-scanning #3b is wired), the **macOS Chromium-under-Seatbelt regression** ([#284](https://github.com/hherb/kastellan/issues/284)), or Phase-2 channels (IMAP/Telegram inbound) as the next phase boundary.
 
 **Egress follow-ups now that the proxy is feature-complete (each small, on demand):** (1) **slice #4 frontier wiring** — read the operator's real frontier pin config on the daemon + route frontier LLM egress through a **pinned** sidecar (lands with the first frontier worker / the Phase-5 escalation path; today's callers pass `cert_pins_json: None`). (2) **slice #3b dispatch-time live-append** ([#268](https://github.com/hherb/kastellan/issues/268)) — provision per-worker secret hashes at dispatch (today's callers pass `&[]`). Both share the `NetWorkerSpawn` params struct that slice #4 introduced.
 
@@ -501,19 +433,23 @@ relay + the blocking `peek_first_byte` still lack **read** idle-deadlines (folde
 [#242](https://github.com/hherb/kastellan/issues/242)); literal-IP **HTTPS** origins now require an IP-SAN cert under
 MITM upstream validation (behaviour-change decision — needs a tracking issue; see PR #259 review).
 
-**`browser-driver` Phase 2 (ROADMAP:147) is DONE** (branch `feat/browser-driver-phase2`, this session): renders on macOS
-Seatbelt + DGX bwrap end-to-end. #263 resolved for dev (force-route exemption + production lockout). Remaining browser-driver
-picks:
-- **★ `browser-driver` egress slice #2 — [#280](https://github.com/hherb/kastellan/issues/280)** (the production fix): make
-  it egress-proxy-routable (loopback-TCP↔UDS shim in the jail + in-browser trust of the per-instance proxy CA), then drop the
-  force-route exemption + the `KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET` escape hatch, switch the manifest to
-  `proxy_uds: Some(...)`, and **close #263**. Until then browser-driver is **dev-only**.
+**`browser-driver` Phase 2 + egress slice #2 are DONE; #263 + #280 CLOSED.** It renders under the real jail (Phase 2, PR
+#282) and is egress-proxy-routed in the default force-routed deployment (slice #2, this session — transparent tunnel +
+in-jail loopback shim; see the top block). Remaining browser-driver picks:
+- **★ MITM-of-browser (deferred slice-#2 follow-up):** in-Chromium trust of the per-instance proxy CA via a proper **NSS
+  trust-store import** (not the `--ignore-certificate-errors-*` error-suppression flag), so the sidecar can content/leak-scan
+  browser egress. Do this only once leak-scanning (#3b) is actually wired — it trades away Chromium-grade origin validation +
+  enlarges the sidecar blast radius, so it needs a concrete inspection benefit to justify.
+- **★ [#284](https://github.com/hherb/kastellan/issues/284) — macOS Chromium-under-Seatbelt SIGABRT** (Chromium 148 /
+  chromium-1223 on macOS 26.5.1): the unchanged `real_render_of_loopback_page` baseline + the slice-#2 forced tests all
+  `EarlyExit` on the Mac; renders fine unsandboxed + on Linux/bwrap. Pre-existing, not slice #2 — likely needs new Seatbelt
+  grants for Chrome 148 (capture via `log stream … sender == "Sandbox"`).
 - **★ [#281](https://github.com/hherb/kastellan/issues/281) — pure-Python workers get no Linux seccomp/Landlock** (the Rust
   prelude is Rust-only; bwrap doesn't `--seccomp`). Affects `gliner-relex` + `browser-driver`. The `browser_client` seccomp
-  profile (this session) is built+smoke-tested but applied only via Seatbelt on macOS; wire it for Linux Python workers (a
-  Rust `lock_down`+`execve` shim, or bwrap `--seccomp`) or document the bwrap-only posture.
+  profile is built+smoke-tested but applied only via Seatbelt on macOS; wire it for Linux Python workers (a Rust
+  `lock_down`+`execve` shim, or bwrap `--seccomp`) or document the bwrap-only posture.
 - **Phase-2 hardening (on demand):** narrow the Seatbelt `mach-lookup`/`sysctl-write`/`system-socket` grants to specific
-  services; a true per-spawn scratch (vs the shared `/tmp`) on macOS; screenshot output; warm-keep lifecycle.
+  services; a true per-spawn scratch (vs the shared `/tmp`) on macOS (#283); screenshot output; warm-keep lifecycle.
 
 Operator note: `scripts/workers/browser-driver/install.sh` stages the venv + Chromium; `KASTELLAN_BROWSER_DRIVER_ENABLE=1`
 to register; on a host whose interpreter pulls libs outside its prefix (e.g. a pyenv CPython linking `/opt/homebrew`), set
@@ -567,6 +503,8 @@ The `memory_entities` join table (P1) shipped; the graph lane is wired into `rec
 
 Only currently-open issues are listed; closed-issue detail lives in the archive snapshots and git history.
 
+- [#284](https://github.com/hherb/kastellan/issues/284) — browser-driver Chromium SIGABRT under Seatbelt on macOS 26.5.1 (Chromium 148/chromium-1223); pre-existing, blocks the macOS render e2e (Linux/bwrap is green). Likely needs new Seatbelt grants for Chrome 148.
+- [#286](https://github.com/hherb/kastellan/issues/286) — browser-driver Seatbelt `localhost:*` loopback widening is host-shared on macOS (no netns), so a compromised browser worker could reach host-local services bypassing the egress sidecar. Latent (Chromium is proxy-routed; macOS render blocked by #284). Fix: scope the rule to the shim's bound port, a UDS-only transport, or the `MacosContainer` VM-netns backend.
 - [#3](https://github.com/hherb/kastellan/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64.
 - [#4](https://github.com/hherb/kastellan/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added (process hygiene).
 - [#8](https://github.com/hherb/kastellan/issues/8) — collapse `default_probe`/`default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears.

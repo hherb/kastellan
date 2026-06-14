@@ -115,7 +115,7 @@ fn handle_conn_tunnels_allowed_literal_origin() {
         install_provider();
         let ca = test_ca();
         let mut cache = crate::leaf_cache::LeafCache::new();
-        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream(), secret_hashes_path: None };
+        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream(), secret_hashes_path: None, disable_mitm: false };
         handle_conn(conn, "web-fetch", &allow, &StdResolve, &mut reporter, &mut mitm);
         reporter.0
     });
@@ -153,7 +153,7 @@ fn handle_conn_reports_block_for_off_allowlist() {
         install_provider();
         let ca = test_ca();
         let mut cache = crate::leaf_cache::LeafCache::new();
-        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream(), secret_hashes_path: None };
+        let mut mitm = MitmCtx { ca: &ca, leaf_cache: &mut cache, upstream_tls: webpki_upstream(), secret_hashes_path: None, disable_mitm: false };
         handle_conn(conn, "web-fetch", &allow, &StdResolve, &mut reporter, &mut mitm);
         reporter.0
     });
@@ -224,4 +224,67 @@ fn classify_mitm_error_generic_failure_is_allowed_mitm_failed() {
     let (verdict, reason) = super::classify_mitm_error("origin TLS handshake: connection reset");
     assert_eq!(verdict, crate::report::Verdict::Allowed);
     assert!(reason.starts_with("mitm_failed:"));
+}
+
+#[test]
+fn disable_mitm_forces_transparent_tunnel_even_for_tls() {
+    // Origin: a localhost TCP server that echoes the first byte it receives.
+    let upstream = std::net::TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+    let upstream_addr = upstream.local_addr().unwrap();
+
+    std::thread::spawn(move || {
+        if let Ok((mut s, _)) = upstream.accept() {
+            let mut b = [0u8; 1];
+            let _ = s.read(&mut b);
+            let _ = s.write_all(&b); // echo the byte back
+        }
+    });
+
+    let allow = eps(&[&upstream_addr.to_string()]);
+
+    let dir = std::env::temp_dir().join(format!("egress-test-nomitm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("egress.sock");
+    let _ = std::fs::remove_file(&sock);
+    let listener = UnixListener::bind(&sock).unwrap();
+
+    let proxy_thread = std::thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        let mut reporter = VecReporter::default();
+        install_provider();
+        let ca = test_ca();
+        let mut cache = crate::leaf_cache::LeafCache::new();
+        let mut mitm = MitmCtx {
+            ca: &ca,
+            leaf_cache: &mut cache,
+            upstream_tls: webpki_upstream(),
+            secret_hashes_path: None,
+            disable_mitm: true,
+        };
+        handle_conn(conn, "browser-driver", &allow, &StdResolve, &mut reporter, &mut mitm);
+        reporter.0
+    });
+
+    // Client: CONNECT, read 200, send TLS-looking first byte (0x16 = TLS ClientHello),
+    // then read the echo to confirm transparent tunnel.
+    let mut client = UnixStream::connect(&sock).unwrap();
+    write!(client, "CONNECT {upstream_addr} HTTP/1.1\r\nHost: {upstream_addr}\r\n\r\n").unwrap();
+    let mut head = [0u8; 39]; // "HTTP/1.1 200 Connection Established\r\n\r\n"
+    client.read_exact(&mut head).unwrap();
+    assert!(std::str::from_utf8(&head).unwrap().starts_with("HTTP/1.1 200"));
+
+    // Send a TLS ClientHello marker byte — with disable_mitm=true the proxy
+    // must NOT intercept it, but must transparently relay it to the upstream.
+    client.write_all(&[0x16]).unwrap();
+    let mut echoed = [0u8; 1];
+    client.read_exact(&mut echoed).unwrap();
+    assert_eq!(echoed[0], 0x16, "transparent tunnel must relay the TLS marker byte");
+    drop(client);
+
+    let decisions = proxy_thread.join().unwrap();
+    let last = decisions.last().expect("a decision was emitted");
+    assert_eq!(last.verdict, Verdict::Allowed);
+    assert!(!last.tls_intercepted, "disable_mitm must transparently tunnel even a TLS ClientHello");
+
+    let _ = std::fs::remove_file(&sock);
 }

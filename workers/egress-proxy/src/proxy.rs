@@ -106,6 +106,11 @@ pub struct MitmCtx<'a> {
     /// per MITM connection so dispatch-time additions are picked up. `None`
     /// disables scanning entirely.
     pub secret_hashes_path: Option<std::path::PathBuf>,
+    /// When true, never MITM — always transparently tunnel, even a TLS
+    /// ClientHello. Set for workers that do their own end-to-end TLS and cannot
+    /// trust our per-instance CA (the browser; egress slice #2). The allowlist +
+    /// SSRF check at CONNECT still apply; only inspection is skipped.
+    pub disable_mitm: bool,
 }
 
 /// Handle one accepted UDS connection end-to-end. Reads the CONNECT line,
@@ -175,9 +180,14 @@ pub fn handle_conn(
             // Peek the first tunnel byte (non-consuming). The CONNECT round-trip
             // guarantees the worker only sends after the 200, so this is the
             // first tunnel byte. EOF / error → treat as pass-through.
-            let is_tls = peek_first_byte(&client)
-                .map(crate::mitm::looks_like_tls)
-                .unwrap_or(false);
+            // When disable_mitm is set (e.g. the browser worker which does its
+            // own end-to-end TLS), always tunnel transparently regardless of
+            // what the byte looks like — the allowlist + SSRF check above still
+            // applied; only TLS interception is skipped.
+            let is_tls = !mitm.disable_mitm
+                && peek_first_byte(&client)
+                    .map(crate::mitm::looks_like_tls)
+                    .unwrap_or(false);
             if is_tls {
                 // MITM branch: the sync `upstream` proved reachability + the 502
                 // path; `intercept` re-dials a tokio stream itself, so drop it.

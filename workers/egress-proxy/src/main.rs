@@ -13,6 +13,10 @@
 //!       host grants any port (the weaker back-compat form, flagged in the audit
 //!       reason). See `proxy::decide` / `proxy::allowed_reason`.
 //!   KASTELLAN_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
+//!   KASTELLAN_EGRESS_PROXY_DISABLE_MITM — `"1"` ⇒ never MITM; transparently
+//!       tunnel even a TLS ClientHello. For a worker that does its own
+//!       end-to-end TLS and can't trust our per-instance CA (the browser,
+//!       egress slice #2). Allowlist + SSRF at CONNECT are unaffected.
 
 mod ca;
 mod leaf_cache;
@@ -42,6 +46,18 @@ fn main() -> anyhow::Result<()> {
     let allow_json = std::env::var("KASTELLAN_EGRESS_PROXY_ALLOWLIST")
         .map_err(|_| anyhow::anyhow!("KASTELLAN_EGRESS_PROXY_ALLOWLIST unset"))?;
     let worker = std::env::var("KASTELLAN_EGRESS_PROXY_WORKER").unwrap_or_else(|_| "unknown".into());
+    // No-MITM mode: a worker that does end-to-end TLS itself and cannot trust
+    // our per-instance CA (the browser, egress slice #2) sets this so the proxy
+    // transparently tunnels instead of intercepting. Allowlist + SSRF still apply.
+    // Strict on the value: only `"1"` (trimmed) counts, so this safety-relevant
+    // mode is never enabled by an accidental/ambiguous spelling.
+    let disable_mitm = matches!(
+        std::env::var("KASTELLAN_EGRESS_PROXY_DISABLE_MITM")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1")
+    );
     // Parse `host[:port]` endpoint entries so the boundary check is port-scoped
     // (#241), not host-only.
     let entries: Vec<String> = serde_json::from_str(&allow_json)
@@ -113,6 +129,7 @@ fn main() -> anyhow::Result<()> {
                     leaf_cache: cache,
                     upstream_tls: std::sync::Arc::clone(upstream_tls),
                     secret_hashes_path: Some(secret_hashes_path.clone()),
+                    disable_mitm,
                 };
                 handle_conn(conn, &worker, allow, &resolver, &mut reporter, &mut mitm);
             });

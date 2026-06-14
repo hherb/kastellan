@@ -84,12 +84,5 @@ pub fn map_dispatch_result(
             code: "POLICY_DENIED".to_string(),
             detail: "secret redemption failed before worker call".to_string(),
         },
-        // A deterministic, config-determined refusal to spawn an
-        // egress-unconfined worker in a force-routed deployment (issue #263).
-        // Like a secret-redemption failure: fail fast, retrying can't help.
-        Err(e @ ToolHostError::ForceRouteUnconfined { .. }) => StepOutcome::Err {
-            code: "POLICY_DENIED".to_string(),
-            detail: e.to_string(),
-        },
     }
 }

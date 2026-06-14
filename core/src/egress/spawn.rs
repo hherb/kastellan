@@ -13,6 +13,10 @@ const ENV_UDS: &str = "KASTELLAN_EGRESS_PROXY_UDS";
 const ENV_ALLOWLIST: &str = "KASTELLAN_EGRESS_PROXY_ALLOWLIST";
 const ENV_WORKER: &str = "KASTELLAN_EGRESS_PROXY_WORKER";
 const ENV_PINS: &str = "KASTELLAN_EGRESS_PROXY_PINS";
+/// Env key that puts the sidecar into no-MITM (transparent-tunnel) mode for
+/// workers that do their own end-to-end TLS (the browser). Must match the read
+/// in `egress-proxy::main`.
+const ENV_DISABLE_MITM: &str = "KASTELLAN_EGRESS_PROXY_DISABLE_MITM";
 
 /// Basename of the per-worker sidecar UDS under the scratch dir. Shared so the
 /// force-routing scratch-dir guard (`net_worker::make_worker_scratch_dir`) can
@@ -66,6 +70,7 @@ pub fn proxy_policy(
     scratch: &Path,
     worker: &str,
     cert_pins_json: Option<&str>,
+    disable_mitm: bool,
 ) -> SandboxPolicy {
     let uds = scratch.join(UDS_FILE_NAME);
     let allow_json = serde_json::to_string(allowlist).expect("Vec<String> serializes");
@@ -78,6 +83,11 @@ pub fn proxy_policy(
     // absent so the no-pin path is byte-identical to slice #3b.
     if let Some(pins) = cert_pins_json.filter(|s| !s.trim().is_empty()) {
         env.push((ENV_PINS.to_string(), pins.to_string()));
+    }
+    // Omit the disable-MITM key entirely when false so the no-flag path is
+    // byte-identical to the default MITM path (mirrors the pins pattern).
+    if disable_mitm {
+        env.push((ENV_DISABLE_MITM.to_string(), "1".to_string()));
     }
     SandboxPolicy {
         fs_read: vec![
@@ -107,8 +117,9 @@ pub fn spawn_sidecar(
     scratch: &Path,
     worker: &str,
     cert_pins_json: Option<&str>,
+    disable_mitm: bool,
 ) -> anyhow::Result<SidecarHandle> {
-    let policy = proxy_policy(binary, allowlist, scratch, worker, cert_pins_json);
+    let policy = proxy_policy(binary, allowlist, scratch, worker, cert_pins_json, disable_mitm);
     let uds_path = scratch.join(UDS_FILE_NAME);
     let _ = std::fs::remove_file(&uds_path);
 
@@ -142,7 +153,7 @@ mod tests {
 
     #[test]
     fn policy_uses_proxy_egress_and_net_client() {
-        let p = proxy_policy(Path::new("/opt/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None);
+        let p = proxy_policy(Path::new("/opt/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None, false);
         assert!(matches!(p.net, Net::ProxyEgress));
         assert!(matches!(p.profile, Profile::WorkerNetClient));
         assert!(p.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
@@ -156,7 +167,7 @@ mod tests {
 
     #[test]
     fn proxy_policy_omits_pins_env_when_none() {
-        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None);
+        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None, false);
         let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
         assert!(!env.contains_key(ENV_PINS));
     }
@@ -164,8 +175,28 @@ mod tests {
     #[test]
     fn proxy_policy_includes_pins_env_when_set() {
         let pins = r#"{"api.anthropic.com":["sha256/AAAA"]}"#;
-        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", Some(pins));
+        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", Some(pins), false);
         let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
         assert_eq!(env[ENV_PINS], pins);
+    }
+
+    #[test]
+    fn proxy_policy_sets_disable_mitm_env_when_requested() {
+        let p = proxy_policy(
+            Path::new("/bin/proxy"), &["example.com:443".into()],
+            Path::new("/scratch"), "browser-driver", None, true,
+        );
+        let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
+        assert_eq!(env[ENV_DISABLE_MITM], "1");
+    }
+
+    #[test]
+    fn proxy_policy_omits_disable_mitm_env_when_false() {
+        let p = proxy_policy(
+            Path::new("/bin/proxy"), &["example.com:443".into()],
+            Path::new("/scratch"), "web-fetch", None, false,
+        );
+        let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
+        assert!(!env.contains_key(ENV_DISABLE_MITM));
     }
 }

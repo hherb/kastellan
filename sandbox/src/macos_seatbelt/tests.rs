@@ -364,6 +364,43 @@ fn browser_client_profile_emits_browser_clusters() {
     }
 }
 
+/// Force-routed browser profile (`Net::Allowlist` + `proxy_uds` +
+/// `WorkerBrowserClient`): must emit the standard deny-outbound-except-UDS
+/// rules AND additionally allow loopback TCP bind/accept/connect so the
+/// in-jail loopback-TCP<->UDS shim (egress slice #2) can serve Chromium.
+#[test]
+fn browser_proxy_uds_allows_loopback_tcp() {
+    let policy = SandboxPolicy {
+        net: crate::Net::Allowlist(vec!["example.com:443".into()]),
+        proxy_uds: Some(std::path::PathBuf::from("/tmp/egress.sock")),
+        profile: crate::Profile::WorkerBrowserClient,
+        ..SandboxPolicy::default()
+    };
+    let p = build_profile(&policy);
+    assert!(p.contains("(deny network-outbound)"), "still deny-by-default");
+    assert!(p.contains("unix-socket (path-literal"), "UDS still allowed");
+    assert!(p.contains(r#"(allow network-bind (local ip "localhost:*"))"#));
+    assert!(p.contains(r#"(allow network-inbound (local ip "localhost:*"))"#));
+    assert!(p.contains(r#"(allow network-outbound (remote ip "localhost:*"))"#));
+}
+
+/// Non-browser force-routed workers (`Net::Allowlist` + `proxy_uds` +
+/// `WorkerNetClient`) must NOT receive the loopback TCP widening — they use
+/// an in-process CONNECT-over-UDS client and have no in-jail shim.
+#[test]
+fn non_browser_proxy_uds_has_no_loopback_tcp() {
+    let policy = SandboxPolicy {
+        net: crate::Net::Allowlist(vec!["example.com:443".into()]),
+        proxy_uds: Some(std::path::PathBuf::from("/tmp/egress.sock")),
+        profile: crate::Profile::WorkerNetClient,
+        ..SandboxPolicy::default()
+    };
+    let p = build_profile(&policy);
+    assert!(!p.contains(r#"network-bind (local ip "localhost"#),
+        "non-browser UDS workers must not be widened with loopback TCP");
+    assert!(!p.contains(r#"network-outbound (remote ip "localhost"#));
+}
+
 /// The widening is gated to `WorkerBrowserClient` ALONE — the strict and
 /// net-client profiles keep the deny-default (incl. the issue-#1 mach-lookup
 /// deny). This is the regression pin that the browser cluster never leaks into

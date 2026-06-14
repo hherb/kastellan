@@ -39,6 +39,9 @@ pub struct NetWorkerSpawn<'a> {
     /// SPKI pin JSON for the #4 cert pinner (`None` today). Passed opaque to the
     /// sidecar env; the proxy parses + enforces.
     pub cert_pins_json: Option<&'a str>,
+    /// Put this worker's sidecar into no-MITM (transparent-tunnel) mode. Set for
+    /// the browser, which does end-to-end TLS and can't trust our CA (slice #2).
+    pub disable_mitm: bool,
 }
 
 /// Maximum byte length of a Unix-domain-socket path. `sockaddr_un.sun_path` is
@@ -151,6 +154,7 @@ where
         scratch,
         params.worker_name,
         params.cert_pins_json,
+        params.disable_mitm,
     )
     .map_err(|e| ToolHostError::Io(std::io::Error::other(format!("egress sidecar: {e}"))))?;
     // Capture the proxy stdout for the ingest thread before the handle moves.
@@ -432,6 +436,7 @@ mod tests {
             worker_name: "web-fetch",
             secret_fingerprints: &[], // none for this fail-closed test
             cert_pins_json: None,
+            disable_mitm: false,
         };
         let res = spawn_net_worker(&params, Path::new("/tmp/kastellan-net-worker-test"), |_row| {});
         assert!(res.is_err(), "no proxy => no net worker (fail-closed)");
@@ -464,6 +469,7 @@ mod tests {
             worker_name: "web-fetch",
             secret_fingerprints: &[], // none for this fail-closed test
             cert_pins_json: None,
+            disable_mitm: false,
         };
         let res = spawn_forced_net_worker(&params, scratch_root.path(), |_row| {});
         assert!(res.is_err(), "no proxy => no net worker (fail-closed)");
@@ -504,6 +510,7 @@ mod tests {
             worker_name: "web-fetch",
             secret_fingerprints: &[],
             cert_pins_json: None,
+            disable_mitm: false,
         };
         let _ = spawn_forced_net_worker(&params, scratch_root.path(), |_row| {});
         let leftovers: Vec<_> = std::fs::read_dir(scratch_root.path())
@@ -533,6 +540,7 @@ mod tests {
             worker_name: "web-fetch",
             secret_fingerprints: &[],
             cert_pins_json: Some(r#"{"api.anthropic.com":["sha256/AAAA"]}"#),
+            disable_mitm: false,
         };
         let scratch = tempfile::tempdir().unwrap();
         let res = spawn_net_worker(&params, scratch.path(), |_row| {});

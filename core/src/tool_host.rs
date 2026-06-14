@@ -44,22 +44,6 @@ pub enum ToolHostError {
     /// POLICY_DENIED — task step fails fast, no retry budget burned.
     #[error("tool_host: secret redemption failed: {0}")]
     SecretRedemptionFailed(#[from] crate::secrets::SubstituteError),
-
-    /// A worker that is **not yet egress-proxy-routable** (today only
-    /// `browser-driver` — a real browser cannot speak `CONNECT`-over-UDS, see
-    /// issue #263) was asked to spawn while egress force-routing is ON (the
-    /// supervised/production posture). Rather than silently run it unconfined on
-    /// the host netns, the spawn is **refused fail-closed**. An operator who
-    /// genuinely wants direct-net for development must opt in explicitly with
-    /// `KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET=1`. The proper production
-    /// fix is egress slice #2 (UDS↔TCP shim + in-browser per-instance CA trust).
-    #[error(
-        "tool_host: worker {worker:?} cannot run unconfined in a force-routed \
-         (production) deployment — it is not yet egress-proxy-routable (issue \
-         #263). Set KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET=1 to allow \
-         direct-net for DEVELOPMENT ONLY."
-    )]
-    ForceRouteUnconfined { worker: String },
 }
 
 /// A sealed JSON-RPC request shape. The fields and constructor are

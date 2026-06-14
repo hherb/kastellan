@@ -103,9 +103,6 @@ pub fn dispatch_indicates_worker_dead<T>(result: &Result<T, ToolHostError>) -> b
         // SecretRedemptionFailed fires before the worker is called —
         // the worker process was never contacted, so it is not dead.
         Err(ToolHostError::SecretRedemptionFailed(_)) => false,
-        // ForceRouteUnconfined refuses the spawn before any worker exists
-        // (issue #263) — no worker process, so not dead.
-        Err(ToolHostError::ForceRouteUnconfined { .. }) => false,
     }
 }
 
