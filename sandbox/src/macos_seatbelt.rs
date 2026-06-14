@@ -359,6 +359,33 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
         ));
     }
 
+    // Browser-only Seatbelt widening (spike findings, design spec §3.1). A
+    // headless Chromium SIGSEGVs at launch without all three clusters; bisected
+    // on macOS 26.4 ARM64 (dropping any one → child crash). This is gated to
+    // `WorkerBrowserClient` ALONE — every other worker keeps the strict
+    // deny-default (incl. the `mach-lookup` deny of issue #1). It is a real,
+    // documented threat-model widening for the browser tool only.
+    //
+    // Phase-2 hardening (deferred): narrow `mach-lookup` to the specific
+    // `(global-name …)` services Chromium needs rather than the unrestricted
+    // form; record the service set first.
+    if matches!(policy.profile, crate::Profile::WorkerBrowserClient) {
+        out.push_str("(allow ipc-posix-shm*)\n"); // shared-memory IPC between browser processes
+        out.push_str("(allow iokit-open)\n"); // GPU/graphics probing (even under SwiftShader)
+        out.push_str("(allow iokit-get-properties)\n");
+        out.push_str("(allow mach-lookup)\n"); // Mach bootstrap — re-grants issue #1's deny
+        out.push_str("(allow mach-register)\n");
+        // The spike's proven-working render profile also carried these two
+        // (`scripts/spikes/browser-driver/seatbelt-run.sh`, the `chromium`
+        // case): sysctl-write (Chromium tweaks a few sysctls at startup) and
+        // system-socket (PF_SYSTEM kernel-control socket for network-config
+        // detection). They were not part of the shm/iokit/mach bisect but were
+        // present when render succeeded, so we include them to match the
+        // verified set. Narrowing both is a Phase-2 hardening follow-up.
+        out.push_str("(allow sysctl-write)\n");
+        out.push_str("(allow system-socket)\n");
+    }
+
     match (&policy.net, &policy.proxy_uds) {
         (crate::Net::Allowlist(_), Some(uds)) => {
             // Force-routed: deny all outbound, then re-allow ONLY the proxy UDS.

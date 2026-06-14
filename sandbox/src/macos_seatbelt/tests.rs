@@ -336,3 +336,62 @@ fn canonicalize_policy_paths_propagates_non_notfound_errors() {
         "expected 'could not canonicalize' in error, got: {msg}"
     );
 }
+
+fn browser_policy() -> SandboxPolicy {
+    SandboxPolicy {
+        net: Net::Allowlist(vec!["example.com:443".into()]),
+        profile: crate::Profile::WorkerBrowserClient,
+        ..SandboxPolicy::default()
+    }
+}
+
+/// The browser-only Seatbelt widening (spike findings §3.1): a
+/// `WorkerBrowserClient` policy must emit all three clusters Chromium needs —
+/// shared-memory IPC, IOKit, and Mach bootstrap.
+#[test]
+fn browser_client_profile_emits_browser_clusters() {
+    let p = build_profile(&browser_policy());
+    for rule in [
+        "(allow ipc-posix-shm*)",
+        "(allow iokit-open)",
+        "(allow iokit-get-properties)",
+        "(allow mach-lookup)",
+        "(allow mach-register)",
+        "(allow sysctl-write)",
+        "(allow system-socket)",
+    ] {
+        assert!(p.contains(rule), "browser profile missing {rule:?}\n{p}");
+    }
+}
+
+/// The widening is gated to `WorkerBrowserClient` ALONE — the strict and
+/// net-client profiles keep the deny-default (incl. the issue-#1 mach-lookup
+/// deny). This is the regression pin that the browser cluster never leaks into
+/// another worker's profile.
+#[test]
+fn non_browser_profiles_do_not_emit_browser_clusters() {
+    for policy in [
+        strict_policy(),
+        SandboxPolicy {
+            net: Net::Allowlist(vec!["example.com:443".into()]),
+            profile: crate::Profile::WorkerNetClient,
+            ..SandboxPolicy::default()
+        },
+    ] {
+        let p = build_profile(&policy);
+        for rule in [
+            "(allow ipc-posix-shm*)",
+            "(allow iokit-open)",
+            "(allow mach-lookup)",
+            "(allow mach-register)",
+            "(allow sysctl-write)",
+            "(allow system-socket)",
+        ] {
+            assert!(
+                !p.contains(rule),
+                "non-browser profile ({:?}) leaked browser rule {rule:?}",
+                policy.profile
+            );
+        }
+    }
+}

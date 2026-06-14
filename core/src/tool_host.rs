@@ -44,6 +44,22 @@ pub enum ToolHostError {
     /// POLICY_DENIED — task step fails fast, no retry budget burned.
     #[error("tool_host: secret redemption failed: {0}")]
     SecretRedemptionFailed(#[from] crate::secrets::SubstituteError),
+
+    /// A worker that is **not yet egress-proxy-routable** (today only
+    /// `browser-driver` — a real browser cannot speak `CONNECT`-over-UDS, see
+    /// issue #263) was asked to spawn while egress force-routing is ON (the
+    /// supervised/production posture). Rather than silently run it unconfined on
+    /// the host netns, the spawn is **refused fail-closed**. An operator who
+    /// genuinely wants direct-net for development must opt in explicitly with
+    /// `KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET=1`. The proper production
+    /// fix is egress slice #2 (UDS↔TCP shim + in-browser per-instance CA trust).
+    #[error(
+        "tool_host: worker {worker:?} cannot run unconfined in a force-routed \
+         (production) deployment — it is not yet egress-proxy-routable (issue \
+         #263). Set KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET=1 to allow \
+         direct-net for DEVELOPMENT ONLY."
+    )]
+    ForceRouteUnconfined { worker: String },
 }
 
 /// A sealed JSON-RPC request shape. The fields and constructor are
@@ -460,8 +476,19 @@ where
     B: SandboxBackend + ?Sized,
 {
     let derived = derive_lockdown_env(spec.policy);
-    let child = backend.spawn_under_policy(&derived, spec.program, spec.args)?;
+    let mut child = backend.spawn_under_policy(&derived, spec.program, spec.args)?;
     let pid = child.id();
+    // Drain the worker's piped stderr in a detached background thread. The
+    // sandbox backends pipe stderr (`Stdio::piped()`), but the JSON-RPC client
+    // only reads stdout — so a worker that writes more than the ~64 KiB pipe
+    // buffer to stderr would **block on write and deadlock** (then get
+    // wall-clock-killed). Most workers are quiet; a headless Chromium
+    // (browser-driver) is not. Reading to EOF keeps the pipe empty; the thread
+    // self-terminates when the worker exits (stderr closes). Lines surface at
+    // debug level so they're available when troubleshooting without being noisy.
+    if let Some(stderr) = child.stderr.take() {
+        drain_worker_stderr(pid, stderr);
+    }
     let client = Client::from_child(child)?;
     let watchdog = spec.wall_clock_ms.map(|ms| watchdog::spawn_watchdog(pid, ms));
     Ok(SupervisedWorker {
@@ -469,6 +496,38 @@ where
         _watchdog: watchdog,
         egress: None,
     })
+}
+
+/// Spawn a detached thread that reads `stderr` to EOF, emitting each chunk at
+/// `debug`. Its only hard job is to keep the pipe drained so the worker can't
+/// deadlock writing to a full stderr buffer (see [`spawn_worker`]). The thread
+/// ends when the worker's stderr closes (process exit), so it needs no join
+/// handle and leaks nothing.
+///
+/// Reads **raw bytes**, not lines: a `BufRead::lines()` loop yields an `Err`
+/// on the first invalid-UTF-8 byte and would stop draining — re-opening the
+/// very deadlock this guards against if the worker keeps writing (Chromium's
+/// stderr is overwhelmingly UTF-8, but "overwhelmingly" is not "always"). Each
+/// chunk is logged lossily so non-UTF-8 bytes are surfaced as `�` rather than
+/// halting the drain.
+fn drain_worker_stderr(pid: u32, stderr: std::process::ChildStderr) {
+    use std::io::Read;
+    std::thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut buf = [0u8; 8192];
+        loop {
+            match stderr.read(&mut buf) {
+                Ok(0) => break,                 // EOF — pipe closed (worker exited)
+                Ok(n) => tracing::debug!(
+                    worker_pid = pid,
+                    "worker stderr: {}",
+                    String::from_utf8_lossy(&buf[..n]).trim_end()
+                ),
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break, // genuine read error — pipe gone, nothing left to drain
+            }
+        }
+    });
 }
 
 /// Owning handle to a spawned worker. Wraps the JSON-RPC [`Client`] and a

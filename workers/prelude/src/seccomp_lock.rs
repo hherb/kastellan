@@ -80,6 +80,23 @@ pub enum Profile {
     /// syscall-entry restriction — actual network reach is still gated by
     /// `bwrap --share-net`/`unshare --net` and (Phase 3) the egress proxy.
     NetClient,
+    /// `"browser_client"` — `net_client` **plus** the browser-specific
+    /// syscalls a headless Chromium issues ([`BROWSER_CLIENT_ADDITIONS`],
+    /// enumerated by the spike's `strace -f` — design spec §3.1), for the
+    /// `browser-driver` worker.
+    ///
+    /// **`io_uring` carve-out:** Chromium probes `io_uring_setup`/
+    /// `io_uring_enter`, but io_uring is a well-known sandbox-escape primitive,
+    /// so it must NOT be plain-`Allow`ed. Killing it (the default for an
+    /// un-listed syscall) would crash the browser instead of letting it fall
+    /// back. So [`apply`] installs **a second seccomp filter** mapping just
+    /// those two syscalls to `Errno(EPERM)`. The kernel runs all installed
+    /// filters and takes the highest-precedence action; `ERRNO` outranks
+    /// `ALLOW` (so io_uring → EPERM) while `KILL` still outranks everything
+    /// (so a genuinely-unknown syscall is still killed). io_uring is therefore
+    /// listed in [`allow_list_for`] (so the main filter returns `ALLOW`, not
+    /// `KILL`, leaving the second filter free to downgrade it to `ERRNO`).
+    BrowserClient,
 }
 
 impl Profile {
@@ -87,9 +104,11 @@ impl Profile {
         match s {
             "strict" => Ok(Some(Profile::Strict)),
             "net_client" => Ok(Some(Profile::NetClient)),
+            "browser_client" => Ok(Some(Profile::BrowserClient)),
             "none" | "" => Ok(None),
             other => Err(LockdownError::Env(format!(
-                "KASTELLAN_SECCOMP_PROFILE must be 'strict' | 'net_client' | 'none', got {other:?}"
+                "KASTELLAN_SECCOMP_PROFILE must be 'strict' | 'net_client' | \
+                 'browser_client' | 'none', got {other:?}"
             ))),
         }
     }
@@ -104,12 +123,36 @@ pub fn apply_from_env() -> Result<SeccompReport, LockdownError> {
     }
 }
 
-/// Install the seccomp filter for `profile`. Sets `PR_SET_NO_NEW_PRIVS`
+/// Install the seccomp filter(s) for `profile`. Sets `PR_SET_NO_NEW_PRIVS`
 /// first, which is required for unprivileged seccomp loading.
+///
+/// Most profiles install exactly one filter. [`Profile::BrowserClient`] also
+/// installs a separate filter mapping `io_uring_setup`/`io_uring_enter` to
+/// `Errno(EPERM)` (see the variant docs): the main filter `Allow`s io_uring so
+/// it isn't killed, then the io_uring filter downgrades it to EPERM, which the
+/// kernel honours because `ERRNO` outranks `ALLOW` in seccomp action precedence.
+///
+/// **Install order matters** (only for installation, not for runtime
+/// precedence). The io_uring filter is installed **first**, the restrictive
+/// main filter **second**, because the second `seccomp(2)` install call must
+/// itself be permitted by whatever filter is already active: the io_uring
+/// filter has `mismatch_action = Allow`, so it permits the `SYS_seccomp` of the
+/// second install. Were the main (`mismatch = KillProcess`) filter installed
+/// first, installing the io_uring filter would be SIGSYS-killed (verified on the
+/// DGX) unless we granted the worker `SYS_seccomp` — which we deliberately
+/// don't. Runtime action precedence is install-order-independent, so the
+/// EPERM/KILL semantics are identical either way.
 pub fn apply(profile: Profile) -> Result<(), LockdownError> {
     set_no_new_privs()?;
-    let bpf = build_bpf(profile)?;
-    apply_filter(&bpf).map_err(|e| LockdownError::Seccomp(format!("apply_filter: {e}")))?;
+    // For BrowserClient, install the permissive io_uring->EPERM filter FIRST so
+    // its Allow-default permits the SYS_seccomp of the main filter's install.
+    if matches!(profile, Profile::BrowserClient) {
+        let io_uring = build_io_uring_eperm_bpf()?;
+        apply_filter(&io_uring)
+            .map_err(|e| LockdownError::Seccomp(format!("apply_filter (io_uring EPERM): {e}")))?;
+    }
+    let main = build_bpf(profile)?;
+    apply_filter(&main).map_err(|e| LockdownError::Seccomp(format!("apply_filter: {e}")))?;
     Ok(())
 }
 
@@ -136,14 +179,54 @@ pub fn build_bpf(profile: Profile) -> Result<BpfProgram, LockdownError> {
         .map_err(|e| LockdownError::Seccomp(format!("BpfProgram::try_from: {e}")))
 }
 
+/// Pure builder: the **second** [`Profile::BrowserClient`] filter — a tiny
+/// filter that matches only `io_uring_setup`/`io_uring_enter` and returns
+/// `Errno(EPERM)`, allowing everything else.
+///
+/// Installed *in addition to* the main browser filter (see [`apply`]). Because
+/// the kernel evaluates every installed filter and keeps the highest-precedence
+/// action, and `ERRNO` outranks `ALLOW`, the net effect is io_uring → EPERM
+/// even though the main filter `Allow`s it. (A genuinely-unknown syscall is
+/// still `KILL`ed by the main filter, since `KILL` outranks `ERRNO`/`ALLOW`.)
+///
+/// EPERM (= `1`) makes Chromium fall back gracefully instead of dying on a
+/// `SIGSYS` — io_uring is a known sandbox-escape primitive we deliberately
+/// refuse rather than allow.
+pub fn build_io_uring_eperm_bpf() -> Result<BpfProgram, LockdownError> {
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+    for nr in BROWSER_IO_URING {
+        rules.insert(*nr, Vec::new());
+    }
+    // match_action = Errno(EPERM) for io_uring; mismatch_action = Allow for
+    // every other syscall (the main filter is what actually restricts those).
+    const EPERM: u32 = 1;
+    let filter = SeccompFilter::new(
+        rules,
+        SeccompAction::Allow, // default: defer to the main filter
+        SeccompAction::Errno(EPERM),
+        target_arch()?,
+    )
+    .map_err(|e| LockdownError::Seccomp(format!("SeccompFilter::new (io_uring): {e}")))?;
+    BpfProgram::try_from(filter)
+        .map_err(|e| LockdownError::Seccomp(format!("BpfProgram::try_from (io_uring): {e}")))
+}
+
 /// Build the allow-list for `profile`. Returns a freshly-allocated `Vec`
 /// because the contents are arch-dependent — see the `cfg` blocks below.
 pub fn allow_list_for(profile: Profile) -> Vec<i64> {
     let mut out: Vec<i64> = BASE_ALLOW.to_vec();
     #[cfg(target_arch = "x86_64")]
     out.extend_from_slice(BASE_ALLOW_X86_64_LEGACY);
-    if matches!(profile, Profile::NetClient) {
+    // Both net-using profiles get the BSD-socket family.
+    if matches!(profile, Profile::NetClient | Profile::BrowserClient) {
         out.extend_from_slice(NET_CLIENT_ADDITIONS);
+    }
+    if matches!(profile, Profile::BrowserClient) {
+        out.extend_from_slice(BROWSER_CLIENT_ADDITIONS);
+        // io_uring is listed here so the MAIN filter returns Allow (not Kill);
+        // the second filter from `build_io_uring_eperm_bpf` then downgrades it
+        // to EPERM. Never reachable as a real allow — see the variant docs.
+        out.extend_from_slice(BROWSER_IO_URING);
     }
     out
 }
@@ -484,6 +567,35 @@ pub const NET_CLIENT_ADDITIONS: &[i64] = &[
     libc::SYS_shutdown,
 ];
 
+/// Browser-specific syscalls a headless Chromium issues on top of
+/// [`NET_CLIENT_ADDITIONS`]. Permitted only under [`Profile::BrowserClient`].
+///
+/// Enumerated by the spike via `strace -f -c` of the full bwrapped Chromium
+/// process tree, then diffed against the `net_client` set (design spec §3.1).
+/// (`capget`/`capset`/`pivot_root`/`umount2` also appeared in the trace but are
+/// **bwrap's own** container setup, run before the worker self-applies the
+/// filter, so they are deliberately NOT here.) Every entry exists on both
+/// `x86_64` and `aarch64`.
+pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
+    libc::SYS_fallocate,
+    libc::SYS_ftruncate,
+    libc::SYS_getresgid,
+    libc::SYS_getresuid,
+    libc::SYS_inotify_add_watch,
+    libc::SYS_inotify_init1,
+    libc::SYS_memfd_create,
+    libc::SYS_pidfd_open,
+    libc::SYS_restart_syscall,
+];
+
+/// The `io_uring` syscalls Chromium probes. Listed in [`allow_list_for`] for
+/// [`Profile::BrowserClient`] so the **main** filter returns `Allow` (not
+/// `Kill`) — but a **second** filter ([`build_io_uring_eperm_bpf`]) downgrades
+/// them to `Errno(EPERM)`. io_uring is a known sandbox-escape primitive; we
+/// refuse it gracefully rather than allow it or crash the browser. See the
+/// [`Profile::BrowserClient`] docs for the precedence reasoning.
+pub const BROWSER_IO_URING: &[i64] = &[libc::SYS_io_uring_setup, libc::SYS_io_uring_enter];
+
 /// Map the build target architecture to seccompiler's enum. Returns an
 /// error on unsupported arches so we never silently install a filter for
 /// the wrong arch (which is a foot-gun: filters are arch-specific BPF).
@@ -534,6 +646,10 @@ mod tests {
         assert_eq!(
             Profile::parse("net_client").unwrap(),
             Some(Profile::NetClient)
+        );
+        assert_eq!(
+            Profile::parse("browser_client").unwrap(),
+            Some(Profile::BrowserClient)
         );
         assert_eq!(Profile::parse("none").unwrap(), None);
         assert_eq!(Profile::parse("").unwrap(), None);
@@ -644,6 +760,73 @@ mod tests {
             assert!(
                 BASE_ALLOW.contains(&nr),
                 "essential syscall {nr} missing from BASE_ALLOW"
+            );
+        }
+    }
+
+    #[test]
+    fn build_bpf_browser_client_succeeds() {
+        let bpf = build_bpf(Profile::BrowserClient).expect("browser_client bpf must build");
+        assert!(!bpf.is_empty(), "browser_client filter must emit instructions");
+    }
+
+    #[test]
+    fn io_uring_eperm_filter_builds() {
+        let bpf = build_io_uring_eperm_bpf().expect("io_uring EPERM filter must build");
+        assert!(!bpf.is_empty(), "io_uring EPERM filter must emit instructions");
+    }
+
+    #[test]
+    fn browser_client_is_a_superset_of_net_client() {
+        // BrowserClient must allow everything NetClient does (it's net_client +
+        // the browser additions), so a browser worker is never *more* restricted
+        // on the socket family than the egress proxy.
+        let net_client = allow_list_for(Profile::NetClient);
+        let browser = allow_list_for(Profile::BrowserClient);
+        for nr in net_client {
+            assert!(
+                browser.contains(&nr),
+                "BrowserClient missing NetClient syscall {nr}"
+            );
+        }
+        // socket() in particular (the net/strict dividing line).
+        assert!(browser.contains(&libc::SYS_socket));
+    }
+
+    #[test]
+    fn browser_client_includes_the_spike_additions() {
+        let browser = allow_list_for(Profile::BrowserClient);
+        let strict = allow_list_for(Profile::Strict);
+        for nr in BROWSER_CLIENT_ADDITIONS {
+            assert!(
+                browser.contains(nr),
+                "BrowserClient missing spike syscall {nr}"
+            );
+            assert!(
+                !strict.contains(nr),
+                "browser syscall {nr} leaked into Strict"
+            );
+        }
+    }
+
+    #[test]
+    fn io_uring_is_allowed_in_the_main_filter_but_eperm_listed_separately() {
+        // io_uring MUST be in the main allow-list (so the main filter returns
+        // Allow, not Kill) — the second filter then downgrades it to EPERM.
+        // Neither Strict nor NetClient list io_uring at all.
+        let browser = allow_list_for(Profile::BrowserClient);
+        for nr in BROWSER_IO_URING {
+            assert!(
+                browser.contains(nr),
+                "io_uring {nr} must be in the BrowserClient main allow-list"
+            );
+            assert!(
+                !allow_list_for(Profile::NetClient).contains(nr),
+                "io_uring {nr} must NOT be in NetClient"
+            );
+            assert!(
+                !allow_list_for(Profile::Strict).contains(nr),
+                "io_uring {nr} must NOT be in Strict"
             );
         }
     }

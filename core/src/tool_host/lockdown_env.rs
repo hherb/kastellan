@@ -73,6 +73,7 @@ pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
         let value = match out.profile {
             Profile::WorkerStrict => "strict",
             Profile::WorkerNetClient => "net_client",
+            Profile::WorkerBrowserClient => "browser_client",
         };
         out.env.push((ENV_SECCOMP_PROFILE.into(), value.into()));
     }
@@ -115,6 +116,19 @@ mod tests {
             .find(|(k, _)| k == ENV_SECCOMP_PROFILE)
             .unwrap();
         assert_eq!(seccomp.1, "net_client");
+    }
+
+    #[test]
+    fn derive_adds_browser_client_profile() {
+        let mut p = base_policy();
+        p.profile = Profile::WorkerBrowserClient;
+        let derived = derive_lockdown_env(&p);
+        let seccomp = derived
+            .env
+            .iter()
+            .find(|(k, _)| k == ENV_SECCOMP_PROFILE)
+            .unwrap();
+        assert_eq!(seccomp.1, "browser_client");
     }
 
     #[test]

@@ -31,6 +31,14 @@ pub enum Profile {
     WorkerStrict,
     /// Slightly relaxed for workers that need outbound HTTPS via the egress proxy.
     WorkerNetClient,
+    /// For the `browser-driver` worker: `WorkerNetClient` **plus** the
+    /// browser-specific syscall set (Linux seccomp `browser_client`) and the
+    /// Seatbelt shared-memory / IOKit / Mach clusters a headless Chromium needs
+    /// (macOS). This is a deliberate, **browser-only** widening of the base
+    /// Seatbelt profile (it re-grants `mach-lookup`, which the strict profile
+    /// denies — issue #1); it must never be selected by any other worker. See
+    /// the spike findings in the browser-driver design spec §3.1.
+    WorkerBrowserClient,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
