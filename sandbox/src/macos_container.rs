@@ -206,7 +206,11 @@ pub fn build_container_argv(
             argv.push("--tmpfs".into());
             argv.push("/tmp".into());
         }
-        Profile::WorkerNetClient => {
+        // Both net-capable profiles get the same container hardening (writable
+        // root + tmpfs /tmp + dropped caps + low-priv user). The browser-
+        // specific Seatbelt/seccomp widening is applied by the host backends,
+        // not the container backend.
+        Profile::WorkerNetClient | Profile::WorkerBrowserClient => {
             argv.push("--cap-drop".into());
             argv.push("ALL".into());
             argv.push("--user".into());
