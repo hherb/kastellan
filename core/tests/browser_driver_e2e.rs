@@ -17,15 +17,16 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 
+use kastellan_core::egress::net_worker::{spawn_forced_net_worker, NetWorkerSpawn};
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
 use kastellan_core::workers::browser_driver::{browser_driver_entry, BrowserDriverEnv};
 use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
-    skip_if_sandbox_unavailable, unique_suffix, PgCluster,
+    skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
 };
 
 /// Resolve the venv shim the way the host manifest does: the
@@ -157,6 +158,69 @@ async fn render_in_jail(
     result
 }
 
+/// Locate the built proxy binary; `[SKIP]` if absent (mirrors `egress_proxy_e2e`).
+fn proxy_binary_or_skip() -> Option<PathBuf> {
+    let p = workspace_target_binary("kastellan-worker-egress-proxy");
+    p.exists().then_some(p)
+}
+
+/// Create a short `/tmp`-based scratch root and return it. Short on purpose:
+/// `spawn_forced_net_worker` nests `<root>/egress-<pid>-<seq>/egress.sock`, and
+/// that projected UDS path must fit the 104-byte macOS `sockaddr_un.sun_path`
+/// (the default `$TMPDIR` on macOS is ~50 chars deep and overflows once nested).
+/// `/tmp` exists on both Linux and macOS.
+fn short_scratch_root(tag: &str) -> PathBuf {
+    let root = PathBuf::from("/tmp").join(format!("kfr-{tag}"));
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+/// Render `url` through the real jail **force-routed** through an egress-proxy
+/// sidecar (the production posture). Mirrors `render_in_jail` but spawns via
+/// `spawn_forced_net_worker` with `disable_mitm: true` (the browser tunnels TLS
+/// end-to-end; the sidecar transparently tunnels).
+async fn render_in_jail_forced(
+    pool: &sqlx::PgPool,
+    env: &TestEnv,
+    proxy_bin: &Path,
+    scratch_root: &Path,
+    allowlist: &[String],
+    url: &str,
+) -> Result<serde_json::Value, kastellan_core::tool_host::ToolHostError> {
+    let entry = browser_driver_entry(&env.browser, allowlist);
+    let backend = backend();
+    let program = env.browser.script_path.to_string_lossy().into_owned();
+    let spec = WorkerSpec {
+        policy: &entry.policy,
+        program: &program,
+        args: &[],
+        wall_clock_ms: entry.wall_clock_ms,
+    };
+    let params = NetWorkerSpawn {
+        backend: backend.as_ref(),
+        proxy_bin,
+        spec: &spec,
+        allowlist,
+        worker_name: "browser-driver",
+        secret_fingerprints: &[],
+        cert_pins_json: None,
+        disable_mitm: true,
+    };
+    let mut sworker = spawn_forced_net_worker(&params, scratch_root, |_row| {})
+        .expect("force-route browser-driver under sidecar");
+    let result = dispatch(
+        pool,
+        &Vault::new(),
+        &mut sworker,
+        "browser-driver",
+        "browser.render",
+        serde_json::json!({ "url": url, "wait_until": "load", "timeout_ms": 10000 }),
+    )
+    .await;
+    let _ = sworker.close();
+    result
+}
+
 /// Spawn a one-shot loopback HTTP server that serves a JS-rendered page, and
 /// return its `127.0.0.1:<port>` authority. The page injects a `js-ran` marker
 /// via inline JS so the test can prove the DOM was rendered post-JS.
@@ -239,4 +303,61 @@ fn off_allowlist_navigation_fails_closed() {
         );
         pool.close().await;
     });
+}
+
+/// Acceptance (#280/#263): the browser renders an allowlisted loopback page
+/// **through the egress sidecar** under force-routing — egress enforced at the
+/// netns boundary, not in-process. Needs a staged Chromium + the egress-proxy
+/// binary -> #[ignore]. Cross-platform (Seatbelt + bwrap).
+#[test]
+#[ignore = "requires staged Chromium + egress-proxy binary"]
+fn forced_render_of_loopback_page_through_sidecar() {
+    let env = match ready_or_skip() {
+        Some(e) => e,
+        None => return,
+    };
+    let Some(proxy) = proxy_binary_or_skip() else {
+        return;
+    };
+    let scratch_root = short_scratch_root(&format!("bd-fr-{}", unique_suffix()));
+    let authority = spawn_loopback_page();
+    let url = format!("http://{authority}/");
+    let allowlist = vec![authority.clone()];
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        let r = render_in_jail_forced(&pool, &env, &proxy, &scratch_root, &allowlist, &url)
+            .await
+            .expect("forced browser.render round trip");
+        assert_eq!(r["status"], 200, "render result: {r}");
+        let text = r["text"].as_str().unwrap_or("");
+        assert!(text.contains("js-ran"), "post-JS marker missing: {r}");
+        pool.close().await;
+    });
+    let _ = std::fs::remove_dir_all(&scratch_root);
+}
+
+/// Fail-closed at the sidecar: under force-routing, a navigation host not on the
+/// allowlist is rejected at the egress boundary (CONNECT 403), so the render
+/// fails — proving the OS boundary, not just in-process interception, blocks it.
+#[test]
+#[ignore = "requires staged Chromium + egress-proxy binary"]
+fn forced_off_allowlist_fails_closed_at_sidecar() {
+    let env = match ready_or_skip() {
+        Some(e) => e,
+        None => return,
+    };
+    let Some(proxy) = proxy_binary_or_skip() else {
+        return;
+    };
+    let scratch_root = short_scratch_root(&format!("bd-fr-deny-{}", unique_suffix()));
+    let authority = spawn_loopback_page();
+    let url = format!("http://{authority}/");
+    let allowlist = vec!["someother.test:443".to_string()];
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        let r = render_in_jail_forced(&pool, &env, &proxy, &scratch_root, &allowlist, &url).await;
+        assert!(r.is_err(), "off-allowlist nav must fail closed at the sidecar, got: {r:?}");
+        pool.close().await;
+    });
+    let _ = std::fs::remove_dir_all(&scratch_root);
 }
