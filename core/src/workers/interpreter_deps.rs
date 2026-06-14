@@ -9,7 +9,7 @@
 //! returns the canonical parent dirs to bind read-only.
 //!
 //! Pure core: the dependency graph and path canonicalization arrive as injected
-//! closures, so the transitive BFS is unit-testable without `otool`/`ldd`. The
+//! closures, so the transitive graph walk is unit-testable without `otool`/`ldd`. The
 //! only impurity is [`resolve_deps_via_tool`].
 
 use std::collections::BTreeSet;
@@ -23,7 +23,7 @@ fn is_system_lib_path_in(p: &Path, roots: &[&str]) -> bool {
 /// True when the canonical path is a system library root already granted by the
 /// base sandbox profile (so we never emit a redundant `fs_read` bind). The roots
 /// mirror `macos_seatbelt::build_profile` (macOS) and bwrap's base binds (Linux).
-pub fn is_system_lib_path(p: &Path) -> bool {
+pub(crate) fn is_system_lib_path(p: &Path) -> bool {
     #[cfg(target_os = "macos")]
     let roots: &[&str] = &["/usr/lib", "/System/Library"];
     #[cfg(not(target_os = "macos"))]
@@ -31,7 +31,7 @@ pub fn is_system_lib_path(p: &Path) -> bool {
     is_system_lib_path_in(p, roots)
 }
 
-/// Transitive BFS over the dynamic-dependency graph seeded from `roots`
+/// Transitive depth-first walk over the dynamic-dependency graph seeded from `roots`
 /// (the interpreter binary and its `libpython`). For each dependency: skip + do
 /// not follow system libs; bind the **canonical parent dir** of any dep outside
 /// `prefix`; follow every unvisited non-system dep — **including in-prefix libs**
@@ -46,18 +46,18 @@ pub fn out_of_prefix_lib_dirs(
     let canon = |p: &Path| canonicalize(p).unwrap_or_else(|| p.to_path_buf());
     let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
-    let mut queue: Vec<PathBuf> = Vec::new();
+    let mut stack: Vec<PathBuf> = Vec::new();
 
-    // Seed the roots for scanning. They are in-prefix (interpreter / libpython),
-    // so they are bound elsewhere — we enqueue them only to read their deps.
+    // Seed the walk; roots are starting points for dep-scanning only — we never
+    // emit a bound dir for a root itself, only for the deps reachable from it.
     for r in roots {
         let c = canon(r);
         if visited.insert(c.clone()) {
-            queue.push(c);
+            stack.push(c);
         }
     }
 
-    while let Some(obj) = queue.pop() {
+    while let Some(obj) = stack.pop() {
         for dep in resolve_deps(&obj) {
             let c = canon(&dep);
             if is_system_lib_path(&c) {
@@ -69,7 +69,7 @@ pub fn out_of_prefix_lib_dirs(
                 }
             }
             if visited.insert(c.clone()) {
-                queue.push(c); // follow transitively (in-prefix libs too)
+                stack.push(c); // follow transitively (in-prefix libs too)
             }
         }
     }
@@ -91,11 +91,13 @@ fn parse_otool_output(out: &str) -> Vec<PathBuf> {
 /// Parse `ldd` output into resolved dependency paths. Dependency lines look like
 /// `\t<soname> => /resolved/path (0x…)`; we take the path after `=> ` and before
 /// ` (`. Lines without a `=>` (vdso, the loader) and `=> not found` are skipped.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(all(not(test), target_os = "macos"), allow(dead_code))]
 fn parse_ldd_output(out: &str) -> Vec<PathBuf> {
     out.lines()
         .filter_map(|line| line.split_once(" => "))
         .map(|(_, rhs)| rhs.trim())
+        // Fallback `Some(rhs)`: a bare resolved path with no ` (load-address)`
+        // suffix (non-standard ldd output) — keep the whole right-hand side.
         .filter_map(|rhs| rhs.rsplit_once(" (").map(|(path, _)| path).or(Some(rhs)))
         .filter(|p| p.starts_with('/'))
         .map(PathBuf::from)
@@ -316,6 +318,16 @@ mod tests {
             &ident,
         );
         assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn empty_roots_yields_no_dirs() {
+        let g = graph(&[(
+            "/px/bin/python3.12",
+            &["/opt/hb/gettext/lib/libintl.8.dylib"],
+        )]);
+        let dirs = out_of_prefix_lib_dirs(&[], Path::new("/px"), &g, &ident);
+        assert!(dirs.is_empty(), "empty roots ⇒ no dirs, got {dirs:?}");
     }
 
     #[test]
