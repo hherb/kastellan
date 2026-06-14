@@ -83,8 +83,8 @@ pub(super) async fn expand_invoke_skill(
         }};
     }
 
-    // Resolve the directive to OWNED data first so the borrow from
-    // `validate_invoke` ends before the caller assigns `plan.steps`.
+    // Resolve the directive to OWNED data so nothing borrows `plan` past
+    // this point.
     let validated = plan
         .validate_invoke()
         .map(|d| (d.name.clone(), d.args.clone(), d.params.clone()));
