@@ -37,6 +37,12 @@ pub struct BrowserDriverEnv {
     /// mirrors `python-exec`'s interpreter binding). `None` for a fully
     /// self-contained venv (nothing extra to bind).
     pub interpreter_root: Option<PathBuf>,
+    /// Read-only directories of the interpreter's out-of-prefix shared-library
+    /// dependencies (e.g. a Homebrew `libintl` dir a pyenv CPython links). Bound
+    /// so the interpreter can dyld-load inside the jail — without them it
+    /// SIGABRTs before the worker runs (issue #284). Empty when the interpreter
+    /// is self-contained or the dep tool is unavailable.
+    pub interpreter_lib_dirs: Vec<PathBuf>,
     /// Operator-supplied extra read-only paths
     /// (`KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ`, a JSON array of absolute
     /// paths). An escape hatch for host-specific dependencies the resolver
@@ -66,17 +72,19 @@ pub enum ResolveSkipReason {
 /// probes uniformly. `canonicalize` resolves the venv's `python3` symlink to
 /// the real interpreter so its prefix can be bound into the jail (see
 /// [`BrowserDriverEnv::interpreter_root`]).
-pub fn resolve_env<E, D, X, C>(
+pub fn resolve_env<E, D, X, C, R>(
     env_lookup: E,
     _is_dir: D,
     exists: X,
     canonicalize: C,
+    resolve_deps: R,
 ) -> Result<BrowserDriverEnv, ResolveSkipReason>
 where
     E: Fn(&str) -> Option<String>,
     D: Fn(&Path) -> bool,
     X: Fn(&Path) -> bool,
     C: Fn(&Path) -> Option<PathBuf>,
+    R: Fn(&Path) -> Vec<PathBuf>,
 {
     // `trim` so a stray newline from `echo "1" > envfile` doesn't fail the
     // opt-in silently. Strict on the value: only `"1"` counts.
@@ -103,6 +111,13 @@ where
         return Err(ResolveSkipReason::ScriptShimMissing { path: script_path });
     }
     let interpreter_root = resolve_interpreter_root(&venv_dir, &exists, &canonicalize);
+    let interpreter_lib_dirs = resolve_interpreter_lib_dirs(
+        &venv_dir,
+        interpreter_root.as_deref(),
+        &exists,
+        &canonicalize,
+        &resolve_deps,
+    );
     let extra_fs_read = env_lookup("KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ")
         .as_deref()
         .map(parse_extra_fs_read)
@@ -111,6 +126,7 @@ where
         script_path,
         venv_dir,
         interpreter_root,
+        interpreter_lib_dirs,
         extra_fs_read,
     })
 }
@@ -158,6 +174,64 @@ fn resolve_interpreter_root(
     Some(prefix.to_path_buf())
 }
 
+/// Compute the out-of-prefix shared-lib dirs to bind for the venv interpreter.
+///
+/// Seeds the dependency walk with the real interpreter binary AND its
+/// `libpython` (located at `<prefix>/lib/libpython<X.Y>.{dylib,so}`, version
+/// derived from the real interpreter filename like `python3.12` → `3.12`; seeded
+/// only when present — a miss is harmless because the walk reaches `libpython`
+/// through the binary's own deps anyway). `prefix` is the interpreter prefix when
+/// external, else the venv dir (a self-contained interpreter can still link
+/// out-of-prefix libs). Returns empty when the interpreter can't be located.
+fn resolve_interpreter_lib_dirs(
+    venv_dir: &Path,
+    interpreter_root: Option<&Path>,
+    exists: &dyn Fn(&Path) -> bool,
+    canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,
+    resolve_deps: &dyn Fn(&Path) -> Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let bin = venv_dir.join("bin");
+    let candidate = match ["python3", "python"]
+        .iter()
+        .map(|n| bin.join(n))
+        .find(|p| exists(p))
+    {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let real = match canonicalize(&candidate) {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    // The prefix to treat as "already bound in-jail": the external interpreter
+    // root, or (self-contained) the venv dir.
+    let prefix = interpreter_root.unwrap_or(venv_dir);
+
+    let mut roots = vec![real.clone()];
+    // Seed libpython explicitly (belt-and-braces). Derive `<X.Y>` from e.g.
+    // "python3.12" → "3.12"; try `.dylib` then `.so` under `<real-prefix>/lib`.
+    if let (Some(stem), Some(real_prefix)) = (
+        real.file_name().and_then(|n| n.to_str()),
+        real.parent().and_then(|b| b.parent()),
+    ) {
+        let ver = stem.trim_start_matches("python");
+        if !ver.is_empty() {
+            for ext in ["dylib", "so"] {
+                let lib = real_prefix.join("lib").join(format!("libpython{ver}.{ext}"));
+                if exists(&lib) {
+                    roots.push(lib);
+                }
+            }
+        }
+    }
+    crate::workers::interpreter_deps::out_of_prefix_lib_dirs(
+        &roots,
+        prefix,
+        resolve_deps,
+        canonicalize,
+    )
+}
+
 /// Build the [`ToolEntry`] for the browser-driver worker (Phase 2).
 ///
 /// Posture: `Net::Allowlist`; `proxy_uds` is left `None` in the manifest and
@@ -198,6 +272,9 @@ pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> Too
     if let Some(root) = &env.interpreter_root {
         fs_read.push(root.clone());
     }
+    // Bind the interpreter's out-of-prefix shared-lib dirs (issue #284) so a
+    // pyenv/Homebrew-linked interpreter can dyld-load in the jail.
+    fs_read.extend(env.interpreter_lib_dirs.iter().cloned());
     // Operator-supplied host-specific extra reads (interpreter system-lib deps,
     // fonts, …) — see BrowserDriverEnv::extra_fs_read.
     fs_read.extend(env.extra_fs_read.iter().cloned());
@@ -284,6 +361,7 @@ impl WorkerManifest for BrowserDriverManifest {
             |p| (ctx.is_dir)(p),
             |p| (ctx.exists)(p),
             |p| (ctx.canonicalize)(p),
+            crate::workers::interpreter_deps::resolve_deps_via_tool,
         ) {
             Ok(env) => {
                 let allowlist = (ctx.allowlist)(TOOL_NAME);
@@ -313,13 +391,18 @@ mod tests {
         None
     }
 
+    /// No interpreter deps in most tests.
+    fn no_deps(_p: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
     #[test]
     fn disabled_when_enable_not_set() {
         let env = |_k: &str| None;
         let is_dir = |_p: &Path| true;
         let exists = |_p: &Path| true;
         assert!(matches!(
-            resolve_env(env, is_dir, exists, no_canon),
+            resolve_env(env, is_dir, exists, no_canon, no_deps),
             Err(ResolveSkipReason::Disabled)
         ));
     }
@@ -330,7 +413,7 @@ mod tests {
         let is_dir = |_p: &Path| true;
         let exists = |_p: &Path| true;
         assert!(matches!(
-            resolve_env(env, is_dir, exists, no_canon),
+            resolve_env(env, is_dir, exists, no_canon, no_deps),
             Err(ResolveSkipReason::VenvDirUnresolvable)
         ));
     }
@@ -344,7 +427,7 @@ mod tests {
         };
         let is_dir = |_p: &Path| true;
         let exists = |_p: &Path| false; // shim absent
-        match resolve_env(env, is_dir, exists, no_canon) {
+        match resolve_env(env, is_dir, exists, no_canon, no_deps) {
             Err(ResolveSkipReason::ScriptShimMissing { path }) => {
                 assert!(path.ends_with(SHIM_NAME), "path: {}", path.display());
             }
@@ -361,7 +444,7 @@ mod tests {
         };
         let is_dir = |_p: &Path| true;
         let exists = |_p: &Path| true;
-        let out = resolve_env(env, is_dir, exists, no_canon).expect("resolves");
+        let out = resolve_env(env, is_dir, exists, no_canon, no_deps).expect("resolves");
         assert_eq!(out.venv_dir, PathBuf::from("/v"));
         assert!(out.script_path.ends_with(SHIM_NAME));
         // Self-contained (canonicalize → None) ⇒ no extra interpreter bind.
@@ -389,7 +472,7 @@ mod tests {
                 None
             }
         };
-        let out = resolve_env(env, is_dir, exists, canon).expect("resolves");
+        let out = resolve_env(env, is_dir, exists, canon, no_deps).expect("resolves");
         assert_eq!(
             out.interpreter_root,
             Some(PathBuf::from("/home/u/.pyenv/versions/3.12.3"))
@@ -412,7 +495,7 @@ mod tests {
             }
             _ => None,
         };
-        let out = resolve_env(env, |_p| true, |_p| true, no_canon).expect("resolves");
+        let out = resolve_env(env, |_p| true, |_p| true, no_canon, no_deps).expect("resolves");
         // Absolute entry kept; relative one dropped (policy needs absolute paths).
         assert_eq!(out.extra_fs_read, vec![PathBuf::from("/opt/homebrew")]);
         let entry = browser_driver_entry(&out, &[]);
@@ -427,7 +510,7 @@ mod tests {
             "KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ" => Some("not json".to_string()),
             _ => None,
         };
-        let out = resolve_env(env, |_p| true, |_p| true, no_canon).expect("resolves");
+        let out = resolve_env(env, |_p| true, |_p| true, no_canon, no_deps).expect("resolves");
         assert!(out.extra_fs_read.is_empty());
     }
 
@@ -442,7 +525,7 @@ mod tests {
         let exists = |_p: &Path| true;
         // Self-contained venv: python3 resolves to within /v.
         let canon = |_p: &Path| Some(PathBuf::from("/v/bin/python3.12"));
-        let out = resolve_env(env, is_dir, exists, canon).expect("resolves");
+        let out = resolve_env(env, is_dir, exists, canon, no_deps).expect("resolves");
         assert_eq!(
             out.interpreter_root, None,
             "interpreter already under venv_dir ⇒ no extra bind"
@@ -470,6 +553,7 @@ mod tests {
             script_path: PathBuf::from("/v/bin/kastellan-worker-browser-driver"),
             venv_dir: PathBuf::from("/v"),
             interpreter_root: None,
+            interpreter_lib_dirs: vec![],
             extra_fs_read: vec![],
         };
         let entry = browser_driver_entry(&env, &["example.com:443".to_string()]);
@@ -551,5 +635,52 @@ mod tests {
             BrowserDriverManifest.resolve(&c),
             Resolution::Disabled { .. }
         ));
+    }
+
+    #[test]
+    fn interpreter_lib_dirs_are_bound_in_fs_read() {
+        let env = BrowserDriverEnv {
+            script_path: PathBuf::from("/v/bin/kastellan-worker-browser-driver"),
+            venv_dir: PathBuf::from("/v"),
+            interpreter_root: Some(PathBuf::from("/px")),
+            interpreter_lib_dirs: vec![PathBuf::from("/opt/hb/gettext/lib")],
+            extra_fs_read: vec![],
+        };
+        let entry = browser_driver_entry(&env, &[]);
+        assert!(entry
+            .policy
+            .fs_read
+            .contains(&PathBuf::from("/opt/hb/gettext/lib")));
+    }
+
+    #[test]
+    fn resolve_env_binds_out_of_prefix_interpreter_deps() {
+        let env = |k: &str| match k {
+            "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_VENV_DIR" => Some("/v".to_string()),
+            _ => None,
+        };
+        // External pyenv interpreter at /px linking a Homebrew libintl.
+        let canon = |p: &Path| match p.to_str() {
+            Some("/v/bin/python3") => Some(PathBuf::from("/px/bin/python3.12")),
+            _ => Some(p.to_path_buf()),
+        };
+        let deps = |p: &Path| {
+            if p == Path::new("/px/bin/python3.12") {
+                vec![PathBuf::from("/opt/hb/gettext/lib/libintl.8.dylib")]
+            } else {
+                vec![]
+            }
+        };
+        let out = resolve_env(env, |_p| true, |_p| true, canon, deps).expect("resolves");
+        assert_eq!(
+            out.interpreter_lib_dirs,
+            vec![PathBuf::from("/opt/hb/gettext/lib")]
+        );
+        let entry = browser_driver_entry(&out, &[]);
+        assert!(entry
+            .policy
+            .fs_read
+            .contains(&PathBuf::from("/opt/hb/gettext/lib")));
     }
 }

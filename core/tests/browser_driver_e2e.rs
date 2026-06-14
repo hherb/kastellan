@@ -78,6 +78,7 @@ fn resolve_browser_env() -> Option<BrowserDriverEnv> {
         script_path,
         venv_dir,
         interpreter_root,
+        interpreter_lib_dirs: vec![],
         extra_fs_read,
     })
 }
