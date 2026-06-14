@@ -42,6 +42,16 @@ fn main() -> anyhow::Result<()> {
     let allow_json = std::env::var("KASTELLAN_EGRESS_PROXY_ALLOWLIST")
         .map_err(|_| anyhow::anyhow!("KASTELLAN_EGRESS_PROXY_ALLOWLIST unset"))?;
     let worker = std::env::var("KASTELLAN_EGRESS_PROXY_WORKER").unwrap_or_else(|_| "unknown".into());
+    // No-MITM mode: a worker that does end-to-end TLS itself and cannot trust
+    // our per-instance CA (the browser, egress slice #2) sets this so the proxy
+    // transparently tunnels instead of intercepting. Allowlist + SSRF still apply.
+    let disable_mitm = matches!(
+        std::env::var("KASTELLAN_EGRESS_PROXY_DISABLE_MITM")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1")
+    );
     // Parse `host[:port]` endpoint entries so the boundary check is port-scoped
     // (#241), not host-only.
     let entries: Vec<String> = serde_json::from_str(&allow_json)
@@ -113,6 +123,7 @@ fn main() -> anyhow::Result<()> {
                     leaf_cache: cache,
                     upstream_tls: std::sync::Arc::clone(upstream_tls),
                     secret_hashes_path: Some(secret_hashes_path.clone()),
+                    disable_mitm,
                 };
                 handle_conn(conn, &worker, allow, &resolver, &mut reporter, &mut mitm);
             });
