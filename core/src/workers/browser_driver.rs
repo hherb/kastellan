@@ -183,6 +183,9 @@ fn resolve_interpreter_root(
 /// through the binary's own deps anyway). `prefix` is the interpreter prefix when
 /// external, else the venv dir (a self-contained interpreter can still link
 /// out-of-prefix libs). Returns empty when the interpreter can't be located.
+/// A degenerate stem (`python3` → ver `3`, or bare `python` → ver `""`, the
+/// latter skipped by the non-empty guard) just misses the libpython seed
+/// harmlessly — the binary's own deps still reach `libpython` transitively.
 fn resolve_interpreter_lib_dirs(
     venv_dir: &Path,
     interpreter_root: Option<&Path>,
