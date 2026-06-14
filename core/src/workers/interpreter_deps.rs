@@ -102,6 +102,36 @@ fn parse_ldd_output(out: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Run the platform's linker-introspection tool on `obj` and return its resolved
+/// dependency paths. macOS: `otool -L`; Linux: `ldd`. Fail-safe: a missing tool,
+/// a non-zero exit, or unparseable output yields an empty vec (the caller then
+/// binds nothing extra and the manual `*_EXTRA_FS_READ` hatch remains the
+/// backstop). Never panics. This is the only impure item in the module.
+pub fn resolve_deps_via_tool(obj: &Path) -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let (tool, args): (&str, &[&str]) = ("otool", &["-L"]);
+    #[cfg(not(target_os = "macos"))]
+    let (tool, args): (&str, &[&str]) = ("ldd", &[]);
+
+    let output = match std::process::Command::new(tool)
+        .args(args)
+        .arg(obj)
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    #[cfg(target_os = "macos")]
+    {
+        parse_otool_output(&text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        parse_ldd_output(&text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +356,16 @@ mod tests {
                 PathBuf::from("/usr/lib/aarch64-linux-gnu/libc.so.6"),
             ]
         );
+    }
+
+    /// Live check (operator-run): on a host whose interpreter links out-of-prefix
+    /// libs, the real tool returns a non-empty, absolute dep set. Skipped in CI.
+    #[test]
+    #[ignore = "runs the real otool/ldd against the current interpreter"]
+    fn real_tool_returns_absolute_deps() {
+        let me = std::env::current_exe().expect("current_exe");
+        let deps = resolve_deps_via_tool(&me);
+        assert!(!deps.is_empty(), "expected some linked deps for {me:?}");
+        assert!(deps.iter().all(|p| p.is_absolute()), "deps: {deps:?}");
     }
 }
