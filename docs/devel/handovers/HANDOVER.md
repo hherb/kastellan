@@ -40,6 +40,10 @@ before the network, so the deny test diverges the worker/sidecar allowlists to i
 is wired. **macOS render-under-Seatbelt is currently broken by a PRE-EXISTING regression** (Chromium 148/chromium-1223
 SIGABRTs under Seatbelt on macOS 26.5.1 — the unchanged `real_render_of_loopback_page` baseline fails identically; renders
 fine unsandboxed and on Linux/bwrap) — filed [#284](https://github.com/hherb/kastellan/issues/284), NOT caused by slice #2.
+**Code-review follow-up (this commit):** the Seatbelt `localhost:*` loopback widening is host-shared on macOS (no netns), so a
+*compromised* browser worker could reach host-local services bypassing the sidecar — a Linux/macOS guarantee divergence (Linux's
+private netns isolates loopback). Latent today (Chromium is proxy-routed; macOS render blocked by #284). Filed
+[#286](https://github.com/hherb/kastellan/issues/286); documented in `docs/threat-model.md` + at the code site.
 
 _(The full python-exec arc — skill-catalog slice 1/2 + runtime params — is condensed into "Recently merged" below; older verbose blocks pruned to archive convention.)_
 
@@ -500,6 +504,7 @@ The `memory_entities` join table (P1) shipped; the graph lane is wired into `rec
 Only currently-open issues are listed; closed-issue detail lives in the archive snapshots and git history.
 
 - [#284](https://github.com/hherb/kastellan/issues/284) — browser-driver Chromium SIGABRT under Seatbelt on macOS 26.5.1 (Chromium 148/chromium-1223); pre-existing, blocks the macOS render e2e (Linux/bwrap is green). Likely needs new Seatbelt grants for Chrome 148.
+- [#286](https://github.com/hherb/kastellan/issues/286) — browser-driver Seatbelt `localhost:*` loopback widening is host-shared on macOS (no netns), so a compromised browser worker could reach host-local services bypassing the egress sidecar. Latent (Chromium is proxy-routed; macOS render blocked by #284). Fix: scope the rule to the shim's bound port, a UDS-only transport, or the `MacosContainer` VM-netns backend.
 - [#3](https://github.com/hherb/kastellan/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64.
 - [#4](https://github.com/hherb/kastellan/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added (process hygiene).
 - [#8](https://github.com/hherb/kastellan/issues/8) — collapse `default_probe`/`default_supervisor` cfg-ladder duplication once a third entry point or backend OS appears.

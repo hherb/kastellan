@@ -405,6 +405,11 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
             // 127.0.0.1 (egress slice #2): allow loopback TCP bind/accept (shim)
             // + connect (Chromium). Scoped to the browser profile so the other
             // UDS workers (in-process CONNECT-over-UDS, no loopback) stay strict.
+            // CAVEAT (#286): unlike Linux (private netns isolates loopback to the
+            // worker), macOS has no netns, so `localhost:*` is the *host's*
+            // loopback — a compromised browser worker could reach host-local
+            // services directly, bypassing the sidecar. Latent today (Chromium is
+            // proxy-routed; macOS render is blocked by #284). See docs/threat-model.md.
             if matches!(policy.profile, crate::Profile::WorkerBrowserClient) {
                 out.push_str("(allow network-bind (local ip \"localhost:*\"))\n");
                 out.push_str("(allow network-inbound (local ip \"localhost:*\"))\n");

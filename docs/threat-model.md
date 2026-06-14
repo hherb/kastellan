@@ -135,6 +135,21 @@ make a *compromised* worker unable to bypass the proxy:
   `host:port` *endpoint*, not just the host; a bare-host (port-unconstrained)
   grant is flagged distinctly in `audit_log`.
 
+**`browser-driver` exception — loopback shim, and a macOS-only caveat (#286).**
+A headless Chromium cannot speak `CONNECT`-over-UDS, so the browser reaches its
+sidecar via an in-jail loopback-TCP↔UDS shim (`shim.py`) and is pointed at it
+with `--proxy-server=127.0.0.1:<port>` + `--proxy-bypass-list=<-loopback>` (the
+bypass removal forces *even loopback* destinations through the sidecar). On
+**Linux** this is fully contained: the private netns isolates loopback to the
+worker, so the shim is its only loopback peer. On **macOS** there is no netns —
+Seatbelt's `localhost:*` widening (`Profile::WorkerBrowserClient` + `proxy_uds`)
+is the *host's* loopback, so a *compromised* browser worker could open a raw
+socket to a host-local service (e.g. Postgres) directly, bypassing the sidecar.
+This is latent today (Chromium is proxy-routed; macOS render is anyway blocked
+by the pre-existing #284) but is a real Linux/macOS guarantee divergence —
+tracked in **#286** (scope the rule to the shim's bound port, use a UDS-only
+transport, or route the browser through the `MacosContainer` VM-netns backend).
+
 The coupled host-side spawn (`core::egress::spawn_net_worker`: sidecar-first +
 **fail-closed** — no proxy ⇒ no worker — policy rewrite, 1:1 teardown,
 decision-ingest → `audit_log`) is **built and unit-tested**. The remaining step
