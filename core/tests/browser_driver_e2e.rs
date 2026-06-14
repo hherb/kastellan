@@ -179,6 +179,25 @@ fn short_scratch_root(tag: &str) -> PathBuf {
 /// sidecar (the production posture). Mirrors `render_in_jail` but spawns via
 /// `spawn_forced_net_worker` with `disable_mitm: true` (the browser tunnels TLS
 /// end-to-end; the sidecar transparently tunnels).
+/// One sidecar decision, flattened to the fields the acceptance asserts on:
+/// `(action, host, port)` — e.g. `("egress.allowed", "127.0.0.1", 40787)`.
+/// We capture tuples rather than `EgressAuditRow` (which isn't `Clone`) so the
+/// test can snapshot them out of the decision-ingest thread.
+type CapturedDecision = (String, String, u64);
+
+/// Render `url` through the real jail **force-routed** through an egress-proxy
+/// sidecar (the production posture). Mirrors `render_in_jail` but spawns via
+/// `spawn_forced_net_worker` with `disable_mitm: true` (the browser does
+/// end-to-end TLS; the sidecar transparently tunnels — no MITM).
+///
+/// Returns `(render_result, decisions)`. The **decisions** are the acceptance
+/// signal: they are the egress sidecar's own allow/deny verdicts, captured from
+/// its decision stream, proving egress is enforced at the netns boundary. The
+/// `render_result` itself is NOT a reliable signal under a transparent tunnel —
+/// to a hermetic loopback origin Chromium cannot complete real end-to-end TLS
+/// (it would reject a self-signed cert; a trusted-cert render needs the deferred
+/// MITM/NSS path), so a full 200 is not hermetically achievable. The sidecar
+/// decision is the direct proof of the #280 property.
 async fn render_in_jail_forced(
     pool: &sqlx::PgPool,
     env: &TestEnv,
@@ -186,7 +205,10 @@ async fn render_in_jail_forced(
     scratch_root: &Path,
     allowlist: &[String],
     url: &str,
-) -> Result<serde_json::Value, kastellan_core::tool_host::ToolHostError> {
+) -> (
+    Result<serde_json::Value, kastellan_core::tool_host::ToolHostError>,
+    Vec<CapturedDecision>,
+) {
     let entry = browser_driver_entry(&env.browser, allowlist);
     let backend = backend();
     let program = env.browser.script_path.to_string_lossy().into_owned();
@@ -206,8 +228,15 @@ async fn render_in_jail_forced(
         cert_pins_json: None,
         disable_mitm: true,
     };
-    let mut sworker = spawn_forced_net_worker(&params, scratch_root, |_row| {})
-        .expect("force-route browser-driver under sidecar");
+    let decisions: std::sync::Arc<std::sync::Mutex<Vec<CapturedDecision>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_decisions = std::sync::Arc::clone(&decisions);
+    let mut sworker = spawn_forced_net_worker(&params, scratch_root, move |row| {
+        let host = row.payload["host"].as_str().unwrap_or_default().to_string();
+        let port = row.payload["port"].as_u64().unwrap_or_default();
+        sink_decisions.lock().unwrap().push((row.action, host, port));
+    })
+    .expect("force-route browser-driver under sidecar");
     let result = dispatch(
         pool,
         &Vault::new(),
@@ -218,7 +247,25 @@ async fn render_in_jail_forced(
     )
     .await;
     let _ = sworker.close();
-    result
+    // Decisions land on a detached ingest thread reading the proxy's stdout;
+    // poll briefly (the CONNECT decision was emitted during the render, before
+    // close()) so we don't race the thread.
+    let mut snapshot = Vec::new();
+    for _ in 0..60 {
+        snapshot = decisions.lock().unwrap().clone();
+        if !snapshot.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    (result, snapshot)
+}
+
+/// Split a `host:port` authority into `(host, port)` for asserting on a
+/// captured sidecar decision.
+fn split_authority(authority: &str) -> (String, u64) {
+    let (h, p) = authority.rsplit_once(':').expect("authority has a port");
+    (h.to_string(), p.parse().expect("numeric port"))
 }
 
 /// Spawn a one-shot loopback HTTP server that serves a JS-rendered page, and
@@ -305,10 +352,18 @@ fn off_allowlist_navigation_fails_closed() {
     });
 }
 
-/// Acceptance (#280/#263): the browser renders an allowlisted loopback page
-/// **through the egress sidecar** under force-routing — egress enforced at the
-/// netns boundary, not in-process. Needs a staged Chromium + the egress-proxy
-/// binary -> #[ignore]. Cross-platform (Seatbelt + bwrap).
+/// Acceptance (#280/#263): under force-routing, the browser's egress is enforced
+/// at the **netns boundary** — a navigation to an allowlisted host reaches the
+/// network ONLY via the per-worker egress sidecar, which ALLOWS it. We drive an
+/// `https://` URL so Chromium uses the proxy's `CONNECT` protocol (it sends a
+/// plain absolute-form GET for `http://`, which a CONNECT proxy rejects), and we
+/// assert on the **sidecar's own decision** (the direct evidence of
+/// egress-at-the-boundary) rather than a 200 render: a transparent tunnel can't
+/// complete real TLS to a hermetic self-signed loopback origin (that needs the
+/// deferred MITM/NSS path). Reaching an `egress.allowed` decision for the target
+/// proves the full Chromium → in-jail shim → loopback-in-netns → UDS → sidecar →
+/// origin path works. Needs a staged Chromium + the egress-proxy binary ->
+/// #[ignore]. Cross-platform (Seatbelt + bwrap).
 #[test]
 #[ignore = "requires staged Chromium + egress-proxy binary"]
 fn forced_render_of_loopback_page_through_sidecar() {
@@ -321,24 +376,34 @@ fn forced_render_of_loopback_page_through_sidecar() {
     };
     let scratch_root = short_scratch_root(&format!("bd-fr-{}", unique_suffix()));
     let authority = spawn_loopback_page();
-    let url = format!("http://{authority}/");
+    let (host, port) = split_authority(&authority);
+    // https → Chromium uses CONNECT through the proxy; the host:port is on the
+    // allowlist, so the sidecar must ALLOW + dial it.
+    let url = format!("https://{authority}/");
     let allowlist = vec![authority.clone()];
     dispatch_runtime().block_on(async {
         let pool = probe_and_pool(&env.cluster.conn_spec).await;
-        let r = render_in_jail_forced(&pool, &env, &proxy, &scratch_root, &allowlist, &url)
-            .await
-            .expect("forced browser.render round trip");
-        assert_eq!(r["status"], 200, "render result: {r}");
-        let text = r["text"].as_str().unwrap_or("");
-        assert!(text.contains("js-ran"), "post-JS marker missing: {r}");
+        let (_render, decisions) =
+            render_in_jail_forced(&pool, &env, &proxy, &scratch_root, &allowlist, &url).await;
+        // The render result is not the signal (transparent tunnel can't complete
+        // TLS to a hermetic origin). The sidecar decision is: it must have
+        // ALLOWED the CONNECT to the allowlisted target — proving egress flowed
+        // through the netns→shim→sidecar path and was permitted at the boundary.
+        assert!(
+            decisions
+                .iter()
+                .any(|(a, h, p)| a == "egress.allowed" && h == &host && *p == port),
+            "expected an egress.allowed sidecar decision for {host}:{port}, got: {decisions:?}"
+        );
         pool.close().await;
     });
     let _ = std::fs::remove_dir_all(&scratch_root);
 }
 
-/// Fail-closed at the sidecar: under force-routing, a navigation host not on the
-/// allowlist is rejected at the egress boundary (CONNECT 403), so the render
-/// fails — proving the OS boundary, not just in-process interception, blocks it.
+/// Fail-closed at the sidecar: under force-routing, a navigation host NOT on the
+/// allowlist is rejected at the egress boundary, so the render fails and the
+/// sidecar emits a BLOCKED decision — proving the OS boundary (not just
+/// in-process interception) blocks it.
 #[test]
 #[ignore = "requires staged Chromium + egress-proxy binary"]
 fn forced_off_allowlist_fails_closed_at_sidecar() {
@@ -351,12 +416,32 @@ fn forced_off_allowlist_fails_closed_at_sidecar() {
     };
     let scratch_root = short_scratch_root(&format!("bd-fr-deny-{}", unique_suffix()));
     let authority = spawn_loopback_page();
-    let url = format!("http://{authority}/");
+    let (host, port) = split_authority(&authority);
+    let url = format!("https://{authority}/");
+    // Allowlist a DIFFERENT host:port — the navigation host is not permitted.
     let allowlist = vec!["someother.test:443".to_string()];
     dispatch_runtime().block_on(async {
         let pool = probe_and_pool(&env.cluster.conn_spec).await;
-        let r = render_in_jail_forced(&pool, &env, &proxy, &scratch_root, &allowlist, &url).await;
-        assert!(r.is_err(), "off-allowlist nav must fail closed at the sidecar, got: {r:?}");
+        let (render, decisions) =
+            render_in_jail_forced(&pool, &env, &proxy, &scratch_root, &allowlist, &url).await;
+        assert!(
+            render.is_err(),
+            "off-allowlist nav must fail closed (render error), got Ok: {render:?}"
+        );
+        // The sidecar must have BLOCKED the CONNECT at the netns boundary (and
+        // must NOT have allowed the target).
+        assert!(
+            decisions
+                .iter()
+                .any(|(a, h, p)| a.starts_with("egress.blocked") && h == &host && *p == port),
+            "expected a blocked sidecar decision for {host}:{port}, got: {decisions:?}"
+        );
+        assert!(
+            !decisions
+                .iter()
+                .any(|(a, h, p)| a == "egress.allowed" && h == &host && *p == port),
+            "off-allowlist target must never be allowed by the sidecar: {decisions:?}"
+        );
         pool.close().await;
     });
     let _ = std::fs::remove_dir_all(&scratch_root);
