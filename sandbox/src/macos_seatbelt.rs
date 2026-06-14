@@ -401,6 +401,15 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
             out.push_str(&format!(
                 "(allow network-outbound (remote unix-socket (path-literal {uds:?})))\n",
             ));
+            // The browser reaches its in-jail loopback-TCP↔UDS shim over
+            // 127.0.0.1 (egress slice #2): allow loopback TCP bind/accept (shim)
+            // + connect (Chromium). Scoped to the browser profile so the other
+            // UDS workers (in-process CONNECT-over-UDS, no loopback) stay strict.
+            if matches!(policy.profile, crate::Profile::WorkerBrowserClient) {
+                out.push_str("(allow network-bind (local ip \"localhost:*\"))\n");
+                out.push_str("(allow network-inbound (local ip \"localhost:*\"))\n");
+                out.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
+            }
         }
         (crate::Net::Allowlist(_), None) | (crate::Net::ProxyEgress, _) => {
             // The host allowlist itself is enforced by the future egress proxy
