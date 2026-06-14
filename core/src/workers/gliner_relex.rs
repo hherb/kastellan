@@ -41,7 +41,9 @@ mod wire;
 pub use client::{Client, ClientError};
 pub use entry::gliner_relex_entry;
 pub use manifest::GlinerRelexManifest;
-pub use resolve::{resolve_env, GlinerRelexEnv, ResolveSkipReason};
+pub use resolve::{
+    resolve_env, resolve_host_interpreter_binds, GlinerRelexEnv, ResolveSkipReason,
+};
 pub use wire::{
     Entity, ExtractRequest, ExtractResponse, Triple, TripleEntity, MAX_ENTITY_LABELS,
     MAX_RELATION_LABELS, MAX_TEXT_BYTES,

@@ -19,7 +19,9 @@ use std::path::PathBuf;
 
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use kastellan_core::workers::python_exec::{python_exec_entry, PYTHON_CANDIDATES};
+use kastellan_core::workers::python_exec::{
+    interpreter_extra_lib_dirs, python_exec_entry, PYTHON_CANDIDATES,
+};
 use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
@@ -106,7 +108,21 @@ async fn exec_in_jail(
     env: &TestEnv,
     code: &str,
 ) -> Result<serde_json::Value, kastellan_core::tool_host::ToolHostError> {
-    let entry = python_exec_entry(env.worker_path.clone(), env.python.clone());
+    // Mirror the manifest: bind the interpreter's out-of-prefix shared-lib dirs
+    // (issue #284) so a pyenv/Homebrew-linked interpreter dyld-loads in the jail
+    // without a manual KASTELLAN_*_EXTRA_FS_READ. Shares the manifest's seed
+    // logic (interpreter_deps) so the two can't drift.
+    let interpreter_lib_dirs = interpreter_extra_lib_dirs(
+        &env.python,
+        &|p| p.exists(),
+        &|p| std::fs::canonicalize(p).ok(),
+        &kastellan_core::workers::interpreter_deps::resolve_deps_via_tool,
+    );
+    let entry = python_exec_entry(
+        env.worker_path.clone(),
+        env.python.clone(),
+        interpreter_lib_dirs,
+    );
     let backend = backend();
     let worker_str = env.worker_path.to_string_lossy().into_owned();
     let spec = WorkerSpec {

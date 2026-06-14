@@ -131,6 +131,8 @@ fn test_env() -> GlinerRelexEnv {
         device: "auto".to_string(),
         use_container_backend: false,
         container_image: None,
+        interpreter_root: None,
+        interpreter_lib_dirs: vec![],
     }
 }
 
@@ -402,6 +404,68 @@ fn entry_container_mode_honours_custom_image_tag() {
         Some("kastellan/gliner-relex:v0.0.1"),
         "operator-supplied image tag must flow into entry.container_image"
     );
+}
+
+// ---- issue #284: host-mode external-interpreter binds ------------
+
+/// A uv venv whose `bin/python3` symlinks to an EXTERNAL interpreter must
+/// surface that interpreter's prefix as `interpreter_root`, plus any
+/// out-of-prefix shared-lib dir the interpreter links (e.g. a Homebrew
+/// `libintl`) — so CPython can start + dyld-load inside the jail.
+#[test]
+fn host_interpreter_binds_external_venv() {
+    let venv = Path::new("/v/.venv");
+    let exists = |p: &Path| p == Path::new("/v/.venv/bin/python3");
+    let canon = |p: &Path| {
+        (p == Path::new("/v/.venv/bin/python3"))
+            .then(|| PathBuf::from("/opt/py/3.12/bin/python3.12"))
+    };
+    let deps = |p: &Path| {
+        if p == Path::new("/opt/py/3.12/bin/python3.12") {
+            vec![PathBuf::from("/opt/hb/gettext/lib/libintl.8.dylib")]
+        } else {
+            vec![]
+        }
+    };
+    let (root, dirs) = resolve_host_interpreter_binds(venv, exists, canon, deps);
+    assert_eq!(root, Some(PathBuf::from("/opt/py/3.12")));
+    assert_eq!(dirs, vec![PathBuf::from("/opt/hb/gettext/lib")]);
+}
+
+/// A self-contained venv (python canonicalizes UNDER the venv) needs no extra
+/// interpreter binds — the venv `fs_read` already covers it.
+#[test]
+fn host_interpreter_binds_self_contained() {
+    let venv = Path::new("/v/.venv");
+    let exists = |p: &Path| p == Path::new("/v/.venv/bin/python3");
+    let canon = |p: &Path| {
+        (p == Path::new("/v/.venv/bin/python3"))
+            .then(|| PathBuf::from("/v/.venv/bin/python3.12"))
+    };
+    let no_deps = |_p: &Path| vec![];
+    let (root, dirs) = resolve_host_interpreter_binds(venv, exists, canon, no_deps);
+    assert_eq!(root, None);
+    assert!(dirs.is_empty(), "self-contained venv ⇒ no extra dirs, got {dirs:?}");
+}
+
+/// `host_mode_entry` binds `interpreter_root` + `interpreter_lib_dirs`
+/// read-only, alongside the pre-#284 weights/venv/src binds.
+#[test]
+fn host_mode_entry_binds_interpreter_root_and_lib_dirs() {
+    let env = GlinerRelexEnv {
+        interpreter_root: Some(PathBuf::from("/opt/py/3.12")),
+        interpreter_lib_dirs: vec![PathBuf::from("/opt/hb/gettext/lib")],
+        ..test_env()
+    };
+    let entry = gliner_relex_entry(&env);
+    assert!(entry.policy.fs_read.contains(&PathBuf::from("/opt/py/3.12")));
+    assert!(entry
+        .policy
+        .fs_read
+        .contains(&PathBuf::from("/opt/hb/gettext/lib")));
+    // Pre-#284 binds remain.
+    assert!(entry.policy.fs_read.contains(&env.weights_dir));
+    assert!(entry.policy.fs_read.contains(&env.venv_dir));
 }
 
 // ---- resolve_env unit tests --------------------------------------

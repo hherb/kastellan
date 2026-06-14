@@ -110,7 +110,11 @@ where
     if !exists(&script_path) {
         return Err(ResolveSkipReason::ScriptShimMissing { path: script_path });
     }
-    let interpreter_root = resolve_interpreter_root(&venv_dir, &exists, &canonicalize);
+    let interpreter_root = crate::workers::interpreter_deps::resolve_interpreter_root(
+        &venv_dir,
+        &exists,
+        &canonicalize,
+    );
     let interpreter_lib_dirs = crate::workers::interpreter_deps::interpreter_lib_dirs(
         &venv_dir,
         interpreter_root.as_deref(),
@@ -145,33 +149,6 @@ fn parse_extra_fs_read(raw: &str) -> Vec<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .collect()
-}
-
-/// Resolve the real interpreter prefix to bind into the jail.
-///
-/// The venv's `bin/python3` (or `bin/python`) is canonicalized to the real
-/// CPython, whose **prefix** (`<bin>/..`) is returned — that root holds the
-/// interpreter binary + `libpython` + the stdlib. `None` when the interpreter
-/// can't be found/canonicalized or already lives under the venv (self-contained
-/// — nothing extra to bind). Pure: all I/O arrives via the closures.
-fn resolve_interpreter_root(
-    venv_dir: &Path,
-    exists: &dyn Fn(&Path) -> bool,
-    canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,
-) -> Option<PathBuf> {
-    let bin = venv_dir.join("bin");
-    let candidate = ["python3", "python"]
-        .iter()
-        .map(|n| bin.join(n))
-        .find(|p| exists(p))?;
-    let real = canonicalize(&candidate)?;
-    let prefix = real.parent()?.parent()?; // <prefix>/bin/python → <prefix>
-    // Self-contained: the real interpreter is already under venv_dir, so the
-    // venv fs_read covers it — nothing extra to bind.
-    if prefix.starts_with(venv_dir) {
-        return None;
-    }
-    Some(prefix.to_path_buf())
 }
 
 /// Build the [`ToolEntry`] for the browser-driver worker (Phase 2).

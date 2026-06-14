@@ -106,16 +106,27 @@ where
 /// `Net::Deny`, `Profile::WorkerStrict`, `fs_write = []` (scratch is the
 /// jail's ephemeral `/tmp` tmpfs via the explicit Landlock-RW grant),
 /// `cpu_ms = 10_000`, `mem_mb = 512`, `wall_clock_ms = Some(30_000)`,
-/// `SingleUse`. `fs_read` carries the worker binary, the interpreter, and
-/// the derived stdlib path from [`interpreter_extra_fs_read`] (`<prefix>/lib`,
+/// `SingleUse`. `fs_read` carries the worker binary, the interpreter, the
+/// derived stdlib path from [`interpreter_extra_fs_read`] (`<prefix>/lib`,
 /// or the framework version root for macOS framework pythons) — redundant
 /// under bwrap's always-bound `/usr`, required for non-`/usr` prefixes
-/// under Seatbelt/Landlock.
-pub fn python_exec_entry(binary: PathBuf, python: PathBuf) -> ToolEntry {
+/// under Seatbelt/Landlock — and `interpreter_lib_dirs`, the interpreter's
+/// out-of-prefix shared-library dirs (issue #284; see
+/// [`interpreter_extra_lib_dirs`]). Pass an empty vec when the caller hasn't
+/// resolved the dep graph (the manual `*_EXTRA_FS_READ` hatch stays the backstop).
+pub fn python_exec_entry(
+    binary: PathBuf,
+    python: PathBuf,
+    interpreter_lib_dirs: Vec<PathBuf>,
+) -> ToolEntry {
     let mut fs_read = vec![binary.clone(), python.clone()];
     if let Some(extra) = interpreter_extra_fs_read(&python) {
         fs_read.push(extra);
     }
+    // Bind the interpreter's out-of-prefix shared-lib dirs (issue #284) so a
+    // pyenv/Homebrew-linked interpreter can dyld-load in the jail. Empty for a
+    // self-contained interpreter (or when the dep tool is unavailable).
+    fs_read.extend(interpreter_lib_dirs);
     let policy = SandboxPolicy {
         fs_read,
         fs_write: vec![],
@@ -174,6 +185,39 @@ fn interpreter_extra_fs_read(python: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Out-of-prefix shared-library dirs the resolved interpreter needs to
+/// dyld-load inside the jail (issue #284).
+///
+/// `python` must be the **canonical** interpreter path. The dep-graph walk
+/// treats [`interpreter_extra_fs_read`] — the prefix `lib` / framework version
+/// root this worker already binds — as the in-jail-readable region; anything
+/// the interpreter links *outside* it (e.g. a pyenv CPython's Homebrew
+/// `libintl`) is returned for an extra read-only bind. When the interpreter has
+/// no `bin/` parent (so no derived bound region), the binary path itself is used
+/// as the prefix — nothing lies under a file path, so every non-system dep is
+/// bound (safe over-approximation). Empty when the interpreter is self-contained
+/// or the dep tool is unavailable (fail-safe — the manual `*_EXTRA_FS_READ`
+/// hatch stays the backstop).
+///
+/// `pub` so the e2e suite computes the identical dirs the manifest does (the
+/// seed logic lives in [`crate::workers::interpreter_deps`], so the two can't
+/// drift). Pure: `exists`, `canonicalize`, and `resolve_deps` are injected.
+pub fn interpreter_extra_lib_dirs(
+    python: &Path,
+    exists: &dyn Fn(&Path) -> bool,
+    canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,
+    resolve_deps: &dyn Fn(&Path) -> Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let prefix = interpreter_extra_fs_read(python).unwrap_or_else(|| python.to_path_buf());
+    crate::workers::interpreter_deps::interpreter_lib_dirs_for_binary(
+        python,
+        &prefix,
+        exists,
+        canonicalize,
+        resolve_deps,
+    )
+}
+
 /// python-exec's manifest. No `allowlist_tool` (there is no argv-shaped
 /// operational allowlist; the gate is `KASTELLAN_PYTHON_EXEC_ENABLE`).
 pub struct PythonExecManifest;
@@ -227,261 +271,18 @@ impl WorkerManifest for PythonExecManifest {
                 };
             }
         };
-        Resolution::Register(python_exec_entry(binary, python))
+        // Resolve the interpreter's out-of-prefix shared-lib dirs (issue #284)
+        // via the real linker-introspection tool. Fail-safe: an unavailable
+        // tool yields no extra binds (the manual EXTRA_FS_READ hatch backstops).
+        let interpreter_lib_dirs = interpreter_extra_lib_dirs(
+            &python,
+            &|p| (ctx.exists)(p),
+            &|p| (ctx.canonicalize)(p),
+            &crate::workers::interpreter_deps::resolve_deps_via_tool,
+        );
+        Resolution::Register(python_exec_entry(binary, python, interpreter_lib_dirs))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ctx<'a>(
-        get_env: &'a dyn Fn(&str) -> Option<String>,
-        exists: &'a dyn Fn(&Path) -> bool,
-    ) -> ResolveCtx<'a> {
-        ResolveCtx {
-            get_env,
-            exists,
-            is_dir: &|_p| false,
-            exe_dir: None,
-            canonicalize: &|_p| None,
-            allowlist: &|_t| Vec::new(),
-        }
-    }
-
-    #[test]
-    fn resolve_disabled_without_enable_gate() {
-        let get_env = |k: &str| (k == BIN_ENV).then(|| "/opt/python-exec".to_string());
-        let exists = |_p: &Path| true;
-        let c = ctx(&get_env, &exists);
-        match PythonExecManifest.resolve(&c) {
-            Resolution::Disabled { detail } => {
-                assert!(detail.contains(ENABLE_ENV), "detail: {detail}");
-            }
-            other => panic!("expected Disabled, got {}", outcome_label(&other)),
-        }
-    }
-
-    #[test]
-    fn resolve_registers_with_strictest_policy() {
-        let get_env = |k: &str| match k {
-            "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
-            "KASTELLAN_PYTHON_EXEC_BIN" => Some("/opt/python-exec".to_string()),
-            _ => None,
-        };
-        // Only the override binary + the first interpreter candidate exist
-        // (the first candidate differs per OS — see PYTHON_CANDIDATES).
-        let first = Path::new(PYTHON_CANDIDATES[0]);
-        let exists = |p: &Path| p == Path::new("/opt/python-exec") || p == first;
-        let c = ctx(&get_env, &exists);
-
-        match PythonExecManifest.resolve(&c) {
-            Resolution::Register(entry) => {
-                assert_eq!(entry.binary, PathBuf::from("/opt/python-exec"));
-                assert!(matches!(entry.policy.net, Net::Deny));
-                assert_eq!(entry.policy.profile, Profile::WorkerStrict);
-                assert_eq!(entry.policy.cpu_ms, 10_000);
-                assert_eq!(entry.policy.mem_mb, 512);
-                assert_eq!(entry.wall_clock_ms, Some(30_000));
-                // No writable host path, ever.
-                assert!(entry.policy.fs_write.is_empty());
-                // fs_read: worker + interpreter + derived stdlib path
-                // (value pins for the derivation live in the dedicated
-                // interpreter_extra_fs_read tests below).
-                assert!(entry.policy.fs_read.contains(&first.to_path_buf()));
-                assert!(entry
-                    .policy
-                    .fs_read
-                    .contains(&interpreter_extra_fs_read(first).expect("candidate has bin parent")));
-                // Env: interpreter for the worker's fail-closed startup +
-                // the explicit Landlock /tmp grant (jail tmpfs scratch).
-                assert!(entry
-                    .policy
-                    .env
-                    .contains(&(PYTHON_ENV.to_string(), PYTHON_CANDIDATES[0].to_string())));
-                assert!(entry
-                    .policy
-                    .env
-                    .contains(&(ENV_LANDLOCK_RW.to_string(), r#"["/tmp"]"#.to_string())));
-            }
-            other => panic!("expected Register, got {}", outcome_label(&other)),
-        }
-    }
-
-    #[test]
-    fn python_override_set_but_invalid_fails_closed() {
-        let get_env = |k: &str| match k {
-            "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
-            "KASTELLAN_PYTHON_EXEC_PYTHON" => Some("/opt/typo/python3".to_string()),
-            "KASTELLAN_PYTHON_EXEC_BIN" => Some("/opt/python-exec".to_string()),
-            _ => None,
-        };
-        // The candidates DO exist — but the explicit override must not be
-        // silently substituted.
-        let exists = |p: &Path| p != Path::new("/opt/typo/python3");
-        let c = ctx(&get_env, &exists);
-        match PythonExecManifest.resolve(&c) {
-            Resolution::Misconfigured { detail } => {
-                assert!(detail.contains("/opt/typo/python3"), "detail: {detail}");
-                assert!(detail.contains("fail-closed"), "detail: {detail}");
-            }
-            other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
-        }
-    }
-
-    #[test]
-    fn no_interpreter_anywhere_is_misconfigured() {
-        let get_env = |k: &str| match k {
-            "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
-            "KASTELLAN_PYTHON_EXEC_BIN" => Some("/opt/python-exec".to_string()),
-            _ => None,
-        };
-        let exists = |p: &Path| p == Path::new("/opt/python-exec");
-        let c = ctx(&get_env, &exists);
-        match PythonExecManifest.resolve(&c) {
-            Resolution::Misconfigured { detail } => {
-                assert!(detail.contains("no python3 interpreter"), "detail: {detail}");
-            }
-            other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
-        }
-    }
-
-    #[test]
-    fn candidate_cascade_skips_missing_entries() {
-        let get_env = |k: &str| match k {
-            "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
-            _ => None,
-        };
-        // Host where only /usr/local/bin/python3 exists — the second
-        // candidate on BOTH platforms, so this pins the skip-and-continue
-        // behaviour portably.
-        let exists = |p: &Path| p == Path::new("/usr/local/bin/python3");
-        let python = resolve_env(get_env, |p: &Path| exists(p)).expect("resolves");
-        assert_eq!(python, PathBuf::from("/usr/local/bin/python3"));
-        // And the derived stdlib prefix follows the prefix, not /usr.
-        assert_eq!(
-            interpreter_extra_fs_read(&python),
-            Some(PathBuf::from("/usr/local/lib"))
-        );
-    }
-
-    /// `/usr/bin/python3` on macOS is ALWAYS Apple's xcrun shim (SIP owns
-    /// `/usr/bin`), which cannot run inside the jail — it must never be a
-    /// candidate there. On Linux it is the primary distro interpreter.
-    #[test]
-    fn usr_bin_python_candidacy_is_platform_correct() {
-        #[cfg(target_os = "macos")]
-        assert!(!PYTHON_CANDIDATES.contains(&"/usr/bin/python3"));
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(PYTHON_CANDIDATES[0], "/usr/bin/python3");
-    }
-
-    #[test]
-    fn interpreter_symlink_is_canonicalized_into_policy_and_env() {
-        // /usr/bin/python3 → /etc/alternatives/python3 → /usr/bin/python3.11
-        // (update-alternatives layout). The jail binds /usr but NOT
-        // /etc/alternatives, so the policy + injected env must carry the
-        // canonical target, not the symlink. Exercised via the explicit
-        // override so the test is independent of the per-OS candidate list
-        // (canonicalization applies identically to both resolve paths).
-        let get_env = |k: &str| match k {
-            "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
-            "KASTELLAN_PYTHON_EXEC_PYTHON" => Some("/usr/bin/python3".to_string()),
-            "KASTELLAN_PYTHON_EXEC_BIN" => Some("/opt/python-exec".to_string()),
-            _ => None,
-        };
-        let exists = |p: &Path| {
-            p == Path::new("/opt/python-exec") || p == Path::new("/usr/bin/python3")
-        };
-        let canonicalize = |p: &Path| {
-            (p == Path::new("/usr/bin/python3")).then(|| PathBuf::from("/usr/bin/python3.11"))
-        };
-        let c = ResolveCtx {
-            get_env: &get_env,
-            exists: &exists,
-            is_dir: &|_p| false,
-            exe_dir: None,
-            canonicalize: &canonicalize,
-            allowlist: &|_t| Vec::new(),
-        };
-        match PythonExecManifest.resolve(&c) {
-            Resolution::Register(entry) => {
-                assert!(entry.policy.fs_read.contains(&PathBuf::from("/usr/bin/python3.11")));
-                assert!(
-                    !entry.policy.fs_read.contains(&PathBuf::from("/usr/bin/python3")),
-                    "the symlink path must be replaced by its canonical target"
-                );
-                assert!(entry
-                    .policy
-                    .env
-                    .contains(&(PYTHON_ENV.to_string(), "/usr/bin/python3.11".to_string())));
-            }
-            other => panic!("expected Register, got {}", outcome_label(&other)),
-        }
-    }
-
-    #[test]
-    fn missing_worker_binary_is_misconfigured() {
-        let get_env = |k: &str| match k {
-            "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
-            _ => None,
-        };
-        let exists = |p: &Path| p == Path::new(PYTHON_CANDIDATES[0]);
-        let c = ctx(&get_env, &exists);
-        match PythonExecManifest.resolve(&c) {
-            Resolution::Misconfigured { detail } => {
-                assert!(detail.contains(DEFAULT_BIN_NAME), "detail: {detail}");
-            }
-            other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
-        }
-    }
-
-    #[test]
-    fn interpreter_extra_fs_read_posix_prefix_grants_lib() {
-        assert_eq!(
-            interpreter_extra_fs_read(Path::new("/usr/bin/python3")),
-            Some(PathBuf::from("/usr/lib"))
-        );
-        assert_eq!(interpreter_extra_fs_read(Path::new("/snap/python3")), None);
-    }
-
-    /// Framework pythons (what every macOS candidate canonicalizes into)
-    /// keep the interpreter dylib at `<version-root>/Python` — a sibling
-    /// of `bin/` and `lib/` — so the grant must be the version root.
-    #[test]
-    fn interpreter_extra_fs_read_framework_grants_version_root() {
-        // python.org installer layout.
-        assert_eq!(
-            interpreter_extra_fs_read(Path::new(
-                "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13"
-            )),
-            Some(PathBuf::from("/Library/Frameworks/Python.framework/Versions/3.13"))
-        );
-        // Apple-Silicon Homebrew Cellar layout.
-        assert_eq!(
-            interpreter_extra_fs_read(Path::new(
-                "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
-            )),
-            Some(PathBuf::from(
-                "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14"
-            ))
-        );
-        // Command Line Tools layout (note: Python3.framework).
-        assert_eq!(
-            interpreter_extra_fs_read(Path::new(
-                "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9"
-            )),
-            Some(PathBuf::from(
-                "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9"
-            ))
-        );
-    }
-
-    fn outcome_label(r: &Resolution) -> &'static str {
-        match r {
-            Resolution::Register(_) => "Register",
-            Resolution::Disabled { .. } => "Disabled",
-            Resolution::Misconfigured { .. } => "Misconfigured",
-        }
-    }
-}
+mod tests;

@@ -90,6 +90,22 @@ pub struct GlinerRelexEnv {
     /// Setting `IMAGE=` alone (without `USE_CONTAINER=1`) does NOT
     /// switch the worker to container mode.
     pub container_image: Option<String>,
+    /// Host-mode only: the real interpreter prefix the venv's `bin/python3`
+    /// symlinks to, when it lives **outside** `venv_dir` (a uv venv symlinks
+    /// to a base CPython whose `libpython` + stdlib are external). Mounted
+    /// read-only so the interpreter starts inside the jail. `None` for a
+    /// self-contained venv (or container mode). Populated by the manifest via
+    /// [`resolve_host_interpreter_binds`] (NOT by [`resolve_env`], which has no
+    /// other `canonicalize` need) — same external-interpreter binding the
+    /// browser-driver worker does.
+    pub interpreter_root: Option<PathBuf>,
+    /// Host-mode only: read-only directories of the interpreter's out-of-prefix
+    /// shared-library dependencies (e.g. a Homebrew `libintl` a pyenv/Homebrew
+    /// CPython links). Bound so the interpreter can dyld-load inside the jail —
+    /// without them it SIGABRTs before the worker runs (issue #284). Empty when
+    /// the interpreter is self-contained / all-system, the dep tool is
+    /// unavailable, or in container mode.
+    pub interpreter_lib_dirs: Vec<PathBuf>,
 }
 
 /// Reason the daemon's [`GlinerRelexEnv`] resolver returned no entry.
@@ -246,5 +262,53 @@ where
         device,
         use_container_backend,
         container_image,
+        // Interpreter binds are resolved by the manifest (host mode only) —
+        // they need `canonicalize` + the otool/ldd dep tool, which this pure
+        // env resolver doesn't take. Default to "nothing extra" here.
+        interpreter_root: None,
+        interpreter_lib_dirs: Vec::new(),
     })
+}
+
+/// Resolve the host-mode interpreter binds for the worker venv (issue #284).
+///
+/// `uv` creates the worker venv by symlinking `bin/python3` to a base
+/// interpreter; that interpreter's `libpython`, stdlib, and any out-of-prefix
+/// shared libraries (e.g. a Homebrew `libintl`) live **outside** the venv, so
+/// binding only `.venv` leaves CPython unable to dyld-load inside the jail.
+/// Returns `(interpreter_root, interpreter_lib_dirs)` for
+/// [`GlinerRelexEnv`]:
+///
+/// * `interpreter_root` — the external interpreter prefix to bind read-only;
+///   `None` for a self-contained venv. (On Linux the base python lives under
+///   `/usr`, which bwrap already binds — it is still surfaced here; binding it
+///   again is a harmless redundancy, exactly as the browser-driver worker does.)
+/// * `interpreter_lib_dirs` — out-of-prefix shared-lib dirs the interpreter
+///   links; empty when self-contained / all-system, or the dep tool is
+///   unavailable (fail-safe — the manual `*_EXTRA_FS_READ` hatch backstops).
+///
+/// Delegates to the shared [`crate::workers::interpreter_deps`] helpers so the
+/// "where's the real interpreter + what does it link" logic is byte-identical
+/// to the browser-driver worker. Pure: `exists`, `canonicalize`, and
+/// `resolve_deps` are injected. Call for host mode only — container-mode workers
+/// bake the interpreter into the image.
+pub fn resolve_host_interpreter_binds(
+    venv_dir: &Path,
+    exists: impl Fn(&Path) -> bool,
+    canonicalize: impl Fn(&Path) -> Option<PathBuf>,
+    resolve_deps: impl Fn(&Path) -> Vec<PathBuf>,
+) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let interpreter_root = crate::workers::interpreter_deps::resolve_interpreter_root(
+        venv_dir,
+        &exists,
+        &canonicalize,
+    );
+    let interpreter_lib_dirs = crate::workers::interpreter_deps::interpreter_lib_dirs(
+        venv_dir,
+        interpreter_root.as_deref(),
+        &exists,
+        &canonicalize,
+        &resolve_deps,
+    );
+    (interpreter_root, interpreter_lib_dirs)
 }
