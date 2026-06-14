@@ -203,13 +203,20 @@ async fn render_in_jail_forced(
     env: &TestEnv,
     proxy_bin: &Path,
     scratch_root: &Path,
-    allowlist: &[String],
+    worker_allowlist: &[String],
+    sidecar_allowlist: &[String],
     url: &str,
 ) -> (
     Result<serde_json::Value, kastellan_core::tool_host::ToolHostError>,
     Vec<CapturedDecision>,
 ) {
-    let entry = browser_driver_entry(&env.browser, allowlist);
+    // The worker's in-process Playwright interception enforces `worker_allowlist`
+    // (defense in depth); the egress sidecar enforces `sidecar_allowlist` at the
+    // netns boundary. Passing DIFFERENT lists lets a test isolate the sidecar
+    // boundary: allow in-process (so Chromium actually makes the request) while
+    // the sidecar blocks it — proving the OS boundary, not just the app-layer
+    // check. Production passes the same list to both.
+    let entry = browser_driver_entry(&env.browser, worker_allowlist);
     let backend = backend();
     let program = env.browser.script_path.to_string_lossy().into_owned();
     let spec = WorkerSpec {
@@ -222,7 +229,7 @@ async fn render_in_jail_forced(
         backend: backend.as_ref(),
         proxy_bin,
         spec: &spec,
-        allowlist,
+        allowlist: sidecar_allowlist,
         worker_name: "browser-driver",
         secret_fingerprints: &[],
         cert_pins_json: None,
@@ -383,8 +390,10 @@ fn forced_render_of_loopback_page_through_sidecar() {
     let allowlist = vec![authority.clone()];
     dispatch_runtime().block_on(async {
         let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        // Both layers allow the target.
         let (_render, decisions) =
-            render_in_jail_forced(&pool, &env, &proxy, &scratch_root, &allowlist, &url).await;
+            render_in_jail_forced(&pool, &env, &proxy, &scratch_root, &allowlist, &allowlist, &url)
+                .await;
         // The render result is not the signal (transparent tunnel can't complete
         // TLS to a hermetic origin). The sidecar decision is: it must have
         // ALLOWED the CONNECT to the allowlisted target — proving egress flowed
@@ -400,10 +409,16 @@ fn forced_render_of_loopback_page_through_sidecar() {
     let _ = std::fs::remove_dir_all(&scratch_root);
 }
 
-/// Fail-closed at the sidecar: under force-routing, a navigation host NOT on the
-/// allowlist is rejected at the egress boundary, so the render fails and the
-/// sidecar emits a BLOCKED decision — proving the OS boundary (not just
-/// in-process interception) blocks it.
+/// Fail-closed AT THE SIDECAR (the #280 "not in-process-only" property): the
+/// egress sidecar must block an off-allowlist target independently of the
+/// worker's in-process interception. To isolate the OS boundary we deliberately
+/// DIVERGE the two allowlists — the worker's in-process check ALLOWS the target
+/// (so Chromium actually makes the request, rather than aborting it app-side),
+/// while the sidecar's allowlist does NOT include it. The sidecar must then
+/// block at the netns boundary: the render fails and a BLOCKED decision is
+/// emitted, with NO allowed decision for the target. (In production both lists
+/// are identical; this divergence exists only to prove the sidecar is a real,
+/// independent boundary.)
 #[test]
 #[ignore = "requires staged Chromium + egress-proxy binary"]
 fn forced_off_allowlist_fails_closed_at_sidecar() {
@@ -418,12 +433,22 @@ fn forced_off_allowlist_fails_closed_at_sidecar() {
     let authority = spawn_loopback_page();
     let (host, port) = split_authority(&authority);
     let url = format!("https://{authority}/");
-    // Allowlist a DIFFERENT host:port — the navigation host is not permitted.
-    let allowlist = vec!["someother.test:443".to_string()];
+    // In-process check ALLOWS the target (so Chromium issues the CONNECT)...
+    let worker_allowlist = vec![authority.clone()];
+    // ...but the SIDECAR allowlist does not — it must block at the netns boundary.
+    let sidecar_allowlist = vec!["someother.test:443".to_string()];
     dispatch_runtime().block_on(async {
         let pool = probe_and_pool(&env.cluster.conn_spec).await;
-        let (render, decisions) =
-            render_in_jail_forced(&pool, &env, &proxy, &scratch_root, &allowlist, &url).await;
+        let (render, decisions) = render_in_jail_forced(
+            &pool,
+            &env,
+            &proxy,
+            &scratch_root,
+            &worker_allowlist,
+            &sidecar_allowlist,
+            &url,
+        )
+        .await;
         assert!(
             render.is_err(),
             "off-allowlist nav must fail closed (render error), got Ok: {render:?}"
