@@ -357,6 +357,8 @@ fn browser_client_profile_emits_browser_clusters() {
         "(allow iokit-get-properties)",
         "(allow mach-lookup)",
         "(allow mach-register)",
+        "(allow sysctl-write)",
+        "(allow system-socket)",
     ] {
         assert!(p.contains(rule), "browser profile missing {rule:?}\n{p}");
     }
@@ -382,6 +384,8 @@ fn non_browser_profiles_do_not_emit_browser_clusters() {
             "(allow iokit-open)",
             "(allow mach-lookup)",
             "(allow mach-register)",
+            "(allow sysctl-write)",
+            "(allow system-socket)",
         ] {
             assert!(
                 !p.contains(rule),

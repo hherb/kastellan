@@ -375,6 +375,15 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
         out.push_str("(allow iokit-get-properties)\n");
         out.push_str("(allow mach-lookup)\n"); // Mach bootstrap — re-grants issue #1's deny
         out.push_str("(allow mach-register)\n");
+        // The spike's proven-working render profile also carried these two
+        // (`scripts/spikes/browser-driver/seatbelt-run.sh`, the `chromium`
+        // case): sysctl-write (Chromium tweaks a few sysctls at startup) and
+        // system-socket (PF_SYSTEM kernel-control socket for network-config
+        // detection). They were not part of the shm/iokit/mach bisect but were
+        // present when render succeeded, so we include them to match the
+        // verified set. Narrowing both is a Phase-2 hardening follow-up.
+        out.push_str("(allow sysctl-write)\n");
+        out.push_str("(allow system-socket)\n");
     }
 
     match (&policy.net, &policy.proxy_uds) {

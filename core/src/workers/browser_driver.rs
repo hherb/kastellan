@@ -24,10 +24,24 @@ const SHIM_NAME: &str = "kastellan-worker-browser-driver";
 /// Resolved config for the browser-driver worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserDriverEnv {
-    /// Absolute path to the uv console-script shim the dispatcher spawns.
+    /// Absolute path to the console-script shim the dispatcher spawns.
     pub script_path: PathBuf,
     /// Worker venv root, mounted read-only into the jail.
     pub venv_dir: PathBuf,
+    /// Real interpreter prefix root (e.g. `~/.pyenv/versions/3.12.3` or
+    /// `/usr`), when the venv's `python3` symlinks to a CPython whose
+    /// `libpython`/stdlib live **outside** `venv_dir`. Mounted read-only so the
+    /// interpreter starts inside the jail (the spike's `py_root` finding §3.1;
+    /// mirrors `python-exec`'s interpreter binding). `None` for a fully
+    /// self-contained venv (nothing extra to bind).
+    pub interpreter_root: Option<PathBuf>,
+    /// Operator-supplied extra read-only paths
+    /// (`KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ`, a JSON array of absolute
+    /// paths). An escape hatch for host-specific dependencies the resolver
+    /// can't infer — e.g. a non-self-contained interpreter that links a system
+    /// library outside its prefix (a pyenv CPython built against Homebrew
+    /// `/opt/homebrew/...`), or extra font dirs. Empty by default.
+    pub extra_fs_read: Vec<PathBuf>,
 }
 
 /// Reason the resolver returned no entry (mirrors GLiNER's skip taxonomy).
@@ -42,20 +56,25 @@ pub enum ResolveSkipReason {
     ScriptShimMissing { path: PathBuf },
 }
 
-/// Pure resolver: ENABLE gate + venv-anchor cascade + shim existence.
+/// Pure resolver: ENABLE gate + venv-anchor cascade + shim existence +
+/// interpreter-root resolution.
 ///
 /// `is_dir` is unused today (browser-driver has no weights dir like GLiNER) but
 /// kept in the signature so the manifest can thread the same `ResolveCtx`
-/// probes uniformly.
-pub fn resolve_env<E, D, X>(
+/// probes uniformly. `canonicalize` resolves the venv's `python3` symlink to
+/// the real interpreter so its prefix can be bound into the jail (see
+/// [`BrowserDriverEnv::interpreter_root`]).
+pub fn resolve_env<E, D, X, C>(
     env_lookup: E,
     _is_dir: D,
     exists: X,
+    canonicalize: C,
 ) -> Result<BrowserDriverEnv, ResolveSkipReason>
 where
     E: Fn(&str) -> Option<String>,
     D: Fn(&Path) -> bool,
     X: Fn(&Path) -> bool,
+    C: Fn(&Path) -> Option<PathBuf>,
 {
     // `trim` so a stray newline from `echo "1" > envfile` doesn't fail the
     // opt-in silently. Strict on the value: only `"1"` counts.
@@ -81,10 +100,60 @@ where
     if !exists(&script_path) {
         return Err(ResolveSkipReason::ScriptShimMissing { path: script_path });
     }
+    let interpreter_root = resolve_interpreter_root(&venv_dir, &exists, &canonicalize);
+    let extra_fs_read = env_lookup("KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ")
+        .as_deref()
+        .map(parse_extra_fs_read)
+        .unwrap_or_default();
     Ok(BrowserDriverEnv {
         script_path,
         venv_dir,
+        interpreter_root,
+        extra_fs_read,
     })
+}
+
+/// Parse the `KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ` JSON array into absolute
+/// paths. Lenient: a blank value or malformed JSON yields no extra paths
+/// (the worker simply gets fewer reads — fail-closed, never a parse panic);
+/// relative entries are dropped (the policy requires absolute paths).
+fn parse_extra_fs_read(raw: &str) -> Vec<PathBuf> {
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<String>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .collect()
+}
+
+/// Resolve the real interpreter prefix to bind into the jail.
+///
+/// The venv's `bin/python3` (or `bin/python`) is canonicalized to the real
+/// CPython, whose **prefix** (`<bin>/..`) is returned — that root holds the
+/// interpreter binary + `libpython` + the stdlib. `None` when the interpreter
+/// can't be found/canonicalized or already lives under the venv (self-contained
+/// — nothing extra to bind). Pure: all I/O arrives via the closures.
+fn resolve_interpreter_root(
+    venv_dir: &Path,
+    exists: &dyn Fn(&Path) -> bool,
+    canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    let bin = venv_dir.join("bin");
+    let candidate = ["python3", "python"]
+        .iter()
+        .map(|n| bin.join(n))
+        .find(|p| exists(p))?;
+    let real = canonicalize(&candidate)?;
+    let prefix = real.parent()?.parent()?; // <prefix>/bin/python → <prefix>
+    // Self-contained: the real interpreter is already under venv_dir, so the
+    // venv fs_read covers it — nothing extra to bind.
+    if prefix.starts_with(venv_dir) {
+        return None;
+    }
+    Some(prefix.to_path_buf())
 }
 
 /// Build the [`ToolEntry`] for the browser-driver worker (Phase 2).
@@ -118,6 +187,15 @@ pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> Too
         PathBuf::from("/etc/hosts"),
         PathBuf::from("/etc/nsswitch.conf"),
     ];
+    // Bind the real interpreter prefix when the venv's python lives outside
+    // venv_dir (pyenv/uv venvs) so CPython can start inside the jail.
+    if let Some(root) = &env.interpreter_root {
+        fs_read.push(root.clone());
+    }
+    // Operator-supplied host-specific extra reads (interpreter system-lib deps,
+    // fonts, …) — see BrowserDriverEnv::extra_fs_read.
+    fs_read.extend(env.extra_fs_read.iter().cloned());
+
     // macOS: /System/Library/Fonts is covered by the base profile's
     // /System/Library grant, but user/third-party fonts under /Library/Fonts
     // are not — add them so Chromium has a font to fall back on.
@@ -188,6 +266,7 @@ impl WorkerManifest for BrowserDriverManifest {
             |k| (ctx.get_env)(k),
             |p| (ctx.is_dir)(p),
             |p| (ctx.exists)(p),
+            |p| (ctx.canonicalize)(p),
         ) {
             Ok(env) => {
                 let allowlist = (ctx.allowlist)(TOOL_NAME);
@@ -212,13 +291,18 @@ impl WorkerManifest for BrowserDriverManifest {
 mod tests {
     use super::*;
 
+    /// No interpreter canonicalization in most tests — a self-contained venv.
+    fn no_canon(_p: &Path) -> Option<PathBuf> {
+        None
+    }
+
     #[test]
     fn disabled_when_enable_not_set() {
         let env = |_k: &str| None;
         let is_dir = |_p: &Path| true;
         let exists = |_p: &Path| true;
         assert!(matches!(
-            resolve_env(env, is_dir, exists),
+            resolve_env(env, is_dir, exists, no_canon),
             Err(ResolveSkipReason::Disabled)
         ));
     }
@@ -229,7 +313,7 @@ mod tests {
         let is_dir = |_p: &Path| true;
         let exists = |_p: &Path| true;
         assert!(matches!(
-            resolve_env(env, is_dir, exists),
+            resolve_env(env, is_dir, exists, no_canon),
             Err(ResolveSkipReason::VenvDirUnresolvable)
         ));
     }
@@ -243,7 +327,7 @@ mod tests {
         };
         let is_dir = |_p: &Path| true;
         let exists = |_p: &Path| false; // shim absent
-        match resolve_env(env, is_dir, exists) {
+        match resolve_env(env, is_dir, exists, no_canon) {
             Err(ResolveSkipReason::ScriptShimMissing { path }) => {
                 assert!(path.ends_with(SHIM_NAME), "path: {}", path.display());
             }
@@ -260,9 +344,92 @@ mod tests {
         };
         let is_dir = |_p: &Path| true;
         let exists = |_p: &Path| true;
-        let out = resolve_env(env, is_dir, exists).expect("resolves");
+        let out = resolve_env(env, is_dir, exists, no_canon).expect("resolves");
         assert_eq!(out.venv_dir, PathBuf::from("/v"));
         assert!(out.script_path.ends_with(SHIM_NAME));
+        // Self-contained (canonicalize → None) ⇒ no extra interpreter bind.
+        assert_eq!(out.interpreter_root, None);
+    }
+
+    #[test]
+    fn resolves_interpreter_root_for_external_venv() {
+        let env = |k: &str| match k {
+            "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_VENV_DIR" => Some("/v".to_string()),
+            _ => None,
+        };
+        let is_dir = |_p: &Path| true;
+        let exists = |_p: &Path| true;
+        // The venv's python3 symlinks to an EXTERNAL interpreter (pyenv-style):
+        // /home/u/.pyenv/versions/3.12.3/bin/python3.12 → prefix
+        // /home/u/.pyenv/versions/3.12.3 must be bound.
+        let canon = |p: &Path| {
+            if p == Path::new("/v/bin/python3") {
+                Some(PathBuf::from(
+                    "/home/u/.pyenv/versions/3.12.3/bin/python3.12",
+                ))
+            } else {
+                None
+            }
+        };
+        let out = resolve_env(env, is_dir, exists, canon).expect("resolves");
+        assert_eq!(
+            out.interpreter_root,
+            Some(PathBuf::from("/home/u/.pyenv/versions/3.12.3"))
+        );
+        // And the entry binds that root read-only.
+        let entry = browser_driver_entry(&out, &[]);
+        assert!(entry
+            .policy
+            .fs_read
+            .contains(&PathBuf::from("/home/u/.pyenv/versions/3.12.3")));
+    }
+
+    #[test]
+    fn extra_fs_read_env_is_parsed_and_bound() {
+        let env = |k: &str| match k {
+            "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_VENV_DIR" => Some("/v".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ" => {
+                Some(r#"["/opt/homebrew", "relative/dropped"]"#.to_string())
+            }
+            _ => None,
+        };
+        let out = resolve_env(env, |_p| true, |_p| true, no_canon).expect("resolves");
+        // Absolute entry kept; relative one dropped (policy needs absolute paths).
+        assert_eq!(out.extra_fs_read, vec![PathBuf::from("/opt/homebrew")]);
+        let entry = browser_driver_entry(&out, &[]);
+        assert!(entry.policy.fs_read.contains(&PathBuf::from("/opt/homebrew")));
+    }
+
+    #[test]
+    fn malformed_extra_fs_read_yields_no_extra_paths() {
+        let env = |k: &str| match k {
+            "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_VENV_DIR" => Some("/v".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ" => Some("not json".to_string()),
+            _ => None,
+        };
+        let out = resolve_env(env, |_p| true, |_p| true, no_canon).expect("resolves");
+        assert!(out.extra_fs_read.is_empty());
+    }
+
+    #[test]
+    fn interpreter_under_venv_needs_no_extra_bind() {
+        let env = |k: &str| match k {
+            "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_VENV_DIR" => Some("/v".to_string()),
+            _ => None,
+        };
+        let is_dir = |_p: &Path| true;
+        let exists = |_p: &Path| true;
+        // Self-contained venv: python3 resolves to within /v.
+        let canon = |_p: &Path| Some(PathBuf::from("/v/bin/python3.12"));
+        let out = resolve_env(env, is_dir, exists, canon).expect("resolves");
+        assert_eq!(
+            out.interpreter_root, None,
+            "interpreter already under venv_dir ⇒ no extra bind"
+        );
     }
 
     fn ctx<'a>(
@@ -285,6 +452,8 @@ mod tests {
         let env = BrowserDriverEnv {
             script_path: PathBuf::from("/v/bin/kastellan-worker-browser-driver"),
             venv_dir: PathBuf::from("/v"),
+            interpreter_root: None,
+            extra_fs_read: vec![],
         };
         let entry = browser_driver_entry(&env, &["example.com:443".to_string()]);
         assert_eq!(entry.binary, PathBuf::from("/v/bin/kastellan-worker-browser-driver"));
