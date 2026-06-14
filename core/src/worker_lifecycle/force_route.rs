@@ -267,6 +267,7 @@ pub(crate) fn spawn_worker_maybe_forced(
                 worker_name,
                 secret_fingerprints: &[], // dispatch-time provisioning deferred (#268)
                 cert_pins_json: None,     // operator frontier-pin wiring deferred (slice #4 follow-up)
+                disable_mitm: false,      // Task 3 will set true for the browser-driver
             };
             spawn_forced_net_worker(&params, &cfg.scratch_root, (cfg.make_sink)())
         }
