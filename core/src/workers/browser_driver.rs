@@ -227,6 +227,13 @@ pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> Too
             ),
             // Chromium writes its --user-data-dir under $TMPDIR.
             ("TMPDIR".to_string(), "/tmp".to_string()),
+            // Playwright's bundled Node driver calls uv_os_homedir() at startup;
+            // with bwrap's --clearenv stripping HOME and no /etc/passwd bound in
+            // the jail, that returns ENOENT and the driver crashes ("Connection
+            // closed while reading from the driver"). Point HOME at the writable
+            // tmpfs so the driver starts. (macOS resolves the real home via
+            // directory services, so this is belt-and-braces there.)
+            ("HOME".to_string(), "/tmp".to_string()),
             // Grant the jail's /tmp through the worker-side Landlock layer
             // (Linux; honoured by derive_lockdown_env, no-op on macOS). MUST
             // stay out of fs_write on Linux: a /tmp entry there would bind the
@@ -490,6 +497,9 @@ mod tests {
             Some("/v/browsers")
         );
         assert_eq!(env_get("TMPDIR").as_deref(), Some("/tmp"));
+        // HOME must be set so Playwright's Node driver's uv_os_homedir() works
+        // under bwrap's --clearenv (no /etc/passwd in the jail).
+        assert_eq!(env_get("HOME").as_deref(), Some("/tmp"));
         assert_eq!(
             env_get(crate::tool_host::ENV_LANDLOCK_RW).as_deref(),
             Some(r#"["/tmp"]"#)
