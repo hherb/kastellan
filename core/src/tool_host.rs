@@ -476,8 +476,19 @@ where
     B: SandboxBackend + ?Sized,
 {
     let derived = derive_lockdown_env(spec.policy);
-    let child = backend.spawn_under_policy(&derived, spec.program, spec.args)?;
+    let mut child = backend.spawn_under_policy(&derived, spec.program, spec.args)?;
     let pid = child.id();
+    // Drain the worker's piped stderr in a detached background thread. The
+    // sandbox backends pipe stderr (`Stdio::piped()`), but the JSON-RPC client
+    // only reads stdout — so a worker that writes more than the ~64 KiB pipe
+    // buffer to stderr would **block on write and deadlock** (then get
+    // wall-clock-killed). Most workers are quiet; a headless Chromium
+    // (browser-driver) is not. Reading to EOF keeps the pipe empty; the thread
+    // self-terminates when the worker exits (stderr closes). Lines surface at
+    // debug level so they're available when troubleshooting without being noisy.
+    if let Some(stderr) = child.stderr.take() {
+        drain_worker_stderr(pid, stderr);
+    }
     let client = Client::from_child(child)?;
     let watchdog = spec.wall_clock_ms.map(|ms| watchdog::spawn_watchdog(pid, ms));
     Ok(SupervisedWorker {
@@ -485,6 +496,24 @@ where
         _watchdog: watchdog,
         egress: None,
     })
+}
+
+/// Spawn a detached thread that reads `stderr` to EOF, emitting each line at
+/// `debug`. Its only hard job is to keep the pipe drained so the worker can't
+/// deadlock writing to a full stderr buffer (see [`spawn_worker`]). The thread
+/// ends when the worker's stderr closes (process exit), so it needs no join
+/// handle and leaks nothing.
+fn drain_worker_stderr(pid: u32, stderr: std::process::ChildStderr) {
+    use std::io::{BufRead, BufReader};
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            match line {
+                Ok(l) => tracing::debug!(worker_pid = pid, "worker stderr: {l}"),
+                Err(_) => break, // pipe closed / non-UTF8 read error — stop draining
+            }
+        }
+    });
 }
 
 /// Owning handle to a spawned worker. Wraps the JSON-RPC [`Client`] and a
