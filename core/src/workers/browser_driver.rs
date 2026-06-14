@@ -174,7 +174,8 @@ fn resolve_interpreter_root(
 /// `/tmp` tmpfs (#89), granted to the in-jail Landlock layer via
 /// `KASTELLAN_LANDLOCK_RW=["/tmp"]` with `fs_write` empty (keeps the host `/tmp`
 /// off the tmpfs); on macOS Seatbelt has no tmpfs, so `fs_write=["/tmp"]` grants
-/// the writable dir (a per-spawn scratch is the deferred follow-up). Fonts:
+/// the writable dir (a per-spawn scratch dir is the deferred follow-up — #283).
+/// Fonts:
 /// `/usr` (Linux) and `/System/Library` (macOS) are already readable from the
 /// base sandbox; macOS additionally needs `/Library/Fonts`.
 pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> ToolEntry {

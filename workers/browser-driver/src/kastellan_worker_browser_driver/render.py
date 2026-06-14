@@ -99,6 +99,19 @@ def request_is_allowed(url: str, allowlist: HostAllowlist) -> bool:
     return allowlist.is_allowed_endpoint(*hp)
 
 
+class RenderNotAllowed(Exception):
+    """The navigation landed on a URL outside the operator allowlist.
+
+    Raised when the *final* (post-redirect) URL is off-allowlist, even if the
+    initial URL was allowed. The server maps it to `RENDER_FAILED` (fail-closed)
+    — no off-allowlist content is ever returned.
+    """
+
+    def __init__(self, final_url: str):
+        super().__init__(f"final navigation URL not on allowlist: {final_url}")
+        self.final_url = final_url
+
+
 class PlaywrightRenderer:
     """Drives a headless Chromium to render one page and extract its content.
 
@@ -139,9 +152,17 @@ class PlaywrightRenderer:
                 page.route("**/*", self._route_handler)
                 response = page.goto(url, wait_until=wait_until, timeout=timeout_ms)
                 status = response.status if response is not None else 0
+                final_url = page.url
+                # Defense in depth: the per-request route handler aborts
+                # off-allowlist hops, but Playwright's interception of *redirect*
+                # hops has varied across versions. So independently verify the
+                # final landing URL is on the allowlist before reading any
+                # content — a redirect chain that ends off-allowlist fails closed
+                # rather than returning off-allowlist content. (issue #263)
+                if not request_is_allowed(final_url, self._allowlist):
+                    raise RenderNotAllowed(final_url)
                 title = page.title()
                 html = page.content()
-                final_url = page.url
             finally:
                 browser.close()
         finally:

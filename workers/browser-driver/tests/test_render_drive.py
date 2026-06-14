@@ -9,6 +9,7 @@ from kastellan_worker_browser_driver.allowlist import HostAllowlist
 from kastellan_worker_browser_driver.render import (
     DEFAULT_LAUNCH_ARGS,
     PlaywrightRenderer,
+    RenderNotAllowed,
     host_port_from_url,
     request_is_allowed,
 )
@@ -173,3 +174,34 @@ def test_render_handles_missing_response_status():
     )
     out = r.render(url="https://x.test/", timeout_ms=1000, wait_until="load")
     assert out["status"] == 0  # no response → status 0, not a crash
+
+
+def test_render_fails_closed_when_redirect_lands_off_allowlist():
+    """A redirect chain that ends off-allowlist must fail closed — even if the
+    initial URL was allowed — and never read the off-allowlist page content.
+
+    Defends against Playwright versions that don't re-intercept redirect hops:
+    the post-navigation final-URL check is the backstop (issue #263).
+    """
+    # final_url is off-allowlist though the navigation started at the allowed host.
+    page = FakePage(
+        html="<html><body>secret</body></html>",
+        title="Off",
+        final_url="https://evil.test/landing",
+        status=200,
+    )
+    # Track whether the off-allowlist content was ever read.
+    content_reads = []
+    orig_content = page.content
+    page.content = lambda: (content_reads.append(1), orig_content())[1]
+    browser = FakeBrowser(page)
+    r = PlaywrightRenderer(
+        allowlist=HostAllowlist.from_endpoints(["x.test"]),
+        playwright_factory=make_factory(browser),
+    )
+
+    with pytest.raises(RenderNotAllowed):
+        r.render(url="https://x.test/", timeout_ms=1000, wait_until="load")
+
+    assert not content_reads, "off-allowlist content must not be read"
+    assert browser.closed, "browser must still be torn down on the fail-closed path"

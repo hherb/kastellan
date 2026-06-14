@@ -498,19 +498,33 @@ where
     })
 }
 
-/// Spawn a detached thread that reads `stderr` to EOF, emitting each line at
+/// Spawn a detached thread that reads `stderr` to EOF, emitting each chunk at
 /// `debug`. Its only hard job is to keep the pipe drained so the worker can't
 /// deadlock writing to a full stderr buffer (see [`spawn_worker`]). The thread
 /// ends when the worker's stderr closes (process exit), so it needs no join
 /// handle and leaks nothing.
+///
+/// Reads **raw bytes**, not lines: a `BufRead::lines()` loop yields an `Err`
+/// on the first invalid-UTF-8 byte and would stop draining — re-opening the
+/// very deadlock this guards against if the worker keeps writing (Chromium's
+/// stderr is overwhelmingly UTF-8, but "overwhelmingly" is not "always"). Each
+/// chunk is logged lossily so non-UTF-8 bytes are surfaced as `�` rather than
+/// halting the drain.
 fn drain_worker_stderr(pid: u32, stderr: std::process::ChildStderr) {
-    use std::io::{BufRead, BufReader};
+    use std::io::Read;
     std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            match line {
-                Ok(l) => tracing::debug!(worker_pid = pid, "worker stderr: {l}"),
-                Err(_) => break, // pipe closed / non-UTF8 read error — stop draining
+        let mut stderr = stderr;
+        let mut buf = [0u8; 8192];
+        loop {
+            match stderr.read(&mut buf) {
+                Ok(0) => break,                 // EOF — pipe closed (worker exited)
+                Ok(n) => tracing::debug!(
+                    worker_pid = pid,
+                    "worker stderr: {}",
+                    String::from_utf8_lossy(&buf[..n]).trim_end()
+                ),
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break, // genuine read error — pipe gone, nothing left to drain
             }
         }
     });

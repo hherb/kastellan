@@ -30,6 +30,13 @@ wiring = #281.)
 (`--ignored`, PG 18 + staged Chromium). DGX native-Linux `cargo test --workspace` all-green (0 failed, 108 suites ok) +
 `clippy --workspace -D warnings` clean; DGX `seccomp_smoke` 8/8 (incl. `io_uring_is_eperm_under_browser_client`). Mac:
 `clippy --workspace -D warnings` clean; 32 pytest in `workers/browser-driver`; workspace skip-as-pass green.
+**Code-review hardening pass (post-review, same PR):** (1) confirmed on the DGX that `unshare_is_killed_under_browser_client`
+genuinely *enforces* (no `[SKIP]`, real SIGSYS) — so the io_uring 2nd-filter's `Allow`-default does NOT defeat the main
+filter's `KillProcess` precedence. (2) `render.py` now fail-closes on the **final post-redirect URL** too (`RenderNotAllowed`
+→ `RENDER_FAILED`), a backstop against Playwright versions that don't re-intercept redirect hops (+1 pytest, 33 total).
+(3) `tool_host::drain_worker_stderr` reads **raw bytes** (was `BufRead::lines()`, which stopped draining on the first
+non-UTF-8 byte → could re-introduce the deadlock). (4) macOS shared-`/tmp` `fs_write` grant filed as hardening issue
+[#283](https://github.com/hherb/kastellan/issues/283).
 
 **Prior this-session block — Phase 4 python-exec RUNTIME PARAMS (branch `feat/python-exec-runtime-params`, PR [#278](https://github.com/hherb/kastellan/pull/278) MERGED `02ccb57`).**
 The deferred "params" piece of the skill catalog. A Python skill is verbatim, SHA-256-bound source (approve == execute), so params
