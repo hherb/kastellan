@@ -44,7 +44,6 @@ pub enum ToolHostError {
     /// POLICY_DENIED — task step fails fast, no retry budget burned.
     #[error("tool_host: secret redemption failed: {0}")]
     SecretRedemptionFailed(#[from] crate::secrets::SubstituteError),
-
 }
 
 /// A sealed JSON-RPC request shape. The fields and constructor are
