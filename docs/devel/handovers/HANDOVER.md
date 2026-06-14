@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-15 (**`interpreter_deps` helper ADOPTED in `python-exec` + `gliner-relex`** — the #284
-follow-up. Branch `feat/interpreter-deps-adoption`. The same external-interpreter dyld footgun #284 fixed in
+follow-up. Branch `feat/interpreter-deps-adoption`, PR [#289](https://github.com/hherb/kastellan/pull/289). The same external-interpreter dyld footgun #284 fixed in
 `browser-driver` (a venv/bare interpreter that links a shared lib OUTSIDE its bound prefix → SIGABRT under Seatbelt before
 the worker runs) is now closed in the other two Python workers, all routed through one shared module.
 **Shared-helper refactor (`core/src/workers/interpreter_deps.rs`):** extracted two pure, injected-closure helpers from the
