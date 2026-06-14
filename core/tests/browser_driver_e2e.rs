@@ -74,10 +74,22 @@ fn resolve_browser_env() -> Option<BrowserDriverEnv> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .collect();
+    // Mirror the manifest: bind the interpreter's out-of-prefix shared-lib dirs
+    // (issue #284) so a pyenv/Homebrew-linked interpreter dyld-loads in the jail
+    // without a manual KASTELLAN_BROWSER_DRIVER_EXTRA_FS_READ. Shares the
+    // manifest's seed logic so the two can't drift (review M2).
+    let interpreter_lib_dirs = kastellan_core::workers::interpreter_deps::interpreter_lib_dirs(
+        &venv_dir,
+        interpreter_root.as_deref(),
+        &|p| p.exists(),
+        &|p| std::fs::canonicalize(p).ok(),
+        &|p| kastellan_core::workers::interpreter_deps::resolve_deps_via_tool(p),
+    );
     Some(BrowserDriverEnv {
         script_path,
         venv_dir,
         interpreter_root,
+        interpreter_lib_dirs,
         extra_fs_read,
     })
 }
