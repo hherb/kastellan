@@ -13,6 +13,10 @@
 //!       host grants any port (the weaker back-compat form, flagged in the audit
 //!       reason). See `proxy::decide` / `proxy::allowed_reason`.
 //!   KASTELLAN_EGRESS_PROXY_WORKER    — the calling worker's name (for audit).
+//!   KASTELLAN_EGRESS_PROXY_DISABLE_MITM — `"1"` ⇒ never MITM; transparently
+//!       tunnel even a TLS ClientHello. For a worker that does its own
+//!       end-to-end TLS and can't trust our per-instance CA (the browser,
+//!       egress slice #2). Allowlist + SSRF at CONNECT are unaffected.
 
 mod ca;
 mod leaf_cache;
@@ -45,6 +49,8 @@ fn main() -> anyhow::Result<()> {
     // No-MITM mode: a worker that does end-to-end TLS itself and cannot trust
     // our per-instance CA (the browser, egress slice #2) sets this so the proxy
     // transparently tunnels instead of intercepting. Allowlist + SSRF still apply.
+    // Strict on the value: only `"1"` (trimmed) counts, so this safety-relevant
+    // mode is never enabled by an accidental/ambiguous spelling.
     let disable_mitm = matches!(
         std::env::var("KASTELLAN_EGRESS_PROXY_DISABLE_MITM")
             .ok()
