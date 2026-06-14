@@ -166,6 +166,9 @@ pub(crate) fn spawn_worker_maybe_forced(
             let cfg = force.expect("Sidecar action implies force-routing is configured");
             let allowlist = match &spec.policy.net {
                 Net::Allowlist(hosts) => hosts.clone(),
+                // Unreachable: `policy_net_is_force_routable` already gated the
+                // Sidecar action on `Net::Allowlist`. Fall back to the legacy
+                // path rather than panic if that invariant ever changes.
                 _ => return spawn_worker(backend, spec),
             };
             let params = crate::egress::net_worker::NetWorkerSpawn {
@@ -408,6 +411,8 @@ mod tests {
 
     #[test]
     fn action_force_off_is_always_direct() {
+        // worker_name no longer affects the decision (the browser exemption was
+        // removed in slice #2), so this only varies over `net_force_routable`.
         for routable in [true, false] {
             assert_eq!(force_route_action(false, routable), ForceRouteAction::Direct);
         }
