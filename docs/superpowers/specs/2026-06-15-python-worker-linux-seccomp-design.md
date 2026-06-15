@@ -163,6 +163,40 @@ setting it).
   choice (torch/ML surface) and DGX validation that the filter doesn't break the
   model load. Heavy ML worker → separate session.
 
+## Residual risk when Landlock is off (browser-driver, this session)
+
+Disabling Landlock for browser-driver does **not** widen filesystem access,
+because Landlock is the *second* FS layer, not the primary one. bwrap's mount
+namespace is the boundary and stays fully in force (see
+`sandbox/src/linux_bwrap.rs::build_argv`):
+
+- `--unshare-all` → private mount namespace, **no blanket `--bind /`**. A path
+  not explicitly bound does not exist in the worker's view (`/home`, `/root`,
+  `/var`, other users' files — invisible).
+- `fs_read` paths are `--ro-bind-try` → **read-only at the VFS layer**; not
+  writable even with Landlock off.
+- Writable surface is already minimal: the per-spawn `--tmpfs /tmp` (ephemeral),
+  `fs_write` (empty for browser-driver on Linux), and the proxy UDS (`--bind`,
+  write needed for AF_UNIX connect).
+- Landlock's RO set is **derived from `fs_read`** — the same paths bwrap binds —
+  and Landlock can only further-restrict, never grant. For browser-driver it was
+  a redundant second check over the same set.
+
+What is genuinely deferred is the **defense-in-depth delta**, not access control:
+(1) a second independent kernel gate that would backstop a hypothetical bwrap
+mount-setup bug or namespace escape; (2) Landlock v6 **scopes** — deny connecting
+to abstract UNIX sockets created outside the jail and deny signaling outside
+processes (the abstract-UDS scope matters only on the dev, non-force-routed path;
+the supervised force-routed deployment already isolates abstract UDS via its
+private netns).
+
+Net for this session: the **seccomp** layer we are adding blocks exactly the
+syscalls used to escape the mount/namespace jail (`mount`, `unshare`,
+`pivot_root`, `setns`, …) — directly hardening the scenario Landlock-as-backstop
+guarded. So browser-driver's containment goes **up** this session even with
+Landlock still off. The residual is closed by the tracked Landlock-for-browser
+follow-up once the Chromium-compatible RO path set is validated on the DGX.
+
 ## Files touched
 
 New:
