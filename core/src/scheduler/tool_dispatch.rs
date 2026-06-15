@@ -144,7 +144,7 @@ pub struct ToolEntry {
     /// workers (browser-driver) on Linux: bwrap spawns them directly and never
     /// runs the Rust prelude, so the shim applies the seccomp filter and
     /// `execve`s the real binary, which inherits it. See issue #281.
-    pub lockdown_shim: Option<std::path::PathBuf>,
+    pub lockdown_shim: Option<PathBuf>,
 }
 
 /// Look-up table from logical tool name (as it appears in

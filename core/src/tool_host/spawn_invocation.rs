@@ -67,4 +67,17 @@ mod tests {
             vec!["/venv/bin/worker".to_string(), "--flag".to_string()]
         );
     }
+
+    #[test]
+    fn shim_wraps_binary_with_no_extra_args() {
+        // The production case for every current Python worker: base_args empty,
+        // so the shim's only arg is the worker binary it execs.
+        let (program, args) = build_program_and_args(
+            Path::new("/venv/bin/worker"),
+            Some(Path::new("/usr/bin/kastellan-worker-lockdown-exec")),
+            &[],
+        );
+        assert_eq!(program, "/usr/bin/kastellan-worker-lockdown-exec");
+        assert_eq!(args, vec!["/venv/bin/worker".to_string()]);
+    }
 }
