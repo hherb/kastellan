@@ -172,6 +172,18 @@ sessions 2026-05-10 → 2026-05-29 in
 sessions 2026-05-06 → 2026-05-09 in
 [`archive/handover_20260510_pre-prune.md`](archive/handover_20260510_pre-prune.md).
 
+- **2026-06-15 — IBM Granite Guardian 4.1 evaluation (docs-only, branch `claude/exciting-wilson-c1f637`):**
+  investigated `ibm-granite/granite-guardian-4.1-8b` as a model-based safety/judge tier and the user
+  **locally smoke-tested it** (Mac, 8-bit quant: performance "not bad", reasoning "quite solid for that size")
+  ⇒ **viable**. Apache-2.0 (license clean), hybrid Mamba-2 (low memory), runs through the existing
+  `kastellan-llm-router` local pointer (Ollama :11434 / vLLM :8000) — no new egress, no vendor/NVIDIA dep.
+  **Advisory / defense-in-depth ONLY, never a gate** (~0.79 F1, misses ~1 in 5; sandbox + egress proxy stay
+  the real containment). Added a Phase 5 ROADMAP item ("Model-based CASSANDRA guard tier") with three hook
+  points; **first slice = `GuardianReviewStage` implementing `ReviewStage`**, slotted into `ChainReviewStage`
+  after `DeterministicPolicy`, `yes`→`Verdict::Advisory` (not `Block`), no-think `Router::send`, fail-open.
+  Hooks 2/3 = function-call-hallucination pre-flight at `ToolHostStepDispatcher` + groundedness on
+  `memory::recall`. Caveats: English-only; `<think>` traces not logged verbatim; ~doubles inference load.
+  No code; ROADMAP-only. Memory note: `granite-guardian-evaluation.md`.
 - **2026-06-12 — comms SLICE #6: conduwuit homeserver infra (branch `claude/zen-bell-6bn2ze`):** the homeserver
   deliverable, shaped as operator infra (NOT a kastellan `ServiceSpec` — the user-level supervisor can't run conduwuit
   as a dedicated `matrix` user, so it's a root/system unit or a separate host). `deploy/matrix/conduwuit.toml.template`
