@@ -319,11 +319,7 @@ impl WorkerManifest for BrowserDriverManifest {
                             Resolution::Register(browser_driver_entry(&env, &allowlist, Some(shim)))
                         }
                         None => Resolution::Misconfigured {
-                            detail: "lockdown-exec shim not found \
-                                     (KASTELLAN_LOCKDOWN_EXEC_BIN unset/invalid and no \
-                                     exe-relative sibling); browser-driver requires it \
-                                     for worker-side seccomp on Linux"
-                                .to_string(),
+                            detail: "lockdown-exec shim not found (KASTELLAN_LOCKDOWN_EXEC_BIN unset/invalid and no exe-relative sibling); browser-driver requires it for worker-side seccomp on Linux".to_string(),
                         },
                     }
                 }

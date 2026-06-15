@@ -267,6 +267,9 @@ use super::*;
             .contains(&PathBuf::from("/opt/hb/gettext/lib")));
     }
 
+    /// cfg-split: only one arm runs per platform — the Linux arm asserts the
+    /// shim + KASTELLAN_LANDLOCK_PROFILE=none are set; the macOS arm asserts
+    /// neither is present. The Linux arm is exercised by CI/DGX.
     #[test]
     fn entry_sets_lockdown_shim_and_landlock_none_on_linux() {
         let env = BrowserDriverEnv {
