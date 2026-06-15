@@ -28,6 +28,11 @@ pub const ENV_LANDLOCK_RO: &str = "KASTELLAN_LANDLOCK_RO";
 /// Env var name read by `kastellan-worker-prelude::seccomp_lock` for the
 /// per-worker seccomp profile selector.
 pub const ENV_SECCOMP_PROFILE: &str = "KASTELLAN_SECCOMP_PROFILE";
+/// Env var read by `kastellan-worker-prelude::landlock_lock` to disable the
+/// Landlock layer (`"none"`). Source of truth for the string is the prelude;
+/// mirrored here for manifests that set it (browser-driver). Not set by
+/// `derive_lockdown_env` — only explicitly by a manifest that opts out.
+pub const ENV_LANDLOCK_PROFILE: &str = "KASTELLAN_LANDLOCK_PROFILE";
 /// Env var name read by `kastellan-worker-prelude::rlimit` for the
 /// `policy.cpu_ms` budget. Plumbed cross-platform — applied via
 /// `setrlimit(RLIMIT_CPU)` from the worker prelude before lock-down.

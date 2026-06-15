@@ -170,6 +170,7 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         lifecycle: build_idle_timeout_lifecycle(),
         sandbox_backend: None,
         container_image: None,
+        lockdown_shim: None,
     }
 }
 
@@ -230,6 +231,7 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         lifecycle: build_idle_timeout_lifecycle(),
         sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::Container),
         container_image: Some(image),
+        lockdown_shim: None,
     }
 }
 

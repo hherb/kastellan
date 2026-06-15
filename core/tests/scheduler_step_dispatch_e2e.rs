@@ -184,6 +184,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
                 lifecycle: kastellan_core::worker_lifecycle::Lifecycle::SingleUse,
                 sandbox_backend: None,
                 container_image: None,
+                lockdown_shim: None,
             },
         );
         let registry = Arc::new(registry);

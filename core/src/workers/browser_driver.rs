@@ -257,6 +257,7 @@ pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> Too
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
+        lockdown_shim: None,
     }
 }
 

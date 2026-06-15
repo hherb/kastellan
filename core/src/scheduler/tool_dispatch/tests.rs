@@ -138,6 +138,7 @@ fn fake_entry() -> ToolEntry {
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
+        lockdown_shim: None,
     }
 }
 

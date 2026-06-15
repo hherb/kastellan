@@ -152,6 +152,7 @@ pub fn python_exec_entry(
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
+        lockdown_shim: None,
     }
 }
 
