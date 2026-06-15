@@ -38,7 +38,24 @@ impl crate::worker_manifest::WorkerManifest for GlinerRelexManifest {
             |p| (ctx.is_dir)(p),
             |p| (ctx.exists)(p),
         ) {
-            Ok(env) => Resolution::Register(gliner_relex_entry(&env)),
+            Ok(mut env) => {
+                // Host mode: bind the venv's external interpreter prefix + its
+                // out-of-prefix shared-lib dirs (issue #284) so CPython
+                // dyld-loads in the jail. Needs `canonicalize` + the otool/ldd
+                // dep tool, so it lives here (not in the pure `resolve_env`).
+                // Container mode bakes the interpreter into the image — skip.
+                if !env.use_container_backend {
+                    let (root, dirs) = super::resolve::resolve_host_interpreter_binds(
+                        &env.venv_dir,
+                        |p| (ctx.exists)(p),
+                        |p| (ctx.canonicalize)(p),
+                        crate::workers::interpreter_deps::resolve_deps_via_tool,
+                    );
+                    env.interpreter_root = root;
+                    env.interpreter_lib_dirs = dirs;
+                }
+                Resolution::Register(gliner_relex_entry(&env))
+            }
             Err(ResolveSkipReason::Disabled) => Resolution::Disabled {
                 detail: "KASTELLAN_GLINER_RELEX_ENABLE != \"1\"".to_string(),
             },

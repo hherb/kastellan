@@ -164,6 +164,8 @@ fn build_real_model_entry() -> Option<ToolEntry> {
         device: "auto".to_string(),
         use_container_backend: false,
         container_image: None,
+        interpreter_root: None,
+        interpreter_lib_dirs: vec![],
     };
     Some(gliner_relex_entry(&env))
 }

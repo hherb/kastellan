@@ -42,16 +42,69 @@ forced stays green). Earlier: browser-driver egress slice #2 — PR #285 / `76c5
 
 ---
 
+**Prior this-session block — Phase 4 python-exec SKILL CATALOG slice 1 (branch `feat/python-exec-skill-catalog`, PR [#275](https://github.com/hherb/kastellan/pull/275), MERGED `0cbddc5`).**
+Brainstormed → spec'd → planned → executed via subagent-driven TDD (8 tasks, per-task spec+quality review + a whole-branch
+opus review = READY TO MERGE). **A "Python skill" is the agent-authored, verbatim Python it just ran, promoted through the
+*same* trust lifecycle as L3 templated skills** — the payload is opaque source instead of a tool-call template; everything
+else (SkillTrust enum, layer-3 `memories` storage, SHA-256 dedup, the operator approve/pin/revoke CLI) is reused, not
+duplicated.
+- **Locked design decisions (brainstorm):** agent-authored (mirror L3 crystallise); **no params — verbatim code, SHA-256-bound**
+  (what the operator approves == what runs); stored as a layer-3 `memories` row with `metadata.kind="python"` +
+  `metadata.python={name,description,code}` (**absent `kind` ⇒ templated**, back-compat); approval gate = structural caps +
+  `secret://` scan + **the human reading the source** (NO registry/tool-existence check — a Python skill dispatches no tools,
+  the python-exec jail is the containment boundary).
+- **New pure+DB module `core/src/memory/l3py_crystallise.rs`:** `validate_python_skill` (snake_case name ≤64 B; description no
+  newline/control/`<skills>`-tag ≤512 B; code **allows only `\n`+`\t`**, rejects empty/`secret://`/>64 KiB/**every other ASCII
+  control byte** incl. NUL/CR/ESC/DEL — see review-hardening note below), `canonical_json`
+  + `compute_python_sha256` (flat sorted-key SHA), `build_python_skill_metadata`, `crystallise_python_skill` (validate → SHA →
+  `metadata->>'body_sha256'` EXISTS-check → insert `layer=3`/`kind=python`/`trust=untrusted`, idempotent). `PyError`/`PyWriteOutcome`
+  mirror the L3 shapes; reuses `L3Source`.
+- **New pure gate `core/src/memory/l3py_approval.rs`:** `evaluate_python_approval` (validate-first short-circuit, then the pure
+  `scan_code_secret_refs` helper emits one `RejectReason::CodeSecretRef{offset,found}` per `secret://`). `RejectReason` gained the
+  additive `CodeSecretRef` arm (templated path untouched).
+- **Crystallise wiring:** `Plan.python_skill: Option<PythonSkillCandidate>` + `Plan::completion_python_skill()`;
+  `InnerLoopResult.terminal_python_skill`; the `finish!` macro grew a 4-arg form (1/3-arg forms still delegate); captured under
+  the **same `dispatch_count>=1 && !invoke_used` grounding gate** as `l3_skill`; `runner::write_python_skill_crystallised_row`
+  (best-effort, reuses `build_l3_write_payload` + injects `kind:"python"`, action `l3.crystallised`).
+- **CLI (kind-aware):** new `memory l3 show <id>` (prints verbatim source for python / pretty template otherwise — the operator
+  read IS the gate); `list` gains a `KIND` column + reads name from either payload; `approve`/`pin` short-circuit python rows to
+  `approve_python_skill`/`pin_python_skill` which gate via `evaluate_python_approval` (**no registry snapshot**; pin keeps the
+  user_approved ladder guard). `revoke`/`remove` unchanged (already kind-agnostic).
+- **Tests:** unit (9 crystallise + 5 approval + 1 scheduler-capture + types serde/gate) + PG-gated
+  `core/tests/python_skill_crystallise_e2e.rs` + two `cli_memory_l3_e2e.rs` scenarios (python approve without registry; `show`
+  prints verbatim source). **Workspace 1725/0/8, clippy clean; four paths live-PG verified.**
+- **Post-review hardening (this session, after the opus review of PR #275):** addressed the review's findings on the
+  `show`-then-approve trust surface. (1) **Terminal-escape deception of the review gate** — `validate_python_skill` now rejects
+  every ASCII control byte in `code` except `\n`/`\t` (was: NUL only), so an embedded ESC/CR cannot inject escape sequences into
+  the source the operator reads via `memory l3 show`; `show` additionally renders any residual control char (hand-edited SQL row)
+  as a visible `\xNN` escape — defense-in-depth, the description line too. (2) **Coverage gap** — added
+  `cli_memory_l3_show_python_prints_verbatim_code` (the first automated test of `show`'s stdout). (3) Clarified the
+  `evaluate_python_approval` doc: the `secret://` re-scan is unreachable within that fn (validate runs first); it's exercised via
+  `scan_code_secret_refs`' own tests. The two non-blocking nits (double-validate in `runner.rs`; test-stub duplication) were left
+  as-is — still tracked below.
+- **Deferred to slice 2** (next TODO below): invocation (`l3py_invoke` + daemon `l3_run` python branch, fail-closed), surfacing
+  (kind-aware `l3_surface`), agent-autonomous `invoke_skill` python resolution, the SHA re-hash-at-invoke binding, and params.
+- **Review follow-ups noted (not blocking, not yet done):** (1) `ScriptedFormulator`/`OkDispatcher` test stubs are now declared in
+  ~4 places (unit test can't import from `core/tests/*`) — a shared `test_support` module would de-dup; (2) the
+  `PyWriteOutcome→L3WriteOutcome` map in `runner.rs` is a latent variant-coupling (a `From` impl would relocate, not seal, it).
+- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-13-python-exec-skill-catalog*`.
+
+---
+
 **Recently merged to `main` (condensed, newest first).** Full reasoning in the PRs / `docs/superpowers/specs` / archive snapshots:
 - **#284 interpreter-lib-dep auto-bind (a MISDIAGNOSIS fix)** (PR [#288](https://github.com/hherb/kastellan/pull/288), `a7338c3`): the "Chromium-148 Seatbelt SIGABRT" was a pyenv CPython linking a Homebrew `libintl` OUTSIDE its bound prefix → dyld `open()` blocked → SIGABRT before Chromium launches (empty stderr). New pure `core/src/workers/interpreter_deps.rs` (`out_of_prefix_lib_dirs` transitive dep-graph walk seeded with the binary+`libpython`, binds the canonical parent dir of every out-of-prefix non-system lib RO; `resolve_deps_via_tool` = `otool`/`ldd`, fail-safe). Wired into `browser-driver` + its e2e; `real_render_of_loopback_page` renders under Seatbelt with NO manual `EXTRA_FS_READ`. Unmasked [#287](https://github.com/hherb/kastellan/issues/287). Reads-only, DGX 1790/0 unchanged. (The cross-worker adoption into `python-exec` + `gliner-relex` is this session — top block.)
 - **`browser-driver` egress slice #2 — egress-proxy-routed (transparent tunnel)** (PR [#285](https://github.com/hherb/kastellan/pull/285), `76c58d9`): the browser runs in a private netns reaching the net only via its per-worker egress sidecar in **no-MITM/transparent-tunnel** mode (browser keeps end-to-end TLS; in-jail `shim.py` `ProxyShim` loopback-TCP↔UDS bridge + Chromium `--proxy-server`). Removed the dev-only force-route exemption + `KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET` escape hatch. DGX acceptance 2/2 green; #263 + #280 closed. macOS forced-egress now tracked by [#287](https://github.com/hherb/kastellan/issues/287).
-- **python-exec skill-catalog arc** (PRs [#275](https://github.com/hherb/kastellan/pull/275)/[#276](https://github.com/hherb/kastellan/pull/276)/[#278](https://github.com/hherb/kastellan/pull/278), `0cbddc5`/`e478309`/`02ccb57`): a "Python skill" = agent-authored verbatim Python promoted through the *same* L3 trust lifecycle as templated skills (SHA-256-bound, operator reads the source = the gate). crystallise/approve/pin (slice 1) + invoke/surface (slice 2) + runtime params (env-var channel). `core/src/memory/l3py_*`. Full detail in the PRs / archive.
-- **`browser-driver` Phase 2 + slice #1** (PRs [#282](https://github.com/hherb/kastellan/pull/282) `9f2e955`, [#262](https://github.com/hherb/kastellan/pull/262)): headless Chromium renders under the real jail (`Profile::WorkerBrowserClient` seccomp/Seatbelt clusters, `render.py` `PlaywrightRenderer`, browsers-in-venv, `TasksMax=512`, `tool_host::spawn_worker` stderr-drain). macOS `/tmp` `fs_write` = [#283](https://github.com/hherb/kastellan/issues/283); pure-Python Linux seccomp = [#281](https://github.com/hherb/kastellan/issues/281).
-- **`inner_loop.rs` prod-split** (PR [#279](https://github.com/hherb/kastellan/pull/279), `e16c80e`): `invoke_skill` expansion → `inner_loop/invoke_expand.rs` + floor → `inner_loop/floor.rs`; 630 → 481 LOC.
-- **Phase 4 python-exec acceptance + macOS fixes** (PR [#270](https://github.com/hherb/kastellan/pull/270), `0de4249`): per-OS interpreter cascade (excludes the xcrun shim; framework version-root granted), `unique_suffix` → `{pid}-{nanos}-{counter}`; `python_exec_e2e` green both platforms. Closed [#273](https://github.com/hherb/kastellan/issues/273).
-- **egress proxy — all 4 slices** (PRs [#240](https://github.com/hherb/kastellan/pull/240)/[#256](https://github.com/hherb/kastellan/pull/256)/[#259](https://github.com/hherb/kastellan/pull/259)/[#269](https://github.com/hherb/kastellan/pull/269)/[#272](https://github.com/hherb/kastellan/pull/272)): #1 allowlist+SSRF, #2 force-routing (ON by default, fail-closed), #3a TLS-intercept MITM (ephemeral per-instance CA), #3b credential-leak scanner (`kastellan-leak-scan`), #4 SPKI TLS-pinning. Feature-complete; callers pass `secret_fingerprints:&[]` + `cert_pins_json:None` today.
-- **Matrix comms channel (Phase 2 inbound)** (PR [#265](https://github.com/hherb/kastellan/pull/265)): decision + bus + hermetic Matrix client + pairing + conduwuit homeserver infra; `core/src/channel/*`, `workers/matrix*`, migration 0018. Phase D (live SDK) DGX-pending.
-- **`db/src/secrets.rs` prod-split** (PR [#253](https://github.com/hherb/kastellan/pull/253)) + **public website kastellan.dev** (PR [#252](https://github.com/hherb/kastellan/pull/252)): operator action — connect Cloudflare Pages (output `site`, branch `main`); regenerate root `assets/*.png` (still "hhagent"-titled).
+- **`browser-driver` Phase 2 — real render both platforms** (PR [#282](https://github.com/hherb/kastellan/pull/282), `9f2e955`): dropped the slice-#1 `NotImplementedError`; headless Chromium renders under the real jail (Seatbelt + bwrap). Added `Profile::BrowserClient`/`WorkerBrowserClient` seccomp+Seatbelt browser clusters (io_uring→EPERM 2nd-filter; shm/iokit/mach), `render.py` `PlaywrightRenderer` + per-nav/subresource allowlist, manifest (browsers-in-venv, `TasksMax=512`, interpreter-root binds), `install.sh`, `browser_driver_e2e.rs`, and a cross-cutting `tool_host::spawn_worker` stderr-drain (an unread piped stderr deadlocks chatty workers). Was **dev-only** (force-route exemption + `KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET`); slice #2 (this session) makes it egress-proxy-routed and removes the exemption. macOS `/tmp` `fs_write` grant = [#283](https://github.com/hherb/kastellan/issues/283); pure-Python Linux seccomp = [#281](https://github.com/hherb/kastellan/issues/281).
+- **`inner_loop.rs` prod-split** (PR [#279](https://github.com/hherb/kastellan/pull/279), `e16c80e`): behaviour-preserving extraction of the autonomous `invoke_skill` expansion → `inner_loop/invoke_expand.rs` (`InvokeExpansion` enum) + the classification-floor concern → `inner_loop/floor.rs` (re-exported). `inner_loop.rs` 630 → 481 LOC (under cap). The priority refactor-bucket (b) item — DONE.
+- **Phase 4 acceptance + macOS fixes** (PR [#270](https://github.com/hherb/kastellan/pull/270), `0de4249`): `tests-common::unique_suffix` → `{pid}-{nanos}-{counter}` (kills the parallel-`initdb` collision class); the macOS python interpreter cascade is now per-OS (`PYTHON_CANDIDATES` excludes Apple's xcrun shim; the framework version-root is granted for fs_read). `python_exec_e2e` GREEN both platforms (Mac Seatbelt 3/3, DGX bwrap 3/3). Closed env-leak [#273](https://github.com/hherb/kastellan/issues/273).
+- **egress proxy slice #4 — TLS pinning** (PR [#272](https://github.com/hherb/kastellan/pull/272), ROADMAP:142): operator SPKI-pin set (`KASTELLAN_EGRESS_PROXY_PINS`) overlaid on webpki in the proxy upstream leg; new `pins.rs`, `Verdict::BlockedTlsPin`, the `NetWorkerSpawn` params struct (dropped both `#[allow(too_many_arguments)]`). Fail-CLOSED for a pinned host, additive over webpki. **No pins provisioned today** — frontier wiring lands with the first frontier worker / Phase 5.
+- **egress proxy slice #3b — credential-leak scanner** (PR [#269](https://github.com/hherb/kastellan/pull/269)): new pure crate `kastellan-leak-scan` (Rabin + SHA-256 rolling matcher, carry-over across reads); the MITM proxy scans plaintext for the materialized-secret bytes of the calling worker and kills+audits on a hit (hash+offset only, never plaintext). Fail-OPEN defense-in-depth. Callers pass `&[]` today; dispatch-time live-append deferred ([#268](https://github.com/hherb/kastellan/issues/268)).
+- **`browser-driver` worker slice #1** (PR [#262](https://github.com/hherb/kastellan/pull/262), ROADMAP:147): feasibility spike GREEN both platforms + Playwright-Python scaffold. Real render = Phase 2, gated on blocker [#263](https://github.com/hherb/kastellan/issues/263) (force-routing collision).
+- **Matrix comms channel (Phase 2 inbound)** (PR [#265](https://github.com/hherb/kastellan/pull/265)): decision + bus + Matrix client (hermetic) + pairing + outbound + conduwuit homeserver infra; new `core/src/channel/*`, `workers/matrix*`, `db/src/pairings.rs` + migration 0018.
+- **egress proxy slice #3a — TLS-intercept MITM** (PR [#259](https://github.com/hherb/kastellan/pull/259), `e2a7b2b`): in-proxy ephemeral per-instance CA (`rcgen`, key never leaves the sandbox, `ca.pem` exported beside the UDS), webpki-validated re-origination, additive `tls_intercepted` audit flag. New `ca.rs`/`leaf_cache.rs`/`mitm.rs`.
+- **egress proxy slice #2 — force-routing** (PR [#256](https://github.com/hherb/kastellan/pull/256), `f0464d7`): every supervised `Net::Allowlist` worker force-routes through its own sidecar (private netns, no direct route); `KASTELLAN_EGRESS_FORCE_ROUTING` ON by default, fail-closed if the proxy binary is missing.
+- **`db/src/secrets.rs` prod split** (PR [#253](https://github.com/hherb/kastellan/pull/253)): 848 → 252 parent facade + `crypto.rs`/`key_provider.rs`/`error.rs` siblings, all under cap, public API byte-identical via `pub use`. (Refactor bucket 9b-b.)
+- **public website kastellan.dev** (PR [#252](https://github.com/hherb/kastellan/pull/252)): `site/*.html` + `style.css` + kastellan-branded SVG security diagrams + `scripts/site/check-site.sh`. Operator action: connect Cloudflare Pages (output dir `site`, branch `main`). Follow-up: regenerate root `assets/*.png` (still "hhagent"-titled).
 
 **Current state.** `main` carries the full python-exec arc (skill-catalog slice 1 `0cbddc5`, slice 2 `e478309`, runtime params `02ccb57`) + the slice-#1 worker (PR #267) + all 4 egress slices + the above. Dev box is **macOS** (Seatbelt); the DGX Spark (aarch64) is driven natively over WireGuard SSH (`ssh dgx '<command>'`) for real-bwrap/PG Linux acceptance.
 
@@ -277,10 +330,49 @@ sessions 2026-05-06 → 2026-05-09 in
 - **2026-06-04 — L3 autonomous door, agent-path (PR [#181](https://github.com/hherb/kastellan/pull/181) at `6e10a81`):** `Plan.invoke_skill` directive the inner loop expands (pinned-only; reuses `prepare_invocation` live re-validation; CASSANDRA review on the agent path) + the `pin` command (real `Pinned`-vs-`UserApproved`). Completes the L3 arc bar #179's IPC reroute.
 - **2026-06-01 — L3 recall surfacing, the `<skills>` block (PR [#177](https://github.com/hherb/kastellan/pull/177) at `4b978d8`):** new `core/src/memory/l3_surface.rs` surfaces only `UserApproved`/`Pinned` skills to the planner (L0 → L1 → skills → recalled → base); `skill_count` threaded + audited. Surfacing-only, no invocation. Carries SQL trust push-down `load_layer_by_trust` (`a53b4bc`).
 - **2026-05-31 — L3 skill trust enum + approval gate (PR [#176](https://github.com/hherb/kastellan/pull/176) at `bbcc7b3`):** `SkillTrust{Untrusted|UserApproved|Pinned}` (fail-safe parse); pure `evaluate_approval` (re-validate + `secret://` scan + tool-existence vs the `registry.loaded` snapshot, fail-closed); `set_skill_trust` db helper; `memory l3 {approve,revoke}` + audit rows. Trust flips → `user_approved` ONLY on `Approve`. No execution.
-- **2026-05-31 — L3 skill crystallisation writer (PR [#173](https://github.com/hherb/kastellan/pull/173) at `6eb966e`):** first writer for `MemoryLayer::Skill` (L3) — agent `Plan.l3_skill` → validate → canonical-SHA-256 dedup → `layer=3 trust:"untrusted"`; `dispatch_count >= 1` grounding gate; `memory l3 {list,remove}`. New `core/src/memory/l3_crystallise.rs`.
-- **2026-05-30/31 — refactor + CI batch** (PRs #161–#175): file-splits/test-lifts (`db/memories`, `tool_dispatch`, `launchd_agents`, `scheduler/audit`, `macos_container`, `replay`, `inner_loop`, `l3_crystallise`) under the 500-LOC cap; #99 CLI `with_runtime`; #153 clippy `-D warnings` gate; #130/#163 launchd serialization. Detail in git / archive.
-- **2026-05-29 — security slices + refactor batch** (PRs #146–#160): ★ opaque secret references (`SecretRef` + Vault, #146) + worker-output prompt-injection guard (#141) + `walk()` depth-guard/sibling-continue + Linux build/clippy gate (#144/#150) + several test-lifts. Full detail in [`archive/handover_20260605_pre-prune.md`](archive/handover_20260605_pre-prune.md).
-- **2026-05-06 → 2026-05-28 — Phase 0 + Phase 1 build-out** (PRs #38–#140): sandbox core (Landlock+seccomp prelude, Seatbelt, bwrap, shell-exec, cgroup caps), Linux/macOS supervisors, scheduler online + CASSANDRA, recall lanes + L0/L1 memory, entity extraction v2 + GLiNER-Relex, worker-lifecycle managers, macOS Apple-`container` backend, observation capture. Full detail in the [`archive/`](archive/) `20260510` / `20260529` snapshots.
+- **2026-05-31 — `l3_crystallise.rs` test-lift (PR [#175](https://github.com/hherb/kastellan/pull/175) at `55b212e`):** inline `mod tests` → sibling; 676 → 467 LOC.
+- **2026-05-31 — L3 skill crystallisation writer (PR [#173](https://github.com/hherb/kastellan/pull/173) at `6eb966e`):** first writer for `MemoryLayer::Skill` (L3) — agent emits `Plan.l3_skill` template → `drain_lane` validates → canonical-SHA-256 dedup → stores `layer=3 trust:"untrusted"`; `dispatch_count >= 1` grounding gate; `memory l3 {list,remove}`. Writer-only, non-executable. New `core/src/memory/l3_crystallise.rs`.
+- **2026-05-31 — `inner_loop.rs` test-lift, closes [#81](https://github.com/hherb/kastellan/issues/81) (PR [#172](https://github.com/hherb/kastellan/pull/172) at `98a5be0`):** 655 → 438 LOC.
+- **2026-05-30 — `replay.rs` test-lift (PR [#171](https://github.com/hherb/kastellan/pull/171) at `30aa52e`):** 804 → 422 LOC.
+- **2026-05-30 — `tool_dispatch.rs` split (PR [#170](https://github.com/hherb/kastellan/pull/170) at `4e401cc`):** test-lift + re-exported `result_mapping.rs` seam; 828 → 442 LOC.
+- **2026-05-30 — `db/memories.rs` split (PR [#169](https://github.com/hherb/kastellan/pull/169) at `e1be537`):** real prod split into re-exported `write.rs` + `search.rs`; 961 → 360 LOC.
+- **2026-05-30 — `launchd_agents.rs` split (PR [#168](https://github.com/hherb/kastellan/pull/168) at `5bf010b`):** `builders.rs` + `tests.rs` siblings; 1093 → 485 LOC.
+- **2026-05-30 — `scheduler/audit.rs` split (PR [#167](https://github.com/hherb/kastellan/pull/167) at `79fcc27`):** `extract_entities.rs` + `tests.rs` siblings; 1106 → 500 LOC.
+- **2026-05-30 — #99 CLI `with_runtime` migration (PR [#166](https://github.com/hherb/kastellan/pull/166) at `75e9039`):** all six `kastellan-cli` dispatchers share one idiom; #99 CLOSED.
+- **2026-05-30 — `macos_container.rs` test-lift (PR [#165](https://github.com/hherb/kastellan/pull/165) at `48c0396`):** 983 → 491 LOC.
+- **2026-05-30 — #130 launchd bring-up serialization + #163 `sun_path` fix (PR [#164](https://github.com/hherb/kastellan/pull/164) at `091e53d`):** reentrant `serial_lock` around the macOS launchd window; bundled `injection_guard_e2e` label shorten + `check_socket_path_fits` guard. Both CLOSED.
+- **2026-05-30 — #162 graph-lane seed-thread regression test (PR [#162](https://github.com/hherb/kastellan/pull/162) at `a83be4a`):** found item-12 wiring already shipped (Slice F, 2026-05-19); reconciled + pinned the seed thread; zero production change.
+- **2026-05-30 — #153 clippy `-D warnings` gate (PR [#161](https://github.com/hherb/kastellan/pull/161) at `12b080c`):** cleared the whole workspace, flipped `linux-check` to `-D warnings`. CLOSED.
+- **2026-05-29 — #5 `tool_host.rs` sibling-lift (PR [#160](https://github.com/hherb/kastellan/pull/160) at `fd7dd7a`):** watchdog + lockdown_env + seal tests → child modules; 911 → 519 LOC (trust-boundary residual).
+- **2026-05-29 — #4b `injection_guard.rs` test-lift (PR [#159](https://github.com/hherb/kastellan/pull/159) at `1106145`):** 667 → 338 LOC.
+- **2026-05-29 — #156 `walk()` sibling-continue (PR [#158](https://github.com/hherb/kastellan/pull/158) at `f3c380f`):** depth-skip now continues siblings. CLOSED.
+- **2026-05-29 — #148/#149 secret-vault test gaps (PR [#157](https://github.com/hherb/kastellan/pull/157) at `53e68ed`):** `AuditSink` seam + `insert_fresh` extraction. Both CLOSED.
+- **2026-05-29 — #143 `walk()` recursion-depth guard (PR [#155](https://github.com/hherb/kastellan/pull/155) at `6e82252`):** `MAX_WALK_DEPTH = 256`. CLOSED.
+- **2026-05-29 — #144/#150 Linux build + clippy gate (PR [#152](https://github.com/hherb/kastellan/pull/152) at `560d845`):** `linux-check` CI green.
+- **2026-05-29 — #147 redact secret plaintext in tool audit row (PR [#151](https://github.com/hherb/kastellan/pull/151) at `54e8885`).**
+- **2026-05-29 — ★ Opaque secret references slice 1 (PR [#146](https://github.com/hherb/kastellan/pull/146) at `bc36e4c`):** `SecretRef` opaque newtype + `substitute_refs_in_params` walker + Vault. Closes openhuman Item 31.
+- **2026-05-28 — ★ Worker-output prompt-injection guard slice 1 (PR [#141](https://github.com/hherb/kastellan/pull/141) at `62905ae`):** 22-entry substring catalogue + screen + `extract_scannable_text`. Closes openhuman Item 30.
+- **2026-05-28 — `idle_timeout/release.rs` sibling-lift + #89 `/tmp` tmpfs pin** (PRs [#138](https://github.com/hherb/kastellan/pull/138)/[#139](https://github.com/hherb/kastellan/pull/139)/[#140](https://github.com/hherb/kastellan/pull/140)).
+- **2026-05-27 — worker_lifecycle hardening (#84/#85/#86) + test-infra slices** (PRs #137/#135/#133/#132/#129; filed #130).
+- **2026-05-26 — graph diamond-dedupe (#114/#115) + `KASTELLAN_PG_BIN_DIR` override + entity-upsert Layer B** (PRs #128/#126/#125).
+- **2026-05-25 — Slice 2.5 follow-ups (#120/#121/#122) + `gliner_relex.rs` test-lift + GLiNER-Relex container** (PRs #124/#123/#118).
+- **2026-05-23 — Item 23(a) test-lifts + Item 22 CLI splits (#111/#112) + `relations show`** (PRs #117/#116/#113).
+- **2026-05-22 — kinds CLIs + `MacosContainer` Slice 2** (PRs #110/#109/#108; NB: the unconditional `Container` ref here is what broke the Linux build, #144).
+- **2026-05-21 — macOS container backend Slice 1 + Apple `container` spike + GLiNER macOS device tree** (PRs #106/#105/#103/#100/#98).
+- **2026-05-20 — quarantine review CLI + `kastellan-cli` split (#66) + entity-upsert Layer A** (PRs #96/#94/#93).
+- **2026-05-19 — entity extraction v2: `memory_entities` auto-linker + GLiNER-Relex + migration 0016** (PRs #92/#91).
+- **2026-05-18 — worker lifecycle managers + GLiNER worker + `inner_loop.rs` split (#81) + L1 promotion writer** (PRs #88/#87/#82).
+- **2026-05-17 — recall-lane wiring into the production scheduler** (PR #79).
+- **2026-05-16 — prompt-assembler L0+L1 + L0 seed loader + classification-floor inference** (PRs #74/#77/#70).
+- **2026-05-15 — first CASSANDRA rules + replay harness + L1 storage migrations 0013/0014** (PRs #68/#67/#65/#61).
+- **2026-05-14 — observation capture + constitutional refusal state (#23) + per-tool argv allowlist + CPU/rlimit** (PRs #60/#59/#54).
+- **2026-05-13 — task-lifecycle audit rows + `WorkerCommand` seal (#16) + graph lane in recall** (PR #41).
+- **2026-05-12 — `tests-common` crate (#15) + crash-recovery sweep + Option O embedding router** (PR #38).
+- **2026-05-11 — scheduler online: `cli_ask_e2e` full-chain pin + CASSANDRA Phases 2–5.**
+- **2026-05-10 — chokepoint + recall skeleton (Options M/N) + secrets-at-rest + audit NOTIFY/mirror + non-superuser role.**
+- **2026-05-09 — cgroup v2 caps: `systemd-run --scope` MemoryMax/CPUQuota/TasksMax + C2.2 schema + Graph trait.**
+- **2026-05-08 — Linux/macOS supervisors + per-task `Workspace` RAII + watchdog `kill(-1)` fix.**
+- **2026-05-06/07 — Phase 0 sandbox core: Landlock+seccomp prelude + macOS Seatbelt + AGPL workspace + bwrap backend + shell-exec + first e2e.** Full detail in the 20260510 archive.
 
 ---
 

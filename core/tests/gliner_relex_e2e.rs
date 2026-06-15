@@ -155,6 +155,9 @@ fn build_test_entry_container() -> Option<ToolEntry> {
         device: "auto".to_string(),
         use_container_backend: true,
         container_image: None,  // defaults to CONTAINER_IMAGE_DEFAULT
+        // Container mode bakes the interpreter into the image — no host binds.
+        interpreter_root: None,
+        interpreter_lib_dirs: vec![],
     };
     Some(gliner_relex_entry(&env))
 }
@@ -195,6 +198,10 @@ fn build_test_entry() -> Option<ToolEntry> {
         device: "auto".to_string(),
         use_container_backend: false,
         container_image: None,
+        // Self-contained fixture: the production manifest computes the real
+        // external-interpreter binds (issue #284) via resolve_host_interpreter_binds.
+        interpreter_root: None,
+        interpreter_lib_dirs: vec![],
     };
     Some(gliner_relex_entry(&env))
 }

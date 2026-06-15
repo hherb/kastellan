@@ -135,12 +135,23 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         .expect("GlinerRelexEnv.venv_dir must have a parent (got a root/relative path)")
         .join("src");
 
+    let mut fs_read = vec![
+        env.weights_dir.clone(),
+        env.venv_dir.clone(),
+        worker_src_dir,
+    ];
+    // Bind the real interpreter prefix when the venv's python lives outside the
+    // venv (uv symlinks `bin/python3` to a base CPython) so the interpreter can
+    // start inside the jail — and its out-of-prefix shared-lib dirs (issue #284)
+    // so it can dyld-load. Both `None`/empty for a self-contained venv (and on
+    // Linux the prefix is `/usr`, already bound by bwrap — a harmless redundancy).
+    if let Some(root) = &env.interpreter_root {
+        fs_read.push(root.clone());
+    }
+    fs_read.extend(env.interpreter_lib_dirs.iter().cloned());
+
     let policy = SandboxPolicy {
-        fs_read: vec![
-            env.weights_dir.clone(),
-            env.venv_dir.clone(),
-            worker_src_dir,
-        ],
+        fs_read,
         fs_write: vec![],
         net: Net::Deny,
         cpu_ms: 0,
