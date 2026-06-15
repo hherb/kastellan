@@ -226,17 +226,57 @@ use super::*;
         let get_env = |k: &str| match k {
             "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
             "KASTELLAN_BROWSER_DRIVER_VENV_DIR" => Some("/v".to_string()),
+            // On Linux, resolve() fail-closes unless the lockdown-exec shim is
+            // discoverable; point the override at a (test-runnable) path so the
+            // manifest registers. Ignored on macOS (Seatbelt — no shim there).
+            "KASTELLAN_LOCKDOWN_EXEC_BIN" => {
+                Some("/usr/bin/kastellan-worker-lockdown-exec".to_string())
+            }
             _ => None,
         };
         let exists = |_p: &Path| true;
         let allowlist = |_t: &str| vec!["example.com:443".to_string()];
-        let c = ctx(&get_env, &exists, &allowlist);
+        // is_dir=false so the shim override path counts as a runnable file
+        // (discover_binary requires exists && !is_dir).
+        let c = ResolveCtx {
+            get_env: &get_env,
+            exists: &exists,
+            is_dir: &|_p| false,
+            exe_dir: None,
+            canonicalize: &|_p| None,
+            allowlist: &allowlist,
+        };
         assert_eq!(BrowserDriverManifest.name(), "browser-driver");
         assert_eq!(BrowserDriverManifest.allowlist_tool(), Some("browser-driver"));
         assert!(matches!(
             BrowserDriverManifest.resolve(&c),
             Resolution::Register(_)
         ));
+    }
+
+    /// Linux fail-closed: enabled + venv present but NO discoverable
+    /// lockdown-exec shim ⇒ Misconfigured (never register an unfilterable
+    /// browser). Linux-only — on macOS the shim isn't used.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn manifest_misconfigured_when_shim_missing_on_linux() {
+        let get_env = |k: &str| match k {
+            "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_VENV_DIR" => Some("/v".to_string()),
+            // No KASTELLAN_LOCKDOWN_EXEC_BIN override and no exe_dir ⇒ shim
+            // undiscoverable.
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["example.com:443".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist); // exe_dir: None
+        assert!(
+            matches!(
+                BrowserDriverManifest.resolve(&c),
+                Resolution::Misconfigured { .. }
+            ),
+            "Linux browser-driver must fail closed when the lockdown-exec shim is missing"
+        );
     }
 
     #[test]
