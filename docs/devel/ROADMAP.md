@@ -289,6 +289,32 @@ items unlock later ones.
 
 - [ ] Policy gate: per-tool, per-task, per-data-classification routing decision
 - [ ] Frontier escalation through egress proxy (Anthropic / OpenAI)
+- [ ] **Model-based CASSANDRA guard tier — IBM Granite Guardian 4.1 (defense-in-depth, advisory only)** —
+  a local safety/judge model (`ibm-granite/granite-guardian-4.1-8b`, **Apache-2.0** ⇒ license-audit clean;
+  hybrid Mamba-2/Transformer ⇒ low memory; runs on Ollama `:11434` macOS / vLLM `:8000` Linux, i.e. the
+  **existing `kastellan-llm-router` local backend pointer** — no new egress, no vendor lock-in, no NVIDIA dep).
+  Three hook points, all **advisory** — Guardian is a probabilistic classifier (~0.79 F1 OOD-safety; misses
+  ~1 in 5), so it **never** becomes a gate: the OS sandbox (bwrap/Seatbelt) + the egress proxy's deterministic
+  allowlist/SSRF/pinning remain the only things that actually contain a compromise. It lowers attempt volume
+  and feeds the audit log; it does not change the threat model.
+  1. **`GuardianReviewStage` implementing `ReviewStage`** (`core/src/cassandra`) — slots into the existing
+     `ChainReviewStage(vec![ConstitutionalGuard, DeterministicPolicy, …])` after the deterministic rules.
+     `async fn review(&self, plan, ctx)` formats the agent's `Plan` (esp. tool-call steps) into Guardian's
+     `<guardian>` criteria block, calls `Router::send` in **no-think mode** (low latency, direct `<score>`),
+     maps `yes` → `Verdict::Advisory`/`Escalate` (NOT `Block` — advisory tier) carrying the jailbreak/harm
+     reason tag. Fail-open on router error (defense-in-depth, not the boundary).
+  2. **Function-calling-hallucination check before step dispatch** (`ToolHostStepDispatcher`) — Guardian's
+     agentic detector validates that a tool-call step's args are consistent with the worker's manifest schema
+     + the user intent *before* the worker is spawned. This is the strongest novel fit — semantic validation
+     the argv allowlist structurally can't express. Advisory pre-flight; the allowlist + sandbox still gate.
+  3. **RAG groundedness on `memory::recall`** — Guardian's context-relevance/groundedness/answer-relevance
+     scores spot-check that a memory-backed answer is grounded in what was actually recalled (BYOC criteria
+     can also encode kastellan-specific policy — "attempts secret exfiltration?", "targets a non-allowlisted
+     host?" — as auditable yes/no rows). **Limitation: English-only.** `<think>` traces are NOT logged verbatim
+     (IBM warns they may contain unsafe / unfaithful content). Cost: an 8B judge ~doubles inference load, so
+     no-think inline + reserve think-mode for offline spot-checks. (Investigated 2026-06-15; sources in the
+     handover.) Pairs naturally with the policy gate + frontier escalation above (screen what crosses the
+     local↔frontier boundary).
 - [ ] Read-only audit log viewer (CLI complete; web optional)
 - [ ] 7-day adversarial soak test (prompt-injected channel content; no escapes in audit log)
 
