@@ -47,10 +47,11 @@ fn seccomp_enforced() -> bool {
 fn baseline_raw_unshare_without_shim_is_not_killed() {
     // Run the probe directly (no shim, no seccomp). Proves raw-unshare does not
     // self-lockdown, so the SIGSYS in the next test is genuinely inherited.
+    // No env is set: the `raw-*` fast path dispatches before the probe reads
+    // KASTELLAN_SECCOMP_PROFILE, so there is nothing to configure here.
     let out = Command::new(PROBE)
         .args(["raw-unshare"])
         .env_clear()
-        .envs([("KASTELLAN_SECCOMP_PROFILE", "none")])
         .output()
         .expect("failed to spawn probe");
     assert!(
@@ -80,6 +81,13 @@ fn shim_seccomp_is_inherited_and_kills_unshare() {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
+    // A signal kill has no exit code — confirms it was SIGSYS, not a normal
+    // exit (mirrors seccomp_smoke.rs::unshare_is_killed_by_sigsys).
+    assert!(
+        out.status.code().is_none(),
+        "unshare under the inherited filter must be signal-killed, not exit with a code: {:?}",
+        out.status.code()
+    );
 }
 
 #[test]
@@ -94,11 +102,17 @@ fn shim_target_runs_and_innocent_syscall_survives() {
         ],
         &["raw-getpid"],
     );
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         out.status.code(),
         Some(0),
-        "shim must execve the target and getpid must survive; got {:?}\nstderr: {}",
+        "shim must execve the target and getpid must survive; got {:?}\nstderr: {stderr}",
         out.status,
-        String::from_utf8_lossy(&out.stderr)
+    );
+    // Confirm the probe actually ran past the execve (not a shim-side exit):
+    // probe_getpid prints "getpid() = <pid>" on stderr.
+    assert!(
+        stderr.contains("getpid()"),
+        "expected the probe to run and print getpid output across the execve; stderr: {stderr}"
     );
 }
