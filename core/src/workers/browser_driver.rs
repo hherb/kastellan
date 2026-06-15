@@ -202,6 +202,15 @@ pub fn browser_driver_entry(
     // fonts, …) — see BrowserDriverEnv::extra_fs_read.
     fs_read.extend(env.extra_fs_read.iter().cloned());
 
+    // Bind the lockdown-exec shim into the jail read-only so bwrap can exec it.
+    // In production it lives under /usr (bound globally), but in dev/test the
+    // shim is in target/debug/ which is NOT part of the base /usr bind — without
+    // this explicit entry bwrap returns "No such file or directory" before the
+    // shim ever runs. Safe to skip on macOS (lockdown_shim is always None there).
+    if let Some(shim) = &lockdown_shim {
+        fs_read.push(shim.clone());
+    }
+
     // macOS: /System/Library/Fonts is covered by the base profile's
     // /System/Library grant, but user/third-party fonts under /Library/Fonts
     // are not — add them so Chromium has a font to fall back on.
