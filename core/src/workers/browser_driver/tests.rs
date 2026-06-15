@@ -286,6 +286,10 @@ use super::*;
             let entry = browser_driver_entry(&env, &allow, Some(shim.clone()));
             assert_eq!(entry.lockdown_shim.as_deref(), Some(shim.as_path()));
             assert!(
+                entry.policy.fs_read.contains(&shim),
+                "shim must be bound RO into the jail so bwrap can exec it (the DGX bug)"
+            );
+            assert!(
                 entry.policy.env.iter().any(|(k, v)| k == "KASTELLAN_LANDLOCK_PROFILE" && v == "none"),
                 "Linux browser-driver must disable Landlock for the shim's lock_down"
             );

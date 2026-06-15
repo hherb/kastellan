@@ -585,19 +585,16 @@ pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
     libc::SYS_memfd_create,
     libc::SYS_pidfd_open,
     libc::SYS_restart_syscall,
-    // Playwright's bundled Node.js driver calls capget() at startup to
-    // inspect the process's capability set (capset is its write counterpart;
-    // listed for symmetry so a future Node version that calls both doesn't
-    // require another allowlist expansion). Both appeared in the spike trace
-    // attributed to bwrap's setup — it turns out Playwright's node also calls
-    // them *after* the filter is installed, killing the Node driver with SIGSYS
-    // and causing `'PlaywrightContextManager' has no attr '_playwright'`.
-    // capget/capset are read/write of the *same-process* capability bitmask
-    // and grant no privilege uplift — the kernel enforces capability rules
-    // independently of whether the syscall entry point is available. (DGX
-    // acceptance gate: Task 7 of issue #281, confirmed 2026-06-15.)
+    // Playwright's bundled Node.js driver calls capget() *after* the filter is
+    // installed, to inspect the process's own capability set; without it the
+    // Node driver is SIGSYS-killed, surfacing as `'PlaywrightContextManager'
+    // has no attr '_playwright'`. capget is a read-only query of the
+    // same-process capability bitmask and grants no privilege uplift. Its write
+    // counterpart capset is deliberately NOT listed (least-privilege): it was
+    // not observed post-filter, and a future Node version that needs it would
+    // SIGSYS visibly — add it then, with evidence. (DGX acceptance gate: issue
+    // #281, confirmed 2026-06-15.)
     libc::SYS_capget,
-    libc::SYS_capset,
 ];
 
 /// The `io_uring` syscalls Chromium probes. Listed in [`allow_list_for`] for
