@@ -40,7 +40,23 @@ echo ">>> installing the worker into the venv (non-editable)"
 # package must be copied INTO venv site-packages. An editable (`-e`) install
 # leaves the source in the repo via a `.pth`, which the sandbox can't read.
 "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null
+# Two steps so a re-run always stages the CURRENT worker source:
+#   1. Plain install pulls in the runtime deps (readability/lxml/playwright);
+#      pip skips any already-satisfied versioned dep, so re-runs are fast.
+#   2. Force-reinstall the local package WITHOUT deps. The package version is
+#      static (0.0.1), so a plain `pip install <path>` on a re-run reports
+#      "already satisfied" and SILENTLY KEEPS STALE worker code after the source
+#      changes — e.g. egress slice #2 added shim.py + rewired __main__.py, and a
+#      stale venv (no shim, no --proxy-server) made Chromium bypass the egress
+#      sidecar on macOS, which looked like a forced-egress code bug (issue #287)
+#      but was just an out-of-date install. --force-reinstall always recopies.
+#      (Recent pip rebuilds a local path install every run anyway; the explicit
+#      --force-reinstall keeps this robust on older pip that skips "already
+#      satisfied". Caveat: a NEW runtime dep added WITHOUT a version bump can
+#      still be skipped by step 1 on such pip — bump the version when deps
+#      change. The shim.py tripwire below catches any source staleness.)
 "$VENV_DIR/bin/pip" install "$WORKER_DIR"
+"$VENV_DIR/bin/pip" install --force-reinstall --no-deps "$WORKER_DIR"
 
 echo ">>> installing the chromium headless shell into $BROWSERS_DIR"
 # Keep the browser tree inside the venv so only the venv needs an fs_read bind.
@@ -50,6 +66,17 @@ PLAYWRIGHT_BROWSERS_PATH="$BROWSERS_DIR" "$VENV_DIR/bin/playwright" install chro
 SHIM="$VENV_DIR/bin/kastellan-worker-browser-driver"
 if [ ! -x "$SHIM" ]; then
   echo "error: console-script shim not found at $SHIM — pip install failed" >&2
+  exit 2
+fi
+
+# ----- staleness tripwire: assert CURRENT worker source actually got staged -----
+# The console-script above existed even in the pre-slice-#2 build, so it can't
+# catch a stale install (issue #287). shim.py (the egress ProxyShim) is slice-#2
+# only, so its absence in site-packages means the venv kept old worker code —
+# fail loudly here rather than silently bypassing the egress sidecar at render.
+SITE_PACKAGES="$("$VENV_DIR/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+if [ ! -f "$SITE_PACKAGES/kastellan_worker_browser_driver/shim.py" ]; then
+  echo "error: installed worker missing shim.py under $SITE_PACKAGES — stale/partial install (see issue #287)" >&2
   exit 2
 fi
 
