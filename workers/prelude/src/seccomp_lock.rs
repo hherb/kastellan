@@ -593,8 +593,13 @@ pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
     // page/renderer (`Browser.new_page: ... browser has been closed`) — its
     // zygote/process setup adjusts the same-process capability set. Both operate
     // ONLY on this process's own capability bitmask and grant no privilege
-    // uplift: under PR_SET_NO_NEW_PRIVS with the jail's dropped bounding set,
-    // capset cannot raise capabilities the kernel hasn't already granted.
+    // uplift: the worker runs inside bwrap's unprivileged user namespace
+    // (`--unshare-all`), where any capability is namespaced — it confers nothing
+    // against the host and cannot be mapped out of the userns. PR_SET_NO_NEW_PRIVS
+    // additionally blocks gaining privileges across the inevitable execve. So
+    // capset can at most shuffle caps the kernel already confined to this jail;
+    // it cannot raise host privilege. (If bwrap were ever run setuid or with
+    // --cap-add, this reasoning would need revisiting — neither is done here.)
     libc::SYS_capget,
     libc::SYS_capset,
 ];

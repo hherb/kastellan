@@ -246,6 +246,13 @@ pub fn browser_driver_entry(
         // (Linux; honoured by derive_lockdown_env, no-op on macOS). MUST
         // stay out of fs_write on Linux: a /tmp entry there would bind the
         // host /tmp over bwrap's per-spawn ephemeral tmpfs (#89).
+        //
+        // NB: while spawned through the shim with KASTELLAN_LANDLOCK_PROFILE=none
+        // (set just below), the shim's apply_from_env returns Disabled before
+        // reading this — so on Linux today it is inert. Kept so it is already
+        // correct when the deferred #281 follow-up flips Landlock back on for
+        // browser-driver (and it is load-bearing on macOS, where Landlock is
+        // a no-op but the RW grant documents intent).
         (crate::tool_host::ENV_LANDLOCK_RW.to_string(), r#"["/tmp"]"#.to_string()),
     ];
 
