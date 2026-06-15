@@ -572,10 +572,9 @@ pub const NET_CLIENT_ADDITIONS: &[i64] = &[
 ///
 /// Enumerated by the spike via `strace -f -c` of the full bwrapped Chromium
 /// process tree, then diffed against the `net_client` set (design spec §3.1).
-/// (`capget`/`capset`/`pivot_root`/`umount2` also appeared in the trace but are
-/// **bwrap's own** container setup, run before the worker self-applies the
-/// filter, so they are deliberately NOT here.) Every entry exists on both
-/// `x86_64` and `aarch64`.
+/// (`pivot_root`/`umount2` also appeared in the trace but are **bwrap's own**
+/// container setup, run before the worker self-applies the filter, so they are
+/// deliberately NOT here.) Every entry exists on both `x86_64` and `aarch64`.
 pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
     libc::SYS_fallocate,
     libc::SYS_ftruncate,
@@ -586,6 +585,19 @@ pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
     libc::SYS_memfd_create,
     libc::SYS_pidfd_open,
     libc::SYS_restart_syscall,
+    // Playwright's bundled Node.js driver calls capget() at startup to
+    // inspect the process's capability set (capset is its write counterpart;
+    // listed for symmetry so a future Node version that calls both doesn't
+    // require another allowlist expansion). Both appeared in the spike trace
+    // attributed to bwrap's setup — it turns out Playwright's node also calls
+    // them *after* the filter is installed, killing the Node driver with SIGSYS
+    // and causing `'PlaywrightContextManager' has no attr '_playwright'`.
+    // capget/capset are read/write of the *same-process* capability bitmask
+    // and grant no privilege uplift — the kernel enforces capability rules
+    // independently of whether the syscall entry point is available. (DGX
+    // acceptance gate: Task 7 of issue #281, confirmed 2026-06-15.)
+    libc::SYS_capget,
+    libc::SYS_capset,
 ];
 
 /// The `io_uring` syscalls Chromium probes. Listed in [`allow_list_for`] for
