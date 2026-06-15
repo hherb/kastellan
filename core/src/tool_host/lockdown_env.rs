@@ -47,6 +47,15 @@ pub const ENV_CPU_MS: &str = "KASTELLAN_CPU_MS";
 ///
 /// Exposed for unit testing the env-derivation logic without spinning up
 /// a real sandbox.
+///
+/// NOTE: this function deliberately does **not** manage
+/// [`ENV_LANDLOCK_PROFILE`] (`KASTELLAN_LANDLOCK_PROFILE`). That opt-out is set
+/// only by a manifest that ALSO routes the worker through the lockdown-exec
+/// shim (`ToolEntry.lockdown_shim.is_some()` — today only browser-driver, #281),
+/// where the shim's own `lock_down()` reads it. Do NOT add
+/// `KASTELLAN_LANDLOCK_PROFILE=none` to a Rust worker's `policy.env`: a Rust
+/// worker self-applies via `serve_stdio`, and the var would silently disable its
+/// Landlock layer while leaving it otherwise locked down.
 pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
     let mut out = policy.clone();
     let has_landlock = out.env.iter().any(|(k, _)| k == ENV_LANDLOCK_RW);
