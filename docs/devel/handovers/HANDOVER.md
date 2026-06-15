@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-15 (**#287 RESOLVED — it was a STALE browser-driver venv, NOT a macOS forced-egress code bug.**
-Branch `fix/287-browser-driver-stale-venv`, PR TBD. Systematic-debugging investigation on macOS (Seatbelt, chromium-1223,
+Branch `fix/287-browser-driver-stale-venv`, PR [#290](https://github.com/hherb/kastellan/pull/290). Systematic-debugging investigation on macOS (Seatbelt, chromium-1223,
 PG18) reproduced `got: []`, then instrumented the boundaries: the render error was `net::ERR_SSL_PROTOCOL_ERROR at
 https://127.0.0.1:<port>/` (a **direct** TLS handshake against the plain-HTTP loopback origin) with **zero** sidecar
 decisions ⇒ Chromium connected **directly, bypassing the proxy**. The installed venv was a **pre-slice-#2 build** (no
@@ -21,7 +21,10 @@ of a package pinned at version `0.0.1`; slice #2 added files without bumping the
 satisfied" and **silently kept the old worker code**. Fix: keep the plain install (pulls deps) then add
 `pip install --force-reinstall --no-deps "$WORKER_DIR"` so a re-run always recopies the current source. The only sibling
 worker installer with a local `pip install <path>` — `gliner-relex` uses `uv sync` (re-syncs each run, no staleness);
-`web-search` is SearxNG infra — so the footgun is scoped to this one script. Verified: re-running the fixed `install.sh`
+`web-search` is SearxNG infra — so the footgun is scoped to this one script. The script also gained a **staleness tripwire**
+(asserts the slice-#2 `shim.py` is actually present in site-packages after install — the pre-existing console-script check
+couldn't catch staleness since that entry point existed in the old build too) so any future stale install fails loudly at
+install time instead of silently bypassing the egress sidecar at render. Verified: re-running the fixed `install.sh`
 uninstalls+reinstalls, and the 4 e2e + 40 pytest all green afterward. **macOS-only investigation; no Rust code changed**
 (temporary test instrumentation was reverted). #287 closed by the PR.
 
