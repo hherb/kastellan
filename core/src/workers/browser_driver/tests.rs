@@ -92,7 +92,7 @@ use super::*;
             Some(PathBuf::from("/home/u/.pyenv/versions/3.12.3"))
         );
         // And the entry binds that root read-only.
-        let entry = browser_driver_entry(&out, &[]);
+        let entry = browser_driver_entry(&out, &[], None);
         assert!(entry
             .policy
             .fs_read
@@ -112,7 +112,7 @@ use super::*;
         let out = resolve_env(env, |_p| true, |_p| true, no_canon, no_deps).expect("resolves");
         // Absolute entry kept; relative one dropped (policy needs absolute paths).
         assert_eq!(out.extra_fs_read, vec![PathBuf::from("/opt/homebrew")]);
-        let entry = browser_driver_entry(&out, &[]);
+        let entry = browser_driver_entry(&out, &[], None);
         assert!(entry.policy.fs_read.contains(&PathBuf::from("/opt/homebrew")));
     }
 
@@ -170,7 +170,7 @@ use super::*;
             interpreter_lib_dirs: vec![],
             extra_fs_read: vec![],
         };
-        let entry = browser_driver_entry(&env, &["example.com:443".to_string()]);
+        let entry = browser_driver_entry(&env, &["example.com:443".to_string()], None);
         assert_eq!(entry.binary, PathBuf::from("/v/bin/kastellan-worker-browser-driver"));
         // Phase 2: the browser-specific seccomp/Seatbelt profile.
         assert!(matches!(entry.policy.profile, Profile::WorkerBrowserClient));
@@ -226,17 +226,57 @@ use super::*;
         let get_env = |k: &str| match k {
             "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
             "KASTELLAN_BROWSER_DRIVER_VENV_DIR" => Some("/v".to_string()),
+            // On Linux, resolve() fail-closes unless the lockdown-exec shim is
+            // discoverable; point the override at a (test-runnable) path so the
+            // manifest registers. Ignored on macOS (Seatbelt — no shim there).
+            "KASTELLAN_LOCKDOWN_EXEC_BIN" => {
+                Some("/usr/bin/kastellan-worker-lockdown-exec".to_string())
+            }
             _ => None,
         };
         let exists = |_p: &Path| true;
         let allowlist = |_t: &str| vec!["example.com:443".to_string()];
-        let c = ctx(&get_env, &exists, &allowlist);
+        // is_dir=false so the shim override path counts as a runnable file
+        // (discover_binary requires exists && !is_dir).
+        let c = ResolveCtx {
+            get_env: &get_env,
+            exists: &exists,
+            is_dir: &|_p| false,
+            exe_dir: None,
+            canonicalize: &|_p| None,
+            allowlist: &allowlist,
+        };
         assert_eq!(BrowserDriverManifest.name(), "browser-driver");
         assert_eq!(BrowserDriverManifest.allowlist_tool(), Some("browser-driver"));
         assert!(matches!(
             BrowserDriverManifest.resolve(&c),
             Resolution::Register(_)
         ));
+    }
+
+    /// Linux fail-closed: enabled + venv present but NO discoverable
+    /// lockdown-exec shim ⇒ Misconfigured (never register an unfilterable
+    /// browser). Linux-only — on macOS the shim isn't used.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn manifest_misconfigured_when_shim_missing_on_linux() {
+        let get_env = |k: &str| match k {
+            "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_VENV_DIR" => Some("/v".to_string()),
+            // No KASTELLAN_LOCKDOWN_EXEC_BIN override and no exe_dir ⇒ shim
+            // undiscoverable.
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["example.com:443".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist); // exe_dir: None
+        assert!(
+            matches!(
+                BrowserDriverManifest.resolve(&c),
+                Resolution::Misconfigured { .. }
+            ),
+            "Linux browser-driver must fail closed when the lockdown-exec shim is missing"
+        );
     }
 
     #[test]
@@ -260,11 +300,49 @@ use super::*;
             interpreter_lib_dirs: vec![PathBuf::from("/opt/hb/gettext/lib")],
             extra_fs_read: vec![],
         };
-        let entry = browser_driver_entry(&env, &[]);
+        let entry = browser_driver_entry(&env, &[], None);
         assert!(entry
             .policy
             .fs_read
             .contains(&PathBuf::from("/opt/hb/gettext/lib")));
+    }
+
+    /// cfg-split: only one arm runs per platform — the Linux arm asserts the
+    /// shim + KASTELLAN_LANDLOCK_PROFILE=none are set; the macOS arm asserts
+    /// neither is present. The Linux arm is exercised by CI/DGX.
+    #[test]
+    fn entry_sets_lockdown_shim_and_landlock_none_on_linux() {
+        let env = BrowserDriverEnv {
+            script_path: PathBuf::from("/v/bin/kastellan-worker-browser-driver"),
+            venv_dir: PathBuf::from("/v"),
+            interpreter_root: None,
+            interpreter_lib_dirs: vec![],
+            extra_fs_read: vec![],
+        };
+        let allow = vec!["example.com".to_string()];
+        #[cfg(target_os = "linux")]
+        {
+            let shim = std::path::PathBuf::from("/opt/kastellan/kastellan-worker-lockdown-exec");
+            let entry = browser_driver_entry(&env, &allow, Some(shim.clone()));
+            assert_eq!(entry.lockdown_shim.as_deref(), Some(shim.as_path()));
+            assert!(
+                entry.policy.fs_read.contains(&shim),
+                "shim must be bound RO into the jail so bwrap can exec it (the DGX bug)"
+            );
+            assert!(
+                entry.policy.env.iter().any(|(k, v)| k == "KASTELLAN_LANDLOCK_PROFILE" && v == "none"),
+                "Linux browser-driver must disable Landlock for the shim's lock_down"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let entry = browser_driver_entry(&env, &allow, None);
+            assert!(entry.lockdown_shim.is_none());
+            assert!(
+                !entry.policy.env.iter().any(|(k, _)| k == "KASTELLAN_LANDLOCK_PROFILE"),
+                "macOS browser-driver must not add the Landlock-profile env"
+            );
+        }
     }
 
     #[test]
@@ -291,7 +369,7 @@ use super::*;
             out.interpreter_lib_dirs,
             vec![PathBuf::from("/opt/hb/gettext/lib")]
         );
-        let entry = browser_driver_entry(&out, &[]);
+        let entry = browser_driver_entry(&out, &[], None);
         assert!(entry
             .policy
             .fs_read

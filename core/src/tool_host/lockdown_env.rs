@@ -28,6 +28,11 @@ pub const ENV_LANDLOCK_RO: &str = "KASTELLAN_LANDLOCK_RO";
 /// Env var name read by `kastellan-worker-prelude::seccomp_lock` for the
 /// per-worker seccomp profile selector.
 pub const ENV_SECCOMP_PROFILE: &str = "KASTELLAN_SECCOMP_PROFILE";
+/// Env var read by `kastellan-worker-prelude::landlock_lock` to disable the
+/// Landlock layer (`"none"`). Source of truth for the string is the prelude;
+/// mirrored here for manifests that set it (browser-driver). Not set by
+/// `derive_lockdown_env` — only explicitly by a manifest that opts out.
+pub const ENV_LANDLOCK_PROFILE: &str = "KASTELLAN_LANDLOCK_PROFILE";
 /// Env var name read by `kastellan-worker-prelude::rlimit` for the
 /// `policy.cpu_ms` budget. Plumbed cross-platform — applied via
 /// `setrlimit(RLIMIT_CPU)` from the worker prelude before lock-down.
@@ -42,6 +47,15 @@ pub const ENV_CPU_MS: &str = "KASTELLAN_CPU_MS";
 ///
 /// Exposed for unit testing the env-derivation logic without spinning up
 /// a real sandbox.
+///
+/// NOTE: this function deliberately does **not** manage
+/// [`ENV_LANDLOCK_PROFILE`] (`KASTELLAN_LANDLOCK_PROFILE`). That opt-out is set
+/// only by a manifest that ALSO routes the worker through the lockdown-exec
+/// shim (`ToolEntry.lockdown_shim.is_some()` — today only browser-driver, #281),
+/// where the shim's own `lock_down()` reads it. Do NOT add
+/// `KASTELLAN_LANDLOCK_PROFILE=none` to a Rust worker's `policy.env`: a Rust
+/// worker self-applies via `serve_stdio`, and the var would silently disable its
+/// Landlock layer while leaving it otherwise locked down.
 pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
     let mut out = policy.clone();
     let has_landlock = out.env.iter().any(|(k, _)| k == ENV_LANDLOCK_RW);

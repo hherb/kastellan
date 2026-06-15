@@ -42,6 +42,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
+        lockdown_shim: None,
     }
 }
 

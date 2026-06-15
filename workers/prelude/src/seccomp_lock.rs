@@ -572,10 +572,9 @@ pub const NET_CLIENT_ADDITIONS: &[i64] = &[
 ///
 /// Enumerated by the spike via `strace -f -c` of the full bwrapped Chromium
 /// process tree, then diffed against the `net_client` set (design spec §3.1).
-/// (`capget`/`capset`/`pivot_root`/`umount2` also appeared in the trace but are
-/// **bwrap's own** container setup, run before the worker self-applies the
-/// filter, so they are deliberately NOT here.) Every entry exists on both
-/// `x86_64` and `aarch64`.
+/// (`pivot_root`/`umount2` also appeared in the trace but are **bwrap's own**
+/// container setup, run before the worker self-applies the filter, so they are
+/// deliberately NOT here.) Every entry exists on both `x86_64` and `aarch64`.
 pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
     libc::SYS_fallocate,
     libc::SYS_ftruncate,
@@ -586,6 +585,23 @@ pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
     libc::SYS_memfd_create,
     libc::SYS_pidfd_open,
     libc::SYS_restart_syscall,
+    // capget + capset: both are required post-filter and both are confirmed by
+    // the DGX acceptance gate (issue #281, 2026-06-15) — removing either breaks
+    // the render. Without capget, Playwright's bundled Node.js driver is
+    // SIGSYS-killed at startup (surfacing as `'PlaywrightContextManager' has no
+    // attr '_playwright'`). Without capset, Chromium crashes while spawning a
+    // page/renderer (`Browser.new_page: ... browser has been closed`) — its
+    // zygote/process setup adjusts the same-process capability set. Both operate
+    // ONLY on this process's own capability bitmask and grant no privilege
+    // uplift: the worker runs inside bwrap's unprivileged user namespace
+    // (`--unshare-all`), where any capability is namespaced — it confers nothing
+    // against the host and cannot be mapped out of the userns. PR_SET_NO_NEW_PRIVS
+    // additionally blocks gaining privileges across the inevitable execve. So
+    // capset can at most shuffle caps the kernel already confined to this jail;
+    // it cannot raise host privilege. (If bwrap were ever run setuid or with
+    // --cap-add, this reasoning would need revisiting — neither is done here.)
+    libc::SYS_capget,
+    libc::SYS_capset,
 ];
 
 /// The `io_uring` syscalls Chromium probes. Listed in [`allow_list_for`] for

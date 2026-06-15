@@ -230,11 +230,18 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
         // `ToolEntry` cannot mutate each other's policy. The clone matches the
         // discipline the pre-refactor inline path used.
         let policy = entry.policy.clone();
-        let program = entry.binary.to_string_lossy().into_owned();
+        // Route through the lockdown shim when the manifest set one (Linux
+        // pure-Python workers); otherwise spawn the binary directly.
+        let (program, args) = crate::tool_host::build_program_and_args(
+            &entry.binary,
+            entry.lockdown_shim.as_deref(),
+            &[],
+        );
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let spec = WorkerSpec {
             policy: &policy,
             program: &program,
-            args: &[],
+            args: &arg_refs,
             wall_clock_ms: entry.wall_clock_ms,
         };
         // Resolve per call: `entry.sandbox_backend == None` returns the

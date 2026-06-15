@@ -137,6 +137,14 @@ pub struct ToolEntry {
     ///   `SandboxBackends::resolve`. Production workers (gliner-relex,
     ///   future python-exec) populate this with their per-worker image.
     pub container_image: Option<String>,
+    /// Optional lockdown shim the worker is spawned *through*
+    /// (`kastellan-worker-lockdown-exec`). `None` (every Rust worker) spawns
+    /// the binary directly — the worker locks itself down via the prelude's
+    /// `serve_stdio`. `Some(path)` is set by manifests for pure-Python venv
+    /// workers (browser-driver) on Linux: bwrap spawns them directly and never
+    /// runs the Rust prelude, so the shim applies the seccomp filter and
+    /// `execve`s the real binary, which inherits it. See issue #281.
+    pub lockdown_shim: Option<PathBuf>,
 }
 
 /// Look-up table from logical tool name (as it appears in

@@ -142,6 +142,7 @@ mod tests {
             lifecycle: Lifecycle::SingleUse,
             sandbox_backend: None,
             container_image: None,
+            lockdown_shim: None,
         }
     }
 
@@ -161,6 +162,7 @@ mod tests {
             lifecycle,
             sandbox_backend: None,
             container_image: None,
+            lockdown_shim: None,
         }
     }
 

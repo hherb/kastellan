@@ -22,7 +22,7 @@ use std::thread;
 
 use kastellan_core::egress::net_worker::{spawn_forced_net_worker, NetWorkerSpawn};
 use kastellan_core::secrets::Vault;
-use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::tool_host::{build_program_and_args, dispatch, spawn_worker, WorkerSpec};
 use kastellan_core::workers::browser_driver::{browser_driver_entry, BrowserDriverEnv};
 use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
@@ -140,6 +140,21 @@ async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::Pg
         .expect("connect runtime pool")
 }
 
+/// Build the `(program, args)` to spawn browser-driver, routing through the
+/// lockdown-exec shim on Linux (so the worker actually gets the browser_client
+/// seccomp filter — the #281 property). On macOS the shim is not used (Seatbelt
+/// applies the profile from the parent); the binary is spawned directly.
+/// Returns `(shim_for_entry, program, args)` where `shim_for_entry` is what to
+/// pass as `browser_driver_entry`'s 3rd arg.
+fn shim_spawn_for(script_path: &std::path::Path) -> (Option<PathBuf>, String, Vec<String>) {
+    #[cfg(target_os = "linux")]
+    let shim = Some(workspace_target_binary("kastellan-worker-lockdown-exec"));
+    #[cfg(not(target_os = "linux"))]
+    let shim: Option<PathBuf> = None;
+    let (program, args) = build_program_and_args(script_path, shim.as_deref(), &[]);
+    (shim, program, args)
+}
+
 /// Render `url` through the real jail with the given operator `allowlist`.
 async fn render_in_jail(
     pool: &sqlx::PgPool,
@@ -147,13 +162,14 @@ async fn render_in_jail(
     allowlist: &[String],
     url: &str,
 ) -> Result<serde_json::Value, kastellan_core::tool_host::ToolHostError> {
-    let entry = browser_driver_entry(&env.browser, allowlist);
+    let (shim, program, args) = shim_spawn_for(&env.browser.script_path);
+    let entry = browser_driver_entry(&env.browser, allowlist, shim);
     let backend = backend();
-    let program = env.browser.script_path.to_string_lossy().into_owned();
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let spec = WorkerSpec {
         policy: &entry.policy,
         program: &program,
-        args: &[],
+        args: &arg_refs,
         wall_clock_ms: entry.wall_clock_ms,
     };
     let mut sworker = spawn_worker(&*backend, &spec).expect("spawn browser-driver under sandbox");
@@ -228,13 +244,14 @@ async fn render_in_jail_forced(
     // boundary: allow in-process (so Chromium actually makes the request) while
     // the sidecar blocks it — proving the OS boundary, not just the app-layer
     // check. Production passes the same list to both.
-    let entry = browser_driver_entry(&env.browser, worker_allowlist);
+    let (shim, program, args) = shim_spawn_for(&env.browser.script_path);
+    let entry = browser_driver_entry(&env.browser, worker_allowlist, shim);
     let backend = backend();
-    let program = env.browser.script_path.to_string_lossy().into_owned();
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let spec = WorkerSpec {
         policy: &entry.policy,
         program: &program,
-        args: &[],
+        args: &arg_refs,
         wall_clock_ms: entry.wall_clock_ms,
     };
     let params = NetWorkerSpawn {

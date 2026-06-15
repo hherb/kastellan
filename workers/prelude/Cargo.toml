@@ -29,3 +29,7 @@ seccompiler = { workspace = true }
 [[bin]]
 name = "kastellan-lockdown-probe"
 path = "src/bin/lockdown_probe.rs"
+
+[[bin]]
+name = "kastellan-worker-lockdown-exec"
+path = "src/bin/lockdown_exec.rs"

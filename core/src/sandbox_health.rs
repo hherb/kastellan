@@ -213,6 +213,7 @@ mod tests {
             lifecycle: Lifecycle::SingleUse,
             sandbox_backend,
             container_image: container_image.map(String::from),
+            lockdown_shim: None,
         }
     }
 

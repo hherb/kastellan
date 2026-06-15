@@ -83,6 +83,7 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
+        lockdown_shim: None,
     }
 }
 

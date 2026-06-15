@@ -99,9 +99,36 @@ const DEFAULT_RO_EXEC_ROOTS: &[&str] = &[
     "/proc",
 ];
 
-/// Read [`KASTELLAN_LANDLOCK_RW`] and [`KASTELLAN_LANDLOCK_RO`] from the
-/// environment and apply the ruleset. Used by [`crate::lock_down`].
+/// Name of the env var that can disable the Landlock layer. Value `"none"`
+/// skips the ruleset entirely; unset / any other value keeps the default
+/// behavior. Used by workers whose filesystem surface is not yet validated
+/// against a Landlock ruleset (e.g. browser-driver/Chromium), where bwrap's
+/// mount namespace remains the filesystem-containment layer.
+pub const LANDLOCK_PROFILE_ENV: &str = "KASTELLAN_LANDLOCK_PROFILE";
+
+/// Pure predicate: should the Landlock layer be skipped for this profile value?
+/// Only the exact string `"none"` disables it (mirrors the seccomp `"none"`
+/// convention). Split out so it is unit-testable without touching process env.
+///
+/// Note: an empty string (`""`) does NOT disable Landlock — unlike the seccomp
+/// profile parser, which also treats `""` as `None`. An empty value here is far
+/// more likely a misconfigured env var than a deliberate opt-out, so we
+/// fail-safe and keep the ruleset.
+pub fn landlock_disabled_by_profile(profile: Option<&str>) -> bool {
+    profile == Some("none")
+}
+
+/// Read [`LANDLOCK_PROFILE_ENV`], [`KASTELLAN_LANDLOCK_RW`], and
+/// [`KASTELLAN_LANDLOCK_RO`] from the environment and apply the ruleset — or
+/// return [`LandlockReport::Disabled`] when the profile is `"none"`. Used by
+/// [`crate::lock_down`].
 pub fn apply_from_env() -> Result<LandlockReport, LockdownError> {
+    // Explicit opt-out: a worker that sets KASTELLAN_LANDLOCK_PROFILE=none gets
+    // no Landlock ruleset. bwrap's mount namespace still contains it.
+    let profile = std::env::var(LANDLOCK_PROFILE_ENV).ok();
+    if landlock_disabled_by_profile(profile.as_deref()) {
+        return Ok(LandlockReport::Disabled);
+    }
     let rw_paths = parse_rw_env_var()?;
     let ro_paths = parse_ro_env_var()?;
     apply(&rw_paths, &ro_paths)
@@ -346,5 +373,15 @@ mod tests {
     fn parse_ro_string_rejects_bad_json() {
         let err = parse_ro_string("not-json").unwrap_err();
         assert!(matches!(err, LockdownError::Env(_)));
+    }
+
+    // ── KASTELLAN_LANDLOCK_PROFILE disable signal ────────────────────────
+
+    #[test]
+    fn landlock_disabled_only_for_explicit_none() {
+        assert!(landlock_disabled_by_profile(Some("none")));
+        assert!(!landlock_disabled_by_profile(Some("")));
+        assert!(!landlock_disabled_by_profile(Some("strict")));
+        assert!(!landlock_disabled_by_profile(None));
     }
 }

@@ -33,6 +33,7 @@ async fn idle_timeout_acquire_on_single_use_entry_returns_wiring_error() {
         lifecycle: Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
+        lockdown_shim: None,
     };
     let r = mgr.acquire("test-tool", &entry).await;
     assert!(r.is_err(), "must return Err on wiring bug");
@@ -124,6 +125,7 @@ async fn single_use_lifecycle_acquire_routes_via_entry_sandbox_backend_kind() {
         lifecycle: Lifecycle::SingleUse,
         sandbox_backend: Some(SandboxBackendKind::Container),
         container_image: None,
+        lockdown_shim: None,
     };
     let _ = mgr.acquire("test", &entry_container).await;
     assert_eq!(
@@ -216,6 +218,7 @@ async fn idle_timeout_lifecycle_acquire_routes_via_entry_sandbox_backend_kind() 
         lifecycle,
         sandbox_backend: Some(SandboxBackendKind::Container),
         container_image: None,
+        lockdown_shim: None,
     };
     // Distinct tool name from the default-entry call below — warm
     // slots are keyed by tool name, so reusing the name would race
