@@ -109,12 +109,19 @@ pub const LANDLOCK_PROFILE_ENV: &str = "KASTELLAN_LANDLOCK_PROFILE";
 /// Pure predicate: should the Landlock layer be skipped for this profile value?
 /// Only the exact string `"none"` disables it (mirrors the seccomp `"none"`
 /// convention). Split out so it is unit-testable without touching process env.
+///
+/// Note: an empty string (`""`) does NOT disable Landlock — unlike the seccomp
+/// profile parser, which also treats `""` as `None`. An empty value here is far
+/// more likely a misconfigured env var than a deliberate opt-out, so we
+/// fail-safe and keep the ruleset.
 pub fn landlock_disabled_by_profile(profile: Option<&str>) -> bool {
     profile == Some("none")
 }
 
-/// Read [`KASTELLAN_LANDLOCK_RW`] and [`KASTELLAN_LANDLOCK_RO`] from the
-/// environment and apply the ruleset. Used by [`crate::lock_down`].
+/// Read [`LANDLOCK_PROFILE_ENV`], [`KASTELLAN_LANDLOCK_RW`], and
+/// [`KASTELLAN_LANDLOCK_RO`] from the environment and apply the ruleset — or
+/// return [`LandlockReport::Disabled`] when the profile is `"none"`. Used by
+/// [`crate::lock_down`].
 pub fn apply_from_env() -> Result<LandlockReport, LockdownError> {
     // Explicit opt-out: a worker that sets KASTELLAN_LANDLOCK_PROFILE=none gets
     // no Landlock ruleset. bwrap's mount namespace still contains it.
