@@ -39,6 +39,15 @@ pub enum Profile {
     /// denies — issue #1); it must never be selected by any other worker. See
     /// the spike findings in the browser-driver design spec §3.1.
     WorkerBrowserClient,
+    /// For heavy torch/transformers inference workers (gliner-relex): the
+    /// `WorkerNetClient` syscall set (torch creates sockets even fully offline)
+    /// **plus** an empirically-enumerated ML-additions set (Linux seccomp
+    /// `ml_client`). The worker stays `Net::Deny` — the socket syscalls are
+    /// permitted at the seccomp layer but have no route out of the private
+    /// netns. On macOS this renders identically to `WorkerStrict` (Seatbelt has
+    /// no per-syscall layer and the worker is net-denied). See the
+    /// gliner-relex Linux-seccomp design spec (2026-06-16) and issue #281.
+    WorkerMlClient,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -474,6 +483,16 @@ mod tests {
             !Arc::ptr_eq(&backend, &cached_default),
             "resolve with custom image must return a fresh backend, not the cached default-image slot"
         );
+    }
+
+    #[test]
+    fn ml_client_profile_is_distinct_and_serialises() {
+        // WorkerMlClient is a real variant (torch/ML worker seccomp tier).
+        let p = Profile::WorkerMlClient;
+        let json = serde_json::to_string(&p).expect("serialise");
+        let back: Profile = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back, Profile::WorkerMlClient);
+        assert_ne!(Profile::WorkerMlClient, Profile::WorkerStrict);
     }
 
     #[test]
