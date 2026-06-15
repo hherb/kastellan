@@ -891,6 +891,10 @@ fn manifest_misconfigured_when_weights_dir_env_missing() {
     }
 }
 
+/// On macOS the manifest registers without any lockdown-exec shim
+/// (Seatbelt is applied from the parent process, not via a shim).
+/// On Linux, see `manifest_registers_on_happy_path_linux_with_shim` below.
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn manifest_registers_on_happy_path() {
     // enable=1, weights dir is a dir, explicit venv dir, shim exists.
@@ -915,6 +919,88 @@ fn manifest_registers_on_happy_path() {
             );
         }
         _ => panic!("expected Register on the happy path"),
+    }
+}
+
+/// On Linux the manifest must fail-closed when the lockdown-exec shim
+/// cannot be found: never register an unfiltered torch worker.
+/// macOS uses Seatbelt (applied from the parent), so no shim is required.
+#[cfg(target_os = "linux")]
+#[test]
+fn manifest_is_fail_closed_when_shim_missing_on_linux() {
+    use crate::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
+    // Enabled + venv shim present, but the lockdown-exec shim cannot be found:
+    // resolve() must refuse (Misconfigured), never Register an unfiltered worker.
+    let ctx = ResolveCtx {
+        get_env: &|k: &str| match k {
+            "KASTELLAN_GLINER_RELEX_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR" => Some("/tmp/fake/weights".to_string()),
+            "KASTELLAN_GLINER_RELEX_VENV_DIR" => Some("/tmp/fake/.venv".to_string()),
+            // No KASTELLAN_LOCKDOWN_EXEC_BIN set.
+            _ => None,
+        },
+        // weights dir + venv shim "exist"; lockdown-exec sibling does not.
+        exists: &|p| {
+            p == std::path::Path::new("/tmp/fake/.venv/bin/kastellan-worker-gliner-relex")
+        },
+        is_dir: &|p| p == std::path::Path::new("/tmp/fake/weights"),
+        // exe_dir None => no current_exe()-relative sibling lookup, so with no
+        // override env the shim cannot be discovered => fail-closed.
+        exe_dir: None,
+        canonicalize: &|p| Some(p.to_path_buf()),
+        allowlist: &|_| vec![],
+    };
+    match GlinerRelexManifest.resolve(&ctx) {
+        Resolution::Misconfigured { detail } => {
+            assert!(detail.contains("lockdown-exec"), "detail: {detail}");
+        }
+        Resolution::Register(_) => panic!("expected Misconfigured, got Register"),
+        Resolution::Disabled { detail } => panic!("expected Misconfigured, got Disabled: {detail}"),
+    }
+}
+
+/// On Linux the manifest registers when the lockdown-exec shim IS found
+/// (via KASTELLAN_LOCKDOWN_EXEC_BIN override pointing at a runnable file).
+#[cfg(target_os = "linux")]
+#[test]
+fn manifest_registers_on_happy_path_linux_with_shim() {
+    use crate::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
+    let shim_path = "/tmp/fake/kastellan-worker-lockdown-exec";
+    let ctx = ResolveCtx {
+        get_env: &|k: &str| match k {
+            "KASTELLAN_GLINER_RELEX_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR" => Some("/tmp/fake/weights".to_string()),
+            "KASTELLAN_GLINER_RELEX_VENV_DIR" => Some("/tmp/fake/.venv".to_string()),
+            "KASTELLAN_LOCKDOWN_EXEC_BIN" => Some(shim_path.to_string()),
+            _ => None,
+        },
+        exists: &|p| {
+            p == std::path::Path::new("/tmp/fake/.venv/bin/kastellan-worker-gliner-relex")
+                || p == std::path::Path::new(shim_path)
+        },
+        is_dir: &|p| p == std::path::Path::new("/tmp/fake/weights"),
+        exe_dir: None,
+        canonicalize: &|p| Some(p.to_path_buf()),
+        allowlist: &|_| vec![],
+    };
+    match GlinerRelexManifest.resolve(&ctx) {
+        Resolution::Register(entry) => {
+            assert!(
+                matches!(entry.lifecycle, crate::worker_lifecycle::Lifecycle::IdleTimeout { .. }),
+                "gliner must register IdleTimeout"
+            );
+            assert_eq!(
+                entry.lockdown_shim.as_deref(),
+                Some(std::path::Path::new(shim_path)),
+                "shim must be threaded through to the ToolEntry"
+            );
+        }
+        Resolution::Misconfigured { detail } => {
+            panic!("expected Register on the happy path with shim, got Misconfigured: {detail}")
+        }
+        Resolution::Disabled { detail } => {
+            panic!("expected Register on the happy path with shim, got Disabled: {detail}")
+        }
     }
 }
 
