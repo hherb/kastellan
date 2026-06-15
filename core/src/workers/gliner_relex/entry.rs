@@ -7,11 +7,6 @@
 //! share their env-var list and lifecycle via the helpers at the bottom
 //! so a future PyTorch-hygiene or lifecycle tweak lands in both.
 
-// `PathBuf` is only named by the macOS-only `container_mode_entry`
-// (host-mode builds its paths from the already-typed `GlinerRelexEnv`
-// fields), so the import is gated to match — avoids an unused-import
-// warning on the Linux build (clippy `-D warnings`).
-#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
 use kastellan_sandbox::{Net, Profile, SandboxPolicy};
@@ -92,7 +87,10 @@ const CONTAINER_BINARY: &str = "/usr/local/bin/kastellan-worker-gliner-relex";
 /// - **`mem_mb: 4_096`** — sized for `multi-v1.0` (~2-3 GB resident)
 ///   with headroom. Operators picking `large-v0.5` (~4-5 GB) need
 ///   to bump this; flagged in the README's env-var table.
-pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
+pub fn gliner_relex_entry(
+    env: &GlinerRelexEnv,
+    lockdown_shim: Option<PathBuf>,
+) -> ToolEntry {
     // The container branch is macOS-only: it constructs an entry tagged
     // `SandboxBackendKind::Container`, a variant that doesn't exist on
     // Linux. On Linux `env.use_container_backend` is forced `false` by
@@ -102,16 +100,18 @@ pub fn gliner_relex_entry(env: &GlinerRelexEnv) -> ToolEntry {
     // containment layer; Apple `container` is the macOS opt-in.
     #[cfg(target_os = "macos")]
     if env.use_container_backend {
+        // Container mode never uses the host-spawn shim (the image bakes its
+        // own entrypoint); the param is host-mode-only.
         return container_mode_entry(env);
     }
-    host_mode_entry(env)
+    host_mode_entry(env, lockdown_shim)
 }
 
 /// Host-mode entry: the existing pre-Slice-2.5 shape. Worker runs from
 /// the host venv shim; FS allowlist holds weights + venv + editable
 /// src dir; per-OS default sandbox backend (Seatbelt darwin / bwrap
 /// linux).
-fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
+fn host_mode_entry(env: &GlinerRelexEnv, lockdown_shim: Option<PathBuf>) -> ToolEntry {
     // The venv uses an editable install (uv's default for hatchling
     // workspace projects); `.venv/.../_editable_impl_*.pth` points at
     // `<worker_dir>/src`. Mounting only `.venv` would let Python start
@@ -150,16 +150,36 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
     }
     fs_read.extend(env.interpreter_lib_dirs.iter().cloned());
 
+    // Bind the lockdown-exec shim into the jail read-only so bwrap can exec it
+    // (it lives in target/debug/ in dev, outside the base /usr bind). Linux
+    // only — macOS/container pass None (Seatbelt is applied from the parent).
+    if let Some(shim) = &lockdown_shim {
+        fs_read.push(shim.clone());
+    }
+
+    let mut policy_env = build_runtime_env(env);
+    // When spawned through the lockdown shim (Linux), run seccomp-only: the
+    // shim's lock_down() reads KASTELLAN_LANDLOCK_PROFILE=none and skips the
+    // Landlock layer. gliner's FS surface isn't validated against a Landlock
+    // ruleset yet and bwrap's mount namespace already bounds it (Landlock is a
+    // tracked #281 follow-up). macOS/container pass None and add nothing.
+    if lockdown_shim.is_some() {
+        policy_env.push((
+            crate::tool_host::ENV_LANDLOCK_PROFILE.to_string(),
+            "none".to_string(),
+        ));
+    }
+
     let policy = SandboxPolicy {
         fs_read,
         fs_write: vec![],
         net: Net::Deny,
         cpu_ms: 0,
         mem_mb: 4_096,
-        profile: Profile::WorkerStrict,
+        profile: Profile::WorkerMlClient,
         cpu_quota_pct: Some(400),
         tasks_max: Some(64),
-        env: build_runtime_env(env),
+        env: policy_env,
         proxy_uds: None,
     };
 
@@ -170,7 +190,7 @@ fn host_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         lifecycle: build_idle_timeout_lifecycle(),
         sandbox_backend: None,
         container_image: None,
-        lockdown_shim: None,
+        lockdown_shim,
     }
 }
 

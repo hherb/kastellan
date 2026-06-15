@@ -54,7 +54,7 @@ impl crate::worker_manifest::WorkerManifest for GlinerRelexManifest {
                     env.interpreter_root = root;
                     env.interpreter_lib_dirs = dirs;
                 }
-                Resolution::Register(gliner_relex_entry(&env))
+                Resolution::Register(gliner_relex_entry(&env, None))
             }
             Err(ResolveSkipReason::Disabled) => Resolution::Disabled {
                 detail: "KASTELLAN_GLINER_RELEX_ENABLE != \"1\"".to_string(),

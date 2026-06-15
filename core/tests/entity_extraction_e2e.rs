@@ -167,7 +167,7 @@ fn build_real_model_entry() -> Option<ToolEntry> {
         interpreter_root: None,
         interpreter_lib_dirs: vec![],
     };
-    Some(gliner_relex_entry(&env))
+    Some(gliner_relex_entry(&env, None))
 }
 
 // ---------------------------------------------------------------------

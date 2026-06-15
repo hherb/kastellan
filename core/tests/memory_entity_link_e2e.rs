@@ -485,7 +485,7 @@ async fn build_real_extractor(pool: &sqlx::PgPool) -> Option<Arc<dyn EntityExtra
         interpreter_root: None,
         interpreter_lib_dirs: vec![],
     };
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle: Arc<dyn WorkerLifecycleManager> =
         Arc::new(CompositeLifecycle::new(sandboxes));

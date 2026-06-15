@@ -159,7 +159,7 @@ fn build_test_entry_container() -> Option<ToolEntry> {
         interpreter_root: None,
         interpreter_lib_dirs: vec![],
     };
-    Some(gliner_relex_entry(&env))
+    Some(gliner_relex_entry(&env, None))
 }
 
 /// Skip-helper smoke test: confirms the resolution helpers compile +
@@ -203,7 +203,7 @@ fn build_test_entry() -> Option<ToolEntry> {
         interpreter_root: None,
         interpreter_lib_dirs: vec![],
     };
-    Some(gliner_relex_entry(&env))
+    Some(gliner_relex_entry(&env, None))
 }
 
 /// Bring up a one-shot Postgres cluster + run the schema probe. Skips
