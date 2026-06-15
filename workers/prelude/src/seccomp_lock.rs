@@ -97,6 +97,13 @@ pub enum Profile {
     /// listed in [`allow_list_for`] (so the main filter returns `ALLOW`, not
     /// `KILL`, leaving the second filter free to downgrade it to `ERRNO`).
     BrowserClient,
+    /// `"ml_client"` — `net_client` **plus** [`ML_CLIENT_ADDITIONS`]: the
+    /// syscalls a torch/transformers inference worker (gliner-relex) issues
+    /// beyond the net-client base, enumerated empirically on the DGX via a
+    /// log-mode seccomp run (design spec 2026-06-16 §4). The worker is
+    /// `Net::Deny`; the socket family is permitted at the syscall layer (torch
+    /// opens sockets even fully offline) but the private netns gives it no route.
+    MlClient,
 }
 
 impl Profile {
@@ -105,10 +112,11 @@ impl Profile {
             "strict" => Ok(Some(Profile::Strict)),
             "net_client" => Ok(Some(Profile::NetClient)),
             "browser_client" => Ok(Some(Profile::BrowserClient)),
+            "ml_client" => Ok(Some(Profile::MlClient)),
             "none" | "" => Ok(None),
             other => Err(LockdownError::Env(format!(
                 "KASTELLAN_SECCOMP_PROFILE must be 'strict' | 'net_client' | \
-                 'browser_client' | 'none', got {other:?}"
+                 'browser_client' | 'ml_client' | 'none', got {other:?}"
             ))),
         }
     }
@@ -218,7 +226,7 @@ pub fn allow_list_for(profile: Profile) -> Vec<i64> {
     #[cfg(target_arch = "x86_64")]
     out.extend_from_slice(BASE_ALLOW_X86_64_LEGACY);
     // Both net-using profiles get the BSD-socket family.
-    if matches!(profile, Profile::NetClient | Profile::BrowserClient) {
+    if matches!(profile, Profile::NetClient | Profile::BrowserClient | Profile::MlClient) {
         out.extend_from_slice(NET_CLIENT_ADDITIONS);
     }
     if matches!(profile, Profile::BrowserClient) {
@@ -227,6 +235,9 @@ pub fn allow_list_for(profile: Profile) -> Vec<i64> {
         // the second filter from `build_io_uring_eperm_bpf` then downgrades it
         // to EPERM. Never reachable as a real allow — see the variant docs.
         out.extend_from_slice(BROWSER_IO_URING);
+    }
+    if matches!(profile, Profile::MlClient) {
+        out.extend_from_slice(ML_CLIENT_ADDITIONS);
     }
     out
 }
@@ -612,6 +623,17 @@ pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
 /// [`Profile::BrowserClient`] docs for the precedence reasoning.
 pub const BROWSER_IO_URING: &[i64] = &[libc::SYS_io_uring_setup, libc::SYS_io_uring_enter];
 
+/// torch/transformers-specific syscalls beyond [`NET_CLIENT_ADDITIONS`].
+/// Permitted only under [`Profile::MlClient`] (gliner-relex).
+///
+/// **Populated empirically** by a log-mode seccomp run on the DGX (see the
+/// design spec §4) — each entry is a syscall a real
+/// `knowledgator/gliner-relex-multi-v1.0` model load + `extract` was observed
+/// to issue and SIGSYS on under the bare `net_client` set. Starts empty: a
+/// fresh enumeration fills it. Escape primitives (namespace/mount/ptrace/bpf/
+/// io_uring) are NEVER added here — they stay killed by the default action.
+pub const ML_CLIENT_ADDITIONS: &[i64] = &[];
+
 /// Map the build target architecture to seccompiler's enum. Returns an
 /// error on unsupported arches so we never silently install a filter for
 /// the wrong arch (which is a foot-gun: filters are arch-specific BPF).
@@ -844,6 +866,46 @@ mod tests {
                 !allow_list_for(Profile::Strict).contains(nr),
                 "io_uring {nr} must NOT be in Strict"
             );
+        }
+    }
+
+    #[test]
+    fn profile_parse_recognises_ml_client() {
+        assert_eq!(Profile::parse("ml_client").unwrap(), Some(Profile::MlClient));
+    }
+
+    #[test]
+    fn build_bpf_ml_client_succeeds() {
+        let bpf = build_bpf(Profile::MlClient).expect("ml_client bpf must build");
+        assert!(!bpf.is_empty(), "ml_client filter must emit instructions");
+    }
+
+    #[test]
+    fn ml_client_is_a_superset_of_net_client() {
+        // ml_client = net_client + ML additions, so it must allow everything
+        // net_client does (notably the socket family torch needs even offline).
+        let net_client = allow_list_for(Profile::NetClient);
+        let ml = allow_list_for(Profile::MlClient);
+        for nr in net_client {
+            assert!(ml.contains(&nr), "MlClient missing NetClient syscall {nr}");
+        }
+        assert!(ml.contains(&libc::SYS_socket), "MlClient must allow socket()");
+    }
+
+    #[test]
+    fn ml_client_excludes_escape_primitives() {
+        // The threat-model invariant: even a torch-tier worker must never be able
+        // to escape its namespace / inspect other processes / load BPF.
+        let ml = allow_list_for(Profile::MlClient);
+        for nr in [
+            libc::SYS_unshare,
+            libc::SYS_setns,
+            libc::SYS_mount,
+            libc::SYS_ptrace,
+            libc::SYS_bpf,
+            libc::SYS_perf_event_open,
+        ] {
+            assert!(!ml.contains(&nr), "MlClient must never allow {nr}");
         }
     }
 }
