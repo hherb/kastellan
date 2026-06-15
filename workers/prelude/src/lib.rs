@@ -90,6 +90,10 @@ pub enum LandlockReport {
     /// installed. The bwrap mount layer is still in effect, so isolation is
     /// degraded but not absent.
     KernelTooOld,
+    /// Deliberately not installed — the worker set
+    /// `KASTELLAN_LANDLOCK_PROFILE=none`. bwrap's mount namespace remains the
+    /// filesystem-containment layer. Not an error; logged via the report.
+    Disabled,
 }
 
 /// Status of the seccomp-bpf layer after `lock_down`.
