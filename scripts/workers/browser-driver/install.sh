@@ -40,7 +40,18 @@ echo ">>> installing the worker into the venv (non-editable)"
 # package must be copied INTO venv site-packages. An editable (`-e`) install
 # leaves the source in the repo via a `.pth`, which the sandbox can't read.
 "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null
+# Two steps so a re-run always stages the CURRENT worker source:
+#   1. Plain install pulls in the runtime deps (readability/lxml/playwright);
+#      pip skips any already-satisfied versioned dep, so re-runs are fast.
+#   2. Force-reinstall the local package WITHOUT deps. The package version is
+#      static (0.0.1), so a plain `pip install <path>` on a re-run reports
+#      "already satisfied" and SILENTLY KEEPS STALE worker code after the source
+#      changes — e.g. egress slice #2 added shim.py + rewired __main__.py, and a
+#      stale venv (no shim, no --proxy-server) made Chromium bypass the egress
+#      sidecar on macOS, which looked like a forced-egress code bug (issue #287)
+#      but was just an out-of-date install. --force-reinstall always recopies.
 "$VENV_DIR/bin/pip" install "$WORKER_DIR"
+"$VENV_DIR/bin/pip" install --force-reinstall --no-deps "$WORKER_DIR"
 
 echo ">>> installing the chromium headless shell into $BROWSERS_DIR"
 # Keep the browser tree inside the venv so only the venv needs an fs_read bind.

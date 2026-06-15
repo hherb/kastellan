@@ -6,43 +6,35 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-15 (**`interpreter_deps` helper ADOPTED in `python-exec` + `gliner-relex`** — the #284
-follow-up. Branch `feat/interpreter-deps-adoption`, PR [#289](https://github.com/hherb/kastellan/pull/289). The same external-interpreter dyld footgun #284 fixed in
-`browser-driver` (a venv/bare interpreter that links a shared lib OUTSIDE its bound prefix → SIGABRT under Seatbelt before
-the worker runs) is now closed in the other two Python workers, all routed through one shared module.
-**Shared-helper refactor (`core/src/workers/interpreter_deps.rs`):** extracted two pure, injected-closure helpers from the
-venv-shaped `interpreter_lib_dirs` so non-venv callers reuse the seed logic: `resolve_interpreter_root(venv, exists,
-canonicalize)` (lifted out of `browser_driver.rs`, now its single source) + `interpreter_lib_dirs_for_binary(real_python,
-prefix, exists, canonicalize, resolve_deps)` (the libpython-seed + graph walk for an already-resolved binary).
-`interpreter_lib_dirs` delegates to the latter. Inline tests lifted to `interpreter_deps/tests.rs` (parent 462→254 LOC).
-**`python-exec`** (bare-interpreter, not a venv): new `pub interpreter_extra_lib_dirs(python, …)` picks the walk-prefix from
-`interpreter_extra_fs_read` (the prefix lib / framework version root it already binds) and delegates to
-`interpreter_lib_dirs_for_binary`; `python_exec_entry` gained an `interpreter_lib_dirs: Vec<PathBuf>` param it extends
-`fs_read` with; the manifest `resolve()` computes it via `resolve_deps_via_tool`; the e2e mirrors it. Tests lifted to
-`python_exec/tests.rs`.
-**`gliner-relex`** (uv venv): `GlinerRelexEnv` gained `interpreter_root` + `interpreter_lib_dirs` (host mode only); new pure
-`resolve_host_interpreter_binds(venv, exists, canonicalize, resolve_deps)` returns both via the shared helpers; the manifest
-computes them for host mode (NOT in `resolve_env`, which has no other `canonicalize` need — keeps its 3-arg signature, so the
-14 resolver unit-test call sites are untouched); `host_mode_entry` binds them. This also closes a **latent real gap**: gliner
-host-mode bound only `.venv`, so a uv venv's external base interpreter would not have dyld-loaded under Seatbelt (it worked on
-Linux only because bwrap base-binds `/usr`).
-**Posture:** reads-only (no net/write/seccomp change); fail-safe (missing `otool`/`ldd` ⇒ no extra binds, the manual
-`*_EXTRA_FS_READ` hatch stays the backstop); a no-op where all deps are system libs (Linux `/usr` python ⇒ `interpreter_root`
-surfaces redundantly + lib dirs empty). All touched files under the 500-LOC cap. macOS: full core lib suite green
-(interpreter_deps 21, python_exec 16, gliner_relex 50, browser_driver 14), `clippy --workspace --all-targets -D warnings`
-clean. **Not yet DGX-verified** (Linux native `cargo test` — the path is a no-op there, but run it before merge).
-**Deferred:** wiring real interpreter binds into the gliner host-mode e2e fixtures (currently `None`/empty — preserves DGX
-behaviour; the browser-driver e2e already proves the shared helper under the real jail).
+**Last updated:** 2026-06-15 (**#287 RESOLVED — it was a STALE browser-driver venv, NOT a macOS forced-egress code bug.**
+Branch `fix/287-browser-driver-stale-venv`, PR TBD. Systematic-debugging investigation on macOS (Seatbelt, chromium-1223,
+PG18) reproduced `got: []`, then instrumented the boundaries: the render error was `net::ERR_SSL_PROTOCOL_ERROR at
+https://127.0.0.1:<port>/` (a **direct** TLS handshake against the plain-HTTP loopback origin) with **zero** sidecar
+decisions ⇒ Chromium connected **directly, bypassing the proxy**. The installed venv was a **pre-slice-#2 build** (no
+`shim.py`; an old `__main__.py` that builds the renderer **without** `build_launch_args(port)` ⇒ no `--proxy-server` flag at
+all). On macOS there's no netns, so `127.0.0.1` is the host's loopback and a direct connect succeeds — on Linux the private
+netns has nothing on that port, forcing proxy use (why the DGX gate was green). **Force-reinstalling current source ⇒ all 4
+`browser_driver_e2e --ignored` tests pass on macOS, both forced tests included** (`decisions = [("egress.allowed",
+"127.0.0.1", <port>), …]`). So the slice-#2 macOS forced-egress code path is **correct**.
+**Root-cause fix (`scripts/workers/browser-driver/install.sh`):** the script did a non-editable `pip install "$WORKER_DIR"`
+of a package pinned at version `0.0.1`; slice #2 added files without bumping the version, so a re-run reported "already
+satisfied" and **silently kept the old worker code**. Fix: keep the plain install (pulls deps) then add
+`pip install --force-reinstall --no-deps "$WORKER_DIR"` so a re-run always recopies the current source. The only sibling
+worker installer with a local `pip install <path>` — `gliner-relex` uses `uv sync` (re-syncs each run, no staleness);
+`web-search` is SearxNG infra — so the footgun is scoped to this one script. Verified: re-running the fixed `install.sh`
+uninstalls+reinstalls, and the 4 e2e + 40 pytest all green afterward. **macOS-only investigation; no Rust code changed**
+(temporary test instrumentation was reverted). #287 closed by the PR.
 
-_(Prior session — **#284 RESOLVED (a misdiagnosis: the "Chromium-148 Seatbelt SIGABRT" was a pyenv→Homebrew `libintl` dyld
-gap, NOT a Chromium regression), merged as PR [#288](https://github.com/hherb/kastellan/pull/288) / `a7338c3`** — added the
-`interpreter_deps.rs` module + wired it into `browser-driver`; condensed into "Recently merged" below. Unmasked
-[#287](https://github.com/hherb/kastellan/issues/287) (macOS forced egress-sidecar render emits no decisions; macOS-only, DGX
-forced stays green). Earlier: browser-driver egress slice #2 — PR #285 / `76c58d9`.)_
+_(Prior session — **`interpreter_deps` helper ADOPTED in `python-exec` + `gliner-relex` (#284 follow-up), MERGED as PR
+[#289](https://github.com/hherb/kastellan/pull/289) / `2d85ea1`** — condensed into "Recently merged" below. The #289 path is
+a no-op on Linux; a native-Linux `cargo test` on the DGX was not run pre-merge but carries negligible risk. Earlier:
+**#284 RESOLVED** (the "Chromium-148 Seatbelt SIGABRT" was a pyenv→Homebrew `libintl` dyld gap, not a Chromium regression),
+PR [#288](https://github.com/hherb/kastellan/pull/288) / `a7338c3`, which unmasked #287 — now resolved this session.)_
 
 ---
 
 **Recently merged to `main` (condensed, newest first).** Full reasoning in the PRs / `docs/superpowers/specs` / archive snapshots:
+- **`interpreter_deps` adopted in `python-exec` + `gliner-relex`** (PR [#289](https://github.com/hherb/kastellan/pull/289), `2d85ea1`): the #284 follow-up — the same out-of-prefix interpreter-dyld auto-bind now routed through one shared `core/src/workers/interpreter_deps.rs` (pure `resolve_interpreter_root` + `interpreter_lib_dirs_for_binary` helpers); `python-exec` (bare interpreter) + `gliner-relex` (uv venv host mode) both bind their interpreter's out-of-prefix lib dirs. Reads-only, fail-safe (missing `otool`/`ldd` ⇒ no extra binds), no-op where all deps are system libs. macOS core lib suite + clippy `-D warnings` green; path is a no-op on Linux (DGX `cargo test` not re-run pre-merge, negligible risk).
 - **#284 interpreter-lib-dep auto-bind (a MISDIAGNOSIS fix)** (PR [#288](https://github.com/hherb/kastellan/pull/288), `a7338c3`): the "Chromium-148 Seatbelt SIGABRT" was a pyenv CPython linking a Homebrew `libintl` OUTSIDE its bound prefix → dyld `open()` blocked → SIGABRT before Chromium launches (empty stderr). New pure `core/src/workers/interpreter_deps.rs` (`out_of_prefix_lib_dirs` transitive dep-graph walk seeded with the binary+`libpython`, binds the canonical parent dir of every out-of-prefix non-system lib RO; `resolve_deps_via_tool` = `otool`/`ldd`, fail-safe). Wired into `browser-driver` + its e2e; `real_render_of_loopback_page` renders under Seatbelt with NO manual `EXTRA_FS_READ`. Unmasked [#287](https://github.com/hherb/kastellan/issues/287). Reads-only, DGX 1790/0 unchanged. (The cross-worker adoption into `python-exec` + `gliner-relex` is this session — top block.)
 - **`browser-driver` egress slice #2 — egress-proxy-routed (transparent tunnel)** (PR [#285](https://github.com/hherb/kastellan/pull/285), `76c58d9`): the browser runs in a private netns reaching the net only via its per-worker egress sidecar in **no-MITM/transparent-tunnel** mode (browser keeps end-to-end TLS; in-jail `shim.py` `ProxyShim` loopback-TCP↔UDS bridge + Chromium `--proxy-server`). Removed the dev-only force-route exemption + `KASTELLAN_BROWSER_DRIVER_INSECURE_DIRECT_NET` escape hatch. DGX acceptance 2/2 green; #263 + #280 closed. macOS forced-egress now tracked by [#287](https://github.com/hherb/kastellan/issues/287).
 - **python-exec skill-catalog arc** (PRs [#275](https://github.com/hherb/kastellan/pull/275)/[#276](https://github.com/hherb/kastellan/pull/276)/[#278](https://github.com/hherb/kastellan/pull/278), `0cbddc5`/`e478309`/`02ccb57`): a "Python skill" = agent-authored verbatim Python promoted through the *same* L3 trust lifecycle as templated skills (SHA-256-bound, operator reads the source = the gate). crystallise/approve/pin (slice 1) + invoke/surface (slice 2) + runtime params (env-var channel). `core/src/memory/l3py_*`. Full detail in the PRs / archive.
@@ -301,7 +293,7 @@ sessions 2026-05-06 → 2026-05-09 in
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**`browser-driver` is egress-proxy-routed (slice #2, PR #285) and renders under Seatbelt on macOS (#284 RESOLVED, PR #288). The `interpreter_deps` helper is now ALSO adopted in `python-exec` + `gliner-relex` (this session — top block).** Leading remaining picks: **[#287](https://github.com/hherb/kastellan/issues/287)** — the macOS forced (egress-sidecar) render path emits no decisions (distinct macOS-only issue unmasked by the #284 fix); the **python-worker Linux seccomp/Landlock wiring** ([#281](https://github.com/hherb/kastellan/issues/281), affects browser-driver + gliner-relex); **MITM-of-browser** (in-Chromium CA trust via NSS — deferred slice #2 follow-up, once leak-scanning #3b is wired); or Phase-2 channels (IMAP/Telegram inbound) as the next phase boundary.
+**`browser-driver` is egress-proxy-routed (slice #2, PR #285), renders under Seatbelt on macOS (#284 RESOLVED, PR #288), the `interpreter_deps` helper is adopted in `python-exec` + `gliner-relex` (PR #289), and the macOS *forced* egress path is now verified green (#287 RESOLVED this session — it was a stale venv, not a code bug).** Leading remaining picks: the **python-worker Linux seccomp/Landlock wiring** ([#281](https://github.com/hherb/kastellan/issues/281), affects browser-driver + gliner-relex); **MITM-of-browser** (in-Chromium CA trust via NSS — deferred slice #2 follow-up, once leak-scanning #3b is wired); or Phase-2 channels (IMAP/Telegram inbound) as the next phase boundary.
 
 **Egress follow-ups now that the proxy is feature-complete (each small, on demand):** (1) **slice #4 frontier wiring** — read the operator's real frontier pin config on the daemon + route frontier LLM egress through a **pinned** sidecar (lands with the first frontier worker / the Phase-5 escalation path; today's callers pass `cert_pins_json: None`). (2) **slice #3b dispatch-time live-append** ([#268](https://github.com/hherb/kastellan/issues/268)) — provision per-worker secret hashes at dispatch (today's callers pass `&[]`). Both share the `NetWorkerSpawn` params struct that slice #4 introduced.
 
@@ -344,12 +336,9 @@ in-jail loopback shim; see the top block). Remaining browser-driver picks:
   trust-store import** (not the `--ignore-certificate-errors-*` error-suppression flag), so the sidecar can content/leak-scan
   browser egress. Do this only once leak-scanning (#3b) is actually wired — it trades away Chromium-grade origin validation +
   enlarges the sidecar blast radius, so it needs a concrete inspection benefit to justify.
-- **★ [#287](https://github.com/hherb/kastellan/issues/287) — macOS forced (egress-sidecar) render emits no decisions**
-  (unmasked by the #284 fix). The non-forced `real_render_of_loopback_page` now renders under Seatbelt; the **forced**
-  `forced_render_of_loopback_page_through_sidecar` / `forced_off_allowlist_fails_closed_at_sidecar` get `[]` decisions on the
-  Mac (Chromium → in-jail `ProxyShim` → UDS → sidecar path). DGX forced is green (the production gate); macOS-only. Capture the
-  shim/worker stderr + the sidecar accept loop during a forced run. (#284 — the SIGABRT — is RESOLVED: it was the pyenv→Homebrew
-  `libintl` dyld gap, not a Chromium regression; auto-bound via `interpreter_deps.rs`.)
+- ~~**[#287] — macOS forced (egress-sidecar) render emits no decisions**~~ — **RESOLVED 2026-06-15** (this session): it was a
+  stale browser-driver venv, not a code bug. All 4 `browser_driver_e2e --ignored` tests (incl. both forced ones) now pass on
+  macOS once the venv is re-staged from current source; `install.sh` now `--force-reinstall`s to prevent recurrence.
 - **★ [#281](https://github.com/hherb/kastellan/issues/281) — pure-Python workers get no Linux seccomp/Landlock** (the Rust
   prelude is Rust-only; bwrap doesn't `--seccomp`). Affects `gliner-relex` + `browser-driver`. The `browser_client` seccomp
   profile is built+smoke-tested but applied only via Seatbelt on macOS; wire it for Linux Python workers (a Rust
@@ -409,7 +398,7 @@ The `memory_entities` join table (P1) shipped; the graph lane is wired into `rec
 
 Only currently-open issues are listed; closed-issue detail lives in the archive snapshots and git history.
 
-- [#287](https://github.com/hherb/kastellan/issues/287) — browser-driver (macOS) forced egress-sidecar render emits no decisions; distinct macOS-only issue unmasked by the #284 fix (DGX forced is green). (#284 RESOLVED 2026-06-15 — the SIGABRT was an out-of-prefix interpreter dyld gap, auto-bound via `interpreter_deps.rs`, NOT a Chromium regression.)
+- ~~[#287](https://github.com/hherb/kastellan/issues/287)~~ — **RESOLVED 2026-06-15** (PR `fix/287-browser-driver-stale-venv`): the macOS forced egress-sidecar "no decisions" was a **stale browser-driver venv** (a pre-slice-#2 install with no shim / no `--proxy-server`), not a code bug — fixed `install.sh` to `--force-reinstall` the local package so re-runs always stage current source. All 4 `browser_driver_e2e --ignored` tests pass on macOS.
 - [#286](https://github.com/hherb/kastellan/issues/286) — browser-driver Seatbelt `localhost:*` loopback widening is host-shared on macOS (no netns), so a compromised browser worker could reach host-local services bypassing the egress sidecar. Latent (Chromium is proxy-routed; the macOS forced egress path itself doesn't complete yet — #287). Fix: scope the rule to the shim's bound port, a UDS-only transport, or the `MacosContainer` VM-netns backend.
 - [#3](https://github.com/hherb/kastellan/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64.
 - [#4](https://github.com/hherb/kastellan/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added (process hygiene).
