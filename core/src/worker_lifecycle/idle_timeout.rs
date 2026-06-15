@@ -459,6 +459,8 @@ pub(crate) async fn acquire_impl(
 
     // Cold-spawn path.
     let policy = entry.policy.clone();
+    // Route through the lockdown shim when the manifest set one (Linux
+    // pure-Python workers); otherwise spawn the binary directly.
     let (program, args) = crate::tool_host::build_program_and_args(
         &entry.binary,
         entry.lockdown_shim.as_deref(),
