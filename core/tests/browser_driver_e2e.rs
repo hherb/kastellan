@@ -147,7 +147,7 @@ async fn render_in_jail(
     allowlist: &[String],
     url: &str,
 ) -> Result<serde_json::Value, kastellan_core::tool_host::ToolHostError> {
-    let entry = browser_driver_entry(&env.browser, allowlist);
+    let entry = browser_driver_entry(&env.browser, allowlist, None);
     let backend = backend();
     let program = env.browser.script_path.to_string_lossy().into_owned();
     let spec = WorkerSpec {
@@ -228,7 +228,7 @@ async fn render_in_jail_forced(
     // boundary: allow in-process (so Chromium actually makes the request) while
     // the sidecar blocks it — proving the OS boundary, not just the app-layer
     // check. Production passes the same list to both.
-    let entry = browser_driver_entry(&env.browser, worker_allowlist);
+    let entry = browser_driver_entry(&env.browser, worker_allowlist, None);
     let backend = backend();
     let program = env.browser.script_path.to_string_lossy().into_owned();
     let spec = WorkerSpec {

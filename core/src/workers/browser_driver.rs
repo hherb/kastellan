@@ -176,7 +176,11 @@ fn parse_extra_fs_read(raw: &str) -> Vec<PathBuf> {
 /// Fonts:
 /// `/usr` (Linux) and `/System/Library` (macOS) are already readable from the
 /// base sandbox; macOS additionally needs `/Library/Fonts`.
-pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> ToolEntry {
+pub fn browser_driver_entry(
+    env: &BrowserDriverEnv,
+    allowlist: &[String],
+    lockdown_shim: Option<PathBuf>,
+) -> ToolEntry {
     let allow_json =
         serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
 
@@ -210,6 +214,44 @@ pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> Too
     #[cfg(not(target_os = "linux"))]
     let fs_write = vec![PathBuf::from("/tmp")]; // macOS Seatbelt needs an explicit writable dir
 
+    let mut policy_env = vec![
+        (
+            "KASTELLAN_BROWSER_DRIVER_ALLOWLIST".to_string(),
+            allow_json,
+        ),
+        // Keep Playwright's browser tree inside the already-bound venv.
+        (
+            "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+            env.venv_dir.join("browsers").display().to_string(),
+        ),
+        // Chromium writes its --user-data-dir under $TMPDIR.
+        ("TMPDIR".to_string(), "/tmp".to_string()),
+        // Playwright's bundled Node driver calls uv_os_homedir() at startup;
+        // with bwrap's --clearenv stripping HOME and no /etc/passwd bound in
+        // the jail, that returns ENOENT and the driver crashes ("Connection
+        // closed while reading from the driver"). Point HOME at the writable
+        // tmpfs so the driver starts. (macOS resolves the real home via
+        // directory services, so this is belt-and-braces there.)
+        ("HOME".to_string(), "/tmp".to_string()),
+        // Grant the jail's /tmp through the worker-side Landlock layer
+        // (Linux; honoured by derive_lockdown_env, no-op on macOS). MUST
+        // stay out of fs_write on Linux: a /tmp entry there would bind the
+        // host /tmp over bwrap's per-spawn ephemeral tmpfs (#89).
+        (crate::tool_host::ENV_LANDLOCK_RW.to_string(), r#"["/tmp"]"#.to_string()),
+    ];
+
+    // When spawned through the lockdown shim (Linux), disable the shim's
+    // Landlock layer: browser-driver's Chromium FS surface isn't validated
+    // against a Landlock ruleset yet, and bwrap's mount namespace already
+    // contains it. seccomp (browser_client) still applies. (#281; Landlock is
+    // a tracked follow-up.) macOS passes None here and adds nothing.
+    if lockdown_shim.is_some() {
+        policy_env.push((
+            crate::tool_host::ENV_LANDLOCK_PROFILE.to_string(),
+            "none".to_string(),
+        ));
+    }
+
     let policy = SandboxPolicy {
         fs_read,
         fs_write,
@@ -217,31 +259,7 @@ pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> Too
         cpu_ms: 30_000,
         mem_mb: 1024, // spike §3.1: headless-shell ~150-300 MB; 1 GiB is a safe cap
         profile: Profile::WorkerBrowserClient,
-        env: vec![
-            (
-                "KASTELLAN_BROWSER_DRIVER_ALLOWLIST".to_string(),
-                allow_json,
-            ),
-            // Keep Playwright's browser tree inside the already-bound venv.
-            (
-                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
-                env.venv_dir.join("browsers").display().to_string(),
-            ),
-            // Chromium writes its --user-data-dir under $TMPDIR.
-            ("TMPDIR".to_string(), "/tmp".to_string()),
-            // Playwright's bundled Node driver calls uv_os_homedir() at startup;
-            // with bwrap's --clearenv stripping HOME and no /etc/passwd bound in
-            // the jail, that returns ENOENT and the driver crashes ("Connection
-            // closed while reading from the driver"). Point HOME at the writable
-            // tmpfs so the driver starts. (macOS resolves the real home via
-            // directory services, so this is belt-and-braces there.)
-            ("HOME".to_string(), "/tmp".to_string()),
-            // Grant the jail's /tmp through the worker-side Landlock layer
-            // (Linux; honoured by derive_lockdown_env, no-op on macOS). MUST
-            // stay out of fs_write on Linux: a /tmp entry there would bind the
-            // host /tmp over bwrap's per-spawn ephemeral tmpfs (#89).
-            (crate::tool_host::ENV_LANDLOCK_RW.to_string(), r#"["/tmp"]"#.to_string()),
-        ],
+        env: policy_env,
         cpu_quota_pct: None,
         // Chromium spawns a process tree (zygote + renderer + gpu + utility),
         // each multi-threaded — easily >100 tasks. The default cgroup
@@ -257,7 +275,7 @@ pub fn browser_driver_entry(env: &BrowserDriverEnv, allowlist: &[String]) -> Too
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
-        lockdown_shim: None,
+        lockdown_shim,
     }
 }
 
@@ -285,7 +303,34 @@ impl WorkerManifest for BrowserDriverManifest {
         ) {
             Ok(env) => {
                 let allowlist = (ctx.allowlist)(TOOL_NAME);
-                Resolution::Register(browser_driver_entry(&env, &allowlist))
+                // Linux: browser-driver is a pure-Python venv worker bwrap
+                // spawns directly, so it needs the lockdown-exec shim to get the
+                // browser_client seccomp filter. Fail-closed if the shim is
+                // missing — never register an unfilterable browser. macOS uses
+                // Seatbelt (applied from the parent), so no shim.
+                #[cfg(target_os = "linux")]
+                {
+                    match crate::worker_manifest::discover_binary(
+                        ctx,
+                        "KASTELLAN_LOCKDOWN_EXEC_BIN",
+                        "kastellan-worker-lockdown-exec",
+                    ) {
+                        Some(shim) => {
+                            Resolution::Register(browser_driver_entry(&env, &allowlist, Some(shim)))
+                        }
+                        None => Resolution::Misconfigured {
+                            detail: "lockdown-exec shim not found \
+                                     (KASTELLAN_LOCKDOWN_EXEC_BIN unset/invalid and no \
+                                     exe-relative sibling); browser-driver requires it \
+                                     for worker-side seccomp on Linux"
+                                .to_string(),
+                        },
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Resolution::Register(browser_driver_entry(&env, &allowlist, None))
+                }
             }
             Err(ResolveSkipReason::Disabled) => Resolution::Disabled {
                 detail: "KASTELLAN_BROWSER_DRIVER_ENABLE != \"1\"".to_string(),
