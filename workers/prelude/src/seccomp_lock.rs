@@ -585,16 +585,18 @@ pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
     libc::SYS_memfd_create,
     libc::SYS_pidfd_open,
     libc::SYS_restart_syscall,
-    // Playwright's bundled Node.js driver calls capget() *after* the filter is
-    // installed, to inspect the process's own capability set; without it the
-    // Node driver is SIGSYS-killed, surfacing as `'PlaywrightContextManager'
-    // has no attr '_playwright'`. capget is a read-only query of the
-    // same-process capability bitmask and grants no privilege uplift. Its write
-    // counterpart capset is deliberately NOT listed (least-privilege): it was
-    // not observed post-filter, and a future Node version that needs it would
-    // SIGSYS visibly — add it then, with evidence. (DGX acceptance gate: issue
-    // #281, confirmed 2026-06-15.)
+    // capget + capset: both are required post-filter and both are confirmed by
+    // the DGX acceptance gate (issue #281, 2026-06-15) — removing either breaks
+    // the render. Without capget, Playwright's bundled Node.js driver is
+    // SIGSYS-killed at startup (surfacing as `'PlaywrightContextManager' has no
+    // attr '_playwright'`). Without capset, Chromium crashes while spawning a
+    // page/renderer (`Browser.new_page: ... browser has been closed`) — its
+    // zygote/process setup adjusts the same-process capability set. Both operate
+    // ONLY on this process's own capability bitmask and grant no privilege
+    // uplift: under PR_SET_NO_NEW_PRIVS with the jail's dropped bounding set,
+    // capset cannot raise capabilities the kernel hasn't already granted.
     libc::SYS_capget,
+    libc::SYS_capset,
 ];
 
 /// The `io_uring` syscalls Chromium probes. Listed in [`allow_list_for`] for
