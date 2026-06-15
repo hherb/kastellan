@@ -24,6 +24,17 @@
 //!     Call lock_down(), then call getpid(). Exit 0 on success — verifies
 //!     the filter doesn't kill innocent syscalls.
 //!
+//! lockdown-probe raw-getpid
+//!     Pre-lockdown fast path: call getpid() WITHOUT applying any lockdown of
+//!     our own. Used by lockdown_exec_smoke to prove an inherited seccomp
+//!     filter (from the kastellan-worker-lockdown-exec shim's execve) allows
+//!     getpid. Exit 0.
+//!
+//! lockdown-probe raw-unshare
+//!     Pre-lockdown fast path: attempt unshare(CLONE_NEWUSER) WITHOUT applying
+//!     any lockdown of our own. Used by lockdown_exec_smoke to prove an
+//!     inherited seccomp filter SIGSYS-kills unshare. If not killed, exits 0.
+//!
 //! lockdown-probe seccomp-socket
 //!     Call lock_down(), then attempt socket(AF_INET, SOCK_STREAM, 0).
 //!     Under Profile::Strict the BSD-socket family is not allow-listed —
@@ -70,6 +81,19 @@ fn main() -> ExitCode {
     if args.is_empty() {
         eprintln!("usage: lockdown-probe <subcommand> [args]");
         return ExitCode::from(64);
+    }
+
+    // Pre-lockdown fast path: `raw-*` subcommands deliberately run WITHOUT
+    // applying any rlimit/lockdown of their own. They verify that a *parent*
+    // (the kastellan-worker-lockdown-exec shim) which locked down and then
+    // execve'd us actually carried its seccomp filter across the exec. If we
+    // self-locked-down here, the test couldn't distinguish an inherited filter
+    // from a freshly-applied one.
+    #[cfg(target_os = "linux")]
+    match args[0].as_str() {
+        "raw-getpid" => return probe_getpid(),
+        "raw-unshare" => return probe_unshare(),
+        _ => {}
     }
 
     // Apply rlimit first, matching serve_stdio's order. Cross-platform.
