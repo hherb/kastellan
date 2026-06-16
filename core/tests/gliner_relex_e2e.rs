@@ -203,7 +203,18 @@ fn build_test_entry() -> Option<ToolEntry> {
         interpreter_root: None,
         interpreter_lib_dirs: vec![],
     };
-    Some(gliner_relex_entry(&env, None))
+    // Route through the lockdown-exec shim on Linux so the worker actually runs
+    // under the `ml_client` seccomp filter — the #281 property this suite must
+    // exercise (the host manifest does this via discover_binary; the e2e mirrors
+    // it). On macOS the shim is unused (Seatbelt is applied from the parent), so
+    // pass None there.
+    #[cfg(target_os = "linux")]
+    let shim = Some(kastellan_tests_common::workspace_target_binary(
+        "kastellan-worker-lockdown-exec",
+    ));
+    #[cfg(not(target_os = "linux"))]
+    let shim: Option<PathBuf> = None;
+    Some(gliner_relex_entry(&env, shim))
 }
 
 /// Bring up a one-shot Postgres cluster + run the schema probe. Skips
