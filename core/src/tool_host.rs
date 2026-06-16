@@ -19,6 +19,8 @@ use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
 mod audit_sink;
 pub use audit_sink::{AuditSink, PgAuditSink};
 
+mod egress_provision;
+
 mod lockdown_env;
 pub use lockdown_env::{derive_lockdown_env, ENV_CPU_MS, ENV_LANDLOCK_PROFILE, ENV_LANDLOCK_RO, ENV_LANDLOCK_RW, ENV_SECCOMP_PROFILE};
 

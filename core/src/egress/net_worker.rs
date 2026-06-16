@@ -100,8 +100,6 @@ impl EgressSidecar {
     /// return the newly-added fingerprints for audit. The scratch dir holding
     /// that file is always the parent of the sidecar UDS — present for the
     /// sidecar's whole lifetime. Reuses [`super::leak_provision::merge_secret_hashes`].
-    // Task 4 will call this from the force-route glue; allow until that lands.
-    #[allow(dead_code)]
     pub(crate) fn provision_dispatch_secrets(
         &self,
         fps: &[SecretFingerprint],
