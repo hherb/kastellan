@@ -99,10 +99,13 @@ pub enum Profile {
     BrowserClient,
     /// `"ml_client"` — `net_client` **plus** [`ML_CLIENT_ADDITIONS`]: the
     /// syscalls a torch/transformers inference worker (gliner-relex) issues
-    /// beyond the net-client base, enumerated empirically on the DGX via a
-    /// log-mode seccomp run (design spec 2026-06-16 §4). The worker is
-    /// `Net::Deny`; the socket family is permitted at the syscall layer (torch
-    /// opens sockets even fully offline) but the private netns gives it no route.
+    /// beyond the net-client base, enumerated empirically on the DGX (aarch64)
+    /// via the **kill-mode** loop — each run SIGSYS-dies on the first missing
+    /// syscall, read back from `journalctl -k | grep type=1326` (`SECCOMP_RET_LOG`
+    /// is printk-rate-limited on the DGX, so log-mode only surfaces the earliest
+    /// denial per run; design spec 2026-06-16 §4). The worker is `Net::Deny`; the
+    /// socket family is permitted at the syscall layer (torch opens sockets even
+    /// fully offline) but the private netns gives it no route.
     MlClient,
 }
 
@@ -653,6 +656,14 @@ pub const ML_CLIENT_ADDITIONS: &[i64] = &[
     // forward-looking. `mlock2` (the modern flag-taking variant) was NOT observed.
     // Both lock only this process's OWN pages (bounded by `RLIMIT_MEMLOCK`); no
     // namespace/privilege/escape surface — same benign class as `madvise`.
+    //
+    // CAVEAT: unlike the other four (all DGX-observed and therefore exercised by
+    // the real-model e2e gate), these two are the ONLY grants in this set NOT
+    // hit on the current CPU-only DGX — so the e2e suite does not cover them. They
+    // rest on the benign-class argument above, not an empirical kill-mode trace.
+    // If the GPU path is never deployed, removing them is safe (a future CPU-only
+    // trace would not regress); they're kept so a `device=auto` GPU host does not
+    // SIGSYS on first model load.
     libc::SYS_mlock,
     libc::SYS_munlock,
     // `mknodat` — the worker creates a special file (FIFO/regular) in its writable
