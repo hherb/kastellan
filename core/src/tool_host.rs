@@ -308,6 +308,21 @@ pub async fn dispatch_with_sink(
         }
     };
 
+    // ── Egress slice #3b (#268): dispatch-time leak-scanner provisioning. ──
+    //
+    // If this worker has an egress sidecar (a force-routed net worker) and the
+    // call carries scannable secret refs, write each secret's value-fingerprint
+    // into the sidecar's `secret_hashes.json` BEFORE `worker.call` triggers any
+    // egress, so the proxy's per-connection scanner can catch exfiltration.
+    // `compute_provision` runs synchronously, releasing the `worker.egress`
+    // borrow before `worker.call`; `emit_provision` writes the audit rows and,
+    // on a write failure, returns Err — fail CLOSED (D1): a secret never reaches
+    // a net worker the scanner cannot watch. No-op for non-net workers
+    // (`egress == None`) and for calls with no scannable secrets.
+    let provision =
+        egress_provision::compute_provision(worker.egress.as_ref(), &req_for_audit, vault);
+    egress_provision::emit_provision(sink, tool, provision).await?;
+
     // `req_for_audit` was snapshotted above, pre-substitution (issue
     // #147), so the tool row's `payload.req` carries the opaque refs,
     // not the redeemed plaintext.
