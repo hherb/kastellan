@@ -627,27 +627,37 @@ pub const BROWSER_IO_URING: &[i64] = &[libc::SYS_io_uring_setup, libc::SYS_io_ur
 /// Permitted only under [`Profile::MlClient`] (gliner-relex).
 ///
 /// **Enumerated empirically** on the DGX (aarch64) by tracing a real
-/// `knowledgator/gliner-relex-multi-v1.0` CPU model-load + `extract` and
-/// diffing the observed syscalls against the bare `net_client` allow-list
-/// (design spec 2026-06-16 §4). Every observed syscall was already covered by
-/// [`BASE_ALLOW`] + [`NET_CLIENT_ADDITIONS`] **except** the two NUMA
-/// memory-policy calls below. (The trace also confirmed torch issues
-/// `socket`/`bind`/`connect` even fully offline — hence the `net_client` base —
-/// and probed **no** escape primitives or io_uring.)
+/// `knowledgator/gliner-relex-multi-v1.0` worker — both the `device="auto"`
+/// CUDA-availability probe AND the CPU model-load + `extract` it falls back to
+/// inside the jail (no `/dev/nvidia*` bound) — and diffing the observed syscalls
+/// against the bare `net_client` allow-list (design spec 2026-06-16 §4). Every
+/// observed syscall was already covered by [`BASE_ALLOW`] +
+/// [`NET_CLIENT_ADDITIONS`] **except** the four below. (The trace also confirmed
+/// torch issues `socket`/`bind`/`connect` even fully offline — hence the
+/// `net_client` base — and probed **no** escape primitives or io_uring.)
 ///
 /// Escape primitives (namespace/mount/ptrace/bpf/io_uring/keyring) are NEVER
 /// added here — they stay killed by the default action.
 pub const ML_CLIENT_ADDITIONS: &[i64] = &[
     // NUMA memory-policy syscalls PyTorch's threadpool / OpenMP arena
     // allocator issues while placing tensor memory across NUMA nodes
-    // (observed: `mbind` ×20, `get_mempolicy` ×1). Both operate ONLY on this
-    // process's own address-space memory policy — the same benign class as
-    // `madvise`/`mmap`, no namespace/privilege/escape surface. Without them the
-    // worker SIGSYS-dies during model load under the kill filter. `set_mempolicy`
-    // / `migrate_pages` were NOT observed and are deliberately left out (add
-    // iff a future trace shows them — the kill filter fails closed otherwise).
+    // (observed: `mbind` ×20, `get_mempolicy` ×1) during the CPU inference path.
+    // `set_mempolicy` / `migrate_pages` were NOT observed and are deliberately
+    // left out (add iff a future trace shows them).
     libc::SYS_mbind,
     libc::SYS_get_mempolicy,
+    // Memory-locking syscalls libcuda issues while pinning host pages during the
+    // `device="auto"` CUDA-availability probe (observed: `mlock`/`munlock` ×18
+    // each). The worker runs this probe at startup even when it ultimately falls
+    // back to CPU, so without `mlock` it SIGSYS-dies at ~4 s under the kill
+    // filter. `mlock2` (the modern flag-taking variant) was NOT observed — glibc
+    // routes `mlock()` to `SYS_mlock` here; add it iff a future trace shows it.
+    //
+    // All four operate ONLY on this process's own address space (memory policy /
+    // page residency) — the same benign class as `madvise`/`mmap`. `mlock` is
+    // bounded by `RLIMIT_MEMLOCK`; none confer namespace/privilege/escape.
+    libc::SYS_mlock,
+    libc::SYS_munlock,
 ];
 
 /// Map the build target architecture to seccompiler's enum. Returns an
