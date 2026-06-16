@@ -11,7 +11,7 @@
 use std::io;
 use std::path::Path;
 
-use kastellan_leak_scan::{serialize_hashes, SecretFingerprint};
+use kastellan_leak_scan::{parse_hashes, serialize_hashes, SecretFingerprint};
 
 use super::audit::{EgressAuditRow, ACTOR};
 
@@ -51,6 +51,63 @@ pub fn provision_audit_row(worker: &str, name: &str, fp: &SecretFingerprint) -> 
     }
 }
 
+/// Merge `new` fingerprints into `<scratch>/secret_hashes.json`, keeping the
+/// UNION across the worker's lifetime (dedup by `sha256`), and return the
+/// newly-added fingerprints (those not already present). Reads the existing
+/// file leniently (missing/corrupt ⇒ empty), then atomically rewrites only if
+/// the union grew. Union (not overwrite) means a later connection reusing an
+/// earlier secret is still scanned (egress slice #3b, #268, decision D2).
+///
+/// A write failure surfaces as `Err` so the dispatch caller can fail closed
+/// (decision D1) rather than let a secret-bearing worker egress unscanned.
+pub fn merge_secret_hashes(
+    scratch: &Path,
+    new: &[SecretFingerprint],
+) -> io::Result<Vec<SecretFingerprint>> {
+    let existing = read_existing(scratch);
+    let mut have: std::collections::HashSet<[u8; 32]> =
+        existing.iter().map(|f| f.sha256).collect();
+    let mut added: Vec<SecretFingerprint> = Vec::new();
+    for fp in new {
+        if have.insert(fp.sha256) {
+            added.push(fp.clone());
+        }
+    }
+    if !added.is_empty() {
+        let mut union = existing;
+        union.extend(added.iter().cloned());
+        write_secret_hashes(scratch, &union)?;
+    }
+    Ok(added)
+}
+
+/// Lenient read of the existing fingerprint file: missing or corrupt ⇒ empty
+/// (fail-safe; the merge then provisions at least this dispatch's secrets —
+/// never silently fewer than the current call requires).
+fn read_existing(scratch: &Path) -> Vec<SecretFingerprint> {
+    match std::fs::read_to_string(scratch.join(SECRET_HASHES_FILE_NAME)) {
+        Ok(s) => parse_hashes(&s),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Build the fail-closed `policy / egress.secret_hash.provision_failed` audit
+/// row for when dispatch could not write the scanner patterns for a
+/// secret-bearing net worker (the dispatch is then refused; the worker never
+/// egresses). Carries the worker name, how many fingerprints were pending, and
+/// the error string — no plaintext. Pure; the caller inserts it.
+pub fn provision_failed_audit_row(worker: &str, pending: usize, err: &str) -> EgressAuditRow {
+    EgressAuditRow {
+        actor: ACTOR,
+        action: "egress.secret_hash.provision_failed".to_string(),
+        payload: serde_json::json!({
+            "worker": worker,
+            "pending": pending,
+            "error": err,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +141,64 @@ mod tests {
         assert_eq!(row.payload["worker"], "web-fetch");
         assert_eq!(row.payload["name"], "OPENAI_KEY");
         assert_eq!(row.payload["value_sha256"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn merge_into_empty_writes_and_reports_all_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = fingerprint_value(b"first-secret-value").unwrap();
+        let added = merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
+        assert_eq!(added, vec![a.clone()]);
+        let s = std::fs::read_to_string(dir.path().join(SECRET_HASHES_FILE_NAME)).unwrap();
+        assert_eq!(parse_hashes(&s), vec![a]);
+    }
+
+    #[test]
+    fn merge_unions_across_calls_dedup_by_sha256() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = fingerprint_value(b"first-secret-value").unwrap();
+        let b = fingerprint_value(b"second-secret-value").unwrap();
+        merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
+        let added = merge_secret_hashes(dir.path(), &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(added, vec![b.clone()]);
+        let s = std::fs::read_to_string(dir.path().join(SECRET_HASHES_FILE_NAME)).unwrap();
+        let got = parse_hashes(&s);
+        assert_eq!(got.len(), 2);
+        assert!(got.contains(&a) && got.contains(&b));
+    }
+
+    #[test]
+    fn merge_of_already_present_adds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = fingerprint_value(b"first-secret-value").unwrap();
+        merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
+        let added = merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
+        assert!(added.is_empty());
+    }
+
+    #[test]
+    fn merge_treats_corrupt_existing_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SECRET_HASHES_FILE_NAME), b"not json").unwrap();
+        let a = fingerprint_value(b"first-secret-value").unwrap();
+        let added = merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
+        assert_eq!(added, vec![a]);
+    }
+
+    #[test]
+    fn merge_errors_when_scratch_unwritable() {
+        let missing = std::path::Path::new("/nonexistent-kastellan-268/scratch");
+        let a = fingerprint_value(b"first-secret-value").unwrap();
+        assert!(merge_secret_hashes(missing, &[a]).is_err());
+    }
+
+    #[test]
+    fn provision_failed_row_shape() {
+        let row = provision_failed_audit_row("web-fetch", 2, "disk full");
+        assert_eq!(row.actor, "egress_proxy");
+        assert_eq!(row.action, "egress.secret_hash.provision_failed");
+        assert_eq!(row.payload["worker"], "web-fetch");
+        assert_eq!(row.payload["pending"], 2);
+        assert_eq!(row.payload["error"], "disk full");
     }
 }
