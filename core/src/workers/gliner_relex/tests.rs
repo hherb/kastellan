@@ -247,6 +247,32 @@ fn entry_with_shim_enables_landlock_and_grants_tmp_rw() {
         entry.policy.fs_write.is_empty(),
         "fs_write must stay empty so the host /tmp isn't bound over bwrap's tmpfs"
     );
+
+    // The assertions above pin the *entry's* env. The env actually handed to
+    // the worker is what derive_lockdown_env produces at spawn — so pin the
+    // post-derivation contract too, making this worker self-contained rather
+    // than relying transitively on the shared helper's "caller wins" rule.
+    // The explicit ["/tmp"] grant must SURVIVE derivation: with fs_write empty,
+    // a derive that re-synthesised LANDLOCK_RW from fs_write would silently
+    // collapse it to [] and torch's inductor cache would EACCES under Landlock.
+    let derived = crate::tool_host::derive_lockdown_env(&entry.policy);
+    let derived_rw = derived
+        .env
+        .iter()
+        .find(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_RW)
+        .expect("derive_lockdown_env must preserve the explicit /tmp RW grant");
+    assert_eq!(
+        derived_rw.1, r#"["/tmp"]"#,
+        "the explicit /tmp RW grant must survive derive_lockdown_env (not be \
+         overwritten to [] from the empty fs_write)"
+    );
+    assert!(
+        !derived
+            .env
+            .iter()
+            .any(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_PROFILE),
+        "Landlock must stay ACTIVE after derivation: no KASTELLAN_LANDLOCK_PROFILE opt-out"
+    );
 }
 
 #[test]
