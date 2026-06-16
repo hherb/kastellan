@@ -7,9 +7,11 @@
 //! worker runs in a private netns reaching the net only via its per-worker
 //! egress sidecar (in-jail loopback-TCP↔UDS shim + transparent tunnel —
 //! egress slice #2); force-routing is OFF in dev, where the worker runs
-//! direct-net. The real browser launch lives in the Python worker; the prelude
-//! seccomp/Landlock additions + real-sandbox e2e land in the Phase-2 plan
-//! (their exact shape was settled by the spike — see the design spec §3.1).
+//! direct-net. The real browser launch lives in the Python worker. On Linux
+//! the worker is spawned through the `kastellan-worker-lockdown-exec` shim so
+//! the `browser_client` seccomp filter **and** the Landlock ruleset apply
+//! worker-side (#281; Landlock RO derived from `fs_read`, RW = the `/tmp`
+//! scratch); macOS applies the equivalent profile via Seatbelt from the parent.
 
 use std::path::{Path, PathBuf};
 
@@ -223,7 +225,7 @@ pub fn browser_driver_entry(
     #[cfg(not(target_os = "linux"))]
     let fs_write = vec![PathBuf::from("/tmp")]; // macOS Seatbelt needs an explicit writable dir
 
-    let mut policy_env = vec![
+    let policy_env = vec![
         (
             "KASTELLAN_BROWSER_DRIVER_ALLOWLIST".to_string(),
             allow_json,
@@ -243,30 +245,24 @@ pub fn browser_driver_entry(
         // directory services, so this is belt-and-braces there.)
         ("HOME".to_string(), "/tmp".to_string()),
         // Grant the jail's /tmp through the worker-side Landlock layer
-        // (Linux; honoured by derive_lockdown_env, no-op on macOS). MUST
-        // stay out of fs_write on Linux: a /tmp entry there would bind the
-        // host /tmp over bwrap's per-spawn ephemeral tmpfs (#89).
-        //
-        // NB: while spawned through the shim with KASTELLAN_LANDLOCK_PROFILE=none
-        // (set just below), the shim's apply_from_env returns Disabled before
-        // reading this — so on Linux today it is inert. Kept so it is already
-        // correct when the deferred #281 follow-up flips Landlock back on for
-        // browser-driver (and it is load-bearing on macOS, where Landlock is
-        // a no-op but the RW grant documents intent).
+        // (Linux; honoured by the lockdown-exec shim's apply_from_env, no-op
+        // on macOS). MUST stay out of fs_write on Linux: a /tmp entry there
+        // would bind the host /tmp over bwrap's per-spawn ephemeral tmpfs
+        // (#89). Load-bearing now that Landlock is active for browser-driver
+        // (#281 follow-up): Chromium's --user-data-dir lives under /tmp, and
+        // Landlock denies writes outside the RW set.
         (crate::tool_host::ENV_LANDLOCK_RW.to_string(), r#"["/tmp"]"#.to_string()),
     ];
 
-    // When spawned through the lockdown shim (Linux), disable the shim's
-    // Landlock layer: browser-driver's Chromium FS surface isn't validated
-    // against a Landlock ruleset yet, and bwrap's mount namespace already
-    // contains it. seccomp (browser_client) still applies. (#281; Landlock is
-    // a tracked follow-up.) macOS passes None here and adds nothing.
-    if lockdown_shim.is_some() {
-        policy_env.push((
-            crate::tool_host::ENV_LANDLOCK_PROFILE.to_string(),
-            "none".to_string(),
-        ));
-    }
+    // NB: browser-driver runs with Landlock ACTIVE since the #281 follow-up.
+    // We deliberately do NOT set KASTELLAN_LANDLOCK_PROFILE here — its absence
+    // is the default on-path, so the shim's lock_down() installs the ruleset.
+    // The Landlock RO set is derived from this policy's fs_read (see
+    // derive_lockdown_env) — venv, interpreter libs, /etc resolver files, the
+    // shim, and (when force-routed) the per-instance CA. The RW set is the
+    // /tmp scratch above. bwrap's mount namespace remains the primary FS layer;
+    // Landlock is the kernel-side second gate over the same bound set. seccomp
+    // (browser_client) is applied by the same shim.
 
     let policy = SandboxPolicy {
         fs_read,
@@ -320,10 +316,11 @@ impl WorkerManifest for BrowserDriverManifest {
             Ok(env) => {
                 let allowlist = (ctx.allowlist)(TOOL_NAME);
                 // Linux: browser-driver is a pure-Python venv worker bwrap
-                // spawns directly, so it needs the lockdown-exec shim to get the
-                // browser_client seccomp filter. Fail-closed if the shim is
-                // missing — never register an unfilterable browser. macOS uses
-                // Seatbelt (applied from the parent), so no shim.
+                // spawns directly, so it needs the lockdown-exec shim to apply
+                // the worker-side seccomp (browser_client) + Landlock layers
+                // (#281). Fail-closed if the shim is missing — never register
+                // an unfilterable browser. macOS uses Seatbelt (applied from
+                // the parent), so no shim.
                 #[cfg(target_os = "linux")]
                 {
                     match crate::worker_manifest::discover_binary(

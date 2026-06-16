@@ -307,11 +307,14 @@ use super::*;
             .contains(&PathBuf::from("/opt/hb/gettext/lib")));
     }
 
-    /// cfg-split: only one arm runs per platform — the Linux arm asserts the
-    /// shim + KASTELLAN_LANDLOCK_PROFILE=none are set; the macOS arm asserts
-    /// neither is present. The Linux arm is exercised by CI/DGX.
+    /// cfg-split: only one arm runs per platform. The Linux arm asserts the
+    /// shim is set AND that no `KASTELLAN_LANDLOCK_PROFILE` env is emitted —
+    /// since #281's Landlock follow-up, browser-driver runs with Landlock
+    /// **active** (the shim applies the ruleset; absence of the env = the
+    /// default on-path). The macOS arm asserts the shim/env are both absent
+    /// (Seatbelt from the parent). The Linux arm is exercised by CI/DGX.
     #[test]
-    fn entry_sets_lockdown_shim_and_landlock_none_on_linux() {
+    fn entry_sets_lockdown_shim_and_landlock_active_on_linux() {
         let env = BrowserDriverEnv {
             script_path: PathBuf::from("/v/bin/kastellan-worker-browser-driver"),
             venv_dir: PathBuf::from("/v"),
@@ -330,8 +333,16 @@ use super::*;
                 "shim must be bound RO into the jail so bwrap can exec it (the DGX bug)"
             );
             assert!(
-                entry.policy.env.iter().any(|(k, v)| k == "KASTELLAN_LANDLOCK_PROFILE" && v == "none"),
-                "Linux browser-driver must disable Landlock for the shim's lock_down"
+                !entry.policy.env.iter().any(|(k, _)| k == "KASTELLAN_LANDLOCK_PROFILE"),
+                "Linux browser-driver must NOT disable Landlock — the shim applies the ruleset (#281 follow-up)"
+            );
+            // The writable scratch grant is now load-bearing under Landlock
+            // (Chromium's --user-data-dir lives under /tmp).
+            assert!(
+                entry.policy.env.iter().any(
+                    |(k, v)| k == crate::tool_host::ENV_LANDLOCK_RW && v == r#"["/tmp"]"#
+                ),
+                "Landlock RW must grant the /tmp scratch the browser writes to"
             );
         }
         #[cfg(not(target_os = "linux"))]
