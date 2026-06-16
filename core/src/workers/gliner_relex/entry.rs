@@ -110,7 +110,11 @@ pub fn gliner_relex_entry(
 /// Host-mode entry: the existing pre-Slice-2.5 shape. Worker runs from
 /// the host venv shim; FS allowlist holds weights + venv + editable
 /// src dir; per-OS default sandbox backend (Seatbelt darwin / bwrap
-/// linux).
+/// linux). On Linux the spawn routes through the lockdown-exec shim
+/// (`lockdown_shim.is_some()`) which applies BOTH the `ml_client` seccomp
+/// filter AND the Landlock ruleset (#281): the RO set is derived from
+/// `fs_read`, the RW set is the `/tmp` scratch granted via
+/// `KASTELLAN_LANDLOCK_RW` below.
 fn host_mode_entry(env: &GlinerRelexEnv, lockdown_shim: Option<PathBuf>) -> ToolEntry {
     // The venv uses an editable install (uv's default for hatchling
     // workspace projects); `.venv/.../_editable_impl_*.pth` points at
@@ -158,15 +162,25 @@ fn host_mode_entry(env: &GlinerRelexEnv, lockdown_shim: Option<PathBuf>) -> Tool
     }
 
     let mut policy_env = build_runtime_env(env);
-    // When spawned through the lockdown shim (Linux), run seccomp-only: the
-    // shim's lock_down() reads KASTELLAN_LANDLOCK_PROFILE=none and skips the
-    // Landlock layer. gliner's FS surface isn't validated against a Landlock
-    // ruleset yet and bwrap's mount namespace already bounds it (Landlock is a
-    // tracked #281 follow-up). macOS/container pass None and add nothing.
+    // When spawned through the lockdown shim (Linux), Landlock is ACTIVE
+    // (#281 follow-up — closes the last deferred FS half). We deliberately do
+    // NOT set KASTELLAN_LANDLOCK_PROFILE: its absence is the default on-path,
+    // so the shim's lock_down() installs the ruleset alongside the ml_client
+    // seccomp filter. The Landlock RO set is derived from this policy's fs_read
+    // (weights, venv, src, interpreter root + lib dirs, the shim) by
+    // derive_lockdown_env — exactly the set bwrap binds, so reads pass with no
+    // iteration (Landlock can only further-restrict the already-bound set).
+    // The RW set must be granted explicitly because fs_write is empty: torch
+    // writes its inductor cache to /tmp/torchinductor (TORCHINDUCTOR_CACHE_DIR)
+    // on bwrap's per-spawn ephemeral /tmp tmpfs (#89), and Landlock denies
+    // writes outside the RW set. KASTELLAN_LANDLOCK_RW=["/tmp"] grants it while
+    // fs_write stays empty (a /tmp entry there would bind the host /tmp over
+    // the tmpfs). macOS/container pass None: Seatbelt is applied from the
+    // parent and this adds nothing.
     if lockdown_shim.is_some() {
         policy_env.push((
-            crate::tool_host::ENV_LANDLOCK_PROFILE.to_string(),
-            "none".to_string(),
+            crate::tool_host::ENV_LANDLOCK_RW.to_string(),
+            r#"["/tmp"]"#.to_string(),
         ));
     }
 
