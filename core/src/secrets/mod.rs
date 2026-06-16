@@ -19,9 +19,11 @@
 //! See [`docs/superpowers/specs/2026-05-28-opaque-secret-references-design.md`](../../../docs/superpowers/specs/2026-05-28-opaque-secret-references-design.md)
 //! for the full design.
 
+pub mod collect;
 pub mod substitute;
 pub mod vault;
 
+pub use collect::collect_refs_in_params;
 pub use substitute::{
     substitute_refs_in_params, MissingReason, RedeemFromVault, RedemptionEvent, SubstituteError,
 };

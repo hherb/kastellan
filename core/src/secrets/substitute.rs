@@ -54,7 +54,7 @@ pub enum SubstituteError {
 /// nothing else. The lowercase-only check is belt-and-braces (refs
 /// are generated with `{:08x}` which is always lowercase) so a
 /// planner can't synthesise a casing-shifted ref to evade.
-fn is_well_formed_ref(s: &str) -> bool {
+pub(crate) fn is_well_formed_ref(s: &str) -> bool {
     if s.len() != REF_PREFIX.len() + REF_HEX_LEN {
         return false;
     }
