@@ -632,7 +632,7 @@ pub const BROWSER_IO_URING: &[i64] = &[libc::SYS_io_uring_setup, libc::SYS_io_ur
 /// inside the jail (no `/dev/nvidia*` bound) — and diffing the observed syscalls
 /// against the bare `net_client` allow-list (design spec 2026-06-16 §4). Every
 /// observed syscall was already covered by [`BASE_ALLOW`] +
-/// [`NET_CLIENT_ADDITIONS`] **except** the four below. (The trace also confirmed
+/// [`NET_CLIENT_ADDITIONS`] **except** the five below. (The trace also confirmed
 /// torch issues `socket`/`bind`/`connect` even fully offline — hence the
 /// `net_client` base — and probed **no** escape primitives or io_uring.)
 ///
@@ -647,17 +647,24 @@ pub const ML_CLIENT_ADDITIONS: &[i64] = &[
     libc::SYS_mbind,
     libc::SYS_get_mempolicy,
     // Memory-locking syscalls libcuda issues while pinning host pages during the
-    // `device="auto"` CUDA-availability probe (observed: `mlock`/`munlock` ×18
-    // each). The worker runs this probe at startup even when it ultimately falls
-    // back to CPU, so without `mlock` it SIGSYS-dies at ~4 s under the kill
-    // filter. `mlock2` (the modern flag-taking variant) was NOT observed — glibc
-    // routes `mlock()` to `SYS_mlock` here; add it iff a future trace shows it.
-    //
-    // All four operate ONLY on this process's own address space (memory policy /
-    // page residency) — the same benign class as `madvise`/`mmap`. `mlock` is
-    // bounded by `RLIMIT_MEMLOCK`; none confer namespace/privilege/escape.
+    // `device="auto"` CUDA-availability probe the worker runs at startup. Not hit
+    // in the current CPU-only jail (no `/dev/nvidia*` bound, so the probe fails
+    // before pinning), but a GPU-bound gliner deployment reaches them — included
+    // forward-looking. `mlock2` (the modern flag-taking variant) was NOT observed.
+    // Both lock only this process's OWN pages (bounded by `RLIMIT_MEMLOCK`); no
+    // namespace/privilege/escape surface — same benign class as `madvise`.
     libc::SYS_mlock,
     libc::SYS_munlock,
+    // `mknodat` — the worker creates a special file (FIFO/regular) in its writable
+    // scratch during startup; confirmed load-bearing by the DGX kill-mode gate
+    // (`syscall=33`). Same filesystem-mutation family as `mkdirat`/`unlinkat` in
+    // [`BASE_ALLOW`] and bounded identically: it can only create nodes where the
+    // worker can already write (bwrap `/tmp` tmpfs + Landlock). Device-node
+    // creation (`S_IFCHR`/`S_IFBLK`) needs `CAP_MKNOD` the unprivileged user-ns
+    // worker lacks against the host, and a device node minted inside an
+    // unprivileged user-ns cannot be opened to reach real hardware — so no
+    // device-access surface. Scoped to `ml_client` (not widened into BASE_ALLOW).
+    libc::SYS_mknodat,
 ];
 
 /// Map the build target architecture to seccompiler's enum. Returns an
