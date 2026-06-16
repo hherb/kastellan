@@ -6,42 +6,27 @@
 
 use std::collections::HashSet;
 
-use super::substitute::is_well_formed_ref;
+use super::substitute::for_each_ref;
 use super::vault::SecretRef;
 
 /// Walk `value` and return every well-formed `secret://<8-hex>` reference it
 /// contains, dedup'd by `ref_hash`, in first-seen order (deterministic for
-/// tests). Pure: no vault, no I/O, no mutation. Mirrors the JSON walk shape of
-/// [`super::substitute`].
+/// tests). Pure: no vault, no I/O, no mutation.
+///
+/// Drives the **same** [`for_each_ref`] traversal the substitution walker is
+/// pinned to (via the parity test in `substitute::tests`), so collection and
+/// substitution can never disagree on which positions hold a ref — see
+/// [`for_each_ref`] for why that equivalence is load-bearing (#268).
 pub fn collect_refs_in_params(value: &serde_json::Value) -> Vec<SecretRef> {
     let mut out: Vec<SecretRef> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    walk(value, &mut out, &mut seen);
+    for_each_ref(value, &mut |s| {
+        let r = SecretRef::from_raw(s.to_string());
+        if seen.insert(r.ref_hash()) {
+            out.push(r);
+        }
+    });
     out
-}
-
-fn walk(value: &serde_json::Value, out: &mut Vec<SecretRef>, seen: &mut HashSet<String>) {
-    match value {
-        serde_json::Value::String(s) => {
-            if is_well_formed_ref(s) {
-                let r = SecretRef::from_raw(s.clone());
-                if seen.insert(r.ref_hash()) {
-                    out.push(r);
-                }
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for it in items {
-                walk(it, out, seen);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for (_k, v) in map.iter() {
-                walk(v, out, seen);
-            }
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]

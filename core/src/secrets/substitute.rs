@@ -66,6 +66,41 @@ pub(crate) fn is_well_formed_ref(s: &str) -> bool {
         .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
+/// Read-only traversal: call `f` on every well-formed `secret://<8-hex>` ref
+/// string in `value`, in document order. Array items and object **values** are
+/// walked recursively; object **keys** are not (a ref in key-position is a
+/// planner error — see [`walk`]); numbers/bools/null cannot carry refs.
+///
+/// This is the single, shared definition of *which positions may hold a ref*.
+/// [`super::collect::collect_refs_in_params`] drives it directly, and the
+/// mutating [`walk`] below visits exactly the same positions — the
+/// `mutating_and_readonly_walkers_visit_the_same_refs` parity test in
+/// `substitute::tests` locks the two together so they can never drift. Keeping
+/// the two traversals identical is load-bearing: a ref `walk` redeems (so its
+/// plaintext reaches the worker) but `for_each_ref` misses would egress
+/// unscanned by the leak detector (#268, a silent fail-open).
+pub(crate) fn for_each_ref(value: &serde_json::Value, f: &mut impl FnMut(&str)) {
+    match value {
+        serde_json::Value::String(s) => {
+            if is_well_formed_ref(s) {
+                f(s);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                for_each_ref(item, f);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_key, val) in map.iter() {
+                for_each_ref(val, f);
+            }
+        }
+        // Number, Bool, Null — structurally cannot contain refs.
+        _ => {}
+    }
+}
+
 /// Walk `value` and substitute every `Value::String` whose contents
 /// are exactly a well-formed `secret://<8-hex>` ref with the redeemed
 /// plaintext. Returns one [`RedemptionEvent`] per substitution.

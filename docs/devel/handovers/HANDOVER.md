@@ -23,11 +23,19 @@ row, worker never egresses unscanned), D2 **union** across reused IdleTimeout wo
 rows). **Scope:** mechanism + tests — no egress worker carries secrets today, so it's a **no-op for all current workers**
 (`egress == None` short-circuits; proven byte-identical by `shell_exec_e2e`) and activates automatically with the first
 secret-bearing egress worker. The `NetWorkerSpawn` params-struct consolidation #268 also mentioned was already done in
-slice #4. **Verification (Mac, live PG up):** full `cargo test --workspace` **1855/0/13, no `[SKIP]`** (sandbox + live-PG
-e2e actually ran) + `cargo clippy --workspace --all-targets -D warnings` clean. Whole-branch Opus review = "ready to merge".
-**DGX native-Linux not re-run this session** (the dispatch path is hermetic + the no-op is proven by the Mac live-PG
-`shell_exec_e2e`; carried forward as the standing Linux gate). New tests: `secrets::collect` 4, `leak_provision` +6,
-`tool_host::egress_provision` 3 (fake-sink D1/D3), `egress_leak_scan_e2e` +1 union round-trip. Spec/plan:
+slice #4. **PR #296 review-hardening pass (2026-06-17):** (1) **walker drift closed** — `collect_refs_in_params` no longer
+hand-rolls its own JSON walk; both it and the mutating substitution walker now drive one shared read-only
+`secrets::substitute::for_each_ref`, and a `mutating_and_readonly_walkers_visit_the_same_refs` parity test pins them so a
+ref that's redeemed (plaintext egresses) can never be missed by the collector (silent fail-open); (2) **D3 dedup extracted**
+to a pure `select_provisioned_rows` helper + 3 unit tests (newly-added-only / two-refs-one-value → one row / nothing when
+the union didn't grow) — previously only covered transitively; (3) **`merge_secret_hashes` concurrency contract documented**
+(read-merge-atomic-write has no internal lock; safe only because dispatch holds `&mut SupervisedWorker`, so per-worker
+scratch writes are serialized). **Verification (Mac, live PG up):** full `cargo test --workspace` **1859/0/13, no `[SKIP]`**
+(was 1855 pre-review-pass; +4 unit tests) + `cargo clippy -p kastellan-core --all-targets -D warnings` clean. Whole-branch
+Opus review = "ready to merge". **DGX native-Linux not re-run this session** (the dispatch path is hermetic + the no-op is
+proven by the Mac live-PG `shell_exec_e2e`; carried forward as the standing Linux gate). New tests: `secrets::collect` 4 +
+parity 1, `leak_provision` +6, `tool_host::egress_provision` 3 (fake-sink D1/D3) + 3 (D3 `select_provisioned_rows`),
+`egress_leak_scan_e2e` +1 union round-trip. Spec/plan:
 `docs/superpowers/{specs,plans}/2026-06-16-egress-slice3b-dispatch-time-provisioning*`.)
 
 _(Prior session — **[#281] gliner-relex Landlock** merged to `main` as `4b42848` (PR #295): the torch worker now runs with

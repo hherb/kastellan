@@ -65,25 +65,33 @@ pub(crate) fn compute_provision(
     }
     let fps: Vec<SecretFingerprint> = pairs.iter().map(|p| p.fp.clone()).collect();
     match egress.provision_dispatch_secrets(&fps) {
-        Ok(added) => {
-            // Keep only the pairs whose fingerprint the merge actually newly
-            // added (union dedup by sha256), one row per newly-added value (D3).
-            // Two orthogonal filters: "was it newly added?" then "first ref for
-            // this value?" (so two refs sharing a value emit a single row).
-            let added_sha: HashSet<[u8; 32]> = added.iter().map(|f| f.sha256).collect();
-            let mut seen: HashSet<[u8; 32]> = HashSet::new();
-            let provisioned: Vec<ProvisionedSecret> = pairs
-                .into_iter()
-                .filter(|p| added_sha.contains(&p.fp.sha256))
-                .filter(|p| seen.insert(p.fp.sha256))
-                .collect();
-            Provision::Added(provisioned)
-        }
+        Ok(added) => Provision::Added(select_provisioned_rows(pairs, &added)),
         Err(e) => Provision::Failed {
             pending: fps.len(),
             err: e.to_string(),
         },
     }
+}
+
+/// Pure (D3): from the `pairs` we tried to provision and `added` (the subset the
+/// merge reported as newly added to the union, dedup'd by sha256), pick exactly
+/// one [`ProvisionedSecret`] to audit per newly-added value. Two orthogonal
+/// filters in first-seen order: "was this value newly added?" then "is this the
+/// first ref carrying it?" — so two refs sharing one secret value emit a single
+/// `egress.secret_hash.provisioned` row, and a value already in the file emits
+/// none. Split out of [`compute_provision`] so it is unit-testable without a
+/// live [`EgressSidecar`].
+fn select_provisioned_rows(
+    pairs: Vec<ProvisionedSecret>,
+    added: &[SecretFingerprint],
+) -> Vec<ProvisionedSecret> {
+    let added_sha: HashSet<[u8; 32]> = added.iter().map(|f| f.sha256).collect();
+    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    pairs
+        .into_iter()
+        .filter(|p| added_sha.contains(&p.fp.sha256))
+        .filter(|p| seen.insert(p.fp.sha256))
+        .collect()
 }
 
 /// Emit the audit rows for a provisioning outcome and, on failure, return the
@@ -198,5 +206,45 @@ mod tests {
         let rows = sink.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].1, "egress.secret_hash.provision_failed");
+    }
+
+    fn pair(ref_hash: &str, value: &[u8]) -> ProvisionedSecret {
+        ProvisionedSecret {
+            ref_hash: ref_hash.into(),
+            fp: fingerprint_value(value).unwrap(),
+        }
+    }
+
+    #[test]
+    fn select_keeps_only_newly_added_values() {
+        let a = pair("aa", b"secret-value-one");
+        let b = pair("bb", b"secret-value-two");
+        // The merge reported only `a`'s fingerprint as newly added (`b` was
+        // already in the union from an earlier dispatch on the reused worker).
+        let added = vec![fingerprint_value(b"secret-value-one").unwrap()];
+        let kept = select_provisioned_rows(vec![a, b], &added);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].ref_hash, "aa");
+    }
+
+    #[test]
+    fn select_dedups_two_refs_sharing_one_value_to_a_single_row() {
+        // Two distinct refs carry the SAME secret value ⇒ identical fingerprint.
+        // The merge adds that one value once; D3 audits one row (the first ref).
+        let first = pair("aa", b"shared-secret-value");
+        let second = pair("bb", b"shared-secret-value");
+        assert_eq!(first.fp.sha256, second.fp.sha256, "same value ⇒ same sha256");
+        let added = vec![fingerprint_value(b"shared-secret-value").unwrap()];
+        let kept = select_provisioned_rows(vec![first, second], &added);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].ref_hash, "aa", "first ref carrying the value wins");
+    }
+
+    #[test]
+    fn select_emits_nothing_when_merge_added_nothing() {
+        // Every value already present in the file (union didn't grow) ⇒ no rows.
+        let a = pair("aa", b"secret-value-one");
+        let kept = select_provisioned_rows(vec![a], &[]);
+        assert!(kept.is_empty());
     }
 }

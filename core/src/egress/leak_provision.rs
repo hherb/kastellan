@@ -60,6 +60,16 @@ pub fn provision_audit_row(worker: &str, name: &str, fp: &SecretFingerprint) -> 
 ///
 /// A write failure surfaces as `Err` so the dispatch caller can fail closed
 /// (decision D1) rather than let a secret-bearing worker egress unscanned.
+///
+/// **Concurrency:** this is read-merge-(atomic-rename)-write with no internal
+/// lock, so callers MUST serialize calls that target the same `scratch` dir —
+/// two concurrent merges would each read the same prior union and the later
+/// rename would clobber the earlier, silently dropping a fingerprint (fail-open
+/// for that secret). The sole production caller is the dispatch chokepoint via
+/// [`super::net_worker::EgressSidecar::provision_dispatch_secrets`], which holds
+/// the worker as `&mut SupervisedWorker` for the whole dispatch — so dispatches
+/// to a given worker (hence its one scratch dir) are already serialized. Do not
+/// add a caller that provisions a worker's scratch concurrently without a lock.
 pub fn merge_secret_hashes(
     scratch: &Path,
     new: &[SecretFingerprint],
