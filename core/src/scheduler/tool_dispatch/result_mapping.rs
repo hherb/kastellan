@@ -84,5 +84,11 @@ pub fn map_dispatch_result(
             code: "POLICY_DENIED".to_string(),
             detail: "secret redemption failed before worker call".to_string(),
         },
+        // Egress slice #3b (#268): provisioning failed before worker was called —
+        // fail-closed, same treatment as POLICY_DENIED (no retry).
+        Err(ToolHostError::EgressProvisionFailed(msg)) => StepOutcome::Err {
+            code: "POLICY_DENIED".to_string(),
+            detail: msg,
+        },
     }
 }

@@ -147,7 +147,7 @@ mod tests {
     fn merge_into_empty_writes_and_reports_all_added() {
         let dir = tempfile::tempdir().unwrap();
         let a = fingerprint_value(b"first-secret-value").unwrap();
-        let added = merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
+        let added = merge_secret_hashes(dir.path(), std::slice::from_ref(&a)).unwrap();
         assert_eq!(added, vec![a.clone()]);
         let s = std::fs::read_to_string(dir.path().join(SECRET_HASHES_FILE_NAME)).unwrap();
         assert_eq!(parse_hashes(&s), vec![a]);
@@ -158,7 +158,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = fingerprint_value(b"first-secret-value").unwrap();
         let b = fingerprint_value(b"second-secret-value").unwrap();
-        merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
+        merge_secret_hashes(dir.path(), std::slice::from_ref(&a)).unwrap();
         let added = merge_secret_hashes(dir.path(), &[a.clone(), b.clone()]).unwrap();
         assert_eq!(added, vec![b.clone()]);
         let s = std::fs::read_to_string(dir.path().join(SECRET_HASHES_FILE_NAME)).unwrap();
@@ -171,8 +171,8 @@ mod tests {
     fn merge_of_already_present_adds_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let a = fingerprint_value(b"first-secret-value").unwrap();
-        merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
-        let added = merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
+        merge_secret_hashes(dir.path(), std::slice::from_ref(&a)).unwrap();
+        let added = merge_secret_hashes(dir.path(), std::slice::from_ref(&a)).unwrap();
         assert!(added.is_empty());
     }
 
@@ -181,7 +181,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(SECRET_HASHES_FILE_NAME), b"not json").unwrap();
         let a = fingerprint_value(b"first-secret-value").unwrap();
-        let added = merge_secret_hashes(dir.path(), &[a.clone()]).unwrap();
+        let added = merge_secret_hashes(dir.path(), std::slice::from_ref(&a)).unwrap();
         assert_eq!(added, vec![a]);
     }
 

@@ -47,6 +47,14 @@ pub enum ToolHostError {
     /// POLICY_DENIED — task step fails fast, no retry budget burned.
     #[error("tool_host: secret redemption failed: {0}")]
     SecretRedemptionFailed(#[from] crate::secrets::SubstituteError),
+
+    /// Egress slice #3b (#268). Dispatch-time leak-scanner provisioning failed
+    /// for a secret-bearing force-routed net worker. Fail-CLOSED: the worker is
+    /// never called, so a secret can never reach a net worker the scanner
+    /// cannot watch. The fail-closed audit row was already emitted before this
+    /// error. Scheduler treats it like POLICY_DENIED (fail fast, no retry).
+    #[error("tool_host: egress leak-scanner provisioning failed: {0}")]
+    EgressProvisionFailed(String),
 }
 
 /// A sealed JSON-RPC request shape. The fields and constructor are

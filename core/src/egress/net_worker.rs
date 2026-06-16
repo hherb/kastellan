@@ -94,6 +94,25 @@ impl Drop for EgressSidecar {
     }
 }
 
+impl EgressSidecar {
+    /// Dispatch-time live provisioning (egress slice #3b, #268): merge `fps`
+    /// into this worker's sidecar `secret_hashes.json` (union across reuse) and
+    /// return the newly-added fingerprints for audit. The scratch dir holding
+    /// that file is always the parent of the sidecar UDS — present for the
+    /// sidecar's whole lifetime. Reuses [`super::leak_provision::merge_secret_hashes`].
+    // Task 4 will call this from the force-route glue; allow until that lands.
+    #[allow(dead_code)]
+    pub(crate) fn provision_dispatch_secrets(
+        &self,
+        fps: &[SecretFingerprint],
+    ) -> std::io::Result<Vec<SecretFingerprint>> {
+        let dir = self.sidecar.uds_path.parent().ok_or_else(|| {
+            std::io::Error::other("sidecar uds_path has no parent dir")
+        })?;
+        super::leak_provision::merge_secret_hashes(dir, fps)
+    }
+}
+
 /// Write the per-worker secret-value fingerprints into the sidecar scratch dir
 /// for the proxy to read (slice #3b spawn-wiring). Thin wrapper over
 /// [`write_secret_hashes`] kept here so the spawn path has one provisioning
