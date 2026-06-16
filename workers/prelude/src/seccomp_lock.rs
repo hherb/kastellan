@@ -97,6 +97,16 @@ pub enum Profile {
     /// listed in [`allow_list_for`] (so the main filter returns `ALLOW`, not
     /// `KILL`, leaving the second filter free to downgrade it to `ERRNO`).
     BrowserClient,
+    /// `"ml_client"` — `net_client` **plus** [`ML_CLIENT_ADDITIONS`]: the
+    /// syscalls a torch/transformers inference worker (gliner-relex) issues
+    /// beyond the net-client base, enumerated empirically on the DGX (aarch64)
+    /// via the **kill-mode** loop — each run SIGSYS-dies on the first missing
+    /// syscall, read back from `journalctl -k | grep type=1326` (`SECCOMP_RET_LOG`
+    /// is printk-rate-limited on the DGX, so log-mode only surfaces the earliest
+    /// denial per run; design spec 2026-06-16 §4). The worker is `Net::Deny`; the
+    /// socket family is permitted at the syscall layer (torch opens sockets even
+    /// fully offline) but the private netns gives it no route.
+    MlClient,
 }
 
 impl Profile {
@@ -105,10 +115,11 @@ impl Profile {
             "strict" => Ok(Some(Profile::Strict)),
             "net_client" => Ok(Some(Profile::NetClient)),
             "browser_client" => Ok(Some(Profile::BrowserClient)),
+            "ml_client" => Ok(Some(Profile::MlClient)),
             "none" | "" => Ok(None),
             other => Err(LockdownError::Env(format!(
                 "KASTELLAN_SECCOMP_PROFILE must be 'strict' | 'net_client' | \
-                 'browser_client' | 'none', got {other:?}"
+                 'browser_client' | 'ml_client' | 'none', got {other:?}"
             ))),
         }
     }
@@ -218,7 +229,7 @@ pub fn allow_list_for(profile: Profile) -> Vec<i64> {
     #[cfg(target_arch = "x86_64")]
     out.extend_from_slice(BASE_ALLOW_X86_64_LEGACY);
     // Both net-using profiles get the BSD-socket family.
-    if matches!(profile, Profile::NetClient | Profile::BrowserClient) {
+    if matches!(profile, Profile::NetClient | Profile::BrowserClient | Profile::MlClient) {
         out.extend_from_slice(NET_CLIENT_ADDITIONS);
     }
     if matches!(profile, Profile::BrowserClient) {
@@ -227,6 +238,9 @@ pub fn allow_list_for(profile: Profile) -> Vec<i64> {
         // the second filter from `build_io_uring_eperm_bpf` then downgrades it
         // to EPERM. Never reachable as a real allow — see the variant docs.
         out.extend_from_slice(BROWSER_IO_URING);
+    }
+    if matches!(profile, Profile::MlClient) {
+        out.extend_from_slice(ML_CLIENT_ADDITIONS);
     }
     out
 }
@@ -612,6 +626,58 @@ pub const BROWSER_CLIENT_ADDITIONS: &[i64] = &[
 /// [`Profile::BrowserClient`] docs for the precedence reasoning.
 pub const BROWSER_IO_URING: &[i64] = &[libc::SYS_io_uring_setup, libc::SYS_io_uring_enter];
 
+/// torch/transformers-specific syscalls beyond [`NET_CLIENT_ADDITIONS`].
+/// Permitted only under [`Profile::MlClient`] (gliner-relex).
+///
+/// **Enumerated empirically** on the DGX (aarch64) by tracing a real
+/// `knowledgator/gliner-relex-multi-v1.0` worker — both the `device="auto"`
+/// CUDA-availability probe AND the CPU model-load + `extract` it falls back to
+/// inside the jail (no `/dev/nvidia*` bound) — and diffing the observed syscalls
+/// against the bare `net_client` allow-list (design spec 2026-06-16 §4). Every
+/// observed syscall was already covered by [`BASE_ALLOW`] +
+/// [`NET_CLIENT_ADDITIONS`] **except** the five below. (The trace also confirmed
+/// torch issues `socket`/`bind`/`connect` even fully offline — hence the
+/// `net_client` base — and probed **no** escape primitives or io_uring.)
+///
+/// Escape primitives (namespace/mount/ptrace/bpf/io_uring/keyring) are NEVER
+/// added here — they stay killed by the default action.
+pub const ML_CLIENT_ADDITIONS: &[i64] = &[
+    // NUMA memory-policy syscalls PyTorch's threadpool / OpenMP arena
+    // allocator issues while placing tensor memory across NUMA nodes
+    // (observed: `mbind` ×20, `get_mempolicy` ×1) during the CPU inference path.
+    // `set_mempolicy` / `migrate_pages` were NOT observed and are deliberately
+    // left out (add iff a future trace shows them).
+    libc::SYS_mbind,
+    libc::SYS_get_mempolicy,
+    // Memory-locking syscalls libcuda issues while pinning host pages during the
+    // `device="auto"` CUDA-availability probe the worker runs at startup. Not hit
+    // in the current CPU-only jail (no `/dev/nvidia*` bound, so the probe fails
+    // before pinning), but a GPU-bound gliner deployment reaches them — included
+    // forward-looking. `mlock2` (the modern flag-taking variant) was NOT observed.
+    // Both lock only this process's OWN pages (bounded by `RLIMIT_MEMLOCK`); no
+    // namespace/privilege/escape surface — same benign class as `madvise`.
+    //
+    // CAVEAT: unlike the other four (all DGX-observed and therefore exercised by
+    // the real-model e2e gate), these two are the ONLY grants in this set NOT
+    // hit on the current CPU-only DGX — so the e2e suite does not cover them. They
+    // rest on the benign-class argument above, not an empirical kill-mode trace.
+    // If the GPU path is never deployed, removing them is safe (a future CPU-only
+    // trace would not regress); they're kept so a `device=auto` GPU host does not
+    // SIGSYS on first model load.
+    libc::SYS_mlock,
+    libc::SYS_munlock,
+    // `mknodat` — the worker creates a special file (FIFO/regular) in its writable
+    // scratch during startup; confirmed load-bearing by the DGX kill-mode gate
+    // (`syscall=33`). Same filesystem-mutation family as `mkdirat`/`unlinkat` in
+    // [`BASE_ALLOW`] and bounded identically: it can only create nodes where the
+    // worker can already write (bwrap `/tmp` tmpfs + Landlock). Device-node
+    // creation (`S_IFCHR`/`S_IFBLK`) needs `CAP_MKNOD` the unprivileged user-ns
+    // worker lacks against the host, and a device node minted inside an
+    // unprivileged user-ns cannot be opened to reach real hardware — so no
+    // device-access surface. Scoped to `ml_client` (not widened into BASE_ALLOW).
+    libc::SYS_mknodat,
+];
+
 /// Map the build target architecture to seccompiler's enum. Returns an
 /// error on unsupported arches so we never silently install a filter for
 /// the wrong arch (which is a foot-gun: filters are arch-specific BPF).
@@ -843,6 +909,66 @@ mod tests {
             assert!(
                 !allow_list_for(Profile::Strict).contains(nr),
                 "io_uring {nr} must NOT be in Strict"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_parse_recognises_ml_client() {
+        assert_eq!(Profile::parse("ml_client").unwrap(), Some(Profile::MlClient));
+    }
+
+    #[test]
+    fn build_bpf_ml_client_succeeds() {
+        let bpf = build_bpf(Profile::MlClient).expect("ml_client bpf must build");
+        assert!(!bpf.is_empty(), "ml_client filter must emit instructions");
+    }
+
+    #[test]
+    fn ml_client_is_a_superset_of_net_client() {
+        // ml_client = net_client + ML additions, so it must allow everything
+        // net_client does (notably the socket family torch needs even offline).
+        let net_client = allow_list_for(Profile::NetClient);
+        let ml = allow_list_for(Profile::MlClient);
+        for nr in net_client {
+            assert!(ml.contains(&nr), "MlClient missing NetClient syscall {nr}");
+        }
+        assert!(ml.contains(&libc::SYS_socket), "MlClient must allow socket()");
+    }
+
+    #[test]
+    fn ml_client_excludes_escape_primitives() {
+        // The threat-model invariant: even a torch-tier worker must never be able
+        // to escape its namespace / inspect other processes / load BPF.
+        let ml = allow_list_for(Profile::MlClient);
+        for nr in [
+            libc::SYS_unshare,
+            libc::SYS_setns,
+            libc::SYS_mount,
+            libc::SYS_ptrace,
+            libc::SYS_bpf,
+            libc::SYS_perf_event_open,
+        ] {
+            assert!(!ml.contains(&nr), "MlClient must never allow {nr}");
+        }
+    }
+
+    #[test]
+    fn ml_client_includes_enumerated_numa_additions() {
+        // The DGX-enumerated torch additions (NUMA memory-policy syscalls) must
+        // be present in MlClient and ML-specific — i.e. NOT already granted by
+        // the Strict base (otherwise they'd belong in BASE_ALLOW, not here).
+        let ml = allow_list_for(Profile::MlClient);
+        let strict = allow_list_for(Profile::Strict);
+        assert!(
+            !ML_CLIENT_ADDITIONS.is_empty(),
+            "ML_CLIENT_ADDITIONS was populated by the DGX enumeration"
+        );
+        for nr in ML_CLIENT_ADDITIONS {
+            assert!(ml.contains(nr), "MlClient missing enumerated syscall {nr}");
+            assert!(
+                !strict.contains(nr),
+                "enumerated syscall {nr} is already in Strict — move it to BASE_ALLOW"
             );
         }
     }

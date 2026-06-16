@@ -167,7 +167,16 @@ fn build_real_model_entry() -> Option<ToolEntry> {
         interpreter_root: None,
         interpreter_lib_dirs: vec![],
     };
-    Some(gliner_relex_entry(&env))
+    // Route through the lockdown-exec shim on Linux so the real worker runs under
+    // the `ml_client` seccomp filter (mirrors the host manifest + gliner_relex_e2e).
+    // macOS passes None (Seatbelt is applied from the parent).
+    #[cfg(target_os = "linux")]
+    let shim = Some(kastellan_tests_common::workspace_target_binary(
+        "kastellan-worker-lockdown-exec",
+    ));
+    #[cfg(not(target_os = "linux"))]
+    let shim: Option<std::path::PathBuf> = None;
+    Some(gliner_relex_entry(&env, shim))
 }
 
 // ---------------------------------------------------------------------

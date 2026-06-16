@@ -139,7 +139,7 @@ fn test_env() -> GlinerRelexEnv {
 #[test]
 fn entry_carries_idle_timeout_lifecycle_with_spec_caps() {
     let env = test_env();
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     match entry.lifecycle {
         Lifecycle::IdleTimeout { caps, contract } => {
             assert!(
@@ -163,7 +163,7 @@ fn entry_disables_per_request_kill_switches_for_warm_worker() {
     // worker" pass doesn't quietly re-enable either without an
     // explicit revisit of the lifecycle semantics.
     let env = test_env();
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     assert_eq!(
         entry.policy.cpu_ms, 0,
         "cpu_ms must be 0; RLIMIT_CPU is cumulative and would fire across many warm calls"
@@ -177,7 +177,7 @@ fn entry_disables_per_request_kill_switches_for_warm_worker() {
 #[test]
 fn entry_denies_network() {
     let env = test_env();
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     match entry.policy.net {
         Net::Deny => {}
         other => panic!("expected Net::Deny, got {other:?}"),
@@ -185,19 +185,54 @@ fn entry_denies_network() {
 }
 
 #[test]
-fn entry_uses_strict_profile() {
+fn entry_uses_ml_client_profile() {
     let env = test_env();
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     match entry.policy.profile {
-        Profile::WorkerStrict => {}
-        other => panic!("expected Profile::WorkerStrict, got {other:?}"),
+        Profile::WorkerMlClient => {}
+        other => panic!("expected Profile::WorkerMlClient, got {other:?}"),
     }
+}
+
+#[test]
+fn entry_without_shim_sets_no_lockdown_shim_and_no_landlock_optout() {
+    // macOS / container path: no shim, no KASTELLAN_LANDLOCK_PROFILE override.
+    let env = test_env();
+    let entry = gliner_relex_entry(&env, None);
+    assert!(entry.lockdown_shim.is_none());
+    assert!(
+        !entry
+            .policy
+            .env
+            .iter()
+            .any(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_PROFILE),
+        "no Landlock opt-out without a shim"
+    );
+}
+
+#[test]
+fn entry_with_shim_binds_it_and_opts_out_of_landlock() {
+    let env = test_env();
+    let shim = PathBuf::from("/tmp/fake/target/debug/kastellan-worker-lockdown-exec");
+    let entry = gliner_relex_entry(&env, Some(shim.clone()));
+    assert_eq!(entry.lockdown_shim.as_deref(), Some(shim.as_path()));
+    assert!(
+        entry.policy.fs_read.contains(&shim),
+        "shim must be bound read-only so bwrap can exec it"
+    );
+    let landlock = entry
+        .policy
+        .env
+        .iter()
+        .find(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_PROFILE)
+        .expect("shim path must opt out of Landlock (seccomp-only)");
+    assert_eq!(landlock.1, "none");
 }
 
 #[test]
 fn entry_mounts_weights_and_venv_and_src_read_only_no_writes() {
     let env = test_env();
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     assert!(
         entry.policy.fs_read.contains(&env.weights_dir),
         "weights dir must be in fs_read so the model can load"
@@ -229,7 +264,7 @@ fn entry_mounts_weights_and_venv_and_src_read_only_no_writes() {
 #[test]
 fn entry_carries_offline_and_routing_env_vars() {
     let env = test_env();
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     // Build a map view; the order in the Vec<(K, V)> is incidental.
     let env_map: std::collections::HashMap<&str, &str> = entry
         .policy
@@ -290,7 +325,7 @@ fn entry_forwards_device_verbatim_regardless_of_value() {
             device: device.to_string(),
             ..test_env()
         };
-        let entry = gliner_relex_entry(&env);
+        let entry = gliner_relex_entry(&env, None);
         let env_map: std::collections::HashMap<&str, &str> = entry
             .policy
             .env
@@ -312,7 +347,7 @@ fn entry_sets_cgroup_ceilings_for_warm_inference() {
     // tweak doesn't silently widen what the gliner-relex worker
     // gets.
     let env = test_env();
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     assert_eq!(entry.policy.cpu_quota_pct, Some(400));
     assert_eq!(entry.policy.tasks_max, Some(64));
     assert_eq!(
@@ -324,7 +359,7 @@ fn entry_sets_cgroup_ceilings_for_warm_inference() {
 #[test]
 fn entry_binary_points_at_the_venv_shim() {
     let env = test_env();
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     assert_eq!(entry.binary, env.script_path);
 }
 
@@ -336,7 +371,7 @@ fn entry_binary_points_at_the_venv_shim() {
 fn entry_host_mode_container_image_is_none() {
     let env = test_env();
     assert!(!env.use_container_backend, "test_env defaults to host mode");
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     assert!(
         entry.container_image.is_none(),
         "host-mode entry must have container_image == None; got {:?}",
@@ -363,7 +398,7 @@ fn entry_container_mode_emits_in_container_binary_and_weights_only_fs_read() {
         use_container_backend: true,
         ..test_env()
     };
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
 
     assert_eq!(
         entry.binary,
@@ -398,7 +433,7 @@ fn entry_container_mode_honours_custom_image_tag() {
         container_image: Some("kastellan/gliner-relex:v0.0.1".to_string()),
         ..test_env()
     };
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     assert_eq!(
         entry.container_image.as_deref(),
         Some("kastellan/gliner-relex:v0.0.1"),
@@ -457,7 +492,7 @@ fn host_mode_entry_binds_interpreter_root_and_lib_dirs() {
         interpreter_lib_dirs: vec![PathBuf::from("/opt/hb/gettext/lib")],
         ..test_env()
     };
-    let entry = gliner_relex_entry(&env);
+    let entry = gliner_relex_entry(&env, None);
     assert!(entry.policy.fs_read.contains(&PathBuf::from("/opt/py/3.12")));
     assert!(entry
         .policy
@@ -856,6 +891,10 @@ fn manifest_misconfigured_when_weights_dir_env_missing() {
     }
 }
 
+/// On macOS the manifest registers without any lockdown-exec shim
+/// (Seatbelt is applied from the parent process, not via a shim).
+/// On Linux, see `manifest_registers_on_happy_path_linux_with_shim` below.
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn manifest_registers_on_happy_path() {
     // enable=1, weights dir is a dir, explicit venv dir, shim exists.
@@ -880,6 +919,88 @@ fn manifest_registers_on_happy_path() {
             );
         }
         _ => panic!("expected Register on the happy path"),
+    }
+}
+
+/// On Linux the manifest must fail-closed when the lockdown-exec shim
+/// cannot be found: never register an unfiltered torch worker.
+/// macOS uses Seatbelt (applied from the parent), so no shim is required.
+#[cfg(target_os = "linux")]
+#[test]
+fn manifest_is_fail_closed_when_shim_missing_on_linux() {
+    use crate::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
+    // Enabled + venv shim present, but the lockdown-exec shim cannot be found:
+    // resolve() must refuse (Misconfigured), never Register an unfiltered worker.
+    let ctx = ResolveCtx {
+        get_env: &|k: &str| match k {
+            "KASTELLAN_GLINER_RELEX_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR" => Some("/tmp/fake/weights".to_string()),
+            "KASTELLAN_GLINER_RELEX_VENV_DIR" => Some("/tmp/fake/.venv".to_string()),
+            // No KASTELLAN_LOCKDOWN_EXEC_BIN set.
+            _ => None,
+        },
+        // weights dir + venv shim "exist"; lockdown-exec sibling does not.
+        exists: &|p| {
+            p == std::path::Path::new("/tmp/fake/.venv/bin/kastellan-worker-gliner-relex")
+        },
+        is_dir: &|p| p == std::path::Path::new("/tmp/fake/weights"),
+        // exe_dir None => no current_exe()-relative sibling lookup, so with no
+        // override env the shim cannot be discovered => fail-closed.
+        exe_dir: None,
+        canonicalize: &|p| Some(p.to_path_buf()),
+        allowlist: &|_| vec![],
+    };
+    match GlinerRelexManifest.resolve(&ctx) {
+        Resolution::Misconfigured { detail } => {
+            assert!(detail.contains("lockdown-exec"), "detail: {detail}");
+        }
+        Resolution::Register(_) => panic!("expected Misconfigured, got Register"),
+        Resolution::Disabled { detail } => panic!("expected Misconfigured, got Disabled: {detail}"),
+    }
+}
+
+/// On Linux the manifest registers when the lockdown-exec shim IS found
+/// (via KASTELLAN_LOCKDOWN_EXEC_BIN override pointing at a runnable file).
+#[cfg(target_os = "linux")]
+#[test]
+fn manifest_registers_on_happy_path_linux_with_shim() {
+    use crate::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
+    let shim_path = "/tmp/fake/kastellan-worker-lockdown-exec";
+    let ctx = ResolveCtx {
+        get_env: &|k: &str| match k {
+            "KASTELLAN_GLINER_RELEX_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_GLINER_RELEX_WEIGHTS_DIR" => Some("/tmp/fake/weights".to_string()),
+            "KASTELLAN_GLINER_RELEX_VENV_DIR" => Some("/tmp/fake/.venv".to_string()),
+            "KASTELLAN_LOCKDOWN_EXEC_BIN" => Some(shim_path.to_string()),
+            _ => None,
+        },
+        exists: &|p| {
+            p == std::path::Path::new("/tmp/fake/.venv/bin/kastellan-worker-gliner-relex")
+                || p == std::path::Path::new(shim_path)
+        },
+        is_dir: &|p| p == std::path::Path::new("/tmp/fake/weights"),
+        exe_dir: None,
+        canonicalize: &|p| Some(p.to_path_buf()),
+        allowlist: &|_| vec![],
+    };
+    match GlinerRelexManifest.resolve(&ctx) {
+        Resolution::Register(entry) => {
+            assert!(
+                matches!(entry.lifecycle, crate::worker_lifecycle::Lifecycle::IdleTimeout { .. }),
+                "gliner must register IdleTimeout"
+            );
+            assert_eq!(
+                entry.lockdown_shim.as_deref(),
+                Some(std::path::Path::new(shim_path)),
+                "shim must be threaded through to the ToolEntry"
+            );
+        }
+        Resolution::Misconfigured { detail } => {
+            panic!("expected Register on the happy path with shim, got Misconfigured: {detail}")
+        }
+        Resolution::Disabled { detail } => {
+            panic!("expected Register on the happy path with shim, got Disabled: {detail}")
+        }
     }
 }
 

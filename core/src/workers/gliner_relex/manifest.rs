@@ -54,7 +54,30 @@ impl crate::worker_manifest::WorkerManifest for GlinerRelexManifest {
                     env.interpreter_root = root;
                     env.interpreter_lib_dirs = dirs;
                 }
-                Resolution::Register(gliner_relex_entry(&env))
+                // Linux: gliner-relex is a pure-Python venv worker bwrap spawns
+                // directly, so it needs the lockdown-exec shim to actually apply
+                // its ml_client seccomp filter. Fail-closed if the shim is
+                // missing — never register an unfiltered torch worker. macOS uses
+                // Seatbelt (applied from the parent), so no shim.
+                #[cfg(target_os = "linux")]
+                {
+                    match crate::worker_manifest::discover_binary(
+                        ctx,
+                        "KASTELLAN_LOCKDOWN_EXEC_BIN",
+                        "kastellan-worker-lockdown-exec",
+                    ) {
+                        Some(shim) => {
+                            Resolution::Register(gliner_relex_entry(&env, Some(shim)))
+                        }
+                        None => Resolution::Misconfigured {
+                            detail: "lockdown-exec shim not found (KASTELLAN_LOCKDOWN_EXEC_BIN unset/invalid and no exe-relative sibling); gliner-relex requires it for worker-side seccomp on Linux".to_string(),
+                        },
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Resolution::Register(gliner_relex_entry(&env, None))
+                }
             }
             Err(ResolveSkipReason::Disabled) => Resolution::Disabled {
                 detail: "KASTELLAN_GLINER_RELEX_ENABLE != \"1\"".to_string(),

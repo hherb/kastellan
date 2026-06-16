@@ -485,7 +485,16 @@ async fn build_real_extractor(pool: &sqlx::PgPool) -> Option<Arc<dyn EntityExtra
         interpreter_root: None,
         interpreter_lib_dirs: vec![],
     };
-    let entry = gliner_relex_entry(&env);
+    // Route through the lockdown-exec shim on Linux so the real worker runs under
+    // the `ml_client` seccomp filter (mirrors the host manifest + gliner_relex_e2e).
+    // macOS passes None (Seatbelt is applied from the parent).
+    #[cfg(target_os = "linux")]
+    let shim = Some(kastellan_tests_common::workspace_target_binary(
+        "kastellan-worker-lockdown-exec",
+    ));
+    #[cfg(not(target_os = "linux"))]
+    let shim: Option<std::path::PathBuf> = None;
+    let entry = gliner_relex_entry(&env, shim);
     let sandboxes = Arc::new(kastellan_sandbox::SandboxBackends::default_for_current_os());
     let lifecycle: Arc<dyn WorkerLifecycleManager> =
         Arc::new(CompositeLifecycle::new(sandboxes));

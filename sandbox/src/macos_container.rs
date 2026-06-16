@@ -197,7 +197,10 @@ pub fn build_container_argv(
     // and run as a low-priv user; only `WorkerStrict` makes the root FS
     // read-only.
     match policy.profile {
-        Profile::WorkerStrict => {
+        // gliner-relex (WorkerMlClient) is Net::Deny like WorkerStrict, so it
+        // gets the same read-only-root container hardening; the ml_client
+        // seccomp widening is a Linux-only host-backend concern.
+        Profile::WorkerStrict | Profile::WorkerMlClient => {
             argv.push("--read-only".into());
             argv.push("--cap-drop".into());
             argv.push("ALL".into());
