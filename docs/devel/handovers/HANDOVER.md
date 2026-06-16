@@ -6,30 +6,27 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-16 (**[#281] gliner-relex half DONE — the heavy torch/transformers worker now gets a real
-Linux seccomp filter via the same `kastellan-worker-lockdown-exec` shim.** Branch `feat/281-gliner-relex-seccomp`,
-PR [#293](https://github.com/hherb/kastellan/pull/293), HEAD `0b38f4f`. gliner-relex runs in host mode — a pure-Python venv bwrap spawns directly — so like browser-driver it never
-ran the Rust prelude and had **no worker-side seccomp on Linux** (its `WorkerStrict` profile was nominal-only). Fix mirrors
-the browser-driver #281 pattern: route the host-mode spawn through the lockdown-exec shim (manifest discovers it, fail-closed
-on Linux — missing shim ⇒ `Misconfigured`, never an unfiltered torch worker; binds it into `fs_read`; seccomp-only via
-`KASTELLAN_LANDLOCK_PROFILE=none`). New dedicated **`ml_client`** seccomp profile = `net_client` base (torch opens sockets
-even fully offline — confirmed by trace; `Net::Deny` still blocks the route) **+ 5 empirically-enumerated additions**:
-`mbind`/`get_mempolicy` (NUMA arena placement, CPU path), `mlock`/`munlock` (libcuda host-pinning during the `device=auto`
-CUDA probe — forward-looking for a GPU-bound deployment), `mknodat` (worker scratch special-file). New sandbox
-`Profile::WorkerMlClient` renders **byte-identical to `WorkerStrict` off Linux** (macOS Seatbelt only special-cases
-`BrowserClient`; gliner is `Net::Deny`). **DGX acceptance GREEN:** real `knowledgator/gliner-relex-multi-v1.0` model load +
-`extract` passes under the **kill-mode** `ml_client` filter applied through the shim (all 3 real-model e2e suites:
-`gliner_relex_e2e` + `entity_extraction_e2e` 16/0 + `memory_entity_link_e2e` 6/0); full native-Linux `cargo test --workspace`
-**1839/0/15** + clippy `-D warnings` clean.
-**Enumeration lesson:** `SECCOMP_RET_LOG` is **printk-rate-limited** on the DGX (`dmesg_restrict=1`, auditd off) so Log mode
-only surfaces the *earliest* unlisted syscall per run — unreliable for the full set. **Kill-mode is the deterministic
-enumerator**: each run SIGSYS-dies on the first missing syscall, logged as a single un-rate-limited `type=1326` record
-readable via `journalctl -k` **unprivileged** (the `adm` group; no `sudo` needed). The `cpu`-only strace repro also misses
-syscalls the real `__main__` worker issues (e.g. `mknodat`, the CUDA probe) — trust the in-jail journalctl/kill loop, not a
-standalone strace proxy. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-16-gliner-relex-linux-seccomp*`.)
+**Last updated:** 2026-06-16 (**[#281] browser-driver Landlock DONE — the browser worker now runs with Landlock
+*active* on Linux, closing the deferred FS half for browser-driver.** Branch `feat/281-browser-driver-landlock`,
+PR [#294](https://github.com/hherb/kastellan/pull/294), HEAD `5cc6d8b`. browser-driver's seccomp half (`browser_client`) shipped via the lockdown-exec shim
+(PR #292) but Landlock was deferred behind `KASTELLAN_LANDLOCK_PROFILE=none`. Fix is small: `browser_driver_entry`
+**no longer emits** the `none` profile, so the shim's `lock_down()` installs the ruleset. The Landlock RO set is derived
+from `fs_read` (venv, interpreter libs, `/etc` resolver files, the shim, and the per-instance CA when force-routed); RW =
+the `/tmp` scratch (now **load-bearing** — Chromium's `--user-data-dir` lives there). **No `fs_read` iteration was needed**
+— the render passed first try, because the Landlock RO set is `DEFAULT_RO_EXEC_ROOTS ∪ fs_read` = exactly what bwrap binds
+(Landlock can only further-restrict the same set). **The proxy UDS connect is NOT gated by Landlock `AccessFs`** —
+path-based AF_UNIX connect is unmediated (only the v6 *abstract*-UDS scope applies), matching force-routed web-fetch which
+already runs Landlock-on without the UDS in its RW set. **DGX acceptance GREEN:** all 4 `browser_driver_e2e --ignored` pass
+with Landlock on (direct render + force-routed-through-sidecar + both allowlist fail-closed), and a direct shim probe
+confirms `landlock: FullyEnforced` — out-of-RO-set reads (`/etc/shadow`, `/etc/hostname`) **denied**, RO set + `/tmp` RW
+readable/writable (real containment, **not** a silent `Disabled`/false green). Full native-Linux `cargo test --workspace`
+**1839/0/15** (unchanged — a test was renamed, not added) + clippy `-D warnings` clean; Mac unit + clippy green.
+Spec/plan: the #281 design `docs/superpowers/specs/2026-06-15-python-worker-linux-seccomp-design.md` §5 (the Landlock
+follow-up it scoped). **#281 is now fully closed for browser-driver (seccomp + Landlock); only gliner-relex Landlock remains.**)
 
-_(Prior session — **[#281] browser-driver half** merged to `main` as `80de534` (PR #292); the lockdown-exec shim +
-`build_program_and_args` infrastructure this session reuses. Condensed into "Recently merged" below.)_
+_(Prior session — **[#281] gliner-relex seccomp** merged to `main` as `feffa77` (PR #293): the torch worker's `ml_client`
+seccomp filter via the same shim. Condensed into "Recently merged" below. The lockdown-exec shim + `derive_lockdown_env`
+RO-derivation this session relies on were built there + in the browser-driver seccomp half (`80de534`, PR #292).)_
 
 ---
 
@@ -64,9 +61,10 @@ CI-verified, and the `linux-check` CI is **compile + clippy only** (no
 **natively**, so a full native-Linux `cargo test --workspace` +
 `cargo clippy --workspace --all-targets -D warnings` are both runnable there.
 The current native-Linux test baseline is **1839 / 0 / 15**
-(`feat/281-gliner-relex-seccomp`, 2026-06-16 — full `cargo test --workspace` with live PG 18 + worker binaries built
+(`feat/281-browser-driver-landlock`, 2026-06-16 — full `cargo test --workspace` with live PG 18 + worker binaries built
 [`cargo build --workspace`, so the `kastellan-worker-lockdown-exec` shim bin is fresh — see the #281 process lesson]; clippy
-`-D warnings` clean. Was 1829 after the browser-driver #281 half).
+`-D warnings` clean. **Unchanged from the gliner-relex baseline — browser-driver Landlock renamed a test, didn't add one;
+the 4 `browser_driver_e2e` render tests are `#[ignore]` and counted in the 15 ignored.** Was 1829 after the browser-driver #281 seccomp half).
 
 ---
 
@@ -307,11 +305,10 @@ sessions 2026-05-06 → 2026-05-09 in
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
-**Both #281 worker halves are now DONE on Linux** — browser-driver gets `browser_client` (PR #292, on `main`) and gliner-relex gets the new `ml_client` filter (this session's branch) via the lockdown-exec shim. **`browser-driver` is also egress-proxy-routed (slice #2, PR #285), renders under Seatbelt on macOS (#284), macOS forced path green (#287).** Leading remaining picks: the **two Landlock follow-ups** (below); **MITM-of-browser** (in-Chromium CA trust via NSS — deferred slice #2 follow-up, once leak-scanning #3b is wired); or Phase-2 channels (IMAP/Telegram inbound) as the next phase boundary.
+**Both #281 worker halves have seccomp DONE on Linux, and browser-driver now also has Landlock** — browser-driver gets `browser_client` seccomp (PR #292, on `main`) **+ Landlock active** (this session's branch); gliner-relex gets the `ml_client` filter (PR #293, `feffa77`) via the lockdown-exec shim. **`browser-driver` is also egress-proxy-routed (slice #2, PR #285), renders under Seatbelt on macOS (#284), macOS forced path green (#287).** Leading remaining picks: the **one remaining Landlock follow-up** (gliner-relex, below); **MITM-of-browser** (in-Chromium CA trust via NSS — deferred slice #2 follow-up, once leak-scanning #3b is wired); or Phase-2 channels (IMAP/Telegram inbound) as the next phase boundary.
 
-**★ #281 Landlock follow-ups (seccomp is done for both workers; Landlock is the deferred FS half — both set `KASTELLAN_LANDLOCK_PROFILE=none` today, relying on bwrap mounts):**
-1. **Landlock for browser-driver** — flip off `KASTELLAN_LANDLOCK_PROFILE=none` and validate the Chromium-compatible read-only path set on the DGX (needs `/sys` probing, the force-routed `proxy_uds` path under Landlock, fonts — see the spec's residual-risk section). Iterate the `fs_read`/RO set until a real render passes with Landlock on.
-2. **Landlock for gliner-relex** — same: flip off `LANDLOCK_PROFILE=none` in `gliner_relex::entry::host_mode_entry` and derive the torch RO set (weights + venv + interpreter libs are already in `fs_read`; torch may `dlopen`/`mmap` paths beyond them). The seccomp `ml_client` profile is already DGX-validated, so this is FS-only. **Enumeration method (LEARNED this session):** `SECCOMP_RET_LOG`/`dmesg` is **printk-rate-limited** on the DGX (`dmesg_restrict=1`, auditd off) so Log mode only shows the *first* denial per run — use **kill-mode iteratively** instead: each run SIGSYS-dies on the first missing syscall, read it via `journalctl -k | grep type=1326` (unprivileged — `adm` group, no sudo), add it, repeat. The Landlock equivalent is the same loop on `LandlockReport`/`EACCES`. **Process gotcha:** always `cargo build --workspace` before the worker e2e so the shim bin is fresh (a `-p <crate> --tests` build leaves a stale shim and the e2e silently runs the old binary).
+**★ #281 Landlock follow-up — gliner-relex only (browser-driver Landlock landed this session):**
+- **Landlock for gliner-relex** — flip off `LANDLOCK_PROFILE=none` in `gliner_relex::entry::host_mode_entry` and derive the torch RO set (weights + venv + interpreter libs are already in `fs_read`; torch may `dlopen`/`mmap` paths beyond them). The seccomp `ml_client` profile is already DGX-validated, so this is FS-only. **Method confirmed by the browser-driver Landlock work this session:** the Landlock RO set is `DEFAULT_RO_EXEC_ROOTS ∪ fs_read` = exactly what bwrap binds, so if `fs_read` already covers everything the worker reads, Landlock passes with no iteration (browser-driver passed first try). If torch reads beyond `fs_read`, enumerate via kill-mode/`EACCES`: each run fails on the first denied path (surfaced in worker stderr; `SECCOMP_RET_LOG`/`dmesg` is printk-rate-limited on the DGX, so trust the in-jail failure, not dmesg), add it to `fs_read`, repeat. **To confirm Landlock is genuinely enforced (not a silent `Disabled`/false green), run the shim directly:** `KASTELLAN_SECCOMP_PROFILE=none KASTELLAN_LANDLOCK_RW='[...]' KASTELLAN_LANDLOCK_RO='[...]' ./target/debug/kastellan-worker-lockdown-exec /bin/sh -c '...'` prints `lockdown ... { landlock: FullyEnforced ... }` and lets you verify an out-of-RO-set read is denied. **Process gotcha:** always `cargo build --workspace` before the worker e2e so the shim bin is fresh (a `-p <crate> --tests` build leaves a stale shim and the e2e silently runs the old binary).
 
 **Egress follow-ups now that the proxy is feature-complete (each small, on demand):** (1) **slice #4 frontier wiring** — read the operator's real frontier pin config on the daemon + route frontier LLM egress through a **pinned** sidecar (lands with the first frontier worker / the Phase-5 escalation path; today's callers pass `cert_pins_json: None`). (2) **slice #3b dispatch-time live-append** ([#268](https://github.com/hherb/kastellan/issues/268)) — provision per-worker secret hashes at dispatch (today's callers pass `&[]`). Both share the `NetWorkerSpawn` params struct that slice #4 introduced.
 
@@ -357,9 +354,10 @@ in-jail loopback shim; see the top block). Remaining browser-driver picks:
 - ~~**[#287] — macOS forced (egress-sidecar) render emits no decisions**~~ — **RESOLVED 2026-06-15** (this session): it was a
   stale browser-driver venv, not a code bug. All 4 `browser_driver_e2e --ignored` tests (incl. both forced ones) now pass on
   macOS once the venv is re-staged from current source; `install.sh` now `--force-reinstall`s to prevent recurrence.
-- **[#281](https://github.com/hherb/kastellan/issues/281) — pure-Python Linux seccomp:** **seccomp DONE for both workers**
-  — browser-driver (`browser_client`, PR #292 on `main`) and gliner-relex (`ml_client`, this branch). **Remaining: Landlock**
-  for each (the deferred FS half — both set `KASTELLAN_LANDLOCK_PROFILE=none`; see the two Landlock follow-ups under "Next TODO").
+- **[#281](https://github.com/hherb/kastellan/issues/281) — pure-Python Linux seccomp + Landlock:** **seccomp DONE for both
+  workers** — browser-driver (`browser_client`, PR #292 on `main`) and gliner-relex (`ml_client`, PR #293, `feffa77`).
+  **Landlock DONE for browser-driver** (this session); **remaining: Landlock for gliner-relex** (the last deferred FS half —
+  still sets `KASTELLAN_LANDLOCK_PROFILE=none`; see the Landlock follow-up under "Next TODO").
 - **Phase-2 hardening (on demand):** narrow the Seatbelt `mach-lookup`/`sysctl-write`/`system-socket` grants to specific
   services; a true per-spawn scratch (vs the shared `/tmp`) on macOS (#283); screenshot output; warm-keep lifecycle.
 
