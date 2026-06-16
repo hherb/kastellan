@@ -211,7 +211,14 @@ fn entry_without_shim_sets_no_lockdown_shim_and_no_landlock_optout() {
 }
 
 #[test]
-fn entry_with_shim_binds_it_and_opts_out_of_landlock() {
+fn entry_with_shim_enables_landlock_and_grants_tmp_rw() {
+    // Linux shim path: Landlock is ACTIVE (#281 follow-up). The entry must
+    // (a) bind the shim read-only so bwrap can exec it, (b) NOT opt out of
+    // Landlock (absence of KASTELLAN_LANDLOCK_PROFILE = the shim installs the
+    // ruleset), and (c) grant /tmp as the worker-side Landlock RW set so
+    // torch's inductor cache (TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor) can
+    // write under bwrap's per-spawn /tmp tmpfs — while fs_write stays empty so
+    // the host /tmp is never bound over that tmpfs.
     let env = test_env();
     let shim = PathBuf::from("/tmp/fake/target/debug/kastellan-worker-lockdown-exec");
     let entry = gliner_relex_entry(&env, Some(shim.clone()));
@@ -220,13 +227,52 @@ fn entry_with_shim_binds_it_and_opts_out_of_landlock() {
         entry.policy.fs_read.contains(&shim),
         "shim must be bound read-only so bwrap can exec it"
     );
-    let landlock = entry
+    assert!(
+        !entry
+            .policy
+            .env
+            .iter()
+            .any(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_PROFILE),
+        "Landlock must be ACTIVE: the shim path must NOT emit a \
+         KASTELLAN_LANDLOCK_PROFILE=none opt-out"
+    );
+    let rw = entry
         .policy
         .env
         .iter()
-        .find(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_PROFILE)
-        .expect("shim path must opt out of Landlock (seccomp-only)");
-    assert_eq!(landlock.1, "none");
+        .find(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_RW)
+        .expect("shim path must grant the /tmp RW set for torch's scratch");
+    assert_eq!(rw.1, r#"["/tmp"]"#);
+    assert!(
+        entry.policy.fs_write.is_empty(),
+        "fs_write must stay empty so the host /tmp isn't bound over bwrap's tmpfs"
+    );
+
+    // The assertions above pin the *entry's* env. The env actually handed to
+    // the worker is what derive_lockdown_env produces at spawn — so pin the
+    // post-derivation contract too, making this worker self-contained rather
+    // than relying transitively on the shared helper's "caller wins" rule.
+    // The explicit ["/tmp"] grant must SURVIVE derivation: with fs_write empty,
+    // a derive that re-synthesised LANDLOCK_RW from fs_write would silently
+    // collapse it to [] and torch's inductor cache would EACCES under Landlock.
+    let derived = crate::tool_host::derive_lockdown_env(&entry.policy);
+    let derived_rw = derived
+        .env
+        .iter()
+        .find(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_RW)
+        .expect("derive_lockdown_env must preserve the explicit /tmp RW grant");
+    assert_eq!(
+        derived_rw.1, r#"["/tmp"]"#,
+        "the explicit /tmp RW grant must survive derive_lockdown_env (not be \
+         overwritten to [] from the empty fs_write)"
+    );
+    assert!(
+        !derived
+            .env
+            .iter()
+            .any(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_PROFILE),
+        "Landlock must stay ACTIVE after derivation: no KASTELLAN_LANDLOCK_PROFILE opt-out"
+    );
 }
 
 #[test]
