@@ -626,13 +626,29 @@ pub const BROWSER_IO_URING: &[i64] = &[libc::SYS_io_uring_setup, libc::SYS_io_ur
 /// torch/transformers-specific syscalls beyond [`NET_CLIENT_ADDITIONS`].
 /// Permitted only under [`Profile::MlClient`] (gliner-relex).
 ///
-/// **Populated empirically** by a log-mode seccomp run on the DGX (see the
-/// design spec §4) — each entry is a syscall a real
-/// `knowledgator/gliner-relex-multi-v1.0` model load + `extract` was observed
-/// to issue and SIGSYS on under the bare `net_client` set. Starts empty: a
-/// fresh enumeration fills it. Escape primitives (namespace/mount/ptrace/bpf/
-/// io_uring) are NEVER added here — they stay killed by the default action.
-pub const ML_CLIENT_ADDITIONS: &[i64] = &[];
+/// **Enumerated empirically** on the DGX (aarch64) by tracing a real
+/// `knowledgator/gliner-relex-multi-v1.0` CPU model-load + `extract` and
+/// diffing the observed syscalls against the bare `net_client` allow-list
+/// (design spec 2026-06-16 §4). Every observed syscall was already covered by
+/// [`BASE_ALLOW`] + [`NET_CLIENT_ADDITIONS`] **except** the two NUMA
+/// memory-policy calls below. (The trace also confirmed torch issues
+/// `socket`/`bind`/`connect` even fully offline — hence the `net_client` base —
+/// and probed **no** escape primitives or io_uring.)
+///
+/// Escape primitives (namespace/mount/ptrace/bpf/io_uring/keyring) are NEVER
+/// added here — they stay killed by the default action.
+pub const ML_CLIENT_ADDITIONS: &[i64] = &[
+    // NUMA memory-policy syscalls PyTorch's threadpool / OpenMP arena
+    // allocator issues while placing tensor memory across NUMA nodes
+    // (observed: `mbind` ×20, `get_mempolicy` ×1). Both operate ONLY on this
+    // process's own address-space memory policy — the same benign class as
+    // `madvise`/`mmap`, no namespace/privilege/escape surface. Without them the
+    // worker SIGSYS-dies during model load under the kill filter. `set_mempolicy`
+    // / `migrate_pages` were NOT observed and are deliberately left out (add
+    // iff a future trace shows them — the kill filter fails closed otherwise).
+    libc::SYS_mbind,
+    libc::SYS_get_mempolicy,
+];
 
 /// Map the build target architecture to seccompiler's enum. Returns an
 /// error on unsupported arches so we never silently install a filter for
@@ -906,6 +922,26 @@ mod tests {
             libc::SYS_perf_event_open,
         ] {
             assert!(!ml.contains(&nr), "MlClient must never allow {nr}");
+        }
+    }
+
+    #[test]
+    fn ml_client_includes_enumerated_numa_additions() {
+        // The DGX-enumerated torch additions (NUMA memory-policy syscalls) must
+        // be present in MlClient and ML-specific — i.e. NOT already granted by
+        // the Strict base (otherwise they'd belong in BASE_ALLOW, not here).
+        let ml = allow_list_for(Profile::MlClient);
+        let strict = allow_list_for(Profile::Strict);
+        assert!(
+            !ML_CLIENT_ADDITIONS.is_empty(),
+            "ML_CLIENT_ADDITIONS was populated by the DGX enumeration"
+        );
+        for nr in ML_CLIENT_ADDITIONS {
+            assert!(ml.contains(nr), "MlClient missing enumerated syscall {nr}");
+            assert!(
+                !strict.contains(nr),
+                "enumerated syscall {nr} is already in Strict — move it to BASE_ALLOW"
+            );
         }
     }
 }
