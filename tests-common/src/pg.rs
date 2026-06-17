@@ -108,6 +108,10 @@ pub struct PgCluster {
     pub conn_spec: kastellan_db::conn::ConnectSpec,
     pub data_dir: PathBuf,
     pub socket_dir: PathBuf,
+    /// Read-only handle to the running service — call `status()` and other
+    /// non-mutating methods only. **Do not call `stop`/`uninstall` on this**:
+    /// the trailing `_guards` triple owns teardown (idempotent stop+uninstall
+    /// on drop), and racing it from here is unsupported.
     pub sup: Box<dyn Supervisor>,
     pub service_name: String,
     _guards: (ServiceGuard, PathGuard, PathGuard),
@@ -118,9 +122,8 @@ pub struct PgCluster {
 ///
 /// Thin wrapper around [`bring_up_pg_cluster_with_timeout`] — see that
 /// function for the full bring-up sequence and parameter docs. Use the
-/// `_with_timeout` variant directly when you need a tighter cap (e.g.
-/// known-Homebrew CI runners that fail faster) or a wider cap (e.g.
-/// known-cold-cache launchd hosts).
+/// `_with_timeout` variant directly when you need a tighter or wider cap
+/// than the [`PG_BRING_UP_TIMEOUT_SECS`] (30 s) default.
 pub fn bring_up_pg_cluster(
     bin_dir: &Path,
     data_label: &str,

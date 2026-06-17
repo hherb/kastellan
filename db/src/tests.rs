@@ -17,6 +17,12 @@
 
 use super::*;
 
+// Panic-safe env-var RAII guard, shared across crates via `tests-common`
+// (issue #127). Paired with `crate::env_lock()` below so the lock also
+// excludes `db`'s own production readers of `$USER` / `$HOME`, while the
+// restore half is the single shared implementation.
+use kastellan_tests_common::EnvVarGuard;
+
 fn opts(dir: &str) -> InitDbOptions {
     InitDbOptions {
         data_dir: PathBuf::from(dir),
@@ -190,8 +196,7 @@ fn pg_bin_dir_candidates_with_env_override_returns_defaults_when_unset() {
     // Hold `env_lock` so concurrent tests in this crate cannot race
     // a stale `KASTELLAN_PG_BIN_DIR` into our read.
     let _guard = crate::env_lock();
-    let prior = std::env::var(PG_BIN_DIR_ENV).ok();
-    std::env::remove_var(PG_BIN_DIR_ENV);
+    let _env = EnvVarGuard::unset(PG_BIN_DIR_ENV);
 
     let got = pg_bin_dir_candidates_with_env_override();
     assert_eq!(
@@ -199,11 +204,6 @@ fn pg_bin_dir_candidates_with_env_override_returns_defaults_when_unset() {
         default_pg_bin_dir_candidates(),
         "with env unset, override helper must mirror defaults"
     );
-
-    match prior {
-        Some(v) => std::env::set_var(PG_BIN_DIR_ENV, v),
-        None => std::env::remove_var(PG_BIN_DIR_ENV),
-    }
 }
 
 /// A non-blank env value is prepended to the defaults so it wins
@@ -212,8 +212,7 @@ fn pg_bin_dir_candidates_with_env_override_returns_defaults_when_unset() {
 #[test]
 fn pg_bin_dir_candidates_with_env_override_prepends_valid_env_path() {
     let _guard = crate::env_lock();
-    let prior = std::env::var(PG_BIN_DIR_ENV).ok();
-    std::env::set_var(PG_BIN_DIR_ENV, "/custom/pg/bin");
+    let _env = EnvVarGuard::set(PG_BIN_DIR_ENV, "/custom/pg/bin");
 
     let got = pg_bin_dir_candidates_with_env_override();
     let defaults = default_pg_bin_dir_candidates();
@@ -233,11 +232,6 @@ fn pg_bin_dir_candidates_with_env_override_prepends_valid_env_path() {
         defaults.as_slice(),
         "defaults must remain unchanged after the prepended override"
     );
-
-    match prior {
-        Some(v) => std::env::set_var(PG_BIN_DIR_ENV, v),
-        None => std::env::remove_var(PG_BIN_DIR_ENV),
-    }
 }
 
 /// An empty-string env value is treated as unset — operators can
@@ -249,8 +243,7 @@ fn pg_bin_dir_candidates_with_env_override_prepends_valid_env_path() {
 #[test]
 fn pg_bin_dir_candidates_with_env_override_treats_empty_string_as_unset() {
     let _guard = crate::env_lock();
-    let prior = std::env::var(PG_BIN_DIR_ENV).ok();
-    std::env::set_var(PG_BIN_DIR_ENV, "");
+    let _env = EnvVarGuard::set(PG_BIN_DIR_ENV, "");
 
     let got = pg_bin_dir_candidates_with_env_override();
     assert_eq!(
@@ -258,11 +251,6 @@ fn pg_bin_dir_candidates_with_env_override_treats_empty_string_as_unset() {
         default_pg_bin_dir_candidates(),
         "empty-string override must behave as if unset"
     );
-
-    match prior {
-        Some(v) => std::env::set_var(PG_BIN_DIR_ENV, v),
-        None => std::env::remove_var(PG_BIN_DIR_ENV),
-    }
 }
 
 /// Whitespace-only env value is treated as unset for the same
@@ -271,8 +259,7 @@ fn pg_bin_dir_candidates_with_env_override_treats_empty_string_as_unset() {
 #[test]
 fn pg_bin_dir_candidates_with_env_override_treats_whitespace_as_unset() {
     let _guard = crate::env_lock();
-    let prior = std::env::var(PG_BIN_DIR_ENV).ok();
-    std::env::set_var(PG_BIN_DIR_ENV, "  \t \n");
+    let _env = EnvVarGuard::set(PG_BIN_DIR_ENV, "  \t \n");
 
     let got = pg_bin_dir_candidates_with_env_override();
     assert_eq!(
@@ -280,11 +267,6 @@ fn pg_bin_dir_candidates_with_env_override_treats_whitespace_as_unset() {
         default_pg_bin_dir_candidates(),
         "whitespace-only override must behave as if unset"
     );
-
-    match prior {
-        Some(v) => std::env::set_var(PG_BIN_DIR_ENV, v),
-        None => std::env::remove_var(PG_BIN_DIR_ENV),
-    }
 }
 
 /// `find_pg_bin_dir` must be honest: an empty candidate list is

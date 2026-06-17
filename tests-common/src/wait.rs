@@ -113,3 +113,49 @@ pub fn wait_for_log_match<F: Fn(&str) -> bool>(
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_log_match;
+    use std::time::Duration;
+
+    fn temp_log(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "kastellan-wait-selftest-{}-{}.log",
+            tag,
+            crate::temp::unique_suffix()
+        ))
+    }
+
+    /// A file that never appears must time out with the dedicated
+    /// "never appeared" message, not hang or panic.
+    #[test]
+    fn errors_when_file_never_appears() {
+        let path = temp_log("absent");
+        let err = wait_for_log_match(&path, |_| true, Duration::from_millis(80)).unwrap_err();
+        assert!(err.contains("never appeared"), "got: {err}");
+    }
+
+    /// A present file with no matching line times out and surfaces the
+    /// captured body for triage.
+    #[test]
+    fn errors_with_body_when_no_line_matches() {
+        let path = temp_log("nomatch");
+        std::fs::write(&path, "line one\nline two\n").unwrap();
+        let err = wait_for_log_match(&path, |l| l.contains("absent-marker"), Duration::from_millis(80))
+            .unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("full content was"), "got: {err}");
+        assert!(err.contains("line one"), "error should echo the body, got: {err}");
+    }
+
+    /// The happy path returns the matching line (newline stripped).
+    #[test]
+    fn returns_the_matching_line() {
+        let path = temp_log("match");
+        std::fs::write(&path, "noise\nthe MARKER line\nmore\n").unwrap();
+        let got = wait_for_log_match(&path, |l| l.contains("MARKER"), Duration::from_secs(1)).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got, "the MARKER line");
+    }
+}

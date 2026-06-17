@@ -31,6 +31,8 @@
 //!   `gui/<uid>` domain across daemon-spawning tests.
 //! * [`embedding`] — `text_to_embedding` deterministic SHA-256-seeded
 //!   L2-normalised seed vector used by the memory-recall tests.
+//! * [`env`] — `env_lock()` + `EnvVarGuard` for unit tests that mutate
+//!   process-wide environment variables (issue #127).
 //!
 //! Nothing here is shipped at runtime. The crate is `publish = false`
 //! and consumed only from `[dev-dependencies]`.
@@ -38,6 +40,7 @@
 pub mod allowlist;
 pub mod binaries;
 pub mod embedding;
+pub mod env;
 pub mod guards;
 pub mod pg;
 pub mod sandbox;
@@ -49,6 +52,7 @@ pub mod wait;
 pub use allowlist::seed_tool_allowlist;
 pub use binaries::{cli_binary, core_binary, shell_exec_worker_binary, workspace_target_binary};
 pub use embedding::text_to_embedding;
+pub use env::{env_lock, EnvVarGuard};
 pub use guards::{PathGuard, ServiceGuard};
 pub use pg::{
     bring_up_pg_cluster, bring_up_pg_cluster_with_timeout, PgCluster, PG_BRING_UP_TIMEOUT_SECS,

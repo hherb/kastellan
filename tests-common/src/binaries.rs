@@ -46,3 +46,43 @@ pub fn core_binary() -> PathBuf {
 pub fn cli_binary() -> PathBuf {
     workspace_target_binary("kastellan-cli")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_target_binary;
+    use crate::env::{env_lock, EnvVarGuard};
+    use std::path::PathBuf;
+
+    /// `CARGO_TARGET_DIR` (when set) overrides the default
+    /// `<workspace_root>/target`; otherwise the default applies. `env_lock()`
+    /// serialises against any sibling test that reads the var, and the
+    /// `EnvVarGuard` captures the real prior up front and restores it on drop
+    /// — even on an unwinding assertion — so the intermediate mutation never
+    /// leaks into another test.
+    #[test]
+    fn honours_cargo_target_dir_else_workspace_target() {
+        const KEY: &str = "CARGO_TARGET_DIR";
+        let _lock = env_lock();
+
+        // `unset` records the true prior; its `Drop` restores it regardless of
+        // the `set_var` below, so no manual save/restore is needed.
+        let _restore = EnvVarGuard::unset(KEY);
+        let got_default = workspace_target_binary("foo");
+
+        std::env::set_var(KEY, "/custom/target");
+        let got_override = workspace_target_binary("foo");
+
+        let want_default = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("target")
+            .join("debug")
+            .join("foo");
+        assert_eq!(got_default, want_default, "unset → workspace target/debug");
+        assert_eq!(
+            got_override,
+            PathBuf::from("/custom/target/debug/foo"),
+            "set → <CARGO_TARGET_DIR>/debug"
+        );
+    }
+}

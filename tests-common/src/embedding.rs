@@ -56,3 +56,41 @@ pub fn text_to_embedding(text: &str) -> Vec<f32> {
     }
     v
 }
+
+#[cfg(test)]
+mod tests {
+    use super::text_to_embedding;
+
+    /// The only randomness is the SHA-256 of the input — identical text
+    /// must yield a byte-identical vector, every time.
+    #[test]
+    fn deterministic_for_identical_input() {
+        assert_eq!(text_to_embedding("hello world"), text_to_embedding("hello world"));
+    }
+
+    /// Output length is the pgvector column width, or inserts fail.
+    #[test]
+    fn has_embedding_dim_length() {
+        assert_eq!(
+            text_to_embedding("anything").len(),
+            kastellan_db::memories::EMBEDDING_DIM
+        );
+    }
+
+    /// L2-normalised so cosine similarity equals dot product downstream.
+    #[test]
+    fn is_l2_normalised() {
+        let norm: f32 = text_to_embedding("normalise me")
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "expected unit norm, got {norm}");
+    }
+
+    /// Distinct inputs are near-orthogonal — at minimum, not identical.
+    #[test]
+    fn distinct_inputs_differ() {
+        assert_ne!(text_to_embedding("alpha"), text_to_embedding("beta"));
+    }
+}
