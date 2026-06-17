@@ -22,7 +22,9 @@ into `dispatch_with_sink` on the `Ok(v)` arm **before** the injection screen, us
 snapshot for fingerprinting. **No-op (byte-identical) for every other worker** (default-off gate; `shell_exec_e2e` 4/4 under
 a real sandbox proves it). Confirming e2e (`cli_memory_l3py_run_daemon_e2e::python_exec_child_env_is_clobber_proof`): the
 python-exec child env is **exactly** `{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}` — params can't become/clobber env vars —
-**live-green on PG18 + real jail**. **Accepted limit:** secrets `<8` bytes unscannable (same as #3b). **Verification (Mac):**
+**live-green on PG18 + real jail**. **Accepted limits:** secrets `<8` bytes unscannable (same as #3b); + a vanishingly-narrow TTL-expiry race (if a secret's
+vault TTL lapses between substitution and the post-call fingerprint read it could survive unscrubbed — pre-existing, same
+race as #268; see the spec's limitations). **Verification (Mac):**
 `cargo test --workspace` **1877/0/13** (was 1859; +18 ≈ new tests: leak-scan redact 12, secret_scrub 6, env e2e 1) +
 `cargo clippy --workspace --all-targets -D warnings` clean. **DGX not re-run** (pure post-worker result transform, touches no
 sandbox/seccomp/Landlock; carried forward as the standing Linux gate). **Deferred:** the full **real-secret daemon e2e** —

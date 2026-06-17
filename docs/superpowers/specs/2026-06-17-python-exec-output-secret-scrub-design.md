@@ -200,6 +200,7 @@ transform after the worker returns).
 ## Accepted limitations
 
 - Secrets `< MIN_SECRET_LEN` (8 bytes) are unscannable — same as #3b.
+- **Narrow TTL-expiry race.** Fingerprints are read post-`worker.call` via `Vault::value_fingerprint`. If a secret's vault TTL expires in the window between substitution (which injected the plaintext into the worker's params) and that post-call read, `value_fingerprint` returns `None`, the fingerprint set omits it, and that one secret's plaintext would survive into the result unscrubbed. In practice a dispatch is far shorter than any sane TTL, and this is the **same race already present in the egress #3b dispatch-time provisioning** (#268) — it is not introduced here. Closing it would require capturing fingerprints at substitution time (when the plaintext is in hand) rather than re-reading the vault; deferred as consistent-with-#268 and vanishingly narrow.
 - The marker changes output length; the result is not a verbatim copy of what the
   code printed (intended — the point is to remove the secret bytes).
 - Only `python-exec` opts in; curated workers' result-plaintext stays trusted per
