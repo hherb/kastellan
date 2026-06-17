@@ -22,7 +22,7 @@ use std::sync::Arc;
 use kastellan_sandbox::{Net, SandboxBackend};
 
 use crate::egress::audit::EgressAuditRow;
-use crate::egress::cert_pins::{parse_cert_pins, CertPinError, CertPinMap};
+use crate::egress::cert_pins::{parse_cert_pins, select_pins_for_allowlist, CertPinError, CertPinMap};
 use crate::egress::net_worker::{pg_decision_sink, spawn_forced_net_worker};
 use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
 use crate::worker_manifest::{discover_binary, ResolveCtx};
@@ -66,9 +66,7 @@ pub struct ForceRoutingConfig {
     /// Operator cert pins for force-routed workers (slice #4). `Some` ⇒
     /// non-empty (an empty/`{}` config normalizes to `None` in [`from_env`]).
     /// Selected per worker by allowlist host in [`ForceRoutingConfig::pins_for`]
-    /// (Task 4) and handed to the sidecar via `cert_pins_json`.
-    // Task 4 wires this field up; suppress until then.
-    #[allow(dead_code)]
+    /// and handed to the sidecar via `cert_pins_json`.
     pub(crate) cert_pins: Option<CertPinMap>,
 }
 
@@ -84,6 +82,13 @@ impl ForceRoutingConfig {
         cert_pins: Option<CertPinMap>,
     ) -> Self {
         Self { proxy_bin, scratch_root, make_sink, cert_pins }
+    }
+
+    /// The pin JSON to hand a force-routed worker's sidecar, given the worker's
+    /// allowlist. `None` when no pins are configured or none of the worker's
+    /// allowlisted hosts are pinned (→ byte-identical no-pin path).
+    pub(crate) fn pins_for(&self, allowlist: &[String]) -> Option<String> {
+        self.cert_pins.as_ref().and_then(|m| select_pins_for_allowlist(m, allowlist))
     }
 }
 
@@ -209,6 +214,7 @@ pub(crate) fn spawn_worker_maybe_forced(
                 // path rather than panic if that invariant ever changes.
                 _ => return spawn_worker(backend, spec),
             };
+            let pins_json = cfg.pins_for(&allowlist);
             let params = crate::egress::net_worker::NetWorkerSpawn {
                 backend,
                 proxy_bin: &cfg.proxy_bin,
@@ -216,7 +222,7 @@ pub(crate) fn spawn_worker_maybe_forced(
                 allowlist: &allowlist,
                 worker_name,
                 secret_fingerprints: &[],
-                cert_pins_json: None,
+                cert_pins_json: pins_json.as_deref(),
                 // The browser does end-to-end TLS + can't trust our CA → its
                 // sidecar transparently tunnels (slice #2).
                 disable_mitm: worker_name == BROWSER_DRIVER_TOOL,
@@ -620,6 +626,38 @@ mod tests {
             Some(exe.join(PROXY_BIN_DEFAULT)),
             "unset override must use the exe-relative sibling default"
         );
+    }
+
+    #[test]
+    fn pins_for_selects_allowlisted_subset() {
+        let pins = parse_cert_pins_env(Some(r#"{"a.com":["sha256/A"]}"#)).unwrap();
+        let cfg = ForceRoutingConfig::new(
+            PathBuf::from("/nonexistent/egress-proxy"),
+            PathBuf::from("/tmp"),
+            noop_sink_factory(),
+            pins,
+        );
+        let json = cfg.pins_for(&["a.com:443".to_string()]).expect("pinned host in allowlist");
+        assert!(json.contains("a.com"));
+        assert!(json.contains("sha256/A"));
+    }
+
+    #[test]
+    fn pins_for_none_when_unconfigured() {
+        let cfg = config_with(PathBuf::from("/tmp"));
+        assert!(cfg.pins_for(&["a.com:443".to_string()]).is_none());
+    }
+
+    #[test]
+    fn pins_for_none_when_no_allowlist_match() {
+        let pins = parse_cert_pins_env(Some(r#"{"a.com":["sha256/A"]}"#)).unwrap();
+        let cfg = ForceRoutingConfig::new(
+            PathBuf::from("/nonexistent/egress-proxy"),
+            PathBuf::from("/tmp"),
+            noop_sink_factory(),
+            pins,
+        );
+        assert!(cfg.pins_for(&["z.com:443".to_string()]).is_none());
     }
 
     #[test]
