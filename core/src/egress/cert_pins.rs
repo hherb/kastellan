@@ -119,9 +119,9 @@ mod tests {
     fn parses_valid_map_and_lowercases_hosts() {
         let m = parse_cert_pins(r#"{"API.Example.com":["sha256/AAAA"]}"#).unwrap();
         assert!(!m.is_empty());
-        // Host key is lowercased.
-        let round = parse_cert_pins(r#"{"api.example.com":["sha256/AAAA"]}"#).unwrap();
-        assert_eq!(m, round);
+        // Host key is stored lowercased.
+        assert_eq!(m.0.get("api.example.com"), Some(&vec!["sha256/AAAA".to_string()]));
+        assert_eq!(m.0.get("API.Example.com"), None);
     }
 
     #[test]
@@ -156,6 +156,11 @@ mod tests {
     fn accepts_multiple_pins_per_host() {
         let m = parse_cert_pins(r#"{"h.com":["sha256/A","sha256/B"]}"#).unwrap();
         assert!(!m.is_empty());
+        // Both pins must survive the parse → select round-trip.
+        let json = select_pins_for_allowlist(&m, &["h.com:443".to_string()])
+            .expect("pinned host in allowlist");
+        assert!(json.contains("sha256/A"), "first pin dropped: {json}");
+        assert!(json.contains("sha256/B"), "second pin dropped: {json}");
     }
 
     #[test]
@@ -167,6 +172,11 @@ mod tests {
     fn host_of_endpoint_handles_bracketed_ipv6() {
         assert_eq!(host_of_endpoint("[2001:db8::1]:8443"), "2001:db8::1");
         assert_eq!(host_of_endpoint("[::1]:443"), "::1");
+    }
+
+    #[test]
+    fn host_of_endpoint_bracketed_ipv6_without_port() {
+        assert_eq!(host_of_endpoint("[2001:db8::1]"), "2001:db8::1");
     }
 
     #[test]
