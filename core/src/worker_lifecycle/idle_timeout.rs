@@ -103,6 +103,9 @@ pub fn dispatch_indicates_worker_dead<T>(result: &Result<T, ToolHostError>) -> b
         // SecretRedemptionFailed fires before the worker is called —
         // the worker process was never contacted, so it is not dead.
         Err(ToolHostError::SecretRedemptionFailed(_)) => false,
+        // EgressProvisionFailed (slice #3b, #268) also fires before the worker
+        // is called — worker process was never contacted, not dead.
+        Err(ToolHostError::EgressProvisionFailed(_)) => false,
     }
 }
 

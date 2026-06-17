@@ -19,6 +19,8 @@ use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
 mod audit_sink;
 pub use audit_sink::{AuditSink, PgAuditSink};
 
+mod egress_provision;
+
 mod lockdown_env;
 pub use lockdown_env::{derive_lockdown_env, ENV_CPU_MS, ENV_LANDLOCK_PROFILE, ENV_LANDLOCK_RO, ENV_LANDLOCK_RW, ENV_SECCOMP_PROFILE};
 
@@ -47,6 +49,14 @@ pub enum ToolHostError {
     /// POLICY_DENIED — task step fails fast, no retry budget burned.
     #[error("tool_host: secret redemption failed: {0}")]
     SecretRedemptionFailed(#[from] crate::secrets::SubstituteError),
+
+    /// Egress slice #3b (#268). Dispatch-time leak-scanner provisioning failed
+    /// for a secret-bearing force-routed net worker. Fail-CLOSED: the worker is
+    /// never called, so a secret can never reach a net worker the scanner
+    /// cannot watch. The fail-closed audit row was already emitted before this
+    /// error. Scheduler treats it like POLICY_DENIED (fail fast, no retry).
+    #[error("tool_host: egress leak-scanner provisioning failed: {0}")]
+    EgressProvisionFailed(String),
 }
 
 /// A sealed JSON-RPC request shape. The fields and constructor are
@@ -297,6 +307,21 @@ pub async fn dispatch_with_sink(
             return Err(ToolHostError::SecretRedemptionFailed(e));
         }
     };
+
+    // ── Egress slice #3b (#268): dispatch-time leak-scanner provisioning. ──
+    //
+    // If this worker has an egress sidecar (a force-routed net worker) and the
+    // call carries scannable secret refs, write each secret's value-fingerprint
+    // into the sidecar's `secret_hashes.json` BEFORE `worker.call` triggers any
+    // egress, so the proxy's per-connection scanner can catch exfiltration.
+    // `compute_provision` runs synchronously, releasing the `worker.egress`
+    // borrow before `worker.call`; `emit_provision` writes the audit rows and,
+    // on a write failure, returns Err — fail CLOSED (D1): a secret never reaches
+    // a net worker the scanner cannot watch. No-op for non-net workers
+    // (`egress == None`) and for calls with no scannable secrets.
+    let provision =
+        egress_provision::compute_provision(worker.egress.as_ref(), &req_for_audit, vault);
+    egress_provision::emit_provision(sink, tool, provision).await?;
 
     // `req_for_audit` was snapshotted above, pre-substitution (issue
     // #147), so the tool row's `payload.req` carries the opaque refs,

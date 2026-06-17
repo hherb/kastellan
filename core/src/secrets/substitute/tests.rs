@@ -264,6 +264,57 @@ fn non_ref_string_is_no_op() {
     assert_eq!(v, json!("just some unrelated text"));
 }
 
+/// Anti-drift guard (#268): the read-only [`for_each_ref`] traversal that
+/// `collect_refs_in_params` drives MUST visit exactly the refs the mutating
+/// [`walk`] redeems — same positions, same order. If they diverge, a secret
+/// could be substituted into the worker's params (plaintext egresses) yet never
+/// collected for the leak scanner (silent fail-open). We compare the two on a
+/// structure that exercises every position: object value, nested array,
+/// deeply-nested object, a non-ref string, a ref-shaped object *key* (must be
+/// ignored by both), and number/null leaves. The mutating side is observed via
+/// `RedemptionEvent`s (one per redeemed ref) from a vault staged with every ref.
+#[test]
+fn mutating_and_readonly_walkers_visit_the_same_refs() {
+    let staged = ["11111111", "22222222", "33333333", "aabbccdd"];
+    let mut vault = FakeVault::new();
+    for tail in staged {
+        vault = vault.with(make_ref(tail), b"PT");
+    }
+
+    let shape = json!({
+        "top":    "secret://11111111",
+        "nested": {"deep": {"k": "secret://22222222"}},
+        "arr":    ["plain", "secret://33333333", 42, null],
+        "plain":  "not a ref",
+        // ref-shaped KEY — neither walker may treat it as a ref:
+        "secret://aabbccdd": "value-under-ref-key",
+    });
+
+    // Read-only side: refs collected by the shared traversal.
+    let mut collected: Vec<String> = Vec::new();
+    for_each_ref(&shape, &mut |s| collected.push(s.to_string()));
+
+    // Mutating side: refs the substitution walker actually redeemed.
+    let mut to_mutate = shape.clone();
+    let events =
+        substitute_refs_in_params(&mut to_mutate, &vault).expect("all staged ⇒ substitute Ok");
+    let redeemed_hashes: Vec<String> = events.into_iter().map(|e| e.ref_hash).collect();
+
+    // Same refs, same document order — compared by `ref_hash` (the read-only
+    // side yields raw ref strings, the mutating side yields hashes).
+    let collected_hashes: Vec<String> = collected
+        .iter()
+        .map(|s| SecretRef::from_raw(s.clone()).ref_hash())
+        .collect();
+    assert_eq!(
+        collected_hashes, redeemed_hashes,
+        "for_each_ref and the mutating walk must visit the same refs in the same order",
+    );
+    // And exactly the three value-position refs — never the key-position one.
+    assert_eq!(collected.len(), 3);
+    assert!(!collected.iter().any(|s| s == "secret://aabbccdd"));
+}
+
 #[test]
 fn multiple_distinct_refs_in_one_value_all_substituted() {
     let a = make_ref("11111111");
