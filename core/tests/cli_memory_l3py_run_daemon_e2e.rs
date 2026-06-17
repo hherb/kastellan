@@ -710,10 +710,35 @@ async fn python_exec_child_env_is_clobber_proof() {
     );
     // env_clear() leaves exactly TMPDIR + HOME + KASTELLAN_PYTHON_PARAMS; the
     // `path`/`ld_preload` params live INSIDE KASTELLAN_PYTHON_PARAMS as JSON keys,
-    // not as env vars, so they never appear here.
-    assert!(
-        stdout.contains("ENVKEYS:HOME,KASTELLAN_PYTHON_PARAMS,TMPDIR"),
-        "python-exec child env must be exactly {{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}}; got:\n{stdout}",
+    // not as env vars, so they never appear here. Assert the FULL sorted key list
+    // exactly — a substring check would miss a leaked var that sorts after TMPDIR
+    // (e.g. the lowercase `path`/`ld_preload` we pass), which is precisely the
+    // leak this test exists to catch.
+    //
+    // The CLI renders the worker's stdout inside a JSON step-result object on a
+    // single output line, so we find the ENVKEYS token within the raw CLI stdout
+    // string and extract everything up to the next `\n` or `"` delimiter.
+    let env_token_start = stdout
+        .find("ENVKEYS:")
+        .unwrap_or_else(|| {
+            panic!("worker stdout must contain an ENVKEYS: token; got:\n{stdout}")
+        });
+    let env_value_start = env_token_start + "ENVKEYS:".len();
+    // The keys list ends at the first `"` (JSON string closing quote) or actual
+    // newline. The JSON-encoded `\n` in the worker's stdout appears as the two
+    // chars `\` + `n` inside the CLI output string, so we split on `"` (which
+    // always terminates the JSON value) and also on actual newlines.
+    let env_keys = stdout[env_value_start..]
+        .split('"')
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c| c == '\n' || c == '\r' || c == '\\' || c == 'n')
+        .trim();
+    assert_eq!(
+        env_keys, "HOME,KASTELLAN_PYTHON_PARAMS,TMPDIR",
+        "python-exec child env must be EXACTLY {{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}}; \
+         a differing set means a runtime param leaked as an env var or a host var leaked into the child; \
+         got full stdout:\n{stdout}",
     );
 
     pool.close().await;
