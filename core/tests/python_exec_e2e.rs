@@ -22,10 +22,21 @@ use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
 use kastellan_core::workers::python_exec::{
     interpreter_extra_lib_dirs, python_exec_entry, PYTHON_CANDIDATES,
 };
+use kastellan_db::secrets::{MapKeyProvider, KEY_LEN};
 use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
 };
+
+/// Deterministic key-provider for the secret-scrub test — mirrors
+/// `secret_vault_e2e.rs`. A fixed in-memory AES key is all the scrub test needs:
+/// it `put`s a secret, `materialize`s it into a Vault, and asserts the plaintext
+/// is redacted from the worker's output.
+const TEST_KEY_ID: &str = "test-keyring";
+
+fn test_key_provider() -> MapKeyProvider {
+    MapKeyProvider::new(TEST_KEY_ID, [42u8; KEY_LEN])
+}
 
 /// The manifest's own per-OS candidate cascade (single source of truth —
 /// on macOS that list deliberately excludes the `/usr/bin/python3` xcrun
@@ -101,12 +112,19 @@ fn ready_or_skip() -> Option<TestEnv> {
     })
 }
 
-/// One jailed `python.exec` dispatch under the **production** policy
-/// (`python_exec_entry`), returning the result value.
-async fn exec_in_jail(
+/// Spawn the python-exec worker under the **production** policy
+/// (`python_exec_entry`) and run one `python.exec` dispatch with the
+/// caller-supplied `vault` + `params`, returning the result value.
+///
+/// The explicit `vault` + `params` seam (vs. the code-only [`exec_in_jail`]
+/// convenience wrapper) lets the secret-scrub test materialize a real secret
+/// into a Vault it owns and pass the opaque `secret://` ref through the params
+/// channel, exercising the substitution-in + scrub-out path of `dispatch`.
+async fn dispatch_in_jail(
     pool: &sqlx::PgPool,
     env: &TestEnv,
-    code: &str,
+    vault: &Vault,
+    params: serde_json::Value,
 ) -> Result<serde_json::Value, kastellan_core::tool_host::ToolHostError> {
     // Mirror the manifest: bind the interpreter's out-of-prefix shared-lib dirs
     // (issue #284) so a pyenv/Homebrew-linked interpreter dyld-loads in the jail
@@ -132,17 +150,20 @@ async fn exec_in_jail(
         wall_clock_ms: None,
     };
     let mut sworker = spawn_worker(&*backend, &spec).expect("spawn python-exec under sandbox");
-    let result = dispatch(
-        pool,
-        &Vault::new(),
-        &mut sworker,
-        "python-exec",
-        "python.exec",
-        serde_json::json!({ "code": code }),
-    )
-    .await;
+    let result = dispatch(pool, vault, &mut sworker, "python-exec", "python.exec", params).await;
     let _ = sworker.close();
     result
+}
+
+/// One jailed `python.exec` dispatch under the **production** policy, returning
+/// the result value. Convenience wrapper over [`dispatch_in_jail`] with a fresh
+/// (empty) vault and a code-only payload.
+async fn exec_in_jail(
+    pool: &sqlx::PgPool,
+    env: &TestEnv,
+    code: &str,
+) -> Result<serde_json::Value, kastellan_core::tool_host::ToolHostError> {
+    dispatch_in_jail(pool, env, &Vault::new(), serde_json::json!({ "code": code })).await
 }
 
 #[test]
@@ -226,4 +247,88 @@ fn scratch_tmp_write_round_trip_inside_jail() {
             pool.close().await;
         });
     }
+}
+
+/// A secret materialized into a Vault and passed through the `params` channel as
+/// an opaque `secret://` ref reaches the python-exec child as plaintext (so the
+/// skill can use it), but the worker's stdout is **redacted** before `dispatch`
+/// returns it — proving the python-exec output secret-scrub (design 2026-06-17)
+/// end-to-end with the real worker, real jail, real Vault, and a real secret.
+///
+/// This is the in-process complement to the (deferred) full-daemon e2e: the
+/// scrub lives in `tool_host::dispatch_with_sink`, which this path runs, so the
+/// only thing not exercised here is the CLI→scheduler→l3py routing — and that
+/// (which never touches the scrub) is covered by the param round-trip test in
+/// `cli_memory_l3py_run_daemon_e2e.rs`. The full-daemon scrub e2e needs a
+/// production seam to expose a Vault ref to the separate CLI process; it is
+/// tracked as a follow-up issue. Without the scrub, the `!contains(plaintext)`
+/// assertion below would fail — the secret would surface verbatim in stdout.
+#[test]
+fn materialized_secret_param_is_scrubbed_from_output() {
+    let env = match ready_or_skip() {
+        Some(e) => e,
+        None => return,
+    };
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        let kp = test_key_provider();
+
+        // A distinctive plaintext well over MIN_SECRET_LEN (8 bytes) so the leak
+        // scanner can fingerprint it and an un-scrubbed leak would be unmistakable
+        // in the assertion output.
+        let plaintext = "SCRUBME-7c1f9a2b-secret-value-do-not-leak";
+        kastellan_db::secrets::put(&pool, &kp, "scrub-secret", plaintext.as_bytes(), None)
+            .await
+            .expect("put secret");
+
+        // Materialize into a Vault we own, then pass the opaque ref through the
+        // params channel. `dispatch` substitutes `params.token` → plaintext before
+        // the worker runs; the python code echoes it; the scrub redacts it on the
+        // way back out.
+        let vault = Vault::new();
+        let secret_ref = vault
+            .materialize(&pool, &kp, "scrub-secret", "test")
+            .await
+            .expect("materialize");
+
+        let code = "import os, json\n\
+                    p = json.loads(os.environ['KASTELLAN_PYTHON_PARAMS'])\n\
+                    print('TOKEN:' + p['token'])\n";
+        let params = serde_json::json!({
+            "code": code,
+            "params": { "token": secret_ref.as_str() },
+        });
+
+        let r = dispatch_in_jail(&pool, &env, &vault, params)
+            .await
+            .expect("python.exec dispatch must succeed");
+
+        assert_eq!(r["exit_code"], 0, "stderr: {}", r["stderr"]);
+        let stdout = r["stdout"].as_str().expect("stdout string");
+
+        // The plaintext must NOT survive in the returned output...
+        assert!(
+            !stdout.contains(plaintext),
+            "materialized secret plaintext leaked through python-exec output: {stdout:?}"
+        );
+        // ...and the scrub must have replaced it with the redaction marker.
+        assert!(
+            stdout.contains("[redacted:"),
+            "expected a [redacted:<hex>] marker in scrubbed output, got: {stdout:?}"
+        );
+
+        // The redacted scrub audit row landed under the `policy` actor (hash/
+        // offset/len only — never plaintext; that shape is unit-pinned in
+        // tool_host::secret_scrub).
+        let scrub_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log \
+             WHERE actor='policy' AND action='secret.output_scrubbed'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count scrub rows");
+        assert_eq!(scrub_rows, 1, "exactly one secret.output_scrubbed audit row");
+
+        pool.close().await;
+    });
 }

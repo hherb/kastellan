@@ -292,9 +292,14 @@ items unlock later ones.
     **exactly** `{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}` (live-green PG18 + real jail — params can't become/clobber env vars).
     Accepted limit: secrets `<8` bytes unscannable (same as #3b). Mac `cargo test --workspace` **1877/0/13**, clippy `-D warnings`
     clean. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-17-python-exec-output-secret-scrub*`. **Deferred:** scratch-file
-    channel for >64 KiB payloads (rides macOS writable-scratch); declared-param schema (only if free-form proves too loose);
-    the full **real-secret daemon e2e** (the scrub logic is hermetically unit-tested + the dispatch wiring proven; the daemon
-    harness still lacks a vault-materialisation seam — pre-existing `TODO(params-e2e)` in `cli_memory_l3py_run_daemon_e2e.rs`).
+    channel for >64 KiB payloads (rides macOS writable-scratch); declared-param schema (only if free-form proves too loose).
+    **Scrub e2e now proven in-process — 2026-06-17:** `python_exec_e2e::materialized_secret_param_is_scrubbed_from_output`
+    materialises a real secret, passes it through the `params` channel as a `secret://` ref, runs the **real** python-exec
+    worker in the **real** jail through the **real** `dispatch`, and asserts the plaintext returns `[redacted:…]` + one
+    `secret.output_scrubbed` row (live-green PG18). The full **daemon** scrub e2e (CLI→scheduler→l3py routing, which never
+    touches the scrub) is deferred to [#298](https://github.com/hherb/kastellan/issues/298): the `secret://` ref is minted
+    randomly in the daemon's in-process Vault and never logged, so driving it through the separate CLI process needs a
+    (security-sensitive) Vault-ref test seam in `main.rs`.
 - [ ] **Skill trust enum** — `Untrusted | UserApproved | Pinned`, each level mapping to an explicit capability ceiling (which workers it may invoke, which net allowlists, which fs paths). Authorship and approval recorded in `audit_log`; promotion requires re-approval. (Pattern: IronClaw skill trust model — user-placed vs registry-installed. The L3 templated-skill arc above is the first concrete implementation of this shape.)
 - [ ] Optional micro-VM backend for `python-exec` (Firecracker on Linux, Apple `container` on macOS — discovery spike completed 2026-05-21, verdict COMMIT; see [`docs/superpowers/specs/2026-05-21-macos-container-spike-notes.md`](../superpowers/specs/2026-05-21-macos-container-spike-notes.md))
 - [ ] **Tiered delegation policy with hard no-recursion ceiling** — when the scheduler grows subagent delegation (today everything is one inner loop), borrow openhuman's `docs/DELEGATION_POLICY.md` four-tier shape: Tier 1 reply-directly (no tools), Tier 2 direct tool, Tier 3 inline subagent (≤5 turns, no new thread), Tier 4 dedicated worker thread (>5 turns). **The structural constraint that matters: workers do not spawn workers.** Encode it in `tool_host` as a compile-time check (`SubagentContext: Sealed` newtype that can only be constructed from the root scheduler) so the spawn tree is provably finite and the audit log has bounded fan-out per task. Maps cleanly onto the existing `Lifecycle::{SingleUse, IdleTimeout}` shape: tier-3 inline subagents are `SingleUse`, tier-4 dedicated threads piggyback on `IdleTimeoutLifecycle`. Pre-req for any meaningful agent-authored-skills work; defines the budget per skill invocation.
