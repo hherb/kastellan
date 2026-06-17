@@ -37,6 +37,29 @@ pub struct SecretFingerprint {
     pub sha256: [u8; 32],
 }
 
+/// `RABIN_BASE^(len-1)`, wrapping — the weight of the byte leaving an
+/// `len`-wide window. Shared by the streaming matcher and the bounded-buffer
+/// redactor so rolling-hash arithmetic stays in sync.
+pub(crate) fn pow_base(len: usize) -> u64 {
+    let mut p = 1u64;
+    for _ in 0..len.saturating_sub(1) {
+        p = p.wrapping_mul(RABIN_BASE);
+    }
+    p
+}
+
+/// Lowercase hex encoding of a 32-byte SHA-256 digest. Writes into a
+/// pre-allocated `String` with a single `write!` per byte — no per-byte heap
+/// allocation.
+pub(crate) fn sha256_hex(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 /// Direct Rabin polynomial hash of `bytes`: `sum(b_k * BASE^(len-1-k))`, wrapping.
 /// The [`super::matcher::RollingMatcher`] rolling state converges to this exact
 /// value for any window equal to `bytes`.

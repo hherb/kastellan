@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
 
-use crate::fingerprint::{poly, SecretFingerprint, RABIN_BASE};
+use crate::fingerprint::{poly, pow_base, sha256_hex, SecretFingerprint, RABIN_BASE};
 
 /// One redacted span: which secret (by SHA-256, hex) and where it sat.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,32 +31,19 @@ pub struct RedactOutcome {
     pub hits: Vec<RedactHit>,
 }
 
-/// `RABIN_BASE^(len-1)`, wrapping. `len >= 1` (callers filter `len == 0`).
-fn pow_base(len: usize) -> u64 {
-    let mut p = 1u64;
-    for _ in 0..len.saturating_sub(1) {
-        p = p.wrapping_mul(RABIN_BASE);
-    }
-    p
-}
-
-fn hex(bytes: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
-/// The replacement written in place of a matched span. Carries the first 8 hex
-/// chars of the secret's SHA-256 so a redaction correlates to the matching
-/// `secret.redeemed` audit row WITHOUT leaking any plaintext.
-fn marker(sha256_hex: &str) -> Vec<u8> {
-    format!("[redacted:{}]", &sha256_hex[..8]).into_bytes()
+/// Write the redaction marker for `sha256_hex` directly into `out`. Carries the
+/// first 8 hex chars of the secret's SHA-256 so a redaction correlates to the
+/// matching `secret.redeemed` audit row WITHOUT leaking any plaintext.
+fn push_marker(out: &mut Vec<u8>, sha256_hex_str: &str) {
+    use std::fmt::Write as _;
+    let mut m = String::with_capacity(19); // "[redacted:" + 8 + "]"
+    let _ = write!(m, "[redacted:{}]", &sha256_hex_str[..8]);
+    out.extend_from_slice(m.as_bytes());
 }
 
 /// Find every non-overlapping occurrence of any `patterns` value in `input` and
-/// replace it with [`marker`]. Earliest match wins; on equal start the longer
+/// replace it with a `[redacted:<8hex>]` marker. Earliest match wins; on equal
+/// start the longer
 /// span wins; scanning resumes past a chosen span. Empty `patterns` (or none
 /// matching) returns `input` unchanged with no hits. Bounded full-buffer scan:
 /// O(input.len()) per distinct pattern length.
@@ -129,10 +116,10 @@ pub fn redact(input: &[u8], patterns: &[SecretFingerprint]) -> RedactOutcome {
     let mut cursor = 0usize;
     for (off, len, sha) in chosen {
         bytes.extend_from_slice(&input[cursor..off]);
-        let sha256_hex = hex(&sha);
-        bytes.extend_from_slice(&marker(&sha256_hex));
+        let sha_hex = sha256_hex(&sha);
+        push_marker(&mut bytes, &sha_hex);
         hits.push(RedactHit {
-            sha256_hex,
+            sha256_hex: sha_hex,
             offset: off,
             len,
         });
@@ -229,15 +216,27 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_candidates_resolve_earliest_longest() {
-        // "abcdefghij" contains "abcdefgh" (len 8) and "cdefghij" (len 8);
-        // the earliest non-overlapping match wins and scanning resumes past it.
+    fn overlapping_candidates_resolve_earliest_start() {
+        // "abcdefghij" contains "abcdefgh" (len 8) at offset 0 and "cdefghij"
+        // (len 8) at offset 2; the earlier-start match wins.
         let a = b"abcdefgh";
         let b = b"cdefghij";
         let out = redact(b"abcdefghij", &[fp(a), fp(b)]);
         assert_eq!(out.hits.len(), 1);
         assert_eq!(out.hits[0].offset, 0);
         assert_eq!(out.hits[0].sha256_hex.len(), 64);
+    }
+
+    #[test]
+    fn overlapping_candidates_resolve_longer_span_on_tie() {
+        // "abcdefghijklmnop" (len 16) starts at offset 0 and "abcdefgh" (len 8)
+        // is a prefix of it, also at offset 0. The longer span must win.
+        let short = b"abcdefgh"; // len 8, offset 0
+        let long = b"abcdefghijklmnop"; // len 16, offset 0
+        let out = redact(b"abcdefghijklmnop", &[fp(short), fp(long)]);
+        assert_eq!(out.hits.len(), 1, "longer span must win on equal start offset");
+        assert_eq!(out.hits[0].len, long.len());
+        assert_eq!(out.hits[0].offset, 0);
     }
 
     #[test]
