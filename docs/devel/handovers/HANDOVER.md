@@ -6,8 +6,8 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-17 (**python-exec output secret-scrub — DONE (branch `feat/python-exec-output-secret-scrub`, PR
-open).** Closes the Phase-4 "battle-test the runtime-params free-form passthrough for risk slip-throughs" follow-up. A
+**Last updated:** 2026-06-17 (**python-exec output secret-scrub — DONE, merged to `main` as `ddd2cf0` (PR
+[#297](https://github.com/hherb/kastellan/pull/297)).** Closes the Phase-4 "battle-test the runtime-params free-form passthrough for risk slip-throughs" follow-up. A
 `secret://` param materializes to plaintext for the worker; python-exec runs **agent-authored** code, so — unlike the
 curated Rust workers whose result-plaintext is trusted by design (#147) — its returned stdout/stderr could surface the
 secret in `audit_log`/JSONL-mirror/operator-`InvokeReport`. python-exec is `Net::Deny`, so the egress #3b leak scanner
@@ -24,8 +24,11 @@ a real sandbox proves it). Confirming e2e (`cli_memory_l3py_run_daemon_e2e::pyth
 python-exec child env is **exactly** `{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}` — params can't become/clobber env vars —
 **live-green on PG18 + real jail**. **Accepted limits:** secrets `<8` bytes unscannable (same as #3b); + a vanishingly-narrow TTL-expiry race (if a secret's
 vault TTL lapses between substitution and the post-call fingerprint read it could survive unscrubbed — pre-existing, same
-race as #268; see the spec's limitations). **Verification (Mac):**
-`cargo test --workspace` **1877/0/13** (was 1859; +18 ≈ new tests: leak-scan redact 12, secret_scrub 6, env e2e 1) +
+race as #268; see the spec's limitations); + greedy overlap-resolution leaves a partial suffix of a SECOND distinct
+overlapping secret unscrubbed — not adversarially reachable (agent code can't align two vault values), matches the
+matcher's first-hit limitation, now pinned by `redact::tests::overlapping_distinct_secrets_leave_second_suffix`
+(post-merge `/review` follow-up, committed straight to `main`). **Verification (Mac):**
+`cargo test --workspace` **1878/0/13** (1877 at merge + 1 overlap-pin test) +
 `cargo clippy --workspace --all-targets -D warnings` clean. **DGX not re-run** (pure post-worker result transform, touches no
 sandbox/seccomp/Landlock; carried forward as the standing Linux gate). **Deferred:** the full **real-secret daemon e2e** —
 the scrub logic is hermetically unit-tested + the dispatch wiring proven, but the daemon harness lacks a vault-materialisation

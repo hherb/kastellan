@@ -93,6 +93,16 @@ pub fn redact(input: &[u8], patterns: &[SecretFingerprint]) -> RedactOutcome {
 
     // Resolve overlaps: earliest start first, longer span first on a tie; then
     // greedily keep non-overlapping spans.
+    //
+    // Accepted limitation: when two DISTINCT secrets overlap (the tail of one is
+    // the head of the other), the earlier-start span is redacted and the later
+    // one is dropped, so the later secret's non-overlapping suffix survives in
+    // plaintext. This is not adversarially reachable — agent-authored code cannot
+    // control vault secret values, so it cannot engineer such an alignment; it can
+    // only occur by genuine coincidence of two high-entropy secrets (negligible).
+    // The streaming `RollingMatcher` has the equivalent first-hit limitation, and
+    // this matches conventional non-overlapping find/replace semantics. Pinned by
+    // `overlapping_distinct_secrets_leave_second_suffix`.
     raw.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
     let mut next_free = 0usize;
     let mut chosen: Vec<(usize, usize, [u8; 32])> = Vec::new();
@@ -237,6 +247,28 @@ mod tests {
         assert_eq!(out.hits.len(), 1, "longer span must win on equal start offset");
         assert_eq!(out.hits[0].len, long.len());
         assert_eq!(out.hits[0].offset, 0);
+    }
+
+    #[test]
+    fn overlapping_distinct_secrets_leave_second_suffix() {
+        // Accepted-limitation characterization (see the greedy-resolution comment
+        // in `redact`): two DISTINCT len-8 secrets overlap in the input —
+        // A="abcdefgh" at [0,8) and B="fghijklm" at [5,13). Greedy keeps the
+        // earlier-start span (A) and drops B, so B's non-overlapping suffix
+        // ("ijklm") survives in plaintext. Not adversarially reachable: agent
+        // code cannot align two vault secret values like this. If overlap
+        // semantics ever change to redact the union, update this test.
+        let a = b"abcdefgh"; // [0,8)
+        let b = b"fghijklm"; // [5,13)
+        let out = redact(b"abcdefghijklm", &[fp(a), fp(b)]);
+        let body = String::from_utf8(out.bytes).unwrap();
+        assert_eq!(out.hits.len(), 1, "only the earlier-start span is chosen");
+        assert_eq!(out.hits[0].offset, 0);
+        assert_eq!(out.hits[0].len, a.len());
+        assert_eq!(body, format!("[redacted:{}]ijklm", sha8(a)));
+        // The full second secret is gone, but its suffix coincidentally survives.
+        assert!(!body.contains("fghijklm"));
+        assert!(body.contains("ijklm"));
     }
 
     #[test]
