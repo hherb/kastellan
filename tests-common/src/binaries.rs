@@ -12,7 +12,8 @@
 //! was not built yet — common on a freshly-cloned tree before the
 //! first `cargo build`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Returns the path to `<workspace_root>/target/debug/<name>`,
 /// honouring `CARGO_TARGET_DIR` if set.
@@ -45,6 +46,24 @@ pub fn core_binary() -> PathBuf {
 /// Path to the operator CLI (`kastellan-cli`).
 pub fn cli_binary() -> PathBuf {
     workspace_target_binary("kastellan-cli")
+}
+
+/// A [`Command`] for the operator CLI with the deliberately-minimal env every
+/// CLI e2e test uses: `env_clear()` then exactly `PATH`, `LC_ALL`, `USER`, and
+/// `KASTELLAN_DATA_DIR`.
+///
+/// The empty environment is load-bearing — these tests prove the daemon, not
+/// the operator subprocess, owns the live tool registry (the #179 invariant),
+/// so the CLI must NOT inherit `KASTELLAN_*_BIN`. Callers chain `.args(...)`
+/// and any test-specific env (e.g. `KASTELLAN_L3_RUN_GRACE_SECS`).
+pub fn cli_command(data_dir: &Path, user: &str) -> Command {
+    let mut cmd = Command::new(cli_binary());
+    cmd.env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .env("USER", user)
+        .env("KASTELLAN_DATA_DIR", data_dir.to_string_lossy().as_ref());
+    cmd
 }
 
 #[cfg(test)]

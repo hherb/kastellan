@@ -25,6 +25,9 @@ readme.workspace       = true
 kastellan-db         = { path = "../db" }
 kastellan-supervisor = { path = "../supervisor" }
 kastellan-sandbox    = { path = "../sandbox" }
+# `daemon.rs`'s inert mock-LLM listener + the async bring-up helpers run on the
+# same Tokio reactor the tests use. Workspace pin (full features), dev-only.
+tokio              = { workspace = true }
 serde_json         = { workspace = true }
 sha2               = { workspace = true }
 sqlx               = { workspace = true }

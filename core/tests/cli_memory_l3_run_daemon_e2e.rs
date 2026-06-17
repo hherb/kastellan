@@ -33,24 +33,18 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::path::Path;
 
 use kastellan_core::cassandra::types::{L3Param, L3SkillCandidate, L3TemplateStep};
 use kastellan_core::memory::l3_crystallise::{crystallise_l3, L3Source};
-use kastellan_supervisor::specs::core_service_spec;
-use kastellan_supervisor::{default_supervisor, ServiceStatus};
 use kastellan_tests_common::{
-    bring_up_pg_cluster, cli_binary, core_binary, current_username, pg_bin_dir_or_skip,
-    seed_tool_allowlist, shell_exec_worker_binary, skip_if_no_supervisor,
-    skip_if_sandbox_unavailable, unique_suffix, unique_temp_root, wait_for_log_match,
-    wait_for_status, PathGuard, PgCluster, ServiceGuard,
+    assert_cli_failure, assert_cli_success, bring_up_daemon, bring_up_pg_cluster, cli_binary,
+    cli_command, core_binary, current_username, pg_bin_dir_or_skip, seed_tool_allowlist,
+    shell_exec_worker_binary, skip_if_no_supervisor, skip_if_sandbox_unavailable, spawn_inert_mock,
+    unique_suffix, PgCluster,
 };
 #[cfg(target_os = "macos")]
 use kastellan_tests_common::serial_lock;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 #[cfg(target_os = "linux")]
 const ECHO_PATH: &str = "/usr/bin/echo";
@@ -58,165 +52,18 @@ const ECHO_PATH: &str = "/usr/bin/echo";
 const ECHO_PATH: &str = "/bin/echo";
 
 // ---------------------------------------------------------------------------
-// Minimal LLM mock — the l3_run path NEVER calls the LLM (the daemon executes
-// the approved template's steps directly, no planner / CASSANDRA). It exists
-// only so the daemon's router config points at a live socket and the daemon
-// boots cleanly. Every request gets a 503; if the l3_run path ever did dial
-// the LLM, that 503 would surface loudly as a task failure rather than hang.
+// Daemon bring-up: the inert mock LLM + `bring_up_daemon` live in
+// `kastellan_tests_common::daemon` (shared with cli_memory_l3py_run_daemon_e2e).
+// The decisive #179 env var — `KASTELLAN_SHELL_EXEC_BIN` — is registered on the
+// *daemon* via `extra_env`; the operator CLI subprocess deliberately omits it.
 // ---------------------------------------------------------------------------
 
-struct MockLlm {
-    base_url: String,
-    join: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl Drop for MockLlm {
-    fn drop(&mut self) {
-        if let Some(h) = self.join.take() {
-            h.abort();
-        }
-    }
-}
-
-async fn spawn_inert_mock() -> MockLlm {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let port = listener.local_addr().unwrap().port();
-    let base_url = format!("http://127.0.0.1:{port}");
-
-    let join = tokio::spawn(async move {
-        loop {
-            let (mut sock, _peer) = match listener.accept().await {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            // Drain whatever the client sent (best-effort) then 503.
-            let mut tmp = [0u8; 1024];
-            let _ = sock.read(&mut tmp).await;
-            let body = "{}";
-            let resp = format!(
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body,
-            );
-            let _ = sock.write_all(resp.as_bytes()).await;
-            let _ = sock.flush().await;
-            let _ = sock.shutdown().await;
-        }
-    });
-
-    MockLlm {
-        base_url,
-        join: Some(join),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Daemon bring-up — copied from cli_ask_e2e.rs, trimmed to what l3_run needs.
-// Crucially this sets KASTELLAN_SHELL_EXEC_BIN on the *daemon* so its live
-// registry has shell-exec — the operator CLI subprocess will NOT carry it.
-// ---------------------------------------------------------------------------
-
-struct Daemon {
-    stdout_path: PathBuf,
-    stderr_path: PathBuf,
-}
-
-fn bring_up_daemon(
-    suffix: &str,
-    data_dir: &Path,
-    mock_base_url: &str,
-    user: &str,
-) -> (Daemon, (ServiceGuard, PathGuard, PathGuard)) {
-    let core_log_dir = unique_temp_root("cli-l3run-clog");
-    std::fs::create_dir_all(&core_log_dir).expect("create core log dir");
-    let core_log_guard = PathGuard {
-        path: core_log_dir.clone(),
-    };
-
-    let state_dir = unique_temp_root("cli-l3run-state");
-    let state_guard = PathGuard {
-        path: state_dir.clone(),
-    };
-
-    let binary = core_binary();
-    let mut spec = core_service_spec(&binary, &core_log_dir);
-    spec.name = format!("kastellan-supervisor-test-core-l3run-{suffix}");
-    assert!(spec.name.len() <= 200);
-    let stdout_path = core_log_dir.join(format!("{}.out", spec.name));
-    let stderr_path = core_log_dir.join(format!("{}.err", spec.name));
-    spec.stdout_log = Some(stdout_path.clone());
-    spec.stderr_log = Some(stderr_path.clone());
-
-    spec.env.push((
-        "KASTELLAN_DATA_DIR".into(),
-        data_dir.to_string_lossy().into_owned(),
-    ));
-    spec.env.push(("USER".into(), user.to_string()));
-    spec.env.push((
-        "KASTELLAN_STATE_DIR".into(),
-        state_dir.to_string_lossy().into_owned(),
-    ));
-
-    // Prompts: the daemon's prompt loader fails closed if the dir is missing.
-    let workspace_prompts = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace root")
-        .join("prompts");
-    spec.env.push((
-        "KASTELLAN_PROMPTS_DIR".into(),
-        workspace_prompts.to_string_lossy().into_owned(),
-    ));
-
-    // LLM router → inert mock. The l3_run path never dials it, but the daemon
-    // needs a valid-looking config to construct its router at startup.
-    spec.env.push((
-        "KASTELLAN_LLM_LOCAL_URL".into(),
-        format!("{mock_base_url}/v1"),
-    ));
-    spec.env
-        .push(("KASTELLAN_LLM_LOCAL_MODEL".into(), "test-local-model".into()));
-    spec.env.push(("KASTELLAN_LLM_TIMEOUT_MS".into(), "5000".into()));
-
-    // The decisive #179 env var: the daemon registers shell-exec from ITS OWN
-    // environment. The operator CLI subprocess below deliberately omits it.
-    spec.env.push((
+/// The shell-exec worker registration the daemon (not the operator CLI) carries.
+fn shell_exec_env() -> Vec<(String, String)> {
+    vec![(
         "KASTELLAN_SHELL_EXEC_BIN".into(),
         shell_exec_worker_binary().to_string_lossy().into_owned(),
-    ));
-
-    let sup = default_supervisor();
-    let service_guard = ServiceGuard {
-        sup: default_supervisor(),
-        name: spec.name.clone(),
-    };
-    sup.install(&spec).expect("install core");
-    sup.start(&spec.name).expect("start core");
-
-    wait_for_status(
-        sup.as_ref(),
-        &spec.name,
-        |s| s == ServiceStatus::Active,
-        Duration::from_secs(10),
-    )
-    .expect("core active");
-
-    wait_for_log_match(
-        &stdout_path,
-        |s| s.contains("scheduler spawned"),
-        Duration::from_secs(10),
-    )
-    .expect("daemon should log 'scheduler spawned' within 10s");
-
-    (
-        Daemon {
-            stdout_path,
-            stderr_path,
-        },
-        (service_guard, core_log_guard, state_guard),
-    )
+    )]
 }
 
 /// Build the per-test PG cluster.
@@ -259,13 +106,8 @@ async fn seed_and_approve_echo_skill(pool: &sqlx::PgPool, data_dir: &Path, user:
     // The `registry.loaded` snapshot the approval gate reads.
     seed_registry_loaded(pool, &["shell-exec"]).await;
 
-    let approve = Command::new(cli_binary())
+    let approve = cli_command(data_dir, user)
         .args(["memory", "l3", "approve", &id.to_string()])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LC_ALL", "C")
-        .env("USER", user)
-        .env("KASTELLAN_DATA_DIR", data_dir.to_string_lossy().as_ref())
         .output()
         .expect("spawn cli memory l3 approve");
     assert!(
@@ -352,13 +194,19 @@ async fn run_succeeds_against_daemon_registry_without_operator_env() {
     let id = seed_and_approve_echo_skill(&pool, &cluster.data_dir, &user).await;
 
     let mock = spawn_inert_mock().await;
-    let (daemon, _daemon_guards) =
-        bring_up_daemon(&suffix, &cluster.data_dir, &mock.base_url, &user);
+    let (daemon, _daemon_guards) = bring_up_daemon(
+        "l3run",
+        &suffix,
+        &cluster.data_dir,
+        &mock.base_url,
+        &user,
+        shell_exec_env(),
+    );
 
     // The operator CLI subprocess: NO KASTELLAN_SHELL_EXEC_BIN. Pre-#179 the
     // in-process rebuild refused here; post-#179 the daemon executes against
     // its own registry and this SUCCEEDS.
-    let output = Command::new(cli_binary())
+    let output = cli_command(&cluster.data_dir, &user)
         .args([
             "memory",
             "l3",
@@ -368,11 +216,6 @@ async fn run_succeeds_against_daemon_registry_without_operator_env() {
             "msg=hello-179",
             "--execute",
         ])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LC_ALL", "C")
-        .env("USER", &user)
-        .env("KASTELLAN_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
         .env("KASTELLAN_L3_RUN_GRACE_SECS", "30")
         // Bound Phase-2 (execution-wait) so a daemon that claims the task but
         // never NOTIFYs can't hang the suite for the 1800s default.
@@ -380,23 +223,8 @@ async fn run_succeeds_against_daemon_registry_without_operator_env() {
         .output()
         .expect("spawn kastellan-cli memory l3 run --execute");
 
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-    assert!(
-        output.status.success(),
-        "run --execute must exit 0 (the #179 regression pin); got {:?}\n\
-         --- CLI stdout ---\n{}\n--- CLI stderr ---\n{}\n\
-         --- daemon stdout ({}) ---\n{}\n\
-         --- daemon stderr ({}) ---\n{}\n",
-        output.status,
-        stdout,
-        stderr,
-        daemon.stdout_path.display(),
-        std::fs::read_to_string(&daemon.stdout_path).unwrap_or_default(),
-        daemon.stderr_path.display(),
-        std::fs::read_to_string(&daemon.stderr_path).unwrap_or_default(),
-    );
+    let (stdout, stderr) =
+        assert_cli_success(&output, &daemon, "run --execute (the #179 regression pin)");
     assert!(
         stdout.contains("executed skill"),
         "stdout must report 'executed skill'; got:\n{stdout}\n--- stderr ---\n{stderr}",
@@ -434,25 +262,13 @@ async fn run_with_no_daemon_cancels_and_errors() {
 
     // Dry-run is fine — there's no daemon to execute against anyway. A short
     // grace keeps the no-daemon detection fast.
-    let output = Command::new(cli_binary())
+    let output = cli_command(&cluster.data_dir, &user)
         .args(["memory", "l3", "run", &id.to_string()])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LC_ALL", "C")
-        .env("USER", &user)
-        .env("KASTELLAN_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
         .env("KASTELLAN_L3_RUN_GRACE_SECS", "1")
         .output()
         .expect("spawn kastellan-cli memory l3 run (no daemon)");
 
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-    assert!(
-        !output.status.success(),
-        "run with no daemon must exit non-zero; got {:?}\nstdout={stdout}\nstderr={stderr}",
-        output.status,
-    );
+    let (_stdout, stderr) = assert_cli_failure(&output, "run with no daemon");
     assert!(
         stderr.contains("daemon does not appear to be running"),
         "stderr must explain the daemon is not running; got:\n{stderr}",

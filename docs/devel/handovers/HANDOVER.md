@@ -6,35 +6,30 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-18 (**egress slice-#4 operator cert-pin plumbing — DONE on branch
-`feat/egress-operator-cert-pins`, PR [#303](https://github.com/hherb/kastellan/pull/303).** Completes the slice-#4 host-side "last mile": an operator-configurable
-`KASTELLAN_EGRESS_CERT_PINS` env var (`{host:["sha256/<b64>"]}`, the same shape the egress-proxy sidecar enforces),
-parsed **fail-closed** on the daemon and selected **per-worker** (least-privilege, by allowlist host) into each
-force-routed sidecar's `cert_pins_json` — replacing the hard-coded `cert_pins_json: None` at
-`spawn_worker_maybe_forced`. New pure module `core/src/egress/cert_pins.rs` (`CertPinMap` + `CertPinError` +
-structural `parse_cert_pins` [shape + `sha256/` prefix only — the proxy's `PinSet::parse` stays the **authoritative
-strict** validator: base64/32-byte; a typo'd pin fails closed one layer later at sidecar startup, never silently
-dropped] + `host_of_endpoint` [IPv6-bracket-aware] + `select_pins_for_allowlist` [least-privilege subset → `{host:[...]}`
-JSON, `None` when empty]); `force_route.rs` gains `ForceRoutingConfig.cert_pins` + `ForceRoutingError` (widens
-`from_env`; `main.rs`'s `.context()?` absorbs it, no change) + `parse_cert_pins_env` (unset/blank/`{}` → `None`;
-`Some` ⇒ non-empty invariant) + `pins_for`. **Decoupled from the Phase-5 frontier path** (which doesn't exist:
-`Router::send` denies all frontier calls + runs in-core via reqwest, not a sidecar). **No new deps, OS-agnostic,
-byte-identical when the env var is unset.** Spec + plan:
-`docs/superpowers/{specs,plans}/2026-06-17-operator-egress-cert-pins*`. **Verification (Mac):** `cargo test --workspace`
-exit 0 (all green; force_route 25 + cert_pins 13 unit) + `cargo clippy --workspace --all-targets -D warnings` clean.
-4-task subagent-driven build, each task reviewed clean + a final whole-branch review (READY TO MERGE). **DGX not
-re-run** — pure host-side parsing/config + a no-op spawn path when unset; touches no sandbox/seccomp/Landlock; the
-1839/0/15 Linux baseline carries forward. **Deferred (tracked in [#304](https://github.com/hherb/kastellan/issues/304)):** a real-sandbox pin-enforcement e2e — a
-force-routed worker dials a host whose served cert mismatches the configured pin and is blocked with a
-`tls_pin`/`pin_mismatch` decision (needs a controllable TLS origin; no frontier consumer yet to justify the harness;
-proxy-side `PinningVerifier` is already unit-covered).)
+**Last updated:** 2026-06-18 (**`cli_memory_l3py_run_daemon_e2e` test-lift — DONE on branch
+`refactor/l3py-daemon-e2e-test-lift`.** Refactor bucket (c): the python l3_run daemon e2e was **838 LOC**
+(over the 500 cap) because it byte-duplicated the daemon-bring-up scaffolding from its sibling
+`cli_memory_l3_run_daemon_e2e.rs`. Hoisted the shared, **core-free** pieces into a new
+`tests-common/src/daemon.rs` — `MockLlm` + `spawn_inert_mock` (inert 503 local-LLM listener), parameterised
+`bring_up_daemon(label, suffix, data_dir, mock_url, user, extra_env)` (+ `DaemonHandle`/`DaemonGuards`), and the
+CLI-output assertion helpers `assert_cli_success`/`assert_cli_failure`; plus `cli_command(data_dir, user)` (the
+env-clear'd operator-CLI builder — the #179 invariant) into `tests-common/src/binaries.rs`. The python-specific bits
+(interpreter cascade `find_python`, the `PythonSkillCandidate` factories) stay local — `tests-common` is deliberately
+**core-free**, so they don't move. l3py also gained a small in-file `Fixture`/`setup` collapsing the repeated per-test
+preamble. **Both** daemon e2e files now consume the shared helpers (true dedup, the issue-#15 point of `tests-common`):
+l3py **838 → 499**, l3 **480 → 296**, new `daemon.rs` 248. Added `tokio` (workspace, dev-only) to `tests-common`.
+**No behaviour change, no test added/removed.** Verification (Mac, PG 18 + Seatbelt jail): both suites run live —
+`cli_memory_l3_run_daemon_e2e` 2/2, `cli_memory_l3py_run_daemon_e2e` 5/5 green; `cargo clippy -p kastellan-tests-common
+-p kastellan-core --all-targets -D warnings` clean; `tests-common` unit 17/17. **DGX not re-run** — test-harness-only
+refactor touching no sandbox/seccomp/Landlock/production code; the 1839/0/15 Linux baseline carries forward.)
 
-_(Prior session — **python-exec output secret-scrub in-process e2e** merged to `main` as `7b889dc` (PR
-[#299](https://github.com/hherb/kastellan/pull/299)); branch `feat/python-exec-scrub-inprocess-e2e` now stale, safe to
-delete. `python_exec_e2e::materialized_secret_param_is_scrubbed_from_output` proves the scrub through the real worker +
-jail + Vault + `dispatch`; full DAEMON e2e deferred to [#298](https://github.com/hherb/kastellan/issues/298). Earlier:
-**python-exec output secret-scrub** (`ddd2cf0`, PR #297 + overlap-pin `d9570ee`); **[#268] egress #3b dispatch-time
-secret-hash provisioning** (PR #296, `1da9882`); **[#281] gliner-relex Landlock** (PR #295, `4b42848`) — all on `main`.)_
+_(Prior session — **egress slice-#4 operator cert-pin plumbing** merged to `main` as `4ecb94a` (PR
+[#303](https://github.com/hherb/kastellan/pull/303)); deferred real-sandbox pin-enforcement e2e tracked in
+[#304](https://github.com/hherb/kastellan/issues/304) (PR #305). Operator pins (`KASTELLAN_EGRESS_CERT_PINS`,
+fail-closed, per-worker least-privilege) now flow into each force-routed sidecar's `cert_pins_json`
+(`core/src/egress/cert_pins.rs` + `force_route.rs`); byte-identical when unset. Earlier: **python-exec output
+secret-scrub in-process e2e** (PR #299, `7b889dc`); **python-exec output secret-scrub** (`ddd2cf0`, PR #297 +
+overlap-pin `d9570ee`); **[#268] egress #3b dispatch-time secret-hash provisioning** (PR #296, `1da9882`) — all on `main`.)_
 
 ---
 
@@ -100,7 +95,7 @@ kastellan (Rust workspace, 15 crates [+ `matrix`/`matrix-wire` from PR #265 not 
 ├── sandbox            kastellan-sandbox: SandboxPolicy (+ additive `proxy_uds: Option<PathBuf>` — slice #2 force-routing target) + `Net` enum {Deny | Allowlist(hosts) | ProxyEgress (the egress proxy's own policy — real netns, self-enforcing; #141 slice #1)}; `Net::Allowlist + proxy_uds` ⇒ bwrap private netns + UDS bind / Seatbelt deny-outbound-except-UDS (slice #2). + `Profile` {WorkerStrict | WorkerNetClient | WorkerBrowserClient | **WorkerMlClient** (gliner-relex torch tier — #281; renders byte-identical to WorkerStrict off Linux, only the Linux `ml_client` seccomp layer differs)} + SandboxBackend trait + SandboxBackendKind (cfg-gated per-OS) + SandboxBackends resolver + LinuxBwrap (wrapped in systemd-run --scope cgroup) + MacosSeatbelt + MacosContainer (Apple `container` micro-VM, macOS-only, opt-in per-worker)
 ├── supervisor         kastellan-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, kastellan_target_spec} + default_probe. ServiceSpec carries after/part_of ordering + optional restart_backoff (RestartBackoff{max_delay_sec,steps}: systemd → RestartSteps/RestartMaxDelaySec, launchd → warn-and-ignore); TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native kastellan.target unit). Names screened by validate_service_name before unit-file write
 ├── protocol           kastellan-protocol: JSON-RPC 2.0 over stdio (working)
-├── tests-common       kastellan-tests-common: shared dev-dep crate (publish = false) — PgCluster + bring_up_pg_cluster(+_with_timeout), RAII guards, skip helpers, sandbox factory, binary discovery, macOS launchd serial lock (reentrant), deterministic SHA-256-seeded embedding seed. Consumed only from [dev-dependencies]; never linked into a runtime binary.
+├── tests-common       kastellan-tests-common: shared dev-dep crate (publish = false) — PgCluster + bring_up_pg_cluster(+_with_timeout), RAII guards, skip helpers, sandbox factory, binary discovery (+ `cli_command` env-clear'd operator-CLI builder), **`daemon.rs` (MockLlm/spawn_inert_mock inert-503 LLM + parameterised bring_up_daemon + DaemonHandle/DaemonGuards + assert_cli_success/assert_cli_failure — shared by the cli_memory_l3*_run_daemon_e2e suites; deliberately core-free)**, macOS launchd serial lock (reentrant), deterministic SHA-256-seeded embedding seed. Consumed only from [dev-dependencies]; never linked into a runtime binary.
 ├── workers/prelude      kastellan-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS) + cross-platform setrlimit(RLIMIT_CPU). Landlock derives BOTH RW (from fs_write) and RO (from fs_read, env KASTELLAN_LANDLOCK_RO) rules so net workers can read /etc/resolv.conf in-jail; **`KASTELLAN_LANDLOCK_PROFILE=none` skips the Landlock layer** (additive, `LandlockReport::Disabled`; supported opt-out but **no current worker sets it** — both browser-driver and gliner-relex now run Landlock-active, #281 fully closed). 2 bins: `kastellan-lockdown-probe` (test fixture; + `raw-getpid`/`raw-unshare` pre-lockdown subcommands) and **`kastellan-worker-lockdown-exec`** (#281 — production exec-shim: `rlimit::apply_from_env()` → `lock_down()` → `execve(target)`; the target inherits seccomp under `NO_NEW_PRIVS`; gives pure-Python venv workers worker-side Linux seccomp since bwrap spawns them directly, bypassing the Rust prelude — used by browser-driver AND gliner-relex). seccomp `Profile` {Strict | NetClient | BrowserClient | **MlClient**}: `browser_client` ADDITIONS include `capget`+`capset` (Playwright-Node + Chromium-zygote); **`ml_client` = `net_client` + `ML_CLIENT_ADDITIONS` {mbind, get_mempolicy, mlock, munlock, mknodat}** (torch/CUDA-probe/NUMA, DGX-enumerated via the kill-mode/`journalctl -k` loop; all DGX-confirmed load-bearing)
 ├── workers/shell-exec   kastellan-worker-shell-exec: uses prelude::serve_stdio
 ├── workers/web-common   kastellan-worker-web-common: shared lib for net-egress workers. allowlist.rs (HostAllowlist: host-only `from_env_json`/`is_allowed` + **port-scoped `from_endpoints`/`is_allowed_endpoint`/`is_port_scoped`** [host:port, IPv6-aware — #241]) + http.rs (HttpGet seam [+`transport_kind`] + RawResponse + ReqwestGet + **env-selected `make_get` factory**) + proxy_connect.rs (**ProxyConnectGet**: CONNECT-over-UDS HttpGet, hyper+tokio-rustls/ring, end-to-end TLS — used when `KASTELLAN_EGRESS_PROXY_UDS` set) + testing.rs (FakeGet, `testing` feature). Consumed by web-fetch + web-search + egress-proxy.
@@ -344,9 +339,11 @@ continues:
    (this session, branch `feat/python-exec-scrub-inprocess-e2e`): `python_exec_e2e::materialized_secret_param_is_scrubbed_from_output`
    proves the scrub end-to-end through the real worker + real jail + real Vault + real `dispatch`; the full **daemon** e2e
    (CLI→scheduler→l3py routing, which never touches the scrub) is deferred to [#298](https://github.com/hherb/kastellan/issues/298)
-   (needs a security-sensitive Vault-ref test seam in `main.rs`). **★ NEXT immediate pick:** (b) `core/tests/cli_memory_l3py_run_daemon_e2e.rs`
-   (now ~840 LOC) test-lift — extract the shared daemon bring-up / `find_python` / skill factories into `tests-common`
-   (mirrors `cli_memory_l3_run_daemon_e2e.rs`; refactor bucket (c)).
+   (needs a security-sensitive Vault-ref test seam in `main.rs`). **(b) `cli_memory_l3py_run_daemon_e2e` test-lift —
+   DONE 2026-06-18** (branch `refactor/l3py-daemon-e2e-test-lift`): shared daemon bring-up + inert mock LLM + CLI-output
+   asserts + `cli_command` builder hoisted into `tests-common` (`daemon.rs` + `binaries.rs`), consumed by **both** daemon
+   e2e files (l3py 838 → 499, l3 480 → 296); python-specific `find_python` + skill factories stay local (`tests-common`
+   is deliberately core-free). See "Last updated" up top.
 3. **python-exec worker slice-#2 candidates (on demand):** macOS writable scratch (shares browser-driver Phase 2's per-spawn
    scratch wiring) — also unblocks the deferred **scratch-file param channel** for >64 KiB payloads; curated-wheels RO dir if
    skills demand packages. **Other Phase-4 picks:** micro-VM backend (ROADMAP), tiered delegation policy (ROADMAP).
