@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-18 (**`cli_memory_l3py_run_daemon_e2e` test-lift — DONE on branch
-`refactor/l3py-daemon-e2e-test-lift`.** Refactor bucket (c): the python l3_run daemon e2e was **838 LOC**
+`refactor/l3py-daemon-e2e-test-lift`, PR [#306](https://github.com/hherb/kastellan/pull/306).** Refactor bucket (c): the python l3_run daemon e2e was **838 LOC**
 (over the 500 cap) because it byte-duplicated the daemon-bring-up scaffolding from its sibling
 `cli_memory_l3_run_daemon_e2e.rs`. Hoisted the shared, **core-free** pieces into a new
 `tests-common/src/daemon.rs` — `MockLlm` + `spawn_inert_mock` (inert 503 local-LLM listener), parameterised
@@ -340,7 +340,7 @@ continues:
    proves the scrub end-to-end through the real worker + real jail + real Vault + real `dispatch`; the full **daemon** e2e
    (CLI→scheduler→l3py routing, which never touches the scrub) is deferred to [#298](https://github.com/hherb/kastellan/issues/298)
    (needs a security-sensitive Vault-ref test seam in `main.rs`). **(b) `cli_memory_l3py_run_daemon_e2e` test-lift —
-   DONE 2026-06-18** (branch `refactor/l3py-daemon-e2e-test-lift`): shared daemon bring-up + inert mock LLM + CLI-output
+   DONE 2026-06-18** (PR [#306](https://github.com/hherb/kastellan/pull/306)): shared daemon bring-up + inert mock LLM + CLI-output
    asserts + `cli_command` builder hoisted into `tests-common` (`daemon.rs` + `binaries.rs`), consumed by **both** daemon
    e2e files (l3py 838 → 499, l3 480 → 296); python-specific `find_python` + skill factories stay local (`tests-common`
    is deliberately core-free). See "Last updated" up top.
