@@ -29,6 +29,9 @@ Thumbs.db
 /data/
 /scratch/
 
+# Generated docs site (built fresh in CI, never committed)
+/dist/
+
 # Python (only ever inside workers/python-exec/)
 __pycache__/
 *.py[cod]
