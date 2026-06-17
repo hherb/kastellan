@@ -50,28 +50,27 @@ pub fn cli_binary() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::workspace_target_binary;
+    use crate::env::{env_lock, EnvVarGuard};
     use std::path::PathBuf;
 
     /// `CARGO_TARGET_DIR` (when set) overrides the default
-    /// `<workspace_root>/target`; otherwise the default applies. This single
-    /// test owns the env mutation — no sibling test reads the var — and
-    /// restores the prior value **before** any assertion can unwind, so a
-    /// failure never leaks the var into another test.
+    /// `<workspace_root>/target`; otherwise the default applies. `env_lock()`
+    /// serialises against any sibling test that reads the var, and the
+    /// `EnvVarGuard` captures the real prior up front and restores it on drop
+    /// — even on an unwinding assertion — so the intermediate mutation never
+    /// leaks into another test.
     #[test]
     fn honours_cargo_target_dir_else_workspace_target() {
         const KEY: &str = "CARGO_TARGET_DIR";
-        let prior = std::env::var_os(KEY);
+        let _lock = env_lock();
 
-        std::env::remove_var(KEY);
+        // `unset` records the true prior; its `Drop` restores it regardless of
+        // the `set_var` below, so no manual save/restore is needed.
+        let _restore = EnvVarGuard::unset(KEY);
         let got_default = workspace_target_binary("foo");
 
         std::env::set_var(KEY, "/custom/target");
         let got_override = workspace_target_binary("foo");
-
-        match &prior {
-            Some(v) => std::env::set_var(KEY, v),
-            None => std::env::remove_var(KEY),
-        }
 
         let want_default = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()

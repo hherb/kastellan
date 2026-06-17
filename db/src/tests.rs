@@ -17,40 +17,11 @@
 
 use super::*;
 
-/// RAII guard that restores a process env var to its prior value when it
-/// drops — panic-safe, unlike a manual save / `set_var` / restore dance where
-/// a failing assertion between the mutation and the restore leaks the value
-/// into whatever runs next under the same [`crate::env_lock`]. Always pair it
-/// with `env_lock()` so concurrent tests cannot observe the mutation.
-struct EnvVarGuard {
-    key: &'static str,
-    prior: Option<String>,
-}
-
-impl EnvVarGuard {
-    /// Set `key` to `value`, remembering the prior value for restoration.
-    fn set(key: &'static str, value: &str) -> Self {
-        let prior = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, prior }
-    }
-
-    /// Remove `key`, remembering the prior value for restoration.
-    fn unset(key: &'static str) -> Self {
-        let prior = std::env::var(key).ok();
-        std::env::remove_var(key);
-        Self { key, prior }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.prior {
-            Some(v) => std::env::set_var(self.key, v),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
+// Panic-safe env-var RAII guard, shared across crates via `tests-common`
+// (issue #127). Paired with `crate::env_lock()` below so the lock also
+// excludes `db`'s own production readers of `$USER` / `$HOME`, while the
+// restore half is the single shared implementation.
+use kastellan_tests_common::EnvVarGuard;
 
 fn opts(dir: &str) -> InitDbOptions {
     InitDbOptions {
