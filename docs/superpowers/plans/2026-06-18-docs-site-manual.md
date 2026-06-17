@@ -12,7 +12,7 @@
 
 - **Python tooling is `uv` only — never bare `pip`.** Converter is a PEP 723 script run via `uv run`; tests via `uv run --with pytest --with markdown==3.7 --with pygments==2.18.0 pytest …`.
 - **Pinned deps:** `markdown==3.7`, `pygments==2.18.0`. Both BSD → AGPL-compatible. No CDDL/BUSL/SSPL/Elastic/source-available deps.
-- **`site/style.css` is locked** — contract-checked by `scripts/site/check-site.sh`. Do NOT modify it. All docs-only CSS goes in the new `site/manual.css`.
+- **`site/style.css` is treated as locked** — `scripts/site/check-site.sh` greps it for palette tokens (it does not checksum the file). Do NOT modify it. All docs-only CSS goes in the new `site/manual.css`.
 - **Docs nav links are absolute** to `https://kastellan.dev` (separate host from the Cloudflare main site).
 - **Canonical domain:** `docs.kastellan.dev`. Repo: `hherb/kastellan`. GitHub blob base: `https://github.com/hherb/kastellan/blob/main/`.
 - **Converter filename uses an underscore** (`build_manual.py`, not `build-manual.py`) so its functions are importable by the test module.

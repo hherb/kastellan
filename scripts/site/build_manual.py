@@ -117,7 +117,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
         <a href="https://kastellan.dev/roadmap.html">Roadmap</a>
         <a href="https://kastellan.dev/security.html">Security</a>
         <a href="https://kastellan.dev/contributing.html">Contributing</a>
-        <a href="index.html" aria-current="page">Manual</a>
+        <a href="index.html">Manual</a>
         <a class="nav-cta" href="https://github.com/hherb/kastellan">GitHub</a>
       </nav>
     </div>
@@ -160,6 +160,7 @@ def render_body(md_text: str) -> str:
         "fenced_code", "codehilite", "tables", "toc", "attr_list",
     ], extension_configs={"codehilite": {"guess_lang": False}})
     html = engine.convert(md_text)
+    # Only href is rewritten; src is intentionally left alone (manual has no local image/src refs).
     return _HREF_RE.sub(lambda m: f'href="{rewrite_link(m.group(1))}"', html)
 
 

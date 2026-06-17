@@ -72,8 +72,8 @@ docs/devel/manual/*.md ──uv run build-manual.py──▶ dist/manual/  ─�
 
 ### 2. Styling
 
-`site/style.css` is contract-checked by `scripts/site/check-site.sh` and stays
-**byte-for-byte unchanged**. All docs-only additions go in a **new `site/manual.css`**,
+`site/style.css` is treated as locked (left untouched); `scripts/site/check-site.sh` greps it
+for its palette tokens but does not checksum the file. All docs-only additions go in a **new `site/manual.css`**,
 layered on top:
 
 - sidebar layout (reusing existing tokens — `--border`, `--surface`, `--muted`, `--accent`);
@@ -163,4 +163,4 @@ These can be added later if wanted; none block v1.
 | `site/README.md` | edit — document the one-time DNS + Pages operator steps |
 | `.gitignore` | edit — ignore `dist/` |
 | `docs/devel/manual/*.md` | unchanged — source of truth, also read on GitHub |
-| `site/style.css` | unchanged — locked, contract-checked |
+| `site/style.css` | unchanged — treated as locked (left untouched); check-site.sh greps palette tokens only |
