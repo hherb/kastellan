@@ -46,3 +46,44 @@ pub fn core_binary() -> PathBuf {
 pub fn cli_binary() -> PathBuf {
     workspace_target_binary("kastellan-cli")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_target_binary;
+    use std::path::PathBuf;
+
+    /// `CARGO_TARGET_DIR` (when set) overrides the default
+    /// `<workspace_root>/target`; otherwise the default applies. This single
+    /// test owns the env mutation — no sibling test reads the var — and
+    /// restores the prior value **before** any assertion can unwind, so a
+    /// failure never leaks the var into another test.
+    #[test]
+    fn honours_cargo_target_dir_else_workspace_target() {
+        const KEY: &str = "CARGO_TARGET_DIR";
+        let prior = std::env::var_os(KEY);
+
+        std::env::remove_var(KEY);
+        let got_default = workspace_target_binary("foo");
+
+        std::env::set_var(KEY, "/custom/target");
+        let got_override = workspace_target_binary("foo");
+
+        match &prior {
+            Some(v) => std::env::set_var(KEY, v),
+            None => std::env::remove_var(KEY),
+        }
+
+        let want_default = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("target")
+            .join("debug")
+            .join("foo");
+        assert_eq!(got_default, want_default, "unset → workspace target/debug");
+        assert_eq!(
+            got_override,
+            PathBuf::from("/custom/target/debug/foo"),
+            "set → <CARGO_TARGET_DIR>/debug"
+        );
+    }
+}

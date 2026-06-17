@@ -43,6 +43,7 @@ before writing your first line of code.
 | 11 | [CASSANDRA review pipeline](./11-cassandra-pipeline.md) | Adding a rule, debugging a block, working on the injection guard |
 | 12 | [Memory and recall](./12-memory-and-recall.md) | Adding a recall lane, changing promotion, debugging RRF results |
 | 13 | [LLM router](./13-llm-router.md) | Adding a backend, changing the wire shape, working on Phase 5 frontier escalation |
+| 14 | [Test-lift refactors](./14-test-lift-refactors.md) | Lifting an over-cap file's inline test block to a sibling `tests.rs`, proving zero behaviour change |
 
 ---
 
