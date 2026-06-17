@@ -6,8 +6,8 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-17 (**[#268] egress #3b dispatch-time secret-hash provisioning — DONE (branch
-`feat/268-egress-dispatch-time-provisioning`, PR open).** Closes the slice-#3b §9 deferral: when `tool_host::dispatch`
+**Last updated:** 2026-06-17 (**[#268] egress #3b dispatch-time secret-hash provisioning — DONE & MERGED to `main` as
+`1da9882` (PR [#296](https://github.com/hherb/kastellan/pull/296)).** Closes the slice-#3b §9 deferral: when `tool_host::dispatch`
 materializes a `secret://` ref for a **force-routed net worker**, the secret's value-fingerprint is now written into the
 worker's egress-sidecar `secret_hashes.json` **before** `worker.call` triggers any egress, so the proxy's credential-leak
 scanner (which already lazily re-reads that file per connection) finally has patterns to match. Pieces (all small, pure
