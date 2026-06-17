@@ -623,9 +623,15 @@ async fn python_skill_params_round_trip_through_jail() {
         "stdout must carry the param-echo marker 'GOT:hi'; got:\n{stdout}",
     );
 
-    // TODO(params-e2e): secret-param coverage needs the vault harness (deferred).
-    // The recursive substitute_refs_in_params walker is unit-tested in
-    // core/src/secrets/substitute.rs; the e2e confirmation is a nice-to-have.
+    // Secret-param coverage: the substitute-in + python-exec output secret-scrub
+    // is proven end-to-end (real worker, real jail, real Vault, real secret) by
+    // python_exec_e2e::materialized_secret_param_is_scrubbed_from_output, which
+    // runs the same dispatch chokepoint this daemon path does. The remaining
+    // full-DAEMON secret e2e is deferred to issue #298: the secret:// ref is
+    // minted randomly in the daemon's in-process Vault and never logged, so
+    // driving it through the separate CLI process needs a (security-sensitive)
+    // Vault-ref test seam in main.rs. The walker itself is unit-tested in
+    // core/src/secrets/substitute.rs.
 
     pool.close().await;
     drop(cluster);

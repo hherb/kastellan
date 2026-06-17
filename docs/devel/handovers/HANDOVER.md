@@ -6,45 +6,39 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-17 (**python-exec output secret-scrub — DONE, merged to `main` as `ddd2cf0` (PR
-[#297](https://github.com/hherb/kastellan/pull/297)).** Closes the Phase-4 "battle-test the runtime-params free-form passthrough for risk slip-throughs" follow-up. A
-`secret://` param materializes to plaintext for the worker; python-exec runs **agent-authored** code, so — unlike the
-curated Rust workers whose result-plaintext is trusted by design (#147) — its returned stdout/stderr could surface the
-secret in `audit_log`/JSONL-mirror/operator-`InvokeReport`. python-exec is `Net::Deny`, so the egress #3b leak scanner
-**never runs** on it; its returned output is its only channel (the analog of egress). Fix, symmetric with #3b: scan the
-result for the fingerprints of the secrets materialized into **this** dispatch and redact them before the result is
-screened/audited/returned. Pieces: (1) new pure **`kastellan_leak_scan::redact`** (bounded-buffer, all-hits, marker
-`[redacted:<8hex>]`; reuses the Rabin+SHA-256 detection — shared `pow_base`/`sha256_hex` extracted into `fingerprint.rs`
-so detection can't drift); (2) new **`core/src/tool_host/secret_scrub.rs`** (`worker_redacts_output` python-exec-only gate,
-`fingerprints_for_dispatch` via `Vault::value_fingerprint` — **no plaintext copy**, `scrub_result_value` walks every JSON
-string leaf, `emit_scrub_audit` writes a redacted `policy/secret.output_scrubbed` row — hash/offset/len only); (3) wired
-into `dispatch_with_sink` on the `Ok(v)` arm **before** the injection screen, using the **pre-substitution** `req_for_audit`
-snapshot for fingerprinting. **No-op (byte-identical) for every other worker** (default-off gate; `shell_exec_e2e` 4/4 under
-a real sandbox proves it). Confirming e2e (`cli_memory_l3py_run_daemon_e2e::python_exec_child_env_is_clobber_proof`): the
-python-exec child env is **exactly** `{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}` — params can't become/clobber env vars —
-**live-green on PG18 + real jail**. **Accepted limits:** secrets `<8` bytes unscannable (same as #3b); + a vanishingly-narrow TTL-expiry race (if a secret's
-vault TTL lapses between substitution and the post-call fingerprint read it could survive unscrubbed — pre-existing, same
-race as #268; see the spec's limitations); + greedy overlap-resolution leaves a partial suffix of a SECOND distinct
-overlapping secret unscrubbed — not adversarially reachable (agent code can't align two vault values), matches the
-matcher's first-hit limitation, now pinned by `redact::tests::overlapping_distinct_secrets_leave_second_suffix`
-(post-merge `/review` follow-up, committed straight to `main`). **Verification (Mac):**
-`cargo test --workspace` **1878/0/13** (1877 at merge + 1 overlap-pin test) +
-`cargo clippy --workspace --all-targets -D warnings` clean. **DGX not re-run** (pure post-worker result transform, touches no
-sandbox/seccomp/Landlock; carried forward as the standing Linux gate). **Deferred:** the full **real-secret daemon e2e** —
-the scrub logic is hermetically unit-tested + the dispatch wiring proven, but the daemon harness lacks a vault-materialisation
-seam (pre-existing `TODO(params-e2e)` at `cli_memory_l3py_run_daemon_e2e.rs`). Spec/plan:
-`docs/superpowers/{specs,plans}/2026-06-17-python-exec-output-secret-scrub*`.)
+**Last updated:** 2026-06-17 (**python-exec output secret-scrub — in-process end-to-end e2e — DONE on branch
+`feat/python-exec-scrub-inprocess-e2e`.** Closes the deferred "real-secret daemon e2e" follow-up from the scrub session
+(#297, on `main`) with its clean, debt-free half. New
+`core/tests/python_exec_e2e.rs::materialized_secret_param_is_scrubbed_from_output`: materializes a real secret into a
+Vault, passes it through the `params` channel as a `secret://` ref, runs the **real** python-exec worker in the **real**
+jail through the **real** `tool_host::dispatch`, and asserts the plaintext returns `[redacted:<8hex>]` + exactly one
+`secret.output_scrubbed` audit row — **live-green on PG18 + real Seatbelt jail**. This exercises the actual scrub code
+path (`dispatch_with_sink`'s `Ok` arm); the ONLY thing it does not cover is the CLI→scheduler→l3py routing, which never
+touches the scrub and is already param-covered by
+`cli_memory_l3py_run_daemon_e2e::python_skill_params_round_trip_through_jail`. Test-harness refactor: `exec_in_jail` now
+delegates to a new `dispatch_in_jail(pool, env, &vault, params)` core (caller-supplied vault + params); the 3 existing
+`python_exec_e2e` tests pass unchanged. **The full DAEMON scrub e2e is deferred to
+[#298](https://github.com/hherb/kastellan/issues/298):** the `secret://` ref is minted randomly in the daemon's
+in-process Vault and never logged (only `ref_hash`, by design), so driving it through the separate CLI process needs a
+security-sensitive Vault-ref test seam in `main.rs` — design-first. The `TODO(params-e2e)` marker now points at #298 +
+this in-process test. **Verification (Mac):** `cargo test --workspace` **1879/0/13** (1878 prior + 1 new e2e) +
+`cargo clippy --workspace --all-targets -D warnings` clean; the new test ran live (PG18 + real jail). **DGX not re-run** —
+a test-only addition + a test-harness refactor, touches no sandbox/seccomp/Landlock; the 1839/0/15 Linux baseline carries
+forward.)
 
-_(Prior session — **[#268] egress #3b dispatch-time secret-hash provisioning** merged to `main` as `1da9882` (PR
-[#296](https://github.com/hherb/kastellan/pull/296)): `tool_host::dispatch` now writes each materialized secret's
-value-fingerprint into a force-routed net worker's egress-sidecar `secret_hashes.json` **before** `worker.call` (fail-closed
-D1, union D2, audit-newly-added D3); no-op for all current workers, activates with the first secret-bearing egress worker.
-Condensed into "Recently merged" below. **[#281] gliner-relex Landlock** (PR #295, `4b42848`) closed #281 fully — both
-pure-Python workers now have seccomp + Landlock.)_
+_(Prior session — **python-exec output secret-scrub** merged to `main` as `ddd2cf0` (PR
+[#297](https://github.com/hherb/kastellan/pull/297)) + overlap-pin `d9570ee`: scrubs this-dispatch's materialized-secret
+fingerprints out of python-exec output before it is screened/audited/returned — `kastellan_leak_scan::redact`
+(bounded-buffer, all-hits, marker `[redacted:<8hex>]`) + `core/src/tool_host/secret_scrub.rs` (python-exec-only gate,
+`scrub_result_value` over JSON string leaves, `Vault::value_fingerprint` with no plaintext copy, redacted
+`secret.output_scrubbed` audit row), wired into `dispatch_with_sink`'s `Ok` arm before the injection screen; no-op for
+every other worker. Condensed into "Recently merged" below. **[#268] egress #3b dispatch-time secret-hash provisioning**
+(PR #296, `1da9882`) + **[#281] gliner-relex Landlock** (PR #295, `4b42848`) also on `main`.)_
 
 ---
 
 **Recently merged to `main` (condensed, newest first).** Full reasoning in the PRs / `docs/superpowers/specs` / archive snapshots:
+- **python-exec output secret-scrub** (PR [#297](https://github.com/hherb/kastellan/pull/297), `ddd2cf0` + overlap-pin `d9570ee`): scans a python-exec result for the fingerprints of the secrets materialized into **this** dispatch and redacts them before the result is screened/audited/returned (python-exec runs agent-authored code + is `Net::Deny`, so its output is its only channel — the analog of egress #3b). New pure `kastellan_leak_scan::redact` (bounded-buffer, all-hits, marker `[redacted:<8hex>]`; shared `pow_base`/`sha256_hex` extracted into `fingerprint.rs`) + `core/src/tool_host/secret_scrub.rs` (`worker_redacts_output` python-exec-only gate, `fingerprints_for_dispatch` via `Vault::value_fingerprint` [no plaintext copy], `scrub_result_value` over every JSON string leaf, redacted `secret.output_scrubbed` audit row — hash/offset/len only), wired into `dispatch_with_sink`'s `Ok` arm **before** the injection screen using the pre-substitution `req_for_audit` snapshot. No-op (byte-identical) for every other worker. Accepted limits: secrets `<8` bytes unscannable (same as #3b); a vanishingly-narrow TTL-expiry race; a partial-suffix overlap edge (pinned). **In-process scrub e2e added this session** (see top block; full daemon e2e → [#298](https://github.com/hherb/kastellan/issues/298)).
 - **[#268] egress #3b dispatch-time secret-hash provisioning** (PR [#296](https://github.com/hherb/kastellan/pull/296), `1da9882`): `tool_host::dispatch` writes each materialized secret's value-fingerprint into a force-routed net worker's egress-sidecar `secret_hashes.json` **before** `worker.call` (re-scans the pre-substitution `req_for_audit` via `collect_refs_in_params` + `Vault::value_fingerprint`; `egress::leak_provision::merge_secret_hashes` union accumulator + `tool_host/egress_provision` `compute_provision`/`emit_provision`). D1 fail-closed / D2 union across reused workers / D3 audit-newly-added (`ref_hash`-keyed). No-op for all current workers (`egress==None`; byte-identical `shell_exec_e2e`); activates with the first secret-bearing egress worker. PR #296 review pass unified `collect_refs_in_params` + substitution onto one `for_each_ref` traversal (parity-tested) + extracted pure `select_provisioned_rows`.
 - **[#281] gliner-relex Landlock — #281 FULLY CLOSED** (PR [#295](https://github.com/hherb/kastellan/pull/295), `4b42848`): flipped Landlock **on** for the torch worker — `host_mode_entry` no longer emits `KASTELLAN_LANDLOCK_PROFILE=none`, so the lockdown-exec shim installs the ruleset alongside the `ml_client` seccomp filter (RO from `fs_read`, RW=`["/tmp"]` for torch's inductor cache, `fs_write` empty). No `fs_read` iteration needed (RO set = `DEFAULT_RO_EXEC_ROOTS ∪ fs_read` = what bwrap binds). DGX: 3 host-mode `gliner_relex_e2e` real-model suites green under Landlock + shim probe `FullyEnforced` (a world-readable out-of-RO file denied = real containment, not DAC); workspace 1839/0/15. Both pure-Python workers now have seccomp + Landlock.
 - **[#281] browser-driver Landlock** (PR [#294](https://github.com/hherb/kastellan/pull/294), `545975e`): flipped Landlock **on** for browser-driver — `browser_driver_entry` no longer emits `KASTELLAN_LANDLOCK_PROFILE=none`, so the lockdown-exec shim installs the ruleset (RO from `fs_read` — venv, interpreter libs, `/etc` resolver files, the shim, per-instance CA when force-routed; RW = `/tmp` for Chromium's `--user-data-dir`, `fs_write` empty). No `fs_read` iteration needed (RO set = `DEFAULT_RO_EXEC_ROOTS ∪ fs_read` = what bwrap binds). Proxy UDS connect is not gated by Landlock `AccessFs` (path-based AF_UNIX connect is unmediated). DGX: all 4 `browser_driver_e2e --ignored` green + shim probe `FullyEnforced`; workspace 1839/0/15. The method gliner-relex Landlock (above) reused verbatim.
@@ -121,11 +115,12 @@ kastellan (Rust workspace, 15 crates [+ `matrix`/`matrix-wire` from PR #265 not 
 on `feat/281-gliner-relex-seccomp` (2026-06-16 #281 gliner-relex acceptance; the real-sandbox e2e suites actually run here —
 incl. the 3 gliner real-model suites loading `multi-v1.0` + running `extract` **under the kill-mode `ml_client` seccomp filter
 applied via the lockdown-exec shim**; + the 4 `browser_driver_e2e` render tests under `browser_client`; + `lockdown_exec_smoke`).
-macOS (2026-06-17, python-exec output secret-scrub): full workspace `cargo test --workspace` **1877 / 0 / 13** (was 1859
-pre-session; +18 ≈ new tests — leak-scan `redact` 12, `secret_scrub` 6, env-clobber e2e 1) + clippy `--workspace
---all-targets -D warnings` clean; the env-clobber e2e + `shell_exec_e2e` ran live (PG 18 + real sandbox). (Prior #268 macOS
-live-PG baseline was **1859 / 0 / 13**.) **DGX native-Linux not re-run for the scrub** — it is a pure post-worker result
-transform touching no sandbox/seccomp/Landlock; the 1839/0/15 Linux baseline is carried forward as the standing gate.
+macOS (2026-06-17, in-process scrub e2e): full workspace `cargo test --workspace` **1879 / 0 / 13** (1878 prior + 1 new
+`python_exec_e2e::materialized_secret_param_is_scrubbed_from_output`) + clippy `--workspace --all-targets -D warnings`
+clean; the new scrub e2e + `python_exec_e2e` suite ran live (PG 18 + real Seatbelt jail). (Prior scrub-session macOS
+baseline was **1878 / 0 / 13** = 1877 at #297 merge + 1 overlap-pin.) **DGX native-Linux not re-run** — a test-only
+addition + a test-harness refactor touching no sandbox/seccomp/Landlock; the 1839/0/15 Linux baseline is carried forward
+as the standing gate.
 8–15 ignored = explicit doctest/real-net markers;
 `[SKIP]` lines on `--nocapture` are GLiNER-Relex real-model tests gated on
 `KASTELLAN_GLINER_RELEX_ENABLE=1`. (Full per-session test-count history is in the
@@ -141,6 +136,7 @@ archive snapshots; the suite table below lists what each integration suite verif
 | `sandbox` integration (`macos_container_smoke`) | 7+ | **real** Apple `container`: argv shape, alpine smoke under `--init`, bind-mount-readonly, strict profile, probe skip |
 | `core` unit | 60+ | lockdown-env, watchdog, workspace RAII, audit parsers, dispatch-result mapping, ToolRegistry, injection_guard catalogue, secrets Vault + SecretRef, L3 crystallise/approval/invoke/surface units (see archive for full breakdown) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → sandbox → shell-exec round-trip; every call routes through `tool_host::dispatch` |
+| `core` integration (`python_exec_e2e`) | 4 | **real** core → sandbox → python-exec round-trip under the production policy: print round-trip, socket-attempt contained by the jail, Linux `/tmp` scratch write, **materialized-secret param scrubbed to `[redacted:]` + one `secret.output_scrubbed` row** (the in-process scrub e2e — full daemon e2e → #298) |
 | `web-common` unit | 8 | shared `HostAllowlist` matcher (exact/wildcard/case/lookalike/empty/malformed-json/trim/lone-dot) |
 | `web-fetch` unit | 21 | extract (HTML/PDF/text/JSON/char-boundary cap/unsupported), fetch redirect-drive (cap, non-allowlisted/non-HTTPS refusal, no-Location), handler (happy path, policy-denied arms, method-not-found, invalid-params). (Allowlist matcher tests moved to `web-common`.) |
 | `core` integration (`web_fetch_e2e`) | 1 (+1 ignored) | **real** sandbox deny-path: host outside allowlist is denied (hermetic); `real_fetch_extracts_readable_text` `#[ignore]` (real network, validates DNS+TLS in-jail) |
@@ -343,12 +339,13 @@ continues:
    `inner_loop/floor.rs`). **(a) battle-test the params free-form passthrough — DONE 2026-06-17** (this session, branch
    `feat/python-exec-output-secret-scrub`): the risk found + closed was the secret-in-param → python-exec output → audit/CLI
    leak; output is now scrubbed of this-dispatch's materialized-secret fingerprints (`leak_scan::redact` + `tool_host/secret_scrub.rs`),
-   python-exec-only, no-op elsewhere. See "Last updated" up top. **★ NEXT immediate picks:** (b) `core/tests/cli_memory_l3py_run_daemon_e2e.rs`
-   (now ~810 LOC after the env-clobber test) test-lift — extract the shared daemon bring-up / `find_python` / skill factories
-   into `tests-common` (mirrors `cli_memory_l3_run_daemon_e2e.rs`; bucket (c)); (c) the deferred **real-secret daemon e2e** —
-   needs a vault-materialisation seam in the l3py harness (pre-existing `TODO(params-e2e)` in that file) so a `secret://`
-   param round-trips through the daemon's in-process Vault; would directly prove the scrub end-to-end (today it's hermetic
-   unit + dispatch-wiring proven).
+   python-exec-only, no-op elsewhere. See "Last updated" up top. **(c) real-secret scrub e2e — DONE in-process 2026-06-17**
+   (this session, branch `feat/python-exec-scrub-inprocess-e2e`): `python_exec_e2e::materialized_secret_param_is_scrubbed_from_output`
+   proves the scrub end-to-end through the real worker + real jail + real Vault + real `dispatch`; the full **daemon** e2e
+   (CLI→scheduler→l3py routing, which never touches the scrub) is deferred to [#298](https://github.com/hherb/kastellan/issues/298)
+   (needs a security-sensitive Vault-ref test seam in `main.rs`). **★ NEXT immediate pick:** (b) `core/tests/cli_memory_l3py_run_daemon_e2e.rs`
+   (now ~840 LOC) test-lift — extract the shared daemon bring-up / `find_python` / skill factories into `tests-common`
+   (mirrors `cli_memory_l3_run_daemon_e2e.rs`; refactor bucket (c)).
 3. **python-exec worker slice-#2 candidates (on demand):** macOS writable scratch (shares browser-driver Phase 2's per-spawn
    scratch wiring) — also unblocks the deferred **scratch-file param channel** for >64 KiB payloads; curated-wheels RO dir if
    skills demand packages. **Other Phase-4 picks:** micro-VM backend (ROADMAP), tiered delegation policy (ROADMAP).
@@ -438,6 +435,7 @@ The `memory_entities` join table (P1) shipped; the graph lane is wired into `rec
 Only currently-open issues are listed; closed-issue detail lives in the archive snapshots and git history.
 
 - ~~[#287](https://github.com/hherb/kastellan/issues/287)~~ — **RESOLVED 2026-06-15** (PR `fix/287-browser-driver-stale-venv`): the macOS forced egress-sidecar "no decisions" was a **stale browser-driver venv** (a pre-slice-#2 install with no shim / no `--proxy-server`), not a code bug — fixed `install.sh` to `--force-reinstall` the local package so re-runs always stage current source. All 4 `browser_driver_e2e --ignored` tests pass on macOS.
+- [#298](https://github.com/hherb/kastellan/issues/298) — full-DAEMON python-exec output secret-scrub e2e: the in-process scrub e2e is done (`python_exec_e2e::materialized_secret_param_is_scrubbed_from_output`); driving the whole CLI→scheduler→l3py→dispatch chain needs a security-sensitive Vault-ref test seam in `main.rs` (the `secret://` ref is minted randomly + never logged, so the separate CLI process can't pass a working ref). Design-first.
 - [#286](https://github.com/hherb/kastellan/issues/286) — browser-driver Seatbelt `localhost:*` loopback widening is host-shared on macOS (no netns), so a compromised browser worker could reach host-local services bypassing the egress sidecar. Latent (Chromium is proxy-routed; the macOS forced egress path itself doesn't complete yet — #287). Fix: scope the rule to the shim's bound port, a UDS-only transport, or the `MacosContainer` VM-netns backend.
 - [#3](https://github.com/hherb/kastellan/issues/3) — drop `SYS_SENDFILE`/`SYS_FADVISE64` shim once libc exposes them on aarch64.
 - [#4](https://github.com/hherb/kastellan/issues/4) — bump Last-commit + test-count fields whenever a Recently-completed entry is added (process hygiene).
