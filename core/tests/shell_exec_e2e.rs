@@ -283,14 +283,9 @@ fn workspace_dir_is_writable_during_call_and_wiped_on_drop() {
 
     // Per-test root keeps tests independent (so two parallel runs don't
     // collide on the same task id) and avoids touching `~/.kastellan/`.
-    let test_root = std::env::temp_dir().join(format!(
-        "kastellan-e2e-workspace-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
+    // `unique_suffix()` carries the process-local AtomicU64 counter, so two
+    // parallel cases can't collide even within one clock tick (#101/#104).
+    let test_root = std::env::temp_dir().join(format!("kastellan-e2e-workspace-{}", unique_suffix()));
     let _ = std::fs::remove_dir_all(&test_root);
 
     let ws = Workspace::with_root(&test_root, "task-e2e").expect("create workspace");
