@@ -12,11 +12,6 @@
 //! Pulled into a sibling (like `egress_provision.rs`) so `tool_host.rs` stays
 //! near the 500-LOC cap and the pure pieces are unit-testable with a fake sink.
 
-// All five `pub(crate)` functions in this module are forward-declarations: they
-// are wired into the dispatch chokepoint in the follow-on task (Task 3). Until
-// then, suppress the dead_code lint so `cargo clippy -D warnings` stays green.
-#![allow(dead_code)]
-
 use kastellan_leak_scan::{redact, RedactHit, SecretFingerprint};
 use serde_json::Value;
 
@@ -43,8 +38,8 @@ pub(crate) fn fingerprints_for_dispatch(
     vault: &Vault,
 ) -> Vec<SecretFingerprint> {
     collect_refs_in_params(req_for_audit)
-        .iter()
-        .filter_map(|r| vault.value_fingerprint(r))
+        .into_iter()
+        .filter_map(|r| vault.value_fingerprint(&r))
         .collect()
 }
 
@@ -111,12 +106,9 @@ mod tests {
         kastellan_leak_scan::fingerprint_value(v).expect("test secret >= MIN_SECRET_LEN")
     }
 
-    // NOTE: match the EXACT AuditSink::insert signature + error type + async_trait
-    // usage from the RecordingSink in egress_provision.rs's test module. The body
-    // below assumes `insert(&self, actor, action, payload) -> Result<i64, DbError>`.
     #[derive(Default)]
     struct RecordingSink {
-        rows: Mutex<Vec<(String, String)>>,
+        rows: Mutex<Vec<(String, String, Value)>>,
     }
 
     #[async_trait::async_trait]
@@ -125,12 +117,12 @@ mod tests {
             &self,
             actor: &str,
             action: &str,
-            _payload: Value,
+            payload: Value,
         ) -> Result<i64, kastellan_db::DbError> {
             self.rows
                 .lock()
                 .unwrap()
-                .push((actor.to_string(), action.to_string()));
+                .push((actor.to_string(), action.to_string(), payload));
             Ok(1)
         }
     }
@@ -200,6 +192,23 @@ mod tests {
         emit_scrub_audit(&sink, "python-exec", &hits).await;
         let rows = sink.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], ("policy".to_string(), "secret.output_scrubbed".to_string()));
+
+        let (actor, action, payload) = &rows[0];
+        // actor / action assertions (security feature — the row must land under "policy")
+        assert_eq!(actor, "policy");
+        assert_eq!(action, "secret.output_scrubbed");
+
+        // payload shape assertions (security feature — the row must carry hash metadata,
+        // never plaintext)
+        assert_eq!(payload["count"], 1);
+        assert_eq!(payload["tool"], "python-exec");
+        let sha = payload["hits"][0]["sha256_hex"].as_str().unwrap();
+        assert!(!sha.is_empty(), "sha256_hex must be a non-empty string");
+        // The serialized payload must NOT contain a "plaintext" key anywhere
+        let serialized = serde_json::to_string(payload).unwrap();
+        assert!(
+            !serialized.contains("\"plaintext\""),
+            "audit payload must not expose plaintext: {serialized}"
+        );
     }
 }
