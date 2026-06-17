@@ -99,3 +99,12 @@ def test_build_copies_assets_and_writes_pages_files(tmp_path):
     assert (out / "assets" / "favicon.png").is_file()
     assert (out / ".nojekyll").is_file()
     assert (out / "CNAME").read_text().strip() == "docs.kastellan.dev"
+
+
+def test_manual_css_defines_layout_and_prose(tmp_path):
+    out = _build(tmp_path)
+    css = (out / "manual.css").read_text()
+    for selector in [".manual-layout", ".manual-sidebar", ".prose",
+                     ".manual-toc", ".codehilite"]:
+        assert selector in css, f"manual.css missing {selector}"
+    assert "var(--accent)" in css  # built on the locked palette tokens
