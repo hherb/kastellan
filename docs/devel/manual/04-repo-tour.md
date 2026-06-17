@@ -8,29 +8,36 @@ know where to look when you need something.
 ## Top-level layout
 
 ```
-core/           The agent brain: scheduler, memory, CASSANDRA, audit, IPC
+core/           The agent brain: scheduler, memory, CASSANDRA, audit, IPC,
+                channel bus, egress integration, secret vault, handoff cache
 db/             Database crate: migrations, Postgres helpers, secrets
+leak-scan/      Pure credential-leak scanner shared by core + egress-proxy
 llm-router/     Sole egress for LLM calls (local + frontier, OpenAI shape)
-sandbox/        Cross-platform sandbox abstraction (bwrap / Seatbelt)
+sandbox/        Cross-platform sandbox abstraction (bwrap / Seatbelt / container)
 supervisor/     Service supervisor abstraction (systemd --user / launchd)
 protocol/       JSON-RPC 2.0 over stdio — the IPC wire format
 tests-common/   Shared test helpers (per-test Postgres clusters, etc.)
-workers/        One subdirectory per sandboxed tool worker
-adapters/       Placeholder dir; the Matrix channel lives in workers/matrix
-                + workers/matrix-wire, email failover in workers/mail
+workers/        One subdirectory per sandboxed tool/channel worker
+adapters/       Placeholder dir (empty `signal/`, `telegram/` stubs); the
+                Matrix channel lives in workers/matrix + workers/matrix-wire
 config/         Runtime policy files and per-worker sandbox profiles
+deploy/         Operator deployment templates (e.g. the Matrix homeserver unit)
 scripts/        Setup scripts (install bwrap profile, install Postgres, etc.)
 docs/           All documentation
 prompts/        LLM system-prompt files
-seeds/          SQL seed data for kinds and other static tables
+seeds/          Seed data (memory L0 meta-rules, entity/relation kinds)
+site/           Public website (kastellan.dev) sources
 ```
 
 The **workspace members** declared in the top-level `Cargo.toml` are:
-`core`, `db`, `llm-router`, `sandbox`, `supervisor`, `protocol`,
-`tests-common`, `workers/prelude`, `workers/shell-exec`. Other directories
-either live outside the Rust workspace (Python `gliner-relex` is built
-with `uv`) or are scaffolds not yet ready to compile (see
-[The `workers/` directory](#the-workers-directory) below).
+`core`, `db`, `leak-scan`, `llm-router`, `sandbox`, `supervisor`,
+`protocol`, `tests-common`, and the Rust workers `workers/prelude`,
+`workers/shell-exec`, `workers/web-common`, `workers/web-fetch`,
+`workers/web-search`, `workers/python-exec`, `workers/egress-proxy`,
+`workers/matrix-wire`, `workers/matrix`. The Python workers
+(`workers/gliner-relex`, `workers/browser-driver`) live outside the Rust
+workspace and are built with `uv`; `workers/mail` is an empty scaffold.
+See [The `workers/` directory](#the-workers-directory) below.
 
 ---
 
@@ -40,67 +47,83 @@ This is the largest crate and the one most contributors will touch.
 
 ```
 core/src/
-  main.rs                Daemon entry point
+  main.rs                Daemon entry point (probe → connect pool → spawn
+                         mirror → block on SIGTERM/SIGINT)
   lib.rs                 Public crate API
   tool_host.rs           THE dispatcher chokepoint — every worker call goes here
+  tool_host/             Chokepoint submodules: secret_scrub (python-exec
+                         output scrub), egress_provision (dispatch-time
+                         secret-hash provisioning), watchdog, lockdown env
   workspace.rs           Per-worker scratch directory lifecycle
   sandbox_health.rs      Boot-time sandbox-backend probe
   classification_inference.rs
                          Heuristic data-classification used by CASSANDRA stage 0
 
   scheduler/             Tick → plan → review → dispatch → repeat loop
+                         (runner, lanes, crash recovery, l3_run routing)
   cassandra/             CASSANDRA review pipeline
     mod.rs               Public re-exports
-    types.rs             Plan, PlannedStep, Verdict, DataClass, Severity
-    review.rs            ReviewStage trait, ChainReviewStage,
-                         ConstitutionalGuard, DeterministicPolicy stubs
-    constitutional.rs    Five hard-coded constitutional constraints
-    deterministic.rs     Data-classification invariants
-    injection_guard.rs   Worker-output prompt-injection screen (catalogue
-                         scan, ≥ 0.70 block threshold) — wired into
-                         tool_host::dispatch after worker.call returns
+    types.rs / types/    Plan, PlannedStep, Verdict, DataClass, Severity
+    review.rs            ReviewStage trait + ChainReviewStage runner
+    constitutional.rs    Real constitutional-principle screen (English phrases)
+    deterministic.rs     Data-classification invariants (ceiling/floor/step)
+    injection_guard.rs   Worker-output prompt-injection screen (per-tool
+    injection_guard/     GuardProfile Strict/Relaxed, ≥ 0.70 block threshold)
+                         — wired into tool_host::dispatch after worker.call
 
   memory/                Recall + memory layers
-    mod.rs               Public re-exports
+    mod.rs               Public re-exports / facade
     recall.rs            recall() — RRF fusion across semantic, lexical, graph
     embed.rs             embed_query() via llm-router; MemoryError
-    layers.rs            L0 (raw observation) and L1 (promoted) layer types
-    l0_seed.rs           Seeding L0 rows from new observations
-    l1_promote.rs        Promotion logic: which L0 rows become L1 memories
-    entity_link.rs       Entity ↔ memory linkage helpers
+    l0_seed.rs           Seed L0 rows from new observations
+    l1_promote.rs        Promote L0 rows into L1 memories
+    l3_crystallise / l3_approval / l3_invoke / l3_surface
+                         Templated L3 skill lifecycle
+    l3py_crystallise / l3py_approval / l3py_invoke
+                         Agent-authored Python L3 skill lifecycle
+
+  secrets/               Vault (TTL'd in-memory store) + SecretRef opaque
+                         newtype + secret:// substitution + value_fingerprint
+  channel/               Channel bus: Channel trait, auth/pairing,
+                         injection screen, route, Matrix adapter
+  egress/                Host side of the egress proxy: sidecar spawn,
+                         force-routed net workers, decision audit, leak
+                         provisioning
+  handoff.rs             In-memory content-addressed large-result cache
+  registry_build.rs      Static WORKER_MANIFESTS + build_tool_registry
+  worker_manifest.rs     WorkerManifest trait + binary discovery
 
   entity_extraction/     Entity extraction pipeline (calls gliner-relex worker)
-    batch_upsert/        Batched upsert into entities + relations tables
   observation/           Observation phase: turn channel events into L0 rows
   prompt_assembly/       Builds the LLM prompt from recalled context
   recall_assembly/       Assembles recall query parameters from a task
+  worker_lifecycle/      Long-lived worker management (SingleUse / IdleTimeout
+                         / Composite managers + egress force-routing glue)
 
-  worker_lifecycle/      Long-lived worker management (gliner-relex etc.)
-    types.rs             WorkerHandle, lifecycle states
-    manager.rs           Spawn / restart / health-check loop
-    manager/             Submodules of manager (oversized → split per soft
-                         500-LOC cap)
-    idle_timeout.rs      Reap idle workers after a quiet window
-    idle_timeout/        Submodules of idle_timeout (release path lifted
-                         into a sibling per recent refactor)
-    composite.rs         Composite policy combining manager + idle_timeout
-
-  workers/               Adapters from core to specific worker crates
-    gliner_relex/        Spawn + JSON-RPC contract for the GLiNER/ReLeX worker
+  workers/               Host-side manifests + clients for each worker
+    shell_exec.rs        ShellExecManifest + entry
+    web_fetch.rs / web_search.rs
+    python_exec.rs       Net::Deny + WorkerStrict executor manifest
+    browser_driver.rs / browser_driver/   Playwright render worker manifest
+    gliner_relex.rs / gliner_relex/        torch entity-extraction manifest
+    interpreter_deps.rs  Out-of-prefix interpreter-lib auto-bind helper
 
   audit_mirror.rs        Background JSONL mirror of audit_log rows
   audit_tail.rs          CLI audit log viewer helpers
   cli_audit.rs           Audit write helpers used by CLI subcommands
-  bin/kastellan-cli/       All CLI subcommands (ask, audit, tasks, entities, …)
+  bin/kastellan-cli/       All CLI subcommands (ask, audit, tasks, entities,
+                         relations, memory l1/l3, secrets, pair, …)
 ```
 
 The `tool_host.rs` file is especially important. It is the **only** place that
 authors a `WorkerCommand` and the only place that writes audit log entries for
 tool calls. If you are building a new entry point (a channel, a routine), it
-must call through `dispatch()` — never spawn a worker directly. Worker
-*output* also passes through the same chokepoint, where it is screened by
-`cassandra::injection_guard::screen` before being handed back to the
-scheduler — see [chapter 11](./11-cassandra-pipeline.md).
+must call through `dispatch()` — never spawn a worker directly. On the way in,
+`dispatch` substitutes any `secret://` references into worker params; on the
+way out, worker *output* passes back through the same chokepoint where it is
+screened by `cassandra::injection_guard` (and, for python-exec, scrubbed of any
+materialized-secret fingerprints) before being handed back to the scheduler —
+see [chapter 11](./11-cassandra-pipeline.md).
 
 ---
 
@@ -113,49 +136,63 @@ sandbox/src/
   linux_bwrap.rs      Linux backend (bubblewrap)
   linux_cgroup.rs     cgroup v2 CPU/memory caps via systemd-run
   macos_seatbelt.rs   macOS backend (sandbox-exec / Seatbelt) — shipped
-  macos_container.rs  macOS micro-VM backend (Apple container CLI, optional,
-                      Tahoe+) — file exists; not yet wired into the
-                      SandboxBackendKind enum
+  macos_container.rs  macOS micro-VM backend (Apple `container` CLI, opt-in
+                      per-worker, Tahoe+) — wired into SandboxBackendKind
 sandbox/tests/
-  linux_smoke.rs      Negative tests: file denials, network denial, OOM kill
-  macos_smoke.rs      Same tests for macOS
+  linux_smoke.rs            Negative tests: file denials, net denial, OOM kill
+  macos_smoke.rs            Same tests for macOS
+  macos_container_smoke.rs  Real Apple `container` tests (opt-in)
 ```
 
 The key abstraction is `SandboxPolicy` (a plain struct with fields like
-`fs_read`, `fs_write`, `net`, `mem_mb`) and the `SandboxBackend` trait
-(`spawn_under_policy`). The Linux and macOS backends both implement the same
-trait from the same `SandboxPolicy` — you only write policy once.
+`fs_read`, `fs_write`, `net`, `proxy_uds`, `mem_mb`, `profile`) and the
+`SandboxBackend` trait (`spawn_under_policy`). The Linux and macOS backends
+both implement the same trait from the same `SandboxPolicy` — you only write
+policy once. `SandboxBackendKind` lets a worker opt into a specific backend
+(e.g. the Apple `container` micro-VM on macOS). `Net` is `Deny` /
+`Allowlist(hosts)` / `ProxyEgress`, and `Profile` selects the syscall/Seatbelt
+cluster (`WorkerStrict` / `WorkerNetClient` / `WorkerBrowserClient` /
+`WorkerMlClient`). See [chapter 7](./07-sandboxing.md).
 
 ---
 
 ## The `workers/` directory
 
-Each subdirectory is intended to become an independent binary crate. Today
-only two are in the Rust workspace:
+Each subdirectory is an independent worker. Rust workers are members of the
+Cargo workspace; Python workers are built with `uv` and driven from core over
+JSON-RPC.
 
 ```
 workers/
-  prelude/          [IN WORKSPACE] Shared init: Landlock + seccomp lock-down,
-                    JSON-RPC serve. Every Rust worker imports this.
-  shell-exec/       [IN WORKSPACE] Runs allow-listed shell commands (no shell
-                    interpretation). Argv allowlist via env var.
+  prelude/          [RUST] Shared init: Landlock + seccomp lock-down, JSON-RPC
+                    serve. Also ships kastellan-worker-lockdown-exec, the
+                    lock_down()→execve shim that gives pure-Python venv workers
+                    worker-side Linux seccomp + Landlock.
+  shell-exec/       [RUST] Runs allow-listed shell commands (no shell
+                    interpretation). Argv allowlist via KASTELLAN_SHELL_ALLOWLIST.
+  web-common/       [RUST] Shared lib for net-egress workers: HostAllowlist,
+                    HttpGet transport, CONNECT-over-UDS proxy connector.
+  web-fetch/        [RUST] HTTPS-only web.fetch (HTML readability / PDF / text).
+  web-search/       [RUST] web.search against a SearxNG JSON endpoint.
+  python-exec/      [RUST] Executes agent-authored Python under the strictest
+                    policy (Net::Deny, curated stdlib, no site-packages).
+  egress-proxy/     [RUST] Per-worker sandboxed CONNECT proxy: allowlist + SSRF
+                    + TLS-intercept MITM + leak scanner + SPKI pinning.
+  matrix-wire/      [RUST] Shared serde wire types for the Matrix worker.
+  matrix/           [RUST] Matrix channel worker (matrix-rust-sdk behind a seam;
+                    hermetic parts compile by default, live SDK is feature-gated).
 
-  gliner-relex/     [scaffolded, Python] Named-entity extraction via GLiNER
-                    + ReLeX. Built with uv, not cargo. Driven from core via
-                    JSON-RPC.
-  python-exec/      [scaffolded, in progress] General Python execution
-  web-fetch/        [scaffolded, in progress] HTTP fetcher
-  browser-driver/   [scaffolded, in progress] Playwright-based browser
-  mail/             [scaffolded, in progress] IMAP/SMTP worker
+  gliner-relex/     [PYTHON] Named-entity + relation extraction via GLiNER +
+                    ReLeX. Built with uv. Host manifest in core/src/workers.
+  browser-driver/   [PYTHON] Playwright headless-Chromium read-only render.
+                    Built with uv. Host manifest in core/src/workers.
+  mail/             [empty scaffold] IMAP/SMTP failover — not yet built.
 ```
 
-Aspirational workers that aren't yet members of the workspace will not be
-built by `cargo build --workspace`. When you make one ready, add it to
-`[workspace.members]` in the top-level `Cargo.toml` and update this list.
-
 Workers communicate with the core exclusively over stdin/stdout using
-JSON-RPC 2.0 (`kastellan-protocol`). They never talk to Postgres. They
-never talk to each other.
+JSON-RPC 2.0 (`kastellan-protocol`). They never talk to Postgres. They never
+talk to each other. A net-egress worker reaches the network only through its
+own egress-proxy sidecar (force-routed on by default) — never directly.
 
 ---
 
@@ -171,8 +208,9 @@ db/src/
   conn.rs             Connection options (peer auth, search_path, etc.)
   probe.rs            Liveness / readiness probe
   audit.rs            audit_log writes; SHA-256 fingerprint for oversized rows
-  memories.rs         L0/L1 memory rows + recall helpers (semantic + lexical)
-  graph.rs / graph/   entities + relations graph queries
+  memories.rs / memories/  L0/L1/L3 memory rows + recall helpers; light
+                      (embedding-skipping) write path; skill-trust accessors
+  graph.rs / graph/   entities + relations graph queries (recursive-CTE walks)
   entities.rs         Entity row CRUD
   entity_kinds.rs     entity_kinds seed table accessors
   entity_name.rs      Canonical-name helpers
@@ -180,10 +218,12 @@ db/src/
   tasks.rs            tasks table CRUD; FOR UPDATE SKIP LOCKED claim
   tool_allowlists.rs  Per-tool egress allowlist rows
   agent_prompts.rs    Versioned system-prompt store
-  secrets.rs          AES-256-GCM-at-rest secret store (decrypt on demand)
+  pairings.rs         Channel DM pairings + single-use pairing codes
+  secrets.rs / secrets/  AES-256-GCM-at-rest secret store (crypto, key
+                      providers [OS keyring], async DB I/O)
   tests.rs            Cross-module DB integration tests
   bin/                kastellan-db-init and other admin binaries
-db/migrations/        Embedded *.sql migrations baked in via sqlx::migrate!
+db/migrations/        Embedded *.sql migrations (0001..0018) via sqlx::migrate!
 ```
 
 Migrations live under `db/migrations/` and are embedded into the binary at
@@ -220,9 +260,25 @@ Phase 5. See [chapter 13](./13-llm-router.md) for details.
 
 Cross-platform service supervisor abstraction. Generates and installs a
 `systemd --user` unit on Linux and a `launchd` plist on macOS so the agent
-restarts on logout/reboot. Skeleton today — the public trait and the
-per-platform implementations are sketched but not yet driving production
-boot.
+restarts on logout/reboot. Functional: `ServiceSpec` (with `after`/`part_of`
+ordering and optional `restart_backoff`), `TargetSpec`, and
+`Supervisor::{install,start,stop,uninstall}_target` drive a real
+`kastellan.target` bring-up of Postgres + core. `specs::` holds the core,
+Postgres, and target specs; service names are screened by
+`validate_service_name` before any unit file is written.
+
+---
+
+## The `leak-scan/` crate
+
+`kastellan-leak-scan` is a small, pure (serde/serde_json/sha2 only)
+credential-leak scanner — the single source of truth shared by the egress
+proxy (which *detects* and blocks leaks mid-stream) and the core (which
+*scrubs* python-exec output). It has no async, no I/O: a `RollingMatcher`
+(streaming, per-length Rabin rolling pre-filter + SHA-256 confirm) for the
+proxy, a `redact()` sibling for core's output scrub, and the
+`secret_hashes.json` wire codec. Secret values shorter than 8 bytes are
+unscannable by design.
 
 ---
 

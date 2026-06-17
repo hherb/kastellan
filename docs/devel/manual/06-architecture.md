@@ -47,7 +47,11 @@ schedules work, reviews plans, and manages the lifetime of worker processes.
 **Worker processes** (one per tool invocation)  
 Short-lived processes that execute a single tool call and exit. They never
 talk to Postgres. They never talk to each other. They speak JSON-RPC over
-their own stdin/stdout.
+their own stdin/stdout. A worker that needs network egress gets its own
+sandboxed **egress-proxy sidecar** (force-routed on by default): the worker
+runs in a private network namespace whose only route out is the proxy's Unix
+socket, which enforces the host:port allowlist + SSRF guard. Workers never
+reach the network directly.
 
 **Postgres** (long-lived, local, Unix socket only)  
 Stores memories, tasks, the audit log, entity/relation graph, and secrets.
@@ -100,7 +104,7 @@ the existing helper types.
 
 ## Memory and recall
 
-Memories live in two tiers under `core::memory`:
+Memories live in layers under `core::memory`:
 
 - **L0 — raw observations.** Every incoming channel event, every tool
   result the scheduler decides to remember, is seeded into L0 by
@@ -108,6 +112,10 @@ Memories live in two tiers under `core::memory`:
 - **L1 — promoted memories.** `memory::l1_promote` distills L0 rows into
   longer-lived L1 memories with embeddings + tsvector + entity links.
   Recall queries hit L1.
+- **L3 — skills.** Successful trajectories crystallise into reusable
+  JSON-RPC tool-call templates (or verbatim agent-authored Python),
+  promoted through a trust lifecycle (untrusted → user-approved → pinned)
+  before they can be recalled and re-invoked. See chapter 12.
 
 L1 memories are addressable via three lanes:
 
@@ -171,4 +179,4 @@ pipeline.
 | New injection pattern | Add an entry to the catalogue in `core/src/cassandra/injection_guard.rs` |
 | New recall lane | New lane in `core/src/memory/recall.rs` and wire into `recall()` |
 | New LLM backend | Implement in `llm-router/src/backend.rs`; gate selection in `policy.rs` |
-| New channel adapter | New crate under `adapters/`; connect via JSON-RPC to core |
+| New channel | Worker crate under `workers/` + a `Channel` impl in `core/src/channel/`; wire into the `ChannelBus` |

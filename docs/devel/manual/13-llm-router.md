@@ -94,8 +94,10 @@ caller changes.
 ## What the chokepoint guarantees today
 
 1. **Single egress URL.** No worker, tool, or library elsewhere in the
-   workspace opens an outbound HTTP connection to a model backend. The
-   future egress proxy will see exactly one client.
+   workspace opens an outbound HTTP connection to a model backend. (The
+   per-worker egress proxy that already guards *tool* egress is separate;
+   the router is the core's own single LLM-egress seam, and is where a
+   Phase-5 LLM-egress policy would mount.)
 2. **Stable typed surface.** Callers see `ChatRequest` / `ChatResponse`,
    not raw JSON.
 3. **Audit-log friendly.** `Backend::as_tag` and the serde shapes are

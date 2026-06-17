@@ -24,8 +24,9 @@ cargo build -p kastellan-sandbox
 cargo build -p kastellan-core
 ```
 
-Warnings are expected for a few pre-existing issues in `db/src/probe.rs` and
-`kastellan-protocol`. Do not introduce new warnings.
+The workspace builds clean and CI gates on
+`cargo clippy --workspace --all-targets -D warnings`. Do not introduce new
+warnings.
 
 ---
 
@@ -107,23 +108,35 @@ The CLI for interacting with a running daemon:
 |----------|---------|---------|
 | `KASTELLAN_LLM_LOCAL_URL` | `http://127.0.0.1:8000/v1` (Linux) / `:11434/v1` (macOS) | Local LLM endpoint |
 | `KASTELLAN_LLM_LOCAL_MODEL` | `""` | Model name to pass to the local LLM |
-| `KASTELLAN_SHELL_EXEC_BIN` | (auto-detected) | Path to `kastellan-worker-shell-exec` binary |
-| `KASTELLAN_SHELL_EXEC_ALLOWLIST` | `""` | Colon-separated list of allowed shell commands |
+| `KASTELLAN_SHELL_ALLOWLIST` | `[]` | JSON array of allowed argv patterns (read by the shell-exec worker) |
+| `KASTELLAN_EGRESS_FORCE_ROUTING` | `1` (on) | Route `Net::Allowlist` workers through their per-worker egress proxy. Fail-closed. |
+| `KASTELLAN_WEB_SEARCH_ENDPOINT` | (unset) | SearxNG `/search` endpoint for the web-search worker |
 | `KASTELLAN_STATE_DIR` | `~/.local/state/kastellan` | Audit JSONL output directory |
+
+### Opt-in worker enable flags
+
+Some workers are gated behind an explicit enable flag (off by default):
+
+| Flag | Worker |
+|------|--------|
+| `KASTELLAN_PYTHON_EXEC_ENABLE=1` | `python-exec` |
+| `KASTELLAN_BROWSER_DRIVER_ENABLE=1` | `browser-driver` |
+| `KASTELLAN_GLINER_RELEX_ENABLE=1` | `gliner-relex` (its `#[ignore]` real-model e2e tests) |
 
 ---
 
 ## Python worker tests
 
-The `gliner-relex` worker is Python and lives outside the Cargo workspace.
-Its tests use `uv` (a fast Python package manager):
+The Python workers (`gliner-relex`, `browser-driver`) live outside the Cargo
+workspace. Their tests use `uv` (a fast Python package manager):
 
 ```sh
-cd workers/gliner-relex
-uv run pytest
+cd workers/gliner-relex && uv run pytest
+cd workers/browser-driver && uv run pytest
 ```
 
-These tests are independent of the Rust test suite. They run against the
-Python source directly without spawning a Rust process. End-to-end tests
-that drive `gliner-relex` from `core` live in `core/tests/` and are gated
-behind `#[ignore]` so they only run when the model is installed.
+These tests are independent of the Rust test suite — they run against the
+Python source directly without spawning a Rust process. End-to-end tests that
+drive these workers from `core` (under the real sandbox) live in `core/tests/`
+and are gated behind `#[ignore]` + an enable flag, so they only run when the
+model / browser engine is installed.
