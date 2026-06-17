@@ -268,6 +268,19 @@ fn param_echo_skill() -> PythonSkillCandidate {
     }
 }
 
+/// A Python skill that prints the SORTED keys of its own process environment,
+/// so the test can pin EXACTLY which env vars the python-exec child sees —
+/// proving runtime params (JSON inside `KASTELLAN_PYTHON_PARAMS`) never become
+/// env vars and that no host lockdown env var (`KASTELLAN_LANDLOCK_*`, `PATH`,
+/// `KASTELLAN_PYTHON_EXEC_PYTHON`, …) leaks into the child.
+fn env_keys_skill() -> PythonSkillCandidate {
+    PythonSkillCandidate {
+        name: "env_keys_py".into(),
+        description: "Print the python-exec child's environment keys".into(),
+        code: "import os\nprint('ENVKEYS:' + ','.join(sorted(os.environ.keys())))\n".into(),
+    }
+}
+
 /// Crystallise → approve a Python skill via the CLI; returns its memory id.
 /// Unlike the templated path, the Python approve gate needs NO `registry.loaded`
 /// snapshot (a python skill dispatches no tools — the jail is its ceiling), so
@@ -619,7 +632,96 @@ async fn python_skill_params_round_trip_through_jail() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 4 — over-cap params rejection: params serialising to >64 KiB are
+// Scenario 4 — env clobber proof: the python-exec child env is clobber-proof.
+// Runtime params are JSON inside KASTELLAN_PYTHON_PARAMS, never separate env
+// vars, and the worker's env_clear() keeps every host lockdown var out of the
+// child. We pass params named like dangerous env vars (`path`, `ld_preload`)
+// and assert the child's env keys are EXACTLY {HOME, KASTELLAN_PYTHON_PARAMS,
+// TMPDIR}.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn python_exec_child_env_is_clobber_proof() {
+    #[cfg(target_os = "macos")]
+    let _serial = serial_lock();
+
+    if missing_prereqs(true) {
+        return;
+    }
+    let Some(python) = find_python() else {
+        return;
+    };
+    let worker_bin = workspace_target_binary("kastellan-worker-python-exec");
+
+    let suffix = unique_suffix();
+    let user = current_username();
+    let cluster = tokio::task::block_in_place(|| cluster_for(&suffix));
+
+    let pool = prepare_db(&cluster).await;
+    let id = seed_and_approve_skill(&pool, &env_keys_skill(), &cluster.data_dir, &user).await;
+
+    let mock = spawn_inert_mock().await;
+    let (daemon, _daemon_guards) = bring_up_daemon(
+        &suffix,
+        &cluster.data_dir,
+        &mock.base_url,
+        &user,
+        &worker_bin,
+        &python,
+        true, // python-exec enabled
+    );
+
+    let output = Command::new(cli_binary())
+        .args([
+            "memory",
+            "l3",
+            "run",
+            &id.to_string(),
+            "--param",
+            "path=/evil/bin",
+            "--param",
+            "ld_preload=/evil.so",
+            "--execute",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .env("USER", &user)
+        .env("KASTELLAN_DATA_DIR", cluster.data_dir.to_string_lossy().as_ref())
+        .env("KASTELLAN_L3_RUN_GRACE_SECS", "30")
+        .env("KASTELLAN_L3_RUN_TIMEOUT_SECS", "120")
+        .output()
+        .expect("spawn kastellan-cli memory l3 run env_keys --execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert!(
+        output.status.success(),
+        "env-keys run must exit 0; got {:?}\n--- CLI stdout ---\n{}\n--- CLI stderr ---\n{}\n\
+         --- daemon stdout ({}) ---\n{}\n--- daemon stderr ({}) ---\n{}\n",
+        output.status,
+        stdout,
+        stderr,
+        daemon.stdout_path.display(),
+        std::fs::read_to_string(&daemon.stdout_path).unwrap_or_default(),
+        daemon.stderr_path.display(),
+        std::fs::read_to_string(&daemon.stderr_path).unwrap_or_default(),
+    );
+    // env_clear() leaves exactly TMPDIR + HOME + KASTELLAN_PYTHON_PARAMS; the
+    // `path`/`ld_preload` params live INSIDE KASTELLAN_PYTHON_PARAMS as JSON keys,
+    // not as env vars, so they never appear here.
+    assert!(
+        stdout.contains("ENVKEYS:HOME,KASTELLAN_PYTHON_PARAMS,TMPDIR"),
+        "python-exec child env must be exactly {{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}}; got:\n{stdout}",
+    );
+
+    pool.close().await;
+    drop(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 5 — over-cap params rejection: params serialising to >64 KiB are
 // rejected by the core gate (validate_python_params) before dispatch, and the
 // CLI renders a REFUSED outcome (exit non-zero). Asserted at the CLI output
 // layer, matching the fail-closed assertion style of scenario 2.
