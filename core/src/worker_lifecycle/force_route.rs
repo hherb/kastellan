@@ -22,6 +22,7 @@ use std::sync::Arc;
 use kastellan_sandbox::{Net, SandboxBackend};
 
 use crate::egress::audit::EgressAuditRow;
+use crate::egress::cert_pins::{parse_cert_pins, CertPinError, CertPinMap};
 use crate::egress::net_worker::{pg_decision_sink, spawn_forced_net_worker};
 use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
 use crate::worker_manifest::{discover_binary, ResolveCtx};
@@ -34,6 +35,10 @@ const ENV_PROXY_BIN: &str = "KASTELLAN_EGRESS_PROXY_BIN";
 const PROXY_BIN_DEFAULT: &str = "kastellan-worker-egress-proxy";
 /// Optional override for the per-worker sidecar scratch root.
 const ENV_SCRATCH_DIR: &str = "KASTELLAN_EGRESS_SCRATCH_DIR";
+/// Optional operator cert-pin config for force-routed workers (slice #4). Same
+/// `{host:["sha256/<b64>"]}` JSON the egress-proxy sidecar enforces. Validated
+/// fail-closed at startup; selected per worker by allowlist host.
+const ENV_CERT_PINS: &str = "KASTELLAN_EGRESS_CERT_PINS";
 
 /// Factory that mints a fresh decision sink for each force-routed worker. Each
 /// sidecar gets its own `FnMut` so its decision-ingest thread owns an
@@ -58,6 +63,13 @@ pub struct ForceRoutingConfig {
     pub(crate) scratch_root: PathBuf,
     /// Mints the per-worker decision sink (see [`DecisionSinkFactory`]).
     pub(crate) make_sink: DecisionSinkFactory,
+    /// Operator cert pins for force-routed workers (slice #4). `Some` ⇒
+    /// non-empty (an empty/`{}` config normalizes to `None` in [`from_env`]).
+    /// Selected per worker by allowlist host in [`ForceRoutingConfig::pins_for`]
+    /// (Task 4) and handed to the sidecar via `cert_pins_json`.
+    // Task 4 wires this field up; suppress until then.
+    #[allow(dead_code)]
+    pub(crate) cert_pins: Option<CertPinMap>,
 }
 
 impl ForceRoutingConfig {
@@ -69,8 +81,9 @@ impl ForceRoutingConfig {
         proxy_bin: PathBuf,
         scratch_root: PathBuf,
         make_sink: DecisionSinkFactory,
+        cert_pins: Option<CertPinMap>,
     ) -> Self {
-        Self { proxy_bin, scratch_root, make_sink }
+        Self { proxy_bin, scratch_root, make_sink, cert_pins }
     }
 }
 
@@ -84,6 +97,31 @@ impl ForceRoutingConfig {
      place kastellan-worker-egress-proxy beside the kastellan binary)"
 )]
 pub struct ProxyBinaryNotFound;
+
+/// Error building the force-routing config from the environment. Either the
+/// proxy binary was missing (fail-closed) or the cert-pin config was malformed
+/// (fail-closed). Mapped to `anyhow` at the `main.rs` startup call site.
+#[derive(Debug, thiserror::Error)]
+pub enum ForceRoutingError {
+    #[error(transparent)]
+    ProxyBinaryNotFound(#[from] ProxyBinaryNotFound),
+    #[error("invalid {env} config: {source}", env = ENV_CERT_PINS)]
+    CertPins {
+        #[from]
+        source: CertPinError,
+    },
+}
+
+/// Pure: turn the raw `KASTELLAN_EGRESS_CERT_PINS` env value into an optional
+/// parsed map. Unset, blank, or `{}` → `None` (no pins); a non-empty valid map →
+/// `Some(map)`; malformed → `Err` (the daemon fails closed at startup).
+fn parse_cert_pins_env(value: Option<&str>) -> Result<Option<CertPinMap>, CertPinError> {
+    let Some(raw) = value.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let map = parse_cert_pins(raw)?;
+    Ok(if map.is_empty() { None } else { Some(map) })
+}
 
 /// Pure: is this worker's `net` policy one the egress proxy fronts?
 ///
@@ -203,12 +241,13 @@ pub fn resolve_force_routing(
     proxy_bin: Option<PathBuf>,
     scratch_root: PathBuf,
     make_sink: DecisionSinkFactory,
+    cert_pins: Option<CertPinMap>,
 ) -> Result<Option<ForceRoutingConfig>, ProxyBinaryNotFound> {
     if !enabled {
         return Ok(None);
     }
     let proxy_bin = proxy_bin.ok_or(ProxyBinaryNotFound)?;
-    Ok(Some(ForceRoutingConfig::new(proxy_bin, scratch_root, make_sink)))
+    Ok(Some(ForceRoutingConfig::new(proxy_bin, scratch_root, make_sink, cert_pins)))
 }
 
 /// Pure: does this env value enable force-routing? Truthy spellings are
@@ -238,18 +277,18 @@ pub fn from_env(
     pool: sqlx::PgPool,
     handle: tokio::runtime::Handle,
     exe_dir: Option<&Path>,
-) -> Result<Option<Arc<ForceRoutingConfig>>, ProxyBinaryNotFound> {
+) -> Result<Option<Arc<ForceRoutingConfig>>, ForceRoutingError> {
     if !env_flag_enabled(std::env::var(ENV_ENABLE).ok()) {
         return Ok(None);
     }
+    let cert_pins = parse_cert_pins_env(std::env::var(ENV_CERT_PINS).ok().as_deref())?;
     let proxy_bin = discover_egress_proxy_bin(exe_dir);
     let scratch_root = std::env::var_os(ENV_SCRATCH_DIR)
         .map(PathBuf::from)
         .unwrap_or_else(default_egress_scratch_root);
-    let make_sink: DecisionSinkFactory = Box::new(move || {
-        Box::new(pg_decision_sink(pool.clone(), handle.clone()))
-    });
-    Ok(resolve_force_routing(true, proxy_bin, scratch_root, make_sink)?.map(Arc::new))
+    let make_sink: DecisionSinkFactory =
+        Box::new(move || Box::new(pg_decision_sink(pool.clone(), handle.clone())));
+    Ok(resolve_force_routing(true, proxy_bin, scratch_root, make_sink, cert_pins)?.map(Arc::new))
 }
 
 /// Default per-worker sidecar scratch root (when `KASTELLAN_EGRESS_SCRATCH_DIR`
@@ -343,6 +382,7 @@ mod tests {
             PathBuf::from("/nonexistent/egress-proxy"),
             scratch_root,
             noop_sink_factory(),
+            None,
         )
     }
 
@@ -466,6 +506,7 @@ mod tests {
             Some(PathBuf::from("/opt/egress-proxy")),
             PathBuf::from("/tmp"),
             noop_sink_factory(),
+            None,
         )
         .expect("disabled never errors");
         assert!(out.is_none(), "disabled => None (legacy path)");
@@ -478,6 +519,7 @@ mod tests {
             Some(PathBuf::from("/opt/egress-proxy")),
             PathBuf::from("/tmp"),
             noop_sink_factory(),
+            None,
         )
         .expect("enabled + binary => Ok(Some)");
         let cfg = out.expect("Some");
@@ -488,7 +530,7 @@ mod tests {
     #[test]
     fn enabled_without_binary_fails_closed() {
         let out =
-            resolve_force_routing(true, None, PathBuf::from("/tmp"), noop_sink_factory());
+            resolve_force_routing(true, None, PathBuf::from("/tmp"), noop_sink_factory(), None);
         assert!(
             out.is_err(),
             "enabled but no proxy binary must fail closed, not fall back to unrouted egress"
@@ -578,5 +620,43 @@ mod tests {
             Some(exe.join(PROXY_BIN_DEFAULT)),
             "unset override must use the exe-relative sibling default"
         );
+    }
+
+    #[test]
+    fn parse_cert_pins_env_handles_absent_blank_and_empty() {
+        assert!(parse_cert_pins_env(None).unwrap().is_none());
+        assert!(parse_cert_pins_env(Some("")).unwrap().is_none());
+        assert!(parse_cert_pins_env(Some("   ")).unwrap().is_none());
+        // `{}` is valid but empty → normalized to None (no pins).
+        assert!(parse_cert_pins_env(Some("{}")).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_cert_pins_env_parses_valid_map() {
+        let got = parse_cert_pins_env(Some(r#"{"a.com":["sha256/A"]}"#))
+            .unwrap()
+            .expect("non-empty map => Some");
+        assert!(!got.is_empty());
+    }
+
+    #[test]
+    fn parse_cert_pins_env_fails_closed_on_malformed() {
+        let err = parse_cert_pins_env(Some(r#"{"a.com":[]}"#)).unwrap_err();
+        assert!(matches!(err, crate::egress::cert_pins::CertPinError::EmptyPinList(_)));
+    }
+
+    #[test]
+    fn resolve_force_routing_stores_cert_pins() {
+        let pins = parse_cert_pins_env(Some(r#"{"a.com":["sha256/A"]}"#)).unwrap();
+        let cfg = resolve_force_routing(
+            true,
+            Some(PathBuf::from("/opt/egress-proxy")),
+            PathBuf::from("/tmp"),
+            noop_sink_factory(),
+            pins.clone(),
+        )
+        .expect("ok")
+        .expect("some");
+        assert_eq!(cfg.cert_pins, pins);
     }
 }
