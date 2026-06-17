@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
 
-use crate::fingerprint::{poly, SecretFingerprint, RABIN_BASE};
+use crate::fingerprint::{poly, pow_base, sha256_hex, SecretFingerprint, RABIN_BASE};
 
 /// A confirmed leak: which secret (by its SHA-256, hex) and where in the stream
 /// its first byte sat.
@@ -121,7 +121,7 @@ impl RollingMatcher {
                     let digest: [u8; 32] = h.finalize().into();
                     if shas.contains(&digest) {
                         return Some(LeakHit {
-                            sha256_hex: hex(&digest),
+                            sha256_hex: sha256_hex(&digest),
                             offset: i + 1 - l,
                         });
                     }
@@ -131,15 +131,6 @@ impl RollingMatcher {
         }
         None
     }
-}
-
-/// `RABIN_BASE^(len-1)`, wrapping. `len >= 1` guaranteed by the caller.
-fn pow_base(len: usize) -> u64 {
-    let mut p = 1u64;
-    for _ in 0..len.saturating_sub(1) {
-        p = p.wrapping_mul(RABIN_BASE);
-    }
-    p
 }
 
 /// Direct poly hash of the `len`-byte window ending at absolute index `i`.
@@ -155,14 +146,6 @@ fn read_window(ring: &[u8], cap: usize, i: u64, len: usize) -> Vec<u8> {
         .collect()
 }
 
-fn hex(bytes: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +158,7 @@ mod tests {
     fn sha_hex(v: &[u8]) -> String {
         let mut h = Sha256::new();
         h.update(v);
-        hex(&h.finalize().into())
+        sha256_hex(&h.finalize().into())
     }
 
     #[test]

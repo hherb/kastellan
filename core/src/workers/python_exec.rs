@@ -26,7 +26,7 @@ use crate::tool_host::ENV_LANDLOCK_RW;
 use crate::worker_manifest::{discover_binary, Resolution, ResolveCtx, WorkerManifest};
 
 /// Tool name the registry/planner keys python-exec on.
-const TOOL_NAME: &str = "python-exec";
+pub(crate) const TOOL_NAME: &str = "python-exec";
 /// Operator override for the worker binary path.
 const BIN_ENV: &str = "KASTELLAN_PYTHON_EXEC_BIN";
 /// Exe-relative sibling default (cargo `target/debug` + flat installs).

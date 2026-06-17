@@ -21,6 +21,8 @@ pub use audit_sink::{AuditSink, PgAuditSink};
 
 mod egress_provision;
 
+mod secret_scrub;
+
 mod lockdown_env;
 pub use lockdown_env::{derive_lockdown_env, ENV_CPU_MS, ENV_LANDLOCK_PROFILE, ENV_LANDLOCK_RO, ENV_LANDLOCK_RW, ENV_SECCOMP_PROFILE};
 
@@ -338,7 +340,23 @@ pub async fn dispatch_with_sink(
     // text-channel content (the planner sees them as failure codes,
     // not as text), so they can't carry injection — skip.
     let (final_result, blocked_meta) = match call_result {
-        Ok(v) => {
+        Ok(mut v) => {
+            // ── python-exec output secret-scrub (design 2026-06-17). ──
+            // For a worker that runs agent-authored code, redact every secret
+            // materialized into THIS dispatch's params out of the result before
+            // it is screened, audited (tool row + JSONL mirror), or returned to
+            // the operator's InvokeReport. No-op (byte-identical) for every other
+            // worker and for any call with no scannable secrets. `req_for_audit`
+            // is the pre-substitution snapshot, so its `secret://` refs are still
+            // present for fingerprinting.
+            if secret_scrub::worker_redacts_output(tool) {
+                let fps = secret_scrub::fingerprints_for_dispatch(&req_for_audit, vault);
+                if !fps.is_empty() {
+                    let hits = secret_scrub::scrub_result_value(&mut v, &fps);
+                    secret_scrub::emit_scrub_audit(sink, tool, &hits).await;
+                }
+            }
+
             let (body, truncated) = crate::cassandra::injection_guard::extract_scannable_text(
                 &v,
                 crate::cassandra::injection_guard::SCAN_BYTE_CAP,
