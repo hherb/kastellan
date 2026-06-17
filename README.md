@@ -41,6 +41,10 @@ A long-running personal AI agent designed to:
 Not all of this is built yet — see [Status](#status) for what works today versus
 what's still on the roadmap.
 
+> **New here?** The [**User Manual**](docs/user/manual/index.md) explains — in
+> plain language, for non-developers — what Kastellan is, how it's built, how it
+> protects you, and how to set it up and run it.
+
 ## Design priorities (in order)
 
 1. **Security boundary = the agent's own OS user account.** Worst-case compromise (LLM, tool, dependency, or LLM-authored Python) does not escape that boundary.
@@ -246,7 +250,8 @@ workers/browser-driver/ Playwright read-only render worker (scaffold; non-Rust)
 config/                example runtime policy + per-worker sandbox profiles
 seeds/                 L0 memory meta-rule seed data
 scripts/               host setup (AppArmor profile, Postgres install, SearxNG, Matrix)
-docs/                  architecture, threat-model, CASSANDRA design, roadmap, handovers
+docs/                  architecture, threat-model, CASSANDRA design, roadmap, handovers,
+                       user manual (docs/user/manual), developer manual (docs/devel/manual)
 ```
 
 (`workers/mail` is a placeholder for the email failover transport.)
