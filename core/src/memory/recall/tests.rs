@@ -222,3 +222,31 @@ fn recall_params_with_seeds_enables_all_three_lanes() {
 fn graph_fanout_cap_per_seed_is_thirty_two() {
     assert_eq!(GRAPH_FANOUT_CAP_PER_SEED, 32);
 }
+
+/// Issue #17 — the missing-input policy is *hybrid*, and this pins its sharp
+/// edge: a lane whose input is absent warn-and-skips, BUT when **every**
+/// enabled lane skipped, `recall` returns an `Err` instead of a silent
+/// `Ok(vec![])` that would look like "no matches" and mask the caller bug.
+/// Here the only enabled lane is semantic and `query_embedding` is `None`
+/// — exactly the worst case called out in the issue. The error path returns
+/// before any SQL runs, so a lazy (never-connected) pool is enough.
+#[tokio::test]
+async fn recall_errors_when_only_enabled_lane_lacks_its_input() {
+    let pool = PgPool::connect_lazy("postgres://localhost/kastellan_recall_unit_unused")
+        .expect("construct a lazy pool (no connection is attempted on the all-skip path)");
+    let params = RecallParams {
+        query_text: None,
+        query_embedding: None,
+        seed_entity_ids: None,
+        k: 5,
+        modes: RecallModes::SEMANTIC_ONLY,
+    };
+    let err = recall(&pool, &params)
+        .await
+        .expect_err("semantic-only with no embedding must error, not return an empty Ok");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no lanes ran"),
+        "error should explain the missing-input cause, got: {msg}"
+    );
+}
