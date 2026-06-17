@@ -56,18 +56,29 @@ should be allowed to do. The platform-specific code translates that policy.
 ### Layer 2: Worker-side sandbox (Landlock + seccomp on Linux)
 
 After the worker process starts, it installs a *second* layer on itself before
-serving any JSON-RPC request. It calls `kastellan_worker_prelude::serve_stdio`,
-which:
+serving any JSON-RPC request. A Rust worker calls
+`kastellan_worker_prelude::serve_stdio`, which:
 
 1. Applies **Landlock** — a kernel mechanism that restricts which files the
-   process can access (an allow-list, not a deny-list).
+   process can access (an allow-list, not a deny-list). Both RW (from
+   `fs_write`) and RO (from `fs_read`) rules are derived so a net worker can
+   still read `/etc/resolv.conf`.
 2. Applies **seccomp-bpf** — a filter that restricts which system calls the
-   process can make. The default action is "kill the process". About 110
-   safe syscalls are explicitly allowed.
+   process can make. The default action is "kill the process". A per-profile
+   allow-list of safe syscalls is permitted (`Strict` kills `socket()`,
+   `NetClient` permits it, `BrowserClient` and `MlClient` add the extra
+   syscalls Chromium / torch empirically need).
 3. Starts the JSON-RPC server.
 
-After `restrict_self()` and `apply_filter()` return, the restrictions cannot
-be relaxed — not even by the process itself.
+After the filter is installed the restrictions cannot be relaxed — not even by
+the process itself (`NO_NEW_PRIVS`).
+
+**Pure-Python workers** (`gliner-relex`, `browser-driver`) can't call the Rust
+prelude because bwrap spawns the interpreter directly. They get the same Layer 2
+via `kastellan-worker-lockdown-exec`: a tiny shim that applies the rlimits,
+`lock_down()` (Landlock + seccomp), then `execve`s the venv script, which
+inherits the filter under `NO_NEW_PRIVS`. The shim is discovered fail-closed
+(a missing shim binary makes the worker `Misconfigured`, not unsandboxed).
 
 ---
 
@@ -81,6 +92,8 @@ SandboxPolicy {
     fs_read: vec!["/usr", "/lib"],           // directories the worker can read
     fs_write: vec!["/tmp/kastellan/task-42"],  // directories it can write
     net: Net::Deny,                          // no network
+    proxy_uds: None,                         // egress-proxy socket (set at spawn)
+    profile: Profile::WorkerStrict,          // syscall / Seatbelt cluster
     mem_mb: Some(256),                       // memory cap
     cpu_ms: None,                            // no CPU cap
     // ...
@@ -92,6 +105,40 @@ a Seatbelt profile (macOS). You write the policy once; both platforms enforce it
 
 **Important:** `fs_read` paths must be absolute. Relative paths are rejected
 at `spawn_under_policy` time with a clear error.
+
+---
+
+## Network: deny, allowlist, and the egress proxy
+
+`SandboxPolicy.net` is one of three values:
+
+- `Net::Deny` — no network at all (a private, empty netns on Linux).
+- `Net::Allowlist(hosts)` — the worker may reach the listed `host:port`
+  endpoints. In the default **force-routed** deployment
+  (`KASTELLAN_EGRESS_FORCE_ROUTING=1`), the worker still runs in a private
+  netns with **no direct route**; `proxy_uds` is set at spawn to its own
+  egress-proxy sidecar's Unix socket, and the proxy enforces the allowlist +
+  an SSRF guard. The worker literally cannot reach anything the proxy didn't
+  approve.
+- `Net::ProxyEgress` — the egress proxy's *own* policy: it keeps the host
+  netns because it is the thing doing real DNS + outbound connections, and it
+  is self-enforcing.
+
+This is why "a compromised tool reaches at most the endpoints in that tool's
+allowlist" is enforced by the kernel + the proxy, not by convention.
+
+---
+
+## Profiles
+
+`SandboxPolicy.profile` selects the syscall/Seatbelt cluster:
+
+- `WorkerStrict` — minimal; kills `socket()`. Default.
+- `WorkerNetClient` — adds the syscalls an outbound-HTTPS client needs.
+- `WorkerBrowserClient` — `WorkerNetClient` plus the headless-Chromium set.
+- `WorkerMlClient` — `WorkerNetClient` plus the torch/CUDA-probe set (the
+  worker stays `Net::Deny`; the socket syscalls have no route out). Renders
+  identically to `WorkerStrict` on macOS.
 
 ---
 

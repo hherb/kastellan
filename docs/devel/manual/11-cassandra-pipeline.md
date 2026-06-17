@@ -41,13 +41,13 @@ Both screens are inside the chokepoint. There is no "skip review" flag.
 ```
 core/src/cassandra/
   mod.rs              Public re-exports
-  types.rs            Plan, PlannedStep, Verdict, DataClass, Severity, …
+  types.rs / types/   Plan, PlannedStep, Verdict, DataClass, Severity, …
   review.rs           ReviewStage trait, ChainReviewStage runner,
-                      ConstitutionalGuard and DeterministicPolicy stubs,
-                      NoopReviewStage
-  constitutional.rs   Five hard-coded constitutional constraints (Stage -1)
+                      ConstitutionalGuard, DeterministicPolicy, NoopReviewStage
+  constitutional.rs   Constitutional-principle screen (Stage -1)
   deterministic.rs    Data-classification invariants (Stage 0)
   injection_guard.rs  Worker-output prompt-injection screen
+  injection_guard/    Per-tool GuardProfile (Strict/Relaxed) + catalogue
 ```
 
 Public surface (re-exported through `mod.rs`):
@@ -73,21 +73,24 @@ pub trait ReviewStage: Send + Sync {
 runs them in order. The first `Verdict::Block` wins and the chain
 short-circuits.
 
-Today the chain is wired with two stages:
+Today the chain is wired with two real stages:
 
-- **Stage -1 — `ConstitutionalGuard`** (`constitutional.rs`). Five
-  hard-coded constraints, currently stubbed to always `Approve` so the
-  baseline agent loop is measurable. The eventual real implementation
-  replaces the stub in place; the trait, types, and chain runner are
-  stable.
+- **Stage -1 — `ConstitutionalGuard`** (`constitutional.rs`). Screens each
+  step's instruction against the constitutional principles
+  (`prompts/agent_planner.md`) using a curated, English-phrase,
+  case-insensitive substring catalogue. A hit returns
+  `Verdict::ConstitutionalBlock` with a `(principle, reason)` tag that
+  round-trips into the `cassandra:chain/verdict` audit row; no hit ⇒
+  `Approve` and the chain continues. (English-only by design — the user is
+  an anglophone clinician.)
 
-- **Stage 0 — `DeterministicPolicy`** (`deterministic.rs`).
-  Data-classification invariants (e.g. "PII cannot be sent to a frontier
-  LLM"). Also stubbed in Phase 0, real logic follows the same
-  replace-in-place pattern.
+- **Stage 0 — `DeterministicPolicy`** (`deterministic.rs`). Enforces the
+  data-classification invariants (`ceiling ≥ floor`, `step ≥ floor`,
+  `step ≤ ceiling`) → `Verdict::Block`. The classification floor itself is
+  inferred upstream (CLI keyword classifier + agent raise-only request).
 
 The `#[non_exhaustive]` `Verdict` enum lets future stages introduce a
-`Review` tier without breaking callers.
+`Review` tier (e.g. the planned model-based guard) without breaking callers.
 
 ---
 
@@ -103,14 +106,21 @@ agent's LLM might obediently follow on the next turn.
 ### How the scan works
 
 1. `normalize` lowercases and strips zero-width code points.
-2. The catalogue (22 entries in Slice 1) is matched as substrings.
-   Each entry has:
+2. The catalogue (22 entries) is matched as substrings. Each entry has:
    - a class code (`instruction_override`, `role_hijack`,
      `secret_exfiltration`, `unsafe_tool_coercion`)
    - a weight in `[0.0, 1.0]`
 3. Per-rule weights for matches are summed (capped at 1.0).
 4. If the score ≥ `BLOCK_THRESHOLD` (0.70) → `InjectionDecision::Block`.
    Otherwise `Allow`.
+
+**Per-tool profiles (#142).** The screen runs under a `GuardProfile` chosen
+per tool by `for_tool(...)`: `Strict` (the default) and `Relaxed`. `Relaxed`
+caps the chat-template family at a single sub-threshold contribution so that a
+worker whose legitimate output *discusses* prompt-injection (e.g. a web-fetch
+of a security blog post) is not blocked, while a corroborated attack still
+trips the threshold. Use `screen_with_profile` when you have a tool name;
+`screen` uses the strict default.
 
 ### What happens on Block
 

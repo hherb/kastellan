@@ -11,7 +11,7 @@ Debian-based distributions work; Fedora/Arch users will need to adapt the
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
-rustc --version    # should print 1.77 or later
+rustc --version    # 1.78+ required; the dev box + CI track current stable
 ```
 
 Cargo (the build tool) is installed alongside Rust. The `source` line is
