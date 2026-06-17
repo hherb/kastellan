@@ -50,26 +50,40 @@ record to the wrong person". CASSANDRA reviews each *plan*, not each syscall.
 
 The project is in active development. As of mid-2026:
 
-- The full parent-side sandbox stack is working on both Linux (bwrap +
-  cgroup v2) and macOS (Seatbelt). Worker-side defence-in-depth on Linux
-  (Landlock + seccomp) is shipped.
+- The full parent-side sandbox stack works on both Linux (bwrap +
+  cgroup v2) and macOS (Seatbelt, plus an opt-in Apple `container`
+  micro-VM backend for workers that need real memory enforcement).
+  Worker-side defence-in-depth on Linux (Landlock + seccomp) is shipped,
+  including for the pure-Python workers via a `lock_down()`-then-`execve`
+  exec shim (`kastellan-worker-lockdown-exec`).
 - The scheduler, memory store (semantic + lexical + graph lanes with RRF
-  fusion), CASSANDRA review pipeline (constitutional + deterministic
-  stages + a worker-output prompt-injection guard), audit log + JSONL
-  mirror, LLM router (Phase 0 local-only egress), and a growing CLI are
-  all functional.
-- **Workers in the workspace today:** `prelude` (shared init), `shell-exec`
-  (allow-listed argv, no shell interpretation). Both ship and are
-  integration-tested end-to-end.
-- **Workers scaffolded on disk but not yet in the workspace build:**
-  `gliner-relex` (Python entity extraction), `python-exec`, `web-fetch`,
-  `browser-driver`, `mail`. These are in-progress directories — they are
-  excluded from `[workspace.members]` until they're ready to compile.
-- The egress proxy (per-worker outbound allowlist enforcement) is the
-  next major infrastructure piece.
+  fusion, L0/L1/L3 layers), CASSANDRA review pipeline (real constitutional
+  + deterministic rules + a per-tool worker-output prompt-injection guard),
+  audit log + JSONL mirror, LLM router, opaque secret references (`Vault`),
+  the L3 skill lifecycle (crystallise → approve → pin → invoke, for both
+  templated and agent-authored Python skills), the large-tool-result
+  handoff cache, and a substantial CLI are all functional.
+- **The egress proxy is shipped** — a per-worker sandboxed CONNECT proxy
+  enforcing a host:port allowlist + SSRF guard, with force-routing **on by
+  default** so a net worker reaches its allowlist only through its own
+  egress sidecar (TLS-intercept MITM, credential-leak scanner, and SPKI
+  pinning are all implemented behind it).
+- **Workers in the workspace today (Rust):** `prelude` (shared init +
+  lockdown shim), `shell-exec`, `web-common` (shared net-egress helpers),
+  `web-fetch`, `web-search`, `python-exec` (curated-stdlib executor for
+  agent-authored Python), `egress-proxy`, plus `matrix` / `matrix-wire`
+  (the Matrix channel worker, hermetic parts only).
+- **Python workers (built with `uv`, outside the Cargo workspace, driven
+  from core over JSON-RPC):** `gliner-relex` (entity/relation extraction)
+  and `browser-driver` (headless Chromium render). Each has a Rust-side
+  manifest under `core/src/workers/`.
+- **Channel:** Matrix (self-hosted, single-user, federation off, E2E) is
+  the primary channel; inbound is in progress (hermetic parts shipped, live
+  SDK wiring pending). Email failover and the `workers/mail` worker are not
+  yet built (`workers/mail` is an empty scaffold).
 
 See `docs/devel/ROADMAP.md` for the phased feature list and the latest
-`docs/devel/handovers/HANDOVER.md` for what shipped this week.
+`docs/devel/handovers/HANDOVER.md` for what shipped most recently.
 
 ---
 

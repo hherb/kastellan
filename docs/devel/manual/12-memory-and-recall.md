@@ -29,6 +29,13 @@ incoming event  ───►  L0 (raw observations)  ───►  L1 (promoted 
 Recall queries always hit L1. L0 is forensic — it answers "what exactly
 came in?" rather than "what does the agent know?".
 
+There is also an **L3 — skills** layer: parameterised JSON-RPC tool-call
+templates (or verbatim agent-authored Python) crystallised from successful
+trajectories and promoted through a trust lifecycle (untrusted →
+user-approved → pinned) before they can be recalled and re-invoked. L3 is a
+distinct surface (`l3_*` / `l3py_*` modules + the `memory l3` CLI), separate
+from the L0/L1 recall lanes below.
+
 The layer types and layer-aware helpers live in `core/src/memory/layers.rs`;
 the seeding and promotion logic in `l0_seed.rs` and `l1_promote.rs`.
 
@@ -132,6 +139,10 @@ core/src/memory/
   l0_seed.rs       Seed L0 rows from new observations
   l1_promote.rs    Promote L0 rows into L1 memories
   entity_link.rs   Helpers that link L1 memories to entities
+  l3_crystallise / l3_approval / l3_invoke / l3_surface
+                   Templated L3 skill lifecycle
+  l3py_crystallise / l3py_approval / l3py_invoke
+                   Agent-authored Python L3 skill lifecycle
 ```
 
 The files are split because each one is at or near the soft 500-LOC cap
