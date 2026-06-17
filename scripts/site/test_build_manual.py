@@ -61,3 +61,41 @@ def test_validate_manifest_raises_on_unlisted_file(tmp_path):
     (tmp_path / "99-orphan.md").write_text("# 99 — Orphan\n")
     with pytest.raises(ValueError, match="99-orphan"):
         bm.validate_manifest(tmp_path)
+
+
+def _build(tmp_path):
+    repo = Path(__file__).resolve().parents[2]
+    out = tmp_path / "manual"
+    bm.build(out, src=repo / "docs" / "devel" / "manual")
+    return out
+
+
+def test_build_emits_every_chapter(tmp_path):
+    out = _build(tmp_path)
+    for stem in bm.manifest_stems():
+        assert (out / f"{stem}.html").is_file(), f"missing {stem}.html"
+
+
+def test_build_rewrites_intra_manual_links(tmp_path):
+    out = _build(tmp_path)
+    index = (out / "index.html").read_text()
+    assert 'href="01-what-is-kastellan.html"' in index
+    assert ".md\"" not in index  # no raw .md link targets leaked through
+
+
+def test_build_nav_links_are_absolute(tmp_path):
+    out = _build(tmp_path)
+    page = (out / "06-architecture.html").read_text()
+    assert 'href="https://kastellan.dev/security.html"' in page
+    assert '<link rel="stylesheet" href="manual.css">' in page
+    assert '<meta name="description"' in page
+
+
+def test_build_copies_assets_and_writes_pages_files(tmp_path):
+    out = _build(tmp_path)
+    assert (out / "style.css").is_file()
+    assert (out / "manual.css").is_file()
+    assert (out / "pygments.css").is_file()
+    assert (out / "assets" / "favicon.png").is_file()
+    assert (out / ".nojekyll").is_file()
+    assert (out / "CNAME").read_text().strip() == "docs.kastellan.dev"
