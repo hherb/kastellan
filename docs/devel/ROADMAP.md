@@ -280,9 +280,21 @@ items unlock later ones.
     `substitute_refs_in_params` walker; `Net::Deny` contains them). **Free-form passthrough** — no declared schema, SHA +
     approval untouched; a missing key is a runtime `KeyError`. Live-green on Mac Seatbelt/PG 18 (`cli_memory_l3py_run_daemon_e2e`
     param round-trip `GOT:hi` + over-cap refusal). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-14-python-exec-runtime-params*`.
-    **Follow-up: battle-test free-form passthrough for risk slip-throughs in test mode. Deferred:** scratch-file channel for
-    >64 KiB payloads (rides macOS writable-scratch); declared-param schema (only if free-form proves too loose); structured
-    secret-param e2e (the walker is unit-tested; daemon e2e lacks a vault harness today).
+  - [x] **Output secret-scrub (params battle-test follow-up) — 2026-06-17** (branch `feat/python-exec-output-secret-scrub`).
+    Closes the "battle-test free-form passthrough for risk slip-throughs" follow-up. A `secret://` param materialises to
+    plaintext for the worker, and python-exec runs **agent-authored** code, so its returned stdout/stderr (its only channel —
+    `Net::Deny`, the #3b egress scanner never runs on it) could surface the secret in `audit_log`/JSONL/InvokeReport. New pure
+    `kastellan_leak_scan::redact` (bounded-buffer, all-hits, marker `[redacted:<8hex>]`; reuses the Rabin+SHA-256 detection,
+    shared `pow_base`/`sha256_hex` extracted to `fingerprint.rs`) + `core/src/tool_host/secret_scrub.rs` (walks the result
+    JSON's string leaves, scrubs against `Vault::value_fingerprint` — no plaintext copy; `secret.output_scrubbed` audit row,
+    hash/offset/len only). Wired into `dispatch_with_sink` on the `Ok(v)` arm **before** the injection screen, gated to
+    python-exec only (`shell_exec_e2e` proves the no-op for every other worker). Confirming e2e: python-exec child env is
+    **exactly** `{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}` (live-green PG18 + real jail — params can't become/clobber env vars).
+    Accepted limit: secrets `<8` bytes unscannable (same as #3b). Mac `cargo test --workspace` **1877/0/13**, clippy `-D warnings`
+    clean. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-17-python-exec-output-secret-scrub*`. **Deferred:** scratch-file
+    channel for >64 KiB payloads (rides macOS writable-scratch); declared-param schema (only if free-form proves too loose);
+    the full **real-secret daemon e2e** (the scrub logic is hermetically unit-tested + the dispatch wiring proven; the daemon
+    harness still lacks a vault-materialisation seam — pre-existing `TODO(params-e2e)` in `cli_memory_l3py_run_daemon_e2e.rs`).
 - [ ] **Skill trust enum** — `Untrusted | UserApproved | Pinned`, each level mapping to an explicit capability ceiling (which workers it may invoke, which net allowlists, which fs paths). Authorship and approval recorded in `audit_log`; promotion requires re-approval. (Pattern: IronClaw skill trust model — user-placed vs registry-installed. The L3 templated-skill arc above is the first concrete implementation of this shape.)
 - [ ] Optional micro-VM backend for `python-exec` (Firecracker on Linux, Apple `container` on macOS — discovery spike completed 2026-05-21, verdict COMMIT; see [`docs/superpowers/specs/2026-05-21-macos-container-spike-notes.md`](../superpowers/specs/2026-05-21-macos-container-spike-notes.md))
 - [ ] **Tiered delegation policy with hard no-recursion ceiling** — when the scheduler grows subagent delegation (today everything is one inner loop), borrow openhuman's `docs/DELEGATION_POLICY.md` four-tier shape: Tier 1 reply-directly (no tools), Tier 2 direct tool, Tier 3 inline subagent (≤5 turns, no new thread), Tier 4 dedicated worker thread (>5 turns). **The structural constraint that matters: workers do not spawn workers.** Encode it in `tool_host` as a compile-time check (`SubagentContext: Sealed` newtype that can only be constructed from the root scheduler) so the spawn tree is provably finite and the audit log has bounded fan-out per task. Maps cleanly onto the existing `Lifecycle::{SingleUse, IdleTimeout}` shape: tier-3 inline subagents are `SingleUse`, tier-4 dedicated threads piggyback on `IdleTimeoutLifecycle`. Pre-req for any meaningful agent-authored-skills work; defines the budget per skill invocation.
