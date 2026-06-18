@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use kastellan_protocol::server::Handler;
-use kastellan_worker_python_exec::exec::{MAX_CAPTURE_BYTES, INLINE_PARAMS_MAX};
+use kastellan_worker_python_exec::exec::{MAX_CAPTURE_BYTES, PARAMS_FILE_MAX_DEFAULT};
 use kastellan_worker_python_exec::handler::PythonExecHandler;
 
 /// First existing interpreter from the manifest's per-OS candidate
@@ -209,9 +209,11 @@ fn absent_params_defaults_to_empty_object() {
 }
 
 #[test]
-fn over_cap_params_rejected_before_spawn() {
+fn over_file_cap_params_rejected_before_spawn() {
     let Some(py) = find_python() else { return };
-    let big = "x".repeat(INLINE_PARAMS_MAX);
+    // A param exceeding the default 1 MiB file ceiling is rejected
+    // with INVALID_PARAMS before the spawn attempt.
+    let big = "x".repeat(PARAMS_FILE_MAX_DEFAULT + 1024);
     let err = call_params(py, "print(1)", serde_json::json!({"k": big}))
         .unwrap_err();
     assert_eq!(err.code, kastellan_protocol::codes::INVALID_PARAMS);
