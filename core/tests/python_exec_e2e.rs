@@ -141,15 +141,21 @@ async fn dispatch_in_jail(
         env.python.clone(),
         interpreter_lib_dirs,
     );
+    let mut policy = entry.policy.clone();
+    let scratch =
+        kastellan_core::tool_host::prepare_ephemeral_scratch(&mut policy, entry.ephemeral_scratch)
+            .expect("prepare scratch");
     let backend = backend();
     let worker_str = env.worker_path.to_string_lossy().into_owned();
     let spec = WorkerSpec {
-        policy: &entry.policy,
+        policy: &policy,
         program: &worker_str,
         args: &[],
         wall_clock_ms: None,
     };
-    let mut sworker = spawn_worker(&*backend, &spec).expect("spawn python-exec under sandbox");
+    let mut sworker = spawn_worker(&*backend, &spec)
+        .expect("spawn python-exec under sandbox")
+        .with_scratch(scratch);
     let result = dispatch(pool, vault, &mut sworker, "python-exec", "python.exec", params).await;
     let _ = sworker.close();
     result
@@ -213,40 +219,31 @@ fn socket_attempt_is_contained_by_the_jail() {
 
 #[test]
 fn scratch_tmp_write_round_trip_inside_jail() {
-    // macOS slice #1 has no writable scratch (Seatbelt deny-default with
-    // fs_write = []) — the Linux jail's /tmp is an ephemeral tmpfs with
-    // an explicit Landlock RW grant. See the design spec §2.3/§5.
-    // The gate sits BEFORE ready_or_skip(): on darwin the `env` binding
-    // must never exist (unused-variable → clippy -D warnings) and a PG
-    // cluster must not be brought up just to be dropped.
-    #[cfg(target_os = "macos")]
-    {
-        eprintln!("\n[SKIP] no writable scratch under Seatbelt in slice #1\n");
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let env = match ready_or_skip() {
-            Some(e) => e,
-            None => return,
-        };
-        dispatch_runtime().block_on(async {
-            let pool = probe_and_pool(&env.cluster.conn_spec).await;
-            let code = concat!(
-                "import tempfile\n",
-                "with tempfile.NamedTemporaryFile('w+', delete=True) as f:\n",
-                "    f.write('jail-scratch-ok')\n",
-                "    f.flush()\n",
-                "    f.seek(0)\n",
-                "    print(f.read())\n",
-            );
-            let r = exec_in_jail(&pool, &env, code)
-                .await
-                .expect("python.exec round trip");
-            assert_eq!(r["exit_code"], 0, "stderr: {}", r["stderr"]);
-            assert_eq!(r["stdout"].as_str().unwrap().trim_end(), "jail-scratch-ok");
-            pool.close().await;
-        });
-    }
+    // Linux: bwrap's per-spawn `/tmp` tmpfs (#89). macOS: a host-created
+    // per-spawn dir granted via Seatbelt `fs_write` + handed to the worker
+    // through KASTELLAN_WORKER_SCRATCH (#283). Either way the agent code can
+    // write + read a temp file inside the jail.
+    let env = match ready_or_skip() {
+        Some(e) => e,
+        None => return,
+    };
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        let code = concat!(
+            "import tempfile\n",
+            "with tempfile.NamedTemporaryFile('w+', delete=True) as f:\n",
+            "    f.write('jail-scratch-ok')\n",
+            "    f.flush()\n",
+            "    f.seek(0)\n",
+            "    print(f.read())\n",
+        );
+        let r = exec_in_jail(&pool, &env, code)
+            .await
+            .expect("python.exec round trip");
+        assert_eq!(r["exit_code"], 0, "stderr: {}", r["stderr"]);
+        assert_eq!(r["stdout"].as_str().unwrap().trim_end(), "jail-scratch-ok");
+        pool.close().await;
+    });
 }
 
 /// A secret materialized into a Vault and passed through the `params` channel as
