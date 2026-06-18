@@ -246,7 +246,7 @@ items unlock later ones.
     `/tmp`. `python_exec_e2e::scratch_tmp_write_round_trip_inside_jail` now **runs+passes on macOS** (was `[SKIP]`).
     Spec/plan: `docs/superpowers/{specs,plans}/2026-06-18-python-exec-macos-perspawn-scratch*`.
   - [x] **browser-driver adopts `ephemeral_scratch` — #283 FULLY CLOSED, 2026-06-18** (branch
-    `feat/browser-driver-perspawn-scratch`). `browser_driver_entry` now sets `ephemeral_scratch: true` and leaves
+    `feat/browser-driver-perspawn-scratch`, PR [#308](https://github.com/hherb/kastellan/pull/308)). `browser_driver_entry` now sets `ephemeral_scratch: true` and leaves
     `fs_write` empty on **both** OSes (was macOS `["/tmp"]`), so each browser spawn gets a unique per-spawn writable
     dir instead of the shared host `/tmp`: macOS via `prepare_ephemeral_scratch` (host dir + Seatbelt `fs_write` grant +
     `KASTELLAN_WORKER_SCRATCH`, RAII-cleaned), Linux unchanged (bwrap per-spawn `/tmp` tmpfs; the flag is a no-op there).
@@ -254,8 +254,9 @@ items unlock later ones.
     (Playwright Node driver) to `KASTELLAN_WORKER_SCRATCH` when set, else the manifest's `/tmp` stands (Linux
     byte-identical). e2e harness (`render_in_jail` + `render_in_jail_forced`) mirrors the cold-spawn `prepare → spawn →
     with_scratch` pattern + asserts the dir is RAII-cleaned. Verified: macOS Seatbelt `browser_driver_e2e --ignored`
-    4/4 (real render confined to the per-spawn dir; leak-check green), 3 new Python scratch tests, browser_driver unit
-    +1, clippy `-D warnings` clean. Linux provably inert (flag no-op + `if scratch:` never fires when the env is unset).
+    4/4 (real render confined to the per-spawn dir; leak-check green) **+ DGX native aarch64 (real bwrap + Landlock +
+    seccomp + live PG) `browser_driver_e2e --ignored` 4/4** (confirms the inert Linux path), 3 new Python scratch tests,
+    browser_driver unit +1, clippy `-D warnings` clean. Linux byte-identical (flag no-op + `if scratch:` never fires when the env is unset).
   - [ ] **Follow-ups:**
     the >64 KiB scratch-file param channel (now unblocked — the worker has a host-writable scratch); curated-wheels RO dir
     if/when the skill catalog demands packages; planner-prompt surfacing (parity note: the net workers have none either).

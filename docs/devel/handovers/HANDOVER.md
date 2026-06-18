@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-18 (**browser-driver adopts per-spawn `ephemeral_scratch` — #283 FULLY CLOSED, DONE on branch
-`feat/browser-driver-perspawn-scratch`.** The follow-up to PR #307: browser-driver now reuses the same per-spawn scratch
+`feat/browser-driver-perspawn-scratch`, PR [#308](https://github.com/hherb/kastellan/pull/308).** The follow-up to PR #307: browser-driver now reuses the same per-spawn scratch
 mechanism instead of granting the shared host `/tmp`. `browser_driver_entry` sets `ephemeral_scratch: true` and leaves
 `fs_write` empty on **both** OSes (was macOS `["/tmp"]`) — collapsing the per-OS `fs_write` cfg-split. Each browser spawn now
 gets a unique writable dir: macOS via `prepare_ephemeral_scratch` (host-created `<temp_dir>/pyexec-<pid>-<seq>`, Seatbelt
