@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-18 (**python-exec per-spawn writable scratch on macOS — DONE on branch
-`feat/python-exec-macos-perspawn-scratch`, PR pending.** Closes the macOS-writable-scratch follow-up (Phase 4,
+`feat/python-exec-macos-perspawn-scratch`, PR [#307](https://github.com/hherb/kastellan/pull/307).** Closes the macOS-writable-scratch follow-up (Phase 4,
 [#283](https://github.com/hherb/kastellan/issues/283) for python-exec). python-exec had a cross-platform parity gap:
 on Linux it gets a per-spawn ephemeral `/tmp` tmpfs (bwrap `--tmpfs`, #89), but on macOS Seatbelt has no tmpfs and the
 manifest's `fs_write=[]` left agent Python with **no writable scratch at all**. Fixed with a reusable mechanism, NOT a
@@ -350,7 +350,7 @@ continues:
    e2e files (l3py 838 → 499, l3 480 → 296); python-specific `find_python` + skill factories stay local (`tests-common`
    is deliberately core-free). See "Last updated" up top.
 3. **python-exec worker slice-#2 candidates (on demand):** ~~macOS writable scratch~~ — **DONE 2026-06-18** (branch
-   `feat/python-exec-macos-perspawn-scratch`, PR pending): a reusable per-spawn scratch mechanism (`ToolEntry.ephemeral_scratch`
+   `feat/python-exec-macos-perspawn-scratch`, PR [#307](https://github.com/hherb/kastellan/pull/307)): a reusable per-spawn scratch mechanism (`ToolEntry.ephemeral_scratch`
    → `tool_host/scratch.rs::prepare_ephemeral_scratch` → host dir + Seatbelt `fs_write` grant + `KASTELLAN_WORKER_SCRATCH` +
    RAII `SupervisedWorker.scratch`); macOS now has a per-spawn isolated writable scratch, Linux byte-identical. See "Last
    updated". Remaining: the **scratch-file param channel** for >64 KiB payloads (now unblocked — the worker has a host-writable
