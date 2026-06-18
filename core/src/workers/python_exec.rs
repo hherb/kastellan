@@ -42,6 +42,10 @@ const ENABLE_ENV: &str = "KASTELLAN_PYTHON_EXEC_ENABLE";
 /// Interpreter path: operator override on the daemon side, and the exact
 /// var injected into the jail for the worker's fail-closed startup.
 const PYTHON_ENV: &str = "KASTELLAN_PYTHON_EXEC_PYTHON";
+/// Operator-config ceiling for the >64 KiB params file channel, forwarded into
+/// the jail when set. Worker-side default + clamp live in
+/// `workers/python-exec/src/exec.rs::params_file_max`; keep the name in sync.
+const PARAMS_FILE_MAX_ENV: &str = "KASTELLAN_PYTHON_PARAMS_FILE_MAX";
 
 /// Interpreter candidates probed (in order) when `KASTELLAN_PYTHON_EXEC_PYTHON`
 /// is unset: distro python (`/usr/bin`), then source installs
@@ -127,6 +131,7 @@ pub fn python_exec_entry(
     binary: PathBuf,
     python: PathBuf,
     interpreter_lib_dirs: Vec<PathBuf>,
+    params_file_max: Option<String>,
 ) -> ToolEntry {
     let mut fs_read = vec![binary.clone(), python.clone()];
     if let Some(extra) = interpreter_extra_fs_read(&python) {
@@ -136,6 +141,19 @@ pub fn python_exec_entry(
     // pyenv/Homebrew-linked interpreter can dyld-load in the jail. Empty for a
     // self-contained interpreter (or when the dep tool is unavailable).
     fs_read.extend(interpreter_lib_dirs);
+    let mut env = vec![
+        (PYTHON_ENV.to_string(), python.to_string_lossy().into_owned()),
+        // Grant the jail's /tmp through the worker-side Landlock layer.
+        // MUST stay out of fs_write: a /tmp entry there would bind the
+        // host /tmp over bwrap's per-spawn ephemeral tmpfs (#89).
+        (ENV_LANDLOCK_RW.to_string(), r#"["/tmp"]"#.to_string()),
+    ];
+    // Forward the operator's file-channel ceiling into the jail ONLY when set,
+    // so an unset config leaves the worker env byte-identical (worker default
+    // 1 MiB). Blank values are treated as unset.
+    if let Some(v) = params_file_max.filter(|v| !v.trim().is_empty()) {
+        env.push((PARAMS_FILE_MAX_ENV.to_string(), v));
+    }
     let policy = SandboxPolicy {
         fs_read,
         fs_write: vec![],
@@ -143,13 +161,7 @@ pub fn python_exec_entry(
         cpu_ms: 10_000,
         mem_mb: 512,
         profile: Profile::WorkerStrict,
-        env: vec![
-            (PYTHON_ENV.to_string(), python.to_string_lossy().into_owned()),
-            // Grant the jail's /tmp through the worker-side Landlock layer.
-            // MUST stay out of fs_write: a /tmp entry there would bind the
-            // host /tmp over bwrap's per-spawn ephemeral tmpfs (#89).
-            (ENV_LANDLOCK_RW.to_string(), r#"["/tmp"]"#.to_string()),
-        ],
+        env,
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
@@ -291,7 +303,13 @@ impl WorkerManifest for PythonExecManifest {
             &|p| (ctx.canonicalize)(p),
             &crate::workers::interpreter_deps::resolve_deps_via_tool,
         );
-        Resolution::Register(python_exec_entry(binary, python, interpreter_lib_dirs))
+        let params_file_max = (ctx.get_env)(PARAMS_FILE_MAX_ENV);
+        Resolution::Register(python_exec_entry(
+            binary,
+            python,
+            interpreter_lib_dirs,
+            params_file_max,
+        ))
     }
 }
 

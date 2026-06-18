@@ -140,6 +140,7 @@ async fn dispatch_in_jail(
         env.worker_path.clone(),
         env.python.clone(),
         interpreter_lib_dirs,
+        None,
     );
     let mut policy = entry.policy.clone();
     let scratch =
