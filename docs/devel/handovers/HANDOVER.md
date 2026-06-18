@@ -26,7 +26,13 @@ same pass count) + host-side `no leaked scratch dirs`; `tool_host` 40/0, `worker
 scratch tests; `cargo clippy --workspace --all-targets -D warnings` clean. **DGX not re-run** — change is macOS-`cfg`-gated
 and the Linux path is byte-identical; the 1839/0/15 Linux baseline carries forward. Follow-ups: browser-driver adopting
 the flag + dropping its `fs_write=["/tmp"]` (closes #283 fully); the >64 KiB scratch-file param channel (now unblocked).
-Spec/plan: `docs/superpowers/{specs,plans}/2026-06-18-python-exec-macos-perspawn-scratch*`.)
+Spec/plan: `docs/superpowers/{specs,plans}/2026-06-18-python-exec-macos-perspawn-scratch*`. **Post-review hardening (same PR):**
+the host dir is now created with exclusive `std::fs::create_dir` (was `create_dir_all`) so a name collision with a
+crash-leaked dir aborts the spawn fail-closed instead of reusing stale contents; `SupervisedWorker::close()` drops its
+guards (watchdog→egress→scratch) explicitly to match the implicit `Drop` order; the `no leaked scratch dirs` check is
+now an in-band assertion in the `python_exec_e2e` harness (was manual); and the `ephemeral_scratch` doc records that
+per-spawn isolation holds for `SingleUse` workers only. Re-verified: `python_exec_e2e` 4/4 under the real jail,
+scratch units 12/0, `clippy -D warnings` clean.)
 
 _(Prior session — **`cli_memory_l3py_run_daemon_e2e` test-lift** merged to `main` as `625e9d6` (PR
 [#306](https://github.com/hherb/kastellan/pull/306)): hoisted shared daemon bring-up + inert mock LLM + CLI-output asserts

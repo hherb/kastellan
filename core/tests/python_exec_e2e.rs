@@ -145,6 +145,10 @@ async fn dispatch_in_jail(
     let scratch =
         kastellan_core::tool_host::prepare_ephemeral_scratch(&mut policy, entry.ephemeral_scratch)
             .expect("prepare scratch");
+    // Capture the host scratch path (macOS; `None` on Linux) so we can assert
+    // it is RAII-cleaned after `close()` — turns the "no leaked scratch dirs"
+    // manual check into an in-band regression guard.
+    let scratch_path = scratch.as_ref().map(|s| s.path().to_path_buf());
     let backend = backend();
     let worker_str = env.worker_path.to_string_lossy().into_owned();
     let spec = WorkerSpec {
@@ -158,6 +162,13 @@ async fn dispatch_in_jail(
         .with_scratch(scratch);
     let result = dispatch(pool, vault, &mut sworker, "python-exec", "python.exec", params).await;
     let _ = sworker.close();
+    if let Some(p) = scratch_path {
+        assert!(
+            !p.exists(),
+            "scratch dir must be RAII-cleaned after close(), but {} still exists",
+            p.display()
+        );
+    }
     result
 }
 

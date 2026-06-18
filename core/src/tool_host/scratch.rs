@@ -65,10 +65,18 @@ impl Drop for EphemeralScratch {
 /// the RAII guard the caller must hold for the worker's lifetime.
 ///
 /// * **macOS, `ephemeral == true`:** create `<temp_dir>/pyexec-<pid>-<seq>`,
-///   [`apply_scratch`] it onto `policy`, return `Some(guard)`. Fail-closed: a
-///   `create_dir_all` error aborts the spawn.
+///   [`apply_scratch`] it onto `policy`, return `Some(guard)`. Fail-closed: any
+///   create error aborts the spawn.
 /// * **Otherwise** (off macOS, or `ephemeral == false`): `Ok(None)` — Linux's
 ///   bwrap tmpfs already provides per-spawn `/tmp`, so the host creates nothing.
+///
+/// The dir is created with [`std::fs::create_dir`] (exclusive — fails if the
+/// path already exists), **not** `create_dir_all`: `<temp_dir>` always exists,
+/// so no recursion is needed, and exclusivity means a name collision with a
+/// dir leaked by a crashed prior run (reused pid + reset seq) aborts the spawn
+/// fail-closed rather than silently handing the worker another spawn's stale
+/// contents — preserving the per-spawn-isolation guarantee. (Crash-time leak
+/// sweep is tracked in #251.)
 ///
 /// Cross-platform-callable (runtime `cfg!`) so there is no dead code on Linux.
 pub fn prepare_ephemeral_scratch(
@@ -80,7 +88,7 @@ pub fn prepare_ephemeral_scratch(
     }
     let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = scratch_subdir(&std::env::temp_dir(), std::process::id(), seq);
-    std::fs::create_dir_all(&dir).map_err(ToolHostError::Io)?;
+    std::fs::create_dir(&dir).map_err(ToolHostError::Io)?;
     apply_scratch(policy, &dir);
     Ok(Some(EphemeralScratch { dir }))
 }

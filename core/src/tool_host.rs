@@ -617,20 +617,29 @@ impl SupervisedWorker {
     /// cancel the watchdog. Returns the worker's exit status.
     pub fn close(self) -> std::io::Result<std::process::ExitStatus> {
         // Destructure to move `client` out by value (consumed by `close`)
-        // while leaving `_watchdog` to drop at end-of-scope, which sets
-        // the cancel flag. Safe because [`SupervisedWorker`] has no
+        // while binding the remaining guards so we can drop them in a
+        // controlled order below. Safe because [`SupervisedWorker`] has no
         // [`Drop`] impl, so partial moves are allowed.
         let SupervisedWorker {
             client,
-            _watchdog: _drop_at_scope_end,
-            egress: _drop_egress_at_scope_end,
-            scratch: _drop_scratch_at_scope_end,
+            _watchdog,
+            egress,
+            scratch,
         } = self;
         // `client.close()` runs first (waits for the worker to exit, closing
-        // its pipes); `_drop_egress_at_scope_end` drops next, killing the
-        // sidecar after the worker has stopped; `_drop_scratch_at_scope_end`
-        // drops last, removing the host scratch dir after both are gone.
-        client.close()
+        // its pipes). The remaining guards are then dropped *explicitly* in the
+        // same order as the struct's field-drop order — watchdog, egress,
+        // scratch — so `close()` matches the implicit `Drop` path exactly: the
+        // egress sidecar is killed after the worker has stopped, and the host
+        // scratch dir is removed last. (Pattern bindings would otherwise drop
+        // in reverse-declaration order, putting scratch before egress; harmless
+        // here since the worker is already gone, but we make it explicit so the
+        // documented ordering can't silently drift.)
+        let status = client.close();
+        drop(_watchdog);
+        drop(egress);
+        drop(scratch);
+        status
     }
 
     /// Forcefully kill the worker without waiting for graceful shutdown.
