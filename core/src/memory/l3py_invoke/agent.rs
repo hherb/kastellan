@@ -55,7 +55,7 @@ pub fn expand_python_for_agent(
     // + SHA re-hash; pinned satisfies runnable, so this adds the structural +
     // drift checks and returns the verbatim code.
     let code = prepare_python_invocation(candidate, stored_trust, stored_sha256)?;
-    let params = validate_python_params(params)
+    let params = validate_python_params(params, super::pure::HOST_PARAMS_HARD_MAX)
         .map_err(|e| InvokeRefusal { reasons: vec![e.to_string()] })?;
     let step = python_exec_step(&code, &params);
     Ok(vec![PlannedStep {

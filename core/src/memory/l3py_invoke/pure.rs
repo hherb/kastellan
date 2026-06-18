@@ -26,11 +26,14 @@ pub const PY_EXEC_TOOL: &str = "python-exec";
 /// `workers/python-exec/src/handler.rs`).
 pub const PY_EXEC_METHOD: &str = "python.exec";
 
-/// Byte cap on serialized runtime params. Keep in sync with the worker's
-/// authoritative cap (`workers/python-exec/src/exec.rs::MAX_PARAMS_BYTES`);
-/// core enforces it early for a clean refusal, the worker enforces it as the
-/// real boundary.
-pub const MAX_PARAMS_BYTES: usize = 64 * 1024;
+/// Structural backstop the **host** gate enforces: a payload above this is
+/// rejected early for a clean refusal. This is NOT the operator knob — the
+/// configurable ceiling (`KASTELLAN_PYTHON_PARAMS_FILE_MAX`, default 1 MiB) is
+/// enforced WORKER-side (the real boundary; see
+/// `workers/python-exec/src/exec.rs::params_file_max`). Equal to the worker's
+/// absolute clamp ceiling so the host never refuses something the worker would
+/// have accepted.
+pub const HOST_PARAMS_HARD_MAX: usize = 16 * 1024 * 1024;
 
 /// Why a runtime params object was rejected at the core gate.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -55,11 +58,11 @@ fn is_snake_ident(s: &str) -> bool {
 
 /// PURE gate for a runtime params object: must be a JSON object, every
 /// TOP-LEVEL key snake_case (param names; nested structure is opaque author
-/// data), serialized ≤ [`MAX_PARAMS_BYTES`]. Returns the validated object
-/// unchanged. Unlike the templated arg guard there is NO newline/control-char
-/// rejection — serde escapes control chars inside JSON strings, so long
-/// multi-line text passes freely.
-pub fn validate_python_params(params: &Value) -> Result<Value, PyParamError> {
+/// data), serialized ≤ `max_bytes`. Returns the validated object unchanged.
+/// Unlike the templated arg guard there is NO newline/control-char rejection —
+/// serde escapes control chars inside JSON strings, so long multi-line text
+/// passes freely.
+pub fn validate_python_params(params: &Value, max_bytes: usize) -> Result<Value, PyParamError> {
     // A null params value means "no params" — accept it. `InvokeDirective.params`
     // defaults to `Value::Null` (and the daemon defaults an absent `params` key to
     // Null), so the agent/daemon no-param path lands here. `params_is_empty` and
@@ -76,8 +79,8 @@ pub fn validate_python_params(params: &Value) -> Result<Value, PyParamError> {
         }
     }
     let serialized = serde_json::to_string(params).unwrap_or_default();
-    if serialized.len() > MAX_PARAMS_BYTES {
-        return Err(PyParamError::TooLarge { got: serialized.len(), max: MAX_PARAMS_BYTES });
+    if serialized.len() > max_bytes {
+        return Err(PyParamError::TooLarge { got: serialized.len(), max: max_bytes });
     }
     Ok(params.clone())
 }
@@ -243,35 +246,42 @@ mod tests {
     #[test]
     fn validate_params_accepts_object_with_snake_case_keys() {
         let v = serde_json::json!({"repo_path": "/tmp/x", "limit": 5, "tags": ["a", "b"]});
-        let got = validate_python_params(&v).expect("valid");
+        let got = validate_python_params(&v, HOST_PARAMS_HARD_MAX).expect("valid");
         assert_eq!(got, v);
     }
 
     #[test]
     fn validate_params_rejects_non_object() {
-        assert!(validate_python_params(&serde_json::json!([1, 2])).is_err());
-        assert!(validate_python_params(&serde_json::json!("flat")).is_err());
+        assert!(validate_python_params(&serde_json::json!([1, 2]), HOST_PARAMS_HARD_MAX).is_err());
+        assert!(validate_python_params(&serde_json::json!("flat"), HOST_PARAMS_HARD_MAX).is_err());
     }
 
     #[test]
     fn validate_params_rejects_non_snake_case_top_level_key() {
         // Top-level keys are param NAMES; nested keys are opaque author data.
         let v = serde_json::json!({"BadKey": 1});
-        assert!(validate_python_params(&v).is_err());
+        assert!(validate_python_params(&v, HOST_PARAMS_HARD_MAX).is_err());
     }
 
     #[test]
     fn validate_params_allows_arbitrary_nested_keys() {
         // Nested object keys are data, NOT param names — no snake_case rule.
         let v = serde_json::json!({"payload": {"CamelCase": 1, "with space": 2}});
-        assert!(validate_python_params(&v).is_ok());
+        assert!(validate_python_params(&v, HOST_PARAMS_HARD_MAX).is_ok());
     }
 
     #[test]
-    fn validate_params_rejects_over_cap() {
-        let big = "x".repeat(MAX_PARAMS_BYTES);
-        let v = serde_json::json!({"k": big});
-        assert!(validate_python_params(&v).is_err());
+    fn validate_python_params_rejects_over_the_passed_cap() {
+        let big = "x".repeat(2048);
+        let v = serde_json::json!({ "k": big });
+        // A tiny explicit cap rejects; deterministic, no env.
+        assert!(validate_python_params(&v, 1024).is_err());
+    }
+
+    #[test]
+    fn validate_python_params_accepts_up_to_the_passed_cap() {
+        let v = serde_json::json!({ "k": "x".repeat(100) });
+        assert!(validate_python_params(&v, HOST_PARAMS_HARD_MAX).is_ok());
     }
 
     #[test]
@@ -300,7 +310,8 @@ mod tests {
     fn validate_params_accepts_null_as_no_params() {
         // InvokeDirective.params defaults to Value::Null — must be accepted,
         // not refused, so a no-param autonomous python invoke works.
-        let got = validate_python_params(&serde_json::Value::Null).expect("null is no-params");
+        let got = validate_python_params(&serde_json::Value::Null, HOST_PARAMS_HARD_MAX)
+            .expect("null is no-params");
         assert!(got.is_null());
     }
 
