@@ -1,0 +1,151 @@
+# Matrix Phase D — egress-transport spike + `matrix-sdk` dependency landing (design)
+
+**Date:** 2026-06-19
+**Status:** approved (brainstorm), pending implementation plan
+**Slice of:** comms slice #2 Phase D (live `matrix-rust-sdk` integration). See
+`docs/superpowers/specs/2026-06-12-matrix-inbound-sandboxed-worker-design.md` and
+`docs/superpowers/plans/2026-06-12-matrix-inbound-sandboxed-worker.md` (Task 8, Step 0 + Step 1).
+
+## Why this slice
+
+Phase D is the only remaining un-built part of the Matrix channel: the real
+`matrix-rust-sdk` network code. Phases A–C + E (the worker JSON-RPC surface +
+buffer, the core `MatrixChannel` + driver thread, the sandbox/egress spawn
+policy builders, config-gated daemon wiring) are already on `main` and verified
+hermetically.
+
+The Phase D plan makes **Step 0 a spike-first gate**: confirm `matrix-rust-sdk`'s
+HTTP client can be routed through our egress proxy *before* writing the sync
+loop, because the answer forks the downstream design. This slice executes that
+gate and lands the dependency cleanly. It does **not** write the live SDK
+integration (`sdk_live.rs`), the live worker wiring, or the live e2e — those are
+the next slice, verified on the DGX.
+
+## Key facts established during brainstorming
+
+`matrix-sdk` 0.17 `ClientBuilder` exposes (non-wasm builds):
+
+- `.add_root_certificates(Vec<Certificate>)` — trusts custom root CAs (wraps
+  `reqwest::ClientBuilder::add_root_certificate`). Unlike a browser, matrix-sdk
+  **can** be made to trust our per-instance egress CA cleanly. (Not used by this
+  slice — see the posture decision below — but it is what makes MITM *feasible*
+  for matrix, where it was not for the browser.)
+- `.proxy("http://…")` — but reqwest proxies are **TCP HTTP(S) URLs**; reqwest
+  cannot dial a **Unix-domain-socket** proxy. Our egress sidecar is UDS-only.
+- `.http_client(reqwest::Client)` — a fully custom client, but mutually exclusive
+  with `.proxy()`/`.add_root_certificates()`, and reqwest still won't do
+  CONNECT-over-UDS without a custom connector. Not a clean path.
+
+**Consequence:** the UDS gap forces an in-worker **TCP↔UDS bridge** regardless of
+posture — the Rust analogue of browser-driver's `shim.py ProxyShim`. matrix-sdk
+points `.proxy()` at a loopback TCP port; the bridge relays that connection to
+the sidecar UDS. This is a DGX-proven, threat-model-reviewed pattern; the spike
+confirms it empirically, it does not invent anything new.
+
+## Decisions locked in
+
+1. **Scope = spike-first slice (plan Step 0 + Step 1).** Land the dependency +
+   license pass + the transport proof + the recorded decision. Live SDK
+   integration is the next slice.
+2. **Egress posture = transparent-tunnel (MITM-bypass pin).** The sidecar runs
+   `disable_mitm` keyed on the matrix worker name (reuse browser-driver's exact
+   mechanism). The proxy still enforces allowlist + SSRF + IP-pin; it does *not*
+   TLS-intercept the homeserver. matrix-sdk keeps native end-to-end TLS
+   validation against the trusted, self-hosted, federation-off homeserver.
+   **Rationale:** Matrix room content is E2E-encrypted *before* it hits HTTP, so
+   a MITM leak-scan would only ever see opaque ciphertext — MITM buys almost
+   nothing here while enlarging sidecar blast radius and discarding the SDK's own
+   homeserver cert validation. (MITM is feasible via `.add_root_certificates()`
+   if a future need ever justifies it; it is explicitly declined now.)
+3. **Verification split:** macOS hermetic this slice; DGX live deferred to the
+   next slice.
+
+## What this slice delivers
+
+All of the following are committable on the macOS dev box and keep the default
+build/CI byte-identical (feature off → no SDK compiled):
+
+1. **`matrix-sdk` dependency** added to `workers/matrix/Cargo.toml` behind the
+   existing `[features] live-matrix` flag, configured for a **SQLite state store**
+   and **rustls** TLS (no native-tls/OpenSSL). Default features stay light; the
+   heavy crate compiles only under `--features live-matrix`.
+2. **AGPL license pass** on the `live-matrix`-enabled dependency subtree —
+   recorded in this spec (or a sibling note) before any further work. Hard gate:
+   if any transitive dep carries a non-AGPL-compatible license (CDDL, BUSL, SSPL,
+   Elastic, or any "source-available"), **stop and report** — do not proceed to
+   the bridge/spike. Permissive (Apache-2.0 / MIT / BSD / MPL / LGPL / (A)GPL) is
+   fine. matrix-rust-sdk itself is Apache-2.0; the gate must scan the transitive
+   set (e.g. vodozemac, ruma).
+3. **`ProxyBridge`** — a small Rust loopback-TCP↔UDS relay in `workers/matrix`
+   (e.g. `src/bridge.rs`): bind `127.0.0.1:0`, accept, connect the sidecar UDS,
+   `copy_bidirectional`. One bridge listener per worker; the bound port is handed
+   to the SDK as the `.proxy()` target. Kept small and unit-testable; pure helpers
+   (address parsing, the relay loop seam) separated from the I/O where practical.
+4. **Hermetic spike test** (gated on `live-matrix`): stand up a **stub UDS proxy**
+   that records the request line, start a `ProxyBridge` in front of it, build a
+   `matrix_sdk::Client` with `homeserver_url(<fake host>)` + `.proxy(bridge_addr)`,
+   trigger the SDK's first network call (the `/_matrix/client/versions` probe on
+   `.build()`), and assert the stub observed a **`CONNECT <fake-host>:443`**. This
+   proves matrix-sdk routes through our egress transport without any homeserver.
+5. **Recorded outcome** in this spec + HANDOVER: transport = transparent-tunnel
+   via `disable_mitm` (worker name) + the `ProxyBridge`; sync loop unblocked.
+
+## What this slice explicitly does NOT do (next slice, DGX)
+
+- `workers/matrix/src/sdk_live.rs` — the `LiveSdk` impl of the `MatrixSdk` seam
+  (tokio runtime, `block_on` login, persistent encrypted store, sync task →
+  bounded `VecDeque`, `poll`/`send`).
+- Worker `main.rs` live wiring (build `LiveSdk` → `prelude::lock_down` →
+  `serve_stdio`), mirroring the egress proxy's "network-init then lock_down" order.
+- The `disable_mitm`-by-worker-name wiring in the core spawn path for the matrix
+  worker (the mechanism exists for browser-driver; matrix adoption rides the
+  live-wiring slice).
+- `core/tests/matrix_live_e2e.rs` `#[ignore]` live round-trip against conduwuit
+  (`scripts/matrix/setup-conduwuit.sh` already exists from slice #6).
+
+## Components & boundaries
+
+- **`workers/matrix/src/bridge.rs` — `ProxyBridge`.** *What:* relays a loopback
+  TCP connection to the sidecar UDS. *Interface:* `bind(uds_path) -> ProxyBridge`
+  exposing `proxy_addr() -> SocketAddr`; spawns/owns the accept loop; dropped on
+  worker shutdown. *Depends on:* tokio net only. Testable against a stub UDS
+  listener with no SDK.
+- **Spike test (`workers/matrix/tests/` or `#[cfg(feature="live-matrix")]`
+  in-crate).** *What:* the empirical proof matrix-sdk uses the bridge. *Depends
+  on:* `matrix-sdk` (feature-gated), `ProxyBridge`, a local stub UDS proxy. No
+  homeserver, no real sidecar binary, no PG.
+- **`workers/matrix/Cargo.toml`.** *What:* the feature-gated dependency surface.
+  *Constraint:* default build unaffected.
+
+## Error handling
+
+- Bridge: a failed UDS connect or a closed peer ends that relayed connection;
+  the accept loop continues. Bind failure is fatal to the worker (surfaced at
+  startup) — fail-closed, mirroring egress/browser-driver.
+- License gate: any incompatible transitive license is a hard stop with a report,
+  never a silent proceed.
+
+## Testing
+
+- **TDD order:** bridge unit tests (relay round-trip, peer-close, bind) →
+  bridge impl → dependency add (makes the spike test compile) → spike test.
+- **macOS green gate (this slice):**
+  - `cargo build -p kastellan-worker-matrix --features live-matrix` compiles.
+  - the hermetic spike test passes (CONNECT reaches the stub via the bridge).
+  - `cargo test -p kastellan-worker-matrix` (default features) green.
+  - `cargo clippy --workspace --all-targets -- -D warnings` (default features,
+    `live-matrix` off) clean. The heavy SDK is not in the default-feature clippy
+    surface; a `--features live-matrix` clippy pass on the matrix crate is run
+    locally on macOS as an additional check.
+- **DGX (deferred):** the live login/E2E/send-recv round-trip — next slice.
+
+## Open risks
+
+- **SDK `.build()` network behaviour.** The spike assumes `Client::builder()
+  .homeserver_url(url).build()` (or the first call after) issues a network
+  request that traverses the proxy. If `.build()` is lazy, the spike triggers the
+  probe explicitly (a `versions()`/whoami-style call) — the assertion is on the
+  stub seeing a CONNECT, so any first network call suffices. Confirm during
+  implementation; adjust the trigger, not the design.
+- **License surprise in the transitive tree.** Low (matrix-rust-sdk ecosystem is
+  permissively licensed) but the gate is mandatory and abortive.
