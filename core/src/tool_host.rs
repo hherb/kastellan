@@ -26,6 +26,9 @@ mod secret_scrub;
 mod lockdown_env;
 pub use lockdown_env::{derive_lockdown_env, ENV_CPU_MS, ENV_LANDLOCK_PROFILE, ENV_LANDLOCK_RO, ENV_LANDLOCK_RW, ENV_SECCOMP_PROFILE};
 
+mod scratch;
+pub use scratch::{prepare_ephemeral_scratch, EphemeralScratch, ENV_WORKER_SCRATCH};
+
 mod spawn_invocation;
 pub use spawn_invocation::build_program_and_args;
 
