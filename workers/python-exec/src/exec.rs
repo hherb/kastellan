@@ -380,4 +380,10 @@ mod tests {
         });
         assert_eq!(s, "/var/folders/xx/pyexec-1-1");
     }
+
+    #[test]
+    fn scratch_dir_falls_back_when_env_is_empty() {
+        let s = scratch_dir_from_env(|_| Some(String::new()));
+        assert_eq!(s, "/tmp");
+    }
 }
