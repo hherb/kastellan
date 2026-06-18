@@ -4,11 +4,17 @@
 //! The first executor for agent-authored Python: arbitrary source in,
 //! `{exit_code, stdout, stderr}` out, under the strictest policy any worker
 //! has — `Net::Deny`, `Profile::WorkerStrict` (the CPython child inherits the
-//! seccomp filter across `execve`), no writable host path. Scratch is the
-//! jail's own ephemeral `/tmp` tmpfs (#89), granted through the worker-side
-//! Landlock layer by an explicit `KASTELLAN_LANDLOCK_RW=["/tmp"]` env entry
-//! (`derive_lockdown_env` honours a caller-supplied value) — `fs_write` stays
-//! empty so the *host* `/tmp` is never bound over the tmpfs.
+//! seccomp filter across `execve`), no writable host path.
+//!
+//! **Writable scratch** is per-spawn and ephemeral (`ephemeral_scratch: true`):
+//! * **Linux** — the jail's own `/tmp` tmpfs (#89), granted through the
+//!   worker-side Landlock layer via `KASTELLAN_LANDLOCK_RW=["/tmp"]`.
+//!   `fs_write` stays empty so the *host* `/tmp` is never bound over the
+//!   tmpfs.
+//! * **macOS** — a host-created per-spawn directory under
+//!   `KASTELLAN_WORKER_SCRATCH`, produced by `prepare_ephemeral_scratch` in
+//!   `tool_host`, added to `fs_write` at spawn time, and RAII-cleaned after
+//!   the worker exits.  No longer "not writable on macOS".
 //!
 //! Registration is opt-in (`KASTELLAN_PYTHON_EXEC_ENABLE=1`): shell-exec is
 //! deny-by-default through its empty argv allowlist, but python-exec has no
@@ -103,10 +109,13 @@ where
 /// Build the [`ToolEntry`] for the python-exec worker.
 ///
 /// Policy pins (the strictest of any registered worker):
-/// `Net::Deny`, `Profile::WorkerStrict`, `fs_write = []` (scratch is the
-/// jail's ephemeral `/tmp` tmpfs via the explicit Landlock-RW grant),
+/// `Net::Deny`, `Profile::WorkerStrict`, `fs_write = []` (Linux scratch is
+/// the jail's ephemeral `/tmp` tmpfs via the explicit Landlock-RW grant;
+/// macOS scratch is the per-spawn host dir prepared by `prepare_ephemeral_scratch`
+/// and injected into `fs_write` at spawn — see `tool_host`),
 /// `cpu_ms = 10_000`, `mem_mb = 512`, `wall_clock_ms = Some(30_000)`,
-/// `SingleUse`. `fs_read` carries the worker binary, the interpreter, the
+/// `SingleUse`, `ephemeral_scratch: true`. `fs_read` carries the worker binary,
+/// the interpreter, the
 /// derived stdlib path from [`interpreter_extra_fs_read`] (`<prefix>/lib`,
 /// or the framework version root for macOS framework pythons) — redundant
 /// under bwrap's always-bound `/usr`, required for non-`/usr` prefixes
@@ -153,6 +162,7 @@ pub fn python_exec_entry(
         sandbox_backend: None,
         container_image: None,
         lockdown_shim: None,
+        ephemeral_scratch: true,
     }
 }
 

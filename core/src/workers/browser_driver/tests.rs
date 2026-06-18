@@ -221,6 +221,34 @@ use super::*;
         assert_eq!(entry.policy.tasks_max, Some(512));
     }
 
+    /// #283: macOS browser-driver no longer grants the shared host `/tmp`. The
+    /// manifest leaves `fs_write` empty and opts into `ephemeral_scratch`, so the
+    /// cold-spawn path mints a unique per-spawn dir (added to `fs_write` at spawn
+    /// by `prepare_ephemeral_scratch`) and the worker writes only there. Holds on
+    /// both platforms (Linux already had an empty `fs_write` — its scratch is the
+    /// bwrap per-spawn `/tmp` tmpfs; `ephemeral_scratch` is a no-op there).
+    #[test]
+    fn entry_uses_per_spawn_ephemeral_scratch_not_shared_tmp() {
+        let env = BrowserDriverEnv {
+            script_path: PathBuf::from("/v/bin/kastellan-worker-browser-driver"),
+            venv_dir: PathBuf::from("/v"),
+            interpreter_root: None,
+            interpreter_lib_dirs: vec![],
+            extra_fs_read: vec![],
+        };
+        let entry = browser_driver_entry(&env, &[], None);
+        assert!(
+            entry.ephemeral_scratch,
+            "browser-driver must opt into the per-spawn scratch mechanism (#283)"
+        );
+        assert!(
+            entry.policy.fs_write.is_empty(),
+            "manifest must not pre-grant a writable dir; the per-spawn scratch is \
+             added at spawn, never the shared host /tmp ({:?})",
+            entry.policy.fs_write,
+        );
+    }
+
     #[test]
     fn manifest_registers_when_enabled() {
         let get_env = |k: &str| match k {

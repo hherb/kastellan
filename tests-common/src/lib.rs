@@ -31,13 +31,20 @@
 //!   `gui/<uid>` domain across daemon-spawning tests.
 //! * [`embedding`] — `text_to_embedding` deterministic SHA-256-seeded
 //!   L2-normalised seed vector used by the memory-recall tests.
+//! * [`env`] — `env_lock()` + `EnvVarGuard` for unit tests that mutate
+//!   process-wide environment variables (issue #127).
+//! * [`daemon`] — `MockLlm` + `spawn_inert_mock` + `bring_up_daemon` — the
+//!   real-`kastellan`-daemon-under-the-supervisor bring-up shared by the
+//!   `cli_memory_l3*_run_daemon_e2e` tests.
 //!
 //! Nothing here is shipped at runtime. The crate is `publish = false`
 //! and consumed only from `[dev-dependencies]`.
 
 pub mod allowlist;
 pub mod binaries;
+pub mod daemon;
 pub mod embedding;
+pub mod env;
 pub mod guards;
 pub mod pg;
 pub mod sandbox;
@@ -47,8 +54,15 @@ pub mod temp;
 pub mod wait;
 
 pub use allowlist::seed_tool_allowlist;
-pub use binaries::{cli_binary, core_binary, shell_exec_worker_binary, workspace_target_binary};
+pub use binaries::{
+    cli_binary, cli_command, core_binary, shell_exec_worker_binary, workspace_target_binary,
+};
+pub use daemon::{
+    assert_cli_failure, assert_cli_success, bring_up_daemon, spawn_inert_mock, DaemonGuards,
+    DaemonHandle, MockLlm,
+};
 pub use embedding::text_to_embedding;
+pub use env::{env_lock, EnvVarGuard};
 pub use guards::{PathGuard, ServiceGuard};
 pub use pg::{
     bring_up_pg_cluster, bring_up_pg_cluster_with_timeout, PgCluster, PG_BRING_UP_TIMEOUT_SECS,
