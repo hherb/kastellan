@@ -17,7 +17,7 @@ flag is a no-op there, `prepare_ephemeral_scratch` returns `None`). The Python w
 (Playwright's Node driver `uv_os_homedir()`) to `KASTELLAN_WORKER_SCRATCH` **when set**; unset ⇒ the manifest's seeded
 `TMPDIR=/tmp`/`HOME=/tmp` stand, so **Linux is byte-identical** (the only Linux manifest delta is the no-op flag flip). e2e
 harness `render_in_jail` + `render_in_jail_forced` mirror the cold-spawn `prepare → spawn → with_scratch` order (both bypass
-the lifecycle managers, so they attach scratch explicitly like `python_exec_e2e`); `render_in_jail` asserts the dir is
+the lifecycle managers, so they attach scratch explicitly like `python_exec_e2e`); **both** harnesses assert the dir is
 RAII-cleaned after `close()` ("no leaked scratch dirs", in-band). **Verification (Mac, PG 18 + real Seatbelt jail):**
 `browser_driver_e2e --ignored` **4/4** — the real render now writes only to its per-spawn dir (proves `fs_write` no longer
 needs `/tmp`) and the leak-check passes; browser_driver unit +1 (`entry_uses_per_spawn_ephemeral_scratch_not_shared_tmp`,

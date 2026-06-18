@@ -277,6 +277,7 @@ async fn render_in_jail_forced(
     let scratch =
         kastellan_core::tool_host::prepare_ephemeral_scratch(&mut policy, entry.ephemeral_scratch)
             .expect("prepare scratch");
+    let scratch_path = scratch.as_ref().map(|s| s.path().to_path_buf());
     let spec = WorkerSpec {
         policy: &policy,
         program: &program,
@@ -313,6 +314,16 @@ async fn render_in_jail_forced(
     )
     .await;
     let _ = sworker.close();
+    // The macOS per-spawn scratch dir must be RAII-cleaned by close() — same
+    // in-band leak-check as `render_in_jail`. `None` on Linux (bwrap tmpfs;
+    // nothing host-created) and on the macOS forced path until #287 lands.
+    if let Some(p) = scratch_path {
+        assert!(
+            !p.exists(),
+            "scratch dir must be RAII-cleaned after close(), but {} still exists",
+            p.display()
+        );
+    }
     // Decisions land on a detached ingest thread reading the proxy's stdout;
     // poll briefly (the CONNECT decision was emitted during the render, before
     // close()) so we don't race the thread.

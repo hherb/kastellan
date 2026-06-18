@@ -185,6 +185,12 @@ fn parse_extra_fs_read(raw: &str) -> Vec<PathBuf> {
 ///   spawn is now confined to its own scratch (closes #283's least-privilege
 ///   gap). `TMPDIR`/`HOME` are seeded to `/tmp` here too as the fail-closed
 ///   default; the worker overrides them once it reads the scratch env.
+///   Overriding `HOME` on macOS (away from the real home that directory
+///   services would resolve) is deliberate, not incidental: nothing in the
+///   render path reads `~/Library/...`, and the per-spawn `HOME` keeps the
+///   Playwright Node driver's `uv_os_homedir()` inside the granted scratch.
+///   Verified by `browser_driver_e2e --ignored` 4/4 under the real Seatbelt
+///   jail.
 ///
 /// Fonts:
 /// `/usr` (Linux) and `/System/Library` (macOS) are already readable from the
