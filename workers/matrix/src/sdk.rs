@@ -1,7 +1,9 @@
 //! The SDK seam: the handler talks to Matrix only through this trait, so the
 //! JSON-RPC dispatch + buffering is unit-tested with a fake (no homeserver). The
-//! real `matrix-rust-sdk`-backed implementation lives in `sdk_live.rs` behind the
-//! `live-matrix` feature (Phase D).
+//! real `matrix-rust-sdk`-backed implementation will live in `sdk_live.rs`
+//! behind the `live-matrix` feature (Phase D, next slice). The egress transport
+//! that impl relies on is already proven — see `bridge.rs` + the `egress_spike`
+//! test.
 
 use kastellan_matrix_wire::{Event, InitResult};
 

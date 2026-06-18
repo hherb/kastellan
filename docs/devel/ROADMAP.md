@@ -170,7 +170,9 @@ items unlock later ones.
   (worker name) + `ProxyBridge`; no CA injection; conduwuit homeserver infra already done (slice #6)**.
   SDK builder names (homeserver_url, sqlite_store, proxy, build, whoami) recorded in the spike spec.
   **Phase D live integration pending (DGX — the next slice):** `sdk_live.rs` LiveSdk impl, restore
-  `main.rs` wiring, wire `disable_mitm` in core spawn path, `matrix_live_e2e.rs` `#[ignore]` vs conduwuit.
+  `main.rs` wiring (narrowing the crate-wide `#![allow(dead_code)]` back to the `live-matrix`-cfg form), wire
+  `disable_mitm` in core spawn path, `ProxyBridge` error-surfacing ([#312](https://github.com/hherb/kastellan/issues/312)),
+  `matrix_live_e2e.rs` `#[ignore]` vs conduwuit.
   Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-matrix-inbound-sandboxed-worker*`;
   spike spec: `docs/superpowers/specs/2026-06-19-matrix-phase-d-egress-transport-spike-design.md`.
 - [x] **Homeserver supervisor unit + hardening** — conduwuit (federation OFF, loopback bind,

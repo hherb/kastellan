@@ -12,7 +12,12 @@
 `matrix_sdk_routes_first_request_through_the_bridge` — CONNECT reaches the stub UDS via the bridge. Transport decision CONFIRMED:
 transparent tunnel via `disable_mitm` (worker name) + `ProxyBridge`; no CA injection. SDK builder names (homeserver_url, sqlite_store,
 proxy, build, whoami) recorded in the spec for the next slice's `LiveSdk`. Default build unaffected (feature off → no SDK compiled).
-Matrix worker tests: 7 / 0 / 0 (default features), 8 / 0 / 0 (live-matrix, +1 spike test); clippy `-D warnings` clean (default features).
+Matrix worker tests: 7 / 0 / 0 (default features), 9 / 0 / 0 (live-matrix, +1 spike test +1 negative control
+`without_proxy_nothing_reaches_the_bridge` — strip `.proxy()` → stub sees nothing → proves the spike is non-spurious);
+clippy `-D warnings` clean (default features AND live-matrix `--all-targets`). **Deferred to the live-wiring slice:** (a) narrow the
+crate-wide `#![allow(dead_code)]` in `main.rs` back to `#![cfg_attr(not(feature = "live-matrix"), allow(dead_code))]` once
+`LiveSdk` consumes the handler/SDK seam + `ProxyBridge`; (b) [#312](https://github.com/hherb/kastellan/issues/312) — make
+`ProxyBridge` surface accept/relay errors instead of silently `break`/drop (fine for the spike, must not ship under live traffic).
 Spec: `docs/superpowers/specs/2026-06-19-matrix-phase-d-egress-transport-spike-design.md`.)
 
 _(Prior session — **python-exec >64 KiB scratch-file param channel — DONE on branch
