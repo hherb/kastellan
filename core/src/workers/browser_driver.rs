@@ -169,12 +169,29 @@ fn parse_extra_fs_read(raw: &str) -> Vec<PathBuf> {
 /// **Browsers live inside the venv** (`PLAYWRIGHT_BROWSERS_PATH =
 /// <venv>/browsers`, set here + by `install.sh`) so only `venv_dir` needs an
 /// `fs_read` bind — no separate browser-cache path. **Writable scratch** for
-/// Chromium's `--user-data-dir` (Playwright places it under `$TMPDIR`):
-/// `TMPDIR=/tmp` on both OSes; on Linux that's bwrap's per-spawn ephemeral
-/// `/tmp` tmpfs (#89), granted to the in-jail Landlock layer via
-/// `KASTELLAN_LANDLOCK_RW=["/tmp"]` with `fs_write` empty (keeps the host `/tmp`
-/// off the tmpfs); on macOS Seatbelt has no tmpfs, so `fs_write=["/tmp"]` grants
-/// the writable dir (a per-spawn scratch dir is the deferred follow-up — #283).
+/// Chromium's `--user-data-dir` (Playwright places it under `$TMPDIR`) is
+/// per-spawn and ephemeral (`ephemeral_scratch: true`, #283), so `fs_write` is
+/// left empty in the manifest and the host grants exactly one writable dir at
+/// spawn:
+/// * **Linux** — bwrap's per-spawn ephemeral `/tmp` tmpfs (#89), granted to the
+///   in-jail Landlock layer via `KASTELLAN_LANDLOCK_RW=["/tmp"]`. `fs_write`
+///   empty keeps the host `/tmp` off the tmpfs; `TMPDIR`/`HOME` are `/tmp`.
+///   `ephemeral_scratch` is a no-op here (`prepare_ephemeral_scratch` returns
+///   `None`).
+/// * **macOS** — Seatbelt has no tmpfs, so `prepare_ephemeral_scratch`
+///   host-creates a unique per-spawn dir, adds it to `fs_write`, and injects
+///   `KASTELLAN_WORKER_SCRATCH`; the worker redirects `TMPDIR`/`HOME` to it.
+///   This replaces the former shared `fs_write=["/tmp"]` grant — each browser
+///   spawn is now confined to its own scratch (closes #283's least-privilege
+///   gap). `TMPDIR`/`HOME` are seeded to `/tmp` here too as the fail-closed
+///   default; the worker overrides them once it reads the scratch env.
+///   Overriding `HOME` on macOS (away from the real home that directory
+///   services would resolve) is deliberate, not incidental: nothing in the
+///   render path reads `~/Library/...`, and the per-spawn `HOME` keeps the
+///   Playwright Node driver's `uv_os_homedir()` inside the granted scratch.
+///   Verified by `browser_driver_e2e --ignored` 4/4 under the real Seatbelt
+///   jail.
+///
 /// Fonts:
 /// `/usr` (Linux) and `/System/Library` (macOS) are already readable from the
 /// base sandbox; macOS additionally needs `/Library/Fonts`.
@@ -219,11 +236,12 @@ pub fn browser_driver_entry(
     #[cfg(target_os = "macos")]
     fs_read.push(PathBuf::from("/Library/Fonts"));
 
-    // Writable scratch for Chromium's user-data-dir (see the fn doc).
-    #[cfg(target_os = "linux")]
-    let fs_write = vec![]; // bwrap per-spawn /tmp tmpfs (#89), granted via LANDLOCK_RW below
-    #[cfg(not(target_os = "linux"))]
-    let fs_write = vec![PathBuf::from("/tmp")]; // macOS Seatbelt needs an explicit writable dir
+    // Writable scratch for Chromium's user-data-dir is per-spawn (#283; see the
+    // fn doc): the manifest grants nothing, and the host adds exactly one dir at
+    // spawn — bwrap's per-spawn /tmp tmpfs on Linux (via LANDLOCK_RW below), or a
+    // unique macOS dir minted by `prepare_ephemeral_scratch` (added to fs_write +
+    // exposed as KASTELLAN_WORKER_SCRATCH). No shared host /tmp on either OS.
+    let fs_write: Vec<PathBuf> = vec![];
 
     let policy_env = vec![
         (
@@ -235,14 +253,17 @@ pub fn browser_driver_entry(
             "PLAYWRIGHT_BROWSERS_PATH".to_string(),
             env.venv_dir.join("browsers").display().to_string(),
         ),
-        // Chromium writes its --user-data-dir under $TMPDIR.
+        // Chromium writes its --user-data-dir under $TMPDIR. Seeded to /tmp (the
+        // Linux per-spawn tmpfs); on macOS the worker redirects it to the
+        // per-spawn KASTELLAN_WORKER_SCRATCH dir at startup (#283).
         ("TMPDIR".to_string(), "/tmp".to_string()),
         // Playwright's bundled Node driver calls uv_os_homedir() at startup;
         // with bwrap's --clearenv stripping HOME and no /etc/passwd bound in
         // the jail, that returns ENOENT and the driver crashes ("Connection
         // closed while reading from the driver"). Point HOME at the writable
         // tmpfs so the driver starts. (macOS resolves the real home via
-        // directory services, so this is belt-and-braces there.)
+        // directory services, so this is belt-and-braces there; the worker also
+        // redirects HOME to the per-spawn scratch dir at startup — #283.)
         ("HOME".to_string(), "/tmp".to_string()),
         // Grant the jail's /tmp through the worker-side Landlock layer
         // (Linux; honoured by the lockdown-exec shim's apply_from_env, no-op
@@ -288,7 +309,10 @@ pub fn browser_driver_entry(
         sandbox_backend: None,
         container_image: None,
         lockdown_shim,
-        ephemeral_scratch: false,
+        // Per-spawn writable scratch (#283): no-op on Linux (bwrap tmpfs); on
+        // macOS the host mints a unique dir, grants it via fs_write, and exposes
+        // it as KASTELLAN_WORKER_SCRATCH — replacing the shared /tmp grant.
+        ephemeral_scratch: true,
     }
 }
 

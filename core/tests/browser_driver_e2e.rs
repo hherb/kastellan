@@ -166,13 +166,24 @@ async fn render_in_jail(
     let entry = browser_driver_entry(&env.browser, allowlist, shim);
     let backend = backend();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    // Per-spawn writable scratch (#283): mutate a private copy of the policy
+    // exactly as the cold-spawn lifecycle managers do (host-create the macOS dir,
+    // grant it via fs_write, inject KASTELLAN_WORKER_SCRATCH) and hold the RAII
+    // guard for the worker's lifetime via `with_scratch`. No-op on Linux.
+    let mut policy = entry.policy.clone();
+    let scratch =
+        kastellan_core::tool_host::prepare_ephemeral_scratch(&mut policy, entry.ephemeral_scratch)
+            .expect("prepare scratch");
+    let scratch_path = scratch.as_ref().map(|s| s.path().to_path_buf());
     let spec = WorkerSpec {
-        policy: &entry.policy,
+        policy: &policy,
         program: &program,
         args: &arg_refs,
         wall_clock_ms: entry.wall_clock_ms,
     };
-    let mut sworker = spawn_worker(&*backend, &spec).expect("spawn browser-driver under sandbox");
+    let mut sworker = spawn_worker(&*backend, &spec)
+        .expect("spawn browser-driver under sandbox")
+        .with_scratch(scratch);
     let result = dispatch(
         pool,
         &Vault::new(),
@@ -183,6 +194,16 @@ async fn render_in_jail(
     )
     .await;
     let _ = sworker.close();
+    // The macOS per-spawn scratch dir must be RAII-cleaned by close() — turns the
+    // "no leaked scratch dirs" property into an in-band assertion (mirrors
+    // python_exec_e2e). `None` on Linux (bwrap tmpfs; nothing host-created).
+    if let Some(p) = scratch_path {
+        assert!(
+            !p.exists(),
+            "scratch dir must be RAII-cleaned after close(), but {} still exists",
+            p.display()
+        );
+    }
     result
 }
 
@@ -248,8 +269,17 @@ async fn render_in_jail_forced(
     let entry = browser_driver_entry(&env.browser, worker_allowlist, shim);
     let backend = backend();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    // Per-spawn writable scratch (#283), prepared on a private policy copy before
+    // force-routing rewrites it (the rewrite only appends proxy_uds + CA fs_read,
+    // so the scratch grant/env survive). No-op on Linux. The RAII guard is bound
+    // to the worker via `with_scratch` below.
+    let mut policy = entry.policy.clone();
+    let scratch =
+        kastellan_core::tool_host::prepare_ephemeral_scratch(&mut policy, entry.ephemeral_scratch)
+            .expect("prepare scratch");
+    let scratch_path = scratch.as_ref().map(|s| s.path().to_path_buf());
     let spec = WorkerSpec {
-        policy: &entry.policy,
+        policy: &policy,
         program: &program,
         args: &arg_refs,
         wall_clock_ms: entry.wall_clock_ms,
@@ -272,7 +302,8 @@ async fn render_in_jail_forced(
         let port = row.payload["port"].as_u64().unwrap_or_default();
         sink_decisions.lock().unwrap().push((row.action, host, port));
     })
-    .expect("force-route browser-driver under sidecar");
+    .expect("force-route browser-driver under sidecar")
+    .with_scratch(scratch);
     let result = dispatch(
         pool,
         &Vault::new(),
@@ -283,6 +314,16 @@ async fn render_in_jail_forced(
     )
     .await;
     let _ = sworker.close();
+    // The macOS per-spawn scratch dir must be RAII-cleaned by close() — same
+    // in-band leak-check as `render_in_jail`. `None` on Linux (bwrap tmpfs;
+    // nothing host-created) and on the macOS forced path until #287 lands.
+    if let Some(p) = scratch_path {
+        assert!(
+            !p.exists(),
+            "scratch dir must be RAII-cleaned after close(), but {} still exists",
+            p.display()
+        );
+    }
     // Decisions land on a detached ingest thread reading the proxy's stdout;
     // poll briefly (the CONNECT decision was emitted during the render, before
     // close()) so we don't race the thread.
