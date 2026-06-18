@@ -99,7 +99,14 @@ build/CI byte-identical (feature off → no SDK compiled):
   `serve_stdio`), mirroring the egress proxy's "network-init then lock_down" order.
 - The `disable_mitm`-by-worker-name wiring in the core spawn path for the matrix
   worker (the mechanism exists for browser-driver; matrix adoption rides the
-  live-wiring slice).
+  live-wiring slice). **#286 macOS-loopback caveat (carry forward):** the
+  `ProxyBridge` binds `127.0.0.1:0` inside the worker — the same loopback pattern
+  as browser-driver's `shim.py`, which `docs/threat-model.md` records as having a
+  macOS-only containment divergence (no netns ⇒ the worker's loopback is the
+  host's). It is latent in this spike slice (no Seatbelt loopback grant is added
+  here), but the live-wiring slice that grants the matrix worker loopback on
+  macOS must pair it with the #286 mitigation (scope the grant to the bridge's
+  bound port, or use a UDS-only transport / the `MacosContainer` VM-netns backend).
 - `core/tests/matrix_live_e2e.rs` `#[ignore]` live round-trip against conduwuit
   (`scripts/matrix/setup-conduwuit.sh` already exists from slice #6).
 
