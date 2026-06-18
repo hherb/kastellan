@@ -153,6 +153,7 @@ pub fn python_exec_entry(
         sandbox_backend: None,
         container_image: None,
         lockdown_shim: None,
+        ephemeral_scratch: true,
     }
 }
 

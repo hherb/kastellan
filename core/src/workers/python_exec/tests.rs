@@ -242,6 +242,16 @@ fn interpreter_extra_fs_read_framework_grants_version_root() {
     );
 }
 
+#[test]
+fn python_exec_entry_opts_into_ephemeral_scratch() {
+    let e = python_exec_entry(
+        std::path::PathBuf::from("/bin/worker"),
+        std::path::PathBuf::from("/usr/bin/python3"),
+        vec![],
+    );
+    assert!(e.ephemeral_scratch, "python-exec must request per-spawn scratch");
+}
+
 fn outcome_label(r: &Resolution) -> &'static str {
     match r {
         Resolution::Register(_) => "Register",

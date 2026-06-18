@@ -145,6 +145,11 @@ pub struct ToolEntry {
     /// runs the Rust prelude, so the shim applies the seccomp filter and
     /// `execve`s the real binary, which inherits it. See issue #281.
     pub lockdown_shim: Option<PathBuf>,
+    /// When `true`, the worker is granted a per-spawn writable scratch dir on
+    /// macOS (host-created, Seatbelt-granted, RAII-cleaned) — the parity
+    /// counterpart of Linux's bwrap `/tmp` tmpfs. `false` for every worker
+    /// except python-exec today. See `tool_host::prepare_ephemeral_scratch`.
+    pub ephemeral_scratch: bool,
 }
 
 /// Look-up table from logical tool name (as it appears in
