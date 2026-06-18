@@ -16,7 +16,7 @@ path = "src/main.rs"
 [features]
 # The heavy matrix-rust-sdk integration is opt-in so the default build (and CI)
 # stays light + hermetic. Phase D (DGX) builds with `--features live-matrix`.
-live-matrix = []
+live-matrix = ["dep:matrix-sdk"]
 
 [dependencies]
 kastellan-protocol       = { path = "../../protocol" }
@@ -26,3 +26,4 @@ serde                    = { workspace = true }
 serde_json               = { workspace = true }
 anyhow                   = { workspace = true }
 tokio                    = { workspace = true }
+matrix-sdk               = { version = "0.8.0", default-features = false, features = ["e2e-encryption", "sqlite", "bundled-sqlite", "rustls-tls"], optional = true }
