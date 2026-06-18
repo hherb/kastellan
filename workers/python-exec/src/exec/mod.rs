@@ -52,7 +52,7 @@ pub const PARAMS_ENV: &str = "KASTELLAN_PYTHON_PARAMS";
 pub const INLINE_PARAMS_MAX: usize = 64 * 1024;
 
 /// Default file-channel ceiling when `KASTELLAN_PYTHON_PARAMS_FILE_MAX` is
-/// unset, and the absolute clamp ceiling regardless of operator config.
+/// unset (1 MiB).
 pub const PARAMS_FILE_MAX_DEFAULT: usize = 1024 * 1024;
 /// Absolute ceiling — operator config can never exceed this (the clamp in [`params_file_max`]).
 pub const PARAMS_FILE_MAX_ABS: usize = 16 * 1024 * 1024;
