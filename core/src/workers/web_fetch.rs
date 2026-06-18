@@ -73,6 +73,7 @@ pub fn web_fetch_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         sandbox_backend: None,
         container_image: None,
         lockdown_shim: None,
+        ephemeral_scratch: false,
     }
 }
 

@@ -229,7 +229,13 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
         // Per-call clone of the base policy so concurrent dispatches against the same
         // `ToolEntry` cannot mutate each other's policy. The clone matches the
         // discipline the pre-refactor inline path used.
-        let policy = entry.policy.clone();
+        let mut policy = entry.policy.clone();
+        // macOS per-spawn writable scratch (#283): host-create + grant + RAII.
+        // No-op on Linux (bwrap tmpfs) and for non-scratch workers.
+        let scratch = crate::tool_host::prepare_ephemeral_scratch(
+            &mut policy,
+            entry.ephemeral_scratch,
+        )?;
         // Route through the lockdown shim when the manifest set one (Linux
         // pure-Python workers); otherwise spawn the binary directly.
         let (program, args) = crate::tool_host::build_program_and_args(
@@ -262,7 +268,7 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
             &spec,
             tool_name,
         )?;
-        Ok(WorkerHandle::single_use(worker))
+        Ok(WorkerHandle::single_use(worker.with_scratch(scratch)))
     }
 }
 

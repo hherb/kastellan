@@ -6,30 +6,41 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-18 (**`cli_memory_l3py_run_daemon_e2e` test-lift — DONE on branch
-`refactor/l3py-daemon-e2e-test-lift`, PR [#306](https://github.com/hherb/kastellan/pull/306).** Refactor bucket (c): the python l3_run daemon e2e was **838 LOC**
-(over the 500 cap) because it byte-duplicated the daemon-bring-up scaffolding from its sibling
-`cli_memory_l3_run_daemon_e2e.rs`. Hoisted the shared, **core-free** pieces into a new
-`tests-common/src/daemon.rs` — `MockLlm` + `spawn_inert_mock` (inert 503 local-LLM listener), parameterised
-`bring_up_daemon(label, suffix, data_dir, mock_url, user, extra_env)` (+ `DaemonHandle`/`DaemonGuards`), and the
-CLI-output assertion helpers `assert_cli_success`/`assert_cli_failure`; plus `cli_command(data_dir, user)` (the
-env-clear'd operator-CLI builder — the #179 invariant) into `tests-common/src/binaries.rs`. The python-specific bits
-(interpreter cascade `find_python`, the `PythonSkillCandidate` factories) stay local — `tests-common` is deliberately
-**core-free**, so they don't move. l3py also gained a small in-file `Fixture`/`setup` collapsing the repeated per-test
-preamble. **Both** daemon e2e files now consume the shared helpers (true dedup, the issue-#15 point of `tests-common`):
-l3py **838 → 499**, l3 **480 → 296**, new `daemon.rs` 248. Added `tokio` (workspace, dev-only) to `tests-common`.
-**No behaviour change, no test added/removed.** Verification (Mac, PG 18 + Seatbelt jail): both suites run live —
-`cli_memory_l3_run_daemon_e2e` 2/2, `cli_memory_l3py_run_daemon_e2e` 5/5 green; `cargo clippy -p kastellan-tests-common
--p kastellan-core --all-targets -D warnings` clean; `tests-common` unit 17/17. **DGX not re-run** — test-harness-only
-refactor touching no sandbox/seccomp/Landlock/production code; the 1839/0/15 Linux baseline carries forward.)
+**Last updated:** 2026-06-18 (**python-exec per-spawn writable scratch on macOS — DONE on branch
+`feat/python-exec-macos-perspawn-scratch`, PR [#307](https://github.com/hherb/kastellan/pull/307).** Closes the macOS-writable-scratch follow-up (Phase 4,
+[#283](https://github.com/hherb/kastellan/issues/283) for python-exec). python-exec had a cross-platform parity gap:
+on Linux it gets a per-spawn ephemeral `/tmp` tmpfs (bwrap `--tmpfs`, #89), but on macOS Seatbelt has no tmpfs and the
+manifest's `fs_write=[]` left agent Python with **no writable scratch at all**. Fixed with a reusable mechanism, NOT a
+python-exec-only hack: new additive `ToolEntry.ephemeral_scratch: bool` (python-exec sets it `true`, all 16 other literals
+`false`) drives `core/src/tool_host/scratch.rs::prepare_ephemeral_scratch`, which on macOS host-creates
+`<temp_dir>/pyexec-<pid>-<seq>`, grants it via `fs_write` (→ Seatbelt subpath rule), hands the path to the worker through
+`KASTELLAN_WORKER_SCRATCH`, and RAII-cleans it (`EphemeralScratch` held in a new `SupervisedWorker.scratch`, attached via
+`with_scratch` **post-spawn** at both cold-spawn sites [`manager.rs` SingleUse + `idle_timeout.rs` cold path] AND the e2e
+harness — mirrors how egress attaches its sidecar, so `WorkerSpec`/`spawn_worker` stay untouched). The worker
+(`workers/python-exec/src/exec.rs`) resolves `TMPDIR`/`HOME`/cwd from `KASTELLAN_WORKER_SCRATCH` (fallback `/tmp`).
+**Linux byte-identical** (`prepare_ephemeral_scratch` returns `None` off macOS; env unset → `/tmp`). Seatbelt grants only
+the spawn's own subpath, so invocations can't read each other's scratch — strictly stronger than browser-driver's shared
+`/tmp`. Verification (Mac, PG 18 + real Seatbelt jail): `python_exec_e2e` 4/4 with
+`scratch_tmp_write_round_trip_inside_jail` now **running+passing on macOS** (was a macOS `[SKIP]`; one fewer `[SKIP]`,
+same pass count) + host-side `no leaked scratch dirs`; `tool_host` 40/0, `worker_lifecycle` 68/0, worker unit incl. 3 new
+scratch tests; `cargo clippy --workspace --all-targets -D warnings` clean. **DGX not re-run** — change is macOS-`cfg`-gated
+and the Linux path is byte-identical; the 1839/0/15 Linux baseline carries forward. Follow-ups: browser-driver adopting
+the flag + dropping its `fs_write=["/tmp"]` (closes #283 fully); the >64 KiB scratch-file param channel (now unblocked).
+Spec/plan: `docs/superpowers/{specs,plans}/2026-06-18-python-exec-macos-perspawn-scratch*`. **Post-review hardening (same PR):**
+the host dir is now created with exclusive `std::fs::create_dir` (was `create_dir_all`) so a name collision with a
+crash-leaked dir aborts the spawn fail-closed instead of reusing stale contents; `SupervisedWorker::close()` drops its
+guards (watchdog→egress→scratch) explicitly to match the implicit `Drop` order; the `no leaked scratch dirs` check is
+now an in-band assertion in the `python_exec_e2e` harness (was manual); and the `ephemeral_scratch` doc records that
+per-spawn isolation holds for `SingleUse` workers only. Re-verified: `python_exec_e2e` 4/4 under the real jail,
+scratch units 12/0, `clippy -D warnings` clean.)
 
-_(Prior session — **egress slice-#4 operator cert-pin plumbing** merged to `main` as `4ecb94a` (PR
-[#303](https://github.com/hherb/kastellan/pull/303)); deferred real-sandbox pin-enforcement e2e tracked in
-[#304](https://github.com/hherb/kastellan/issues/304) (PR #305). Operator pins (`KASTELLAN_EGRESS_CERT_PINS`,
-fail-closed, per-worker least-privilege) now flow into each force-routed sidecar's `cert_pins_json`
-(`core/src/egress/cert_pins.rs` + `force_route.rs`); byte-identical when unset. Earlier: **python-exec output
-secret-scrub in-process e2e** (PR #299, `7b889dc`); **python-exec output secret-scrub** (`ddd2cf0`, PR #297 +
-overlap-pin `d9570ee`); **[#268] egress #3b dispatch-time secret-hash provisioning** (PR #296, `1da9882`) — all on `main`.)_
+_(Prior session — **`cli_memory_l3py_run_daemon_e2e` test-lift** merged to `main` as `625e9d6` (PR
+[#306](https://github.com/hherb/kastellan/pull/306)): hoisted shared daemon bring-up + inert mock LLM + CLI-output asserts
++ `cli_command` builder into `tests-common` (`daemon.rs` + `binaries.rs`), consumed by both daemon e2e files (l3py
+838→499, l3 480→296); python-specific `find_python`/skill factories stay local (core-free). Earlier on `main`: **egress
+slice-#4 operator cert-pin plumbing** (`4ecb94a`, PR #303; deferred e2e [#304](https://github.com/hherb/kastellan/issues/304));
+**python-exec output secret-scrub** in-process e2e (PR #299) + scrub (`ddd2cf0`, PR #297); **[#268] egress #3b dispatch-time
+secret-hash provisioning** (PR #296).)_
 
 ---
 
@@ -132,7 +143,7 @@ archive snapshots; the suite table below lists what each integration suite verif
 | `sandbox` integration (`macos_container_smoke`) | 7+ | **real** Apple `container`: argv shape, alpine smoke under `--init`, bind-mount-readonly, strict profile, probe skip |
 | `core` unit | 60+ | lockdown-env, watchdog, workspace RAII, audit parsers, dispatch-result mapping, ToolRegistry, injection_guard catalogue, secrets Vault + SecretRef, L3 crystallise/approval/invoke/surface units (see archive for full breakdown) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → sandbox → shell-exec round-trip; every call routes through `tool_host::dispatch` |
-| `core` integration (`python_exec_e2e`) | 4 | **real** core → sandbox → python-exec round-trip under the production policy: print round-trip, socket-attempt contained by the jail, Linux `/tmp` scratch write, **materialized-secret param scrubbed to `[redacted:]` + one `secret.output_scrubbed` row** (the in-process scrub e2e — full daemon e2e → #298) |
+| `core` integration (`python_exec_e2e`) | 4 | **real** core → sandbox → python-exec round-trip under the production policy: print round-trip, socket-attempt contained by the jail, **per-spawn scratch write (now cross-platform — Linux tmpfs `/tmp` + macOS host-created per-spawn dir, #283)**, **materialized-secret param scrubbed to `[redacted:]` + one `secret.output_scrubbed` row** (the in-process scrub e2e — full daemon e2e → #298) |
 | `web-common` unit | 8 | shared `HostAllowlist` matcher (exact/wildcard/case/lookalike/empty/malformed-json/trim/lone-dot) |
 | `web-fetch` unit | 21 | extract (HTML/PDF/text/JSON/char-boundary cap/unsupported), fetch redirect-drive (cap, non-allowlisted/non-HTTPS refusal, no-Location), handler (happy path, policy-denied arms, method-not-found, invalid-params). (Allowlist matcher tests moved to `web-common`.) |
 | `core` integration (`web_fetch_e2e`) | 1 (+1 ignored) | **real** sandbox deny-path: host outside allowlist is denied (hermetic); `real_fetch_extracts_readable_text` `#[ignore]` (real network, validates DNS+TLS in-jail) |
@@ -344,9 +355,13 @@ continues:
    asserts + `cli_command` builder hoisted into `tests-common` (`daemon.rs` + `binaries.rs`), consumed by **both** daemon
    e2e files (l3py 838 → 499, l3 480 → 296); python-specific `find_python` + skill factories stay local (`tests-common`
    is deliberately core-free). See "Last updated" up top.
-3. **python-exec worker slice-#2 candidates (on demand):** macOS writable scratch (shares browser-driver Phase 2's per-spawn
-   scratch wiring) — also unblocks the deferred **scratch-file param channel** for >64 KiB payloads; curated-wheels RO dir if
-   skills demand packages. **Other Phase-4 picks:** micro-VM backend (ROADMAP), tiered delegation policy (ROADMAP).
+3. **python-exec worker slice-#2 candidates (on demand):** ~~macOS writable scratch~~ — **DONE 2026-06-18** (branch
+   `feat/python-exec-macos-perspawn-scratch`, PR [#307](https://github.com/hherb/kastellan/pull/307)): a reusable per-spawn scratch mechanism (`ToolEntry.ephemeral_scratch`
+   → `tool_host/scratch.rs::prepare_ephemeral_scratch` → host dir + Seatbelt `fs_write` grant + `KASTELLAN_WORKER_SCRATCH` +
+   RAII `SupervisedWorker.scratch`); macOS now has a per-spawn isolated writable scratch, Linux byte-identical. See "Last
+   updated". Remaining: the **scratch-file param channel** for >64 KiB payloads (now unblocked — the worker has a host-writable
+   scratch); curated-wheels RO dir if skills demand packages; **browser-driver adopting `ephemeral_scratch`** + dropping its
+   `fs_write=["/tmp"]` to close #283 fully. **Other Phase-4 picks:** micro-VM backend (ROADMAP), tiered delegation policy (ROADMAP).
 
 **Egress deferrals carried forward:** [#242](https://github.com/hherb/kastellan/issues/242) tunnel idle/resolve timeouts;
 [#251](https://github.com/hherb/kastellan/issues/251) stale-scratch crash-sweep (needs cross-platform pid-liveness);

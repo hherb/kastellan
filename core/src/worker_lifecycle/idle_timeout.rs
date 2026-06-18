@@ -461,7 +461,13 @@ pub(crate) async fn acquire_impl(
     }
 
     // Cold-spawn path.
-    let policy = entry.policy.clone();
+    let mut policy = entry.policy.clone();
+    // macOS per-spawn writable scratch (#283): host-create + grant + RAII.
+    // No-op on Linux (bwrap tmpfs) and for non-scratch workers.
+    let scratch = crate::tool_host::prepare_ephemeral_scratch(
+        &mut policy,
+        entry.ephemeral_scratch,
+    )?;
     // Route through the lockdown shim when the manifest set one (Linux
     // pure-Python workers); otherwise spawn the binary directly.
     let (program, args) = crate::tool_host::build_program_and_args(
@@ -480,7 +486,7 @@ pub(crate) async fn acquire_impl(
     // configured; otherwise byte-identical to the legacy `spawn_worker`. A
     // warm-reused worker (above) keeps the sidecar it was first spawned with —
     // only this cold-spawn path attaches one.
-    let worker = spawn_worker_maybe_forced(force, sandbox, &spec, tool_name)?;
+    let worker = spawn_worker_maybe_forced(force, sandbox, &spec, tool_name)?.with_scratch(scratch);
     let spawned_at = Instant::now();
     Ok(WorkerHandle::idle_timeout(
         worker,

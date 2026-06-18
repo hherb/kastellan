@@ -254,49 +254,17 @@ git commit -m "feat(tool_host): per-spawn ephemeral scratch mechanism (macOS, #2
 - Consumes: `scratch::EphemeralScratch` (Task 1).
 - Produces: `pub fn SupervisedWorker::with_scratch(self, Option<EphemeralScratch>) -> Self` (the post-spawn attach seam, mirroring how `worker.egress` is set after `spawn_worker`).
 
-- [ ] **Step 1: Write the failing test**
+> **No new unit test in this task — by design, not omission.** `SupervisedWorker`
+> wraps a live `Client` and has no public/test constructor, so a unit test cannot
+> build one without spawning a real worker. A test that only calls
+> `prepare_ephemeral_scratch` + `drop` would duplicate **Task 1's** Drop test and
+> assert nothing about `with_scratch`. The builder's real behaviour — guard moved
+> in, dir cleaned when the worker drops — is verified end-to-end by **Task 6's
+> e2e** (a real worker spawned `.with_scratch(...)`, then the host-side
+> `no leaked scratch dirs` check). This task is field + builder plumbing; its gate
+> is "compiles, clippy clean, existing `tool_host` tests still green".
 
-Add to `core/src/tool_host.rs` (or its existing test module) — a test that does not need a real worker, only the field + builder. Place it in a `#[cfg(test)] mod` already present, or create one:
-
-```rust
-#[cfg(test)]
-mod scratch_attach_tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn with_scratch_holds_guard_until_worker_drops() {
-        // A guard over a real temp dir; attaching to a worker and dropping the
-        // worker must remove the dir. We fabricate the guard via the public
-        // prepare path on macOS, or skip the dir-cleanup leg off macOS.
-        let mut policy = kastellan_sandbox::SandboxPolicy::default();
-        let guard = scratch::prepare_ephemeral_scratch(&mut policy, true).unwrap();
-        // Off macOS guard is None (no dir); on macOS it owns a real dir.
-        let dir = guard.as_ref().map(|g| g.path().to_path_buf());
-        // Build a minimal SupervisedWorker without spawning: only valid if the
-        // struct exposes a test constructor. If not, this leg is covered by the
-        // e2e (Task 6) + the Drop unit test (Task 1) — assert the builder
-        // compiles + returns Self with the guard moved in instead:
-        if let Some(dir) = dir {
-            assert!(dir.exists());
-            drop(guard);
-            assert!(!dir.exists());
-        } else {
-            // non-macOS: nothing to clean; just prove the builder typechecks.
-            drop(guard);
-        }
-    }
-}
-```
-
-> NOTE: `SupervisedWorker` has no public constructor and wraps a live `Client`, so a pure unit test cannot build one. The `with_scratch` builder's behaviour (guard moved in, dropped with the worker) is therefore verified by **Task 1's Drop test** (the guard cleans the dir) plus **Task 6's e2e** (a real worker spawned with scratch). This step's test only pins that `prepare_ephemeral_scratch` + guard ownership compose; keep it minimal as above.
-
-- [ ] **Step 2: Run to verify it compiles + passes (no `with_scratch` referenced yet)**
-
-Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib scratch_attach 2>&1 | tail -10`
-Expected: PASS.
-
-- [ ] **Step 3: Add the field + builder**
+- [ ] **Step 1: Add the field + builder**
 
 In `core/src/tool_host.rs`, add to `SupervisedWorker` (after the `egress` field, so it drops last):
 
@@ -323,12 +291,12 @@ Add an `impl SupervisedWorker` method:
     }
 ```
 
-- [ ] **Step 4: Run tests + clippy**
+- [ ] **Step 2: Run tests + clippy**
 
-Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib scratch 2>&1 | tail -10 && cargo clippy -p kastellan-core --all-targets -D warnings 2>&1 | tail -5`
+Run: `source "$HOME/.cargo/env" && cargo test -p kastellan-core --lib tool_host 2>&1 | tail -10 && cargo clippy -p kastellan-core --all-targets -D warnings 2>&1 | tail -5`
 Expected: PASS + clean. (If clippy flags `field 'scratch' is never read`, mirror the `egress` field's exact treatment — it is the same shape and compiles clean today; if needed the established silencer in this struct is the `_`-prefix used by `_watchdog`, but prefer matching `egress`.)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add core/src/tool_host.rs core/src/egress/net_worker.rs
