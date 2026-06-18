@@ -205,6 +205,7 @@ fn host_mode_entry(env: &GlinerRelexEnv, lockdown_shim: Option<PathBuf>) -> Tool
         sandbox_backend: None,
         container_image: None,
         lockdown_shim,
+        ephemeral_scratch: false,
     }
 }
 
@@ -266,6 +267,7 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::Container),
         container_image: Some(image),
         lockdown_shim: None,
+        ephemeral_scratch: false,
     }
 }
 

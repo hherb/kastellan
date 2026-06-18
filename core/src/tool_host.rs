@@ -26,6 +26,9 @@ mod secret_scrub;
 mod lockdown_env;
 pub use lockdown_env::{derive_lockdown_env, ENV_CPU_MS, ENV_LANDLOCK_PROFILE, ENV_LANDLOCK_RO, ENV_LANDLOCK_RW, ENV_SECCOMP_PROFILE};
 
+mod scratch;
+pub use scratch::{prepare_ephemeral_scratch, EphemeralScratch, ENV_WORKER_SCRATCH};
+
 mod spawn_invocation;
 pub use spawn_invocation::build_program_and_args;
 
@@ -525,6 +528,7 @@ where
         client,
         _watchdog: watchdog,
         egress: None,
+        scratch: None,
     })
 }
 
@@ -567,10 +571,13 @@ fn drain_worker_stderr(pid: u32, stderr: std::process::ChildStderr) {
 /// closing stdio pipes. `_watchdog` drops second, setting the watchdog's
 /// cancel flag. The watchdog thread checks the flag at most every 50 ms
 /// and exits without firing SIGKILL — so closing a worker normally never
-/// produces a kill on a reused PID. `egress` drops last: for a force-routed
+/// produces a kill on a reused PID. `egress` drops third: for a force-routed
 /// net worker (slice #2) it kills the egress-proxy sidecar *after* the
 /// worker's pipes have closed, so the worker stops talking to the proxy
 /// before the proxy dies. Plain (`Net::Deny` / legacy) workers leave it `None`.
+/// `scratch` drops last: for a macOS per-spawn scratch worker its RAII guard
+/// removes the host dir after both the worker's pipes and the egress sidecar
+/// are gone. `None` on Linux and for any non-scratch worker.
 pub struct SupervisedWorker {
     client: Client,
     _watchdog: Option<watchdog::WatchdogGuard>,
@@ -578,6 +585,12 @@ pub struct SupervisedWorker {
     /// `crate::egress::net_worker::spawn_net_worker`. Additive — its `Drop`
     /// tears the coupled egress-proxy sidecar down 1:1 with this worker.
     pub(crate) egress: Option<crate::egress::net_worker::EgressSidecar>,
+    /// `Some` only for a worker that requested per-spawn scratch
+    /// (`ToolEntry.ephemeral_scratch`, macOS). Set post-spawn via
+    /// [`SupervisedWorker::with_scratch`], mirroring how `egress` is attached.
+    /// Its `Drop` removes the host scratch dir after the worker's pipes close.
+    /// `None` for every worker on Linux and every non-scratch worker.
+    pub(crate) scratch: Option<scratch::EphemeralScratch>,
 }
 
 impl SupervisedWorker {
@@ -604,18 +617,29 @@ impl SupervisedWorker {
     /// cancel the watchdog. Returns the worker's exit status.
     pub fn close(self) -> std::io::Result<std::process::ExitStatus> {
         // Destructure to move `client` out by value (consumed by `close`)
-        // while leaving `_watchdog` to drop at end-of-scope, which sets
-        // the cancel flag. Safe because [`SupervisedWorker`] has no
+        // while binding the remaining guards so we can drop them in a
+        // controlled order below. Safe because [`SupervisedWorker`] has no
         // [`Drop`] impl, so partial moves are allowed.
         let SupervisedWorker {
             client,
-            _watchdog: _drop_at_scope_end,
-            egress: _drop_egress_at_scope_end,
+            _watchdog,
+            egress,
+            scratch,
         } = self;
         // `client.close()` runs first (waits for the worker to exit, closing
-        // its pipes); `_drop_egress_at_scope_end` then drops at end of scope,
-        // killing the sidecar *after* the worker has stopped.
-        client.close()
+        // its pipes). The remaining guards are then dropped *explicitly* in the
+        // same order as the struct's field-drop order — watchdog, egress,
+        // scratch — so `close()` matches the implicit `Drop` path exactly: the
+        // egress sidecar is killed after the worker has stopped, and the host
+        // scratch dir is removed last. (Pattern bindings would otherwise drop
+        // in reverse-declaration order, putting scratch before egress; harmless
+        // here since the worker is already gone, but we make it explicit so the
+        // documented ordering can't silently drift.)
+        let status = client.close();
+        drop(_watchdog);
+        drop(egress);
+        drop(scratch);
+        status
     }
 
     /// Forcefully kill the worker without waiting for graceful shutdown.
@@ -623,5 +647,13 @@ impl SupervisedWorker {
     /// [`Self::close`]).
     pub fn kill(&mut self) -> std::io::Result<()> {
         self.client.kill()
+    }
+
+    /// Attach an optional per-spawn scratch guard, returning `self` for
+    /// chaining. The guard's `Drop` cleans the host dir when this worker is
+    /// dropped. `None` is a no-op (Linux / non-scratch workers).
+    pub fn with_scratch(mut self, scratch: Option<scratch::EphemeralScratch>) -> Self {
+        self.scratch = scratch;
+        self
     }
 }

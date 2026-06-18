@@ -19,8 +19,23 @@ pub const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 /// Scratch root inside the jail. On Linux this is bwrap's per-spawn
 /// ephemeral tmpfs (#89), granted through Landlock by the explicit
 /// `KASTELLAN_LANDLOCK_RW=["/tmp"]` the host policy carries; on macOS
-/// slice #1 it exists but is not writable (Seatbelt `(deny default)`).
+/// the host sets [`WORKER_SCRATCH_ENV`] to a per-spawn writable dir and
+/// this constant serves only as the fallback when that var is unset.
 pub const SCRATCH_DIR: &str = "/tmp";
+
+/// Env var by which the host hands this worker its per-spawn scratch dir
+/// (macOS). Unset on Linux (the bwrap `/tmp` tmpfs is the scratch). **Keep in
+/// sync** with core's `kastellan_core::tool_host::ENV_WORKER_SCRATCH`.
+pub const WORKER_SCRATCH_ENV: &str = "KASTELLAN_WORKER_SCRATCH";
+
+/// Resolve the scratch dir: the host-provided [`WORKER_SCRATCH_ENV`] value, or
+/// the default [`SCRATCH_DIR`] (`/tmp`) when unset. Pure (no I/O) so the
+/// fallback is unit-testable; the worker reads the real env at the call site.
+pub fn scratch_dir_from_env(lookup: impl Fn(&str) -> Option<String>) -> String {
+    lookup(WORKER_SCRATCH_ENV)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| SCRATCH_DIR.to_string())
+}
 
 /// Env var carrying the runtime params JSON object to the skill. The worker
 /// ALWAYS sets it (default `{}`) so the author's
@@ -165,17 +180,18 @@ pub fn truncate_lossy(bytes: &[u8], cap: usize) -> (String, bool) {
 /// as the JSON string `params_json` in the [`PARAMS_ENV`] env var; the
 /// value has already been validated and serialized by the caller.
 pub fn run_code(python: &Path, code: &str, params_json: &str) -> std::io::Result<ExecOutcome> {
+    let scratch = scratch_dir_from_env(|k| std::env::var(k).ok());
     let mut cmd = Command::new(python);
     cmd.args(python_args())
         .env_clear()
-        .env("TMPDIR", SCRATCH_DIR)
-        .env("HOME", SCRATCH_DIR)
+        .env("TMPDIR", &scratch)
+        .env("HOME", &scratch)
         .env(PARAMS_ENV, params_json)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if Path::new(SCRATCH_DIR).is_dir() {
-        cmd.current_dir(SCRATCH_DIR);
+    if Path::new(&scratch).is_dir() {
+        cmd.current_dir(&scratch);
     }
     let mut child = cmd.spawn()?;
 
@@ -349,5 +365,25 @@ mod tests {
         assert!(!s.as_bytes().contains(&0), "serialized params must be NUL-free");
         let back: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(back["text"], "a\u{0000}b");
+    }
+
+    #[test]
+    fn scratch_dir_defaults_to_tmp_when_unset() {
+        let s = scratch_dir_from_env(|_| None);
+        assert_eq!(s, "/tmp");
+    }
+
+    #[test]
+    fn scratch_dir_uses_env_when_set() {
+        let s = scratch_dir_from_env(|k| {
+            (k == WORKER_SCRATCH_ENV).then(|| "/var/folders/xx/pyexec-1-1".to_string())
+        });
+        assert_eq!(s, "/var/folders/xx/pyexec-1-1");
+    }
+
+    #[test]
+    fn scratch_dir_falls_back_when_env_is_empty() {
+        let s = scratch_dir_from_env(|_| Some(String::new()));
+        assert_eq!(s, "/tmp");
     }
 }

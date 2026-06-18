@@ -235,9 +235,19 @@ items unlock later ones.
   - [x] **DGX (bwrap) acceptance — 2026-06-13:** `python_exec_e2e` 3/3 under the real jail (no `[SKIP]` lines —
     round-trip, socket negative, AND the scratch-tmpfs write all ran; live PG + Landlock + seccomp). Verified on both
     `main` (`313f6bb`) and the fix branch; native-Linux workspace clippy `-D warnings` clean on the branch.
-  - [ ] **Follow-ups:** macOS writable scratch (Seatbelt deny-default leaves slice #1 with none — tighter, not
-    looser; shares the per-spawn scratch wiring browser-driver Phase 2 needs); curated-wheels RO dir if/when the skill
-    catalog demands packages; planner-prompt surfacing (parity note: the net workers have none either).
+  - [x] **macOS writable scratch — DONE 2026-06-18** (branch `feat/python-exec-macos-perspawn-scratch`; #283 for python-exec).
+    A reusable per-spawn scratch mechanism: `ToolEntry.ephemeral_scratch: bool` (python-exec sets it) drives
+    `core/src/tool_host/scratch.rs::prepare_ephemeral_scratch`, which on macOS host-creates `<temp_dir>/pyexec-<pid>-<seq>`,
+    grants it via `fs_write` (→ Seatbelt subpath rule), hands the path to the worker through `KASTELLAN_WORKER_SCRATCH`,
+    and RAII-cleans it (`EphemeralScratch` held in `SupervisedWorker.scratch`, attached via `with_scratch` post-spawn at
+    both cold-spawn sites + the e2e harness — mirrors egress). The worker resolves `TMPDIR`/`HOME`/cwd from the env var
+    (fallback `/tmp`). **Linux byte-identical** (helper returns `None` off macOS; env unset → `/tmp` tmpfs). Seatbelt grants
+    only the spawn's own subpath, so invocations can't read each other — strictly stronger than browser-driver's shared
+    `/tmp`. `python_exec_e2e::scratch_tmp_write_round_trip_inside_jail` now **runs+passes on macOS** (was `[SKIP]`).
+    Spec/plan: `docs/superpowers/{specs,plans}/2026-06-18-python-exec-macos-perspawn-scratch*`.
+  - [ ] **Follow-ups:** browser-driver adopting `ephemeral_scratch` + dropping its `fs_write=["/tmp"]` (closes #283 fully);
+    the >64 KiB scratch-file param channel (now unblocked — the worker has a host-writable scratch); curated-wheels RO dir
+    if/when the skill catalog demands packages; planner-prompt surfacing (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
   - [x] **Slice 1 — crystallise + approval + operator CLI — 2026-06-13** (branch `feat/python-exec-skill-catalog`,
     PR [#275](https://github.com/hherb/kastellan/pull/275)). Agent-authored Python skills mirror the L3 templated arc one payload over: a layer-3 `memories` row

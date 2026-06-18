@@ -145,6 +145,19 @@ pub struct ToolEntry {
     /// runs the Rust prelude, so the shim applies the seccomp filter and
     /// `execve`s the real binary, which inherits it. See issue #281.
     pub lockdown_shim: Option<PathBuf>,
+    /// When `true`, the worker is granted a per-spawn writable scratch dir on
+    /// macOS (host-created, Seatbelt-granted, RAII-cleaned) — the parity
+    /// counterpart of Linux's bwrap `/tmp` tmpfs. `false` for every worker
+    /// except python-exec today. See `tool_host::prepare_ephemeral_scratch`.
+    ///
+    /// **Isolation is per-spawn only for `SingleUse` workers** (python-exec is
+    /// one): the guard is created at the cold-spawn site, so a fresh dir is
+    /// minted per dispatch. A *warm-reusable* worker that set this flag would
+    /// keep the dir it was first spawned with across every dispatch routed to
+    /// it — per-worker-lifetime, not per-spawn — so successive invocations on
+    /// the same warm worker would share scratch. No warm-reusable worker opts
+    /// in today; revisit this guarantee before the first one does.
+    pub ephemeral_scratch: bool,
 }
 
 /// Look-up table from logical tool name (as it appears in

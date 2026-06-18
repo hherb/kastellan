@@ -185,6 +185,7 @@ fn dispatcher_routes_ok_denied_and_unknown_tool_paths() {
                 sandbox_backend: None,
                 container_image: None,
                 lockdown_shim: None,
+                ephemeral_scratch: false,
             },
         );
         let registry = Arc::new(registry);
