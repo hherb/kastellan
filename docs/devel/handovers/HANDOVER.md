@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-19 (**python-exec >64 KiB scratch-file param channel — DONE on branch
-`feat/python-exec-scratch-file-params`, PR pending (push from DGX + `gh pr create`).** Runtime params >64 KiB were
+`feat/python-exec-scratch-file-params`, PR [#310](https://github.com/hherb/kastellan/pull/310).** Runtime params >64 KiB were
 previously refused outright (the 64 KiB cap exists because the worker hands params to the child CPython as an `execve` env
 var); now they ride a file. The worker decides by serialized size: **≤64 KiB → inline env `KASTELLAN_PYTHON_PARAMS`
 (byte-identical, unchanged); >64 KiB → write `<scratch>/params.json` (0600, in the worker's per-spawn writable scratch) +
