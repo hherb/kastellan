@@ -162,10 +162,19 @@ items unlock later ones.
   bridging the synchronous protocol Client to the async `Channel` trait — keeps the protocol pure
   request/response), `build_matrix_policy` (pure), config-gated `main.rs` hook (byte-identical when
   unset), and `matrix_channel_e2e` (full loop against a real fake-worker process; paired round-trip
-  + unpaired-dropped). **Phase D pending (DGX):** the real `matrix-rust-sdk` worker impl + egress
-  coupling + persistent encrypted E2E store + restart supervision + `#[ignore]` live test (gated on
-  the `live-matrix` feature; the matrix-rust-sdk-through-MITM-egress-proxy spike is the top risk).
-  Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-matrix-inbound-sandboxed-worker*`.
+  + unpaired-dropped). **Phase D egress-transport spike DONE** (branch
+  `feat/matrix-phase-d-egress-spike`, 2026-06-19): matrix-sdk 0.8.0 landed behind `live-matrix`
+  feature; AGPL license pass (225 new crates, all PASS); `ProxyBridge` (loopback-TCP↔UDS relay,
+  `src/bridge.rs`); hermetic spike test (`egress_spike.rs`) confirms `CONNECT fake-homeserver.invalid:443`
+  arrives at the stub via the bridge — **transport CONFIRMED: transparent tunnel via `disable_mitm`
+  (worker name) + `ProxyBridge`; no CA injection; conduwuit homeserver infra already done (slice #6)**.
+  SDK builder names (homeserver_url, sqlite_store, proxy, build, whoami) recorded in the spike spec.
+  **Phase D live integration pending (DGX — the next slice):** `sdk_live.rs` LiveSdk impl, restore
+  `main.rs` wiring (narrowing the crate-wide `#![allow(dead_code)]` back to the `live-matrix`-cfg form), wire
+  `disable_mitm` in core spawn path, `ProxyBridge` error-surfacing ([#312](https://github.com/hherb/kastellan/issues/312)),
+  `matrix_live_e2e.rs` `#[ignore]` vs conduwuit.
+  Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-matrix-inbound-sandboxed-worker*`;
+  spike spec: `docs/superpowers/specs/2026-06-19-matrix-phase-d-egress-transport-spike-design.md`.
 - [x] **Homeserver supervisor unit + hardening** — conduwuit (federation OFF, loopback bind,
   token-gated→closed registration): hardened **system** systemd unit template + config template +
   `setup-conduwuit.sh` (dev/Tier-C) + `check-conduwuit-config.sh` (security-invariant verifier,
