@@ -399,7 +399,8 @@ async fn python_skill_params_round_trip_through_jail() {
 // vars, and the worker's env_clear() keeps every host lockdown var out of the
 // child. We pass params named like dangerous env vars (`path`, `ld_preload`)
 // and assert the child's env keys are EXACTLY {HOME, KASTELLAN_PYTHON_PARAMS,
-// TMPDIR}.
+// TMPDIR} (plus LC_CTYPE on Linux — a benign CPython PEP 538 locale artifact,
+// see the per-platform expected set in the assertion below).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -447,9 +448,21 @@ async fn python_exec_child_env_is_clobber_proof() {
         .unwrap_or("")
         .trim_matches(|c| c == '\n' || c == '\r' || c == '\\' || c == 'n')
         .trim();
+    // CPython's PEP 538 C-locale coercion injects LC_CTYPE=C.UTF-8 into the
+    // child on Linux, because the worker's env_clear() leaves no LANG/LC_* ⇒ the
+    // interpreter sees the C locale and coerces. It is the interpreter's OWN
+    // benign artifact — not a runtime-param or host-var leak — so the exact set
+    // includes it on Linux. macOS framework python does not coerce, so the set
+    // stays the original three there. The guarantee this test exists to catch (no
+    // param/host-var leak) is preserved exactly on each platform.
+    let expected = if cfg!(target_os = "linux") {
+        "HOME,KASTELLAN_PYTHON_PARAMS,LC_CTYPE,TMPDIR"
+    } else {
+        "HOME,KASTELLAN_PYTHON_PARAMS,TMPDIR"
+    };
     assert_eq!(
-        env_keys, "HOME,KASTELLAN_PYTHON_PARAMS,TMPDIR",
-        "python-exec child env must be EXACTLY {{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}}; \
+        env_keys, expected,
+        "python-exec child env must be EXACTLY {expected:?}; \
          a differing set means a runtime param leaked as an env var or a host var leaked into the child; \
          got full stdout:\n{stdout}",
     );
