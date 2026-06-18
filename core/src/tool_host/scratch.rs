@@ -43,6 +43,7 @@ pub fn apply_scratch(policy: &mut SandboxPolicy, dir: &Path) {
 /// removes the whole subtree — mirrors `crate::egress::net_worker`'s scratch
 /// cleanup. Held inside `SupervisedWorker` so the dir outlives the worker
 /// exactly and no longer.
+#[must_use = "dropping the guard immediately removes the scratch dir before the worker can use it; bind it to the worker via SupervisedWorker::with_scratch"]
 pub struct EphemeralScratch {
     dir: PathBuf,
 }
