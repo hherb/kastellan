@@ -149,3 +149,36 @@ build/CI byte-identical (feature off → no SDK compiled):
   implementation; adjust the trigger, not the design.
 - **License surprise in the transitive tree.** Low (matrix-rust-sdk ecosystem is
   permissively licensed) but the gate is mandatory and abortive.
+
+## License pass (2026-06-19)
+
+**matrix-sdk version:** 0.8.0
+**Resolved feature set:** e2e-encryption, sqlite, bundled-sqlite, rustls-tls
+**New crate count (unique names added by `live-matrix` feature):** 225
+**Decision:** PASS — all AGPL-compatible
+
+### Method
+
+Enumerated the full dependency tree of `kastellan-worker-matrix` with the
+`live-matrix` feature on via `cargo tree -p kastellan-worker-matrix --features
+live-matrix -e normal --prefix none | sort -u` (359 lines including dedup markers
+`(*)`), then cross-referenced against the baseline tree without the feature (40
+lines). 225 unique crate names are new. Workspace-wide license map obtained via
+`cargo-license --all-features`.
+
+### Non-obvious licenses investigated
+
+| Crate | License ID | Actual license | Compatible? |
+|---|---|---|---|
+| `xxhash-rust` | `BSL-1.0` | **Boost Software License 1.0** (permissive) — confirmed by reading LICENSE file | YES — permissive, AGPL-compatible |
+| `webpki-roots` | `CDLA-Permissive-2.0` | Community Data License Agreement – Permissive 2.0 — a **data license** for the bundled TLS root certificates; Section 3.1 explicitly places no restriction on use of results | YES — permissive data license, AGPL-compatible |
+| `ryu` | `Apache-2.0 OR BSL-1.0` | Dual Apache-2.0 / Boost; licensor chose whichever the user prefers | YES |
+| `blake3` | `Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR CC0-1.0` | All three variants are permissive | YES |
+| Matrix/ruma/vodozemac crates | `Apache-2.0` | Pure Apache-2.0 | YES |
+| `ring` | `Apache-2.0 AND ISC` | Conjunctive Apache-2.0 + ISC | YES |
+| `curve25519-dalek`, `ed25519-dalek`, `x25519-dalek` | `BSD-3-Clause` | Permissive | YES |
+| `MPL-2.0` family (`eyeball`, `imbl`, `as_variant`, …) | MPL-2.0 / MPL-2.0+ | File-copyleft only; compatible as a dependency in an AGPL project | YES |
+| ICU crates | `Unicode-3.0` | Unicode License v3 — permissive | YES |
+
+No `CDDL`, `BUSL` (Business Source), `SSPL`, `Elastic License`, `Commons Clause`,
+or any other source-available / non-free license detected in the subtree.
