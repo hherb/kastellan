@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn over_cap_params_is_invalid_params() {
-        let big = "x".repeat(crate::exec::MAX_PARAMS_BYTES);
+        let big = "x".repeat(crate::exec::INLINE_PARAMS_MAX);
         let err = handler()
             .call(
                 "python.exec",

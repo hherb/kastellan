@@ -43,11 +43,42 @@ pub fn scratch_dir_from_env(lookup: impl Fn(&str) -> Option<String>) -> String {
 /// lookup. Survives `-I` (which drops only `PYTHON*` names).
 pub const PARAMS_ENV: &str = "KASTELLAN_PYTHON_PARAMS";
 
-/// Byte cap on the serialized params object. Sits under the Linux
-/// `MAX_ARG_STRLEN` (128 KiB) per-env-string `execve` wall with headroom;
-/// the host-side `core` enforces the same cap early (keep the two in sync —
-/// see `core/src/memory/l3py_invoke/pure.rs::MAX_PARAMS_BYTES`).
-pub const MAX_PARAMS_BYTES: usize = 64 * 1024;
+/// The execve-safe **inline** threshold. Params serializing to ≤ this many
+/// bytes ride the `KASTELLAN_PYTHON_PARAMS` env var; larger payloads are
+/// written to `<scratch>/params.json` (the file channel — see
+/// [`decide_param_channel`]). Sits under the Linux `MAX_ARG_STRLEN` (128 KiB)
+/// per-env-string `execve` wall with headroom. The host gate mirrors the file
+/// ceiling, not this threshold (the worker owns the inline-vs-file split).
+pub const INLINE_PARAMS_MAX: usize = 64 * 1024;
+
+/// Default file-channel ceiling when `KASTELLAN_PYTHON_PARAMS_FILE_MAX` is
+/// unset, and the absolute clamp ceiling regardless of operator config.
+pub const PARAMS_FILE_MAX_DEFAULT: usize = 1024 * 1024;
+pub const PARAMS_FILE_MAX_ABS: usize = 16 * 1024 * 1024;
+
+/// Operator-config env naming the file-channel ceiling. The host manifest
+/// injects this into the jail (when the operator sets it); **keep in sync**
+/// with `core/src/workers/python_exec.rs`.
+pub const PARAMS_FILE_MAX_ENV: &str = "KASTELLAN_PYTHON_PARAMS_FILE_MAX";
+
+/// Env var by which the worker hands the child the PATH to the params file —
+/// set ONLY when the file channel is used. The author reads the file when this
+/// is present, else the inline [`PARAMS_ENV`]. (See the [`PARAMS_FILE_ENV`]
+/// doc-comment in Task 2 for the author idiom.)
+pub const PARAMS_FILE_ENV: &str = "KASTELLAN_PYTHON_PARAMS_FILE";
+
+/// Basename of the params file written into the scratch dir.
+pub const PARAMS_FILE_NAME: &str = "params.json";
+
+/// Which transport carries the serialized params to the child interpreter.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParamChannel {
+    /// Fits the execve-safe env var — set [`PARAMS_ENV`] directly.
+    Inline,
+    /// Too big for the env var — write `<scratch>/params.json` and point the
+    /// child at it via [`PARAMS_FILE_ENV`].
+    File,
+}
 
 /// Why a params payload was rejected. The handler maps both arms to
 /// JSON-RPC `INVALID_PARAMS`.
@@ -55,7 +86,7 @@ pub const MAX_PARAMS_BYTES: usize = 64 * 1024;
 pub enum ParamsError {
     /// Present but not a JSON object (array / scalar / null).
     NotObject,
-    /// Serialized object exceeds [`MAX_PARAMS_BYTES`].
+    /// Serialized object exceeds the applicable ceiling.
     TooLarge { got: usize, max: usize },
 }
 
@@ -70,11 +101,61 @@ impl std::fmt::Display for ParamsError {
     }
 }
 
+/// Resolve the file-channel ceiling from [`PARAMS_FILE_MAX_ENV`]: parse the
+/// value, fall back to [`PARAMS_FILE_MAX_DEFAULT`] when unset/empty/unparseable,
+/// then clamp to `[INLINE_PARAMS_MAX, PARAMS_FILE_MAX_ABS]` (a ceiling below the
+/// inline threshold is nonsensical — the file channel only fires above it).
+/// Pure (lookup injected) so the parse/clamp truth-table is unit-testable.
+pub fn params_file_max(lookup: impl Fn(&str) -> Option<String>) -> usize {
+    lookup(PARAMS_FILE_MAX_ENV)
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(PARAMS_FILE_MAX_DEFAULT)
+        .clamp(INLINE_PARAMS_MAX, PARAMS_FILE_MAX_ABS)
+}
+
+/// Decide the channel for a params payload of `serialized_len` bytes:
+/// `≤ inline_max` → [`ParamChannel::Inline`]; `≤ file_max` → [`ParamChannel::File`];
+/// otherwise [`ParamsError::TooLarge`]. Pure. `file_max ≥ inline_max` is
+/// guaranteed by [`params_file_max`]'s clamp.
+pub fn decide_param_channel(
+    serialized_len: usize,
+    inline_max: usize,
+    file_max: usize,
+) -> Result<ParamChannel, ParamsError> {
+    if serialized_len <= inline_max {
+        Ok(ParamChannel::Inline)
+    } else if serialized_len <= file_max {
+        Ok(ParamChannel::File)
+    } else {
+        Err(ParamsError::TooLarge { got: serialized_len, max: file_max })
+    }
+}
+
+/// The child env pairs for the chosen params channel. `Inline` → just
+/// [`PARAMS_ENV`]; `File` → [`PARAMS_ENV`]`="{}"` (the stable empty-default so a
+/// legacy unconditional `json.loads(os.environ["KASTELLAN_PYTHON_PARAMS"])`
+/// never `KeyError`s) **plus** [`PARAMS_FILE_ENV`]`=file_path`. Pure (no I/O) so
+/// the env contract is unit-testable; [`run_code`] writes the file then applies
+/// these.
+pub fn params_env_pairs(
+    channel: &ParamChannel,
+    params_json: &str,
+    file_path: &str,
+) -> Vec<(&'static str, String)> {
+    match channel {
+        ParamChannel::Inline => vec![(PARAMS_ENV, params_json.to_string())],
+        ParamChannel::File => vec![
+            (PARAMS_ENV, "{}".to_string()),
+            (PARAMS_FILE_ENV, file_path.to_string()),
+        ],
+    }
+}
+
 /// Serialize the optional params object to the env-var string.
 ///
 /// * `None` ⇒ `"{}"` (the stable empty-default contract).
 /// * `Some(obj)` where `obj` is a JSON object ⇒ its compact serialization,
-///   rejected if it exceeds [`MAX_PARAMS_BYTES`].
+///   rejected if it exceeds [`INLINE_PARAMS_MAX`].
 /// * `Some(non-object)` ⇒ [`ParamsError::NotObject`].
 ///
 /// Pure (no I/O) so it is unit-testable without an interpreter. The worker is
@@ -89,8 +170,8 @@ pub fn serialize_params(params: &Option<Value>) -> Result<String, ParamsError> {
             // making the result safe to hand to execve as one C-string env
             // value.
             let s = serde_json::to_string(v).unwrap_or_default();
-            if s.len() > MAX_PARAMS_BYTES {
-                return Err(ParamsError::TooLarge { got: s.len(), max: MAX_PARAMS_BYTES });
+            if s.len() > INLINE_PARAMS_MAX {
+                return Err(ParamsError::TooLarge { got: s.len(), max: INLINE_PARAMS_MAX });
             }
             Ok(s)
         }
@@ -337,7 +418,7 @@ mod tests {
 
     #[test]
     fn serialize_params_rejects_over_cap() {
-        let big = "x".repeat(MAX_PARAMS_BYTES);
+        let big = "x".repeat(INLINE_PARAMS_MAX);
         let v = serde_json::json!({ "k": big });
         assert!(matches!(
             serialize_params(&Some(v)),
@@ -385,5 +466,85 @@ mod tests {
     fn scratch_dir_falls_back_when_env_is_empty() {
         let s = scratch_dir_from_env(|_| Some(String::new()));
         assert_eq!(s, "/tmp");
+    }
+
+    #[test]
+    fn params_file_max_defaults_when_unset() {
+        let m = params_file_max(|_| None);
+        assert_eq!(m, PARAMS_FILE_MAX_DEFAULT);
+    }
+
+    #[test]
+    fn params_file_max_parses_a_valid_value() {
+        let m = params_file_max(|k| (k == PARAMS_FILE_MAX_ENV).then(|| "200000".to_string()));
+        assert_eq!(m, 200_000);
+    }
+
+    #[test]
+    fn params_file_max_garbage_falls_back_to_default() {
+        let m = params_file_max(|k| (k == PARAMS_FILE_MAX_ENV).then(|| "not-a-number".to_string()));
+        assert_eq!(m, PARAMS_FILE_MAX_DEFAULT);
+    }
+
+    #[test]
+    fn params_file_max_clamps_below_inline_and_above_abs() {
+        // Below the inline threshold is nonsensical (file channel only fires
+        // above inline) → clamp up.
+        let low = params_file_max(|k| (k == PARAMS_FILE_MAX_ENV).then(|| "1".to_string()));
+        assert_eq!(low, INLINE_PARAMS_MAX);
+        // Above the absolute ceiling → clamp down.
+        let high = params_file_max(|k| (k == PARAMS_FILE_MAX_ENV).then(|| "999999999".to_string()));
+        assert_eq!(high, PARAMS_FILE_MAX_ABS);
+    }
+
+    #[test]
+    fn decide_inline_at_and_below_threshold() {
+        assert_eq!(
+            decide_param_channel(0, INLINE_PARAMS_MAX, PARAMS_FILE_MAX_DEFAULT).unwrap(),
+            ParamChannel::Inline
+        );
+        assert_eq!(
+            decide_param_channel(INLINE_PARAMS_MAX, INLINE_PARAMS_MAX, PARAMS_FILE_MAX_DEFAULT).unwrap(),
+            ParamChannel::Inline
+        );
+    }
+
+    #[test]
+    fn decide_file_just_over_inline_and_at_ceiling() {
+        assert_eq!(
+            decide_param_channel(INLINE_PARAMS_MAX + 1, INLINE_PARAMS_MAX, PARAMS_FILE_MAX_DEFAULT).unwrap(),
+            ParamChannel::File
+        );
+        assert_eq!(
+            decide_param_channel(PARAMS_FILE_MAX_DEFAULT, INLINE_PARAMS_MAX, PARAMS_FILE_MAX_DEFAULT).unwrap(),
+            ParamChannel::File
+        );
+    }
+
+    #[test]
+    fn decide_too_large_over_ceiling() {
+        let err = decide_param_channel(
+            PARAMS_FILE_MAX_DEFAULT + 1, INLINE_PARAMS_MAX, PARAMS_FILE_MAX_DEFAULT,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParamsError::TooLarge { .. }));
+    }
+
+    #[test]
+    fn params_env_pairs_inline_sets_only_params_env() {
+        let pairs = params_env_pairs(&ParamChannel::Inline, r#"{"a":1}"#, "/unused");
+        assert_eq!(pairs, vec![(PARAMS_ENV, r#"{"a":1}"#.to_string())]);
+    }
+
+    #[test]
+    fn params_env_pairs_file_sets_empty_default_plus_path() {
+        let pairs = params_env_pairs(&ParamChannel::File, r#"{"a":1}"#, "/tmp/params.json");
+        assert_eq!(
+            pairs,
+            vec![
+                (PARAMS_ENV, "{}".to_string()),
+                (PARAMS_FILE_ENV, "/tmp/params.json".to_string()),
+            ]
+        );
     }
 }
