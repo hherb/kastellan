@@ -52,55 +52,74 @@ core changes. Rejected alternatives:
 
 ## Components and seams
 
-### 1. Opt-in flag (core types)
+### 1. Opt-in flag (core type)
 
 - `ToolEntry.ephemeral_scratch: bool` — new additive field, default `false`.
   Set `true` only on the python-exec manifest. Mirrors the existing additive
-  per-worker fields (`sandbox_backend`, `lockdown_shim`).
-- `WorkerSpec.ephemeral_scratch: bool` — sourced from the `ToolEntry` at each
-  spec-construction site (the established pattern, same as `lockdown_shim`
-  shaping `program`). Net-worker / test sites set `false`.
+  per-worker opt-in fields (`sandbox_backend`, `lockdown_shim`), and is the
+  codebase's convention for manifest-declared per-worker behaviour (an env
+  marker would be a less greppable, stringly-typed alternative — rejected).
+- **`WorkerSpec` and `spawn_worker` stay untouched.** The e2e harness
+  (`python_exec_e2e::dispatch_in_jail`) spawns via bare `spawn_worker`, not the
+  lifecycle manager; adding the flag to `WorkerSpec` would force it onto ~35
+  literals AND still not let the harness exercise scratch without extra wiring.
+  Instead the scratch is composed *around* `spawn_worker` (next section),
+  mirroring how egress attaches its sidecar post-spawn — so production and the
+  e2e harness share one helper.
 
 ### 2. New `core/src/tool_host/scratch.rs` sibling
 
 Keeps `tool_host.rs` (already 627 LOC, over the 500 cap) from growing — rule 4.
 Contains:
 
-- **`EphemeralScratch`** — RAII guard owning the created dir; `Drop` =
-  best-effort `std::fs::remove_dir_all`. Mirrors `EgressSidecar.scratch`.
+- **`EphemeralScratch`** (pub, opaque) — RAII guard owning the created dir;
+  `Drop` = best-effort `std::fs::remove_dir_all`. Mirrors `EgressSidecar.scratch`.
 - **pure `scratch_subdir(root: &Path, pid: u32, seq: u64) -> PathBuf`** —
   builds `<root>/pyexec-<pid>-<seq>`. Unit-testable, no I/O.
 - **pure `apply_scratch(policy: &mut SandboxPolicy, dir: &Path)`** — pushes
   `dir` onto `policy.fs_write` and sets the `KASTELLAN_WORKER_SCRATCH` env
   entry. Unit-testable, no I/O.
-- a small `create_scratch(root) -> io::Result<EphemeralScratch>` that picks the
-  pid + an atomic seq, `create_dir_all`s the subdir, and returns the guard.
+- **`prepare_ephemeral_scratch(policy: &mut SandboxPolicy, ephemeral: bool) ->
+    Result<Option<EphemeralScratch>, ToolHostError>`** — the shared seam. On
+  macOS, when `ephemeral`: pick pid + an atomic seq, `create_dir_all` the
+  subdir under `std::env::temp_dir()`, `apply_scratch`, return the guard.
+  Off macOS, or when `!ephemeral`: `Ok(None)` (Linux's tmpfs already covers it).
+  Cross-platform-callable (runtime `cfg!`), so no dead code on Linux.
 
 Scratch **root** defaults to `std::env::temp_dir()` (per-user, private
 `/var/folders/...` on macOS). Seatbelt's existing not-yet-created-path
 canonicalization (`canonicalize_policy_paths`) already resolves the dir into the
 real `(allow file-read* file-write* (subpath ...))` rule.
 
-### 3. `spawn_worker` (macOS-gated only)
+### 3. Composition around `spawn_worker` (lifecycle + e2e share one helper)
+
+`SupervisedWorker` gains a private `scratch: Option<EphemeralScratch>` field
+(declared **after** `egress` so the dir is removed last, after the worker's
+pipes close) and a public builder `with_scratch(self, Option<EphemeralScratch>)
+-> Self` (the attach seam — mirrors how egress sets `worker.egress` post-spawn).
+
+Both production cold-spawn sites (`worker_lifecycle/manager.rs::SingleUse` and
+`worker_lifecycle/idle_timeout.rs` cold path) already `let policy =
+entry.policy.clone()` before building the `WorkerSpec`. The change at each:
 
 ```text
-let mut derived = derive_lockdown_env(spec.policy);   // already owned
-#[cfg(target_os = "macos")]
-let scratch = if spec.ephemeral_scratch {
-    let s = scratch::create_scratch(&std::env::temp_dir())?;  // fail-closed
-    scratch::apply_scratch(&mut derived, s.path());
-    Some(s)
-} else { None };
-#[cfg(not(target_os = "macos"))]
-let scratch = None;   // Linux already has the tmpfs; nothing to create
-... spawn_under_policy(&derived, ...) ...
-SupervisedWorker { client, _watchdog, egress: None, scratch }
+let mut policy = entry.policy.clone();
+let scratch = prepare_ephemeral_scratch(&mut policy, entry.ephemeral_scratch)?;  // fail-closed
+... build spec(&policy); let worker = spawn_worker_maybe_forced(...)?; ...
+Ok(WorkerHandle::…(worker.with_scratch(scratch), …))
 ```
 
-- `SupervisedWorker` gains `scratch: Option<EphemeralScratch>`, declared **after**
-  `egress` so the dir is removed last, after the worker's pipes have closed.
-- The **Linux branch is untouched** → byte-identical to today.
+The e2e harness composes the identical two calls around its bare `spawn_worker`
+(it already clones nothing — it borrows `&entry.policy`, so it switches to a
+local `let mut policy = entry.policy.clone()`).
+
+- **Linux branch is untouched** → `prepare_ephemeral_scratch` returns `None`,
+  `with_scratch(None)` is a no-op, byte-identical to today.
 - Fail-closed: a dir-create error aborts the spawn (`ToolHostError::Io`).
+- python-exec is `Net::Deny` (never force-routed) and `SingleUse`, so only the
+  single-use path matters for it today; the idle-timeout wiring is for
+  browser-driver's later adoption. Forced+scratch composition is out of scope
+  (no current consumer).
 
 ### 4. python-exec worker (`workers/python-exec/src/exec.rs`)
 
