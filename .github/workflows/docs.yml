@@ -1,0 +1,51 @@
+name: docs-site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/devel/manual/**"
+      - "scripts/site/**"
+      - "site/style.css"
+      - "site/manual.css"
+      - "site/assets/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Install tidy (HTML validity check)
+        run: sudo apt-get update && sudo apt-get install -y tidy
+      - name: Verify the manual site
+        run: scripts/site/check-manual.sh
+      - name: Build the manual site
+        run: uv run scripts/site/build_manual.py --out dist/manual
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/manual
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,160 @@
+/* ==========================================================================
+   docs.kastellan.dev — manual-only styles, layered on style.css.
+   style.css is locked (check-site.sh); all docs additions live here.
+   ========================================================================== */
+
+/* ---- Two-column layout: sidebar + prose ---------------------------------- */
+.manual-layout {
+  display: grid;
+  grid-template-columns: 16rem minmax(0, 1fr);
+  gap: clamp(1.5rem, 4vw, 3rem);
+  padding-block: clamp(2rem, 5vw, 3.5rem);
+  align-items: start;
+}
+
+.manual-sidebar {
+  position: sticky;
+  top: 5rem;
+  max-height: calc(100vh - 6rem);
+  overflow-y: auto;
+  padding-right: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.manual-toc ol {
+  list-style: none;
+  margin: 0 0 1.25rem;
+  padding: 0;
+}
+
+.manual-toc li { margin: 0; }
+
+.manual-group {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.manual-home,
+.manual-link {
+  display: block;
+  padding: 0.35rem 0.6rem;
+  border-radius: var(--radius-s);
+  color: var(--body);
+  line-height: 1.35;
+}
+
+.manual-home { font-weight: 600; color: var(--ink); }
+
+.manual-home:hover,
+.manual-link:hover {
+  background: var(--tint);
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.manual-home.active,
+.manual-link.active {
+  background: rgba(79, 70, 229, 0.09);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---- Prose (rendered Markdown) ------------------------------------------- */
+.prose {
+  max-width: 46rem;
+  min-width: 0;
+}
+
+.prose h1 {
+  font-size: clamp(1.8rem, 4vw, 2.4rem);
+  letter-spacing: -0.02em;
+  margin-bottom: 0.4em;
+}
+
+.prose h2 {
+  margin-top: 2.25rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border);
+}
+
+.prose h3 { margin-top: 1.75rem; }
+
+.prose p,
+.prose li { color: var(--body); }
+
+.prose ul,
+.prose ol { padding-left: 1.4rem; }
+
+.prose li { margin-bottom: 0.4rem; }
+
+.prose blockquote {
+  margin: 1.5rem 0;
+  padding: 0.25rem 0 0.25rem 1rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+  font-style: italic;
+}
+
+.prose a { color: var(--accent); font-weight: 500; }
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+  font-size: 0.92rem;
+}
+
+.prose th,
+.prose td {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th { background: var(--tint); color: var(--ink); font-weight: 600; }
+
+/* Inline code */
+.prose :not(pre) > code {
+  padding: 0.12rem 0.38rem;
+  background: var(--tint);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.85em;
+  color: var(--ink);
+}
+
+/* ---- Code blocks (Pygments token colours come from pygments.css) --------- */
+.codehilite {
+  margin: 1.25rem 0;
+  padding: 1rem 1.25rem;
+  background: var(--tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  overflow-x: auto;
+}
+
+.codehilite pre { margin: 0; }
+
+.codehilite,
+.codehilite pre code {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+
+/* ---- Responsive: sidebar stacks above content --------------------------- */
+@media (max-width: 859.98px) {
+  .manual-layout { grid-template-columns: 1fr; }
+
+  .manual-sidebar {
+    position: static;
+    max-height: none;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1rem;
+  }
+}
