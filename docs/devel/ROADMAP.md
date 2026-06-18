@@ -257,9 +257,20 @@ items unlock later ones.
     4/4 (real render confined to the per-spawn dir; leak-check green) **+ DGX native aarch64 (real bwrap + Landlock +
     seccomp + live PG) `browser_driver_e2e --ignored` 4/4** (confirms the inert Linux path), 3 new Python scratch tests,
     browser_driver unit +1, clippy `-D warnings` clean. Linux byte-identical (flag no-op + `if scratch:` never fires when the env is unset).
-  - [ ] **Follow-ups:**
-    the >64 KiB scratch-file param channel (now unblocked — the worker has a host-writable scratch); curated-wheels RO dir
-    if/when the skill catalog demands packages; planner-prompt surfacing (parity note: the net workers have none either).
+  - [x] **>64 KiB scratch-file param channel — DONE 2026-06-19** (branch `feat/python-exec-scratch-file-params`).
+    Runtime params >64 KiB are no longer refused: the worker writes them to `<scratch>/params.json` (0600, in its
+    per-spawn writable scratch) and points the child at the path via `KASTELLAN_PYTHON_PARAMS_FILE` (inline
+    `KASTELLAN_PYTHON_PARAMS` defaulted to `"{}"`); ≤64 KiB rides the inline env unchanged. Operator-configurable ceiling
+    `KASTELLAN_PYTHON_PARAMS_FILE_MAX` (default 1 MiB, clamp `[64 KiB, 16 MiB]`) enforced authoritatively worker-side
+    (`exec.rs::params_file_max`/`decide_param_channel`, both pure); host gate keeps a fixed 16 MiB structural backstop
+    (`HOST_PARAMS_HARD_MAX`) so its functions stay pure. Manifest forwards the operator knob into the jail only when set
+    (unset → byte-identical env). Secret substitution stays host-side → output secret-scrub unaffected; SingleUse scratch
+    RAII-cleans the file. Verified macOS (Seatbelt, PG 18) **and DGX native aarch64 (real bwrap + live PG)**: worker unit
+    45/0, core lib green, clippy `-D warnings` clean, `python_exec_e2e` 5/5 (live 100 KiB file-channel round-trip),
+    `cli_memory_l3py_run_daemon_e2e` 5/5 (daemon-path file-channel delivery). Also fixed a pre-existing Linux-latent
+    clobber-proof test (CPython PEP 538 `LC_CTYPE`). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-18-python-exec-scratch-file-param-channel*`.
+  - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
+    (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
   - [x] **Slice 1 — crystallise + approval + operator CLI — 2026-06-13** (branch `feat/python-exec-skill-catalog`,
     PR [#275](https://github.com/hherb/kastellan/pull/275)). Agent-authored Python skills mirror the L3 templated arc one payload over: a layer-3 `memories` row
