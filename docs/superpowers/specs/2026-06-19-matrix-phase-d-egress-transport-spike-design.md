@@ -182,3 +182,86 @@ lines). 225 unique crate names are new. Workspace-wide license map obtained via
 
 No `CDDL`, `BUSL` (Business Source), `SSPL`, `Elastic License`, `Commons Clause`,
 or any other source-available / non-free license detected in the subtree.
+
+## Spike outcome (2026-06-19)
+
+**Branch:** `feat/matrix-phase-d-egress-spike`
+**Status:** CONFIRMED — transport decision locked, live integration unblocked.
+
+### matrix-sdk version and resolved feature set
+
+- **matrix-sdk = 0.8.0** (Cargo.toml `workers/matrix/Cargo.toml`, optional dep gated
+  by `live-matrix = ["dep:matrix-sdk"]`)
+- **Features used:** `e2e-encryption, sqlite, bundled-sqlite, rustls-tls`
+  (rustls, no native-tls; bundled SQLite so the jail needs no system libsqlite)
+- **default-features = false** — default build excludes matrix-sdk entirely; only
+  `--features live-matrix` pulls it in. Default CI/clippy surface is unchanged.
+
+### Transport decision — CONFIRMED
+
+**Transparent tunnel via `disable_mitm` (worker name) + in-worker `ProxyBridge`.**
+
+- `matrix-sdk 0.8.0` routes its first HTTPS request as a **`CONNECT` tunnel** when
+  given a proxy URL via the SDK builder's `.proxy()` method.
+- `ProxyBridge` (added in `workers/matrix/src/bridge.rs`) binds a loopback-TCP
+  listener, accepts the SDK's CONNECT, and byte-relays it to the sidecar UDS. This
+  is the Rust analogue of browser-driver's `shim.py ProxyShim`.
+- The egress sidecar runs in **`disable_mitm`** mode keyed on the matrix worker
+  name (the same mechanism already used for browser-driver). The proxy enforces
+  allowlist + SSRF + IP-pin but does NOT TLS-intercept. matrix-sdk keeps native
+  end-to-end TLS validation against the self-hosted homeserver.
+- **No custom CA is injected.** MITM is feasible via `.add_root_certificates()` if
+  a future need arises, but is explicitly declined now (Matrix room content is
+  E2E-encrypted before it hits HTTP, so a MITM leak-scan would only see opaque
+  ciphertext and enlarges sidecar blast radius with no gain).
+
+### Exact SDK builder and trigger method names (for the next slice's LiveSdk impl)
+
+The hermetic spike test (`workers/matrix/src/egress_spike.rs`, gated on
+`#[cfg(all(test, feature="live-matrix"))]`) confirmed the following API surface
+against matrix-sdk 0.8.0:
+
+```rust
+// Builder:
+Client::builder()
+    .homeserver_url("<url>")              // set the homeserver URL
+    .sqlite_store("<path>", None)         // persistent encrypted SQLite store (path, passphrase)
+    .proxy("<http://127.0.0.1:<port>")    // proxy URL; here: the ProxyBridge loopback address
+    .build()                              // consumes the builder; performs the first network probe
+    .await?;
+
+// First network trigger (the one that traverses the proxy):
+client.whoami().await                     // causes the SDK to issue CONNECT <host>:443 through the proxy
+```
+
+The spike asserted that the stub UDS observer received `CONNECT fake-homeserver.invalid:443`
+immediately after the `whoami()` call, proving the routing is end-to-end through the bridge.
+`build()` itself may or may not issue a network probe depending on the SDK version — `whoami()`
+is the reliable trigger.
+
+### What was confirmed green (macOS, hermetic, no homeserver)
+
+| Check | Result |
+|---|---|
+| `cargo build -p kastellan-worker-matrix --features live-matrix` | PASS |
+| `cargo test -p kastellan-worker-matrix` (default features, 7 tests) | PASS |
+| `cargo test -p kastellan-worker-matrix --features live-matrix` (8 tests, +1 spike) | PASS |
+| `cargo clippy --workspace --all-targets -- -D warnings` (default features) | PASS |
+
+### What is deferred to the next slice (live `LiveSdk` integration)
+
+Per plan `docs/superpowers/plans/2026-06-12-matrix-inbound-sandboxed-worker.md`
+Task 8 Steps 2–5:
+
+1. **`workers/matrix/src/sdk_live.rs`** — `LiveSdk` impl of the `MatrixSdk` seam:
+   tokio runtime, `block_on` login, persistent encrypted SQLite store, sync task →
+   bounded `VecDeque`, `poll`/`send`. Reuses `ProxyBridge` for transport (exact
+   builder sequence above).
+2. **Restore `main.rs` live serving wiring** — build `LiveSdk` → `prelude::lock_down`
+   → `serve_stdio` — and narrow the crate-wide `#![allow(dead_code)]` back to the
+   specific items that remain in-progress.
+3. **Wire `disable_mitm`-by-worker-name** for the matrix worker in the core spawn
+   path (the mechanism exists for browser-driver; matrix adoption rides this slice).
+4. **`core/tests/matrix_live_e2e.rs`** `#[ignore]` live round-trip against
+   conduwuit — DGX-verified (`scripts/matrix/setup-conduwuit.sh` exists from
+   slice #6).
