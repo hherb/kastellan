@@ -67,23 +67,25 @@ The ceiling is operator-configurable via `KASTELLAN_PYTHON_PARAMS_FILE_MAX`
   Snake_case top-level-key checks and the null/empty passthrough are unchanged;
   only the size gate now compares against `max_bytes` instead of the hardcoded
   `MAX_PARAMS_BYTES`.
-- Add a thin boundary helper `params_file_max_from_env()` that reads
-  `KASTELLAN_PYTHON_PARAMS_FILE_MAX` (default 1 MiB, parse failure → default,
-  clamp to the 16 MiB absolute max). The pure validator stays I/O-free; the env
-  read happens at the call site.
+- The host gate is a **structural backstop**, not the operator knob: callers pass
+  a fixed `HOST_PARAMS_HARD_MAX` (= 16 MiB, the absolute ceiling). This keeps the
+  host gate functions (`expand_python_for_agent`, `prepare_python_steps`) **pure**
+  — no env reads threaded through them — and honors the design principle that the
+  **worker is the real boundary**: the operator-configurable ceiling is enforced
+  worker-side. The host only rejects the structurally-impossible early.
 - The host no longer has an inline-vs-file notion — that is a worker-only
   concern. So `pure.rs`'s current `MAX_PARAMS_BYTES` (64 KiB) is **retired** as
-  the rejection cap; the host validates only against the configurable file
-  ceiling. Any existing references to `pure::MAX_PARAMS_BYTES` (tests, the
-  doc-comment cross-reference) migrate to the new helper / the worker's
-  `INLINE_PARAMS_MAX`.
+  the rejection cap and replaced by `HOST_PARAMS_HARD_MAX`. Existing references
+  to `pure::MAX_PARAMS_BYTES` (tests, the doc-comment cross-reference) migrate
+  accordingly; the over-cap test passes an explicit small `max_bytes` (no env,
+  fully deterministic).
 
 **`core/src/workers/python_exec.rs`**
-- Inject `KASTELLAN_PYTHON_PARAMS_FILE_MAX` into the worker's `policy.env`
-  (sourced from the operator env, default 1 MiB) so the worker enforces the
-  **same** ceiling. Defense-in-depth: the worker is the authoritative boundary
-  (the secrets/sandbox principle), and a direct or malformed call must never
-  reach `execve` or the filesystem with an oversize payload.
+- Pass the operator's `KASTELLAN_PYTHON_PARAMS_FILE_MAX` value (read from
+  `ResolveCtx::get_env`) through to `python_exec_entry`, which injects it into the
+  worker's `policy.env` **only when set** (unset → omitted → the worker defaults
+  to 1 MiB → byte-identical env). The worker is the authoritative enforcer of the
+  configurable ceiling; this is how the operator's knob reaches the jail.
 
 ### Worker side
 
