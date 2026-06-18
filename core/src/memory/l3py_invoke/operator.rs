@@ -40,7 +40,7 @@ pub fn prepare_python_steps(
     params: &serde_json::Value,
 ) -> Result<Vec<L3TemplateStep>, InvokeRefusal> {
     let code = prepare_python_invocation(candidate, stored_trust, stored_sha256)?;
-    let params = validate_python_params(params)
+    let params = validate_python_params(params, super::pure::HOST_PARAMS_HARD_MAX)
         .map_err(|e| InvokeRefusal { reasons: vec![e.to_string()] })?;
     Ok(vec![python_exec_step(&code, &params)])
 }

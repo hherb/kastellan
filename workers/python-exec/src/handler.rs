@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use kastellan_protocol::{codes, server::Handler, RpcError};
 use serde::Deserialize;
 
-use crate::exec::{run_code, serialize_params, MAX_CODE_BYTES};
+use crate::exec::{self, run_code, serialize_params, MAX_CODE_BYTES};
 
 /// Env var carrying the absolute interpreter path. Set by the host
 /// manifest (`core/src/workers/python_exec.rs`) via `policy.env`; the
@@ -65,8 +65,11 @@ impl Handler for PythonExecHandler {
 
         let params_json = serialize_params(&p.params)
             .map_err(|e| RpcError::new(codes::INVALID_PARAMS, e.to_string()))?;
+        let file_max = exec::params_file_max(|k| std::env::var(k).ok());
+        let channel = exec::decide_param_channel(params_json.len(), exec::INLINE_PARAMS_MAX, file_max)
+            .map_err(|e| RpcError::new(codes::INVALID_PARAMS, e.to_string()))?;
 
-        let outcome = run_code(&self.python, &p.code, &params_json)
+        let outcome = run_code(&self.python, &p.code, &params_json, channel)
             .map_err(|e| RpcError::new(codes::OPERATION_FAILED, format!("spawn failed: {e}")))?;
 
         Ok(serde_json::json!({
@@ -139,8 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn over_cap_params_is_invalid_params() {
-        let big = "x".repeat(crate::exec::MAX_PARAMS_BYTES);
+    fn over_file_cap_params_is_invalid_params() {
+        // A param larger than the default 1 MiB file ceiling is rejected
+        // fail-closed (INVALID_PARAMS) — proves the file channel still has a
+        // hard ceiling. (Env unset → default ceiling.)
+        let big = "x".repeat(crate::exec::PARAMS_FILE_MAX_DEFAULT + 1024);
         let err = handler()
             .call(
                 "python.exec",

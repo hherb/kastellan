@@ -13,8 +13,8 @@
 //! What this pins (one scenario each, fully described at its banner below): the
 //! happy path + the #179 invariant + the `kind:"python"` audit row; the
 //! fail-closed contract when python-exec is unregistered; the runtime-params
-//! round-trip through the jail; the clobber-proof child env; and >64 KiB params
-//! refused by the core gate before dispatch.
+//! round-trip through the jail; the clobber-proof child env; and large (>64 KiB)
+//! params delivered to the skill via the scratch-file channel.
 //!
 //! ## Skip semantics
 //!
@@ -103,6 +103,18 @@ fn param_echo_skill() -> PythonSkillCandidate {
         name: "param_echo_py".into(),
         description: "Echo the greeting runtime param".into(),
         code: "import os, json\np = json.loads(os.environ['KASTELLAN_PYTHON_PARAMS'])\nprint('GOT:' + p['greeting'])\n".into(),
+    }
+}
+
+/// A Python skill that reads runtime params via the FILE channel when present
+/// (params >64 KiB), falling back to the inline env var, and prints the byte
+/// length of the `greeting` key — used to prove a large param survives the
+/// scratch-file channel end-to-end through the daemon path.
+fn large_param_echo_skill() -> PythonSkillCandidate {
+    PythonSkillCandidate {
+        name: "large_param_echo_py".into(),
+        description: "Echo the length of the greeting runtime param (file channel)".into(),
+        code: "import os, json\np = os.environ.get('KASTELLAN_PYTHON_PARAMS_FILE')\nif p:\n    with open(p) as f:\n        params = json.load(f)\nelse:\n    params = json.loads(os.environ.get('KASTELLAN_PYTHON_PARAMS', '{}'))\nprint('GOT:' + str(len(params['greeting'])))\n".into(),
     }
 }
 
@@ -387,7 +399,8 @@ async fn python_skill_params_round_trip_through_jail() {
 // vars, and the worker's env_clear() keeps every host lockdown var out of the
 // child. We pass params named like dangerous env vars (`path`, `ld_preload`)
 // and assert the child's env keys are EXACTLY {HOME, KASTELLAN_PYTHON_PARAMS,
-// TMPDIR}.
+// TMPDIR} (plus LC_CTYPE on Linux — a benign CPython PEP 538 locale artifact,
+// see the per-platform expected set in the assertion below).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -435,9 +448,21 @@ async fn python_exec_child_env_is_clobber_proof() {
         .unwrap_or("")
         .trim_matches(|c| c == '\n' || c == '\r' || c == '\\' || c == 'n')
         .trim();
+    // CPython's PEP 538 C-locale coercion injects LC_CTYPE=C.UTF-8 into the
+    // child on Linux, because the worker's env_clear() leaves no LANG/LC_* ⇒ the
+    // interpreter sees the C locale and coerces. It is the interpreter's OWN
+    // benign artifact — not a runtime-param or host-var leak — so the exact set
+    // includes it on Linux. macOS framework python does not coerce, so the set
+    // stays the original three there. The guarantee this test exists to catch (no
+    // param/host-var leak) is preserved exactly on each platform.
+    let expected = if cfg!(target_os = "linux") {
+        "HOME,KASTELLAN_PYTHON_PARAMS,LC_CTYPE,TMPDIR"
+    } else {
+        "HOME,KASTELLAN_PYTHON_PARAMS,TMPDIR"
+    };
     assert_eq!(
-        env_keys, "HOME,KASTELLAN_PYTHON_PARAMS,TMPDIR",
-        "python-exec child env must be EXACTLY {{HOME, KASTELLAN_PYTHON_PARAMS, TMPDIR}}; \
+        env_keys, expected,
+        "python-exec child env must be EXACTLY {expected:?}; \
          a differing set means a runtime param leaked as an env var or a host var leaked into the child; \
          got full stdout:\n{stdout}",
     );
@@ -447,25 +472,27 @@ async fn python_exec_child_env_is_clobber_proof() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 5 — over-cap params rejection: params serialising to >64 KiB are
-// rejected by the core gate (validate_python_params) before dispatch, and the
-// CLI renders a REFUSED outcome (exit non-zero). Asserted at the CLI output
-// layer, matching the fail-closed assertion style of scenario 2.
+// Scenario 5 — large (>64 KiB) params via the scratch-file channel: a param
+// that exceeds the 64 KiB inline-env threshold (but is under the 1 MiB worker
+// file ceiling) is delivered to the skill through <scratch>/params.json +
+// KASTELLAN_PYTHON_PARAMS_FILE, end-to-end through the daemon's l3_run path.
+// (The CLI argv channel cannot carry an over-ceiling payload — MAX_ARG_STRLEN
+// is 128 KiB on Linux — so over-cap REFUSAL is covered by the worker/host unit
+// tests, not here. This scenario proves the positive file-channel delivery.)
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn python_skill_over_cap_params_refused() {
+async fn python_skill_large_params_via_file_channel() {
     #[cfg(target_os = "macos")]
     let _serial = serial_lock();
 
-    // Any approved skill works — the gate fires before execution.
-    let Some(fx) = setup(&hello_python_skill(), true).await else {
+    let Some(fx) = setup(&large_param_echo_skill(), true).await else {
         return;
     };
 
-    // Build a params JSON object whose serialised form exceeds the 64 KiB cap.
-    // {"greeting": "xxx…"} with 64*1024 x's serialises to ~65551 bytes > 65536.
-    let big_value = "x".repeat(64 * 1024);
+    // 80 KiB greeting: > the 64 KiB inline threshold (forces the file channel)
+    // and < the 128 KiB Linux per-arg argv limit (so --params-json can carry it).
+    let big_value = "x".repeat(80 * 1024);
     let big_params = serde_json::json!({ "greeting": big_value });
     let params_json_str = serde_json::to_string(&big_params).expect("serialise big params");
 
@@ -482,16 +509,16 @@ async fn python_skill_over_cap_params_refused() {
         .env("KASTELLAN_L3_RUN_GRACE_SECS", "30")
         .env("KASTELLAN_L3_RUN_TIMEOUT_SECS", "120")
         .output()
-        .expect("spawn kastellan-cli memory l3 run (over-cap params)");
+        .expect("spawn kastellan-cli memory l3 run (large params)");
 
-    // The core gate (validate_python_params) fires in the daemon's l3_run
-    // handler before dispatch. It returns InvokeReport::Refused, which the CLI
-    // renders as "REFUSED …" and exits non-zero.
-    let (stdout, stderr) = assert_cli_failure(&output, "over-cap params run");
-    let combined = format!("{stdout}\n{stderr}");
+    // The param exceeds the inline env threshold, so the worker writes it to
+    // <scratch>/params.json and the skill reads it via the file channel; the run
+    // succeeds and echoes the full 80 KiB length (81920) — a broken file channel
+    // would leave the inline env as "{}" → KeyError → non-zero exit.
+    let (stdout, _stderr) = assert_cli_success(&output, &fx.daemon, "large params run");
     assert!(
-        combined.to_lowercase().contains("cap") || combined.to_lowercase().contains("refused"),
-        "the failure must mention the cap or REFUSED; got:\nstdout={stdout}\nstderr={stderr}",
+        stdout.contains("GOT:81920"),
+        "skill must echo the full 80 KiB greeting length via the file channel; got:\n{stdout}",
     );
 
     fx.pool.close().await;

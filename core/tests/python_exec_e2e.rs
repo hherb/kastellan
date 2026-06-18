@@ -140,6 +140,7 @@ async fn dispatch_in_jail(
         env.worker_path.clone(),
         env.python.clone(),
         interpreter_lib_dirs,
+        None,
     );
     let mut policy = entry.policy.clone();
     let scratch =
@@ -253,6 +254,46 @@ fn scratch_tmp_write_round_trip_inside_jail() {
             .expect("python.exec round trip");
         assert_eq!(r["exit_code"], 0, "stderr: {}", r["stderr"]);
         assert_eq!(r["stdout"].as_str().unwrap().trim_end(), "jail-scratch-ok");
+        pool.close().await;
+    });
+}
+
+/// A params payload larger than the inline env threshold (64 KiB) must reach
+/// the agent through the **file channel**: the worker writes
+/// `<scratch>/params.json`, sets `KASTELLAN_PYTHON_PARAMS_FILE`, and the agent
+/// reads the full value. If the file channel failed, `KASTELLAN_PYTHON_PARAMS`
+/// would be the `"{}"` default → `KeyError` → non-zero exit, so a zero exit
+/// with the correct length proves end-to-end delivery. Real worker, real jail,
+/// production policy — runs on macOS (Seatbelt) + DGX (bwrap).
+#[test]
+fn large_param_round_trips_via_file_channel() {
+    let Some(env) = ready_or_skip() else { return };
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        // 100_000 bytes ≫ the 64 KiB inline threshold, ≪ the 1 MiB default
+        // file ceiling → the File channel.
+        let blob = "A".repeat(100_000);
+        let code = concat!(
+            "import json, os\n",
+            "p = os.environ.get('KASTELLAN_PYTHON_PARAMS_FILE')\n",
+            "if p:\n",
+            "    with open(p) as f:\n",
+            "        params = json.load(f)\n",
+            "else:\n",
+            "    params = json.loads(os.environ.get('KASTELLAN_PYTHON_PARAMS', '{}'))\n",
+            "b = params['blob']\n",
+            "print(len(b), b[:4], b[-4:])\n",
+        );
+        let params = serde_json::json!({ "code": code, "params": { "blob": blob } });
+        let r = dispatch_in_jail(&pool, &env, &kastellan_core::secrets::Vault::new(), params)
+            .await
+            .expect("python.exec dispatch must succeed");
+        assert_eq!(r["exit_code"].as_i64(), Some(0), "stderr: {}", r["stderr"]);
+        assert_eq!(
+            r["stdout"].as_str().unwrap().trim_end(),
+            "100000 AAAA AAAA",
+            "agent must read the full 100 KiB payload via the file channel"
+        );
         pool.close().await;
     });
 }

@@ -248,8 +248,44 @@ fn python_exec_entry_opts_into_ephemeral_scratch() {
         std::path::PathBuf::from("/bin/worker"),
         std::path::PathBuf::from("/usr/bin/python3"),
         vec![],
+        None,
     );
     assert!(e.ephemeral_scratch, "python-exec must request per-spawn scratch");
+}
+
+#[test]
+fn entry_injects_params_file_max_when_set() {
+    let entry = super::python_exec_entry(
+        std::path::PathBuf::from("/bin/worker"),
+        std::path::PathBuf::from("/usr/bin/python3"),
+        vec![],
+        Some("250000".to_string()),
+    );
+    let got = entry
+        .policy
+        .env
+        .iter()
+        .find(|(k, _)| k == "KASTELLAN_PYTHON_PARAMS_FILE_MAX")
+        .map(|(_, v)| v.as_str());
+    assert_eq!(got, Some("250000"));
+}
+
+#[test]
+fn entry_omits_params_file_max_when_unset() {
+    let entry = super::python_exec_entry(
+        std::path::PathBuf::from("/bin/worker"),
+        std::path::PathBuf::from("/usr/bin/python3"),
+        vec![],
+        None,
+    );
+    assert!(
+        !entry
+            .policy
+            .env
+            .iter()
+            .any(|(k, _)| k == "KASTELLAN_PYTHON_PARAMS_FILE_MAX"),
+        "unset → env must stay byte-identical (no file-max key)"
+    );
 }
 
 fn outcome_label(r: &Resolution) -> &'static str {
@@ -308,6 +344,7 @@ fn entry_binds_interpreter_lib_dirs() {
         PathBuf::from("/opt/python-exec"),
         PathBuf::from("/usr/local/bin/python3"),
         vec![PathBuf::from("/opt/hb/gettext/lib")],
+        None,
     );
     assert!(with
         .policy
@@ -318,6 +355,7 @@ fn entry_binds_interpreter_lib_dirs() {
         PathBuf::from("/opt/python-exec"),
         PathBuf::from("/usr/local/bin/python3"),
         vec![],
+        None,
     );
     assert!(!bare
         .policy
