@@ -63,6 +63,13 @@ fn prepare_filesystem_populates_prefix_and_env_file() {
     assert!(env.contains("KASTELLAN_LLM_LOCAL_MODEL=test-model\n"));
     assert!(env.contains(&format!("KASTELLAN_DATA_DIR={}\n", layout.data_dir.display())));
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&layout.env_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "kastellan.env must be mode 0600");
+    }
+
     fs::remove_dir_all(&tmp).ok();
 }
 

@@ -205,12 +205,22 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        f.write_all(bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     Ok(())
 }
