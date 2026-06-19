@@ -110,12 +110,29 @@ fn parse_config(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<LiveSdkC
 /// background sync task, and (when force-routed) the egress proxy bridge.
 pub struct LiveSdk {
     runtime: Runtime,
-    client: Client,
+    // `Option` so [`Drop`] can `take()` it and drop it *inside* the runtime —
+    // see the `Drop` impl for why that ordering matters.
+    client: Option<Client>,
     identity: InitResult,
     buffer: Arc<Mutex<VecDeque<Event>>>,
     // Kept alive for the worker's lifetime; both abort/close on drop.
     _bridge: Option<ProxyBridge>,
     _sync_task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for LiveSdk {
+    fn drop(&mut self) {
+        // matrix-sdk's SQLite state/crypto/event-cache stores use `deadpool`,
+        // whose pooled-connection `Drop` calls tokio `spawn_blocking` to close
+        // the connection — which panics ("aborting") unless a tokio runtime
+        // context is active on the dropping thread. The worker drops `LiveSdk`
+        // on its (non-runtime) main thread after `serve_stdio` returns, so we
+        // must drop the client *inside* `block_on` to give that teardown a
+        // runtime context; otherwise the worker SIGABRTs on every shutdown.
+        if let Some(client) = self.client.take() {
+            self.runtime.block_on(async move { drop(client) });
+        }
+    }
 }
 
 impl LiveSdk {
@@ -146,7 +163,7 @@ impl LiveSdk {
 
         Ok(Self {
             runtime,
-            client,
+            client: Some(client),
             identity,
             buffer,
             _bridge: bridge,
@@ -188,7 +205,7 @@ impl MatrixSdk for LiveSdk {
         let conversation = conversation.to_string();
         // Clone the client (cheap — it's `Arc`-backed) so the future doesn't
         // borrow `self` across the runtime's `block_on`.
-        let client = self.client.clone();
+        let client = self.client.as_ref().expect("live client present").clone();
         self.runtime.block_on(async move {
             let room_id = RoomId::parse(&conversation)
                 .with_context(|| format!("invalid room id {conversation:?}"))?;
