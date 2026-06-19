@@ -83,6 +83,11 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
     // db-init (idempotent) via the just-copied binary.
     let mut dbinit = Command::new(layout.bin_dir.join("kastellan-db-init"));
     dbinit.arg("--data-dir").arg(&layout.data_dir);
+    // The cluster's initdb superuser MUST be this OS user: the daemon connects
+    // via peer auth as `ConnectSpec::default_for` (= current_os_user), so the
+    // superuser role has to match `$USER` — not kastellan-db-init's default
+    // `kastellan` role (which would yield `role "<user>" does not exist`).
+    dbinit.arg("--username").arg(&layout.user);
     if let Some(bd) = &args.pg_bin_dir {
         dbinit.arg("--bin-dir").arg(bd);
     }
