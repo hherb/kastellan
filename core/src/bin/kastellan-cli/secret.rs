@@ -76,6 +76,9 @@ async fn secret_put(args: &[String]) -> ExitCode {
 
     // Read the value: silent prompt on a TTY, raw stdin when piped.
     let value: Vec<u8> = if std::io::stdin().is_terminal() {
+        if keep_raw {
+            eprintln!("note: --raw has no effect when reading from a TTY; pipe the value to use --raw");
+        }
         match rpassword::prompt_password(format!("Value for secret {name:?}: ")) {
             Ok(s) => s.into_bytes(),
             Err(e) => {
