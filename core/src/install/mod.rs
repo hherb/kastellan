@@ -4,3 +4,6 @@
 //! is added alongside.
 
 pub mod plan;
+pub mod run;
+
+pub use run::{prepare_filesystem, run_install, run_uninstall};
