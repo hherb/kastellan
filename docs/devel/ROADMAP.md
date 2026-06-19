@@ -169,10 +169,20 @@ items unlock later ones.
   arrives at the stub via the bridge — **transport CONFIRMED: transparent tunnel via `disable_mitm`
   (worker name) + `ProxyBridge`; no CA injection; conduwuit homeserver infra already done (slice #6)**.
   SDK builder names (homeserver_url, sqlite_store, proxy, build, whoami) recorded in the spike spec.
-  **Phase D live integration pending (DGX — the next slice):** `sdk_live.rs` LiveSdk impl, restore
-  `main.rs` wiring (narrowing the crate-wide `#![allow(dead_code)]` back to the `live-matrix`-cfg form), wire
-  `disable_mitm` in core spawn path, `ProxyBridge` error-surfacing ([#312](https://github.com/hherb/kastellan/issues/312)),
-  `matrix_live_e2e.rs` `#[ignore]` vs conduwuit.
+  **Phase D live `LiveSdk` integration DONE** (this session, 2026-06-19): `workers/matrix/src/sdk_live.rs`
+  (`LiveSdk` impl of the `MatrixSdk` seam — owns a tokio runtime, restore-or-password-login with persisted
+  `<store>/session.json`, background sync task → bounded `VecDeque`, `poll`/`send`, reuses `ProxyBridge` for
+  transport); worker `main.rs` restored to live serving (build `LiveSdk` → `rlimit` → `lock_down` → raw
+  `serve_stdio`, network-init-then-lockdown order) + crate `#![allow(dead_code)]` narrowed to
+  `#![cfg_attr(not(feature = "live-matrix"), allow(dead_code))]`; core `disable_mitm_for(worker_name)` pure
+  predicate (browser-driver + the new `MATRIX_TOOL`) in `worker_lifecycle/force_route.rs`;
+  `core/tests/matrix_live_e2e.rs` `#[ignore]` two-worker (bot+peer) send/recv round-trip. **Hermetic green
+  (macOS):** matrix worker 13/0 (`live-matrix`) / 7/0 (default), `force_route` +1, `clippy --workspace -D
+  warnings` + `clippy -p kastellan-worker-matrix --features live-matrix` clean. **DGX live round-trip pending
+  operator homeserver setup** (run `setup-conduwuit.sh`, create 2 accounts + a shared encrypted room, then the
+  `#[ignore]` e2e). Remaining: `ProxyBridge` error-surfacing ([#312](https://github.com/hherb/kastellan/issues/312));
+  full channel-worker egress-coupled production spawn (the matrix worker's sidecar spawn, plan Task 5) +
+  daemon `ChannelBus` wiring + `DbPeerAuthorizer`/`DbPairingService` swap.
   Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-matrix-inbound-sandboxed-worker*`;
   spike spec: `docs/superpowers/specs/2026-06-19-matrix-phase-d-egress-transport-spike-design.md`.
 - [x] **Homeserver supervisor unit + hardening** — conduwuit (federation OFF, loopback bind,
