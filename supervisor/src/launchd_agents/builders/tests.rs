@@ -20,6 +20,7 @@ fn minimal_spec(name: &str) -> ServiceSpec {
         after: vec![],
         part_of: None,
         restart_backoff: None,
+        environment_file: None,
     }
 }
 
@@ -179,6 +180,7 @@ fn build_plist_label_is_xml_escaped() {
         after: vec![],
         part_of: None,
         restart_backoff: None,
+        environment_file: None,
     };
     let s = build_plist(&spec);
     assert!(s.contains("<string>a&amp;b&lt;c</string>"), "{s}");

@@ -100,6 +100,7 @@ pub fn core_service_spec(binary: &Path, log_dir: &Path) -> ServiceSpec {
         after: vec![POSTGRES_SERVICE_NAME.to_string()],
         part_of: Some(KASTELLAN_TARGET_NAME.to_string()),
         restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
+        environment_file: None,
     }
 }
 
@@ -165,6 +166,7 @@ pub fn postgres_service_spec(
         after: vec![],
         part_of: Some(KASTELLAN_TARGET_NAME.to_string()),
         restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
+        environment_file: None,
     }
 }
 

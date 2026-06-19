@@ -114,6 +114,9 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
         out.push_str(&quote_if_needed(&kv));
         out.push('\n');
     }
+    if let Some(env_file) = &spec.environment_file {
+        out.push_str(&format!("EnvironmentFile={}\n", env_file.display()));
+    }
 
     if let Some(dir) = &spec.working_dir {
         out.push_str(&format!("WorkingDirectory={}\n", dir.display()));

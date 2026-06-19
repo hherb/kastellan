@@ -25,6 +25,7 @@ fn minimal_spec(name: &str) -> ServiceSpec {
         after: vec![],
         part_of: None,
         restart_backoff: None,
+        environment_file: None,
     }
 }
 

@@ -110,6 +110,15 @@ pub struct ServiceSpec {
     /// warning** (no equivalent knob).
     #[serde(default)]
     pub restart_backoff: Option<RestartBackoff>,
+    /// Optional path to a systemd `EnvironmentFile=` (KEY=value lines) the
+    /// service reads on start. `None` (default) renders no directive —
+    /// byte-identical to today for every current caller. Used by the
+    /// installer to point the core daemon at `~/.config/kastellan/kastellan.env`
+    /// so operators can tune LLM/prompt/data settings without reinstalling.
+    /// **Ignored on launchd** (no equivalent; the installer bakes the same
+    /// values into the plist `EnvironmentVariables` there if needed later).
+    #[serde(default)]
+    pub environment_file: Option<PathBuf>,
 }
 
 /// A named bundle of services brought up and torn down together.
@@ -359,6 +368,7 @@ mod default_target_tests {
             after: vec![],
             part_of: Some("kastellan".into()),
             restart_backoff: None,
+            environment_file: None,
         }
     }
 
@@ -461,6 +471,7 @@ mod spec_ordering_tests {
             after: vec![],
             part_of: None,
             restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
+            environment_file: None,
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: ServiceSpec = serde_json::from_str(&json).expect("deserialize");
