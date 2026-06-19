@@ -56,7 +56,10 @@ up() {
   "$DOCKER" rm -f "$CNAME" >/dev/null 2>&1 || true
   rm -rf "$STATE"
   mkdir -p "$STATE/db"
-  chmod -R 777 "$STATE"   # the container user must be able to write the store
+  # World-writable so the container's (image-defined, often non-root) uid can
+  # write the bind-mounted store regardless of host uid. Acceptable only because
+  # this is a dev-only, loopback, throwaway homeserver under "$HOME/.local/state".
+  chmod -R 777 "$STATE"
 
   # Loopback, federation-off, token-gated registration (mirrors the production
   # security invariants; conduit-flavoured config keys).

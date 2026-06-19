@@ -182,9 +182,12 @@ items unlock later ones.
   builds, 13/0 hermetic, and the live encrypted send/recv round-trip passes** (`matrix_live_e2e` 1/0 against a throwaway
   loopback matrix-conduit homeserver). A shutdown SIGABRT (matrix-sdk's deadpool SQLite `Drop` calling `spawn_blocking`
   off-runtime) was found via the DGX e2e and fixed (`client: Option<Client>` dropped inside `runtime.block_on`).
-  Remaining: `ProxyBridge` error-surfacing ([#312](https://github.com/hherb/kastellan/issues/312));
+  Post-#313-review hardening (2026-06-19): dead sync loop `process::exit(1)`s (no silent stall), `session.json` written `0600`,
+  `_PASSWORD` made optional for restored sessions. Remaining: `ProxyBridge` error-surfacing ([#312](https://github.com/hherb/kastellan/issues/312));
   full channel-worker egress-coupled production spawn (the matrix worker's sidecar spawn, plan Task 5) +
-  daemon `ChannelBus` wiring + `DbPeerAuthorizer`/`DbPairingService` swap.
+  daemon `ChannelBus` wiring + `DbPeerAuthorizer`/`DbPairingService` swap. **Task 5 must grant the matrix Landlock ruleset RW
+  on the persistent store dir** (the background sync task keeps writing the SQLite state/crypto store after `lock_down`) — the
+  live e2e runs with seccomp/Landlock `none`, so this is untested.
   Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-matrix-inbound-sandboxed-worker*`;
   spike spec: `docs/superpowers/specs/2026-06-19-matrix-phase-d-egress-transport-spike-design.md`.
 - [x] **Homeserver supervisor unit + hardening** — conduwuit (federation OFF, loopback bind,

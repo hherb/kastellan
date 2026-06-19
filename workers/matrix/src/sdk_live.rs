@@ -73,8 +73,11 @@ pub struct LiveSdkConfig {
     pub homeserver_url: String,
     /// Login user (localpart or full `@user:server`).
     pub user: String,
-    /// Login password.
-    pub password: String,
+    /// Login password. Optional: only needed for the *initial* password login
+    /// (no persisted session yet). Once `<store>/session.json` exists it is
+    /// restored instead, so the spawn need not materialize the secret on every
+    /// restart.
+    pub password: Option<String>,
     /// Persistent store dir (SQLite state/crypto store + `session.json`).
     pub store_dir: PathBuf,
     /// Initial device display name (cosmetic).
@@ -98,7 +101,7 @@ fn parse_config(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<LiveSdkC
     Ok(LiveSdkConfig {
         homeserver_url: req("KASTELLAN_MATRIX_HOMESERVER_URL")?,
         user: req("KASTELLAN_MATRIX_USER")?,
-        password: req("KASTELLAN_MATRIX_PASSWORD")?,
+        password: get("KASTELLAN_MATRIX_PASSWORD"),
         store_dir: PathBuf::from(req("KASTELLAN_MATRIX_STORE")?),
         device_name: get("KASTELLAN_MATRIX_DEVICE_NAME")
             .unwrap_or_else(|| DEVICE_NAME_DEFAULT.to_string()),
@@ -152,13 +155,25 @@ impl LiveSdk {
             runtime.block_on(connect_client(&config, buffer.clone()))?;
 
         // Continuous background sync: keeps the buffer filled for `poll` and the
-        // crypto state fresh for `send`. Errors end the task; the driver thread
-        // then sees `poll` fail and the worker is restarted by the supervisor.
+        // crypto state fresh for `send`. `client.sync` only returns when the loop
+        // is genuinely over (a fatal error, or the client being dropped on
+        // shutdown — which aborts this task before the body runs). If it ever
+        // returns *here*, inbound is dead: the buffer will never fill again and
+        // the `MatrixSdk::poll` seam has no error channel to signal it, so a
+        // silently-dead loop would leave the worker looking alive while receiving
+        // nothing. Fail loudly instead — exit non-zero so the supervisor restarts
+        // a fresh worker. `process::exit` skips destructors, so the deadpool
+        // SQLite teardown that needs a runtime context (see the `Drop` impl) never
+        // runs off-runtime; the OS reclaims everything.
         let sync_client = client.clone();
         let sync_task = runtime.spawn(async move {
-            if let Err(e) = sync_client.sync(SyncSettings::default()).await {
-                eprintln!("kastellan-worker-matrix: sync loop ended: {e}");
+            match sync_client.sync(SyncSettings::default()).await {
+                Ok(()) => eprintln!(
+                    "kastellan-worker-matrix: sync loop ended unexpectedly (no error); exiting"
+                ),
+                Err(e) => eprintln!("kastellan-worker-matrix: sync loop failed: {e}; exiting"),
             }
+            std::process::exit(1);
         });
 
         Ok(Self {
@@ -291,9 +306,14 @@ async fn restore_or_login(client: &Client, config: &LiveSdkConfig) -> anyhow::Re
         return Ok(());
     }
 
+    // No persisted session → initial password login. The password is only
+    // required on this path; restarts restore the session above without it.
+    let password = config.password.as_deref().context(
+        "KASTELLAN_MATRIX_PASSWORD must be set for the initial login (no persisted session yet)",
+    )?;
     client
         .matrix_auth()
-        .login_username(&config.user, &config.password)
+        .login_username(&config.user, password)
         .initial_device_display_name(&config.device_name)
         .send()
         .await
@@ -301,10 +321,26 @@ async fn restore_or_login(client: &Client, config: &LiveSdkConfig) -> anyhow::Re
 
     if let Some(session) = client.matrix_auth().session() {
         let bytes = serde_json::to_vec(&session).context("encode session")?;
-        std::fs::write(&session_path, bytes)
+        // The session holds the access token + device keys: write it 0600 so the
+        // worker's credentials are never world/group-readable at rest.
+        write_private(&session_path, &bytes)
             .with_context(|| format!("persist session to {session_path:?}"))?;
     }
     Ok(())
+}
+
+/// Write `bytes` to `path`, truncating, with `0600` permissions (owner-only).
+/// Used for the persisted login session, which is a secret at rest.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)
 }
 
 /// Register the room-message event handler: decode text bodies, skip our own
@@ -318,7 +354,10 @@ fn register_message_handler(
         let buffer = buffer.clone();
         let own = own_user_id.clone();
         async move {
-            // Never re-ingest our own outbound messages (echo-loop guard).
+            // Echo-loop guard: never re-ingest messages from our own user id.
+            // Note this also drops messages sent by *other* devices logged into
+            // the same account — acceptable for a single-identity channel bot,
+            // which is the only deployment shape today.
             if ev.sender == own {
                 return;
             }
@@ -366,6 +405,19 @@ mod tests {
         assert_eq!(cfg.store_dir, PathBuf::from("/var/lib/k/matrix"));
         assert_eq!(cfg.device_name, DEVICE_NAME_DEFAULT);
         assert_eq!(cfg.proxy_uds, None);
+        assert_eq!(cfg.password.as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn parse_config_password_is_optional() {
+        // No password: valid (a restart restoring a persisted session needs none).
+        let cfg = parse_config(getter(&[
+            ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://m.example.org"),
+            ("KASTELLAN_MATRIX_USER", "bot"),
+            ("KASTELLAN_MATRIX_STORE", "/store"),
+        ]))
+        .expect("password is optional");
+        assert_eq!(cfg.password, None);
     }
 
     #[test]

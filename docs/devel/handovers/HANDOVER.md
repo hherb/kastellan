@@ -25,8 +25,15 @@ worker's future egress-coupled spawn (plan Task 5) inherits the transparent-tunn
 `core/tests/matrix_live_e2e.rs` — `#[ignore]` two-worker (bot + peer) live send/recv round-trip: reuses the worker binary as
 the test's second Matrix client (no `matrix-sdk` dev-dep in core), gated on `KASTELLAN_MATRIX_LIVE_E2E` + skip-as-pass.
 **Worker env contract (worker-side; the channel-worker production spawn / Task 5 will set these):**
-`KASTELLAN_MATRIX_HOMESERVER_URL`, `_USER`, `_PASSWORD`, `_STORE` (required), `_DEVICE_NAME` (opt), `KASTELLAN_EGRESS_PROXY_UDS`
-(opt). **Verification — macOS hermetic:** matrix worker **13/0/0** (`live-matrix`, +4 `sdk_live` tests) / **7/0/0** (default);
+`KASTELLAN_MATRIX_HOMESERVER_URL`, `_USER`, `_STORE` (required), `_PASSWORD` (opt — only the *initial* login; restarts restore
+`<store>/session.json`, so the spawn need not re-materialize the secret), `_DEVICE_NAME` (opt), `KASTELLAN_EGRESS_PROXY_UDS`
+(opt). **Post-#313-review hardening (2026-06-19):** (1) a dead background sync loop now `process::exit(1)`s instead of silently
+stalling (`poll` has no error channel — a dead loop looked alive while receiving nothing; exit lets the supervisor restart, and
+skips the deadpool `Drop`); (2) `session.json` (access token + device keys) is now written `0600` via `write_private`; (3)
+`_PASSWORD` made optional (above) — restored sessions don't need it. **Task 5 carry-forward:** the live e2e runs with
+seccomp/Landlock `none`, so the matrix Landlock ruleset Task 5 wires **must grant RW on the persistent store dir** (the
+background sync task keeps writing the SQLite state/crypto store after `lock_down`) or sync deadlocks — untested by the e2e.
+**Verification — macOS hermetic:** matrix worker **14/0/0** (`live-matrix`, +5 `sdk_live` tests) / **7/0/0** (default);
 `force_route` **25/0** (+1 `disable_mitm_only_for_transparent_tunnel_workers`); `matrix_live_e2e` compiles + skip-as-passes;
 `cargo clippy --workspace --all-targets -D warnings` clean; `cargo clippy -p kastellan-worker-matrix --features live-matrix
 --all-targets -D warnings` clean. **DGX live verification — DONE (2026-06-19):** `--features live-matrix` **builds on aarch64
