@@ -176,11 +176,13 @@ items unlock later ones.
   `serve_stdio`, network-init-then-lockdown order) + crate `#![allow(dead_code)]` narrowed to
   `#![cfg_attr(not(feature = "live-matrix"), allow(dead_code))]`; core `disable_mitm_for(worker_name)` pure
   predicate (browser-driver + the new `MATRIX_TOOL`) in `worker_lifecycle/force_route.rs`;
-  `core/tests/matrix_live_e2e.rs` `#[ignore]` two-worker (bot+peer) send/recv round-trip. **Hermetic green
-  (macOS):** matrix worker 13/0 (`live-matrix`) / 7/0 (default), `force_route` +1, `clippy --workspace -D
-  warnings` + `clippy -p kastellan-worker-matrix --features live-matrix` clean. **DGX live round-trip pending
-  operator homeserver setup** (run `setup-conduwuit.sh`, create 2 accounts + a shared encrypted room, then the
-  `#[ignore]` e2e). Remaining: `ProxyBridge` error-surfacing ([#312](https://github.com/hherb/kastellan/issues/312));
+  `core/tests/matrix_live_e2e.rs` `#[ignore]` two-worker (bot+peer) send/recv round-trip. **Green
+  (macOS hermetic + DGX live):** matrix worker 13/0 (`live-matrix`) / 7/0 (default), `force_route` +1, `clippy --workspace -D
+  warnings` + `clippy -p kastellan-worker-matrix --features live-matrix` clean; **DGX aarch64: `--features live-matrix`
+  builds, 13/0 hermetic, and the live encrypted send/recv round-trip passes** (`matrix_live_e2e` 1/0 against a throwaway
+  loopback matrix-conduit homeserver). A shutdown SIGABRT (matrix-sdk's deadpool SQLite `Drop` calling `spawn_blocking`
+  off-runtime) was found via the DGX e2e and fixed (`client: Option<Client>` dropped inside `runtime.block_on`).
+  Remaining: `ProxyBridge` error-surfacing ([#312](https://github.com/hherb/kastellan/issues/312));
   full channel-worker egress-coupled production spawn (the matrix worker's sidecar spawn, plan Task 5) +
   daemon `ChannelBus` wiring + `DbPeerAuthorizer`/`DbPairingService` swap.
   Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-matrix-inbound-sandboxed-worker*`;
