@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use kastellan_supervisor::default_supervisor;
 
 use super::plan::{
-    build_specs, optional_binaries, render_env_file, required_binaries, InstallArgs, Layout,
+    build_specs, estimate_model_bytes, is_local_ollama, memory_suffices, optional_binaries,
+    render_env_file, required_binaries, InstallArgs, Layout,
 };
 
 /// Create dirs, copy binaries + assets, write the EnvironmentFile.
@@ -76,6 +77,15 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
     };
     // Assets source = the repo (cwd) prompts/ + seeds/.
     let assets_src = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+
+    // Ensure the chat + embedding models are present (local Ollama: pull if
+    // missing, after a memory-fit check). Fail-closed if a model won't fit;
+    // a no-op note for non-Ollama endpoints. Done before any filesystem change
+    // so a too-big model aborts cleanly.
+    ensure_ollama_model(&args.llm_url, &args.llm_model)?;
+    if let Some(em) = &args.embedding_model {
+        ensure_ollama_model(&args.llm_url, em)?;
+    }
 
     let copied = prepare_filesystem(&layout, &from, &assets_src, &args)?;
     eprintln!("installed {} binaries into {}", copied.len(), layout.bin_dir.display());
@@ -240,4 +250,90 @@ fn run_checked(cmd: &mut Command, label: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Ensure `model` is available for a *local Ollama* endpoint: if it isn't
+/// pulled, check it will fit in memory, then `ollama pull` it. No-op (with a
+/// note) for non-Ollama endpoints or when the `ollama` CLI isn't installed —
+/// the model is then the operator's responsibility to serve. Fail-closed when
+/// a model clearly won't fit.
+fn ensure_ollama_model(url: &str, model: &str) -> Result<(), String> {
+    if !is_local_ollama(url) {
+        eprintln!("note: {url} is not a local Ollama endpoint — ensure model {model:?} is served there");
+        return Ok(());
+    }
+    if Command::new("ollama").arg("--version").output().is_err() {
+        eprintln!("note: `ollama` CLI not found — ensure model {model:?} is pulled on the Ollama host at {url}");
+        return Ok(());
+    }
+    if ollama_has_model(model)? {
+        eprintln!("model {model} already present");
+        return Ok(());
+    }
+    // Memory-fit guard (approximate; embedding models have no `<n>b` size and skip).
+    if let (Some(est), Some(total)) = (estimate_model_bytes(model), total_system_memory_bytes()) {
+        if !memory_suffices(est, total) {
+            return Err(format!(
+                "model {model} needs ~{} GiB but the system has ~{} GiB total — choose a smaller model (--llm-model) or free memory",
+                est >> 30,
+                total >> 30
+            ));
+        }
+    }
+    eprintln!("pulling {model} via ollama (this can take a while)...");
+    let status = Command::new("ollama")
+        .arg("pull")
+        .arg(model)
+        .status()
+        .map_err(|e| format!("ollama pull {model}: {e}"))?;
+    if !status.success() {
+        return Err(format!("ollama pull {model} failed ({status})"));
+    }
+    Ok(())
+}
+
+/// True when `ollama list` reports `model` (matching the bare tag or `:latest`).
+fn ollama_has_model(model: &str) -> Result<bool, String> {
+    let out = Command::new("ollama")
+        .arg("list")
+        .output()
+        .map_err(|e| format!("ollama list: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ollama list failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let want = model.strip_suffix(":latest").unwrap_or(model);
+    Ok(listing.lines().skip(1).any(|line| {
+        let name = line.split_whitespace().next().unwrap_or("");
+        name == model || name == want || name == format!("{want}:latest")
+    }))
+}
+
+/// Total physical RAM in bytes, or `None` if it can't be determined.
+fn total_system_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in meminfo.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                // "MemTotal:  263456789 kB"
+                let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                return Some(kb * 1024);
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("sysctl").arg("-n").arg("hw.memsize").output().ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }

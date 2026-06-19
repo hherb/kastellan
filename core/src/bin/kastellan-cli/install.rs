@@ -23,7 +23,7 @@ fn install(args: &[String]) -> ExitCode {
     let parsed = match parse_install_args(args) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("{e}\nusage: kastellan-cli install --llm-model <name> [--llm-url <url>] [--embedding-model <name>] [--pg-bin-dir <dir>] [--from <dir>] [--no-start]");
+            eprintln!("{e}\nusage: kastellan-cli install [--llm-model <name>] [--llm-url <url>] [--embedding-model <name>] [--pg-bin-dir <dir>] [--from <dir>] [--no-start]");
             return ExitCode::from(2);
         }
     };

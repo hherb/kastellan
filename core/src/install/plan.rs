@@ -128,15 +128,86 @@ pub fn parse_install_args(args: &[String]) -> Result<InstallArgs, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    let llm_model = model.ok_or("install requires --llm-model <name>")?;
     Ok(InstallArgs {
-        llm_model,
+        llm_model: model.unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string()),
         llm_url: url.unwrap_or_else(|| default_llm_url().to_string()),
-        embedding_model: emb,
+        embedding_model: Some(emb.unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_string())),
         pg_bin_dir: pg,
         from,
         no_start,
     })
+}
+
+/// Default chat model (Ollama tag). Spike-tested as a strong general-purpose
+/// default; override with `--llm-model`.
+pub const DEFAULT_LLM_MODEL: &str = "gemma4:26b-a4b-it-q8_0";
+
+/// Default embedding model (Ollama tag). Override with `--embedding-model`.
+pub const DEFAULT_EMBEDDING_MODEL: &str = "embeddinggemma";
+
+/// True when `url` looks like a *local* Ollama endpoint (loopback `:11434`),
+/// the only case where the installer can drive `ollama pull` to fetch a model.
+pub fn is_local_ollama(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    (u.contains("127.0.0.1") || u.contains("localhost") || u.contains("[::1]")) && u.contains(":11434")
+}
+
+/// Parse the parameter count from an Ollama model tag, e.g. `gemma4:26b-a4b…`
+/// → 26e9 (the *total* params — what must fit in memory; the `aNb` active-param
+/// figure is about compute, not footprint). Returns `None` if no `<n>b` token
+/// is present. Decimal sizes like `1.5b` are supported.
+pub fn parse_param_count(tag: &str) -> Option<u64> {
+    let lower = tag.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    // Find the FIRST `<number>b` token (the total-param size).
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'b' {
+                if let Ok(n) = lower[start..i].parse::<f64>() {
+                    return Some((n * 1e9) as u64);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Rough RAM footprint (bytes) for an Ollama model tag, from its parameter
+/// count × bytes-per-param for the quantization. Approximate by design — used
+/// only as a "will it obviously not fit" guard, not a precise sizing.
+pub fn estimate_model_bytes(tag: &str) -> Option<u64> {
+    let params = parse_param_count(tag)?;
+    let lower = tag.to_ascii_lowercase();
+    // bytes per parameter by quant family (q8≈1B, q6≈0.82, q5≈0.68, q4≈0.56,
+    // fp16/f16≈2B); default to ~1B (conservative) when unlabelled.
+    let bpp = if lower.contains("q8") {
+        1.06
+    } else if lower.contains("q6") {
+        0.82
+    } else if lower.contains("q5") {
+        0.68
+    } else if lower.contains("q4") {
+        0.56
+    } else if lower.contains("fp16") || lower.contains("f16") {
+        2.0
+    } else {
+        1.0
+    };
+    Some((params as f64 * bpp) as u64)
+}
+
+/// Whether `total_mem_bytes` is enough to run a model of `model_bytes`: require
+/// 1.2× the weights (KV cache / activations headroom) plus a 2 GiB OS reserve.
+pub fn memory_suffices(model_bytes: u64, total_mem_bytes: u64) -> bool {
+    let needed = model_bytes.saturating_mul(12) / 10 + 2 * 1024 * 1024 * 1024;
+    total_mem_bytes >= needed
 }
 
 fn take(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -212,15 +283,60 @@ mod tests {
     }
 
     #[test]
-    fn parse_requires_llm_model_and_defaults_url() {
-        let a = parse_install_args(&["--llm-model".into(), "m".into()]).unwrap();
+    fn parse_defaults_models_and_url_overridable() {
+        // No flags → both models + url default.
+        let d = parse_install_args(&[]).unwrap();
+        assert_eq!(d.llm_model, DEFAULT_LLM_MODEL);
+        assert_eq!(d.embedding_model.as_deref(), Some(DEFAULT_EMBEDDING_MODEL));
+        assert_eq!(d.llm_url, default_llm_url());
+        assert!(!d.no_start);
+        // Overrides.
+        let a = parse_install_args(&[
+            "--llm-model".into(), "m".into(),
+            "--embedding-model".into(), "e".into(),
+            "--llm-url".into(), "http://x:1".into(),
+            "--no-start".into(),
+        ]).unwrap();
         assert_eq!(a.llm_model, "m");
-        assert_eq!(a.llm_url, default_llm_url());
-        assert!(!a.no_start);
-        assert!(parse_install_args(&[]).is_err()); // missing --llm-model
+        assert_eq!(a.embedding_model.as_deref(), Some("e"));
+        assert_eq!(a.llm_url, "http://x:1");
+        assert!(a.no_start);
         assert!(parse_install_args(&["--bogus".into()]).is_err());
-        let a2 = parse_install_args(&["--llm-model".into(), "m".into(), "--llm-url".into(), "http://x:1".into(), "--no-start".into()]).unwrap();
-        assert_eq!(a2.llm_url, "http://x:1");
-        assert!(a2.no_start);
+    }
+
+    #[test]
+    fn parses_param_count_total_not_active() {
+        assert_eq!(parse_param_count("gemma4:26b-a4b-it-q8_0"), Some(26_000_000_000));
+        assert_eq!(parse_param_count("qwen3.5:9b-q8_0"), Some(9_000_000_000));
+        assert_eq!(parse_param_count("gpt-oss:120B"), Some(120_000_000_000));
+        assert_eq!(parse_param_count("nomic-embed-text-v2-moe:latest"), None);
+        assert_eq!(parse_param_count("embeddinggemma"), None);
+    }
+
+    #[test]
+    fn estimates_model_bytes_by_quant() {
+        // 26B q8 ≈ 26e9 * 1.06 ≈ 27.6 GB
+        let q8 = estimate_model_bytes("gemma4:26b-a4b-it-q8_0").unwrap();
+        assert!((27_000_000_000..30_000_000_000).contains(&q8), "got {q8}");
+        // q4 of the same is much smaller than q8.
+        let q4 = estimate_model_bytes("foo:26b-q4_0").unwrap();
+        assert!(q4 < q8);
+        assert_eq!(estimate_model_bytes("embeddinggemma"), None);
+    }
+
+    #[test]
+    fn memory_suffices_requires_headroom() {
+        let twenty_gb = 20u64 * 1024 * 1024 * 1024;
+        // 20 GB model needs 1.2x + 2 GB ≈ 26 GB → 32 GB suffices, 24 GB does not.
+        assert!(memory_suffices(twenty_gb, 32 * 1024 * 1024 * 1024));
+        assert!(!memory_suffices(twenty_gb, 24 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn detects_local_ollama_url() {
+        assert!(is_local_ollama("http://127.0.0.1:11434"));
+        assert!(is_local_ollama("http://localhost:11434"));
+        assert!(!is_local_ollama("http://127.0.0.1:8000"));
+        assert!(!is_local_ollama("http://10.0.0.5:11434")); // remote — can't drive `ollama pull`
     }
 }
