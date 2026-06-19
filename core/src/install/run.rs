@@ -130,10 +130,10 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
     eprintln!("removed kastellan.target units");
 
     if purge {
-        for d in [&layout.bin_dir, &layout.assets_dir, &layout.config_dir] {
+        for d in [&layout.bin_dir, &layout.assets_dir, &layout.config_dir, &layout.log_dir] {
             fs::remove_dir_all(d).map_err(|e| format!("purge {}: {e}", d.display()))?;
         }
-        eprintln!("purged prefix + data dir (cluster + secrets deleted)");
+        eprintln!("purged prefix + data + logs (cluster + secrets deleted)");
     } else {
         eprintln!("kept data dir + secrets at {} (use --purge to delete)", layout.assets_dir.display());
     }

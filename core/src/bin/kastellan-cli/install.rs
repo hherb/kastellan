@@ -9,10 +9,8 @@ use kastellan_core::install::run::{run_install, run_uninstall};
 
 pub(crate) fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
-        Some("uninstall") => uninstall(&args[1..]),
-        // `install` is the implicit verb: `kastellan-cli install [flags]`
-        _ if !args.is_empty() && args[0].starts_with("--") => install(args),
         Some("install") => install(&args[1..]),
+        Some("uninstall") => uninstall(&args[1..]),
         _ => {
             eprintln!("usage: kastellan-cli install [--llm-model <m>] [--llm-url <u>] [--embedding-model <m>] [--pg-bin-dir <d>] [--from <d>] [--no-start]");
             eprintln!("       kastellan-cli uninstall [--purge]");
