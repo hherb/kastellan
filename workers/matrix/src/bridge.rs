@@ -11,15 +11,13 @@ use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::task::JoinHandle;
 
-/// A loopback-TCP↔UDS relay. Constructed by the next slice's `LiveSdk` and
-/// exercised now by the `egress_spike` test.
-#[allow(dead_code)]
+/// A loopback-TCP↔UDS relay. Constructed by [`LiveSdk`](crate::sdk_live::LiveSdk)
+/// (under `live-matrix`) and exercised by the `egress_spike` test.
 pub struct ProxyBridge {
     addr: SocketAddr,
     accept_task: JoinHandle<()>,
 }
 
-#[allow(dead_code)]
 impl ProxyBridge {
     /// Bind `127.0.0.1:0`, spawn the accept loop relaying to `uds_path`, and
     /// return immediately. The accept loop runs until the `ProxyBridge` is

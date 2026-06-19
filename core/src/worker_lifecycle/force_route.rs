@@ -139,10 +139,27 @@ pub(crate) fn policy_net_is_force_routable(net: &Net) -> bool {
 }
 
 /// The browser does end-to-end TLS itself and cannot trust our per-instance MITM
-/// CA, so its sidecar runs in no-MITM (transparent-tunnel) mode. This is the only
-/// worker-specific bit of force-routing left after egress slice #2 — the browser
-/// is otherwise a normal force-routable `Net::Allowlist` worker.
+/// CA, so its sidecar runs in no-MITM (transparent-tunnel) mode. The browser is
+/// otherwise a normal force-routable `Net::Allowlist` worker.
 pub(crate) const BROWSER_DRIVER_TOOL: &str = "browser-driver";
+
+/// The Matrix channel worker (matrix-rust-sdk) is the second transparent-tunnel
+/// worker: it does native end-to-end TLS against the self-hosted homeserver and
+/// cannot trust our MITM CA either. MITM would also buy nothing — Matrix room
+/// content is E2E-encrypted *before* it reaches HTTP, so an interceptor sees only
+/// ciphertext (see the Phase D egress-transport spike,
+/// `docs/superpowers/specs/2026-06-19-matrix-phase-d-egress-transport-spike-design.md`).
+/// The matrix worker's egress-coupled spawn (plan Task 5) passes this name; the
+/// constant is wired here so that path inherits the transparent-tunnel decision.
+pub(crate) const MATRIX_TOOL: &str = "matrix";
+
+/// Pure: should this worker's egress sidecar disable TLS interception (run as a
+/// transparent tunnel)? True for the workers that do their own end-to-end TLS and
+/// cannot trust our per-instance MITM CA. The single source of truth for the
+/// no-MITM decision, kept as a small exhaustively-testable predicate.
+pub(crate) fn disable_mitm_for(worker_name: &str) -> bool {
+    matches!(worker_name, BROWSER_DRIVER_TOOL | MATRIX_TOOL)
+}
 
 /// How a single worker spawn should be routed, given the force-routing posture.
 /// This is the **single source of truth** for the routing decision;
@@ -223,9 +240,9 @@ pub(crate) fn spawn_worker_maybe_forced(
                 worker_name,
                 secret_fingerprints: &[],
                 cert_pins_json: pins_json.as_deref(),
-                // The browser does end-to-end TLS + can't trust our CA → its
-                // sidecar transparently tunnels (slice #2).
-                disable_mitm: worker_name == BROWSER_DRIVER_TOOL,
+                // Workers that do their own end-to-end TLS + can't trust our CA
+                // (browser, matrix) → their sidecar transparently tunnels.
+                disable_mitm: disable_mitm_for(worker_name),
             };
             spawn_forced_net_worker(&params, &cfg.scratch_root, (cfg.make_sink)())
         }
@@ -490,6 +507,16 @@ mod tests {
         // to force-route the browser rather than refuse or run direct.
         assert!(matches!(res, Err(ToolHostError::Io(_))),
             "browser-driver under force-routing must force-route (Io fail-closed)");
+    }
+
+    #[test]
+    fn disable_mitm_only_for_transparent_tunnel_workers() {
+        // The browser + matrix do their own end-to-end TLS → transparent tunnel.
+        assert!(disable_mitm_for(BROWSER_DRIVER_TOOL));
+        assert!(disable_mitm_for(MATRIX_TOOL));
+        // Every other worker is MITM-intercepted by its sidecar.
+        assert!(!disable_mitm_for("web-fetch"));
+        assert!(!disable_mitm_for("web-search"));
     }
 
     #[test]
