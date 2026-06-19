@@ -39,13 +39,12 @@ pub fn resolve_layout(home: &Path, user: &str) -> Layout {
     }
 }
 
-/// The default local LLM URL per OS (Linux: vLLM/SGLang :8000; macOS: Ollama :11434).
+/// The default local LLM URL: Ollama `:11434` on both OSes — it pairs with the
+/// Ollama default models ([`DEFAULT_LLM_MODEL`]/[`DEFAULT_EMBEDDING_MODEL`]) and
+/// is the backend the installer can `ollama pull` into. Operators on vLLM/MLX/etc.
+/// override with `--llm-url` (and the matching `--llm-model`).
 pub fn default_llm_url() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "http://127.0.0.1:11434"
-    } else {
-        "http://127.0.0.1:8000"
-    }
+    "http://127.0.0.1:11434"
 }
 
 /// Render the `kastellan.env` EnvironmentFile contents.

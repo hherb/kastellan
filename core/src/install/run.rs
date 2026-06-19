@@ -155,34 +155,39 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Poll for the PG socket, then confirm both services are `active`.
+/// Wait for the socket to appear AND both services to reach `active`, polling
+/// over a window. `kastellan-core` is `After=` Postgres but systemd does not
+/// wait for PG *readiness*, so core typically crash-restarts a few times (with
+/// `Restart=on-failure` backoff) before the cluster accepts connections — this
+/// poll gives the target time to converge rather than failing on the first
+/// not-yet-active read.
 fn verify_running(layout: &Layout) -> Result<(), String> {
     let socket = layout.data_dir.join("sockets/.s.PGSQL.5432");
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut last = String::new();
     while Instant::now() < deadline {
-        if socket.exists() {
-            break;
+        let pg = service_state("kastellan-postgres");
+        let core = service_state("kastellan-core");
+        if socket.exists() && pg == "active" && core == "active" {
+            return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(500));
+        last = format!("postgres={pg}, core={core}, socket={}", socket.exists());
+        std::thread::sleep(Duration::from_secs(2));
     }
-    if !socket.exists() {
-        return Err(format!(
-            "Postgres socket never appeared at {}. Inspect: journalctl --user -u kastellan-postgres -n 50",
-            socket.display()
-        ));
-    }
-    for svc in ["kastellan-postgres", "kastellan-core"] {
-        let out = Command::new("systemctl").args(["--user", "is-active", svc]).output()
-            .map_err(|e| format!("systemctl is-active {svc}: {e}"))?;
-        let state = String::from_utf8_lossy(&out.stdout);
-        if state.trim() != "active" {
-            return Err(format!(
-                "{svc} is not active (state: {}). Inspect: journalctl --user -u {svc} -n 50",
-                state.trim()
-            ));
-        }
-    }
-    Ok(())
+    Err(format!(
+        "kastellan.target did not become healthy within 90s ({last}). \
+         Inspect: journalctl --user -u kastellan-core -n 50 (and -u kastellan-postgres)",
+    ))
+}
+
+/// `systemctl --user is-active <svc>` → trimmed state (e.g. "active",
+/// "activating", "failed", "inactive"); "unknown" if the command can't run.
+fn service_state(svc: &str) -> String {
+    Command::new("systemctl")
+        .args(["--user", "is-active", svc])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 fn copy_exec(src: &Path, dest: &Path) -> Result<(), String> {
