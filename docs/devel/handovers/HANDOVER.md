@@ -435,6 +435,14 @@ need to re-run it: `scripts/matrix/dev-e2e-bootstrap.sh up` — a throwaway loop
 of two accounts + an encrypted room; `source ~/.matrix-e2e.env` then the `#[ignore]` e2e; `… down` to tear down. Runs on the
 DGX via `ssh dgx 'bash -s up' < scripts/matrix/dev-e2e-bootstrap.sh`. Documented in `docs/deploy/matrix-homeserver.md`.)
 
+**Production Matrix homeserver is now LIVE (2026-06-19): `matrix.kastellan.dev`** — Continuwuity (the maintained
+conduwuit fork; conduwuit is archived), federation-off, loopback-bound behind Caddy auto-TLS, registration closed.
+Accounts `@horst` (admin) + `@kastellan` (agent bot) exist. So Task 5 below now has a real homeserver to point at:
+`KASTELLAN_MATRIX_HOMESERVER_URL=https://matrix.kastellan.dev`, `_USER=kastellan`, `_PASSWORD`=(store as a `db::secrets`
+secret). Deploy details: runbook `docs/devel/runbooks/2026-06-19-matrix-homeserver-deploy.md`, scripts `scripts/matrix/vps/`,
+doc `docs/deploy/matrix-homeserver.md`. **Gotcha for any redeploy:** a fresh Continuwuity server's first (admin) account
+needs the one-time BOOTSTRAP token from the startup log, not the config `registration_token`.
+
 **★ TOP PICK — channel-worker egress-coupled production spawn (plan Task 5) + daemon wiring.** This is what makes the live
 Matrix channel actually run in the daemon. Today `core/src/channel/matrix.rs` has the driver + pure `build_matrix_policy`
 but **no production spawn of the matrix worker with a real egress sidecar** (the `disable_mitm_for("matrix")` decision is

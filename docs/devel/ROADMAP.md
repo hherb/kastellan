@@ -197,6 +197,10 @@ items unlock later ones.
   operator steps). Deliberately **not** a kastellan `ServiceSpec`: the user-level supervisor can't run
   conduwuit as the dedicated unprivileged `matrix` user, so the homeserver is a root/system unit (or
   a separate host), installed independently. Branch `claude/zen-bell-6bn2ze`, 2026-06-12. (Slice #6.)
+  **DEPLOYED LIVE 2026-06-19: `matrix.kastellan.dev`** (Tier A dedicated VPS) — **Continuwuity** (conduwuit is
+  archived; config-compatible fork) + Caddy auto-TLS, federation off, registration closed, accounts `@horst`/`@kastellan`.
+  Runbook `docs/devel/runbooks/2026-06-19-matrix-homeserver-deploy.md`; phase scripts `scripts/matrix/vps/`. Template
+  corrected to Continuwuity keys. Unblocks Phase D Task 5 (point the worker at it).
 - [ ] IMAP inbound worker (fallback channel; sandbox: net allowlist = configured IMAP server only). Low-trust async notifications only; require SPF/DKIM/DMARC pass + per-pairing in-body token before surfacing. (Slice #5.)
 - [x] DM pairing flow: short-lived single-use pairing code issued out-of-band (`kastellan-cli pair issue`, hash-only storage); the new peer presents it in-channel; binding recorded in `pairings` (migration 0018), revocable, audited. Static contact allowlists rejected (forgeable) — `DbPeerAuthorizer` gates the bus on active `(channel,peer)` rows; the pairing carve-out is compare-only + operator-gated + single-use (`claim_code` atomic). **WebAuthn deferred** (no browser/CLI client surface yet). Daemon wiring (swap `StaticPairings`→`DbPeerAuthorizer` + pass `DbPairingService`) rides slice #2 Phase D. Branch `claude/zen-bell-6bn2ze`, 2026-06-12. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-12-channel-pairing*`. (Pattern: ZeroClaw `security/{pairing,otp}.rs`.) (Slice #3.)
 - [ ] ~~Telegram inbound adapter (`grammers`, Rust)~~ — **rejected as primary 2026-06-12** (no bot E2E, centralized, ban risk). Could return later as an additional `Channel` impl if a need arises.

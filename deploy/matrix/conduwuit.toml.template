@@ -1,4 +1,13 @@
-# conduwuit configuration template for kastellan's single-user Matrix homeserver.
+# Config template for kastellan's single-user Matrix homeserver.
+#
+# NB: the original `conduwuit` project is ARCHIVED/unmaintained. We deploy
+# **Continuwuity** (the maintained community continuation) instead — it keeps the
+# `conduwuit` binary name + `conduwuit.toml` config format, so this template is
+# config-compatible. The keys below are the subset Continuwuity 0.5.x accepts;
+# do NOT add conduwuit-era keys it rejects (`allow_incoming_federation`,
+# `allow_outgoing_federation`, `allow_check_for_updates`). See
+# docs/deploy/matrix-homeserver.md for the full deployment + the first-user
+# bootstrap-token gotcha.
 #
 # Rendered by scripts/matrix/setup-conduwuit.sh (which substitutes the {{...}}
 # placeholders) and validated by scripts/matrix/check-conduwuit-config.sh, which
@@ -35,12 +44,12 @@ allow_registration = true
 registration_token = "{{REGISTRATION_TOKEN}}"
 
 # Federation OFF — the single biggest attack-surface reduction. Do not enable.
+# (Continuwuity has a single `allow_federation` master toggle; the conduwuit-era
+# `allow_incoming_federation`/`allow_outgoing_federation` keys do not exist here.)
 allow_federation = false
-allow_incoming_federation = false
-allow_outgoing_federation = false
 
-# Don't phone home.
-allow_check_for_updates = false
+# Don't phone home (Continuwuity's update/announcement check).
+allow_announcements_check = false
 
 # No trusted key servers (federation is off anyway).
 trusted_servers = []

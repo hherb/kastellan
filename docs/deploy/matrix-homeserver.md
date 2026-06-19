@@ -1,10 +1,21 @@
-# Deploying the kastellan Matrix homeserver (conduwuit)
+# Deploying the kastellan Matrix homeserver (Continuwuity)
 
 kastellan's primary user↔agent channel is **Matrix, self-hosted, single-user,
 federation OFF** (decision:
 [`docs/superpowers/specs/2026-06-12-primary-communication-channel-design.md`](../superpowers/specs/2026-06-12-primary-communication-channel-design.md)).
 This page covers standing up the homeserver. The Matrix *client* runs as a
 sandboxed kastellan worker (slice #2); this page is about the *server*.
+
+> **conduwuit is archived — we run Continuwuity.** The original `conduwuit`
+> project was archived/unmaintained in 2025. We deploy
+> **[Continuwuity](https://continuwuity.org)**, the maintained community
+> continuation (frequent security releases). It keeps the `conduwuit` binary
+> name + `conduwuit.toml` config format, so the template + checker here are
+> unchanged in spirit; only a few config keys differ (noted inline). A live
+> production deployment exists at **`matrix.kastellan.dev`** — its end-to-end
+> bring-up is captured in the runbook
+> [`docs/devel/runbooks/2026-06-19-matrix-homeserver-deploy.md`](../devel/runbooks/2026-06-19-matrix-homeserver-deploy.md),
+> with copy-paste phase scripts under [`scripts/matrix/vps/`](../../scripts/matrix/vps/).
 
 > **Why kastellan does not supervise the homeserver itself.** kastellan's
 > supervisor is *user-level* (`systemd --user` / launchd LaunchAgents), but the
@@ -62,7 +73,12 @@ failover.
    sudo useradd --system --home /var/lib/conduwuit --shell /usr/sbin/nologin matrix
    sudo mkdir -p /var/lib/conduwuit && sudo chown matrix:matrix /var/lib/conduwuit
    ```
-2. **Install the conduwuit binary** (per upstream) at a root-owned path.
+2. **Install the Continuwuity binary** at a root-owned path. Releases are on
+   [forgejo.ellis.link](https://forgejo.ellis.link/continuwuation/continuwuity/releases)
+   (the binary is still named `conduwuit`). It is **dynamically linked** — it
+   needs `libjemalloc2` + a kernel with `io_uring` on the host (`apt install
+   libjemalloc2 liburing2`). On modern x86_64 (AVX2) use the
+   `conduwuit-haswell-linux-amd64-maxperf` asset; otherwise `conduwuit-linux-amd64`.
 3. **Render the config** from the template (substitute `{{SERVER_NAME}}`,
    `{{PORT}}`, `{{DB_PATH}}`, `{{REGISTRATION_TOKEN}}`) to e.g.
    `/etc/kastellan/conduwuit.toml`, then **validate**:
@@ -78,10 +94,17 @@ failover.
    ```
 5. **Reverse proxy** (Caddy/nginx) terminates TLS on 443 and proxies to
    `127.0.0.1:<port>`. **Do not** open the federation port (8448).
-6. **Create the two accounts** (operator + `@kastellan:<server>`) using the
-   registration token (Element → Register against your URL, or the conduwuit
-   register API), then set `allow_registration = false` and restart.
-7. **Firewall:** inbound 443 (client API) + WireGuard UDP only.
+6. **Create the two accounts** (operator + `@kastellan:<server>`), then set
+   `allow_registration = false` and restart. **⚠️ First-user bootstrap gotcha:**
+   on a brand-new Continuwuity server the **first** account (which becomes the
+   admin) must be registered with a **one-time, server-generated bootstrap
+   token** that Continuwuity prints to its log at startup
+   (`journalctl -u kastellan-matrix | grep 'registration token'`) — the
+   `registration_token` from your config **does not work until that first admin
+   account exists**. Register the operator first with the bootstrap token, then
+   `@kastellan` with the config token. (The phase scripts in
+   [`scripts/matrix/vps/`](../../scripts/matrix/vps/) automate exactly this.)
+7. **Firewall:** inbound 443 (client API) + 80 (ACME) + WireGuard UDP only.
 
 ## Tier A — dedicated public VPS (worked example: `matrix.kastellan.dev`)
 
@@ -100,10 +123,14 @@ insurance (`fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile
    ```sh
    sudo ufw allow OpenSSH && sudo ufw allow 80 && sudo ufw allow 443 && sudo ufw --force enable
    ```
-2. **conduwuit binary** (root-owned), matching the box's arch (`uname -m`):
+2. **Continuwuity binary** (root-owned), matching the box's arch (`uname -m`).
+   Needs `libjemalloc2` + `io_uring`:
    ```sh
-   sudo curl -L -o /usr/local/bin/conduwuit <RELEASE_URL>   # x86_64 or aarch64
-   sudo chmod 755 /usr/local/bin/conduwuit
+   sudo apt install -y libjemalloc2 liburing2
+   # x86_64 w/ AVX2 — see the releases page for the current version + aarch64 asset:
+   sudo curl -fSL --proto '=https' -o /usr/local/bin/conduwuit \
+     https://forgejo.ellis.link/continuwuation/continuwuity/releases/download/v0.5.9/conduwuit-haswell-linux-amd64-maxperf
+   sudo chmod 755 /usr/local/bin/conduwuit && conduwuit --version
    ```
 3. **Dedicated user + config + hardened unit** — exactly the Tiers B/C steps
    above, with `server_name = "matrix.kastellan.dev"`, `address = "127.0.0.1"`,
@@ -118,9 +145,11 @@ insurance (`fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile
    ```
    `sudo systemctl restart caddy`, then verify:
    `curl https://matrix.kastellan.dev/_matrix/client/versions` (valid TLS, JSON).
-5. **Accounts + close registration** — create the operator + `@kastellan` bot via
-   the registration token (Element → Register against `https://matrix.kastellan.dev`,
-   or the register API), then `allow_registration = false` and restart.
+5. **Accounts + close registration** — create the operator (first → admin) with
+   the **bootstrap token** from the log, then `@kastellan` with the config token
+   (see the first-user bootstrap gotcha above), then `allow_registration = false`
+   and restart. The [`scripts/matrix/vps/phase4-accounts.sh`](../../scripts/matrix/vps/phase4-accounts.sh)
+   helper drives this whole flow.
 6. **Point the worker at it** — `KASTELLAN_MATRIX_HOMESERVER_URL=https://matrix.kastellan.dev`.
    The worker validates the real cert natively; its egress sidecar runs as a
    transparent tunnel (no MITM) for the matrix worker. See "Wiring kastellan".
