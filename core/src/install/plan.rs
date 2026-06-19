@@ -147,8 +147,24 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "embeddinggemma";
 /// True when `url` looks like a *local* Ollama endpoint (loopback `:11434`),
 /// the only case where the installer can drive `ollama pull` to fetch a model.
 pub fn is_local_ollama(url: &str) -> bool {
-    let u = url.to_ascii_lowercase();
-    (u.contains("127.0.0.1") || u.contains("localhost") || u.contains("[::1]")) && u.contains(":11434")
+    // authority = between "://" and the next "/", minus any "user@"
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let authority = rest.split('/').next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let (host, port) = if let Some(after) = hostport.strip_prefix('[') {
+        // [ipv6]:port
+        match after.split_once("]:") {
+            Some((h, p)) => (h.to_string(), p.to_string()),
+            None => (after.trim_end_matches(']').to_string(), String::new()),
+        }
+    } else {
+        match hostport.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.to_string()),
+            None => (hostport.to_string(), String::new()),
+        }
+    };
+    let host = host.to_ascii_lowercase();
+    (host == "127.0.0.1" || host == "localhost" || host == "::1") && port == "11434"
 }
 
 /// Parse the parameter count from an Ollama model tag, e.g. `gemma4:26b-a4b…`
@@ -337,5 +353,9 @@ mod tests {
         assert!(is_local_ollama("http://localhost:11434"));
         assert!(!is_local_ollama("http://127.0.0.1:8000"));
         assert!(!is_local_ollama("http://10.0.0.5:11434")); // remote — can't drive `ollama pull`
+        assert!(!is_local_ollama("http://127.0.0.1.evil.com:11434")); // not loopback host
+        assert!(!is_local_ollama("http://127.0.0.1:114340"));         // not port 11434
+        assert!(!is_local_ollama("http://127.0.0.1:11434x"));         // not numeric port 11434
+        assert!(is_local_ollama("http://[::1]:11434"));               // ipv6 loopback
     }
 }

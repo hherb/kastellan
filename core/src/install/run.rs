@@ -179,6 +179,19 @@ fn verify_running(layout: &Layout) -> Result<(), String> {
         last = format!("postgres={pg}, core={core}, socket={}", socket.exists());
         std::thread::sleep(Duration::from_secs(2));
     }
+    // A cluster created by an older install (superuser != $USER) yields a role
+    // error the daemon can't recover from; db-init won't re-init an existing
+    // data dir. Surface that specifically so the operator knows to purge.
+    let core_err = std::fs::read_to_string(layout.log_dir.join("kastellan-core.err")).unwrap_or_default();
+    if core_err.contains("does not exist") {
+        return Err(format!(
+            "kastellan-core cannot authenticate to Postgres ({last}). The daemon log shows a missing \
+             database role — the cluster was likely created by an older install with a different \
+             superuser. Fix: `kastellan-cli uninstall --purge` then reinstall. \
+             (Log: {})",
+            layout.log_dir.join("kastellan-core.err").display()
+        ));
+    }
     Err(format!(
         "kastellan.target did not become healthy within 90s ({last}). \
          Inspect: journalctl --user -u kastellan-core -n 50 (and -u kastellan-postgres)",
@@ -276,9 +289,16 @@ fn ensure_ollama_model(url: &str, model: &str) -> Result<(), String> {
         eprintln!("note: `ollama` CLI not found — ensure model {model:?} is pulled on the Ollama host at {url}");
         return Ok(());
     }
-    if ollama_has_model(model)? {
-        eprintln!("model {model} already present");
-        return Ok(());
+    match ollama_has_model(model) {
+        Ok(true) => {
+            eprintln!("model {model} already present");
+            return Ok(());
+        }
+        Ok(false) => {} // fall through to memory-check + pull
+        Err(e) => {
+            eprintln!("note: could not query Ollama ({e}) — ensure model {model:?} is pulled at {url}");
+            return Ok(());
+        }
     }
     // Memory-fit guard (approximate; embedding models have no `<n>b` size and skip).
     if let (Some(est), Some(total)) = (estimate_model_bytes(model), total_system_memory_bytes()) {
