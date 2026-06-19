@@ -83,6 +83,48 @@ failover.
    register API), then set `allow_registration = false` and restart.
 7. **Firewall:** inbound 443 (client API) + WireGuard UDP only.
 
+## Tier A — dedicated public VPS (worked example: `matrix.kastellan.dev`)
+
+The preferred topology: conduwuit on its own small box, **loopback-bound**, with a
+TLS-terminating reverse proxy in front. The hardened unit + config are identical
+to Tiers B/C; Tier A just adds the public-facing pieces (DNS, TLS, firewall) and
+the clean separation of a dedicated host. Steps use `matrix.kastellan.dev` / port
+`6167` as the running example.
+
+**Prerequisites.** An `A` record `matrix.kastellan.dev → <vps-ip>` that resolves
+(`dig +short matrix.kastellan.dev`), and — on a 1 GB box — a swap file as
+insurance (`fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile
+&& swapon /swapfile`, persisted in `/etc/fstab`).
+
+1. **Firewall — client API + ACME only; never the federation port (8448):**
+   ```sh
+   sudo ufw allow OpenSSH && sudo ufw allow 80 && sudo ufw allow 443 && sudo ufw --force enable
+   ```
+2. **conduwuit binary** (root-owned), matching the box's arch (`uname -m`):
+   ```sh
+   sudo curl -L -o /usr/local/bin/conduwuit <RELEASE_URL>   # x86_64 or aarch64
+   sudo chmod 755 /usr/local/bin/conduwuit
+   ```
+3. **Dedicated user + config + hardened unit** — exactly the Tiers B/C steps
+   above, with `server_name = "matrix.kastellan.dev"`, `address = "127.0.0.1"`,
+   `port = 6167`. Validate with `check-conduwuit-config.sh`, then
+   `systemctl enable --now kastellan-matrix`.
+4. **TLS reverse proxy (Caddy — automatic Let's Encrypt):** `sudo apt install -y caddy`,
+   then `/etc/caddy/Caddyfile`:
+   ```
+   matrix.kastellan.dev {
+       reverse_proxy 127.0.0.1:6167
+   }
+   ```
+   `sudo systemctl restart caddy`, then verify:
+   `curl https://matrix.kastellan.dev/_matrix/client/versions` (valid TLS, JSON).
+5. **Accounts + close registration** — create the operator + `@kastellan` bot via
+   the registration token (Element → Register against `https://matrix.kastellan.dev`,
+   or the register API), then `allow_registration = false` and restart.
+6. **Point the worker at it** — `KASTELLAN_MATRIX_HOMESERVER_URL=https://matrix.kastellan.dev`.
+   The worker validates the real cert natively; its egress sidecar runs as a
+   transparent tunnel (no MITM) for the matrix worker. See "Wiring kastellan".
+
 ## Dev / Tier-C quick start
 
 ```sh
@@ -90,6 +132,27 @@ export KASTELLAN_MATRIX_SERVER_NAME=localhost      # or your domain
 scripts/matrix/setup-conduwuit.sh                  # renders+validates+runs on 127.0.0.1:6167
 ```
 Then follow the printed steps to create the accounts + point kastellan at it.
+
+## Live e2e loop (headless, throwaway)
+
+To exercise the worker's `matrix-rust-sdk` integration end to end without standing
+up a homeserver of your own,
+[`scripts/matrix/dev-e2e-bootstrap.sh`](../../scripts/matrix/dev-e2e-bootstrap.sh)
+brings up a **loopback, throwaway** homeserver in a container (matrix-conduit —
+conduwuit's upstream; same client-server API + E2E relay), registers two accounts,
+creates one **encrypted** room they both join, and writes the env block
+[`core/tests/matrix_live_e2e.rs`](../../core/tests/matrix_live_e2e.rs) needs. This
+is **dev-only** — not the production homeserver.
+
+```sh
+cargo build -p kastellan-worker-matrix --features live-matrix   # build the live worker first
+scripts/matrix/dev-e2e-bootstrap.sh up                          # bring up + bootstrap
+source ~/.matrix-e2e.env
+cargo test -p kastellan-core --test matrix_live_e2e -- --ignored --nocapture
+scripts/matrix/dev-e2e-bootstrap.sh down                        # stop + wipe
+```
+Needs `docker` (or `DOCKER=podman`) + `curl` + `jq`. Runs anywhere the live worker
+builds (verified on the DGX, aarch64).
 
 ## Wiring kastellan (slice #2 Phase D)
 

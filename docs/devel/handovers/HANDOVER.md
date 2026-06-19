@@ -424,8 +424,9 @@ Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 
 `main.rs` live serving + core `disable_mitm_for` + the `#[ignore]` `matrix_live_e2e.rs`; hermetically green on macOS,
 **and the live encrypted round-trip passes on the DGX** (aarch64 build + 13/0 hermetic + 1/0 live e2e, 0 shutdown aborts
 after the deadpool `Drop` fix). The Matrix follow-ups below are the natural continuation. (DGX live-loop recipe, if you
-need to re-run it: a throwaway `matrix-conduit` docker container on loopback + a curl bootstrap that registers two accounts
-and creates an encrypted room — `/tmp/matrix_e2e_bootstrap.sh` from this session; pipe to the DGX via `ssh dgx 'bash -s'`.)
+need to re-run it: `scripts/matrix/dev-e2e-bootstrap.sh up` — a throwaway loopback `matrix-conduit` container + curl bootstrap
+of two accounts + an encrypted room; `source ~/.matrix-e2e.env` then the `#[ignore]` e2e; `… down` to tear down. Runs on the
+DGX via `ssh dgx 'bash -s up' < scripts/matrix/dev-e2e-bootstrap.sh`. Documented in `docs/deploy/matrix-homeserver.md`.)
 
 **★ TOP PICK — channel-worker egress-coupled production spawn (plan Task 5) + daemon wiring.** This is what makes the live
 Matrix channel actually run in the daemon. Today `core/src/channel/matrix.rs` has the driver + pure `build_matrix_policy`
