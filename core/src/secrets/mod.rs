@@ -19,6 +19,7 @@
 //! See [`docs/superpowers/specs/2026-05-28-opaque-secret-references-design.md`](../../../docs/superpowers/specs/2026-05-28-opaque-secret-references-design.md)
 //! for the full design.
 
+pub mod admin;
 pub mod collect;
 pub mod substitute;
 pub mod vault;
