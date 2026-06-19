@@ -126,6 +126,11 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
         let _ = Command::new("loginctl").arg("enable-linger").arg(&layout.user).status();
     }
 
+    // Restart (stop→start), not just start: a plain `start` is a no-op when a
+    // member is already active, so a re-install/upgrade would keep running the
+    // OLD binaries/env. Stopping first guarantees the new artifacts take effect.
+    // On a fresh install nothing is running, so the stop is a harmless no-op.
+    let _ = sup.stop_target(&specs.target);
     sup.start_target(&specs.target).map_err(|e| format!("start kastellan.target: {e}"))?;
     verify_running(&layout)?;
     eprintln!("kastellan.target is up. Check: systemctl --user status kastellan.target");
