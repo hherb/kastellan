@@ -146,6 +146,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # MIT OR Apache-2.0 — AGPL-compatible.
 url = "2"
 
+# Silent secret/password prompt for `kastellan-cli secret put` on a TTY.
+# Apache-2.0 OR MIT — AGPL-compatible.
+rpassword = "7"
+
 # PDF text extraction for the web-fetch worker. MIT — AGPL-compatible.
 pdf-extract = "0.10"
 

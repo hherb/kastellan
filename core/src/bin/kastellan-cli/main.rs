@@ -62,6 +62,15 @@
 //!   captured plans through the production review chain for offline
 //!   rule iteration.
 //!
+//! * `secret put <name> [--raw]` — store or update a named secret;
+//!   value is read from stdin (silent prompt on a TTY, raw bytes when
+//!   piped). Never echoed or logged in plaintext.
+//!
+//! * `secret list` — list metadata (name, key_id, timestamps) for all
+//!   stored secrets. Ciphertext is never printed.
+//!
+//! * `secret delete <name>` — permanently remove a named secret.
+//!
 //! Usage:
 //!
 //! ```text
@@ -93,6 +102,9 @@
 //! kastellan-cli relations kinds list
 //! kastellan-cli relations show         <entity-id> [--depth N] [--format plain|json]
 //! kastellan-cli observation replay     [--captures-dir PATH] [--model SLUG]
+//! kastellan-cli secret put    <name> [--raw]   # value read from stdin
+//! kastellan-cli secret list
+//! kastellan-cli secret delete <name>
 //! kastellan-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 //! ```
 //!
@@ -120,6 +132,7 @@
 //! * [`relations_kinds`] — `relations kinds {add,remove,list}`.
 //! * [`relations_show`] — `relations show <entity-id> [--depth N] [--format plain|json]`.
 //! * [`observation_replay`] — `observation replay`.
+//! * [`secret`] — `secret {put,list,delete}`.
 
 use std::process::ExitCode;
 
@@ -136,6 +149,7 @@ mod pair;
 mod relations;
 mod relations_kinds;
 mod relations_show;
+mod secret;
 mod tasks;
 mod tools_allowlist;
 
@@ -161,6 +175,7 @@ fn main() -> ExitCode {
         "relations"   => relations::run_relations(&args[2..]),
         "observation" => observation_replay::run_observation(&args[2..]),
         "pair"        => pair::run(&args[2..]),
+        "secret"      => secret::run(&args[2..]),
         "--help" | "-h" | "help" => {
             println!("{}", help_text());
             ExitCode::from(0)
@@ -207,6 +222,9 @@ usage:
     kastellan-cli pair issue   [--label <text>] [--ttl-mins <n>]
     kastellan-cli pair list    [--all]
     kastellan-cli pair revoke  <channel> <peer>
+    kastellan-cli secret put    <name> [--raw]   # value read from stdin
+    kastellan-cli secret list
+    kastellan-cli secret delete <name>
     kastellan-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
 
 flags (ask):
