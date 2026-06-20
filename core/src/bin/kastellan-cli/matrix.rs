@@ -183,9 +183,9 @@ async fn probe(args: &[String], kp: kastellan_db::secrets::OsKeyringProvider) ->
 
     let sandboxes = kastellan_sandbox::SandboxBackends::default_for_current_os();
     #[cfg(target_os = "linux")]
-    let backend = &*sandboxes.bwrap;
+    let backend = std::sync::Arc::clone(&sandboxes.bwrap);
     #[cfg(target_os = "macos")]
-    let backend = &*sandboxes.seatbelt;
+    let backend = std::sync::Arc::clone(&sandboxes.seatbelt);
 
     let cfg = MatrixSpawnConfig {
         worker_bin: worker_bin.clone(),

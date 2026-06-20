@@ -354,7 +354,7 @@ async fn main() -> Result<()> {
         let backend = Arc::clone(&sandboxes.seatbelt);
         let spawn = tokio::task::spawn_blocking(move || {
             kastellan_core::channel::matrix::spawn_matrix_worker(
-                &*backend,
+                backend,
                 kastellan_core::channel::ChannelId("matrix".to_string()),
                 &spawn_cfg,
             )

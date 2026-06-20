@@ -32,6 +32,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -309,7 +310,13 @@ async fn connect_client(
             .to_string(),
     };
 
-    register_message_handler(&client, buffer, user_id);
+    // Gate inbound delivery on `live`: false during the initial catch-up sync so
+    // its backlog (room history, and any messages received while the worker was
+    // down/restarting) is consumed *silently* — only events from the continuous
+    // sync afterwards reach the buffer. Without this, every (re)start replays the
+    // whole room history as fresh inbound events.
+    let live = Arc::new(AtomicBool::new(false));
+    register_message_handler(&client, buffer, user_id, live.clone());
     register_autojoin_handler(&client);
 
     // One initial sync so room state + member device keys are present before we
@@ -318,6 +325,9 @@ async fn connect_client(
         .sync_once(SyncSettings::default())
         .await
         .context("initial sync")?;
+
+    // Backlog drained; surface inbound events from here on.
+    live.store(true, Ordering::SeqCst);
 
     Ok((client, identity, bridge))
 }
@@ -413,16 +423,24 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Register the room-message event handler: decode text bodies, skip our own
-/// echoes, and push onto the bounded inbound buffer.
+/// echoes + the initial-sync backlog (`live`), and push onto the bounded inbound
+/// buffer.
 fn register_message_handler(
     client: &Client,
     buffer: Arc<Mutex<VecDeque<Event>>>,
     own_user_id: matrix_sdk::ruma::OwnedUserId,
+    live: Arc<AtomicBool>,
 ) {
     client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
         let buffer = buffer.clone();
         let own = own_user_id.clone();
+        let live = live.clone();
         async move {
+            // Skip the initial catch-up sync (room history + offline backlog):
+            // only surface events once continuous sync is live.
+            if !live.load(Ordering::SeqCst) {
+                return;
+            }
             // Echo-loop guard: never re-ingest messages from our own user id.
             // Note this also drops messages sent by *other* devices logged into
             // the same account — acceptable for a single-identity channel bot,

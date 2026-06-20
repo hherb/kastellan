@@ -17,9 +17,12 @@
 //! module ships the transport-and-driver mechanism + the pure policy builder,
 //! proven by `core/tests/matrix_channel_e2e.rs` against a fake-worker stub.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use tokio::sync::mpsc as tok_mpsc;
 
@@ -144,23 +147,51 @@ pub struct MatrixChannel {
     _driver: thread::JoinHandle<()>,
 }
 
+/// Produces a fresh, logged-in worker (spawns the process + `matrix.init`),
+/// returning the client and its reported identity. The supervised
+/// [`MatrixChannel`] driver calls this to **respawn** after a worker death.
+pub type WorkerFactory =
+    Box<dyn FnMut() -> anyhow::Result<(Box<dyn WorkerClient>, serde_json::Value)> + Send>;
+
+/// Capped exponential backoff between worker respawn attempts.
+const RESPAWN_BACKOFF_START: Duration = Duration::from_secs(1);
+const RESPAWN_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
 impl MatrixChannel {
     /// Spawn the driver thread over a [`WorkerClient`]. `id` is the channel id
     /// (e.g. `"matrix"`) stamped onto every inbound message + matched on replies.
-    pub fn new(id: ChannelId, mut client: Box<dyn WorkerClient>) -> Self {
+    /// **Unsupervised:** the driver exits when the worker dies (used by tests and
+    /// callers that own worker lifecycle themselves).
+    pub fn new(id: ChannelId, client: Box<dyn WorkerClient>) -> Self {
+        Self::spawn_driver(id, client, None)
+    }
+
+    /// Like [`new`](Self::new) but **self-healing**: when the worker dies (a
+    /// `poll`/`send` error), the driver respawns it via `factory` with capped
+    /// exponential backoff and resumes — so a worker crash doesn't take the
+    /// channel down. Replies in flight when the worker died are retried after the
+    /// respawn (no dropped replies), and the bus never sees the blip.
+    pub fn supervised(id: ChannelId, client: Box<dyn WorkerClient>, factory: WorkerFactory) -> Self {
+        Self::spawn_driver(id, client, Some(factory))
+    }
+
+    fn spawn_driver(
+        id: ChannelId,
+        mut client: Box<dyn WorkerClient>,
+        mut factory: Option<WorkerFactory>,
+    ) -> Self {
         let (inbound_tx, inbound_rx) = tok_mpsc::channel::<IncomingMessage>(INBOUND_BUFFER);
         let (outbound_tx, outbound_rx) = std_mpsc::channel::<OutgoingMessage>();
         let cid = id.clone();
         let driver = thread::spawn(move || {
+            // Replies accepted from the bus but not yet acknowledged by the worker.
+            // Kept across a respawn so a death mid-send doesn't lose a reply.
+            let mut pending: VecDeque<OutgoingMessage> = VecDeque::new();
             loop {
-                // 1) Drain any pending outbound replies (non-blocking) → matrix.send.
+                // 1) Pull newly-queued replies into the local buffer (non-blocking).
                 loop {
                     match outbound_rx.try_recv() {
-                        Ok(out) => {
-                            if let Err(e) = client.send(&out.conversation.0, &out.body) {
-                                tracing::warn!(error = %e, "matrix.send failed; reply dropped");
-                            }
-                        }
+                        Ok(out) => pending.push_back(out),
                         Err(std_mpsc::TryRecvError::Empty) => break,
                         Err(std_mpsc::TryRecvError::Disconnected) => {
                             tracing::info!("matrix outbound sender dropped; driver exiting");
@@ -168,25 +199,70 @@ impl MatrixChannel {
                         }
                     }
                 }
-                // 2) Long-poll for inbound events → push to the bus.
-                match client.poll(POLL_MS) {
-                    Ok(events) => {
-                        for ev in events {
-                            let msg = IncomingMessage {
-                                channel: cid.clone(),
-                                peer: PeerId(ev.peer),
-                                conversation: ConversationId(ev.conversation),
-                                body: ev.body,
-                            };
-                            if inbound_tx.blocking_send(msg).is_err() {
-                                tracing::info!("matrix inbound receiver closed; driver exiting");
-                                return;
-                            }
+
+                // 2) Flush buffered replies (front-first). Stop on the first error
+                //    — the worker may have died; respawn before retrying this reply.
+                let mut worker_dead = false;
+                while let Some(out) = pending.front() {
+                    match client.send(&out.conversation.0, &out.body) {
+                        Ok(()) => {
+                            pending.pop_front();
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "matrix.send failed; retrying after respawn");
+                            worker_dead = true;
+                            break;
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "matrix.poll failed; driver exiting (worker likely died)");
+                }
+
+                // 3) Long-poll for inbound events → push to the bus.
+                if !worker_dead {
+                    match client.poll(POLL_MS) {
+                        Ok(events) => {
+                            for ev in events {
+                                let msg = IncomingMessage {
+                                    channel: cid.clone(),
+                                    peer: PeerId(ev.peer),
+                                    conversation: ConversationId(ev.conversation),
+                                    body: ev.body,
+                                };
+                                if inbound_tx.blocking_send(msg).is_err() {
+                                    tracing::info!("matrix inbound receiver closed; driver exiting");
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "matrix.poll failed (worker likely died)");
+                            worker_dead = true;
+                        }
+                    }
+                }
+
+                // 4) On death: respawn (supervised) or exit (unsupervised).
+                if worker_dead {
+                    let Some(factory) = factory.as_mut() else {
+                        tracing::warn!("matrix worker died; driver exiting (unsupervised)");
                         return;
+                    };
+                    let mut delay = RESPAWN_BACKOFF_START;
+                    loop {
+                        thread::sleep(delay);
+                        match factory() {
+                            Ok((fresh, _identity)) => {
+                                client = fresh;
+                                tracing::info!("matrix worker respawned; channel resumed");
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %format!("{e:#}"),
+                                    "matrix worker respawn failed; backing off"
+                                );
+                                delay = (delay * 2).min(RESPAWN_BACKOFF_MAX);
+                            }
+                        }
                     }
                 }
             }
@@ -399,14 +475,16 @@ pub struct SpawnedMatrixWorker {
 /// Bring up the sandboxed live Matrix worker: build the [`SandboxPolicy`]
 /// (`Net::Allowlist` scoped to the homeserver, persistent store as `fs_write`),
 /// spawn the worker, and block on `matrix.init` so the returned worker is
-/// logged-in-and-synced. The caller owns teardown by dropping the
-/// [`MatrixChannel`] (closes the worker's stdin → EOF → clean exit).
+/// logged-in-and-synced. The returned [`MatrixChannel`] is **supervised** — if
+/// the worker later dies, the driver respawns it (capped backoff) and resumes,
+/// so a worker crash doesn't take the channel down. `backend` is an [`Arc`] so
+/// the respawn factory can outlive this call.
 ///
 /// Egress force-routing (the per-worker sidecar) is **not** wired here yet — the
 /// worker reaches the homeserver directly on `Net::Allowlist`. Coupling it to the
 /// egress proxy (matrix is on the MITM-bypass list) is the immediate follow-up.
-pub fn spawn_matrix_worker<B: SandboxBackend + ?Sized>(
-    backend: &B,
+pub fn spawn_matrix_worker(
+    backend: Arc<dyn SandboxBackend>,
     id: ChannelId,
     cfg: &MatrixSpawnConfig,
 ) -> anyhow::Result<SpawnedMatrixWorker> {
@@ -450,16 +528,27 @@ pub fn spawn_matrix_worker<B: SandboxBackend + ?Sized>(
         policy.env.push(("KASTELLAN_LANDLOCK_PROFILE".into(), "none".into()));
     }
 
-    // 4) Spawn + block on login (matrix.init) before handing the bus a channel.
     let program = cfg
         .worker_bin
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("worker bin path not UTF-8: {:?}", cfg.worker_bin))?;
-    let mut client = spawn_worker_client(backend, &policy, program, &[])?;
-    let identity = client.init()?;
+        .ok_or_else(|| anyhow::anyhow!("worker bin path not UTF-8: {:?}", cfg.worker_bin))?
+        .to_string();
+
+    // 4) Spawn factory: each call spawns the worker + blocks on `matrix.init`
+    //    (login proof / readiness). Owns the backend + policy + program so the
+    //    supervised driver can respawn after a death. NOTE: respawn relies on the
+    //    persisted session — the one-time password file is consumed on first login.
+    let mut spawn: WorkerFactory = Box::new(move || {
+        let mut client = spawn_worker_client(&*backend, &policy, &program, &[])?;
+        let identity = client.init()?;
+        Ok((Box::new(client) as Box<dyn WorkerClient>, identity))
+    });
+
+    // Initial spawn (also the caller's login proof), via the same factory.
+    let (client, identity) = spawn()?;
 
     Ok(SpawnedMatrixWorker {
-        channel: MatrixChannel::new(id, Box::new(client)),
+        channel: MatrixChannel::supervised(id, client, spawn),
         identity,
     })
 }
@@ -671,6 +760,36 @@ mod tests {
         let mut ch = MatrixChannel::new(ChannelId("matrix".into()), Box::new(worker));
         // Driver exits on the poll error → inbound sender dropped → recv() None.
         assert!(ch.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn supervised_driver_respawns_after_worker_death() {
+        // First worker dies after its first poll; the factory hands back a fresh
+        // worker carrying a queued event. The supervised driver must respawn and
+        // surface that event — i.e. the channel survives a worker death.
+        let dying = FakeWorker::new();
+        *dying.fail_after.lock().unwrap() = Some(1); // poll #2 errors → "death"
+
+        let replacement = FakeWorker::new();
+        replacement.push(ev("after-respawn"));
+
+        // Factory yields the replacement exactly once, then errors (so a runaway
+        // respawn loop can't mask a bug — we only expect one respawn here).
+        let replacement_cell = std::sync::Mutex::new(Some(replacement));
+        let factory: WorkerFactory = Box::new(move || match replacement_cell.lock().unwrap().take() {
+            Some(w) => Ok((Box::new(w) as Box<dyn WorkerClient>, serde_json::json!({}))),
+            None => anyhow::bail!("factory exhausted"),
+        });
+
+        let mut ch =
+            MatrixChannel::supervised(ChannelId("matrix".into()), Box::new(dying), factory);
+
+        // Bounded wait: respawn backoff is 1s, so allow a couple of seconds.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), ch.recv())
+            .await
+            .expect("channel should resume within the respawn window")
+            .expect("event surfaced after respawn");
+        assert_eq!(got.body, "after-respawn");
     }
 
     #[test]
