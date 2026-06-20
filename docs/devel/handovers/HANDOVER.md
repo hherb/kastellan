@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-21 (**L1 embedding backfill — `kastellan-cli memory l1 reembed` — [#325](https://github.com/hherb/kastellan/issues/325)
-DONE. Branch `feat/325-l1-embedding-backfill` (PR pending).** Closes #323 item 2: PR #324 wired the *forward* embed path, but
+DONE. Branch `feat/325-l1-embedding-backfill` (PR [#327](https://github.com/hherb/kastellan/pull/327)).** Closes #323 item 2: PR #324 wired the *forward* embed path, but
 pre-#324 rows and operator-added `memory l1 add` rows (which use `NoOpEmbedder` by design) still had `embedding IS NULL` and
 were invisible to the semantic recall lane (`semantic_search` filters `WHERE embedding IS NOT NULL`). **What shipped (TDD, 3
 layers):** (1) **`db::memories`** — two re-exported helpers reusing the existing `check_embedding_dim`/`vector_literal`
@@ -588,7 +588,7 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (branch `feat/325-l1-embedding-backfill`, PR pending):** [#325](https://github.com/hherb/kastellan/issues/325)
+**Just shipped (branch `feat/325-l1-embedding-backfill`, PR [#327](https://github.com/hherb/kastellan/pull/327)):** [#325](https://github.com/hherb/kastellan/issues/325)
 — `kastellan-cli memory l1 reembed` backfills embeddings for NULL-embedding L1 rows through the real `RouterEmbedder`
 (closes #323 item 2; see "Last updated" up top). **Open Matrix-hardening picks (the remaining residual follow-ups):**
 [#321](https://github.com/hherb/kastellan/issues/321) inbound-loss window on respawn (needs a persisted sync-token watermark
