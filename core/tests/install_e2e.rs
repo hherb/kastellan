@@ -68,6 +68,15 @@ fn prepare_filesystem_populates_prefix_and_env_file() {
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(&layout.env_file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "kastellan.env must be mode 0600");
+
+        // Operator CLI symlinked onto PATH (~/.local/bin), pointing into the prefix.
+        let target = fs::read_link(&layout.cli_link).expect("cli_link must be a symlink");
+        assert_eq!(target, layout.bin_dir.join("kastellan-cli"));
+        // Resolves to the real prefix binary (so current_exe-relative discovery holds).
+        assert_eq!(
+            fs::canonicalize(&layout.cli_link).unwrap(),
+            fs::canonicalize(layout.bin_dir.join("kastellan-cli")).unwrap()
+        );
     }
 
     fs::remove_dir_all(&tmp).ok();
