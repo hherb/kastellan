@@ -1,9 +1,14 @@
-//! `memory l1 {add,list,remove}` — operator-facing management of
+//! `memory l1 {add,list,remove,reembed}` — operator-facing management of
 //! layer-1 (in-prompt insight) memories. Add/remove emit one
 //! `actor='cli' action='l1.{added,removed}'` audit row per operation.
 //! `add` is idempotent (duplicate body_sha256 returns
 //! `skipped_duplicate`); `list` prints the in-prompt slice by
-//! default, or every L1 row with `--all`.
+//! default, or every L1 row with `--all`; `reembed` is the embedding
+//! **backfill** — it (re)embeds every `layer = 1` row whose `embedding
+//! IS NULL` (pre-#324 rows + operator-added rows) through the real
+//! `RouterEmbedder`, so they re-enter the semantic recall lane. Each
+//! embed is already audited (`action='embed'`) by the router; `reembed`
+//! changes no rows' existence, so it emits no separate `l1.*` audit row.
 
 use std::process::ExitCode;
 
@@ -26,18 +31,19 @@ pub(crate) fn run_memory(args: &[String]) -> ExitCode {
 
 fn run_memory_l1(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: kastellan-cli memory l1 <add|list|remove> ...");
+        eprintln!("usage: kastellan-cli memory l1 <add|list|remove|reembed> ...");
         return ExitCode::from(2);
     }
     // Per-action dispatch. `with_runtime` is called only from the known
     // arms — an invalid action exits 2 without spawning tokio worker
     // threads (Issue #97).
     match args[0].as_str() {
-        "add"    => with_runtime("memory l1", memory_l1_add(&args[1..])),
-        "list"   => with_runtime("memory l1", memory_l1_list(&args[1..])),
-        "remove" => with_runtime("memory l1", memory_l1_remove(&args[1..])),
-        other    => {
-            eprintln!("memory l1: unknown action '{other}'; expected: add | list | remove");
+        "add"     => with_runtime("memory l1", memory_l1_add(&args[1..])),
+        "list"    => with_runtime("memory l1", memory_l1_list(&args[1..])),
+        "remove"  => with_runtime("memory l1", memory_l1_remove(&args[1..])),
+        "reembed" => with_runtime("memory l1", memory_l1_reembed(&args[1..])),
+        other     => {
+            eprintln!("memory l1: unknown action '{other}'; expected: add | list | remove | reembed");
             ExitCode::from(2)
         }
     }
@@ -170,5 +176,63 @@ async fn memory_l1_remove(args: &[String]) -> ExitCode {
             ExitCode::from(0)
         }
         Err(e) => { eprintln!("memory l1 remove: {e}"); ExitCode::from(1) }
+    }
+}
+
+/// `memory l1 reembed` — backfill embeddings for NULL-embedding L1 rows.
+///
+/// Unlike `add` (which injects a `NoOpEmbedder`), this builds the **real**
+/// `RouterEmbedder` from the host's `KASTELLAN_LLM_*` env — the same config
+/// the daemon's forward write path uses — so a backfilled vector is identical
+/// to what an on-insert embed would have produced. Idempotent and safe to
+/// re-run (see [`reembed_l1_null`]); prints a one-line `scanned=/embedded=/
+/// skipped=` summary. Takes no arguments.
+async fn memory_l1_reembed(args: &[String]) -> ExitCode {
+    use std::sync::Arc;
+    use kastellan_core::memory::{format_reembed_report, reembed_l1_null, RouterEmbedder};
+    use kastellan_db::pool::connect_runtime_pool;
+
+    if !args.is_empty() {
+        eprintln!("usage: kastellan-cli memory l1 reembed");
+        return ExitCode::from(2);
+    }
+
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+
+    // Build the Router-backed embedder. `from_env` reads the host's
+    // KASTELLAN_LLM_* config (chat/embed endpoints, models); on a daemon host
+    // the operator runs this with the same env the daemon uses.
+    let router_cfg = match kastellan_llm_router::RouterConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("memory l1 reembed: RouterConfig::from_env: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let router = match kastellan_llm_router::Router::new(router_cfg) {
+        Ok(r) => Arc::new(r),
+        Err(e) => {
+            eprintln!("memory l1 reembed: Router::new: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let embedder = RouterEmbedder::new(pool.clone(), router);
+
+    match reembed_l1_null(&pool, &embedder).await {
+        Ok(report) => {
+            println!("{}", format_reembed_report(&report));
+            ExitCode::from(0)
+        }
+        Err(e) => {
+            eprintln!("memory l1 reembed: {e}");
+            ExitCode::from(1)
+        }
     }
 }

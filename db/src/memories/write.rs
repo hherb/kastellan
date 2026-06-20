@@ -261,6 +261,55 @@ where
     Ok(rows.rows_affected() == 1)
 }
 
+/// Populate the `embedding` column of an existing row — the backfill
+/// updater behind `kastellan-cli memory l1 reembed`.
+///
+/// The `WHERE embedding IS NULL` guard makes this **idempotent and
+/// race-safe**: a row that already carries an embedding (e.g. populated
+/// concurrently by the forward write path between the backfill's scan and
+/// this update) is left untouched, and a re-run of the backfill is a no-op
+/// rather than a re-embed. Returns `true` iff this call actually wrote the
+/// column (one row matched the id *and* was still NULL); `false` if the id
+/// is absent or was already embedded.
+///
+/// `embedding.len()` MUST equal [`EMBEDDING_DIM`](super::EMBEDDING_DIM) —
+/// the shared [`check_embedding_dim`] guard rejects mismatches up front so
+/// the operator-facing error is "wrong dimensionality" rather than an opaque
+/// Postgres `column type error`. The value is bound as the canonical
+/// pgvector text form and cast `::vector` inside the statement (same
+/// rationale as [`insert_memory`] — see [`vector_literal`]).
+///
+/// Layer-agnostic by design: the backfill scans `layer = 1` ids via
+/// [`super::load_unembedded_at_layer`] and only ever feeds L1 ids here, but
+/// the updater itself imposes no layer constraint — the `IS NULL` guard is
+/// the safety invariant that matters.
+///
+/// `executor` is generic over `sqlx::Executor` so the same helper works
+/// against `&PgPool` (production) and `&mut PgConnection` (test setup).
+pub async fn set_embedding<'e, E>(
+    executor: E,
+    id: i64,
+    embedding: &[f32],
+) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    check_embedding_dim("set_embedding", embedding)?;
+
+    let lit = vector_literal(embedding);
+    let rows = sqlx::query(
+        "UPDATE memories \
+         SET embedding = $1::vector \
+         WHERE id = $2 AND embedding IS NULL",
+    )
+    .bind(lit)
+    .bind(id)
+    .execute(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("set_embedding id={id}: {e}")))?;
+    Ok(rows.rows_affected() == 1)
+}
+
 /// Insert an L0 (meta-rule) memory row.
 ///
 /// Separate from [`insert_memory_at_layer`] on purpose: L0 rows are
@@ -368,6 +417,31 @@ mod tests {
                 "PolicyViolation must name L0 and the admin path; got: {msg}"
             ),
             other => panic!("expected DbError::PolicyViolation, got {other:?}"),
+        }
+    }
+
+    /// `set_embedding` rejects a wrong-dimensionality embedding up front
+    /// via the shared [`check_embedding_dim`] guard — same operator-readable
+    /// error as the insert path. The guard fires **before any SQL**, so this
+    /// needs no live database (the lazy pool never opens a connection). This
+    /// is the backfill updater's one PG-free invariant; the happy-path UPDATE
+    /// is exercised by `memory_l1_reembed_e2e`.
+    #[tokio::test]
+    async fn set_embedding_rejects_wrong_dim_without_pg() {
+        let pool = sqlx::postgres::PgPool::connect_lazy(
+            "postgres://invalid:invalid@127.0.0.1:1/nonexistent",
+        )
+        .expect("lazy pool construction does not connect");
+
+        let too_short = vec![0.0_f32; super::super::EMBEDDING_DIM - 1];
+        let rejected = set_embedding(&pool, 1, &too_short).await;
+
+        match rejected {
+            Err(DbError::Query(msg)) => assert!(
+                msg.contains("embedding dim mismatch"),
+                "Query error must name the dim mismatch; got: {msg}"
+            ),
+            other => panic!("expected DbError::Query dim-mismatch, got {other:?}"),
         }
     }
 }

@@ -6,8 +6,34 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-20 (**Matrix `ProxyBridge` error surfacing — [#312](https://github.com/hherb/kastellan/issues/312)
-CLOSED. Branch `fix/312-proxy-bridge-error-surfacing` (PR pending).** The spike's deliberately-minimal error handling
+**Last updated:** 2026-06-21 (**L1 embedding backfill — `kastellan-cli memory l1 reembed` — [#325](https://github.com/hherb/kastellan/issues/325)
+DONE. Branch `feat/325-l1-embedding-backfill` (PR pending).** Closes #323 item 2: PR #324 wired the *forward* embed path, but
+pre-#324 rows and operator-added `memory l1 add` rows (which use `NoOpEmbedder` by design) still had `embedding IS NULL` and
+were invisible to the semantic recall lane (`semantic_search` filters `WHERE embedding IS NOT NULL`). **What shipped (TDD, 3
+layers):** (1) **`db::memories`** — two re-exported helpers reusing the existing `check_embedding_dim`/`vector_literal`
+chokepoints: `load_unembedded_at_layer(executor, layer) -> Vec<(i64,String)>` (`search.rs`; `SELECT id, body WHERE layer=$1
+AND embedding IS NULL ORDER BY id` — a stable, resumable scan) + `set_embedding(executor, id, &[f32]) -> bool` (`write.rs`;
+guarded `UPDATE … SET embedding=$1::vector WHERE id=$2 AND embedding IS NULL` → **idempotent + race-safe**: a row embedded
+concurrently by the forward path no-ops and returns `false`). (2) **`core::memory::l1_reembed`** (new module, 162 LOC) —
+`reembed_l1_null(pool, &dyn Embedder) -> ReembedReport{scanned,embedded,skipped}`: scans NULL-embedding L1 rows, embeds each
+via the injected `Embedder`, writes back; **degrade-and-warn per row** (a `None` / write-error / lost `IS NULL` race skips
+that row, never fails the batch — mirrors `promote_l1`); only an initial-scan failure returns `Err`. Pure
+`format_reembed_report` one-liner. (3) **CLI** — new `memory l1 reembed` action (`memory_l1.rs`) builds the **real**
+`RouterEmbedder` from `RouterConfig::from_env()` (same config as the daemon's forward path, so backfilled vectors are
+byte-identical to on-insert ones), prints `scanned=/embedded=/skipped=`; takes no args. **No separate `l1.reembed` audit
+row** — each embed is already audited (`action='embed'` via `embed_query`), reembed changes no rows' existence, and
+`cli_audit.rs` is far over-cap. **Decision: L1 only** (symmetric with #324). **Verification — macOS, live PG 18:** new
+`memory_l1_reembed_e2e` 3/0 (backfill + `semantic_search`-finds-it; idempotent re-run embeds nothing; degrade-and-warn keeps
+the row NULL), db unit +1 (`set_embedding` dim-reject, PG-free lazy pool), core unit +3 (`l1_reembed` signature pin + report
+sum + `format_reembed_report`); `cargo clippy -p kastellan-db -p kastellan-core --all-targets -D warnings` clean; full
+`cargo test --workspace` green except one **pre-existing flake** — `cli_ask_e2e::ask_subprocess_fails_after_plan_iteration_cap`
+(an exact `audit_log` multiset assertion on `scheduler/task.finalize` that is timing-sensitive under heavy parallel suite
+load; **passes deterministically when re-run in isolation**, and this change is purely additive to `db::memories` so cannot
+affect the agent/scheduler/audit path — not yet filed as an issue). Pure-Rust, no migration, no OS-gated code → DGX not required.
+**`db/src/memories/search.rs` is now 508 LOC (+8 over the 500 cap, within the documented ≤27-over deferral).**)_
+
+_(Prior session — **Matrix `ProxyBridge` error surfacing — [#312](https://github.com/hherb/kastellan/issues/312)
+CLOSED. MERGED to `main` as `0ff5cee` (PR [#326](https://github.com/hherb/kastellan/pull/326)).** The spike's deliberately-minimal error handling
 (PR #311) must not stay silent now that the live Matrix channel (PR #320) carries real traffic through the bridge.
 **Two silent paths closed in `workers/matrix/src/bridge.rs` (TDD):** (1) the accept loop **broke on any error** — a single
 transient `accept()` failure (e.g. `ECONNABORTED`/`EINTR`/`EMFILE`) tore the bridge down for the worker's lifetime, after
@@ -28,7 +54,7 @@ returns `std::io::Result<()>` (surfacing both the UDS-connect error and any `cop
 **18/0** `live-matrix` (incl. the 2 `egress_spike` tests that drive the bridge through matrix-sdk); `cargo clippy
 -p kastellan-worker-matrix --all-targets -D warnings` clean for **both** feature configs. Pure-Rust, no OS-gated code, no
 `db`/cross-platform-gated change → DGX not required (the bridge is loopback-TCP↔UDS, identical on both OSes).
-`bridge.rs` 110 → 287 LOC (under cap).)
+`bridge.rs` 110 → 287 LOC (under cap).)_
 
 _(Prior session — **L1 embedding population — semantic recall lane now populated. MERGED to `main` as
 `2ec853a` (PR [#324](https://github.com/hherb/kastellan/pull/324)).** Closes the forward write path of
@@ -562,14 +588,14 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (branch `fix/312-proxy-bridge-error-surfacing`, PR pending):** [#312](https://github.com/hherb/kastellan/issues/312)
-— the Matrix `ProxyBridge` no longer swallows accept/relay errors silently now that the live channel carries real traffic
-(see "Last updated" up top). **Open Matrix-hardening picks (the remaining residual follow-ups):**
+**Just shipped (branch `feat/325-l1-embedding-backfill`, PR pending):** [#325](https://github.com/hherb/kastellan/issues/325)
+— `kastellan-cli memory l1 reembed` backfills embeddings for NULL-embedding L1 rows through the real `RouterEmbedder`
+(closes #323 item 2; see "Last updated" up top). **Open Matrix-hardening picks (the remaining residual follow-ups):**
 [#321](https://github.com/hherb/kastellan/issues/321) inbound-loss window on respawn (needs a persisted sync-token watermark
 in the E2E store — medium); the matrix-worker **seccomp/Landlock enforcement** flip (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0`
-today; needs DGX syscall enumeration like the #281 arc — larger). **Other small natural picks:** the deferred **L1 embedding
-backfill** — `kastellan-cli memory l1 reembed` over `layer=1 AND embedding IS NULL` + operator rows through the same
-`RouterEmbedder`/`embed_query` chokepoint (closes #323 item 2 — tracked in [#325](https://github.com/hherb/kastellan/issues/325)).
+today; needs DGX syscall enumeration like the #281 arc — larger). **Other small natural picks:** entity-embedding
+backfill / an `entities.embedding` similarity lane (the `vector(256)` column exists but is NULL for all entities — would seed
+an entity-similarity recall lane; see "Design notes for parked work" → Option P).
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
