@@ -6,10 +6,51 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::task::JoinHandle;
+
+/// How long to pause after a non-trivial `accept()` error before retrying. Long
+/// enough that a *persistent* failure (e.g. file-descriptor exhaustion) logs at
+/// a readable cadence instead of spinning a hot loop, short enough that a
+/// genuinely transient blip barely delays the next connection.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+
+/// What the accept loop should do after a failed [`TcpListener::accept`].
+///
+/// The bridge never *breaks* its accept loop: tearing it down would leave the
+/// worker alive but the bridge silently dead (the SDK would then see only
+/// opaque connection failures — exactly the regression #312 closes). Instead
+/// every error is logged and retried; this enum only decides whether to retry
+/// at once or after [`ACCEPT_BACKOFF`].
+#[derive(Debug, PartialEq, Eq)]
+enum AcceptRetry {
+    /// Retry immediately — nothing is wrong with the listener itself.
+    Immediate,
+    /// Pause [`ACCEPT_BACKOFF`] before retrying — the error may persist (e.g.
+    /// resource exhaustion), so we avoid a hot loop.
+    Backoff,
+}
+
+/// Classify an `accept()` error into a retry strategy.
+///
+/// Pure (no I/O): the loop in [`ProxyBridge::bind`] calls this and acts on the
+/// result, which keeps the policy unit-testable in isolation.
+fn classify_accept_error(err: &std::io::Error) -> AcceptRetry {
+    use std::io::ErrorKind;
+    match err.kind() {
+        // A peer aborted between connect and accept (`ECONNABORTED`), or a
+        // signal interrupted the syscall (`EINTR`): the listener is healthy, so
+        // retry without delay.
+        ErrorKind::ConnectionAborted | ErrorKind::Interrupted => AcceptRetry::Immediate,
+        // Resource exhaustion (`EMFILE`/`ENFILE`/`ENOBUFS`/`ENOMEM` surface as
+        // `OutOfMemory` or an uncategorized kind) or anything else unexpected:
+        // back off so a persistent condition is logged steadily, not hot-looped.
+        _ => AcceptRetry::Backoff,
+    }
+}
 
 /// A loopback-TCP↔UDS relay. Constructed by [`LiveSdk`](crate::sdk_live::LiveSdk)
 /// (under `live-matrix`) and exercised by the `egress_spike` test.
@@ -29,10 +70,40 @@ impl ProxyBridge {
             loop {
                 let (tcp, _peer) = match listener.accept().await {
                     Ok(pair) => pair,
-                    Err(_) => break,
+                    Err(e) => {
+                        // Never break: a single (possibly transient) accept
+                        // error must not silently kill the bridge for the
+                        // worker's lifetime (#312). Log, then retry — backing
+                        // off on non-trivial errors to avoid a hot loop.
+                        match classify_accept_error(&e) {
+                            AcceptRetry::Immediate => {
+                                eprintln!(
+                                    "kastellan-worker-matrix: proxy bridge accept error (retrying): {e}"
+                                );
+                            }
+                            AcceptRetry::Backoff => {
+                                eprintln!(
+                                    "kastellan-worker-matrix: proxy bridge accept error (backing off {}ms): {e}",
+                                    ACCEPT_BACKOFF.as_millis()
+                                );
+                                tokio::time::sleep(ACCEPT_BACKOFF).await;
+                            }
+                        }
+                        continue;
+                    }
                 };
                 let path = uds_path.clone();
-                tokio::spawn(async move { relay(tcp, path).await });
+                tokio::spawn(async move {
+                    if let Err(e) = relay(tcp, path.clone()).await {
+                        // A dead/misconfigured sidecar UDS, or a relay I/O
+                        // error, is now diagnosable instead of presenting as an
+                        // unexplained SDK timeout (#312, silent path #2).
+                        eprintln!(
+                            "kastellan-worker-matrix: proxy bridge relay to {} failed: {e}",
+                            path.display()
+                        );
+                    }
+                });
             }
         });
         Ok(ProxyBridge { addr, accept_task })
@@ -51,11 +122,15 @@ impl Drop for ProxyBridge {
 }
 
 /// Relay one accepted TCP connection to the sidecar UDS, both directions.
-async fn relay(mut tcp: TcpStream, uds_path: PathBuf) {
-    let Ok(mut uds) = UnixStream::connect(&uds_path).await else {
-        return; // sidecar gone / not listening: drop this connection
-    };
-    let _ = copy_bidirectional(&mut tcp, &mut uds).await;
+///
+/// Returns the first I/O error so the caller can log it: `Err` means either the
+/// sidecar UDS could not be reached (gone / not listening) or the byte-copy
+/// itself failed. A normal connection close is `Ok` — `copy_bidirectional`
+/// reports a clean EOF as success, so this never logs spuriously on shutdown.
+async fn relay(mut tcp: TcpStream, uds_path: PathBuf) -> std::io::Result<()> {
+    let mut uds = UnixStream::connect(&uds_path).await?;
+    copy_bidirectional(&mut tcp, &mut uds).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -106,5 +181,59 @@ mod tests {
         assert!(bridge.proxy_addr().ip().is_loopback());
         drop(bridge);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // A relay to a non-existent UDS must surface the connect failure (so the
+    // caller can log it) rather than swallowing it — issue #312, silent path #2.
+    #[tokio::test]
+    async fn relay_surfaces_uds_connect_failure() {
+        let path = uds_path("missing");
+        let _ = std::fs::remove_file(&path); // ensure the UDS is absent
+
+        // A throwaway loopback TCP peer so `relay` has something to accept.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind tcp");
+        let addr = listener.local_addr().expect("addr");
+        let accept = tokio::spawn(async move { listener.accept().await });
+        let _client = TcpStream::connect(addr).await.expect("connect tcp");
+        let (server_side, _) = accept.await.expect("join").expect("accept");
+
+        let err = relay(server_side, path).await.expect_err("must surface UDS connect failure");
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ),
+            "unexpected error kind: {err:?}"
+        );
+    }
+
+    // Transient accept errors (peer aborted, signal-interrupted syscall) must be
+    // retried immediately — nothing is wrong with the listener.
+    #[test]
+    fn transient_accept_errors_retry_immediately() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            classify_accept_error(&Error::from(ErrorKind::ConnectionAborted)),
+            AcceptRetry::Immediate,
+        );
+        assert_eq!(
+            classify_accept_error(&Error::from(ErrorKind::Interrupted)),
+            AcceptRetry::Immediate,
+        );
+    }
+
+    // Resource exhaustion / unexpected accept errors must back off before
+    // retrying so a persistent condition logs steadily instead of hot-looping.
+    #[test]
+    fn resource_and_unknown_accept_errors_back_off() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            classify_accept_error(&Error::from(ErrorKind::OutOfMemory)),
+            AcceptRetry::Backoff,
+        );
+        assert_eq!(
+            classify_accept_error(&Error::from(ErrorKind::PermissionDenied)),
+            AcceptRetry::Backoff,
+        );
     }
 }
