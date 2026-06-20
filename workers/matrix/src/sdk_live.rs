@@ -32,6 +32,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,11 +41,13 @@ use tokio::runtime::Runtime;
 
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::matrix_auth::MatrixSession;
+use matrix_sdk::ruma::api::client::uiaa;
+use matrix_sdk::ruma::events::room::member::StrippedRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
 };
 use matrix_sdk::ruma::RoomId;
-use matrix_sdk::{Client, Room};
+use matrix_sdk::{Client, Room, RoomState};
 
 use kastellan_matrix_wire::{push_bounded, Event, InitResult};
 
@@ -89,8 +92,28 @@ pub struct LiveSdkConfig {
 impl LiveSdkConfig {
     /// Read config from the process environment, failing closed if a required
     /// variable is unset.
+    ///
+    /// The password is resolved from `KASTELLAN_MATRIX_PASSWORD_FILE` first (its
+    /// contents, trailing newline trimmed) and only then from
+    /// `KASTELLAN_MATRIX_PASSWORD`. The host spawns the worker with the *file*
+    /// path — never the secret value in the environment — so the plaintext never
+    /// lands in the bwrap argv (`/proc/<pid>/cmdline`, `ps`). The file is consumed
+    /// (deleted) once read, so it doesn't linger at rest beyond the initial login.
     pub fn from_env() -> anyhow::Result<Self> {
-        parse_config(|k| std::env::var(k).ok())
+        let file_password = std::env::var("KASTELLAN_MATRIX_PASSWORD_FILE").ok().and_then(|path| {
+            let value = std::fs::read_to_string(&path).ok();
+            // Best-effort consume: minimize the at-rest window for the secret.
+            let _ = std::fs::remove_file(&path);
+            value.map(|v| v.trim_end_matches(['\n', '\r']).to_string())
+        });
+        parse_config(|k| {
+            if k == "KASTELLAN_MATRIX_PASSWORD" {
+                if let Some(p) = &file_password {
+                    return Some(p.clone());
+                }
+            }
+            std::env::var(k).ok()
+        })
     }
 }
 
@@ -270,6 +293,13 @@ async fn connect_client(
 
     restore_or_login(&client, config).await?;
 
+    // Bootstrap the account's cross-signing identity so the bot self-signs its
+    // own device — clears Element's "device not verified by its owner" shield.
+    // Idempotent + best-effort: a failure must not stop the worker serving.
+    if let Err(e) = ensure_cross_signing(&client, config).await {
+        eprintln!("kastellan-worker-matrix: cross-signing bootstrap failed (non-fatal): {e:#}");
+    }
+
     // Identity is known locally post-login/restore — no extra network round-trip.
     let user_id = client.user_id().context("no user id after login")?.to_owned();
     let identity = InitResult {
@@ -280,7 +310,14 @@ async fn connect_client(
             .to_string(),
     };
 
-    register_message_handler(&client, buffer, user_id);
+    // Gate inbound delivery on `live`: false during the initial catch-up sync so
+    // its backlog (room history, and any messages received while the worker was
+    // down/restarting) is consumed *silently* — only events from the continuous
+    // sync afterwards reach the buffer. Without this, every (re)start replays the
+    // whole room history as fresh inbound events.
+    let live = Arc::new(AtomicBool::new(false));
+    register_message_handler(&client, buffer, user_id, live.clone());
+    register_autojoin_handler(&client);
 
     // One initial sync so room state + member device keys are present before we
     // start serving `send`; the continuous sync task takes over afterwards.
@@ -288,6 +325,9 @@ async fn connect_client(
         .sync_once(SyncSettings::default())
         .await
         .context("initial sync")?;
+
+    // Backlog drained; surface inbound events from here on.
+    live.store(true, Ordering::SeqCst);
 
     Ok((client, identity, bridge))
 }
@@ -329,6 +369,45 @@ async fn restore_or_login(client: &Client, config: &LiveSdkConfig) -> anyhow::Re
     Ok(())
 }
 
+/// Ensure the account has a cross-signing identity, bootstrapping one if absent
+/// so the bot self-signs its own device. `bootstrap_cross_signing_if_needed` is
+/// idempotent (a no-op once an identity exists, e.g. on every session restore);
+/// the initial bootstrap uploads keys behind UIA, so it needs the password —
+/// available only on the initial password-login path. Without a password and
+/// without an existing identity it logs and returns `Ok` (the worker still runs;
+/// the shield just persists until an initial login bootstraps it).
+async fn ensure_cross_signing(client: &Client, config: &LiveSdkConfig) -> anyhow::Result<()> {
+    match client.encryption().bootstrap_cross_signing_if_needed(None).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // The keys upload demands user-interactive auth; retry with the password.
+            let Some(uiaa_info) = e.as_uiaa_response() else {
+                return Err(anyhow::anyhow!("bootstrap cross-signing: {e}"));
+            };
+            let Some(password) = config.password.as_deref() else {
+                eprintln!(
+                    "kastellan-worker-matrix: cross-signing needs setup but no password is \
+                     available (session restore); skipping — re-run the initial login with a password"
+                );
+                return Ok(());
+            };
+            let user_id = client.user_id().context("no user id for cross-signing UIA")?;
+            let mut pw = uiaa::Password::new(
+                uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
+                password.to_owned(),
+            );
+            pw.session = uiaa_info.session.clone();
+            client
+                .encryption()
+                .bootstrap_cross_signing(Some(uiaa::AuthData::Password(pw)))
+                .await
+                .context("bootstrap cross-signing with password UIA")?;
+            eprintln!("kastellan-worker-matrix: cross-signing bootstrapped");
+            Ok(())
+        }
+    }
+}
+
 /// Write `bytes` to `path`, truncating, with `0600` permissions (owner-only).
 /// Used for the persisted login session, which is a secret at rest.
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -344,16 +423,24 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Register the room-message event handler: decode text bodies, skip our own
-/// echoes, and push onto the bounded inbound buffer.
+/// echoes + the initial-sync backlog (`live`), and push onto the bounded inbound
+/// buffer.
 fn register_message_handler(
     client: &Client,
     buffer: Arc<Mutex<VecDeque<Event>>>,
     own_user_id: matrix_sdk::ruma::OwnedUserId,
+    live: Arc<AtomicBool>,
 ) {
     client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
         let buffer = buffer.clone();
         let own = own_user_id.clone();
+        let live = live.clone();
         async move {
+            // Skip the initial catch-up sync (room history + offline backlog):
+            // only surface events once continuous sync is live.
+            if !live.load(Ordering::SeqCst) {
+                return;
+            }
             // Echo-loop guard: never re-ingest messages from our own user id.
             // Note this also drops messages sent by *other* devices logged into
             // the same account — acceptable for a single-identity channel bot,
@@ -377,6 +464,43 @@ fn register_message_handler(
                 }
             }
         }
+    });
+}
+
+/// Auto-accept room invites addressed to the bot so a user can simply start a
+/// (DM) conversation with it. This only *joins* the room — it grants no trust:
+/// authorization stays at the core bus ([`channel::auth::DbPeerAuthorizer`]),
+/// which drops messages from unpaired senders. Joining is retried a few times
+/// to ride out transient server lag (federation is off here, so a couple of
+/// short retries suffice).
+fn register_autojoin_handler(client: &Client) {
+    client.add_event_handler(|ev: StrippedRoomMemberEvent, client: Client, room: Room| async move {
+        // Only react to the invite *for us*; ignore membership churn for others.
+        let Some(me) = client.user_id() else { return };
+        if ev.state_key != me {
+            return;
+        }
+        if room.state() != RoomState::Invited {
+            return;
+        }
+        let room_id = room.room_id().to_string();
+        for attempt in 0..3u32 {
+            match room.join().await {
+                Ok(()) => {
+                    eprintln!("kastellan-worker-matrix: auto-joined invited room {room_id}");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "kastellan-worker-matrix: join {room_id} failed (attempt {}): {e}",
+                        attempt + 1
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * (attempt as u64 + 1)))
+                        .await;
+                }
+            }
+        }
+        eprintln!("kastellan-worker-matrix: gave up auto-joining {room_id}");
     });
 }
 

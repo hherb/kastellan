@@ -55,7 +55,7 @@ pub fn prepare_filesystem(
     copy_tree(&assets_src.join("prompts"), &layout.prompts_dir)?;
     copy_tree(&assets_src.join("seeds"), &layout.assets_dir.join("seeds"))?;
 
-    let env = render_env_file(&args.llm_model, &args.llm_url, args.embedding_model.as_deref(), layout);
+    let env = render_env_file(args, layout);
     write_private(&layout.env_file, env.as_bytes())?;
 
     // Put the operator CLI on PATH. The flat prefix (`bin_dir`) lives under

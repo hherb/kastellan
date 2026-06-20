@@ -45,6 +45,8 @@ fn prepare_filesystem_populates_prefix_and_env_file() {
         pg_bin_dir: None,
         from: Some(from.clone()),
         no_start: true,
+        matrix_homeserver_url: None,
+        matrix_user: None,
     };
 
     let copied = prepare_filesystem(&layout, &from, &assets_src, &args).expect("prepare_filesystem");
@@ -98,6 +100,7 @@ fn prepare_filesystem_fails_closed_on_missing_required_binary() {
     let args = InstallArgs {
         llm_model: "m".into(), llm_url: "u".into(), embedding_model: None,
         pg_bin_dir: None, from: Some(from.clone()), no_start: true,
+        matrix_homeserver_url: None, matrix_user: None,
     };
     let err = prepare_filesystem(&layout, &from, &assets_src, &args).unwrap_err();
     assert!(

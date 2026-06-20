@@ -57,15 +57,18 @@ use crate::DbError;
 
 /// Default maximum connections in the runtime pool.
 ///
-/// Phase 0's only hot path is the dispatcher write site, which is one
-/// short INSERT per tool call. A handful of pool slots covers every
-/// envisioned concurrency shape (parallel tool calls, the audit-mirror
-/// task's catch-up SELECTs, occasional Phase 1 memory queries) without
-/// the cluster's `max_connections = 32` ceiling becoming a concern.
+/// **Long-lived `PgListener`s each hold a pool slot for their lifetime.** The
+/// daemon now runs four of them — the audit-mirror (`audit_log_inserted`), both
+/// scheduler lanes (`tasks_cancelled`), and the Matrix channel bus
+/// (`tasks_completed`) — so a cap of 4 left **zero** slots for transactional
+/// work (dispatcher INSERTs, pairing lookups, `claim_one`, catch-up SELECTs),
+/// starving every query. 16 leaves a comfortable transactional margin under the
+/// cluster's `max_connections = 32` ceiling; pools are lazy (`min_connections =
+/// 0`), so this is headroom, not a standing connection count.
 ///
 /// Tunable via [`connect_runtime_pool_with_max`] if a measured workload
 /// ever justifies it.
-pub const DEFAULT_MAX_CONNECTIONS: u32 = 4;
+pub const DEFAULT_MAX_CONNECTIONS: u32 = 16;
 
 /// Idle-connection timeout. sqlx will close a connection that hasn't
 /// been used for this long, freeing the cluster slot. 5 minutes is

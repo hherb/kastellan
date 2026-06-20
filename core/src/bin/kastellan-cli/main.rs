@@ -146,6 +146,7 @@ mod audit_tail;
 mod entities;
 mod entities_kinds;
 mod install;
+mod matrix;
 mod memory_l1;
 mod memory_l3;
 mod observation_replay;
@@ -181,6 +182,7 @@ fn main() -> ExitCode {
         "install"     => install::run(&args[1..]),
         "uninstall"   => install::run(&args[1..]),
         "pair"        => pair::run(&args[2..]),
+        "matrix"      => matrix::run(&args[2..]),
         "secret"      => secret::run(&args[2..]),
         "--help" | "-h" | "help" => {
             println!("{}", help_text());
@@ -228,6 +230,9 @@ usage:
     kastellan-cli pair issue   [--label <text>] [--ttl-mins <n>]
     kastellan-cli pair list    [--all]
     kastellan-cli pair revoke  <channel> <peer>
+    kastellan-cli matrix probe [--homeserver URL] [--user USER] [--secret NAME]
+                               [--store DIR] [--worker-bin PATH] [--send ROOM]
+                               [--body TEXT] [--listen SECS] [--enforce-sandbox]
     kastellan-cli secret put    <name> [--raw]   # value read from stdin
     kastellan-cli secret list
     kastellan-cli secret delete <name>

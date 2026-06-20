@@ -4,7 +4,7 @@ use kastellan_db::conn::ConnectSpec;
 use kastellan_db::default_data_dir;
 use sqlx::PgPool;
 use tokio::signal::unix::{signal, SignalKind};
-use tracing::info;
+use tracing::{error, info};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -331,23 +331,80 @@ async fn main() -> Result<()> {
     );
     info!("scheduler spawned (lane_fast + lane_long)");
 
-    // ── Channel bus (comms slice #2). ──
-    // The Matrix channel's live worker requires the `live-matrix` build + the
-    // sandbox/egress/persistent-store spawn path, both landing in slice #2
-    // Phase D (verified on the DGX). Until then a configured homeserver is logged
-    // but no channel is spawned, so the default daemon is byte-identical to a
-    // Matrix-less build. Phase D replaces this block with the real
-    // `spawn_matrix_worker` + `ChannelBus::spawn` wiring + shutdown teardown.
-    if let Some(cfg) = kastellan_core::channel::matrix::MatrixConfig::from_env() {
-        tracing::warn!(
-            homeserver = %cfg.homeserver,
-            recognised_peers = cfg.peers.len(),
-            "KASTELLAN_MATRIX_HOMESERVER is set, but the Matrix channel worker is not yet \
-             wired (comms slice #2 Phase D requires the live-matrix build); no channel started"
-        );
+    // ── Channel bus (comms slice #2 — Matrix). ──
+    // Gated on KASTELLAN_MATRIX_HOMESERVER_URL: unset ⇒ no channel, daemon is
+    // byte-identical to a Matrix-less build. When set, spawn the sandboxed live
+    // worker (restores its persisted session — do the one-time initial login
+    // with `kastellan-cli matrix probe`) and run a ChannelBus over the DB-backed
+    // pairing/authorizer + the tasks-queue event/completion seams. Authorization
+    // is fail-closed at the bus: only DB-paired peers' messages are enqueued.
+    let mut matrix_bus: Option<kastellan_core::channel::ChannelBus> = None;
+    if let Some(spawn_cfg) = kastellan_core::channel::matrix::daemon_spawn_config_from_env(
+        std::env::current_exe().ok().as_deref().and_then(|p| p.parent()),
+    ) {
+        // The worker's login is blocking (matrix.init waits for the SDK's login +
+        // first sync), so run it on a blocking thread under a bounded timeout: an
+        // unreachable homeserver fails-soft (channel not started) instead of
+        // hanging daemon startup, and it doesn't block an async worker thread. On
+        // timeout the blocking task is left to drain against the SDK's own HTTP
+        // timeouts (a blocking task can't be force-cancelled).
+        #[cfg(target_os = "linux")]
+        let backend = Arc::clone(&sandboxes.bwrap);
+        #[cfg(target_os = "macos")]
+        let backend = Arc::clone(&sandboxes.seatbelt);
+        let spawn = tokio::task::spawn_blocking(move || {
+            kastellan_core::channel::matrix::spawn_matrix_worker(
+                backend,
+                kastellan_core::channel::ChannelId("matrix".to_string()),
+                &spawn_cfg,
+            )
+        });
+        const MATRIX_LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+        match tokio::time::timeout(MATRIX_LOGIN_TIMEOUT, spawn).await {
+            Ok(Ok(Ok(worker))) => {
+                info!(identity = %worker.identity, "matrix worker logged in; starting channel bus");
+                let authorizer = Arc::new(
+                    kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()),
+                );
+                let pairing = Arc::new(
+                    kastellan_core::channel::pairing::DbPairingService::new(pool.clone()),
+                );
+                let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(pool.clone()));
+                match kastellan_core::channel::bus::PgCompletedTasks::connect(pool.clone()).await {
+                    Ok(completed) => {
+                        matrix_bus = Some(kastellan_core::channel::ChannelBus::spawn(
+                            vec![Box::new(worker.channel)],
+                            authorizer,
+                            Some(pairing),
+                            events,
+                            Box::new(completed),
+                        ));
+                        info!("matrix channel bus running");
+                    }
+                    Err(e) => {
+                        error!(error = %e, "matrix: PgCompletedTasks::connect failed; channel not started");
+                    }
+                }
+            }
+            Ok(Ok(Err(e))) => {
+                error!(error = %format!("{e:#}"), "matrix worker spawn/login failed; channel not started");
+            }
+            Ok(Err(join_err)) => {
+                error!(error = %join_err, "matrix worker spawn task panicked; channel not started");
+            }
+            Err(_elapsed) => {
+                error!("matrix worker login timed out (60s); channel not started");
+            }
+        }
     }
 
     wait_for_shutdown().await?;
+
+    // Stop the channel bus first so no further inbound messages are enqueued and
+    // the worker's stdin closes (clean worker exit).
+    if let Some(bus) = matrix_bus {
+        bus.shutdown().await;
+    }
 
     // Stop the scheduler before the audit-mirror so any final audit
     // rows it writes during graceful drain land in the mirror's
