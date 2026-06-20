@@ -156,6 +156,9 @@ pub type WorkerFactory =
 /// Capped exponential backoff between worker respawn attempts.
 const RESPAWN_BACKOFF_START: Duration = Duration::from_secs(1);
 const RESPAWN_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Granularity at which the respawn backoff checks for channel shutdown, so a
+/// long (up-to-30s) backoff doesn't keep a dead channel's driver thread alive.
+const RESPAWN_POLL_SLICE: Duration = Duration::from_millis(200);
 
 impl MatrixChannel {
     /// Spawn the driver thread over a [`WorkerClient`]. `id` is the channel id
@@ -170,7 +173,11 @@ impl MatrixChannel {
     /// `poll`/`send` error), the driver respawns it via `factory` with capped
     /// exponential backoff and resumes — so a worker crash doesn't take the
     /// channel down. Replies in flight when the worker died are retried after the
-    /// respawn (no dropped replies), and the bus never sees the blip.
+    /// respawn (no dropped replies). Note that *inbound* messages that arrive
+    /// during the downtime are NOT recovered: the respawned worker's catch-up sync
+    /// is consumed silently (it only surfaces events from the continuous sync
+    /// afterwards), so a message sent to the bot while it was down is lost. Closing
+    /// that window needs a sync-token watermark — tracked as issue #321.
     pub fn supervised(id: ChannelId, client: Box<dyn WorkerClient>, factory: WorkerFactory) -> Self {
         Self::spawn_driver(id, client, Some(factory))
     }
@@ -248,7 +255,28 @@ impl MatrixChannel {
                     };
                     let mut delay = RESPAWN_BACKOFF_START;
                     loop {
-                        thread::sleep(delay);
+                        // Responsive backoff: poll for shutdown in short slices
+                        // rather than sleeping the full delay. If the bus dropped
+                        // the inbound receiver (channel shutdown), bail instead of
+                        // respawning forever against an unreachable homeserver.
+                        let mut slept = Duration::ZERO;
+                        while slept < delay {
+                            if inbound_tx.is_closed() {
+                                tracing::info!(
+                                    "matrix inbound receiver closed during respawn; driver exiting"
+                                );
+                                return;
+                            }
+                            let slice = RESPAWN_POLL_SLICE.min(delay - slept);
+                            thread::sleep(slice);
+                            slept += slice;
+                        }
+                        if inbound_tx.is_closed() {
+                            tracing::info!(
+                                "matrix inbound receiver closed during respawn; driver exiting"
+                            );
+                            return;
+                        }
                         match factory() {
                             Ok((fresh, _identity)) => {
                                 client = fresh;
@@ -304,6 +332,7 @@ impl Channel for MatrixChannel {
 pub fn build_matrix_policy(
     binary: PathBuf,
     homeserver_host: &str,
+    homeserver_port: u16,
     store_dir: PathBuf,
     proxy_uds: Option<PathBuf>,
     egress_ca: Option<PathBuf>,
@@ -320,7 +349,7 @@ pub fn build_matrix_policy(
     SandboxPolicy {
         fs_read,
         fs_write: vec![store_dir],
-        net: Net::Allowlist(vec![format!("{homeserver_host}:443")]),
+        net: Net::Allowlist(vec![format!("{homeserver_host}:{homeserver_port}")]),
         cpu_ms: 0, // long-lived; no per-process CPU cap (bounded by cgroup/quota)
         mem_mb: 512,
         profile: Profile::WorkerNetClient,
@@ -419,24 +448,49 @@ pub fn parse_peers_csv(csv: &str) -> Vec<PeerId> {
         .collect()
 }
 
-/// Extract the bare host from a homeserver URL (e.g. `https://matrix.example.org`
-/// → `matrix.example.org`) for the `Net::Allowlist` entry. Strips the scheme, any
-/// path, and an explicit port. Handles bracketed IPv6 literals
-/// (`https://[::1]:8448` → `::1`).
-pub fn host_from_url(url: &str) -> anyhow::Result<String> {
-    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+/// Extract `(host, port)` from a homeserver URL for the `Net::Allowlist` entry.
+/// The port is the explicit `:port` if present, else the scheme default
+/// (`https` → 443, `http` → 80, no scheme → 443). Strips the scheme + any path
+/// and handles bracketed IPv6 literals (`https://[::1]:8448` → `("::1", 8448)`).
+/// This is what scopes egress to the *actual* homeserver endpoint, so a
+/// self-hosted server on a non-443 port (e.g. `:8448`) is reachable.
+pub fn host_port_from_url(url: &str) -> anyhow::Result<(String, u16)> {
+    let (scheme, after_scheme) = match url.split_once("://") {
+        Some((s, rest)) => (Some(s), rest),
+        None => (None, url),
+    };
     let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let host = if let Some(rest) = authority.strip_prefix('[') {
-        // [ipv6]:port → take up to the closing bracket.
-        rest.split(']').next().unwrap_or(rest)
+    let (host, port_str) = if let Some(rest) = authority.strip_prefix('[') {
+        // [ipv6]:port → host up to the closing bracket, optional `:port` after.
+        let mut parts = rest.splitn(2, ']');
+        let host = parts.next().unwrap_or(rest);
+        let port = parts.next().unwrap_or("").strip_prefix(':');
+        (host, port)
     } else {
-        // host[:port] → drop the port.
-        authority.split(':').next().unwrap_or(authority)
+        // host[:port] → split on the final colon.
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        }
     };
     if host.is_empty() {
         anyhow::bail!("could not parse host from homeserver url {url:?}");
     }
-    Ok(host.to_string())
+    let port = match port_str {
+        Some(p) => p
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("invalid port in homeserver url {url:?}"))?,
+        None if scheme.is_some_and(|s| s.eq_ignore_ascii_case("http")) => 80,
+        None => 443,
+    };
+    Ok((host.to_string(), port))
+}
+
+/// Extract the bare host from a homeserver URL (e.g. `https://matrix.example.org`
+/// → `matrix.example.org`), dropping the port. Thin wrapper over
+/// [`host_port_from_url`].
+pub fn host_from_url(url: &str) -> anyhow::Result<String> {
+    Ok(host_port_from_url(url)?.0)
 }
 
 /// Everything `spawn_matrix_worker` needs to bring up the live worker. The
@@ -504,9 +558,11 @@ pub fn spawn_matrix_worker(
     }
 
     // 3) Policy + worker env (the worker reads KASTELLAN_MATRIX_* from its jail env).
-    let host = host_from_url(&cfg.homeserver_url)?;
+    //    The allowlist is scoped to the homeserver's actual host:port (the URL's
+    //    explicit port, or the scheme default) so a non-443 server is reachable.
+    let (host, port) = host_port_from_url(&cfg.homeserver_url)?;
     let mut policy =
-        build_matrix_policy(cfg.worker_bin.clone(), &host, cfg.store_dir.clone(), None, None);
+        build_matrix_policy(cfg.worker_bin.clone(), &host, port, cfg.store_dir.clone(), None, None);
     policy
         .env
         .push(("KASTELLAN_MATRIX_HOMESERVER_URL".into(), cfg.homeserver_url.clone()));
@@ -569,6 +625,23 @@ mod tests {
         assert_eq!(host_from_url("https://[::1]:8448").unwrap(), "::1");
         assert_eq!(host_from_url("http://[2001:db8::1]/_matrix").unwrap(), "2001:db8::1");
         assert!(host_from_url("https://").is_err());
+    }
+
+    #[test]
+    fn host_port_from_url_extracts_port_and_scheme_defaults() {
+        // Scheme defaults when no explicit port.
+        assert_eq!(host_port_from_url("https://matrix.kastellan.dev").unwrap(), ("matrix.kastellan.dev".into(), 443));
+        assert_eq!(host_port_from_url("http://127.0.0.1").unwrap(), ("127.0.0.1".into(), 80));
+        assert_eq!(host_port_from_url("matrix.bare.host").unwrap(), ("matrix.bare.host".into(), 443));
+        // Explicit port wins over the scheme default — the self-hosted-on-8448 case.
+        assert_eq!(host_port_from_url("https://matrix.example.org:8448/").unwrap(), ("matrix.example.org".into(), 8448));
+        assert_eq!(host_port_from_url("http://127.0.0.1:6167").unwrap(), ("127.0.0.1".into(), 6167));
+        // IPv6 literals, with and without an explicit port.
+        assert_eq!(host_port_from_url("https://[::1]:8448").unwrap(), ("::1".into(), 8448));
+        assert_eq!(host_port_from_url("http://[2001:db8::1]/_matrix").unwrap(), ("2001:db8::1".into(), 80));
+        // Malformed: empty host, non-numeric port.
+        assert!(host_port_from_url("https://").is_err());
+        assert!(host_port_from_url("https://h:notaport").is_err());
     }
 
     fn daemon_get(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -797,6 +870,7 @@ mod tests {
         let p = build_matrix_policy(
             PathBuf::from("/opt/kastellan/kastellan-worker-matrix"),
             "matrix.example.org",
+            443,
             PathBuf::from("/var/lib/kastellan/matrix/store"),
             Some(PathBuf::from("/run/egress.sock")),
             Some(PathBuf::from("/run/ca.pem")),
@@ -824,6 +898,7 @@ mod tests {
         let p = build_matrix_policy(
             PathBuf::from("/opt/k/kastellan-worker-matrix"),
             "m.example.org",
+            443,
             PathBuf::from("/store"),
             None,
             None,

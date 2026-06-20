@@ -163,9 +163,11 @@ items unlock later ones.
   (`core/src/channel/matrix.rs`) + `ChannelBus::spawn` over `DbPeerAuthorizer`/`DbPairingService`/`PgChannelEvents`/
   `PgCompletedTasks` (`main.rs`); worker auto-joins invites + bootstraps cross-signing (`sdk_live.rs`);
   `kastellan-cli matrix probe` smoke/diagnostic; installer `--matrix-*` flags + `/v1` LLM-URL fix +
-  `scripts/build-release.sh`; `db` pool `DEFAULT_MAX_CONNECTIONS` 4→16 (listener-slot starvation). **Follow-ups
-  (none blocking):** worker restart supervision (intermittent worker death); enable worker seccomp/Landlock
-  (`ENFORCE_SANDBOX=0` today) + egress force-routing coupling (direct `--share-net` now); in-daemon password
+  `scripts/build-release.sh`; `db` pool `DEFAULT_MAX_CONNECTIONS` 4→16 (listener-slot starvation). Self-healing worker
+  respawn (`MatrixChannel::supervised`, capped backoff, shutdown-aware); allowlist scoped to the homeserver's actual
+  host:port (non-443 servers reachable). **Follow-ups (none blocking):** inbound messages lost while the worker is
+  down/respawning — needs a sync-token watermark ([#321](https://github.com/hherb/kastellan/issues/321)); enable worker
+  seccomp/Landlock (`ENFORCE_SANDBOX=0` today) + egress force-routing coupling (direct `--share-net` now); in-daemon password
   materialize (keyring sync-init); embedding dim mismatch (768 vs 1024 → recall degrades); user-side device verify.
   **Phases A–C+E done** (branch `claude/zen-bell-6bn2ze`, 2026-06-12,
   hermetic + verified anywhere): `kastellan-matrix-wire` + sandboxed-worker JSON-RPC surface

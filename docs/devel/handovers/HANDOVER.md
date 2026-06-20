@@ -29,14 +29,22 @@ worker with `--features live-matrix` (a plain `--workspace` build is inert/refus
 `DEFAULT_MAX_CONNECTIONS` 4→16 — each long-lived `PgListener` (audit-mirror + 2 scheduler lanes + the new `tasks_completed`)
 holds a pool slot; 4 listeners on a 4-slot pool starved every transactional query (claim_one/pairing/audit all timed out).
 **Deployed:** `build-release.sh` + `kastellan-cli install --matrix-homeserver-url https://matrix.kastellan.dev --matrix-user
-@kastellan:matrix.kastellan.dev` on the DGX; `@horst` paired via `kastellan-cli pair issue`. **Follow-ups (none blocking):**
-(a) **worker restart supervision** — the matrix worker intermittently dies (`matrix.poll: worker exited before responding`,
-~seconds-to-minutes in; no respawn today → channel goes quiet until daemon restart); (b) **embedding dim mismatch** —
-`embeddinggemma` returns 768-d but recall expects 1024 (`recall failed; continuing with empty recall context`, non-fatal;
-the `/v1` fix exposed it); (c) **worker hardening** — `KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` for now (seccomp/Landlock off) +
-no egress force-routing coupling yet (direct `--share-net`); (d) **in-daemon password materialize** — needs the keyring
-initialized outside the runtime (also the latent `main.rs` bootstrap-secrets bug); (e) user-side device verification (TOFU)
-to clear the milder "you haven't verified this user" state. Files also: `core/src/install/{plan,run}.rs`.)
+@kastellan:matrix.kastellan.dev` on the DGX; `@horst` paired via `kastellan-cli pair issue`.
+**PR #320 review fixes (this session):** (i) the worker net allowlist was hardcoded to `:443` while `host_from_url` discarded
+the URL port — now `host_port_from_url` scopes the allowlist to the homeserver's actual host:port (explicit port, or scheme
+default https→443/http→80), so a self-hosted server on a non-443 port (e.g. `:8448`) is reachable; (ii) the supervised
+respawn backoff loop had no shutdown escape (could spin forever against an unreachable homeserver after the bus was torn down)
+— it now polls `inbound_tx.is_closed()` in 200ms slices and exits on channel shutdown; (iii) inbound messages that arrive
+while the worker is down/respawning are silently dropped by the catch-up-sync `live` gate (needs a sync-token watermark) —
+documented on `MatrixChannel::supervised` and tracked as [#321](https://github.com/hherb/kastellan/issues/321).
+**Follow-ups (none blocking):** (a) **worker restart supervision** — self-healing respawn is now implemented
+(`MatrixChannel::supervised`, capped backoff, replies retried across the bounce); residual is the inbound-loss window above
+([#321](https://github.com/hherb/kastellan/issues/321)); (b) **embedding dim mismatch** — `embeddinggemma` returns 768-d but
+recall expects 1024 (`recall failed; continuing with empty recall context`, non-fatal; the `/v1` fix exposed it); (c) **worker
+hardening** — `KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` for now (seccomp/Landlock off) + no egress force-routing coupling yet
+(direct `--share-net`); (d) **in-daemon password materialize** — needs the keyring initialized outside the runtime (also the
+latent `main.rs` bootstrap-secrets bug); (e) user-side device verification (TOFU) to clear the milder "you haven't verified
+this user" state. Files also: `core/src/install/{plan,run}.rs`.)
 
 _(Prior session — **`kastellan-cli install` — MERGED (#316) + DGX post-merge verification + review fixes.**
 The one-command per-user supervised installer (Postgres + daemon under `systemd --user` / launchd, from a freshly-built
