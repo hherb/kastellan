@@ -13,19 +13,22 @@ CLOSED. Branch `fix/312-proxy-bridge-error-surfacing` (PR pending).** The spike'
 transient `accept()` failure (e.g. `ECONNABORTED`/`EINTR`/`EMFILE`) tore the bridge down for the worker's lifetime, after
 which the SDK saw only opaque connection failures. It now **logs every error and continues** (never breaks — matches the
 egress-proxy `incoming()` norm; breaking would leave the worker alive but the bridge silently dead, the exact regression),
-backing off `ACCEPT_BACKOFF` (50ms) on non-trivial errors so a *persistent* condition logs at a readable cadence instead of
+backing off on non-trivial errors so a *persistent* condition logs at a readable cadence instead of
 hot-looping. Strategy is a pure unit-tested classifier `classify_accept_error(&io::Error) -> AcceptRetry{Immediate,Backoff}`
-(`ConnectionAborted`/`Interrupted` → immediate; resource-exhaustion/unknown → backoff). **No portable errno "fatal"
+(`ConnectionAborted`/`Interrupted` → immediate; resource-exhaustion/unknown → backoff); the backoff itself is a pure
+unit-tested `backoff_delay(consecutive_backoffs)` — **capped exponential** (50ms base, doubling, clamped at 5s; counter resets
+on a healthy accept), so a *wedged* listener logs at ~1 line/5s rather than ~20 lines/s forever (review follow-up). **No portable errno "fatal"
 classification** — `ErrorKind` is the cross-platform seam, and a fatal accept is now loudly-diagnosable-via-logs rather than
 a silent teardown (strictly better than the issue's "break on fatal" proposal). (2) `relay()` **dropped the connection with
 no log** on UDS-connect failure — a dead/misconfigured sidecar surfaced only as an unexplained SDK timeout. `relay` now
 returns `std::io::Result<()>` (surfacing both the UDS-connect error and any `copy_bidirectional` I/O error; a clean EOF stays
 `Ok`, so no spurious logs on shutdown) and the spawn site logs on `Err` via the worker's `eprintln!("kastellan-worker-matrix:
-…")` seam. **Verification — macOS hermetic:** matrix worker **10/0** default (+3: `transient_accept_errors_retry_immediately`,
-`resource_and_unknown_accept_errors_back_off`, `relay_surfaces_uds_connect_failure`) / **7/0** `live-matrix` (incl. the 2
-`egress_spike` tests that drive the bridge through matrix-sdk); `cargo clippy -p kastellan-worker-matrix --all-targets
--D warnings` clean for **both** feature configs. Pure-Rust, no OS-gated code, no `db`/cross-platform-gated change → DGX not
-required (the bridge is loopback-TCP↔UDS, identical on both OSes). `bridge.rs` 110 → 239 LOC (under cap).)
+…")` seam. **Verification — macOS hermetic:** matrix worker **11/0** default (+4: `transient_accept_errors_retry_immediately`,
+`resource_and_unknown_accept_errors_back_off`, `backoff_delay_escalates_then_caps`, `relay_surfaces_uds_connect_failure`) /
+**18/0** `live-matrix` (incl. the 2 `egress_spike` tests that drive the bridge through matrix-sdk); `cargo clippy
+-p kastellan-worker-matrix --all-targets -D warnings` clean for **both** feature configs. Pure-Rust, no OS-gated code, no
+`db`/cross-platform-gated change → DGX not required (the bridge is loopback-TCP↔UDS, identical on both OSes).
+`bridge.rs` 110 → 287 LOC (under cap).)
 
 _(Prior session — **L1 embedding population — semantic recall lane now populated. MERGED to `main` as
 `2ec853a` (PR [#324](https://github.com/hherb/kastellan/pull/324)).** Closes the forward write path of

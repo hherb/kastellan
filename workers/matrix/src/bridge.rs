@@ -12,11 +12,32 @@ use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::task::JoinHandle;
 
-/// How long to pause after a non-trivial `accept()` error before retrying. Long
-/// enough that a *persistent* failure (e.g. file-descriptor exhaustion) logs at
-/// a readable cadence instead of spinning a hot loop, short enough that a
-/// genuinely transient blip barely delays the next connection.
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+/// Base pause after the *first* non-trivial `accept()` error before retrying.
+/// Short enough that a genuinely transient blip barely delays the next
+/// connection; consecutive failures escalate from here (see [`backoff_delay`]).
+const ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(50);
+
+/// Cap on the per-error backoff. A *persistent* failure (e.g. file-descriptor
+/// exhaustion, a wedged listener) thus logs at a steady, readable cadence
+/// (~1 line / 5s) instead of forever at the base rate (~20 lines/s) — the
+/// bridge stays loud and diagnosable without flooding stderr (#312 follow-up).
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(5);
+
+/// Backoff delay for the Nth consecutive `Backoff`-class accept error.
+///
+/// Pure (no I/O): exponential — `BASE`, `2·BASE`, `4·BASE`, … doubling each
+/// consecutive failure — capped at [`ACCEPT_BACKOFF_MAX`]. The counter resets
+/// on the next healthy accept (or `Immediate`-class error), so a transient blip
+/// never inflates the delay for the connection after it. Saturates rather than
+/// overflowing for an arbitrarily long failure streak.
+fn backoff_delay(consecutive_backoffs: u32) -> Duration {
+    // `checked_shl` is `None` once the shift reaches the integer width; saturate
+    // to the max factor there, then the `.min` clamp does the rest.
+    let factor = 1u32.checked_shl(consecutive_backoffs).unwrap_or(u32::MAX);
+    ACCEPT_BACKOFF_BASE
+        .saturating_mul(factor)
+        .min(ACCEPT_BACKOFF_MAX)
+}
 
 /// What the accept loop should do after a failed [`TcpListener::accept`].
 ///
@@ -24,12 +45,12 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 /// worker alive but the bridge silently dead (the SDK would then see only
 /// opaque connection failures — exactly the regression #312 closes). Instead
 /// every error is logged and retried; this enum only decides whether to retry
-/// at once or after [`ACCEPT_BACKOFF`].
+/// at once or after an (escalating) [`backoff_delay`].
 #[derive(Debug, PartialEq, Eq)]
 enum AcceptRetry {
     /// Retry immediately — nothing is wrong with the listener itself.
     Immediate,
-    /// Pause [`ACCEPT_BACKOFF`] before retrying — the error may persist (e.g.
+    /// Pause [`backoff_delay`] before retrying — the error may persist (e.g.
     /// resource exhaustion), so we avoid a hot loop.
     Backoff,
 }
@@ -67,6 +88,10 @@ impl ProxyBridge {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let addr = listener.local_addr()?;
         let accept_task = tokio::spawn(async move {
+            // Counts *consecutive* `Backoff`-class accept errors so the delay
+            // (and thus the log cadence) escalates under a persistent failure
+            // and resets the moment the listener recovers.
+            let mut consecutive_backoffs: u32 = 0;
             loop {
                 let (tcp, _peer) = match listener.accept().await {
                     Ok(pair) => pair,
@@ -74,24 +99,30 @@ impl ProxyBridge {
                         // Never break: a single (possibly transient) accept
                         // error must not silently kill the bridge for the
                         // worker's lifetime (#312). Log, then retry — backing
-                        // off on non-trivial errors to avoid a hot loop.
+                        // off (with escalation) on non-trivial errors to avoid a
+                        // hot loop and a flood of identical log lines.
                         match classify_accept_error(&e) {
                             AcceptRetry::Immediate => {
+                                consecutive_backoffs = 0;
                                 eprintln!(
                                     "kastellan-worker-matrix: proxy bridge accept error (retrying): {e}"
                                 );
                             }
                             AcceptRetry::Backoff => {
+                                let delay = backoff_delay(consecutive_backoffs);
+                                consecutive_backoffs = consecutive_backoffs.saturating_add(1);
                                 eprintln!(
                                     "kastellan-worker-matrix: proxy bridge accept error (backing off {}ms): {e}",
-                                    ACCEPT_BACKOFF.as_millis()
+                                    delay.as_millis()
                                 );
-                                tokio::time::sleep(ACCEPT_BACKOFF).await;
+                                tokio::time::sleep(delay).await;
                             }
                         }
                         continue;
                     }
                 };
+                // A healthy accept clears the backoff escalation.
+                consecutive_backoffs = 0;
                 let path = uds_path.clone();
                 tokio::spawn(async move {
                     if let Err(e) = relay(tcp, path.clone()).await {
@@ -235,5 +266,22 @@ mod tests {
             classify_accept_error(&Error::from(ErrorKind::PermissionDenied)),
             AcceptRetry::Backoff,
         );
+    }
+
+    // The backoff escalates exponentially from the base and is clamped to the
+    // cap, so a persistent accept failure logs at a steady ~1-line/5s cadence
+    // rather than flooding stderr at the base rate. Must not overflow for an
+    // arbitrarily long failure streak.
+    #[test]
+    fn backoff_delay_escalates_then_caps() {
+        assert_eq!(backoff_delay(0), ACCEPT_BACKOFF_BASE);
+        assert_eq!(backoff_delay(1), ACCEPT_BACKOFF_BASE * 2);
+        assert_eq!(backoff_delay(2), ACCEPT_BACKOFF_BASE * 4);
+        // Monotonic non-decreasing up to the cap.
+        assert!(backoff_delay(3) >= backoff_delay(2));
+        // Eventually clamps, and stays clamped (no overflow / wraparound).
+        assert_eq!(backoff_delay(100), ACCEPT_BACKOFF_MAX);
+        assert_eq!(backoff_delay(u32::MAX), ACCEPT_BACKOFF_MAX);
+        assert!(backoff_delay(7) <= ACCEPT_BACKOFF_MAX);
     }
 }

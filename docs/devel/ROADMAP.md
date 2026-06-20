@@ -202,9 +202,10 @@ items unlock later ones.
   Post-#313-review hardening (2026-06-19): dead sync loop `process::exit(1)`s (no silent stall), `session.json` written `0600`,
   `_PASSWORD` made optional for restored sessions. `ProxyBridge` error-surfacing ([#312](https://github.com/hherb/kastellan/issues/312))
   **DONE 2026-06-20** (branch `fix/312-proxy-bridge-error-surfacing`): accept loop continues+logs+backs-off instead of
-  breaking on any error; `relay` returns `std::io::Result` so UDS-connect/relay failures are logged via the worker's
-  `eprintln!` seam; pure unit-tested `classify_accept_error`. matrix worker 10/0 default + 7/0 `live-matrix`, clippy
-  `-D warnings` clean (both configs). Remaining:
+  breaking on any error (backoff is capped-exponential `backoff_delay`, resets on a healthy accept, so a wedged listener logs
+  at ~1 line/5s not ~20/s); `relay` returns `std::io::Result` so UDS-connect/relay failures are logged via the worker's
+  `eprintln!` seam; pure unit-tested `classify_accept_error` + `backoff_delay`. matrix worker 11/0 default + 18/0 `live-matrix`,
+  clippy `-D warnings` clean (both configs). Remaining:
   full channel-worker egress-coupled production spawn (the matrix worker's sidecar spawn, plan Task 5) +
   daemon `ChannelBus` wiring + `DbPeerAuthorizer`/`DbPairingService` swap. **Task 5 must grant the matrix Landlock ruleset RW
   on the persistent store dir** (the background sync task keeps writing the SQLite state/crypto store after `lock_down`) — the
