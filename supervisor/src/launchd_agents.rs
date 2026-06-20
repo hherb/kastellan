@@ -233,8 +233,26 @@ impl Supervisor for LaunchAgents {
         fs::create_dir_all(&self.agents_dir)
             .map_err(|e| SupervisorError::Io(format!("create {}: {e}", self.agents_dir.display())))?;
 
+        // launchd has no `EnvironmentFile=` equivalent, so honour
+        // `spec.environment_file` by reading it at install time and baking its
+        // KEY=value pairs into the plist's `EnvironmentVariables` (file values
+        // override inline `spec.env` on key collision, matching systemd's
+        // EnvironmentFile-after-Environment ordering). This gives macOS the
+        // same guarantee the Linux backend gets from `EnvironmentFile=` rather
+        // than silently dropping the operator's tuned config.
         let path = self.plist_path(&spec.name);
-        let body = build_plist(spec);
+        let body = match &spec.environment_file {
+            Some(env_file) => {
+                let contents = fs::read_to_string(env_file).map_err(|e| {
+                    SupervisorError::Io(format!("read environment_file {}: {e}", env_file.display()))
+                })?;
+                let mut merged = spec.clone();
+                builders::merge_env(&mut merged.env, builders::parse_env_file(&contents));
+                merged.environment_file = None; // already folded into env
+                build_plist(&merged)
+            }
+            None => build_plist(spec),
+        };
         write_atomic(&path, body.as_bytes())?;
         // Unlike the Linux backend, there is no separate "reload"
         // step — `bootstrap` is the load step and is invoked from

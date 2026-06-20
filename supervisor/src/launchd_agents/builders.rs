@@ -230,5 +230,44 @@ pub fn validate_service_name(name: &str) -> Result<(), SupervisorError> {
     Ok(())
 }
 
+/// Parse an `EnvironmentFile`-style buffer into ordered `(KEY, value)` pairs.
+///
+/// Pure (no I/O). Matches the subset of systemd's `EnvironmentFile=` grammar
+/// the installer emits: one `KEY=value` per line, blank lines and `#` comments
+/// skipped, surrounding whitespace on the key trimmed. Values are taken
+/// verbatim after the first `=` (no shell expansion, no quote stripping) since
+/// the installer writes plain values. Lines without `=` are ignored. The
+/// launchd backend uses this to fold `ServiceSpec.environment_file` into the
+/// plist's `EnvironmentVariables` (launchd has no `EnvironmentFile=` directive).
+pub(super) fn parse_env_file(contents: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let k = k.trim();
+            if !k.is_empty() {
+                out.push((k.to_string(), v.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Merge `from` into `into`, with `from` winning on key collision (matching
+/// systemd's `EnvironmentFile=`-after-`Environment=` override order). Existing
+/// keys keep their position with the value replaced; new keys are appended.
+pub(super) fn merge_env(into: &mut Vec<(String, String)>, from: Vec<(String, String)>) {
+    for (k, v) in from {
+        if let Some(slot) = into.iter_mut().find(|(ek, _)| *ek == k) {
+            slot.1 = v;
+        } else {
+            into.push((k, v));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

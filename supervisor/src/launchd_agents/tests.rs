@@ -192,3 +192,37 @@ fn status_returns_not_installed_when_plist_absent() {
     let s = sup.status("never-installed").expect("status");
     assert_eq!(s, ServiceStatus::NotInstalled);
 }
+
+// ---------- environment_file folding (launchd's EnvironmentFile= counterpart) ----------
+
+#[test]
+fn install_folds_environment_file_into_plist_env_vars() {
+    let dir = TestRoot::new("env-file");
+    let env_file = dir.path().join("kastellan.env");
+    fs::write(&env_file, "# tuned by operator\nKASTELLAN_DATA_DIR=/srv/data\nKASTELLAN_LLM_LOCAL_MODEL=test-model\n")
+        .unwrap();
+
+    let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
+    let mut spec = minimal_spec("kastellan-core");
+    spec.environment_file = Some(env_file);
+    sup.install(&spec).expect("install");
+
+    let body = fs::read_to_string(sup.plist_path("kastellan-core")).unwrap();
+    // The env-file keys must land in the plist's EnvironmentVariables, since
+    // launchd has no EnvironmentFile= directive to read them at start.
+    assert!(body.contains("<key>EnvironmentVariables</key>"), "{body}");
+    assert!(body.contains("<key>KASTELLAN_DATA_DIR</key>"), "{body}");
+    assert!(body.contains("<string>/srv/data</string>"), "{body}");
+    assert!(body.contains("<key>KASTELLAN_LLM_LOCAL_MODEL</key>"), "{body}");
+    assert!(body.contains("<string>test-model</string>"), "{body}");
+}
+
+#[test]
+fn install_errors_when_environment_file_missing() {
+    let dir = TestRoot::new("env-file-missing");
+    let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
+    let mut spec = minimal_spec("svc");
+    spec.environment_file = Some(dir.path().join("does-not-exist.env"));
+    let err = sup.install(&spec).expect_err("missing env file");
+    assert!(matches!(err, SupervisorError::Io(_)), "{err}");
+}

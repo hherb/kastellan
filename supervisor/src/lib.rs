@@ -115,8 +115,10 @@ pub struct ServiceSpec {
     /// byte-identical to today for every current caller. Used by the
     /// installer to point the core daemon at `~/.config/kastellan/kastellan.env`
     /// so operators can tune LLM/prompt/data settings without reinstalling.
-    /// **Ignored on launchd** (no equivalent; the installer bakes the same
-    /// values into the plist `EnvironmentVariables` there if needed later).
+    /// On **launchd** there is no `EnvironmentFile=` directive, so the backend
+    /// reads this file at install time and folds its `KEY=value` pairs into the
+    /// plist's `EnvironmentVariables` (file values override inline `env` on key
+    /// collision) — the equivalent guarantee, not a silent drop.
     #[serde(default)]
     pub environment_file: Option<PathBuf>,
 }

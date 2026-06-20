@@ -81,10 +81,14 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
     // Ensure the chat + embedding models are present (local Ollama: pull if
     // missing, after a memory-fit check). Fail-closed if a model won't fit;
     // a no-op note for non-Ollama endpoints. Done before any filesystem change
-    // so a too-big model aborts cleanly.
-    ensure_ollama_model(&args.llm_url, &args.llm_model)?;
-    if let Some(em) = &args.embedding_model {
-        ensure_ollama_model(&args.llm_url, em)?;
+    // so a too-big model aborts cleanly. Skipped under `--no-start`: that mode
+    // only lays down artifacts, so it shouldn't trigger a (potentially multi-GB)
+    // `ollama pull` for a target the operator isn't bringing up yet.
+    if !args.no_start {
+        ensure_ollama_model(&args.llm_url, &args.llm_model)?;
+        if let Some(em) = &args.embedding_model {
+            ensure_ollama_model(&args.llm_url, em)?;
+        }
     }
 
     let copied = prepare_filesystem(&layout, &from, &assets_src, &args)?;
@@ -150,8 +154,15 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
     eprintln!("removed kastellan.target units");
 
     if purge {
+        // Best-effort per dir: a partial/aborted install may be missing some of
+        // these, and `remove_dir_all` errors on a missing path. Treat NotFound
+        // as already-purged so cleanup is idempotent like the rest of the flow.
         for d in [&layout.bin_dir, &layout.assets_dir, &layout.config_dir, &layout.log_dir] {
-            fs::remove_dir_all(d).map_err(|e| format!("purge {}: {e}", d.display()))?;
+            match fs::remove_dir_all(d) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("purge {}: {e}", d.display())),
+            }
         }
         eprintln!("purged prefix + data + logs (cluster + secrets deleted)");
     } else {
