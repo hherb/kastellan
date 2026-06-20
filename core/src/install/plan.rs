@@ -97,18 +97,45 @@ pub fn default_llm_url() -> &'static str {
     "http://127.0.0.1:11434"
 }
 
+/// Ensure an OpenAI-compatible base URL ends in exactly one `/v1` segment — the
+/// path the LLM router appends `/chat/completions` onto. Ollama and vLLM both
+/// serve their OpenAI-compatible API under `/v1`; the installer's default
+/// `…:11434` base omits it, so without this the router hits `…/chat/completions`
+/// → HTTP 404. Idempotent (a URL already ending in `/v1` is returned unchanged).
+pub fn ensure_v1_suffix(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
+}
+
 /// Render the `kastellan.env` EnvironmentFile contents.
-pub fn render_env_file(model: &str, url: &str, embedding_model: Option<&str>, layout: &Layout) -> String {
+pub fn render_env_file(args: &InstallArgs, layout: &Layout) -> String {
     let mut s = String::new();
-    s.push_str(&format!("KASTELLAN_LLM_LOCAL_URL={url}\n"));
-    s.push_str(&format!("KASTELLAN_LLM_LOCAL_MODEL={model}\n"));
-    s.push_str(&format!("KASTELLAN_LLM_EMBEDDING_URL={url}\n"));
-    if let Some(em) = embedding_model {
+    let router_url = ensure_v1_suffix(&args.llm_url);
+    s.push_str(&format!("KASTELLAN_LLM_LOCAL_URL={router_url}\n"));
+    s.push_str(&format!("KASTELLAN_LLM_LOCAL_MODEL={}\n", args.llm_model));
+    s.push_str(&format!("KASTELLAN_LLM_EMBEDDING_URL={router_url}\n"));
+    if let Some(em) = args.embedding_model.as_deref() {
         s.push_str(&format!("KASTELLAN_LLM_EMBEDDING_MODEL={em}\n"));
     }
     s.push_str(&format!("KASTELLAN_PROMPTS_DIR={}\n", layout.prompts_dir.display()));
     s.push_str(&format!("KASTELLAN_L0_RULES_FILE={}\n", layout.l0_rules_file.display()));
     s.push_str(&format!("KASTELLAN_DATA_DIR={}\n", layout.data_dir.display()));
+    if let (Some(hs), Some(user)) =
+        (args.matrix_homeserver_url.as_deref(), args.matrix_user.as_deref())
+    {
+        // Matrix inbound channel (comms slice #2). The worker must be the
+        // `live-matrix` build; run `kastellan-cli matrix probe` once after
+        // install to seed its E2E session + cross-signing. Worker-side
+        // seccomp/Landlock stays off for now (first bring-up); enabling it +
+        // egress force-routing is a hardening follow-up.
+        s.push_str(&format!("KASTELLAN_MATRIX_HOMESERVER_URL={hs}\n"));
+        s.push_str(&format!("KASTELLAN_MATRIX_USER={user}\n"));
+        s.push_str("KASTELLAN_MATRIX_ENFORCE_SANDBOX=0\n");
+    }
     s
 }
 
@@ -159,12 +186,19 @@ pub struct InstallArgs {
     pub pg_bin_dir: Option<PathBuf>,
     pub from: Option<PathBuf>,
     pub no_start: bool,
+    /// When both are set, the installer writes the Matrix channel env so the
+    /// daemon brings up the inbound channel (comms slice #2). Requires the
+    /// `live-matrix` worker build + a one-time `kastellan-cli matrix probe` to
+    /// seed the E2E session/cross-signing.
+    pub matrix_homeserver_url: Option<String>,
+    pub matrix_user: Option<String>,
 }
 
 /// Parse `install [--llm-model <m>] [--llm-url <u>] [--embedding-model <m>] [--pg-bin-dir <d>] [--from <d>] [--no-start]`.
 pub fn parse_install_args(args: &[String]) -> Result<InstallArgs, String> {
     let (mut model, mut url, mut emb, mut pg, mut from, mut no_start) =
         (None::<String>, None::<String>, None::<String>, None::<PathBuf>, None::<PathBuf>, false);
+    let (mut matrix_hs, mut matrix_user) = (None::<String>, None::<String>);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -173,9 +207,16 @@ pub fn parse_install_args(args: &[String]) -> Result<InstallArgs, String> {
             "--embedding-model" => { emb = Some(take(args, &mut i, "--embedding-model")?); }
             "--pg-bin-dir" => { pg = Some(PathBuf::from(take(args, &mut i, "--pg-bin-dir")?)); }
             "--from" => { from = Some(PathBuf::from(take(args, &mut i, "--from")?)); }
+            "--matrix-homeserver-url" => { matrix_hs = Some(take(args, &mut i, "--matrix-homeserver-url")?); }
+            "--matrix-user" => { matrix_user = Some(take(args, &mut i, "--matrix-user")?); }
             "--no-start" => { no_start = true; i += 1; }
             other => return Err(format!("unknown argument {other}")),
         }
+    }
+    if matrix_hs.is_some() != matrix_user.is_some() {
+        return Err(
+            "--matrix-homeserver-url and --matrix-user must be given together".to_string(),
+        );
     }
     Ok(InstallArgs {
         llm_model: model.unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string()),
@@ -184,6 +225,8 @@ pub fn parse_install_args(args: &[String]) -> Result<InstallArgs, String> {
         pg_bin_dir: pg,
         from,
         no_start,
+        matrix_homeserver_url: matrix_hs,
+        matrix_user,
     })
 }
 
@@ -333,23 +376,58 @@ mod tests {
         assert!(note.contains("not on PATH"), "{note}");
     }
 
+    fn test_args(model: &str, url: &str, embedding_model: Option<&str>) -> InstallArgs {
+        InstallArgs {
+            llm_model: model.to_string(),
+            llm_url: url.to_string(),
+            embedding_model: embedding_model.map(str::to_string),
+            pg_bin_dir: None,
+            from: None,
+            no_start: false,
+            matrix_homeserver_url: None,
+            matrix_user: None,
+        }
+    }
+
     #[test]
     fn env_file_has_all_required_keys_and_prefix_paths() {
         let l = layout();
-        let s = render_env_file("my-model", "http://127.0.0.1:8000", Some("emb-model"), &l);
-        assert!(s.contains("KASTELLAN_LLM_LOCAL_URL=http://127.0.0.1:8000\n"));
+        let s = render_env_file(&test_args("my-model", "http://127.0.0.1:8000", Some("emb-model")), &l);
+        // URLs are normalized to the router's `/v1` base.
+        assert!(s.contains("KASTELLAN_LLM_LOCAL_URL=http://127.0.0.1:8000/v1\n"), "{s}");
         assert!(s.contains("KASTELLAN_LLM_LOCAL_MODEL=my-model\n"));
-        assert!(s.contains("KASTELLAN_LLM_EMBEDDING_URL=http://127.0.0.1:8000\n"));
+        assert!(s.contains("KASTELLAN_LLM_EMBEDDING_URL=http://127.0.0.1:8000/v1\n"), "{s}");
         assert!(s.contains("KASTELLAN_LLM_EMBEDDING_MODEL=emb-model\n"));
         assert!(s.contains("KASTELLAN_PROMPTS_DIR=/home/u/.local/share/kastellan/prompts\n"));
         assert!(s.contains("KASTELLAN_L0_RULES_FILE=/home/u/.local/share/kastellan/seeds/memory/l0_meta_rules.toml\n"));
         assert!(s.contains("KASTELLAN_DATA_DIR=/home/u/.local/share/kastellan/pg/data\n"));
+        // No matrix block unless configured.
+        assert!(!s.contains("KASTELLAN_MATRIX_HOMESERVER_URL"));
     }
 
     #[test]
     fn env_file_omits_embedding_model_when_absent() {
-        let s = render_env_file("m", "u", None, &layout());
+        let s = render_env_file(&test_args("m", "http://h:1", None), &layout());
         assert!(!s.contains("KASTELLAN_LLM_EMBEDDING_MODEL="));
+    }
+
+    #[test]
+    fn ensure_v1_suffix_idempotent_and_appends() {
+        assert_eq!(ensure_v1_suffix("http://127.0.0.1:11434"), "http://127.0.0.1:11434/v1");
+        assert_eq!(ensure_v1_suffix("http://127.0.0.1:11434/"), "http://127.0.0.1:11434/v1");
+        assert_eq!(ensure_v1_suffix("http://x:8000/v1"), "http://x:8000/v1");
+        assert_eq!(ensure_v1_suffix("http://x:8000/v1/"), "http://x:8000/v1");
+    }
+
+    #[test]
+    fn env_file_writes_matrix_block_when_configured() {
+        let mut a = test_args("m", "http://127.0.0.1:11434", Some("e"));
+        a.matrix_homeserver_url = Some("https://matrix.example.org".to_string());
+        a.matrix_user = Some("@bot:matrix.example.org".to_string());
+        let s = render_env_file(&a, &layout());
+        assert!(s.contains("KASTELLAN_MATRIX_HOMESERVER_URL=https://matrix.example.org\n"), "{s}");
+        assert!(s.contains("KASTELLAN_MATRIX_USER=@bot:matrix.example.org\n"), "{s}");
+        assert!(s.contains("KASTELLAN_MATRIX_ENFORCE_SANDBOX=0\n"), "{s}");
     }
 
     #[test]
