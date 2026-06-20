@@ -37,6 +37,24 @@ per-row `None` path can't WARN generically), and the CLI now **exits non-zero** 
 `reembed && next-step` doesn't proceed on a wholly-failed backfill; the idempotent no-op (`scanned==0`) still exits 0. +3 core
 units for the predicate (empty-scan / any-embedded / all-skipped) and a 4th e2e scenario `reembed_mixed_batch_embeds_one_skips_the_other`
 (`SequencedEmbedder` → exact `embedded=1, skipped=1` split). `memory_l1_reembed_e2e` now **4/0** on live PG 18; clippy clean.)_
+**Last updated:** 2026-06-21 (**Branch reconciliation + redeploy of newest `main` to the DGX. No code change — operational
+session.** Local `main` had diverged (4 commits, `716b873`: an *earlier* iteration of the Matrix-channel work) from
+`origin/main`, which had squash-merged the same work in **more refined** form via PR [#320](https://github.com/hherb/kastellan/pull/320)
+(self-healing `supervised()`/`WorkerFactory` respawn, timeout-protected login, atomic `0o600` writes, `--matrix-*` install
+flags). **Verified the divergent local work was fully superseded** — the two substantive local fixes (`DEFAULT_MAX_CONNECTIONS`
+4 → 16 for the 4th long-lived `PgListener`; `ensure_cross_signing` UIA bootstrap; `ensure_v1_suffix`) are all present
+verbatim in `main` — then **reset local `main` to `origin/main`** (backup branch taken + verified + deleted; nothing lost)
+and fast-forwarded through #322/#324/#326. **Branch hygiene:** deleted 17 stale local + 34 stale merged-PR remote branches
+(every one a MERGED PR or confirmed `main` ancestor); `origin` is now just `main` + the one open PR
+[#264](https://github.com/hherb/kastellan/pull/264) (`update_worker_name_to_kastellan`). **Redeploy:** `scripts/build-release.sh`
+(workspace release 37.75s + `live-matrix` worker 1m50s) + `./target/release/kastellan-cli install --matrix-homeserver-url
+https://matrix.kastellan.dev --matrix-user @kastellan:matrix.kastellan.dev` deployed **`0ff5cee` (PR #326)** — the current
+`main` tip — to the DGX. 10 binaries copied, both models already present, stop→start applied, all three services
+(`kastellan.target`/`-core`/`-postgres`) **active**, Matrix worker re-logged-in + running jailed, `secret list` connects.
+**Operator gotcha recorded:** `render_env_file` *regenerates* `~/.config/kastellan/kastellan.env` from CLI flags (no merge) —
+the Matrix block (incl. `KASTELLAN_MATRIX_ENFORCE_SANDBOX=0`) is written **only** when `--matrix-homeserver-url`/`--matrix-user`
+are passed, so every reinstall must re-pass them or the live channel is silently dropped. No tests run beyond the pre-deploy
+`cargo test --workspace` (**1973/0**) on the synced tree.)
 
 _(Prior session — **Matrix `ProxyBridge` error surfacing — [#312](https://github.com/hherb/kastellan/issues/312)
 CLOSED. MERGED to `main` as `0ff5cee` (PR [#326](https://github.com/hherb/kastellan/pull/326)).** The spike's deliberately-minimal error handling
