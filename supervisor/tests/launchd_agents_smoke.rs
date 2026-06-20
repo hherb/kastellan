@@ -140,6 +140,7 @@ fn install_start_status_stop_uninstall_round_trip() {
         after: vec![],
         part_of: None,
         restart_backoff: None,
+        environment_file: None,
     };
 
     sup.install(&spec).expect("install");
@@ -199,6 +200,7 @@ fn start_after_install_is_idempotent() {
         after: vec![],
         part_of: None,
         restart_backoff: None,
+        environment_file: None,
     };
     sup.install(&spec).expect("install");
     sup.start(&name).expect("first start");
@@ -242,6 +244,7 @@ fn stop_when_not_started_is_idempotent() {
         after: vec![],
         part_of: None,
         restart_backoff: None,
+        environment_file: None,
     };
     sup.install(&spec).expect("install");
     // Calling stop before start: the agent isn't bootstrapped, so

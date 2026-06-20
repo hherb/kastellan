@@ -55,7 +55,21 @@ pub(crate) fn parse_put_args(args: &[String]) -> Result<(String, bool), String> 
 
 pub(crate) fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
-        Some("put") => with_runtime("secret put", secret_put(&args[1..])),
+        Some("put") => {
+            // Acquire the OS keyring BEFORE entering the async runtime. On Linux
+            // the keyring's async-secret-service (zbus) backend block_on's
+            // internally and panics "Cannot start a runtime from within a
+            // runtime" if first-initialized inside tokio. ensure_initialized
+            // caches the key, so kp.get() later (inside the runtime) is pure.
+            let kp = match kastellan_db::secrets::OsKeyringProvider::ensure_initialized() {
+                Ok(k) => k,
+                Err(e) => {
+                    eprintln!("keyring: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            with_runtime("secret put", secret_put(&args[1..], kp))
+        }
         Some("list") => with_runtime("secret list", secret_list(&args[1..])),
         Some("delete") => with_runtime("secret delete", secret_delete(&args[1..])),
         _ => {
@@ -65,7 +79,10 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
     }
 }
 
-async fn secret_put(args: &[String]) -> ExitCode {
+async fn secret_put(
+    args: &[String],
+    kp: kastellan_db::secrets::OsKeyringProvider,
+) -> ExitCode {
     let (name, keep_raw) = match parse_put_args(args) {
         Ok(v) => v,
         Err(e) => {
@@ -115,14 +132,6 @@ async fn secret_put(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let kp = match kastellan_db::secrets::OsKeyringProvider::ensure_initialized() {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("keyring: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
     match store_secret(&pool, &kp, &name, &value).await {
         Ok(Outcome::Created) => {
             println!("stored {name} (created)");

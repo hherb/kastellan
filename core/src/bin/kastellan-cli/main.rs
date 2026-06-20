@@ -106,6 +106,8 @@
 //! kastellan-cli secret list
 //! kastellan-cli secret delete <name>
 //! kastellan-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
+//! kastellan-cli install [--llm-model <m>] [--llm-url <u>] [--no-start]
+//! kastellan-cli uninstall [--purge]
 //! ```
 //!
 //! The CLI parser is hand-rolled (no `clap` dep) because the surface
@@ -133,6 +135,7 @@
 //! * [`relations_show`] — `relations show <entity-id> [--depth N] [--format plain|json]`.
 //! * [`observation_replay`] — `observation replay`.
 //! * [`secret`] — `secret {put,list,delete}`.
+//! * [`install`] — `install [flags]` / `uninstall [--purge]`.
 
 use std::process::ExitCode;
 
@@ -142,6 +145,7 @@ mod ask;
 mod audit_tail;
 mod entities;
 mod entities_kinds;
+mod install;
 mod memory_l1;
 mod memory_l3;
 mod observation_replay;
@@ -174,6 +178,8 @@ fn main() -> ExitCode {
         "entities"    => entities::run_entities(&args[2..]),
         "relations"   => relations::run_relations(&args[2..]),
         "observation" => observation_replay::run_observation(&args[2..]),
+        "install"     => install::run(&args[1..]),
+        "uninstall"   => install::run(&args[1..]),
         "pair"        => pair::run(&args[2..]),
         "secret"      => secret::run(&args[2..]),
         "--help" | "-h" | "help" => {
@@ -226,6 +232,8 @@ usage:
     kastellan-cli secret list
     kastellan-cli secret delete <name>
     kastellan-cli audit tail   [--from-start] [--no-follow] [--state-dir PATH]
+    kastellan-cli install [--llm-model <m>] [--llm-url <u>] [--no-start]
+    kastellan-cli uninstall [--purge]
 
 flags (ask):
     --fast | --long             Lane selection (default: --fast).

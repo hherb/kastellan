@@ -20,6 +20,7 @@ fn minimal_spec(name: &str) -> ServiceSpec {
         after: vec![],
         part_of: None,
         restart_backoff: None,
+        environment_file: None,
     }
 }
 
@@ -220,6 +221,23 @@ fn target_unit_wants_all_members() {
         "{body}"
     );
     assert!(body.contains("[Install]\nWantedBy=default.target\n"), "{body}");
+}
+
+#[test]
+fn environment_file_rendered_when_set() {
+    let mut spec = minimal_spec("svc");
+    spec.environment_file = Some(std::path::PathBuf::from("/home/u/.config/kastellan/kastellan.env"));
+    let unit = build_unit_file(&spec);
+    assert!(
+        unit.contains("EnvironmentFile=/home/u/.config/kastellan/kastellan.env"),
+        "unit should carry EnvironmentFile=; got:\n{unit}"
+    );
+}
+
+#[test]
+fn environment_file_absent_when_none() {
+    let unit = build_unit_file(&minimal_spec("svc"));
+    assert!(!unit.contains("EnvironmentFile="), "no EnvironmentFile= when None");
 }
 
 // ---------- name validator tests ----------
