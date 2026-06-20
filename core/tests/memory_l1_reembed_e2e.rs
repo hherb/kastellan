@@ -11,7 +11,9 @@
 //!      finds them;
 //!   2. it is idempotent — a re-run embeds nothing (no double-embed);
 //!   3. it degrades-and-warns per row — an embed failure (`None`) skips that
-//!      row, leaving it NULL, rather than failing the batch.
+//!      row, leaving it NULL, rather than failing the batch;
+//!   4. a mixed batch splits exactly — one row embeds while another fails,
+//!      yielding `embedded = 1, skipped = 1`.
 //!
 //! Each scenario brings up its own per-test Postgres cluster. Skips silently
 //! with `[SKIP]` lines on hosts without Postgres or a reachable supervisor;
@@ -52,6 +54,33 @@ impl Embedder for FakeEmbedder {
     async fn embed_for_storage(&self, _text: &str) -> Option<Vec<f32>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.out.clone()
+    }
+}
+
+/// Test embedder driven by a fixed call-ordered sequence of outcomes: the
+/// `n`-th `embed_for_storage` returns `outs[n]` (and `None` past the end).
+/// Lets a single batch exercise a **mix** of embed success (`Some`) and
+/// failure (`None`) to pin the `embedded`/`skipped` split. The scan orders by
+/// `id`, so insertion order is call order.
+struct SequencedEmbedder {
+    calls: AtomicUsize,
+    outs: Vec<Option<Vec<f32>>>,
+}
+
+impl SequencedEmbedder {
+    fn new(outs: Vec<Option<Vec<f32>>>) -> Self {
+        Self { calls: AtomicUsize::new(0), outs }
+    }
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Embedder for SequencedEmbedder {
+    async fn embed_for_storage(&self, _text: &str) -> Option<Vec<f32>> {
+        let i = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.outs.get(i).cloned().flatten()
     }
 }
 
@@ -257,6 +286,72 @@ fn reembed_degrades_and_warns_leaving_row_null() {
             .expect("load_unembedded after");
         assert_eq!(remaining.len(), 1, "the skipped row stays NULL-embedding");
         assert_eq!(remaining[0].0, id, "the same row is still unembedded");
+
+        pool.close().await;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 4 — mixed batch: one row embeds, one fails; the split is exact
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reembed_mixed_batch_embeds_one_skips_the_other() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "l1re-d",
+        "l1re-l",
+        &format!("kastellan-supervisor-test-pg-l1re4-{suffix}"),
+    );
+
+    rt().block_on(async {
+        kastellan_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"purpose": "l1-reembed-4"}),
+        )
+        .await
+        .expect("probe");
+
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await
+            .expect("pool");
+
+        // Two NULL rows; the scan visits them in id (= insertion) order.
+        let id_ok = insert_null_l1(&pool, "this insight embeds").await;
+        let id_fail = insert_null_l1(&pool, "this insight's embed fails").await;
+
+        // First call succeeds, second fails — a genuinely mixed batch.
+        let embedder = SequencedEmbedder::new(vec![Some(unit_vec_e0()), None]);
+        let report = reembed_l1_null(&pool, &embedder).await.expect("reembed");
+
+        assert_eq!(
+            report,
+            ReembedReport { scanned: 2, embedded: 1, skipped: 1 },
+            "exactly one row embedded, the other skipped"
+        );
+        assert_eq!(embedder.call_count(), 2, "embedder attempted once per scanned row");
+
+        // The embedded row surfaces in the semantic lane; the failed one does
+        // not — and remains the sole NULL-embedding row.
+        let after = semantic_search(&pool, &unit_vec_e0(), 10).await.expect("semantic after");
+        assert!(after.contains(&id_ok), "embedded row is now found by semantic search");
+        assert!(!after.contains(&id_fail), "the skipped row stays out of the semantic lane");
+
+        let remaining = load_unembedded_at_layer(&pool, MemoryLayer::Index)
+            .await
+            .expect("load_unembedded after");
+        assert_eq!(remaining.len(), 1, "only the failed row remains NULL-embedding");
+        assert_eq!(remaining[0].0, id_fail, "and it is the row whose embed failed");
 
         pool.close().await;
     });

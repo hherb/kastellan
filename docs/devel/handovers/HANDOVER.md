@@ -30,7 +30,13 @@ sum + `format_reembed_report`); `cargo clippy -p kastellan-db -p kastellan-core 
 (an exact `audit_log` multiset assertion on `scheduler/task.finalize` that is timing-sensitive under heavy parallel suite
 load; **passes deterministically when re-run in isolation**, and this change is purely additive to `db::memories` so cannot
 affect the agent/scheduler/audit path — not yet filed as an issue). Pure-Rust, no migration, no OS-gated code → DGX not required.
-**`db/src/memories/search.rs` is now 508 LOC (+8 over the 500 cap, within the documented ≤27-over deferral).**)_
+**`db/src/memories/search.rs` is now 508 LOC (+8 over the 500 cap, within the documented ≤27-over deferral).**
+**Review follow-ups (2026-06-21, same branch/PR #327):** new pure predicate `reembed_batch_failed(&report)` (`scanned>0 && embedded==0`,
+re-exported) drives two things — `reembed_l1_null` now emits an **aggregate WARN** when a batch found rows but embedded none (the
+per-row `None` path can't WARN generically), and the CLI now **exits non-zero** in that case (vs always-0 before) so a scripted
+`reembed && next-step` doesn't proceed on a wholly-failed backfill; the idempotent no-op (`scanned==0`) still exits 0. +3 core
+units for the predicate (empty-scan / any-embedded / all-skipped) and a 4th e2e scenario `reembed_mixed_batch_embeds_one_skips_the_other`
+(`SequencedEmbedder` → exact `embedded=1, skipped=1` split). `memory_l1_reembed_e2e` now **4/0** on live PG 18; clippy clean.)_
 
 _(Prior session — **Matrix `ProxyBridge` error surfacing — [#312](https://github.com/hherb/kastellan/issues/312)
 CLOSED. MERGED to `main` as `0ff5cee` (PR [#326](https://github.com/hherb/kastellan/pull/326)).** The spike's deliberately-minimal error handling

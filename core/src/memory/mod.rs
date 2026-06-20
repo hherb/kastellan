@@ -64,7 +64,7 @@ mod recall;
 // is an internal refactor that must not break import sites.
 pub use embed::{embed_query, MemoryError};
 pub use embedder::{Embedder, NoOpEmbedder, RouterEmbedder};
-pub use l1_reembed::{format_reembed_report, reembed_l1_null, ReembedReport};
+pub use l1_reembed::{format_reembed_report, reembed_batch_failed, reembed_l1_null, ReembedReport};
 pub use recall::{
     recall, reciprocal_rank_fusion, RecallModes, RecallParams, GRAPH_FANOUT_CAP_PER_SEED,
     RRF_K_CONSTANT,

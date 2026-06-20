@@ -107,7 +107,37 @@ pub async fn reembed_l1_null(
         }
     }
 
-    Ok(ReembedReport { scanned, embedded, skipped })
+    let report = ReembedReport { scanned, embedded, skipped };
+
+    // Aggregate signal: rows were scanned but none embedded. The per-row
+    // `None` path can't WARN generically (it depends on the injected
+    // `Embedder`), so a batch that found work yet wrote nothing — typically
+    // an unreachable embed endpoint — must be visible at the batch level
+    // regardless of which embedder was used.
+    if reembed_batch_failed(&report) {
+        tracing::warn!(
+            target: "kastellan::memory",
+            scanned = report.scanned,
+            skipped = report.skipped,
+            "L1 reembed: all scanned rows skipped, none embedded — embed endpoint may be unreachable"
+        );
+    }
+
+    Ok(report)
+}
+
+/// True when a batch found NULL-embedding rows to embed but embedded **none**
+/// — `scanned > 0 && embedded == 0`. Equivalent to "every scanned row was
+/// skipped" (since `embedded + skipped == scanned`): a total failure,
+/// typically an unreachable embed endpoint.
+///
+/// Distinguished from the idempotent no-op (`scanned == 0`), which is *not* a
+/// failure — a re-run with nothing left to do is success. The CLI maps this
+/// to a non-zero exit code so a scripted `reembed && next-step` chain does not
+/// treat a wholly-failed backfill as success; [`reembed_l1_null`] uses it to
+/// emit the aggregate WARN.
+pub fn reembed_batch_failed(report: &ReembedReport) -> bool {
+    report.scanned > 0 && report.embedded == 0
 }
 
 /// Render a [`ReembedReport`] as the one-line operator summary
@@ -158,5 +188,32 @@ mod tests {
     fn format_reembed_report_empty_batch() {
         let r = ReembedReport { scanned: 0, embedded: 0, skipped: 0 };
         assert_eq!(format_reembed_report(&r), "scanned=0 embedded=0 skipped=0");
+    }
+
+    /// The idempotent no-op (nothing scanned) is **not** a failure — a re-run
+    /// with no NULL rows left is success, so a scripted `reembed && next` must
+    /// proceed.
+    #[test]
+    fn reembed_batch_failed_false_for_empty_scan() {
+        let r = ReembedReport { scanned: 0, embedded: 0, skipped: 0 };
+        assert!(!reembed_batch_failed(&r));
+    }
+
+    /// Any embedded row means the batch made progress — not a failure, even
+    /// with some skips (e.g. lost `IS NULL` races).
+    #[test]
+    fn reembed_batch_failed_false_when_any_embedded() {
+        let all = ReembedReport { scanned: 3, embedded: 3, skipped: 0 };
+        let partial = ReembedReport { scanned: 5, embedded: 3, skipped: 2 };
+        assert!(!reembed_batch_failed(&all));
+        assert!(!reembed_batch_failed(&partial));
+    }
+
+    /// Rows scanned but none embedded (every row skipped) is the total-failure
+    /// signal the CLI maps to a non-zero exit code.
+    #[test]
+    fn reembed_batch_failed_true_when_all_skipped() {
+        let r = ReembedReport { scanned: 4, embedded: 0, skipped: 4 };
+        assert!(reembed_batch_failed(&r));
     }
 }

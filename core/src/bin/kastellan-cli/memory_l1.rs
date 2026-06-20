@@ -187,9 +187,17 @@ async fn memory_l1_remove(args: &[String]) -> ExitCode {
 /// to what an on-insert embed would have produced. Idempotent and safe to
 /// re-run (see [`reembed_l1_null`]); prints a one-line `scanned=/embedded=/
 /// skipped=` summary. Takes no arguments.
+///
+/// Exit code: `0` on success (including the idempotent no-op where nothing is
+/// left to embed); `1` if the batch scanned rows but embedded none (a total
+/// failure, typically an unreachable embed endpoint — see
+/// [`reembed_batch_failed`]) so a scripted `reembed && next-step` chain does
+/// not proceed on a wholly-failed backfill.
 async fn memory_l1_reembed(args: &[String]) -> ExitCode {
     use std::sync::Arc;
-    use kastellan_core::memory::{format_reembed_report, reembed_l1_null, RouterEmbedder};
+    use kastellan_core::memory::{
+        format_reembed_report, reembed_batch_failed, reembed_l1_null, RouterEmbedder,
+    };
     use kastellan_db::pool::connect_runtime_pool;
 
     if !args.is_empty() {
@@ -228,7 +236,20 @@ async fn memory_l1_reembed(args: &[String]) -> ExitCode {
     match reembed_l1_null(&pool, &embedder).await {
         Ok(report) => {
             println!("{}", format_reembed_report(&report));
-            ExitCode::from(0)
+            // A batch that found rows but embedded none (typically an
+            // unreachable embed endpoint) exits non-zero so a scripted
+            // `reembed && next-step` chain does not treat it as success. The
+            // idempotent no-op (`scanned == 0`) is *not* a failure — exit 0.
+            if reembed_batch_failed(&report) {
+                eprintln!(
+                    "memory l1 reembed: scanned {} row(s) but embedded none \
+                     (embed endpoint unreachable?); re-run after restoring it",
+                    report.scanned
+                );
+                ExitCode::from(1)
+            } else {
+                ExitCode::from(0)
+            }
         }
         Err(e) => {
             eprintln!("memory l1 reembed: {e}");
