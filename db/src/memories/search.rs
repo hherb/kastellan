@@ -294,6 +294,51 @@ where
     Ok(out)
 }
 
+/// Load the `(id, body)` of every row at `layer` whose `embedding IS NULL`
+/// — the scan behind the `kastellan-cli memory l1 reembed` backfill.
+///
+/// These rows are invisible to the semantic recall lane ([`semantic_search`]
+/// filters `WHERE embedding IS NOT NULL`): pre-#324 rows and operator-added
+/// rows (`memory l1 add` stores no embedding). The backfill re-embeds each
+/// body and writes the vector back via [`super::set_embedding`].
+///
+/// Ordered by `id` for a stable, resumable scan: embedded rows drop out of
+/// this `IS NULL` filter, so a re-run after a crash simply skips them.
+/// Returns every match unpaged — at Phase-0 scale the L1 layer is small
+/// (capped in-prompt); add a `LIMIT`/keyset cursor here if that ever changes.
+/// `executor` is generic so the same helper serves `&PgPool` and
+/// `&mut PgConnection` (test setup).
+pub async fn load_unembedded_at_layer<'e, E>(
+    executor: E,
+    layer: MemoryLayer,
+) -> Result<Vec<(i64, String)>, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let rows = sqlx::query(
+        "SELECT id, body \
+         FROM memories \
+         WHERE layer = $1 AND embedding IS NULL \
+         ORDER BY id",
+    )
+    .bind(layer.as_db())
+    .fetch_all(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("load_unembedded_at_layer {layer:?}: {e}")))?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let id: i64 = r
+            .try_get(0)
+            .map_err(|e| DbError::Query(format!("decode memory.id: {e}")))?;
+        let body: String = r
+            .try_get(1)
+            .map_err(|e| DbError::Query(format!("decode memory.body: {e}")))?;
+        out.push((id, body));
+    }
+    Ok(out)
+}
+
 /// Decode one `(id, body, metadata, layer, created_at)` row — in that
 /// column order — into a [`Memory`]. Shared by the layer loaders so the
 /// column order and decode-error shape stay identical across them.

@@ -65,11 +65,11 @@ mod write;
 
 pub use search::{
     fetch_by_ids, graph_search, lexical_search, load_active_l0, load_layer, load_layer_by_trust,
-    semantic_search,
+    load_unembedded_at_layer, semantic_search,
 };
 pub use write::{
     delete_memory_at_layer, insert_memory, insert_memory_at_layer, insert_memory_light,
-    link_memory_to_entities, seed_meta_memory, set_skill_trust,
+    link_memory_to_entities, seed_meta_memory, set_embedding, set_skill_trust,
 };
 
 /// Required dimensionality of every embedding written to `memories`.
