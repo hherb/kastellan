@@ -6,8 +6,32 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-20 (**L1 embedding population — semantic recall lane now populated. Branch
-`feat/l1-embedding-population` (PR pending).** Closes the forward write path of
+**Last updated:** 2026-06-20 (**Matrix `ProxyBridge` error surfacing — [#312](https://github.com/hherb/kastellan/issues/312)
+CLOSED. Branch `fix/312-proxy-bridge-error-surfacing` (PR pending).** The spike's deliberately-minimal error handling
+(PR #311) must not stay silent now that the live Matrix channel (PR #320) carries real traffic through the bridge.
+**Two silent paths closed in `workers/matrix/src/bridge.rs` (TDD):** (1) the accept loop **broke on any error** — a single
+transient `accept()` failure (e.g. `ECONNABORTED`/`EINTR`/`EMFILE`) tore the bridge down for the worker's lifetime, after
+which the SDK saw only opaque connection failures. It now **logs every error and continues** (never breaks — matches the
+egress-proxy `incoming()` norm; breaking would leave the worker alive but the bridge silently dead, the exact regression),
+backing off on non-trivial errors so a *persistent* condition logs at a readable cadence instead of
+hot-looping. Strategy is a pure unit-tested classifier `classify_accept_error(&io::Error) -> AcceptRetry{Immediate,Backoff}`
+(`ConnectionAborted`/`Interrupted` → immediate; resource-exhaustion/unknown → backoff); the backoff itself is a pure
+unit-tested `backoff_delay(consecutive_backoffs)` — **capped exponential** (50ms base, doubling, clamped at 5s; counter resets
+on a healthy accept), so a *wedged* listener logs at ~1 line/5s rather than ~20 lines/s forever (review follow-up). **No portable errno "fatal"
+classification** — `ErrorKind` is the cross-platform seam, and a fatal accept is now loudly-diagnosable-via-logs rather than
+a silent teardown (strictly better than the issue's "break on fatal" proposal). (2) `relay()` **dropped the connection with
+no log** on UDS-connect failure — a dead/misconfigured sidecar surfaced only as an unexplained SDK timeout. `relay` now
+returns `std::io::Result<()>` (surfacing both the UDS-connect error and any `copy_bidirectional` I/O error; a clean EOF stays
+`Ok`, so no spurious logs on shutdown) and the spawn site logs on `Err` via the worker's `eprintln!("kastellan-worker-matrix:
+…")` seam. **Verification — macOS hermetic:** matrix worker **11/0** default (+4: `transient_accept_errors_retry_immediately`,
+`resource_and_unknown_accept_errors_back_off`, `backoff_delay_escalates_then_caps`, `relay_surfaces_uds_connect_failure`) /
+**18/0** `live-matrix` (incl. the 2 `egress_spike` tests that drive the bridge through matrix-sdk); `cargo clippy
+-p kastellan-worker-matrix --all-targets -D warnings` clean for **both** feature configs. Pure-Rust, no OS-gated code, no
+`db`/cross-platform-gated change → DGX not required (the bridge is loopback-TCP↔UDS, identical on both OSes).
+`bridge.rs` 110 → 287 LOC (under cap).)
+
+_(Prior session — **L1 embedding population — semantic recall lane now populated. MERGED to `main` as
+`2ec853a` (PR [#324](https://github.com/hherb/kastellan/pull/324)).** Closes the forward write path of
 [#323](https://github.com/hherb/kastellan/issues/323): no write path populated embeddings for any layer, so
 `semantic_search` (`WHERE embedding IS NOT NULL`, layer-agnostic) returned 0 rows and recall ran lexical+graph only.
 **What shipped (3 tasks, all TDD + reviewed):** (1) **`core/src/memory/embedder.rs`** — new `Embedder` async-trait seam
@@ -19,14 +43,12 @@ intentional-skip vs embed-failure (both store NULL). (2) **`promote_l1`** gains 
 stored with NULL embedding + WARN (degrade-and-warn, mirrors the entity-linker beside it; the insight write is never
 blocked). (3) **Threaded `Arc<dyn Embedder>`** through `spawn_scheduler`→`lane_loop`→`drain_lane`→`write_l1_promoted_row`
 (exactly like `entity_extractor`); `main.rs` builds the real `RouterEmbedder` for the agent-raised path. **Operator CLI
-`l1 add` stays NoOp** (symmetric with its `NoOpEntityExtractor`; no Router in the CLI). **Decision: L1 only** (supersedes
-the old `l1_promote` doc note that said L1 needs no embedding — rewritten). **Verification — macOS, live PG 18:**
-`memory_l1_promote_e2e` **12/0** (9 existing + 3 new: embed-on-insert + `semantic_search` finds it, lazy-on-dedup-skip
-[call_count stays 1], degrade-and-warn [NULL row absent from semantic, present in lexical]); `embedding_recall_e2e` 4/0,
-`memory_recall_e2e` 2/0; `cargo clippy --workspace --all-targets -D warnings` clean. Pure-Rust, no OS-gated code; no `db`
-crate change → DGX not required, Linux baseline carries forward. **Deferred follow-up:** backfill / `kastellan-cli memory
-l1 reembed` of existing NULL-embedding + operator rows (closes #323 item 2 later — tracked in [#325](https://github.com/hherb/kastellan/issues/325)). Spec/plan:
-`docs/superpowers/{specs,plans}/2026-06-20-l1-embedding-population*`.)
+`l1 add` stays NoOp** (symmetric with its `NoOpEntityExtractor`; no Router in the CLI). **Decision: L1 only.** **Verification
+— macOS, live PG 18:** `memory_l1_promote_e2e` **12/0** (+3: embed-on-insert + `semantic_search` finds it,
+lazy-on-dedup-skip, degrade-and-warn); `embedding_recall_e2e` 4/0, `memory_recall_e2e` 2/0; `cargo clippy --workspace
+--all-targets -D warnings` clean. Pure-Rust, no `db` change → DGX not required. **Deferred:** backfill / `kastellan-cli
+memory l1 reembed` of existing NULL-embedding + operator rows (#323 item 2 — tracked in [#325](https://github.com/hherb/kastellan/issues/325)).
+Spec/plan: `docs/superpowers/{specs,plans}/2026-06-20-l1-embedding-population*`.)_
 
 _(Prior session — **Embedding dimension 1024 → 256 (Matryoshka). MERGED to `main` as `b06224f`
 (PR [#322](https://github.com/hherb/kastellan/pull/322)).** Fixes the Matrix-session follow-up (b): the active embed model
@@ -540,11 +562,14 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (branch `feat/l1-embedding-population`, PR pending):** the [#323](https://github.com/hherb/kastellan/issues/323)
-forward write path — agent-raised L1 insights now embed-on-insert via the new `Embedder` seam, so the semantic recall lane
-is populated end-to-end (see "Last updated" up top). **Natural next pick:** the deferred **L1 embedding backfill** —
-a `kastellan-cli memory l1 reembed` subcommand that (re)embeds existing `layer=1 AND embedding IS NULL` rows + operator-added
-rows through the same `RouterEmbedder`/`embed_query` chokepoint (closes #323 item 2; small, on demand — tracked in [#325](https://github.com/hherb/kastellan/issues/325)).
+**Just shipped (branch `fix/312-proxy-bridge-error-surfacing`, PR pending):** [#312](https://github.com/hherb/kastellan/issues/312)
+— the Matrix `ProxyBridge` no longer swallows accept/relay errors silently now that the live channel carries real traffic
+(see "Last updated" up top). **Open Matrix-hardening picks (the remaining residual follow-ups):**
+[#321](https://github.com/hherb/kastellan/issues/321) inbound-loss window on respawn (needs a persisted sync-token watermark
+in the E2E store — medium); the matrix-worker **seccomp/Landlock enforcement** flip (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0`
+today; needs DGX syscall enumeration like the #281 arc — larger). **Other small natural picks:** the deferred **L1 embedding
+backfill** — `kastellan-cli memory l1 reembed` over `layer=1 AND embedding IS NULL` + operator rows through the same
+`RouterEmbedder`/`embed_query` chokepoint (closes #323 item 2 — tracked in [#325](https://github.com/hherb/kastellan/issues/325)).
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
@@ -573,14 +598,16 @@ needs the one-time BOOTSTRAP token from the startup log, not the config `registr
 systemd daemon (inbound DM → invite auto-join → E2E decrypt → DB pairing → task → agent → LLM → reply; see the prior-session
 block up top). `core/src/channel/matrix.rs::spawn_matrix_worker` + `main.rs` `ChannelBus::spawn` over
 `DbPeerAuthorizer`/`DbPairingService` shipped. **Residual follow-ups** (not blocking): [#321](https://github.com/hherb/kastellan/issues/321)
-inbound-loss window on respawn; [#312](https://github.com/hherb/kastellan/issues/312) `ProxyBridge` error-surfacing;
-matrix-worker hardening (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today). **Historical note (the original pick, now satisfied):
+inbound-loss window on respawn; ~~[#312](https://github.com/hherb/kastellan/issues/312) `ProxyBridge` error-surfacing~~ —
+**DONE this session** (branch `fix/312-proxy-bridge-error-surfacing`; accept loop continues+logs+backs-off, `relay` returns
+`Result` and the caller logs — see "Last updated" up top); matrix-worker hardening (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0`
+today). **Historical note (the original pick, now satisfied):
 Carry the
 [#286](https://github.com/hherb/kastellan/issues/286) macOS-loopback caveat:** the `ProxyBridge` binds `127.0.0.1:0`
 inside the worker (same pattern as browser-driver's `shim.py`); when this spawn grants the matrix worker a loopback-widening
 Seatbelt profile on macOS, scope the grant to the bridge's bound port (or prefer a UDS-only transport / the `MacosContainer`
-VM-netns backend). Also [#312](https://github.com/hherb/kastellan/issues/312): make `ProxyBridge` surface accept/relay
-errors instead of silently dropping (must not ship under live traffic). Plan: `docs/superpowers/plans/2026-06-12-matrix-inbound-sandboxed-worker.md` Tasks 5–6.
+VM-netns backend). (~~Also [#312](https://github.com/hherb/kastellan/issues/312): make `ProxyBridge` surface accept/relay
+errors instead of silently dropping~~ — **DONE this session**.) Plan: `docs/superpowers/plans/2026-06-12-matrix-inbound-sandboxed-worker.md` Tasks 5–6.
 
 **Phase 4 continuation (`python-exec` arc, now on `main`).** `python-exec` slice #1 shipped
 (PR [#267](https://github.com/hherb/kastellan/pull/267)); **acceptance is GREEN on BOTH platforms** (2026-06-13, PR
