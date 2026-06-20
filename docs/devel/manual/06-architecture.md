@@ -119,9 +119,9 @@ Memories live in layers under `core::memory`:
 
 L1 memories are addressable via three lanes:
 
-1. **Semantic** — pgvector ANN search on the 1024-dimension embedding
-   produced by `memory::embed_query` (which itself routes through
-   `llm-router`).
+1. **Semantic** — pgvector ANN search on the 256-dimension embedding
+   produced by `memory::embed_query` (which Matryoshka-truncates the
+   model's native output to 256 and routes through `llm-router`).
 2. **Lexical** — native Postgres `tsvector` full-text search with `ts_rank`.
 3. **Graph** — entity-keyed neighbour walk over the `entities`/`relations`
    tables, seeded from entities mentioned in the query.

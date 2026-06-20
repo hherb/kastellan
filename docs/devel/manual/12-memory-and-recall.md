@@ -21,7 +21,8 @@ incoming event  ───►  L0 (raw observations)  ───►  L1 (promoted 
   and preserves the original wording.
 - **L1 — promoted memories.** A separate pass (`memory::l1_promote`)
   distills L0 rows into longer-lived L1 memories. Promotion attaches:
-  - a 1024-dim embedding (via `llm-router`),
+  - a 256-dim embedding (via `llm-router`; the model's native output is
+    Matryoshka-truncated to 256 — see `db::memories::truncate_to_embedding_dim`),
   - a `tsvector` for lexical search,
   - links into the entity/relation graph
     (`memory::entity_link`).
@@ -60,7 +61,7 @@ recall(&pool, &RecallParams {
 - Vector is produced by `memory::embed_query`, which routes through
   `llm-router::embeddings` and writes the first
   `actor='llm:router' action='embed'` audit row.
-- Postgres-side: pgvector ANN over the 1024-dim `embedding` column on
+- Postgres-side: pgvector ANN over the 256-dim `embedding` column on
   L1 memories.
 
 ### 2. Lexical — `tsvector` + `ts_rank`

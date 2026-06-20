@@ -12,11 +12,13 @@
 //!
 //! ## Why we omit `encoding_format` and `dimensions`
 //! OpenAI's spec carries optional `encoding_format` (`"float"` or
-//! `"base64"`) and `dimensions` (Matryoshka-truncation target).
-//! Phase 1 always wants float arrays at the model's native dim
-//! (bge-m3 = 1024), so we don't serialise either. Adding them later
-//! is a backwards-compatible additive change (existing backends
-//! already treat them as optional).
+//! `"base64"`) and `dimensions` (server-side Matryoshka-truncation
+//! target). We want float arrays and request the model's native dim,
+//! then Matryoshka-truncate to the storage contract *client-side*
+//! (`db::memories::truncate_to_embedding_dim`) rather than rely on
+//! every backend honouring `dimensions` — so we serialise neither.
+//! Adding them later is a backwards-compatible additive change
+//! (existing backends already treat them as optional).
 
 use serde::{Deserialize, Serialize};
 
@@ -54,12 +56,12 @@ pub struct EmbeddingData {
     /// requests.
     #[serde(default)]
     pub index: u32,
-    /// Raw float vector at the model's native dimension (bge-m3:
-    /// 1024). Phase 1's caller (`core::memory::embed_query`)
-    /// validates the length against `db::memories::EMBEDDING_DIM`
-    /// after decode — we don't pin a length here because future
-    /// embedding models may run at other dims and the router stays
-    /// model-agnostic.
+    /// Raw float vector at the model's native dimension
+    /// (embeddinggemma: 768). The caller
+    /// (`core::memory::embed_query`) Matryoshka-truncates this to
+    /// `db::memories::EMBEDDING_DIM` (256) after decode — we don't pin
+    /// a length here because embedding models run at different native
+    /// dims and the router stays model-agnostic.
     pub embedding: Vec<f32>,
 }
 

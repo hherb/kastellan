@@ -168,7 +168,10 @@ items unlock later ones.
   host:port (non-443 servers reachable). **Follow-ups (none blocking):** inbound messages lost while the worker is
   down/respawning — needs a sync-token watermark ([#321](https://github.com/hherb/kastellan/issues/321)); enable worker
   seccomp/Landlock (`ENFORCE_SANDBOX=0` today) + egress force-routing coupling (direct `--share-net` now); in-daemon password
-  materialize (keyring sync-init); embedding dim mismatch (768 vs 1024 → recall degrades); user-side device verify.
+  materialize (keyring sync-init); ~~embedding dim mismatch (768 vs 1024 → recall degrades)~~ **FIXED 2026-06-20**
+  (migration 0019: `EMBEDDING_DIM` 1024→**256**, embeddinggemma Matryoshka-truncated client-side via
+  `db::memories::truncate_to_embedding_dim`; ~4× less embedding storage + faster ANN; recall semantic lane live again);
+  user-side device verify.
   **Phases A–C+E done** (branch `claude/zen-bell-6bn2ze`, 2026-06-12,
   hermetic + verified anywhere): `kastellan-matrix-wire` + sandboxed-worker JSON-RPC surface
   (`matrix.init/poll/send` over the SDK seam), core `MatrixChannel` (blocking driver thread

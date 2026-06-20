@@ -4,7 +4,7 @@
 //!
 //! What this test proves against a per-test PG cluster:
 //!
-//!   1. `db::memories::insert_memory` writes rows with a `vector(1024)`
+//!   1. `db::memories::insert_memory` writes rows with a `vector(256)`
 //!      embedding via the text-cast path; no pgvector Rust crate
 //!      required.
 //!   2. `db::memories::semantic_search` ranks the embedding-matched

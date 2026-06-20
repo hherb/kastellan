@@ -32,7 +32,7 @@
 //!   entry point), [`reciprocal_rank_fusion`] (the pure fusion
 //!   algorithm), [`RecallParams`] / [`RecallModes`] (input shape),
 //!   [`RRF_K_CONSTANT`].
-//! * [`embed`] — [`embed_query`] (turn a free-text query into a 1024-
+//! * [`embed`] — [`embed_query`] (turn a free-text query into a 256-
 //!   float embedding via the LLM router and write the first
 //!   `actor='llm:router' action='embed'` audit row), plus the shared
 //!   [`MemoryError`] surface.
