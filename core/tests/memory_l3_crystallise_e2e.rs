@@ -28,6 +28,7 @@ use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
 use kastellan_core::cassandra::types::{DataClass, L3SkillCandidate, L3Param, L3TemplateStep, Plan, PlannedStep};
 use kastellan_core::cli_audit::l3_remove_and_audit;
 use kastellan_core::entity_extraction::NoOpEntityExtractor;
+use kastellan_core::memory::embedder::NoOpEmbedder;
 use kastellan_core::memory::l1_promote::{promote_l1, L1Source};
 use kastellan_core::memory::l3_crystallise::{crystallise_l3, list_l3, L3Source};
 use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
@@ -270,7 +271,9 @@ async fn run_task_through_scheduler(
     let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
         Arc::new(NoOpEntityExtractor::new());
 
-    let scheduler = spawn_scheduler(pool.clone(), formulator, review, dispatcher, entity_extractor);
+    let embedder: std::sync::Arc<dyn kastellan_core::memory::Embedder> =
+        std::sync::Arc::new(NoOpEmbedder::new());
+    let scheduler = spawn_scheduler(pool.clone(), formulator, review, dispatcher, entity_extractor, embedder);
 
     // Wait for completion (10 s timeout so CI doesn't hang forever).
     tokio::time::timeout(Duration::from_secs(10), listener.recv())
@@ -593,6 +596,7 @@ async fn remove_wrong_layer_is_noop() {
     let l1_outcome = promote_l1(
         &pool,
         &NoOpEntityExtractor::new(),
+        &NoOpEmbedder::new(),
         "some insight",
         L1Source::Operator,
     )

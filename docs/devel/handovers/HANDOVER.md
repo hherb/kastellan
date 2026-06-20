@@ -6,8 +6,30 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-20 (**Embedding dimension 1024 → 256 (Matryoshka). Branch
-`feat/embedding-dim-256-matryoshka` (PR pending).** Fixes the Matrix-session follow-up (b): the active embed model
+**Last updated:** 2026-06-20 (**L1 embedding population — semantic recall lane now populated. Branch
+`feat/l1-embedding-population` (PR pending).** Closes the forward write path of
+[#323](https://github.com/hherb/kastellan/issues/323): no write path populated embeddings for any layer, so
+`semantic_search` (`WHERE embedding IS NOT NULL`, layer-agnostic) returned 0 rows and recall ran lexical+graph only.
+**What shipped (3 tasks, all TDD + reviewed):** (1) **`core/src/memory/embedder.rs`** — new `Embedder` async-trait seam
+(mirrors the `EntityExtractor` seam): `embed_for_storage(text) -> Option<Vec<f32>>`; `RouterEmbedder` (delegates to the
+existing `embed_query`, which already Matryoshka-truncates to `EMBEDDING_DIM` + writes the `action='embed'` audit row;
+`Err → warn! + None`) + `NoOpEmbedder` (always `None`). `Option` not `Result` so the caller can't conflate
+intentional-skip vs embed-failure (both store NULL). (2) **`promote_l1`** gains `embedder: &dyn Embedder`, called
+**lazily — only after the dedup EXISTS-check passes**, so a duplicate body never triggers an embed; embed failure → row
+stored with NULL embedding + WARN (degrade-and-warn, mirrors the entity-linker beside it; the insight write is never
+blocked). (3) **Threaded `Arc<dyn Embedder>`** through `spawn_scheduler`→`lane_loop`→`drain_lane`→`write_l1_promoted_row`
+(exactly like `entity_extractor`); `main.rs` builds the real `RouterEmbedder` for the agent-raised path. **Operator CLI
+`l1 add` stays NoOp** (symmetric with its `NoOpEntityExtractor`; no Router in the CLI). **Decision: L1 only** (supersedes
+the old `l1_promote` doc note that said L1 needs no embedding — rewritten). **Verification — macOS, live PG 18:**
+`memory_l1_promote_e2e` **12/0** (9 existing + 3 new: embed-on-insert + `semantic_search` finds it, lazy-on-dedup-skip
+[call_count stays 1], degrade-and-warn [NULL row absent from semantic, present in lexical]); `embedding_recall_e2e` 4/0,
+`memory_recall_e2e` 2/0; `cargo clippy --workspace --all-targets -D warnings` clean. Pure-Rust, no OS-gated code; no `db`
+crate change → DGX not required, Linux baseline carries forward. **Deferred follow-up:** backfill / `kastellan-cli memory
+l1 reembed` of existing NULL-embedding + operator rows (closes #323 item 2 later — tracked in [#325](https://github.com/hherb/kastellan/issues/325)). Spec/plan:
+`docs/superpowers/{specs,plans}/2026-06-20-l1-embedding-population*`.)
+
+_(Prior session — **Embedding dimension 1024 → 256 (Matryoshka). MERGED to `main` as `b06224f`
+(PR [#322](https://github.com/hherb/kastellan/pull/322)).** Fixes the Matrix-session follow-up (b): the active embed model
 **embeddinggemma** returns 768-d but the schema demanded 1024, so every embed failed the dim gate and recall ran with an
 **empty semantic lane** (`recall failed; continuing with empty recall context`). Settled on **256**: embeddinggemma is a
 Matryoshka/MRL model, so its 256-dim prefix (renormalized) is a valid, information-dense embedding — and 256 vs 1024 cuts
@@ -32,7 +54,7 @@ pgvector + migration SQL. The live DGX daemon applies 0019 on next deploy/restar
 no write path populates embeddings yet (l1_promote passes `None`), so the semantic recall lane is empty end-to-end until one
 lands — when it does (`insert_memory_light` / l1_promote embedding population), route its model output through the same
 `truncate_to_embedding_dim` chokepoint. (Ranking is unaffected by the renormalization since `semantic_search` orders by cosine
-`<=>`, which is scale-invariant; review note from PR #322.))
+`<=>`, which is scale-invariant; review note from PR #322.))_
 
 _(Prior session — **Matrix inbound channel — END-TO-END ROUNDTRIP LIVE on `matrix.kastellan.dev` under systemd.**
 **MERGED to `main` as `9b5c310` (PR [#320](https://github.com/hherb/kastellan/pull/320)).** A real Matrix DM from `@horst` now runs through the agent and replies:
@@ -518,6 +540,12 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
+**Just shipped (branch `feat/l1-embedding-population`, PR pending):** the [#323](https://github.com/hherb/kastellan/issues/323)
+forward write path — agent-raised L1 insights now embed-on-insert via the new `Embedder` seam, so the semantic recall lane
+is populated end-to-end (see "Last updated" up top). **Natural next pick:** the deferred **L1 embedding backfill** —
+a `kastellan-cli memory l1 reembed` subcommand that (re)embeds existing `layer=1 AND embedding IS NULL` rows + operator-added
+rows through the same `RouterEmbedder`/`embed_query` chokepoint (closes #323 item 2; small, on demand — tracked in [#325](https://github.com/hherb/kastellan/issues/325)).
+
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
 **#281 is FULLY CLOSED** — both pure-Python venv workers now have worker-side seccomp **+ Landlock** on Linux via the lockdown-exec shim: browser-driver (`browser_client` seccomp PR #292 + Landlock PR #294, both on `main`) and gliner-relex (`ml_client` seccomp PR #293 + Landlock this branch). **`browser-driver` is also egress-proxy-routed (slice #2, PR #285), renders under Seatbelt on macOS (#284), macOS forced path green (#287).** Leading remaining picks: **MITM-of-browser** (in-Chromium CA trust via NSS — deferred slice #2 follow-up, once leak-scanning #3b is wired); the **egress follow-ups** below; **python-exec Phase-4 continuation** (top pick below); or Phase-2 channels (IMAP/Telegram inbound) as the next phase boundary.
@@ -540,13 +568,14 @@ secret). Deploy details: runbook `docs/devel/runbooks/2026-06-19-matrix-homeserv
 doc `docs/deploy/matrix-homeserver.md`. **Gotcha for any redeploy:** a fresh Continuwuity server's first (admin) account
 needs the one-time BOOTSTRAP token from the startup log, not the config `registration_token`.
 
-**★ TOP PICK — channel-worker egress-coupled production spawn (plan Task 5) + daemon wiring.** This is what makes the live
-Matrix channel actually run in the daemon. Today `core/src/channel/matrix.rs` has the driver + pure `build_matrix_policy`
-but **no production spawn of the matrix worker with a real egress sidecar** (the `disable_mitm_for("matrix")` decision is
-wired + ready but nothing routes the channel worker through `spawn_worker_maybe_forced` yet). Build: the long-lived
-channel-worker spawn (sandbox + per-worker egress sidecar in transparent-tunnel mode + persistent store + restart
-supervision), then `core/src/channel/matrix.rs::from_env` + the `main.rs` `ChannelBus` wiring (plan Tasks 5–6), and swap
-`StaticPairings`→`DbPeerAuthorizer` + pass `DbPairingService` (slice #3 deferrals). **Carry the
+**~~★ TOP PICK — channel-worker egress-coupled production spawn (plan Task 5) + daemon wiring.~~ — DONE, MERGED as
+`9b5c310` (PR [#320](https://github.com/hherb/kastellan/pull/320)).** The live Matrix channel now runs end-to-end in the
+systemd daemon (inbound DM → invite auto-join → E2E decrypt → DB pairing → task → agent → LLM → reply; see the prior-session
+block up top). `core/src/channel/matrix.rs::spawn_matrix_worker` + `main.rs` `ChannelBus::spawn` over
+`DbPeerAuthorizer`/`DbPairingService` shipped. **Residual follow-ups** (not blocking): [#321](https://github.com/hherb/kastellan/issues/321)
+inbound-loss window on respawn; [#312](https://github.com/hherb/kastellan/issues/312) `ProxyBridge` error-surfacing;
+matrix-worker hardening (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today). **Historical note (the original pick, now satisfied):
+Carry the
 [#286](https://github.com/hherb/kastellan/issues/286) macOS-loopback caveat:** the `ProxyBridge` binds `127.0.0.1:0`
 inside the worker (same pattern as browser-driver's `shim.py`); when this spawn grants the matrix worker a loopback-widening
 Seatbelt profile on macOS, scope the grant to the bridge's bound port (or prefer a UDS-only transport / the `MacosContainer`

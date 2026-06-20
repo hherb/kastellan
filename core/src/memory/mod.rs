@@ -44,6 +44,7 @@
 //! mock.
 
 mod embed;
+pub mod embedder;
 pub mod entity_link;
 pub mod l0_seed;
 pub mod l1_promote;
@@ -61,6 +62,7 @@ mod recall;
 // `kastellan_core::memory::{...}` namespace — splitting into submodules
 // is an internal refactor that must not break import sites.
 pub use embed::{embed_query, MemoryError};
+pub use embedder::{Embedder, NoOpEmbedder, RouterEmbedder};
 pub use recall::{
     recall, reciprocal_rank_fusion, RecallModes, RecallParams, GRAPH_FANOUT_CAP_PER_SEED,
     RRF_K_CONSTANT,
