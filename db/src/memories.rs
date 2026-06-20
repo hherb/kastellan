@@ -120,9 +120,15 @@ fn check_embedding_dim(label: &str, v: &[f32]) -> Result<(), DbError> {
 /// embeddinggemma — and other MRL-trained models — pack the most
 /// information-dense signal into the leading components, so the
 /// leading-`N` prefix is itself a valid lower-dimensional embedding.
-/// Truncation breaks unit norm, so we renormalize: this keeps cosine
-/// similarity equal to the dot product downstream and matches the
-/// unit-norm vectors recall compares against.
+/// Truncation breaks unit norm, so we renormalize to restore it.
+///
+/// Note the renormalization does **not** change semantic-recall
+/// ranking today: `semantic_search` orders by pgvector's cosine
+/// operator (`<=>`, see `db::memories::search`), which is scale-
+/// invariant. We renormalize anyway so the stored representation is
+/// canonical unit-norm — matching the other unit-norm vectors recall
+/// compares against and keeping cosine equal to the dot product for any
+/// future inner-product (`<#>`) path.
 ///
 /// Pure function — no I/O, no global state — so the write path
 /// ([`insert_memory`]) and the query path

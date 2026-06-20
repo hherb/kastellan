@@ -28,9 +28,11 @@ llm-router doc-comments). **Verification — macOS, live PG 18:** db memories un
 (full migration chain incl. 0019, real pgvector)**, `cargo clippy -p kastellan-db -p kastellan-core -p kastellan-llm-router
 --all-targets -D warnings` clean. **DGX:** pure-Rust + plain-SQL migration, no OS-gated code; macOS PG 18 exercises the same
 pgvector + migration SQL. The live DGX daemon applies 0019 on next deploy/restart — its embedding columns are all-NULL today
-(768≠1024 meant nothing was ever stored), so the discard is a no-op there. **Follow-up:** when a high-frequency write path
-lands (`insert_memory_light` / l1_promote embedding population), route its model output through the same
-`truncate_to_embedding_dim` chokepoint.)
+(768≠1024 meant nothing was ever stored), so the discard is a no-op there. **Follow-up ([#323](https://github.com/hherb/kastellan/issues/323)):**
+no write path populates embeddings yet (l1_promote passes `None`), so the semantic recall lane is empty end-to-end until one
+lands — when it does (`insert_memory_light` / l1_promote embedding population), route its model output through the same
+`truncate_to_embedding_dim` chokepoint. (Ranking is unaffected by the renormalization since `semantic_search` orders by cosine
+`<=>`, which is scale-invariant; review note from PR #322.))
 
 _(Prior session — **Matrix inbound channel — END-TO-END ROUNDTRIP LIVE on `matrix.kastellan.dev` under systemd.**
 **MERGED to `main` as `9b5c310` (PR [#320](https://github.com/hherb/kastellan/pull/320)).** A real Matrix DM from `@horst` now runs through the agent and replies:
