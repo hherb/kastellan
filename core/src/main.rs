@@ -322,12 +322,18 @@ async fn main() -> Result<()> {
             ),
         );
 
+    let embedder: std::sync::Arc<dyn kastellan_core::memory::Embedder> =
+        std::sync::Arc::new(kastellan_core::memory::RouterEmbedder::new(
+            pool.clone(),
+            router.clone(),
+        ));
     let scheduler = kastellan_core::scheduler::spawn_scheduler(
         pool.clone(),
         formulator,
         review,
         dispatcher,
         entity_extractor.clone(),
+        embedder,
     );
     info!("scheduler spawned (lane_fast + lane_long)");
 

@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
 use kastellan_core::cassandra::types::{DataClass, Plan, PlannedStep};
+use kastellan_core::memory::embedder::NoOpEmbedder;
 use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
 use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome, TaskContext};
 use kastellan_core::scheduler::spawn_scheduler;
@@ -253,12 +254,15 @@ async fn two_lanes_run_concurrently() {
 
     let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
         Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new());
+    let embedder: Arc<dyn kastellan_core::memory::Embedder> =
+        Arc::new(NoOpEmbedder::new());
     let scheduler = spawn_scheduler(
         pool.clone(),
         formulator,
         review,
         dispatcher,
         entity_extractor,
+        embedder,
     );
 
     // Wait for both `tasks_completed` NOTIFYs.

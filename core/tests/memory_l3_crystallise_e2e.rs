@@ -271,7 +271,9 @@ async fn run_task_through_scheduler(
     let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
         Arc::new(NoOpEntityExtractor::new());
 
-    let scheduler = spawn_scheduler(pool.clone(), formulator, review, dispatcher, entity_extractor);
+    let embedder: std::sync::Arc<dyn kastellan_core::memory::Embedder> =
+        std::sync::Arc::new(NoOpEmbedder::new());
+    let scheduler = spawn_scheduler(pool.clone(), formulator, review, dispatcher, entity_extractor, embedder);
 
     // Wait for completion (10 s timeout so CI doesn't hang forever).
     tokio::time::timeout(Duration::from_secs(10), listener.recv())
