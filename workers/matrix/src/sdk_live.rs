@@ -40,6 +40,7 @@ use tokio::runtime::Runtime;
 
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::matrix_auth::MatrixSession;
+use matrix_sdk::ruma::api::client::uiaa;
 use matrix_sdk::ruma::events::room::member::StrippedRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
@@ -271,6 +272,13 @@ async fn connect_client(
 
     restore_or_login(&client, config).await?;
 
+    // Bootstrap the account's cross-signing identity so the bot self-signs its
+    // own device — clears Element's "device not verified by its owner" shield.
+    // Idempotent + best-effort: a failure must not stop the worker serving.
+    if let Err(e) = ensure_cross_signing(&client, config).await {
+        eprintln!("kastellan-worker-matrix: cross-signing bootstrap failed (non-fatal): {e:#}");
+    }
+
     // Identity is known locally post-login/restore — no extra network round-trip.
     let user_id = client.user_id().context("no user id after login")?.to_owned();
     let identity = InitResult {
@@ -329,6 +337,45 @@ async fn restore_or_login(client: &Client, config: &LiveSdkConfig) -> anyhow::Re
             .with_context(|| format!("persist session to {session_path:?}"))?;
     }
     Ok(())
+}
+
+/// Ensure the account has a cross-signing identity, bootstrapping one if absent
+/// so the bot self-signs its own device. `bootstrap_cross_signing_if_needed` is
+/// idempotent (a no-op once an identity exists, e.g. on every session restore);
+/// the initial bootstrap uploads keys behind UIA, so it needs the password —
+/// available only on the initial password-login path. Without a password and
+/// without an existing identity it logs and returns `Ok` (the worker still runs;
+/// the shield just persists until an initial login bootstraps it).
+async fn ensure_cross_signing(client: &Client, config: &LiveSdkConfig) -> anyhow::Result<()> {
+    match client.encryption().bootstrap_cross_signing_if_needed(None).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // The keys upload demands user-interactive auth; retry with the password.
+            let Some(uiaa_info) = e.as_uiaa_response() else {
+                return Err(anyhow::anyhow!("bootstrap cross-signing: {e}"));
+            };
+            let Some(password) = config.password.as_deref() else {
+                eprintln!(
+                    "kastellan-worker-matrix: cross-signing needs setup but no password is \
+                     available (session restore); skipping — re-run the initial login with a password"
+                );
+                return Ok(());
+            };
+            let user_id = client.user_id().context("no user id for cross-signing UIA")?;
+            let mut pw = uiaa::Password::new(
+                uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
+                password.to_owned(),
+            );
+            pw.session = uiaa_info.session.clone();
+            client
+                .encryption()
+                .bootstrap_cross_signing(Some(uiaa::AuthData::Password(pw)))
+                .await
+                .context("bootstrap cross-signing with password UIA")?;
+            eprintln!("kastellan-worker-matrix: cross-signing bootstrapped");
+            Ok(())
+        }
+    }
 }
 
 /// Write `bytes` to `path`, truncating, with `0600` permissions (owner-only).
