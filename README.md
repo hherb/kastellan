@@ -279,6 +279,40 @@ If you skip this step, the agent will refuse to spawn workers and emit a
 clear error pointing back here. Other Linux distros without AppArmor user-ns
 restrictions don't need this script.
 
+### Install (per-user, supervised)
+
+`kastellan-cli install` takes a freshly-built tree to a **running, supervised,
+per-user Kastellan** — Postgres + the agent daemon under `systemd --user`
+(Linux) / `launchd` (macOS) — in one command. No root.
+
+Prerequisites: PostgreSQL 18 (Linux: PGDG apt — `scripts/linux/install-postgres.sh`;
+macOS: Postgres.app or Homebrew, pass `--pg-bin-dir`), and an LLM endpoint. The
+default models target a local **Ollama** at `http://127.0.0.1:11434` and are
+pulled automatically if missing (after a memory-fit check).
+
+```sh
+cargo build --release --workspace
+./target/release/kastellan-cli install          # run from the repo root (assets come from ./prompts, ./seeds)
+```
+
+This copies all binaries into `~/.local/lib/kastellan/`, assets into
+`~/.local/share/kastellan/`, initializes the cluster (idempotent), writes a
+tunable `~/.config/kastellan/kastellan.env` (mode 0600), installs the
+`kastellan.target` units, enables linger (Linux), and verifies both services
+reach `active` before returning. Re-running it is a clean upgrade (stop→start so
+new binaries/env take effect).
+
+```
+kastellan-cli install [--llm-model <m>] [--llm-url <u>] [--embedding-model <m>]
+                      [--pg-bin-dir <d>] [--from <built-bin-dir>] [--no-start]
+kastellan-cli uninstall [--purge]               # --purge also deletes the cluster + secrets (typed confirm)
+```
+
+Tune the LLM/prompt/data settings any time by editing
+`~/.config/kastellan/kastellan.env` and restarting:
+`systemctl --user restart kastellan.target` (Linux). Check health with
+`systemctl --user status kastellan.target` and `kastellan-cli secret list`.
+
 ## License
 
 AGPL-3.0-only. See [LICENSE](LICENSE).
