@@ -59,6 +59,16 @@ impl ProtocolWorkerClient {
     pub fn new(client: Client) -> Self {
         Self { client }
     }
+
+    /// Call `matrix.init`: the worker has already logged in + first-synced before
+    /// it answers any RPC (login happens in `LiveSdk::connect`, before serving),
+    /// so a successful return proves the live login and yields the bot identity
+    /// (`user_id`, `device_id`). Used at spawn time as the login smoke check.
+    pub fn init(&mut self) -> anyhow::Result<serde_json::Value> {
+        self.client
+            .call("matrix.init", serde_json::json!({}))
+            .map_err(|e| anyhow::anyhow!("matrix.init: {e}"))
+    }
 }
 
 impl WorkerClient for ProtocolWorkerClient {
@@ -259,11 +269,134 @@ pub fn parse_peers_csv(csv: &str) -> Vec<PeerId> {
         .collect()
 }
 
+/// Extract the bare host from a homeserver URL (e.g. `https://matrix.example.org`
+/// → `matrix.example.org`) for the `Net::Allowlist` entry. Strips the scheme, any
+/// path, and an explicit port.
+pub fn host_from_url(url: &str) -> anyhow::Result<String> {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() {
+        anyhow::bail!("could not parse host from homeserver url {url:?}");
+    }
+    Ok(host.to_string())
+}
+
+/// Everything `spawn_matrix_worker` needs to bring up the live worker. The
+/// homeserver URL + user are operator config (env); the password is a Vault
+/// secret name materialized at spawn (only needed for the *initial* login — the
+/// worker persists `session.json` and restores it thereafter).
+pub struct MatrixSpawnConfig {
+    /// Path to the (live-matrix) worker binary.
+    pub worker_bin: PathBuf,
+    /// Full homeserver URL, e.g. `https://matrix.kastellan.dev`.
+    pub homeserver_url: String,
+    /// Login user (localpart or full `@user:server`).
+    pub user: String,
+    /// Persistent encrypted E2E store dir (created if absent).
+    pub store_dir: PathBuf,
+    /// Vault secret name holding the bot password.
+    pub password_secret_name: String,
+    /// Optional device display name.
+    pub device_name: Option<String>,
+    /// When `false`, the worker runs with seccomp + Landlock disabled — for
+    /// first-bring-up / SDK-correctness smoke runs. Production passes `true`.
+    pub enforce_sandbox: bool,
+}
+
+/// A spawned live Matrix worker: the [`Channel`] for the bus plus the bot
+/// identity reported by `matrix.init` (login proof).
+pub struct SpawnedMatrixWorker {
+    pub channel: MatrixChannel,
+    pub identity: serde_json::Value,
+}
+
+/// Bring up the sandboxed live Matrix worker: materialize the bot password from
+/// the [`Vault`], build the [`SandboxPolicy`] (`Net::Allowlist` scoped to the
+/// homeserver, persistent store as `fs_write`), spawn the worker, and block on
+/// `matrix.init` so the returned worker is logged-in-and-synced. The caller owns
+/// teardown by dropping the [`MatrixChannel`] (closes the worker's stdin → EOF →
+/// clean exit).
+///
+/// Egress force-routing (the per-worker sidecar) is **not** wired here yet — the
+/// worker reaches the homeserver directly on `Net::Allowlist`. Coupling it to the
+/// egress proxy (matrix is on the MITM-bypass list) is the immediate follow-up.
+pub async fn spawn_matrix_worker<B: SandboxBackend + ?Sized>(
+    backend: &B,
+    pool: &sqlx::PgPool,
+    vault: &crate::secrets::Vault,
+    key_provider: &dyn kastellan_db::secrets::KeyProvider,
+    id: ChannelId,
+    cfg: &MatrixSpawnConfig,
+) -> anyhow::Result<SpawnedMatrixWorker> {
+    use crate::secrets::RedeemResult;
+
+    // 1) Materialize the bot password at the host boundary.
+    let secret_ref = vault
+        .materialize(pool, key_provider, &cfg.password_secret_name, "channel/matrix")
+        .await
+        .map_err(|e| anyhow::anyhow!("materialize {:?}: {e}", cfg.password_secret_name))?;
+    let password = match vault.redeem(&secret_ref) {
+        RedeemResult::Hit(bytes) => String::from_utf8(bytes.to_vec())
+            .map_err(|_| anyhow::anyhow!("matrix password is not valid UTF-8"))?,
+        RedeemResult::Expired => anyhow::bail!("matrix password expired before use"),
+        RedeemResult::NotFound => {
+            anyhow::bail!("matrix password {:?} not found in vault", cfg.password_secret_name)
+        }
+    };
+
+    // 2) Persistent store dir must exist before bwrap can bind it.
+    std::fs::create_dir_all(&cfg.store_dir)
+        .map_err(|e| anyhow::anyhow!("create matrix store dir {:?}: {e}", cfg.store_dir))?;
+
+    // 3) Policy + worker env (the worker reads KASTELLAN_MATRIX_* from its jail env).
+    let host = host_from_url(&cfg.homeserver_url)?;
+    let mut policy =
+        build_matrix_policy(cfg.worker_bin.clone(), &host, cfg.store_dir.clone(), None, None);
+    policy
+        .env
+        .push(("KASTELLAN_MATRIX_HOMESERVER_URL".into(), cfg.homeserver_url.clone()));
+    policy.env.push(("KASTELLAN_MATRIX_USER".into(), cfg.user.clone()));
+    policy.env.push(("KASTELLAN_MATRIX_PASSWORD".into(), password));
+    policy
+        .env
+        .push(("KASTELLAN_MATRIX_STORE".into(), cfg.store_dir.display().to_string()));
+    if let Some(dev) = &cfg.device_name {
+        policy.env.push(("KASTELLAN_MATRIX_DEVICE_NAME".into(), dev.clone()));
+    }
+    if !cfg.enforce_sandbox {
+        policy.env.push(("KASTELLAN_SECCOMP_PROFILE".into(), "none".into()));
+        policy.env.push(("KASTELLAN_LANDLOCK_PROFILE".into(), "none".into()));
+    }
+
+    // 4) Spawn + block on login (matrix.init) before handing the bus a channel.
+    let program = cfg
+        .worker_bin
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("worker bin path not UTF-8: {:?}", cfg.worker_bin))?;
+    let mut client = spawn_worker_client(backend, &policy, program, &[])?;
+    let identity = client.init()?;
+
+    Ok(SpawnedMatrixWorker {
+        channel: MatrixChannel::new(id, Box::new(client)),
+        identity,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn host_from_url_strips_scheme_path_and_port() {
+        assert_eq!(host_from_url("https://matrix.kastellan.dev").unwrap(), "matrix.kastellan.dev");
+        assert_eq!(host_from_url("https://matrix.example.org:8448/").unwrap(), "matrix.example.org");
+        assert_eq!(host_from_url("http://127.0.0.1:6167").unwrap(), "127.0.0.1");
+        assert_eq!(host_from_url("matrix.bare.host").unwrap(), "matrix.bare.host");
+        assert!(host_from_url("https://").is_err());
+    }
 
     /// Fake WorkerClient over an injectable shared inbox (tests push events at
     /// will) + a recorded sends log. `poll` drains the inbox; empty polls sleep
