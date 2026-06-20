@@ -155,9 +155,19 @@ items unlock later ones.
   audited (hash only). 18 unit tests + hermetic `FakeChannel` full-loop e2e + PG-gated real-queue
   e2e; clippy `-D warnings` clean. No live transport / no `main.rs` wiring (slice #2). Branch
   `claude/zen-bell-6bn2ze`, 2026-06-12. Plan: `docs/superpowers/plans/2026-06-12-channel-bus-abstraction.md`.
-- [~] **Matrix inbound** (`MatrixChannel`, `matrix-rust-sdk`, E2E) — net allowlist scoped to the
-  homeserver host:port only, force-routed through the egress proxy; single-user homeserver
-  bring-up. (Slice #2.) **Phases A–C+E done** (branch `claude/zen-bell-6bn2ze`, 2026-06-12,
+- [x] **Matrix inbound** (`MatrixChannel`, `matrix-rust-sdk`, E2E) — net allowlist scoped to the
+  homeserver host:port only; single-user homeserver bring-up. (Slice #2.) **END-TO-END ROUNDTRIP LIVE**
+  (branch `feat/matrix-roundtrip-wiring`, 2026-06-20): a real DM from `@horst` to `@kastellan` on
+  `matrix.kastellan.dev` runs through the agent and replies (`17×23 → 391`; free-text → NL reply), on the
+  **systemd** daemon. Daemon wiring (plan Task 5/6): `spawn_matrix_worker` + `daemon_spawn_config_from_env`
+  (`core/src/channel/matrix.rs`) + `ChannelBus::spawn` over `DbPeerAuthorizer`/`DbPairingService`/`PgChannelEvents`/
+  `PgCompletedTasks` (`main.rs`); worker auto-joins invites + bootstraps cross-signing (`sdk_live.rs`);
+  `kastellan-cli matrix probe` smoke/diagnostic; installer `--matrix-*` flags + `/v1` LLM-URL fix +
+  `scripts/build-release.sh`; `db` pool `DEFAULT_MAX_CONNECTIONS` 4→16 (listener-slot starvation). **Follow-ups
+  (none blocking):** worker restart supervision (intermittent worker death); enable worker seccomp/Landlock
+  (`ENFORCE_SANDBOX=0` today) + egress force-routing coupling (direct `--share-net` now); in-daemon password
+  materialize (keyring sync-init); embedding dim mismatch (768 vs 1024 → recall degrades); user-side device verify.
+  **Phases A–C+E done** (branch `claude/zen-bell-6bn2ze`, 2026-06-12,
   hermetic + verified anywhere): `kastellan-matrix-wire` + sandboxed-worker JSON-RPC surface
   (`matrix.init/poll/send` over the SDK seam), core `MatrixChannel` (blocking driver thread
   bridging the synchronous protocol Client to the async `Channel` trait — keeps the protocol pure

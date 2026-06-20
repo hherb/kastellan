@@ -6,7 +6,39 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-20 (**`kastellan-cli install` — MERGED (#316) + DGX post-merge verification + review fixes.**
+**Last updated:** 2026-06-20 (**Matrix inbound channel — END-TO-END ROUNDTRIP LIVE on `matrix.kastellan.dev` under systemd.**
+Branch `feat/matrix-roundtrip-wiring` (PR pending). A real Matrix DM from `@horst` now runs through the agent and replies:
+**inbound DM → invite auto-join → E2E decrypt → DB pairing → task → agent → LLM → reply** (verified: `17×23 → 391`, and a
+free-text "Are you working now?" → coherent NL reply, both as `completed` tasks with `payload.kind="channel"`, on the
+**systemd** `kastellan-core` daemon, `NRestarts=0`). **What shipped:** (1) `core/src/channel/matrix.rs` — `spawn_matrix_worker`
+(sandboxed live-worker spawn via `build_matrix_policy` [`Net::Allowlist(homeserver:443)`, persistent E2E store as `fs_write`],
+blocks on `matrix.init` so the returned `MatrixChannel` is logged-in; **password is `Option`** — the worker restores its
+persisted `session.json`, so the daemon passes `None`), `SpawnedMatrixWorker`, `daemon_spawn_config_from_env` (gated on
+`KASTELLAN_MATRIX_HOMESERVER_URL`; reads `_USER`/`_STORE`/`_WORKER_BIN`/`_ENFORCE_SANDBOX`), `host_from_url`. (2) `core/src/main.rs`
+— replaced the Phase-D stub with real `ChannelBus::spawn` over `DbPeerAuthorizer` + `DbPairingService` + `PgChannelEvents` +
+`PgCompletedTasks`, torn down before the scheduler on shutdown. (3) `workers/matrix/src/sdk_live.rs` — **auto-join invites**
+(`register_autojoin_handler`, authorization stays fail-closed at the bus) + **cross-signing bootstrap**
+(`ensure_cross_signing` via `bootstrap_cross_signing_if_needed`/UIA-password → bot self-signs its device; clears Element's
+"device not verified by its owner" shield; server now returns `master_keys`+`self_signing_keys` for `@kastellan`, device
+double-signed). (4) `kastellan-cli matrix probe` (`core/src/bin/kastellan-cli/matrix.rs`) — login/round-trip smoke +
+`--send`/`--listen` diagnostic; keyring acquired **before** the tokio runtime (zbus `block_on` panics otherwise). (5)
+**Installer:** `--matrix-homeserver-url`/`--matrix-user` flags write the `KASTELLAN_MATRIX_*` env block (survives reinstall,
+which rewrites `kastellan.env`); **`ensure_v1_suffix` normalizes the LLM URL to `…/v1`** (the `:11434` default omitted it →
+router hit `…/chat/completions` → HTTP 404; the agent's LLM calls were failing); `scripts/build-release.sh` builds the matrix
+worker with `--features live-matrix` (a plain `--workspace` build is inert/refuses to run). (6) **`db` pool fix:**
+`DEFAULT_MAX_CONNECTIONS` 4→16 — each long-lived `PgListener` (audit-mirror + 2 scheduler lanes + the new `tasks_completed`)
+holds a pool slot; 4 listeners on a 4-slot pool starved every transactional query (claim_one/pairing/audit all timed out).
+**Deployed:** `build-release.sh` + `kastellan-cli install --matrix-homeserver-url https://matrix.kastellan.dev --matrix-user
+@kastellan:matrix.kastellan.dev` on the DGX; `@horst` paired via `kastellan-cli pair issue`. **Follow-ups (none blocking):**
+(a) **worker restart supervision** — the matrix worker intermittently dies (`matrix.poll: worker exited before responding`,
+~seconds-to-minutes in; no respawn today → channel goes quiet until daemon restart); (b) **embedding dim mismatch** —
+`embeddinggemma` returns 768-d but recall expects 1024 (`recall failed; continuing with empty recall context`, non-fatal;
+the `/v1` fix exposed it); (c) **worker hardening** — `KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` for now (seccomp/Landlock off) +
+no egress force-routing coupling yet (direct `--share-net`); (d) **in-daemon password materialize** — needs the keyring
+initialized outside the runtime (also the latent `main.rs` bootstrap-secrets bug); (e) user-side device verification (TOFU)
+to clear the milder "you haven't verified this user" state. Files also: `core/src/install/{plan,run}.rs`.)
+
+_(Prior session — **`kastellan-cli install` — MERGED (#316) + DGX post-merge verification + review fixes.**
 The one-command per-user supervised installer (Postgres + daemon under `systemd --user` / launchd, from a freshly-built
 tree) landed on `main` as `4fdafda` (PR [#316](https://github.com/hherb/kastellan/pull/316)). **What it does:** copies all
 workspace binaries (atomic temp+rename, 0755) into a flat `~/.local/lib/kastellan/` prefix (so the daemon's
@@ -33,7 +65,7 @@ EXIT=0); final plain `install` EXIT=0 with both services `active`; **`kastellan-
 EXIT=0 → daemon authenticated to Postgres via peer auth); env file mode `0600` with all 7 keys, `EnvironmentFile=` present in
 `kastellan-core.service`, `Linger=yes`. Supervisor 69/0 + core install (plan 10/0, e2e 2/0), clippy `-D warnings` clean.
 Docs updated this session: this HANDOVER (header + open-question #6 + over-cap census), ROADMAP Phase-0 supervisor, README
-quick-install section.)
+quick-install section.)_
 
 _(Prior session — **Matrix Phase D — live `LiveSdk` integration — DONE on branch
 `feat/matrix-phase-d-live-sdk`** (the next slice after the spike #311, now merged to `main`). Implements the real
