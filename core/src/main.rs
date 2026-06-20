@@ -342,16 +342,26 @@ async fn main() -> Result<()> {
     if let Some(spawn_cfg) = kastellan_core::channel::matrix::daemon_spawn_config_from_env(
         std::env::current_exe().ok().as_deref().and_then(|p| p.parent()),
     ) {
+        // The worker's login is blocking (matrix.init waits for the SDK's login +
+        // first sync), so run it on a blocking thread under a bounded timeout: an
+        // unreachable homeserver fails-soft (channel not started) instead of
+        // hanging daemon startup, and it doesn't block an async worker thread. On
+        // timeout the blocking task is left to drain against the SDK's own HTTP
+        // timeouts (a blocking task can't be force-cancelled).
         #[cfg(target_os = "linux")]
-        let backend = &*sandboxes.bwrap;
+        let backend = Arc::clone(&sandboxes.bwrap);
         #[cfg(target_os = "macos")]
-        let backend = &*sandboxes.seatbelt;
-        match kastellan_core::channel::matrix::spawn_matrix_worker(
-            backend,
-            kastellan_core::channel::ChannelId("matrix".to_string()),
-            &spawn_cfg,
-        ) {
-            Ok(worker) => {
+        let backend = Arc::clone(&sandboxes.seatbelt);
+        let spawn = tokio::task::spawn_blocking(move || {
+            kastellan_core::channel::matrix::spawn_matrix_worker(
+                &*backend,
+                kastellan_core::channel::ChannelId("matrix".to_string()),
+                &spawn_cfg,
+            )
+        });
+        const MATRIX_LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+        match tokio::time::timeout(MATRIX_LOGIN_TIMEOUT, spawn).await {
+            Ok(Ok(Ok(worker))) => {
                 info!(identity = %worker.identity, "matrix worker logged in; starting channel bus");
                 let authorizer = Arc::new(
                     kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()),
@@ -376,8 +386,14 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            Err(e) => {
+            Ok(Ok(Err(e))) => {
                 error!(error = %format!("{e:#}"), "matrix worker spawn/login failed; channel not started");
+            }
+            Ok(Err(join_err)) => {
+                error!(error = %join_err, "matrix worker spawn task panicked; channel not started");
+            }
+            Err(_elapsed) => {
+                error!("matrix worker login timed out (60s); channel not started");
             }
         }
     }

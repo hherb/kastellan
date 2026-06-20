@@ -91,8 +91,28 @@ pub struct LiveSdkConfig {
 impl LiveSdkConfig {
     /// Read config from the process environment, failing closed if a required
     /// variable is unset.
+    ///
+    /// The password is resolved from `KASTELLAN_MATRIX_PASSWORD_FILE` first (its
+    /// contents, trailing newline trimmed) and only then from
+    /// `KASTELLAN_MATRIX_PASSWORD`. The host spawns the worker with the *file*
+    /// path — never the secret value in the environment — so the plaintext never
+    /// lands in the bwrap argv (`/proc/<pid>/cmdline`, `ps`). The file is consumed
+    /// (deleted) once read, so it doesn't linger at rest beyond the initial login.
     pub fn from_env() -> anyhow::Result<Self> {
-        parse_config(|k| std::env::var(k).ok())
+        let file_password = std::env::var("KASTELLAN_MATRIX_PASSWORD_FILE").ok().and_then(|path| {
+            let value = std::fs::read_to_string(&path).ok();
+            // Best-effort consume: minimize the at-rest window for the secret.
+            let _ = std::fs::remove_file(&path);
+            value.map(|v| v.trim_end_matches(['\n', '\r']).to_string())
+        });
+        parse_config(|k| {
+            if k == "KASTELLAN_MATRIX_PASSWORD" {
+                if let Some(p) = &file_password {
+                    return Some(p.clone());
+                }
+            }
+            std::env::var(k).ok()
+        })
     }
 }
 

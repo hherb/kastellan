@@ -102,6 +102,11 @@ pub fn default_llm_url() -> &'static str {
 /// serve their OpenAI-compatible API under `/v1`; the installer's default
 /// `…:11434` base omits it, so without this the router hits `…/chat/completions`
 /// → HTTP 404. Idempotent (a URL already ending in `/v1` is returned unchanged).
+///
+/// Deliberately assumes an OpenAI-style base: it appends `/v1` to *any* URL that
+/// doesn't already end in one (so `http://h:8000` → `…/v1`). A backend exposing
+/// its OpenAI API under a different path is out of scope — set `--llm-url` to the
+/// full base (ending in `/v1`) and this is a no-op.
 pub fn ensure_v1_suffix(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     if trimmed.ends_with("/v1") {
@@ -194,7 +199,9 @@ pub struct InstallArgs {
     pub matrix_user: Option<String>,
 }
 
-/// Parse `install [--llm-model <m>] [--llm-url <u>] [--embedding-model <m>] [--pg-bin-dir <d>] [--from <d>] [--no-start]`.
+/// Parse `install [--llm-model <m>] [--llm-url <u>] [--embedding-model <m>] [--pg-bin-dir <d>] [--from <d>]
+/// [--matrix-homeserver-url <u> --matrix-user <@u:server>] [--no-start]`. The two `--matrix-*` flags must be
+/// given together (one without the other is an error).
 pub fn parse_install_args(args: &[String]) -> Result<InstallArgs, String> {
     let (mut model, mut url, mut emb, mut pg, mut from, mut no_start) =
         (None::<String>, None::<String>, None::<String>, None::<PathBuf>, None::<PathBuf>, false);

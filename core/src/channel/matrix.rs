@@ -39,6 +39,25 @@ pub const POLL_MS: u64 = 2000;
 /// channel never reaches it.
 const INBOUND_BUFFER: usize = 256;
 
+/// Filename (inside the persistent store dir) for the one-time initial-login
+/// password handed to the worker out-of-band (not via argv). The worker reads it
+/// via `KASTELLAN_MATRIX_PASSWORD_FILE` and consumes (deletes) it after login.
+const LOGIN_PASSWORD_FILE: &str = ".login-password";
+
+/// Write `bytes` to `path`, truncating, with `0600` permissions (owner-only) —
+/// the initial-login password is a secret at rest, like the worker's session.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)
+}
+
 /// Seam over the worker RPC so the driver is unit-tested without spawning a
 /// process. The real impl ([`ProtocolWorkerClient`]) wraps the blocking
 /// `kastellan_protocol::Client`.
@@ -277,17 +296,30 @@ impl MatrixConfig {
 /// probe`). Materializing the password in-daemon needs the keyring initialized
 /// outside the tokio runtime — a follow-up.
 pub fn daemon_spawn_config_from_env(exe_dir: Option<&std::path::Path>) -> Option<MatrixSpawnConfig> {
-    let homeserver_url = std::env::var("KASTELLAN_MATRIX_HOMESERVER_URL").ok()?;
-    let user = std::env::var("KASTELLAN_MATRIX_USER").ok()?;
-    let store_dir = std::env::var_os("KASTELLAN_MATRIX_STORE")
+    let default_store = crate::audit_mirror::default_state_dir().map(|d| d.join("matrix").join("store"));
+    parse_daemon_spawn_config(|k| std::env::var(k).ok(), exe_dir, default_store.as_deref())
+}
+
+/// Pure builder behind [`daemon_spawn_config_from_env`] over an injectable getter
+/// plus resolved defaults, so the required/optional/`enforce_sandbox` contract is
+/// unit-tested without mutating the process environment. `default_store` is the
+/// `<state>/matrix/store` fallback; `exe_dir` sources the worker-binary fallback.
+fn parse_daemon_spawn_config(
+    get: impl Fn(&str) -> Option<String>,
+    exe_dir: Option<&std::path::Path>,
+    default_store: Option<&std::path::Path>,
+) -> Option<MatrixSpawnConfig> {
+    let homeserver_url = get("KASTELLAN_MATRIX_HOMESERVER_URL")?;
+    let user = get("KASTELLAN_MATRIX_USER")?;
+    let store_dir = get("KASTELLAN_MATRIX_STORE")
         .map(PathBuf::from)
-        .or_else(|| {
-            crate::audit_mirror::default_state_dir().map(|d| d.join("matrix").join("store"))
-        })?;
-    let worker_bin = std::env::var_os("KASTELLAN_MATRIX_WORKER_BIN")
+        .or_else(|| default_store.map(|p| p.to_path_buf()))?;
+    let worker_bin = get("KASTELLAN_MATRIX_WORKER_BIN")
         .map(PathBuf::from)
         .or_else(|| exe_dir.map(|d| d.join("kastellan-worker-matrix")))?;
-    let enforce_sandbox = std::env::var("KASTELLAN_MATRIX_ENFORCE_SANDBOX")
+    // Default ON (fail-safe): only an explicit `0`/`false` disables the worker's
+    // seccomp + Landlock.
+    let enforce_sandbox = get("KASTELLAN_MATRIX_ENFORCE_SANDBOX")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(true);
     Some(MatrixSpawnConfig {
@@ -313,11 +345,18 @@ pub fn parse_peers_csv(csv: &str) -> Vec<PeerId> {
 
 /// Extract the bare host from a homeserver URL (e.g. `https://matrix.example.org`
 /// → `matrix.example.org`) for the `Net::Allowlist` entry. Strips the scheme, any
-/// path, and an explicit port.
+/// path, and an explicit port. Handles bracketed IPv6 literals
+/// (`https://[::1]:8448` → `::1`).
 pub fn host_from_url(url: &str) -> anyhow::Result<String> {
     let after_scheme = url.split("://").nth(1).unwrap_or(url);
-    let host = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let host = host.split(':').next().unwrap_or(host);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        // [ipv6]:port → take up to the closing bracket.
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        // host[:port] → drop the port.
+        authority.split(':').next().unwrap_or(authority)
+    };
     if host.is_empty() {
         anyhow::bail!("could not parse host from homeserver url {url:?}");
     }
@@ -375,7 +414,18 @@ pub fn spawn_matrix_worker<B: SandboxBackend + ?Sized>(
     std::fs::create_dir_all(&cfg.store_dir)
         .map_err(|e| anyhow::anyhow!("create matrix store dir {:?}: {e}", cfg.store_dir))?;
 
-    // 2) Policy + worker env (the worker reads KASTELLAN_MATRIX_* from its jail env).
+    // 2) Password (initial login only) goes via a 0600 file inside the store dir
+    //    — which bwrap already binds — NOT the jail env. A `--setenv` value lands
+    //    in the worker's argv (`/proc/<pid>/cmdline`, `ps`); the secret must not.
+    //    The worker reads `KASTELLAN_MATRIX_PASSWORD_FILE` and consumes (deletes)
+    //    it after login. `None` (the daemon's session-restore path) writes nothing.
+    if let Some(password) = &cfg.password {
+        let pw_path = cfg.store_dir.join(LOGIN_PASSWORD_FILE);
+        write_private(&pw_path, password.as_bytes())
+            .map_err(|e| anyhow::anyhow!("write matrix password file {pw_path:?}: {e}"))?;
+    }
+
+    // 3) Policy + worker env (the worker reads KASTELLAN_MATRIX_* from its jail env).
     let host = host_from_url(&cfg.homeserver_url)?;
     let mut policy =
         build_matrix_policy(cfg.worker_bin.clone(), &host, cfg.store_dir.clone(), None, None);
@@ -383,8 +433,11 @@ pub fn spawn_matrix_worker<B: SandboxBackend + ?Sized>(
         .env
         .push(("KASTELLAN_MATRIX_HOMESERVER_URL".into(), cfg.homeserver_url.clone()));
     policy.env.push(("KASTELLAN_MATRIX_USER".into(), cfg.user.clone()));
-    if let Some(password) = &cfg.password {
-        policy.env.push(("KASTELLAN_MATRIX_PASSWORD".into(), password.clone()));
+    if cfg.password.is_some() {
+        let pw_path = cfg.store_dir.join(LOGIN_PASSWORD_FILE);
+        policy
+            .env
+            .push(("KASTELLAN_MATRIX_PASSWORD_FILE".into(), pw_path.display().to_string()));
     }
     policy
         .env
@@ -423,7 +476,76 @@ mod tests {
         assert_eq!(host_from_url("https://matrix.example.org:8448/").unwrap(), "matrix.example.org");
         assert_eq!(host_from_url("http://127.0.0.1:6167").unwrap(), "127.0.0.1");
         assert_eq!(host_from_url("matrix.bare.host").unwrap(), "matrix.bare.host");
+        // IPv6 literals: strip brackets + port.
+        assert_eq!(host_from_url("https://[::1]:8448").unwrap(), "::1");
+        assert_eq!(host_from_url("http://[2001:db8::1]/_matrix").unwrap(), "2001:db8::1");
         assert!(host_from_url("https://").is_err());
+    }
+
+    fn daemon_get(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> =
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        move |k: &str| map.get(k).cloned()
+    }
+
+    #[test]
+    fn daemon_cfg_none_when_required_unset() {
+        let exe = std::path::Path::new("/exe");
+        let st = std::path::Path::new("/st");
+        // Nothing set.
+        assert!(parse_daemon_spawn_config(daemon_get(&[]), Some(exe), Some(st)).is_none());
+        // Homeserver set but user missing.
+        let g = daemon_get(&[("KASTELLAN_MATRIX_HOMESERVER_URL", "https://m")]);
+        assert!(parse_daemon_spawn_config(g, Some(exe), Some(st)).is_none());
+    }
+
+    #[test]
+    fn daemon_cfg_defaults_worker_bin_and_store_and_sandbox_on() {
+        let g = daemon_get(&[
+            ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://m"),
+            ("KASTELLAN_MATRIX_USER", "@b:m"),
+        ]);
+        let c = parse_daemon_spawn_config(
+            g,
+            Some(std::path::Path::new("/exe")),
+            Some(std::path::Path::new("/st/matrix/store")),
+        )
+        .expect("config");
+        assert_eq!(c.worker_bin, PathBuf::from("/exe/kastellan-worker-matrix"));
+        assert_eq!(c.store_dir, PathBuf::from("/st/matrix/store"));
+        assert!(c.enforce_sandbox, "sandbox must default ON");
+        assert!(c.password.is_none(), "daemon relies on persisted session");
+    }
+
+    #[test]
+    fn daemon_cfg_enforce_sandbox_off_only_for_explicit_falsey() {
+        let mk = |val: &str| {
+            daemon_get(&[
+                ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://m"),
+                ("KASTELLAN_MATRIX_USER", "@b:m"),
+                ("KASTELLAN_MATRIX_ENFORCE_SANDBOX", val),
+            ])
+        };
+        let exe = std::path::Path::new("/e");
+        let st = std::path::Path::new("/s");
+        assert!(!parse_daemon_spawn_config(mk("0"), Some(exe), Some(st)).unwrap().enforce_sandbox);
+        assert!(!parse_daemon_spawn_config(mk("false"), Some(exe), Some(st)).unwrap().enforce_sandbox);
+        assert!(!parse_daemon_spawn_config(mk("FALSE"), Some(exe), Some(st)).unwrap().enforce_sandbox);
+        assert!(parse_daemon_spawn_config(mk("1"), Some(exe), Some(st)).unwrap().enforce_sandbox);
+    }
+
+    #[test]
+    fn daemon_cfg_env_overrides_worker_bin_and_store() {
+        let g = daemon_get(&[
+            ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://m"),
+            ("KASTELLAN_MATRIX_USER", "@b:m"),
+            ("KASTELLAN_MATRIX_WORKER_BIN", "/opt/w"),
+            ("KASTELLAN_MATRIX_STORE", "/data/store"),
+        ]);
+        // No exe_dir / default_store needed when both are overridden.
+        let c = parse_daemon_spawn_config(g, None, None).expect("config");
+        assert_eq!(c.worker_bin, PathBuf::from("/opt/w"));
+        assert_eq!(c.store_dir, PathBuf::from("/data/store"));
     }
 
     /// Fake WorkerClient over an injectable shared inbox (tests push events at
