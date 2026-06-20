@@ -6,7 +6,29 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-20 (**Embedding dimension 1024 → 256 (Matryoshka). MERGED to `main` as `b06224f`
+**Last updated:** 2026-06-20 (**L1 embedding population — semantic recall lane now populated. Branch
+`feat/l1-embedding-population` (PR pending).** Closes the forward write path of
+[#323](https://github.com/hherb/kastellan/issues/323): no write path populated embeddings for any layer, so
+`semantic_search` (`WHERE embedding IS NOT NULL`, layer-agnostic) returned 0 rows and recall ran lexical+graph only.
+**What shipped (3 tasks, all TDD + reviewed):** (1) **`core/src/memory/embedder.rs`** — new `Embedder` async-trait seam
+(mirrors the `EntityExtractor` seam): `embed_for_storage(text) -> Option<Vec<f32>>`; `RouterEmbedder` (delegates to the
+existing `embed_query`, which already Matryoshka-truncates to `EMBEDDING_DIM` + writes the `action='embed'` audit row;
+`Err → warn! + None`) + `NoOpEmbedder` (always `None`). `Option` not `Result` so the caller can't conflate
+intentional-skip vs embed-failure (both store NULL). (2) **`promote_l1`** gains `embedder: &dyn Embedder`, called
+**lazily — only after the dedup EXISTS-check passes**, so a duplicate body never triggers an embed; embed failure → row
+stored with NULL embedding + WARN (degrade-and-warn, mirrors the entity-linker beside it; the insight write is never
+blocked). (3) **Threaded `Arc<dyn Embedder>`** through `spawn_scheduler`→`lane_loop`→`drain_lane`→`write_l1_promoted_row`
+(exactly like `entity_extractor`); `main.rs` builds the real `RouterEmbedder` for the agent-raised path. **Operator CLI
+`l1 add` stays NoOp** (symmetric with its `NoOpEntityExtractor`; no Router in the CLI). **Decision: L1 only** (supersedes
+the old `l1_promote` doc note that said L1 needs no embedding — rewritten). **Verification — macOS, live PG 18:**
+`memory_l1_promote_e2e` **12/0** (9 existing + 3 new: embed-on-insert + `semantic_search` finds it, lazy-on-dedup-skip
+[call_count stays 1], degrade-and-warn [NULL row absent from semantic, present in lexical]); `embedding_recall_e2e` 4/0,
+`memory_recall_e2e` 2/0; `cargo clippy --workspace --all-targets -D warnings` clean. Pure-Rust, no OS-gated code; no `db`
+crate change → DGX not required, Linux baseline carries forward. **Deferred follow-up:** backfill / `kastellan-cli memory
+l1 reembed` of existing NULL-embedding + operator rows (closes #323 item 2 later — issue to be filed). Spec/plan:
+`docs/superpowers/{specs,plans}/2026-06-20-l1-embedding-population*`.)
+
+_(Prior session — **Embedding dimension 1024 → 256 (Matryoshka). MERGED to `main` as `b06224f`
 (PR [#322](https://github.com/hherb/kastellan/pull/322)).** Fixes the Matrix-session follow-up (b): the active embed model
 **embeddinggemma** returns 768-d but the schema demanded 1024, so every embed failed the dim gate and recall ran with an
 **empty semantic lane** (`recall failed; continuing with empty recall context`). Settled on **256**: embeddinggemma is a
@@ -32,7 +54,7 @@ pgvector + migration SQL. The live DGX daemon applies 0019 on next deploy/restar
 no write path populates embeddings yet (l1_promote passes `None`), so the semantic recall lane is empty end-to-end until one
 lands — when it does (`insert_memory_light` / l1_promote embedding population), route its model output through the same
 `truncate_to_embedding_dim` chokepoint. (Ranking is unaffected by the renormalization since `semantic_search` orders by cosine
-`<=>`, which is scale-invariant; review note from PR #322.))
+`<=>`, which is scale-invariant; review note from PR #322.))_
 
 _(Prior session — **Matrix inbound channel — END-TO-END ROUNDTRIP LIVE on `matrix.kastellan.dev` under systemd.**
 **MERGED to `main` as `9b5c310` (PR [#320](https://github.com/hherb/kastellan/pull/320)).** A real Matrix DM from `@horst` now runs through the agent and replies:
@@ -517,6 +539,12 @@ sessions 2026-05-06 → 2026-05-09 in
 ---
 
 ## Next TODO (pick one)
+
+**Just shipped (branch `feat/l1-embedding-population`, PR pending):** the [#323](https://github.com/hherb/kastellan/issues/323)
+forward write path — agent-raised L1 insights now embed-on-insert via the new `Embedder` seam, so the semantic recall lane
+is populated end-to-end (see "Last updated" up top). **Natural next pick:** the deferred **L1 embedding backfill** —
+a `kastellan-cli memory l1 reembed` subcommand that (re)embeds existing `layer=1 AND embedding IS NULL` rows + operator-added
+rows through the same `RouterEmbedder`/`embed_query` chokepoint (closes #323 item 2; small, on demand — issue to be filed).
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
