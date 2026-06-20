@@ -91,7 +91,20 @@ fn default_store() -> Result<PathBuf, String> {
 
 pub(crate) fn run(args: &[String]) -> ExitCode {
     match args.first().map(|s| s.as_str()) {
-        Some("probe") => with_runtime("matrix probe", probe(&args[1..])),
+        Some("probe") => {
+            // Acquire the OS keyring BEFORE entering the async runtime: on Linux
+            // the keyring's secret-service (zbus) backend `block_on`s during
+            // initialization, which panics ("cannot start a runtime from within a
+            // runtime") if done inside tokio. Once initialized, `get()` is pure.
+            let kp = match kastellan_db::secrets::OsKeyringProvider::ensure_initialized() {
+                Ok(kp) => kp,
+                Err(e) => {
+                    eprintln!("matrix probe: keyring: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            with_runtime("matrix probe", probe(&args[1..], kp))
+        }
         _ => {
             eprintln!("usage: kastellan-cli matrix probe [--homeserver URL] [--user USER]\n  \
                        [--secret NAME] [--store DIR] [--worker-bin PATH]\n  \
@@ -101,7 +114,7 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
     }
 }
 
-async fn probe(args: &[String]) -> ExitCode {
+async fn probe(args: &[String], kp: kastellan_db::secrets::OsKeyringProvider) -> ExitCode {
     let a = match parse_args(args) {
         Ok(a) => a,
         Err(e) => {
@@ -145,14 +158,29 @@ async fn probe(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let kp = match kastellan_db::secrets::OsKeyringProvider::ensure_initialized() {
-        Ok(kp) => kp,
+    // Materialize the bot password from the Vault (keyring already initialized
+    // in `run()`, before the runtime — `materialize`/`redeem` here are pure).
+    let vault = kastellan_core::secrets::Vault::new();
+    let password = match vault.materialize(&pool, &kp, &a.secret, "cli:matrix-probe").await {
+        Ok(secret_ref) => match vault.redeem(&secret_ref) {
+            kastellan_core::secrets::RedeemResult::Hit(bytes) => match String::from_utf8(bytes.to_vec()) {
+                Ok(s) => Some(s),
+                Err(_) => {
+                    eprintln!("matrix probe: password secret is not valid UTF-8");
+                    return ExitCode::from(1);
+                }
+            },
+            _ => {
+                eprintln!("matrix probe: could not redeem password secret {:?}", a.secret);
+                return ExitCode::from(1);
+            }
+        },
         Err(e) => {
-            eprintln!("matrix probe: keyring: {e}");
+            eprintln!("matrix probe: materialize secret {:?}: {e}", a.secret);
             return ExitCode::from(1);
         }
     };
-    let vault = kastellan_core::secrets::Vault::new();
+
     let sandboxes = kastellan_sandbox::SandboxBackends::default_for_current_os();
     #[cfg(target_os = "linux")]
     let backend = &*sandboxes.bwrap;
@@ -164,7 +192,7 @@ async fn probe(args: &[String]) -> ExitCode {
         homeserver_url: a.homeserver.clone(),
         user: a.user.clone(),
         store_dir: store.clone(),
-        password_secret_name: a.secret.clone(),
+        password,
         device_name: Some("kastellan-probe".to_string()),
         enforce_sandbox: a.enforce_sandbox,
     };
@@ -178,16 +206,8 @@ async fn probe(args: &[String]) -> ExitCode {
         if a.enforce_sandbox { "enforced" } else { "disabled" },
     );
 
-    let SpawnedMatrixWorker { mut channel, identity } = match spawn_matrix_worker(
-        backend,
-        &pool,
-        &vault,
-        &kp,
-        ChannelId("matrix".to_string()),
-        &cfg,
-    )
-    .await
-    {
+    let SpawnedMatrixWorker { mut channel, identity } =
+        match spawn_matrix_worker(backend, ChannelId("matrix".to_string()), &cfg) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("matrix probe: spawn/login failed: {e:#}");

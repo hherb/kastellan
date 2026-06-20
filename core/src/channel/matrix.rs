@@ -259,6 +259,48 @@ impl MatrixConfig {
     }
 }
 
+/// Build the daemon's [`MatrixSpawnConfig`] from the environment, gated on
+/// `KASTELLAN_MATRIX_HOMESERVER_URL` (returns `None` when unset, so the
+/// Matrix-less daemon is byte-identical). `exe_dir` is the directory holding the
+/// daemon binary; the worker is its sibling unless `KASTELLAN_MATRIX_WORKER_BIN`
+/// overrides.
+///
+/// Env contract:
+/// - `KASTELLAN_MATRIX_HOMESERVER_URL` (required) — e.g. `https://matrix.kastellan.dev`.
+/// - `KASTELLAN_MATRIX_USER` (required) — e.g. `@kastellan:matrix.kastellan.dev`.
+/// - `KASTELLAN_MATRIX_STORE` (optional) — default `<state>/matrix/store`.
+/// - `KASTELLAN_MATRIX_WORKER_BIN` (optional) — default `exe_dir/kastellan-worker-matrix`.
+/// - `KASTELLAN_MATRIX_ENFORCE_SANDBOX` (optional, default on) — `0`/`false` disables.
+///
+/// `password` is `None`: the daemon relies on the worker's persisted
+/// `session.json` (do the one-time initial login with `kastellan-cli matrix
+/// probe`). Materializing the password in-daemon needs the keyring initialized
+/// outside the tokio runtime — a follow-up.
+pub fn daemon_spawn_config_from_env(exe_dir: Option<&std::path::Path>) -> Option<MatrixSpawnConfig> {
+    let homeserver_url = std::env::var("KASTELLAN_MATRIX_HOMESERVER_URL").ok()?;
+    let user = std::env::var("KASTELLAN_MATRIX_USER").ok()?;
+    let store_dir = std::env::var_os("KASTELLAN_MATRIX_STORE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::audit_mirror::default_state_dir().map(|d| d.join("matrix").join("store"))
+        })?;
+    let worker_bin = std::env::var_os("KASTELLAN_MATRIX_WORKER_BIN")
+        .map(PathBuf::from)
+        .or_else(|| exe_dir.map(|d| d.join("kastellan-worker-matrix")))?;
+    let enforce_sandbox = std::env::var("KASTELLAN_MATRIX_ENFORCE_SANDBOX")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+    Some(MatrixSpawnConfig {
+        worker_bin,
+        homeserver_url,
+        user,
+        store_dir,
+        password: None,
+        device_name: Some("kastellan-daemon".to_string()),
+        enforce_sandbox,
+    })
+}
+
 /// Parse a comma-separated recognised-peer list into [`PeerId`]s, trimming
 /// whitespace and dropping empty entries.
 pub fn parse_peers_csv(csv: &str) -> Vec<PeerId> {
@@ -283,9 +325,12 @@ pub fn host_from_url(url: &str) -> anyhow::Result<String> {
 }
 
 /// Everything `spawn_matrix_worker` needs to bring up the live worker. The
-/// homeserver URL + user are operator config (env); the password is a Vault
-/// secret name materialized at spawn (only needed for the *initial* login — the
-/// worker persists `session.json` and restores it thereafter).
+/// homeserver URL + user are operator config (env). The `password` is only used
+/// for the *initial* login; once the worker has persisted `session.json` in the
+/// store it restores from that, so `None` is correct on every restart. Callers
+/// that materialize the password from the Vault must do so themselves (the
+/// keyring's secret-service backend must be initialized *outside* a tokio
+/// runtime — see `kastellan-cli`'s `matrix probe`).
 pub struct MatrixSpawnConfig {
     /// Path to the (live-matrix) worker binary.
     pub worker_bin: PathBuf,
@@ -295,8 +340,9 @@ pub struct MatrixSpawnConfig {
     pub user: String,
     /// Persistent encrypted E2E store dir (created if absent).
     pub store_dir: PathBuf,
-    /// Vault secret name holding the bot password.
-    pub password_secret_name: String,
+    /// Bot password — `Some` only for the initial login (no persisted session
+    /// yet); `None` relies on the restored session.
+    pub password: Option<String>,
     /// Optional device display name.
     pub device_name: Option<String>,
     /// When `false`, the worker runs with seccomp + Landlock disabled — for
@@ -311,45 +357,25 @@ pub struct SpawnedMatrixWorker {
     pub identity: serde_json::Value,
 }
 
-/// Bring up the sandboxed live Matrix worker: materialize the bot password from
-/// the [`Vault`], build the [`SandboxPolicy`] (`Net::Allowlist` scoped to the
-/// homeserver, persistent store as `fs_write`), spawn the worker, and block on
-/// `matrix.init` so the returned worker is logged-in-and-synced. The caller owns
-/// teardown by dropping the [`MatrixChannel`] (closes the worker's stdin → EOF →
-/// clean exit).
+/// Bring up the sandboxed live Matrix worker: build the [`SandboxPolicy`]
+/// (`Net::Allowlist` scoped to the homeserver, persistent store as `fs_write`),
+/// spawn the worker, and block on `matrix.init` so the returned worker is
+/// logged-in-and-synced. The caller owns teardown by dropping the
+/// [`MatrixChannel`] (closes the worker's stdin → EOF → clean exit).
 ///
 /// Egress force-routing (the per-worker sidecar) is **not** wired here yet — the
 /// worker reaches the homeserver directly on `Net::Allowlist`. Coupling it to the
 /// egress proxy (matrix is on the MITM-bypass list) is the immediate follow-up.
-pub async fn spawn_matrix_worker<B: SandboxBackend + ?Sized>(
+pub fn spawn_matrix_worker<B: SandboxBackend + ?Sized>(
     backend: &B,
-    pool: &sqlx::PgPool,
-    vault: &crate::secrets::Vault,
-    key_provider: &dyn kastellan_db::secrets::KeyProvider,
     id: ChannelId,
     cfg: &MatrixSpawnConfig,
 ) -> anyhow::Result<SpawnedMatrixWorker> {
-    use crate::secrets::RedeemResult;
-
-    // 1) Materialize the bot password at the host boundary.
-    let secret_ref = vault
-        .materialize(pool, key_provider, &cfg.password_secret_name, "channel/matrix")
-        .await
-        .map_err(|e| anyhow::anyhow!("materialize {:?}: {e}", cfg.password_secret_name))?;
-    let password = match vault.redeem(&secret_ref) {
-        RedeemResult::Hit(bytes) => String::from_utf8(bytes.to_vec())
-            .map_err(|_| anyhow::anyhow!("matrix password is not valid UTF-8"))?,
-        RedeemResult::Expired => anyhow::bail!("matrix password expired before use"),
-        RedeemResult::NotFound => {
-            anyhow::bail!("matrix password {:?} not found in vault", cfg.password_secret_name)
-        }
-    };
-
-    // 2) Persistent store dir must exist before bwrap can bind it.
+    // 1) Persistent store dir must exist before bwrap can bind it.
     std::fs::create_dir_all(&cfg.store_dir)
         .map_err(|e| anyhow::anyhow!("create matrix store dir {:?}: {e}", cfg.store_dir))?;
 
-    // 3) Policy + worker env (the worker reads KASTELLAN_MATRIX_* from its jail env).
+    // 2) Policy + worker env (the worker reads KASTELLAN_MATRIX_* from its jail env).
     let host = host_from_url(&cfg.homeserver_url)?;
     let mut policy =
         build_matrix_policy(cfg.worker_bin.clone(), &host, cfg.store_dir.clone(), None, None);
@@ -357,7 +383,9 @@ pub async fn spawn_matrix_worker<B: SandboxBackend + ?Sized>(
         .env
         .push(("KASTELLAN_MATRIX_HOMESERVER_URL".into(), cfg.homeserver_url.clone()));
     policy.env.push(("KASTELLAN_MATRIX_USER".into(), cfg.user.clone()));
-    policy.env.push(("KASTELLAN_MATRIX_PASSWORD".into(), password));
+    if let Some(password) = &cfg.password {
+        policy.env.push(("KASTELLAN_MATRIX_PASSWORD".into(), password.clone()));
+    }
     policy
         .env
         .push(("KASTELLAN_MATRIX_STORE".into(), cfg.store_dir.display().to_string()));

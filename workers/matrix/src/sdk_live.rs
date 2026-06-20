@@ -40,11 +40,12 @@ use tokio::runtime::Runtime;
 
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::matrix_auth::MatrixSession;
+use matrix_sdk::ruma::events::room::member::StrippedRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
 };
 use matrix_sdk::ruma::RoomId;
-use matrix_sdk::{Client, Room};
+use matrix_sdk::{Client, Room, RoomState};
 
 use kastellan_matrix_wire::{push_bounded, Event, InitResult};
 
@@ -281,6 +282,7 @@ async fn connect_client(
     };
 
     register_message_handler(&client, buffer, user_id);
+    register_autojoin_handler(&client);
 
     // One initial sync so room state + member device keys are present before we
     // start serving `send`; the continuous sync task takes over afterwards.
@@ -377,6 +379,43 @@ fn register_message_handler(
                 }
             }
         }
+    });
+}
+
+/// Auto-accept room invites addressed to the bot so a user can simply start a
+/// (DM) conversation with it. This only *joins* the room — it grants no trust:
+/// authorization stays at the core bus ([`channel::auth::DbPeerAuthorizer`]),
+/// which drops messages from unpaired senders. Joining is retried a few times
+/// to ride out transient server lag (federation is off here, so a couple of
+/// short retries suffice).
+fn register_autojoin_handler(client: &Client) {
+    client.add_event_handler(|ev: StrippedRoomMemberEvent, client: Client, room: Room| async move {
+        // Only react to the invite *for us*; ignore membership churn for others.
+        let Some(me) = client.user_id() else { return };
+        if ev.state_key != me {
+            return;
+        }
+        if room.state() != RoomState::Invited {
+            return;
+        }
+        let room_id = room.room_id().to_string();
+        for attempt in 0..3u32 {
+            match room.join().await {
+                Ok(()) => {
+                    eprintln!("kastellan-worker-matrix: auto-joined invited room {room_id}");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "kastellan-worker-matrix: join {room_id} failed (attempt {}): {e}",
+                        attempt + 1
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * (attempt as u64 + 1)))
+                        .await;
+                }
+            }
+        }
+        eprintln!("kastellan-worker-matrix: gave up auto-joining {room_id}");
     });
 }
 
