@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use kastellan_supervisor::default_supervisor;
 
 use super::plan::{
-    build_specs, estimate_model_bytes, is_local_ollama, memory_suffices, optional_binaries,
-    render_env_file, required_binaries, InstallArgs, Layout,
+    build_specs, cli_path_precedence_note, estimate_model_bytes, is_local_ollama, memory_suffices,
+    optional_binaries, render_env_file, required_binaries, InstallArgs, Layout,
 };
 
 /// Create dirs, copy binaries + assets, write the EnvironmentFile.
@@ -58,6 +58,15 @@ pub fn prepare_filesystem(
     let env = render_env_file(&args.llm_model, &args.llm_url, args.embedding_model.as_deref(), layout);
     write_private(&layout.env_file, env.as_bytes())?;
 
+    // Put the operator CLI on PATH. The flat prefix (`bin_dir`) lives under
+    // `~/.local/lib/` which is not on PATH, so without this symlink operators
+    // can't reach `kastellan-cli` and tend to hand-copy a binary into
+    // /usr/local/bin — which then goes stale and shadows the real one.
+    // `current_exe()` resolves through the symlink, so sibling worker discovery
+    // is unaffected. Symlink is Unix-only (the production targets).
+    #[cfg(unix)]
+    symlink_replace(&layout.bin_dir.join("kastellan-cli"), &layout.cli_link)?;
+
     Ok(copied)
 }
 
@@ -93,6 +102,15 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
 
     let copied = prepare_filesystem(&layout, &from, &assets_src, &args)?;
     eprintln!("installed {} binaries into {}", copied.len(), layout.bin_dir.display());
+    eprintln!("linked operator CLI: {}", layout.cli_link.display());
+
+    // Warn if the per-user CLI dir won't take precedence over system-wide bins
+    // (a host may run one Kastellan per user; each user's ~/.local/bin must win).
+    if let Some(path_var) = std::env::var_os("PATH") {
+        if let Some(note) = cli_path_precedence_note(&path_var.to_string_lossy(), &home) {
+            eprintln!("{note}");
+        }
+    }
 
     // db-init (idempotent) via the just-copied binary.
     let mut dbinit = Command::new(layout.bin_dir.join("kastellan-db-init"));
@@ -152,6 +170,15 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
     let _ = sup.stop_target(&specs.target);
     sup.uninstall_target(&specs.target).map_err(|e| format!("uninstall units: {e}"))?;
     eprintln!("removed kastellan.target units");
+
+    // Remove the operator-CLI symlink (a pointer, not data — gone on any
+    // uninstall, not just --purge). Only if it actually points into our prefix,
+    // so we never clobber an unrelated file the operator put at that path.
+    #[cfg(unix)]
+    if fs::read_link(&layout.cli_link).map(|t| t.starts_with(&layout.bin_dir)).unwrap_or(false) {
+        let _ = fs::remove_file(&layout.cli_link);
+        eprintln!("removed operator CLI symlink: {}", layout.cli_link.display());
+    }
 
     if purge {
         // Best-effort per dir: a partial/aborted install may be missing some of
@@ -271,6 +298,24 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     {
         fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
     }
+    Ok(())
+}
+
+/// Create/refresh the `link` symlink → `target` (mkdir parent; replace an
+/// existing link/file atomically so reinstalls always point at the current
+/// binary). Unix-only.
+#[cfg(unix)]
+fn symlink_replace(target: &Path, link: &Path) -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    // symlink() fails if the path exists, so stage a temp link and rename over.
+    let tmp = link.with_extension("tmp-install");
+    let _ = fs::remove_file(&tmp);
+    symlink(target, &tmp)
+        .map_err(|e| format!("symlink {} -> {}: {e}", tmp.display(), target.display()))?;
+    fs::rename(&tmp, link).map_err(|e| format!("rename symlink into {}: {e}", link.display()))?;
     Ok(())
 }
 

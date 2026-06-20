@@ -19,6 +19,13 @@ pub struct Layout {
     pub config_dir: PathBuf,
     pub env_file: PathBuf,
     pub log_dir: PathBuf,
+    /// Symlink placed on the operator's PATH (`~/.local/bin/kastellan-cli`)
+    /// pointing at `bin_dir/kastellan-cli`. The flat prefix (`bin_dir`) lives
+    /// under `~/.local/lib/` — not on PATH — so without this link operators
+    /// can't reach the CLI and tend to hand-copy a binary elsewhere (which
+    /// then goes stale). `current_exe()` resolves through the symlink to the
+    /// real prefix path, so worker sibling-discovery is unaffected.
+    pub cli_link: PathBuf,
 }
 
 /// Compute the per-user layout from `$HOME` + `$USER`. Pure.
@@ -34,8 +41,51 @@ pub fn resolve_layout(home: &Path, user: &str) -> Layout {
         data_dir: assets_dir.join("pg/data"),
         env_file: config_dir.join("kastellan.env"),
         log_dir: home.join(".local/state/kastellan"),
+        cli_link: home.join(".local/bin/kastellan-cli"),
         assets_dir,
         config_dir,
+    }
+}
+
+/// System-wide bin dirs the per-user CLI symlink must take precedence over.
+/// A machine may host one Kastellan per user, so each user's `~/.local/bin`
+/// has to win over any global install — otherwise a system-wide (or stale,
+/// hand-copied) `kastellan-cli` shadows every user's per-user one.
+const GLOBAL_BIN_DIRS: &[&str] = &[
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+];
+
+/// Check that the per-user CLI dir (`~/.local/bin`) will take precedence over
+/// system-wide bin dirs on the operator's `PATH`. Pure: PATH string in, advice
+/// out. Returns `None` when precedence is already correct, or `Some(warning)`
+/// with exact remediation when `~/.local/bin` is absent from PATH or sits
+/// *after* a global bin dir (so a global `kastellan-cli` would shadow the
+/// per-user one). The check is per-user by design — essential on a host that
+/// runs one Kastellan instance per user.
+pub fn cli_path_precedence_note(path_var: &str, home: &Path) -> Option<String> {
+    let local_bin = home.join(".local/bin");
+    let local_bin = local_bin.to_string_lossy();
+    let entries: Vec<&str> = path_var.split(':').filter(|s| !s.is_empty()).collect();
+    let local_idx = entries.iter().position(|e| *e == local_bin);
+
+    let remedy = "Put it first so the per-user install always wins (essential on a \
+         multi-user host): add to your shell rc — export PATH=\"$HOME/.local/bin:$PATH\"";
+    match local_idx {
+        None => Some(format!(
+            "warning: {local_bin} (the per-user CLI dir) is not on PATH — `kastellan-cli` won't be found there. {remedy}"
+        )),
+        Some(idx) => {
+            // Any global bin dir appearing *before* ~/.local/bin would shadow it.
+            let shadower = entries[..idx].iter().find(|e| GLOBAL_BIN_DIRS.contains(e));
+            shadower.map(|g| format!(
+                "warning: {g} precedes {local_bin} on PATH, so a system-wide `kastellan-cli` there would shadow this per-user install. {remedy}"
+            ))
+        }
     }
 }
 
@@ -251,6 +301,36 @@ mod tests {
         assert_eq!(l.config_dir, PathBuf::from("/home/u/.config/kastellan"));
         assert_eq!(l.env_file, PathBuf::from("/home/u/.config/kastellan/kastellan.env"));
         assert_eq!(l.log_dir, PathBuf::from("/home/u/.local/state/kastellan"));
+        // The operator CLI is symlinked onto PATH (~/.local/bin), not left in the lib prefix.
+        assert_eq!(l.cli_link, PathBuf::from("/home/u/.local/bin/kastellan-cli"));
+    }
+
+    #[test]
+    fn cli_path_precedence_ok_when_local_bin_is_first() {
+        let home = Path::new("/home/u");
+        // ~/.local/bin ahead of the global dirs → no warning.
+        assert_eq!(
+            cli_path_precedence_note("/home/u/.local/bin:/usr/local/bin:/usr/bin", home),
+            None
+        );
+    }
+
+    #[test]
+    fn cli_path_precedence_warns_when_global_precedes_local() {
+        let home = Path::new("/home/u");
+        // /usr/local/bin BEFORE ~/.local/bin → a global CLI would shadow the per-user one.
+        let note = cli_path_precedence_note("/usr/local/bin:/home/u/.local/bin", home)
+            .expect("should warn");
+        assert!(note.contains("/usr/local/bin"), "{note}");
+        assert!(note.contains("/home/u/.local/bin"), "{note}");
+        assert!(note.contains("export PATH"), "{note}");
+    }
+
+    #[test]
+    fn cli_path_precedence_warns_when_local_bin_absent() {
+        let home = Path::new("/home/u");
+        let note = cli_path_precedence_note("/usr/bin:/bin", home).expect("should warn");
+        assert!(note.contains("not on PATH"), "{note}");
     }
 
     #[test]
