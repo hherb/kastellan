@@ -25,7 +25,7 @@ the old `l1_promote` doc note that said L1 needs no embedding — rewritten). **
 [call_count stays 1], degrade-and-warn [NULL row absent from semantic, present in lexical]); `embedding_recall_e2e` 4/0,
 `memory_recall_e2e` 2/0; `cargo clippy --workspace --all-targets -D warnings` clean. Pure-Rust, no OS-gated code; no `db`
 crate change → DGX not required, Linux baseline carries forward. **Deferred follow-up:** backfill / `kastellan-cli memory
-l1 reembed` of existing NULL-embedding + operator rows (closes #323 item 2 later — issue to be filed). Spec/plan:
+l1 reembed` of existing NULL-embedding + operator rows (closes #323 item 2 later — tracked in [#325](https://github.com/hherb/kastellan/issues/325)). Spec/plan:
 `docs/superpowers/{specs,plans}/2026-06-20-l1-embedding-population*`.)
 
 _(Prior session — **Embedding dimension 1024 → 256 (Matryoshka). MERGED to `main` as `b06224f`
@@ -544,7 +544,7 @@ sessions 2026-05-06 → 2026-05-09 in
 forward write path — agent-raised L1 insights now embed-on-insert via the new `Embedder` seam, so the semantic recall lane
 is populated end-to-end (see "Last updated" up top). **Natural next pick:** the deferred **L1 embedding backfill** —
 a `kastellan-cli memory l1 reembed` subcommand that (re)embeds existing `layer=1 AND embedding IS NULL` rows + operator-added
-rows through the same `RouterEmbedder`/`embed_query` chokepoint (closes #323 item 2; small, on demand — issue to be filed).
+rows through the same `RouterEmbedder`/`embed_query` chokepoint (closes #323 item 2; small, on demand — tracked in [#325](https://github.com/hherb/kastellan/issues/325)).
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
