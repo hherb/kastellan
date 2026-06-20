@@ -849,6 +849,10 @@ fn promote_l1_stores_null_embedding_when_embedder_returns_none() {
         let hits = semantic_search(&pool, &unit_vec_e0(), 10).await.expect("semantic_search");
         assert!(!hits.contains(&id), "NULL-embedding row must be absent from semantic lane");
 
+        // The lexical term "embedding" is a lexeme of the body
+        // "insight with no embedding" above; if you change that body, change
+        // this query in lockstep (this asserts the row stays retrievable via
+        // the embedding-free lexical lane even with a NULL embedding).
         let lex = kastellan_db::memories::lexical_search(&pool, "embedding", 10)
             .await.expect("lexical_search");
         assert!(lex.contains(&id), "row still retrievable via lexical lane");
