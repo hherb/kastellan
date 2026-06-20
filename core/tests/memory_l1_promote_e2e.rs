@@ -12,10 +12,44 @@
 use kastellan_core::cli_audit::{l1_add_and_audit, l1_remove_and_audit};
 use kastellan_core::entity_extraction::NoOpEntityExtractor;
 use kastellan_core::memory::l1_promote::{promote_l1, list_l1, L1Source, L1WriteOutcome, L1Error};
-use kastellan_db::memories::MemoryLayer;
+use kastellan_core::memory::embedder::{Embedder, NoOpEmbedder};
+use kastellan_db::memories::{semantic_search, EMBEDDING_DIM, MemoryLayer};
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
+use async_trait::async_trait;
+
+/// Test embedder: counts calls and returns a fixed unit vector (or `None`).
+/// `None` models both the NoOp and the embed-failure degrade paths.
+struct FakeEmbedder {
+    calls: AtomicUsize,
+    out: Option<Vec<f32>>,
+}
+
+impl FakeEmbedder {
+    fn returning(out: Option<Vec<f32>>) -> Self {
+        Self { calls: AtomicUsize::new(0), out }
+    }
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Embedder for FakeEmbedder {
+    async fn embed_for_storage(&self, _text: &str) -> Option<Vec<f32>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.out.clone()
+    }
+}
+
+/// A deterministic `EMBEDDING_DIM`-length unit vector: 1.0 in slot 0, else 0.
+fn unit_vec_e0() -> Vec<f32> {
+    let mut v = vec![0.0f32; EMBEDDING_DIM];
+    v[0] = 1.0;
+    v
+}
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
@@ -450,6 +484,7 @@ fn agent_raised_promote_l1_writes_l1_row_with_task_id_metadata() {
         let outcome = promote_l1(
             &pool,
             &NoOpEntityExtractor::new(),
+            &NoOpEmbedder::new(),
             "shell-exec /bin/echo works",
             L1Source::AgentRaised { task_id: 17 },
         )
@@ -526,6 +561,7 @@ fn agent_raised_promote_dedups_against_operator_row() {
         let agent_outcome = promote_l1(
             &pool,
             &NoOpEntityExtractor::new(),
+            &NoOpEmbedder::new(),
             "shared",
             L1Source::AgentRaised { task_id: 99 },
         )
@@ -599,6 +635,7 @@ fn list_l1_in_prompt_vs_all_distinguishes_at_cap_boundary() {
             promote_l1(
                 &pool,
                 &NoOpEntityExtractor::new(),
+                &NoOpEmbedder::new(),
                 &format!("distinct insight row {i:03}"),
                 L1Source::AgentRaised { task_id: i64::from(i) },
             )
@@ -680,6 +717,7 @@ fn promote_l1_inserted_outcome_carries_link_outcome() {
         let outcome = promote_l1(
             &pool,
             &extractor,
+            &NoOpEmbedder::new(),
             "carol leads project alpha",
             L1Source::Operator,
         )
@@ -707,5 +745,112 @@ fn promote_l1_inserted_outcome_carries_link_outcome() {
         }
 
         pool.close().await;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: embed-on-insert — a Some(vec) embedder stores a non-NULL
+// embedding and semantic_search returns the row.
+// ---------------------------------------------------------------------------
+#[test]
+fn promote_l1_stores_embedding_and_semantic_search_finds_it() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "l1emb-d", "l1emb-l",
+        &format!("kastellan-supervisor-test-pg-l1emb-{suffix}"),
+    );
+    rt().block_on(async {
+        kastellan_db::probe::run(
+            &cluster.conn_spec, "core", "startup",
+            serde_json::json!({"purpose": "l1-embed"}),
+        ).await.expect("probe");
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await.expect("pool");
+
+        let embedder = FakeEmbedder::returning(Some(unit_vec_e0()));
+        let outcome = promote_l1(
+            &pool, &NoOpEntityExtractor::new(), &embedder,
+            "semantically retrievable insight", L1Source::Operator,
+        ).await.expect("promote_l1");
+        assert!(matches!(outcome, L1WriteOutcome::Inserted { .. }));
+        assert_eq!(embedder.call_count(), 1, "embedder called once on insert");
+
+        let hits = semantic_search(&pool, &unit_vec_e0(), 10).await.expect("semantic_search");
+        assert_eq!(hits, vec![outcome.memory_id()], "semantic lane returns the embedded row");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: lazy on dedup-skip — a duplicate body never triggers an embed.
+// ---------------------------------------------------------------------------
+#[test]
+fn promote_l1_does_not_embed_on_dedup_skip() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "l1lazy-d", "l1lazy-l",
+        &format!("kastellan-supervisor-test-pg-l1lazy-{suffix}"),
+    );
+    rt().block_on(async {
+        kastellan_db::probe::run(
+            &cluster.conn_spec, "core", "startup",
+            serde_json::json!({"purpose": "l1-lazy"}),
+        ).await.expect("probe");
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await.expect("pool");
+
+        let embedder = FakeEmbedder::returning(Some(unit_vec_e0()));
+        let first = promote_l1(
+            &pool, &NoOpEntityExtractor::new(), &embedder,
+            "duplicate body", L1Source::Operator,
+        ).await.expect("first insert");
+        assert!(matches!(first, L1WriteOutcome::Inserted { .. }));
+
+        let second = promote_l1(
+            &pool, &NoOpEntityExtractor::new(), &embedder,
+            "duplicate body", L1Source::Operator,
+        ).await.expect("second insert");
+        assert!(matches!(second, L1WriteOutcome::SkippedDuplicate { .. }));
+        assert_eq!(embedder.call_count(), 1, "skip path must NOT embed");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: degrade-and-warn — a None embedder stores a NULL embedding;
+// the row is written, semantic_search skips it, lexical still finds it.
+// ---------------------------------------------------------------------------
+#[test]
+fn promote_l1_stores_null_embedding_when_embedder_returns_none() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir, "l1deg-d", "l1deg-l",
+        &format!("kastellan-supervisor-test-pg-l1deg-{suffix}"),
+    );
+    rt().block_on(async {
+        kastellan_db::probe::run(
+            &cluster.conn_spec, "core", "startup",
+            serde_json::json!({"purpose": "l1-degrade"}),
+        ).await.expect("probe");
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
+            .await.expect("pool");
+
+        let embedder = FakeEmbedder::returning(None);
+        let outcome = promote_l1(
+            &pool, &NoOpEntityExtractor::new(), &embedder,
+            "insight with no embedding", L1Source::Operator,
+        ).await.expect("promote_l1");
+        let id = outcome.memory_id();
+
+        let hits = semantic_search(&pool, &unit_vec_e0(), 10).await.expect("semantic_search");
+        assert!(!hits.contains(&id), "NULL-embedding row must be absent from semantic lane");
+
+        let lex = kastellan_db::memories::lexical_search(&pool, "embedding", 10)
+            .await.expect("lexical_search");
+        assert!(lex.contains(&id), "row still retrievable via lexical lane");
     });
 }

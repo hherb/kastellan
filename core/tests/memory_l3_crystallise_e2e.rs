@@ -28,6 +28,7 @@ use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
 use kastellan_core::cassandra::types::{DataClass, L3SkillCandidate, L3Param, L3TemplateStep, Plan, PlannedStep};
 use kastellan_core::cli_audit::l3_remove_and_audit;
 use kastellan_core::entity_extraction::NoOpEntityExtractor;
+use kastellan_core::memory::embedder::NoOpEmbedder;
 use kastellan_core::memory::l1_promote::{promote_l1, L1Source};
 use kastellan_core::memory::l3_crystallise::{crystallise_l3, list_l3, L3Source};
 use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
@@ -593,6 +594,7 @@ async fn remove_wrong_layer_is_noop() {
     let l1_outcome = promote_l1(
         &pool,
         &NoOpEntityExtractor::new(),
+        &NoOpEmbedder::new(),
         "some insight",
         L1Source::Operator,
     )

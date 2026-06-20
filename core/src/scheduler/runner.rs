@@ -377,7 +377,10 @@ async fn write_l1_promoted_row(pool: &PgPool, extractor: &dyn EntityExtractor, t
     use crate::memory::l1_promote::{promote_l1, L1Error, L1Source};
 
     let source = L1Source::AgentRaised { task_id };
-    let outcome = match promote_l1(pool, extractor, insight, source.clone()).await {
+    // TEMPORARY (Task 3 threads the real RouterEmbedder here): operator-
+    // equivalent NoOp keeps the agent path compiling + non-embedding.
+    let embedder = crate::memory::embedder::NoOpEmbedder::new();
+    let outcome = match promote_l1(pool, extractor, &embedder, insight, source.clone()).await {
         Ok(o) => o,
         Err(L1Error::Validation(msg)) => {
             tracing::warn!(

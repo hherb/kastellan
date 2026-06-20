@@ -582,6 +582,7 @@ pub async fn l1_add_and_audit(
     body: &str,
 ) -> Result<(crate::memory::l1_promote::L1WriteOutcome, i64), crate::memory::l1_promote::L1Error> {
     use crate::memory::l1_promote::{compute_body_sha256, promote_l1, validate_l1_body, L1Source};
+    use crate::memory::embedder::NoOpEmbedder;
 
     // Validate first so the body we audit and the body we SHA-256
     // both come from the same trimmed slice as promote_l1's internal
@@ -589,7 +590,7 @@ pub async fn l1_add_and_audit(
     // twice (once here, once inside promote_l1) is fine.
     let trimmed = validate_l1_body(body)?.to_string();
     let source = L1Source::Operator;
-    let outcome = promote_l1(pool, extractor, &trimmed, source.clone()).await?;
+    let outcome = promote_l1(pool, extractor, &NoOpEmbedder::new(), &trimmed, source.clone()).await?;
     let body_sha256 = compute_body_sha256(&trimmed);
 
     let payload = build_l1_write_payload(&outcome, &source, &body_sha256);

@@ -33,6 +33,7 @@ use sqlx::PgPool;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use crate::entity_extraction::EntityExtractor;
+use crate::memory::embedder::Embedder;
 use crate::memory::entity_link::{link_memory_entities, LinkOutcome};
 use crate::memory::layers::load_l1_default;
 
@@ -206,14 +207,21 @@ pub(crate) fn build_l1_metadata(
 /// The `metadata` blob carries `{source, body_sha256, created_at, task_id?}`
 /// per [`build_l1_metadata`].
 ///
-/// **Embedding:** not populated. L1 is loaded by sequential scan via
-/// `load_l1` (newest-first, byte-capped); the embedding column would
-/// only matter if L1 rows ever flowed through `recall(SEMANTIC_ONLY)`.
-/// They don't today; a future hybrid always-in-context + semantically-
-/// retrieved approach can backfill.
+/// **Embedding:** populated lazily via the injected [`Embedder`] — but
+/// only after the dedup EXISTS-check passes, so a duplicate body never
+/// triggers an embed call. The agent-raised path injects a
+/// [`crate::memory::RouterEmbedder`] (truncated to `EMBEDDING_DIM`,
+/// unit-norm, with an `action='embed'` audit row); the operator CLI path
+/// injects a [`crate::memory::NoOpEmbedder`] so operator rows stay
+/// embedding-free. On embed failure the row is stored with a NULL
+/// embedding (graceful degradation, mirroring the entity auto-linker
+/// below). A NULL-embedding row is simply skipped by `semantic_search`
+/// (`WHERE embedding IS NOT NULL`); it stays retrievable via the lexical
+/// and graph lanes.
 pub async fn promote_l1(
     pool: &PgPool,
     extractor: &dyn EntityExtractor,
+    embedder: &dyn Embedder,
     body: &str,
     source: L1Source,
 ) -> Result<L1WriteOutcome, L1Error> {
@@ -247,11 +255,17 @@ pub async fn promote_l1(
         .expect("rfc3339 format");
     let metadata = build_l1_metadata(&source, &body_sha256, &created_at);
 
+    // Embed AFTER the dedup miss so a duplicate body never triggers an
+    // embed call. On embed failure the embedder returns None (it logs the
+    // WARN); the row is stored with a NULL embedding rather than blocking
+    // the insight write.
+    let embedding = embedder.embed_for_storage(trimmed).await;
+
     let new_id = insert_memory_at_layer(
         pool,
         trimmed,
         &metadata,
-        None, // embedding not populated for L1 v1
+        embedding.as_deref(),
         MemoryLayer::Index,
     )
     .await?;
@@ -442,16 +456,18 @@ mod tests {
     #[test]
     fn promote_l1_signature_compile_pin() {
         // Compile-only smoke: verify the function signature stays
-        // (pool: &PgPool, extractor: &dyn EntityExtractor, body: &str, source: L1Source)
+        // (pool: &PgPool, extractor: &dyn EntityExtractor, embedder: &dyn Embedder,
+        //  body: &str, source: L1Source)
         // -> Result<L1WriteOutcome, L1Error>.
         // Full DB-backed coverage lives in core/tests/memory_l1_promote_e2e.rs.
         fn _signature_pin<'a>(
             pool: &'a sqlx::PgPool,
             extractor: &'a dyn crate::entity_extraction::EntityExtractor,
+            embedder: &'a dyn crate::memory::embedder::Embedder,
             body: &'a str,
             source: L1Source,
         ) -> impl std::future::Future<Output = Result<L1WriteOutcome, L1Error>> + 'a {
-            promote_l1(pool, extractor, body, source)
+            promote_l1(pool, extractor, embedder, body, source)
         }
         // No call — just ensure the function exists and has this signature.
         let _ = _signature_pin;
