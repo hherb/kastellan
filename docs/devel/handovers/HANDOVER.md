@@ -6,8 +6,8 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-20 (**Embedding dimension 1024 → 256 (Matryoshka). Branch
-`feat/embedding-dim-256-matryoshka` (PR pending).** Fixes the Matrix-session follow-up (b): the active embed model
+**Last updated:** 2026-06-20 (**Embedding dimension 1024 → 256 (Matryoshka). MERGED to `main` as `b06224f`
+(PR [#322](https://github.com/hherb/kastellan/pull/322)).** Fixes the Matrix-session follow-up (b): the active embed model
 **embeddinggemma** returns 768-d but the schema demanded 1024, so every embed failed the dim gate and recall ran with an
 **empty semantic lane** (`recall failed; continuing with empty recall context`). Settled on **256**: embeddinggemma is a
 Matryoshka/MRL model, so its 256-dim prefix (renormalized) is a valid, information-dense embedding — and 256 vs 1024 cuts
@@ -540,13 +540,14 @@ secret). Deploy details: runbook `docs/devel/runbooks/2026-06-19-matrix-homeserv
 doc `docs/deploy/matrix-homeserver.md`. **Gotcha for any redeploy:** a fresh Continuwuity server's first (admin) account
 needs the one-time BOOTSTRAP token from the startup log, not the config `registration_token`.
 
-**★ TOP PICK — channel-worker egress-coupled production spawn (plan Task 5) + daemon wiring.** This is what makes the live
-Matrix channel actually run in the daemon. Today `core/src/channel/matrix.rs` has the driver + pure `build_matrix_policy`
-but **no production spawn of the matrix worker with a real egress sidecar** (the `disable_mitm_for("matrix")` decision is
-wired + ready but nothing routes the channel worker through `spawn_worker_maybe_forced` yet). Build: the long-lived
-channel-worker spawn (sandbox + per-worker egress sidecar in transparent-tunnel mode + persistent store + restart
-supervision), then `core/src/channel/matrix.rs::from_env` + the `main.rs` `ChannelBus` wiring (plan Tasks 5–6), and swap
-`StaticPairings`→`DbPeerAuthorizer` + pass `DbPairingService` (slice #3 deferrals). **Carry the
+**~~★ TOP PICK — channel-worker egress-coupled production spawn (plan Task 5) + daemon wiring.~~ — DONE, MERGED as
+`9b5c310` (PR [#320](https://github.com/hherb/kastellan/pull/320)).** The live Matrix channel now runs end-to-end in the
+systemd daemon (inbound DM → invite auto-join → E2E decrypt → DB pairing → task → agent → LLM → reply; see the prior-session
+block up top). `core/src/channel/matrix.rs::spawn_matrix_worker` + `main.rs` `ChannelBus::spawn` over
+`DbPeerAuthorizer`/`DbPairingService` shipped. **Residual follow-ups** (not blocking): [#321](https://github.com/hherb/kastellan/issues/321)
+inbound-loss window on respawn; [#312](https://github.com/hherb/kastellan/issues/312) `ProxyBridge` error-surfacing;
+matrix-worker hardening (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today). **Historical note (the original pick, now satisfied):
+Carry the
 [#286](https://github.com/hherb/kastellan/issues/286) macOS-loopback caveat:** the `ProxyBridge` binds `127.0.0.1:0`
 inside the worker (same pattern as browser-driver's `shim.py`); when this spawn grants the matrix worker a loopback-widening
 Seatbelt profile on macOS, scope the grant to the bridge's bound port (or prefer a UDS-only transport / the `MacosContainer`
