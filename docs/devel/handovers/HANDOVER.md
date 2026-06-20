@@ -6,7 +6,36 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-19 (**Matrix Phase D — live `LiveSdk` integration — DONE on branch
+**Last updated:** 2026-06-20 (**`kastellan-cli install` — MERGED (#316) + DGX post-merge verification + review fixes.**
+The one-command per-user supervised installer (Postgres + daemon under `systemd --user` / launchd, from a freshly-built
+tree) landed on `main` as `4fdafda` (PR [#316](https://github.com/hherb/kastellan/pull/316)). **What it does:** copies all
+workspace binaries (atomic temp+rename, 0755) into a flat `~/.local/lib/kastellan/` prefix (so the daemon's
+`current_exe()`-relative worker discovery just works) + assets into `~/.local/share/kastellan/`; shells out to idempotent
+`kastellan-db-init --username $USER` (peer-auth role match); writes a tunable `~/.config/kastellan/kastellan.env` (mode
+0600) carried by the new additive `ServiceSpec.environment_file` → systemd `EnvironmentFile=`; defaults to Ollama
+`gemma4:26b-a4b-it-q8_0` + `embeddinggemma` (memory-fit-checked `ollama pull` when the endpoint is local Ollama, soft no-op
+otherwise); enables linger (Linux); **restart (stop→start)** so reinstalls apply new artifacts; **verifies** (PG socket +
+both services `active`, polled to 90s). `uninstall [--purge]` (typed confirm). `core/src/install/{plan,run}.rs` +
+`core/src/bin/kastellan-cli/install.rs`. **Resolves HANDOVER open-question #6** (production install convention). **Review
+fixes folded in this session (commit `608ce78` on the PR branch before merge):** (1) **launchd `EnvironmentFile=`
+counterpart** — launchd has no such directive, so the LaunchAgents backend was silently dropping `environment_file` (a macOS
+install would start the daemon with none of its tuned LLM/data config); `LaunchAgents::install` now reads the env file at
+install time and folds its `KEY=value` pairs into the plist `EnvironmentVariables` (file overrides inline `env` on
+collision, matching systemd's EnvironmentFile-after-Environment order). Pure `parse_env_file`/`merge_env` helpers live in
+the sibling `supervisor/src/launchd_agents/builders.rs` (I/O-free; `launchd_agents.rs` now 526 LOC, +18, within the
+≤27-over deferral). (2) **`uninstall --purge` idempotent** — `NotFound` per-dir treated as already-purged (no abort
+mid-cleanup on a partial install). (3) **`--no-start` skips the `ollama pull`** — that mode only lays down artifacts.
+Assets-source override deferred as [#317](https://github.com/hherb/kastellan/issues/317). **DGX post-merge verification —
+PASSED (2026-06-20):** synced `main` to `4fdafda`, `cargo build --release --workspace` clean (exit 0, only the pre-existing
+`sqlx-postgres` future-incompat warning); `kastellan-cli install` over the existing cluster **EXIT=0** (reinstall stop→start,
+both models already present, 10 binaries, target up); `install --no-start` correctly **skips the model check** (units-only,
+EXIT=0); final plain `install` EXIT=0 with both services `active`; **`kastellan-cli secret list` connects** (`(no secrets)`,
+EXIT=0 → daemon authenticated to Postgres via peer auth); env file mode `0600` with all 7 keys, `EnvironmentFile=` present in
+`kastellan-core.service`, `Linger=yes`. Supervisor 69/0 + core install (plan 10/0, e2e 2/0), clippy `-D warnings` clean.
+Docs updated this session: this HANDOVER (header + open-question #6 + over-cap census), ROADMAP Phase-0 supervisor, README
+quick-install section.)
+
+_(Prior session — **Matrix Phase D — live `LiveSdk` integration — DONE on branch
 `feat/matrix-phase-d-live-sdk`** (the next slice after the spike #311, now merged to `main`). Implements the real
 matrix-rust-sdk path behind the `live-matrix` feature; default build byte-identical (feature off → no SDK compiled).
 **What shipped:** (1) `workers/matrix/src/sdk_live.rs` — `LiveSdk` impl of the `MatrixSdk` seam: owns a multi-thread tokio
@@ -49,7 +78,7 @@ forward (matrix live path is `live-matrix`-cfg-gated; the `force_route` change i
 clippy+unit covered). **Remaining Phase D:**
 [#312](https://github.com/hherb/kastellan/issues/312) `ProxyBridge` error-surfacing; the full channel-worker egress-coupled
 production spawn (Task 5) + daemon `ChannelBus` wiring + `DbPeerAuthorizer`/`DbPairingService` swap. Spec for the SDK API
-names: `docs/superpowers/specs/2026-06-19-matrix-phase-d-egress-transport-spike-design.md#exact-sdk-builder-and-trigger-method-names`.)
+names: `docs/superpowers/specs/2026-06-19-matrix-phase-d-egress-transport-spike-design.md#exact-sdk-builder-and-trigger-method-names`.)_
 
 _(Prior session — **Matrix Phase D egress-transport spike — DONE, merged to `main` as `0a7df92` (PR
 [#311](https://github.com/hherb/kastellan/pull/311)).** matrix-sdk 0.8.0 landed behind `live-matrix` feature; AGPL license pass (225 new crates, all PASS);
@@ -545,7 +574,7 @@ leading Phase-3 pick above. Beyond that, Phase-2 channels (IMAP/Telegram inbound
 
 - **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none meaningfully remaining.** The substantial ones are done — `cassandra/types.rs`, `inner_loop_audit.rs`, `entity_extraction/gliner_relex.rs` (2026-06-07 batch); `macos_seatbelt.rs` (PR #192); `recall.rs`/`l0_seed.rs`/`capture.rs`/`inner_loop.rs`/`replay.rs` (Earlier history). A fresh census shows only files sitting **1–27 LOC over cap** still carry a liftable block (`core/src/main.rs` 527, `db/src/lib.rs` 525, `core/src/bin/kastellan-cli/memory_l3/run.rs` 519, `core/src/cassandra/constitutional.rs` 502, `core/src/memory/l1_promote.rs` 501) — a lift would save little; defer unless one grows. **`core/src/tool_host.rs` is now 627** (584 on `main` before #268; +~25 #268 dispatch hook, +16 the secret-scrub wiring — bulk kept out in `tool_host/egress_provision.rs` + `tool_host/secret_scrub.rs`). A real prod-split of `tool_host.rs` (its tests already live under `tool_host/`) is the leading over-cap candidate now — needs a seam (e.g. lift `dispatch_with_sink`'s `match call_result` post-processing — scrub + injection screen + audit-emission arms — into a `tool_host/post_process.rs` sibling).
 - **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `core/src/scheduler/runner.rs` (777), `core/src/scheduler/audit.rs` (701, tests already lifted), `db/src/entities.rs` (653), `workers/prelude/src/seccomp_lock.rs` (650). (`core/src/scheduler/inner_loop.rs` is **DONE** — split 630 → 481 this session via `inner_loop/invoke_expand.rs` [the `invoke_skill` expansion returning an `InvokeExpansion` enum] + `inner_loop/floor.rs` [`ClassificationFloorSource` + `apply_floor_raise`, re-exported]. `db/secrets.rs` [848 → 252 + crypto/key_provider/error siblings], `systemd_user.rs`, `gliner_relex.rs` also done — see history.) Most over-cap production file remains `core/src/cli_audit.rs` (958).
-  Also `supervisor/src/launchd_agents.rs` (508, +8) — pushed over by Option K's install-time warn; tests already external, so a fix needs a real prod-split (disproportionate for 8 lines; deferred per this same policy). And `core/src/scheduler/tool_dispatch.rs` (507, +7) — pushed over by the handoff stash + `fetch_handoff` intercept; tests already external (`tool_dispatch/tests.rs`), so deferred per the same ≤27-over policy (a clean split would lift the `fetch_handoff` intercept + stash path into a `handoff_dispatch.rs` sibling if it grows).
+  Also `supervisor/src/launchd_agents.rs` (526, +26) — Option K's install-time warn (+8) plus the installer's launchd `EnvironmentFile=` counterpart (#316 review fix: `install` reads `spec.environment_file` and folds it into the plist `EnvironmentVariables`; the pure `parse_env_file`/`merge_env` helpers live in the sibling `builders.rs` to keep the parent near cap). Tests already external, so a fix needs a real prod-split (disproportionate for a +26 file at the deferral threshold; deferred per this same ≤27-over policy — split the launchctl driver helpers if it grows). And `core/src/scheduler/tool_dispatch.rs` (507, +7) — pushed over by the handoff stash + `fetch_handoff` intercept; tests already external (`tool_dispatch/tests.rs`), so deferred per the same ≤27-over policy (a clean split would lift the `fetch_handoff` intercept + stash path into a `handoff_dispatch.rs` sibling if it grows).
 - **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851), `core/src/cassandra/types/tests.rs` (568).
 
 **Engineering pickups (need a spec/design first):**
@@ -613,7 +642,7 @@ Only currently-open issues are listed; closed-issue detail lives in the archive 
 3. ~~Egress proxy as separate worker vs in-process in `tool_host`~~ **Resolved 2026-05-06:** separate worker, with the credential-leak scanner co-located.
 4. Skill review workflow for *named* agent-authored Python (Phase 4) — see Phase 4 line items: trust enum + per-level capability ceiling. *(The L3 skill arc — crystallise → approve → pin → invoke — is the first concrete implementation of this for templated tool-call skills.)*
 5. Worker keep-alive vs spawn-per-call (idle-timeout lifecycle shipped for GLiNER-Relex; revisit for other workers when latency matters).
-6. ~~Worker binary discovery in production~~ **Advanced 2026-06-05 (item 11):** plain compiled workers default to a sibling of the `kastellan` binary (`current_exe()`-relative; `KASTELLAN_*_BIN` override wins; gliner exempt — keeps venv/weights env resolution). Residual: FHS `libexec` layout if/when packaging wants it.
+6. ~~Worker binary discovery in production~~ / ~~production install convention~~ **RESOLVED 2026-06-20 (`kastellan-cli install`, PR #316 + DGX post-merge verification):** the installer copies all workspace binaries into a flat `~/.local/lib/kastellan/` prefix so the daemon's `current_exe()`-relative discovery (item 11, 2026-06-05) just works in a real deployment, brings up the supervised `kastellan.target`, and writes a tunable `~/.config/kastellan/kastellan.env`. Residual: FHS `libexec`/system-wide (multi-user) layout if/when packaging wants it (today's install is per-user, no root); optional `--assets-from` ([#317](https://github.com/hherb/kastellan/issues/317)).
 
 ## Inspirations / things to read before each milestone
 
