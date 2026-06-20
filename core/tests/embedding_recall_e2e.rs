@@ -9,15 +9,19 @@
 //!
 //! Four cases:
 //!
-//!   1. Happy path — mock returns 1024-float vector; `embed_query`
-//!      returns `Ok(Vec<f32>)` of length 1024.
+//!   1. Happy path — mock returns an `EMBEDDING_DIM`-float vector;
+//!      `embed_query` returns `Ok(Vec<f32>)` of length `EMBEDDING_DIM`.
 //!   2. Audit row written — after `embed_query` returns Ok, the
 //!      `audit_log` table has exactly one row with
 //!      `actor='llm:router' action='embed'`, payload shape matching
 //!      `build_embed_audit_payload` invariants.
-//!   3. Dim mismatch — mock returns 512-float vector; `embed_query`
-//!      returns `Err(MemoryError::EmbeddingDimMismatch)`; `audit_log`
-//!      has only the probe bring-up row (no llm:router row).
+//!   3. Dim mismatch — mock returns a vector shorter than
+//!      `EMBEDDING_DIM` (which Matryoshka truncation cannot upscale);
+//!      `embed_query` returns `Err(MemoryError::EmbeddingDimMismatch)`;
+//!      `audit_log` has only the probe bring-up row (no llm:router row).
+//!      (A vector *longer* than `EMBEDDING_DIM` is no longer an error —
+//!      it is truncated; see the db-side `truncate_to_embedding_dim`
+//!      unit tests.)
 //!   4. Full text-to-recall flow — seed 3 memories with deterministic
 //!      embeddings; mock returns the embedding for memory A;
 //!      `embed_query("alpha bravo charlie")` → recall(SEMANTIC_ONLY)
@@ -324,7 +328,7 @@ fn embed_query_writes_llm_router_audit_row() {
         assert_eq!(action, "embed");
         assert_eq!(payload["model"], "embedding-test");
         assert_eq!(payload["n_texts"], 1);
-        assert_eq!(payload["dim"], 1024);
+        assert_eq!(payload["dim"], EMBEDDING_DIM as i64);
         assert_eq!(payload["backend"], "local");
         assert!(
             payload["latency_ms"].is_u64(),
@@ -375,8 +379,11 @@ fn embed_query_dim_mismatch_surfaces_typed_error_and_writes_no_audit_row() {
     rt.block_on(async {
         let pool = setup_pg(&cluster.conn_spec).await;
 
-        // Mock returns a 512-float vector — wrong dim.
-        let short_vec = make_short_vec(512);
+        // Mock returns a vector SHORTER than EMBEDDING_DIM — Matryoshka
+        // truncation can shrink an oversized output but cannot upscale a
+        // too-short one, so this is the surviving mismatch case.
+        let short_len = EMBEDDING_DIM - 1;
+        let short_vec = make_short_vec(short_len);
         let canned = serde_json::json!({
             "data": [{"index": 0, "embedding": short_vec}],
             "model": "embedding-test"
@@ -399,8 +406,8 @@ fn embed_query_dim_mismatch_surfaces_typed_error_and_writes_no_audit_row() {
                 actual,
                 model,
             } => {
-                assert_eq!(expected, 1024);
-                assert_eq!(actual, 512);
+                assert_eq!(expected, EMBEDDING_DIM);
+                assert_eq!(actual, short_len);
                 assert_eq!(model, "embedding-test");
             }
             other => panic!("expected EmbeddingDimMismatch, got {other:?}"),

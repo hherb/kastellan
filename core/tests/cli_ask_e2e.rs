@@ -373,17 +373,19 @@ fn envelope_for(plan_json_string: &str) -> String {
 /// expected embed dial and the chat queue holds one envelope per
 /// expected plan-iteration — independent of call ordering.
 ///
-/// `embed_query` validates that the returned embedding vector has
-/// exactly `EMBEDDING_DIM = 1024` elements; any other length causes a
-/// `MemoryError::EmbeddingDimMismatch` which triggers the
-/// degrade-and-warn path in `formulate_plan`. The byte values don't
-/// matter for these tests: the `memories` table is never seeded, so
-/// both recall lanes return 0 rows regardless of the query vector.
-/// Using `0.001` (a small non-zero value) keeps the embedding numerically
-/// well-defined for pgvector's cosine operator without relying on any
-/// implementation-defined behaviour for the all-zeros edge case.
+/// `embed_query` Matryoshka-truncates the returned embedding to
+/// `EMBEDDING_DIM` (256) elements; a vector at least that long succeeds
+/// (this 768-long filler mirrors embeddinggemma's native width), while
+/// a shorter one causes a `MemoryError::EmbeddingDimMismatch` that
+/// triggers the degrade-and-warn path in `formulate_plan`. The byte
+/// values don't matter for these tests: the `memories` table is never
+/// seeded, so both recall lanes return 0 rows regardless of the query
+/// vector. Using `0.001` (a small non-zero value) keeps the embedding
+/// numerically well-defined for pgvector's cosine operator without
+/// relying on any implementation-defined behaviour for the all-zeros
+/// edge case.
 fn embedding_envelope() -> String {
-    let filler: Vec<f32> = vec![0.001f32; 1024];
+    let filler: Vec<f32> = vec![0.001f32; 768];
     serde_json::json!({
         "object": "list",
         "data": [{"object": "embedding", "index": 0, "embedding": filler}],

@@ -32,7 +32,7 @@
 //! all; matches `Router::send` and `tool_host::dispatch` precedent).
 
 use kastellan_db::audit;
-use kastellan_db::memories::EMBEDDING_DIM;
+use kastellan_db::memories::{truncate_to_embedding_dim, EMBEDDING_DIM};
 use kastellan_db::DbError;
 use kastellan_llm_router::embeddings::EmbeddingRequest;
 use kastellan_llm_router::{Router, RouterError};
@@ -102,8 +102,10 @@ fn build_embed_audit_payload(
 /// 3. Validate `data.len() == 1` (router already validated against
 ///    request input length; this is a defensive check for the
 ///    single-text shape).
-/// 4. Validate the returned embedding's length equals
-///    [`EMBEDDING_DIM`]; otherwise [`MemoryError::EmbeddingDimMismatch`].
+/// 4. Matryoshka-truncate the returned embedding to [`EMBEDDING_DIM`]
+///    via [`truncate_to_embedding_dim`] (keep leading components +
+///    renormalize); a model that returned *fewer* dims can't be
+///    upscaled and yields [`MemoryError::EmbeddingDimMismatch`].
 /// 5. Insert one row into `audit_log` with
 ///    `actor='llm:router' action='embed'` and the payload shape
 ///    pinned by `build_embed_audit_payload`.
@@ -141,19 +143,23 @@ pub async fn embed_query(
             returned: resp.data.len(),
         }));
     }
-    let emb = resp.data
+    let raw = resp.data
         .into_iter()
         .next()
         .expect("invariant: data.len()==1 checked above; if this fires a refactor broke the guard")
         .embedding;
 
-    if emb.len() != EMBEDDING_DIM {
-        return Err(MemoryError::EmbeddingDimMismatch {
-            expected: EMBEDDING_DIM,
-            actual: emb.len(),
-            model,
-        });
-    }
+    // The active model (embeddinggemma) is Matryoshka/MRL: its native
+    // 768-dim output is narrowed to the `vector(256)` storage contract
+    // by keeping the leading components + renormalizing. A model that
+    // returns *fewer* than `EMBEDDING_DIM` dims can't be upscaled — that
+    // is the only remaining `EmbeddingDimMismatch` case.
+    let actual = raw.len();
+    let emb = truncate_to_embedding_dim(&raw).map_err(|_| MemoryError::EmbeddingDimMismatch {
+        expected: EMBEDDING_DIM,
+        actual,
+        model,
+    })?;
 
     // Source the backend tag from the same policy decision the router
     // made on dispatch. Phase 0/1 always resolves to "local" under
@@ -187,7 +193,7 @@ mod tests {
     /// *content* fields by their canonical key names.
     #[test]
     fn embed_audit_payload_excludes_input_text_and_embeddings() {
-        let v = build_embed_audit_payload("bge-m3", 1, 1024, "local", 42);
+        let v = build_embed_audit_payload("embeddinggemma", 1, 256, "local", 42);
         let s = serde_json::to_string(&v).unwrap();
         assert!(!s.contains("\"input\""), "input leaked: {s}");
         assert!(!s.contains("\"input_text\""), "input_text leaked: {s}");
@@ -200,10 +206,10 @@ mod tests {
     /// The audit payload must carry the operator-facing summary fields.
     #[test]
     fn embed_audit_payload_includes_load_bearing_fields() {
-        let v = build_embed_audit_payload("bge-m3", 1, 1024, "local", 87);
-        assert_eq!(v["model"], "bge-m3");
+        let v = build_embed_audit_payload("embeddinggemma", 1, 256, "local", 87);
+        assert_eq!(v["model"], "embeddinggemma");
         assert_eq!(v["n_texts"], 1);
-        assert_eq!(v["dim"], 1024);
+        assert_eq!(v["dim"], 256);
         assert_eq!(v["backend"], "local");
         assert_eq!(v["latency_ms"], 87);
     }

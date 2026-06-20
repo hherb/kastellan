@@ -8,7 +8,7 @@
 //! `db::memories::{insert_memory, insert_memory_at_layer,
 //! delete_memory_at_layer, seed_meta_memory, link_memory_to_entities}`
 //! are byte-for-byte unchanged. See the parent module doc for the
-//! chokepoint discipline and the `vector(1024)` text-encoding decision.
+//! chokepoint discipline and the `vector(256)` text-encoding decision.
 //!
 //! Shared vocabulary lives in the parent and is imported below: the
 //! `check_embedding_dim` guard, the [`vector_literal`] pgvector

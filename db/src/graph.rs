@@ -16,7 +16,7 @@
 //!
 //! ## What's NOT here yet
 //!
-//! - **Embeddings.** `entities.embedding` is `vector(1024)` in the
+//! - **Embeddings.** `entities.embedding` is `vector(256)` in the
 //!   schema, but writing/reading it requires either the `pgvector`
 //!   crate or a `::vector`-cast text representation. Phase 1 picks
 //!   one when the embedding worker lands; until then `upsert_entity`

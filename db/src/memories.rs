@@ -7,7 +7,7 @@
 //! follow. Outside callers (today: `core::memory::recall`) never write
 //! raw SQL against the table. Two payoffs:
 //!
-//!   1. The `vector(1024)` bind shape lives in *one* place. We choose
+//!   1. The `vector(256)` bind shape lives in *one* place. We choose
 //!      to encode embeddings as their canonical Postgres-text form
 //!      (`'[0.12, 0.34, ...]'::vector`) rather than pull in the
 //!      `pgvector` Rust crate. The reasons are documented on
@@ -74,12 +74,20 @@ pub use write::{
 
 /// Required dimensionality of every embedding written to `memories`.
 ///
-/// Pinned by `0001_init.sql`'s `vector(1024)` column type — bge-m3's
-/// natural output dim. A mismatch surfaces as a Postgres error at
-/// INSERT time (`expected 1024 dimensions, not <N>`); the
-/// application-layer check in [`insert_memory`] catches it earlier
-/// with an operator-readable message.
-pub const EMBEDDING_DIM: usize = 1024;
+/// Pinned by migration `0019_embedding_dim_256.sql`'s `vector(256)`
+/// column type. The active embedding model is **embeddinggemma**, a
+/// Matryoshka (MRL) model whose 256-dim prefix retains strong retrieval
+/// quality at ~3× less storage and faster ANN than its native 768-dim
+/// output — so [`truncate_to_embedding_dim`] keeps the leading 256
+/// components and renormalizes. (Historical note: migrations 0001/0008
+/// created these columns as `vector(1024)` for the original bge-m3
+/// candidate; 0019 narrowed them.)
+///
+/// A mismatch surfaces as a Postgres error at INSERT time
+/// (`expected 256 dimensions, not <N>`); the application-layer check in
+/// [`insert_memory`] catches it earlier with an operator-readable
+/// message.
+pub const EMBEDDING_DIM: usize = 256;
 
 /// Default fusion budget when a caller hasn't specified one.
 ///
@@ -103,6 +111,46 @@ fn check_embedding_dim(label: &str, v: &[f32]) -> Result<(), DbError> {
         )));
     }
     Ok(())
+}
+
+/// Adapt a raw model embedding to the storage contract via Matryoshka
+/// (MRL) truncation: keep the leading [`EMBEDDING_DIM`] components, then
+/// L2-renormalize.
+///
+/// embeddinggemma — and other MRL-trained models — pack the most
+/// information-dense signal into the leading components, so the
+/// leading-`N` prefix is itself a valid lower-dimensional embedding.
+/// Truncation breaks unit norm, so we renormalize: this keeps cosine
+/// similarity equal to the dot product downstream and matches the
+/// unit-norm vectors recall compares against.
+///
+/// Pure function — no I/O, no global state — so the write path
+/// ([`insert_memory`]) and the query path
+/// (`core::memory::embed_query`) share one canonicalization and the
+/// 256-dim contract lives in exactly one place.
+///
+/// # Errors
+/// [`DbError::Query`] if the model returned *fewer* than
+/// [`EMBEDDING_DIM`] components — Matryoshka can shrink an embedding but
+/// not synthesize missing dimensions. A zero-norm prefix (vanishingly
+/// unlikely from a real model) is returned un-normalized rather than
+/// dividing by zero.
+pub fn truncate_to_embedding_dim(raw: &[f32]) -> Result<Vec<f32>, DbError> {
+    if raw.len() < EMBEDDING_DIM {
+        return Err(DbError::Query(format!(
+            "embedding too short for Matryoshka truncation: got {}, need at least {}",
+            raw.len(),
+            EMBEDDING_DIM
+        )));
+    }
+    let mut v = raw[..EMBEDDING_DIM].to_vec();
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+    Ok(v)
 }
 
 /// `usize` → `i64` for SQL `LIMIT` binds. Saturates at `i64::MAX`
@@ -265,12 +313,12 @@ pub fn vector_literal(v: &[f32]) -> String {
 mod tests {
     use super::*;
 
-    /// Pin the embedding dim. Cluster-side `vector(1024)` and Rust-side
-    /// constant must agree; if either drifts the integration test will
-    /// trip immediately.
+    /// Pin the embedding dim. Cluster-side `vector(256)` (migration
+    /// 0019) and Rust-side constant must agree; if either drifts the
+    /// integration test will trip immediately.
     #[test]
-    fn embedding_dim_is_1024() {
-        assert_eq!(EMBEDDING_DIM, 1024);
+    fn embedding_dim_is_256() {
+        assert_eq!(EMBEDDING_DIM, 256);
     }
 
     /// Default fusion budget is non-zero. A zero default would let a
@@ -287,7 +335,7 @@ mod tests {
     }
 
     /// Empty vector is still valid input — pgvector rejects it at
-    /// INSERT (it expects exactly 1024 dimensions), but the formatter
+    /// INSERT (it expects exactly 256 dimensions), but the formatter
     /// emits the canonical `[]` shape regardless. Rejecting it here
     /// would mask the operator-readable error.
     #[test]
@@ -335,7 +383,7 @@ mod tests {
                 assert!(msg.contains("dim mismatch"), "msg: {msg}");
                 assert!(msg.contains("insert"), "label missing in: {msg}");
                 assert!(msg.contains("10"), "got-dim missing in: {msg}");
-                assert!(msg.contains("1024"), "expected-dim missing in: {msg}");
+                assert!(msg.contains("256"), "expected-dim missing in: {msg}");
             }
             other => panic!("expected DbError::Query, got {other:?}"),
         }
@@ -357,5 +405,78 @@ mod tests {
         assert_eq!(limit_as_i64(0), 0);
         assert_eq!(limit_as_i64(40), 40);
         assert_eq!(limit_as_i64(usize::MAX), i64::MAX);
+    }
+
+    /// Matryoshka truncation of a larger model output (e.g.
+    /// embeddinggemma's native 768) yields exactly [`EMBEDDING_DIM`]
+    /// components, ready to satisfy `check_embedding_dim` / the
+    /// `vector(256)` column.
+    #[test]
+    fn truncate_shrinks_oversized_output_to_embedding_dim() {
+        let raw: Vec<f32> = (0..768).map(|i| (i as f32) + 1.0).collect();
+        let out = truncate_to_embedding_dim(&raw).expect("768 ≥ 256 truncates");
+        assert_eq!(out.len(), EMBEDDING_DIM);
+        check_embedding_dim("query", &out).expect("truncated output passes the dim gate");
+    }
+
+    /// The result is L2-normalised (unit norm) so cosine == dot product
+    /// downstream — truncation breaks the source norm, renormalization
+    /// restores it.
+    #[test]
+    fn truncate_output_is_unit_norm() {
+        let raw: Vec<f32> = (0..512).map(|i| (i as f32) * 0.5 - 3.0).collect();
+        let out = truncate_to_embedding_dim(&raw).expect("512 ≥ 256");
+        let norm: f32 = out.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "expected unit norm, got {norm}");
+    }
+
+    /// Truncation keeps the leading components' *direction*: each output
+    /// element is the matching input element scaled by one shared
+    /// factor (1/‖prefix‖), so ratios between components are preserved.
+    #[test]
+    fn truncate_preserves_leading_component_direction() {
+        let raw: Vec<f32> = (0..300).map(|i| (i as f32) + 1.0).collect();
+        let out = truncate_to_embedding_dim(&raw).expect("300 ≥ 256");
+        // out[k] / out[0] must equal raw[k] / raw[0] (same scale factor).
+        let ratio_in = raw[100] / raw[0];
+        let ratio_out = out[100] / out[0];
+        assert!(
+            (ratio_in - ratio_out).abs() < 1e-4,
+            "direction not preserved: in {ratio_in} vs out {ratio_out}"
+        );
+    }
+
+    /// An exact-length input is sliced (no-op) then renormalized — still
+    /// [`EMBEDDING_DIM`] long and unit-norm.
+    #[test]
+    fn truncate_accepts_exact_length() {
+        let raw: Vec<f32> = vec![0.25; EMBEDDING_DIM];
+        let out = truncate_to_embedding_dim(&raw).expect("exact length is valid");
+        assert_eq!(out.len(), EMBEDDING_DIM);
+    }
+
+    /// A model that returns *fewer* than [`EMBEDDING_DIM`] components
+    /// cannot be Matryoshka-upscaled — reject with a clear message.
+    #[test]
+    fn truncate_rejects_too_short_output() {
+        let raw: Vec<f32> = vec![0.1; EMBEDDING_DIM - 1];
+        let err = truncate_to_embedding_dim(&raw).expect_err("128 < 256 must error");
+        match err {
+            DbError::Query(msg) => {
+                assert!(msg.contains("too short"), "msg: {msg}");
+                assert!(msg.contains("256"), "expected-dim missing in: {msg}");
+            }
+            other => panic!("expected DbError::Query, got {other:?}"),
+        }
+    }
+
+    /// A zero-norm prefix is returned un-normalized rather than dividing
+    /// by zero (defends the `norm > 0.0` guard).
+    #[test]
+    fn truncate_zero_vector_does_not_divide_by_zero() {
+        let raw: Vec<f32> = vec![0.0; EMBEDDING_DIM];
+        let out = truncate_to_embedding_dim(&raw).expect("zero vector is length-valid");
+        assert_eq!(out.len(), EMBEDDING_DIM);
+        assert!(out.iter().all(|x| *x == 0.0), "zero stays zero, no NaN");
     }
 }
