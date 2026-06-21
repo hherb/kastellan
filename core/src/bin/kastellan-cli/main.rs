@@ -145,6 +145,7 @@ mod ask;
 mod audit_tail;
 mod entities;
 mod entities_kinds;
+mod entities_reembed;
 mod install;
 mod matrix;
 mod memory_l1;
