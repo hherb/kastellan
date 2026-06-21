@@ -326,7 +326,8 @@ impl Channel for MatrixChannel {
 ///   homeserver (via the egress proxy when `proxy_uds` is set).
 /// - `Profile::WorkerNetClient` — outbound HTTPS via the proxy.
 /// - `fs_read`: the worker binary + the resolver config files (DNS in-jail) +
-///   the egress CA when force-routed.
+///   the system CA trust store (matrix-sdk 0.18 validates homeserver TLS against
+///   it) + the egress CA when force-routed.
 /// - `fs_write`: the **persistent** E2E store dir (NOT ephemeral scratch — the
 ///   SDK persists device keys + sync token there across restarts).
 pub fn build_matrix_policy(
@@ -343,6 +344,21 @@ pub fn build_matrix_policy(
         PathBuf::from("/etc/hosts"),
         PathBuf::from("/etc/nsswitch.conf"),
     ];
+    // matrix-sdk 0.18 validates the homeserver's TLS against the *system* trust
+    // store (rustls + native certs), so the worker needs the CA bundle inside the
+    // jail — without it `Client::builder().build()` fails at startup with "No CA
+    // certificates were loaded from the system" and the channel never starts.
+    // (matrix-sdk 0.8 used bundled webpki roots and never read these, which is why
+    // this only surfaced after the 0.18 upgrade.) The worker does native
+    // end-to-end TLS to the homeserver even through the egress tunnel (transparent
+    // `disable_mitm`), so the system CA is needed regardless of force-routing.
+    // Bind the well-known trust-store locations; `fs_read` is emitted as
+    // `--ro-bind-try`, so paths absent on a given distro/OS are silently skipped.
+    // `/usr/share/ca-certificates` is already covered by the `/usr` bind — these
+    // are the `/etc` paths that are not.
+    for ca in ["/etc/ssl/certs", "/etc/pki/tls/certs", "/etc/ssl/cert.pem"] {
+        fs_read.push(PathBuf::from(ca));
+    }
     if let Some(ca) = egress_ca {
         fs_read.push(ca);
     }
@@ -880,6 +896,10 @@ mod tests {
         assert_eq!(p.fs_write, vec![PathBuf::from("/var/lib/kastellan/matrix/store")]);
         assert!(p.fs_read.contains(&PathBuf::from("/run/ca.pem")));
         assert!(p.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
+        // System CA trust store must be bound regardless of force-routing —
+        // matrix-sdk 0.18 validates homeserver TLS against it (transparent tunnel,
+        // not MITM), so its absence fails the client build at startup.
+        assert!(p.fs_read.contains(&PathBuf::from("/etc/ssl/certs")));
         assert_eq!(p.proxy_uds, Some(PathBuf::from("/run/egress.sock")));
     }
 
