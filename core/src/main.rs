@@ -191,6 +191,16 @@ async fn main() -> Result<()> {
     // back to NoOpEntityExtractor — daemon stays up; graph lane stays
     // empty. Reads the resolved entry back from the registry — single
     // resolution, registry as source of truth.
+    // Shared embedder for every forward embed path: L1 promotion (via the
+    // scheduler) AND entity embed-on-insert (via the extractor below). Built
+    // once from the same pool + router so backfilled, L1, and entity vectors
+    // are all byte-identical.
+    let embedder: std::sync::Arc<dyn kastellan_core::memory::Embedder> =
+        std::sync::Arc::new(kastellan_core::memory::RouterEmbedder::new(
+            pool.clone(),
+            router.clone(),
+        ));
+
     let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
         match tool_registry
             .lookup(kastellan_core::workers::gliner_relex::Client::TOOL_NAME)
@@ -210,6 +220,7 @@ async fn main() -> Result<()> {
                     kastellan_core::entity_extraction::gliner_relex::GlinerRelexExtractor::new(
                         client,
                         pool.clone(),
+                        embedder.clone(),
                     ),
                 )
             }
@@ -322,11 +333,6 @@ async fn main() -> Result<()> {
             ),
         );
 
-    let embedder: std::sync::Arc<dyn kastellan_core::memory::Embedder> =
-        std::sync::Arc::new(kastellan_core::memory::RouterEmbedder::new(
-            pool.clone(),
-            router.clone(),
-        ));
     let scheduler = kastellan_core::scheduler::spawn_scheduler(
         pool.clone(),
         formulator,

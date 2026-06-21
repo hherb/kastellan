@@ -182,8 +182,10 @@ pub struct UpsertOutcome {
 pub async fn upsert_entities_and_relations(
     pool: &PgPool,
     merged: &ExtractResponse,
+    embedder: &dyn crate::memory::Embedder,
 ) -> Result<UpsertOutcome, crate::entity_extraction::EntityExtractionError> {
-    crate::entity_extraction::batch_upsert::upsert_entities_and_relations(pool, merged).await
+    crate::entity_extraction::batch_upsert::upsert_entities_and_relations(pool, merged, embedder)
+        .await
 }
 
 use crate::entity_extraction::{EntityExtractor, EntityExtractionError, EntitySeeds, SeedSource};
@@ -221,18 +223,25 @@ pub struct GlinerRelexExtractor {
     pool: PgPool,
     kinds_cache: Arc<KindsCache>,
     relation_labels: RelationLabelSource,
+    /// Embeds newly-inserted entities at upsert time (forward embed-on-insert).
+    /// Production wires a `RouterEmbedder`; tests inject a `NoOpEmbedder`
+    /// (entities stay embedding-free) or a deterministic embedder.
+    embedder: Arc<dyn crate::memory::Embedder>,
 }
 
 impl GlinerRelexExtractor {
     /// Build the production extractor with both kind caches seeded
     /// empty. First `extract` call populates each cache via one
-    /// `SELECT kind FROM <table>` query.
-    pub fn new(client: Client, pool: PgPool) -> Self {
+    /// `SELECT kind FROM <table>` query. `embedder` embeds entities the
+    /// upsert creates so they are searchable via the entity-similarity
+    /// recall lane without a manual `entities reembed` backfill.
+    pub fn new(client: Client, pool: PgPool, embedder: Arc<dyn crate::memory::Embedder>) -> Self {
         Self {
             client,
             pool,
             kinds_cache: Arc::new(KindsCache::new()),
             relation_labels: RelationLabelSource::FromDb(Arc::new(RelationKindsCache::new())),
+            embedder,
         }
     }
 
@@ -347,7 +356,8 @@ impl EntityExtractor for GlinerRelexExtractor {
 
         let n_chunks = chunk_responses.len();
         let merged = merge_chunks(chunk_responses);
-        let outcome = upsert_entities_and_relations(&self.pool, &merged).await?;
+        let outcome =
+            upsert_entities_and_relations(&self.pool, &merged, &*self.embedder).await?;
         let latency_ms_total = started.elapsed().as_millis() as u64;
 
         // Emit summary audit row — best-effort, WARN on failure.

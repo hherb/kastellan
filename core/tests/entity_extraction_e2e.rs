@@ -208,7 +208,7 @@ async fn upsert_creates_quarantined_entities() {
         ],
         triples: vec![],
     };
-    let outcome = upsert_entities_and_relations(&pool, &merged)
+    let outcome = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("upsert");
 
@@ -276,10 +276,10 @@ async fn upsert_is_idempotent_on_rerun() {
         }],
     };
 
-    let out1 = upsert_entities_and_relations(&pool, &merged)
+    let out1 = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("first upsert");
-    let out2 = upsert_entities_and_relations(&pool, &merged)
+    let out2 = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("second upsert");
 
@@ -327,10 +327,10 @@ async fn upsert_dedup_works_with_case_variants() {
         }],
         triples: vec![],
     };
-    let out_a = upsert_entities_and_relations(&pool, &merged_a)
+    let out_a = upsert_entities_and_relations(&pool, &merged_a, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("a");
-    let out_b = upsert_entities_and_relations(&pool, &merged_b)
+    let out_b = upsert_entities_and_relations(&pool, &merged_b, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("b");
 
@@ -371,7 +371,7 @@ async fn upsert_preserves_operator_unquarantine_decision() {
         }],
         triples: vec![],
     };
-    let out1 = upsert_entities_and_relations(&pool, &merged)
+    let out1 = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("first upsert");
     assert_eq!(out1.entity_ids.len(), 1);
@@ -386,7 +386,7 @@ async fn upsert_preserves_operator_unquarantine_decision() {
         .expect("operator approve simulation");
 
     // Re-extract the same entity. The upsert path hits ON CONFLICT.
-    let out2 = upsert_entities_and_relations(&pool, &merged)
+    let out2 = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("second upsert");
     assert_eq!(out2.n_entities_upserted_new, 0, "no new row created");
@@ -431,7 +431,7 @@ async fn upsert_counts_new_inserts_correctly_in_mixed_batch() {
         }],
         triples: vec![],
     };
-    let out_seed = upsert_entities_and_relations(&pool, &seeded)
+    let out_seed = upsert_entities_and_relations(&pool, &seeded, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("seed upsert");
     let alpha_id = out_seed.entity_ids[0];
@@ -456,7 +456,7 @@ async fn upsert_counts_new_inserts_correctly_in_mixed_batch() {
         ],
         triples: vec![],
     };
-    let out_mixed = upsert_entities_and_relations(&pool, &mixed)
+    let out_mixed = upsert_entities_and_relations(&pool, &mixed, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("mixed upsert");
 
@@ -529,7 +529,7 @@ async fn extractor_extract_against_real_worker_returns_seeds() {
         Arc::new(CompositeLifecycle::new(sandboxes));
 
     let client = Client::new(lifecycle, pool.clone(), entry);
-    let extractor = GlinerRelexExtractor::new(client, pool.clone());
+    let extractor = GlinerRelexExtractor::new(client, pool.clone(), std::sync::Arc::new(kastellan_core::memory::NoOpEmbedder::new()));
 
     let seeds = extractor
         .extract("Dr Smith treats asthma in Mosman.")
@@ -581,7 +581,7 @@ async fn extractor_chunking_path_against_real_worker() {
         Arc::new(CompositeLifecycle::new(sandboxes));
 
     let client = Client::new(lifecycle, pool.clone(), entry);
-    let extractor = GlinerRelexExtractor::new(client, pool.clone());
+    let extractor = GlinerRelexExtractor::new(client, pool.clone(), std::sync::Arc::new(kastellan_core::memory::NoOpEmbedder::new()));
 
     // Build > 8192-byte input: two halves with distinct entities each.
     // 34 bytes × 250 ≈ 8500 bytes each half → 17 KB total, forcing
@@ -659,7 +659,7 @@ async fn upsert_batch_happy_path_returns_same_outcome_shape_as_layer_a() {
         ],
         triples: vec![],
     };
-    let out = upsert_entities_and_relations(&pool, &merged)
+    let out = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("batch upsert should succeed on fresh batch");
 
@@ -702,7 +702,7 @@ async fn upsert_batch_preserves_entity_id_order_for_unique_inputs() {
         ],
         triples: vec![],
     };
-    let out = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+    let out = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new()).await.unwrap();
 
     // Verify each id resolves to the expected name in input order.
     assert_eq!(out.entity_ids.len(), 3);
@@ -739,7 +739,7 @@ async fn upsert_batch_dedup_input_returns_same_id_for_duplicates() {
         ],
         triples: vec![],
     };
-    let out = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+    let out = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new()).await.unwrap();
 
     assert_eq!(out.entity_ids.len(), 3, "entity_ids has one id per input position");
     assert_eq!(
@@ -780,7 +780,7 @@ async fn upsert_batch_preserves_operator_unquarantine_decision() {
         ],
         triples: vec![],
     };
-    let out1 = upsert_entities_and_relations(&pool, &merged1).await.unwrap();
+    let out1 = upsert_entities_and_relations(&pool, &merged1, &kastellan_core::memory::NoOpEmbedder::new()).await.unwrap();
     assert_eq!(out1.entity_ids.len(), 3);
     let smith_id = out1.entity_ids[1];
 
@@ -794,7 +794,7 @@ async fn upsert_batch_preserves_operator_unquarantine_decision() {
 
     // Second pass: re-extract — all three hit ON CONFLICT through the
     // batch path.
-    let out2 = upsert_entities_and_relations(&pool, &merged1).await.unwrap();
+    let out2 = upsert_entities_and_relations(&pool, &merged1, &kastellan_core::memory::NoOpEmbedder::new()).await.unwrap();
     assert_eq!(out2.entity_ids, out1.entity_ids, "same ids returned");
     assert_eq!(out2.n_entities_upserted_new, 0, "no new rows on rerun");
 
@@ -869,7 +869,7 @@ async fn upsert_batch_falls_back_to_per_row_on_entity_kind_fk_violation() {
         ],
         triples: vec![],
     };
-    let result = upsert_entities_and_relations(&pool, &merged).await;
+    let result = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new()).await;
     // UpsertOutcome doesn't implement Debug so we can't use expect_err.
     // Unwrap as Err manually.
     let err = match result {
@@ -929,7 +929,7 @@ async fn upsert_batch_relations_inserts_dedups_and_skips_unknown_entities() {
             },
         ],
     };
-    let out1 = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+    let out1 = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new()).await.unwrap();
     assert_eq!(out1.entity_ids.len(), 2, "both entities upserted");
     assert_eq!(
         out1.n_relations_inserted, 1,
@@ -937,7 +937,7 @@ async fn upsert_batch_relations_inserts_dedups_and_skips_unknown_entities() {
     );
 
     // Re-run: WHERE NOT EXISTS makes the relation insert idempotent.
-    let out2 = upsert_entities_and_relations(&pool, &merged).await.unwrap();
+    let out2 = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new()).await.unwrap();
     assert_eq!(out2.n_relations_inserted, 0, "re-run finds the relation present");
 
     // Verify the relation row landed in the DB with the expected kind.
@@ -991,7 +991,7 @@ async fn upsert_batch_falls_back_to_per_row_on_relation_kind_fk_violation() {
 
     // Use a match instead of expect_err because UpsertOutcome doesn't
     // implement Debug (Task 8 made the same adjustment).
-    let err = match upsert_entities_and_relations(&pool, &merged).await {
+    let err = match upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new()).await {
         Ok(_) => panic!("expected FK violation from missing relation_kind"),
         Err(e) => e,
     };
@@ -1028,7 +1028,7 @@ async fn upsert_batch_empty_input_returns_zero_outcome() {
         entities: vec![],
         triples: vec![],
     };
-    let out = upsert_entities_and_relations(&pool, &merged)
+    let out = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new())
         .await
         .expect("empty input should succeed without issuing any SQL");
 
