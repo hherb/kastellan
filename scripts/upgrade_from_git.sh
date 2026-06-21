@@ -102,8 +102,14 @@ echo -n "    services: "
 systemctl --user is-active kastellan.target kastellan-core kastellan-postgres | paste -sd' '
 
 if [ -n "$HS" ] && [ -n "$MX_USER" ] && [ -f "$CORE_LOG" ]; then
-  # Look at the most recent matrix lifecycle line written by *this* daemon start.
-  last="$(grep -aoE '"message":"(matrix channel bus running|matrix worker spawn/login failed[^"]*)"' "$CORE_LOG" 2>/dev/null | tail -1)"
+  # Most recent matrix lifecycle line anywhere in the log. NOTE: this is not
+  # scoped to *this* daemon start — on a normal (non-relogin) upgrade a stale
+  # "channel bus running" from a prior boot can be read if the new start has not
+  # logged its status yet within the wait above. The --relogin path wipes the
+  # store and restarts, so there it reflects the current start.
+  # `|| true`: with `set -euo pipefail` a no-match grep exits 1 and would abort
+  # the script here, making the "(not yet in the log)" fallback below unreachable.
+  last="$(grep -aoE '"message":"(matrix channel bus running|matrix worker spawn/login failed[^"]*)"' "$CORE_LOG" 2>/dev/null | tail -1 || true)"
   case "$last" in
     *"channel bus running"*)
       echo "    ✅ Matrix channel is up." ;;
