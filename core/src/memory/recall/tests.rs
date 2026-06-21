@@ -24,13 +24,14 @@ fn recall_modes_default_runs_every_lane() {
     assert!(m.semantic);
     assert!(m.lexical);
     assert!(m.graph);
+    assert!(m.entity);
 }
 
 #[test]
 fn recall_modes_all_is_every_lane_on() {
     assert_eq!(
         RecallModes::ALL,
-        RecallModes { semantic: true, lexical: true, graph: true }
+        RecallModes { semantic: true, lexical: true, graph: true, entity: true }
     );
 }
 
@@ -185,18 +186,21 @@ fn recall_modes_semantic_and_lexical_is_two_text_lanes() {
 }
 
 /// `RecallParams::new(text, emb)` leaves `seed_entity_ids = None`
-/// and uses [`RecallModes::SEMANTIC_AND_LEXICAL`] — graph lane is
+/// and uses [`RecallModes::SEMANTIC_LEXICAL_ENTITY`] — graph lane is
 /// off by default because the no-seeds constructor cannot
-/// populate it. Issue #40 pin.
+/// populate it; entity lane is ON because it only needs
+/// `query_embedding`. Issue #40 pin.
 #[test]
-fn recall_params_new_default_is_semantic_and_lexical_no_seeds() {
-    let emb: Vec<f32> = vec![0.0; 1024];
+fn recall_params_new_default_enables_entity_no_graph_no_seeds() {
+    let emb: Vec<f32> = vec![0.0; super::EMBEDDING_DIM];
     let params = RecallParams::new("query text", &emb);
     assert!(params.seed_entity_ids.is_none());
-    assert_eq!(params.modes, RecallModes::SEMANTIC_AND_LEXICAL);
-    // Specifically: graph is OFF by default. If a future change
-    // re-enables graph in `new()`, every prod caller starts
-    // warn-and-skipping on every call — pin against that.
+    assert_eq!(params.modes, RecallModes::SEMANTIC_LEXICAL_ENTITY);
+    // The entity lane is on (no seeds needed); graph stays OFF — re-enabling
+    // graph in new() would warn-and-skip on every no-seed call. #40 pin.
+    assert!(params.modes.entity);
+    assert!(params.modes.semantic);
+    assert!(params.modes.lexical);
     assert!(!params.modes.graph);
 }
 
@@ -214,6 +218,7 @@ fn recall_params_with_seeds_enables_all_three_lanes() {
     assert!(params.modes.graph);
     assert!(params.modes.semantic);
     assert!(params.modes.lexical);
+    assert!(params.modes.entity);
 }
 
 /// Pin `GRAPH_FANOUT_CAP_PER_SEED = 32` so a future tune is an
@@ -221,6 +226,33 @@ fn recall_params_with_seeds_enables_all_three_lanes() {
 #[test]
 fn graph_fanout_cap_per_seed_is_thirty_two() {
     assert_eq!(GRAPH_FANOUT_CAP_PER_SEED, 32);
+}
+
+/// `RecallModes::ALL` now enables the fourth (entity-similarity) lane. If a
+/// future fifth lane lands without updating `ALL`, this trips loudly.
+#[allow(clippy::assertions_on_constants)]
+#[test]
+fn recall_modes_all_includes_entity() {
+    assert!(RecallModes::ALL.entity);
+    assert!(RecallModes::ALL.graph);
+    assert!(RecallModes::ALL.semantic);
+    assert!(RecallModes::ALL.lexical);
+}
+
+/// `RecallModes::ENTITY_ONLY` exact shape pin.
+#[test]
+fn recall_modes_entity_only_is_only_entity() {
+    let m = RecallModes::ENTITY_ONLY;
+    assert!(m.entity);
+    assert!(!m.semantic);
+    assert!(!m.lexical);
+    assert!(!m.graph);
+}
+
+/// Pin `ENTITY_SIMILARITY_FANOUT = 64` so a future tune is an explicit PR.
+#[test]
+fn entity_similarity_fanout_is_sixty_four() {
+    assert_eq!(ENTITY_SIMILARITY_FANOUT, 64);
 }
 
 /// Issue #17 — the missing-input policy is *hybrid*, and this pins its sharp

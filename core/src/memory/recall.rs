@@ -57,6 +57,11 @@ pub struct RecallModes {
     /// then ranking via [`kastellan_db::memories::graph_search`]).
     /// Requires `seed_entity_ids` to be a non-empty slice.
     pub graph: bool,
+    /// Run the entity-similarity lane: embed-nearest entities (via
+    /// [`kastellan_db::entity_embedding::entity_similarity_search`]) →
+    /// their linked memories. Requires `query_embedding` (the same input the
+    /// semantic lane uses); needs no seeds.
+    pub entity: bool,
 }
 
 impl RecallModes {
@@ -66,6 +71,7 @@ impl RecallModes {
         semantic: true,
         lexical: true,
         graph: true,
+        entity: true,
     };
 
     /// Run only the semantic lane.
@@ -73,6 +79,7 @@ impl RecallModes {
         semantic: true,
         lexical: false,
         graph: false,
+        entity: false,
     };
 
     /// Run only the lexical lane.
@@ -80,6 +87,7 @@ impl RecallModes {
         semantic: false,
         lexical: true,
         graph: false,
+        entity: false,
     };
 
     /// Run only the graph lane.
@@ -87,16 +95,36 @@ impl RecallModes {
         semantic: false,
         lexical: false,
         graph: true,
+        entity: false,
     };
 
-    /// Semantic + lexical lanes, graph off. The default
-    /// [`RecallParams::new`] modes (graph requires explicit seeds the
-    /// no-seeds constructor can't provide). Use
-    /// [`RecallModes::ALL`] when seeds are populated.
+    /// Semantic + lexical lanes, graph and entity off. Name stays accurate:
+    /// exactly the two text-bearing lanes. Use [`RecallModes::SEMANTIC_LEXICAL_ENTITY`]
+    /// when entity is also wanted without seeds.
     pub const SEMANTIC_AND_LEXICAL: RecallModes = RecallModes {
         semantic: true,
         lexical: true,
         graph: false,
+        entity: false,
+    };
+
+    /// Semantic + lexical + entity, graph off — the no-seeds default used by
+    /// [`RecallParams::new`]. The entity lane needs only `query_embedding`
+    /// (which `new` supplies), so it runs even without graph seeds; it is most
+    /// valuable here, where the graph lane is off.
+    pub const SEMANTIC_LEXICAL_ENTITY: RecallModes = RecallModes {
+        semantic: true,
+        lexical: true,
+        graph: false,
+        entity: true,
+    };
+
+    /// Run only the entity-similarity lane.
+    pub const ENTITY_ONLY: RecallModes = RecallModes {
+        semantic: false,
+        lexical: false,
+        graph: false,
+        entity: true,
     };
 }
 
@@ -138,12 +166,14 @@ pub struct RecallParams<'a> {
 }
 
 impl<'a> RecallParams<'a> {
-    /// Common-case constructor: semantic + lexical lanes
-    /// ([`RecallModes::SEMANTIC_AND_LEXICAL`]), default budget, no graph
+    /// Common-case constructor: semantic + lexical + entity lanes
+    /// ([`RecallModes::SEMANTIC_LEXICAL_ENTITY`]), default budget, no graph
     /// seeds. The graph lane stays off because there are no seeds to
     /// run it against; turning it on without seeds would warn-and-skip
     /// on every call (and is rejected outright once it becomes the only
-    /// enabled lane — see [`recall`]). Callers that have entity seeds
+    /// enabled lane — see [`recall`]). The entity lane needs only
+    /// `query_embedding`, which this constructor supplies, so it runs
+    /// on every no-seeds call. Callers that have entity seeds
     /// use [`RecallParams::with_seeds`] for the graph-enabled shape.
     pub fn new(query_text: &'a str, query_embedding: &'a [f32]) -> Self {
         Self {
@@ -151,7 +181,7 @@ impl<'a> RecallParams<'a> {
             query_embedding: Some(query_embedding),
             seed_entity_ids: None,
             k: kastellan_db::memories::DEFAULT_RECALL_K,
-            modes: RecallModes::SEMANTIC_AND_LEXICAL,
+            modes: RecallModes::SEMANTIC_LEXICAL_ENTITY,
         }
     }
 
@@ -195,6 +225,12 @@ const LANE_FANOUT: usize = 4;
 /// tight against pathological hubs.
 pub const GRAPH_FANOUT_CAP_PER_SEED: i64 = 32;
 
+/// How many nearest entities the entity-similarity lane considers before
+/// joining to their memories. Bounded + generous, analogous to
+/// [`GRAPH_FANOUT_CAP_PER_SEED`]: a query close to many entities still pulls a
+/// finite candidate set. Tuning is a follow-up if measurement shows it matters.
+pub const ENTITY_SIMILARITY_FANOUT: i64 = 64;
+
 /// Run the configured lanes, fuse via RRF, hydrate the top-`k` rows.
 ///
 /// ## Missing-input policy (hybrid; pinned by [issue #17][0])
@@ -235,14 +271,14 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
     // of this function — see the missing-input policy in the docstring.
     let mut any_enabled = false;
 
-    // Run each enabled lane. We could `try_join!` the three lane
+    // Run each enabled lane. We could `try_join!` the four lane
     // queries for marginal latency, but Phase 0 throughput doesn't
     // warrant it and sequencing makes the error path simpler — a
     // failure in any lane short-circuits the whole call rather than
     // leaving half-completed futures to abort. (The graph lane fans
     // its *internal* per-seed `neighbors` calls via `try_join_all`
     // because it has no other work to interleave.)
-    let mut lane_lists: Vec<Vec<i64>> = Vec::with_capacity(3);
+    let mut lane_lists: Vec<Vec<i64>> = Vec::with_capacity(4);
 
     if params.modes.semantic {
         any_enabled = true;
@@ -335,6 +371,35 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
         }
     }
 
+    if params.modes.entity {
+        any_enabled = true;
+        match params.query_embedding {
+            Some(emb) if emb.len() == EMBEDDING_DIM => {
+                lane_lists.push(
+                    kastellan_db::entity_embedding::entity_similarity_search(
+                        pool,
+                        emb,
+                        ENTITY_SIMILARITY_FANOUT,
+                        lane_k,
+                        false,
+                    )
+                    .await?,
+                );
+            }
+            Some(_) => {
+                return Err(DbError::Query(format!(
+                    "entity lane: embedding dim must be {EMBEDDING_DIM}"
+                )));
+            }
+            None => {
+                tracing::warn!(
+                    target: "kastellan::memory",
+                    "entity lane requested but query_embedding is None; skipping"
+                );
+            }
+        }
+    }
+
     // Hybrid missing-input policy: zero enabled lanes OR every enabled
     // lane skipped (lane_lists still empty) is a caller bug — see the
     // docstring. The error carries the diagnostic info the caller
@@ -344,7 +409,7 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
             "recall: no lanes ran (any_enabled={any_enabled}); \
              at least one enabled lane must have its required input — \
              semantic needs query_embedding, lexical needs non-empty query_text, \
-             graph needs non-empty seed_entity_ids"
+             graph needs non-empty seed_entity_ids, entity needs query_embedding"
         )));
     }
 
