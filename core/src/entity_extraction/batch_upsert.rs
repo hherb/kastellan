@@ -207,8 +207,10 @@ async fn embed_new_entities(
 ) {
     for &(id, kind, name) in new_entities {
         let text = entity_embedding_text(kind, name);
-        match embedder.embed_for_storage(&text).await {
-            Some(vector) => match set_entity_embedding(pool, id, &vector).await {
+        // Embed declined/failed (`None`) → the RouterEmbedder already logged
+        // the WARN, or a NoOpEmbedder intentionally skips; the row stays NULL.
+        if let Some(vector) = embedder.embed_for_storage(&text).await {
+            match set_entity_embedding(pool, id, &vector).await {
                 // Embedded, or a concurrent backfill won the IS-NULL race
                 // (Ok(false)) — both leave the row with a valid embedding.
                 Ok(_) => {}
@@ -220,10 +222,7 @@ async fn embed_new_entities(
                         "entity embed-on-insert: write failed; row left NULL (backfill will catch it)",
                     );
                 }
-            },
-            // Embed declined/failed (the RouterEmbedder logged the WARN, or
-            // a NoOpEmbedder intentionally skips). Row stays NULL.
-            None => {}
+            }
         }
     }
 }
