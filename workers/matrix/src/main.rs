@@ -21,6 +21,11 @@
 // build. WITH `live-matrix` everything is live (LiveSdk consumes the seam +
 // ProxyBridge; main serves), so no allowance is needed.
 #![cfg_attr(not(feature = "live-matrix"), allow(dead_code))]
+// matrix-sdk 0.18's crypto types nest deeply enough that the `Send` auto-trait
+// solver overflows the default recursion limit when the sync task's future is
+// type-checked (matrix-sdk-crypto account.rs). Raising the limit is the
+// SDK-recommended fix; it affects only compile-time trait evaluation.
+#![recursion_limit = "256"]
 
 mod bridge;
 mod handler;

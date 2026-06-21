@@ -346,7 +346,7 @@ fn runtime_role_audit_log_revoke_is_enforced() {
 
         // ---------- SET ROLE on a held connection ----------
         let mut held = pool.acquire().await.expect("acquire connection");
-        sqlx::query(&kastellan_db::conn::set_role_runtime_statement())
+        sqlx::query(sqlx::AssertSqlSafe(kastellan_db::conn::set_role_runtime_statement()))
             .execute(&mut *held)
             .await
             .expect("SET ROLE kastellan_runtime");

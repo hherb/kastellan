@@ -50,7 +50,6 @@
 use std::time::Duration;
 
 use sqlx::postgres::{PgPool, PgPoolOptions};
-use sqlx::Executor;
 
 use crate::conn::{set_role_runtime_statement, ConnectSpec};
 use crate::DbError;
@@ -118,7 +117,7 @@ pub async fn connect_runtime_pool_with_max(
             // hoisting it out of the closure.
             Box::pin(async move {
                 let stmt = set_role_runtime_statement();
-                conn.execute(stmt.as_str()).await?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(stmt)).execute(&mut *conn).await?;
                 Ok(())
             })
         })

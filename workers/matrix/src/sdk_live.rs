@@ -40,7 +40,7 @@ use anyhow::Context as _;
 use tokio::runtime::Runtime;
 
 use matrix_sdk::config::SyncSettings;
-use matrix_sdk::matrix_auth::MatrixSession;
+use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::ruma::api::client::uiaa;
 use matrix_sdk::ruma::events::room::member::StrippedRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::{
@@ -393,7 +393,9 @@ async fn ensure_cross_signing(client: &Client, config: &LiveSdkConfig) -> anyhow
             };
             let user_id = client.user_id().context("no user id for cross-signing UIA")?;
             let mut pw = uiaa::Password::new(
-                uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
+                uiaa::UserIdentifier::Matrix(uiaa::MatrixUserIdentifier::new(
+                    user_id.localpart().to_owned(),
+                )),
                 password.to_owned(),
             );
             pw.session = uiaa_info.session.clone();

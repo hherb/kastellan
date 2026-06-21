@@ -86,7 +86,7 @@ libc        = "0.2"
 #     JSONB columns on `audit_log`, `tasks`, `entities`, `relations`.
 #   - "time" wires sqlx's `TIMESTAMPTZ` codec to the same `time` crate
 #     types used elsewhere in the workspace (`time::OffsetDateTime`).
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "postgres",
     "migrate",
