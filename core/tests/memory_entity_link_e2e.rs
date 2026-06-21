@@ -499,7 +499,7 @@ async fn build_real_extractor(pool: &sqlx::PgPool) -> Option<Arc<dyn EntityExtra
     let lifecycle: Arc<dyn WorkerLifecycleManager> =
         Arc::new(CompositeLifecycle::new(sandboxes));
     let client = Client::new(lifecycle, pool.clone(), entry);
-    let extractor = GlinerRelexExtractor::new(client, pool.clone());
+    let extractor = GlinerRelexExtractor::new(client, pool.clone(), std::sync::Arc::new(kastellan_core::memory::NoOpEmbedder::new()));
     Some(Arc::new(extractor))
 }
 

@@ -59,6 +59,37 @@ pub(crate) fn dedup_entity_inputs<'a>(
     (deduped, name_norms_by_input)
 }
 
+/// Select the **newly-inserted** entities from an upsert result map, as
+/// `(id, kind, name)` borrows ready for the forward embed loop.
+///
+/// Walks `deduped` (so the result is in first-seen input order, matching
+/// the rest of the module), looks each entry up in `upsert_map` by its
+/// `(kind, name_norm)` key, and keeps only rows the upsert actually created
+/// (`inserted == true`, the `xmax = 0` discriminator). Conflict-hit rows are
+/// dropped — an existing entity keeps whatever embedding it had, and a still-
+/// NULL existing row stays the backfill's job (`kastellan-cli entities
+/// reembed`), mirroring the L1 #324(forward)/#325(backfill) split.
+///
+/// `kind` is the input label and `name` is the input display text — the same
+/// `(kind, name)` the backfill reads back from `entities.{kind,name}`, so
+/// `entity_embedding_text(kind, name)` yields an identical string on either
+/// path. Pure; no I/O. Unit-tested in `batch_upsert/tests.rs`.
+pub(crate) fn select_new_entities<'a>(
+    deduped: &'a [DedupedEntity<'a>],
+    upsert_map: &HashMap<(String, String), (i64, bool)>,
+) -> Vec<(i64, &'a str, &'a str)> {
+    deduped
+        .iter()
+        .filter_map(|d| {
+            let key = (d.label.to_string(), d.name_norm.clone());
+            match upsert_map.get(&key) {
+                Some((id, true)) => Some((*id, d.label, d.text)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// True iff the SQLSTATE code names a constraint violation (PostgreSQL
 /// class 23). Members:
 ///   - 23000: integrity_constraint_violation (generic)
@@ -148,10 +179,53 @@ pub(crate) fn build_entity_unnest_arrays<'a>(
 }
 
 use crate::entity_extraction::EntityExtractionError;
+use crate::memory::embedder::Embedder;
+use crate::memory::entity_embedding_text;
 use crate::workers::gliner_relex::ExtractResponse;
+use kastellan_db::entity_embedding::set_entity_embedding;
 use kastellan_db::DbError;
 use sqlx::PgPool;
 use std::collections::HashMap;
+
+/// Forward embed-on-insert: embed each newly-inserted entity through the
+/// shared [`entity_embedding_text`] chokepoint and write the vector via the
+/// guarded [`set_entity_embedding`] updater (the same writer the backfill
+/// uses, so an on-insert vector is byte-identical to a backfilled one).
+///
+/// **Degrade-and-warn per row** — mirrors
+/// [`crate::memory::reembed_entities_null`] and
+/// [`crate::memory::l1_promote::promote_l1`]: an embed `None` (the
+/// [`crate::memory::RouterEmbedder`] already logged the WARN), a lost
+/// `embedding IS NULL` race (`Ok(false)` — a concurrent backfill embedded the
+/// row first; not an error, no WARN), or a write `Err` (WARN) all skip that
+/// row and continue. The loop **never** returns an error: a flaky embedder
+/// must not block the entity/relation write the caller is performing.
+async fn embed_new_entities(
+    pool: &PgPool,
+    embedder: &dyn Embedder,
+    new_entities: &[(i64, &str, &str)],
+) {
+    for &(id, kind, name) in new_entities {
+        let text = entity_embedding_text(kind, name);
+        // Embed declined/failed (`None`) → the RouterEmbedder already logged
+        // the WARN, or a NoOpEmbedder intentionally skips; the row stays NULL.
+        if let Some(vector) = embedder.embed_for_storage(&text).await {
+            match set_entity_embedding(pool, id, &vector).await {
+                // Embedded, or a concurrent backfill won the IS-NULL race
+                // (Ok(false)) — both leave the row with a valid embedding.
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        target: "kastellan::entity_extraction",
+                        entity_id = id,
+                        error = %e,
+                        "entity embed-on-insert: write failed; row left NULL (backfill will catch it)",
+                    );
+                }
+            }
+        }
+    }
+}
 
 /// One row's worth of the entity batch's RETURNING clause: the
 /// (kind, name_norm) key plus the resolved id and the xmax=0
@@ -247,6 +321,7 @@ async fn per_row_upsert_entities(
 pub async fn upsert_entities_and_relations(
     pool: &PgPool,
     merged: &ExtractResponse,
+    embedder: &dyn Embedder,
 ) -> Result<crate::entity_extraction::gliner_relex::UpsertOutcome, EntityExtractionError> {
     // Phase 1: entity upsert with fallback.
     // dedup_entity_inputs returns the deduped vec PLUS a Vec<String> of
@@ -283,6 +358,16 @@ pub async fn upsert_entities_and_relations(
             n_new += 1;
         }
     }
+
+    // Forward embed-on-insert: embed the entities this upsert just CREATED so
+    // they are immediately visible to the entity-similarity recall lane
+    // without waiting for an `entities reembed` backfill. Run here — after the
+    // entities are committed, before the relations phase — so a newly-created
+    // row still gets embedded even if the relations phase below errors.
+    // Degrade-and-warn; never fails the upsert. Conflict-hit rows are skipped
+    // (still the backfill's job); a NoOpEmbedder makes this a no-op loop.
+    let new_entities = select_new_entities(&deduped, &upsert_map);
+    embed_new_entities(pool, embedder, &new_entities).await;
 
     // Phase 2: relation upsert with fallback.
     let resolved = build_resolved_triples(merged, &upsert_map);

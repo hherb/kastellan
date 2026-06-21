@@ -167,3 +167,66 @@ fn format_per_row_relation_error_contains_src_dst_kind() {
     assert!(msg.contains("kind='treats'"), "msg should contain kind: {msg}");
     assert!(msg.contains("pool"), "msg should contain underlying error: {msg}");
 }
+
+// ── select_new_entities (forward embed-on-insert, pure selector) ──
+
+use std::collections::HashMap;
+
+/// Build a `(kind, name_norm) -> (id, inserted)` upsert map from explicit
+/// tuples — mirrors the shape both `try_batch_upsert_entities` and the
+/// per-row fallback return.
+fn make_upsert_map(rows: &[(&str, &str, i64, bool)]) -> HashMap<(String, String), (i64, bool)> {
+    rows.iter()
+        .map(|(kind, name_norm, id, inserted)| {
+            ((kind.to_string(), name_norm.to_string()), (*id, *inserted))
+        })
+        .collect()
+}
+
+#[test]
+fn select_new_entities_returns_only_inserted_rows_as_id_kind_name() {
+    // Two inputs; the upsert map marks the first as newly inserted, the
+    // second as a conflict hit. Only the new one is selected, carrying its
+    // id + kind(label) + name(display text).
+    let input = vec![make_entity("Alpha", "person"), make_entity("Beta", "org")];
+    let (deduped, _norms) = dedup_entity_inputs(&input);
+    let map = make_upsert_map(&[
+        ("person", "alpha", 10, true),
+        ("org", "beta", 20, false),
+    ]);
+
+    let new = select_new_entities(&deduped, &map);
+    assert_eq!(new, vec![(10i64, "person", "Alpha")]);
+}
+
+#[test]
+fn select_new_entities_all_new_returns_all_in_dedup_order() {
+    let input = vec![make_entity("Alpha", "person"), make_entity("Beta", "org")];
+    let (deduped, _norms) = dedup_entity_inputs(&input);
+    let map = make_upsert_map(&[
+        ("person", "alpha", 10, true),
+        ("org", "beta", 20, true),
+    ]);
+
+    let new = select_new_entities(&deduped, &map);
+    assert_eq!(new, vec![(10i64, "person", "Alpha"), (20i64, "org", "Beta")]);
+}
+
+#[test]
+fn select_new_entities_all_conflict_returns_empty() {
+    let input = vec![make_entity("Alpha", "person"), make_entity("Beta", "org")];
+    let (deduped, _norms) = dedup_entity_inputs(&input);
+    let map = make_upsert_map(&[
+        ("person", "alpha", 10, false),
+        ("org", "beta", 20, false),
+    ]);
+
+    assert!(select_new_entities(&deduped, &map).is_empty());
+}
+
+#[test]
+fn select_new_entities_empty_input_returns_empty() {
+    let deduped: Vec<DedupedEntity> = Vec::new();
+    let map: HashMap<(String, String), (i64, bool)> = HashMap::new();
+    assert!(select_new_entities(&deduped, &map).is_empty());
+}

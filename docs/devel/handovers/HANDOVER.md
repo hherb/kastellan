@@ -6,8 +6,32 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-21 (**Entity-embedding backfill + entity-similarity recall lane — DONE on branch
-`feat/entity-embedding-recall-lane` (PR pending).** `entities.embedding` (`vector(256)`, NULL for every row, no reader)
+**Last updated:** 2026-06-21 (**Forward entity embed-on-insert — DONE on branch `feat/entity-forward-embed-on-insert`
+(PR pending).** Closes the deferred *forward* half of the entity-embedding arc (PR #335 shipped backfill + lane; this is the
+on-insert path, symmetric with the L1 #324-forward / #325-backfill split but for entities). New entities written by
+`entity_extraction::batch_upsert` previously landed `embedding IS NULL` until a manual `entities reembed`; they are now embedded
+the moment the upsert creates them, so a freshly-extracted entity is searchable via the entity-similarity recall lane with no
+backfill run. **What shipped (TDD, 5 layers):** (1) **pure `select_new_entities(deduped, upsert_map) -> Vec<(id,kind,name)>`**
+(`batch_upsert.rs`) — picks only rows the upsert just CREATED (`inserted == true`, the `xmax = 0` discriminator the upsert
+already returns); conflict-hit existing rows are dropped (a still-NULL existing row stays the **backfill's** job — the #324/#325
+division). 4 units. (2) **degrade-and-warn `embed_new_entities(pool, &dyn Embedder, &[(id,kind,name)])`** — embeds each via the
+shared `entity_embedding_text` chokepoint (so on-insert == backfilled byte-for-byte) + the guarded `set_entity_embedding`; an
+embed `None` (RouterEmbedder logged), a lost `IS NULL` race (`Ok(false)`, concurrent backfill won — no WARN), or a write `Err`
+(WARN) skips that row and **never fails the upsert**. (3) wired into `upsert_entities_and_relations` (now takes `&dyn Embedder`)
+**after the entity commit, before the relations phase** — committed new rows get embedded even if relations later error.
+(4) `gliner_relex::upsert_entities_and_relations` delegate widened; **`GlinerRelexExtractor` now owns `Arc<dyn Embedder>`**
+(`new(client, pool, embedder)`); `NoOpEntityExtractor` path unaffected (never upserts → never embeds). (5) `main.rs` builds the
+one `RouterEmbedder` **before** the extractor and shares the Arc across L1 (scheduler) + entities. **Decisions:** embed only
+NEW inserts (conflict-hits = backfill); no batch-embed seam (sequential loop, mirrors backfill — possible follow-up); no
+migration / no ANN index (as #335). **Verification — macOS PG18:** new `entity_forward_embed_e2e` **3/0** (embed-on-insert +
+lane surfaces the linked memory; conflict-hit NOT re-embedded [`call_count` pin]; declined embed leaves row NULL + upsert still
+Ok) + regressions `entity_extraction_e2e` **16/0**, `entity_reembed_e2e` **4/0**, `memory_entity_link_e2e` **6/0**, batch_upsert
+units **15/0** (+4); `cargo clippy --workspace --all-targets -D warnings` CLEAN. Pure-Rust, no migration, no OS-gated code → DGX
+not required. **`batch_upsert.rs` is 514 LOC** (+14 over the 500 cap, within the documented ≤27-over deferral; tests already
+external in `batch_upsert/tests.rs`). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-21-entity-forward-embed-on-insert*`.)
+
+_(Prior session — **Entity-embedding backfill + entity-similarity recall lane — MERGED to `main` as
+`4f4d61c` (PR [#335](https://github.com/hherb/kastellan/pull/335)).** `entities.embedding` (`vector(256)`, NULL for every row, no reader)
 is now populated by a backfill CLI and consumed by a **4th recall lane**, mirroring the L1 arc (#324/#325).
 **What shipped (8 tasks, TDD, subagent-driven):** (1) **`db::entity_embedding`** (new module) — `load_unembedded_entities`
 (`(id,kind,name)` scan of NULL rows, **quarantine-blind**), `set_entity_embedding` (guarded race-safe `UPDATE … WHERE
@@ -30,7 +54,7 @@ Pure-Rust, no OS-gated code → DGX not required. **⚠ Note:** the full seriali
 the PRE-EXISTING, unrelated `memory_layers_e2e` (imports only `memory::layers`; 0-CPU pool deadlock under heavy multi-cluster
 live-PG load — the documented sqlx-0.9 env issue, NOT this change; clippy compiles it fine). **Final review (opus):
 merge-ready** after one stale-comment fix in the production recall caller (`pg_builder.rs`, fixed). Spec/plan:
-`docs/superpowers/{specs,plans}/2026-06-21-entity-embedding-recall-lane*`.)
+`docs/superpowers/{specs,plans}/2026-06-21-entity-embedding-recall-lane*`.)_
 
 _(Prior session — **matrix-sdk 0.18 deployed live to the DGX; Matrix channel restored after a jail CA-cert fix.
 PR [#333](https://github.com/hherb/kastellan/pull/333) (CA fix + `upgrade_from_git.sh`).** Redeployed #329 to the DGX — the
@@ -693,11 +717,13 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (branch `feat/entity-embedding-recall-lane`, PR pending):** entity-embedding backfill + entity-similarity
-recall lane (see "Last updated" up top). **Natural follow-up to it:** the **forward entity embed-on-insert path** — embed in
-`entity_extraction::batch_upsert` through the same `entity_embedding_text` chokepoint, so fresh entities are searchable
-without a `entities reembed` run (symmetric with the #324 forward / #325 backfill split; small). Then an **ANN index** on
-`entities.embedding` once entity cardinality warrants it. **Open Matrix-hardening picks (residual follow-ups):**
+**Just shipped (branch `feat/entity-forward-embed-on-insert`, PR pending):** forward entity embed-on-insert — new entities are
+embedded the moment `batch_upsert` creates them (see "Last updated" up top). The entity-embedding arc is now complete (backfill
+#335 + forward this branch). **Remaining entity-embedding follow-ups:** (1) an **ANN index** (ivfflat/hnsw) on
+`entities.embedding` once entity cardinality warrants it (the lane does a sequential cosine scan today, matching the memories
+semantic lane); (2) a **batch-embed seam** so the backfill + forward loops embed N entities per round-trip instead of one
+`embed_for_storage` call each (sequential today; cheap to add behind the `Embedder` trait if embed latency becomes a recall-path
+cost). **Open Matrix-hardening picks (residual follow-ups):**
 [#321](https://github.com/hherb/kastellan/issues/321) inbound-loss window on respawn (persisted sync-token watermark —
 medium); the matrix-worker **seccomp/Landlock enforcement** flip (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today; needs DGX
 syscall enumeration like the #281 arc — larger). **Pre-existing test-infra debt surfaced this session:** the full serialized
