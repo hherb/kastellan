@@ -50,19 +50,44 @@ pub struct TaskContext {
     pub max_plans: u32,
 }
 
+/// Max chars of a step error `detail` surfaced back to the agent in
+/// `plans_so_far_summary`. Long worker stderr / RPC messages are
+/// clamped so a single chatty failure can't blow up the always-in-context
+/// planner prompt; the `code` (always short) is never truncated.
+pub(crate) const STEP_ERR_DETAIL_MAX: usize = 200;
+
+/// Render one [`StepOutcome`] for the agent's plan summary. An `Ok`
+/// step is the compact `"ok"` scalar; an `Err` surfaces its `code` and
+/// (length-clamped) `detail` as `"err: <CODE>: <detail>"` so the agent
+/// can see *why* a step failed and replan, rather than seeing a bare
+/// `"err"` and blindly re-trying the same dead end (the
+/// `plan_iteration_cap_exceeded` failure mode).
+fn render_step_outcome(o: &StepOutcome) -> String {
+    match o {
+        StepOutcome::Ok(_) => "ok".to_string(),
+        StepOutcome::Err { code, detail } => {
+            let detail = if detail.chars().count() > STEP_ERR_DETAIL_MAX {
+                let truncated: String = detail.chars().take(STEP_ERR_DETAIL_MAX).collect();
+                format!("{truncated}…")
+            } else {
+                detail.clone()
+            };
+            format!("err: {code}: {detail}")
+        }
+    }
+}
+
 impl TaskContext {
     /// Compact summary of completed plans, for inclusion in the
     /// agent's input. Avoids dumping unbounded `serde_json::Value`
     /// blobs into the prompt; gives just enough for the agent to
-    /// reflect.
+    /// reflect — including each failed step's `code` + clamped `detail`
+    /// (see [`render_step_outcome`]).
     pub fn plans_so_far_summary(&self) -> Vec<serde_json::Value> {
         self.plans.iter().map(|(p, outcomes)| {
             serde_json::json!({
                 "decision":      p.decision,
-                "step_outcomes": outcomes.iter().map(|o| match o {
-                    StepOutcome::Ok(_) => "ok",
-                    StepOutcome::Err { .. } => "err",
-                }).collect::<Vec<_>>(),
+                "step_outcomes": outcomes.iter().map(render_step_outcome).collect::<Vec<_>>(),
             })
         }).collect()
     }
