@@ -30,7 +30,12 @@ sqlite crypto store + `session.json` at `~/.local/state/kastellan/matrix/store`,
 only copies binaries + regenerates env + restarts), so the new worker fails to restore → channel not started. Before redeploying:
 `rm -rf ~/.local/state/kastellan/matrix/store`, then a fresh password login (password in the secret store) re-bootstraps a new
 device + cross-signing — re-verify it once in `@horst`'s Element. (`uninstall --purge` also wipes it but nukes PG + secrets —
-overkill.) Tested in dev; `--release` build + redeploy is the follow-up.)
+overkill.) Tested in dev; `--release` build + redeploy is the follow-up.
+**Code-review follow-ups (PR #329):** `restore_or_login` now returns an **actionable** error naming the store-wipe remedy
+(no more silent rediscovery of the deploy gotcha). Three non-blocking follow-ups lodged: [#330](https://github.com/hherb/kastellan/issues/330)
+(auto-detect + recover from an incompatible crypto store after an SDK bump), [#331](https://github.com/hherb/kastellan/issues/331)
+(CI doesn't compile `--features live-matrix`, so `sdk_live.rs` is uncovered — DGX-gated by design today), and
+[#332](https://github.com/hherb/kastellan/issues/332) (focused variant-D PgListener/`pool.close()` deadlock isolation test).)
 
 _(Prior session — **L1 embedding backfill — `kastellan-cli memory l1 reembed` — [#325](https://github.com/hherb/kastellan/issues/325)
 DONE. Branch `feat/325-l1-embedding-backfill` (PR [#327](https://github.com/hherb/kastellan/pull/327)).** Closes #323 item 2: PR #324 wired the *forward* embed path, but
