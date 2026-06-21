@@ -14,7 +14,7 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_entities(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: kastellan-cli entities <list|show|approve|reject|merge|kinds> ...");
+        eprintln!("usage: kastellan-cli entities <list|show|approve|reject|merge|reembed|kinds> ...");
         return ExitCode::from(2);
     }
     // Per-action dispatch. `with_runtime` is called only from the known
@@ -26,9 +26,10 @@ pub(crate) fn run_entities(args: &[String]) -> ExitCode {
         "approve" => with_runtime("entities", entities_approve(&args[1..])),
         "reject"  => with_runtime("entities", entities_reject(&args[1..])),
         "merge"   => with_runtime("entities", entities_merge(&args[1..])),
+        "reembed" => crate::entities_reembed::run(&args[1..]),
         "kinds"   => crate::entities_kinds::run(&args[1..]),
         other     => {
-            eprintln!("entities: unknown action '{other}'; expected: list | show | approve | reject | merge | kinds");
+            eprintln!("entities: unknown action '{other}'; expected: list | show | approve | reject | merge | reembed | kinds");
             ExitCode::from(2)
         }
     }

@@ -48,7 +48,9 @@ pub mod embedder;
 pub mod entity_link;
 pub mod l0_seed;
 pub mod l1_promote;
+pub mod entity_reembed;
 pub mod l1_reembed;
+pub mod reembed;
 pub mod l3_approval;
 pub mod l3py_approval;
 pub mod l3_crystallise;
@@ -64,7 +66,9 @@ mod recall;
 // is an internal refactor that must not break import sites.
 pub use embed::{embed_query, MemoryError};
 pub use embedder::{Embedder, NoOpEmbedder, RouterEmbedder};
-pub use l1_reembed::{format_reembed_report, reembed_batch_failed, reembed_l1_null, ReembedReport};
+pub use entity_reembed::{entity_embedding_text, reembed_entities_null};
+pub use l1_reembed::reembed_l1_null;
+pub use reembed::{format_reembed_report, reembed_batch_failed, ReembedReport};
 pub use recall::{
     recall, reciprocal_rank_fusion, RecallModes, RecallParams, GRAPH_FANOUT_CAP_PER_SEED,
     RRF_K_CONSTANT,

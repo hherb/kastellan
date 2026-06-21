@@ -118,11 +118,12 @@ impl RecallBuilder for PgRecallBuilder {
         // actor='llm:router' action='embed' audit row internally).
         let emb = embed_query(&self.pool, &self.router, query).await?;
 
-        // Step 2 — fan out lanes. Seeded vs. semantic+lexical-only:
-        // choose params shape. RecallParams::new defaults to
-        // SEMANTIC_AND_LEXICAL; with_seeds defaults to ALL
-        // (semantic+lexical+graph). Both correct for their respective
-        // seed-presence cases — no override needed.
+        // Step 2 — fan out lanes. Seeded vs. no-seeds: choose params
+        // shape. RecallParams::new defaults to SEMANTIC_LEXICAL_ENTITY
+        // (semantic+lexical+entity — the entity lane needs only the query
+        // embedding, no seeds); with_seeds defaults to ALL
+        // (semantic+lexical+graph+entity). Both correct for their
+        // respective seed-presence cases — no override needed.
         let params = if seeds.is_empty() {
             RecallParams::new(query, &emb)
         } else {

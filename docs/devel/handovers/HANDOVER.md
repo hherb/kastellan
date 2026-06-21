@@ -6,7 +6,33 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-21 (**matrix-sdk 0.18 deployed live to the DGX; Matrix channel restored after a jail CA-cert fix.
+**Last updated:** 2026-06-21 (**Entity-embedding backfill + entity-similarity recall lane — DONE on branch
+`feat/entity-embedding-recall-lane` (PR pending).** `entities.embedding` (`vector(256)`, NULL for every row, no reader)
+is now populated by a backfill CLI and consumed by a **4th recall lane**, mirroring the L1 arc (#324/#325).
+**What shipped (8 tasks, TDD, subagent-driven):** (1) **`db::entity_embedding`** (new module) — `load_unembedded_entities`
+(`(id,kind,name)` scan of NULL rows, **quarantine-blind**), `set_entity_embedding` (guarded race-safe `UPDATE … WHERE
+embedding IS NULL`), `entity_similarity_search` (the lane: top-`ENTITY_SIMILARITY_FANOUT=64` entities by cosine `<=>`,
+embedded + non-quarantined, → their linked memories ranked by `MIN(dist)`; `include_quarantined` seam mirrors
+`graph_search`). Reuses the `check_embedding_dim`/`vector_literal` chokepoints. (2) **`core::memory::reembed`** (new) —
+shared `ReembedReport` + `format_reembed_report`/`reembed_batch_failed` lifted out of `l1_reembed` (public paths unchanged).
+(3) **`core::memory::entity_reembed`** — pure `entity_embedding_text(kind,name)="kind: name"` (single source of truth) +
+`reembed_entities_null(pool,&dyn Embedder)` (degrade-and-warn per row; mirrors `reembed_l1_null`). (4) **recall lane** —
+`RecallModes` gains `entity`; `ALL` + the new no-seeds default `SEMANTIC_LEXICAL_ENTITY` (used by `RecallParams::new`) enable
+it, so the lane runs on the common cli_ask path; `ENTITY_ONLY` preset; quarantine-filtered (`false`) in production; RRF-fused.
+(5) **CLI** `kastellan-cli entities reembed` (sibling module `entities_reembed.rs`; builds the real `RouterEmbedder`, prints
+`scanned=/embedded=/skipped=`, non-zero exit on a wholly-failed batch). **Decisions:** backfill embeds ALL entities
+(review-blind; the lane filters), no migration (column pre-exists from 0019), no ANN index (deferred), **no forward
+embed-on-insert path** (deferred follow-up — new `batch_upsert` entities stay NULL until the next `entities reembed`).
+**Verification — macOS targeted (PG18):** `cargo clippy --workspace --all-targets -D warnings` CLEAN; db lib **140/0**, core
+memory lib **215/0**, recall units **22/22**; live e2e `entity_reembed_e2e` **4/0** (backfill→lane→linked-memory, idempotent,
+degrade-and-warn, **quarantine-excluded-but-operator-visible**), `memory_recall_e2e` **2/0**, `memory_l1_reembed_e2e` **4/0**.
+Pure-Rust, no OS-gated code → DGX not required. **⚠ Note:** the full serialized `cargo test --workspace` live run wedges on
+the PRE-EXISTING, unrelated `memory_layers_e2e` (imports only `memory::layers`; 0-CPU pool deadlock under heavy multi-cluster
+live-PG load — the documented sqlx-0.9 env issue, NOT this change; clippy compiles it fine). **Final review (opus):
+merge-ready** after one stale-comment fix in the production recall caller (`pg_builder.rs`, fixed). Spec/plan:
+`docs/superpowers/{specs,plans}/2026-06-21-entity-embedding-recall-lane*`.)
+
+_(Prior session — **matrix-sdk 0.18 deployed live to the DGX; Matrix channel restored after a jail CA-cert fix.
 PR [#333](https://github.com/hherb/kastellan/pull/333) (CA fix + `upgrade_from_git.sh`).** Redeployed #329 to the DGX — the
 live channel would NOT start. **Root cause (systematic debugging):** reproduced the daemon's exact bwrap jail and captured the
 worker's otherwise-swallowed stderr → `build matrix client / No CA certificates were loaded from the system`. **matrix-sdk 0.18
@@ -28,7 +54,7 @@ password by default**; `--relogin` wipes + re-logs-in for SDK-major bumps; `-pwd
 stable. Addresses the deploy half of [#330](https://github.com/hherb/kastellan/issues/330). **Per-user install reminder:**
 `kastellan-cli` lives at `~/.local/bin/kastellan-cli` (per-user, multi-tenant, never system-wide); scripts call it by absolute
 path. A bare-`kastellan-cli` "No such file or directory at /usr/local/bin" is a stale bash command hash in an old shell —
-`hash -r`, not a real problem.)
+`hash -r`, not a real problem.)_
 
 _(Prior session — **matrix-sdk 0.8→0.18 + sqlx 0.8→0.9 — clears all 4 Dependabot alerts. Branch
 `worktree-matrix-sdk-0.18-upgrade` (PR [#329](https://github.com/hherb/kastellan/pull/329)) — green, awaiting review/merge.**
@@ -667,14 +693,17 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (branch `feat/325-l1-embedding-backfill`, PR [#327](https://github.com/hherb/kastellan/pull/327)):** [#325](https://github.com/hherb/kastellan/issues/325)
-— `kastellan-cli memory l1 reembed` backfills embeddings for NULL-embedding L1 rows through the real `RouterEmbedder`
-(closes #323 item 2; see "Last updated" up top). **Open Matrix-hardening picks (the remaining residual follow-ups):**
-[#321](https://github.com/hherb/kastellan/issues/321) inbound-loss window on respawn (needs a persisted sync-token watermark
-in the E2E store — medium); the matrix-worker **seccomp/Landlock enforcement** flip (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0`
-today; needs DGX syscall enumeration like the #281 arc — larger). **Other small natural picks:** entity-embedding
-backfill / an `entities.embedding` similarity lane (the `vector(256)` column exists but is NULL for all entities — would seed
-an entity-similarity recall lane; see "Design notes for parked work" → Option P).
+**Just shipped (branch `feat/entity-embedding-recall-lane`, PR pending):** entity-embedding backfill + entity-similarity
+recall lane (see "Last updated" up top). **Natural follow-up to it:** the **forward entity embed-on-insert path** — embed in
+`entity_extraction::batch_upsert` through the same `entity_embedding_text` chokepoint, so fresh entities are searchable
+without a `entities reembed` run (symmetric with the #324 forward / #325 backfill split; small). Then an **ANN index** on
+`entities.embedding` once entity cardinality warrants it. **Open Matrix-hardening picks (residual follow-ups):**
+[#321](https://github.com/hherb/kastellan/issues/321) inbound-loss window on respawn (persisted sync-token watermark —
+medium); the matrix-worker **seccomp/Landlock enforcement** flip (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today; needs DGX
+syscall enumeration like the #281 arc — larger). **Pre-existing test-infra debt surfaced this session:** the full serialized
+`cargo test --workspace` live run wedges on `memory_layers_e2e` (0-CPU pool deadlock under heavy multi-cluster live-PG load —
+the documented sqlx-0.9 env issue); worth a focused isolation + `Pool::close()`/`PgListener` audit (cf. the #332 variant-D
+deadlock test).
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
