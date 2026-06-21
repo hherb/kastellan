@@ -6,7 +6,33 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-21 (**L1 embedding backfill — `kastellan-cli memory l1 reembed` — [#325](https://github.com/hherb/kastellan/issues/325)
+**Last updated:** 2026-06-21 (**matrix-sdk 0.8→0.18 + sqlx 0.8→0.9 — clears all 4 Dependabot alerts. Branch
+`worktree-matrix-sdk-0.18-upgrade` (PR [#329](https://github.com/hherb/kastellan/pull/329)) — green, awaiting review/merge.**
+**Why both at once:** the three `matrix-sdk-*` alerts (crypto sender-spoofing, base panics) and the `sqlx` cast-truncation
+alert are entangled by a shared `libsqlite3-sys` native `links` conflict (`sqlx-sqlite` vs `matrix-sdk-sqlite → rusqlite`, only
+one `links="sqlite3"` allowed per graph). No `matrix-sdk ≥0.11` shares a `libsqlite3-sys` major with `sqlx 0.8.x`, so neither
+moves alone — they meet at `libsqlite3-sys 0.35` (matrix-sdk 0.18 + sqlx 0.9). **sqlx 0.9:** `query()`/`execute()` now take
+`impl SqlSafeStr`; string literals are unchanged (the project uses runtime query strings, not `query!` macros — no `.sqlx`
+cache, no DB at build), so of ~637 call sites only **4 dynamic-SQL sites** needed `AssertSqlSafe`/`raw_sql`
+(`db/{pool,probe}.rs` + `db/tests/postgres_e2e.rs` — internal `SET ROLE`/`CREATE DATABASE`/`pg_notify`, all injection-safe).
+**matrix-sdk 0.18:** `MatrixSession` moved to `authentication::matrix`, `UserIdentifier::UserIdOrLocalpart(x)` →
+`UserIdentifier::Matrix(MatrixUserIdentifier::new(x))`, `#![recursion_limit = "256"]` for the deep crypto async `Send`-solver
+overflow, dropped the removed `rustls-tls` feature (rustls implicit now). **Latent deadlock sqlx 0.9 made deterministic
+(root-caused via systematic debugging + a 4-variant isolation test):** `Pool::close()` blocks until every connection is
+returned, and a `PgListener` only releases its checked-out connection from *inside* `recv()`. `channel_bus_pg_e2e` called
+`pool.close()` with the completed-task listener still in scope → **hung 16+ min** (passed on 0.8 by luck); fix = `drop(completed)`
+before close. `ChannelBus::shutdown` aborted its pump tasks **without joining** → raced the daemon's `pool.close()` at shutdown;
+now **abort-then-join** (matches the scheduler/audit-mirror signal-then-join pattern). Variants A–C (basic PgListener,
+the SET-ROLE runtime pool, trigger-fired NOTIFY) all passed — variant D (`pool.close()` + live listener) reproduced it.
+**Verified:** workspace **1994/0**, matrix worker `live-matrix` **18/0**, `cargo clippy --workspace --all-targets` (+ live-matrix)
+clean. **⚠ DEPLOY GOTCHA — the matrix store is NOT auto-wiped by `install`:** a 0.8→0.18 SDK jump invalidates the on-disk
+sqlite crypto store + `session.json` at `~/.local/state/kastellan/matrix/store`, and a plain reinstall preserves it (install
+only copies binaries + regenerates env + restarts), so the new worker fails to restore → channel not started. Before redeploying:
+`rm -rf ~/.local/state/kastellan/matrix/store`, then a fresh password login (password in the secret store) re-bootstraps a new
+device + cross-signing — re-verify it once in `@horst`'s Element. (`uninstall --purge` also wipes it but nukes PG + secrets —
+overkill.) Tested in dev; `--release` build + redeploy is the follow-up.)
+
+_(Prior session — **L1 embedding backfill — `kastellan-cli memory l1 reembed` — [#325](https://github.com/hherb/kastellan/issues/325)
 DONE. Branch `feat/325-l1-embedding-backfill` (PR [#327](https://github.com/hherb/kastellan/pull/327)).** Closes #323 item 2: PR #324 wired the *forward* embed path, but
 pre-#324 rows and operator-added `memory l1 add` rows (which use `NoOpEmbedder` by design) still had `embedding IS NULL` and
 were invisible to the semantic recall lane (`semantic_search` filters `WHERE embedding IS NOT NULL`). **What shipped (TDD, 3
@@ -37,7 +63,7 @@ per-row `None` path can't WARN generically), and the CLI now **exits non-zero** 
 `reembed && next-step` doesn't proceed on a wholly-failed backfill; the idempotent no-op (`scanned==0`) still exits 0. +3 core
 units for the predicate (empty-scan / any-embedded / all-skipped) and a 4th e2e scenario `reembed_mixed_batch_embeds_one_skips_the_other`
 (`SequencedEmbedder` → exact `embedded=1, skipped=1` split). `memory_l1_reembed_e2e` now **4/0** on live PG 18; clippy clean.)_
-**Last updated:** 2026-06-21 (**Branch reconciliation + redeploy of newest `main` to the DGX. No code change — operational
+_(Prior session — **Branch reconciliation + redeploy of newest `main` to the DGX. No code change — operational
 session.** Local `main` had diverged (4 commits, `716b873`: an *earlier* iteration of the Matrix-channel work) from
 `origin/main`, which had squash-merged the same work in **more refined** form via PR [#320](https://github.com/hherb/kastellan/pull/320)
 (self-healing `supervised()`/`WorkerFactory` respawn, timeout-protected login, atomic `0o600` writes, `--matrix-*` install
@@ -54,7 +80,7 @@ https://matrix.kastellan.dev --matrix-user @kastellan:matrix.kastellan.dev` depl
 **Operator gotcha recorded:** `render_env_file` *regenerates* `~/.config/kastellan/kastellan.env` from CLI flags (no merge) —
 the Matrix block (incl. `KASTELLAN_MATRIX_ENFORCE_SANDBOX=0`) is written **only** when `--matrix-homeserver-url`/`--matrix-user`
 are passed, so every reinstall must re-pass them or the live channel is silently dropped. No tests run beyond the pre-deploy
-`cargo test --workspace` (**1973/0**) on the synced tree.)
+`cargo test --workspace` (**1973/0**) on the synced tree.)_
 
 _(Prior session — **Matrix `ProxyBridge` error surfacing — [#312](https://github.com/hherb/kastellan/issues/312)
 CLOSED. MERGED to `main` as `0ff5cee` (PR [#326](https://github.com/hherb/kastellan/pull/326)).** The spike's deliberately-minimal error handling
