@@ -457,7 +457,6 @@ async fn entities_merge(args: &[String]) -> ExitCode {
     }
 }
 
-
 #[cfg(test)]
 mod entities_parser_tests {
     use super::{parse_entity_state, parse_id_list};
