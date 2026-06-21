@@ -6,7 +6,31 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-21 (**matrix-sdk 0.8→0.18 + sqlx 0.8→0.9 — clears all 4 Dependabot alerts. Branch
+**Last updated:** 2026-06-21 (**matrix-sdk 0.18 deployed live to the DGX; Matrix channel restored after a jail CA-cert fix.
+PR [#333](https://github.com/hherb/kastellan/pull/333) (CA fix + `upgrade_from_git.sh`).** Redeployed #329 to the DGX — the
+live channel would NOT start. **Root cause (systematic debugging):** reproduced the daemon's exact bwrap jail and captured the
+worker's otherwise-swallowed stderr → `build matrix client / No CA certificates were loaded from the system`. **matrix-sdk 0.18
+validates the homeserver's TLS against the *system* trust store** (rustls native certs); 0.8 used bundled webpki roots, so it
+never read them. The jail bound `resolv.conf`/`hosts`/`nsswitch` but **not** the CA bundle → the 0.18 worker exited ~40 ms into
+`matrix.init`, before any login (looked like an auth failure — it wasn't). **Fix:** `build_matrix_policy` binds `/etc/ssl/certs`
++ `/etc/pki/tls/certs` + `/etc/ssl/cert.pem` into `fs_read` (`--ro-bind-try`, cross-distro); needed regardless of force-routing
+since the worker does native E2E TLS through the transparent (`disable_mitm`) egress tunnel. +1 unit assertion; policy tests
+green. **Second, separate problem — stale Vault password:** a fresh login 403'd. Ruled out the SDK via direct `curl` to
+continuwuity — account exists (`displayname:kastellan`), identifier wire-format is the one that worked on 0.8, request
+well-formed → `M_FORBIDDEN` = *credential* rejection, not a format issue. Reset the secret; the channel now runs via **session
+restore** (device `xA31CsGn82`). **`secret put` gotcha:** the interactive (non-`--raw`) prompt stored a value login rejected,
+while the exact 13 bytes via `printf|… secret put --raw` worked — **always use `--raw`** for exact bytes. **Store-wipe gotcha
+confirmed + scripted:** a matrix-sdk *major* bump invalidates the on-disk crypto store; `install` does NOT wipe it → restore
+fails → must `rm -rf ~/.local/state/kastellan/matrix/store` + re-login (`matrix probe`, keyring password). New
+`scripts/upgrade_from_git.sh` encodes the whole flow (switch→pull→`build-release`→`install`→restart→verify; **keyring-only, no
+password by default**; `--relogin` wipes + re-logs-in for SDK-major bumps; `-pwd` resets the stale Vault secret first via
+`secret put --raw`). **Verified live:** `matrix worker logged in; starting channel bus` + `matrix channel bus running`, worker
+stable. Addresses the deploy half of [#330](https://github.com/hherb/kastellan/issues/330). **Per-user install reminder:**
+`kastellan-cli` lives at `~/.local/bin/kastellan-cli` (per-user, multi-tenant, never system-wide); scripts call it by absolute
+path. A bare-`kastellan-cli` "No such file or directory at /usr/local/bin" is a stale bash command hash in an old shell —
+`hash -r`, not a real problem.)
+
+_(Prior session — **matrix-sdk 0.8→0.18 + sqlx 0.8→0.9 — clears all 4 Dependabot alerts. Branch
 `worktree-matrix-sdk-0.18-upgrade` (PR [#329](https://github.com/hherb/kastellan/pull/329)) — green, awaiting review/merge.**
 **Why both at once:** the three `matrix-sdk-*` alerts (crypto sender-spoofing, base panics) and the `sqlx` cast-truncation
 alert are entangled by a shared `libsqlite3-sys` native `links` conflict (`sqlx-sqlite` vs `matrix-sdk-sqlite → rusqlite`, only
@@ -35,7 +59,7 @@ overkill.) Tested in dev; `--release` build + redeploy is the follow-up.
 (no more silent rediscovery of the deploy gotcha). Three non-blocking follow-ups lodged: [#330](https://github.com/hherb/kastellan/issues/330)
 (auto-detect + recover from an incompatible crypto store after an SDK bump), [#331](https://github.com/hherb/kastellan/issues/331)
 (CI doesn't compile `--features live-matrix`, so `sdk_live.rs` is uncovered — DGX-gated by design today), and
-[#332](https://github.com/hherb/kastellan/issues/332) (focused variant-D PgListener/`pool.close()` deadlock isolation test).)
+[#332](https://github.com/hherb/kastellan/issues/332) (focused variant-D PgListener/`pool.close()` deadlock isolation test).)_
 
 _(Prior session — **L1 embedding backfill — `kastellan-cli memory l1 reembed` — [#325](https://github.com/hherb/kastellan/issues/325)
 DONE. Branch `feat/325-l1-embedding-backfill` (PR [#327](https://github.com/hherb/kastellan/pull/327)).** Closes #323 item 2: PR #324 wired the *forward* embed path, but
