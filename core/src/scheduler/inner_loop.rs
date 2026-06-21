@@ -53,7 +53,9 @@ pub struct TaskContext {
 /// Max chars of a step error `detail` surfaced back to the agent in
 /// `plans_so_far_summary`. Long worker stderr / RPC messages are
 /// clamped so a single chatty failure can't blow up the always-in-context
-/// planner prompt; the `code` (always short) is never truncated.
+/// planner prompt; the `code` (always short) is never truncated. A
+/// truncated detail gets a trailing `…` marker, so the rendered detail is
+/// at most `STEP_ERR_DETAIL_MAX + 1` chars.
 pub(crate) const STEP_ERR_DETAIL_MAX: usize = 200;
 
 /// Render one [`StepOutcome`] for the agent's plan summary. An `Ok`

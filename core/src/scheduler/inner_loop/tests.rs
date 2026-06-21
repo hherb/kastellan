@@ -272,6 +272,51 @@ fn plans_so_far_summary_truncates_long_error_detail() {
     assert!(surfaced.ends_with('…'));
 }
 
+#[test]
+fn worker_rpc_error_surfaces_verbatim_in_plan_summary() {
+    // Seam pin: a *real* worker rejection — the way the dispatcher
+    // actually produces a failed step — must flow through
+    // `map_dispatch_result` and out of `plans_so_far_summary` as the
+    // `err: <CODE>: <detail>` string the planner sees. Both halves are
+    // unit-tested in isolation (`map_dispatch_result_*` in
+    // `tool_dispatch/tests.rs`, `render_step_outcome` truncation above),
+    // but nothing pinned the composition; this guards the wiring so a
+    // regression in either half is caught end-to-end.
+    let rpc = kastellan_protocol::RpcError::new(
+        kastellan_protocol::codes::POLICY_DENIED,
+        "argv not allowlisted",
+    );
+    let outcome = crate::scheduler::tool_dispatch::map_dispatch_result(Err(
+        crate::tool_host::ToolHostError::Protocol(
+            kastellan_protocol::client::ClientError::Rpc(rpc),
+        ),
+    ));
+
+    let mut c = ctx();
+    c.plans.push((
+        crate::cassandra::types::Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+            l3_skill: None,
+            invoke_skill: None,
+            python_skill: None,
+        },
+        vec![outcome],
+    ));
+    let s = c.plans_so_far_summary();
+    assert_eq!(
+        s[0]["step_outcomes"],
+        serde_json::json!(["err: POLICY_DENIED: argv not allowlisted"])
+    );
+}
+
 // ── Slice E: InnerLoopResult field pin (l1_insight payload-key
 //    tests live in `inner_loop_audit::tests`) ───────────────────
 
