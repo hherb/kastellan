@@ -209,7 +209,7 @@ fn recall_params_new_default_enables_entity_no_graph_no_seeds() {
 /// constructor is the only way to get graph contributions from the
 /// canonical constructors. Issue #40 pin.
 #[test]
-fn recall_params_with_seeds_enables_all_three_lanes() {
+fn recall_params_with_seeds_enables_all_four_lanes() {
     let emb: Vec<f32> = vec![0.0; 1024];
     let seeds: &[i64] = &[7, 42];
     let params = RecallParams::with_seeds("query", &emb, seeds);
