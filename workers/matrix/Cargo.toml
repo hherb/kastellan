@@ -26,4 +26,4 @@ serde                    = { workspace = true }
 serde_json               = { workspace = true }
 anyhow                   = { workspace = true }
 tokio                    = { workspace = true }
-matrix-sdk               = { version = "0.8.0", default-features = false, features = ["e2e-encryption", "sqlite", "bundled-sqlite", "rustls-tls"], optional = true }
+matrix-sdk               = { version = "0.18", default-features = false, features = ["e2e-encryption", "sqlite", "bundled-sqlite"], optional = true }

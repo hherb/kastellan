@@ -31,7 +31,7 @@
 //! Migrations are tracked by sqlx in `_sqlx_migrations`; running
 //! [`MIGRATOR`] against an already-up-to-date schema is a no-op.
 
-use sqlx::{Connection, Executor, Row};
+use sqlx::{Connection, Row};
 
 use crate::conn::{quote_ident, set_role_runtime_statement, ConnectSpec};
 use crate::DbError;
@@ -74,7 +74,8 @@ pub async fn run(
     // than only by application discipline. Migration 0002 GRANTs the
     // runtime role to the OS user, so this SET ROLE always succeeds on
     // a freshly-migrated cluster.
-    conn.execute(set_role_runtime_statement().as_str())
+    sqlx::raw_sql(sqlx::AssertSqlSafe(set_role_runtime_statement()))
+        .execute(&mut conn)
         .await
         .map_err(|e| DbError::Query(format!("SET ROLE kastellan_runtime: {e}")))?;
 
@@ -130,7 +131,8 @@ pub async fn ensure_database_exists(spec: &ConnectSpec) -> Result<(), DbError> {
             quote_ident(&spec.database),
             quote_ident(&spec.user),
         );
-        conn.execute(stmt.as_str())
+        sqlx::raw_sql(sqlx::AssertSqlSafe(stmt))
+            .execute(&mut conn)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
     }

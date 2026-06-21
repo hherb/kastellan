@@ -40,7 +40,7 @@ use anyhow::Context as _;
 use tokio::runtime::Runtime;
 
 use matrix_sdk::config::SyncSettings;
-use matrix_sdk::matrix_auth::MatrixSession;
+use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::ruma::api::client::uiaa;
 use matrix_sdk::ruma::events::room::member::StrippedRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::{
@@ -339,10 +339,19 @@ async fn restore_or_login(client: &Client, config: &LiveSdkConfig) -> anyhow::Re
     if let Ok(bytes) = std::fs::read(&session_path) {
         let session: MatrixSession =
             serde_json::from_slice(&bytes).context("decode persisted session")?;
-        client
-            .restore_session(session)
-            .await
-            .context("restore session")?;
+        // A matrix-sdk major upgrade (e.g. 0.8→0.18) can invalidate the on-disk
+        // SQLite crypto store; restore then fails here. `install` does NOT wipe
+        // the store, so name the remedy in the error itself rather than leaving
+        // the operator to rediscover it — see the deploy gotcha in HANDOVER.md.
+        client.restore_session(session).await.with_context(|| {
+            format!(
+                "restore session from {session_path:?} — if this follows a \
+                 matrix-sdk upgrade the on-disk crypto store is likely \
+                 incompatible; remove {:?} and restart with \
+                 KASTELLAN_MATRIX_PASSWORD set to re-bootstrap a fresh device",
+                config.store_dir
+            )
+        })?;
         return Ok(());
     }
 
@@ -393,7 +402,9 @@ async fn ensure_cross_signing(client: &Client, config: &LiveSdkConfig) -> anyhow
             };
             let user_id = client.user_id().context("no user id for cross-signing UIA")?;
             let mut pw = uiaa::Password::new(
-                uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
+                uiaa::UserIdentifier::Matrix(uiaa::MatrixUserIdentifier::new(
+                    user_id.localpart().to_owned(),
+                )),
                 password.to_owned(),
             );
             pw.session = uiaa_info.session.clone();

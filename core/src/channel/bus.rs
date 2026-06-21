@@ -287,10 +287,20 @@ impl ChannelBus {
         Self { handles }
     }
 
-    /// Abort all pump tasks (called on daemon shutdown).
+    /// Abort all pump tasks (called on daemon shutdown), then join them so any
+    /// resources they hold are released before the caller proceeds. The
+    /// completed-task pump owns a `PgListener`, which holds a checked-out pool
+    /// connection that sqlx 0.9 only releases when the listener is dropped; the
+    /// daemon's shutdown closes the pool right after, and `Pool::close()` blocks
+    /// until every connection is returned. Aborting without joining would leave
+    /// that release racing the pool close. Mirrors the scheduler/audit-mirror
+    /// shutdowns, which signal-then-join for the same reason.
     pub async fn shutdown(self) {
-        for h in self.handles {
+        for h in &self.handles {
             h.abort();
+        }
+        for h in self.handles {
+            let _ = h.await;
         }
     }
 }

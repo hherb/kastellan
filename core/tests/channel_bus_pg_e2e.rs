@@ -123,5 +123,10 @@ async fn channel_inbound_enqueues_and_completion_routes_a_reply() {
         "expected a channel.replied audit row"
     );
 
+    // Drop the listener before pool.close() — `PgCompletedTasks` holds a
+    // checked-out PoolConnection (sqlx 0.9 `PgListener` only releases it from
+    // inside `recv()`), and `pool.close()` blocks until every connection is
+    // returned, so a listener still in scope at close-time deadlocks the test.
+    drop(completed);
     pool.close().await;
 }
