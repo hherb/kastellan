@@ -32,6 +32,7 @@ pub mod audit;
 pub mod conn;
 pub mod entities;
 pub mod entity_kinds;
+pub mod entity_embedding;
 pub mod entity_name;
 pub mod graph;
 pub mod memories;

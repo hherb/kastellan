@@ -102,7 +102,7 @@ pub const DEFAULT_RECALL_K: usize = 10;
 /// (read path) so the operator-readable error message is identical at
 /// both ends. The check fires before any sqlx call, so unit tests can
 /// exercise it without a live executor.
-fn check_embedding_dim(label: &str, v: &[f32]) -> Result<(), DbError> {
+pub(crate) fn check_embedding_dim(label: &str, v: &[f32]) -> Result<(), DbError> {
     if v.len() != EMBEDDING_DIM {
         return Err(DbError::Query(format!(
             "{label} embedding dim mismatch: got {}, expected {}",
@@ -162,7 +162,7 @@ pub fn truncate_to_embedding_dim(raw: &[f32]) -> Result<Vec<f32>, DbError> {
 /// `usize` → `i64` for SQL `LIMIT` binds. Saturates at `i64::MAX`
 /// rather than wrapping to a negative value (which Postgres would
 /// reject with a runtime error far from the call site).
-fn limit_as_i64(k: usize) -> i64 {
+pub(crate) fn limit_as_i64(k: usize) -> i64 {
     i64::try_from(k).unwrap_or(i64::MAX)
 }
 
