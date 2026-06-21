@@ -21,7 +21,7 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use kastellan_core::memory::l1_reembed::{reembed_l1_null, ReembedReport};
+use kastellan_core::memory::{reembed_l1_null, ReembedReport};
 use kastellan_db::memories::{
     insert_memory_at_layer, load_unembedded_at_layer, semantic_search, EMBEDDING_DIM, MemoryLayer,
 };
