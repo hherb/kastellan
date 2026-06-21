@@ -48,12 +48,31 @@ pub(crate) fn truncate_for_error(body: &str, max: usize) -> String {
 /// vector if a backend dumps megabytes of HTML.
 pub(crate) const ERROR_BODY_CAP: usize = 1024;
 
+/// Operator-facing category tag for a [`RouterError::Transport`]. A
+/// `reqwest` total-`.timeout()` failure has the SAME top-level `Display`
+/// as a connection send failure (`"error sending request for url …"`),
+/// so without this tag a slow/hung generation (timeout) is
+/// indistinguishable from a dead backend (connect) in the logs — the
+/// exact ambiguity that masked a too-short `KASTELLAN_LLM_TIMEOUT_MS`.
+/// Pure + testable; the live caller passes `reqwest::Error::is_timeout`
+/// / `is_connect`. Timeout takes precedence — it's the more actionable
+/// signal (raise the timeout / the backend is slow).
+pub(crate) fn transport_kind_tag(is_timeout: bool, is_connect: bool) -> &'static str {
+    if is_timeout {
+        " [request timed out]"
+    } else if is_connect {
+        " [connection failed]"
+    } else {
+        ""
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RouterError {
     #[error("router configuration error: {0}")]
     Config(String),
 
-    #[error("HTTP transport error: {0}")]
+    #[error("HTTP transport error: {}{}", .0, transport_kind_tag(.0.is_timeout(), .0.is_connect()))]
     Transport(#[from] reqwest::Error),
 
     #[error("backend returned HTTP {status}: {body}")]
@@ -81,6 +100,19 @@ pub enum RouterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_kind_tag_classifies_timeout_connect_and_other() {
+        // A reqwest timeout displays identically to a send failure
+        // ("error sending request for url …"); this tag is what lets an
+        // operator tell a slow/hung generation (timeout) apart from a
+        // dead backend (connect) without reading the hidden source chain.
+        assert_eq!(transport_kind_tag(true, false), " [request timed out]");
+        assert_eq!(transport_kind_tag(false, true), " [connection failed]");
+        assert_eq!(transport_kind_tag(false, false), "");
+        // timeout wins if both somehow set (it's the more actionable signal).
+        assert_eq!(transport_kind_tag(true, true), " [request timed out]");
+    }
 
     #[test]
     fn truncate_for_error_passes_through_short_strings() {

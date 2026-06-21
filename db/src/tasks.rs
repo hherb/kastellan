@@ -46,8 +46,11 @@ pub const DEFAULT_DEADLINE_LONG_S: i64 = 30 * 60;
 
 /// Default plan-iteration caps per lane. Mirror values in
 /// `core::scheduler` so a producer omitting the cap gets the same
-/// behaviour as the runner enforces.
-pub const DEFAULT_MAX_PLANS_FAST: u32 = 3;
+/// behaviour as the runner enforces. Fast is 5 (not 3): with step
+/// error `code`/`detail` now fed back into the planner prompt the
+/// agent can actually recover across replans, so a couple of extra
+/// attempts buy real convergence rather than blind flailing.
+pub const DEFAULT_MAX_PLANS_FAST: u32 = 5;
 pub const DEFAULT_MAX_PLANS_LONG: u32 = 12;
 
 #[cfg(test)]

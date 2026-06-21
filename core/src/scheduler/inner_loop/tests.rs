@@ -225,7 +225,96 @@ fn task_context_plans_so_far_summary_is_compact() {
     let s = c.plans_so_far_summary();
     assert_eq!(s.len(), 1);
     assert_eq!(s[0]["decision"], "act");
-    assert_eq!(s[0]["step_outcomes"], serde_json::json!(["ok", "err"]));
+    // An Ok step stays the compact "ok" scalar; an Err step now surfaces
+    // its code + detail so the agent can diagnose and replan instead of
+    // seeing a bare "err" and flailing.
+    assert_eq!(
+        s[0]["step_outcomes"],
+        serde_json::json!(["ok", "err: POLICY_DENIED: no"])
+    );
+}
+
+#[test]
+fn plans_so_far_summary_truncates_long_error_detail() {
+    let mut c = ctx();
+    let long_detail = "x".repeat(500);
+    c.plans.push((
+        crate::cassandra::types::Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+            l3_skill: None,
+            invoke_skill: None,
+            python_skill: None,
+        },
+        vec![StepOutcome::Err {
+            code: "OPERATION_FAILED".into(),
+            detail: long_detail,
+        }],
+    ));
+    let s = c.plans_so_far_summary();
+    let surfaced = s[0]["step_outcomes"][0].as_str().unwrap();
+    // Prefix is intact; the unbounded detail is clamped so a single
+    // chatty worker error can't blow up the always-in-context prompt.
+    assert!(surfaced.starts_with("err: OPERATION_FAILED: "));
+    let prefix_chars = "err: OPERATION_FAILED: ".chars().count();
+    assert!(
+        surfaced.chars().count() <= prefix_chars + STEP_ERR_DETAIL_MAX + 1,
+        "detail not truncated: {} chars",
+        surfaced.chars().count()
+    );
+    assert!(surfaced.ends_with('…'));
+}
+
+#[test]
+fn worker_rpc_error_surfaces_verbatim_in_plan_summary() {
+    // Seam pin: a *real* worker rejection — the way the dispatcher
+    // actually produces a failed step — must flow through
+    // `map_dispatch_result` and out of `plans_so_far_summary` as the
+    // `err: <CODE>: <detail>` string the planner sees. Both halves are
+    // unit-tested in isolation (`map_dispatch_result_*` in
+    // `tool_dispatch/tests.rs`, `render_step_outcome` truncation above),
+    // but nothing pinned the composition; this guards the wiring so a
+    // regression in either half is caught end-to-end.
+    let rpc = kastellan_protocol::RpcError::new(
+        kastellan_protocol::codes::POLICY_DENIED,
+        "argv not allowlisted",
+    );
+    let outcome = crate::scheduler::tool_dispatch::map_dispatch_result(Err(
+        crate::tool_host::ToolHostError::Protocol(
+            kastellan_protocol::client::ClientError::Rpc(rpc),
+        ),
+    ));
+
+    let mut c = ctx();
+    c.plans.push((
+        crate::cassandra::types::Plan {
+            context: "c".into(),
+            decision: "act".into(),
+            rationale: "r".into(),
+            steps: vec![],
+            result: None,
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+            l3_skill: None,
+            invoke_skill: None,
+            python_skill: None,
+        },
+        vec![outcome],
+    ));
+    let s = c.plans_so_far_summary();
+    assert_eq!(
+        s[0]["step_outcomes"],
+        serde_json::json!(["err: POLICY_DENIED: argv not allowlisted"])
+    );
 }
 
 // ── Slice E: InnerLoopResult field pin (l1_insight payload-key

@@ -75,7 +75,7 @@ const CAT_PATH: &str = "/bin/cat";
 const DEFAULT_LLM_MODEL: &str = "gemma4:26b-a4b-it-q8_0";
 
 /// Default per-fixture wall-clock budget. Sized to allow up to the
-/// 3-plan cap on a moderately fast local model; reasoning-heavy or
+/// fast-lane plan cap on a moderately fast local model; reasoning-heavy or
 /// large quantised models may need more. Operators override with
 /// `KASTELLAN_OBSERVATION_PER_FIXTURE_TIMEOUT_SECS`.
 const DEFAULT_PER_FIXTURE_TIMEOUT_SECS: u64 = 600;

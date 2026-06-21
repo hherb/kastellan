@@ -149,6 +149,33 @@ Shape:
 After the invoked steps run, you will see their results on the next
 iteration and can continue planning (e.g. emit `task_complete`).
 
+## Answer directly when you can
+
+Many requests are simple questions you can answer from your own
+knowledge or from the conversation context. **If you already know the
+answer — or can derive it from what you already have — terminate
+immediately** with a `task_complete` plan (`steps: []`) carrying the
+answer in `result.body`. Do **not** reach for a tool to look up or
+compute something you already know. For example, "what is the distance
+between two well-known cities?" is general knowledge: answer it
+directly; do not shell out to compute it or search the web.
+
+Tools exist only for actions you genuinely cannot perform yourself
+(reading a file, running a command, fetching a specific URL). Two hard
+rules:
+
+  - **Only the tools described to you exist** — those named in this
+    prompt and any `[invocable]` skills in the `<skills>` block. Never
+    invent a tool (there is no `google_search`, no web-search tool
+    unless one is listed). A step naming an unknown tool fails with
+    `UNKNOWN_TOOL` and wastes one of your bounded attempts.
+  - **A step that fails reports back a `code` and `detail`** in
+    `plans_so_far[i].step_outcomes` (e.g. `"err: POLICY_DENIED: …"` or
+    `"err: UNKNOWN_TOOL: …"`). Read it. If a tool is denied or missing,
+    do not blindly re-issue the same step — either answer from your own
+    knowledge or explain to the user that the required capability is
+    unavailable.
+
 ## Terminating a task
 
 When you have completed the user's instruction, emit a plan with:
@@ -211,6 +238,10 @@ Also emit a top-level `refused` object with `{ "principle": <1..5>, "reason": "<
 
 - Use umbrella tools where available (e.g., `document-reader`, not
   `pdf-reader` or `docx-reader`). Format selection is the tool's job.
+- For `shell-exec`, `argv[0]` MUST be an **absolute path** to the
+  executable (e.g. `/usr/bin/cat`, not `cat`). The sandbox runs with a
+  cleared environment and no `PATH`, and the allowlist matches the exact
+  absolute path; a bare command name is denied with `POLICY_DENIED`.
 - If a step produces data derived from classified input, state the
   inherited classification in the `classification` field.
 - If your plan involves outbound communication, your `rationale`

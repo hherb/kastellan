@@ -6,7 +6,42 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-21 (**Forward entity embed-on-insert — DONE on branch `feat/entity-forward-embed-on-insert`
+**Last updated:** 2026-06-22 (**Agent tool-loop recovery — DONE on branch `fix/agent-step-error-feedback`,
+PR [#337](https://github.com/hherb/kastellan/pull/337) (open). Deployed + verified live on the DGX.** A live Matrix question
+— *"What is the distance between Oslo and the capital of Poland?"* — failed with `plan_iteration_cap_exceeded (3>=3)` though
+the model knew the answer. Systematic debugging on the live DGX (`tasks tail`, audit log) found **three** distinct problems.
+**(1) Blind replanning (the reported bug):** `TaskContext::plans_so_far_summary` (`core/src/scheduler/inner_loop.rs`)
+collapsed every failed step to the bare string `"err"`, discarding the `StepOutcome::Err { code, detail }` the dispatcher
+produces — so the planner flailed through near-duplicate plans until the cap (and over-tooled a pure-knowledge question:
+`shell-exec python3`, then an invented `google_search`). Fix: new pure `render_step_outcome` surfaces `err: <CODE>: <detail>`
+(detail clamped to `STEP_ERR_DETAIL_MAX=200`) into the planner prompt; `agent_planner.md` gained guidance (answer directly
+from in-context knowledge; only real tools exist; read the step error, don't repeat a denied step; `shell-exec` argv[0] MUST
+be absolute — cleared env, no PATH in the jail); `DEFAULT_MAX_PLANS_FAST` 3→5 (`db/src/tasks.rs`). 2 new unit tests (TDD),
+`cli_ask_e2e`/`observation_capture` cap pins updated. **(2) LLM transport timeout:** tool-using (multi-plan) tasks failed
+with `router: HTTP transport error: error sending request for url (…:11434/v1/chat/completions)` ~30s after the prior step.
+Root cause: the reqwest total `.timeout()` (`KASTELLAN_LLM_TIMEOUT_MS`, default **30s**) firing **mid-generation** — a real
+agentic plan over `gemma4:26b-a4b-it-q8_0` with the ~13 KB `agent_planner.md` system prompt was **measured at ~86s**
+standalone against a healthy Ollama. A reqwest timeout's `Display` is byte-identical to a send failure, which disguised it.
+Ruled out (all reproduced fine): keep-alive connection reuse, model swapping (gemma 36GB + embeddinggemma 1.1GB both stay
+resident), Ollama health (curl 200 in ~1.4s). Fix (`llm-router`): `DEFAULT_TIMEOUT_MS` 30_000→**180_000** (bounds generation,
+not connect — dead backend still fails fast via the separate 5s `connect_timeout`); `RouterError::Transport` now appends
+`[request timed out]`/`[connection failed]` via the pure tested `transport_kind_tag` so this can't be misdiagnosed again.
+**(3) Empty allowlist (deployment):** the DGX `shell-exec` allowlist was empty → every step `POLICY_DENIED`. Added
+`/usr/bin/{cat,ls,python3}` (operator DB state; entries MUST be absolute paths; daemon loads the allowlist ONCE at startup so
+a restart is required to apply). **Verification — live DGX:** original distance question now completes on **plan 1**
+(~1,050 km); a `shell-exec` step runs `/usr/bin/ls /tmp` with `terminal_kind:ok` in the jail; post-timeout-fix a tool task
+formulated **all 5 plans** (every LLM call completed, none cut off at 30s). `cargo clippy --all-targets -D warnings` clean on
+touched crates (core/db/llm-router). Deploy: relayed commits to the DGX (Mac→github push firewalled), brought DGX to
+origin/main (matrix-sdk 0.18→0.18, **no relogin** — same device `xA31CsGn82`), `build-release.sh` + `install` + restart;
+Matrix channel bus running. **⚠ KNOWN FOLLOW-UP ([#338](https://github.com/hherb/kastellan/issues/338)):** successful tool
+**output** is still fed back as just `"ok"` (only the error half was fixed), so tool tasks loop re-running the same step until
+the cap. Feeding worker stdout into the planner prompt is the prompt-injection surface — route it through
+`core/src/cassandra/injection_guard.rs` and/or the handoff/fetch design (`core/src/handoff.rs`, spec
+`2026-06-09-teach-planner-fetch-handoff`); deliberate design task, NOT a naive inline of raw stdout. Separate, model-side:
+~86s/plan is gemma 26B on the DGX Spark with a 262144-token context — reducing the model's default `num_ctx` (via
+`OLLAMA_CONTEXT_LENGTH`/Modelfile, NOT per-request — that forces a reload) is a possible perf follow-up.)
+
+_(Prior session — **Forward entity embed-on-insert — DONE on branch `feat/entity-forward-embed-on-insert`
 (PR pending).** Closes the deferred *forward* half of the entity-embedding arc (PR #335 shipped backfill + lane; this is the
 on-insert path, symmetric with the L1 #324-forward / #325-backfill split but for entities). New entities written by
 `entity_extraction::batch_upsert` previously landed `embedding IS NULL` until a manual `entities reembed`; they are now embedded
@@ -28,7 +63,7 @@ lane surfaces the linked memory; conflict-hit NOT re-embedded [`call_count` pin]
 Ok) + regressions `entity_extraction_e2e` **16/0**, `entity_reembed_e2e` **4/0**, `memory_entity_link_e2e` **6/0**, batch_upsert
 units **15/0** (+4); `cargo clippy --workspace --all-targets -D warnings` CLEAN. Pure-Rust, no migration, no OS-gated code → DGX
 not required. **`batch_upsert.rs` is 514 LOC** (+14 over the 500 cap, within the documented ≤27-over deferral; tests already
-external in `batch_upsert/tests.rs`). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-21-entity-forward-embed-on-insert*`.)
+external in `batch_upsert/tests.rs`). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-21-entity-forward-embed-on-insert*`.)_
 
 _(Prior session — **Entity-embedding backfill + entity-similarity recall lane — MERGED to `main` as
 `4f4d61c` (PR [#335](https://github.com/hherb/kastellan/pull/335)).** `entities.embedding` (`vector(256)`, NULL for every row, no reader)
@@ -717,9 +752,24 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (branch `feat/entity-forward-embed-on-insert`, PR pending):** forward entity embed-on-insert — new entities are
-embedded the moment `batch_upsert` creates them (see "Last updated" up top). The entity-embedding arc is now complete (backfill
-#335 + forward this branch). **Remaining entity-embedding follow-ups:** (1) an **ANN index** (ivfflat/hnsw) on
+**Just shipped (branch `fix/agent-step-error-feedback`, PR [#337](https://github.com/hherb/kastellan/pull/337) open, deployed +
+verified live on the DGX):** agent tool-loop recovery — step error `code`/`detail` now fed back to the planner, LLM request
+timeout 30s→180s (was cutting off ~86s plan generation), `shell-exec` allowlist seeded with `/usr/bin/{cat,ls,python3}`. See
+the "Last updated" header for the full root-cause writeup.
+
+**★ LEADING PICK — [#338](https://github.com/hherb/kastellan/issues/338): feed successful tool output back to the agent.**
+After PR #337, tool-using tasks STILL fail at the plan cap because the agent never sees a step's *output* (only `"ok"`), so it
+re-runs the same step every iteration (verified live: 5 identical `/usr/bin/ls /tmp` plans). This blocks every tool-using task
+end-to-end. The fix is the success-half symmetric to PR #337's error-half (`render_step_outcome` in
+`core/src/scheduler/inner_loop.rs`), BUT feeding worker stdout into the planner prompt is the prompt-injection surface — route
+it through `core/src/cassandra/injection_guard.rs` and/or the existing handoff/fetch design (`core/src/handoff.rs`, spec
+`docs/superpowers/specs/2026-06-09-teach-planner-fetch-handoff-design.md`), bounded + classification-aware. Verify with a live
+"run ls on /tmp and tell me how many entries" task completing without looping. **Separately (model-side, not a code task):**
+~86s/plan is gemma 26B on the DGX Spark with a 262144-token context; reducing the model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH`
+or a Modelfile — NOT per-request, which forces a reload) is a possible perf win.
+
+**Prior entity-embedding work (still-valid follow-ups):** forward entity embed-on-insert shipped on
+`feat/entity-forward-embed-on-insert` (the entity-embedding arc is complete: backfill #335 + forward). **Remaining entity-embedding follow-ups:** (1) an **ANN index** (ivfflat/hnsw) on
 `entities.embedding` once entity cardinality warrants it (the lane does a sequential cosine scan today, matching the memories
 semantic lane); (2) a **batch-embed seam** so the backfill + forward loops embed N entities per round-trip instead of one
 `embed_for_storage` call each (sequential today; cheap to add behind the `Embedder` trait if embed latency becomes a recall-path
@@ -886,6 +936,8 @@ The `memory_entities` join table (P1) shipped; the graph lane is wired into `rec
 ## Open follow-up issues (filed but not picked)
 
 Only currently-open issues are listed; closed-issue detail lives in the archive snapshots and git history.
+
+- [#338](https://github.com/hherb/kastellan/issues/338) — **agent can't see successful tool output → tool tasks loop to the plan cap.** `plans_so_far_summary` renders `StepOutcome::Ok` as just `"ok"` (PR #337 fixed only the error half: `err: <CODE>: <detail>`). The agent re-runs the same step every iteration because it never sees the result. NOT a naive inline of stdout: feeding worker output into the planner prompt is the prompt-injection surface — route through `core/src/cassandra/injection_guard.rs` and/or the handoff/fetch design (`core/src/handoff.rs`, spec `2026-06-09-teach-planner-fetch-handoff`), bounded + classification-aware. This currently blocks ALL tool-using tasks end-to-end. Design-first.
 
 - ~~[#287](https://github.com/hherb/kastellan/issues/287)~~ — **RESOLVED 2026-06-15** (PR `fix/287-browser-driver-stale-venv`): the macOS forced egress-sidecar "no decisions" was a **stale browser-driver venv** (a pre-slice-#2 install with no shim / no `--proxy-server`), not a code bug — fixed `install.sh` to `--force-reinstall` the local package so re-runs always stage current source. All 4 `browser_driver_e2e --ignored` tests pass on macOS.
 - [#298](https://github.com/hherb/kastellan/issues/298) — full-DAEMON python-exec output secret-scrub e2e: the in-process scrub e2e is done (`python_exec_e2e::materialized_secret_param_is_scrubbed_from_output`); driving the whole CLI→scheduler→l3py→dispatch chain needs a security-sensitive Vault-ref test seam in `main.rs` (the `secret://` ref is minted randomly + never logged, so the separate CLI process can't pass a working ref). Design-first.

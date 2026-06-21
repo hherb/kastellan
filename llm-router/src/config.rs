@@ -24,7 +24,7 @@
 //! | `KASTELLAN_LLM_EMBEDDING_MODEL` | Default model name passed to the embedding backend | `embedding-default` |
 //! | `KASTELLAN_LLM_FRONTIER_URL` | Base URL of the frontier backend | unset (frontier disabled) |
 //! | `KASTELLAN_LLM_FRONTIER_MODEL` | Default model on the frontier backend | unset |
-//! | `KASTELLAN_LLM_TIMEOUT_MS` | Request timeout, milliseconds | 30_000 |
+//! | `KASTELLAN_LLM_TIMEOUT_MS` | Request timeout, milliseconds | 180_000 |
 //!
 //! The frontier URL/model are deliberately *not* defaulted. Phase 0
 //! refuses to dispatch to the frontier even when set; setting the
@@ -44,7 +44,17 @@ use crate::error::RouterError;
 
 pub const DEFAULT_LOCAL_MODEL: &str = "local-default";
 pub const DEFAULT_EMBEDDING_MODEL: &str = "embedding-default";
-pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// Overall per-request timeout (the `reqwest` total `.timeout()`), in
+/// milliseconds. This bounds **generation**, not just connect — a local
+/// agentic plan over a 26B-class model with a multi-KB system prompt was
+/// measured at ~86 s on the DGX, and the previous 30 s value cut those
+/// calls off mid-generation, surfacing as a misleading
+/// `RouterError::Transport("error sending request …")` (a `reqwest`
+/// timeout displays exactly like a send failure). A dead backend still
+/// fails fast via the separate 5 s `connect_timeout`, so this generous
+/// value only ever bites a genuinely slow/hung generation. Operators
+/// override with `KASTELLAN_LLM_TIMEOUT_MS`.
+pub const DEFAULT_TIMEOUT_MS: u64 = 180_000;
 
 /// Per-OS default base URL for the local backend.
 ///
@@ -238,11 +248,11 @@ mod tests {
         // Operators read these via the public re-exports; rotating
         // them silently would surprise a config audit.
         assert_eq!(DEFAULT_LOCAL_MODEL, "local-default");
-        assert_eq!(DEFAULT_TIMEOUT_MS, 30_000);
+        assert_eq!(DEFAULT_TIMEOUT_MS, 180_000);
     }
 
     #[test]
-    fn default_config_uses_per_os_url_no_frontier_30s_timeout() {
+    fn default_config_uses_per_os_url_no_frontier_180s_timeout() {
         let cfg = RouterConfig::default();
         assert_eq!(cfg.local_url, default_local_url_for_os());
         assert_eq!(cfg.local_model, DEFAULT_LOCAL_MODEL);
