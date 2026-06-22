@@ -31,6 +31,23 @@ fn ctx() -> TaskContext {
     }
 }
 
+fn plan_with_decision(decision: &str) -> crate::cassandra::types::Plan {
+    crate::cassandra::types::Plan {
+        context: "c".into(),
+        decision: decision.into(),
+        rationale: "r".into(),
+        steps: vec![],
+        result: None,
+        data_ceiling: DataClass::Public,
+        refused: None,
+        floor_request: None,
+        l1_insight: None,
+        l3_skill: None,
+        invoke_skill: None,
+        python_skill: None,
+    }
+}
+
 #[test]
 fn classification_floor_source_as_snake_str_matches_serde_wire_form() {
     // Pin the audit-log contract: `as_snake_str` MUST stay
@@ -225,12 +242,12 @@ fn task_context_plans_so_far_summary_is_compact() {
     let s = c.plans_so_far_summary();
     assert_eq!(s.len(), 1);
     assert_eq!(s[0]["decision"], "act");
-    // An Ok step stays the compact "ok" scalar; an Err step now surfaces
-    // its code + detail so the agent can diagnose and replan instead of
-    // seeing a bare "err" and flailing.
+    // An Ok step now surfaces its (already-screened, bounded) output
+    // head so the agent can answer from it instead of re-running the
+    // step; an Err step surfaces its code + detail (#337).
     assert_eq!(
         s[0]["step_outcomes"],
-        serde_json::json!(["ok", "err: POLICY_DENIED: no"])
+        serde_json::json!(["ok: x", "err: POLICY_DENIED: no"])
     );
 }
 
@@ -459,6 +476,93 @@ mod inner_loop_test_stubs {
             python_skill: Some(cand),
         }
     }
+}
+
+#[test]
+fn plans_so_far_summary_surfaces_ok_output_head() {
+    let mut c = ctx();
+    c.plans.push((
+        plan_with_decision("act"),
+        vec![StepOutcome::Ok(serde_json::json!({
+            "exit_code": 0,
+            "stdout": "file1\nfile2\nfile3\n",
+            "stderr": "",
+        }))],
+    ));
+    let s = c.plans_so_far_summary();
+    let surfaced = s[0]["step_outcomes"][0].as_str().unwrap();
+    // The textual stdout is visible to the planner; it is no longer the
+    // bare "ok" scalar.
+    assert!(surfaced.starts_with("ok: "), "got: {surfaced}");
+    assert!(surfaced.contains("file1"), "stdout not surfaced: {surfaced}");
+    assert_ne!(surfaced, "ok");
+}
+
+#[test]
+fn plans_so_far_summary_truncates_long_ok_output() {
+    let mut c = ctx();
+    let long_stdout = "y".repeat(STEP_OK_SUMMARY_MAX + 500);
+    c.plans.push((
+        plan_with_decision("act"),
+        vec![StepOutcome::Ok(serde_json::json!({ "stdout": long_stdout }))],
+    ));
+    let s = c.plans_so_far_summary();
+    let surfaced = s[0]["step_outcomes"][0].as_str().unwrap();
+    assert!(surfaced.starts_with("ok: "), "got prefix: {surfaced}");
+    // Bounded so a single chatty success can't blow up the always-in-context
+    // prompt: "ok: " (4 chars) + at most STEP_OK_SUMMARY_MAX chars of head + the
+    // trailing "…" marker.
+    assert!(
+        surfaced.chars().count() <= 4 + STEP_OK_SUMMARY_MAX + 1,
+        "ok output not truncated: {} chars",
+        surfaced.chars().count()
+    );
+    assert!(surfaced.ends_with('…'), "missing truncation marker: {surfaced}");
+}
+
+#[test]
+fn plans_so_far_summary_ok_handoff_placeholder_surfaces_ref() {
+    // An oversized result is stashed upstream and replaced with a small
+    // handoff placeholder; rendering its head surfaces the summary_head +
+    // handoff_ref so the planner can decide to fetch_handoff.
+    let mut c = ctx();
+    c.plans.push((
+        plan_with_decision("act"),
+        vec![StepOutcome::Ok(serde_json::json!({
+            "handoff_ref": "h:abc123",
+            "byte_len": 200000,
+            "summary_head": "the first kilobyte of the big result",
+            "truncated": true,
+        }))],
+    ));
+    let s = c.plans_so_far_summary();
+    let surfaced = s[0]["step_outcomes"][0].as_str().unwrap();
+    assert!(surfaced.starts_with("ok: "), "got: {surfaced}");
+    assert!(surfaced.contains("h:abc123"), "handoff_ref not surfaced: {surfaced}");
+    assert!(surfaced.contains("the first kilobyte"), "summary_head not surfaced: {surfaced}");
+}
+
+#[test]
+fn plans_so_far_summary_ok_injection_blocked_placeholder_surfaces_marker() {
+    // Blocked content is replaced upstream (tool_host) with a tiny
+    // placeholder; rendering must surface the marker and never raw blocked
+    // text (proves the upstream screen carries through to the prompt).
+    let mut c = ctx();
+    c.plans.push((
+        plan_with_decision("act"),
+        vec![StepOutcome::Ok(serde_json::json!({
+            "injection_blocked": true,
+            "score": 0.91,
+            "reason_codes": ["override"],
+        }))],
+    ));
+    let s = c.plans_so_far_summary();
+    let surfaced = s[0]["step_outcomes"][0].as_str().unwrap();
+    assert!(surfaced.starts_with("ok: "), "got: {surfaced}");
+    assert!(
+        surfaced.contains("injection_blocked") || surfaced.contains("override"),
+        "blocked marker not surfaced: {surfaced}"
+    );
 }
 
 /// Python-skill grounding gate: a task that dispatches >= 1 step and
