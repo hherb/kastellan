@@ -45,8 +45,23 @@ already applied before the value reaches `render_step_outcome`:**
 Because `SCAN_BYTE_CAP == DEFAULT_RESULT_BYTE_CAP == 64 KiB`, **every `Ok(v)`
 arriving at `render_step_outcome` is already fully injection-screened and
 ≤64 KiB** (≤64 KiB → screened whole; >64 KiB → stashed to a screened placeholder;
-blocked → tiny placeholder). No new screening call is needed; the fix only
-renders the already-screened value, bounded for prompt-context size.
+blocked → tiny placeholder). No new screening call is needed in the render layer;
+the fix only renders the already-screened value, bounded for prompt-context size.
+
+> **Post-review correction (2026-06-22):** the final whole-branch review found one
+> hole in the reasoning above — the `fetch_handoff` branch
+> (`tool_dispatch::dispatch_step`) returns a *slice* of a stashed body, and the
+> `tool_host` screen only ever covered the body's first `SCAN_BYTE_CAP` = 64 KiB,
+> so a fetch at `offset ≥ 64 KiB` could surface an **unscreened tail** into the
+> prompt once the render change landed. The fix adds
+> `tool_dispatch::fetch_screen::screen_fetched_data` (Strict / fail-closed), which
+> screens each served slice at the dispatch chokepoint and replaces blocked
+> `data` with a withheld-note placeholder. The render layer remains screen-free as
+> designed; the invariant "every `Ok(v)` reaching `render_step_outcome` is
+> screened" now holds via **both** chokepoints (tool_host for fresh worker output,
+> `fetch_screen` for replayed handoff slices). Known inherent limitation (parity
+> with the existing `tool_host` screen, follow-up): injection text split across
+> two fetch slices can evade single-slice screening.
 
 ## Design
 

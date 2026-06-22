@@ -60,11 +60,13 @@ pub(crate) const STEP_ERR_DETAIL_MAX: usize = 200;
 
 /// Max bytes of a *successful* step's output head surfaced back to the
 /// planner in `plans_so_far_summary`. The value is already
-/// injection-screened at the `tool_host` chokepoint (blocked content is
-/// a tiny placeholder) and bounded to <=64 KiB by the handoff stash
-/// before it reaches here; this cap only keeps the always-in-context
-/// planner prompt small as successful outputs accumulate across up to
-/// `max_plans` iterations. A truncated head gets a trailing `…`.
+/// injection-screened — worker results at the `tool_host` chokepoint and
+/// `fetch_handoff` slices at the dispatch chokepoint
+/// (`tool_dispatch::fetch_screen`), blocked content replaced by a tiny
+/// placeholder — and bounded to <=64 KiB by the handoff stash before it
+/// reaches here; this cap only keeps the always-in-context planner prompt
+/// small as successful outputs accumulate across up to `max_plans`
+/// iterations. A truncated head gets a trailing `…`.
 pub(crate) const STEP_OK_SUMMARY_MAX: usize = 4 * 1024;
 
 /// Render one [`StepOutcome`] for the agent's plan summary. An `Ok`
