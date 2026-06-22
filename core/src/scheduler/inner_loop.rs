@@ -59,52 +59,78 @@ pub struct TaskContext {
 pub(crate) const STEP_ERR_DETAIL_MAX: usize = 200;
 
 /// Max bytes of a *successful* step's output head surfaced back to the
-/// planner in `plans_so_far_summary`. The value is already
-/// injection-screened — worker results at the `tool_host` chokepoint and
-/// `fetch_handoff` slices at the dispatch chokepoint
-/// (`tool_dispatch::fetch_screen`), blocked content replaced by a tiny
-/// placeholder — and bounded to <=64 KiB by the handoff stash before it
-/// reaches here; this cap only keeps the always-in-context planner prompt
-/// small as successful outputs accumulate across up to `max_plans`
-/// iterations. A truncated head gets a trailing `…`.
+/// planner in `plans_so_far_summary`. The head is screened at the sink
+/// (see [`render_step_outcome`]/[`sink_screen_blocks`]) and bounded here
+/// to keep the always-in-context planner prompt small as successful
+/// outputs accumulate across up to `max_plans` iterations. A truncated
+/// head gets a trailing `…`.
 pub(crate) const STEP_OK_SUMMARY_MAX: usize = 4 * 1024;
 
-/// Render one [`StepOutcome`] for the agent's plan summary. An `Ok`
-/// step surfaces a bounded, already-screened head of its output as
-/// `"ok: <head>"` so the agent can answer from the result instead of
-/// re-running the step (the success-half of #338); an `Err` surfaces
-/// its `code` and (length-clamped) `detail` as `"err: <CODE>: <detail>"`
-/// (#337). Both prevent the `plan_iteration_cap_exceeded` loop.
-fn render_step_outcome(o: &StepOutcome) -> String {
+/// Marker rendered in place of step text that the sink screen blocked.
+/// A clear, structured signal to the planner that content was withheld —
+/// never raw blocked content.
+const WITHHELD_MARKER: &str = "[withheld: failed injection screen]";
+
+/// Screen `text` with `tool`'s own guard profile; return `None` if it is
+/// safe to surface verbatim, or `Some(reason)` to withhold. The
+/// **single, mandatory sink screen**: every string this module places
+/// into the planner prompt passes through here, so the
+/// "nothing-unscreened-reaches-the-planner" invariant is *enforced* at
+/// one point rather than *relied upon* across the source chokepoints
+/// (`tool_host`, `tool_dispatch::fetch_screen`). Those source screens
+/// stay — they protect non-planner consumers and do the heavy lifting —
+/// so for legitimately-allowed content this re-screen is idempotent
+/// (same per-tool profile → Allow) and cannot over-block a Relaxed-profile
+/// doc-fetch worker (issue #142).
+fn sink_screen_blocks(tool: &str, text: &str) -> bool {
+    use crate::cassandra::injection_guard::{screen_with_profile, GuardProfile, InjectionDecision};
+    screen_with_profile(text, GuardProfile::for_tool(tool)).decision == InjectionDecision::Block
+}
+
+/// Render one [`StepOutcome`] for the agent's plan summary, screening the
+/// exact text about to enter the planner prompt with `tool`'s guard
+/// profile (see [`sink_screen_blocks`]). An `Ok` step surfaces a bounded
+/// head of its output as `"ok: <head>"` so the agent answers from the
+/// result instead of re-running the step (#338); an `Err` surfaces its
+/// `code` and (length-clamped) `detail` as `"err: <CODE>: <detail>"`
+/// (#337). On a Block the worker-influenced text (the `Ok` head, or the
+/// `Err` `detail` — the `code` is an internal constant, always kept) is
+/// replaced by [`WITHHELD_MARKER`]. Both prevent the
+/// `plan_iteration_cap_exceeded` loop.
+fn render_step_outcome(tool: &str, o: &StepOutcome) -> String {
     match o {
         StepOutcome::Ok(v) => {
-            // SAFETY (injection): every `StepOutcome::Ok` value reaching here is
-            // already injection-screened — worker results at the `tool_host`
-            // chokepoint, and `fetch_handoff` slices at the dispatch chokepoint
-            // (`tool_dispatch::fetch_screen`) — with blocked content replaced by a
-            // placeholder, and size-bounded to <=64 KiB by the handoff stash. So
-            // no re-screen is needed here. `extract_scannable_text` is the same
-            // char-boundary-safe extractor `build_handoff_placeholder` uses; we
-            // only bound further here for prompt-context size.
+            // `extract_scannable_text` is the same char-boundary-safe extractor
+            // `build_handoff_placeholder` uses; it also bounds the head for
+            // prompt-context size. We screen the exact head we are about to emit.
             let (head, truncated) =
                 crate::cassandra::injection_guard::extract_scannable_text(
                     v,
                     STEP_OK_SUMMARY_MAX,
                 );
-            if truncated {
+            if sink_screen_blocks(tool, &head) {
+                format!("ok: {WITHHELD_MARKER}")
+            } else if truncated {
                 format!("ok: {head}…")
             } else {
                 format!("ok: {head}")
             }
         }
         StepOutcome::Err { code, detail } => {
-            let detail = if detail.chars().count() > STEP_ERR_DETAIL_MAX {
+            let shown = if detail.chars().count() > STEP_ERR_DETAIL_MAX {
                 let truncated: String = detail.chars().take(STEP_ERR_DETAIL_MAX).collect();
                 format!("{truncated}…")
             } else {
                 detail.clone()
             };
-            format!("err: {code}: {detail}")
+            // Keep the short internal `code` (diagnostic, never worker text);
+            // withhold only the worker-influenced `detail` on a Block.
+            let shown = if sink_screen_blocks(tool, &shown) {
+                WITHHELD_MARKER.to_string()
+            } else {
+                shown
+            };
+            format!("err: {code}: {shown}")
         }
     }
 }
@@ -117,9 +143,19 @@ impl TaskContext {
     /// (see [`render_step_outcome`]).
     pub fn plans_so_far_summary(&self) -> Vec<serde_json::Value> {
         self.plans.iter().map(|(p, outcomes)| {
+            // Each outcome is the result of `p.steps[i]` (the dispatch loop
+            // pushes one outcome per step, in order), so the tool that
+            // produced it — and thus its guard profile for the sink screen —
+            // is `p.steps[i].tool`. A missing step (outcomes longer than
+            // steps, not expected) falls back to the fail-closed Strict
+            // default (`for_tool("")`).
+            let step_outcomes: Vec<String> = outcomes.iter().enumerate().map(|(i, o)| {
+                let tool = p.steps.get(i).map(|s| s.tool.as_str()).unwrap_or("");
+                render_step_outcome(tool, o)
+            }).collect();
             serde_json::json!({
                 "decision":      p.decision,
-                "step_outcomes": outcomes.iter().map(render_step_outcome).collect::<Vec<_>>(),
+                "step_outcomes": step_outcomes,
             })
         }).collect()
     }

@@ -37,7 +37,14 @@ answered without looping. A `/tmp` + `/` variant returned the jail's `Permission
 budget (per-step 4 KiB × `max_plans` × steps is unbounded; `max_plans` operator-overridable);
 [#340](https://github.com/hherb/kastellan/issues/340) clearer injection-blocked signal from the `tool_host` placeholder to the
 planner (renders as `"ok: <reason_code>"` today) + the split-across-slices screening limitation. Spec/plan:
-`docs/superpowers/{specs,plans}/2026-06-22-feed-successful-tool-output-to-planner*`.)
+`docs/superpowers/{specs,plans}/2026-06-22-feed-successful-tool-output-to-planner*`. **Follow-up hardening (branch
+`feat/render-sink-injection-screen`, PR pending):** the "render stays screen-free, trust the two source chokepoints" decision
+was **reversed** — `render_step_outcome` is now the **single mandatory sink screen**, re-screening the exact text it emits (the
+`Ok` head AND the `Err` `detail`; the `code` is kept) with the step's **own per-tool profile** (`GuardProfile::for_tool`,
+threaded from `steps[j].tool`), so the planner-screening invariant is *enforced at one point* not *relied upon* across sources.
+Per-tool profile (not blind Strict) keeps the re-screen idempotent → no over-block of Relaxed doc-fetch workers (#142); Block →
+`WITHHELD_MARKER`. Source screens (`tool_host`/`fetch_screen`) stay for non-planner consumers. 4 new units (35/0 inner_loop),
+`cli_ask_e2e` 7/0, clippy clean.)
 
 _(Prior session — **Agent tool-loop recovery — DONE, MERGED to `main` as `ff3e2f5`
 (PR [#337](https://github.com/hherb/kastellan/pull/337)). Deployed + verified live on the DGX.** A live Matrix question
