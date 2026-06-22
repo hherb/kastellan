@@ -58,15 +58,45 @@ pub struct TaskContext {
 /// at most `STEP_ERR_DETAIL_MAX + 1` chars.
 pub(crate) const STEP_ERR_DETAIL_MAX: usize = 200;
 
+/// Max bytes of a *successful* step's output head surfaced back to the
+/// planner in `plans_so_far_summary`. The value is already
+/// injection-screened — worker results at the `tool_host` chokepoint and
+/// `fetch_handoff` slices at the dispatch chokepoint
+/// (`tool_dispatch::fetch_screen`), blocked content replaced by a tiny
+/// placeholder — and bounded to <=64 KiB by the handoff stash before it
+/// reaches here; this cap only keeps the always-in-context planner prompt
+/// small as successful outputs accumulate across up to `max_plans`
+/// iterations. A truncated head gets a trailing `…`.
+pub(crate) const STEP_OK_SUMMARY_MAX: usize = 4 * 1024;
+
 /// Render one [`StepOutcome`] for the agent's plan summary. An `Ok`
-/// step is the compact `"ok"` scalar; an `Err` surfaces its `code` and
-/// (length-clamped) `detail` as `"err: <CODE>: <detail>"` so the agent
-/// can see *why* a step failed and replan, rather than seeing a bare
-/// `"err"` and blindly re-trying the same dead end (the
-/// `plan_iteration_cap_exceeded` failure mode).
+/// step surfaces a bounded, already-screened head of its output as
+/// `"ok: <head>"` so the agent can answer from the result instead of
+/// re-running the step (the success-half of #338); an `Err` surfaces
+/// its `code` and (length-clamped) `detail` as `"err: <CODE>: <detail>"`
+/// (#337). Both prevent the `plan_iteration_cap_exceeded` loop.
 fn render_step_outcome(o: &StepOutcome) -> String {
     match o {
-        StepOutcome::Ok(_) => "ok".to_string(),
+        StepOutcome::Ok(v) => {
+            // SAFETY (injection): every `StepOutcome::Ok` value reaching here is
+            // already injection-screened — worker results at the `tool_host`
+            // chokepoint, and `fetch_handoff` slices at the dispatch chokepoint
+            // (`tool_dispatch::fetch_screen`) — with blocked content replaced by a
+            // placeholder, and size-bounded to <=64 KiB by the handoff stash. So
+            // no re-screen is needed here. `extract_scannable_text` is the same
+            // char-boundary-safe extractor `build_handoff_placeholder` uses; we
+            // only bound further here for prompt-context size.
+            let (head, truncated) =
+                crate::cassandra::injection_guard::extract_scannable_text(
+                    v,
+                    STEP_OK_SUMMARY_MAX,
+                );
+            if truncated {
+                format!("ok: {head}…")
+            } else {
+                format!("ok: {head}")
+            }
+        }
         StepOutcome::Err { code, detail } => {
             let detail = if detail.chars().count() > STEP_ERR_DETAIL_MAX {
                 let truncated: String = detail.chars().take(STEP_ERR_DETAIL_MAX).collect();
