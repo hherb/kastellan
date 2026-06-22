@@ -56,12 +56,28 @@ the fix only renders the already-screened value, bounded for prompt-context size
 > prompt once the render change landed. The fix adds
 > `tool_dispatch::fetch_screen::screen_fetched_data` (Strict / fail-closed), which
 > screens each served slice at the dispatch chokepoint and replaces blocked
-> `data` with a withheld-note placeholder. The render layer remains screen-free as
-> designed; the invariant "every `Ok(v)` reaching `render_step_outcome` is
-> screened" now holds via **both** chokepoints (tool_host for fresh worker output,
-> `fetch_screen` for replayed handoff slices). Known inherent limitation (parity
+> `data` with a withheld-note placeholder. Known inherent limitation (parity
 > with the existing `tool_host` screen, follow-up): injection text split across
 > two fetch slices can evade single-slice screening.
+
+> **Design revision (2026-06-23): single mandatory sink screen.** The "render layer
+> stays screen-free, trust the source chokepoints" decision above was reconsidered
+> and **reversed**. Relying on two source chokepoints (`tool_host` +
+> `fetch_screen`) means the "nothing-unscreened-reaches-the-planner" invariant is
+> *maintained by convention* — any future path producing a planner-bound
+> `StepOutcome::Ok` must remember to screen. `render_step_outcome` is now the
+> **single mandatory sink screen**: it re-screens the exact text it is about to
+> place in the planner prompt — the `Ok` head AND the `Err` `detail` (the
+> worker-influenced #337 surface; the `code` is an internal constant, always kept)
+> — with the step's **own per-tool profile** (`GuardProfile::for_tool`, threaded
+> from `plans_so_far[i].steps[j].tool`). Using the per-tool profile (not a blind
+> Strict) makes the re-screen **idempotent** for legitimately-allowed content — so
+> it cannot over-block a Relaxed-profile doc-fetch worker (issue #142) — while
+> still guaranteeing the sink. On a Block the worker text is replaced with
+> `WITHHELD_MARKER`. The source screens (`tool_host`, `fetch_screen`) **stay** —
+> they protect non-planner consumers (audit, operator CLI) and do the heavy
+> lifting — but the planner invariant is now *enforced at one point* rather than
+> *relied upon* across many. Branch `feat/render-sink-injection-screen`.
 
 ## Design
 
