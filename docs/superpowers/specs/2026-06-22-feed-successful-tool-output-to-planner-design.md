@@ -53,7 +53,7 @@ renders the already-screened value, bounded for prompt-context size.
 Single change point: `render_step_outcome` (pure, sync, no I/O).
 
 ```rust
-/// Max chars of a successful step's output head surfaced back to the
+/// Max bytes of a successful step's output head surfaced back to the
 /// planner in `plans_so_far_summary`. The value is already
 /// injection-screened at the tool_host chokepoint and bounded to
 /// <=64 KiB by the handoff stash before reaching here; this cap is

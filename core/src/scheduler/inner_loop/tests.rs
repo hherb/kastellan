@@ -510,7 +510,7 @@ fn plans_so_far_summary_truncates_long_ok_output() {
     let surfaced = s[0]["step_outcomes"][0].as_str().unwrap();
     assert!(surfaced.starts_with("ok: "), "got prefix: {surfaced}");
     // Bounded so a single chatty success can't blow up the always-in-context
-    // prompt: "ok: " (4 chars) + at most STEP_OK_SUMMARY_MAX chars of head + the
+    // prompt: "ok: " (4 chars) + at most STEP_OK_SUMMARY_MAX bytes of head + the
     // trailing "…" marker.
     assert!(
         surfaced.chars().count() <= 4 + STEP_OK_SUMMARY_MAX + 1,
@@ -559,10 +559,11 @@ fn plans_so_far_summary_ok_injection_blocked_placeholder_surfaces_marker() {
     let s = c.plans_so_far_summary();
     let surfaced = s[0]["step_outcomes"][0].as_str().unwrap();
     assert!(surfaced.starts_with("ok: "), "got: {surfaced}");
-    assert!(
-        surfaced.contains("injection_blocked") || surfaced.contains("override"),
-        "blocked marker not surfaced: {surfaced}"
-    );
+    // `extract_scannable_text` emits only string LEAF VALUES, not object keys —
+    // so the planner sees the `reason_codes` string ("override"), not the
+    // `injection_blocked` key. Critically, NO raw blocked content is surfaced
+    // (the upstream screen already replaced it with this tiny placeholder).
+    assert_eq!(surfaced, "ok: override");
 }
 
 /// Python-skill grounding gate: a task that dispatches >= 1 step and

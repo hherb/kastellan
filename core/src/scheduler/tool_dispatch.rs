@@ -224,6 +224,9 @@ pub use crate::workers::shell_exec::shell_exec_entry;
 mod result_mapping;
 pub use result_mapping::{map_dispatch_result, rpc_code_name};
 
+mod fetch_screen;
+use fetch_screen::screen_fetched_data;
+
 // Re-export of the canonical actor string for scheduler-emitted audit
 // rows. The dispatcher's short-circuit rows (`step.unknown_tool`,
 // `step.spawn_failed`) and the lane runner's lifecycle rows must agree
@@ -347,7 +350,11 @@ impl StepDispatcher for ToolHostStepDispatcher {
             let fetched = self.handoff.fetch(task_id, &step.parameters);
             let elapsed_ms = started.elapsed().as_millis() as u64;
             let (outcome_label, step_outcome) = match fetched {
-                FetchResult::Ok(v) => ("ok", StepOutcome::Ok(v)),
+                // Re-screen the served slice: the stash holds the full body but
+                // tool_host only screened its first SCAN_BYTE_CAP bytes, so a
+                // slice past that window can carry unscreened content. See
+                // `fetch_screen`.
+                FetchResult::Ok(v) => ("ok", StepOutcome::Ok(screen_fetched_data(v))),
                 FetchResult::NotFound(detail) => (
                     "not_found",
                     StepOutcome::Err { code: "HANDOFF_NOT_FOUND".into(), detail },

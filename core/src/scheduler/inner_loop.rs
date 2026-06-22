@@ -58,7 +58,7 @@ pub struct TaskContext {
 /// at most `STEP_ERR_DETAIL_MAX + 1` chars.
 pub(crate) const STEP_ERR_DETAIL_MAX: usize = 200;
 
-/// Max chars of a *successful* step's output head surfaced back to the
+/// Max bytes of a *successful* step's output head surfaced back to the
 /// planner in `plans_so_far_summary`. The value is already
 /// injection-screened at the `tool_host` chokepoint (blocked content is
 /// a tiny placeholder) and bounded to <=64 KiB by the handoff stash
@@ -76,13 +76,14 @@ pub(crate) const STEP_OK_SUMMARY_MAX: usize = 4 * 1024;
 fn render_step_outcome(o: &StepOutcome) -> String {
     match o {
         StepOutcome::Ok(v) => {
-            // SAFETY (injection): `v` was injection-screened at the
-            // tool_host chokepoint (blocked content is already a tiny
-            // placeholder) and size-bounded to <=64 KiB by the handoff
-            // stash before reaching here, so no re-screen is needed.
-            // `extract_scannable_text` is the same char-boundary-safe
-            // extractor `build_handoff_placeholder` uses; we only bound
-            // further here for prompt-context size.
+            // SAFETY (injection): every `StepOutcome::Ok` value reaching here is
+            // already injection-screened — worker results at the `tool_host`
+            // chokepoint, and `fetch_handoff` slices at the dispatch chokepoint
+            // (`tool_dispatch::fetch_screen`) — with blocked content replaced by a
+            // placeholder, and size-bounded to <=64 KiB by the handoff stash. So
+            // no re-screen is needed here. `extract_scannable_text` is the same
+            // char-boundary-safe extractor `build_handoff_placeholder` uses; we
+            // only bound further here for prompt-context size.
             let (head, truncated) =
                 crate::cassandra::injection_guard::extract_scannable_text(
                     v,
