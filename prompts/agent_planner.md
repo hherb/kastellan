@@ -21,7 +21,8 @@ of the task, with these fields:
 }
 ```
 
-`plans_so_far[i].step_outcomes[j]` is `"ok"` or `"err"`; consult `blocks`
+`plans_so_far[i].step_outcomes[j]` is `"ok: <output head>"` (a bounded head
+of the step's result) or `"err: <CODE>: <detail>"`; consult `blocks`
 and `advisories` to understand *why* a prior plan failed review or what
 to be cautious about going forward. Do not echo the JSON back; respond
 with the next plan as a JSON object in the schema below.
@@ -175,6 +176,13 @@ rules:
     do not blindly re-issue the same step — either answer from your own
     knowledge or explain to the user that the required capability is
     unavailable.
+  - **A step that succeeds reports back a head of its output** in
+    `plans_so_far[i].step_outcomes` as `"ok: <output head>"` (e.g. a
+    command's stdout). Read it and answer the user's instruction from
+    that output — do NOT re-issue the same successful step expecting to
+    "see" the result again; you already have it. If the head was
+    truncated (trailing `…`) and you need more, use the `handoff` /
+    `fetch_handoff` mechanism rather than re-running the step.
 
 ## Terminating a task
 
