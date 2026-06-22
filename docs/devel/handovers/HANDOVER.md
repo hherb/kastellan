@@ -27,9 +27,13 @@ dispatch chokepoint → blocked `data` replaced by a withheld-note placeholder; 
 `render_step_outcome` is screened" now holds via *both* chokepoints. **Verification — macOS:** inner_loop 31/0 (+4 render
 tests), fetch_screen 3/0 (real Strict Block exercised, raw injection text proven gone), `cli_ask_e2e` 7/0 (PG18 override, incl.
 the `ask_subprocess_fails_after_plan_iteration_cap` pin), `cargo clippy --workspace --all-targets -D warnings` CLEAN. Pure
-Rust, no migration, no OS-gated code → DGX not required for the unit gate. **Remaining live gate (operator):** on the deployed
-DGX, "run /usr/bin/ls /tmp and tell me how many entries" should complete without looping — needs the new build deployed +
-daemon restart. **Follow-ups filed:** [#339](https://github.com/hherb/kastellan/issues/339) global `plans_so_far_summary`
+Rust, no migration, no OS-gated code → DGX not required for the unit gate. **VERIFIED LIVE on the DGX (2026-06-23):** deployed
+`main`@`181d70e` via `upgrade_from_git.sh` (no SDK bump → no relogin; channel bus up, `NRestarts=0`); `kastellan-cli ask "run
+/usr/bin/ls /usr and tell me exactly how many entries you saw"` → **"I saw 9 entries in /usr"** (host `ls /usr | wc -l` = 9 ✓),
+`plan_count=2`, `terminal_kind:ok`, `total_dispatch_calls=1` — the agent ran the step **once**, read its stdout, counted, and
+answered without looping. A `/tmp` + `/` variant returned the jail's `Permission denied` stderr, which the planner likewise
+**read and answered from** on plan 2 (proving the *output*, not just `"ok"`, is now fed back), no loop. **Follow-ups filed:**
+[#339](https://github.com/hherb/kastellan/issues/339) global `plans_so_far_summary`
 budget (per-step 4 KiB × `max_plans` × steps is unbounded; `max_plans` operator-overridable);
 [#340](https://github.com/hherb/kastellan/issues/340) clearer injection-blocked signal from the `tool_host` placeholder to the
 planner (renders as `"ok: <reason_code>"` today) + the split-across-slices screening limitation. Spec/plan:
@@ -781,10 +785,10 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (branch `feat/338-feed-tool-output-to-planner`, PR pending):** #338 — successful tool output now fed back to the
-planner (`render_step_outcome` renders `"ok: <head>"`, 4 KiB cap, already-screened; new `fetch_screen` closes a fetch-tail
-injection hole). See the "Last updated" header for the full writeup. **Remaining live gate (operator):** deploy the new build to
-the DGX + restart, then confirm "run /usr/bin/ls /tmp and tell me how many entries" completes without looping to the plan cap.
+**Just shipped (MERGED to `main` as `181d70e`, PR [#341](https://github.com/hherb/kastellan/pull/341)):** #338 — successful tool
+output now fed back to the planner (`render_step_outcome` renders `"ok: <head>"`, 4 KiB cap, already-screened; new
+`fetch_screen` closes a fetch-tail injection hole). **Deployed + VERIFIED LIVE on the DGX 2026-06-23** ("9 entries in /usr" on
+plan 2, one dispatch, no loop — see the "Last updated" header). The DGX is on `main`@`181d70e`, channel bus up.
 
 **★ LEADING PICK — [#339](https://github.com/hherb/kastellan/issues/339): global budget for `plans_so_far_summary`.** The #338
 render change raised the per-step term ~2000× (bare `"ok"` → up to 4 KiB), and `plans_so_far_summary` re-renders every plan's
