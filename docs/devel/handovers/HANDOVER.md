@@ -6,8 +6,37 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-22 (**Agent tool-loop recovery — DONE on branch `fix/agent-step-error-feedback`,
-PR [#337](https://github.com/hherb/kastellan/pull/337) (open). Deployed + verified live on the DGX.** A live Matrix question
+**Last updated:** 2026-06-22 (**Feed successful tool output back to the planner — #338 DONE on branch
+`feat/338-feed-tool-output-to-planner` (PR pending).** The success-half symmetric to PR #337's error-half, and the blocker
+for every tool-using task: `render_step_outcome` (`core/src/scheduler/inner_loop.rs`) collapsed a successful
+`StepOutcome::Ok(serde_json::Value)` to the bare scalar `"ok"`, discarding the worker's result — so the planner never saw a
+step's *output* and re-issued the same successful step every iteration until `plan_iteration_cap_exceeded` (live DGX evidence:
+5 identical `/usr/bin/ls /tmp` plans, the model's own prose "the output was not visible in the current context"). **Key
+finding:** the injection-guard requirement #338 worried about was *already* met upstream — `tool_host::dispatch` screens every
+worker result (blocked → tiny placeholder) over the first `SCAN_BYTE_CAP`=64 KiB, and `tool_dispatch::dispatch_step` stashes
+any `Ok(v)` >`DEFAULT_RESULT_BYTE_CAP`=64 KiB to the handoff cache; since the two caps are equal, every `Ok(v)` reaching the
+render is already screened + ≤64 KiB. **The fix (TDD):** the `Ok` arm now renders a bounded head via the existing
+`injection_guard::extract_scannable_text` (new `STEP_OK_SUMMARY_MAX`=**4 KiB**, user-chosen) as `"ok: <head>"` (`…` on
+truncation); render stays *screen-free* by design (the value is already screened). `prompts/agent_planner.md` updated:
+`step_outcomes[j]` is now `"ok: <output head>"` and a new bullet tells the planner to answer from that output, not re-run the
+step. **Security fix from the final review (the one real catch):** the `fetch_handoff` branch returned its slice *unscreened*,
+and since `tool_host` only screened a stashed body's first 64 KiB, a fetch at `offset ≥ 64 KiB` could surface an unscreened
+tail into the prompt (a regression *opened* by the render change). Closed with new
+`core/src/scheduler/tool_dispatch/fetch_screen.rs::screen_fetched_data` (Strict/fail-closed) screening each served slice at the
+dispatch chokepoint → blocked `data` replaced by a withheld-note placeholder; the invariant "everything reaching
+`render_step_outcome` is screened" now holds via *both* chokepoints. **Verification — macOS:** inner_loop 31/0 (+4 render
+tests), fetch_screen 3/0 (real Strict Block exercised, raw injection text proven gone), `cli_ask_e2e` 7/0 (PG18 override, incl.
+the `ask_subprocess_fails_after_plan_iteration_cap` pin), `cargo clippy --workspace --all-targets -D warnings` CLEAN. Pure
+Rust, no migration, no OS-gated code → DGX not required for the unit gate. **Remaining live gate (operator):** on the deployed
+DGX, "run /usr/bin/ls /tmp and tell me how many entries" should complete without looping — needs the new build deployed +
+daemon restart. **Follow-ups filed:** [#339](https://github.com/hherb/kastellan/issues/339) global `plans_so_far_summary`
+budget (per-step 4 KiB × `max_plans` × steps is unbounded; `max_plans` operator-overridable);
+[#340](https://github.com/hherb/kastellan/issues/340) clearer injection-blocked signal from the `tool_host` placeholder to the
+planner (renders as `"ok: <reason_code>"` today) + the split-across-slices screening limitation. Spec/plan:
+`docs/superpowers/{specs,plans}/2026-06-22-feed-successful-tool-output-to-planner*`.)
+
+_(Prior session — **Agent tool-loop recovery — DONE, MERGED to `main` as `ff3e2f5`
+(PR [#337](https://github.com/hherb/kastellan/pull/337)). Deployed + verified live on the DGX.** A live Matrix question
 — *"What is the distance between Oslo and the capital of Poland?"* — failed with `plan_iteration_cap_exceeded (3>=3)` though
 the model knew the answer. Systematic debugging on the live DGX (`tasks tail`, audit log) found **three** distinct problems.
 **(1) Blind replanning (the reported bug):** `TaskContext::plans_so_far_summary` (`core/src/scheduler/inner_loop.rs`)
@@ -39,7 +68,7 @@ the cap. Feeding worker stdout into the planner prompt is the prompt-injection s
 `core/src/cassandra/injection_guard.rs` and/or the handoff/fetch design (`core/src/handoff.rs`, spec
 `2026-06-09-teach-planner-fetch-handoff`); deliberate design task, NOT a naive inline of raw stdout. Separate, model-side:
 ~86s/plan is gemma 26B on the DGX Spark with a 262144-token context — reducing the model's default `num_ctx` (via
-`OLLAMA_CONTEXT_LENGTH`/Modelfile, NOT per-request — that forces a reload) is a possible perf follow-up.)
+`OLLAMA_CONTEXT_LENGTH`/Modelfile, NOT per-request — that forces a reload) is a possible perf follow-up.)_
 
 _(Prior session — **Forward entity embed-on-insert — DONE on branch `feat/entity-forward-embed-on-insert`
 (PR pending).** Closes the deferred *forward* half of the entity-embedding arc (PR #335 shipped backfill + lane; this is the
@@ -752,21 +781,21 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (branch `fix/agent-step-error-feedback`, PR [#337](https://github.com/hherb/kastellan/pull/337) open, deployed +
-verified live on the DGX):** agent tool-loop recovery — step error `code`/`detail` now fed back to the planner, LLM request
-timeout 30s→180s (was cutting off ~86s plan generation), `shell-exec` allowlist seeded with `/usr/bin/{cat,ls,python3}`. See
-the "Last updated" header for the full root-cause writeup.
+**Just shipped (branch `feat/338-feed-tool-output-to-planner`, PR pending):** #338 — successful tool output now fed back to the
+planner (`render_step_outcome` renders `"ok: <head>"`, 4 KiB cap, already-screened; new `fetch_screen` closes a fetch-tail
+injection hole). See the "Last updated" header for the full writeup. **Remaining live gate (operator):** deploy the new build to
+the DGX + restart, then confirm "run /usr/bin/ls /tmp and tell me how many entries" completes without looping to the plan cap.
 
-**★ LEADING PICK — [#338](https://github.com/hherb/kastellan/issues/338): feed successful tool output back to the agent.**
-After PR #337, tool-using tasks STILL fail at the plan cap because the agent never sees a step's *output* (only `"ok"`), so it
-re-runs the same step every iteration (verified live: 5 identical `/usr/bin/ls /tmp` plans). This blocks every tool-using task
-end-to-end. The fix is the success-half symmetric to PR #337's error-half (`render_step_outcome` in
-`core/src/scheduler/inner_loop.rs`), BUT feeding worker stdout into the planner prompt is the prompt-injection surface — route
-it through `core/src/cassandra/injection_guard.rs` and/or the existing handoff/fetch design (`core/src/handoff.rs`, spec
-`docs/superpowers/specs/2026-06-09-teach-planner-fetch-handoff-design.md`), bounded + classification-aware. Verify with a live
-"run ls on /tmp and tell me how many entries" task completing without looping. **Separately (model-side, not a code task):**
-~86s/plan is gemma 26B on the DGX Spark with a 262144-token context; reducing the model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH`
-or a Modelfile — NOT per-request, which forces a reload) is a possible perf win.
+**★ LEADING PICK — [#339](https://github.com/hherb/kastellan/issues/339): global budget for `plans_so_far_summary`.** The #338
+render change raised the per-step term ~2000× (bare `"ok"` → up to 4 KiB), and `plans_so_far_summary` re-renders every plan's
+every step each iteration; the per-step head is capped but the accumulated total (`max_plans` × steps × 4 KiB) is not, and
+`max_plans` is operator-overridable. Add a global summary budget (cap total rendered Ok bytes, oldest-truncated-first) or a
+per-plan step cap, in `core/src/scheduler/inner_loop.rs`. Cheap hardening; the common case (fast=5 plans, few steps) is fine
+today. **Sibling pick — [#340](https://github.com/hherb/kastellan/issues/340):** give the `tool_host` injection-blocked
+placeholder a human-readable `note` string so a blocked result renders as a clear "withheld" signal to the planner (it shows as
+`"ok: <reason_code>"` today); additive field, mind the placeholder-shape tests. **Separately (model-side, not a code task):**
+~86s/plan is gemma 26B on the DGX Spark with a 262144-token context; reducing the model's default `num_ctx`
+(`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which forces a reload) is a possible perf win.
 
 **Prior entity-embedding work (still-valid follow-ups):** forward entity embed-on-insert shipped on
 `feat/entity-forward-embed-on-insert` (the entity-embedding arc is complete: backfill #335 + forward). **Remaining entity-embedding follow-ups:** (1) an **ANN index** (ivfflat/hnsw) on
