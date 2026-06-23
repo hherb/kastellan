@@ -259,7 +259,12 @@ mod tests {
     }
 
     #[test]
-    fn budget_worst_case_lands_within_budget() {
+    fn budget_lands_within_budget_when_all_heads_are_elidable() {
+        // Worst case *for the elision pass*: every step is a full-size elidable
+        // Ok head, so the budget can always be met. (A summary made entirely of
+        // non-elidable errors can exceed the budget — by design, since errors
+        // are load-bearing; that path is bounded instead by the per-error
+        // `STEP_ERR_DETAIL_MAX` clamp, not by this pass.)
         let big = "y".repeat(STEP_OK_SUMMARY_MAX);
         // 40 plans × one full-size head each — far over a 32 KiB budget.
         let mut plans: Vec<Vec<RenderedStep>> =
