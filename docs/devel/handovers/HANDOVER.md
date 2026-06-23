@@ -22,7 +22,7 @@ replay). `connect_client` seeds `live` from `initial_live_state(token.as_deref()
 post-sync `live.store(true)` stays (no-op when already true). `MatrixChannel::supervised` doc comment updated (recovery, not
 "lost"). **No new persistence, no protocol/schema/migration change.** `Client::sync_token()` is `pub(crate)` in matrix-sdk 0.18 so
 the read goes through the public state-store key — no trait import needed (`get_kv_data` dispatches via the `&DynStateStore`
-vtable). **Verification (macOS):** worker default **11/0**, `live-matrix` **20/0** (+2 new `initial_live_*` units),
+vtable). **Verification (macOS):** worker default **11/0**, `live-matrix` **21/0** (+3 new `initial_live_*` units, incl. the empty-token guard),
 `cargo clippy -p kastellan-worker-matrix --all-targets --features live-matrix -- -D warnings` clean. New `#[ignore]`
 `matrix_restart_recovers_downtime_message` e2e (`core/tests/matrix_live_e2e.rs`): init → `close()` bot → peer sends during
 downtime → respawn same store → poll surfaces it — **compile-verified on the Mac; LIVE RUN DGX-PENDING** (no homeserver here).
