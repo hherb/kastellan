@@ -87,6 +87,29 @@ The two sandbox rows together implement the "parent denies + child denies again"
 
 Redeemed secret plaintext never appears in the request snapshot (`payload.req` of any `tool:<name>` row, snapshotted *before* `secret://<8-hex>` substitution — issue #147) nor in any `actor='policy'` row (issue #146 / Item 31). It does **not** follow that the audit log is free of secrets: a worker that is legitimately handed a secret may echo it into its own output, which lands in `payload.result`. That field is the worker's response, not the request, and is out of scope of the redaction invariant — the worker is the authorized consumer, so an operator with `audit_log` read access can recover any secret a worker chose to emit. Containing worker-emitted plaintext is the egress proxy's and the injection guard's job, not the audit redactor's.
 
+### Injection-screening of planner-bound tool output (and its split-slice limit)
+
+Successful tool output is fed back to the planner (#338), so every worker
+result is screened by `cassandra::injection_guard` before it can reach the
+planner prompt. Two chokepoints enforce this: `tool_host::dispatch` screens the
+first `SCAN_BYTE_CAP` (64 KiB) of each result inline, and
+`scheduler::tool_dispatch::fetch_screen` re-screens every `fetch_handoff` slice
+served from the handoff cache (the cache holds the full body, but `tool_host`
+only saw its first 64 KiB). On a `Block` verdict each substitutes a placeholder
+carrying a human-readable `note` string — the only field the planner-summary
+render surfaces — so the planner gets an intelligible *"content withheld"*
+signal rather than a silent gap that would tempt it to re-run the step (#340).
+
+**Known limitation (not a regression):** screening operates on one slice at a
+time. An injection payload deliberately split across a 64 KiB boundary — or
+across two `fetch_handoff` slices — can have each fragment fall below the
+catalogue's per-slice threshold and evade the screen, the same way it could
+already evade `tool_host`'s `SCAN_BYTE_CAP` window. This is inherent to
+streaming, bounded-memory screening; the OS sandbox and the egress proxy remain
+the actual containment boundary, with injection screening as defense-in-depth
+that lowers attempt volume rather than a guarantee. Cross-slice stateful
+screening is a possible future hardening.
+
 ### Network egress: interim containment and the SSRF/DNS caveat
 
 The `web-fetch` worker is the first network-egress tool, but the **egress proxy

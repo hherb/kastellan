@@ -6,29 +6,42 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-23 (**Global budget for `plans_so_far_summary` — [#339](https://github.com/hherb/kastellan/issues/339)
-DONE on branch `feat/339-plans-summary-global-budget` (PR pending).** Hardening follow-up to #338, which raised the per-step
-summary term ~2000× (bare `"ok"` → up to `STEP_OK_SUMMARY_MAX`=4 KiB); `plans_so_far_summary` re-renders every plan's every step
-every planner iteration, so the *accumulated* total (`max_plans` × steps × 4 KiB, `max_plans` operator-overridable) was unbounded
-in the always-in-context planner prompt. **Shipped (subagent-driven, TDD, 2 tasks):** **(1)** lifted the rendering helpers
-(constants + `sink_screen_blocks` + `render_step_outcome` + the per-plan mapping) out of the over-cap `inner_loop.rs` (575→481)
-into a new pure **`core/src/scheduler/inner_loop/summary.rs`** (286 LOC); `TaskContext::plans_so_far_summary` is now a thin delegate
-to `summary::render_plans_summary`, behavior byte-identical. **(2)** new `RenderedStep{text,elidable}` + pure
+**Last updated:** 2026-06-23 (**Clearer injection-blocked signal to the planner — [#340](https://github.com/hherb/kastellan/issues/340)
+DONE on branch `feat/340-injection-blocked-note` (PR #346).** Final follow-up of the #338 arc. When `tool_host::dispatch`
+blocks a worker result on the output injection screen it substituted `{ injection_blocked, score, reason_codes }`; now that
+successful step output reaches the planner (#338), that placeholder renders through `extract_scannable_text` — which emits only
+**string leaf values** — so the planner saw just the reason-code string (e.g. `"ok: instruction_override"`), an unintelligible
+gap that could tempt a re-run, *unlike* the `fetch_screen` placeholder which already carries a human-readable `note`. **The fix
+(TDD, rule #1 pure-fn):** new pure **`core/src/tool_host/injection_placeholder.rs`** (72 LOC) — `WITHHELD_NOTE` const =
+`"[tool output withheld: failed injection screen]"` + `injection_blocked_placeholder(score, &reason_codes) -> Value` (adds the
+`note` string leaf; keeps `injection_blocked`/`score`/`reason_codes` for audit-shape parity with `fetch_screen`). `dispatch`'s
+Block arm now calls it instead of the inline `json!`. `prompts/agent_planner.md` gained a planner bullet (a withheld step reports
+`"ok: [tool output withheld: …]"`; don't re-run it). `docs/threat-model.md` gained a subsection documenting both the
+planner-bound-output screening (the two chokepoints `tool_host` + `fetch_screen`) **and the known split-slice limitation** (an
+injection payload split across a 64 KiB boundary or two `fetch_handoff` slices can each fall below the per-slice threshold and
+evade single-slice screening — inherent to streaming bounded-memory screening; sandbox + egress proxy remain the real boundary).
+**Verification (macOS):** new `injection_placeholder` units **3/0** (note present + signals "withheld"; structured fields kept;
+no raw-output leak), `tool_host` lib **43/0**, `injection_guard_e2e` **6/0** against real PG18 + real Seatbelt jail (the
+placeholder-shape test now also pins the `note` end-to-end), `cargo clippy -p kastellan-core --lib --tests -- -D warnings`
+clean. Pure-Rust, no migration, no OS-gated code → DGX not required. **`tool_host.rs` 659→667** (still the leading over-cap
+prod-split candidate — additive +8; real split tracked separately). The #338 planner-feedback arc (#337/#338/#343/#339/#340)
+is now complete.)
+
+_(Prior session — **Global budget for `plans_so_far_summary` — [#339](https://github.com/hherb/kastellan/issues/339)
+MERGED to `main` as `8fa67f9` (PR #345).** Hardening follow-up to #338, which raised the per-step summary term ~2000× (bare
+`"ok"` → up to `STEP_OK_SUMMARY_MAX`=4 KiB); `plans_so_far_summary` re-renders every plan's every step every planner iteration,
+so the *accumulated* total (`max_plans` × steps × 4 KiB, `max_plans` operator-overridable) was unbounded in the always-in-context
+planner prompt. **Shipped (TDD, 2 tasks):** **(1)** lifted the rendering helpers (constants + `sink_screen_blocks` +
+`render_step_outcome` + the per-plan mapping) out of the over-cap `inner_loop.rs` (575→481) into a new pure
+**`core/src/scheduler/inner_loop/summary.rs`** (286 LOC); `TaskContext::plans_so_far_summary` is now a thin delegate to
+`summary::render_plans_summary`, behavior byte-identical. **(2)** new `RenderedStep{text,elidable}` + pure
 `apply_summary_budget(&mut [Vec<RenderedStep>], budget) -> usize` that elides the **oldest** successful-step output heads first
-(replaced by `OK_ELIDED_MARKER`) until total step-text bytes ≤ `PLANS_SUMMARY_BUDGET`=**32 KiB**; `render_step_outcome` now
-returns `RenderedStep` (`elidable:true` only for real Ok heads — errors, decisions, the injection withheld-marker, and the
-**most-recent** plan's heads are preserved, so no #338 loop regression — the planner still sees the freshest result). Guards:
-never elide a non-elidable step, never *grow* a tiny `"ok: 9"` (`len > marker` check), idempotent (`elidable=false` + the marker
-is exactly marker-length). The budget bounds the dominant step-output term, not the small per-step framing. **Security:** the
-screen-at-render-then-budget-elide order is the safe one — every head/detail passes `sink_screen_blocks` (per-tool profile)
-*before* the budget pass, which only ever *removes* already-screened text or substitutes a constant; nothing unscreened can
-surface. **Verification (macOS lib gate):** `summary` 17/0 (+8 budget units) + `inner_loop` 43/0 (no regression),
-`cargo clippy -p kastellan-core --lib -- -D warnings` clean; `summary.rs` 286 + `inner_loop.rs` 481, both under cap. Pure-Rust, no
-migration, no OS-gated code → DGX not required for the unit gate. **Final whole-branch review (opus): READY TO MERGE**, no
-Critical/Important (one Minor doc-precision tweak applied: the budget caps step-output bytes, not prefixes/JSON framing).
-Spec/plan: `docs/superpowers/{specs,plans}/2026-06-23-plans-summary-global-budget*`. **Sibling still open:**
-[#340](https://github.com/hherb/kastellan/issues/340) (human-readable `note` on the `tool_host` injection-blocked placeholder +
-split-slice screening limit).)
+(replaced by `OK_ELIDED_MARKER`) until total step-text bytes ≤ `PLANS_SUMMARY_BUDGET`=**32 KiB**; `render_step_outcome` returns
+`RenderedStep` (`elidable:true` only for real Ok heads — errors, decisions, the injection withheld-marker, and the **most-recent**
+plan's heads are preserved, so no #338 loop regression). **Security:** screen-at-render-then-budget-elide is the safe order —
+every head/detail passes `sink_screen_blocks` *before* the budget pass, which only ever *removes* already-screened text. Pure-Rust,
+no migration → DGX not required. The budget is a compile-time constant; expose `PLANS_SUMMARY_BUDGET` via env only if a large
+operator `max_plans` ever needs it (YAGNI today). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-23-plans-summary-global-budget*`.)_
 
 _(Prior session — **Feed successful tool output back to the planner — #338 DONE on branch
 `feat/338-feed-tool-output-to-planner` (PR pending).** The success-half symmetric to PR #337's error-half, and the blocker
@@ -818,23 +831,30 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (#339, branch `feat/339-plans-summary-global-budget`, PR pending):** global 32 KiB byte budget for
-`plans_so_far_summary` — oldest successful-step output heads elided first (`apply_summary_budget` in the new pure
-`inner_loop/summary.rs`); errors, decisions, the withheld-marker, and the most-recent plan's heads preserved. See the "Last
-updated" header. The DGX is on `main`@`447767a` (PRs #341 + #343), channel bus up; this branch is not yet deployed (no operator
-gate — the change can't loop or block, just bounds prompt size).
+**Just shipped (#340, branch `feat/340-injection-blocked-note`, PR #346):** the `tool_host` injection-blocked placeholder now
+carries a human-readable `note` string leaf (`WITHHELD_NOTE`, pure `injection_placeholder.rs`) so the planner gets an
+intelligible "content withheld" signal, not a bare reason-code; planner prompt + threat-model (incl. the split-slice screening
+limitation) updated. See the "Last updated" header. **The whole #338 planner-feedback arc is now complete** (#337 error-half →
+#338 success-half → #343 sink-screen → #339 global budget → #340 clear signal). The DGX is on `main`@`447767a`; #339 (`8fa67f9`)
+and this branch are not yet deployed (no operator gate — neither change can loop or block; #339 bounds prompt size, #340 only
+adds a string field).
 
-**★ LEADING PICK — [#340](https://github.com/hherb/kastellan/issues/340): clearer injection-blocked signal to the planner.** The
-`tool_host::dispatch` injection-blocked placeholder is `{ injection_blocked, score, reason_codes }`; rendered through
-`extract_scannable_text` (string leaves only) the planner sees just the reason-code string (e.g. `"ok: override"`), not an
-intelligible "content withheld" signal — unlike the `fetch_screen` placeholder, which already carries a human-readable `note`.
-Give the `tool_host` placeholder a `note` (e.g. `"[tool output withheld: failed injection screen]"`); additive field, mind the
-existing `tool_host` placeholder-shape tests. Also note the related inherent limitation (worth a threat-model line): injection
-text split across two `fetch_handoff` slices can evade single-slice `fetch_screen` (parity with `tool_host`'s `SCAN_BYTE_CAP`).
-**Separately (model-side, not a code task):** ~86s/plan is gemma 26B on the DGX Spark with a 262144-token context; reducing the
-model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which forces a reload) is a possible perf
-win. **`plans_so_far_summary` budget follow-up (cheap, on demand):** the budget is a compile-time constant; if a deployment with
-a large operator-set `max_plans` ever needs it, expose `PLANS_SUMMARY_BUDGET` via env (YAGNI today).
+**★ LEADING PICK — model-side perf (no code task): reduce the planner `num_ctx`.** ~86s/plan is gemma 26B on the DGX Spark with a
+262144-token context; reducing the model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which
+forces a reload) is the cheapest live latency win now that the feedback arc is closed. Operator action on the DGX.
+
+**Code picks (operator's choice — each ~one session):**
+- **Matrix-worker seccomp/Landlock enforcement flip** (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today) — needs DGX syscall
+  enumeration like the #281 arc (kill-mode + `journalctl -k`, see memory note); larger.
+- **[#321](https://github.com/hherb/kastellan/issues/321) inbound-loss window on matrix respawn** — persisted sync-token
+  watermark; medium.
+- **`tool_host.rs` prod-split** (now 667 LOC, the leading over-cap candidate) — lift `dispatch_with_sink`'s post-processing
+  (scrub + injection screen + audit-emission arms) into a `tool_host/post_process.rs` sibling; tests already external under
+  `tool_host/`.
+- **[#298](https://github.com/hherb/kastellan/issues/298) full-daemon secret-scrub e2e** — needs a Vault-ref test seam in `main.rs`.
+- **Test-infra debt:** the serialized `cargo test --workspace` live run wedges on `memory_layers_e2e` (0-CPU pool deadlock under
+  heavy multi-cluster live-PG load — the documented sqlx-0.9 env issue); a focused isolation + `Pool::close()`/`PgListener`
+  audit (cf. the #332 variant-D deadlock test).
 
 **Prior entity-embedding work (still-valid follow-ups):** forward entity embed-on-insert shipped on
 `feat/entity-forward-embed-on-insert` (the entity-embedding arc is complete: backfill #335 + forward). **Remaining entity-embedding follow-ups:** (1) an **ANN index** (ivfflat/hnsw) on
