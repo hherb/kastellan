@@ -25,8 +25,13 @@ the read goes through the public state-store key — no trait import needed (`ge
 vtable). **Verification (macOS):** worker default **11/0**, `live-matrix` **21/0** (+3 new `initial_live_*` units, incl. the empty-token guard),
 `cargo clippy -p kastellan-worker-matrix --all-targets --features live-matrix -- -D warnings` clean. New `#[ignore]`
 `matrix_restart_recovers_downtime_message` e2e (`core/tests/matrix_live_e2e.rs`): init → `close()` bot → peer sends during
-downtime → respawn same store → poll surfaces it — **compile-verified on the Mac; LIVE RUN DGX-PENDING** (no homeserver here).
-Pure-Rust, `live-matrix`-gated → unit gate runs on the Mac, live proof pending the DGX. Spec/plan:
+downtime → respawn same store → poll surfaces it. **VERIFIED LIVE on the DGX (2026-06-24):** both live e2e tests **2/0** against
+a throwaway loopback matrix-conduit + encrypted room (`scripts/matrix/dev-e2e-bootstrap.sh`), reproducibly (~1.7s); the restart
+test is a genuine regression gate — a **negative control** (`initial_live_state` forced to `false`) **FAILS** at the "never
+received the downtime message" assertion after the full 45s deadline. **Test-robustness fix (`53808ab`):** the first-shutdown
+check no longer asserts a *clean* exit — #321 covers downtime of any cause incl. a crash, the token persists incrementally during
+sync, and the worker's sync task can race teardown into a transient crypto-store abort (`process::exit(1)`); the test now waits
+for exit and logs the status without gating on it. Pure-Rust, `live-matrix`-gated. Spec/plan:
 `docs/superpowers/{specs,plans}/2026-06-23-matrix-downtime-loss-window*`.)
 
 _(Prior session — **Clearer injection-blocked signal to the planner — [#340](https://github.com/hherb/kastellan/issues/340)
