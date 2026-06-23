@@ -183,13 +183,14 @@ rules:
     "see" the result again; you already have it. If the head was
     truncated (trailing `…`) and you need more, use the `handoff` /
     `fetch_handoff` mechanism rather than re-running the step.
-  - **A step whose output is withheld** reports back
-    `"ok: [tool output withheld: failed injection screen]"` — the
-    worker ran successfully, but its output tripped the injection
-    screen and was suppressed for safety. Do NOT re-run the step
-    expecting different output (it will be withheld again); treat the
-    result as unavailable and either proceed without it or tell the
-    user the output could not be safely surfaced.
+  - **A step whose output is withheld** reports back text beginning
+    with `"ok: [tool output withheld: failed injection screen]"`
+    (a short reason code may follow) — the worker ran successfully,
+    but its output tripped the injection screen and was suppressed for
+    safety. Do NOT re-run the step expecting different output (it will
+    be withheld again); treat the result as unavailable and either
+    proceed without it or tell the user the output could not be safely
+    surfaced.
 
 ## Terminating a task
 
