@@ -6,7 +6,31 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-22 (**Feed successful tool output back to the planner — #338 DONE on branch
+**Last updated:** 2026-06-23 (**Global budget for `plans_so_far_summary` — [#339](https://github.com/hherb/kastellan/issues/339)
+DONE on branch `feat/339-plans-summary-global-budget` (PR pending).** Hardening follow-up to #338, which raised the per-step
+summary term ~2000× (bare `"ok"` → up to `STEP_OK_SUMMARY_MAX`=4 KiB); `plans_so_far_summary` re-renders every plan's every step
+every planner iteration, so the *accumulated* total (`max_plans` × steps × 4 KiB, `max_plans` operator-overridable) was unbounded
+in the always-in-context planner prompt. **Shipped (subagent-driven, TDD, 2 tasks):** **(1)** lifted the rendering helpers
+(constants + `sink_screen_blocks` + `render_step_outcome` + the per-plan mapping) out of the over-cap `inner_loop.rs` (575→481)
+into a new pure **`core/src/scheduler/inner_loop/summary.rs`** (286 LOC); `TaskContext::plans_so_far_summary` is now a thin delegate
+to `summary::render_plans_summary`, behavior byte-identical. **(2)** new `RenderedStep{text,elidable}` + pure
+`apply_summary_budget(&mut [Vec<RenderedStep>], budget) -> usize` that elides the **oldest** successful-step output heads first
+(replaced by `OK_ELIDED_MARKER`) until total step-text bytes ≤ `PLANS_SUMMARY_BUDGET`=**32 KiB**; `render_step_outcome` now
+returns `RenderedStep` (`elidable:true` only for real Ok heads — errors, decisions, the injection withheld-marker, and the
+**most-recent** plan's heads are preserved, so no #338 loop regression — the planner still sees the freshest result). Guards:
+never elide a non-elidable step, never *grow* a tiny `"ok: 9"` (`len > marker` check), idempotent (`elidable=false` + the marker
+is exactly marker-length). The budget bounds the dominant step-output term, not the small per-step framing. **Security:** the
+screen-at-render-then-budget-elide order is the safe one — every head/detail passes `sink_screen_blocks` (per-tool profile)
+*before* the budget pass, which only ever *removes* already-screened text or substitutes a constant; nothing unscreened can
+surface. **Verification (macOS lib gate):** `summary` 17/0 (+8 budget units) + `inner_loop` 43/0 (no regression),
+`cargo clippy -p kastellan-core --lib -- -D warnings` clean; `summary.rs` 286 + `inner_loop.rs` 481, both under cap. Pure-Rust, no
+migration, no OS-gated code → DGX not required for the unit gate. **Final whole-branch review (opus): READY TO MERGE**, no
+Critical/Important (one Minor doc-precision tweak applied: the budget caps step-output bytes, not prefixes/JSON framing).
+Spec/plan: `docs/superpowers/{specs,plans}/2026-06-23-plans-summary-global-budget*`. **Sibling still open:**
+[#340](https://github.com/hherb/kastellan/issues/340) (human-readable `note` on the `tool_host` injection-blocked placeholder +
+split-slice screening limit).)
+
+_(Prior session — **Feed successful tool output back to the planner — #338 DONE on branch
 `feat/338-feed-tool-output-to-planner` (PR pending).** The success-half symmetric to PR #337's error-half, and the blocker
 for every tool-using task: `render_step_outcome` (`core/src/scheduler/inner_loop.rs`) collapsed a successful
 `StepOutcome::Ok(serde_json::Value)` to the bare scalar `"ok"`, discarding the worker's result — so the planner never saw a
@@ -44,7 +68,9 @@ was **reversed** — `render_step_outcome` is now the **single mandatory sink sc
 threaded from `steps[j].tool`), so the planner-screening invariant is *enforced at one point* not *relied upon* across sources.
 Per-tool profile (not blind Strict) keeps the re-screen idempotent → no over-block of Relaxed doc-fetch workers (#142); Block →
 `WITHHELD_MARKER`. Source screens (`tool_host`/`fetch_screen`) stay for non-planner consumers. 4 new units (35/0 inner_loop),
-`cli_ask_e2e` 7/0, clippy clean.)
+`cli_ask_e2e` 7/0, clippy clean. **Both halves are now MERGED to `main`** — #338 as `181d70e` (PR #341) and the render-sink
+follow-up as `447767a` (PR #343); deployed + VERIFIED LIVE on the DGX 2026-06-23 ("9 entries in /usr" on plan 2, one dispatch,
+no loop).)_
 
 _(Prior session — **Agent tool-loop recovery — DONE, MERGED to `main` as `ff3e2f5`
 (PR [#337](https://github.com/hherb/kastellan/pull/337)). Deployed + verified live on the DGX.** A live Matrix question
@@ -792,21 +818,23 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (MERGED to `main` as `181d70e`, PR [#341](https://github.com/hherb/kastellan/pull/341)):** #338 — successful tool
-output now fed back to the planner (`render_step_outcome` renders `"ok: <head>"`, 4 KiB cap, already-screened; new
-`fetch_screen` closes a fetch-tail injection hole). **Deployed + VERIFIED LIVE on the DGX 2026-06-23** ("9 entries in /usr" on
-plan 2, one dispatch, no loop — see the "Last updated" header). The DGX is on `main`@`181d70e`, channel bus up.
+**Just shipped (#339, branch `feat/339-plans-summary-global-budget`, PR pending):** global 32 KiB byte budget for
+`plans_so_far_summary` — oldest successful-step output heads elided first (`apply_summary_budget` in the new pure
+`inner_loop/summary.rs`); errors, decisions, the withheld-marker, and the most-recent plan's heads preserved. See the "Last
+updated" header. The DGX is on `main`@`447767a` (PRs #341 + #343), channel bus up; this branch is not yet deployed (no operator
+gate — the change can't loop or block, just bounds prompt size).
 
-**★ LEADING PICK — [#339](https://github.com/hherb/kastellan/issues/339): global budget for `plans_so_far_summary`.** The #338
-render change raised the per-step term ~2000× (bare `"ok"` → up to 4 KiB), and `plans_so_far_summary` re-renders every plan's
-every step each iteration; the per-step head is capped but the accumulated total (`max_plans` × steps × 4 KiB) is not, and
-`max_plans` is operator-overridable. Add a global summary budget (cap total rendered Ok bytes, oldest-truncated-first) or a
-per-plan step cap, in `core/src/scheduler/inner_loop.rs`. Cheap hardening; the common case (fast=5 plans, few steps) is fine
-today. **Sibling pick — [#340](https://github.com/hherb/kastellan/issues/340):** give the `tool_host` injection-blocked
-placeholder a human-readable `note` string so a blocked result renders as a clear "withheld" signal to the planner (it shows as
-`"ok: <reason_code>"` today); additive field, mind the placeholder-shape tests. **Separately (model-side, not a code task):**
-~86s/plan is gemma 26B on the DGX Spark with a 262144-token context; reducing the model's default `num_ctx`
-(`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which forces a reload) is a possible perf win.
+**★ LEADING PICK — [#340](https://github.com/hherb/kastellan/issues/340): clearer injection-blocked signal to the planner.** The
+`tool_host::dispatch` injection-blocked placeholder is `{ injection_blocked, score, reason_codes }`; rendered through
+`extract_scannable_text` (string leaves only) the planner sees just the reason-code string (e.g. `"ok: override"`), not an
+intelligible "content withheld" signal — unlike the `fetch_screen` placeholder, which already carries a human-readable `note`.
+Give the `tool_host` placeholder a `note` (e.g. `"[tool output withheld: failed injection screen]"`); additive field, mind the
+existing `tool_host` placeholder-shape tests. Also note the related inherent limitation (worth a threat-model line): injection
+text split across two `fetch_handoff` slices can evade single-slice `fetch_screen` (parity with `tool_host`'s `SCAN_BYTE_CAP`).
+**Separately (model-side, not a code task):** ~86s/plan is gemma 26B on the DGX Spark with a 262144-token context; reducing the
+model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which forces a reload) is a possible perf
+win. **`plans_so_far_summary` budget follow-up (cheap, on demand):** the budget is a compile-time constant; if a deployment with
+a large operator-set `max_plans` ever needs it, expose `PLANS_SUMMARY_BUDGET` via env (YAGNI today).
 
 **Prior entity-embedding work (still-valid follow-ups):** forward entity embed-on-insert shipped on
 `feat/entity-forward-embed-on-insert` (the entity-embedding arc is complete: backfill #335 + forward). **Remaining entity-embedding follow-ups:** (1) an **ANN index** (ivfflat/hnsw) on
@@ -947,7 +975,7 @@ leading Phase-3 pick above. Beyond that, Phase-2 channels (IMAP/Telegram inbound
 **Refactor bucket — over-cap file splits (item 9b).** Re-census the exact split (`wc -l`) before picking — the numbers below drift each session:
 
 - **(a) Clean test-lifts** (lifting the inline `mod tests` block alone lands the parent under cap): **none meaningfully remaining.** The substantial ones are done — `cassandra/types.rs`, `inner_loop_audit.rs`, `entity_extraction/gliner_relex.rs` (2026-06-07 batch); `macos_seatbelt.rs` (PR #192); `recall.rs`/`l0_seed.rs`/`capture.rs`/`inner_loop.rs`/`replay.rs` (Earlier history). A fresh census shows only files sitting **1–27 LOC over cap** still carry a liftable block (`core/src/main.rs` 527, `db/src/lib.rs` 525, `core/src/bin/kastellan-cli/memory_l3/run.rs` 519, `core/src/cassandra/constitutional.rs` 502, `core/src/memory/l1_promote.rs` 501) — a lift would save little; defer unless one grows. **`core/src/tool_host.rs` is now 627** (584 on `main` before #268; +~25 #268 dispatch hook, +16 the secret-scrub wiring — bulk kept out in `tool_host/egress_provision.rs` + `tool_host/secret_scrub.rs`). A real prod-split of `tool_host.rs` (its tests already live under `tool_host/`) is the leading over-cap candidate now — needs a seam (e.g. lift `dispatch_with_sink`'s `match call_result` post-processing — scrub + injection screen + audit-emission arms — into a `tool_host/post_process.rs` sibling).
-- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `core/src/scheduler/runner.rs` (777), `core/src/scheduler/audit.rs` (701, tests already lifted), `db/src/entities.rs` (653), `workers/prelude/src/seccomp_lock.rs` (650). (`core/src/scheduler/inner_loop.rs` is **DONE** — split 630 → 481 this session via `inner_loop/invoke_expand.rs` [the `invoke_skill` expansion returning an `InvokeExpansion` enum] + `inner_loop/floor.rs` [`ClassificationFloorSource` + `apply_floor_raise`, re-exported]. `db/secrets.rs` [848 → 252 + crypto/key_provider/error siblings], `systemd_user.rs`, `gliner_relex.rs` also done — see history.) Most over-cap production file remains `core/src/cli_audit.rs` (958).
+- **(b) Need a real prod split or a re-exported pure-helper seam** (a test-lift alone leaves the parent over cap): `core/src/cli_audit.rs` (958, the most over-cap production file), `db/graph.rs` (926, the design-gated Item 23b walk-impl split — deferred until a 2nd `WalkedEdge` consumer materialises), `core/src/scheduler/runner.rs` (777), `core/src/scheduler/audit.rs` (701, tests already lifted), `db/src/entities.rs` (653), `workers/prelude/src/seccomp_lock.rs` (650). (`core/src/scheduler/inner_loop.rs` is **DONE** — split via `inner_loop/invoke_expand.rs` [the `invoke_skill` expansion returning an `InvokeExpansion` enum] + `inner_loop/floor.rs` [`ClassificationFloorSource` + `apply_floor_raise`, re-exported] + `inner_loop/summary.rs` [#339: plan-summary rendering + the global budget]; back to **481 LOC** after #338/#343 grew it to 575. `db/secrets.rs` [848 → 252 + crypto/key_provider/error siblings], `systemd_user.rs`, `gliner_relex.rs` also done — see history.) Most over-cap production file remains `core/src/cli_audit.rs` (958).
   Also `supervisor/src/launchd_agents.rs` (526, +26) — Option K's install-time warn (+8) plus the installer's launchd `EnvironmentFile=` counterpart (#316 review fix: `install` reads `spec.environment_file` and folds it into the plist `EnvironmentVariables`; the pure `parse_env_file`/`merge_env` helpers live in the sibling `builders.rs` to keep the parent near cap). Tests already external, so a fix needs a real prod-split (disproportionate for a +26 file at the deferral threshold; deferred per this same ≤27-over policy — split the launchctl driver helpers if it grows). And `core/src/scheduler/tool_dispatch.rs` (507, +7) — pushed over by the handoff stash + `fetch_handoff` intercept; tests already external (`tool_dispatch/tests.rs`), so deferred per the same ≤27-over policy (a clean split would lift the `fetch_handoff` intercept + stash path into a `handoff_dispatch.rs` sibling if it grows).
 - **(c) Over-cap *test* files** (lower priority — not production code, but rule 4 still applies): `core/src/workers/gliner_relex/tests.rs` (851), `core/src/cassandra/types/tests.rs` (568).
 
