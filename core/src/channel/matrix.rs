@@ -173,11 +173,12 @@ impl MatrixChannel {
     /// `poll`/`send` error), the driver respawns it via `factory` with capped
     /// exponential backoff and resumes — so a worker crash doesn't take the
     /// channel down. Replies in flight when the worker died are retried after the
-    /// respawn (no dropped replies). Note that *inbound* messages that arrive
-    /// during the downtime are NOT recovered: the respawned worker's catch-up sync
-    /// is consumed silently (it only surfaces events from the continuous sync
-    /// afterwards), so a message sent to the bot while it was down is lost. Closing
-    /// that window needs a sync-token watermark — tracked as issue #321.
+    /// respawn (no dropped replies). Inbound messages a user sends during the
+    /// downtime are recovered on restart (#321): the respawned worker resumes
+    /// from the SDK's persisted sync token, so its catch-up sync surfaces the
+    /// messages received while it was down rather than dropping them. Only a
+    /// *fresh login* (no prior token) still suppresses its catch-up backlog, to
+    /// avoid replaying the whole room history.
     pub fn supervised(id: ChannelId, client: Box<dyn WorkerClient>, factory: WorkerFactory) -> Self {
         Self::spawn_driver(id, client, Some(factory))
     }
