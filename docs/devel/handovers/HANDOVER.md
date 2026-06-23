@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-24 (**Close the Matrix inbound-loss window on worker respawn — [#321](https://github.com/hherb/kastellan/issues/321)
-DONE on branch `feat/321-matrix-downtime-loss-window` (PR pending).** PR #320's self-healing `MatrixChannel::supervised` respawn
+DONE on branch `feat/321-matrix-downtime-loss-window` (PR #347).** PR #320's self-healing `MatrixChannel::supervised` respawn
 made the channel silently lossy for the worker's downtime: a message a user DM'd the bot while the worker was down arrived in the
 respawned worker's catch-up sync and was dropped by the `live` gate (`workers/matrix/src/sdk_live.rs`), which suppresses the
 *entire* initial sync to avoid replaying full room history on every start. **Key insight:** the "sync-token watermark" the issue
