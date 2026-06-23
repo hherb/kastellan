@@ -110,6 +110,11 @@ async fn dispatch_returns_placeholder_when_worker_result_carries_injection_phras
         .expect("dispatch ok");
 
     assert_eq!(result["injection_blocked"], serde_json::Value::Bool(true));
+    // #340: the placeholder carries a human-readable `note` string — the only
+    // field the planner-summary render surfaces — so the planner gets an
+    // intelligible "content withheld" signal, not just a reason-code string.
+    let note = result["note"].as_str().expect("placeholder carries a note string");
+    assert!(note.contains("withheld"), "note must signal content was withheld: {note:?}");
     let score = result["score"].as_f64().expect("score is number");
     assert!(score >= injection_guard::BLOCK_THRESHOLD as f64);
     let codes = result["reason_codes"].as_array().expect("codes array");

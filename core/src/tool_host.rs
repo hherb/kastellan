@@ -21,6 +21,9 @@ pub use audit_sink::{AuditSink, PgAuditSink};
 
 mod egress_provision;
 
+mod injection_placeholder;
+pub use injection_placeholder::{injection_blocked_placeholder, WITHHELD_NOTE};
+
 mod secret_scrub;
 
 mod lockdown_env;
@@ -377,11 +380,16 @@ pub async fn dispatch_with_sink(
                     (Ok(v), None)
                 }
                 crate::cassandra::injection_guard::InjectionDecision::Block => {
-                    let placeholder = serde_json::json!({
-                        "injection_blocked": true,
-                        "score":             verdict.score,
-                        "reason_codes":      verdict.reason_codes,
-                    });
+                    // Substitute a placeholder carrying a human-readable `note`
+                    // string — the only field the planner-summary render
+                    // surfaces (extract_scannable_text emits string leaves
+                    // only), so the planner gets an intelligible "withheld"
+                    // signal rather than a silent gap (#340). Structured fields
+                    // stay for audit-shape parity with fetch_screen.
+                    let placeholder = injection_blocked_placeholder(
+                        verdict.score,
+                        &verdict.reason_codes,
+                    );
                     (Ok(placeholder), Some((verdict, body, truncated)))
                 }
             }
