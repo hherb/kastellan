@@ -272,8 +272,11 @@ impl MatrixSdk for LiveSdk {
 /// With no prior token this is a fresh login, whose catch-up sync replays recent
 /// room history; that must stay suppressed, so we start not-live (`false`) and
 /// flip live only after the initial sync drains (see `connect_client`).
+///
+/// An empty string is not a real sync position and is treated as no token,
+/// ensuring a fresh login can never replay full room history (defense-in-depth).
 fn initial_live_state(prior_sync_token: Option<&str>) -> bool {
-    prior_sync_token.is_some()
+    prior_sync_token.is_some_and(|token| !token.is_empty())
 }
 
 /// Read the sync token matrix-sdk persisted on a previous run, if any.
@@ -647,5 +650,12 @@ mod tests {
         // No token means a fresh login: the catch-up sync replays room history,
         // which must stay suppressed.
         assert!(!initial_live_state(None));
+    }
+
+    #[test]
+    fn initial_live_false_when_token_empty() {
+        // An empty string is not a real sync position; treat it as no token so a
+        // fresh login can never replay full room history.
+        assert!(!initial_live_state(Some("")));
     }
 }
