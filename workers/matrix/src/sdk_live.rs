@@ -258,6 +258,23 @@ impl MatrixSdk for LiveSdk {
     }
 }
 
+/// Decide whether inbound delivery should be live from the very start of the
+/// initial sync, given the sync token (if any) the SDK persisted on a previous
+/// run.
+///
+/// matrix-sdk stores its sync token in the SQLite state store and resumes from
+/// it on restart, so when a prior token exists the catch-up sync returns only
+/// events received *since* that token — genuinely-unprocessed messages,
+/// including any a user sent while the worker was down. Those must be surfaced,
+/// so we start live (`true`).
+///
+/// With no prior token this is a fresh login, whose catch-up sync replays recent
+/// room history; that must stay suppressed, so we start not-live (`false`) and
+/// flip live only after the initial sync drains (see `connect_client`).
+fn initial_live_state(prior_sync_token: Option<&str>) -> bool {
+    prior_sync_token.is_some()
+}
+
 /// Drain all currently-buffered inbound events, leaving the buffer empty. Pure
 /// helper so the drain contract is testable without the SDK.
 fn drain(buffer: &Mutex<VecDeque<Event>>) -> Vec<Event> {
@@ -593,5 +610,19 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].body, "one");
         assert!(drain(&buf).is_empty(), "second drain sees an empty buffer");
+    }
+
+    #[test]
+    fn initial_live_true_when_prior_token_present() {
+        // A persisted sync token means this is a restart: the catch-up sync is
+        // incremental (only events since the last run), so we must surface them.
+        assert!(initial_live_state(Some("s12_34_56")));
+    }
+
+    #[test]
+    fn initial_live_false_when_no_prior_token() {
+        // No token means a fresh login: the catch-up sync replays room history,
+        // which must stay suppressed.
+        assert!(!initial_live_state(None));
     }
 }
