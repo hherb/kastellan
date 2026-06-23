@@ -32,8 +32,11 @@ const WITHHELD_MARKER: &str = "[withheld: failed injection screen]";
 /// always-in-context planner prompt as successful step outputs accumulate
 /// across up to `max_plans` iterations (#339). Per-step heads stay
 /// `STEP_OK_SUMMARY_MAX`; this caps the *accumulated* total over all plans and
-/// steps. Covers the unbounded term (step-output text bytes), not the small
-/// fixed per-plan JSON overhead (`decision`).
+/// steps. It bounds the dominant, otherwise-unbounded term — the step-output
+/// text bytes (`RenderedStep.text`). The small per-step framing (the `"ok: "` /
+/// `"err: …"` prefixes and the JSON array/key punctuation) and the planner's own
+/// `decision` field are not counted, so the fully-serialized prompt is modestly
+/// larger than this value but still bounded.
 const PLANS_SUMMARY_BUDGET: usize = 32 * 1024;
 
 /// Replacement for an elided `Ok`-output head (#339). A clear, structured
