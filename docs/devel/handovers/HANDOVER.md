@@ -6,7 +6,22 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-25 (**Matrix worker respawn churn FIXED + DGX-CONFIRMED — [#348](https://github.com/hherb/kastellan/issues/348)
+**Last updated:** 2026-06-25 (**#348 item 3 — Matrix respawn-rate alarm DONE on branch `feat/348-respawn-rate-alarm`.**
+The last remaining #348 follow-up: turn worker churn into an *up-front* warning instead of post-hoc death-report archaeology.
+New pure **`core/src/channel/respawn_alarm.rs`** (`RespawnRateAlarm`, 161 LOC) — a sliding-window state machine over
+caller-supplied `Instant`s (owns no clock, spawns nothing, so it's unit-testable without threads/sleeps): `record(now)` prunes
+respawns older than the window, pushes `now`, and returns `Some(count)` the **first** time the in-window count reaches the
+threshold for a storm, `None` otherwise (below threshold, or already fired this storm); it **re-arms** automatically once the
+window empties below threshold (so sustained churn warns once, not per-respawn, but a *new* storm fires again). Wired into the
+supervised `channel::matrix::drive` loop: a `RespawnRateAlarm::new(RESPAWN_ALARM_WINDOW=300s, RESPAWN_ALARM_THRESHOLD=5)` lives
+across the loop; the successful-respawn arm calls `record(Instant::now())` and logs a single `warn!(respawns, window_secs, …)`
+on fire. **Defaults:** 5 respawns within 5 min — the PDEATHSIG churn (~20–90s bursts) would trip it in ~100–450s; a lone crash
+stays silent. **TDD:** 5 pure units (below/at/above threshold fires once; out-of-window pruning; re-arm after a storm clears;
+threshold=1 fires immediately) RED→GREEN. **Verification (macOS):** respawn_alarm **5/0**, full channel module **44/0** (incl.
+`supervised_driver_respawns_after_worker_death` — no regression), `cargo clippy -p kastellan-core --lib --tests -D warnings`
+clean. Pure-Rust, no OS-gated code, no migration → DGX not required. `matrix.rs` 1150→1171 (+21 wiring; the bulk stayed in the
+new sibling). **#348 is now FULLY CLOSED** (churn fix + observability + item 3). _(Prior, same date: **Matrix worker respawn
+churn FIXED + DGX-CONFIRMED — [#348](https://github.com/hherb/kastellan/issues/348)
 on branch `feat/348-matrix-worker-respawn-stability` (PR [#350](https://github.com/hherb/kastellan/pull/350)).** The ~20–90s
 respawn churn's **real root cause** (found by deploying the observability half below and reading the new death log): the
 **initial** matrix worker is spawned via `tokio::task::spawn_blocking` (`main.rs`), so bwrap — which sets `--die-with-parent`
@@ -34,7 +49,7 @@ factored into `MatrixChannel::driver_channels()`. **Verification (macOS):** core
 ownership + initial-failure tests, the hermetic `death_report` test, 8 `worker_stderr` units incl. the carry-bound test), matrix default **17/0** (+6
 `sync_retry`), `live-matrix` **27/0**, `kastellan-protocol` **3/0**, `cargo clippy --workspace --all-targets` (+ `--features
 live-matrix`) `-D warnings` clean. **DGX:** aarch64 release build green + the live confirmation above. **Item 3 (respawn-rate
-alarm) deferred** as a small follow-up. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-24-matrix-worker-respawn-stability*`.)
+alarm) DONE this session** — see top. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-24-matrix-worker-respawn-stability*`.)_
 
 _(Prior session — **Matrix-worker seccomp/Landlock enforcement flip — DONE + DEPLOYED on branch
 `feat/matrix-worker-sandbox-enforcement` (PR pending).** Flipped `KASTELLAN_MATRIX_ENFORCE_SANDBOX` default 0→1.
@@ -911,22 +926,17 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (matrix worker respawn churn FIXED + DGX-CONFIRMED — [#348](https://github.com/hherb/kastellan/issues/348),
-branch `feat/348-matrix-worker-respawn-stability`, PR [#350](https://github.com/hherb/kastellan/pull/350)):** the new death-report
-observability deployed to the DGX and revealed the **real** cause — the initial worker was SIGKILLed ~10s after login by bwrap's
-`--die-with-parent` PDEATHSIG, because it was forked on a `spawn_blocking` pool thread tokio reaps after ~10s. Fixed by
-`MatrixChannel::supervised_self_spawn` (driver thread owns the initial spawn too); **confirmed live** — initial worker stable 2+
-min, zero SIGKILL/respawn (was ~10s-to-death every start). `sync_retry` (transient-`sync()` retry) ships as defense-in-depth.
-See the "Last updated" header. **Open follow-up: item 3 (respawn-rate alarm)** + merge PR #350. (Prior: matrix sandbox
-enforcement flip, PR #349 MERGED as `cf754cf`.)
+**Just shipped (#348 item 3 — respawn-rate alarm, branch `feat/348-respawn-rate-alarm`):** pure
+`channel::respawn_alarm::RespawnRateAlarm` (sliding-window respawn counter, fires once per storm, re-arms when it clears) wired
+into the supervised `drive` loop — 5 respawns within 300s logs one churn `warn!`. See the "Last updated" header. **#348 is now
+FULLY CLOSED** (churn fix `473d8e0` / PR #350 MERGED + observability + item 3). (Prior: matrix sandbox enforcement flip, PR #349
+MERGED as `cf754cf`.)
 
 **★ LEADING PICK — model-side perf (no code task): reduce the planner `num_ctx`.** ~86s/plan is gemma 26B on the DGX Spark with a
 262144-token context; reducing the model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which
 forces a reload) is the cheapest live latency win. Operator action on the DGX.
 
 **Code picks (operator's choice — each ~one session):**
-- **[#348](https://github.com/hherb/kastellan/issues/348) follow-up** — only **item 3 (respawn-rate alarm)** remains (warn when
-  respawns exceed N/window in the `MatrixChannel` driver). The churn fix + observability are DONE + DGX-confirmed this session.
 - **`tool_host.rs` prod-split** (now 636 LOC after #348 lifted the stderr drainer into `worker_stderr.rs`; still the leading
   over-cap candidate) — lift `dispatch_with_sink`'s post-processing
   (scrub + injection screen + audit-emission arms) into a `tool_host/post_process.rs` sibling; tests already external under
@@ -944,7 +954,8 @@ semantic lane); (2) a **batch-embed seam** so the backfill + forward loops embed
 cost). **Open Matrix-hardening picks (residual follow-ups):**
 (~~#321 inbound-loss window on respawn~~ — **DONE 2026-06-24**, sync-token-gated recovery);
 (~~matrix-worker seccomp/Landlock enforcement flip~~ — **DONE + DEPLOYED 2026-06-24**, `matrix_client` profile + the prelude
-TSYNC fix; see header); residual: **[#348](https://github.com/hherb/kastellan/issues/348)** periodic worker die/respawn.
+TSYNC fix; see header); ~~residual: **[#348](https://github.com/hherb/kastellan/issues/348)** periodic worker die/respawn~~
+— **FULLY CLOSED 2026-06-25** (churn fix + observability + the respawn-rate alarm; see header).
 **Pre-existing test-infra debt:** the full serialized
 `cargo test --workspace` live run wedges on `memory_layers_e2e` (0-CPU pool deadlock under heavy multi-cluster live-PG load —
 the documented sqlx-0.9 env issue); worth a focused isolation + `Pool::close()`/`PgListener` audit (cf. the #332 variant-D
