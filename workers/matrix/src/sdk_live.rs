@@ -47,6 +47,7 @@ use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
 };
 use matrix_sdk::ruma::RoomId;
+use matrix_sdk::store::StateStoreDataKey;
 use matrix_sdk::{Client, Room, RoomState};
 
 use kastellan_matrix_wire::{push_bounded, Event, InitResult};
@@ -258,6 +259,44 @@ impl MatrixSdk for LiveSdk {
     }
 }
 
+/// Decide whether inbound delivery should be live from the very start of the
+/// initial sync, given the sync token (if any) the SDK persisted on a previous
+/// run.
+///
+/// matrix-sdk stores its sync token in the SQLite state store and resumes from
+/// it on restart, so when a prior token exists the catch-up sync returns only
+/// events received *since* that token — genuinely-unprocessed messages,
+/// including any a user sent while the worker was down. Those must be surfaced,
+/// so we start live (`true`).
+///
+/// With no prior token this is a fresh login, whose catch-up sync replays recent
+/// room history; that must stay suppressed, so we start not-live (`false`) and
+/// flip live only after the initial sync drains (see `connect_client`).
+///
+/// An empty string is not a real sync position and is treated as no token,
+/// ensuring a fresh login can never replay full room history (defense-in-depth).
+fn initial_live_state(prior_sync_token: Option<&str>) -> bool {
+    prior_sync_token.is_some_and(|token| !token.is_empty())
+}
+
+/// Read the sync token matrix-sdk persisted on a previous run, if any.
+///
+/// `Client::sync_token()` is `pub(crate)` in matrix-sdk 0.18, so we read the
+/// same value the SDK stores via the public state-store key. **Fail-soft:** a
+/// store-read error (or an absent value) yields `None`, which routes
+/// [`initial_live_state`] to "fresh / suppress". A read failure can therefore
+/// never cause a stale-history replay — at worst it re-drops a downtime window,
+/// which is exactly the pre-#321 behavior.
+async fn read_prior_sync_token(client: &Client) -> Option<String> {
+    client
+        .state_store()
+        .get_kv_data(StateStoreDataKey::SyncToken)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| value.into_sync_token())
+}
+
 /// Drain all currently-buffered inbound events, leaving the buffer empty. Pure
 /// helper so the drain contract is testable without the SDK.
 fn drain(buffer: &Mutex<VecDeque<Event>>) -> Vec<Event> {
@@ -310,12 +349,16 @@ async fn connect_client(
             .to_string(),
     };
 
-    // Gate inbound delivery on `live`: false during the initial catch-up sync so
-    // its backlog (room history, and any messages received while the worker was
-    // down/restarting) is consumed *silently* — only events from the continuous
-    // sync afterwards reach the buffer. Without this, every (re)start replays the
-    // whole room history as fresh inbound events.
-    let live = Arc::new(AtomicBool::new(false));
+    // Gate inbound delivery on `live`. On a *fresh login* the catch-up sync
+    // replays recent room history, which must be suppressed (false until the
+    // initial sync drains). On a *restart*, the SDK resumes from its persisted
+    // sync token, so the catch-up sync returns only events received since the
+    // last run — including any a user sent while the worker was down. We seed
+    // `live` from whether that prior token exists, so the restart backlog is
+    // surfaced instead of dropped (#321). The token is read before the handler is
+    // registered so the decision covers the entire initial sync.
+    let prior_sync_token = read_prior_sync_token(&client).await;
+    let live = Arc::new(AtomicBool::new(initial_live_state(prior_sync_token.as_deref())));
     register_message_handler(&client, buffer, user_id, live.clone());
     register_autojoin_handler(&client);
 
@@ -593,5 +636,26 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].body, "one");
         assert!(drain(&buf).is_empty(), "second drain sees an empty buffer");
+    }
+
+    #[test]
+    fn initial_live_true_when_prior_token_present() {
+        // A persisted sync token means this is a restart: the catch-up sync is
+        // incremental (only events since the last run), so we must surface them.
+        assert!(initial_live_state(Some("s12_34_56")));
+    }
+
+    #[test]
+    fn initial_live_false_when_no_prior_token() {
+        // No token means a fresh login: the catch-up sync replays room history,
+        // which must stay suppressed.
+        assert!(!initial_live_state(None));
+    }
+
+    #[test]
+    fn initial_live_false_when_token_empty() {
+        // An empty string is not a real sync position; treat it as no token so a
+        // fresh login can never replay full room history.
+        assert!(!initial_live_state(Some("")));
     }
 }
