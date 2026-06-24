@@ -524,11 +524,12 @@ where
     // only reads stdout — so a worker that writes more than the ~64 KiB pipe
     // buffer to stderr would **block on write and deadlock** (then get
     // wall-clock-killed). Most workers are quiet; a headless Chromium
-    // (browser-driver) is not. Reading to EOF keeps the pipe empty; the thread
-    // self-terminates when the worker exits (stderr closes). Lines surface at
-    // debug level so they're available when troubleshooting without being noisy.
+    // (browser-driver) is not. The shared drainer reads to EOF (keeping the pipe
+    // empty) and surfaces each chunk at `debug`; the thread self-terminates when
+    // the worker exits (stderr closes). See `worker_stderr` (the Matrix channel
+    // worker uses the tail-retaining variant for death reports — #348).
     if let Some(stderr) = child.stderr.take() {
-        drain_worker_stderr(pid, stderr);
+        crate::worker_stderr::spawn_drain(pid, stderr);
     }
     let client = Client::from_child(child)?;
     let watchdog = spec.wall_clock_ms.map(|ms| watchdog::spawn_watchdog(pid, ms));
@@ -538,38 +539,6 @@ where
         egress: None,
         scratch: None,
     })
-}
-
-/// Spawn a detached thread that reads `stderr` to EOF, emitting each chunk at
-/// `debug`. Its only hard job is to keep the pipe drained so the worker can't
-/// deadlock writing to a full stderr buffer (see [`spawn_worker`]). The thread
-/// ends when the worker's stderr closes (process exit), so it needs no join
-/// handle and leaks nothing.
-///
-/// Reads **raw bytes**, not lines: a `BufRead::lines()` loop yields an `Err`
-/// on the first invalid-UTF-8 byte and would stop draining — re-opening the
-/// very deadlock this guards against if the worker keeps writing (Chromium's
-/// stderr is overwhelmingly UTF-8, but "overwhelmingly" is not "always"). Each
-/// chunk is logged lossily so non-UTF-8 bytes are surfaced as `�` rather than
-/// halting the drain.
-fn drain_worker_stderr(pid: u32, stderr: std::process::ChildStderr) {
-    use std::io::Read;
-    std::thread::spawn(move || {
-        let mut stderr = stderr;
-        let mut buf = [0u8; 8192];
-        loop {
-            match stderr.read(&mut buf) {
-                Ok(0) => break,                 // EOF — pipe closed (worker exited)
-                Ok(n) => tracing::debug!(
-                    worker_pid = pid,
-                    "worker stderr: {}",
-                    String::from_utf8_lossy(&buf[..n]).trim_end()
-                ),
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break, // genuine read error — pipe gone, nothing left to drain
-            }
-        }
-    });
 }
 
 /// Owning handle to a spawned worker. Wraps the JSON-RPC [`Client`] and a

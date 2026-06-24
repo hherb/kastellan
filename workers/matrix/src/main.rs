@@ -30,6 +30,9 @@
 mod bridge;
 mod handler;
 mod sdk;
+// Pure sync-retry policy: not feature-gated so its unit tests run in the default
+// build (the `live-matrix` SDK glue that consumes it is DGX-gated — cf. #331).
+mod sync_retry;
 
 #[cfg(feature = "live-matrix")]
 mod sdk_live;

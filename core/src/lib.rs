@@ -32,6 +32,7 @@ pub mod secrets;
 pub mod tool_host;
 pub mod worker_manifest;
 pub mod worker_lifecycle;
+pub mod worker_stderr;
 pub mod workers;
 pub mod workspace;
 

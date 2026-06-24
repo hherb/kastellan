@@ -69,17 +69,42 @@ pub trait WorkerClient: Send {
     fn poll(&mut self, timeout_ms: u64) -> anyhow::Result<Vec<Event>>;
     /// `matrix.send` — deliver an outbound message to a room.
     fn send(&mut self, conversation: &str, body: &str) -> anyhow::Result<()>;
+    /// After a `poll`/`send` error signals the worker died, produce a one-line
+    /// diagnostic for the daemon log — the worker's exit status + recent stderr
+    /// (#348). Returns `None` when no diagnostic is available (the default; the
+    /// in-process test fakes don't wrap a real process).
+    fn death_report(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Real [`WorkerClient`] over the blocking `kastellan_protocol` [`Client`] — the
 /// synchronous JSON-RPC pipe to the spawned matrix worker.
 pub struct ProtocolWorkerClient {
     client: Client,
+    /// Bounded tail of the worker's recent stderr lines, retained by the drain
+    /// thread so [`death_report`](WorkerClient::death_report) can surface the death
+    /// cause. `None` for callers that don't drain (e.g. the e2e helper).
+    stderr_tail: Option<crate::worker_stderr::StderrTail>,
 }
 
+/// How long [`ProtocolWorkerClient::death_report`] waits for the dead worker to be
+/// reaped before giving up on the exit status: up to `REAP_ATTEMPTS * REAP_TICK`.
+/// Bounded so a worker that is (unexpectedly) still alive can't hang the driver.
+const REAP_ATTEMPTS: u32 = 10;
+const REAP_TICK: Duration = Duration::from_millis(50);
+
 impl ProtocolWorkerClient {
+    /// Wrap a connected client with no stderr tail (used by the e2e helper, which
+    /// owns the child's stderr itself).
     pub fn new(client: Client) -> Self {
-        Self { client }
+        Self { client, stderr_tail: None }
+    }
+
+    /// Wrap a connected client together with the tail its stderr is drained into,
+    /// so a death report can surface the worker's last words (#348).
+    pub fn with_stderr(client: Client, stderr_tail: crate::worker_stderr::StderrTail) -> Self {
+        Self { client, stderr_tail: Some(stderr_tail) }
     }
 
     /// Call `matrix.init`: the worker has already logged in + first-synced before
@@ -103,6 +128,28 @@ impl WorkerClient for ProtocolWorkerClient {
             serde_json::from_value(v).map_err(|e| anyhow::anyhow!("decode poll result: {e}"))?;
         Ok(pr.events)
     }
+    fn death_report(&mut self) -> Option<String> {
+        // The driver calls this once a poll/send error indicates death. Reap the
+        // child non-blockingly with a few short retries (the exit may not be
+        // visible the very instant the pipe closed) so we capture the real exit
+        // status — a clean `exit status: 1` (the sync-task fail-loud) vs a
+        // `signal: 6` (a crypto-store SIGABRT) is exactly the signal #348 needs —
+        // without risking a hang if the process is somehow still running.
+        let mut status = None;
+        for _ in 0..REAP_ATTEMPTS {
+            match self.client.try_wait() {
+                Ok(Some(s)) => {
+                    status = Some(s);
+                    break;
+                }
+                Ok(None) => thread::sleep(REAP_TICK),
+                Err(_) => break,
+            }
+        }
+        let tail = self.stderr_tail.as_ref().map(|t| t.snapshot()).unwrap_or_default();
+        Some(crate::worker_stderr::format_death_report(status, &tail))
+    }
+
     fn send(&mut self, conversation: &str, body: &str) -> anyhow::Result<()> {
         self.client
             .call(
@@ -128,12 +175,23 @@ pub fn spawn_worker_client<B: SandboxBackend + ?Sized>(
     args: &[&str],
 ) -> anyhow::Result<ProtocolWorkerClient> {
     let derived = crate::tool_host::derive_lockdown_env(policy);
-    let child = backend
+    let mut child = backend
         .spawn_under_policy(&derived, program, args)
         .map_err(|e| anyhow::anyhow!("spawn matrix worker: {e}"))?;
+    // Drain the worker's piped stderr (the JSON-RPC client reads only stdout, so an
+    // undrained pipe is both discarded and a deadlock risk past ~64 KiB), retaining
+    // a bounded tail so a death is diagnosable in the daemon log (#348).
+    let pid = child.id();
+    let stderr_tail = child
+        .stderr
+        .take()
+        .map(|stderr| crate::worker_stderr::spawn_drain_with_tail(pid, stderr));
     let client = Client::from_child(child)
         .map_err(|e| anyhow::anyhow!("connect to matrix worker: {e}"))?;
-    Ok(ProtocolWorkerClient::new(client))
+    Ok(match stderr_tail {
+        Some(tail) => ProtocolWorkerClient::with_stderr(client, tail),
+        None => ProtocolWorkerClient::new(client),
+    })
 }
 
 /// A live Matrix channel: owns the driver thread; implements the [`Channel`]
@@ -248,8 +306,13 @@ impl MatrixChannel {
                     }
                 }
 
-                // 4) On death: respawn (supervised) or exit (unsupervised).
+                // 4) On death: surface the cause (exit status + recent stderr) so
+                //    the churn is diagnosable in the daemon log (#348), then
+                //    respawn (supervised) or exit (unsupervised).
                 if worker_dead {
+                    if let Some(report) = client.death_report() {
+                        tracing::warn!("matrix worker died: {report}");
+                    }
                     let Some(factory) = factory.as_mut() else {
                         tracing::warn!("matrix worker died; driver exiting (unsupervised)");
                         return;
@@ -854,6 +917,42 @@ mod tests {
         let mut ch = MatrixChannel::new(ChannelId("matrix".into()), Box::new(worker));
         // Driver exits on the poll error → inbound sender dropped → recv() None.
         assert!(ch.recv().await.is_none());
+    }
+
+    #[test]
+    fn death_report_surfaces_exit_status_and_stderr() {
+        // Drive a real short-lived child (writes to stderr, exits non-zero — the
+        // shape of a worker death) through `ProtocolWorkerClient::with_stderr`
+        // exactly as `spawn_worker_client` does, and assert the death report names
+        // both the exit status and the captured stderr (#348). Hermetic: no
+        // sandbox, no PG, no homeserver — just the protocol pipe + stderr drain.
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo worker-boom >&2; exit 3")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let pid = child.id();
+        let tail =
+            crate::worker_stderr::spawn_drain_with_tail(pid, child.stderr.take().expect("stderr"));
+        let client = Client::from_child(child).expect("wrap child");
+        let mut worker = ProtocolWorkerClient::with_stderr(client, tail);
+
+        // The stderr drain runs on a background thread; poll the (idempotent)
+        // report until the captured line lands, bounded so a regression can't hang.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let report = loop {
+            let report = worker.death_report().expect("real client yields a report");
+            if report.contains("worker-boom") || std::time::Instant::now() >= deadline {
+                break report;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        assert!(report.contains("exit status: 3"), "exit status missing: {report}");
+        assert!(report.contains("worker-boom"), "stderr tail missing: {report}");
     }
 
     #[tokio::test]

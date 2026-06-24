@@ -180,7 +180,13 @@ items unlock later ones.
   `read_prior_sync_token`). ~~enable worker seccomp/Landlock (`ENFORCE_SANDBOX=0`)~~ **DONE + DEPLOYED 2026-06-24:**
   default flipped to `=1`; new `matrix_client` seccomp profile (`net_client`+`ftruncate`) + a prelude **TSYNC fix**
   (`apply_filter_all_threads`) — the filter was previously a no-op binding only the main thread, leaving the `tokio` pool
-  unfiltered; residual periodic worker die/respawn tracked in [#348](https://github.com/hherb/kastellan/issues/348). Remaining:
+  unfiltered. ~~residual periodic worker die/respawn~~ **ADDRESSED 2026-06-24 ([#348](https://github.com/hherb/kastellan/issues/348),
+  branch `feat/348-matrix-worker-respawn-stability`):** root cause was the continuous-sync task calling `process::exit(1)`
+  on *any* `sync()` return (a transient blip killed the worker → respawn churn); now it retries in place with capped
+  exponential backoff (pure `sync_retry`), giving up only after sustained failure. Plus observability — the matrix worker's
+  stderr is now drained + a bounded tail retained (shared `core/src/worker_stderr.rs`), and the driver logs the worker's
+  exit status + recent stderr on death (`WorkerClient::death_report`) so any remaining exit is diagnosable (DGX
+  confirmation is the deploy follow-up). Remaining:
   egress force-routing coupling (direct `--share-net` now); in-daemon password
   materialize (keyring sync-init); ~~embedding dim mismatch (768 vs 1024 → recall degrades)~~ **FIXED 2026-06-20**
   (migration 0019: `EMBEDDING_DIM` 1024→**256**, embeddinggemma Matryoshka-truncated client-side via

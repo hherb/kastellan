@@ -54,6 +54,7 @@ use kastellan_matrix_wire::{push_bounded, Event, InitResult};
 
 use crate::bridge::ProxyBridge;
 use crate::sdk::MatrixSdk;
+use crate::sync_retry;
 
 /// Bounded depth of the inbound buffer the sync task fills and `poll` drains. A
 /// single-user channel never reaches this; it is a backstop against a flooding
@@ -68,6 +69,20 @@ const SESSION_FILE: &str = "session.json";
 
 /// How long `poll` sleeps between buffer checks while long-polling.
 const POLL_TICK: Duration = Duration::from_millis(50);
+
+/// A `sync()` that ran at least this long before returning was healthy and
+/// serving; its return is a transient blip, so the consecutive-failure counter
+/// resets (see [`crate::sync_retry`]).
+const SYNC_HEALTHY_RUN: Duration = Duration::from_secs(60);
+/// Base + cap for the continuous-sync retry backoff (mirrors the core-side
+/// `MatrixChannel` respawn backoff).
+const SYNC_BACKOFF_BASE: Duration = Duration::from_secs(1);
+const SYNC_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Consecutive *fast* `sync()` failures the loop tolerates before giving up and
+/// exiting for a fresh supervised respawn — a persistently-wedged client (bad
+/// token, corrupt store) only a fresh `connect` recovers, so retrying in place
+/// forever would never heal it.
+const SYNC_MAX_CONSECUTIVE: u32 = 10;
 
 /// Operator configuration for the live worker, read from its environment. The
 /// core-side spawn fills these in; the live e2e sets them directly.
@@ -179,25 +194,56 @@ impl LiveSdk {
             runtime.block_on(connect_client(&config, buffer.clone()))?;
 
         // Continuous background sync: keeps the buffer filled for `poll` and the
-        // crypto state fresh for `send`. `client.sync` only returns when the loop
-        // is genuinely over (a fatal error, or the client being dropped on
-        // shutdown — which aborts this task before the body runs). If it ever
-        // returns *here*, inbound is dead: the buffer will never fill again and
-        // the `MatrixSdk::poll` seam has no error channel to signal it, so a
-        // silently-dead loop would leave the worker looking alive while receiving
-        // nothing. Fail loudly instead — exit non-zero so the supervisor restarts
-        // a fresh worker. `process::exit` skips destructors, so the deadpool
-        // SQLite teardown that needs a runtime context (see the `Drop` impl) never
-        // runs off-runtime; the OS reclaims everything.
+        // crypto state fresh for `send`. `client.sync` returns whenever the SDK
+        // hits an interruption — a transient server 5xx, a network blip through the
+        // egress tunnel, a long-poll hiccup — none of which is necessarily fatal.
+        //
+        // Treating *every* return as fatal (the original `process::exit(1)`) meant a
+        // single transient blip killed the whole worker and forced a supervised
+        // respawn — the ~20–90s churn of #348. Instead we **retry in place** with
+        // capped exponential backoff and only fail loud (exit → fresh respawn) after
+        // sustained consecutive fast failures, since a persistently-wedged client
+        // (bad token, corrupt store) only a fresh `connect` recovers (see
+        // [`crate::sync_retry`]). The task is aborted before its body re-runs when
+        // the client is dropped on shutdown, so the `process::exit` give-up path is
+        // reached only on a real failure run; it skips destructors deliberately —
+        // the deadpool SQLite teardown that needs a runtime context (see the `Drop`
+        // impl) never runs off-runtime; the OS reclaims everything.
         let sync_client = client.clone();
         let sync_task = runtime.spawn(async move {
-            match sync_client.sync(SyncSettings::default()).await {
-                Ok(()) => eprintln!(
-                    "kastellan-worker-matrix: sync loop ended unexpectedly (no error); exiting"
-                ),
-                Err(e) => eprintln!("kastellan-worker-matrix: sync loop failed: {e}; exiting"),
+            let mut consecutive = 0u32;
+            loop {
+                let started = Instant::now();
+                let result = sync_client.sync(SyncSettings::default()).await;
+                let ran_for = started.elapsed();
+                match &result {
+                    Ok(()) => eprintln!(
+                        "kastellan-worker-matrix: sync loop returned (no error) after {ran_for:?}; retrying"
+                    ),
+                    Err(e) => eprintln!(
+                        "kastellan-worker-matrix: sync loop failed after {ran_for:?}: {e}; retrying"
+                    ),
+                }
+                consecutive =
+                    sync_retry::update_consecutive(consecutive, ran_for, SYNC_HEALTHY_RUN);
+                match sync_retry::next_action(
+                    consecutive,
+                    SYNC_MAX_CONSECUTIVE,
+                    SYNC_BACKOFF_BASE,
+                    SYNC_BACKOFF_MAX,
+                ) {
+                    sync_retry::SyncOutcome::Backoff(delay) => {
+                        tokio::time::sleep(delay).await;
+                    }
+                    sync_retry::SyncOutcome::GiveUp => {
+                        eprintln!(
+                            "kastellan-worker-matrix: sync loop failed {consecutive} times \
+                             consecutively; exiting for a fresh supervised respawn"
+                        );
+                        std::process::exit(1);
+                    }
+                }
             }
-            std::process::exit(1);
         });
 
         Ok(Self {

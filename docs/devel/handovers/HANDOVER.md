@@ -6,7 +6,34 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-24 (**Matrix-worker seccomp/Landlock enforcement flip — DONE + DEPLOYED on branch
+**Last updated:** 2026-06-25 (**Matrix worker respawn stability + death observability — [#348](https://github.com/hherb/kastellan/issues/348)
+DONE on branch `feat/348-matrix-worker-respawn-stability` (PR pending).** Root cause of the ~20–90s respawn churn (found by
+reading the code; the issue ruled out seccomp/Landlock): the live worker's continuous **sync task** called
+`std::process::exit(1)` on **any** `client.sync()` return, so a single transient interruption (server 5xx, egress-tunnel
+hiccup, long-poll timeout) killed the whole worker → supervised respawn. **Fix #2 (resilience, item 2):** new pure
+**`workers/matrix/src/sync_retry.rs`** — `update_consecutive(prev, ran_for, healthy)` (resets on a ≥`SYNC_HEALTHY_RUN`=60s run,
+else `+1`) + `next_action(consecutive, max, base, max) -> SyncOutcome{Backoff,GiveUp}` (capped exponential 1→30s; `GiveUp` at
+`SYNC_MAX_CONSECUTIVE`=10 *consecutive fast* failures). Module is **NOT** feature-gated so CI covers it despite `live-matrix`
+being DGX-gated (#331). `sdk_live.rs`'s sync task now loops: time each `sync()`, update the counter, `Backoff→sleep+retry`
+in place, `GiveUp→exit(1)` for a fresh respawn (a wedged client only `connect` recovers). Worst case ≡ today; transient
+blips no longer churn. **Fix #1 (observability, item 1):** the matrix **channel** worker's piped stderr was **never drained**
+(`spawn_worker_client` went straight to `Client::from_child`) — both discarded *and* a ~64 KiB pipe-fill **deadlock** risk;
+`tool_host` already drained tool workers but the channel path never adopted it. Lifted the drain into shared
+**`core/src/worker_stderr.rs`** (`drain_reader` raw-byte loop @debug + bounded `StderrTail` ring + `spawn_drain` /
+`spawn_drain_with_tail` + `format_death_report`); `tool_host` now delegates to `spawn_drain` (behavior-preserving).
+`spawn_worker_client` drains with a tail; on a `poll`/`send` death the driver logs **`WorkerClient::death_report`** at
+**warn** — the worker's `ExitStatus` (clean `exit status: 1` = sync-task fail-loud vs `signal: 6` SIGABRT = crypto-store
+crash) + recent stderr — so the cause lands in the daemon log. `kastellan-protocol` gained `Client::try_wait` (non-blocking
+reap, bounded so a still-alive process can't hang the driver). **Verification (macOS):** core lib **1053/0** + the touched
+units **10/0** (7 `worker_stderr` incl. non-UTF-8/blank-line/bounded-tail + the hermetic
+`death_report_surfaces_exit_status_and_stderr`: a real `sh -c 'echo …>&2; exit 3'` child → report names `exit status: 3` +
+the captured stderr), matrix default **17/0** (+6 `sync_retry`), `live-matrix` **27/0**, `kastellan-protocol` **3/0**,
+`cargo clippy --workspace --all-targets` (+ `--features live-matrix`) clean. Pure-Rust, no migration, no OS-gated logic →
+DGX not required for the unit gate; **DGX deploy is the empirical churn-confirmation follow-up** (the new `death_report`
+will print the actual exit cause). **Item 3 (respawn-rate alarm) deliberately deferred** as a small separate follow-up.
+Spec/plan: `docs/superpowers/{specs,plans}/2026-06-24-matrix-worker-respawn-stability*`.)
+
+_(Prior session — **Matrix-worker seccomp/Landlock enforcement flip — DONE + DEPLOYED on branch
 `feat/matrix-worker-sandbox-enforcement` (PR pending).** Flipped `KASTELLAN_MATRIX_ENFORCE_SANDBOX` default 0→1.
 **The headline finding (not what the task assumed):** the matrix-worker seccomp filter was a **no-op even when "enforced"** —
 the prelude's `apply_filter` omits `SECCOMP_FILTER_FLAG_TSYNC`, so it bound only to the *calling* (main) thread, while
@@ -25,7 +52,8 @@ logged in via session restore (device `xA31CsGn82`, **no relogin** — no SDK bu
 ≥4 min under `matrix_client` + Landlock, **0 seccomp + 0 Landlock audit records**. **Caveat surfaced, NOT mine:** the worker
 dies+respawns periodically (~20–90s in bursts) — **pre-existing** (present under `=0` before deploy, 0 seccomp/Landlock
 records, cause swallowed by the jail) → filed **[#348](https://github.com/hherb/kastellan/issues/348)** (likely the sync-task
-teardown crypto-store `process::exit(1)` race). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-24-matrix-worker-sandbox-enforcement*`.)
+teardown crypto-store `process::exit(1)` race). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-24-matrix-worker-sandbox-enforcement*`. PR #349 — now MERGED to `main` as
+`cf754cf`.)_
 
 _(Prior session — **Close the Matrix inbound-loss window on worker respawn — [#321](https://github.com/hherb/kastellan/issues/321)
 DONE on branch `feat/321-matrix-downtime-loss-window` (PR #347).** PR #320's self-healing `MatrixChannel::supervised` respawn
@@ -880,19 +908,25 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (matrix-worker sandbox enforcement, branch `feat/matrix-worker-sandbox-enforcement`, PR pending + DEPLOYED):**
-flipped `KASTELLAN_MATRIX_ENFORCE_SANDBOX` 0→1; the headline was that the matrix seccomp filter was a no-op (TSYNC gap, fixed in
-the prelude) + a new `matrix_client` profile (`net_client`+`ftruncate`). See the "Last updated" header. Filed
-[#348](https://github.com/hherb/kastellan/issues/348) for the pre-existing periodic worker die/respawn (not seccomp/Landlock).
+**Just shipped (matrix worker respawn stability + death observability — [#348](https://github.com/hherb/kastellan/issues/348),
+branch `feat/348-matrix-worker-respawn-stability`, PR pending):** the sync task no longer `process::exit(1)`s on a single
+transient `sync()` return — it retries in place with capped backoff (pure `sync_retry`), only giving up after sustained
+failure; the matrix worker's stderr is now drained + a bounded tail kept (shared `core/src/worker_stderr.rs`), and the driver
+logs the worker's exit status + recent stderr on death (`WorkerClient::death_report`). See the "Last updated" header.
+**DGX deploy + churn confirmation is the open follow-up** (deploy, watch the daemon log: the `death_report` now prints the
+real exit cause — `exit status: 1` would confirm the sync-task path). **Item 3 (respawn-rate alarm)** is the remaining small
+follow-up. (Prior: matrix sandbox enforcement flip, PR #349 MERGED as `cf754cf`.)
 
 **★ LEADING PICK — model-side perf (no code task): reduce the planner `num_ctx`.** ~86s/plan is gemma 26B on the DGX Spark with a
 262144-token context; reducing the model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which
 forces a reload) is the cheapest live latency win. Operator action on the DGX.
 
 **Code picks (operator's choice — each ~one session):**
-- **[#348](https://github.com/hherb/kastellan/issues/348) matrix-worker die/respawn instability** — surface the jailed worker's
-  swallowed exit cause to the daemon log + fix the sync-task teardown crypto-store `process::exit(1)` race (`sdk_live.rs`).
-- **`tool_host.rs` prod-split** (now 667 LOC, the leading over-cap candidate) — lift `dispatch_with_sink`'s post-processing
+- **[#348](https://github.com/hherb/kastellan/issues/348) follow-ups** — (a) **DGX deploy + confirm** the churn is gone (the
+  `death_report` warn line now names the real exit cause); (b) **item 3 respawn-rate alarm** (warn when respawns exceed N/window
+  in the `MatrixChannel` driver). The resilience + observability halves are DONE this session (see header).
+- **`tool_host.rs` prod-split** (now 636 LOC after #348 lifted the stderr drainer into `worker_stderr.rs`; still the leading
+  over-cap candidate) — lift `dispatch_with_sink`'s post-processing
   (scrub + injection screen + audit-emission arms) into a `tool_host/post_process.rs` sibling; tests already external under
   `tool_host/`.
 - **[#298](https://github.com/hherb/kastellan/issues/298) full-daemon secret-scrub e2e** — needs a Vault-ref test seam in `main.rs`.

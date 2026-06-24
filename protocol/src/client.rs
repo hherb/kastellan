@@ -103,4 +103,12 @@ impl Client {
     pub fn kill(&mut self) -> io::Result<()> {
         self.child.kill()
     }
+
+    /// Non-blocking reap: `Ok(Some(status))` once the worker has exited, `Ok(None)`
+    /// while it is still running. Used on the death path to record *why* a worker
+    /// exited (e.g. a clean `exit status: 1` vs a `signal: 6 (SIGABRT)` crash)
+    /// without risking a hang if the process is unexpectedly still alive.
+    pub fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
 }
