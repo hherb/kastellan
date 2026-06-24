@@ -173,8 +173,11 @@ items unlock later ones.
   `kastellan-cli matrix probe` smoke/diagnostic; installer `--matrix-*` flags + `/v1` LLM-URL fix +
   `scripts/build-release.sh`; `db` pool `DEFAULT_MAX_CONNECTIONS` 4→16 (listener-slot starvation). Self-healing worker
   respawn (`MatrixChannel::supervised`, capped backoff, shutdown-aware); allowlist scoped to the homeserver's actual
-  host:port (non-443 servers reachable). **Follow-ups (none blocking):** inbound messages lost while the worker is
-  down/respawning — needs a sync-token watermark ([#321](https://github.com/hherb/kastellan/issues/321)); enable worker
+  host:port (non-443 servers reachable). **Follow-ups (none blocking):** ~~inbound messages lost while the worker is
+  down/respawning~~ **FIXED 2026-06-24 ([#321](https://github.com/hherb/kastellan/issues/321)):** on restart the worker reads
+  the SDK's persisted sync token and surfaces the incremental catch-up backlog (the downtime messages) instead of
+  suppressing it; a fresh login (no token) still suppresses full-history replay (`sdk_live.rs` `initial_live_state` +
+  `read_prior_sync_token`). Remaining: enable worker
   seccomp/Landlock (`ENFORCE_SANDBOX=0` today) + egress force-routing coupling (direct `--share-net` now); in-daemon password
   materialize (keyring sync-init); ~~embedding dim mismatch (768 vs 1024 → recall degrades)~~ **FIXED 2026-06-20**
   (migration 0019: `EMBEDDING_DIM` 1024→**256**, embeddinggemma Matryoshka-truncated client-side via

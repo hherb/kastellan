@@ -6,7 +6,35 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-23 (**Clearer injection-blocked signal to the planner — [#340](https://github.com/hherb/kastellan/issues/340)
+**Last updated:** 2026-06-24 (**Close the Matrix inbound-loss window on worker respawn — [#321](https://github.com/hherb/kastellan/issues/321)
+DONE on branch `feat/321-matrix-downtime-loss-window` (PR #347).** PR #320's self-healing `MatrixChannel::supervised` respawn
+made the channel silently lossy for the worker's downtime: a message a user DM'd the bot while the worker was down arrived in the
+respawned worker's catch-up sync and was dropped by the `live` gate (`workers/matrix/src/sdk_live.rs`), which suppresses the
+*entire* initial sync to avoid replaying full room history on every start. **Key insight:** the "sync-token watermark" the issue
+asked for *already exists* — matrix-sdk persists its sync token in the SQLite state store and `sync_once` resumes from it, so on a
+restart the catch-up sync returns only events received *since* the last run (= exactly the downtime backlog); the bug was purely
+that the `live` gate suppressed those too. **The fix (TDD, rule #1 pure-fn):** read the persisted token *before* the initial sync
+and seed `live` from it — pure **`initial_live_state(prior_sync_token: Option<&str>) -> bool`** (= `is_some()`: prior token ⇒
+restart ⇒ live from the start ⇒ surface the incremental backlog; no token ⇒ fresh login ⇒ keep suppressing full-history replay) +
+fail-soft **`read_prior_sync_token(&Client) -> Option<String>`** (`client.state_store().get_kv_data(StateStoreDataKey::SyncToken)`
+→ `.ok().flatten().and_then(into_sync_token)`; any read error ⇒ `None` ⇒ "fresh/suppress", which can never cause a stale-history
+replay). `connect_client` seeds `live` from `initial_live_state(token.as_deref())` **before** `register_message_handler`; the
+post-sync `live.store(true)` stays (no-op when already true). `MatrixChannel::supervised` doc comment updated (recovery, not
+"lost"). **No new persistence, no protocol/schema/migration change.** `Client::sync_token()` is `pub(crate)` in matrix-sdk 0.18 so
+the read goes through the public state-store key — no trait import needed (`get_kv_data` dispatches via the `&DynStateStore`
+vtable). **Verification (macOS):** worker default **11/0**, `live-matrix` **21/0** (+3 new `initial_live_*` units, incl. the empty-token guard),
+`cargo clippy -p kastellan-worker-matrix --all-targets --features live-matrix -- -D warnings` clean. New `#[ignore]`
+`matrix_restart_recovers_downtime_message` e2e (`core/tests/matrix_live_e2e.rs`): init → `close()` bot → peer sends during
+downtime → respawn same store → poll surfaces it. **VERIFIED LIVE on the DGX (2026-06-24):** both live e2e tests **2/0** against
+a throwaway loopback matrix-conduit + encrypted room (`scripts/matrix/dev-e2e-bootstrap.sh`), reproducibly (~1.7s); the restart
+test is a genuine regression gate — a **negative control** (`initial_live_state` forced to `false`) **FAILS** at the "never
+received the downtime message" assertion after the full 45s deadline. **Test-robustness fix (`53808ab`):** the first-shutdown
+check no longer asserts a *clean* exit — #321 covers downtime of any cause incl. a crash, the token persists incrementally during
+sync, and the worker's sync task can race teardown into a transient crypto-store abort (`process::exit(1)`); the test now waits
+for exit and logs the status without gating on it. Pure-Rust, `live-matrix`-gated. Spec/plan:
+`docs/superpowers/{specs,plans}/2026-06-23-matrix-downtime-loss-window*`.)
+
+_(Prior session — **Clearer injection-blocked signal to the planner — [#340](https://github.com/hherb/kastellan/issues/340)
 DONE on branch `feat/340-injection-blocked-note` (PR #346).** Final follow-up of the #338 arc. When `tool_host::dispatch`
 blocks a worker result on the output injection screen it substituted `{ injection_blocked, score, reason_codes }`; now that
 successful step output reaches the planner (#338), that placeholder renders through `extract_scannable_text` — which emits only
@@ -25,7 +53,7 @@ no raw-output leak), `tool_host` lib **43/0**, `injection_guard_e2e` **6/0** aga
 placeholder-shape test now also pins the `note` end-to-end), `cargo clippy -p kastellan-core --lib --tests -- -D warnings`
 clean. Pure-Rust, no migration, no OS-gated code → DGX not required. **`tool_host.rs` 659→667** (still the leading over-cap
 prod-split candidate — additive +8; real split tracked separately). The #338 planner-feedback arc (#337/#338/#343/#339/#340)
-is now complete.)
+is now complete.)_
 
 _(Prior session — **Global budget for `plans_so_far_summary` — [#339](https://github.com/hherb/kastellan/issues/339)
 MERGED to `main` as `8fa67f9` (PR #345).** Hardening follow-up to #338, which raised the per-step summary term ~2000× (bare
@@ -846,8 +874,6 @@ forces a reload) is the cheapest live latency win now that the feedback arc is c
 **Code picks (operator's choice — each ~one session):**
 - **Matrix-worker seccomp/Landlock enforcement flip** (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today) — needs DGX syscall
   enumeration like the #281 arc (kill-mode + `journalctl -k`, see memory note); larger.
-- **[#321](https://github.com/hherb/kastellan/issues/321) inbound-loss window on matrix respawn** — persisted sync-token
-  watermark; medium.
 - **`tool_host.rs` prod-split** (now 667 LOC, the leading over-cap candidate) — lift `dispatch_with_sink`'s post-processing
   (scrub + injection screen + audit-emission arms) into a `tool_host/post_process.rs` sibling; tests already external under
   `tool_host/`.
@@ -862,8 +888,8 @@ forces a reload) is the cheapest live latency win now that the feedback arc is c
 semantic lane); (2) a **batch-embed seam** so the backfill + forward loops embed N entities per round-trip instead of one
 `embed_for_storage` call each (sequential today; cheap to add behind the `Embedder` trait if embed latency becomes a recall-path
 cost). **Open Matrix-hardening picks (residual follow-ups):**
-[#321](https://github.com/hherb/kastellan/issues/321) inbound-loss window on respawn (persisted sync-token watermark —
-medium); the matrix-worker **seccomp/Landlock enforcement** flip (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today; needs DGX
+(~~#321 inbound-loss window on respawn~~ — **DONE 2026-06-24**, sync-token-gated recovery; see header);
+the matrix-worker **seccomp/Landlock enforcement** flip (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today; needs DGX
 syscall enumeration like the #281 arc — larger). **Pre-existing test-infra debt surfaced this session:** the full serialized
 `cargo test --workspace` live run wedges on `memory_layers_e2e` (0-CPU pool deadlock under heavy multi-cluster live-PG load —
 the documented sqlx-0.9 env issue); worth a focused isolation + `Pool::close()`/`PgListener` audit (cf. the #332 variant-D
@@ -895,8 +921,8 @@ needs the one-time BOOTSTRAP token from the startup log, not the config `registr
 `9b5c310` (PR [#320](https://github.com/hherb/kastellan/pull/320)).** The live Matrix channel now runs end-to-end in the
 systemd daemon (inbound DM → invite auto-join → E2E decrypt → DB pairing → task → agent → LLM → reply; see the prior-session
 block up top). `core/src/channel/matrix.rs::spawn_matrix_worker` + `main.rs` `ChannelBus::spawn` over
-`DbPeerAuthorizer`/`DbPairingService` shipped. **Residual follow-ups** (not blocking): [#321](https://github.com/hherb/kastellan/issues/321)
-inbound-loss window on respawn; ~~[#312](https://github.com/hherb/kastellan/issues/312) `ProxyBridge` error-surfacing~~ —
+`DbPeerAuthorizer`/`DbPairingService` shipped. **Residual follow-ups** (not blocking): ~~[#321](https://github.com/hherb/kastellan/issues/321)
+inbound-loss window on respawn~~ — **DONE 2026-06-24** (sync-token-gated recovery; see header); ~~[#312](https://github.com/hherb/kastellan/issues/312) `ProxyBridge` error-surfacing~~ —
 **DONE this session** (branch `fix/312-proxy-bridge-error-surfacing`; accept loop continues+logs+backs-off, `relay` returns
 `Result` and the caller logs — see "Last updated" up top); matrix-worker hardening (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0`
 today). **Historical note (the original pick, now satisfied):

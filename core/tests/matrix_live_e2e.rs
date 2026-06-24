@@ -158,3 +158,122 @@ fn matrix_send_recv_round_trip() {
     }
     assert!(received, "bot never received the peer's message {body:?} within the deadline");
 }
+
+/// Regression proof for **issue #321**: a message sent to a room while the bot
+/// worker was down must be surfaced after the bot restarts.
+///
+/// The fix in `workers/matrix/src/sdk_live.rs` reads the SDK's persisted sync
+/// token before the initial sync (`read_prior_sync_token`) and seeds a `live`
+/// flag via `initial_live_state(Option<&str>) -> bool`. When a token is present
+/// (restart path), `live` starts `true` so the incremental catch-up sync —
+/// which replays only events since the last run — is NOT suppressed. Without
+/// the fix the bot would ignore the downtime backlog (it would start `live =
+/// false` and treat the catch-up as a history replay to silence).
+#[test]
+#[ignore = "live: needs a running conduwuit + two bot accounts in a shared encrypted room"]
+fn matrix_restart_recovers_downtime_message() {
+    // ── Gate 1: operator opt-in ─────────────────────────────────────────────
+    if std::env::var(GATE).is_err() {
+        eprintln!(
+            "\n[SKIP] {GATE} unset — live Matrix restart e2e needs a homeserver; see module docs\n"
+        );
+        return;
+    }
+
+    // ── Gate 2: worker binary present ──────────────────────────────────────
+    let bin = worker_bin();
+    if !bin.exists() {
+        eprintln!(
+            "\n[SKIP] live worker not built: {} — run `cargo build -p kastellan-worker-matrix --features live-matrix`\n",
+            bin.display()
+        );
+        return;
+    }
+
+    // ── Gate 3: all required env vars present ──────────────────────────────
+    let Some((homeserver, bot, peer, room)) = required_env() else {
+        eprintln!(
+            "\n[SKIP] live Matrix restart e2e env incomplete — need KASTELLAN_MATRIX_HOMESERVER_URL, \
+             _USER/_PASSWORD, _PEER_USER/_PEER_PASSWORD, _ROOM\n"
+        );
+        return;
+    };
+
+    // ── Create persistent store dirs ────────────────────────────────────────
+    //
+    // bot_store MUST outlive BOTH spawns of the bot worker; binding it here
+    // (before either spawn) ensures the tempdir is not dropped between them.
+    // The peer gets its own independent store.
+    let bot_store = tempfile::tempdir().expect("bot store dir");
+    let peer_store = tempfile::tempdir().expect("peer store dir");
+
+    // ── First spawn: bot does initial login + first sync ────────────────────
+    //
+    // `matrix.init` blocks until the SDK is ready and has persisted a sync
+    // token + session.json into bot_store. After this call the token exists on
+    // disk, which is the precondition for the #321 fix to take effect on restart.
+    let mut bot_client = spawn_worker(&homeserver, &bot, bot_store.path());
+    let mut peer_client = spawn_worker(&homeserver, &peer, peer_store.path());
+
+    let bot_id: Value = bot_client.call("matrix.init", json!({})).expect("bot first init");
+    assert!(
+        bot_id["user_id"].as_str().is_some_and(|u| u.starts_with('@')),
+        "bot identity should be a user id, got {bot_id:?}"
+    );
+    let _peer_id: Value = peer_client.call("matrix.init", json!({})).expect("peer init");
+
+    // ── Stop the bot so its persisted token becomes the restart watermark ───
+    //
+    // `close(self)` drops stdin → worker sees EOF → shuts down → its OS process
+    // exits (releasing the SQLite store lock so the respawn can reopen it).
+    // `close` waits for the child, so after this call the bot is genuinely DOWN.
+    //
+    // We deliberately do NOT assert a *clean* (zero) exit: #321 is about
+    // recovering from downtime of ANY cause, including a crash, and the sync
+    // token is persisted incrementally during sync (well before shutdown), so
+    // restart recovery does not depend on a graceful teardown. The background
+    // sync task can also race the shutdown and `process::exit(1)` on a transient
+    // crypto-store-teardown abort — an exit either way, immaterial to this test.
+    let bot_exit = bot_client.close().expect("bot worker close (wait for exit)");
+    eprintln!("[restart-e2e] first bot exited with status: {bot_exit}");
+
+    // ── Peer sends a message WHILE the bot is down ──────────────────────────
+    //
+    // Use a distinct tag from the round-trip test so a shared room cannot
+    // accidentally cross-match messages between the two tests.
+    let body = format!("kastellan-live-e2e-restart-{}", std::process::id());
+    peer_client
+        .call("matrix.send", json!({ "conversation": room, "body": body }))
+        .expect("peer send during bot downtime");
+
+    // ── Respawn the bot against the SAME store dir ──────────────────────────
+    //
+    // The worker finds session.json + the persisted sync token in bot_store;
+    // `initial_live_state(Some(&token))` returns `true`, so the incremental
+    // catch-up sync (events since last run = the downtime window) is surfaced
+    // rather than silenced. This is the exact behaviour #321 fixes.
+    let mut bot_client2 = spawn_worker(&homeserver, &bot, bot_store.path());
+    let _bot_id2: Value = bot_client2.call("matrix.init", json!({})).expect("bot second init");
+
+    // ── Poll until the downtime message surfaces (or deadline) ──────────────
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut received = false;
+    while Instant::now() < deadline {
+        let res: Value = bot_client2
+            .call("matrix.poll", json!({ "timeout_ms": 2000 }))
+            .expect("bot poll after restart");
+        let events = res["events"].as_array().cloned().unwrap_or_default();
+        if events.iter().any(|e| e["body"] == json!(body)) {
+            received = true;
+            break;
+        }
+    }
+
+    // If this assertion fires the #321 regression is back: the bot discarded
+    // the downtime backlog instead of resuming from the persisted token.
+    assert!(
+        received,
+        "#321 regression: bot did not surface {body:?} sent during downtime — \
+         catch-up sync may be starting without the persisted token"
+    );
+}
