@@ -58,7 +58,7 @@
 use std::collections::BTreeMap;
 
 use seccompiler::{
-    apply_filter, BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch,
+    apply_filter_all_threads, BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch,
 };
 
 use crate::{LockdownError, SeccompReport};
@@ -137,6 +137,22 @@ pub fn apply_from_env() -> Result<SeccompReport, LockdownError> {
 /// Install the seccomp filter(s) for `profile`. Sets `PR_SET_NO_NEW_PRIVS`
 /// first, which is required for unprivileged seccomp loading.
 ///
+/// **Applied to every thread of the process via `SECCOMP_FILTER_FLAG_TSYNC`**
+/// (`apply_filter_all_threads`), not just the calling thread. This matters when
+/// a worker is *already* multi-threaded at lock-down time: the live Matrix
+/// worker builds its `tokio` runtime + continuous sync task during the
+/// pre-lockdown network init (login must happen before syscalls are
+/// restricted), so those threads pre-exist `apply()`. The thread-local
+/// `apply_filter` would bind the filter to the main thread only — which just
+/// blocks in `block_on` — and leave all of matrix-sdk's network/SQLite/crypto
+/// work on the unfiltered `tokio` pool (DGX-confirmed 2026-06-24: tokio threads
+/// showed `/proc Seccomp:0`). TSYNC fails closed: if any sibling thread held an
+/// incompatible filter the call errors and the worker exits; no kastellan
+/// worker installs a filter before `apply()`, so it always succeeds. For a
+/// worker that is single-threaded at lock-down (most: they lock down before
+/// spawning threads, and filters auto-inherit to threads created afterwards)
+/// TSYNC is equivalent to the thread-local apply.
+///
 /// Most profiles install exactly one filter. [`Profile::BrowserClient`] also
 /// installs a separate filter mapping `io_uring_setup`/`io_uring_enter` to
 /// `Errno(EPERM)` (see the variant docs): the main filter `Allow`s io_uring so
@@ -159,11 +175,13 @@ pub fn apply(profile: Profile) -> Result<(), LockdownError> {
     // its Allow-default permits the SYS_seccomp of the main filter's install.
     if matches!(profile, Profile::BrowserClient) {
         let io_uring = build_io_uring_eperm_bpf()?;
-        apply_filter(&io_uring)
-            .map_err(|e| LockdownError::Seccomp(format!("apply_filter (io_uring EPERM): {e}")))?;
+        apply_filter_all_threads(&io_uring).map_err(|e| {
+            LockdownError::Seccomp(format!("apply_filter_all_threads (io_uring EPERM): {e}"))
+        })?;
     }
     let main = build_bpf(profile)?;
-    apply_filter(&main).map_err(|e| LockdownError::Seccomp(format!("apply_filter: {e}")))?;
+    apply_filter_all_threads(&main)
+        .map_err(|e| LockdownError::Seccomp(format!("apply_filter_all_threads: {e}")))?;
     Ok(())
 }
 
