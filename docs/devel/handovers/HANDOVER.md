@@ -7,7 +7,7 @@
 > [`archive/`](archive/) snapshots.
 
 **Last updated:** 2026-06-25 (**Matrix worker respawn stability + death observability — [#348](https://github.com/hherb/kastellan/issues/348)
-DONE on branch `feat/348-matrix-worker-respawn-stability` (PR pending).** Root cause of the ~20–90s respawn churn (found by
+DONE on branch `feat/348-matrix-worker-respawn-stability` (PR [#350](https://github.com/hherb/kastellan/pull/350)).** Root cause of the ~20–90s respawn churn (found by
 reading the code; the issue ruled out seccomp/Landlock): the live worker's continuous **sync task** called
 `std::process::exit(1)` on **any** `client.sync()` return, so a single transient interruption (server 5xx, egress-tunnel
 hiccup, long-poll timeout) killed the whole worker → supervised respawn. **Fix #2 (resilience, item 2):** new pure
@@ -909,7 +909,7 @@ sessions 2026-05-06 → 2026-05-09 in
 ## Next TODO (pick one)
 
 **Just shipped (matrix worker respawn stability + death observability — [#348](https://github.com/hherb/kastellan/issues/348),
-branch `feat/348-matrix-worker-respawn-stability`, PR pending):** the sync task no longer `process::exit(1)`s on a single
+branch `feat/348-matrix-worker-respawn-stability`, PR [#350](https://github.com/hherb/kastellan/pull/350)):** the sync task no longer `process::exit(1)`s on a single
 transient `sync()` return — it retries in place with capped backoff (pure `sync_retry`), only giving up after sustained
 failure; the matrix worker's stderr is now drained + a bounded tail kept (shared `core/src/worker_stderr.rs`), and the driver
 logs the worker's exit status + recent stderr on death (`WorkerClient::death_report`). See the "Last updated" header.

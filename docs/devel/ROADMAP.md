@@ -181,7 +181,7 @@ items unlock later ones.
   default flipped to `=1`; new `matrix_client` seccomp profile (`net_client`+`ftruncate`) + a prelude **TSYNC fix**
   (`apply_filter_all_threads`) — the filter was previously a no-op binding only the main thread, leaving the `tokio` pool
   unfiltered. ~~residual periodic worker die/respawn~~ **ADDRESSED 2026-06-24 ([#348](https://github.com/hherb/kastellan/issues/348),
-  branch `feat/348-matrix-worker-respawn-stability`):** root cause was the continuous-sync task calling `process::exit(1)`
+  branch `feat/348-matrix-worker-respawn-stability`, PR [#350](https://github.com/hherb/kastellan/pull/350)):** root cause was the continuous-sync task calling `process::exit(1)`
   on *any* `sync()` return (a transient blip killed the worker → respawn churn); now it retries in place with capped
   exponential backoff (pure `sync_retry`), giving up only after sustained failure. Plus observability — the matrix worker's
   stderr is now drained + a bounded tail retained (shared `core/src/worker_stderr.rs`), and the driver logs the worker's
