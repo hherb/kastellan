@@ -71,6 +71,24 @@ and lets the DGX *confirm* the root cause empirically.
 - Full DGX churn-elimination confirmation — a deploy/verify follow-up; this change is
   verified hermetically on macOS (pure helpers + cross-platform stderr plumbing).
 
+## Postscript (2026-06-25): the real root cause, found on deploy
+
+The "from the code, high confidence" hypothesis above (sync-task `process::exit(1)`)
+was **wrong** — and the observability half disproved it. Deploying the death-report
+to the DGX showed `worker exited (signal: 9 (SIGKILL))` ~10s after every login, with
+zero OOM/rlimit/seccomp records. The actual cause: the **initial** worker is spawned
+via `tokio::task::spawn_blocking` (`main.rs`), so bwrap (`--die-with-parent` /
+`PR_SET_PDEATHSIG`, which fires on *parent-thread* death) is forked on a blocking-pool
+thread tokio reaps after its ~10s idle keep-alive → PDEATHSIG SIGKILLs the worker.
+Respawns were already immune (issued by the persistent driver thread).
+
+**The real fix:** `MatrixChannel::supervised_self_spawn` performs the initial spawn on
+the driver thread too, so no worker is parented to an ephemeral thread. DGX-confirmed:
+initial worker stable 2+ min, zero SIGKILL. The sync-retry change remains as
+defense-in-depth (a genuine latent self-exit hazard, just not this churn's cause). This
+is the textbook systematic-debugging outcome: instrument first, let the evidence refute
+the guess.
+
 ## Verification
 
 - `cargo test -p kastellan-worker-matrix` (default) + `--features live-matrix`.
