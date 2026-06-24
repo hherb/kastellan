@@ -241,13 +241,26 @@ impl MatrixChannel {
         Self::spawn_driver(id, client, Some(factory))
     }
 
+    /// The inbound (bus-bound) + outbound (reply) channel pair every driver owns.
+    /// Factored so the two constructors can't drift on buffer size or types.
+    #[allow(clippy::type_complexity)]
+    fn driver_channels() -> (
+        tok_mpsc::Sender<IncomingMessage>,
+        tok_mpsc::Receiver<IncomingMessage>,
+        std_mpsc::Sender<OutgoingMessage>,
+        std_mpsc::Receiver<OutgoingMessage>,
+    ) {
+        let (inbound_tx, inbound_rx) = tok_mpsc::channel::<IncomingMessage>(INBOUND_BUFFER);
+        let (outbound_tx, outbound_rx) = std_mpsc::channel::<OutgoingMessage>();
+        (inbound_tx, inbound_rx, outbound_tx, outbound_rx)
+    }
+
     fn spawn_driver(
         id: ChannelId,
         client: Box<dyn WorkerClient>,
         factory: Option<WorkerFactory>,
     ) -> Self {
-        let (inbound_tx, inbound_rx) = tok_mpsc::channel::<IncomingMessage>(INBOUND_BUFFER);
-        let (outbound_tx, outbound_rx) = std_mpsc::channel::<OutgoingMessage>();
+        let (inbound_tx, inbound_rx, outbound_tx, outbound_rx) = Self::driver_channels();
         let cid = id.clone();
         let driver = thread::spawn(move || drive(client, factory, inbound_tx, outbound_rx, cid));
         Self { id, inbound_rx, outbound_tx, _driver: driver }
@@ -273,8 +286,7 @@ impl MatrixChannel {
         id: ChannelId,
         mut factory: WorkerFactory,
     ) -> anyhow::Result<(Self, serde_json::Value)> {
-        let (inbound_tx, inbound_rx) = tok_mpsc::channel::<IncomingMessage>(INBOUND_BUFFER);
-        let (outbound_tx, outbound_rx) = std_mpsc::channel::<OutgoingMessage>();
+        let (inbound_tx, inbound_rx, outbound_tx, outbound_rx) = Self::driver_channels();
         let (init_tx, init_rx) = std_mpsc::channel::<anyhow::Result<serde_json::Value>>();
         let cid = id.clone();
         let driver = thread::spawn(move || {

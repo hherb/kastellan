@@ -21,6 +21,15 @@ use std::sync::{Arc, Mutex};
 /// Default number of recent stderr lines retained for a death report.
 pub const DEFAULT_TAIL_LINES: usize = 50;
 
+/// Cap on the in-progress (newline-free) carry buffer in [`drain_reader`]. A
+/// worker that streams to stderr without ever emitting a newline would otherwise
+/// grow `carry` unbounded — and in this project a **compromised** sandboxed
+/// worker is in scope (see `docs/threat-model.md`), so an unbounded buffer fed
+/// from worker stderr is a DoS vector on the core daemon. When `carry` reaches
+/// this many bytes we flush it as a synthetic line (bounded by the tail ring)
+/// and start fresh, so memory stays bounded regardless of worker output.
+const MAX_CARRY_BYTES: usize = 64 * 1024;
+
 /// A bounded, shared ring of a worker's most-recent stderr lines. Cloneable
 /// (it's `Arc`-backed): the drain thread pushes, the owning caller snapshots when
 /// the worker dies.
@@ -85,6 +94,12 @@ pub fn drain_reader<R: Read>(pid: u32, mut reader: R, tail: Option<&StderrTail>)
                     while let Some(nl) = carry.find('\n') {
                         let line: String = carry.drain(..=nl).collect();
                         push_trimmed(tail, &line);
+                    }
+                    // Bound the newline-free remainder: a worker that never emits
+                    // a `\n` can't grow `carry` without limit (#350 review).
+                    if carry.len() >= MAX_CARRY_BYTES {
+                        push_trimmed(tail, &carry);
+                        carry.clear();
                     }
                 }
             }
@@ -185,6 +200,27 @@ mod tests {
         // is retained as one line.
         assert_eq!(snap.len(), 2, "blank line not retained: {snap:?}");
         assert!(snap[1].starts_with("beta"), "got {:?}", snap[1]);
+    }
+
+    #[test]
+    fn drain_reader_bounds_newline_free_carry() {
+        // A worker streaming to stderr without ever emitting a `\n` must not grow
+        // the carry buffer without limit; the drain flushes it as synthetic lines
+        // once it crosses MAX_CARRY_BYTES, so the tail captures the output and
+        // memory stays bounded (#350 review).
+        let tail = StderrTail::new(DEFAULT_TAIL_LINES);
+        let data = vec![b'x'; MAX_CARRY_BYTES * 3 + 7]; // no newline anywhere
+        drain_reader(0, Cursor::new(data), Some(&tail));
+        let snap = tail.snapshot();
+        assert!(!snap.is_empty(), "newline-free output should still be captured");
+        // No retained line exceeds the cap by more than a single read chunk's worth.
+        for line in &snap {
+            assert!(
+                line.len() <= MAX_CARRY_BYTES + 8192,
+                "carry line not bounded: {} bytes",
+                line.len()
+            );
+        }
     }
 
     #[test]

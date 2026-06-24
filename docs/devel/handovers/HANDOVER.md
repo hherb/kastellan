@@ -27,8 +27,11 @@ Lifted the drain into shared **`core/src/worker_stderr.rs`** (`drain_reader` @de
 stderr. `kastellan-protocol` gained `Client::try_wait` (bounded non-blocking reap). **Defense-in-depth (also shipped):** pure
 **`workers/matrix/src/sync_retry.rs`** makes the live `sync()` loop retry transient returns with capped backoff (1→30s) instead
 of `process::exit(1)` on the first one, only giving up after `SYNC_MAX_CONSECUTIVE`=10 consecutive fast failures — a real latent
-self-exit hazard, though NOT this churn's cause. **Verification (macOS):** core lib **1056/0** (+`supervised_self_spawn` thread-
-ownership + initial-failure tests, the hermetic `death_report` test, 7 `worker_stderr` units), matrix default **17/0** (+6
+self-exit hazard, though NOT this churn's cause. **Post-review hardening (2026-06-25, `/fixall` on PR #350):** `drain_reader`'s
+newline-free `carry` buffer is now bounded (`MAX_CARRY_BYTES`=64 KiB, flushed as a synthetic tail line) so a compromised worker
+streaming newline-free stderr can't OOM the core daemon (threat-model relevant); the duplicated driver channel-pair setup was
+factored into `MatrixChannel::driver_channels()`. **Verification (macOS):** core lib **1057/0** (+`supervised_self_spawn` thread-
+ownership + initial-failure tests, the hermetic `death_report` test, 8 `worker_stderr` units incl. the carry-bound test), matrix default **17/0** (+6
 `sync_retry`), `live-matrix` **27/0**, `kastellan-protocol` **3/0**, `cargo clippy --workspace --all-targets` (+ `--features
 live-matrix`) `-D warnings` clean. **DGX:** aarch64 release build green + the live confirmation above. **Item 3 (respawn-rate
 alarm) deferred** as a small follow-up. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-24-matrix-worker-respawn-stability*`.)
