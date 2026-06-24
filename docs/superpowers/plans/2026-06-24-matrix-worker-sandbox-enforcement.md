@@ -4,7 +4,7 @@
 
 **Goal:** Run the live Matrix worker under `net_client` seccomp + Landlock by default in the supervised deployment, retaining `KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` as an explicit operator debug escape hatch.
 
-**Architecture:** The enforcement plumbing already exists (`build_matrix_policy` → `Profile::WorkerNetClient` → `derive_lockdown_env` → `KASTELLAN_SECCOMP_PROFILE=net_client` + Landlock RW/RO). The `enforce_sandbox=false` branch only *overrides* it with `none`/`none`. So the work is: (1) empirically determine on the DGX whether matrix-rust-sdk's SQLite crypto store + multi-thread tokio + rustls survive `net_client`; (2) if not, add a dedicated `Profile::WorkerMatrixClient` + `MATRIX_CLIENT_ADDITIONS` mirroring the `ml_client` (#281) precedent; (3) flip the install default — **last**, after live verification, to avoid a production respawn loop.
+**Architecture:** The env plumbing exists (`build_matrix_policy` → `Profile::WorkerNetClient` → `derive_lockdown_env` → `KASTELLAN_SECCOMP_PROFILE=net_client` + Landlock RW/RO; `enforce_sandbox=false` only overrides it with `none`/`none`). **But DGX measurement (Task 1) proved the seccomp filter is a no-op:** the prelude's `apply_filter` omits `SECCOMP_FILTER_FLAG_TSYNC`, so it binds only to the main thread, while matrix-sdk's tokio runtime + sync task (spawned during `connect()` before `lock_down()`) run unfiltered. So the work is: **(A0) fix the prelude to apply the filter across all threads via TSYNC** (`apply_filter_all_threads`); **(1→3)** then empirically enumerate matrix-sdk's syscalls under a *now-genuinely-enforced* `net_client`; **(4)** add a dedicated `Profile::WorkerMatrixClient` + `MATRIX_CLIENT_ADDITIONS` (ml_client #281 precedent) if gaps exist; **(5)** flip the install default — **last**, after live verification, to avoid a production respawn loop.
 
 **Tech Stack:** Rust (`kastellan-worker-prelude` seccomp, `kastellan-sandbox` `Profile`, `kastellan-core` channel + install), matrix-rust-sdk 0.18 (`live-matrix` feature), bwrap on the DGX (aarch64 Linux), `dev-e2e-bootstrap.sh` throwaway homeserver.
 
@@ -60,7 +60,7 @@ Expected: a loopback `matrix-conduit` container + two bootstrapped accounts + an
 The default daemon path runs `enforce_sandbox=0`; we need to force enforcement for the e2e. The `matrix_live_e2e.rs` test drives `spawn_matrix_worker` with a `MatrixSpawnConfig`. Run it with `enforce_sandbox=true` (the test should already build the config; if it hardcodes `enforce_sandbox: false`, temporarily flip it for this measurement — do NOT commit that flip):
 
 ```bash
-ssh dgx 'source $HOME/.cargo/env $HOME/.matrix-e2e.env && cd ~/src/kastellan && cargo test -p kastellan-core --features live-matrix --test matrix_live_e2e -- --ignored --nocapture 2>&1 | tail -40'
+ssh dgx 'source $HOME/.cargo/env $HOME/.matrix-e2e.env && cd ~/src/kastellan && cargo test -p kastellan-core --test matrix_live_e2e -- --ignored --nocapture 2>&1 | tail -40'
 ```
 
 Expected outcomes (record which one):
@@ -86,11 +86,77 @@ Landlock fs_write additions: [<paths or "none">]
 
 - [ ] **Step 7: Commit the discovery notes.**
 
-```bash
-git commit --allow-empty -m "chore(matrix-sandbox): DGX net_client enumeration — <N> gaps found
+> **OUTCOME (2026-06-24):** Bare `net_client` *passed* the happy-path round-trip,
+> but `/proc/<pid>/task/*/status` revealed the filter binds only to the main
+> thread (`Seccomp:2`) while all ~20 `tokio-rt-worker` threads show `Seccomp:0`.
+> The seccomp filter is a **no-op** for matrix's real work. Root cause: the
+> prelude's `apply_filter` omits `TSYNC`. → New **Task 1.5** (TSYNC fix) is the
+> prerequisite; the real enumeration happens *after* it (Task 3).
 
-Candidates: <list or 'none, net_client suffices'>.
-Captured via kill-mode + journalctl -k type=1326 on the DGX dev-e2e homeserver."
+```bash
+git commit --allow-empty -m "chore(matrix-sandbox): DGX enumeration finding — seccomp is a no-op (TSYNC gap)"
+```
+
+---
+
+### Task 1.5: Prelude TSYNC fix — apply the seccomp filter to all threads
+
+**Files:**
+- Modify: `workers/prelude/src/seccomp_lock.rs` (`use` import + the two `apply_filter` calls in `apply()` + doc)
+- Test: `workers/prelude/src/seccomp_lock.rs` inline tests + `workers/prelude/tests/seccomp_smoke.rs` (existing) + DGX `/proc` verification
+
+**Interfaces:**
+- Consumes: seccompiler `apply_filter_all_threads` (already a dependency).
+- Produces: `apply(profile)` now installs the filter on **all** threads of the process.
+
+- [ ] **Step 1: Confirm the seccompiler API is available.**
+
+```bash
+source "$HOME/.cargo/env"
+grep -rn "pub fn apply_filter_all_threads" ~/.cargo/registry/src/*/seccompiler-0.5.0/src/lib.rs
+```
+Expected: the fn exists (`apply_filter_all_threads(bpf_filter: BpfProgramRef) -> Result<()>`, line ~324) — it calls `apply_filter_with_flags(bpf, SECCOMP_FILTER_FLAG_TSYNC)`.
+
+- [ ] **Step 2: Switch the import.**
+
+In `workers/prelude/src/seccomp_lock.rs` (~line 60):
+
+```rust
+use seccompiler::{
+    apply_filter_all_threads, BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch,
+};
+```
+(Drop the now-unused `apply_filter`.)
+
+- [ ] **Step 3: Use TSYNC in `apply()`.**
+
+In `apply()` (~lines 162 + 166), replace both `apply_filter(&…)` calls with `apply_filter_all_threads(&…)`, and update the doc comment above `apply()` to explain: the filter is installed with `SECCOMP_FILTER_FLAG_TSYNC` so it covers **every** thread of the process, not just the caller — required because a worker may already be multi-threaded at lock-down time (the live Matrix worker builds its tokio runtime + sync task during the pre-lockdown network init; without TSYNC the filter would bind only to the main thread and leave all SDK work on the tokio pool unfiltered — DGX-confirmed 2026-06-24). The io_uring-first / main-second install order is unchanged and still correct (the io_uring filter's `Allow` default is synced to all threads first, permitting the second filter's `SYS_seccomp` everywhere).
+
+- [ ] **Step 4: Run the existing prelude tests (no regression).**
+
+```bash
+cargo test -p kastellan-worker-prelude 2>&1 | tail -15
+```
+Expected: all green. The `seccomp_smoke` / `landlock_smoke` tests fork single-threaded children, so TSYNC ≡ the old behaviour for them.
+
+- [ ] **Step 5: Clippy.**
+
+```bash
+cargo clippy -p kastellan-worker-prelude --all-targets --target aarch64-unknown-linux-gnu -- -D warnings 2>&1 | tail -5
+```
+Expected: clean (no unused-import warning for the dropped `apply_filter`).
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add workers/prelude/src/seccomp_lock.rs
+git commit -m "fix(prelude): apply seccomp filter to all threads via TSYNC
+
+apply_filter binds only to the calling thread; a worker already multi-threaded
+at lock_down() time (the live Matrix worker's tokio runtime + sync task, spawned
+during pre-lockdown network init) left all worker threads unfiltered. Switch to
+apply_filter_all_threads (SECCOMP_FILTER_FLAG_TSYNC) so every thread is covered.
+DGX-confirmed: matrix tokio threads now show /proc Seccomp:2."
 ```
 
 ---
@@ -410,7 +476,7 @@ Expected: prelude tests green, clippy clean. (The `--features live-matrix` worke
 
 ```bash
 ssh dgx 'bash -s up' < scripts/matrix/dev-e2e-bootstrap.sh
-ssh dgx 'source $HOME/.cargo/env $HOME/.matrix-e2e.env && cd ~/src/kastellan && cargo test -p kastellan-core --features live-matrix --test matrix_live_e2e -- --ignored --nocapture 2>&1 | tail -30'
+ssh dgx 'source $HOME/.cargo/env $HOME/.matrix-e2e.env && cd ~/src/kastellan && cargo test -p kastellan-core --test matrix_live_e2e -- --ignored --nocapture 2>&1 | tail -30'
 ```
 Expected: PASS — login + E2E sync + send/recv survive under `matrix_client` (or `net_client`) seccomp + Landlock. Run twice to confirm reproducibility.
 
