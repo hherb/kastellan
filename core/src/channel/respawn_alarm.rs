@@ -6,7 +6,9 @@
 //! the bwrap-PDEATHSIG bug (#348) produced exactly this, and it was only
 //! diagnosed after deploying death-report observability. This module turns that
 //! churn into an *up-front* warning: it counts respawns in a sliding time window
-//! and signals once when the rate crosses an operator-chosen threshold.
+//! and signals once when the rate crosses a caller-supplied threshold (the
+//! driver wires in the compile-time `RESPAWN_ALARM_THRESHOLD` /
+//! `RESPAWN_ALARM_WINDOW` defaults).
 //!
 //! The type is deliberately a **pure state machine over caller-supplied
 //! [`Instant`]s** — it owns no clock and spawns nothing — so the driver decides
