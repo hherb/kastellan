@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc as tok_mpsc;
 
@@ -30,6 +30,7 @@ use kastellan_matrix_wire::{Event, PollResult};
 use kastellan_protocol::client::Client;
 use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
+use super::respawn_alarm::RespawnRateAlarm;
 use super::{Channel, ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerId};
 
 /// How long the driver waits in one `matrix.poll` before looping to check the
@@ -218,6 +219,15 @@ const RESPAWN_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// long (up-to-30s) backoff doesn't keep a dead channel's driver thread alive.
 const RESPAWN_POLL_SLICE: Duration = Duration::from_millis(200);
 
+/// Respawn-rate alarm (#348 item 3): if the worker respawns this many times
+/// within [`RESPAWN_ALARM_WINDOW`], the driver logs a single `warn!` flagging
+/// churn. A lone crash is benign; sustained dies-and-respawns is the fault
+/// signature the PDEATHSIG bug produced, so surface it before it's only visible
+/// in a death-report archaeology dig.
+const RESPAWN_ALARM_THRESHOLD: usize = 5;
+/// Sliding window over which [`RESPAWN_ALARM_THRESHOLD`] respawns trip the alarm.
+const RESPAWN_ALARM_WINDOW: Duration = Duration::from_secs(300);
+
 impl MatrixChannel {
     /// Spawn the driver thread over a [`WorkerClient`]. `id` is the channel id
     /// (e.g. `"matrix"`) stamped onto every inbound message + matched on replies.
@@ -329,6 +339,8 @@ fn drive(
     // Replies accepted from the bus but not yet acknowledged by the worker.
     // Kept across a respawn so a death mid-send doesn't lose a reply.
     let mut pending: VecDeque<OutgoingMessage> = VecDeque::new();
+    // Fires a single warn! when respawns cross the churn threshold (#348 item 3).
+    let mut respawn_alarm = RespawnRateAlarm::new(RESPAWN_ALARM_WINDOW, RESPAWN_ALARM_THRESHOLD);
     loop {
         // 1) Pull newly-queued replies into the local buffer (non-blocking).
         loop {
@@ -421,6 +433,15 @@ fn drive(
                     Ok((fresh, _identity)) => {
                         client = fresh;
                         tracing::info!("matrix worker respawned; channel resumed");
+                        if let Some(respawns) = respawn_alarm.record(Instant::now()) {
+                            tracing::warn!(
+                                respawns,
+                                window_secs = RESPAWN_ALARM_WINDOW.as_secs(),
+                                "matrix worker respawn-rate alarm: excessive churn \
+                                 (worker dies and respawns repeatedly) — check the \
+                                 preceding death reports for the cause"
+                            );
+                        }
                         break;
                     }
                     Err(e) => {

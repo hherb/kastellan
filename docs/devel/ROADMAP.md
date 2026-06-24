@@ -187,7 +187,10 @@ items unlock later ones.
   no OOM/rlimit/seccomp). Fix: `MatrixChannel::supervised_self_spawn` does the initial spawn on the persistent driver thread too,
   so no worker is parented to an ephemeral thread; confirmed live (initial worker stable 2+ min, zero SIGKILL). Also shipped:
   death-report observability (shared `core/src/worker_stderr.rs` drain + `WorkerClient::death_report` logs exit status + stderr)
-  and defensive `sync_retry` (the live `sync()` loop retries transient returns instead of `process::exit(1)`). Remaining:
+  and defensive `sync_retry` (the live `sync()` loop retries transient returns instead of `process::exit(1)`).
+  **#348 item 3 (respawn-rate alarm) — DONE 2026-06-25:** pure `channel::respawn_alarm::RespawnRateAlarm` (sliding-window
+  count; fires once per storm, re-arms when it clears) wired into the supervised `drive` loop — 5 respawns within 300s logs one
+  churn `warn!`. Remaining:
   egress force-routing coupling (direct `--share-net` now); in-daemon password
   materialize (keyring sync-init); ~~embedding dim mismatch (768 vs 1024 → recall degrades)~~ **FIXED 2026-06-20**
   (migration 0019: `EMBEDDING_DIM` 1024→**256**, embeddinggemma Matryoshka-truncated client-side via
