@@ -107,6 +107,16 @@ pub enum Profile {
     /// socket family is permitted at the syscall layer (torch opens sockets even
     /// fully offline) but the private netns gives it no route.
     MlClient,
+    /// `"matrix_client"` — `net_client` **plus** [`MATRIX_CLIENT_ADDITIONS`]:
+    /// the syscalls matrix-rust-sdk's SQLite crypto store needs beyond the
+    /// net-client base (today just `ftruncate`), enumerated empirically on the
+    /// DGX (aarch64) via the kill-mode loop (design spec 2026-06-24). For the
+    /// long-lived live Matrix channel worker, which is `Net::Allowlist`
+    /// (homeserver only); the socket family comes from the `net_client` base.
+    /// NB: the worker builds its `tokio` runtime + sync task during pre-lockdown
+    /// network init, so the filter must be TSYNC'd to cover those threads — see
+    /// [`apply`].
+    MatrixClient,
 }
 
 impl Profile {
@@ -116,10 +126,11 @@ impl Profile {
             "net_client" => Ok(Some(Profile::NetClient)),
             "browser_client" => Ok(Some(Profile::BrowserClient)),
             "ml_client" => Ok(Some(Profile::MlClient)),
+            "matrix_client" => Ok(Some(Profile::MatrixClient)),
             "none" | "" => Ok(None),
             other => Err(LockdownError::Env(format!(
                 "KASTELLAN_SECCOMP_PROFILE must be 'strict' | 'net_client' | \
-                 'browser_client' | 'ml_client' | 'none', got {other:?}"
+                 'browser_client' | 'ml_client' | 'matrix_client' | 'none', got {other:?}"
             ))),
         }
     }
@@ -247,7 +258,10 @@ pub fn allow_list_for(profile: Profile) -> Vec<i64> {
     #[cfg(target_arch = "x86_64")]
     out.extend_from_slice(BASE_ALLOW_X86_64_LEGACY);
     // Both net-using profiles get the BSD-socket family.
-    if matches!(profile, Profile::NetClient | Profile::BrowserClient | Profile::MlClient) {
+    if matches!(
+        profile,
+        Profile::NetClient | Profile::BrowserClient | Profile::MlClient | Profile::MatrixClient
+    ) {
         out.extend_from_slice(NET_CLIENT_ADDITIONS);
     }
     if matches!(profile, Profile::BrowserClient) {
@@ -259,6 +273,9 @@ pub fn allow_list_for(profile: Profile) -> Vec<i64> {
     }
     if matches!(profile, Profile::MlClient) {
         out.extend_from_slice(ML_CLIENT_ADDITIONS);
+    }
+    if matches!(profile, Profile::MatrixClient) {
+        out.extend_from_slice(MATRIX_CLIENT_ADDITIONS);
     }
     out
 }
@@ -696,6 +713,37 @@ pub const ML_CLIENT_ADDITIONS: &[i64] = &[
     libc::SYS_mknodat,
 ];
 
+/// matrix-rust-sdk-specific syscalls beyond [`NET_CLIENT_ADDITIONS`].
+/// Permitted only under [`Profile::MatrixClient`] (the live Matrix channel
+/// worker).
+///
+/// **Enumerated empirically** on the DGX (aarch64) by running the real
+/// `live-matrix` worker (login + E2E sync + send/recv) against a throwaway
+/// loopback homeserver under the kill-mode filter, and diffing the observed
+/// syscalls against the bare `net_client` allow-list (design spec 2026-06-24
+/// §A). Three converging lines of evidence: (1) under bare `net_client` a
+/// `tokio-rt-worker` thread `SIGSYS`-died on `syscall=46` (`ftruncate`) during
+/// the SQLite crypto-store's WAL maintenance after ~tens of seconds of sync;
+/// (2) a `SECCOMP_RET_LOG` run logged **only** `syscall=46` beyond `net_client`
+/// across init + 45s sync + a send/recv round-trip; (3) with `ftruncate` added,
+/// a 50s kill-mode session (all 21 threads `Seccomp:2` via TSYNC) survived with
+/// **zero** denials. Everything else matrix-rust-sdk needs was already covered
+/// by [`BASE_ALLOW`] + [`NET_CLIENT_ADDITIONS`].
+///
+/// `ftruncate` truncates an already-open fd the worker owns (the SQLite DB /
+/// WAL inside its writable store dir) — same benign file-mutation class as the
+/// `write`/`fallocate`-adjacent calls in [`BASE_ALLOW`], bounded by Landlock
+/// (RW = the store dir only). No namespace/privilege/escape surface. Escape
+/// primitives (namespace/mount/ptrace/bpf/io_uring/keyring) are NEVER added.
+pub const MATRIX_CLIENT_ADDITIONS: &[i64] = &[
+    // SQLite (matrix-sdk-sqlite crypto + state store) truncates its WAL/journal
+    // during checkpointing on a long-lived connection. DGX kill-mode confirmed
+    // load-bearing (`syscall=46`); not hit by a sub-2s round-trip, only by a
+    // long-running worker — i.e. exactly production. (Also present in
+    // [`BROWSER_CLIENT_ADDITIONS`] for Chromium's on-disk caches.)
+    libc::SYS_ftruncate,
+];
+
 /// Map the build target architecture to seccompiler's enum. Returns an
 /// error on unsupported arches so we never silently install a filter for
 /// the wrong arch (which is a foot-gun: filters are arch-specific BPF).
@@ -987,6 +1035,71 @@ mod tests {
             assert!(
                 !strict.contains(nr),
                 "enumerated syscall {nr} is already in Strict — move it to BASE_ALLOW"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_parse_recognises_matrix_client() {
+        assert_eq!(
+            Profile::parse("matrix_client").unwrap(),
+            Some(Profile::MatrixClient)
+        );
+    }
+
+    #[test]
+    fn build_bpf_matrix_client_succeeds() {
+        let bpf = build_bpf(Profile::MatrixClient).expect("matrix_client bpf must build");
+        assert!(!bpf.is_empty(), "matrix_client filter must emit instructions");
+    }
+
+    #[test]
+    fn matrix_client_is_a_superset_of_net_client() {
+        // matrix_client = net_client + MATRIX additions, so it must allow
+        // everything net_client does (the socket family matrix-sdk needs for
+        // homeserver I/O + reconnects).
+        let net_client = allow_list_for(Profile::NetClient);
+        let mx = allow_list_for(Profile::MatrixClient);
+        for nr in net_client {
+            assert!(mx.contains(&nr), "MatrixClient missing NetClient syscall {nr}");
+        }
+        assert!(mx.contains(&libc::SYS_socket), "MatrixClient must allow socket()");
+    }
+
+    #[test]
+    fn matrix_client_excludes_escape_primitives() {
+        // Threat-model invariant: the worker with the largest external attack
+        // surface must never be able to escape its namespace / inspect other
+        // processes / load BPF.
+        let mx = allow_list_for(Profile::MatrixClient);
+        for nr in [
+            libc::SYS_unshare,
+            libc::SYS_setns,
+            libc::SYS_mount,
+            libc::SYS_ptrace,
+            libc::SYS_bpf,
+            libc::SYS_perf_event_open,
+        ] {
+            assert!(!mx.contains(&nr), "MatrixClient must never allow {nr}");
+        }
+    }
+
+    #[test]
+    fn matrix_client_includes_enumerated_additions() {
+        // The DGX-enumerated matrix-sdk additions (SQLite ftruncate today) must
+        // be present in MatrixClient and matrix-specific — i.e. NOT already
+        // granted by the Strict/net_client base (else they'd belong there).
+        let mx = allow_list_for(Profile::MatrixClient);
+        let net_client = allow_list_for(Profile::NetClient);
+        assert!(
+            !MATRIX_CLIENT_ADDITIONS.is_empty(),
+            "MATRIX_CLIENT_ADDITIONS was populated by the DGX enumeration"
+        );
+        for nr in MATRIX_CLIENT_ADDITIONS {
+            assert!(mx.contains(nr), "MatrixClient missing enumerated syscall {nr}");
+            assert!(
+                !net_client.contains(nr),
+                "enumerated syscall {nr} is already in net_client — drop it from MATRIX_CLIENT_ADDITIONS"
             );
         }
     }

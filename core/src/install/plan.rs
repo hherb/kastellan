@@ -135,11 +135,12 @@ pub fn render_env_file(args: &InstallArgs, layout: &Layout) -> String {
         // Matrix inbound channel (comms slice #2). The worker must be the
         // `live-matrix` build; run `kastellan-cli matrix probe` once after
         // install to seed its E2E session + cross-signing. Worker-side
-        // seccomp/Landlock stays off for now (first bring-up); enabling it +
-        // egress force-routing is a hardening follow-up.
+        // seccomp (`matrix_client`, applied across all threads via TSYNC) +
+        // Landlock are enforced by default (`=1`); set `=0` only as an operator
+        // debug escape hatch. Egress force-routing remains a separate follow-up.
         s.push_str(&format!("KASTELLAN_MATRIX_HOMESERVER_URL={hs}\n"));
         s.push_str(&format!("KASTELLAN_MATRIX_USER={user}\n"));
-        s.push_str("KASTELLAN_MATRIX_ENFORCE_SANDBOX=0\n");
+        s.push_str("KASTELLAN_MATRIX_ENFORCE_SANDBOX=1\n");
     }
     s
 }
@@ -434,7 +435,7 @@ mod tests {
         let s = render_env_file(&a, &layout());
         assert!(s.contains("KASTELLAN_MATRIX_HOMESERVER_URL=https://matrix.example.org\n"), "{s}");
         assert!(s.contains("KASTELLAN_MATRIX_USER=@bot:matrix.example.org\n"), "{s}");
-        assert!(s.contains("KASTELLAN_MATRIX_ENFORCE_SANDBOX=0\n"), "{s}");
+        assert!(s.contains("KASTELLAN_MATRIX_ENFORCE_SANDBOX=1\n"), "{s}");
     }
 
     #[test]

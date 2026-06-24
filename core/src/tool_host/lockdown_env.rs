@@ -89,6 +89,7 @@ pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
             Profile::WorkerNetClient => "net_client",
             Profile::WorkerBrowserClient => "browser_client",
             Profile::WorkerMlClient => "ml_client",
+            Profile::WorkerMatrixClient => "matrix_client",
         };
         out.env.push((ENV_SECCOMP_PROFILE.into(), value.into()));
     }
@@ -157,6 +158,19 @@ mod tests {
             .find(|(k, _)| k == ENV_SECCOMP_PROFILE)
             .expect("seccomp env must be derived");
         assert_eq!(seccomp.1, "ml_client");
+    }
+
+    #[test]
+    fn derive_adds_matrix_client_profile() {
+        let mut p = base_policy();
+        p.profile = Profile::WorkerMatrixClient;
+        let derived = derive_lockdown_env(&p);
+        let seccomp = derived
+            .env
+            .iter()
+            .find(|(k, _)| k == ENV_SECCOMP_PROFILE)
+            .expect("seccomp env must be derived");
+        assert_eq!(seccomp.1, "matrix_client");
     }
 
     #[test]
