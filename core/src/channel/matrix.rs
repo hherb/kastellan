@@ -69,17 +69,42 @@ pub trait WorkerClient: Send {
     fn poll(&mut self, timeout_ms: u64) -> anyhow::Result<Vec<Event>>;
     /// `matrix.send` — deliver an outbound message to a room.
     fn send(&mut self, conversation: &str, body: &str) -> anyhow::Result<()>;
+    /// After a `poll`/`send` error signals the worker died, produce a one-line
+    /// diagnostic for the daemon log — the worker's exit status + recent stderr
+    /// (#348). Returns `None` when no diagnostic is available (the default; the
+    /// in-process test fakes don't wrap a real process).
+    fn death_report(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Real [`WorkerClient`] over the blocking `kastellan_protocol` [`Client`] — the
 /// synchronous JSON-RPC pipe to the spawned matrix worker.
 pub struct ProtocolWorkerClient {
     client: Client,
+    /// Bounded tail of the worker's recent stderr lines, retained by the drain
+    /// thread so [`death_report`](WorkerClient::death_report) can surface the death
+    /// cause. `None` for callers that don't drain (e.g. the e2e helper).
+    stderr_tail: Option<crate::worker_stderr::StderrTail>,
 }
 
+/// How long [`ProtocolWorkerClient::death_report`] waits for the dead worker to be
+/// reaped before giving up on the exit status: up to `REAP_ATTEMPTS * REAP_TICK`.
+/// Bounded so a worker that is (unexpectedly) still alive can't hang the driver.
+const REAP_ATTEMPTS: u32 = 10;
+const REAP_TICK: Duration = Duration::from_millis(50);
+
 impl ProtocolWorkerClient {
+    /// Wrap a connected client with no stderr tail (used by the e2e helper, which
+    /// owns the child's stderr itself).
     pub fn new(client: Client) -> Self {
-        Self { client }
+        Self { client, stderr_tail: None }
+    }
+
+    /// Wrap a connected client together with the tail its stderr is drained into,
+    /// so a death report can surface the worker's last words (#348).
+    pub fn with_stderr(client: Client, stderr_tail: crate::worker_stderr::StderrTail) -> Self {
+        Self { client, stderr_tail: Some(stderr_tail) }
     }
 
     /// Call `matrix.init`: the worker has already logged in + first-synced before
@@ -103,6 +128,28 @@ impl WorkerClient for ProtocolWorkerClient {
             serde_json::from_value(v).map_err(|e| anyhow::anyhow!("decode poll result: {e}"))?;
         Ok(pr.events)
     }
+    fn death_report(&mut self) -> Option<String> {
+        // The driver calls this once a poll/send error indicates death. Reap the
+        // child non-blockingly with a few short retries (the exit may not be
+        // visible the very instant the pipe closed) so we capture the real exit
+        // status — a clean `exit status: 1` (the sync-task fail-loud) vs a
+        // `signal: 6` (a crypto-store SIGABRT) is exactly the signal #348 needs —
+        // without risking a hang if the process is somehow still running.
+        let mut status = None;
+        for _ in 0..REAP_ATTEMPTS {
+            match self.client.try_wait() {
+                Ok(Some(s)) => {
+                    status = Some(s);
+                    break;
+                }
+                Ok(None) => thread::sleep(REAP_TICK),
+                Err(_) => break,
+            }
+        }
+        let tail = self.stderr_tail.as_ref().map(|t| t.snapshot()).unwrap_or_default();
+        Some(crate::worker_stderr::format_death_report(status, &tail))
+    }
+
     fn send(&mut self, conversation: &str, body: &str) -> anyhow::Result<()> {
         self.client
             .call(
@@ -128,12 +175,23 @@ pub fn spawn_worker_client<B: SandboxBackend + ?Sized>(
     args: &[&str],
 ) -> anyhow::Result<ProtocolWorkerClient> {
     let derived = crate::tool_host::derive_lockdown_env(policy);
-    let child = backend
+    let mut child = backend
         .spawn_under_policy(&derived, program, args)
         .map_err(|e| anyhow::anyhow!("spawn matrix worker: {e}"))?;
+    // Drain the worker's piped stderr (the JSON-RPC client reads only stdout, so an
+    // undrained pipe is both discarded and a deadlock risk past ~64 KiB), retaining
+    // a bounded tail so a death is diagnosable in the daemon log (#348).
+    let pid = child.id();
+    let stderr_tail = child
+        .stderr
+        .take()
+        .map(|stderr| crate::worker_stderr::spawn_drain_with_tail(pid, stderr));
     let client = Client::from_child(child)
         .map_err(|e| anyhow::anyhow!("connect to matrix worker: {e}"))?;
-    Ok(ProtocolWorkerClient::new(client))
+    Ok(match stderr_tail {
+        Some(tail) => ProtocolWorkerClient::with_stderr(client, tail),
+        None => ProtocolWorkerClient::new(client),
+    })
 }
 
 /// A live Matrix channel: owns the driver thread; implements the [`Channel`]
@@ -183,120 +241,198 @@ impl MatrixChannel {
         Self::spawn_driver(id, client, Some(factory))
     }
 
-    fn spawn_driver(
-        id: ChannelId,
-        mut client: Box<dyn WorkerClient>,
-        mut factory: Option<WorkerFactory>,
-    ) -> Self {
+    /// The inbound (bus-bound) + outbound (reply) channel pair every driver owns.
+    /// Factored so the two constructors can't drift on buffer size or types.
+    #[allow(clippy::type_complexity)]
+    fn driver_channels() -> (
+        tok_mpsc::Sender<IncomingMessage>,
+        tok_mpsc::Receiver<IncomingMessage>,
+        std_mpsc::Sender<OutgoingMessage>,
+        std_mpsc::Receiver<OutgoingMessage>,
+    ) {
         let (inbound_tx, inbound_rx) = tok_mpsc::channel::<IncomingMessage>(INBOUND_BUFFER);
         let (outbound_tx, outbound_rx) = std_mpsc::channel::<OutgoingMessage>();
+        (inbound_tx, inbound_rx, outbound_tx, outbound_rx)
+    }
+
+    fn spawn_driver(
+        id: ChannelId,
+        client: Box<dyn WorkerClient>,
+        factory: Option<WorkerFactory>,
+    ) -> Self {
+        let (inbound_tx, inbound_rx, outbound_tx, outbound_rx) = Self::driver_channels();
+        let cid = id.clone();
+        let driver = thread::spawn(move || drive(client, factory, inbound_tx, outbound_rx, cid));
+        Self { id, inbound_rx, outbound_tx, _driver: driver }
+    }
+
+    /// Self-healing supervised channel that **also owns the initial spawn**: the
+    /// driver thread performs the *first* `factory()` call (login proof) itself
+    /// and reports the resulting identity back, so the worker process is parented
+    /// to the persistent driver thread — never an ephemeral caller thread.
+    ///
+    /// **This is the #348 churn fix.** The previous path (`supervised` after an
+    /// out-of-band initial `spawn()`) forked the initial worker on the *caller's*
+    /// thread. When the caller is a tokio `spawn_blocking` pool thread — the
+    /// daemon's startup path — tokio reaps it after its ~10s idle keep-alive, and
+    /// bwrap's `--die-with-parent` (`PR_SET_PDEATHSIG`, which fires on *parent
+    /// thread* death) then SIGKILLs the worker ~10s in. Respawns were already
+    /// immune because the driver thread issues them; doing the initial spawn here
+    /// closes the gap so no worker is ever tied to an ephemeral thread.
+    ///
+    /// Blocks until the first spawn+login completes (or fails), preserving the
+    /// synchronous login-proof contract; returns the worker's reported identity.
+    pub fn supervised_self_spawn(
+        id: ChannelId,
+        mut factory: WorkerFactory,
+    ) -> anyhow::Result<(Self, serde_json::Value)> {
+        let (inbound_tx, inbound_rx, outbound_tx, outbound_rx) = Self::driver_channels();
+        let (init_tx, init_rx) = std_mpsc::channel::<anyhow::Result<serde_json::Value>>();
         let cid = id.clone();
         let driver = thread::spawn(move || {
-            // Replies accepted from the bus but not yet acknowledged by the worker.
-            // Kept across a respawn so a death mid-send doesn't lose a reply.
-            let mut pending: VecDeque<OutgoingMessage> = VecDeque::new();
+            // The FIRST spawn happens HERE, on the persistent driver thread, so the
+            // worker's `--die-with-parent` PDEATHSIG is tied to a thread that lives
+            // for the channel's lifetime (the #348 fix).
+            let client = match factory() {
+                Ok((client, identity)) => {
+                    if init_tx.send(Ok(identity)).is_err() {
+                        return; // caller stopped waiting — let the worker die with us
+                    }
+                    client
+                }
+                Err(e) => {
+                    let _ = init_tx.send(Err(e));
+                    return;
+                }
+            };
+            drive(client, Some(factory), inbound_tx, outbound_rx, cid);
+        });
+        let identity = init_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("matrix driver thread exited before initial spawn"))??;
+        Ok((Self { id, inbound_rx, outbound_tx, _driver: driver }, identity))
+    }
+}
+
+/// The driver loop: serialize `matrix.poll` + `matrix.send` on the worker's single
+/// pipe, bridge inbound events to the bus, and (when `factory` is `Some`) respawn a
+/// dead worker with capped backoff. Runs for the channel's lifetime on the thread
+/// that owns the worker process — so for the supervised paths every spawn (initial
+/// and respawn) is parented to this same persistent thread (#348).
+fn drive(
+    mut client: Box<dyn WorkerClient>,
+    mut factory: Option<WorkerFactory>,
+    inbound_tx: tok_mpsc::Sender<IncomingMessage>,
+    outbound_rx: std_mpsc::Receiver<OutgoingMessage>,
+    cid: ChannelId,
+) {
+    // Replies accepted from the bus but not yet acknowledged by the worker.
+    // Kept across a respawn so a death mid-send doesn't lose a reply.
+    let mut pending: VecDeque<OutgoingMessage> = VecDeque::new();
+    loop {
+        // 1) Pull newly-queued replies into the local buffer (non-blocking).
+        loop {
+            match outbound_rx.try_recv() {
+                Ok(out) => pending.push_back(out),
+                Err(std_mpsc::TryRecvError::Empty) => break,
+                Err(std_mpsc::TryRecvError::Disconnected) => {
+                    tracing::info!("matrix outbound sender dropped; driver exiting");
+                    return;
+                }
+            }
+        }
+
+        // 2) Flush buffered replies (front-first). Stop on the first error
+        //    — the worker may have died; respawn before retrying this reply.
+        let mut worker_dead = false;
+        while let Some(out) = pending.front() {
+            match client.send(&out.conversation.0, &out.body) {
+                Ok(()) => {
+                    pending.pop_front();
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "matrix.send failed; retrying after respawn");
+                    worker_dead = true;
+                    break;
+                }
+            }
+        }
+
+        // 3) Long-poll for inbound events → push to the bus.
+        if !worker_dead {
+            match client.poll(POLL_MS) {
+                Ok(events) => {
+                    for ev in events {
+                        let msg = IncomingMessage {
+                            channel: cid.clone(),
+                            peer: PeerId(ev.peer),
+                            conversation: ConversationId(ev.conversation),
+                            body: ev.body,
+                        };
+                        if inbound_tx.blocking_send(msg).is_err() {
+                            tracing::info!("matrix inbound receiver closed; driver exiting");
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "matrix.poll failed (worker likely died)");
+                    worker_dead = true;
+                }
+            }
+        }
+
+        // 4) On death: surface the cause (exit status + recent stderr) so
+        //    the churn is diagnosable in the daemon log (#348), then
+        //    respawn (supervised) or exit (unsupervised).
+        if worker_dead {
+            if let Some(report) = client.death_report() {
+                tracing::warn!("matrix worker died: {report}");
+            }
+            let Some(factory) = factory.as_mut() else {
+                tracing::warn!("matrix worker died; driver exiting (unsupervised)");
+                return;
+            };
+            let mut delay = RESPAWN_BACKOFF_START;
             loop {
-                // 1) Pull newly-queued replies into the local buffer (non-blocking).
-                loop {
-                    match outbound_rx.try_recv() {
-                        Ok(out) => pending.push_back(out),
-                        Err(std_mpsc::TryRecvError::Empty) => break,
-                        Err(std_mpsc::TryRecvError::Disconnected) => {
-                            tracing::info!("matrix outbound sender dropped; driver exiting");
-                            return;
-                        }
-                    }
-                }
-
-                // 2) Flush buffered replies (front-first). Stop on the first error
-                //    — the worker may have died; respawn before retrying this reply.
-                let mut worker_dead = false;
-                while let Some(out) = pending.front() {
-                    match client.send(&out.conversation.0, &out.body) {
-                        Ok(()) => {
-                            pending.pop_front();
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "matrix.send failed; retrying after respawn");
-                            worker_dead = true;
-                            break;
-                        }
-                    }
-                }
-
-                // 3) Long-poll for inbound events → push to the bus.
-                if !worker_dead {
-                    match client.poll(POLL_MS) {
-                        Ok(events) => {
-                            for ev in events {
-                                let msg = IncomingMessage {
-                                    channel: cid.clone(),
-                                    peer: PeerId(ev.peer),
-                                    conversation: ConversationId(ev.conversation),
-                                    body: ev.body,
-                                };
-                                if inbound_tx.blocking_send(msg).is_err() {
-                                    tracing::info!("matrix inbound receiver closed; driver exiting");
-                                    return;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "matrix.poll failed (worker likely died)");
-                            worker_dead = true;
-                        }
-                    }
-                }
-
-                // 4) On death: respawn (supervised) or exit (unsupervised).
-                if worker_dead {
-                    let Some(factory) = factory.as_mut() else {
-                        tracing::warn!("matrix worker died; driver exiting (unsupervised)");
+                // Responsive backoff: poll for shutdown in short slices
+                // rather than sleeping the full delay. If the bus dropped
+                // the inbound receiver (channel shutdown), bail instead of
+                // respawning forever against an unreachable homeserver.
+                let mut slept = Duration::ZERO;
+                while slept < delay {
+                    if inbound_tx.is_closed() {
+                        tracing::info!(
+                            "matrix inbound receiver closed during respawn; driver exiting"
+                        );
                         return;
-                    };
-                    let mut delay = RESPAWN_BACKOFF_START;
-                    loop {
-                        // Responsive backoff: poll for shutdown in short slices
-                        // rather than sleeping the full delay. If the bus dropped
-                        // the inbound receiver (channel shutdown), bail instead of
-                        // respawning forever against an unreachable homeserver.
-                        let mut slept = Duration::ZERO;
-                        while slept < delay {
-                            if inbound_tx.is_closed() {
-                                tracing::info!(
-                                    "matrix inbound receiver closed during respawn; driver exiting"
-                                );
-                                return;
-                            }
-                            let slice = RESPAWN_POLL_SLICE.min(delay - slept);
-                            thread::sleep(slice);
-                            slept += slice;
-                        }
-                        if inbound_tx.is_closed() {
-                            tracing::info!(
-                                "matrix inbound receiver closed during respawn; driver exiting"
-                            );
-                            return;
-                        }
-                        match factory() {
-                            Ok((fresh, _identity)) => {
-                                client = fresh;
-                                tracing::info!("matrix worker respawned; channel resumed");
-                                break;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %format!("{e:#}"),
-                                    "matrix worker respawn failed; backing off"
-                                );
-                                delay = (delay * 2).min(RESPAWN_BACKOFF_MAX);
-                            }
-                        }
+                    }
+                    let slice = RESPAWN_POLL_SLICE.min(delay - slept);
+                    thread::sleep(slice);
+                    slept += slice;
+                }
+                if inbound_tx.is_closed() {
+                    tracing::info!(
+                        "matrix inbound receiver closed during respawn; driver exiting"
+                    );
+                    return;
+                }
+                match factory() {
+                    Ok((fresh, _identity)) => {
+                        client = fresh;
+                        tracing::info!("matrix worker respawned; channel resumed");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %format!("{e:#}"),
+                            "matrix worker respawn failed; backing off"
+                        );
+                        delay = (delay * 2).min(RESPAWN_BACKOFF_MAX);
                     }
                 }
             }
-        });
-        Self { id, inbound_rx, outbound_tx, _driver: driver }
+        }
     }
 }
 
@@ -615,19 +751,20 @@ pub fn spawn_matrix_worker(
     //    (login proof / readiness). Owns the backend + policy + program so the
     //    supervised driver can respawn after a death. NOTE: respawn relies on the
     //    persisted session — the one-time password file is consumed on first login.
-    let mut spawn: WorkerFactory = Box::new(move || {
+    let spawn: WorkerFactory = Box::new(move || {
         let mut client = spawn_worker_client(&*backend, &policy, &program, &[])?;
         let identity = client.init()?;
         Ok((Box::new(client) as Box<dyn WorkerClient>, identity))
     });
 
-    // Initial spawn (also the caller's login proof), via the same factory.
-    let (client, identity) = spawn()?;
+    // The driver thread performs the initial spawn (login proof) too, so the
+    // worker process is parented to that persistent thread rather than this
+    // caller — which the daemon runs on a tokio `spawn_blocking` pool thread that
+    // is reaped after ~10s, tripping bwrap's `--die-with-parent` PDEATHSIG and
+    // SIGKILLing the worker (#348). Blocks until login; returns the bot identity.
+    let (channel, identity) = MatrixChannel::supervised_self_spawn(id, spawn)?;
 
-    Ok(SpawnedMatrixWorker {
-        channel: MatrixChannel::supervised(id, client, spawn),
-        identity,
-    })
+    Ok(SpawnedMatrixWorker { channel, identity })
 }
 
 #[cfg(test)]
@@ -782,6 +919,49 @@ mod tests {
         Event { conversation: "!room:srv".into(), peer: "@me:srv".into(), body: body.into() }
     }
 
+    #[test]
+    fn supervised_self_spawn_runs_initial_spawn_off_the_caller_thread() {
+        // The real #348 churn cause: the *initial* worker was forked on the
+        // caller's thread (a tokio `spawn_blocking` pool thread), which tokio
+        // reaps after ~10s idle → bwrap's `--die-with-parent` PR_SET_PDEATHSIG
+        // SIGKILLs the worker. `supervised_self_spawn` must fork the initial
+        // worker on the persistent driver thread instead, so capture the thread
+        // the factory runs on and prove it is NOT the caller's.
+        let caller = std::thread::current().id();
+        let spawn_thread: Arc<Mutex<Option<std::thread::ThreadId>>> = Arc::new(Mutex::new(None));
+        let st = spawn_thread.clone();
+        let factory: WorkerFactory = Box::new(move || {
+            *st.lock().unwrap() = Some(std::thread::current().id());
+            Ok((
+                Box::new(FakeWorker::new()) as Box<dyn WorkerClient>,
+                serde_json::json!({ "device_id": "d", "user_id": "u" }),
+            ))
+        });
+        let (_channel, identity) =
+            MatrixChannel::supervised_self_spawn(ChannelId("matrix".into()), factory)
+                .expect("initial spawn + login proof");
+        assert_eq!(identity["device_id"], "d", "identity from the first factory call is returned");
+        let observed = spawn_thread.lock().unwrap().expect("factory ran");
+        assert_ne!(
+            observed, caller,
+            "initial worker must be forked on the driver thread, not the caller's ephemeral one"
+        );
+    }
+
+    #[test]
+    fn supervised_self_spawn_propagates_initial_failure() {
+        // A failed initial spawn/login must surface as an Err to the caller (the
+        // login-proof contract `spawn_matrix_worker` relies on), not a silently
+        // dead channel.
+        let factory: WorkerFactory = Box::new(move || anyhow::bail!("login rejected"));
+        // Avoid `expect_err` (it would require `MatrixChannel: Debug` on the Ok arm).
+        let err = match MatrixChannel::supervised_self_spawn(ChannelId("matrix".into()), factory) {
+            Ok(_) => panic!("expected the initial failure to propagate"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("login rejected"), "got: {err}");
+    }
+
     #[tokio::test]
     async fn poll_events_surface_on_recv_in_order() {
         let worker = FakeWorker::new();
@@ -854,6 +1034,42 @@ mod tests {
         let mut ch = MatrixChannel::new(ChannelId("matrix".into()), Box::new(worker));
         // Driver exits on the poll error → inbound sender dropped → recv() None.
         assert!(ch.recv().await.is_none());
+    }
+
+    #[test]
+    fn death_report_surfaces_exit_status_and_stderr() {
+        // Drive a real short-lived child (writes to stderr, exits non-zero — the
+        // shape of a worker death) through `ProtocolWorkerClient::with_stderr`
+        // exactly as `spawn_worker_client` does, and assert the death report names
+        // both the exit status and the captured stderr (#348). Hermetic: no
+        // sandbox, no PG, no homeserver — just the protocol pipe + stderr drain.
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo worker-boom >&2; exit 3")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let pid = child.id();
+        let tail =
+            crate::worker_stderr::spawn_drain_with_tail(pid, child.stderr.take().expect("stderr"));
+        let client = Client::from_child(child).expect("wrap child");
+        let mut worker = ProtocolWorkerClient::with_stderr(client, tail);
+
+        // The stderr drain runs on a background thread; poll the (idempotent)
+        // report until the captured line lands, bounded so a regression can't hang.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let report = loop {
+            let report = worker.death_report().expect("real client yields a report");
+            if report.contains("worker-boom") || std::time::Instant::now() >= deadline {
+                break report;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        assert!(report.contains("exit status: 3"), "exit status missing: {report}");
+        assert!(report.contains("worker-boom"), "stderr tail missing: {report}");
     }
 
     #[tokio::test]
