@@ -6,7 +6,28 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-24 (**Close the Matrix inbound-loss window on worker respawn — [#321](https://github.com/hherb/kastellan/issues/321)
+**Last updated:** 2026-06-24 (**Matrix-worker seccomp/Landlock enforcement flip — DONE + DEPLOYED on branch
+`feat/matrix-worker-sandbox-enforcement` (PR pending).** Flipped `KASTELLAN_MATRIX_ENFORCE_SANDBOX` default 0→1.
+**The headline finding (not what the task assumed):** the matrix-worker seccomp filter was a **no-op even when "enforced"** —
+the prelude's `apply_filter` omits `SECCOMP_FILTER_FLAG_TSYNC`, so it bound only to the *calling* (main) thread, while
+`LiveSdk` runs all SDK work on a multi-thread `tokio` runtime + sync task spawned during the pre-lockdown network init. DGX
+`/proc/<pid>/task/*/status` proof: main thread `Seccomp:2`, **all ~20 `tokio-rt-worker` threads `Seccomp:0`**. **Fix #1
+(`fix(prelude)`):** `apply()` now uses `apply_filter_all_threads` (TSYNC) → all 21 threads `Seccomp:2` (DGX-confirmed); safe +
+uniform for every worker (single-threaded ones are unaffected; closes the same latent gap for any future in-process
+multi-thread worker). **Fix #2 (`feat(matrix)`):** new `Profile::WorkerMatrixClient` / seccomp `matrix_client` = `net_client`
++ **`MATRIX_CLIENT_ADDITIONS=[ftruncate]`** — the SQLite crypto-store WAL-checkpoint truncate matrix-sdk needs on a long-lived
+connection, enumerated 3 ways on the DGX (kill-mode SIGSYS on `syscall=46` from a `tokio-rt-worker`; `SECCOMP_RET_LOG` showed
+*only* 46 beyond net_client; +ftruncate → 50s survival, 0 denials). Wired through `derive_lockdown_env` +
+`build_matrix_policy`; install default flipped to `=1` (`0` stays an operator debug escape hatch). **Verification:** prelude
+41/0 (+5 matrix_client units), core `lockdown_env` 12/0 / `channel::matrix` 14/0 / `install::plan` 15/0, clippy clean (incl.
+`--features live-matrix`). **DEPLOYED to the DGX** (build-release + install regenerating env with `=1` + restart): channel
+logged in via session restore (device `xA31CsGn82`, **no relogin** — no SDK bump) + `matrix channel bus running`, worker stable
+≥4 min under `matrix_client` + Landlock, **0 seccomp + 0 Landlock audit records**. **Caveat surfaced, NOT mine:** the worker
+dies+respawns periodically (~20–90s in bursts) — **pre-existing** (present under `=0` before deploy, 0 seccomp/Landlock
+records, cause swallowed by the jail) → filed **[#348](https://github.com/hherb/kastellan/issues/348)** (likely the sync-task
+teardown crypto-store `process::exit(1)` race). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-24-matrix-worker-sandbox-enforcement*`.)
+
+_(Prior session — **Close the Matrix inbound-loss window on worker respawn — [#321](https://github.com/hherb/kastellan/issues/321)
 DONE on branch `feat/321-matrix-downtime-loss-window` (PR #347).** PR #320's self-healing `MatrixChannel::supervised` respawn
 made the channel silently lossy for the worker's downtime: a message a user DM'd the bot while the worker was down arrived in the
 respawned worker's catch-up sync and was dropped by the `live` gate (`workers/matrix/src/sdk_live.rs`), which suppresses the
@@ -32,7 +53,7 @@ received the downtime message" assertion after the full 45s deadline. **Test-rob
 check no longer asserts a *clean* exit — #321 covers downtime of any cause incl. a crash, the token persists incrementally during
 sync, and the worker's sync task can race teardown into a transient crypto-store abort (`process::exit(1)`); the test now waits
 for exit and logs the status without gating on it. Pure-Rust, `live-matrix`-gated. Spec/plan:
-`docs/superpowers/{specs,plans}/2026-06-23-matrix-downtime-loss-window*`.)
+`docs/superpowers/{specs,plans}/2026-06-23-matrix-downtime-loss-window*`.)_
 
 _(Prior session — **Clearer injection-blocked signal to the planner — [#340](https://github.com/hherb/kastellan/issues/340)
 DONE on branch `feat/340-injection-blocked-note` (PR #346).** Final follow-up of the #338 arc. When `tool_host::dispatch`
@@ -637,7 +658,7 @@ kastellan (Rust workspace, 17 crates [core, db, leak-scan, llm-router, sandbox, 
 ├── supervisor         kastellan-supervisor: SystemdUser (Linux; driver in systemd_user.rs + pure builders re-exported from systemd_user/builder.rs) + LaunchAgents (macOS) + specs::{core_service_spec, postgres_service_spec, kastellan_target_spec} + default_probe. ServiceSpec carries after/part_of ordering + optional restart_backoff (RestartBackoff{max_delay_sec,steps}: systemd → RestartSteps/RestartMaxDelaySec, launchd → warn-and-ignore); TargetSpec + Supervisor::{install,start,stop,uninstall}_target (default = generic bundle for launchd; SystemdUser overrides with a native kastellan.target unit). Names screened by validate_service_name before unit-file write
 ├── protocol           kastellan-protocol: JSON-RPC 2.0 over stdio (working)
 ├── tests-common       kastellan-tests-common: shared dev-dep crate (publish = false) — PgCluster + bring_up_pg_cluster(+_with_timeout), RAII guards, skip helpers, sandbox factory, binary discovery (+ `cli_command` env-clear'd operator-CLI builder), **`daemon.rs` (MockLlm/spawn_inert_mock inert-503 LLM + parameterised bring_up_daemon + DaemonHandle/DaemonGuards + assert_cli_success/assert_cli_failure — shared by the cli_memory_l3*_run_daemon_e2e suites; deliberately core-free)**, macOS launchd serial lock (reentrant), deterministic SHA-256-seeded embedding seed. Consumed only from [dev-dependencies]; never linked into a runtime binary.
-├── workers/prelude      kastellan-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS) + cross-platform setrlimit(RLIMIT_CPU). Landlock derives BOTH RW (from fs_write) and RO (from fs_read, env KASTELLAN_LANDLOCK_RO) rules so net workers can read /etc/resolv.conf in-jail; **`KASTELLAN_LANDLOCK_PROFILE=none` skips the Landlock layer** (additive, `LandlockReport::Disabled`; supported opt-out but **no current worker sets it** — both browser-driver and gliner-relex now run Landlock-active, #281 fully closed). 2 bins: `kastellan-lockdown-probe` (test fixture; + `raw-getpid`/`raw-unshare` pre-lockdown subcommands) and **`kastellan-worker-lockdown-exec`** (#281 — production exec-shim: `rlimit::apply_from_env()` → `lock_down()` → `execve(target)`; the target inherits seccomp under `NO_NEW_PRIVS`; gives pure-Python venv workers worker-side Linux seccomp since bwrap spawns them directly, bypassing the Rust prelude — used by browser-driver AND gliner-relex). seccomp `Profile` {Strict | NetClient | BrowserClient | **MlClient**}: `browser_client` ADDITIONS include `capget`+`capset` (Playwright-Node + Chromium-zygote); **`ml_client` = `net_client` + `ML_CLIENT_ADDITIONS` {mbind, get_mempolicy, mlock, munlock, mknodat}** (torch/CUDA-probe/NUMA, DGX-enumerated via the kill-mode/`journalctl -k` loop; all DGX-confirmed load-bearing)
+├── workers/prelude      kastellan-worker-prelude: Linux-only Landlock + seccomp lock_down (no-op on macOS) + cross-platform setrlimit(RLIMIT_CPU). Landlock derives BOTH RW (from fs_write) and RO (from fs_read, env KASTELLAN_LANDLOCK_RO) rules so net workers can read /etc/resolv.conf in-jail; **`KASTELLAN_LANDLOCK_PROFILE=none` skips the Landlock layer** (additive, `LandlockReport::Disabled`; supported opt-out but **no current worker sets it** — both browser-driver and gliner-relex now run Landlock-active, #281 fully closed). 2 bins: `kastellan-lockdown-probe` (test fixture; + `raw-getpid`/`raw-unshare` pre-lockdown subcommands) and **`kastellan-worker-lockdown-exec`** (#281 — production exec-shim: `rlimit::apply_from_env()` → `lock_down()` → `execve(target)`; the target inherits seccomp under `NO_NEW_PRIVS`; gives pure-Python venv workers worker-side Linux seccomp since bwrap spawns them directly, bypassing the Rust prelude — used by browser-driver AND gliner-relex). seccomp `Profile` {Strict | NetClient | BrowserClient | **MlClient** | **MatrixClient**}: `browser_client` ADDITIONS include `capget`+`capset` (Playwright-Node + Chromium-zygote); **`ml_client` = `net_client` + `ML_CLIENT_ADDITIONS` {mbind, get_mempolicy, mlock, munlock, mknodat}** (torch/CUDA-probe/NUMA, DGX-enumerated via the kill-mode/`journalctl -k` loop; all DGX-confirmed load-bearing); **`matrix_client` = `net_client` + `MATRIX_CLIENT_ADDITIONS` {ftruncate}** (matrix-sdk SQLite WAL-checkpoint truncate, DGX-enumerated). **The filter is installed with `SECCOMP_FILTER_FLAG_TSYNC` (`apply_filter_all_threads`)** so it covers EVERY thread, not just the caller — required for any worker already multi-threaded at `lock_down()` time (the live Matrix worker's `tokio` runtime + sync task are spawned during pre-lockdown network init; without TSYNC the filter was a no-op on the SDK threads — DGX-found 2026-06-24)
 ├── workers/shell-exec   kastellan-worker-shell-exec: uses prelude::serve_stdio
 ├── workers/web-common   kastellan-worker-web-common: shared lib for net-egress workers. allowlist.rs (HostAllowlist: host-only `from_env_json`/`is_allowed` + **port-scoped `from_endpoints`/`is_allowed_endpoint`/`is_port_scoped`** [host:port, IPv6-aware — #241]) + http.rs (HttpGet seam [+`transport_kind`] + RawResponse + ReqwestGet + **env-selected `make_get` factory**) + proxy_connect.rs (**ProxyConnectGet**: CONNECT-over-UDS HttpGet, hyper+tokio-rustls/ring, end-to-end TLS — used when `KASTELLAN_EGRESS_PROXY_UDS` set) + testing.rs (FakeGet, `testing` feature). Consumed by web-fetch + web-search + egress-proxy.
 ├── workers/web-fetch    kastellan-worker-web-fetch: first net-egress worker. HTTPS-only web.fetch JSON-RPC method. Consumes HostAllowlist + the HttpGet transport from web-common. extract.rs (HTML readability via dom_smoothie / PDF via pdf-extract / text+JSON, char-boundary text cap) + fetch.rs (the drive() redirect-follow loop — strict https-only per hop, 5-redirect cap) + handler.rs (web.fetch dispatch). Host-side manifest in core/src/workers/web_fetch.rs
@@ -859,21 +880,18 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (#340, branch `feat/340-injection-blocked-note`, PR #346):** the `tool_host` injection-blocked placeholder now
-carries a human-readable `note` string leaf (`WITHHELD_NOTE`, pure `injection_placeholder.rs`) so the planner gets an
-intelligible "content withheld" signal, not a bare reason-code; planner prompt + threat-model (incl. the split-slice screening
-limitation) updated. See the "Last updated" header. **The whole #338 planner-feedback arc is now complete** (#337 error-half →
-#338 success-half → #343 sink-screen → #339 global budget → #340 clear signal). The DGX is on `main`@`447767a`; #339 (`8fa67f9`)
-and this branch are not yet deployed (no operator gate — neither change can loop or block; #339 bounds prompt size, #340 only
-adds a string field).
+**Just shipped (matrix-worker sandbox enforcement, branch `feat/matrix-worker-sandbox-enforcement`, PR pending + DEPLOYED):**
+flipped `KASTELLAN_MATRIX_ENFORCE_SANDBOX` 0→1; the headline was that the matrix seccomp filter was a no-op (TSYNC gap, fixed in
+the prelude) + a new `matrix_client` profile (`net_client`+`ftruncate`). See the "Last updated" header. Filed
+[#348](https://github.com/hherb/kastellan/issues/348) for the pre-existing periodic worker die/respawn (not seccomp/Landlock).
 
 **★ LEADING PICK — model-side perf (no code task): reduce the planner `num_ctx`.** ~86s/plan is gemma 26B on the DGX Spark with a
 262144-token context; reducing the model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which
-forces a reload) is the cheapest live latency win now that the feedback arc is closed. Operator action on the DGX.
+forces a reload) is the cheapest live latency win. Operator action on the DGX.
 
 **Code picks (operator's choice — each ~one session):**
-- **Matrix-worker seccomp/Landlock enforcement flip** (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today) — needs DGX syscall
-  enumeration like the #281 arc (kill-mode + `journalctl -k`, see memory note); larger.
+- **[#348](https://github.com/hherb/kastellan/issues/348) matrix-worker die/respawn instability** — surface the jailed worker's
+  swallowed exit cause to the daemon log + fix the sync-task teardown crypto-store `process::exit(1)` race (`sdk_live.rs`).
 - **`tool_host.rs` prod-split** (now 667 LOC, the leading over-cap candidate) — lift `dispatch_with_sink`'s post-processing
   (scrub + injection screen + audit-emission arms) into a `tool_host/post_process.rs` sibling; tests already external under
   `tool_host/`.
@@ -888,9 +906,10 @@ forces a reload) is the cheapest live latency win now that the feedback arc is c
 semantic lane); (2) a **batch-embed seam** so the backfill + forward loops embed N entities per round-trip instead of one
 `embed_for_storage` call each (sequential today; cheap to add behind the `Embedder` trait if embed latency becomes a recall-path
 cost). **Open Matrix-hardening picks (residual follow-ups):**
-(~~#321 inbound-loss window on respawn~~ — **DONE 2026-06-24**, sync-token-gated recovery; see header);
-the matrix-worker **seccomp/Landlock enforcement** flip (`KASTELLAN_MATRIX_ENFORCE_SANDBOX=0` today; needs DGX
-syscall enumeration like the #281 arc — larger). **Pre-existing test-infra debt surfaced this session:** the full serialized
+(~~#321 inbound-loss window on respawn~~ — **DONE 2026-06-24**, sync-token-gated recovery);
+(~~matrix-worker seccomp/Landlock enforcement flip~~ — **DONE + DEPLOYED 2026-06-24**, `matrix_client` profile + the prelude
+TSYNC fix; see header); residual: **[#348](https://github.com/hherb/kastellan/issues/348)** periodic worker die/respawn.
+**Pre-existing test-infra debt:** the full serialized
 `cargo test --workspace` live run wedges on `memory_layers_e2e` (0-CPU pool deadlock under heavy multi-cluster live-PG load —
 the documented sqlx-0.9 env issue); worth a focused isolation + `Pool::close()`/`PgListener` audit (cf. the #332 variant-D
 deadlock test).
