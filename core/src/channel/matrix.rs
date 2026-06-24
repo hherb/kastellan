@@ -325,7 +325,8 @@ impl Channel for MatrixChannel {
 ///
 /// - `Net::Allowlist([homeserver_host:443])` — the worker reaches only the
 ///   homeserver (via the egress proxy when `proxy_uds` is set).
-/// - `Profile::WorkerNetClient` — outbound HTTPS via the proxy.
+/// - `Profile::WorkerMatrixClient` — outbound HTTPS via the proxy, plus the
+///   matrix-rust-sdk SQLite-store seccomp additions (`matrix_client`).
 /// - `fs_read`: the worker binary + the resolver config files (DNS in-jail) +
 ///   the system CA trust store (matrix-sdk 0.18 validates homeserver TLS against
 ///   it) + the egress CA when force-routed.
@@ -369,7 +370,7 @@ pub fn build_matrix_policy(
         net: Net::Allowlist(vec![format!("{homeserver_host}:{homeserver_port}")]),
         cpu_ms: 0, // long-lived; no per-process CPU cap (bounded by cgroup/quota)
         mem_mb: 512,
-        profile: Profile::WorkerNetClient,
+        profile: Profile::WorkerMatrixClient,
         cpu_quota_pct: None,
         tasks_max: None,
         env: Vec::new(), // spawn fills env (homeserver/user/secret refs) at Phase D
@@ -411,7 +412,8 @@ impl MatrixConfig {
 /// - `KASTELLAN_MATRIX_USER` (required) — e.g. `@kastellan:matrix.kastellan.dev`.
 /// - `KASTELLAN_MATRIX_STORE` (optional) — default `<state>/matrix/store`.
 /// - `KASTELLAN_MATRIX_WORKER_BIN` (optional) — default `exe_dir/kastellan-worker-matrix`.
-/// - `KASTELLAN_MATRIX_ENFORCE_SANDBOX` (optional, default on) — `0`/`false` disables.
+/// - `KASTELLAN_MATRIX_ENFORCE_SANDBOX` (optional, default on — `matrix_client`
+///   seccomp [TSYNC'd] + Landlock) — `0`/`false` is the operator debug opt-out.
 ///
 /// `password` is `None`: the daemon relies on the worker's persisted
 /// `session.json` (do the one-time initial login with `kastellan-cli matrix
@@ -531,8 +533,10 @@ pub struct MatrixSpawnConfig {
     pub password: Option<String>,
     /// Optional device display name.
     pub device_name: Option<String>,
-    /// When `false`, the worker runs with seccomp + Landlock disabled — for
-    /// first-bring-up / SDK-correctness smoke runs. Production passes `true`.
+    /// When `false`, the worker runs with seccomp + Landlock disabled — an
+    /// operator debug escape hatch (or SDK-correctness smoke runs). Production
+    /// passes `true` (the install default): the worker then runs under the
+    /// `matrix_client` seccomp profile (TSYNC'd across all threads) + Landlock.
     pub enforce_sandbox: bool,
 }
 
@@ -893,7 +897,7 @@ mod tests {
             Some(PathBuf::from("/run/ca.pem")),
         );
         assert!(matches!(p.net, Net::Allowlist(ref v) if v == &["matrix.example.org:443"]));
-        assert!(matches!(p.profile, Profile::WorkerNetClient));
+        assert!(matches!(p.profile, Profile::WorkerMatrixClient));
         assert_eq!(p.fs_write, vec![PathBuf::from("/var/lib/kastellan/matrix/store")]);
         assert!(p.fs_read.contains(&PathBuf::from("/run/ca.pem")));
         assert!(p.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));

@@ -177,8 +177,11 @@ items unlock later ones.
   down/respawning~~ **FIXED 2026-06-24 ([#321](https://github.com/hherb/kastellan/issues/321)):** on restart the worker reads
   the SDK's persisted sync token and surfaces the incremental catch-up backlog (the downtime messages) instead of
   suppressing it; a fresh login (no token) still suppresses full-history replay (`sdk_live.rs` `initial_live_state` +
-  `read_prior_sync_token`). Remaining: enable worker
-  seccomp/Landlock (`ENFORCE_SANDBOX=0` today) + egress force-routing coupling (direct `--share-net` now); in-daemon password
+  `read_prior_sync_token`). ~~enable worker seccomp/Landlock (`ENFORCE_SANDBOX=0`)~~ **DONE + DEPLOYED 2026-06-24:**
+  default flipped to `=1`; new `matrix_client` seccomp profile (`net_client`+`ftruncate`) + a prelude **TSYNC fix**
+  (`apply_filter_all_threads`) — the filter was previously a no-op binding only the main thread, leaving the `tokio` pool
+  unfiltered; residual periodic worker die/respawn tracked in [#348](https://github.com/hherb/kastellan/issues/348). Remaining:
+  egress force-routing coupling (direct `--share-net` now); in-daemon password
   materialize (keyring sync-init); ~~embedding dim mismatch (768 vs 1024 → recall degrades)~~ **FIXED 2026-06-20**
   (migration 0019: `EMBEDDING_DIM` 1024→**256**, embeddinggemma Matryoshka-truncated client-side via
   `db::memories::truncate_to_embedding_dim`; ~4× less embedding storage + faster ANN; recall semantic lane live again);

@@ -213,7 +213,7 @@ pub fn build_container_argv(
         // root + tmpfs /tmp + dropped caps + low-priv user). The browser-
         // specific Seatbelt/seccomp widening is applied by the host backends,
         // not the container backend.
-        Profile::WorkerNetClient | Profile::WorkerBrowserClient => {
+        Profile::WorkerNetClient | Profile::WorkerBrowserClient | Profile::WorkerMatrixClient => {
             argv.push("--cap-drop".into());
             argv.push("ALL".into());
             argv.push("--user".into());

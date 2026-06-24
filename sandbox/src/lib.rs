@@ -48,6 +48,14 @@ pub enum Profile {
     /// no per-syscall layer and the worker is net-denied). See the
     /// gliner-relex Linux-seccomp design spec (2026-06-16) and issue #281.
     WorkerMlClient,
+    /// For the long-lived `matrix` channel worker: the `WorkerNetClient` syscall
+    /// set **plus** the matrix-rust-sdk SQLite-store additions (Linux seccomp
+    /// `matrix_client` — today just `ftruncate`, empirically enumerated on the
+    /// DGX). `Net::Allowlist` (homeserver only). On macOS this renders
+    /// identically to `WorkerNetClient` (Seatbelt has no per-syscall layer);
+    /// only the Linux seccomp layer differs. See the design spec
+    /// (2026-06-24) for the enumeration + the TSYNC requirement.
+    WorkerMatrixClient,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
