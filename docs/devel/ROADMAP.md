@@ -343,7 +343,26 @@ items unlock later ones.
     45/0, core lib green, clippy `-D warnings` clean, `python_exec_e2e` 5/5 (live 100 KiB file-channel round-trip),
     `cli_memory_l3py_run_daemon_e2e` 5/5 (daemon-path file-channel delivery). Also fixed a pre-existing Linux-latent
     clobber-proof test (CPython PEP 538 `LC_CTYPE`). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-18-python-exec-scratch-file-param-channel*`.
-  - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
+  - [x] **macOS micro-VM mode — DONE 2026-06-25** (branch `feat/python-exec-macos-microvm`). Opt-in
+    `KASTELLAN_PYTHON_EXEC_USE_CONTAINER=1` routes python-exec (the arbitrary-agent-code worker) through the existing
+    `MacosContainer` Apple-`container` micro-VM on macOS: a **separate-kernel** boundary + an actually-enforced `mem_mb:512`
+    (Seatbelt can't enforce memory — the parity gap closed; verified a 900 MiB alloc → `MemoryError`). macOS-gated
+    `container_mode_entry` (`#[cfg(target_os="macos")]`, issue-#144 rule) + `USE_CONTAINER`/`IMAGE` resolver short-circuit;
+    `Net::Deny`+`WorkerStrict`+`mem_mb:512` flow to `--read-only --cap-drop ALL --user nobody --network none --tmpfs /tmp -m 512M`.
+    Image via `workers/python-exec/Containerfile` + `scripts/workers/python-exec/build-image.sh` (cross-builds the worker in a
+    bind-mounted `rust:1-slim-bookworm` container with the host cargo cache + `--offline`, then a lone-file-context
+    `python:3.12-slim-bookworm` runtime image — Apple `container` BuildKit can't transfer the workspace as a context; the two
+    bases are PINNED to the same Debian suite so build-glibc == runtime-glibc). Linux unchanged (bwrap stays the baseline; a Linux
+    micro-VM is a future `SandboxBackendKind::FirecrackerVm`). In-VM caveat: Apple guest kernel lacks Landlock (`KernelTooOld`) — the
+    VM + container flags are the primary boundary, in-VM seccomp/Landlock are defense-in-depth on top. Verified macOS: container e2e
+    4/0 real (incl. >64 KiB params file-channel round-trip), python_exec lib 22/0, host `python_exec_e2e` 5/0, workspace clippy
+    `-D warnings` clean. **Review fixes (PR #355):** GLIBC base-image pin (above), an executed in-image binary smoke-check in
+    build-image.sh, the file-channel e2e; resolve-time image-existence parity tracked as
+    [#356](https://github.com/hherb/kastellan/issues/356). Spec/plan:
+    `docs/superpowers/{specs,plans}/2026-06-25-python-exec-macos-microvm*`.
+  - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; warm/idle container lifecycle for
+    python-exec (it's `SingleUse` → ~0.7s warm-VM spawn per call; an `IdleTimeout` warm slot would amortise it, like gliner);
+    Linux micro-VM backend (`FirecrackerVm`/Kata, the DGX-production one — a multi-session arc); planner-prompt surfacing
     (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
   - [x] **Slice 1 — crystallise + approval + operator CLI — 2026-06-13** (branch `feat/python-exec-skill-catalog`,
