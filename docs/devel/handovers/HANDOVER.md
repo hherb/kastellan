@@ -6,7 +6,7 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-25 (**python-exec macOS micro-VM mode — DONE on branch `feat/python-exec-macos-microvm` (PR pending).**
+**Last updated:** 2026-06-25 (**python-exec macOS micro-VM mode — DONE on branch `feat/python-exec-macos-microvm` (PR #355).**
 Phase-4 slice: `python-exec` (the worker that runs arbitrary agent-authored Python) can now opt into the existing `MacosContainer`
 micro-VM on macOS via **`KASTELLAN_PYTHON_EXEC_USE_CONTAINER=1`** — closing the macOS `mem_mb` parity gap (Seatbelt can't enforce
 memory; the VM does, verified) and giving arbitrary code a **separate-kernel** boundary. **Linux is unchanged** (stays on bwrap +
