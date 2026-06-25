@@ -126,22 +126,24 @@ than host mode:
   (**now enforced** — the payoff; 512 > the 200 MiB container floor),
   `cpu_quota_pct`/`tasks_max`: kept on the policy for parity though Apple
   `container` doesn't enforce them yet (same acknowledged gap as gliner).
-* `wall_clock_ms: Some(30_000)`, `lifecycle: SingleUse`, `ephemeral_scratch: true`.
+* `wall_clock_ms: Some(30_000)`, `lifecycle: SingleUse`, `ephemeral_scratch: false`.
 
 The resolver gains a `use_container` branch selecting `container_mode_entry`
 vs the existing `python_exec_entry`, gated on macOS.
 
 ### 4. Writable scratch / param-file channel in the VM
 
-Reuse the existing `ephemeral_scratch: true` + `fs_write` machinery: the host
-per-spawn scratch dir is bound **read-write** into the VM (`build_container_argv`
-maps `fs_write` → a non-`readonly` bind at `source=<P>,target=<P>`),
-`KASTELLAN_WORKER_SCRATCH` points at it, so `params.json` (>64 KiB params) and
-authored scratch writes keep working even under the container's `--read-only`
-root. **Planning task:** verify `tool_host`'s `prepare_ephemeral_scratch` runs
-for `Container`-backed entries (it should be backend-agnostic — it prepares a
-host dir + adds it to `fs_write`); if it short-circuits on backend, that's a
-small fix folded into this slice.
+**No host scratch bind, no `ephemeral_scratch`.** `build_container_argv`
+already adds `--tmpfs /tmp` for the `WorkerStrict` profile (verified
+2026-06-25, `macos_container.rs:209`), so even under `--read-only` root the
+in-VM `/tmp` is a writable tmpfs — exactly mirroring Linux host mode (bwrap's
+per-spawn `/tmp` tmpfs). The worker's `scratch_dir_from_env` falls back to
+`SCRATCH_DIR = "/tmp"` when `KASTELLAN_WORKER_SCRATCH` is unset, so
+`params.json` (>64 KiB params) and authored scratch writes land in the in-VM
+tmpfs with **zero** new plumbing. Therefore container mode sets
+`ephemeral_scratch: false` and does **not** set `KASTELLAN_WORKER_SCRATCH`
+(the macOS host-dir mechanism is a Seatbelt-only need; the VM has its own
+tmpfs). `tool_host` is untouched.
 
 ### 5. Lifecycle
 
@@ -159,11 +161,11 @@ core dispatch ── python.exec {code, params}
   ▼
 MacosContainer.spawn_under_policy
   container run --rm -i --init --read-only --cap-drop ALL --user nobody
-    --network none -m 512M
-    --mount type=bind,source=<scratch>,target=<scratch>          (RW)
+    --network none -m 512M --tmpfs /tmp          (writable in-VM tmpfs)
     <image> /usr/local/bin/kastellan-worker-python-exec
   ▼  (inside the Linux micro-VM)
 worker (JSON-RPC over stdio) → python3 -I -S -B -  (code piped on stdin)
+    params.json (>64 KiB) → /tmp/params.json on the in-VM tmpfs
   ▼
 {exit_code, stdout, stderr, *_truncated} ── back over stdio ── core
   ▼  output secret-scrub + injection screen (unchanged, host-side in core)
@@ -213,6 +215,7 @@ before the PR.
 * `scripts/workers/python-exec/build-image.sh` (new)
 * `core/src/workers/python_exec.rs` (edit: env knobs + `container_mode_entry` + resolver branch + tests)
 * `core/tests/python_exec_container_e2e.rs` (new)
-* possibly `core/src/tool_host/scratch.rs` (only if `prepare_ephemeral_scratch`
-  isn't backend-agnostic)
 * docs: HANDOVER.md + ROADMAP.md at session end
+
+(`tool_host` is **not** touched — container mode uses the in-VM `--tmpfs /tmp`,
+no host scratch bind.)
