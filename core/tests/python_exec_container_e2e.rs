@@ -130,14 +130,11 @@ async fn container_enforces_mem_cap() {
     // Seatbelt host mode this would succeed (the parity gap this closes).
     let code = "x = bytearray(900 * 1024 * 1024); print(len(x))";
     let out = run_in_container(code).await;
-    // Killed by the cgroup/OOM inside the VM → non-zero exit and no success
-    // print. exit_code may be null (signal-killed) or a positive integer —
-    // the constraint is: not zero.
-    assert_ne!(
-        out["exit_code"],
-        serde_json::Value::Number(serde_json::Number::from(0)),
-        "expected non-zero exit on OOM, got: {out}"
-    );
+    // OOM kill manifests either as JSON null (SIGKILL from the cgroup killer —
+    // status.code() is None) or a non-zero exit. Accept both; reject a clean 0.
+    let exit_is_kill = out["exit_code"].is_null()
+        || out["exit_code"].as_i64().is_some_and(|c| c != 0);
+    assert!(exit_is_kill, "expected an OOM-kill exit (null or non-zero), got: {out}");
     let stdout = out["stdout"].as_str().unwrap_or_default();
     assert!(
         !stdout.contains(&(900 * 1024 * 1024).to_string()),
@@ -160,6 +157,20 @@ except Exception as e:
     print('blocked', file=sys.stderr)
 ";
     let out = run_in_container(code).await;
+    // `--network none` in the VM kills the process before Python's try/except can
+    // catch anything (exit_code is null — signal-killed — and both stdout/stderr are
+    // empty). We assert two things:
+    //   1. The worker did NOT exit cleanly (null or non-zero) — proves the network
+    //      block actually fired, not a no-op that left us with vacuous !CONNECTED.
+    //   2. stdout contains no "CONNECTED" — the direct containment guard.
+    // A vacuous pass (Python never ran at all) would still be caught because the
+    // test itself would have returned an Err from dispatch, not an Ok with null exit.
+    let net_was_blocked = out["exit_code"].is_null()
+        || out["exit_code"].as_i64().is_some_and(|c| c != 0);
+    assert!(
+        net_was_blocked,
+        "expected network block to kill the worker (null or non-zero exit), got: {out}"
+    );
     let stdout = out["stdout"].as_str().unwrap_or_default();
     assert!(!stdout.contains("CONNECTED"), "network must be denied: {out}");
 }
