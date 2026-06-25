@@ -1,0 +1,35 @@
+# workers/python-exec/Containerfile
+#
+# Runtime image for the python-exec worker, consumed by the macOS
+# `MacosContainer` SandboxBackend (Phase 4 micro-VM mode). Operator-built via
+# scripts/workers/python-exec/build-image.sh; NOT used on Linux (LinuxBwrap
+# stays the per-OS default there).
+#
+# SINGLE STAGE BY DESIGN — the worker is a Rust binary, but it is NOT compiled
+# here. scripts/workers/python-exec/build-image.sh cross-builds it for the
+# guest arch in a bind-mounted `rust` container (reusing the HOST cargo cache,
+# `--offline`) and stages ONLY that one prebuilt binary as this build's
+# context. Two Apple-`container` BuildKit limitations forced this split:
+#   * its FileSync cannot transfer the multi-GB workspace as a build context
+#     (a multi-stage in-image `cargo build` never receives its sources — the
+#     context arrives as ~2 bytes);
+#   * the in-image network can't reach crates.io reliably (curl timeouts).
+# The host cross-build over a bind mount + `--offline` sidesteps both. The
+# context for THIS image is therefore a lone-file dir holding just the binary,
+# and `COPY . /usr/local/bin/` installs it. (Apple container's
+# `COPY <named-file>` is itself unreliable; `COPY .` over a lone-file context
+# is not — hence the lone-file contract enforced by build-image.sh.)
+#
+# Layout notes:
+#   * python:3.12-slim runtime — the image's own /usr/local/bin/python3 is the
+#     interpreter the worker drives (the manifest injects
+#     KASTELLAN_PYTHON_EXEC_PYTHON=/usr/local/bin/python3).
+#   * NO ENTRYPOINT — the MacosContainer backend appends the manifest `binary`
+#     verbatim as the container program, so the worker runs directly as
+#     /usr/local/bin/kastellan-worker-python-exec.
+#   * USER nobody — defense-in-depth complement to build_container_argv's
+#     policy-driven `--user nobody`.
+
+FROM python:3.12-slim
+COPY . /usr/local/bin/
+USER nobody
