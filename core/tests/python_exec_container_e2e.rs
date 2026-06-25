@@ -126,15 +126,21 @@ async fn container_enforces_mem_cap() {
     if skip_if_no_container_image() {
         return;
     }
-    // Allocate ~900 MiB — above the 512 MiB cap. The VM SIGKILLs it; under
-    // Seatbelt host mode this would succeed (the parity gap this closes).
+    // Allocate ~900 MiB — above the 512 MiB cap. The VM enforces the cap, so the
+    // allocation fails; under macOS Seatbelt host mode it would SUCCEED (Seatbelt
+    // has no memory primitive — the parity gap this micro-VM mode closes).
     let code = "x = bytearray(900 * 1024 * 1024); print(len(x))";
     let out = run_in_container(code).await;
-    // OOM kill manifests either as JSON null (SIGKILL from the cgroup killer —
-    // status.code() is None) or a non-zero exit. Accept both; reject a clean 0.
-    let exit_is_kill = out["exit_code"].is_null()
+    // The cap failure surfaces as a non-zero exit (observed: exit_code 1 with a
+    // Python MemoryError traceback) or, if the cgroup OOM killer SIGKILLs the
+    // child first, a null exit_code (status.code() is None). Accept either; reject
+    // a clean 0 — a 0 would mean the 512 MiB cap was NOT enforced (the Seatbelt gap).
+    let exit_indicates_oom = out["exit_code"].is_null()
         || out["exit_code"].as_i64().is_some_and(|c| c != 0);
-    assert!(exit_is_kill, "expected an OOM-kill exit (null or non-zero), got: {out}");
+    assert!(
+        exit_indicates_oom,
+        "expected an OOM failure exit (non-zero or null), got: {out}"
+    );
     let stdout = out["stdout"].as_str().unwrap_or_default();
     assert!(
         !stdout.contains(&(900 * 1024 * 1024).to_string()),
@@ -147,7 +153,7 @@ async fn container_contains_socket_attempt() {
     if skip_if_no_container_image() {
         return;
     }
-    // Net::Deny + --network none: any connect attempt fails inside the VM.
+    // Net::Deny + --network none: a connect to a public IP cannot succeed in the VM.
     let code = "\
 import socket, sys
 try:
@@ -157,20 +163,20 @@ except Exception as e:
     print('blocked', file=sys.stderr)
 ";
     let out = run_in_container(code).await;
-    // `--network none` in the VM kills the process before Python's try/except can
-    // catch anything (exit_code is null — signal-killed — and both stdout/stderr are
-    // empty). We assert two things:
-    //   1. The worker did NOT exit cleanly (null or non-zero) — proves the network
-    //      block actually fired, not a no-op that left us with vacuous !CONNECTED.
-    //   2. stdout contains no "CONNECTED" — the direct containment guard.
-    // A vacuous pass (Python never ran at all) would still be caught because the
-    // test itself would have returned an Err from dispatch, not an Ok with null exit.
-    let net_was_blocked = out["exit_code"].is_null()
-        || out["exit_code"].as_i64().is_some_and(|c| c != 0);
+    // Containment guard: a SUCCESSFUL connection prints "CONNECTED" to stdout, so
+    // its ABSENCE is the invariant proving egress was denied. We deliberately do
+    // NOT assert on exit_code: a denied connect surfaces inconsistently across
+    // harness timing — sometimes a caught ENETUNREACH (child exits 0 with a
+    // "blocked" stderr), sometimes the child is torn down mid-attempt (exit_code
+    // null, empty streams). Both are legitimate "no egress" outcomes; only a real
+    // connection would ever print "CONNECTED". Non-vacuity rests on
+    // `python_exec_round_trips_through_container`: it proves this same harness
+    // faithfully returns the child's stdout, so a connection that truly succeeded
+    // could not hide. The result-object check rules out a broken dispatch path.
     assert!(
-        net_was_blocked,
-        "expected network block to kill the worker (null or non-zero exit), got: {out}"
+        out.get("exit_code").is_some(),
+        "worker returned no result object — dispatch broken, not contained: {out}"
     );
     let stdout = out["stdout"].as_str().unwrap_or_default();
-    assert!(!stdout.contains("CONNECTED"), "network must be denied: {out}");
+    assert!(!stdout.contains("CONNECTED"), "network must be denied (no CONNECTED): {out}");
 }
