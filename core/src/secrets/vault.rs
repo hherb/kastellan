@@ -116,6 +116,14 @@ pub enum VaultError {
     /// fresh ref is generated.
     #[error("vault: ref collision during materialize (rare; safe to retry)")]
     RefCollision,
+
+    /// A `seed_known_ref_for_test` caller supplied a tail that is not exactly
+    /// [`REF_HEX_LEN`] lowercase hex digits. Test-only — gated on
+    /// `debug_assertions`, so it does not exist in a release build (matching
+    /// the seam method itself; see [`Vault::seed_known_ref_for_test`]).
+    #[cfg(debug_assertions)]
+    #[error("vault: malformed test-seed ref tail (need 8 lowercase hex digits): {0:?}")]
+    MalformedTestRef(String),
 }
 
 impl Vault {
@@ -225,6 +233,49 @@ impl Vault {
             }
             MapEntry::Occupied(_) => Err(VaultError::RefCollision),
         }
+    }
+
+    /// **TEST-ONLY seam (#298).** Bind `plaintext` under the caller-chosen ref
+    /// `secret://<ref_hex>` so an *out-of-process* test can know the ref string
+    /// up front and pass it as a `params` value that the daemon's
+    /// [`crate::tool_host::dispatch`] substitutes back to this plaintext.
+    ///
+    /// **Why this exists / why it is safe:** the production ref minted by
+    /// [`Self::materialize`] is random (OsRng) and never logged (only its
+    /// `ref_hash`), so a separate CLI process cannot learn it — which is
+    /// exactly the desired production property, but blocks a full-daemon
+    /// output-scrub e2e. This method is the minimal seam that unblocks it.
+    /// It is gated on `debug_assertions`, so it is **physically absent from any
+    /// release build** (`cargo build --release` disables `debug_assertions`;
+    /// the deployed daemon is built that way — see `scripts/build-release.sh`).
+    /// There is therefore no code path in production that can bind a
+    /// caller-known plaintext to a known ref.
+    ///
+    /// Validates `ref_hex` against the same well-formed-ref invariant
+    /// `materialize` mints and `substitute` parses (exactly [`REF_HEX_LEN`]
+    /// lowercase hex digits) and rejects an empty plaintext, then reuses the
+    /// collision-safe [`Self::insert_fresh`] path (a re-seed at a bound ref
+    /// returns [`VaultError::RefCollision`], never a silent rebind).
+    #[cfg(debug_assertions)]
+    pub fn seed_known_ref_for_test(
+        &self,
+        ref_hex: &str,
+        plaintext: &[u8],
+    ) -> Result<SecretRef, VaultError> {
+        let well_formed = ref_hex.len() == REF_HEX_LEN
+            && ref_hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !well_formed {
+            return Err(VaultError::MalformedTestRef(ref_hex.to_string()));
+        }
+        if plaintext.is_empty() {
+            return Err(VaultError::EmptyPlaintext);
+        }
+        let secret_ref = SecretRef::from_raw(format!("{REF_PREFIX}{ref_hex}"));
+        let entry = Entry {
+            plaintext: Zeroizing::new(plaintext.to_vec()),
+            expires_at: Instant::now() + self.ttl,
+        };
+        self.insert_fresh(secret_ref, entry)
     }
 
     /// Sync redemption. Returns the discrimination between Hit / Expired

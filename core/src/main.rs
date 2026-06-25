@@ -321,6 +321,27 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── TEST-ONLY Vault seed seam (#298). ──
+    //
+    // `KASTELLAN_TEST_VAULT_SEED = "<8hex>=<plaintext>"` binds a caller-known
+    // `secret://<8hex>` ref to `<plaintext>` so a separate-process e2e (the CLI
+    // in `cli_memory_l3py_run_daemon_e2e`) can pass that ref as a `params` value
+    // and assert the output scrub. Neither the ref nor the plaintext is logged.
+    //
+    // This whole block is `#[cfg(debug_assertions)]`-gated, so it is PHYSICALLY
+    // ABSENT from a release build (`cargo build --release` disables
+    // `debug_assertions`; the deployed daemon is built that way — see
+    // `scripts/build-release.sh`). A production binary has no code path that can
+    // read this env var or bind a caller-known plaintext to a known ref.
+    #[cfg(debug_assertions)]
+    if let Ok(spec) = std::env::var("KASTELLAN_TEST_VAULT_SEED") {
+        if let Some((ref_hex, plaintext)) = parse_test_vault_seed(&spec) {
+            vault
+                .seed_known_ref_for_test(ref_hex, plaintext.as_bytes())
+                .context("KASTELLAN_TEST_VAULT_SEED: seed_known_ref_for_test failed")?;
+        }
+    }
+
     let handoff_cache = std::sync::Arc::new(kastellan_core::handoff::HandoffCache::new());
     let dispatcher: Arc<dyn kastellan_core::scheduler::inner_loop::StepDispatcher> =
         Arc::new(
@@ -594,43 +615,25 @@ fn parse_bootstrap_secrets_csv(csv: &str) -> Vec<&str> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_bootstrap_secrets_csv;
-
-    #[test]
-    fn parse_empty_string_yields_empty_list() {
-        assert!(parse_bootstrap_secrets_csv("").is_empty());
-    }
-
-    #[test]
-    fn parse_only_whitespace_yields_empty_list() {
-        assert!(parse_bootstrap_secrets_csv("   ").is_empty());
-        assert!(parse_bootstrap_secrets_csv(" \t \n ").is_empty());
-    }
-
-    #[test]
-    fn parse_single_name_works() {
-        let names = parse_bootstrap_secrets_csv("openai-api-key");
-        assert_eq!(names, vec!["openai-api-key"]);
-    }
-
-    #[test]
-    fn parse_handles_trailing_comma() {
-        let names = parse_bootstrap_secrets_csv("a,b,");
-        assert_eq!(names, vec!["a", "b"]);
-    }
-
-    #[test]
-    fn parse_handles_leading_comma_and_whitespace() {
-        let names = parse_bootstrap_secrets_csv(", , a , b ,, c , ");
-        assert_eq!(names, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn parse_preserves_internal_dashes_and_dots() {
-        let names = parse_bootstrap_secrets_csv("openai.api.key, github-token");
-        assert_eq!(names, vec!["openai.api.key", "github-token"]);
-    }
+/// Parses the **test-only** `KASTELLAN_TEST_VAULT_SEED` value (`<ref_hex>=<plaintext>`)
+/// into its `(ref_hex, plaintext)` halves, splitting on the **first** `=` only
+/// (a secret may itself contain `=`). Returns `None` when no `=` is present.
+///
+/// Pure function — no I/O, no side effects, no trimming (the plaintext is taken
+/// verbatim; trimming a secret could corrupt it). The ref tail's own format is
+/// validated by [`kastellan_core::secrets::Vault::seed_known_ref_for_test`].
+///
+/// `#[cfg(debug_assertions)]`: the only caller is the debug-only seed block, so
+/// this helper does not exist in a release build (keeps it off the production
+/// surface and clippy-`dead_code`-clean).
+#[cfg(debug_assertions)]
+fn parse_test_vault_seed(spec: &str) -> Option<(&str, &str)> {
+    spec.split_once('=')
 }
+
+// Tests for the pure parse helpers live in a sibling file to keep `main.rs`
+// nearer the 500-LOC cap (the binary's `async fn main` already dominates it).
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;
 

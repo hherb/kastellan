@@ -6,7 +6,28 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-25 (**#348 item 3 — Matrix respawn-rate alarm DONE on branch `feat/348-respawn-rate-alarm`.**
+**Last updated:** 2026-06-25 (**#298 — full-daemon python-exec output secret-scrub e2e + Vault test seam — DONE on
+branch `feat/298-daemon-secret-scrub-e2e` (PR [#352](https://github.com/hherb/kastellan/pull/352)).** Closes the deferred
+full-daemon complement to the in-process scrub test. The blocker was that the production `secret://` ref is minted randomly
+inside the daemon's Vault and never logged (only its `ref_hash`, by design), so a separate CLI process couldn't learn which ref
+to pass as a param. **The seam (both halves `#[cfg(debug_assertions)]`-gated → PHYSICALLY ABSENT from any `--release` production
+binary; proven: the `KASTELLAN_TEST_VAULT_SEED` string occurs once in `target/debug/kastellan`, zero times in
+`target/release/kastellan`):** (1) **`Vault::seed_known_ref_for_test(ref_hex, plaintext)`** binds a caller-known
+`secret://<8hex>` ref to a plaintext via the existing collision-safe `insert_fresh`; validates the well-formed-ref invariant +
+rejects empty plaintext (new debug-gated `VaultError::MalformedTestRef`). (2) **`main.rs`** reads
+`KASTELLAN_TEST_VAULT_SEED=<8hex>=<plaintext>` right after the bootstrap Vault is built and seeds it, logging neither ref nor
+plaintext; pure `parse_test_vault_seed` splits on the **first** `=` (a secret may contain `=`), no trimming. **The e2e**
+(`secret_param_round_trips_and_is_scrubbed_through_daemon`) drives the real CLI → tasks queue → scheduler → l3py_invoke →
+ToolHostStepDispatcher → dispatch chain through the live daemon: CLI passes `token=secret://deadbe01`, the daemon substitutes it
+to the seeded plaintext before the jailed worker runs, the skill echoes it, the output scrub redacts it before the InvokeReport
+renders. Two **jointly non-vacuous** assertions (missing substitution drops the `[redacted:` marker; missing scrub surfaces the
+plaintext). Removed the `TODO(params-e2e)` deferral marker. **TDD:** 4 Vault units + 4 parse units RED→GREEN, then the
+integration e2e; lifted `main.rs`'s inline `mod tests` into `main_tests.rs` (716→639) so the seam's tests don't inflate the
+over-cap entrypoint. **Verification — macOS Seatbelt PG18:** l3py daemon e2e **6/0** (incl. the new scenario), in-process scrub
+regression **1/0**, vault lib **16/0**, main bin units **10/0**, `cargo clippy --workspace --all-targets -D warnings` clean +
+release `-D warnings` clean. **DGX bwrap aarch64:** workspace build green + l3py daemon e2e **6/0** under the real jail. Spec: issue #298.)
+
+_(Prior session — **#348 item 3 — Matrix respawn-rate alarm DONE on branch `feat/348-respawn-rate-alarm` (PR #351, MERGED as `9667042`).**
 The last remaining #348 follow-up: turn worker churn into an *up-front* warning instead of post-hoc death-report archaeology.
 New pure **`core/src/channel/respawn_alarm.rs`** (`RespawnRateAlarm`, 161 LOC) — a sliding-window state machine over
 caller-supplied `Instant`s (owns no clock, spawns nothing, so it's unit-testable without threads/sleeps): `record(now)` prunes
@@ -926,11 +947,11 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (#348 item 3 — respawn-rate alarm, branch `feat/348-respawn-rate-alarm`):** pure
-`channel::respawn_alarm::RespawnRateAlarm` (sliding-window respawn counter, fires once per storm, re-arms when it clears) wired
-into the supervised `drive` loop — 5 respawns within 300s logs one churn `warn!`. See the "Last updated" header. **#348 is now
-FULLY CLOSED** (churn fix `473d8e0` / PR #350 MERGED + observability + item 3). (Prior: matrix sandbox enforcement flip, PR #349
-MERGED as `cf754cf`.)
+**Just shipped (#298 — full-daemon python-exec secret-scrub e2e + Vault test seam, branch `feat/298-daemon-secret-scrub-e2e`,
+PR #352):** `#[cfg(debug_assertions)]` `Vault::seed_known_ref_for_test` + `main.rs` `KASTELLAN_TEST_VAULT_SEED` reader (both
+absent from release builds — proven via `strings`) unblock a real-daemon e2e proving the output scrub fires through the
+CLI→scheduler→l3py→dispatch chain. See the "Last updated" header. macOS 6/0 + DGX bwrap 6/0. (Prior: #348 item 3 respawn-rate
+alarm, PR #351 MERGED as `9667042`; #348 FULLY CLOSED.)
 
 **★ LEADING PICK — model-side perf (no code task): reduce the planner `num_ctx`.** ~86s/plan is gemma 26B on the DGX Spark with a
 262144-token context; reducing the model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which
@@ -941,7 +962,7 @@ forces a reload) is the cheapest live latency win. Operator action on the DGX.
   over-cap candidate) — lift `dispatch_with_sink`'s post-processing
   (scrub + injection screen + audit-emission arms) into a `tool_host/post_process.rs` sibling; tests already external under
   `tool_host/`.
-- **[#298](https://github.com/hherb/kastellan/issues/298) full-daemon secret-scrub e2e** — needs a Vault-ref test seam in `main.rs`.
+- ~~**[#298] full-daemon secret-scrub e2e**~~ — **DONE 2026-06-25** (PR #352; `#[cfg(debug_assertions)]` Vault seed seam, see header).
 - **Test-infra debt:** the serialized `cargo test --workspace` live run wedges on `memory_layers_e2e` (0-CPU pool deadlock under
   heavy multi-cluster live-PG load — the documented sqlx-0.9 env issue); a focused isolation + `Pool::close()`/`PgListener`
   audit (cf. the #332 variant-D deadlock test).

@@ -188,6 +188,85 @@ fn value_fingerprint_matches_plaintext_hash() {
     assert_eq!(fp.len, value.len());
 }
 
+// ---------------------------------------------------------------------------
+// Test-only Vault seam (`seed_known_ref_for_test`, #298). The method is
+// `#[cfg(debug_assertions)]`-gated — physically absent from release builds —
+// so these tests are gated the same way and still compile under
+// `cargo test --release` (where the method, and hence the error variant, do
+// not exist).
+// ---------------------------------------------------------------------------
+
+#[cfg(debug_assertions)]
+#[test]
+fn seed_known_ref_binds_plaintext_under_caller_chosen_ref() {
+    // The whole point of the seam: an out-of-process test can pick the ref
+    // string up front (here `secret://deadbe01`) and later pass it as a param,
+    // which the daemon's `dispatch` substitutes back to this plaintext.
+    let v = Vault::with_ttl(Duration::from_secs(60));
+    let r = v
+        .seed_known_ref_for_test("deadbe01", b"SCRUBME-plaintext")
+        .expect("seed a known ref");
+    assert_eq!(r.as_str(), "secret://deadbe01");
+    match v.redeem(&r) {
+        RedeemResult::Hit(z) => assert_eq!(z.as_slice(), b"SCRUBME-plaintext"),
+        other => panic!("expected Hit, got {other:?}"),
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn seed_known_ref_rejects_malformed_ref() {
+    // Only an exact 8-char lowercase-hex tail is accepted — the same
+    // well-formed-ref invariant `materialize` mints and `substitute` parses.
+    // A caller-supplied tail that is too long/short, uppercase, non-hex, or
+    // already prefixed must be rejected, not silently coerced.
+    let v = Vault::new();
+    for bad in [
+        "deadbeef0",          // 9 chars
+        "deadbee",            // 7 chars
+        "DEADBEEF",           // uppercase
+        "secret://deadbeef",  // already prefixed
+        "zzzzzzzz",           // non-hex
+        "",                   // empty
+    ] {
+        match v.seed_known_ref_for_test(bad, b"plaintext-value") {
+            Err(VaultError::MalformedTestRef(_)) => (),
+            other => panic!("expected MalformedTestRef for {bad:?}, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn seed_known_ref_rejects_empty_plaintext() {
+    // Mirrors `materialize`'s EmptyPlaintext guard — an empty seed is operator
+    // error, never a usable secret.
+    let v = Vault::new();
+    match v.seed_known_ref_for_test("deadbeef", b"") {
+        Err(VaultError::EmptyPlaintext) => (),
+        other => panic!("expected EmptyPlaintext, got {other:?}"),
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn seed_known_ref_collision_does_not_overwrite() {
+    // Delegates to the same `insert_fresh` collision guard as `materialize`:
+    // a second seed at an already-bound ref returns RefCollision and leaves the
+    // original plaintext intact (no silent rebind).
+    let v = Vault::with_ttl(Duration::from_secs(60));
+    v.seed_known_ref_for_test("aabbccdd", b"original-value")
+        .expect("first seed");
+    match v.seed_known_ref_for_test("aabbccdd", b"attacker-value") {
+        Err(VaultError::RefCollision) => (),
+        other => panic!("expected RefCollision on the second seed, got {other:?}"),
+    }
+    match v.redeem(&SecretRef::from_raw("secret://aabbccdd".to_string())) {
+        RedeemResult::Hit(z) => assert_eq!(z.as_slice(), b"original-value"),
+        other => panic!("expected the original plaintext preserved, got {other:?}"),
+    }
+}
+
 #[test]
 fn value_fingerprint_none_for_absent_or_short() {
     let vault = Vault::with_ttl(Duration::from_secs(60));

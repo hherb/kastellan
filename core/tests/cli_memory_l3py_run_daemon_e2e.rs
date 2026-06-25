@@ -118,6 +118,18 @@ fn large_param_echo_skill() -> PythonSkillCandidate {
     }
 }
 
+/// A Python skill that echoes the `token` runtime param prefixed with `TOKEN:`.
+/// Used by the secret-scrub scenario: the daemon substitutes a seeded
+/// `secret://` ref in `token` to plaintext before the worker runs, the worker
+/// prints it, and the output scrub must redact it on the way back out.
+fn secret_param_echo_skill() -> PythonSkillCandidate {
+    PythonSkillCandidate {
+        name: "secret_param_echo_py".into(),
+        description: "Echo the token runtime param".into(),
+        code: "import os, json\np = json.loads(os.environ['KASTELLAN_PYTHON_PARAMS'])\nprint('TOKEN:' + p['token'])\n".into(),
+    }
+}
+
 /// A Python skill that prints the SORTED keys of its own process environment,
 /// so the test can pin EXACTLY which env vars the python-exec child sees —
 /// proving runtime params (JSON inside `KASTELLAN_PYTHON_PARAMS`) never become
@@ -216,6 +228,17 @@ struct Fixture {
 /// registered iff `enable_python`. Returns `None` (already `[SKIP]`-printed)
 /// when a host prerequisite is missing. The caller holds the macOS serial lock.
 async fn setup(skill: &PythonSkillCandidate, enable_python: bool) -> Option<Fixture> {
+    setup_with_env(skill, enable_python, Vec::new()).await
+}
+
+/// Like [`setup`], but folds `extra_env` into the daemon's environment on top of
+/// the python-exec worker registration. Used by the secret-scrub scenario to
+/// inject the test-only `KASTELLAN_TEST_VAULT_SEED` seam (#298).
+async fn setup_with_env(
+    skill: &PythonSkillCandidate,
+    enable_python: bool,
+    extra_env: Vec<(String, String)>,
+) -> Option<Fixture> {
     if missing_prereqs() {
         return None;
     }
@@ -229,6 +252,9 @@ async fn setup(skill: &PythonSkillCandidate, enable_python: bool) -> Option<Fixt
     let pool = prepare_db(&cluster).await;
     let id = seed_and_approve_skill(&pool, skill, &cluster.data_dir, &user).await;
 
+    let mut env = python_env(&worker_bin, &python, enable_python);
+    env.extend(extra_env);
+
     let mock = spawn_inert_mock().await;
     let (daemon, guards) = bring_up_daemon(
         "l3pyrun",
@@ -236,7 +262,7 @@ async fn setup(skill: &PythonSkillCandidate, enable_python: bool) -> Option<Fixt
         &cluster.data_dir,
         &mock.base_url,
         &user,
-        python_env(&worker_bin, &python, enable_python),
+        env,
     );
 
     Some(Fixture {
@@ -383,11 +409,10 @@ async fn python_skill_params_round_trip_through_jail() {
         "stdout must carry the param-echo marker 'GOT:hi'; got:\n{stdout}",
     );
 
-    // Secret-param coverage lives elsewhere: the substitute-in + output scrub is
-    // proven end-to-end by python_exec_e2e::materialized_secret_param_is_scrubbed_from_output
-    // (same dispatch chokepoint); the full-DAEMON secret e2e is deferred to #298
-    // (the secret:// ref is minted randomly + never logged, so the separate CLI
-    // process needs a security-sensitive Vault-ref seam in main.rs).
+    // Secret-param scrub through the FULL DAEMON is covered by
+    // `secret_param_round_trips_and_is_scrubbed_through_daemon` below (#298). The
+    // in-process complement is
+    // python_exec_e2e::materialized_secret_param_is_scrubbed_from_output.
 
     fx.pool.close().await;
     drop(fx.cluster);
@@ -519,6 +544,97 @@ async fn python_skill_large_params_via_file_channel() {
     assert!(
         stdout.contains("GOT:81920"),
         "skill must echo the full 80 KiB greeting length via the file channel; got:\n{stdout}",
+    );
+
+    fx.pool.close().await;
+    drop(fx.cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 6 — full-daemon secret output-scrub (#298). A secret materialized
+// into the DAEMON's in-process Vault under a test-known `secret://` ref (the
+// `#[cfg(debug_assertions)]` `KASTELLAN_TEST_VAULT_SEED` seam) is passed by the
+// separate CLI process as the `token` param. The daemon's `dispatch`
+// substitutes the ref to plaintext before the worker runs; the skill echoes it;
+// and the output scrub redacts it before the CLI renders the InvokeReport.
+//
+// This closes the gap the in-process `python_exec_e2e` test cannot reach: the
+// real CLI → tasks queue → scheduler → l3py_invoke → ToolHostStepDispatcher →
+// dispatch routing, end-to-end through the live daemon subprocess.
+//
+// The two assertions are jointly non-vacuous: if substitution failed the output
+// would carry the literal `secret://` ref and the `[redacted:` marker would be
+// absent (FAIL); if the scrub failed the plaintext would survive (FAIL).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn secret_param_round_trips_and_is_scrubbed_through_daemon() {
+    #[cfg(target_os = "macos")]
+    let _serial = serial_lock();
+
+    // A distinctive plaintext well over the leak scanner's MIN_SECRET_LEN (8
+    // bytes) so an un-scrubbed leak would be unmistakable in the failure output.
+    const PLAINTEXT: &str = "SCRUBME-7c1f9a2b-daemon-secret-do-not-leak";
+    const REF_HEX: &str = "deadbe01";
+
+    let Some(fx) = setup_with_env(
+        &secret_param_echo_skill(),
+        true,
+        vec![(
+            "KASTELLAN_TEST_VAULT_SEED".into(),
+            format!("{REF_HEX}={PLAINTEXT}"),
+        )],
+    )
+    .await
+    else {
+        return;
+    };
+
+    // The CLI (a separate process) passes the ref it knows up front. The daemon
+    // substitutes `secret://deadbe01` → PLAINTEXT inside `dispatch`.
+    let output = cli_command(&fx.cluster.data_dir, &fx.user)
+        .args([
+            "memory",
+            "l3",
+            "run",
+            &fx.id.to_string(),
+            "--param",
+            &format!("token=secret://{REF_HEX}"),
+            "--execute",
+        ])
+        .env("KASTELLAN_L3_RUN_GRACE_SECS", "30")
+        .env("KASTELLAN_L3_RUN_TIMEOUT_SECS", "120")
+        .output()
+        .expect("spawn kastellan-cli memory l3 run --param token=secret://… --execute");
+
+    let (stdout, stderr) = assert_cli_success(&output, &fx.daemon, "secret-scrub run");
+    assert!(
+        stdout.contains("executed skill"),
+        "stdout must report 'executed skill'; got:\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    // The plaintext must NOT survive into the rendered InvokeReport...
+    assert!(
+        !stdout.contains(PLAINTEXT),
+        "materialized secret plaintext leaked through the daemon's rendered output:\n{stdout}",
+    );
+    // ...and the scrub must have replaced it with the redaction marker.
+    assert!(
+        stdout.contains("[redacted:"),
+        "expected a [redacted:<hex>] marker in the scrubbed output; got:\n{stdout}",
+    );
+
+    // The redacted scrub audit row landed (hash/offset/len only — never
+    // plaintext; that shape is unit-pinned in tool_host::secret_scrub).
+    let scrub_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log \
+         WHERE actor='policy' AND action='secret.output_scrubbed'",
+    )
+    .fetch_one(&fx.pool)
+    .await
+    .expect("count scrub rows");
+    assert!(
+        scrub_rows >= 1,
+        "expected at least one secret.output_scrubbed audit row, got {scrub_rows}",
     );
 
     fx.pool.close().await;
