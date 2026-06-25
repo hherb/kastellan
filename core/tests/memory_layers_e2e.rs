@@ -25,7 +25,7 @@ use kastellan_core::memory::layers::{
 };
 use kastellan_db::memories::{insert_memory_at_layer, seed_meta_memory, MemoryLayer};
 use kastellan_tests_common::{
-    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
+    bring_up_pg_cluster, close_pool, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
 
 /// Single-runtime helper — every scenario uses the same shape.
@@ -77,7 +77,10 @@ fn load_l1_empty_returns_empty_vec() {
             l1.len()
         );
 
-        pool.close().await;
+        // Watchdog-bounded close: a stuck pool.close() (the suite's only
+        // unbounded await) panics with a clear message instead of wedging
+        // the whole binary at 0 % CPU under heavy multi-cluster load.
+        close_pool(&pool).await;
     });
 }
 
@@ -143,7 +146,10 @@ fn load_l1_returns_only_l1_rows_newest_first() {
         assert_eq!(l1[0].body, l1_body, "load_l1 must return the L1 row, not a foreign-layer body");
         assert_eq!(l1[0].layer, MemoryLayer::Index, "row.layer must be Index");
 
-        pool.close().await;
+        // Watchdog-bounded close: a stuck pool.close() (the suite's only
+        // unbounded await) panics with a clear message instead of wedging
+        // the whole binary at 0 % CPU under heavy multi-cluster load.
+        close_pool(&pool).await;
     });
 }
 
@@ -205,7 +211,10 @@ fn load_l1_respects_row_cap() {
         assert_eq!(l1[1].body, "l1 row #3", "row 1 must be #3");
         assert_eq!(l1[2].body, "l1 row #2", "row 2 must be #2");
 
-        pool.close().await;
+        // Watchdog-bounded close: a stuck pool.close() (the suite's only
+        // unbounded await) panics with a clear message instead of wedging
+        // the whole binary at 0 % CPU under heavy multi-cluster load.
+        close_pool(&pool).await;
     });
 }
 
@@ -280,7 +289,10 @@ fn load_l1_respects_byte_cap() {
             l1.len()
         );
 
-        pool.close().await;
+        // Watchdog-bounded close: a stuck pool.close() (the suite's only
+        // unbounded await) panics with a clear message instead of wedging
+        // the whole binary at 0 % CPU under heavy multi-cluster load.
+        close_pool(&pool).await;
     });
 }
 
@@ -346,6 +358,9 @@ fn load_l1_default_matches_explicit_default_caps() {
             assert_eq!(a.layer, b.layer, "layer must match for the same prefix slot");
         }
 
-        pool.close().await;
+        // Watchdog-bounded close: a stuck pool.close() (the suite's only
+        // unbounded await) panics with a clear message instead of wedging
+        // the whole binary at 0 % CPU under heavy multi-cluster load.
+        close_pool(&pool).await;
     });
 }

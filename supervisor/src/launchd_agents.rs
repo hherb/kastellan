@@ -94,8 +94,24 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
+use crate::bounded_command::{run_capped, CappedOutcome};
 use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError};
+
+/// Wall-clock cap on a single mutating `launchctl` invocation
+/// (`bootstrap` / `bootout`).
+///
+/// launchctl normally returns in well under a second. The cap exists
+/// solely so a *churn-degraded* `gui/<uid>` domain — which can leave
+/// `bootstrap`/`bootout` blocked indefinitely under heavy
+/// install/uninstall load (issue #130) — surfaces as a fast, structured
+/// `Backend` error instead of an unbounded 0-CPU hang that wedges the
+/// caller (and, in the test harness, every thread waiting on the
+/// process-global serial lock the hung bring-up still holds). 20 s is
+/// far above any healthy call yet bounded enough to fail well within a
+/// test's bring-up budget.
+const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Pure, I/O-free helpers (the plist builder + the name validator).
 /// Re-exported below so `launchd_agents::build_plist` and
@@ -446,13 +462,24 @@ fn current_uid() -> u32 {
 /// Run `launchctl <args>` with stdio captured. Maps non-zero exits to
 /// [`SupervisorError::Backend`] with the trimmed stderr.
 fn run_launchctl(args: &[&str]) -> Result<String, SupervisorError> {
-    let out = Command::new("launchctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| SupervisorError::Io(format!("spawn launchctl: {e}")))?;
+    // Bounded so a hung `bootstrap`/`bootout` against a churn-degraded
+    // GUI domain fails fast instead of wedging the thread at 0 % CPU.
+    // `run_capped` sets the stdio (stdin null, stdout/stderr piped) for us.
+    let mut cmd = Command::new("launchctl");
+    cmd.args(args);
+    let out = match run_capped(&mut cmd, LAUNCHCTL_TIMEOUT)
+        .map_err(|e| SupervisorError::Io(format!("spawn launchctl: {e}")))?
+    {
+        CappedOutcome::Completed(out) => out,
+        CappedOutcome::TimedOut => {
+            return Err(SupervisorError::Backend(format!(
+                "launchctl {} timed out after {}s (the gui/<uid> launchd domain may be \
+                 churn-degraded under heavy service load — see issue #130)",
+                args.join(" "),
+                LAUNCHCTL_TIMEOUT.as_secs()
+            )));
+        }
+    };
     if !out.status.success() {
         // `launchctl` writes most diagnostics to stdout (yes, stdout)
         // and only some to stderr. Fold both so the error message

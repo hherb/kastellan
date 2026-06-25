@@ -23,6 +23,11 @@ pub mod launchd_agents;
 
 pub mod specs;
 
+/// Cross-platform helper to run a child process under a wall-clock
+/// timeout. Used by the launchd backend to bound `launchctl` calls so a
+/// churn-degraded GUI domain cannot hang a lifecycle call indefinitely.
+pub mod bounded_command;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
