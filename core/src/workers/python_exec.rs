@@ -48,9 +48,15 @@ const PYTHON_ENV: &str = "KASTELLAN_PYTHON_EXEC_PYTHON";
 const PARAMS_FILE_MAX_ENV: &str = "KASTELLAN_PYTHON_PARAMS_FILE_MAX";
 
 /// Opt into the macOS micro-VM (`MacosContainer`) backend. macOS-only;
-/// on Linux the flag is never read (the `Container` variant doesn't exist).
+/// on Linux the flag is never read (the `Container` variant doesn't exist),
+/// so the const is `cfg`-gated out there to avoid a dead-code error under
+/// `-D warnings` (issue-#144 rule — its only use site is the macOS resolver
+/// branch).
+#[cfg(target_os = "macos")]
 const USE_CONTAINER_ENV: &str = "KASTELLAN_PYTHON_EXEC_USE_CONTAINER";
-/// Operator override for the container image tag.
+/// Operator override for the container image tag. macOS-only; same `cfg`-gate
+/// rationale as [`USE_CONTAINER_ENV`].
+#[cfg(target_os = "macos")]
 const IMAGE_ENV: &str = "KASTELLAN_PYTHON_EXEC_IMAGE";
 /// Default image tag built by scripts/workers/python-exec/build-image.sh.
 pub const DEFAULT_IMAGE: &str = "kastellan/python-exec:dev";
