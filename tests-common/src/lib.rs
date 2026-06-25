@@ -52,6 +52,7 @@ pub mod serial;
 pub mod skip;
 pub mod temp;
 pub mod wait;
+pub mod watchdog;
 
 pub use allowlist::seed_tool_allowlist;
 pub use binaries::{
@@ -72,3 +73,4 @@ pub use serial::serial_lock;
 pub use skip::{pg_bin_dir_or_skip, skip_if_no_supervisor};
 pub use temp::{current_username, unique_suffix, unique_temp_root};
 pub use wait::{wait_for_log_match, wait_for_socket, wait_for_status};
+pub use watchdog::{await_within, close_pool, close_pool_bounded, DEFAULT_POOL_CLOSE_TIMEOUT};

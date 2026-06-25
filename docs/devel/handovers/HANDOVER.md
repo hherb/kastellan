@@ -6,7 +6,27 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-25 (**#298 — full-daemon python-exec output secret-scrub e2e + Vault test seam — DONE on
+**Last updated:** 2026-06-25 (**Test-infra: bound the two unbounded waits behind the `memory_layers_e2e` 0-CPU wedge —
+DONE on branch `fix/launchctl-pool-close-watchdog` (PR pending).** The handover long attributed the serialized
+`cargo test --workspace` wedge on `memory_layers_e2e` to "the documented sqlx-0.9 env issue" (the PgListener-held-across-`pool.close()`
+deadlock fixed in PR #27). **Audit finding: that cannot be the cause here — `memory_layers_e2e` uses NO `PgListener`** (only `probe`,
+a runtime pool, inserts, `load_l1`, `pool.close()`; every query is awaited to completion). It passes in isolation (4.4s) and under
+20 concurrent clusters (~6s); the wedge only appears during the full-workspace run, i.e. an environment/interaction effect. Since a
+correctly-bounded bring-up (30s→panic) can only *panic*, the sole things that can hang **forever** at 0 % CPU are the two unbounded
+waits: (1) `run_launchctl`'s `bootstrap`/`bootout` `.output()` — `launchctl` is documented to block indefinitely against a
+churn-degraded `gui/<uid>` domain (issue #130), and a hung bring-up holds the process-global serial lock → the other 4 parallel
+tests pile up at 0 CPU; (2) the test's `pool.close().await`. **Fix (TDD, "harden + self-diagnose"):** new cross-platform pure
+**`supervisor/src/bounded_command.rs`** (`run_capped(cmd, timeout) -> CappedOutcome::{Completed,TimedOut}`; drains stdout/stderr on
+threads → no pipe deadlock, polls `try_wait`, kills+reaps on timeout) — `run_launchctl` now runs under a 20s `LAUNCHCTL_TIMEOUT`,
+mapping a hang to a fast `Backend` error instead of an infinite wedge. New **`tests-common/src/watchdog.rs`** (`await_within(label,
+timeout, fut)` + `close_pool`/`close_pool_bounded`) bounds `memory_layers_e2e`'s 5 `pool.close()` sites so a stuck close panics with
+a labelled message naming the phase. **Verification (macOS):** `run_capped` 3/0 + `watchdog` 2/0 (both RED→GREEN), `memory_layers_e2e`
+5/0 (live PG18), supervisor + tests-common `clippy --all-targets -D warnings` clean, **supervisor Linux cross-clippy clean** (the new
+module compiles on both). Read-only `launchctl print` calls (`status`/`probe`/`is_loaded_in_domain`) are still unbounded → filed
+**[#353](https://github.com/hherb/kastellan/issues/353)** (route through `run_capped` too; `status` is in the bring-up poll loop).
+Pure-Rust, no migration, no production behavior change on the happy path.)
+
+_(Prior session — **#298 — full-daemon python-exec output secret-scrub e2e + Vault test seam — DONE on
 branch `feat/298-daemon-secret-scrub-e2e` (PR [#352](https://github.com/hherb/kastellan/pull/352)).** Closes the deferred
 full-daemon complement to the in-process scrub test. The blocker was that the production `secret://` ref is minted randomly
 inside the daemon's Vault and never logged (only its `ref_hash`, by design), so a separate CLI process couldn't learn which ref
@@ -25,7 +45,7 @@ plaintext). Removed the `TODO(params-e2e)` deferral marker. **TDD:** 4 Vault uni
 integration e2e; lifted `main.rs`'s inline `mod tests` into `main_tests.rs` (716→639) so the seam's tests don't inflate the
 over-cap entrypoint. **Verification — macOS Seatbelt PG18:** l3py daemon e2e **6/0** (incl. the new scenario), in-process scrub
 regression **1/0**, vault lib **16/0**, main bin units **10/0**, `cargo clippy --workspace --all-targets -D warnings` clean +
-release `-D warnings` clean. **DGX bwrap aarch64:** workspace build green + l3py daemon e2e **6/0** under the real jail. Spec: issue #298.)
+release `-D warnings` clean. **DGX bwrap aarch64:** workspace build green + l3py daemon e2e **6/0** under the real jail. Spec: issue #298.)_
 
 _(Prior session — **#348 item 3 — Matrix respawn-rate alarm DONE on branch `feat/348-respawn-rate-alarm` (PR #351, MERGED as `9667042`).**
 The last remaining #348 follow-up: turn worker churn into an *up-front* warning instead of post-hoc death-report archaeology.
@@ -963,9 +983,11 @@ forces a reload) is the cheapest live latency win. Operator action on the DGX.
   (scrub + injection screen + audit-emission arms) into a `tool_host/post_process.rs` sibling; tests already external under
   `tool_host/`.
 - ~~**[#298] full-daemon secret-scrub e2e**~~ — **DONE 2026-06-25** (PR #352; `#[cfg(debug_assertions)]` Vault seed seam, see header).
-- **Test-infra debt:** the serialized `cargo test --workspace` live run wedges on `memory_layers_e2e` (0-CPU pool deadlock under
-  heavy multi-cluster live-PG load — the documented sqlx-0.9 env issue); a focused isolation + `Pool::close()`/`PgListener`
-  audit (cf. the #332 variant-D deadlock test).
+- ~~**Test-infra debt:** the serialized `cargo test --workspace` live run wedges on `memory_layers_e2e`~~ — **HARDENED 2026-06-25**
+  (branch `fix/launchctl-pool-close-watchdog`, see header). Audit corrected the long-standing misdiagnosis: `memory_layers_e2e`
+  has **no `PgListener`**, so the PR-#27 sqlx-listener deadlock cannot apply. Bounded the two unbounded waits (`run_launchctl`
+  via `bounded_command::run_capped`; the test's `pool.close()` via `tests-common::watchdog::close_pool`) so a hang fails fast +
+  self-describes instead of wedging at 0 CPU. Residual: read-only `launchctl print` calls still unbounded → [#353](https://github.com/hherb/kastellan/issues/353).
 
 **Prior entity-embedding work (still-valid follow-ups):** forward entity embed-on-insert shipped on
 `feat/entity-forward-embed-on-insert` (the entity-embedding arc is complete: backfill #335 + forward). **Remaining entity-embedding follow-ups:** (1) an **ANN index** (ivfflat/hnsw) on
@@ -977,10 +999,11 @@ cost). **Open Matrix-hardening picks (residual follow-ups):**
 (~~matrix-worker seccomp/Landlock enforcement flip~~ — **DONE + DEPLOYED 2026-06-24**, `matrix_client` profile + the prelude
 TSYNC fix; see header); ~~residual: **[#348](https://github.com/hherb/kastellan/issues/348)** periodic worker die/respawn~~
 — **FULLY CLOSED 2026-06-25** (churn fix + observability + the respawn-rate alarm; see header).
-**Pre-existing test-infra debt:** the full serialized
-`cargo test --workspace` live run wedges on `memory_layers_e2e` (0-CPU pool deadlock under heavy multi-cluster live-PG load —
-the documented sqlx-0.9 env issue); worth a focused isolation + `Pool::close()`/`PgListener` audit (cf. the #332 variant-D
-deadlock test).
+**Pre-existing test-infra debt — HARDENED 2026-06-25** (branch `fix/launchctl-pool-close-watchdog`): the full serialized
+`cargo test --workspace` wedge on `memory_layers_e2e` was mis-attributed to "the documented sqlx-0.9 env issue" — but that test
+has **no `PgListener`**, so the PR-#27 deadlock cannot apply. The two unbounded waits that *can* hang at 0 CPU (`run_launchctl`'s
+`launchctl bootstrap`/`bootout`; the test's `pool.close()`) are now timeout-bounded (`bounded_command::run_capped` +
+`tests-common::watchdog`). Residual read-only `launchctl print` calls tracked in [#353](https://github.com/hherb/kastellan/issues/353).
 
 Phase 0 is complete; Phase 1 is on `main` and pinned by `cli_ask_e2e`. **The L3 invocation arc is COMPLETE on `main`** (PR #186, #179 CLOSED). **`web-fetch` (ROADMAP:145) / `web-search` (ROADMAP:146) workers + injection-guard per-tool profiles (#142) all MERGED.** **Egress proxy is now ALL 4 SLICES COMPLETE** (#1 boundary/SSRF PR #240, #2 force-routing PR #256, #3a MITM PR #259, #3b leak scanner PR #269, #4 TLS pinning this branch). The list below is an **operator-picks bucket** — sized roughly one session each, with file paths and the verification step.
 
