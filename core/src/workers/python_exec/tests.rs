@@ -390,3 +390,153 @@ fn interpreter_extra_lib_dirs_no_prefix_falls_back_to_binary_path() {
     let dirs = interpreter_extra_lib_dirs(Path::new("/snap/python3"), &exists, &canon, &deps);
     assert_eq!(dirs, vec![PathBuf::from("/snap/lib")]);
 }
+
+// ---- container mode (macOS micro-VM) ----
+
+/// Container-mode entry carries the Container backend tag + image, points
+/// `binary` at the in-image worker, injects the in-image interpreter path,
+/// preserves the strict policy, and binds NO host paths (code rides stdin,
+/// scratch is the in-VM /tmp tmpfs).
+#[cfg(target_os = "macos")]
+#[test]
+fn container_mode_entry_shape() {
+    let entry = container_mode_entry(
+        PathBuf::from(CONTAINER_WORKER_BIN),
+        "kastellan/python-exec:dev".to_string(),
+        None,
+    );
+    assert_eq!(
+        entry.sandbox_backend,
+        Some(kastellan_sandbox::SandboxBackendKind::Container)
+    );
+    assert_eq!(
+        entry.container_image.as_deref(),
+        Some("kastellan/python-exec:dev")
+    );
+    assert_eq!(entry.binary, PathBuf::from(CONTAINER_WORKER_BIN));
+    // Strict policy preserved.
+    assert!(matches!(entry.policy.net, Net::Deny));
+    assert_eq!(entry.policy.profile, Profile::WorkerStrict);
+    assert_eq!(entry.policy.mem_mb, 512);
+    assert_eq!(entry.policy.cpu_ms, 10_000);
+    assert_eq!(entry.wall_clock_ms, Some(30_000));
+    // No host binds in container mode.
+    assert!(entry.policy.fs_read.is_empty(), "no host fs_read in container mode");
+    assert!(entry.policy.fs_write.is_empty());
+    // In-image interpreter injected; NO Landlock grant (Linux-prelude concept).
+    assert!(entry
+        .policy
+        .env
+        .contains(&(PYTHON_ENV.to_string(), CONTAINER_PYTHON.to_string())));
+    assert!(!entry
+        .policy
+        .env
+        .iter()
+        .any(|(k, _)| k == ENV_LANDLOCK_RW));
+    // No host scratch dir — the in-VM /tmp tmpfs serves params.json.
+    assert!(!entry.ephemeral_scratch);
+    assert!(matches!(
+        entry.lifecycle,
+        crate::worker_lifecycle::Lifecycle::SingleUse
+    ));
+}
+
+/// The operator's params-file ceiling is forwarded into the jail only when set.
+#[cfg(target_os = "macos")]
+#[test]
+fn container_mode_entry_forwards_params_file_max_only_when_set() {
+    let without = container_mode_entry(
+        PathBuf::from(CONTAINER_WORKER_BIN),
+        "img".to_string(),
+        None,
+    );
+    assert!(!without
+        .policy
+        .env
+        .iter()
+        .any(|(k, _)| k == PARAMS_FILE_MAX_ENV));
+
+    let with = container_mode_entry(
+        PathBuf::from(CONTAINER_WORKER_BIN),
+        "img".to_string(),
+        Some("2097152".to_string()),
+    );
+    assert!(with
+        .policy
+        .env
+        .contains(&(PARAMS_FILE_MAX_ENV.to_string(), "2097152".to_string())));
+}
+
+/// USE_CONTAINER=1 (macOS) routes the manifest to a Container-tagged entry,
+/// with the default image when KASTELLAN_PYTHON_EXEC_IMAGE is unset.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_uses_container_backend_when_flag_set() {
+    let get_env = |k: &str| match k {
+        "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
+        "KASTELLAN_PYTHON_EXEC_USE_CONTAINER" => Some("1".to_string()),
+        "KASTELLAN_PYTHON_EXEC_BIN" => Some("/opt/python-exec".to_string()),
+        _ => None,
+    };
+    // Only the worker binary needs to exist; NO host interpreter is probed
+    // in container mode (the interpreter is in the image).
+    let exists = |p: &Path| p == Path::new("/opt/python-exec");
+    let c = ctx(&get_env, &exists);
+    match PythonExecManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert_eq!(
+                entry.sandbox_backend,
+                Some(kastellan_sandbox::SandboxBackendKind::Container)
+            );
+            assert_eq!(entry.container_image.as_deref(), Some(DEFAULT_IMAGE));
+            assert_eq!(entry.binary, PathBuf::from(CONTAINER_WORKER_BIN));
+        }
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}
+
+/// An explicit KASTELLAN_PYTHON_EXEC_IMAGE override is honoured.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_container_honours_image_override() {
+    let get_env = |k: &str| match k {
+        "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
+        "KASTELLAN_PYTHON_EXEC_USE_CONTAINER" => Some("1".to_string()),
+        "KASTELLAN_PYTHON_EXEC_IMAGE" => Some("kastellan/python-exec:v9".to_string()),
+        "KASTELLAN_PYTHON_EXEC_BIN" => Some("/opt/python-exec".to_string()),
+        _ => None,
+    };
+    let exists = |p: &Path| p == Path::new("/opt/python-exec");
+    let c = ctx(&get_env, &exists);
+    match PythonExecManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert_eq!(
+                entry.container_image.as_deref(),
+                Some("kastellan/python-exec:v9")
+            );
+        }
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}
+
+/// USE_CONTAINER unset (or != "1") stays in host mode: a host interpreter
+/// IS probed and the entry carries no backend tag. (Runs on both OSes — on
+/// Linux the flag is never even read.)
+#[test]
+fn resolve_stays_host_mode_without_use_container() {
+    let get_env = |k: &str| match k {
+        "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
+        "KASTELLAN_PYTHON_EXEC_BIN" => Some("/opt/python-exec".to_string()),
+        _ => None,
+    };
+    let first = Path::new(PYTHON_CANDIDATES[0]);
+    let exists = |p: &Path| p == Path::new("/opt/python-exec") || p == first;
+    let c = ctx(&get_env, &exists);
+    match PythonExecManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert_eq!(entry.sandbox_backend, None, "host mode carries no backend tag");
+            assert!(entry.container_image.is_none());
+        }
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}

@@ -47,6 +47,19 @@ const PYTHON_ENV: &str = "KASTELLAN_PYTHON_EXEC_PYTHON";
 /// `workers/python-exec/src/exec.rs::params_file_max`; keep the name in sync.
 const PARAMS_FILE_MAX_ENV: &str = "KASTELLAN_PYTHON_PARAMS_FILE_MAX";
 
+/// Opt into the macOS micro-VM (`MacosContainer`) backend. macOS-only;
+/// on Linux the flag is never read (the `Container` variant doesn't exist).
+const USE_CONTAINER_ENV: &str = "KASTELLAN_PYTHON_EXEC_USE_CONTAINER";
+/// Operator override for the container image tag.
+const IMAGE_ENV: &str = "KASTELLAN_PYTHON_EXEC_IMAGE";
+/// Default image tag built by scripts/workers/python-exec/build-image.sh.
+pub const DEFAULT_IMAGE: &str = "kastellan/python-exec:dev";
+/// In-image path of the worker binary (Containerfile copies it here). The
+/// `MacosContainer` backend appends this as the container's program.
+pub const CONTAINER_WORKER_BIN: &str = "/usr/local/bin/kastellan-worker-python-exec";
+/// In-image python interpreter the worker drives (python:3.12-slim default).
+pub const CONTAINER_PYTHON: &str = "/usr/local/bin/python3";
+
 /// Interpreter candidates probed (in order) when `KASTELLAN_PYTHON_EXEC_PYTHON`
 /// is unset: distro python (`/usr/bin`), then source installs
 /// (`/usr/local/bin`). `pub` so the e2e suite probes the identical cascade.
@@ -178,6 +191,62 @@ pub fn python_exec_entry(
     }
 }
 
+/// Container-mode entry: routes python-exec through the macOS
+/// `MacosContainer` micro-VM backend (opt-in via
+/// `KASTELLAN_PYTHON_EXEC_USE_CONTAINER=1`). Closes the macOS `mem_mb`
+/// parity gap (Seatbelt can't enforce memory; Apple `container` does via
+/// `-m`) and gives arbitrary agent code a separate-kernel boundary.
+///
+/// Simpler than [`python_exec_entry`]: NO host interpreter discovery, NO
+/// `interpreter_lib_dirs`, `fs_read` empty. Both the worker binary and the
+/// interpreter live inside the image; code arrives over stdin and scratch
+/// (incl. the >64 KiB `params.json` file channel) lands in the in-VM `/tmp`
+/// tmpfs that `build_container_argv` mounts for `WorkerStrict`.
+///
+/// `mem_mb: 512` is now ENFORCED (the payoff). `cpu_quota_pct`/`tasks_max`
+/// stay `None` (python-exec never set them; Apple `container` lacks the
+/// primitive anyway). Latency: ~0.8 s container warm-spawn per call under
+/// `SingleUse` — acceptable; freshness per call is the point for arbitrary
+/// code.
+///
+/// macOS-only: emits `SandboxBackendKind::Container`, a
+/// `#[cfg(target_os = "macos")]` variant. Compiling this on Linux is what
+/// broke the core build before issue #144, so the whole fn is gated out
+/// there and the resolver never reaches it.
+#[cfg(target_os = "macos")]
+pub fn container_mode_entry(
+    binary: PathBuf,
+    image: String,
+    params_file_max: Option<String>,
+) -> ToolEntry {
+    let mut env = vec![(PYTHON_ENV.to_string(), CONTAINER_PYTHON.to_string())];
+    if let Some(v) = params_file_max.filter(|v| !v.trim().is_empty()) {
+        env.push((PARAMS_FILE_MAX_ENV.to_string(), v));
+    }
+    let policy = SandboxPolicy {
+        fs_read: vec![],
+        fs_write: vec![],
+        net: Net::Deny,
+        cpu_ms: 10_000,
+        mem_mb: 512,
+        profile: Profile::WorkerStrict,
+        env,
+        cpu_quota_pct: None,
+        tasks_max: None,
+        proxy_uds: None,
+    };
+    ToolEntry {
+        binary,
+        policy,
+        wall_clock_ms: Some(30_000),
+        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
+        sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::Container),
+        container_image: Some(image),
+        lockdown_shim: None,
+        ephemeral_scratch: false,
+    }
+}
+
 /// Extra read-only path the jailed interpreter needs beyond its own binary.
 ///
 /// * **macOS framework layout** (`…/Python*.framework/Versions/<v>/bin/<exe>`,
@@ -252,6 +321,32 @@ impl WorkerManifest for PythonExecManifest {
 
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
         let is_runnable = |p: &Path| (ctx.exists)(p) && !(ctx.is_dir)(p);
+
+        // Container mode (macOS micro-VM) short-circuits host interpreter
+        // resolution: the interpreter lives in the image, not on the host.
+        // macOS-only — on Linux USE_CONTAINER is never read so the
+        // `Container` variant is never referenced (issue #144).
+        #[cfg(target_os = "macos")]
+        {
+            let enabled = (ctx.get_env)(ENABLE_ENV).unwrap_or_default().trim() == "1";
+            let use_container =
+                (ctx.get_env)(USE_CONTAINER_ENV).unwrap_or_default().trim() == "1";
+            if enabled && use_container {
+                let binary = PathBuf::from(CONTAINER_WORKER_BIN);
+                let image = (ctx.get_env)(IMAGE_ENV)
+                    .filter(|v| !v.trim().is_empty())
+                    .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
+                let params_file_max = (ctx.get_env)(PARAMS_FILE_MAX_ENV);
+                return Resolution::Register(container_mode_entry(
+                    binary,
+                    image,
+                    params_file_max,
+                ));
+            }
+            // enabled && !use_container, or !enabled: fall through to the
+            // existing host-mode logic (which re-checks the ENABLE gate).
+        }
+
         let python = match resolve_env(|k| (ctx.get_env)(k), is_runnable) {
             // Canonicalize host-side: a symlink-chain interpreter (e.g.
             // `/usr/bin/python3 → /etc/alternatives/python3` on
