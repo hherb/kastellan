@@ -21,15 +21,28 @@
 # is not — hence the lone-file contract enforced by build-image.sh.)
 #
 # Layout notes:
-#   * python:3.12-slim runtime — the image's own /usr/local/bin/python3 is the
-#     interpreter the worker drives (the manifest injects
+#   * python:3.12-slim-bookworm runtime — the image's own /usr/local/bin/python3
+#     is the interpreter the worker drives (the manifest injects
 #     KASTELLAN_PYTHON_EXEC_PYTHON=/usr/local/bin/python3).
+#   * GLIBC PARITY — the Debian suite here MUST match the builder image in
+#     build-image.sh (`rust:1-slim-bookworm`). The worker binary is linked
+#     against the builder's glibc and run against THIS image's glibc; if the two
+#     tags drift onto different Debian releases (they float on independent
+#     upstream cadences) the binary fails to load in the VM with
+#     `libc.so.6: version 'GLIBC_2.xx' not found`. Pinning both to the same
+#     suite makes build-glibc == runtime-glibc structurally guaranteed. Bump
+#     both tags together, never one alone.
 #   * NO ENTRYPOINT — the MacosContainer backend appends the manifest `binary`
 #     verbatim as the container program, so the worker runs directly as
 #     /usr/local/bin/kastellan-worker-python-exec.
 #   * USER nobody — defense-in-depth complement to build_container_argv's
-#     policy-driven `--user nobody`.
+#     policy-driven `--user nobody`. build-image.sh `chmod 0755`s the staged
+#     binary before this COPY (standard COPY preserves the source mode), so the
+#     binary is executable by `nobody`. The executed smoke-check at the end of
+#     build-image.sh fails the build if the bit is ever lost — a portable guard
+#     that does not depend on BuildKit `--chmod` support, which Apple
+#     `container`'s build does not reliably honor.
 
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 COPY . /usr/local/bin/
 USER nobody

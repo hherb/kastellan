@@ -350,11 +350,15 @@ items unlock later ones.
     `container_mode_entry` (`#[cfg(target_os="macos")]`, issue-#144 rule) + `USE_CONTAINER`/`IMAGE` resolver short-circuit;
     `Net::Deny`+`WorkerStrict`+`mem_mb:512` flow to `--read-only --cap-drop ALL --user nobody --network none --tmpfs /tmp -m 512M`.
     Image via `workers/python-exec/Containerfile` + `scripts/workers/python-exec/build-image.sh` (cross-builds the worker in a
-    bind-mounted `rust` container with the host cargo cache + `--offline`, then a lone-file-context runtime image — Apple
-    `container` BuildKit can't transfer the workspace as a context). Linux unchanged (bwrap stays the baseline; a Linux micro-VM
-    is a future `SandboxBackendKind::FirecrackerVm`). In-VM caveat: Apple guest kernel lacks Landlock (`KernelTooOld`) — the VM +
-    container flags are the primary boundary, in-VM seccomp/Landlock are defense-in-depth on top. Verified macOS: container e2e
-    3/0 real, python_exec lib 22/0, host `python_exec_e2e` 5/0, workspace clippy `-D warnings` clean. Spec/plan:
+    bind-mounted `rust:1-slim-bookworm` container with the host cargo cache + `--offline`, then a lone-file-context
+    `python:3.12-slim-bookworm` runtime image — Apple `container` BuildKit can't transfer the workspace as a context; the two
+    bases are PINNED to the same Debian suite so build-glibc == runtime-glibc). Linux unchanged (bwrap stays the baseline; a Linux
+    micro-VM is a future `SandboxBackendKind::FirecrackerVm`). In-VM caveat: Apple guest kernel lacks Landlock (`KernelTooOld`) — the
+    VM + container flags are the primary boundary, in-VM seccomp/Landlock are defense-in-depth on top. Verified macOS: container e2e
+    4/0 real (incl. >64 KiB params file-channel round-trip), python_exec lib 22/0, host `python_exec_e2e` 5/0, workspace clippy
+    `-D warnings` clean. **Review fixes (PR #355):** GLIBC base-image pin (above), an executed in-image binary smoke-check in
+    build-image.sh, the file-channel e2e; resolve-time image-existence parity tracked as
+    [#356](https://github.com/hherb/kastellan/issues/356). Spec/plan:
     `docs/superpowers/{specs,plans}/2026-06-25-python-exec-macos-microvm*`.
   - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; warm/idle container lifecycle for
     python-exec (it's `SingleUse` → ~0.7s warm-VM spawn per call; an `IdleTimeout` warm slot would amortise it, like gliner);

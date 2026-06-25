@@ -12,9 +12,9 @@ micro-VM on macOS via **`KASTELLAN_PYTHON_EXEC_USE_CONTAINER=1`** — closing th
 memory; the VM does, verified) and giving arbitrary code a **separate-kernel** boundary. **Linux is unchanged** (stays on bwrap +
 seccomp + Landlock + cgroup, the stronger baseline; a Linux micro-VM is a future `FirecrackerVm`). Mirrors gliner-relex Slice 2.5.
 **What shipped (4 tasks, TDD, subagent-driven):** (1) **image build infra** — `workers/python-exec/Containerfile` (single-stage
-`python:3.12-slim`) + `scripts/workers/python-exec/build-image.sh`. The plan's multi-stage in-image Rust build was **impossible on
+`python:3.12-slim-bookworm`) + `scripts/workers/python-exec/build-image.sh`. The plan's multi-stage in-image Rust build was **impossible on
 Apple `container` 0.12.3** (BuildKit FileSync can't transfer the multi-GB workspace as a build context — arrives as ~2B — and the
-in-image network can't reach crates.io), so build-image.sh **cross-builds the worker in a bind-mounted `container run rust:1-slim`**
+in-image network can't reach crates.io), so build-image.sh **cross-builds the worker in a bind-mounted `container run rust:1-slim-bookworm`**
 (host cargo cache mounted + `--offline`, ~5s) then builds the runtime image over a **lone-file context** (just the binary). Three
 Apple-container FileSync quirks codified inline: context MUST be a `/tmp` path (NOT `/private/tmp` — `container build` shares `/tmp`
 only; `pwd -P` → empty 2B context), the context dir MUST be `chmod 755` (mktemp 0700 → builder uid can't traverse → empty), and the
@@ -24,13 +24,23 @@ macOS-gated **`container_mode_entry`** (`sandbox_backend: Some(Container)`, in-i
 `ephemeral_scratch:false` — the in-VM `--tmpfs /tmp` from `build_container_argv` serves params.json) + the `USE_CONTAINER`/`IMAGE`
 resolver short-circuit + 5 units. All container code `#[cfg(target_os="macos")]`-gated (issue-#144 rule, review-verified airtight).
 Strict policy preserved: `Net::Deny` + `WorkerStrict` + `mem_mb:512` → `--read-only --cap-drop ALL --user nobody --network none
---tmpfs /tmp -m 512M`. (3) **`core/tests/python_exec_container_e2e.rs`** — 3 REAL micro-VM e2e (round-trip `print(6*7)→42`; mem-cap:
-900 MiB → `MemoryError` exit 1, the parity payoff Seatbelt can't enforce; net-deny: no `CONNECTED`). **Verification (macOS,
-`container` 0.12.3):** container e2e **3/0** real, python_exec lib **22/0**, host `python_exec_e2e` **5/0** (Seatbelt), workspace
-`clippy --all-targets -D warnings` clean. **Known in-VM caveat:** the prelude logs `landlock: KernelTooOld` (Apple guest kernel
+--tmpfs /tmp -m 512M`. (3) **`core/tests/python_exec_container_e2e.rs`** — 4 REAL micro-VM e2e (round-trip `print(6*7)→42`; mem-cap:
+900 MiB → `MemoryError` exit 1, the parity payoff Seatbelt can't enforce; net-deny: no `CONNECTED`; **>64 KiB params file-channel
+round-trip** — proves the in-VM `/tmp` tmpfs write works as `nobody`). **Verification (macOS, `container` 0.12.3):** container e2e
+**4/0** real, python_exec lib **22/0**, host `python_exec_e2e` **5/0** (Seatbelt), workspace `clippy --all-targets -D warnings` clean.
+**Known in-VM caveat:** the prelude logs `landlock: KernelTooOld` (Apple guest kernel
 predates Landlock) — acceptable: the **VM separate-kernel + container flags are the primary boundary**; in-VM seccomp/Landlock are
 defense-in-depth on top, not load-bearing. Pure-Rust + bash + a Containerfile, no migration, macOS-only mechanism → DGX not required.
-Spec/plan: `docs/superpowers/{specs,plans}/2026-06-25-python-exec-macos-microvm*`.)
+Spec/plan: `docs/superpowers/{specs,plans}/2026-06-25-python-exec-macos-microvm*`.
+**Review fixes (PR #355 review):** (a) **GLIBC skew closed** — the build/runtime bases are now PINNED to the same Debian suite
+(`rust:1-slim-bookworm` builder + `python:3.12-slim-bookworm` runtime); they floated on independent tags before, so a Debian
+transition could link the binary against a newer glibc than the runtime had → `version 'GLIBC_2.xx' not found` only in the VM.
+(b) **Executed smoke-check** — build-image.sh now actually runs the worker binary inside the freshly-built image (stdin `/dev/null`,
+gates on loader/exec failure signatures) so a glibc/exec-bit break fails the build instead of surfacing at agent runtime; plus an
+explicit `chmod 0755` on the staged binary. (c) **file-channel e2e** (the 4th test above). (d) Resolve-time image-existence
+validation parity (container mode registers unconditionally vs host mode's `Misconfigured`) tracked as
+[#356](https://github.com/hherb/kastellan/issues/356). Re-verified macOS: image rebuilt with pinned bases + smoke-check passing,
+container e2e **4/0**.)
 
 _(Prior session — **Test-infra: bound the two unbounded waits behind the `memory_layers_e2e` 0-CPU wedge —
 DONE, MERGED as `cc213ad` (PR #354).** The handover long attributed the serialized
@@ -810,7 +820,7 @@ archive snapshots; the suite table below lists what each integration suite verif
 | `core` unit | 60+ | lockdown-env, watchdog, workspace RAII, audit parsers, dispatch-result mapping, ToolRegistry, injection_guard catalogue, secrets Vault + SecretRef, L3 crystallise/approval/invoke/surface units (see archive for full breakdown) |
 | `core` integration (`shell_exec_e2e`) | 4 | **cross-platform real** core → sandbox → shell-exec round-trip; every call routes through `tool_host::dispatch` |
 | `core` integration (`python_exec_e2e`) | 4 | **real** core → sandbox → python-exec round-trip under the production policy: print round-trip, socket-attempt contained by the jail, **per-spawn scratch write (now cross-platform — Linux tmpfs `/tmp` + macOS host-created per-spawn dir, #283)**, **materialized-secret param scrubbed to `[redacted:]` + one `secret.output_scrubbed` row** (the in-process scrub e2e — full daemon e2e → #298) |
-| `core` integration (`python_exec_container_e2e`) | 3 | **real macOS micro-VM** (`MacosContainer`, opt-in): `python.exec` round-trip through the VM; **`mem_mb:512` cap enforced** (900 MiB → `MemoryError`, the Seatbelt parity gap closed); `Net::Deny` containment (no `CONNECTED`). Skip-as-pass without the `container` CLI/image |
+| `core` integration (`python_exec_container_e2e`) | 4 | **real macOS micro-VM** (`MacosContainer`, opt-in): `python.exec` round-trip through the VM; **`mem_mb:512` cap enforced** (900 MiB → `MemoryError`, the Seatbelt parity gap closed); `Net::Deny` containment (no `CONNECTED`); **>64 KiB params file-channel round-trip** (in-VM `/tmp` tmpfs write as `nobody`). Skip-as-pass without the `container` CLI/image |
 | `web-common` unit | 8 | shared `HostAllowlist` matcher (exact/wildcard/case/lookalike/empty/malformed-json/trim/lone-dot) |
 | `web-fetch` unit | 21 | extract (HTML/PDF/text/JSON/char-boundary cap/unsupported), fetch redirect-drive (cap, non-allowlisted/non-HTTPS refusal, no-Location), handler (happy path, policy-denied arms, method-not-found, invalid-params). (Allowlist matcher tests moved to `web-common`.) |
 | `core` integration (`web_fetch_e2e`) | 1 (+1 ignored) | **real** sandbox deny-path: host outside allowlist is denied (hermetic); `real_fetch_extracts_readable_text` `#[ignore]` (real network, validates DNS+TLS in-jail) |
@@ -996,7 +1006,7 @@ sessions 2026-05-06 → 2026-05-09 in
 
 **Just shipped (python-exec macOS micro-VM mode, branch `feat/python-exec-macos-microvm`, PR pending):** opt-in
 `KASTELLAN_PYTHON_EXEC_USE_CONTAINER=1` runs python-exec under the `MacosContainer` micro-VM on macOS (separate-kernel boundary +
-enforced `mem_mb`); Linux unchanged. See the "Last updated" header. container e2e 3/0 real, lib 22/0, host e2e 5/0, clippy clean.
+enforced `mem_mb`); Linux unchanged. See the "Last updated" header. container e2e 4/0 real, lib 22/0, host e2e 5/0, clippy clean.
 (Prior: #354 test-infra launchctl/pool.close watchdogs MERGED `cc213ad`; #298 daemon scrub e2e PR #352; #348 FULLY CLOSED.)
 
 **★ LEADING PICK — model-side perf (no code task): reduce the planner `num_ctx`.** ~86s/plan is gemma 26B on the DGX Spark with a

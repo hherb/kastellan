@@ -39,8 +39,13 @@
 set -euo pipefail
 
 IMAGE_TAG="${KASTELLAN_PYTHON_EXEC_IMAGE:-kastellan/python-exec:dev}"
-# Builder image for the cross-compile; pinned to the workspace toolchain line.
-BUILD_IMAGE="${KASTELLAN_PYTHON_EXEC_BUILD_IMAGE:-rust:1-slim}"
+# Builder image for the cross-compile. PINNED to the SAME Debian suite as the
+# runtime image (`python:3.12-slim-bookworm` in workers/python-exec/Containerfile):
+# the binary is linked against this image's glibc and run against the runtime
+# image's glibc, so the two suites MUST match or the worker fails to load in the
+# VM with `version 'GLIBC_2.xx' not found`. If you override this, keep the suite
+# in lockstep with the Containerfile's `FROM`.
+BUILD_IMAGE="${KASTELLAN_PYTHON_EXEC_BUILD_IMAGE:-rust:1-slim-bookworm}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -111,12 +116,41 @@ fi
 # layer (producing an image MISSING the binary while `python3` still works).
 # Forcing a fresh COPY guarantees the binary is actually present.
 cp "$BIN" "$CTX_DIR/"
+# Make the exec bit explicit on the staged file. cargo already emits 0755 and
+# standard COPY preserves the source mode, so the binary lands executable for
+# `USER nobody` in the runtime image. Belt-and-suspenders; the smoke-check below
+# is the real guard.
+chmod 0755 "$CTX_DIR"/*
 echo "[2/2] Building $IMAGE_TAG (runtime image, lone-file context) ..."
 container build \
     --no-cache \
     --tag "$IMAGE_TAG" \
     --file "$CONTAINERFILE" \
     "$CTX_DIR"
+
+# Smoke-check: actually EXECUTE the worker binary inside the runtime image. The
+# build succeeding only proves the COPY ran — it does NOT prove the binary can
+# load and run against the runtime rootfs. This catches the two failure modes a
+# green build would otherwise hide until agent runtime in the VM:
+#   * a GLIBC mismatch (build suite != runtime suite) → the dynamic loader aborts
+#     before main with `version 'GLIBC_2.xx' not found`;
+#   * a lost exec bit / broken COPY → `Permission denied` / `Exec format error`.
+# We feed /dev/null on stdin so the worker's stdio serve loop sees EOF and exits
+# promptly instead of blocking; its own exit code is irrelevant (it may exit
+# non-zero resolving env without the daemon's setup), so we don't gate on it.
+# We gate ONLY on the loader/exec failure signatures, which appear before main.
+echo "Smoke-checking the worker binary inside $IMAGE_TAG ..."
+set +e
+smoke_out="$(container run --rm "$IMAGE_TAG" \
+    /usr/local/bin/kastellan-worker-python-exec </dev/null 2>&1)"
+set -e
+if printf '%s' "$smoke_out" | grep -qiE \
+    "GLIBC_|error while loading shared libraries|cannot execute|exec format error|permission denied"; then
+    echo "error: the worker binary fails to load/execute in $IMAGE_TAG:" >&2
+    printf '%s\n' "$smoke_out" >&2
+    echo "       Likely a build/runtime glibc mismatch or a lost exec bit." >&2
+    exit 7
+fi
 
 echo "Built $IMAGE_TAG. Verify the interpreter:"
 echo "    container run --rm $IMAGE_TAG /usr/local/bin/python3 --version"

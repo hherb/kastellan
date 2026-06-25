@@ -81,12 +81,13 @@ fn container_backend() -> Arc<dyn kastellan_sandbox::SandboxBackend> {
         .resolve(Some(SandboxBackendKind::Container), Some(DEFAULT_IMAGE))
 }
 
-/// Spawn the worker in the VM, dispatch one `python.exec`, return the result.
+/// Spawn the worker in the VM, dispatch one `python.exec` with the given
+/// JSON-RPC params object, return the result.
 ///
 /// Uses `dispatch_with_sink` + `NoopAuditSink` so no PG cluster is needed.
 /// `container_mode_entry` sets `ephemeral_scratch: false` (scratch is the
 /// in-VM `/tmp` tmpfs), so no `with_scratch` call.
-async fn run_in_container(code: &str) -> serde_json::Value {
+async fn dispatch_in_container(payload: serde_json::Value) -> serde_json::Value {
     let entry = container_mode_entry(
         std::path::PathBuf::from(
             kastellan_core::workers::python_exec::CONTAINER_WORKER_BIN,
@@ -109,11 +110,16 @@ async fn run_in_container(code: &str) -> serde_json::Value {
         &mut worker,
         "python-exec",
         "python.exec",
-        serde_json::json!({ "code": code }),
+        payload,
     )
     .await;
     let _ = worker.close();
     result.expect("dispatch python.exec")
+}
+
+/// Convenience: dispatch code-only (no `params`).
+async fn run_in_container(code: &str) -> serde_json::Value {
+    dispatch_in_container(serde_json::json!({ "code": code })).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -191,4 +197,51 @@ except Exception as e:
     );
     let stdout = out["stdout"].as_str().unwrap_or_default();
     assert!(!stdout.contains("CONNECTED"), "network must be denied (no CONNECTED): {out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn container_large_param_round_trips_via_file_channel() {
+    if skip_if_no_container_image() {
+        return;
+    }
+    // A >64 KiB params payload exceeds the inline env threshold, so the worker
+    // takes the FILE channel: it writes `<scratch>/params.json` and points the
+    // child at it via KASTELLAN_PYTHON_PARAMS_FILE. In container mode scratch
+    // is the in-VM `/tmp` tmpfs (`--tmpfs /tmp`, writable even under `--read-only`)
+    // and the worker runs as `nobody`. This proves that write path actually works
+    // in the VM — the one fail-CLOSED path host mode covers but container mode did
+    // not (`write_params_file(...)?` aborts the whole exec on any IO error, so a
+    // tmpfs that `nobody` couldn't write would surface as a non-zero exit here).
+    //
+    // 100_000 bytes ≫ the 64 KiB inline threshold, ≪ the 1 MiB default file
+    // ceiling → the File channel. The agent reads the file when the env var is
+    // set, else falls back to the inline var (which would be the "{}" default →
+    // KeyError → non-zero exit if the file channel silently failed).
+    let blob = "A".repeat(100_000);
+    let code = concat!(
+        "import json, os\n",
+        "p = os.environ.get('KASTELLAN_PYTHON_PARAMS_FILE')\n",
+        "if p:\n",
+        "    with open(p) as f:\n",
+        "        params = json.load(f)\n",
+        "else:\n",
+        "    params = json.loads(os.environ.get('KASTELLAN_PYTHON_PARAMS', '{}'))\n",
+        "b = params['blob']\n",
+        "print(len(b), b[:4], b[-4:])\n",
+    );
+    let out = dispatch_in_container(
+        serde_json::json!({ "code": code, "params": { "blob": blob } }),
+    )
+    .await;
+    assert_eq!(
+        out["exit_code"].as_i64(),
+        Some(0),
+        "file-channel write to the in-VM tmpfs must succeed as nobody; stderr: {}",
+        out["stderr"]
+    );
+    assert_eq!(
+        out["stdout"].as_str().unwrap_or_default().trim_end(),
+        "100000 AAAA AAAA",
+        "agent must read the full 100 KiB payload via the in-VM file channel: {out}"
+    );
 }
