@@ -20,7 +20,6 @@
 
 use std::io::{self, Read};
 use std::process::{Command, Output, Stdio};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -63,24 +62,24 @@ pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutc
     // Drain each pipe on its own thread. Reading after the child exits
     // would risk a deadlock for a child that fills a pipe buffer (it
     // blocks on write, never exits, we never read) — concurrent drains
-    // keep both sides making progress regardless of output volume.
+    // keep both sides making progress regardless of output volume. Each
+    // closure *returns* the captured bytes, so `join()` hands them back
+    // directly (no channel needed).
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
-    let (otx, orx) = mpsc::channel();
-    let (etx, erx) = mpsc::channel();
     let o_handle = thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(p) = stdout_pipe.as_mut() {
             let _ = p.read_to_end(&mut buf);
         }
-        let _ = otx.send(buf);
+        buf
     });
     let e_handle = thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(p) = stderr_pipe.as_mut() {
             let _ = p.read_to_end(&mut buf);
         }
-        let _ = etx.send(buf);
+        buf
     });
 
     // Poll for exit until the deadline. `try_wait` reaps the child the
@@ -96,19 +95,25 @@ pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutc
 
     let Some(status) = exit_status else {
         // Timed out: kill + reap so no zombie survives. Killing closes
-        // the pipes, which lets the reader threads finish; join them so
-        // their fds are released before we return.
+        // the child's pipe ends, so the drain threads normally hit EOF
+        // and exit at once — but we deliberately do NOT join them here.
+        // If the child spawned a descendant that inherited the pipe, the
+        // read would never see EOF and a join would re-introduce the very
+        // unbounded wait this function exists to prevent. Returning
+        // promptly honors the timeout; the detached threads exit on their
+        // own once the pipe finally closes.
         let _ = child.kill();
         let _ = child.wait();
-        let _ = o_handle.join();
-        let _ = e_handle.join();
         return Ok(CappedOutcome::TimedOut);
     };
 
-    let _ = o_handle.join();
-    let _ = e_handle.join();
-    let stdout = orx.recv().unwrap_or_default();
-    let stderr = erx.recv().unwrap_or_default();
+    // The child exited on its own, so its pipe write-ends are closed and
+    // the drain threads have hit (or are about to hit) EOF — these joins
+    // return promptly, handing back the captured bytes. (As with
+    // `Command::output`, a still-open inherited pipe could delay this; on
+    // the non-timeout path that is the same contract the std API offers.)
+    let stdout = o_handle.join().unwrap_or_default();
+    let stderr = e_handle.join().unwrap_or_default();
     Ok(CappedOutcome::Completed(Output { status, stdout, stderr }))
 }
 
