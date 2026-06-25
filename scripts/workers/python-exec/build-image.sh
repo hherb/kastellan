@@ -28,6 +28,10 @@
 # (~/.cargo/registry). They are, after any prior workspace build; if the
 # `--offline` step fails with "no matching package", run once on the host:
 #     cargo build -p kastellan-worker-python-exec
+# The reused cache is the registry's *source* crates (arch-neutral — the same
+# .crate tarballs feed any target), NOT host-arch compiled artifacts, so the
+# in-container build for the guest arch (aarch64 on Apple Silicon) compiles them
+# fresh; only the downloads are skipped.
 #
 # Exits non-zero with a clear message if `container` CLI is missing, its
 # system service is down, or the host cargo cache is absent.

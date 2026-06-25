@@ -67,6 +67,15 @@ fn skip_if_no_container_image() -> bool {
 }
 
 /// Resolve the container backend for the python-exec image.
+///
+/// Layering note: this resolves the backend directly (like
+/// `lifecycle_container_routing_e2e.rs`) rather than threading the entry's
+/// `sandbox_backend`/`container_image` through the daemon's spec→backend
+/// wiring. That field-mapping is covered separately — the manifest unit tests
+/// (`resolve_uses_container_backend_when_flag_set`) assert `container_mode_entry`
+/// produces those fields, and `lifecycle_container_routing_e2e.rs` proves the
+/// lifecycle manager honors `sandbox_backend == Some(Container)`. This e2e's job
+/// is the *runtime* proof: real worker + real VM + the strict policy's flags.
 fn container_backend() -> Arc<dyn kastellan_sandbox::SandboxBackend> {
     SandboxBackends::default_for_current_os()
         .resolve(Some(SandboxBackendKind::Container), Some(DEFAULT_IMAGE))
@@ -173,6 +182,9 @@ except Exception as e:
     // `python_exec_round_trips_through_container`: it proves this same harness
     // faithfully returns the child's stdout, so a connection that truly succeeded
     // could not hide. The result-object check rules out a broken dispatch path.
+    // NOTE: this test's non-vacuity DEPENDS on the round-trip test above staying
+    // live (not `#[ignore]`d / removed) — if it ever is, a worker that never ran
+    // would also print no "CONNECTED" and this guard would weaken. Keep them paired.
     assert!(
         out.get("exit_code").is_some(),
         "worker returned no result object — dispatch broken, not contained: {out}"
