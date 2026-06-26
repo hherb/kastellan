@@ -677,3 +677,146 @@ fn resolve_stays_host_mode_without_use_container() {
         other => panic!("expected Register, got {}", outcome_label(&other)),
     }
 }
+
+// ---- firecracker mode (Linux micro-VM) ----
+
+/// `USE_MICROVM=1` (Linux) routes the manifest to a FirecrackerVm-tagged entry.
+/// The resolver short-circuit skips host interpreter discovery entirely (the
+/// interpreter is in the rootfs image). Mirrors the macOS container resolver test.
+#[cfg(target_os = "linux")]
+#[test]
+fn resolver_registers_firecracker_when_use_microvm() {
+    let get_env = |k: &str| match k {
+        "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
+        "KASTELLAN_PYTHON_EXEC_USE_MICROVM" => Some("1".to_string()),
+        _ => None,
+    };
+    // No host interpreter or binary needs to exist: USE_MICROVM short-circuits
+    // before any host probing.
+    let exists = |_p: &Path| false;
+    let c = ctx(&get_env, &exists);
+    match PythonExecManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert_eq!(
+                entry.sandbox_backend,
+                Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm),
+                "FirecrackerVm backend must be selected"
+            );
+            assert!(entry.container_image.is_none(), "no image tag in firecracker mode");
+            assert_eq!(
+                entry.binary,
+                PathBuf::from("/usr/local/bin/kastellan-worker-python-exec")
+            );
+            // Strict policy preserved.
+            assert!(matches!(entry.policy.net, Net::Deny));
+            assert_eq!(entry.policy.profile, Profile::WorkerStrict);
+            assert_eq!(entry.policy.mem_mb, 512);
+            assert_eq!(entry.policy.cpu_ms, 10_000);
+            assert_eq!(entry.wall_clock_ms, Some(30_000));
+            // No host binds in firecracker mode.
+            assert!(entry.policy.fs_read.is_empty(), "no host fs_read in firecracker mode");
+            assert!(entry.policy.fs_write.is_empty());
+            // Image dir defaults to /var/lib/kastellan/microvm when unset.
+            assert!(
+                entry
+                    .policy
+                    .env
+                    .contains(&(
+                        "KASTELLAN_MICROVM_DIR".to_string(),
+                        "/var/lib/kastellan/microvm".to_string()
+                    )),
+                "KASTELLAN_MICROVM_DIR must default to /var/lib/kastellan/microvm"
+            );
+            // In-image interpreter injected.
+            assert!(entry
+                .policy
+                .env
+                .contains(&(PYTHON_ENV.to_string(), "/usr/local/bin/python3".to_string())));
+            // No host scratch — the in-VM /tmp tmpfs serves params.json.
+            assert!(!entry.ephemeral_scratch);
+            assert!(matches!(entry.lifecycle, crate::worker_lifecycle::Lifecycle::SingleUse));
+        }
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}
+
+/// KASTELLAN_MICROVM_DIR override is honoured (Linux).
+#[cfg(target_os = "linux")]
+#[test]
+fn resolver_firecracker_honours_image_dir_override() {
+    let get_env = |k: &str| match k {
+        "KASTELLAN_PYTHON_EXEC_ENABLE" => Some("1".to_string()),
+        "KASTELLAN_PYTHON_EXEC_USE_MICROVM" => Some("1".to_string()),
+        "KASTELLAN_MICROVM_DIR" => Some("/opt/microvm".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| false;
+    let c = ctx(&get_env, &exists);
+    match PythonExecManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert!(
+                entry
+                    .policy
+                    .env
+                    .contains(&("KASTELLAN_MICROVM_DIR".to_string(), "/opt/microvm".to_string())),
+                "KASTELLAN_MICROVM_DIR override must be forwarded"
+            );
+        }
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}
+
+/// firecracker_mode_entry shape: FirecrackerVm backend, strict policy,
+/// no host binds, in-image interpreter, correct lifecycle.
+#[cfg(target_os = "linux")]
+#[test]
+fn firecracker_mode_entry_shape() {
+    let entry = firecracker_mode_entry(
+        PathBuf::from("/usr/local/bin/kastellan-worker-python-exec"),
+        "/var/lib/kastellan/microvm".to_string(),
+        None,
+        crate::worker_lifecycle::Lifecycle::SingleUse,
+    );
+    assert_eq!(
+        entry.sandbox_backend,
+        Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+    );
+    assert!(entry.container_image.is_none());
+    assert!(matches!(entry.policy.net, Net::Deny));
+    assert_eq!(entry.policy.profile, Profile::WorkerStrict);
+    assert_eq!(entry.policy.mem_mb, 512);
+    assert_eq!(entry.policy.cpu_ms, 10_000);
+    assert_eq!(entry.wall_clock_ms, Some(30_000));
+    assert!(entry.policy.fs_read.is_empty());
+    assert!(entry.policy.fs_write.is_empty());
+    assert!(!entry.ephemeral_scratch);
+    assert!(entry
+        .policy
+        .env
+        .contains(&(PYTHON_ENV.to_string(), "/usr/local/bin/python3".to_string())));
+    assert!(!entry.policy.env.iter().any(|(k, _)| k == ENV_LANDLOCK_RW));
+}
+
+/// The params-file ceiling is forwarded into the VM only when set (Linux).
+#[cfg(target_os = "linux")]
+#[test]
+fn firecracker_mode_entry_forwards_params_file_max_only_when_set() {
+    let without = firecracker_mode_entry(
+        PathBuf::from("/usr/local/bin/kastellan-worker-python-exec"),
+        "/var/lib/kastellan/microvm".to_string(),
+        None,
+        crate::worker_lifecycle::Lifecycle::SingleUse,
+    );
+    assert!(!without.policy.env.iter().any(|(k, _)| k == PARAMS_FILE_MAX_ENV));
+
+    let with = firecracker_mode_entry(
+        PathBuf::from("/usr/local/bin/kastellan-worker-python-exec"),
+        "/var/lib/kastellan/microvm".to_string(),
+        Some("2097152".to_string()),
+        crate::worker_lifecycle::Lifecycle::SingleUse,
+    );
+    assert!(with
+        .policy
+        .env
+        .contains(&(PARAMS_FILE_MAX_ENV.to_string(), "2097152".to_string())));
+}

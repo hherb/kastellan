@@ -18,6 +18,8 @@ members = [
     "workers/egress-proxy",
     "workers/matrix-wire",
     "workers/matrix",
+    "workers/microvm-run",
+    "workers/microvm-init",
 ]
 
 [workspace.package]

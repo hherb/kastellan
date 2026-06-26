@@ -173,6 +173,8 @@ mod tests {
         let sbs = Arc::new(kastellan_sandbox::SandboxBackends {
             #[cfg(target_os = "linux")]
             bwrap: Arc::new(NeverSpawnsBackend),
+            #[cfg(target_os = "linux")]
+            firecracker: Arc::new(NeverSpawnsBackend),
             #[cfg(target_os = "macos")]
             seatbelt: Arc::new(NeverSpawnsBackend),
             #[cfg(target_os = "macos")]
@@ -199,6 +201,8 @@ mod tests {
         let sbs = Arc::new(kastellan_sandbox::SandboxBackends {
             #[cfg(target_os = "linux")]
             bwrap: Arc::new(NeverSpawnsBackend),
+            #[cfg(target_os = "linux")]
+            firecracker: Arc::new(NeverSpawnsBackend),
             #[cfg(target_os = "macos")]
             seatbelt: Arc::new(NeverSpawnsBackend),
             #[cfg(target_os = "macos")]
@@ -237,6 +241,8 @@ mod tests {
         let sbs = Arc::new(kastellan_sandbox::SandboxBackends {
             #[cfg(target_os = "linux")]
             bwrap: Arc::new(NeverSpawnsBackend),
+            #[cfg(target_os = "linux")]
+            firecracker: Arc::new(NeverSpawnsBackend),
             #[cfg(target_os = "macos")]
             seatbelt: Arc::new(NeverSpawnsBackend),
             #[cfg(target_os = "macos")]

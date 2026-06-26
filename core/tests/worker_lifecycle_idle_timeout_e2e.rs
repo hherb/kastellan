@@ -97,7 +97,9 @@ impl SandboxBackend for CountingSandboxBackend {
 fn sandbox_bundle_from(backend: Arc<dyn SandboxBackend>) -> Arc<kastellan_sandbox::SandboxBackends> {
     Arc::new(kastellan_sandbox::SandboxBackends {
         #[cfg(target_os = "linux")]
-        bwrap: backend,
+        bwrap: Arc::clone(&backend),
+        #[cfg(target_os = "linux")]
+        firecracker: backend,
         #[cfg(target_os = "macos")]
         seatbelt: Arc::clone(&backend),
         #[cfg(target_os = "macos")]

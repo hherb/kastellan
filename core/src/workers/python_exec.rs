@@ -29,7 +29,7 @@ use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
 use crate::tool_host::ENV_LANDLOCK_RW;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle};
 use crate::worker_manifest::{discover_binary, Resolution, ResolveCtx, WorkerManifest};
 
@@ -61,29 +61,29 @@ const USE_CONTAINER_ENV: &str = "KASTELLAN_PYTHON_EXEC_USE_CONTAINER";
 #[cfg(target_os = "macos")]
 const IMAGE_ENV: &str = "KASTELLAN_PYTHON_EXEC_IMAGE";
 
-/// Opt-in knob for the warm/idle container lifecycle. `> 0` keeps the macOS
-/// micro-VM warm for that many idle seconds between calls; `0`/unset/garbage →
-/// today's per-call `SingleUse` boot. Container-mode only (the host paths are
-/// already cheap to spawn). macOS-only; same `cfg`-gate rationale as
-/// [`USE_CONTAINER_ENV`].
-#[cfg(target_os = "macos")]
+/// Opt-in knob for the warm/idle lifecycle. `> 0` keeps the micro-VM warm for
+/// that many idle seconds between calls; `0`/unset/garbage → today's per-call
+/// `SingleUse` boot. Used by both the macOS Container backend and the Linux
+/// Firecracker backend.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const IDLE_SECONDS_ENV: &str = "KASTELLAN_PYTHON_EXEC_IDLE_SECONDS";
 /// Override for the warm worker's cumulative request cap (slow-leak hygiene).
-/// Default [`DEFAULT_MAX_REQUESTS`]. macOS-only.
-#[cfg(target_os = "macos")]
+/// Default [`DEFAULT_MAX_REQUESTS`]. Shared by macOS and Linux micro-VM paths.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const MAX_REQUESTS_ENV: &str = "KASTELLAN_PYTHON_EXEC_MAX_REQUESTS";
 /// Override for the warm worker's max-age cap in seconds (drift hygiene).
-/// Default [`DEFAULT_MAX_AGE_SECONDS`]. macOS-only.
-#[cfg(target_os = "macos")]
+/// Default [`DEFAULT_MAX_AGE_SECONDS`]. Shared by macOS and Linux micro-VM paths.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const MAX_AGE_SECONDS_ENV: &str = "KASTELLAN_PYTHON_EXEC_MAX_AGE_SECONDS";
 /// Default cumulative-request cap, mirroring GLiNER-Relex's manifest.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const DEFAULT_MAX_REQUESTS: u64 = 10_000;
 /// Default max-age cap (24 h), mirroring GLiNER-Relex's manifest.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const DEFAULT_MAX_AGE_SECONDS: u64 = 86_400;
 /// SIGTERM grace before SIGKILL on warm-worker teardown (fixed; matches GLiNER).
-#[cfg(target_os = "macos")]
+/// Shared by the macOS container lifecycle and the Linux Firecracker lifecycle.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const IDLE_GRACE_SECONDS: u64 = 5;
 /// Default image tag built by scripts/workers/python-exec/build-image.sh.
 pub const DEFAULT_IMAGE: &str = "kastellan/python-exec:dev";
@@ -255,7 +255,7 @@ pub fn python_exec_entry(
 /// [`IDLE_SECONDS_ENV`] parses to a value `> 0`. The two cap overrides fall back
 /// to their defaults on absent/unparseable input — fail-safe to the
 /// conservative GLiNER-mirrored values.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn parse_idle_caps(get_env: impl Fn(&str) -> Option<String>) -> (Option<u64>, u64, u64) {
     let parse_u64 = |key: &str| -> Option<u64> { get_env(key).and_then(|v| v.trim().parse().ok()) };
     let idle_seconds = parse_u64(IDLE_SECONDS_ENV).filter(|&n| n > 0);
@@ -271,7 +271,7 @@ fn parse_idle_caps(get_env: impl Fn(&str) -> Option<String>) -> (Option<u64>, u6
 /// caps and a fixed 5 s SIGTERM grace. The `Contract { stateless: true }` holds:
 /// the agent's Python runs as a fresh subprocess per call and the worker wipes
 /// its scratch between calls (`wipe_scratch_contents` in the worker crate).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn container_lifecycle(
     idle_seconds: Option<u64>,
     max_requests: u64,
@@ -322,6 +322,78 @@ pub fn container_mode_entry(
         lifecycle,
         sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::Container),
         container_image: Some(image),
+        lockdown_shim: None,
+        ephemeral_scratch: false,
+    }
+}
+
+/// Opt into the Linux Firecracker micro-VM backend. Linux-only;
+/// on macOS the flag is never read (the `FirecrackerVm` variant doesn't exist),
+/// so the const is `cfg`-gated out there to avoid a dead-code error under
+/// `-D warnings` (issue-#144 rule).
+#[cfg(target_os = "linux")]
+const USE_MICROVM_ENV: &str = "KASTELLAN_PYTHON_EXEC_USE_MICROVM";
+
+/// Firecracker-mode entry: routes python-exec through the Linux
+/// `FirecrackerVm` micro-VM backend (opt-in via
+/// `KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`). Gives arbitrary agent code a
+/// separate-kernel boundary on Linux. Simpler than [`python_exec_entry`]:
+/// NO host interpreter discovery, NO `interpreter_lib_dirs`, `fs_read` empty.
+/// Both the worker binary and the interpreter live inside the rootfs image;
+/// code arrives over stdin and scratch (incl. the >64 KiB `params.json` file
+/// channel) lands in the in-VM `/tmp` tmpfs that the guest init mounts.
+///
+/// `mem_mb: 512` is enforced by Firecracker. `cpu_quota_pct`/`tasks_max`
+/// stay `None` (python-exec never set them for the non-VM path).
+///
+/// Linux-only: emits `SandboxBackendKind::FirecrackerVm`, a
+/// `#[cfg(target_os = "linux")]` variant. Compiling this on macOS would
+/// reference the non-existent variant, breaking the macOS build (issue #144).
+#[cfg(target_os = "linux")]
+pub fn firecracker_mode_entry(
+    binary: PathBuf,
+    image_dir: String,
+    params_file_max: Option<String>,
+    lifecycle: Lifecycle,
+) -> ToolEntry {
+    let mut env = vec![
+        (PYTHON_ENV.to_string(), "/usr/local/bin/python3".to_string()),
+        ("KASTELLAN_MICROVM_DIR".to_string(), image_dir),
+    ];
+    // Forward the operator's >64 KiB params file-channel ceiling into the guest
+    // ONLY when set (byte-identical to host/container default otherwise). The
+    // `>64 KiB → <scratch>/params.json` write lands in the in-VM `/tmp` tmpfs
+    // the guest init mounts, so the channel is fully in-guest — same posture as
+    // `container_mode_entry`.
+    //
+    // NOTE (Slice 1): the env vars pushed here (KASTELLAN_PYTHON_PARAMS_FILE_MAX,
+    // KASTELLAN_MICROVM_DIR, etc.) are provisioning-only at this stage.
+    // `policy.env` is NOT yet forwarded into the guest — the guest init bakes a
+    // fixed environment and execs the worker without reading policy env.  These
+    // overrides will take effect in-VM only once guest env-forwarding lands
+    // (tracked as a follow-up to Slice 1).
+    if let Some(v) = params_file_max.filter(|v| !v.trim().is_empty()) {
+        env.push((PARAMS_FILE_MAX_ENV.to_string(), v));
+    }
+    let policy = SandboxPolicy {
+        fs_read: vec![],
+        fs_write: vec![],
+        net: Net::Deny,
+        cpu_ms: 10_000,
+        mem_mb: 512,
+        profile: Profile::WorkerStrict,
+        env,
+        cpu_quota_pct: None,
+        tasks_max: None,
+        proxy_uds: None,
+    };
+    ToolEntry {
+        binary,
+        policy,
+        wall_clock_ms: Some(30_000),
+        lifecycle,
+        sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm),
+        container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
     }
@@ -426,6 +498,34 @@ impl WorkerManifest for PythonExecManifest {
                 ));
             }
             // enabled && !use_container, or !enabled: fall through to the
+            // existing host-mode logic (which re-checks the ENABLE gate).
+        }
+
+        // Firecracker micro-VM mode (Linux) short-circuits host interpreter
+        // resolution: the interpreter lives inside the rootfs image.
+        // Linux-only — on macOS USE_MICROVM is never read so the
+        // `FirecrackerVm` variant is never referenced (issue #144).
+        #[cfg(target_os = "linux")]
+        {
+            let enabled = (ctx.get_env)(ENABLE_ENV).unwrap_or_default().trim() == "1";
+            let use_microvm =
+                (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
+            if enabled && use_microvm {
+                let binary =
+                    PathBuf::from("/usr/local/bin/kastellan-worker-python-exec");
+                let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
+                    .filter(|v| !v.trim().is_empty())
+                    .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
+                let params_file_max = (ctx.get_env)(PARAMS_FILE_MAX_ENV);
+                let (idle, max_req, max_age) = parse_idle_caps(|k| (ctx.get_env)(k));
+                return Resolution::Register(firecracker_mode_entry(
+                    binary,
+                    image_dir,
+                    params_file_max,
+                    container_lifecycle(idle, max_req, max_age),
+                ));
+            }
+            // enabled && !use_microvm, or !enabled: fall through to the
             // existing host-mode logic (which re-checks the ENABLE gate).
         }
 
