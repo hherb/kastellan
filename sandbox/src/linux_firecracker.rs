@@ -9,6 +9,12 @@
 //!
 //! All of this module is `#[cfg(target_os = "linux")]`-gated (see lib.rs).
 
+mod plan;
+pub use plan::{
+    build_launch_plan, render_firecracker_config, FirecrackerImage, FirecrackerLaunchPlan,
+    WORKER_VSOCK_PORT,
+};
+
 use std::process::Child;
 
 use crate::{SandboxBackend, SandboxError, SandboxPolicy};
