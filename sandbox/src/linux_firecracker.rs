@@ -15,6 +15,9 @@ pub use plan::{
     WORKER_VSOCK_PORT,
 };
 
+mod probe;
+pub use probe::{probe_report, ProbeInputs};
+
 use std::process::Child;
 
 use crate::{SandboxBackend, SandboxError, SandboxPolicy};
