@@ -6,7 +6,27 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-25 (**python-exec macOS micro-VM mode — DONE on branch `feat/python-exec-macos-microvm` (PR #355).**
+**Last updated:** 2026-06-26 (**python-exec warm/idle container lifecycle — DONE on branch `feat/python-exec-warm-idle-container` (PR pending).**
+Opt-in `KASTELLAN_PYTHON_EXEC_IDLE_SECONDS > 0` keeps the macOS micro-VM **warm between `python.exec` calls** (reuses the existing
+`IdleTimeout` lifecycle — `CompositeLifecycle` already routes by `entry.lifecycle`, so **no new lifecycle machinery**), amortising the
+~0.7 s VM boot. Default unset/`0` → today's `SingleUse` (byte-identical). **Container-mode only** (host Seatbelt/bwrap spawns are already
+cheap); Linux has no micro-VM backend yet so the knob is a no-op there. **Key finding that made reuse safe:** the worker is a persistent
+Rust JSON-RPC server that already spawns a **fresh `python3` subprocess per call** (`run_code`), so warming reuses only the trusted server
++ booted VM — no Python-state leakage. The **one** cross-call surface (the in-VM `/tmp` tmpfs) is closed by a new worker-side
+**`wipe_scratch_contents`** that clears the scratch dir at the start of every call (idempotent no-op on a fresh/SingleUse spawn), restoring
+pristine-`/tmp` parity. Caps mirror GLiNER (10k requests / 24h age / 5s grace), overridable via
+`KASTELLAN_PYTHON_EXEC_{MAX_REQUESTS,MAX_AGE_SECONDS}`. **Shipped (3 TDD tasks):** (1) worker `wipe_scratch_contents` + wired into
+`run_code` (workers/python-exec/src/exec/mod.rs); (2) core pure `parse_idle_caps` + `container_lifecycle`, `container_mode_entry` gains a
+`lifecycle` param, resolver parses the env (all macOS-`cfg`-gated, issue-#144 rule); (3) real-micro-VM e2e
+`core/tests/python_exec_warm_idle_e2e.rs`. **Gotcha codified in the e2e:** `SandboxBackends::resolve(Some(Container), Some(tag))` builds a
+FRESH `MacosContainer` for the tag (bypassing a stored counting wrapper), so the spawn-count test nulls `entry.container_image` to resolve
+the stored slot (which carries the image). **Verification (macOS, `container` 0.12.3, image rebuilt via build-image.sh):** worker lib 37/0
+(+3 wipe), python_exec lib 30/0 (+8 caps/lifecycle/resolver), warm/idle e2e **3/0 real** (warm-reuse boots VM once; `/tmp` sentinel from
+call 1 GONE for call 2 on the same warm VM; idle teardown clears the slot), `cargo build --workspace` + `cargo clippy --workspace
+--all-targets -D warnings` clean. Pure-Rust + macOS-gated mechanism, no migration → DGX not required. Spec/plan:
+`docs/superpowers/{specs,plans}/2026-06-26-python-exec-warm-idle-container*`.)
+
+_(Prior session — **python-exec macOS micro-VM mode — DONE + MERGED to `main` as `88d2744` (PR #355).**
 Phase-4 slice: `python-exec` (the worker that runs arbitrary agent-authored Python) can now opt into the existing `MacosContainer`
 micro-VM on macOS via **`KASTELLAN_PYTHON_EXEC_USE_CONTAINER=1`** — closing the macOS `mem_mb` parity gap (Seatbelt can't enforce
 memory; the VM does, verified) and giving arbitrary code a **separate-kernel** boundary. **Linux is unchanged** (stays on bwrap +
@@ -40,7 +60,7 @@ gates on loader/exec failure signatures) so a glibc/exec-bit break fails the bui
 explicit `chmod 0755` on the staged binary. (c) **file-channel e2e** (the 4th test above). (d) Resolve-time image-existence
 validation parity (container mode registers unconditionally vs host mode's `Misconfigured`) tracked as
 [#356](https://github.com/hherb/kastellan/issues/356). Re-verified macOS: image rebuilt with pinned bases + smoke-check passing,
-container e2e **4/0**.)
+container e2e **4/0**.)_
 
 _(Prior session — **Test-infra: bound the two unbounded waits behind the `memory_layers_e2e` 0-CPU wedge —
 DONE, MERGED as `cc213ad` (PR #354).** The handover long attributed the serialized
@@ -1004,10 +1024,11 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (python-exec macOS micro-VM mode, branch `feat/python-exec-macos-microvm`, PR pending):** opt-in
-`KASTELLAN_PYTHON_EXEC_USE_CONTAINER=1` runs python-exec under the `MacosContainer` micro-VM on macOS (separate-kernel boundary +
-enforced `mem_mb`); Linux unchanged. See the "Last updated" header. container e2e 4/0 real, lib 22/0, host e2e 5/0, clippy clean.
-(Prior: #354 test-infra launchctl/pool.close watchdogs MERGED `cc213ad`; #298 daemon scrub e2e PR #352; #348 FULLY CLOSED.)
+**Just shipped (python-exec warm/idle container lifecycle, branch `feat/python-exec-warm-idle-container`, PR pending):** opt-in
+`KASTELLAN_PYTHON_EXEC_IDLE_SECONDS > 0` keeps the macOS micro-VM warm between calls (reuses the existing `IdleTimeout` lifecycle),
+amortising the ~0.7 s boot; per-call `/tmp` wipe restores SingleUse-parity isolation. Container-mode only, default off. See the "Last
+updated" header. warm/idle e2e 3/0 real, worker lib 37/0, python_exec lib 30/0, workspace clippy clean.
+(Prior: python-exec macOS micro-VM mode MERGED `88d2744` (PR #355); #354 launchctl/pool.close watchdogs `cc213ad`; #298 daemon scrub e2e PR #352; #348 FULLY CLOSED.)
 
 **★ LEADING PICK — model-side perf (no code task): reduce the planner `num_ctx`.** ~86s/plan is gemma 26B on the DGX Spark with a
 262144-token context; reducing the model's default `num_ctx` (`OLLAMA_CONTEXT_LENGTH` or a Modelfile — NOT per-request, which
@@ -1114,9 +1135,10 @@ continues:
    TMPDIR/HOME to the per-spawn dir, e2e 4/4 on macOS Seatbelt. ~~**macOS micro-VM backend** (separate-kernel boundary +
    enforced `mem_mb`)~~ — **DONE 2026-06-25** (branch `feat/python-exec-macos-microvm`; opt-in
    `KASTELLAN_PYTHON_EXEC_USE_CONTAINER=1` → `container_mode_entry` routes through `MacosContainer`; image via
-   `scripts/workers/python-exec/build-image.sh`; see "Last updated" header). **Remaining Phase-4 picks:** curated-wheels RO
-   dir if skills demand third-party packages (python-exec is stdlib-only today); **warm/idle container lifecycle** for python-exec
-   (it's `SingleUse` → ~0.7s warm-VM spawn per call; an `IdleTimeout` warm slot would amortise it, like gliner); **Linux micro-VM
+   `scripts/workers/python-exec/build-image.sh`; see "Last updated" header). ~~**warm/idle container lifecycle**~~ — **DONE 2026-06-26**
+   (branch `feat/python-exec-warm-idle-container`; opt-in `KASTELLAN_PYTHON_EXEC_IDLE_SECONDS > 0` → `IdleTimeout` warm VM + per-call
+   `/tmp` wipe; see "Last updated" header). **Remaining Phase-4 picks:** curated-wheels RO
+   dir if skills demand third-party packages (python-exec is stdlib-only today); **Linux micro-VM
    backend** (`SandboxBackendKind::FirecrackerVm`/Kata — the production-relevant one on the DGX, a multi-session arc; the enum
    already anticipates it); tiered delegation policy (ROADMAP).
 
