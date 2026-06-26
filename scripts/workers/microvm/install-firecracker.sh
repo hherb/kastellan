@@ -6,8 +6,20 @@
 # firecracker binary, install it to ~/.local/bin, and verify with --version.
 #
 # Run as the kastellan service user (no root needed; writes only to ~/.local):
-#   bash scripts/workers/microvm/install-firecracker.sh
+#   ./scripts/workers/microvm/install-firecracker.sh   (do NOT use sudo or sh)
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Run with bash, not sh: ./scripts/workers/microvm/install-firecracker.sh" >&2
+    exit 1
+fi
 set -euo pipefail
+
+# Per-user install (writes only to ~/.local/bin). Refuse root so the binary
+# does not land in /root/.local/bin, off the worker user's PATH (a sudo run
+# resets HOME to root's).
+if [ "$(id -u)" -eq 0 ]; then
+    echo "Run this as the kastellan service user, NOT root — sudo would install firecracker to /root/.local/bin." >&2
+    exit 1
+fi
 
 FC_VERSION="v1.16.0"
 FC_ARCH="aarch64"
@@ -29,7 +41,7 @@ tar -xzf "${WORKDIR}/${FC_TGZ}" -C "${WORKDIR}"
 EXTRACTED="${WORKDIR}/release-${FC_VERSION}-${FC_ARCH}/${FC_BINARY}"
 if [[ ! -f "${EXTRACTED}" ]]; then
     echo "Unexpected tarball layout. Contents:" >&2
-    find "${TMPDIR}" -maxdepth 3 >&2
+    find "${WORKDIR}" -maxdepth 3 >&2
     exit 1
 fi
 

@@ -3,11 +3,29 @@
 # Mirrors the macOS build-image.sh cross-build: compile the worker + init for
 # the Linux guest in a bind-mounted rust container (or natively on the DGX),
 # then assemble a minimal ext4 with python + both binaries + the init as PID1.
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Run with bash, not sh: ./scripts/workers/microvm/build-rootfs.sh" >&2
+    exit 1
+fi
 set -euo pipefail
 OUT_DIR="${KASTELLAN_MICROVM_DIR:-/var/lib/kastellan/microvm}"
 KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/aarch64/vmlinux-6.1.102"
 ROOTFS_MIB=512
-mkdir -p "$OUT_DIR"
+
+# The output dir defaults to /var/lib/kastellan/microvm, which is provisioned
+# (created + chowned to the worker user) by the privileged one-time setup
+# `sudo scripts/linux/install-firecracker-vsock.sh`. If it is missing or
+# unwritable, point the operator at that step rather than failing on a bare
+# `mkdir: Permission denied`.
+if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
+    echo "Cannot write the micro-VM image dir: $OUT_DIR" >&2
+    echo "Run the one-time privileged setup first:" >&2
+    echo "    sudo ./scripts/linux/install-firecracker-vsock.sh" >&2
+    echo "or build into a user-writable dir:" >&2
+    echo "    KASTELLAN_MICROVM_DIR=\"\$HOME/.local/share/kastellan/microvm\" ./scripts/workers/microvm/build-rootfs.sh" >&2
+    echo "(set the same KASTELLAN_MICROVM_DIR in the kastellan service env so the backend finds it)." >&2
+    exit 1
+fi
 
 # 1. Guest kernel (pinned).
 [ -f "$OUT_DIR/vmlinux" ] || curl -fL --retry 3 -o "$OUT_DIR/vmlinux" "$KERNEL_URL"

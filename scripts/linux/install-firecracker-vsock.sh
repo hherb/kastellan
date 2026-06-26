@@ -14,8 +14,18 @@
 # Run once with sudo:
 #   sudo scripts/linux/install-firecracker-vsock.sh [--user <name>] [--kvm]
 #
+# It also provisions the micro-VM image dir /var/lib/kastellan/microvm (owned
+# by the worker user) so the unprivileged build-rootfs.sh + the per-user
+# service can write it without further root.
+#
 # Reversible: remove /etc/udev/rules.d/99-kastellan-microvm.rules and
 # /etc/modules-load.d/kastellan-vsock.conf, then `udevadm control --reload`.
+# The image dir /var/lib/kastellan/microvm is left in place (holds the built
+# rootfs + kernel); `rm -rf` it manually to fully uninstall.
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Run with bash, not sh: sudo ./scripts/linux/install-firecracker-vsock.sh" >&2
+    exit 1
+fi
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -78,6 +88,15 @@ echo "Wrote ${RULES_PATH}"
 udevadm control --reload
 "${SETFACL_BIN}" -m "u:${TARGET_USER}:rw" /dev/vhost-vsock
 [[ "${GRANT_KVM}" -eq 1 ]] && "${SETFACL_BIN}" -m "u:${TARGET_USER}:rw" /dev/kvm
+
+# 4. Provision the micro-VM image dir, owned by the worker user. build-rootfs.sh
+#    and the FirecrackerVm backend both default to /var/lib/kastellan/microvm;
+#    creating it here (the one privileged step) lets the unprivileged rootfs
+#    build + the per-user service write it without further root.
+MICROVM_DIR="/var/lib/kastellan/microvm"
+mkdir -p "${MICROVM_DIR}"
+chown "${TARGET_USER}:$(id -gn "${TARGET_USER}")" "${MICROVM_DIR}"
+echo "Provisioned ${MICROVM_DIR} (owner ${TARGET_USER})"
 
 echo
 echo "Done. Verify as ${TARGET_USER}:"
