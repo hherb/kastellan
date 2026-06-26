@@ -18,15 +18,15 @@ INSTALL_DIR="${HOME}/.local/bin"
 
 mkdir -p "${INSTALL_DIR}"
 
-TMPDIR=$(mktemp -d); trap 'rm -rf "${TMPDIR}"' EXIT
+WORKDIR=$(mktemp -d); trap 'rm -rf "${WORKDIR}"' EXIT
 echo "Downloading Firecracker ${FC_VERSION} (${FC_ARCH})..."
-curl -fL --retry 3 -o "${TMPDIR}/${FC_TGZ}" "${FC_URL}"
+curl -fL --retry 3 -o "${WORKDIR}/${FC_TGZ}" "${FC_URL}"
 
 echo "Extracting..."
-tar -xzf "${TMPDIR}/${FC_TGZ}" -C "${TMPDIR}"
+tar -xzf "${WORKDIR}/${FC_TGZ}" -C "${WORKDIR}"
 
 # The release tarball unpacks as release-${FC_VERSION}-${FC_ARCH}/firecracker-${FC_VERSION}-${FC_ARCH}
-EXTRACTED="${TMPDIR}/release-${FC_VERSION}-${FC_ARCH}/${FC_BINARY}"
+EXTRACTED="${WORKDIR}/release-${FC_VERSION}-${FC_ARCH}/${FC_BINARY}"
 if [[ ! -f "${EXTRACTED}" ]]; then
     echo "Unexpected tarball layout. Contents:" >&2
     find "${TMPDIR}" -maxdepth 3 >&2

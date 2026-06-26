@@ -37,12 +37,20 @@ fn main() -> std::io::Result<()> {
     // The guest's init listens on `port`; firecracker exposes it as
     // "<uds_path>_<port>" for host-initiated connections (hybrid vsock).
     let conn_path = format!("{vsock_uds}_{port}");
+
+    // Build the teardown guard BEFORE connecting so that a panic (or early
+    // return) in `connect_with_retry` unwinds through it and kills the already-
+    // spawned firecracker child instead of leaving it orphaned (holding KVM/vsock).
+    // The guard gets an owned clone of `conn_path`; the outer scope keeps the
+    // original for the `connect_with_retry` borrow below.
+    let conn_path_for_guard = conn_path.clone();
+    let teardown = scopeguard(move || { let _ = fc.kill(); let _ = std::fs::remove_file(&conn_path_for_guard); });
+
     let stream = connect_with_retry(&conn_path, Duration::from_secs(20))
         .expect("guest vsock did not come up within 20s");
 
     // Hybrid-vsock handshake on a plain connect to the per-port socket is not
     // required (the _<port> suffix encodes it); the worker speaks JSON-RPC now.
-    let teardown = scopeguard(move || { let _ = fc.kill(); let _ = std::fs::remove_file(&conn_path); });
     bridge::pump(stream);
     drop(teardown);
     Ok(())

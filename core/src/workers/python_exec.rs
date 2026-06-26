@@ -365,6 +365,13 @@ pub fn firecracker_mode_entry(
     // `>64 KiB → <scratch>/params.json` write lands in the in-VM `/tmp` tmpfs
     // the guest init mounts, so the channel is fully in-guest — same posture as
     // `container_mode_entry`.
+    //
+    // NOTE (Slice 1): the env vars pushed here (KASTELLAN_PYTHON_PARAMS_FILE_MAX,
+    // KASTELLAN_MICROVM_DIR, etc.) are provisioning-only at this stage.
+    // `policy.env` is NOT yet forwarded into the guest — the guest init bakes a
+    // fixed environment and execs the worker without reading policy env.  These
+    // overrides will take effect in-VM only once guest env-forwarding lands
+    // (tracked as a follow-up to Slice 1).
     if let Some(v) = params_file_max.filter(|v| !v.trim().is_empty()) {
         env.push((PARAMS_FILE_MAX_ENV.to_string(), v));
     }

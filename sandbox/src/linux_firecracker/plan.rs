@@ -26,6 +26,8 @@ pub struct FirecrackerLaunchPlan {
     pub vsock_uds: PathBuf,
     pub vsock_port: u32,
     pub boot_args: String,
+    /// Carried for future guest env-forwarding; NOT yet rendered into the
+    /// Firecracker config in Slice 1 (guest init bakes a fixed env).
     pub env: Vec<(String, String)>,
     pub net_enabled: bool,
 }
