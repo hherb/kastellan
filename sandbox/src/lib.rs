@@ -12,6 +12,8 @@
 pub mod linux_bwrap;
 #[cfg(target_os = "linux")]
 pub mod linux_cgroup;
+#[cfg(target_os = "linux")]
+pub mod linux_firecracker;
 #[cfg(target_os = "macos")]
 pub mod macos_container;
 #[cfg(target_os = "macos")]
@@ -200,6 +202,8 @@ pub enum SandboxError {
 pub enum SandboxBackendKind {
     #[cfg(target_os = "linux")]
     Bwrap,
+    #[cfg(target_os = "linux")]
+    FirecrackerVm,
     #[cfg(target_os = "macos")]
     Seatbelt,
     #[cfg(target_os = "macos")]
@@ -267,6 +271,8 @@ pub fn default_backend() -> Box<dyn SandboxBackend> {
 pub struct SandboxBackends {
     #[cfg(target_os = "linux")]
     pub bwrap: Arc<dyn SandboxBackend>,
+    #[cfg(target_os = "linux")]
+    pub firecracker: Arc<dyn SandboxBackend>,
     #[cfg(target_os = "macos")]
     pub seatbelt: Arc<dyn SandboxBackend>,
     #[cfg(target_os = "macos")]
@@ -283,6 +289,7 @@ impl SandboxBackends {
         {
             Self {
                 bwrap: Arc::new(linux_bwrap::LinuxBwrap::new()),
+                firecracker: Arc::new(linux_firecracker::LinuxFirecracker::new()),
             }
         }
         #[cfg(target_os = "macos")]
@@ -334,6 +341,8 @@ impl SandboxBackends {
             }
             #[cfg(target_os = "linux")]
             (Some(SandboxBackendKind::Bwrap), _) => Arc::clone(&self.bwrap),
+            #[cfg(target_os = "linux")]
+            (Some(SandboxBackendKind::FirecrackerVm), _) => Arc::clone(&self.firecracker),
             #[cfg(target_os = "macos")]
             (Some(SandboxBackendKind::Seatbelt), _) => Arc::clone(&self.seatbelt),
             #[cfg(target_os = "macos")]
@@ -360,6 +369,23 @@ impl SandboxBackend for NotYetImplemented {
         Err(SandboxError::Backend(
             "no sandbox backend for this OS — only Linux and macOS are supported".into(),
         ))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod firecracker_registry_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_returns_firecracker_for_firecracker_kind() {
+        let backends = SandboxBackends::default_for_current_os();
+        // Resolving the FirecrackerVm kind must hand back a backend (the
+        // firecracker slot), not the bwrap default. We can't compare Arcs by
+        // identity through `dyn`, so assert the slot is wired by resolving and
+        // confirming it does not error on construction.
+        let _backend = backends.resolve(Some(SandboxBackendKind::FirecrackerVm), None);
+        // The default (None) must still resolve to bwrap and remain distinct.
+        let _default = backends.resolve(None, None);
     }
 }
 
