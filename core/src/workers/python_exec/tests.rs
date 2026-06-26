@@ -404,6 +404,7 @@ fn container_mode_entry_shape() {
         PathBuf::from(CONTAINER_WORKER_BIN),
         "kastellan/python-exec:dev".to_string(),
         None,
+        crate::worker_lifecycle::Lifecycle::SingleUse,
     );
     assert_eq!(
         entry.sandbox_backend,
@@ -449,6 +450,7 @@ fn container_mode_entry_forwards_params_file_max_only_when_set() {
         PathBuf::from(CONTAINER_WORKER_BIN),
         "img".to_string(),
         None,
+        crate::worker_lifecycle::Lifecycle::SingleUse,
     );
     assert!(!without
         .policy
@@ -460,11 +462,146 @@ fn container_mode_entry_forwards_params_file_max_only_when_set() {
         PathBuf::from(CONTAINER_WORKER_BIN),
         "img".to_string(),
         Some("2097152".to_string()),
+        crate::worker_lifecycle::Lifecycle::SingleUse,
     );
     assert!(with
         .policy
         .env
         .contains(&(PARAMS_FILE_MAX_ENV.to_string(), "2097152".to_string())));
+}
+
+// ---- warm/idle container lifecycle (macOS micro-VM) ----
+
+#[cfg(target_os = "macos")]
+#[test]
+fn parse_idle_caps_unset_yields_single_use_defaults() {
+    let (idle, max_req, max_age) = parse_idle_caps(|_| None);
+    assert_eq!(idle, None, "no IDLE_SECONDS -> SingleUse");
+    assert_eq!(max_req, DEFAULT_MAX_REQUESTS);
+    assert_eq!(max_age, DEFAULT_MAX_AGE_SECONDS);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn parse_idle_caps_reads_idle_seconds_and_overrides() {
+    let env = |k: &str| match k {
+        IDLE_SECONDS_ENV => Some("120".to_string()),
+        MAX_REQUESTS_ENV => Some("50".to_string()),
+        MAX_AGE_SECONDS_ENV => Some("3600".to_string()),
+        _ => None,
+    };
+    let (idle, max_req, max_age) = parse_idle_caps(env);
+    assert_eq!(idle, Some(120));
+    assert_eq!(max_req, 50);
+    assert_eq!(max_age, 3600);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn parse_idle_caps_zero_and_garbage_fall_back_to_single_use() {
+    assert_eq!(
+        parse_idle_caps(|k| (k == IDLE_SECONDS_ENV).then(|| "0".to_string())).0,
+        None
+    );
+    assert_eq!(
+        parse_idle_caps(|k| (k == IDLE_SECONDS_ENV).then(|| "abc".to_string())).0,
+        None
+    );
+    assert_eq!(
+        parse_idle_caps(|k| (k == IDLE_SECONDS_ENV).then(String::new)).0,
+        None
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn parse_idle_caps_garbage_overrides_use_defaults() {
+    // A garbage max_requests must not panic — fall back to the default.
+    let env = |k: &str| match k {
+        IDLE_SECONDS_ENV => Some("60".to_string()),
+        MAX_REQUESTS_ENV => Some("notnum".to_string()),
+        _ => None,
+    };
+    let (idle, max_req, max_age) = parse_idle_caps(env);
+    assert_eq!(idle, Some(60));
+    assert_eq!(max_req, DEFAULT_MAX_REQUESTS);
+    assert_eq!(max_age, DEFAULT_MAX_AGE_SECONDS);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn container_lifecycle_none_is_single_use() {
+    assert!(matches!(
+        container_lifecycle(None, 10_000, 86_400),
+        crate::worker_lifecycle::Lifecycle::SingleUse
+    ));
+    assert!(matches!(
+        container_lifecycle(Some(0), 10_000, 86_400),
+        crate::worker_lifecycle::Lifecycle::SingleUse
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn container_lifecycle_positive_is_idle_timeout_with_caps() {
+    match container_lifecycle(Some(120), 50, 3600) {
+        crate::worker_lifecycle::Lifecycle::IdleTimeout { caps, contract } => {
+            assert_eq!(caps.idle_seconds, 120);
+            assert_eq!(caps.max_requests, 50);
+            assert_eq!(caps.max_age_seconds, 3600);
+            assert_eq!(caps.grace_period_seconds, IDLE_GRACE_SECONDS);
+            assert!(contract.stateless);
+        }
+        other => panic!("expected IdleTimeout, got {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_container_entry_is_idle_timeout_when_idle_seconds_set() {
+    let entry = resolve_container_entry_for_test(|k: &str| match k {
+        ENABLE_ENV => Some("1".to_string()),
+        USE_CONTAINER_ENV => Some("1".to_string()),
+        IDLE_SECONDS_ENV => Some("120".to_string()),
+        _ => None,
+    });
+    assert!(matches!(
+        entry.lifecycle,
+        crate::worker_lifecycle::Lifecycle::IdleTimeout { .. }
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_container_entry_is_single_use_without_idle_seconds() {
+    let entry = resolve_container_entry_for_test(|k: &str| match k {
+        ENABLE_ENV => Some("1".to_string()),
+        USE_CONTAINER_ENV => Some("1".to_string()),
+        _ => None,
+    });
+    assert!(matches!(
+        entry.lifecycle,
+        crate::worker_lifecycle::Lifecycle::SingleUse
+    ));
+}
+
+/// Build the container-mode entry the resolver would register, from an env
+/// closure. Mirrors the resolver's container short-circuit (image / params
+/// ceiling / idle caps) so the lifecycle wiring can be asserted without a
+/// full `ResolveCtx`.
+#[cfg(target_os = "macos")]
+fn resolve_container_entry_for_test(get_env: impl Fn(&str) -> Option<String>) -> ToolEntry {
+    let image = get_env(IMAGE_ENV)
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
+    let params_file_max = get_env(PARAMS_FILE_MAX_ENV);
+    let (idle, max_req, max_age) = parse_idle_caps(&get_env);
+    container_mode_entry(
+        PathBuf::from(CONTAINER_WORKER_BIN),
+        image,
+        params_file_max,
+        container_lifecycle(idle, max_req, max_age),
+    )
 }
 
 /// USE_CONTAINER=1 (macOS) routes the manifest to a Container-tagged entry,

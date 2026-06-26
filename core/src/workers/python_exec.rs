@@ -29,6 +29,8 @@ use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
 use crate::tool_host::ENV_LANDLOCK_RW;
+#[cfg(target_os = "macos")]
+use crate::worker_lifecycle::{Contract, IdleTimeoutCaps, Lifecycle};
 use crate::worker_manifest::{discover_binary, Resolution, ResolveCtx, WorkerManifest};
 
 /// Tool name the registry/planner keys python-exec on.
@@ -58,6 +60,31 @@ const USE_CONTAINER_ENV: &str = "KASTELLAN_PYTHON_EXEC_USE_CONTAINER";
 /// rationale as [`USE_CONTAINER_ENV`].
 #[cfg(target_os = "macos")]
 const IMAGE_ENV: &str = "KASTELLAN_PYTHON_EXEC_IMAGE";
+
+/// Opt-in knob for the warm/idle container lifecycle. `> 0` keeps the macOS
+/// micro-VM warm for that many idle seconds between calls; `0`/unset/garbage →
+/// today's per-call `SingleUse` boot. Container-mode only (the host paths are
+/// already cheap to spawn). macOS-only; same `cfg`-gate rationale as
+/// [`USE_CONTAINER_ENV`].
+#[cfg(target_os = "macos")]
+const IDLE_SECONDS_ENV: &str = "KASTELLAN_PYTHON_EXEC_IDLE_SECONDS";
+/// Override for the warm worker's cumulative request cap (slow-leak hygiene).
+/// Default [`DEFAULT_MAX_REQUESTS`]. macOS-only.
+#[cfg(target_os = "macos")]
+const MAX_REQUESTS_ENV: &str = "KASTELLAN_PYTHON_EXEC_MAX_REQUESTS";
+/// Override for the warm worker's max-age cap in seconds (drift hygiene).
+/// Default [`DEFAULT_MAX_AGE_SECONDS`]. macOS-only.
+#[cfg(target_os = "macos")]
+const MAX_AGE_SECONDS_ENV: &str = "KASTELLAN_PYTHON_EXEC_MAX_AGE_SECONDS";
+/// Default cumulative-request cap, mirroring GLiNER-Relex's manifest.
+#[cfg(target_os = "macos")]
+const DEFAULT_MAX_REQUESTS: u64 = 10_000;
+/// Default max-age cap (24 h), mirroring GLiNER-Relex's manifest.
+#[cfg(target_os = "macos")]
+const DEFAULT_MAX_AGE_SECONDS: u64 = 86_400;
+/// SIGTERM grace before SIGKILL on warm-worker teardown (fixed; matches GLiNER).
+#[cfg(target_os = "macos")]
+const IDLE_GRACE_SECONDS: u64 = 5;
 /// Default image tag built by scripts/workers/python-exec/build-image.sh.
 pub const DEFAULT_IMAGE: &str = "kastellan/python-exec:dev";
 /// In-image path of the worker binary (Containerfile copies it here). The
@@ -212,18 +239,65 @@ pub fn python_exec_entry(
 /// `mem_mb: 512` is now ENFORCED (the payoff). `cpu_quota_pct`/`tasks_max`
 /// stay `None` (python-exec never set them; Apple `container` lacks the
 /// primitive anyway). Latency: ~0.8 s container warm-spawn per call under
-/// `SingleUse` — acceptable; freshness per call is the point for arbitrary
-/// code.
+/// `SingleUse`. Pass an `IdleTimeout` `lifecycle` (operator sets
+/// `KASTELLAN_PYTHON_EXEC_IDLE_SECONDS > 0`) to keep the VM warm between calls
+/// and amortise that boot; per-call freshness is preserved because the agent's
+/// Python is a fresh subprocess each call and the worker wipes its scratch
+/// between calls (`wipe_scratch_contents`).
 ///
 /// macOS-only: emits `SandboxBackendKind::Container`, a
 /// `#[cfg(target_os = "macos")]` variant. Compiling this on Linux is what
 /// broke the core build before issue #144, so the whole fn is gated out
 /// there and the resolver never reaches it.
+/// Parse the warm/idle env knobs into `(idle_seconds, max_requests, max_age_seconds)`.
+///
+/// `idle_seconds` is `None` (→ `SingleUse`) unless
+/// [`IDLE_SECONDS_ENV`] parses to a value `> 0`. The two cap overrides fall back
+/// to their defaults on absent/unparseable input — fail-safe to the
+/// conservative GLiNER-mirrored values.
+#[cfg(target_os = "macos")]
+fn parse_idle_caps(get_env: impl Fn(&str) -> Option<String>) -> (Option<u64>, u64, u64) {
+    let parse_u64 = |key: &str| -> Option<u64> { get_env(key).and_then(|v| v.trim().parse().ok()) };
+    let idle_seconds = parse_u64(IDLE_SECONDS_ENV).filter(|&n| n > 0);
+    let max_requests = parse_u64(MAX_REQUESTS_ENV).unwrap_or(DEFAULT_MAX_REQUESTS);
+    let max_age_seconds = parse_u64(MAX_AGE_SECONDS_ENV).unwrap_or(DEFAULT_MAX_AGE_SECONDS);
+    (idle_seconds, max_requests, max_age_seconds)
+}
+
+/// Build the container-mode lifecycle from the parsed idle window.
+///
+/// `None`/`Some(0)` → `SingleUse` (today's per-call boot). `Some(n>0)` →
+/// `IdleTimeout` keeping the warm VM for `n` idle seconds, with the request/age
+/// caps and a fixed 5 s SIGTERM grace. The `Contract { stateless: true }` holds:
+/// the agent's Python runs as a fresh subprocess per call and the worker wipes
+/// its scratch between calls (`wipe_scratch_contents` in the worker crate).
+#[cfg(target_os = "macos")]
+fn container_lifecycle(
+    idle_seconds: Option<u64>,
+    max_requests: u64,
+    max_age_seconds: u64,
+) -> Lifecycle {
+    match idle_seconds {
+        Some(n) if n > 0 => Lifecycle::idle_timeout(
+            IdleTimeoutCaps {
+                idle_seconds: n,
+                max_requests,
+                max_age_seconds,
+                grace_period_seconds: IDLE_GRACE_SECONDS,
+            },
+            Contract { stateless: true },
+        )
+        .expect("stateless = true; validator must accept"),
+        _ => Lifecycle::SingleUse,
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn container_mode_entry(
     binary: PathBuf,
     image: String,
     params_file_max: Option<String>,
+    lifecycle: Lifecycle,
 ) -> ToolEntry {
     let mut env = vec![(PYTHON_ENV.to_string(), CONTAINER_PYTHON.to_string())];
     if let Some(v) = params_file_max.filter(|v| !v.trim().is_empty()) {
@@ -245,7 +319,7 @@ pub fn container_mode_entry(
         binary,
         policy,
         wall_clock_ms: Some(30_000),
-        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
+        lifecycle,
         sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::Container),
         container_image: Some(image),
         lockdown_shim: None,
@@ -343,10 +417,12 @@ impl WorkerManifest for PythonExecManifest {
                     .filter(|v| !v.trim().is_empty())
                     .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
                 let params_file_max = (ctx.get_env)(PARAMS_FILE_MAX_ENV);
+                let (idle, max_req, max_age) = parse_idle_caps(|k| (ctx.get_env)(k));
                 return Resolution::Register(container_mode_entry(
                     binary,
                     image,
                     params_file_max,
+                    container_lifecycle(idle, max_req, max_age),
                 ));
             }
             // enabled && !use_container, or !enabled: fall through to the

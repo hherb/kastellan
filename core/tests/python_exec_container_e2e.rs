@@ -94,6 +94,7 @@ async fn dispatch_in_container(payload: serde_json::Value) -> serde_json::Value 
         ),
         DEFAULT_IMAGE.to_string(),
         None,
+        kastellan_core::worker_lifecycle::Lifecycle::SingleUse,
     );
     let backend = container_backend();
     let program = entry.binary.to_string_lossy().into_owned();

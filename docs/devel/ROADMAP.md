@@ -360,9 +360,12 @@ items unlock later ones.
     build-image.sh, the file-channel e2e; resolve-time image-existence parity tracked as
     [#356](https://github.com/hherb/kastellan/issues/356). Spec/plan:
     `docs/superpowers/{specs,plans}/2026-06-25-python-exec-macos-microvm*`.
-  - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; warm/idle container lifecycle for
-    python-exec (it's `SingleUse` → ~0.7s warm-VM spawn per call; an `IdleTimeout` warm slot would amortise it, like gliner);
-    Linux micro-VM backend (`FirecrackerVm`/Kata, the DGX-production one — a multi-session arc); planner-prompt surfacing
+  - [x] **Warm/idle container lifecycle** — DONE 2026-06-26 (branch `feat/python-exec-warm-idle-container`): opt-in
+    `KASTELLAN_PYTHON_EXEC_IDLE_SECONDS > 0` reuses the existing `IdleTimeout` lifecycle to keep the macOS micro-VM warm between
+    calls; per-call `wipe_scratch_contents` restores SingleUse-`/tmp` isolation; container-mode only, default off. warm/idle e2e
+    3/0 real. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-26-python-exec-warm-idle-container*`.
+  - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; Linux micro-VM backend
+    (`FirecrackerVm`/Kata, the DGX-production one — a multi-session arc); planner-prompt surfacing
     (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
   - [x] **Slice 1 — crystallise + approval + operator CLI — 2026-06-13** (branch `feat/python-exec-skill-catalog`,
