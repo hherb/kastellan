@@ -1,0 +1,17 @@
+[package]
+name        = "kastellan-microvm-init"
+description = "PID1 inside the Firecracker guest: mounts pseudo-FS, opens AF_VSOCK, wires it onto the worker's stdio, and execs the worker."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme      = "../../README.md"
+
+[[bin]]
+name = "kastellan-microvm-init"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

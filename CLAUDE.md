@@ -62,6 +62,12 @@ Fix: `sudo scripts/linux/install-bwrap-apparmor-profile.sh` once. Same pattern F
 
 Other Linux distros without AppArmor user-ns restrictions don't need this script.
 
+For the optional Firecracker micro-VM backend (`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`),
+run the one-time privileged setup so the worker user can open the vsock device:
+`sudo scripts/linux/install-firecracker-vsock.sh`. Without it, `LinuxFirecracker::probe()`
+fails closed and the worker stays on bwrap. `/dev/kvm` is usually already accessible;
+pass `--kvm` if not.
+
 ## Architecture invariants worth knowing
 
 - **Threat-model invariant:** worst-case compromise (LLM, tool, dep, agent-authored Python) reaches *at most* the agent's own OS user, its own Postgres role, its own scratch FS, and the explicitly allowlisted endpoints for the *one* tool that was compromised. Nothing else. See `docs/threat-model.md`.

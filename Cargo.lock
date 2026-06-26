@@ -2254,6 +2254,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kastellan-microvm-init"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "kastellan-microvm-run"
 version = "0.1.0"
 

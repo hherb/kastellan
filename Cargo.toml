@@ -19,6 +19,7 @@ members = [
     "workers/matrix-wire",
     "workers/matrix",
     "workers/microvm-run",
+    "workers/microvm-init",
 ]
 
 [workspace.package]
