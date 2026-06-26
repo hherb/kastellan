@@ -6,7 +6,30 @@
 > into "Earlier history" below; full per-session detail lives in the
 > [`archive/`](archive/) snapshots.
 
-**Last updated:** 2026-06-26 (**python-exec warm/idle container lifecycle — DONE on branch `feat/python-exec-warm-idle-container` (PR pending).**
+**Last updated:** 2026-06-26 (**Linux Firecracker micro-VM backend — SPEC + SLICE-1 PLAN written on branch `feat/linux-firecracker-microvm` (PR pending). NO code yet — design-first session; implementation is the next session.**
+Brainstormed + spec'd a **generic** `SandboxBackendKind::FirecrackerVm` Linux backend so **any** worker can opt into a throwaway **guest-kernel**
+blast wall on top of bwrap/seccomp/Landlock/cgroup. **Driver:** general hardening for all workers (end-state); **rollout staged** because net
+workers (egress-proxy UDS into a VM), GPU/torch, and long-lived channels are each a hard sub-problem. Defense-in-depth on Linux, **not** a
+parity fix (unlike the macOS VM). **VMM = Firecracker** (smallest TCB, the security-first pick, already named in the `SandboxBackendKind`
+docstring). **Transport researched live on the DGX** (the user asked for evidence, not theory): downloaded firecracker **v1.16.0** + the CI
+aarch64 `vmlinux-6.1.102` + `ubuntu-22.04.ext4`, **booted a real KVM guest under the agent user's own perms** (`/dev/kvm` is RW via ACL — no
+operator help for KVM), **~70 ms boot to userspace**, a clean **stdin→guest-shell→stdout round-trip over serial** (validates the
+"launcher-process-IS-the-Child" model), and **proof that serial is corrupted by kernel printk** (`EXT4-fs`/`panic`/`Freeing` interleaved on
+`ttyS0`) → **vsock is the chosen transport**. vsock is **operator-gated**: `/dev/vhost-vsock` exists (`vhost_vsock.ko` present,
+`CONFIG_VIRTIO_VSOCKETS=m`) but is `root:kvm` with no ACL, so the worker user needs a one-time grant + `modprobe vhost_vsock`. **Architecture:**
+`linux_firecracker.rs` (pure `build_launch_plan` + spawn, mirrors `linux_bwrap.rs`) spawns a new **`kastellan-microvm-run`** launcher binary as
+the `Child` whose stdio carries JSON-RPC; the launcher boots Firecracker (kernel console → log fd, never stdout) + bridges `stdin↔vsock`. A guest
+PID1 **`kastellan-microvm-init`** connects the vsock port, `dup2`s it onto fd 0/1, and execs the **unchanged** `serve_stdio` worker. Rootfs = R1
+**minimal ext4 now** (`build-rootfs.sh`), OCI-source-of-truth unification later. **Firecracker has no virtio-fs/9p** → host-dir sharing is via
+per-spawn block devices (slice 3), the main reason staging is unavoidable. **Slice-1 plan (7 TDD tasks):** enum/registry; pure
+`build_launch_plan`+config; fail-closed `probe`; launcher+vsock bridge; guest init+rootfs; `LinuxFirecracker::spawn` + python-exec
+`firecracker_mode_entry` (`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`, mirrors `container_mode_entry`); DGX e2e (`print(6*7)→42`, **KVM-enforced
+mem-cap → MemoryError**, net-deny). **Test-exec reality codified:** sandbox linux-cfg unit tests don't run under `cargo test` on the Mac →
+cross-clippy on Mac (`--target aarch64-unknown-linux-gnu`), `cargo test` on the DGX. Spec+plan:
+`docs/superpowers/{specs/2026-06-26-linux-firecracker-microvm-design.md,plans/2026-06-26-linux-firecracker-microvm-slice1.md}`.
+DGX spike artifacts left under `/tmp/fc-spike` (firecracker bin + kernel + rootfs, ~580 MB, reusable for slice-1 impl).)
+
+_(Prior session — **python-exec warm/idle container lifecycle — DONE + MERGED to `main` as `7be070f` (PR #358).**
 Opt-in `KASTELLAN_PYTHON_EXEC_IDLE_SECONDS > 0` keeps the macOS micro-VM **warm between `python.exec` calls** (reuses the existing
 `IdleTimeout` lifecycle — `CompositeLifecycle` already routes by `entry.lifecycle`, so **no new lifecycle machinery**), amortising the
 ~0.7 s VM boot. Default unset/`0` → today's `SingleUse` (byte-identical). **Container-mode only** (host Seatbelt/bwrap spawns are already
@@ -24,7 +47,7 @@ the stored slot (which carries the image). **Verification (macOS, `container` 0.
 (+3 wipe), python_exec lib 30/0 (+8 caps/lifecycle/resolver), warm/idle e2e **3/0 real** (warm-reuse boots VM once; `/tmp` sentinel from
 call 1 GONE for call 2 on the same warm VM; idle teardown clears the slot), `cargo build --workspace` + `cargo clippy --workspace
 --all-targets -D warnings` clean. Pure-Rust + macOS-gated mechanism, no migration → DGX not required. Spec/plan:
-`docs/superpowers/{specs,plans}/2026-06-26-python-exec-warm-idle-container*`.)
+`docs/superpowers/{specs,plans}/2026-06-26-python-exec-warm-idle-container*`.)_
 
 _(Prior session — **python-exec macOS micro-VM mode — DONE + MERGED to `main` as `88d2744` (PR #355).**
 Phase-4 slice: `python-exec` (the worker that runs arbitrary agent-authored Python) can now opt into the existing `MacosContainer`
@@ -1024,7 +1047,16 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**Just shipped (python-exec warm/idle container lifecycle, branch `feat/python-exec-warm-idle-container`, PR pending):** opt-in
+**★ LEADING PICK — implement Linux Firecracker micro-VM slice 1.** Spec + 7-task TDD plan are written + committed on branch
+`feat/linux-firecracker-microvm` (this session, design-only; PR pending). Execute
+`docs/superpowers/plans/2026-06-26-linux-firecracker-microvm-slice1.md` task-by-task (subagent-driven-development). Goal: boot a `Net::Deny`
+in-image python-exec worker in a Firecracker VM over vsock with KVM-enforced `mem_mb`. **Before the e2e (Task 7), the operator runs the
+one-time DGX setup** — `sudo scripts/linux/install-firecracker-vsock.sh` (vsock module persist + ACL grant, the one privileged step, mirrors
+`install-bwrap-apparmor-profile.sh`; the probe points here) + per-user `install-firecracker.sh` + `build-rootfs.sh`; `/dev/kvm` already works. The **one genuine unknown** is the hybrid-vsock connect direction (host `CONNECT <port>\n` on the base UDS vs the guest-listen
+`_<port>` suffix) — Task 7 Step 2 resolves it live on the DGX. Spike artifacts are at `/tmp/fc-spike` on the DGX (firecracker v1.16.0 + kernel +
+rootfs). Slices 2–5 (warm/idle, fs-sharing, net workers, jailer) are sketched in the spec for later sessions.
+
+**Just shipped (python-exec warm/idle container lifecycle, MERGED to `main` as `7be070f`, PR #358):** opt-in
 `KASTELLAN_PYTHON_EXEC_IDLE_SECONDS > 0` keeps the macOS micro-VM warm between calls (reuses the existing `IdleTimeout` lifecycle),
 amortising the ~0.7 s boot; per-call `/tmp` wipe restores SingleUse-parity isolation. Container-mode only, default off. See the "Last
 updated" header. warm/idle e2e 3/0 real, worker lib 37/0, python_exec lib 30/0, workspace clippy clean.
