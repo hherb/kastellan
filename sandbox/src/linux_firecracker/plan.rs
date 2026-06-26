@@ -155,15 +155,15 @@ mod tests {
         let cfg = render_firecracker_config(&plan);
         let vsock = cfg.get("vsock").expect("vsock device");
         assert_eq!(vsock["guest_cid"], plan.vsock_cid);
-        assert_eq!(vsock["uds_path"], plan.vsock_uds.to_string_lossy());
+        assert_eq!(vsock["uds_path"], &*plan.vsock_uds.to_string_lossy());
     }
 
     #[test]
     fn config_pins_kernel_and_rootfs_paths() {
         let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
         let cfg = render_firecracker_config(&plan);
-        assert_eq!(cfg["boot-source"]["kernel_image_path"], img().kernel_path.to_string_lossy());
-        assert_eq!(cfg["drives"][0]["path_on_host"], img().rootfs_path.to_string_lossy());
+        assert_eq!(cfg["boot-source"]["kernel_image_path"], &*img().kernel_path.to_string_lossy());
+        assert_eq!(cfg["drives"][0]["path_on_host"], &*img().rootfs_path.to_string_lossy());
         assert_eq!(cfg["drives"][0]["is_root_device"], true);
     }
 
