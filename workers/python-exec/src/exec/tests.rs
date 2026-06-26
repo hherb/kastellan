@@ -219,6 +219,60 @@ fn params_env_pairs_file_sets_empty_default_plus_path() {
     );
 }
 
+/// Build a unique, freshly-created temp dir for a wipe test (the crate has no
+/// `tempfile` dev-dep; this mirrors `write_params_file`'s pattern below).
+fn fresh_tmp(tag: u32) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "pyexec-wipe-test-{}-{}",
+        std::process::id(),
+        tag
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn wipe_scratch_contents_removes_files_and_subdirs_keeps_dir() {
+    let root = fresh_tmp(line!());
+    std::fs::write(root.join("params.json"), b"{}").unwrap();
+    std::fs::write(root.join("leak.txt"), b"secret").unwrap();
+    let sub = root.join("nested");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("inner.bin"), b"x").unwrap();
+
+    let removed = wipe_scratch_contents(&root).expect("wipe ok");
+
+    assert_eq!(removed, 3, "params.json + leak.txt + nested/ are 3 top-level entries");
+    assert!(root.is_dir(), "the scratch dir itself must remain");
+    assert_eq!(
+        std::fs::read_dir(&root).unwrap().count(),
+        0,
+        "scratch dir must be empty after wipe"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn wipe_scratch_contents_is_noop_on_empty_dir() {
+    let root = fresh_tmp(line!());
+    let removed = wipe_scratch_contents(&root).expect("wipe ok");
+    assert_eq!(removed, 0, "empty dir -> nothing removed (the fresh-VM no-op case)");
+    assert!(root.is_dir());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn wipe_scratch_contents_missing_dir_is_ok_zero() {
+    // A not-yet-created scratch dir must not error — run_code tolerates it
+    // (it only sets cwd when the dir exists). Treat absent as "nothing to wipe".
+    let root = fresh_tmp(line!());
+    let missing = root.join("does-not-exist");
+    let removed = wipe_scratch_contents(&missing).expect("missing dir is ok");
+    assert_eq!(removed, 0);
+    std::fs::remove_dir_all(&root).ok();
+}
+
 #[test]
 fn write_params_file_writes_exact_content_mode_0600() {
     use std::os::unix::fs::PermissionsExt;

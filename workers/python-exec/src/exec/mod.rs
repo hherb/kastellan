@@ -277,6 +277,55 @@ fn write_params_file(path: &Path, json: &str) -> std::io::Result<()> {
 /// it exists, which it always does inside the jail). Runtime params arrive
 /// via `channel`: inline (≤ 64 KiB) in [`PARAMS_ENV`], or file (> 64 KiB)
 /// written to `<scratch>/params.json` and pointed at by [`PARAMS_FILE_ENV`].
+/// Remove the *contents* of the scratch directory (files and nested
+/// directories) while leaving the directory itself in place.
+///
+/// Called at the start of every `python.exec` run so that when the worker is
+/// **reused** under the idle-timeout lifecycle (a warm micro-VM serving many
+/// calls) each call starts from a pristine working area — exactly as a fresh
+/// `SingleUse` VM would. This is the isolation guarantee that makes warm reuse
+/// safe: a file an earlier call left under `/tmp` cannot be observed by a later
+/// call, and the VM's memory headroom is reset each call.
+///
+/// **Idempotent:** on a fresh VM (or any `SingleUse` spawn) the scratch dir is
+/// already empty, so this is a no-op — which is why it can live unconditionally
+/// in [`run_code`] regardless of lifecycle.
+///
+/// **Best-effort per entry:** the worker runs as the same uid as its `python3`
+/// child, so it owns every file either wrote and removal normally succeeds. If
+/// one entry can't be removed we log to stderr (captured by the parent's stderr
+/// drain) and continue rather than aborting the whole run; the subsequent
+/// `params.json` write is the fail-closed gate for the call. A missing
+/// directory is treated as "nothing to wipe" (returns `Ok(0)`).
+///
+/// Returns the number of top-level entries successfully removed.
+pub fn wipe_scratch_contents(dir: &Path) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        // A not-yet-created scratch dir is not an error: there is nothing to wipe.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Check the *symlink* file type so a symlinked directory is unlinked
+        // (not traversed) — both correct and safer than following it.
+        let result = match entry.file_type() {
+            Ok(ft) if ft.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(e) => eprintln!(
+                "python-exec: failed to wipe scratch entry {}: {e}",
+                path.display()
+            ),
+        }
+    }
+    Ok(removed)
+}
+
 pub fn run_code(
     python: &Path,
     code: &str,
@@ -284,7 +333,16 @@ pub fn run_code(
     channel: ParamChannel,
 ) -> std::io::Result<ExecOutcome> {
     let scratch = scratch_dir_from_env(|k| std::env::var(k).ok());
-    let file_path = Path::new(&scratch).join(PARAMS_FILE_NAME);
+    let scratch_path = Path::new(&scratch);
+    // Restore pristine-scratch isolation for this call. No-op on a fresh VM /
+    // SingleUse spawn (dir already empty); load-bearing only under warm reuse,
+    // where an earlier call's leftovers would otherwise be visible here. We
+    // swallow the Result: an unexpected read_dir error on the scratch root must
+    // not block the call — per-entry failures are logged inside the helper, and
+    // the params write below remains the fail-closed gate. The helper's Result
+    // is exercised directly by its unit tests.
+    let _ = wipe_scratch_contents(scratch_path);
+    let file_path = scratch_path.join(PARAMS_FILE_NAME);
     if matches!(channel, ParamChannel::File) {
         // Fail-closed: a scratch-write error aborts the run rather than
         // falling back to the oversize env channel (which would exceed the
