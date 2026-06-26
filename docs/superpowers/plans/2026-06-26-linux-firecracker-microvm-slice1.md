@@ -671,6 +671,13 @@ pub fn firecracker_argv(config_path: &str, log_path: &str) -> Vec<String> {
 /// Firecracker hybrid-vsock handshake: after connecting the host-side UDS the
 /// client must announce the guest port with `CONNECT <port>\n`; the guest's
 /// listener replies `OK <assigned_hostport>\n` before bytes flow.
+///
+/// `#[allow(dead_code)]`: slice 1's `main.rs` takes the per-port `_<port>`
+/// suffix path, so this helper is unreferenced in the (non-test) bin build and
+/// would trip `dead_code` under `-D warnings`. It is retained deliberately
+/// because Task 7 Step 2 resolves the connect direction live on the DGX; the
+/// losing branch is deleted then (and this `allow` with it).
+#[allow(dead_code)]
 pub fn firecracker_vsock_connect_line(port: u32) -> String {
     format!("CONNECT {port}\n")
 }
@@ -686,7 +693,6 @@ pub fn firecracker_vsock_connect_line(port: u32) -> String {
 mod boot;
 mod bridge;
 
-use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -708,8 +714,9 @@ fn main() -> std::io::Result<()> {
     // Boot firecracker as our child; it creates the vsock UDS once the guest
     // is up. Its stdout/stderr go to the log path via --log-path, so we keep
     // our own stdout pristine for JSON-RPC.
-    let mut fc = Command::new(&boot::firecracker_argv(&config, &log)[0])
-        .args(&boot::firecracker_argv(&config, &log)[1..])
+    let fc_argv = boot::firecracker_argv(&config, &log);
+    let mut fc = Command::new(&fc_argv[0])
+        .args(&fc_argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1108,7 +1115,7 @@ Wire the backend's real spawn (build plan → write config + log paths to a per-
 
 **Interfaces:**
 - Consumes: `build_launch_plan`, `render_firecracker_config`, `FirecrackerImage` (Task 2); the `kastellan-microvm-run` binary (Task 4) discovered the same way worker binaries are (workspace `target/<profile>/`).
-- Produces: `core::workers::python_exec::firecracker_mode_entry(binary, image_dir, lifecycle) -> ToolEntry` with `sandbox_backend: Some(FirecrackerVm)`; `KASTELLAN_PYTHON_EXEC_USE_MICROVM` opt-in.
+- Produces: `core::workers::python_exec::firecracker_mode_entry(binary, image_dir, params_file_max, lifecycle) -> ToolEntry` with `sandbox_backend: Some(FirecrackerVm)`; `KASTELLAN_PYTHON_EXEC_USE_MICROVM` opt-in. The `params_file_max` arg threads `PARAMS_FILE_MAX_ENV` into the guest exactly as `container_mode_entry` does, so the >64 KiB params file-channel works in-VM (slice-1 verification item).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1204,18 +1211,31 @@ impl SandboxBackend for LinuxFirecracker {
 
 (`tempfile_dir` = a small `mkdtemp` helper or the `tempfile` crate already in the workspace — check `Cargo.lock` and reuse.)
 
-- [ ] **Step 4: Implement `firecracker_mode_entry` + resolver** — in `core/src/workers/python_exec.rs`, mirroring `container_mode_entry` (lines 296-328) but linux-cfg:
+- [ ] **Step 4: Implement `firecracker_mode_entry` + resolver** — in `core/src/workers/python_exec.rs`, mirroring `container_mode_entry` (lines 296-328) and its macOS resolver block (lines 409-430, incl. the `params_file_max = (ctx.get_env)(PARAMS_FILE_MAX_ENV)` threading) but linux-cfg:
 
 ```rust
 #[cfg(target_os = "linux")]
 const USE_MICROVM_ENV: &str = "KASTELLAN_PYTHON_EXEC_USE_MICROVM";
 
 #[cfg(target_os = "linux")]
-pub fn firecracker_mode_entry(binary: PathBuf, image_dir: String, lifecycle: Lifecycle) -> ToolEntry {
-    let env = vec![
+pub fn firecracker_mode_entry(
+    binary: PathBuf,
+    image_dir: String,
+    params_file_max: Option<String>,
+    lifecycle: Lifecycle,
+) -> ToolEntry {
+    let mut env = vec![
         (PYTHON_ENV.to_string(), "/usr/local/bin/python3".to_string()),
         ("KASTELLAN_MICROVM_DIR".to_string(), image_dir),
     ];
+    // Forward the operator's >64 KiB params file-channel ceiling into the guest
+    // ONLY when set (byte-identical to host/container default otherwise). The
+    // `>64 KiB → <scratch>/params.json` write lands in the in-VM `/tmp` tmpfs
+    // the guest init mounts, so the channel is fully in-guest — same posture as
+    // `container_mode_entry`.
+    if let Some(v) = params_file_max.filter(|v| !v.trim().is_empty()) {
+        env.push((PARAMS_FILE_MAX_ENV.to_string(), v));
+    }
     let policy = SandboxPolicy {
         fs_read: vec![], fs_write: vec![],
         net: Net::Deny, cpu_ms: 10_000, mem_mb: 512,
@@ -1242,9 +1262,11 @@ Resolver short-circuit (in `resolve`, a linux-cfg block mirroring the macOS cont
         let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
+        let params_file_max = (ctx.get_env)(PARAMS_FILE_MAX_ENV);
         let (idle, max_req, max_age) = parse_idle_caps(|k| (ctx.get_env)(k));
         return Resolution::Register(firecracker_mode_entry(
-            binary, image_dir, container_lifecycle(idle, max_req, max_age),
+            binary, image_dir, params_file_max,
+            container_lifecycle(idle, max_req, max_age),
         ));
     }
 }
@@ -1308,6 +1330,17 @@ fn microvm_enforces_mem_cap() {
 fn microvm_net_is_denied() {
     // attempt an outbound socket → no connectivity (Net::Deny, no virtio-net).
 }
+
+#[test]
+#[ignore = "needs DGX"]
+fn microvm_large_params_ride_file_channel() {
+    // The slice-1 file-channel verification (spec staged-rollout table + the
+    // testing section). Dispatch python.exec with a >64 KiB params payload →
+    // the worker writes <scratch>/params.json in the in-VM /tmp tmpfs and reads
+    // it back, so the value round-trips. Asserts the >64 KiB path works in-VM
+    // (the env-only inline path caps at 64 KiB via execve). Mirror the macOS
+    // container file-channel e2e.
+}
 ```
 
 - [ ] **Step 2: Confirm the transport on the DGX (the one discovery point)**
@@ -1319,7 +1352,7 @@ Adjust `kastellan-microvm-run` to the proven path; delete the unused branch. Re-
 - [ ] **Step 3: Run the e2e on the DGX**
 
 Run: `ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && KASTELLAN_PYTHON_EXEC_ENABLE=1 KASTELLAN_PYTHON_EXEC_USE_MICROVM=1 cargo test -p kastellan-core --test python_exec_firecracker_e2e -- --ignored --nocapture'`
-Expected: 3/3 PASS — `42` round-trips; mem-cap test sees `MemoryError`/non-zero exit; net-deny test sees no connectivity.
+Expected: 4/4 PASS — `42` round-trips; mem-cap test sees `MemoryError`/non-zero exit; net-deny test sees no connectivity; the >64 KiB params payload round-trips via the in-VM `params.json` file-channel.
 
 - [ ] **Step 4: Write the operator runbook** — `docs/devel/runbooks/2026-06-26-linux-microvm-setup.md`: the one-time DGX setup as three commands — `sudo scripts/linux/install-firecracker-vsock.sh` (vsock module persist + ACL grant; the privileged step), `scripts/workers/microvm/install-firecracker.sh` (per-user firecracker binary), `scripts/workers/microvm/build-rootfs.sh` (kernel + rootfs) — how to enable (`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`), and how to verify (the e2e command above). Note `/dev/kvm` is usually already accessible (pass `--kvm` to the vsock script if not).
 
@@ -1336,10 +1369,10 @@ git commit -m "test(microvm): DGX Firecracker python-exec e2e + operator runbook
 
 ## Self-Review
 
-**Spec coverage:** Enum/registry (T1) ✓; pure `build_launch_plan` + config (T2) ✓; `probe` with operator-fix messages (T3) ✓; launcher-is-the-Child + vsock bridge (T4) ✓; guest PID1 init + `build-rootfs.sh`, R1 minimal-rootfs (T5) ✓; `Net::Deny` in-image python-exec consumer + `USE_MICROVM` opt-in mirroring `container_mode_entry` (T6) ✓; DGX e2e with `42` round-trip + KVM mem-cap + net-deny, runbook, threat-model (T7) ✓. Slices 2–5 (warm/idle, fs-sharing, net workers, jailer) are explicitly out of this plan's scope per the spec staging table.
+**Spec coverage:** Enum/registry (T1) ✓; pure `build_launch_plan` + config (T2) ✓; `probe` with operator-fix messages (T3) ✓; launcher-is-the-Child + vsock bridge (T4) ✓; guest PID1 init + `build-rootfs.sh`, R1 minimal-rootfs (T5) ✓; `Net::Deny` in-image python-exec consumer + `USE_MICROVM` opt-in mirroring `container_mode_entry` (incl. its `params_file_max` threading) (T6) ✓; DGX e2e with `42` round-trip + KVM mem-cap + net-deny + >64 KiB params file-channel, runbook, threat-model (T7) ✓. Slices 2–5 (warm/idle, fs-sharing, net workers, jailer) are explicitly out of this plan's scope per the spec staging table.
 
 **Placeholder scan:** The deliberate compile-fail placeholder in T5 Step 3 (`unimplemented_in_plan_see_step_4`) is replaced with real syscalls in Step 4 and called out for deletion — intentional RED→GREEN, not a plan gap. The T4 hybrid-vsock connect semantics carry an explicit "confirm on DGX in T7 Step 2" discovery note rather than a guessed value — this is the one genuine unknown the spike could not pin without vsock access, and it is scheduled, not hand-waved.
 
-**Type consistency:** `WORKER_VSOCK_PORT` = 1024 is shared by value across `kastellan-sandbox` (T2) and `kastellan-microvm-init` (T5), with the no-cross-dep reason documented in both. `FirecrackerLaunchPlan`/`FirecrackerImage`/`build_launch_plan`/`render_firecracker_config`/`launcher_argv`/`MICROVM_RUN_BIN` names are consistent across T2/T3/T6. `firecracker_mode_entry` mirrors the verified `container_mode_entry` signature shape (`ToolEntry` fields match the real struct read from `python_exec.rs:318-327`).
+**Type consistency:** `WORKER_VSOCK_PORT` = 1024 is shared by value across `kastellan-sandbox` (T2) and `kastellan-microvm-init` (T5), with the no-cross-dep reason documented in both. `FirecrackerLaunchPlan`/`FirecrackerImage`/`build_launch_plan`/`render_firecracker_config`/`launcher_argv`/`MICROVM_RUN_BIN` names are consistent across T2/T3/T6. `firecracker_mode_entry(binary, image_dir, params_file_max, lifecycle)` mirrors the verified `container_mode_entry(binary, image, params_file_max, lifecycle)` signature shape — incl. the `params_file_max → PARAMS_FILE_MAX_ENV` push that backs the >64 KiB file-channel (`ToolEntry` fields match the real struct read from `python_exec.rs:318-327`).
 
 **Cross-platform / test-execution:** every task states the Mac compile-check (`cross-clippy`) vs DGX run split, consistent with the global constraint.
