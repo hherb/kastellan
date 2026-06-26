@@ -32,8 +32,13 @@ pub struct FirecrackerLaunchPlan {
     pub net_enabled: bool,
 }
 
-/// Guest CID for the worker VM. CIDs 0–2 are reserved (hypervisor/host/local),
-/// so workers use 3. One VM per launcher process → no CID collision.
+/// Placeholder guest CID baked into a freshly-built plan. CIDs 0–2 are reserved
+/// (hypervisor/host/local), so the lowest legal value is 3. This default is a
+/// stand-in only: `LinuxFirecracker::spawn_under_policy` ALWAYS overrides it with
+/// a host-unique CID (`next_guest_cid`) before boot, so concurrent VMs never
+/// share CID 3. The pure plan has no spawn context, so it cannot allocate a
+/// unique CID itself; this constant exists so `build_launch_plan` stays a total
+/// pure function (and so the plan-level unit tests have a deterministic value).
 const WORKER_GUEST_CID: u32 = 3;
 /// Fixed vsock port the guest init listens on for the JSON-RPC bridge.
 pub const WORKER_VSOCK_PORT: u32 = 1024;
@@ -67,9 +72,11 @@ pub fn build_launch_plan(
 
     let net_enabled = !matches!(policy.net, Net::Deny);
 
-    // vsock UDS lives next to the rootfs image dir, suffixed per-PID at spawn
-    // time by the launcher; the plan carries a deterministic base the launcher
-    // uniquifies. Slice 1 uses a fixed name; the launcher overrides.
+    // Placeholder vsock UDS next to the rootfs image dir. Like `vsock_cid`, this
+    // is a stand-in: `spawn_under_policy` ALWAYS replaces it with a per-spawn
+    // unique path inside the spawn's private run dir before boot (the pure plan
+    // has no spawn context to allocate a unique path). It is live only in the
+    // plan-level unit tests; the real spawn never uses this value.
     let vsock_uds = image
         .rootfs_path
         .parent()
@@ -102,7 +109,18 @@ pub fn render_firecracker_config(plan: &FirecrackerLaunchPlan) -> Value {
             "drive_id": "rootfs",
             "path_on_host": plan.rootfs_path.to_string_lossy(),
             "is_root_device": true,
-            "is_read_only": false,
+            // Read-only is mandatory, not cosmetic: every spawn shares the one
+            // `<image_dir>/python-exec.ext4` backing file (the spawn uniquifies
+            // the vsock UDS + guest CID, but NOT the rootfs). Two concurrent VMs
+            // opening the same ext4 RW have independent guest page caches, and
+            // ext4 is not a cluster filesystem — any write (journal/atime, even
+            // an mount-time recovery) corrupts the image for both. The guest
+            // writes nothing to root (worker + python + stdlib are read-only;
+            // scratch is the in-VM `/tmp` tmpfs the init mounts), so a read-only
+            // golden image is both safe to share and correct. Per-worker writable
+            // rootfs, if ever needed, is a per-spawn copy/overlay (a later slice),
+            // NOT flipping this back to RW on a shared file.
+            "is_read_only": true,
         }],
         "machine-config": {
             "vcpu_count": plan.vcpu_count,
@@ -167,6 +185,19 @@ mod tests {
         assert_eq!(cfg["boot-source"]["kernel_image_path"], &*img().kernel_path.to_string_lossy());
         assert_eq!(cfg["drives"][0]["path_on_host"], &*img().rootfs_path.to_string_lossy());
         assert_eq!(cfg["drives"][0]["is_root_device"], true);
+    }
+
+    #[test]
+    fn rootfs_is_read_only() {
+        // Security invariant: the rootfs backing file is shared by every spawn
+        // (only the vsock UDS + CID are uniquified), so it MUST be attached
+        // read-only — two concurrent VMs mounting the same ext4 RW corrupt it.
+        let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
+        let cfg = render_firecracker_config(&plan);
+        assert_eq!(
+            cfg["drives"][0]["is_read_only"], true,
+            "shared rootfs must be read-only to be safe across concurrent VMs"
+        );
     }
 
     #[test]

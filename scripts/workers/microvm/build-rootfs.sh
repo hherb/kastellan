@@ -9,7 +9,18 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 set -euo pipefail
 OUT_DIR="${KASTELLAN_MICROVM_DIR:-/var/lib/kastellan/microvm}"
-KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/aarch64/vmlinux-6.1.102"
+# Pinned guest kernel, selected for the host arch (the firecracker-ci bucket
+# publishes the same kernel under x86_64/ and aarch64/). Don't hardcode the
+# DGX's aarch64 — the backend must run on any Linux box (CLAUDE.md).
+HOST_ARCH="$(uname -m)"
+case "${HOST_ARCH}" in
+    x86_64|aarch64) KERNEL_ARCH="${HOST_ARCH}" ;;
+    *)
+        echo "Unsupported architecture '${HOST_ARCH}'. The pinned guest kernel is published for x86_64 and aarch64 only." >&2
+        exit 1
+        ;;
+esac
+KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/${KERNEL_ARCH}/vmlinux-6.1.102"
 ROOTFS_MIB=768
 
 # The output dir defaults to /var/lib/kastellan/microvm, which is provisioned
@@ -77,5 +88,14 @@ cp -a "$STDLIB" "$WORK$STDLIB"
 # 3d. Pseudo-fs mountpoints (kastellan-microvm-init mounts proc/sys/tmp at boot).
 mkdir -p "$WORK/proc" "$WORK/sys" "$WORK/tmp" "$WORK/dev"
 
-mkfs.ext4 -q -F -L kastellan-rootfs -d "$WORK" "$OUT_DIR/python-exec.ext4" "${ROOTFS_MIB}M"
+# Build the image journal-less (`-O ^has_journal`). The backend attaches the
+# rootfs READ-ONLY (is_read_only:true) and every concurrent VM shares this one
+# file, so a journal is both useless (a read-only fs never writes) and actively
+# harmful: a journalled ext4 that was ever mounted read-write needs recovery on
+# the next mount, and a read-only mount cannot replay it — the guest kernel then
+# panics with "recovery required on readonly filesystem ... cannot proceed".
+# A journal-less image mounts read-only cleanly every boot. Firecracker
+# auto-appends `root=/dev/vda ro` for a read-only drive, so no `ro` boot_arg is
+# needed in BASE_BOOT_ARGS.
+mkfs.ext4 -q -F -O ^has_journal -L kastellan-rootfs -d "$WORK" "$OUT_DIR/python-exec.ext4" "${ROOTFS_MIB}M"
 echo "built $OUT_DIR/python-exec.ext4 + $OUT_DIR/vmlinux"

@@ -22,7 +22,17 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 FC_VERSION="v1.16.0"
-FC_ARCH="aarch64"
+# Match the host architecture (Firecracker ships x86_64 and aarch64; `uname -m`
+# already prints exactly those names). Don't hardcode the DGX's aarch64 — the
+# backend must run on any Linux box (CLAUDE.md cross-platform constraint).
+HOST_ARCH="$(uname -m)"
+case "${HOST_ARCH}" in
+    x86_64|aarch64) FC_ARCH="${HOST_ARCH}" ;;
+    *)
+        echo "Unsupported architecture '${HOST_ARCH}'. Firecracker ships x86_64 and aarch64 only." >&2
+        exit 1
+        ;;
+esac
 FC_BINARY="firecracker-${FC_VERSION}-${FC_ARCH}"
 FC_TGZ="${FC_BINARY}.tgz"
 FC_URL="https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/${FC_TGZ}"
