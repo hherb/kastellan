@@ -5,9 +5,8 @@
 mod boot;
 mod bridge;
 
-use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn arg(flag: &str) -> Option<String> {
     let mut it = std::env::args();
@@ -20,12 +19,15 @@ fn arg(flag: &str) -> Option<String> {
 fn main() -> std::io::Result<()> {
     let config = arg("--config-file").expect("--config-file required");
     let vsock_uds = arg("--vsock-uds").expect("--vsock-uds required");
-    let port: u32 = arg("--vsock-port").expect("--vsock-port required").parse().unwrap();
+    let port: u32 = arg("--vsock-port")
+        .expect("--vsock-port required")
+        .parse()
+        .expect("--vsock-port must be a u32");
     let log = arg("--log").unwrap_or_else(|| "/dev/null".into());
 
-    // Boot firecracker as our child; it creates the vsock UDS once the guest
-    // is up. Its stdout/stderr go to the log path via --log-path, so we keep
-    // our own stdout pristine for JSON-RPC.
+    // Boot firecracker as our child; it creates the base vsock UDS once it is
+    // up. Its stdout/stderr go to the log path via --log-path, so we keep our
+    // own stdout pristine for JSON-RPC.
     let fc_argv = boot::firecracker_argv(&config, &log);
     let mut fc = Command::new(&fc_argv[0])
         .args(&fc_argv[1..])
@@ -34,36 +36,25 @@ fn main() -> std::io::Result<()> {
         .stderr(Stdio::null())
         .spawn()?;
 
-    // The guest's init listens on `port`; firecracker exposes it as
-    // "<uds_path>_<port>" for host-initiated connections (hybrid vsock).
-    let conn_path = format!("{vsock_uds}_{port}");
+    // Build the teardown guard BEFORE connecting so a panic (or early return) in
+    // the connect unwinds through it and kills the already-spawned firecracker
+    // child instead of orphaning it (holding KVM/vsock). It also removes the
+    // firecracker-created base UDS. The guard owns a clone; the outer scope
+    // keeps `vsock_uds` for the connect borrow below.
+    let uds_for_guard = vsock_uds.clone();
+    let teardown = scopeguard(move || {
+        let _ = fc.kill();
+        let _ = std::fs::remove_file(&uds_for_guard);
+    });
 
-    // Build the teardown guard BEFORE connecting so that a panic (or early
-    // return) in `connect_with_retry` unwinds through it and kills the already-
-    // spawned firecracker child instead of leaving it orphaned (holding KVM/vsock).
-    // The guard gets an owned clone of `conn_path`; the outer scope keeps the
-    // original for the `connect_with_retry` borrow below.
-    let conn_path_for_guard = conn_path.clone();
-    let teardown = scopeguard(move || { let _ = fc.kill(); let _ = std::fs::remove_file(&conn_path_for_guard); });
-
-    let stream = connect_with_retry(&conn_path, Duration::from_secs(20))
+    // Host-initiated hybrid-vsock connect: dial the base UDS and `CONNECT` to
+    // the guest's listening port (DGX-verified direction). Retries while the
+    // guest boots and binds its listener.
+    let stream = bridge::connect_hybrid_vsock(&vsock_uds, port, Duration::from_secs(20))
         .expect("guest vsock did not come up within 20s");
-
-    // Hybrid-vsock handshake on a plain connect to the per-port socket is not
-    // required (the _<port> suffix encodes it); the worker speaks JSON-RPC now.
     bridge::pump(stream);
     drop(teardown);
     Ok(())
-}
-
-/// Retry connecting to the per-port vsock UDS until the guest listener is up.
-fn connect_with_retry(path: &str, timeout: Duration) -> Option<UnixStream> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Ok(s) = UnixStream::connect(path) { return Some(s); }
-        if Instant::now() >= deadline { return None; }
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 /// Minimal RAII guard (avoid a dep; teardown must run on every exit path).

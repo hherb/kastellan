@@ -19,7 +19,7 @@ mod probe;
 pub use probe::{probe_report, ProbeInputs};
 
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::{SandboxBackend, SandboxError, SandboxPolicy};
 
@@ -55,6 +55,26 @@ fn make_spawn_dir() -> Result<std::path::PathBuf, SandboxError> {
     Ok(dir)
 }
 
+/// Counter backing [`next_guest_cid`].
+static CID_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// A host-unique guest vsock CID for one VM. CIDs 0–2 (hypervisor/host/local)
+/// and `0xffffffff` (`VMADDR_CID_ANY`) are reserved and must be avoided. The
+/// guest init binds `VMADDR_CID_ANY`, so the exact value is host-side
+/// bookkeeping only — its sole job is to be **unique among concurrently-running
+/// VMs on this host** (firecracker rejects a duplicate CID, which would early-
+/// exit the worker). Seeded from the PID so distinct daemons rarely collide,
+/// plus a per-spawn counter for concurrent spawns within one process. Wrapping
+/// is acceptable: a collision only costs one failed boot, surfaced as a spawn
+/// error. The plan's compile-time `WORKER_GUEST_CID` is the (unused) default; a
+/// real spawn always overrides it here.
+fn next_guest_cid() -> u32 {
+    let seq = CID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let base = std::process::id().wrapping_mul(64).wrapping_add(seq);
+    // Range [3, 0xffff_fff2] — clear of 0,1,2 and 0xffffffff.
+    3 + (base % 0xffff_fff0)
+}
+
 /// Boots workers inside a Firecracker micro-VM. Holds no mutable state
 /// (`Send + Sync` via the empty struct), matching the other backends.
 #[derive(Default)]
@@ -85,10 +105,18 @@ impl SandboxBackend for LinuxFirecracker {
             kernel_path: dir.join("vmlinux"),
             rootfs_path: dir.join("python-exec.ext4"),
         };
-        let plan = build_launch_plan(policy, &image, program, args)?;
+        let mut plan = build_launch_plan(policy, &image, program, args)?;
         // Per-spawn temp dir for the config + log files. No new dep: uses std
         // only (atomic counter + create_dir_all).
         let run_dir = make_spawn_dir()?;
+        // Make the vsock UDS path AND the guest CID per-spawn unique so multiple
+        // VMs can run concurrently. The pure `build_launch_plan` carries a fixed
+        // default for both (it has no spawn context); the spawn — which owns the
+        // unique run_dir — is where uniqueness is assigned. Without this, parallel
+        // spawns collide on the single image-dir UDS / CID 3 and all but one
+        // worker EarlyExits.
+        plan.vsock_uds = run_dir.join("vsock.sock");
+        plan.vsock_cid = next_guest_cid();
         let config_path = run_dir.join("fc.json");
         let log_path = run_dir.join("fc.log");
         std::fs::write(&config_path, render_firecracker_config(&plan).to_string())

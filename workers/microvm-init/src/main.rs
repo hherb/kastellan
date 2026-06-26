@@ -80,6 +80,9 @@ fn accept_host_bridge() -> RawFd {
         assert_eq!(libc::listen(fd, 1), 0, "vsock listen");
         let conn = libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut());
         assert!(conn >= 0, "vsock accept");
+        // Serve exactly one connection: close the listen socket so the exec'd
+        // worker does not inherit a stray listening fd (#361).
+        libc::close(fd);
         conn
     }
 }
@@ -94,7 +97,7 @@ fn exec_worker() {
     // SAFETY: single-threaded PID1; no other threads to race with.
     #[allow(deprecated)]
     unsafe {
-        std::env::set_var("KASTELLAN_PYTHON_EXEC_PYTHON", "/usr/local/bin/python3");
+        std::env::set_var("KASTELLAN_PYTHON_EXEC_PYTHON", "/usr/bin/python3");
     }
     let argv = [prog.as_ptr(), std::ptr::null()];
     unsafe {
@@ -109,10 +112,18 @@ fn exec_worker() {
 fn main() {
     mount_pseudo_fs();
     let conn_fd = accept_host_bridge();
-    // Redirect the worker's stdio onto the vsock connection.
+    // Redirect the worker's stdio onto the vsock connection. A silent dup2
+    // failure here would boot the guest with a dead JSON-RPC bridge and no
+    // diagnostic, so the returns are checked (#361). dup2 returns the new fd
+    // number on success.
     unsafe {
-        libc::dup2(conn_fd, 0);
-        libc::dup2(conn_fd, 1);
+        assert_eq!(libc::dup2(conn_fd, 0), 0, "dup2 vsock -> stdin");
+        assert_eq!(libc::dup2(conn_fd, 1), 1, "dup2 vsock -> stdout");
+        // conn_fd is now duplicated onto fd 0 and 1; close the original so the
+        // worker does not inherit a third copy (#361).
+        if conn_fd > 1 {
+            libc::close(conn_fd);
+        }
     }
     // exec the worker (baked path + args); env from the baked config.
     exec_worker();
