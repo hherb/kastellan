@@ -365,12 +365,16 @@ items unlock later ones.
     calls; per-call `wipe_scratch_contents` restores SingleUse-`/tmp` isolation; container-mode only, default off. warm/idle e2e
     3/0 real. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-26-python-exec-warm-idle-container*`.
   - [ ] **Linux Firecracker micro-VM backend (`SandboxBackendKind::FirecrackerVm`)** — generic separate-kernel backend any
-    worker can opt into (driver: general hardening, all workers; staged rollout). **Spec + slice-1 TDD plan written 2026-06-26**
-    (branch `feat/linux-firecracker-microvm`; design-only, impl is the next session): Firecracker VMM, vsock transport
-    (DGX-spike-proven: ~70 ms boot, serial corrupted by printk → vsock chosen), `kastellan-microvm-run` launcher-is-the-Child +
-    guest PID1 `kastellan-microvm-init` (unchanged `serve_stdio` worker), minimal-ext4 rootfs now / OCI-source later. Slice 1 =
-    `Net::Deny` in-image python-exec (`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`) with KVM-enforced `mem_mb`; slices 2–5 = warm/idle,
-    fs-sharing (per-spawn block devices — Firecracker has no virtio-fs), net workers (egress UDS over 2nd vsock), jailer.
+    worker can opt into (driver: general hardening, all workers; staged rollout). **Slice-1 Tasks 1–6 DONE + DGX-unit-verified
+    2026-06-26** (branch `feat/firecracker-microvm-slice1-impl`, PR pending): `FirecrackerVm` enum/registry, pure `build_launch_plan`
+    + config, fail-closed `probe`, new pure-std `kastellan-microvm-run` launcher-is-the-Child + stdio↔vsock bridge, guest PID1
+    `kastellan-microvm-init` (unchanged `serve_stdio` worker) + `build-rootfs.sh`/`install-firecracker.sh`/privileged
+    `install-firecracker-vsock.sh`, `LinuxFirecracker::spawn` + `firecracker_mode_entry` (`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`,
+    Net::Deny+WorkerStrict). Verified: DGX `--all-targets` workspace clippy + unit tests (sandbox 44, microvm-run 2, microvm-init 1,
+    core python_exec 26) all green; macOS workspace clippy green. **Task 7 (live KVM-boot e2e + runbook) PARKED** — needs the
+    one-time privileged DGX setup + live hybrid-vsock transport resolution. Follow-ups: #360 (forward policy.env into guest), #361
+    (guest-boot fd hygiene), #362 (temp-dir cleanup), #363 (python_exec.rs split). Slices 2–5 = warm/idle, fs-sharing (per-spawn
+    block devices — Firecracker has no virtio-fs), net workers (egress UDS over 2nd vsock), jailer.
     Spec/plan: `docs/superpowers/{specs/2026-06-26-linux-firecracker-microvm-design.md,plans/2026-06-26-linux-firecracker-microvm-slice1.md}`.
   - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
     (parity note: the net workers have none either).
