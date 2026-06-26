@@ -134,7 +134,9 @@ Same pure-fn-then-spawn shape as `linux_bwrap.rs`:
   defense-in-depth.
 - **`probe()`** fail-closed: firecracker binary on `PATH`, `/dev/kvm` RW,
   guest kernel + rootfs present, `/dev/vhost-vsock` RW. Each failure names its
-  operator fix (`modprobe vhost_vsock`, add user to `kvm`, run `build-rootfs.sh`).
+  operator fix — the device-access failures point at
+  `scripts/linux/install-firecracker-vsock.sh`; the missing-image failures at
+  `build-rootfs.sh`.
 
 ### 3. Launcher binary (`workers/microvm-run/`, crate `kastellan-microvm-run`)
 *Is* the `Child`. Boots Firecracker, bridges `stdin↔vsock`/`vsock↔stdout`,
@@ -227,8 +229,13 @@ slice-1 round-trip, mem-cap enforcement, net-deny, param file-channel.
   devices (slice 3). If this ever proves too painful for "all workers," a
   `cloud-hypervisor` backend (which *has* virtio-fs) is an **additive sibling**
   `SandboxBackendKind`, not a rewrite — the generic abstraction makes this cheap.
-- **vsock is operator-gated** — one-time DGX setup: `modprobe vhost_vsock`, add
-  worker user to `kvm` (or ACL `/dev/vhost-vsock`), install firecracker, run
+- **vsock is operator-gated** — one-time DGX setup is a single privileged script,
+  `sudo scripts/linux/install-firecracker-vsock.sh` (persists the `vhost_vsock`
+  module + ACL-grants the worker user `/dev/vhost-vsock` via a udev rule),
+  mirroring the established `install-bwrap-apparmor-profile.sh` pattern; the
+  Firecracker `probe()` points operators to it. The per-user, non-root
+  `kastellan-cli install` deliberately does **not** perform this — the daemon
+  never self-escalates. Plus the per-user `install-firecracker.sh` +
   `build-rootfs.sh`. Captured in a runbook with the slice-1 PR.
 - **aarch64-only verification today** — the DGX is aarch64; x86_64 hosts are
   untested but Firecracker supports both (the backend is arch-neutral; the rootfs

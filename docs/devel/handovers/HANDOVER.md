@@ -1050,9 +1050,9 @@ sessions 2026-05-06 → 2026-05-09 in
 **★ LEADING PICK — implement Linux Firecracker micro-VM slice 1.** Spec + 7-task TDD plan are written + committed on branch
 `feat/linux-firecracker-microvm` (this session, design-only; PR pending). Execute
 `docs/superpowers/plans/2026-06-26-linux-firecracker-microvm-slice1.md` task-by-task (subagent-driven-development). Goal: boot a `Net::Deny`
-in-image python-exec worker in a Firecracker VM over vsock with KVM-enforced `mem_mb`. **Before the e2e (Task 7), the operator must do the
-one-time DGX setup** (`modprobe vhost_vsock` + grant the worker user `/dev/vhost-vsock`; `install-firecracker.sh`; `build-rootfs.sh`) — `/dev/kvm`
-already works. The **one genuine unknown** is the hybrid-vsock connect direction (host `CONNECT <port>\n` on the base UDS vs the guest-listen
+in-image python-exec worker in a Firecracker VM over vsock with KVM-enforced `mem_mb`. **Before the e2e (Task 7), the operator runs the
+one-time DGX setup** — `sudo scripts/linux/install-firecracker-vsock.sh` (vsock module persist + ACL grant, the one privileged step, mirrors
+`install-bwrap-apparmor-profile.sh`; the probe points here) + per-user `install-firecracker.sh` + `build-rootfs.sh`; `/dev/kvm` already works. The **one genuine unknown** is the hybrid-vsock connect direction (host `CONNECT <port>\n` on the base UDS vs the guest-listen
 `_<port>` suffix) — Task 7 Step 2 resolves it live on the DGX. Spike artifacts are at `/tmp/fc-spike` on the DGX (firecracker v1.16.0 + kernel +
 rootfs). Slices 2–5 (warm/idle, fs-sharing, net workers, jailer) are sketched in the spec for later sessions.
 

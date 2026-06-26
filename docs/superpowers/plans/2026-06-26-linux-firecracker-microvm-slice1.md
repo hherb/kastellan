@@ -18,7 +18,7 @@
 - **TDD (rule #2):** failing test first, every task.
 - **Files under 500 LOC** (rule #4); split when a file approaches the cap.
 - **Test execution reality:** the `sandbox` crate's linux-gated code does **not** run under `cargo test` on the macOS dev box. **Compile-check on the Mac** with `cargo clippy -p kastellan-sandbox --target aarch64-unknown-linux-gnu` (pure-Rust crate, works per the cross-clippy convention). **Run the unit tests on the DGX** over SSH: `ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && cargo test -p kastellan-sandbox <name>'`. The `ssh dgx '<cmd>'` form is exact — flags before the hostname get denied.
-- **DGX one-time operator setup** (needed only for the e2e boot, Task 7; document, do not script into CI): `sudo modprobe vhost_vsock`; grant the worker user `/dev/vhost-vsock` (add to `kvm` group or ACL); install the firecracker binary on `$PATH`; run `build-rootfs.sh`. `/dev/kvm` is already RW to the user.
+- **DGX one-time operator setup** (needed only for the e2e boot, Task 7): `sudo scripts/linux/install-firecracker-vsock.sh` (vsock module persist + ACL grant — the one privileged step, mirrors `install-bwrap-apparmor-profile.sh`); `scripts/workers/microvm/install-firecracker.sh` (per-user binary); `scripts/workers/microvm/build-rootfs.sh`. `/dev/kvm` is already RW to the user (pass `--kvm` to the vsock script if not). Do NOT fold the privileged step into `kastellan-cli install`, which is per-user/non-root by design.
 - **Firecracker artifacts (pinned):** kernel `vmlinux-6.1.102`, firecracker `v1.16.0`, aarch64. Pin versions in the build script + a constants module; never float tags (GLIBC/ABI skew lesson from the macOS container build).
 
 ---
@@ -441,16 +441,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_vsock_names_modprobe_fix() {
+    fn missing_vsock_names_setup_script() {
         let err = probe_report(&ProbeInputs { vhost_vsock_rw: false, ..ok() }).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("vhost_vsock") && msg.contains("modprobe"));
+        assert!(msg.contains("vhost_vsock") && msg.contains("install-firecracker-vsock.sh"));
     }
 
     #[test]
     fn missing_kvm_names_fix() {
         let err = probe_report(&ProbeInputs { kvm_rw: false, ..ok() }).unwrap_err();
-        assert!(format!("{err}").contains("/dev/kvm"));
+        let msg = format!("{err}");
+        assert!(msg.contains("/dev/kvm") && msg.contains("install-firecracker-vsock.sh"));
     }
 
     #[test]
@@ -498,14 +499,15 @@ pub fn probe_report(inputs: &ProbeInputs) -> Result<(), SandboxError> {
     }
     if !inputs.kvm_rw {
         return Err(SandboxError::Backend(
-            "/dev/kvm not readable+writable by this user — add the worker user to the \
-             `kvm` group (or ACL /dev/kvm) and re-login".into(),
+            "/dev/kvm not readable+writable by this user — run the one-time host setup: \
+             `sudo scripts/linux/install-firecracker-vsock.sh --kvm`".into(),
         ));
     }
     if !inputs.vhost_vsock_rw {
         return Err(SandboxError::Backend(
-            "/dev/vhost-vsock not accessible — run `sudo modprobe vhost_vsock` and grant \
-             the worker user access (kvm group or ACL on /dev/vhost-vsock)".into(),
+            "/dev/vhost-vsock not accessible — run the one-time host setup: \
+             `sudo scripts/linux/install-firecracker-vsock.sh` (loads + persists vhost_vsock \
+             and ACL-grants this user)".into(),
         ));
     }
     if !inputs.kernel_present {
@@ -796,8 +798,12 @@ The in-guest adapter and the rootfs build. `kastellan-microvm-init` (PID1) mount
 **Files:**
 - Create: `workers/microvm-init/Cargo.toml`, `workers/microvm-init/src/main.rs`
 - Create: `scripts/workers/microvm/build-rootfs.sh`, `scripts/workers/microvm/install-firecracker.sh`
+- Create: `scripts/linux/install-firecracker-vsock.sh` (privileged one-time host setup — vsock module + ACL grant; mirrors `scripts/linux/install-bwrap-apparmor-profile.sh`)
+- Modify: `CLAUDE.md` (add a "Linux host setup" Firecracker subsection)
 - Modify: root `Cargo.toml` members
 - Test: inline pure test in `main.rs` for the env-application + vsock-addr helpers; the boot is verified in Task 7.
+
+**Separation of concerns (why a separate sudo script):** `kastellan-cli install` is deliberately **per-user / non-root** (PR #316), so it must not load kernel modules or grant device ACLs. The vsock prerequisite is therefore a standalone privileged script the operator runs once — exactly the established pattern for `install-bwrap-apparmor-profile.sh`, which the bwrap backend's `probe()` likewise points operators to. The Firecracker `probe()` (Task 3) points here.
 
 **Interfaces:**
 - Consumes: `WORKER_VSOCK_PORT` (duplicate the const value `1024` — the guest crate must not depend on `kastellan-sandbox`; document the shared value in both).
@@ -976,6 +982,105 @@ echo "built $OUT_DIR/python-exec.ext4 + $OUT_DIR/vmlinux"
 
 `scripts/workers/microvm/install-firecracker.sh` (pinned v1.16.0 download, mirroring the spike): fetch the release tgz, extract `firecracker-v1.16.0-aarch64`, install to `~/.local/bin/firecracker`, `chmod 0755`, run `firecracker --version` as a smoke check.
 
+- [ ] **Step 5b: Write the privileged vsock host-setup script** — `scripts/linux/install-firecracker-vsock.sh` (mirrors `install-bwrap-apparmor-profile.sh`: Linux-only, root-required, idempotent, parameterized by target user):
+
+```bash
+#!/usr/bin/env bash
+# install-firecracker-vsock.sh
+#
+# One-time host setup for kastellan's Linux Firecracker micro-VM backend
+# (SandboxBackendKind::FirecrackerVm). Same shape as
+# install-bwrap-apparmor-profile.sh: a privileged prerequisite the sandbox
+# backend's probe() checks for and refuses to run without.
+#
+# It (1) loads the vhost_vsock kernel module and persists it across reboots,
+# and (2) grants the kastellan worker user read+write on /dev/vhost-vsock via
+# an ACL that a udev rule re-applies on every boot (devtmpfs drops manual ACLs
+# at boot). /dev/kvm is left alone unless --kvm is passed.
+#
+# Run once with sudo:
+#   sudo scripts/linux/install-firecracker-vsock.sh [--user <name>] [--kvm]
+#
+# Reversible: remove /etc/udev/rules.d/99-kastellan-microvm.rules and
+# /etc/modules-load.d/kastellan-vsock.conf, then `udevadm control --reload`.
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "This script is Linux-only (macOS uses the Apple container backend)." >&2
+    exit 1
+fi
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "This script must run as root (use sudo)." >&2
+    exit 1
+fi
+
+TARGET_USER=""
+GRANT_KVM=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --user) TARGET_USER="${2:-}"; shift 2 ;;
+        --kvm) GRANT_KVM=1; shift ;;
+        *) echo "unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
+TARGET_USER="${TARGET_USER:-${SUDO_USER:-}}"
+if [[ -z "${TARGET_USER}" ]]; then
+    echo "Could not determine target user. Pass --user <name>." >&2
+    exit 1
+fi
+if ! id "${TARGET_USER}" >/dev/null 2>&1; then
+    echo "User '${TARGET_USER}' does not exist." >&2
+    exit 1
+fi
+
+SETFACL_BIN="$(command -v setfacl || true)"
+if [[ -z "${SETFACL_BIN}" ]]; then
+    echo "setfacl not found. Install 'acl' (apt install acl) and re-run." >&2
+    exit 1
+fi
+
+# 1. Kernel module: load now + persist.
+if ! modprobe vhost_vsock; then
+    echo "modprobe vhost_vsock failed — is the module available for this kernel?" >&2
+    exit 1
+fi
+echo vhost_vsock > /etc/modules-load.d/kastellan-vsock.conf
+echo "Loaded vhost_vsock; persisted in /etc/modules-load.d/kastellan-vsock.conf"
+
+# 2. udev rule: re-apply the ACL on each boot.
+RULES_PATH="/etc/udev/rules.d/99-kastellan-microvm.rules"
+{
+    echo "# Installed by kastellan (scripts/linux/install-firecracker-vsock.sh)."
+    echo "# Grants the kastellan worker user rw on the micro-VM devices,"
+    echo "# re-applied on every boot."
+    echo "KERNEL==\"vhost-vsock\", RUN+=\"${SETFACL_BIN} -m u:${TARGET_USER}:rw /dev/vhost-vsock\""
+    if [[ "${GRANT_KVM}" -eq 1 ]]; then
+        echo "KERNEL==\"kvm\", RUN+=\"${SETFACL_BIN} -m u:${TARGET_USER}:rw /dev/kvm\""
+    fi
+} > "${RULES_PATH}"
+echo "Wrote ${RULES_PATH}"
+
+# 3. Apply immediately so no reboot is needed (ACL is checked at open time, so
+#    the running per-user kastellan service picks it up without a restart).
+udevadm control --reload
+"${SETFACL_BIN}" -m "u:${TARGET_USER}:rw" /dev/vhost-vsock
+[[ "${GRANT_KVM}" -eq 1 ]] && "${SETFACL_BIN}" -m "u:${TARGET_USER}:rw" /dev/kvm
+
+echo
+echo "Done. Verify as ${TARGET_USER}:"
+echo "  [ -r /dev/vhost-vsock ] && [ -w /dev/vhost-vsock ] && echo 'vsock OK'"
+```
+
+- [ ] **Step 5c: Add a CLAUDE.md host-setup entry** — under the existing "Linux host setup" section (next to the bwrap/AppArmor note), add:
+
+```markdown
+For the optional Firecracker micro-VM backend (`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`),
+run the one-time privileged setup so the worker user can open the vsock device:
+`sudo scripts/linux/install-firecracker-vsock.sh`. Without it, `LinuxFirecracker::probe()`
+fails closed and the worker stays on bwrap. `/dev/kvm` is usually already accessible;
+pass `--kvm` if not.
+```
+
 - [ ] **Step 6: Run the pure test + build the rootfs on the DGX**
 
 Run: `ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && cargo test -p kastellan-microvm-init && cargo clippy -p kastellan-microvm-init -- -D warnings'`
@@ -986,8 +1091,8 @@ Expected: `firecracker v1.16.0`; `built …/python-exec.ext4 + …/vmlinux`.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add workers/microvm-init scripts/workers/microvm Cargo.toml
-git commit -m "feat(microvm-init): guest PID1 vsock-stdio adapter + rootfs build script"
+git add workers/microvm-init scripts/workers/microvm scripts/linux/install-firecracker-vsock.sh CLAUDE.md Cargo.toml
+git commit -m "feat(microvm-init): guest PID1 vsock-stdio adapter + rootfs + vsock host-setup"
 ```
 
 ---
@@ -1216,7 +1321,7 @@ Adjust `kastellan-microvm-run` to the proven path; delete the unused branch. Re-
 Run: `ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && KASTELLAN_PYTHON_EXEC_ENABLE=1 KASTELLAN_PYTHON_EXEC_USE_MICROVM=1 cargo test -p kastellan-core --test python_exec_firecracker_e2e -- --ignored --nocapture'`
 Expected: 3/3 PASS — `42` round-trips; mem-cap test sees `MemoryError`/non-zero exit; net-deny test sees no connectivity.
 
-- [ ] **Step 4: Write the operator runbook** — `docs/devel/runbooks/2026-06-26-linux-microvm-setup.md`: the one-time DGX setup (modprobe vhost_vsock + persist via `/etc/modules-load.d`; grant `/dev/vhost-vsock` to the worker user; `install-firecracker.sh`; `build-rootfs.sh`), how to enable (`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`), and how to verify (the e2e command above). Note `/dev/kvm` is already accessible.
+- [ ] **Step 4: Write the operator runbook** — `docs/devel/runbooks/2026-06-26-linux-microvm-setup.md`: the one-time DGX setup as three commands — `sudo scripts/linux/install-firecracker-vsock.sh` (vsock module persist + ACL grant; the privileged step), `scripts/workers/microvm/install-firecracker.sh` (per-user firecracker binary), `scripts/workers/microvm/build-rootfs.sh` (kernel + rootfs) — how to enable (`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`), and how to verify (the e2e command above). Note `/dev/kvm` is usually already accessible (pass `--kvm` to the vsock script if not).
 
 - [ ] **Step 5: Update the threat model** — `docs/threat-model.md`: add that opted-in Linux workers (today: python-exec via `USE_MICROVM`) gain a separate-kernel boundary on top of namespaces/seccomp/Landlock/cgroup; the VM enforces `mem_mb` at the hypervisor; scope is unchanged for non-opted workers (still bwrap).
 
