@@ -273,6 +273,28 @@ pub fn render_firecracker_config(plan: &FirecrackerLaunchPlan) -> Value {
             "uds_path": plan.vsock_uds.to_string_lossy(),
         },
     });
+    // Slice 3: attach the host-dir-share drives in the fixed order RO → RW, which
+    // MUST agree with the /dev/vdb,/dev/vdc device nodes build_launch_plan
+    // assigned (the guest init mounts by those nodes). `*_image_path` is `Some`
+    // iff the corresponding share is present (set together in build_launch_plan,
+    // overridden to the run-dir path by build_share_images); path_on_host is the
+    // per-spawn image (a placeholder here in unit tests).
+    if let Some(img) = &plan.ro_image_path {
+        cfg["drives"].as_array_mut().unwrap().push(json!({
+            "drive_id": "ro-share",
+            "path_on_host": img.to_string_lossy(),
+            "is_root_device": false,
+            "is_read_only": true,
+        }));
+    }
+    if let Some(img) = &plan.rw_image_path {
+        cfg["drives"].as_array_mut().unwrap().push(json!({
+            "drive_id": "rw-scratch",
+            "path_on_host": img.to_string_lossy(),
+            "is_root_device": false,
+            "is_read_only": false,
+        }));
+    }
     if plan.net_enabled {
         // Slice 4 fills this in; slice 1 only reaches here for net workers,
         // which are out of scope, so leave a deterministic empty marker.
@@ -538,5 +560,48 @@ mod tests {
     fn build_launch_plan_no_shares_omits_mounts_token() {
         let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
         assert!(!plan.boot_args.contains("kastellan.mounts"));
+    }
+
+    #[test]
+    fn config_attaches_ro_and_rw_drives_in_order() {
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv")],
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        let cfg = render_firecracker_config(&plan);
+        let drives = cfg["drives"].as_array().unwrap();
+        assert_eq!(drives.len(), 3, "rootfs + ro-share + rw-scratch");
+        assert_eq!(drives[0]["drive_id"], "rootfs");
+        assert_eq!(drives[1]["drive_id"], "ro-share");
+        assert_eq!(drives[1]["is_read_only"], true);
+        assert_eq!(drives[2]["drive_id"], "rw-scratch");
+        assert_eq!(drives[2]["is_read_only"], false);
+    }
+
+    #[test]
+    fn config_drive_order_matches_device_letters() {
+        // Pin the invariant: ro=vdb (drives[1]), rw=vdc (drives[2]). The guest relies
+        // on the manifest's device nodes, which this order must agree with.
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv")],
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert_eq!(plan.ro_share.as_ref().unwrap().guest_dev, "/dev/vdb");
+        assert_eq!(plan.rw_scratch.as_ref().unwrap().guest_dev, "/dev/vdc");
+        let cfg = render_firecracker_config(&plan);
+        // rootfs=vda (drives[0]), then ro (drives[1]) → vdb, rw (drives[2]) → vdc.
+        assert_eq!(cfg["drives"][1]["drive_id"], "ro-share");
+        assert_eq!(cfg["drives"][2]["drive_id"], "rw-scratch");
+    }
+
+    #[test]
+    fn config_no_extra_drives_when_no_shares() {
+        let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
+        let cfg = render_firecracker_config(&plan);
+        assert_eq!(cfg["drives"].as_array().unwrap().len(), 1, "only the rootfs drive");
     }
 }
