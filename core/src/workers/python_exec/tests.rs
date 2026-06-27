@@ -1,5 +1,23 @@
 use super::*;
 
+// `Net`/`Profile`/`ENV_LANDLOCK_RW`/`interpreter_extra_fs_read` are referenced
+// bare on both platforms below. The #363 lift moved the entry builders (and
+// these imports) into `entries`, so the parent no longer re-exports the
+// sandbox/scheduler types — pull them in here.
+use crate::tool_host::ENV_LANDLOCK_RW;
+use kastellan_sandbox::{Net, Profile};
+use super::entries::interpreter_extra_fs_read;
+// The container/warm-idle entry-internals are exercised only by the
+// `#[cfg(target_os = "macos")]` tests, so gate their imports to match (else
+// they read as unused imports under `-D warnings` on Linux).
+#[cfg(target_os = "macos")]
+use crate::scheduler::ToolEntry;
+#[cfg(target_os = "macos")]
+use super::entries::{
+    DEFAULT_MAX_AGE_SECONDS, DEFAULT_MAX_REQUESTS, IDLE_GRACE_SECONDS, IDLE_SECONDS_ENV,
+    MAX_AGE_SECONDS_ENV, MAX_REQUESTS_ENV,
+};
+
 fn ctx<'a>(
     get_env: &'a dyn Fn(&str) -> Option<String>,
     exists: &'a dyn Fn(&Path) -> bool,
