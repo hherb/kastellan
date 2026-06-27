@@ -25,6 +25,11 @@ fn main() -> std::io::Result<()> {
         .expect("--vsock-port must be a u32");
     let log = arg("--log").unwrap_or_else(|| "/dev/null".into());
 
+    // Per-spawn run-dir to remove on exit (#362). Optional for backward
+    // compatibility with callers that don't pass it; when absent we fall back
+    // to removing just the base vsock UDS, as before.
+    let run_dir = arg("--run-dir");
+
     // Boot firecracker as our child; it creates the base vsock UDS once it is
     // up. Its stdout/stderr go to the log path via --log-path, so we keep our
     // own stdout pristine for JSON-RPC.
@@ -42,9 +47,18 @@ fn main() -> std::io::Result<()> {
     // firecracker-created base UDS. The guard owns a clone; the outer scope
     // keeps `vsock_uds` for the connect borrow below.
     let uds_for_guard = vsock_uds.clone();
+    let run_dir_for_guard = run_dir.clone();
     let teardown = scopeguard(move || {
         let _ = fc.kill();
-        let _ = std::fs::remove_file(&uds_for_guard);
+        // Remove the whole per-spawn run-dir when we know it (#362); this
+        // subsumes the base-UDS removal since the UDS lives inside it. When the
+        // flag is absent (older caller / a direct test), fall back to the UDS.
+        match run_dir_for_guard {
+            Some(dir) => remove_run_dir(&dir),
+            None => {
+                let _ = std::fs::remove_file(&uds_for_guard);
+            }
+        }
     });
 
     // Host-initiated hybrid-vsock connect: dial the base UDS and `CONNECT` to
@@ -62,4 +76,38 @@ fn scopeguard<F: FnOnce()>(f: F) -> impl Drop {
     struct G<F: FnOnce()>(Option<F>);
     impl<F: FnOnce()> Drop for G<F> { fn drop(&mut self) { if let Some(f) = self.0.take() { f(); } } }
     G(Some(f))
+}
+
+/// Best-effort removal of the per-spawn run-dir on launcher exit. Separated from
+/// the teardown closure so it is unit-testable without booting a VM. Removing
+/// the whole dir subsumes removing the base vsock UDS (which lives inside it).
+fn remove_run_dir(run_dir: &str) {
+    let _ = std::fs::remove_dir_all(run_dir);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_run_dir_deletes_the_directory_tree() {
+        let dir = std::env::temp_dir().join(format!(
+            "kastellan-microvm-runtest-{}-{}",
+            std::process::id(),
+            "a"
+        ));
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("fc.json"), "{}").unwrap();
+        assert!(dir.exists());
+
+        remove_run_dir(&dir.to_string_lossy());
+
+        assert!(!dir.exists(), "remove_run_dir must delete the whole tree");
+    }
+
+    #[test]
+    fn remove_run_dir_is_noop_on_missing_dir() {
+        // Must not panic when the dir is already gone.
+        remove_run_dir("/tmp/kastellan-microvm-runtest-definitely-absent-zzz");
+    }
 }
