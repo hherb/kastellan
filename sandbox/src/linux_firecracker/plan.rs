@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use crate::{Net, SandboxError, SandboxPolicy};
+use super::mounts::{reserved_top_level, RoShare, RwScratch};
 
 /// Where the guest kernel + rootfs live on the host. Defaulted from
 /// constants; the `container_image` tag will later select per-worker rootfs.
@@ -32,6 +33,15 @@ pub struct FirecrackerLaunchPlan {
     /// load-bearing copy the guest init actually decodes.
     pub env: Vec<(String, String)>,
     pub net_enabled: bool,
+    /// Read-only host-dir share, derived from `policy.fs_read`. `None` if empty.
+    pub ro_share: Option<RoShare>,
+    /// Writable scratch drive, derived from `policy.fs_write`. `None` if empty.
+    pub rw_scratch: Option<RwScratch>,
+    /// Host path of the built RO ext4. Placeholder until the spawn sets the
+    /// run-dir path (mirrors `vsock_uds`); `Some` iff `ro_share` is `Some`.
+    pub ro_image_path: Option<std::path::PathBuf>,
+    /// Host path of the built RW ext4. `Some` iff `rw_scratch` is `Some`.
+    pub rw_image_path: Option<std::path::PathBuf>,
 }
 
 /// Placeholder guest CID baked into a freshly-built plan. CIDs 0–2 are reserved
@@ -171,6 +181,42 @@ pub fn build_launch_plan(
         )));
     }
 
+    // Slice 3: derive host-dir-sharing drives from the policy. Device nodes are
+    // assigned RO-before-RW starting at /dev/vdb (vda is the rootfs); the config
+    // drive order in render_firecracker_config MUST match (pinned by a test).
+    for p in &policy.fs_read {
+        if let Some(sys) = reserved_top_level(p) {
+            return Err(SandboxError::Backend(format!(
+                "fs_read path {p:?} is under reserved rootfs system dir /{sys}: the micro-VM \
+                 backend cannot anchor a tmpfs there without hiding the worker's own files"
+            )));
+        }
+    }
+    if policy.fs_write.len() > 1 {
+        return Err(SandboxError::Backend(format!(
+            "micro-VM backend supports a single writable mountpoint per spawn, got {} fs_write \
+             paths",
+            policy.fs_write.len()
+        )));
+    }
+    let mut next_letter = b'b';
+    let ro_share = if policy.fs_read.is_empty() {
+        None
+    } else {
+        let dev = format!("/dev/vd{}", next_letter as char);
+        next_letter += 1;
+        Some(RoShare { sources: policy.fs_read.clone(), guest_dev: dev })
+    };
+    let rw_scratch = policy.fs_write.first().map(|mp| RwScratch {
+        mountpoint: mp.clone(),
+        guest_dev: format!("/dev/vd{}", next_letter as char),
+    });
+    // Placeholder image paths next to the rootfs (overridden per-spawn, like
+    // vsock_uds). Present iff the corresponding share is present.
+    let image_dir = image.rootfs_path.parent().unwrap_or_else(|| std::path::Path::new("/tmp"));
+    let ro_image_path = ro_share.as_ref().map(|_| image_dir.join("ro-share.ext4"));
+    let rw_image_path = rw_scratch.as_ref().map(|_| image_dir.join("rw-scratch.ext4"));
+
     Ok(FirecrackerLaunchPlan {
         kernel_path: image.kernel_path.clone(),
         rootfs_path: image.rootfs_path.clone(),
@@ -182,6 +228,10 @@ pub fn build_launch_plan(
         boot_args,
         env: policy.env.clone(),
         net_enabled,
+        ro_share,
+        rw_scratch,
+        ro_image_path,
+        rw_image_path,
     })
 }
 
@@ -402,5 +452,70 @@ mod tests {
         assert_eq!(build_launch_plan(&p_none, &img(), "/w", &[]).unwrap().vcpu_count, 1);
         let p_250 = SandboxPolicy { cpu_quota_pct: Some(250), ..Default::default() };
         assert_eq!(build_launch_plan(&p_250, &img(), "/w", &[]).unwrap().vcpu_count, 3);
+    }
+
+    #[test]
+    fn fs_read_derives_ro_share_with_device_node() {
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv"), PathBuf::from("/data/models")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        let ro = plan.ro_share.expect("ro_share derived from fs_read");
+        assert_eq!(ro.sources, vec![PathBuf::from("/opt/venv"), PathBuf::from("/data/models")]);
+        assert_eq!(ro.guest_dev, "/dev/vdb", "RO share is the first extra drive");
+        // Placeholder image path present so render attaches the drive; spawn overrides it.
+        assert!(plan.ro_image_path.is_some());
+    }
+
+    #[test]
+    fn fs_write_derives_rw_scratch_after_ro() {
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv")],
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert_eq!(plan.ro_share.unwrap().guest_dev, "/dev/vdb");
+        let rw = plan.rw_scratch.expect("rw_scratch derived from fs_write");
+        assert_eq!(rw.mountpoint, PathBuf::from("/tmp/scratch"));
+        assert_eq!(rw.guest_dev, "/dev/vdc", "RW is the second extra drive when RO present");
+        assert!(plan.rw_image_path.is_some());
+    }
+
+    #[test]
+    fn rw_scratch_is_vdb_when_no_ro_share() {
+        let policy = SandboxPolicy {
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert!(plan.ro_share.is_none());
+        assert_eq!(plan.rw_scratch.unwrap().guest_dev, "/dev/vdb");
+    }
+
+    #[test]
+    fn empty_policy_has_no_extra_drives() {
+        let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
+        assert!(plan.ro_share.is_none() && plan.rw_scratch.is_none());
+        assert!(plan.ro_image_path.is_none() && plan.rw_image_path.is_none());
+    }
+
+    #[test]
+    fn fs_read_under_system_dir_fails_closed() {
+        // Mounting a tmpfs anchor over /usr would hide the worker's own files.
+        let policy = SandboxPolicy { fs_read: vec![PathBuf::from("/usr/lib/foo")], ..Default::default() };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(format!("{err}").contains("system dir") || format!("{err}").contains("/usr"));
+    }
+
+    #[test]
+    fn multiple_fs_write_fails_closed() {
+        let policy = SandboxPolicy {
+            fs_write: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            ..Default::default()
+        };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(format!("{err}").contains("single writable"));
     }
 }

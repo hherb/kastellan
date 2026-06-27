@@ -15,6 +15,9 @@ pub use plan::{
     WORKER_VSOCK_PORT,
 };
 
+mod mounts;
+pub use mounts::{reserved_top_level, RoShare, RwScratch};
+
 mod probe;
 pub use probe::{probe_report, ProbeInputs};
 
