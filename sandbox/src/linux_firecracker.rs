@@ -18,6 +18,9 @@ pub use plan::{
 mod probe;
 pub use probe::{probe_report, ProbeInputs};
 
+mod cleanup;
+pub use cleanup::{orphaned_run_dir_should_remove, LAUNCHER_PID_FILE, RUN_DIR_PREFIX};
+
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
