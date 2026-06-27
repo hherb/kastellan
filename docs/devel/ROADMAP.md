@@ -381,8 +381,17 @@ items unlock later ones.
     (`<run_dir>/launcher.pid` + `/proc` liveness) at the top of
     `spawn_under_policy` backstops both the SIGKILL and panic-kept cases. No `SandboxBackend` trait change. DGX e2e **6/6**, 0 leftover run-dirs.
     Spec/plan: `docs/superpowers/{specs,plans}/2026-06-27-firecracker-rundir-cleanup*`.
-    **Slices 2–5 (next):** warm/idle reuse, fs-sharing (per-spawn block devices — Firecracker has no virtio-fs), net workers
-    (egress UDS over 2nd vsock), jailer.
+    [x] **SLICE 2 — warm/idle reuse + re-armable watchdog (2026-06-27, PR pending).** The entry/resolver/in-guest-wipe wiring
+    already existed from slice 1, so slice 2 = fix a latent watchdog bug + DGX-verify. The wall-clock watchdog was one-shot
+    (armed at spawn) → a warm `IdleTimeout` worker was SIGKILLed `wall_clock_ms` after boot regardless of the idle window
+    (latent on the macOS container warm path too). Replaced with a **re-armable `Watchdog`** owned by `SupervisedWorker`, armed
+    for the span of each `SupervisedWorker::call` (RAII disarm on return) → a warm worker is never under a kill timer while idle;
+    a single overrunning call is still killed; 2026-05-08 blackout guards intact. New DGX e2e `python_exec_firecracker_warm_idle_e2e.rs`
+    **4/4 real** (warm reuse boots VM once; `/tmp` wiped between warm calls; idle teardown; warm survives gap past `wall_clock_ms`);
+    slice-1 e2e **6/6** no-regression; clippy `--all-targets` clean both platforms; opus final review: concurrency primitive correct.
+    Spec/plan: `docs/superpowers/{specs,plans}/2026-06-27-firecracker-microvm-slice2-warm-idle*`.
+    **Slices 3–5 (next):** fs-sharing (per-spawn RO ext4 + writable overlay block devices — Firecracker has no virtio-fs/9p),
+    net workers (egress UDS over 2nd vsock), jailer.
     Spec/plan: `docs/superpowers/{specs/2026-06-26-linux-firecracker-microvm-design.md,plans/2026-06-26-linux-firecracker-microvm-slice1.md}`,
     `specs/2026-06-27-firecracker-guest-env-forwarding-design.md`.
   - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
