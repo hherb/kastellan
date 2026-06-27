@@ -28,31 +28,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use kastellan_core::secrets::Vault;
-use kastellan_core::tool_host::{
-    dispatch_with_sink, spawn_worker, AuditSink, ToolHostError, WorkerSpec,
-};
+use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, ToolHostError, WorkerSpec};
 use kastellan_core::workers::python_exec::firecracker_mode_entry;
-use kastellan_db::DbError;
 use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
 use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends};
-
-/// A no-op audit sink so the test needs no Postgres cluster — the micro-VM is
-/// the only external dependency.
-struct NoopAuditSink;
-
-#[async_trait]
-impl AuditSink for NoopAuditSink {
-    async fn insert(
-        &self,
-        _actor: &str,
-        _action: &str,
-        _payload: serde_json::Value,
-    ) -> Result<i64, DbError> {
-        Ok(1)
-    }
-}
+use kastellan_tests_common::NoopAuditSink;
 
 /// The micro-VM image dir (kernel + rootfs). Matches the backend default and is
 /// overridable for a user-local build, exactly like the runtime resolver.

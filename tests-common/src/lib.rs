@@ -36,11 +36,14 @@
 //! * [`daemon`] — `MockLlm` + `spawn_inert_mock` + `bring_up_daemon` — the
 //!   real-`kastellan`-daemon-under-the-supervisor bring-up shared by the
 //!   `cli_memory_l3*_run_daemon_e2e` tests.
+//! * [`audit`] — `NoopAuditSink`, the no-Postgres `AuditSink` shared by the
+//!   `dispatch_with_sink`-based worker e2e tests.
 //!
 //! Nothing here is shipped at runtime. The crate is `publish = false`
 //! and consumed only from `[dev-dependencies]`.
 
 pub mod allowlist;
+pub mod audit;
 pub mod binaries;
 pub mod daemon;
 pub mod embedding;
@@ -55,6 +58,7 @@ pub mod wait;
 pub mod watchdog;
 
 pub use allowlist::seed_tool_allowlist;
+pub use audit::NoopAuditSink;
 pub use binaries::{
     cli_binary, cli_command, core_binary, shell_exec_worker_binary, workspace_target_binary,
 };

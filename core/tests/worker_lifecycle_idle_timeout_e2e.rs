@@ -35,17 +35,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use kastellan_core::scheduler::ToolEntry;
 use kastellan_core::secrets::Vault;
-use kastellan_core::tool_host::{dispatch_with_sink, AuditSink, ToolHostError};
+use kastellan_core::tool_host::{dispatch_with_sink, ToolHostError};
 use kastellan_core::worker_lifecycle::{
     IdleTimeoutCaps, IdleTimeoutLifecycle, Lifecycle, RestartBackoff, WorkerHandle,
     WorkerLifecycleManager,
 };
-use kastellan_db::DbError;
 use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
 use kastellan_tests_common::binaries::shell_exec_worker_binary;
+use kastellan_tests_common::NoopAuditSink;
 use kastellan_tests_common::sandbox::{backend, policy_for_shell_exec, skip_if_sandbox_unavailable};
 use tokio::sync::oneshot;
 
@@ -128,22 +127,6 @@ fn idle_timeout_entry(worker: PathBuf, caps: IdleTimeoutCaps) -> ToolEntry {
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
-    }
-}
-
-/// No-op audit sink so the dispatch helper needs no Postgres — the sandbox +
-/// worker binary are the only dependencies (matching this suite's posture).
-struct NoopAuditSink;
-
-#[async_trait]
-impl AuditSink for NoopAuditSink {
-    async fn insert(
-        &self,
-        _actor: &str,
-        _action: &str,
-        _payload: serde_json::Value,
-    ) -> Result<i64, DbError> {
-        Ok(1)
     }
 }
 

@@ -27,37 +27,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use kastellan_core::secrets::Vault;
-use kastellan_core::tool_host::{dispatch_with_sink, AuditSink};
+use kastellan_core::tool_host::dispatch_with_sink;
 use kastellan_core::worker_lifecycle::{
     Contract, IdleTimeoutCaps, IdleTimeoutLifecycle, Lifecycle, WorkerHandle,
     WorkerLifecycleManager,
 };
 use kastellan_core::workers::python_exec::firecracker_mode_entry;
-use kastellan_db::DbError;
 use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
 use kastellan_sandbox::{
     SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxError, SandboxPolicy,
 };
+use kastellan_tests_common::NoopAuditSink;
 use std::process::Child;
 
 const TOOL_NAME: &str = "python-exec";
 const CONTAINER_WORKER_BIN: &str = "/usr/local/bin/kastellan-worker-python-exec";
-
-struct NoopAuditSink;
-
-#[async_trait]
-impl AuditSink for NoopAuditSink {
-    async fn insert(
-        &self,
-        _actor: &str,
-        _action: &str,
-        _payload: serde_json::Value,
-    ) -> Result<i64, DbError> {
-        Ok(1)
-    }
-}
 
 /// Spawn-counting wrapper over the real Firecracker backend.
 struct CountingBackend {
