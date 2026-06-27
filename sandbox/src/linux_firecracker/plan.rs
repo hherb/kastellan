@@ -26,8 +26,10 @@ pub struct FirecrackerLaunchPlan {
     pub vsock_uds: PathBuf,
     pub vsock_port: u32,
     pub boot_args: String,
-    /// Carried for future guest env-forwarding; NOT yet rendered into the
-    /// Firecracker config in Slice 1 (guest init bakes a fixed env).
+    /// The worker env, forwarded into the guest via the hex `kastellan.env=`
+    /// cmdline token baked into [`Self::boot_args`] (#360). Retained as a
+    /// structured field for inspection/tests; the boot_args token is the
+    /// load-bearing copy the guest init actually decodes.
     pub env: Vec<(String, String)>,
     pub net_enabled: bool,
 }
@@ -46,6 +48,54 @@ pub const WORKER_VSOCK_PORT: u32 = 1024;
 /// it to a log fd, never stdout); JSON-RPC rides vsock, not the console.
 const BASE_BOOT_ARGS: &str =
     "console=ttyS0 reboot=k panic=1 pci=off i8042.noaux=1 i8042.nomux=1";
+
+/// Cmdline token carrying the hex-encoded worker env (#360). The guest
+/// `kastellan-microvm-init` reads this from `/proc/cmdline`. The key is a
+/// manually-kept-in-sync constant across the crate boundary (microvm-init must
+/// not depend on the sandbox crate — same pattern as [`WORKER_VSOCK_PORT`]).
+const ENV_CMDLINE_KEY: &str = "kastellan.env";
+
+/// Conservative ceiling for the whole kernel cmdline (base args + the env
+/// token). Well under arm64's 2048-byte `COMMAND_LINE_SIZE`; the slice-1 env is
+/// ~3 small vars (~120 hex chars), so this only ever trips on a pathological
+/// policy. `build_launch_plan` fails closed above it rather than emit a
+/// truncated cmdline that would corrupt the boot.
+const MAX_CMDLINE_BYTES: usize = 1024;
+
+/// Lowercase-hex encode (`[0-9a-f]`, two chars/byte). Hand-rolled so the crate
+/// takes no codec dependency; the guest's decoder in `kastellan-microvm-init`
+/// mirrors this exact scheme (roundtrip-pinned in both crates' unit tests).
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Encode the worker env as the ` kastellan.env=<hex>` cmdline suffix (#360).
+///
+/// The env block is `K1=V1\nK2=V2\n…` (UTF-8), hex-encoded. Hex keeps the token
+/// whitespace/quote/`=`-safe so it survives as a single cmdline argument for any
+/// value. Returns `None` for an empty env so the no-env cmdline is byte-identical
+/// to the pre-#360 baseline.
+///
+/// NB: values must not contain a literal newline — `\n` is the pair separator the
+/// guest splits on. Every env value the backend forwards today (paths, numbers,
+/// JSON arrays) is newline-free; the generic contract documents the limit.
+pub fn encode_env_cmdline(env: &[(String, String)]) -> Option<String> {
+    if env.is_empty() {
+        return None;
+    }
+    let block = env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(" {ENV_CMDLINE_KEY}={}", hex_encode(block.as_bytes())))
+}
 
 /// Translate a policy into a launch plan. Pure + fallible (rejects relative
 /// FS paths, matching bwrap).
@@ -83,6 +133,22 @@ pub fn build_launch_plan(
         .unwrap_or_else(|| std::path::Path::new("/tmp"))
         .join("worker-vsock.sock");
 
+    // Forward policy.env into the guest via a hex cmdline token (#360). The
+    // guest init decodes it before exec'ing the worker. Fail closed if the
+    // cmdline would exceed the kernel's COMMAND_LINE_SIZE — a truncated cmdline
+    // would silently corrupt the boot, never acceptable for a security boundary.
+    let mut boot_args = BASE_BOOT_ARGS.to_string();
+    if let Some(suffix) = encode_env_cmdline(&policy.env) {
+        boot_args.push_str(&suffix);
+    }
+    if boot_args.len() > MAX_CMDLINE_BYTES {
+        return Err(SandboxError::Backend(format!(
+            "kernel cmdline {} bytes exceeds {MAX_CMDLINE_BYTES}-byte cap \
+             (worker env too large to forward)",
+            boot_args.len()
+        )));
+    }
+
     Ok(FirecrackerLaunchPlan {
         kernel_path: image.kernel_path.clone(),
         rootfs_path: image.rootfs_path.clone(),
@@ -91,7 +157,7 @@ pub fn build_launch_plan(
         vsock_cid: WORKER_GUEST_CID,
         vsock_uds,
         vsock_port: WORKER_VSOCK_PORT,
-        boot_args: BASE_BOOT_ARGS.to_string(),
+        boot_args,
         env: policy.env.clone(),
         net_enabled,
     })
@@ -206,6 +272,69 @@ mod tests {
             SandboxPolicy { fs_read: vec![PathBuf::from("rel/path")], ..Default::default() };
         let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
         assert!(format!("{err}").contains("absolute"));
+    }
+
+    #[test]
+    fn encode_env_cmdline_empty_is_none() {
+        // No env → no token, so the cmdline stays byte-identical to the
+        // pre-#360 baseline.
+        assert_eq!(encode_env_cmdline(&[]), None);
+    }
+
+    #[test]
+    fn encode_env_cmdline_roundtrip_fixture() {
+        // Cross-crate sync guard: `kastellan-microvm-init` decodes this exact
+        // hex. Keep this fixture identical in both crates' tests. Block
+        // "A=1\nB=2" = bytes 41 3d 31 0a 42 3d 32.
+        let env = vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())];
+        assert_eq!(
+            encode_env_cmdline(&env).unwrap(),
+            " kastellan.env=413d310a423d32"
+        );
+    }
+
+    #[test]
+    fn build_launch_plan_appends_env_token_to_boot_args() {
+        let policy = SandboxPolicy {
+            env: vec![("KASTELLAN_PYTHON_PARAMS_FILE_MAX".to_string(), "100".to_string())],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert!(
+            plan.boot_args.starts_with(BASE_BOOT_ARGS),
+            "base kernel args must be preserved: {}",
+            plan.boot_args
+        );
+        assert!(
+            plan.boot_args.contains(" kastellan.env="),
+            "env token must be appended: {}",
+            plan.boot_args
+        );
+        // Hex token carries no whitespace, so it is a single cmdline arg.
+        let token = plan.boot_args.split_whitespace().last().unwrap();
+        assert!(token.starts_with("kastellan.env="));
+        assert!(token["kastellan.env=".len()..].bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn build_launch_plan_no_env_leaves_boot_args_baseline() {
+        let policy = SandboxPolicy { env: vec![], ..Default::default() };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert_eq!(plan.boot_args, BASE_BOOT_ARGS);
+    }
+
+    #[test]
+    fn build_launch_plan_fails_closed_over_cmdline_cap() {
+        // A pathologically large env must fail closed, never truncate the
+        // cmdline (which would corrupt the boot).
+        let big = "x".repeat(MAX_CMDLINE_BYTES);
+        let policy =
+            SandboxPolicy { env: vec![("HUGE".to_string(), big)], ..Default::default() };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(
+            format!("{err}").contains("cmdline"),
+            "expected a cmdline-cap error, got: {err}"
+        );
     }
 
     #[test]

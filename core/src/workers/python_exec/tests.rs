@@ -745,11 +745,13 @@ fn resolver_registers_firecracker_when_use_microvm() {
                     )),
                 "KASTELLAN_MICROVM_DIR must default to /var/lib/kastellan/microvm"
             );
-            // In-image interpreter injected.
+            // In-image interpreter injected — the rootfs reality (#360); the
+            // value is forwarded into the guest, so it must match the rootfs
+            // python the guest init bakes.
             assert!(entry
                 .policy
                 .env
-                .contains(&(PYTHON_ENV.to_string(), "/usr/local/bin/python3".to_string())));
+                .contains(&(PYTHON_ENV.to_string(), "/usr/bin/python3".to_string())));
             // No host scratch — the in-VM /tmp tmpfs serves params.json.
             assert!(!entry.ephemeral_scratch);
             assert!(matches!(entry.lifecycle, crate::worker_lifecycle::Lifecycle::SingleUse));
@@ -808,10 +810,12 @@ fn firecracker_mode_entry_shape() {
     assert!(entry.policy.fs_read.is_empty());
     assert!(entry.policy.fs_write.is_empty());
     assert!(!entry.ephemeral_scratch);
+    // In-guest interpreter path = the rootfs reality (forwarded via cmdline,
+    // #360); must match `build-rootfs.sh` + the guest init's baked fallback.
     assert!(entry
         .policy
         .env
-        .contains(&(PYTHON_ENV.to_string(), "/usr/local/bin/python3".to_string())));
+        .contains(&(PYTHON_ENV.to_string(), "/usr/bin/python3".to_string())));
     assert!(!entry.policy.env.iter().any(|(k, _)| k == ENV_LANDLOCK_RW));
 }
 
