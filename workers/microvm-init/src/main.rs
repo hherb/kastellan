@@ -23,6 +23,66 @@ const WORKER_VSOCK_PORT: u32 = 1024;
 #[allow(dead_code)]
 const VMADDR_CID_ANY: u32 = 0xffff_ffff;
 
+/// Kernel-cmdline token carrying the host-forwarded worker env (#360). Must stay
+/// in sync with `kastellan-sandbox::linux_firecracker::plan::ENV_CMDLINE_KEY`
+/// (this crate must not depend on the sandbox crate — same constraint as
+/// [`WORKER_VSOCK_PORT`]).
+#[allow(dead_code)]
+const ENV_CMDLINE_KEY: &str = "kastellan.env";
+
+/// Decode lowercase/uppercase hex to bytes. Pure; `None` on odd length or any
+/// non-hex digit (fail-safe — a garbled token yields no env rather than partial
+/// junk). Mirrors `kastellan-sandbox`'s `hex_encode`.
+#[allow(dead_code)]
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    let bytes = s.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let nibble = |b: u8| -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        out.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
+    }
+    Some(out)
+}
+
+/// Parse host-forwarded env out of the kernel cmdline (#360). Finds the
+/// whitespace-delimited `kastellan.env=<hex>` token, hex-decodes it, and splits
+/// the `K1=V1\nK2=V2\n…` block into pairs (split on the FIRST `=` so values may
+/// contain `=`). Pure → unit-testable on any platform.
+///
+/// Fail-safe: a missing token, bad hex, non-UTF-8 bytes, or a line without `=`
+/// all yield no (or fewer) pairs rather than an error — the caller falls back to
+/// the baked defaults and still boots a working worker.
+#[allow(dead_code)]
+fn parse_env_cmdline(cmdline: &str) -> Vec<(String, String)> {
+    let prefix = format!("{ENV_CMDLINE_KEY}=");
+    let Some(token) = cmdline.split_whitespace().find_map(|t| t.strip_prefix(&prefix)) else {
+        return Vec::new();
+    };
+    let Some(bytes) = hex_decode(token) else {
+        return Vec::new();
+    };
+    let Ok(block) = String::from_utf8(bytes) else {
+        return Vec::new();
+    };
+    block
+        .split('\n')
+        .filter_map(|line| {
+            line.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
 /// Returns the (cid, port) pair the guest vsock listener should bind to.
 /// Pure function — no syscalls — so it is unit-testable on any platform.
 #[allow(dead_code)]
@@ -91,13 +151,21 @@ fn accept_host_bridge() -> RawFd {
 fn exec_worker() {
     use std::ffi::CString;
     // Baked worker invocation for python-exec (slice-1 consumer). A later
-    // generalization reads this from the kernel cmdline / a config block.
+    // generalization reads the program path from the cmdline too.
     let prog = CString::new("/usr/local/bin/kastellan-worker-python-exec").unwrap();
-    // Worker env baked here (the policy.env entries the backend would have set).
     // SAFETY: single-threaded PID1; no other threads to race with.
     #[allow(deprecated)]
     unsafe {
+        // Baked fallback FIRST (the rootfs reality), so a missing/garbled
+        // forwarded token still boots a working worker (#360 fail-safe).
         std::env::set_var("KASTELLAN_PYTHON_EXEC_PYTHON", "/usr/bin/python3");
+        // Host-forwarded policy.env OVERRIDES the bake (operator knobs like
+        // KASTELLAN_PYTHON_PARAMS_FILE_MAX, and the now-correct interpreter
+        // path). Read from the kernel cmdline the launcher set.
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        for (k, v) in parse_env_cmdline(&cmdline) {
+            std::env::set_var(k, v);
+        }
     }
     let argv = [prog.as_ptr(), std::ptr::null()];
     unsafe {
@@ -147,5 +215,48 @@ mod tests {
         // Guest listens on VMADDR_CID_ANY:1024. Assert the helper builds the
         // right (cid, port) pair.
         assert_eq!(vsock_listen_cid_port(), (0xffffffff, 1024));
+    }
+
+    #[test]
+    fn parse_env_cmdline_decodes_host_fixture() {
+        // Cross-crate sync guard: `kastellan-sandbox`'s `hex_encode` emits this
+        // exact hex for env [("A","1"),("B","2")] (block "A=1\nB=2"). Keep this
+        // fixture identical in both crates' tests.
+        let cmdline = "console=ttyS0 panic=1 kastellan.env=413d310a423d32";
+        assert_eq!(
+            parse_env_cmdline(cmdline),
+            vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_env_cmdline_missing_token_is_empty() {
+        assert!(parse_env_cmdline("console=ttyS0 panic=1").is_empty());
+    }
+
+    #[test]
+    fn parse_env_cmdline_malformed_hex_is_empty() {
+        // Odd length and non-hex both fail closed to no env (fail-safe → caller
+        // keeps the baked defaults).
+        assert!(parse_env_cmdline("kastellan.env=abc").is_empty());
+        assert!(parse_env_cmdline("kastellan.env=zz").is_empty());
+    }
+
+    #[test]
+    fn parse_env_cmdline_value_may_contain_equals() {
+        // Split on the FIRST '=' so a JSON-ish value survives. Block `K=["a=b"]`
+        // = bytes 4b 3d 5b 22 61 3d 62 22 5d → one whitespace-free token.
+        let cmdline = "console=ttyS0 kastellan.env=4b3d5b22613d62225d";
+        assert_eq!(
+            parse_env_cmdline(cmdline),
+            vec![("K".to_string(), "[\"a=b\"]".to_string())]
+        );
+    }
+
+    #[test]
+    fn hex_decode_rejects_odd_and_non_hex() {
+        assert_eq!(hex_decode("abc"), None);
+        assert_eq!(hex_decode("zz"), None);
+        assert_eq!(hex_decode("00ff"), Some(vec![0x00, 0xff]));
     }
 }

@@ -253,7 +253,13 @@ pub fn firecracker_mode_entry(
     lifecycle: Lifecycle,
 ) -> ToolEntry {
     let mut env = vec![
-        (PYTHON_ENV.to_string(), "/usr/local/bin/python3".to_string()),
+        // The in-guest interpreter path — `/usr/bin/python3` is the rootfs
+        // reality (`build-rootfs.sh` copies the stdlib at the native `/usr`
+        // prefix; the guest init bakes the same path as its fail-safe fallback).
+        // This value is FORWARDED into the guest now (#360), so it must match the
+        // rootfs — the old `/usr/local/bin/python3` was a latent mismatch that
+        // only stayed harmless while env was provisioning-only.
+        (PYTHON_ENV.to_string(), "/usr/bin/python3".to_string()),
         ("KASTELLAN_MICROVM_DIR".to_string(), image_dir),
     ];
     // Forward the operator's >64 KiB params file-channel ceiling into the guest
@@ -262,12 +268,10 @@ pub fn firecracker_mode_entry(
     // the guest init mounts, so the channel is fully in-guest — same posture as
     // `container_mode_entry`.
     //
-    // NOTE (Slice 1): the env vars pushed here (KASTELLAN_PYTHON_PARAMS_FILE_MAX,
-    // KASTELLAN_MICROVM_DIR, etc.) are provisioning-only at this stage.
-    // `policy.env` is NOT yet forwarded into the guest — the guest init bakes a
-    // fixed environment and execs the worker without reading policy env.  These
-    // overrides will take effect in-VM only once guest env-forwarding lands
-    // (tracked as a follow-up to Slice 1).
+    // All of `policy.env` is forwarded into the guest via the hex
+    // `kastellan.env=` kernel-cmdline token the sandbox backend bakes into
+    // `boot_args` (#360); the guest init decodes it and applies it over its baked
+    // defaults before exec'ing the worker. So the ceiling set here is live in-VM.
     if let Some(v) = params_file_max.filter(|v| !v.trim().is_empty()) {
         env.push((PARAMS_FILE_MAX_ENV.to_string(), v));
     }

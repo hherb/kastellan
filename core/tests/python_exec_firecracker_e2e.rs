@@ -30,7 +30,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kastellan_core::secrets::Vault;
-use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, AuditSink, WorkerSpec};
+use kastellan_core::tool_host::{
+    dispatch_with_sink, spawn_worker, AuditSink, ToolHostError, WorkerSpec,
+};
 use kastellan_core::workers::python_exec::firecracker_mode_entry;
 use kastellan_db::DbError;
 use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
@@ -124,14 +126,20 @@ fn firecracker_backend() -> Arc<dyn SandboxBackend> {
     SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
 }
 
-/// Spawn the worker in the micro-VM, dispatch one `python.exec` with the given
-/// JSON-RPC params object, return the result. Mirrors the container e2e harness:
-/// `dispatch_with_sink` + `NoopAuditSink` so no PG is needed.
-async fn dispatch_in_microvm(payload: serde_json::Value) -> serde_json::Value {
+/// Spawn the worker in the micro-VM with the given `params_file_max` (forwarded
+/// into the guest via the #360 cmdline env token), dispatch one `python.exec`,
+/// and return the raw `dispatch_with_sink` result. A worker-side rejection (e.g.
+/// an over-ceiling param → `INVALID_PARAMS`) surfaces here as
+/// `Err(ToolHostError::Protocol)`, so the over-ceiling differential below can
+/// assert on it without panicking. `NoopAuditSink` → no PG needed.
+async fn try_dispatch_in_microvm(
+    payload: serde_json::Value,
+    params_file_max: Option<String>,
+) -> Result<serde_json::Value, ToolHostError> {
     let entry = firecracker_mode_entry(
         PathBuf::from("/usr/local/bin/kastellan-worker-python-exec"),
         image_dir(),
-        None,
+        params_file_max,
         kastellan_core::worker_lifecycle::Lifecycle::SingleUse,
     );
     let backend = firecracker_backend();
@@ -153,7 +161,15 @@ async fn dispatch_in_microvm(payload: serde_json::Value) -> serde_json::Value {
     )
     .await;
     let _ = worker.close();
-    result.expect("dispatch python.exec")
+    result
+}
+
+/// Convenience: dispatch with the default ceiling and unwrap (the happy-path
+/// scenarios expect a successful round-trip).
+async fn dispatch_in_microvm(payload: serde_json::Value) -> serde_json::Value {
+    try_dispatch_in_microvm(payload, None)
+        .await
+        .expect("dispatch python.exec")
 }
 
 async fn run_in_microvm(code: &str) -> serde_json::Value {
@@ -269,5 +285,40 @@ async fn microvm_large_params_ride_file_channel() {
         out["stdout"].as_str().unwrap_or_default().trim_end(),
         "100000 AAAA AAAA",
         "agent must read the full 100 KiB payload via the in-VM file channel: {out}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "needs DGX"]
+async fn microvm_forwarded_params_file_max_is_enforced_in_guest() {
+    if skip_if_no_microvm() {
+        return;
+    }
+    // The #360 differential: prove the operator `KASTELLAN_PYTHON_PARAMS_FILE_MAX`
+    // override is LIVE inside the guest (slice 1 left it inert — provisioning-only,
+    // never forwarded). With a forwarded ceiling of 80_000 B, a ~100 KiB param now
+    // exceeds the file-channel cap and the worker fails closed with INVALID_PARAMS
+    // ("params is N bytes; cap is 80000"), surfaced here as a dispatch error.
+    //
+    // Non-vacuity / negative control: `microvm_large_params_ride_file_channel`
+    // sends the SAME 100 KiB payload at the DEFAULT 1 MiB ceiling and it SUCCEEDS.
+    // So a rejection here can only mean the forwarded 80_000 ceiling reached the
+    // guest — if env-forwarding regresses, the guest falls back to 1 MiB and this
+    // dispatch would succeed instead, failing the test.
+    let blob = "A".repeat(100_000);
+    let code = "print('unreachable')";
+    let result = try_dispatch_in_microvm(
+        serde_json::json!({ "code": code, "params": { "blob": blob } }),
+        Some("80000".to_string()),
+    )
+    .await;
+    let err = result.expect_err(
+        "a 100 KiB param under a forwarded 80_000 ceiling must be rejected in-guest \
+         (if this is Ok, the ceiling did not reach the guest → #360 regressed)",
+    );
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("80000"),
+        "rejection must cite the forwarded cap (80000), proving it took effect; got: {msg}"
     );
 }
