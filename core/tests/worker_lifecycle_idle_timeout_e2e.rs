@@ -35,10 +35,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use kastellan_core::scheduler::ToolEntry;
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch_with_sink, AuditSink, ToolHostError};
 use kastellan_core::worker_lifecycle::{
-    IdleTimeoutCaps, IdleTimeoutLifecycle, Lifecycle, RestartBackoff, WorkerLifecycleManager,
+    IdleTimeoutCaps, IdleTimeoutLifecycle, Lifecycle, RestartBackoff, WorkerHandle,
+    WorkerLifecycleManager,
 };
+use kastellan_db::DbError;
 use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
 use kastellan_tests_common::binaries::shell_exec_worker_binary;
 use kastellan_tests_common::sandbox::{backend, policy_for_shell_exec, skip_if_sandbox_unavailable};
@@ -124,6 +129,50 @@ fn idle_timeout_entry(worker: PathBuf, caps: IdleTimeoutCaps) -> ToolEntry {
         lockdown_shim: None,
         ephemeral_scratch: false,
     }
+}
+
+/// No-op audit sink so the dispatch helper needs no Postgres — the sandbox +
+/// worker binary are the only dependencies (matching this suite's posture).
+struct NoopAuditSink;
+
+#[async_trait]
+impl AuditSink for NoopAuditSink {
+    async fn insert(
+        &self,
+        _actor: &str,
+        _action: &str,
+        _payload: serde_json::Value,
+    ) -> Result<i64, DbError> {
+        Ok(1)
+    }
+}
+
+/// Like `idle_timeout_entry` but with a caller-chosen wall-clock budget so the
+/// re-arm regression can use a short per-call budget (the default is 30 s).
+fn idle_timeout_entry_wall_clock(
+    worker: PathBuf,
+    caps: IdleTimeoutCaps,
+    wall_clock_ms: u64,
+) -> ToolEntry {
+    let mut entry = idle_timeout_entry(worker, caps);
+    entry.wall_clock_ms = Some(wall_clock_ms);
+    entry
+}
+
+/// Dispatch one `shell.exec` echo over an already-acquired warm handle.
+async fn echo_over_handle(
+    handle: &mut WorkerHandle,
+    msg: &str,
+) -> Result<serde_json::Value, ToolHostError> {
+    dispatch_with_sink(
+        &NoopAuditSink,
+        &Vault::new(),
+        handle.worker_mut(),
+        TOOL_NAME,
+        "shell.exec",
+        serde_json::json!({ "argv": [ECHO_PATH, msg] }),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -441,5 +490,66 @@ async fn concurrent_acquires_for_same_tool_serialize() {
     assert!(
         t2_acquired >= t1_released,
         "task 2's acquire must complete after task 1's release (got t2_acquired={t2_acquired:?}, t1_released={t1_released:?})"
+    );
+}
+
+/// Regression for the slice-2 watchdog bug: a warm worker must survive an idle
+/// gap LONGER than its per-call `wall_clock_ms`. The old one-shot watchdog,
+/// armed at spawn, SIGKILLs the worker `wall_clock_ms` after boot regardless of
+/// the idle window; the re-armable watchdog is disarmed between calls, so the
+/// worker survives. Discriminator: dispatch 2 must succeed (warm-reuse hands
+/// back even a dead worker, so only a real second call surfaces the kill).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_worker_survives_idle_gap_longer_than_wall_clock() {
+    if skip_if_sandbox_unavailable() {
+        return;
+    }
+    let worker = shell_exec_worker_binary();
+    if !worker.exists() {
+        eprintln!("\n[SKIP] shell-exec worker not built: {}\n", worker.display());
+        return;
+    }
+
+    let (sandbox, spawn_count) = CountingSandboxBackend::new(backend());
+    let lifecycle = IdleTimeoutLifecycle::new(sandbox_bundle_from(sandbox));
+    // Short per-call budget; generous idle window so the slot stays warm.
+    let entry = idle_timeout_entry_wall_clock(
+        worker.clone(),
+        IdleTimeoutCaps {
+            idle_seconds: 60,
+            max_requests: 100,
+            max_age_seconds: 60,
+            grace_period_seconds: 5,
+        },
+        500, // wall_clock_ms
+    );
+
+    // Call 1: dispatch within budget, then release back to warm.
+    {
+        let mut handle = lifecycle.acquire(TOOL_NAME, &entry).await.expect("acquire 1");
+        let out = echo_over_handle(&mut handle, "one").await.expect("dispatch 1");
+        assert_eq!(out["exit_code"], 0, "call 1 should succeed: {out}");
+        drop(handle);
+    }
+
+    // Idle gap LONGER than the per-call budget, with no call in flight.
+    tokio::time::sleep(Duration::from_millis(900)).await;
+
+    // Call 2 on the SAME warm worker must still succeed.
+    {
+        let mut handle = lifecycle.acquire(TOOL_NAME, &entry).await.expect("acquire 2");
+        let out = echo_over_handle(&mut handle, "two").await.expect(
+            "dispatch 2 — warm worker must survive an idle gap past wall_clock_ms \
+             (re-arm regression)",
+        );
+        assert_eq!(out["exit_code"], 0, "call 2 should succeed: {out}");
+        assert_eq!(out["stdout"].as_str().unwrap().trim_end(), "two");
+        drop(handle);
+    }
+
+    assert_eq!(
+        spawn_count.load(Ordering::SeqCst),
+        1,
+        "both calls must run on one warm worker (else the survival assertion is vacuous)"
     );
 }
