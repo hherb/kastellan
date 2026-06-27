@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use crate::{Net, SandboxError, SandboxPolicy};
-use super::mounts::{reserved_top_level, RoShare, RwScratch};
+use super::mounts::{encode_mount_manifest, reserved_top_level, RoShare, RwScratch};
 
 /// Where the guest kernel + rootfs live on the host. Defaulted from
 /// constants; the `container_image` tag will later select per-worker rootfs.
@@ -75,7 +75,7 @@ const MAX_CMDLINE_BYTES: usize = 1024;
 /// Lowercase-hex encode (`[0-9a-f]`, two chars/byte). Hand-rolled so the crate
 /// takes no codec dependency; the guest's decoder in `kastellan-microvm-init`
 /// mirrors this exact scheme (roundtrip-pinned in both crates' unit tests).
-fn hex_encode(bytes: &[u8]) -> String {
+pub(super) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
@@ -165,22 +165,6 @@ pub fn build_launch_plan(
         .unwrap_or_else(|| std::path::Path::new("/tmp"))
         .join("worker-vsock.sock");
 
-    // Forward policy.env into the guest via a hex cmdline token (#360). The
-    // guest init decodes it before exec'ing the worker. Fail closed if the
-    // cmdline would exceed the kernel's COMMAND_LINE_SIZE — a truncated cmdline
-    // would silently corrupt the boot, never acceptable for a security boundary.
-    let mut boot_args = BASE_BOOT_ARGS.to_string();
-    if let Some(suffix) = encode_env_cmdline(&policy.env)? {
-        boot_args.push_str(&suffix);
-    }
-    if boot_args.len() > MAX_CMDLINE_BYTES {
-        return Err(SandboxError::Backend(format!(
-            "kernel cmdline {} bytes exceeds {MAX_CMDLINE_BYTES}-byte cap \
-             (worker env too large to forward)",
-            boot_args.len()
-        )));
-    }
-
     // Slice 3: derive host-dir-sharing drives from the policy. Device nodes are
     // assigned RO-before-RW starting at /dev/vdb (vda is the rootfs); the config
     // drive order in render_firecracker_config MUST match (pinned by a test).
@@ -211,6 +195,26 @@ pub fn build_launch_plan(
         mountpoint: mp.clone(),
         guest_dev: format!("/dev/vd{}", next_letter as char),
     });
+
+    // Forward policy.env into the guest via a hex cmdline token (#360). The
+    // guest init decodes it before exec'ing the worker. Then append the mounts
+    // token (slice 3). Fail closed if the combined cmdline would exceed the
+    // kernel's COMMAND_LINE_SIZE — a truncated cmdline would silently corrupt
+    // the boot, never acceptable for a security boundary.
+    let mut boot_args = BASE_BOOT_ARGS.to_string();
+    if let Some(suffix) = encode_env_cmdline(&policy.env)? {
+        boot_args.push_str(&suffix);
+    }
+    if let Some(suffix) = encode_mount_manifest(ro_share.as_ref(), rw_scratch.as_ref())? {
+        boot_args.push_str(&suffix);
+    }
+    if boot_args.len() > MAX_CMDLINE_BYTES {
+        return Err(SandboxError::Backend(format!(
+            "kernel cmdline {} bytes exceeds {MAX_CMDLINE_BYTES}-byte cap \
+             (worker env too large to forward)",
+            boot_args.len()
+        )));
+    }
     // Placeholder image paths next to the rootfs (overridden per-spawn, like
     // vsock_uds). Present iff the corresponding share is present.
     let image_dir = image.rootfs_path.parent().unwrap_or_else(|| std::path::Path::new("/tmp"));
@@ -517,5 +521,22 @@ mod tests {
         };
         let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
         assert!(format!("{err}").contains("single writable"));
+    }
+
+    #[test]
+    fn build_launch_plan_appends_mounts_token() {
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv")],
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert!(plan.boot_args.contains(" kastellan.mounts="), "mounts token in boot_args: {}", plan.boot_args);
+    }
+
+    #[test]
+    fn build_launch_plan_no_shares_omits_mounts_token() {
+        let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
+        assert!(!plan.boot_args.contains("kastellan.mounts"));
     }
 }

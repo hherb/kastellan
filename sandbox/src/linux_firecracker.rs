@@ -16,7 +16,7 @@ pub use plan::{
 };
 
 mod mounts;
-pub use mounts::{reserved_top_level, RoShare, RwScratch};
+pub use mounts::{encode_mount_manifest, reserved_top_level, RoShare, RwScratch};
 
 mod probe;
 pub use probe::{probe_report, ProbeInputs};
