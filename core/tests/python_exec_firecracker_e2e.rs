@@ -322,3 +322,39 @@ async fn microvm_forwarded_params_file_max_is_enforced_in_guest() {
         "rejection must cite the forwarded cap (80000), proving it took effect; got: {msg}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "needs DGX: /dev/kvm + vhost_vsock + built rootfs + kastellan-microvm-run"]
+async fn microvm_spawn_leaves_no_orphan_run_dir() {
+    if skip_if_no_microvm() {
+        return;
+    }
+    // #362: a completed micro-VM spawn must leave no per-spawn run-dir behind —
+    // the launcher self-cleans its run-dir on graceful exit. The worker/VM exits
+    // when this dispatch returns.
+    let out = run_in_microvm("print(1)").await;
+    assert_eq!(out["exit_code"], 0, "clean exit expected: {out}");
+
+    // A before/after count is racy under parallel tests, so instead assert that
+    // every surviving `kastellan-microvm-*` run-dir belongs to a STILL-LIVE
+    // launcher (pidfile pid alive). A leaked dir from this finished spawn would
+    // carry a dead launcher pid.
+    let temp = std::env::temp_dir();
+    if let Ok(entries) = std::fs::read_dir(&temp) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.starts_with("kastellan-microvm-") || !path.is_dir() {
+                continue;
+            }
+            if let Ok(pid_str) = std::fs::read_to_string(path.join("launcher.pid")) {
+                if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                    assert!(
+                        std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                        "leaked run-dir {path:?}: launcher pid {pid} is dead but dir survived"
+                    );
+                }
+            }
+        }
+    }
+}

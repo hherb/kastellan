@@ -375,7 +375,12 @@ items unlock later ones.
     **Slice-1 follow-ups (2026-06-27):** [x] #363 split `python_exec.rs` (594→283 + `entries.rs`, PR #365);
     [x] #360 **forward `policy.env` into the guest** via a hex `kastellan.env=` kernel-cmdline token (fail-closed cmdline cap;
     fail-safe baked fallback in the guest; fixed a latent PYTHON `/usr/local/bin`→`/usr/bin` mismatch) — DGX e2e **5/5** incl. the
-    differential proving the `params_file_max` override is now live in-VM (PR #366). [ ] #362 run-dir RAII cleanup (open).
+    differential proving the `params_file_max` override is now live in-VM (PR #366).
+    [x] #362 **per-spawn run-dir cleanup** — launcher self-cleans its run-dir on graceful exit (`--run-dir` + RAII
+    teardown), KEEPS it on a panic so `fc.log` survives for post-mortem (#367 review); a launcher-pid-keyed orphan sweep
+    (`<run_dir>/launcher.pid` + `/proc` liveness) at the top of
+    `spawn_under_policy` backstops both the SIGKILL and panic-kept cases. No `SandboxBackend` trait change. DGX e2e **6/6**, 0 leftover run-dirs.
+    Spec/plan: `docs/superpowers/{specs,plans}/2026-06-27-firecracker-rundir-cleanup*`.
     **Slices 2–5 (next):** warm/idle reuse, fs-sharing (per-spawn block devices — Firecracker has no virtio-fs), net workers
     (egress UDS over 2nd vsock), jailer.
     Spec/plan: `docs/superpowers/{specs/2026-06-26-linux-firecracker-microvm-design.md,plans/2026-06-26-linux-firecracker-microvm-slice1.md}`,
