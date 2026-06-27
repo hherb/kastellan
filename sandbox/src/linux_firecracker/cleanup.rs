@@ -61,15 +61,17 @@ pub fn sweep_orphaned_run_dirs(temp_dir: &std::path::Path, alive: impl Fn(u32) -
     };
     let mut removed = 0;
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let is_run_dir = path
+        // Cheap name check first (no syscall): skip the `is_dir` stat for the
+        // vast majority of `/tmp` entries that aren't ours.
+        let is_run_dir = entry
             .file_name()
-            .and_then(|n| n.to_str())
+            .to_str()
             .is_some_and(|name| name.starts_with(RUN_DIR_PREFIX));
         if !is_run_dir {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
         }
         let pidfile = std::fs::read_to_string(path.join(LAUNCHER_PID_FILE)).ok();
