@@ -371,10 +371,15 @@ items unlock later ones.
     stdio↔vsock bridge; per-spawn unique UDS+CID); guest PID1 `kastellan-microvm-init` (unchanged `serve_stdio` worker, `/usr/bin/python3`,
     fd hygiene); `build-rootfs.sh` (lib closure + python stdlib) / `install-firecracker.sh` / privileged `install-firecracker-vsock.sh`.
     **DGX live e2e 4/4** (42 round-trip + KVM mem-cap + Net::Deny + >64 KiB file channel) in 0.21s, 0 orphaned VMs; both-platform
-    `--all-targets` clippy green. Runbook `docs/devel/runbooks/2026-06-26-linux-microvm-setup.md`. Follow-ups: #360 (forward policy.env
-    into guest), #362 (run-dir cleanup), #363 (python_exec.rs split). **Slices 2–5 (next):** warm/idle reuse, fs-sharing (per-spawn block
-    devices — Firecracker has no virtio-fs), net workers (egress UDS over 2nd vsock), jailer.
-    Spec/plan: `docs/superpowers/{specs/2026-06-26-linux-firecracker-microvm-design.md,plans/2026-06-26-linux-firecracker-microvm-slice1.md}`.
+    `--all-targets` clippy green. Runbook `docs/devel/runbooks/2026-06-26-linux-microvm-setup.md`.
+    **Slice-1 follow-ups (2026-06-27):** [x] #363 split `python_exec.rs` (594→283 + `entries.rs`, PR #365);
+    [x] #360 **forward `policy.env` into the guest** via a hex `kastellan.env=` kernel-cmdline token (fail-closed cmdline cap;
+    fail-safe baked fallback in the guest; fixed a latent PYTHON `/usr/local/bin`→`/usr/bin` mismatch) — DGX e2e **5/5** incl. the
+    differential proving the `params_file_max` override is now live in-VM (PR #366). [ ] #362 run-dir RAII cleanup (open).
+    **Slices 2–5 (next):** warm/idle reuse, fs-sharing (per-spawn block devices — Firecracker has no virtio-fs), net workers
+    (egress UDS over 2nd vsock), jailer.
+    Spec/plan: `docs/superpowers/{specs/2026-06-26-linux-firecracker-microvm-design.md,plans/2026-06-26-linux-firecracker-microvm-slice1.md}`,
+    `specs/2026-06-27-firecracker-guest-env-forwarding-design.md`.
   - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
     (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
