@@ -20,9 +20,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use kastellan_core::secrets::Vault;
-use kastellan_core::tool_host::{dispatch_with_sink, AuditSink};
+use kastellan_core::tool_host::dispatch_with_sink;
 use kastellan_core::worker_lifecycle::{
     Contract, IdleTimeoutCaps, IdleTimeoutLifecycle, Lifecycle, WorkerHandle,
     WorkerLifecycleManager,
@@ -30,29 +29,13 @@ use kastellan_core::worker_lifecycle::{
 use kastellan_core::workers::python_exec::{
     container_mode_entry, CONTAINER_WORKER_BIN, DEFAULT_IMAGE,
 };
-use kastellan_db::DbError;
 use kastellan_sandbox::macos_container::MacosContainer;
 use kastellan_sandbox::{
     SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxError, SandboxPolicy,
 };
+use kastellan_tests_common::NoopAuditSink;
 
 const TOOL_NAME: &str = "python-exec";
-
-/// A no-op audit sink so the test needs no Postgres cluster — the container is
-/// the only external dependency.
-struct NoopAuditSink;
-
-#[async_trait]
-impl AuditSink for NoopAuditSink {
-    async fn insert(
-        &self,
-        _actor: &str,
-        _action: &str,
-        _payload: serde_json::Value,
-    ) -> Result<i64, DbError> {
-        Ok(1)
-    }
-}
 
 /// Spawn-counting wrapper over the real Container backend. The warm-reuse +
 /// teardown tests assert against the counter so a regression that boots a fresh

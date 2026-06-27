@@ -25,6 +25,13 @@ readme.workspace       = true
 kastellan-db         = { path = "../db" }
 kastellan-supervisor = { path = "../supervisor" }
 kastellan-sandbox    = { path = "../sandbox" }
+# `audit::NoopAuditSink` implements `kastellan_core::tool_host::AuditSink` so the
+# dispatch-based worker e2e tests need no Postgres. `kastellan-core` depends on
+# this crate via `[dev-dependencies]`, so the resulting cycle is dev-only and
+# Cargo permits it (the normal build graph stays acyclic: tests-common → core).
+kastellan-core       = { path = "../core" }
+# Needed for the `#[async_trait]` AuditSink impl in `audit.rs`.
+async-trait          = { workspace = true }
 # `daemon.rs`'s inert mock-LLM listener + the async bring-up helpers run on the
 # same Tokio reactor the tests use. Workspace pin (full features), dev-only.
 tokio              = { workspace = true }

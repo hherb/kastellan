@@ -17,29 +17,11 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use kastellan_core::secrets::Vault;
-use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, AuditSink, WorkerSpec};
+use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, WorkerSpec};
 use kastellan_core::workers::python_exec::{container_mode_entry, DEFAULT_IMAGE};
-use kastellan_db::DbError;
 use kastellan_sandbox::{macos_container::MacosContainer, SandboxBackendKind, SandboxBackends};
-
-/// A no-op audit sink: all inserts succeed immediately without touching any
-/// database. Needed because `dispatch_with_sink` requires an `AuditSink` but
-/// this test has no PG cluster.
-struct NoopAuditSink;
-
-#[async_trait]
-impl AuditSink for NoopAuditSink {
-    async fn insert(
-        &self,
-        _actor: &str,
-        _action: &str,
-        _payload: serde_json::Value,
-    ) -> Result<i64, DbError> {
-        Ok(1)
-    }
-}
+use kastellan_tests_common::NoopAuditSink;
 
 /// Skip the test (via early-return) when Apple `container` isn't usable
 /// on this host or the python-exec image is absent. Returns `true` when

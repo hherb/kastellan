@@ -532,23 +532,24 @@ where
         crate::worker_stderr::spawn_drain(pid, stderr);
     }
     let client = Client::from_child(child)?;
-    let watchdog = spec.wall_clock_ms.map(|ms| watchdog::spawn_watchdog(pid, ms));
+    // Build the re-armable watchdog in the DISARMED state. It is armed only for
+    // the duration of each `SupervisedWorker::call` (see that method), so a warm
+    // worker sitting idle in the IdleTimeout slot is never under a kill timer.
+    let watchdog = spec.wall_clock_ms.map(|ms| watchdog::Watchdog::new(pid, ms));
     Ok(SupervisedWorker {
         client,
-        _watchdog: watchdog,
+        watchdog,
         egress: None,
         scratch: None,
     })
 }
 
 /// Owning handle to a spawned worker. Wraps the JSON-RPC [`Client`] and a
-/// [`watchdog::WatchdogGuard`] (when `wall_clock_ms` was set on the spec).
+/// [`watchdog::Watchdog`] (when `wall_clock_ms` was set on the spec).
 ///
 /// Field drop order matters: `client` is declared first so it drops first,
-/// closing stdio pipes. `_watchdog` drops second, setting the watchdog's
-/// cancel flag. The watchdog thread checks the flag at most every 50 ms
-/// and exits without firing SIGKILL — so closing a worker normally never
-/// produces a kill on a reused PID. `egress` drops third: for a force-routed
+/// closing stdio pipes. `watchdog` drops second, shutting down the watchdog
+/// thread (it never fires on drop). `egress` drops third: for a force-routed
 /// net worker (slice #2) it kills the egress-proxy sidecar *after* the
 /// worker's pipes have closed, so the worker stops talking to the proxy
 /// before the proxy dies. Plain (`Net::Deny` / legacy) workers leave it `None`.
@@ -557,7 +558,11 @@ where
 /// are gone. `None` on Linux and for any non-scratch worker.
 pub struct SupervisedWorker {
     client: Client,
-    _watchdog: Option<watchdog::WatchdogGuard>,
+    /// Re-armable wall-clock watchdog (when `wall_clock_ms` was set on the
+    /// spec). Armed for the span of each [`Self::call`] and disarmed in
+    /// between, so a reused (warm) worker is never killed while idle. Dropping
+    /// it shuts the watchdog thread down (no kill).
+    watchdog: Option<watchdog::Watchdog>,
     /// `Some` only for a force-routed net worker; set by
     /// `crate::egress::net_worker::spawn_net_worker`. Additive — its `Drop`
     /// tears the coupled egress-proxy sidecar down 1:1 with this worker.
@@ -587,11 +592,18 @@ impl SupervisedWorker {
         &mut self,
         cmd: WorkerCommand,
     ) -> Result<serde_json::Value, ClientError> {
+        // Arm the wall-clock watchdog for exactly this in-flight call. The RAII
+        // `ArmGuard` disarms it synchronously when `call` returns (success or
+        // error), before the worker can be returned to the warm-cache slot — so
+        // there is no deadline ticking during idle gaps and no Drop-ordering
+        // race against the slot handoff. The watchdog bounds the JSON-RPC call
+        // window, not the spawn/boot window (boot is bounded by the spawn path).
+        let _arm = self.watchdog.as_ref().map(watchdog::Watchdog::arm_scope);
         self.client.call(&cmd.method, cmd.params)
     }
 
     /// Close stdin (signals EOF to the worker), wait for it to exit, and
-    /// cancel the watchdog. Returns the worker's exit status.
+    /// shut down the watchdog thread. Returns the worker's exit status.
     pub fn close(self) -> std::io::Result<std::process::ExitStatus> {
         // Destructure to move `client` out by value (consumed by `close`)
         // while binding the remaining guards so we can drop them in a
@@ -599,7 +611,7 @@ impl SupervisedWorker {
         // [`Drop`] impl, so partial moves are allowed.
         let SupervisedWorker {
             client,
-            _watchdog,
+            watchdog,
             egress,
             scratch,
         } = self;
@@ -613,14 +625,14 @@ impl SupervisedWorker {
         // here since the worker is already gone, but we make it explicit so the
         // documented ordering can't silently drift.)
         let status = client.close();
-        drop(_watchdog);
+        drop(watchdog);
         drop(egress);
         drop(scratch);
         status
     }
 
     /// Forcefully kill the worker without waiting for graceful shutdown.
-    /// The watchdog is cancelled by the [`Drop`] of [`Self`] (or
+    /// The watchdog is shut down by the [`Drop`] of [`Self`] (or
     /// [`Self::close`]).
     pub fn kill(&mut self) -> std::io::Result<()> {
         self.client.kill()
