@@ -58,10 +58,18 @@ static SPAWN_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// `Cargo.toml`). The PID + atomic counter pair guarantees uniqueness across
 /// concurrent spawns within one process and across multiple daemon instances
 /// sharing the same `/tmp`.
+///
+/// The name is built from [`cleanup::RUN_DIR_PREFIX`] so the orphan sweep's
+/// prefix match (#362) can never silently drift out of sync with the dirs it is
+/// meant to GC — the producer and the matcher share one constant.
 fn make_spawn_dir() -> Result<std::path::PathBuf, SandboxError> {
     let seq = SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir()
-        .join(format!("kastellan-microvm-{}-{}", std::process::id(), seq));
+    let dir = std::env::temp_dir().join(format!(
+        "{}{}-{}",
+        cleanup::RUN_DIR_PREFIX,
+        std::process::id(),
+        seq
+    ));
     std::fs::create_dir_all(&dir)
         .map_err(|e| SandboxError::Backend(format!("create per-spawn dir {dir:?}: {e}")))?;
     Ok(dir)
