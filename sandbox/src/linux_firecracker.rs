@@ -32,14 +32,20 @@ use crate::{SandboxBackend, SandboxError, SandboxPolicy};
 /// The launcher binary name; discovered on `$PATH` / next to the daemon.
 pub const MICROVM_RUN_BIN: &str = "kastellan-microvm-run";
 
-/// Pure: the launcher argv for a plan + its rendered config/log paths.
-pub fn launcher_argv(plan: &FirecrackerLaunchPlan, config_path: &str, log_path: &str) -> Vec<String> {
+/// Pure: the launcher argv for a plan + its rendered config/log/run-dir paths.
+pub fn launcher_argv(
+    plan: &FirecrackerLaunchPlan,
+    config_path: &str,
+    log_path: &str,
+    run_dir: &str,
+) -> Vec<String> {
     vec![
         MICROVM_RUN_BIN.into(),
         "--config-file".into(), config_path.into(),
         "--vsock-uds".into(), plan.vsock_uds.to_string_lossy().into_owned(),
         "--vsock-port".into(), plan.vsock_port.to_string(),
         "--log".into(), log_path.into(),
+        "--run-dir".into(), run_dir.into(),
     ]
 }
 
@@ -99,6 +105,10 @@ impl SandboxBackend for LinuxFirecracker {
         program: &str,
         args: &[&str],
     ) -> Result<Child, SandboxError> {
+        // Backstop GC (#362): remove run-dirs left by SIGKILLed launchers whose
+        // own pid is now dead. Runs before we create THIS spawn's dir, so it
+        // never races the in-flight spawn. Best-effort; ignores the count.
+        let _ = cleanup::sweep_orphaned_run_dirs(&std::env::temp_dir(), cleanup::pid_is_alive);
         // Image dir comes from the worker's policy env (set by the entry) —
         // KASTELLAN_MICROVM_DIR — defaulting to /var/lib/kastellan/microvm.
         let dir = policy
@@ -131,14 +141,24 @@ impl SandboxBackend for LinuxFirecracker {
             &plan,
             &config_path.to_string_lossy(),
             &log_path.to_string_lossy(),
+            &run_dir.to_string_lossy(),
         );
-        Command::new(&argv[0])
+        let child = Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| SandboxError::Backend(format!("microvm-run spawn failed: {e}")))
+            .map_err(|e| SandboxError::Backend(format!("microvm-run spawn failed: {e}")))?;
+        // Record the launcher's own pid so the orphan sweep can later tell this
+        // VM's run-dir from a dead one (#362). Best-effort: a write failure only
+        // means this one dir won't be swept if its launcher is later SIGKILLed;
+        // the launcher's own teardown still cleans the dir on a graceful exit.
+        let _ = std::fs::write(
+            run_dir.join(cleanup::LAUNCHER_PID_FILE),
+            child.id().to_string(),
+        );
+        Ok(child)
     }
 }
 
@@ -159,11 +179,15 @@ mod spawn_tests {
             &[],
         )
         .unwrap();
-        let argv = launcher_argv(&plan, "/run/fc.json", "/run/fc.log");
+        let argv = launcher_argv(&plan, "/run/fc.json", "/run/fc.log", "/run");
         assert_eq!(argv[0], MICROVM_RUN_BIN);
         assert!(
             argv.windows(2).any(|w| w[0] == "--config-file" && w[1] == "/run/fc.json"),
             "argv must pass --config-file /run/fc.json"
+        );
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--run-dir" && w[1] == "/run"),
+            "argv must pass --run-dir <dir>"
         );
         assert!(
             argv.windows(2)
