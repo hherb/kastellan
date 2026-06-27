@@ -90,6 +90,10 @@ impl Watchdog {
     }
 }
 
+/// Signals the watchdog thread to exit (it observes `shutdown` on its next
+/// wake). Intentionally does NOT join: the thread self-terminates promptly and
+/// the `Arc<Shared>` it holds keeps `Shared` alive until it does, so there is
+/// no leak or use-after-free across worker churn.
 impl Drop for Watchdog {
     fn drop(&mut self) {
         let mut st = self.shared.state.lock().expect("watchdog state poisoned");

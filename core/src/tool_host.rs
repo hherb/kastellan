@@ -603,7 +603,7 @@ impl SupervisedWorker {
     }
 
     /// Close stdin (signals EOF to the worker), wait for it to exit, and
-    /// cancel the watchdog. Returns the worker's exit status.
+    /// shut down the watchdog thread. Returns the worker's exit status.
     pub fn close(self) -> std::io::Result<std::process::ExitStatus> {
         // Destructure to move `client` out by value (consumed by `close`)
         // while binding the remaining guards so we can drop them in a
@@ -632,7 +632,7 @@ impl SupervisedWorker {
     }
 
     /// Forcefully kill the worker without waiting for graceful shutdown.
-    /// The watchdog is cancelled by the [`Drop`] of [`Self`] (or
+    /// The watchdog is shut down by the [`Drop`] of [`Self`] (or
     /// [`Self::close`]).
     pub fn kill(&mut self) -> std::io::Result<()> {
         self.client.kill()

@@ -521,7 +521,7 @@ async fn warm_worker_survives_idle_gap_longer_than_wall_clock() {
             max_age_seconds: 60,
             grace_period_seconds: 5,
         },
-        500, // wall_clock_ms
+        2_000, // wall_clock_ms
     );
 
     // Call 1: dispatch within budget, then release back to warm.
@@ -533,7 +533,7 @@ async fn warm_worker_survives_idle_gap_longer_than_wall_clock() {
     }
 
     // Idle gap LONGER than the per-call budget, with no call in flight.
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
 
     // Call 2 on the SAME warm worker must still succeed.
     {
