@@ -15,6 +15,9 @@ pub struct ProbeInputs {
     pub vhost_vsock_rw: bool,
     pub kernel_present: bool,
     pub rootfs_present: bool,
+    /// `mkfs.ext4` (e2fsprogs) on `$PATH` — needed to build per-spawn host-dir
+    /// share images (slice 3).
+    pub mkfs_ext4_on_path: bool,
 }
 
 /// Pure: turn capability bits into an Ok or a fail-closed error naming the fix.
@@ -51,6 +54,13 @@ pub fn probe_report(inputs: &ProbeInputs) -> Result<(), SandboxError> {
             "guest rootfs image missing — run scripts/workers/microvm/build-rootfs.sh".into(),
         ));
     }
+    if !inputs.mkfs_ext4_on_path {
+        return Err(SandboxError::Backend(
+            "mkfs.ext4 not on $PATH — install e2fsprogs (Ubuntu: `sudo apt-get install \
+             e2fsprogs`); required to build per-spawn host-dir share images"
+                .into(),
+        ));
+    }
     Ok(())
 }
 
@@ -64,22 +74,21 @@ impl super::LinuxFirecracker {
     /// Gather real capability bits and delegate to [`probe_report`].
     pub fn probe(image: &FirecrackerImage) -> Result<(), SandboxError> {
         let inputs = ProbeInputs {
-            firecracker_on_path: which_firecracker(),
+            firecracker_on_path: which_on_path("firecracker"),
             kvm_rw: dev_rw("/dev/kvm"),
             vhost_vsock_rw: dev_rw("/dev/vhost-vsock"),
             kernel_present: Path::new(&image.kernel_path).exists(),
             rootfs_present: Path::new(&image.rootfs_path).exists(),
+            mkfs_ext4_on_path: which_on_path("mkfs.ext4"),
         };
         probe_report(&inputs)
     }
 }
 
-/// Cheap `$PATH` lookup for the firecracker binary (no spawn).
-fn which_firecracker() -> bool {
+/// Cheap `$PATH` lookup for `bin` (no spawn).
+fn which_on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| dir.join("firecracker").is_file())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
         .unwrap_or(false)
 }
 
@@ -94,6 +103,7 @@ mod tests {
             vhost_vsock_rw: true,
             kernel_present: true,
             rootfs_present: true,
+            mkfs_ext4_on_path: true,
         }
     }
 
@@ -142,5 +152,12 @@ mod tests {
         })
         .unwrap_err();
         assert!(format!("{err}").contains("build-rootfs.sh"));
+    }
+
+    #[test]
+    fn missing_mkfs_names_e2fsprogs() {
+        let err = probe_report(&ProbeInputs { mkfs_ext4_on_path: false, ..ok() }).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("mkfs.ext4") && msg.contains("e2fsprogs"));
     }
 }
