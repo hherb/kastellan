@@ -79,22 +79,44 @@ fn hex_encode(bytes: &[u8]) -> String {
 ///
 /// The env block is `K1=V1\nK2=V2\n…` (UTF-8), hex-encoded. Hex keeps the token
 /// whitespace/quote/`=`-safe so it survives as a single cmdline argument for any
-/// value. Returns `None` for an empty env so the no-env cmdline is byte-identical
-/// to the pre-#360 baseline.
+/// value. Returns `Ok(None)` for an empty env so the no-env cmdline is
+/// byte-identical to the pre-#360 baseline.
 ///
-/// NB: values must not contain a literal newline — `\n` is the pair separator the
-/// guest splits on. Every env value the backend forwards today (paths, numbers,
-/// JSON arrays) is newline-free; the generic contract documents the limit.
-pub fn encode_env_cmdline(env: &[(String, String)]) -> Option<String> {
+/// Fail closed on the two delimiters the guest decoder splits on, so a token is
+/// never emitted that would decode to something other than what was forwarded:
+///
+/// * A `\n` in any key or value — `\n` is the pair separator. A value newline
+///   would split one var into two, and the trailing fragment (no `=`) is
+///   silently dropped in-guest; the forwarded value would also be truncated.
+/// * An `=` in any key — the guest splits each line on its FIRST `=`, so an `=`
+///   in a key silently shifts the boundary (a prefix of the key leaks into the
+///   value). POSIX env names cannot contain `=`, so this only ever rejects a
+///   malformed policy.
+///
+/// Values may freely contain `=` (the first-`=` split preserves them) and any
+/// other byte; only the newline separator is off-limits there.
+pub fn encode_env_cmdline(env: &[(String, String)]) -> Result<Option<String>, SandboxError> {
     if env.is_empty() {
-        return None;
+        return Ok(None);
+    }
+    for (k, v) in env {
+        if k.contains('\n') || v.contains('\n') || k.contains('=') {
+            return Err(SandboxError::Backend(format!(
+                "env var {k:?} cannot be forwarded via the kernel cmdline: keys may not \
+                 contain '=' and neither key nor value may contain a newline (the \
+                 guest decoder's pair/field separators)"
+            )));
+        }
     }
     let block = env
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("\n");
-    Some(format!(" {ENV_CMDLINE_KEY}={}", hex_encode(block.as_bytes())))
+    Ok(Some(format!(
+        " {ENV_CMDLINE_KEY}={}",
+        hex_encode(block.as_bytes())
+    )))
 }
 
 /// Translate a policy into a launch plan. Pure + fallible (rejects relative
@@ -138,7 +160,7 @@ pub fn build_launch_plan(
     // cmdline would exceed the kernel's COMMAND_LINE_SIZE — a truncated cmdline
     // would silently corrupt the boot, never acceptable for a security boundary.
     let mut boot_args = BASE_BOOT_ARGS.to_string();
-    if let Some(suffix) = encode_env_cmdline(&policy.env) {
+    if let Some(suffix) = encode_env_cmdline(&policy.env)? {
         boot_args.push_str(&suffix);
     }
     if boot_args.len() > MAX_CMDLINE_BYTES {
@@ -278,7 +300,7 @@ mod tests {
     fn encode_env_cmdline_empty_is_none() {
         // No env → no token, so the cmdline stays byte-identical to the
         // pre-#360 baseline.
-        assert_eq!(encode_env_cmdline(&[]), None);
+        assert_eq!(encode_env_cmdline(&[]).unwrap(), None);
     }
 
     #[test]
@@ -288,8 +310,44 @@ mod tests {
         // "A=1\nB=2" = bytes 41 3d 31 0a 42 3d 32.
         let env = vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())];
         assert_eq!(
-            encode_env_cmdline(&env).unwrap(),
+            encode_env_cmdline(&env).unwrap().unwrap(),
             " kastellan.env=413d310a423d32"
+        );
+    }
+
+    #[test]
+    fn encode_env_cmdline_rejects_separator_chars() {
+        // Fail closed rather than emit a token the guest would silently
+        // mis-decode: a newline in a value would split one var into two and the
+        // trailing fragment is dropped in-guest; a newline in a key, or an '='
+        // in a key, shifts the field boundary. Each must surface as an error,
+        // not a silent drop/corruption.
+        let newline_value =
+            vec![("K".to_string(), "line1\nline2".to_string())];
+        assert!(encode_env_cmdline(&newline_value).is_err());
+
+        let newline_key = vec![("K\nX".to_string(), "v".to_string())];
+        assert!(encode_env_cmdline(&newline_key).is_err());
+
+        let equals_key = vec![("K=X".to_string(), "v".to_string())];
+        assert!(encode_env_cmdline(&equals_key).is_err());
+
+        // A value with '=' is fine — the guest splits on the first '=' only.
+        let equals_value = vec![("K".to_string(), "a=b".to_string())];
+        assert!(encode_env_cmdline(&equals_value).is_ok());
+    }
+
+    #[test]
+    fn build_launch_plan_fails_closed_on_unforwardable_env() {
+        // The guard propagates through the (already fallible) plan builder.
+        let policy = SandboxPolicy {
+            env: vec![("K".to_string(), "has\nnewline".to_string())],
+            ..Default::default()
+        };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(
+            format!("{err}").contains("newline"),
+            "expected a separator-guard error, got: {err}"
         );
     }
 
