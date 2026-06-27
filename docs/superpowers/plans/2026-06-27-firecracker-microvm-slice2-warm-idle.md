@@ -259,9 +259,12 @@ impl Watchdog {
         Self::new_with_kill(pid, ms, send_sigkill)
     }
 
-    /// Construction seam: tests inject a non-killing `kill` so the thread never
-    /// reaches `kill(2)` (see [`send_sigkill`] for the 2026-05-08 incident).
-    fn new_with_kill(pid: u32, ms: u64, kill: fn(u32)) -> Self {
+    /// Construction seam: tests inject a non-killing `kill` (a closure
+    /// capturing a per-test counter) so the thread never reaches `kill(2)`
+    /// (see [`send_sigkill`] for the 2026-05-08 incident). Generic over the
+    /// killer so each test owns its own counter — no shared mutable state, so
+    /// the unit tests are parallel-safe under cargo's default test harness.
+    fn new_with_kill<K: Fn(u32) + Send + 'static>(pid: u32, ms: u64, kill: K) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(WatchdogState {
                 deadline: None,
@@ -319,7 +322,7 @@ impl Drop for ArmGuard {
 /// `Condvar` (which releases it). All mutators (`arm_scope`, `ArmGuard::drop`,
 /// `Watchdog::drop`) take the lock briefly and `notify_all`, so the thread
 /// wakes promptly. `kill` is injected for test isolation.
-fn watchdog_loop(pid: u32, shared: Arc<Shared>, kill: fn(u32)) {
+fn watchdog_loop<K: Fn(u32)>(pid: u32, shared: Arc<Shared>, kill: K) {
     let mut st = shared.state.lock().expect("watchdog state poisoned");
     loop {
         if st.shutdown {
@@ -389,20 +392,18 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Opaque PID for the tests. With the injected no-op/counting killers it is
-    /// never delivered to `kill(2)` — see the `send_sigkill` incident note.
+    /// Opaque PID for the tests. With the injected counting killers it is never
+    /// delivered to `kill(2)` — see the `send_sigkill` incident note.
     const SAFE_FAKE_PID: u32 = u32::MAX;
 
-    fn noop_kill(_pid: u32) {}
-
-    /// Test-only counting killer. A `fn(u32)` can't capture, so it records into
-    /// a process-global counter; each test that uses it resets the counter
-    /// first and runs the watchdog to completion before asserting. The tests
-    /// below that count kills run serially relative to this counter by reading
-    /// it only after joining the watchdog thread.
-    static KILL_COUNT: AtomicUsize = AtomicUsize::new(0);
-    fn counting_kill(_pid: u32) {
-        KILL_COUNT.fetch_add(1, Ordering::SeqCst);
+    /// A per-test counting killer: returns a `(closure, counter)` pair. Each
+    /// test owns its own `Arc<AtomicUsize>`, so there is no shared mutable
+    /// state and the tests are parallel-safe. The closure is `Send + 'static`
+    /// (captures only the Arc), satisfying the watchdog thread's bound.
+    fn counting_kill() -> (impl Fn(u32) + Send + 'static, Arc<AtomicUsize>) {
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&count);
+        (move |_pid: u32| { c.fetch_add(1, Ordering::SeqCst); }, count)
     }
 
     /// Build a `Shared` directly so a test can drive `watchdog_loop` and
@@ -441,49 +442,52 @@ mod tests {
 
     #[test]
     fn disarmed_watchdog_never_fires() {
+        let (kill, count) = counting_kill();
         let sh = shared();
         let sh2 = Arc::clone(&sh);
-        let h = std::thread::spawn(move || watchdog_loop(SAFE_FAKE_PID, sh2, noop_kill));
+        let h = std::thread::spawn(move || watchdog_loop(SAFE_FAKE_PID, sh2, kill));
         std::thread::sleep(Duration::from_millis(120));
         shutdown(&sh);
         h.join().unwrap();
-        // No assertion on a counter needed: a disarmed loop that ever fired
-        // would have to invent a deadline. The point is it exits cleanly on
-        // shutdown without having waited on a deadline.
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "a watchdog that was never armed must never fire"
+        );
     }
 
     #[test]
     fn armed_watchdog_fires_after_deadline() {
-        KILL_COUNT.store(0, Ordering::SeqCst);
+        let (kill, count) = counting_kill();
         let sh = shared();
         arm(&sh, 80);
         let sh2 = Arc::clone(&sh);
-        let h = std::thread::spawn(move || watchdog_loop(SAFE_FAKE_PID, sh2, counting_kill));
+        let h = std::thread::spawn(move || watchdog_loop(SAFE_FAKE_PID, sh2, kill));
         // Poll until it fires (then it self-disarms and parks).
         let start = Instant::now();
-        while KILL_COUNT.load(Ordering::SeqCst) == 0 {
+        while count.load(Ordering::SeqCst) == 0 {
             assert!(start.elapsed() < Duration::from_secs(2), "watchdog never fired");
             std::thread::sleep(Duration::from_millis(10));
         }
         shutdown(&sh);
         h.join().unwrap();
-        assert_eq!(KILL_COUNT.load(Ordering::SeqCst), 1, "fires exactly once per arm");
+        assert_eq!(count.load(Ordering::SeqCst), 1, "fires exactly once per arm");
     }
 
     #[test]
     fn disarm_before_deadline_prevents_fire() {
-        KILL_COUNT.store(0, Ordering::SeqCst);
+        let (kill, count) = counting_kill();
         let sh = shared();
         arm(&sh, 300);
         let sh2 = Arc::clone(&sh);
-        let h = std::thread::spawn(move || watchdog_loop(SAFE_FAKE_PID, sh2, counting_kill));
+        let h = std::thread::spawn(move || watchdog_loop(SAFE_FAKE_PID, sh2, kill));
         std::thread::sleep(Duration::from_millis(50));
         disarm(&sh); // before the 300 ms deadline
         std::thread::sleep(Duration::from_millis(400));
         shutdown(&sh);
         h.join().unwrap();
         assert_eq!(
-            KILL_COUNT.load(Ordering::SeqCst),
+            count.load(Ordering::SeqCst),
             0,
             "a disarm before the deadline must prevent the kill"
         );
@@ -491,40 +495,45 @@ mod tests {
 
     #[test]
     fn rearm_fires_again_on_the_new_deadline() {
-        KILL_COUNT.store(0, Ordering::SeqCst);
+        let (kill, count) = counting_kill();
         let sh = shared();
         arm(&sh, 60);
         let sh2 = Arc::clone(&sh);
-        let h = std::thread::spawn(move || watchdog_loop(SAFE_FAKE_PID, sh2, counting_kill));
+        let h = std::thread::spawn(move || watchdog_loop(SAFE_FAKE_PID, sh2, kill));
         // First fire.
         let start = Instant::now();
-        while KILL_COUNT.load(Ordering::SeqCst) < 1 {
+        while count.load(Ordering::SeqCst) < 1 {
             assert!(start.elapsed() < Duration::from_secs(2), "first fire missing");
             std::thread::sleep(Duration::from_millis(10));
         }
         // Re-arm: a fresh generation + deadline must fire again.
         arm(&sh, 60);
         let start = Instant::now();
-        while KILL_COUNT.load(Ordering::SeqCst) < 2 {
+        while count.load(Ordering::SeqCst) < 2 {
             assert!(start.elapsed() < Duration::from_secs(2), "re-arm did not fire");
             std::thread::sleep(Duration::from_millis(10));
         }
         shutdown(&sh);
         h.join().unwrap();
-        assert_eq!(KILL_COUNT.load(Ordering::SeqCst), 2, "re-arm fires on the new deadline");
+        assert_eq!(count.load(Ordering::SeqCst), 2, "re-arm fires on the new deadline");
     }
 
     #[test]
     fn arm_scope_guard_disarms_on_drop() {
-        // End-to-end through the public seam with a non-killing thread: arming
-        // then dropping the guard must leave the watchdog disarmed (no fire).
-        let wd = Watchdog::new_with_kill(SAFE_FAKE_PID, 40, noop_kill);
+        // End-to-end through the public seam: arming then dropping the guard
+        // before the deadline must leave the watchdog disarmed (no fire).
+        let (kill, count) = counting_kill();
+        let wd = Watchdog::new_with_kill(SAFE_FAKE_PID, 40, kill);
         {
             let _arm = wd.arm_scope();
             // guard dropped here, well before the 40 ms deadline
         }
-        std::thread::sleep(Duration::from_millis(80));
-        // No panic / no fire path reached; dropping wd shuts the thread down.
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "dropping the ArmGuard before the deadline must disarm (no fire)"
+        );
         drop(wd);
     }
 
