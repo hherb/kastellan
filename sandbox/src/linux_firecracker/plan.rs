@@ -42,6 +42,13 @@ pub struct FirecrackerLaunchPlan {
     pub ro_image_path: Option<std::path::PathBuf>,
     /// Host path of the built RW ext4. `Some` iff `rw_scratch` is `Some`.
     pub rw_image_path: Option<std::path::PathBuf>,
+    /// Slice 4a: the guest-initiated egress vsock port, `Some(EGRESS_VSOCK_PORT)`
+    /// iff the worker is force-routed (`Net::Allowlist` + `proxy_uds`). Drives
+    /// the ` kastellan.egress=1` cmdline token and the launcher's reverse-relay.
+    pub egress_proxy_vsock_port: Option<u32>,
+    /// Slice 4a: the **host** egress-proxy UDS (from `policy.proxy_uds`) the
+    /// launcher relays the guest's egress connections to. `Some` iff force-routed.
+    pub egress_host_uds: Option<std::path::PathBuf>,
 }
 
 /// Placeholder guest CID baked into a freshly-built plan. CIDs 0–2 are reserved
@@ -54,6 +61,16 @@ pub struct FirecrackerLaunchPlan {
 const WORKER_GUEST_CID: u32 = 3;
 /// Fixed vsock port the guest init listens on for the JSON-RPC bridge.
 pub const WORKER_VSOCK_PORT: u32 = 1024;
+/// Fixed vsock port the launcher's reverse-relay listens on and the guest init
+/// dials for the egress channel (slice 4a). A force-routed `Net::Allowlist`
+/// worker reaches the host egress proxy over this second, guest-initiated vsock
+/// port; the JSON-RPC channel keeps `WORKER_VSOCK_PORT`. Shared with
+/// `kastellan-microvm-init` (kept in sync manually; same constraint as
+/// `WORKER_VSOCK_PORT`).
+pub const EGRESS_VSOCK_PORT: u32 = 1025;
+/// In-guest path the worker dials for egress (its `KASTELLAN_EGRESS_PROXY_UDS`)
+/// and the init binds the relay listener at. Shared with `kastellan-microvm-init`.
+const GUEST_EGRESS_UDS: &str = "/run/kastellan-egress.sock";
 /// Kernel cmdline: serial console for *kernel* logs only (the launcher routes
 /// it to a log fd, never stdout); JSON-RPC rides vsock, not the console.
 const BASE_BOOT_ARGS: &str =
@@ -152,7 +169,25 @@ pub fn build_launch_plan(
         Some(pct) => pct.div_ceil(100).clamp(1, 8) as u8,
     };
 
-    let net_enabled = !matches!(policy.net, Net::Deny);
+    // Slice 4a: force-routing detection. A `Net::Allowlist` worker with a
+    // `proxy_uds` reaches the network ONLY through the host egress proxy, tunneled
+    // over a second guest-initiated vsock port — so the VM carries NO virtio-net
+    // device (stronger than the bwrap private-netns path). A `Net::Allowlist`
+    // worker WITHOUT `proxy_uds` would need a virtio-net device this slice does
+    // not build, so reject it fail-closed rather than boot an egress-less VM.
+    let (net_enabled, egress_proxy_vsock_port, egress_host_uds) = match (&policy.net, &policy.proxy_uds) {
+        (Net::Deny, _) => (false, None, None),
+        (Net::Allowlist(_), Some(uds)) => (false, Some(EGRESS_VSOCK_PORT), Some(uds.clone())),
+        (Net::Allowlist(_), None) => {
+            return Err(SandboxError::Backend(
+                "micro-VM net workers require force-routing: Net::Allowlist needs proxy_uds set \
+                 (direct-net in a VM is unsupported — no virtio-net device)"
+                    .to_string(),
+            ));
+        }
+        // The egress proxy itself never runs in a VM; keep prior behaviour.
+        (Net::ProxyEgress, _) => (true, None, None),
+    };
 
     // Placeholder vsock UDS next to the rootfs image dir. Like `vsock_cid`, this
     // is a stand-in: `spawn_under_policy` ALWAYS replaces it with a per-spawn
@@ -214,17 +249,32 @@ pub fn build_launch_plan(
         guest_dev: format!("/dev/vd{}", next_letter as char),
     });
 
-    // Forward policy.env into the guest via a hex cmdline token (#360). The
-    // guest init decodes it before exec'ing the worker. Then append the mounts
-    // token (slice 3). Fail closed if the combined cmdline would exceed the
-    // kernel's COMMAND_LINE_SIZE — a truncated cmdline would silently corrupt
-    // the boot, never acceptable for a security boundary.
+    // Forward policy.env into the guest via a hex cmdline token (#360). When
+    // force-routed (slice 4a), override KASTELLAN_EGRESS_PROXY_UDS to the
+    // IN-GUEST path: the worker dials the in-guest relay UDS, not the
+    // (unreachable-from-a-VM) host sidecar path. Backend-local translation —
+    // SandboxPolicy and the bwrap backend are untouched.
+    let mut env = policy.env.clone();
+    if egress_host_uds.is_some() {
+        const K: &str = "KASTELLAN_EGRESS_PROXY_UDS";
+        match env.iter_mut().find(|(k, _)| k == K) {
+            Some(slot) => slot.1 = GUEST_EGRESS_UDS.to_string(),
+            None => env.push((K.to_string(), GUEST_EGRESS_UDS.to_string())),
+        }
+    }
     let mut boot_args = BASE_BOOT_ARGS.to_string();
-    if let Some(suffix) = encode_env_cmdline(&policy.env)? {
+    if let Some(suffix) = encode_env_cmdline(&env)? {
         boot_args.push_str(&suffix);
     }
     if let Some(suffix) = encode_mount_manifest(ro_share.as_ref(), rw_scratch.as_ref())? {
         boot_args.push_str(&suffix);
+    }
+    if egress_proxy_vsock_port.is_some() {
+        boot_args.push_str(" kastellan.egress=1");
+        // Test-only: emit the self-test token when the operator/test sets the knob.
+        if policy.env.iter().any(|(k, v)| k == "KASTELLAN_MICROVM_EGRESS_SELFTEST" && v == "1") {
+            boot_args.push_str(" kastellan.egress.selftest=1");
+        }
     }
     if boot_args.len() > MAX_CMDLINE_BYTES {
         return Err(SandboxError::Backend(format!(
@@ -248,12 +298,14 @@ pub fn build_launch_plan(
         vsock_uds,
         vsock_port: WORKER_VSOCK_PORT,
         boot_args,
-        env: policy.env.clone(),
+        env,
         net_enabled,
         ro_share,
         rw_scratch,
         ro_image_path,
         rw_image_path,
+        egress_proxy_vsock_port,
+        egress_host_uds,
     })
 }
 
@@ -644,5 +696,57 @@ mod tests {
         let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
         let cfg = render_firecracker_config(&plan);
         assert_eq!(cfg["drives"].as_array().unwrap().len(), 1, "only the rootfs drive");
+    }
+
+    fn forced_policy(uds: &str) -> SandboxPolicy {
+        SandboxPolicy {
+            net: Net::Allowlist(vec!["example.com:443".into()]),
+            proxy_uds: Some(PathBuf::from(uds)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn force_routed_sets_egress_port_and_disables_net() {
+        let plan = build_launch_plan(&forced_policy("/scratch/egress.sock"), &img(), "/w", &[]).unwrap();
+        assert_eq!(plan.egress_proxy_vsock_port, Some(EGRESS_VSOCK_PORT));
+        assert_eq!(plan.egress_host_uds.as_deref(), Some(std::path::Path::new("/scratch/egress.sock")));
+        assert!(!plan.net_enabled, "force-routed VM has no virtio-net device");
+        assert!(plan.boot_args.contains(" kastellan.egress=1"), "egress cmdline token present");
+        assert!(!plan.boot_args.contains("selftest"), "no selftest token without the knob");
+    }
+
+    #[test]
+    fn force_routed_overrides_guest_proxy_uds_env() {
+        // A pre-set host UDS in env is rewritten to the in-guest path the worker dials.
+        let mut policy = forced_policy("/scratch/egress.sock");
+        policy.env = vec![("KASTELLAN_EGRESS_PROXY_UDS".into(), "/scratch/egress.sock".into())];
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        let val = plan.env.iter().find(|(k, _)| k == "KASTELLAN_EGRESS_PROXY_UDS").map(|(_, v)| v.as_str());
+        assert_eq!(val, Some("/run/kastellan-egress.sock"));
+    }
+
+    #[test]
+    fn selftest_knob_emits_selftest_token() {
+        let mut policy = forced_policy("/scratch/egress.sock");
+        policy.env = vec![("KASTELLAN_MICROVM_EGRESS_SELFTEST".into(), "1".into())];
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert!(plan.boot_args.contains(" kastellan.egress.selftest=1"));
+    }
+
+    #[test]
+    fn allowlist_without_proxy_uds_is_rejected() {
+        let policy = SandboxPolicy { net: Net::Allowlist(vec!["x:443".into()]), ..Default::default() };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(format!("{err:?}").contains("force-routing"), "fail-closed reject: {err:?}");
+    }
+
+    #[test]
+    fn net_deny_has_no_egress_channel() {
+        let policy = SandboxPolicy { net: Net::Deny, ..Default::default() };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert_eq!(plan.egress_proxy_vsock_port, None);
+        assert!(plan.egress_host_uds.is_none());
+        assert!(!plan.boot_args.contains("kastellan.egress"));
     }
 }

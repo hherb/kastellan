@@ -12,7 +12,7 @@
 mod plan;
 pub use plan::{
     build_launch_plan, render_firecracker_config, FirecrackerImage, FirecrackerLaunchPlan,
-    WORKER_VSOCK_PORT,
+    EGRESS_VSOCK_PORT, WORKER_VSOCK_PORT,
 };
 
 mod mounts;
