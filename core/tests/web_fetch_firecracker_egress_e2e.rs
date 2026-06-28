@@ -3,7 +3,8 @@
 //! egress proxy over the slice-4a vsock channel.
 //!
 //! Two layers:
-//!  * `web_fetch_vm_reaches_proxy_with_ca_delivered` (always-on hermetic): a host
+//!  * `web_fetch_vm_reaches_proxy_with_ca_delivered` (hermetic, no real network;
+//!    still #[ignore] DGX-only — needs real KVM + vsock + the rootfs): a host
 //!    UnixListener stub stands in for the egress proxy at the worker's proxy_uds;
 //!    a force-routed web-fetch VM boots and one `web.fetch` is driven through it;
 //!    we assert the stub RECEIVES the worker's `CONNECT <host>:443` line. The
@@ -235,7 +236,8 @@ async fn real_web_fetch_through_sidecar() {
     // Implementer: adapt egress_force_routing_e2e::real_mitm_fetch_through_sidecar
     // to spawn the web-fetch VM entry via spawn_forced_net_worker, drive one
     // web.fetch against a real allowlisted HTTPS host, and assert readable text.
-    // Left as a documented #[ignore] scaffold: the always-on gate above is the CI
-    // acceptance; this is the manual origin-validation proof.
+    // Left as a documented #[ignore] scaffold: the hermetic CONNECT-stub gate
+    // above is the slice acceptance (DGX-manual via --ignored, no real network);
+    // this is the manual real-net origin-validation proof.
     eprintln!("manual: see test doc — real-net origin validation through the sidecar");
 }
