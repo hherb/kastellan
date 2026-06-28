@@ -20,6 +20,17 @@ const BIN_ENV: &str = "KASTELLAN_WEB_FETCH_BIN";
 /// Exe-relative sibling default (cargo `target/debug` + flat installs).
 const DEFAULT_BIN_NAME: &str = "kastellan-worker-web-fetch";
 
+/// Opt into the Linux Firecracker micro-VM backend for web-fetch. Linux-only;
+/// on macOS the flag is never read (the `FirecrackerVm` variant doesn't exist),
+/// so the const is `cfg`-gated out there (issue-#144 rule).
+#[cfg(target_os = "linux")]
+const USE_MICROVM_ENV: &str = "KASTELLAN_WEB_FETCH_USE_MICROVM";
+
+/// In-rootfs path of the web-fetch worker binary (staged there by
+/// `build-web-fetch-rootfs.sh`). Used by the micro-VM entry, not the host path.
+#[cfg(target_os = "linux")]
+const MICROVM_WORKER_BIN: &str = "/usr/local/bin/kastellan-worker-web-fetch";
+
 /// Build the [`ToolEntry`] for the web-fetch worker.
 ///
 /// The administrator controls the domain allowlist (sourced from the
@@ -71,6 +82,67 @@ pub fn web_fetch_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         wall_clock_ms: Some(30_000),
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
+        container_image: None,
+        lockdown_shim: None,
+        ephemeral_scratch: false,
+    }
+}
+
+/// Build the [`ToolEntry`] for web-fetch running inside a Firecracker micro-VM
+/// (opt-in via `KASTELLAN_WEB_FETCH_USE_MICROVM=1`). Mirrors the host-mode
+/// [`web_fetch_entry`] but as a VM net worker:
+///
+/// * `Net::Allowlist(host:443…)` (derived from the operator allowlist exactly as
+///   host mode) — **not** `Net::Deny`; web-fetch needs egress. Force-routing sets
+///   `proxy_uds` at spawn, which makes `build_launch_plan` boot the VM with no NIC
+///   and tunnel egress over the slice-4a vsock channel.
+/// * `Profile::WorkerNetClient`, `proxy_uds: None` in the manifest (set at spawn).
+/// * `fs_read: vec![]` — the worker has no NIC and does no local DNS (the egress
+///   proxy resolves host-side), so no `/etc/resolv.conf` etc. The per-instance CA
+///   is appended to `fs_read` at spawn by `rewrite_worker_policy`.
+/// * `env` forwards the verbatim allowlist plus `KASTELLAN_MICROVM_DIR` (shared
+///   image dir) and `KASTELLAN_MICROVM_ROOTFS=web-fetch.ext4` so the backend boots
+///   the right rootfs. All three ride the #360 `kastellan.env` cmdline token.
+///
+/// `mem_mb: 512` is enforced by Firecracker. Linux-only: emits the
+/// `#[cfg(target_os = "linux")]` `FirecrackerVm` backend variant.
+#[cfg(target_os = "linux")]
+pub fn web_fetch_firecracker_entry(
+    binary: PathBuf,
+    image_dir: String,
+    allowlist: &[String],
+) -> ToolEntry {
+    let allow_json =
+        serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
+    let net_entries: Vec<String> = allowlist
+        .iter()
+        .map(|d| {
+            let host = d.strip_prefix('.').unwrap_or(d);
+            format!("{host}:443")
+        })
+        .collect();
+    let policy = SandboxPolicy {
+        fs_read: vec![],
+        fs_write: vec![],
+        net: Net::Allowlist(net_entries),
+        cpu_ms: 10_000,
+        mem_mb: 512,
+        profile: Profile::WorkerNetClient,
+        env: vec![
+            ("KASTELLAN_WEB_FETCH_ALLOWLIST".to_string(), allow_json),
+            ("KASTELLAN_MICROVM_DIR".to_string(), image_dir),
+            ("KASTELLAN_MICROVM_ROOTFS".to_string(), "web-fetch.ext4".to_string()),
+        ],
+        cpu_quota_pct: None,
+        tasks_max: None,
+        proxy_uds: None,
+    };
+    ToolEntry {
+        binary,
+        policy,
+        wall_clock_ms: Some(30_000),
+        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
+        sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm),
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
@@ -191,5 +263,38 @@ mod tests {
             Resolution::Disabled { .. } => "Disabled",
             Resolution::Misconfigured { .. } => "Misconfigured",
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn firecracker_entry_is_net_allowlist_vm_with_empty_fs_read() {
+        let allowlist = vec!["en.wikipedia.org".to_string(), ".example.com".to_string()];
+        let entry = web_fetch_firecracker_entry(
+            PathBuf::from("/usr/local/bin/kastellan-worker-web-fetch"),
+            "/var/lib/kastellan/microvm".to_string(),
+            &allowlist,
+        );
+        // VM backend, net client, no host paths shared in (the CA is added at spawn).
+        assert!(matches!(
+            entry.sandbox_backend,
+            Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+        ));
+        assert!(matches!(entry.policy.profile, Profile::WorkerNetClient));
+        assert!(entry.policy.fs_read.is_empty(), "VM fs_read must be empty (no NIC, no local DNS)");
+        assert!(entry.policy.proxy_uds.is_none(), "proxy_uds is set at spawn, not in the manifest");
+        // Net::Allowlist derived from the domains (wildcard → bare host:443).
+        match &entry.policy.net {
+            Net::Allowlist(hosts) => assert_eq!(
+                hosts,
+                &vec!["en.wikipedia.org:443".to_string(), "example.com:443".to_string()]
+            ),
+            other => panic!("expected Net::Allowlist, got {other:?}"),
+        }
+        // Env forwards the verbatim allowlist + the image dir + the rootfs filename.
+        let env = &entry.policy.env;
+        let get = |k: &str| env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("KASTELLAN_WEB_FETCH_ALLOWLIST"), Some(r#"["en.wikipedia.org",".example.com"]"#));
+        assert_eq!(get("KASTELLAN_MICROVM_DIR"), Some("/var/lib/kastellan/microvm"));
+        assert_eq!(get("KASTELLAN_MICROVM_ROOTFS"), Some("web-fetch.ext4"));
     }
 }
