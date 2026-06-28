@@ -211,7 +211,7 @@ pub fn build_launch_plan(
     if boot_args.len() > MAX_CMDLINE_BYTES {
         return Err(SandboxError::Backend(format!(
             "kernel cmdline {} bytes exceeds {MAX_CMDLINE_BYTES}-byte cap \
-             (worker env too large to forward)",
+             (worker env + mount manifest too large to forward)",
             boot_args.len()
         )));
     }

@@ -218,6 +218,12 @@ fn apply_host_mounts(m: &MountManifest) {
             for t in &ro.targets {
                 let from = format!("/ro-share{t}");
                 if std::fs::create_dir_all(t).is_ok() {
+                    // A bind does NOT inherit a per-mount RO flag, but it is a
+                    // second view of the /ro-share ext4 mounted MS_RDONLY at the
+                    // SUPERBLOCK level above, so writes through this path are
+                    // refused by the read-only superblock. The image is also
+                    // ephemeral with no host write-back. Hence MS_BIND alone is
+                    // a genuinely read-only exposure here.
                     mount(&from, t, None, libc::MS_BIND);
                 }
             }
