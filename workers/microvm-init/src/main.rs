@@ -660,7 +660,7 @@ fn exec_worker() {
     // or nothing) still boot a working worker.
     let prog_path = parse_worker_cmdline(&cmdline)
         .unwrap_or_else(|| "/usr/local/bin/kastellan-worker-python-exec".to_string());
-    let prog = match CString::new(prog_path.clone()) {
+    let prog = match CString::new(prog_path) {
         Ok(c) => c,
         Err(_) => CString::new("/usr/local/bin/kastellan-worker-python-exec").unwrap(),
     };

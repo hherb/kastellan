@@ -13,6 +13,20 @@ use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 use crate::scheduler::ToolEntry;
 use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerManifest};
 
+/// Map the operator domain allowlist to `Net::Allowlist` `host:443` entries:
+/// a wildcard `.domain` maps to its bare `domain:443` (the egress proxy refines
+/// wildcard semantics). HTTPS-only, so port 443. Pure — shared by the host and
+/// micro-VM entries.
+fn allowlist_to_net_entries(allowlist: &[String]) -> Vec<String> {
+    allowlist
+        .iter()
+        .map(|d| {
+            let host = d.strip_prefix('.').unwrap_or(d);
+            format!("{host}:443")
+        })
+        .collect()
+}
+
 /// Tool name the registry keys web-fetch on.
 const TOOL_NAME: &str = "web-fetch";
 /// Operator override for the worker binary path.
@@ -52,13 +66,7 @@ const MICROVM_WORKER_BIN: &str = "/usr/local/bin/kastellan-worker-web-fetch";
 pub fn web_fetch_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
     let allow_json =
         serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
-    let net_entries: Vec<String> = allowlist
-        .iter()
-        .map(|d| {
-            let host = d.strip_prefix('.').unwrap_or(d);
-            format!("{host}:443")
-        })
-        .collect();
+    let net_entries = allowlist_to_net_entries(allowlist);
     let policy = SandboxPolicy {
         fs_read: vec![
             binary.clone(),
@@ -114,13 +122,7 @@ pub fn web_fetch_firecracker_entry(
 ) -> ToolEntry {
     let allow_json =
         serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
-    let net_entries: Vec<String> = allowlist
-        .iter()
-        .map(|d| {
-            let host = d.strip_prefix('.').unwrap_or(d);
-            format!("{host}:443")
-        })
-        .collect();
+    let net_entries = allowlist_to_net_entries(allowlist);
     let policy = SandboxPolicy {
         fs_read: vec![],
         fs_write: vec![],
