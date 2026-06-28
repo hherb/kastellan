@@ -318,6 +318,11 @@ fn setup_egress_relay() {
     };
     // SAFETY: single-threaded PID1 here; fork is safe (no other threads to race).
     let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        eprintln!("microvm-init: fork for egress relay failed; worker egress disabled");
+        unsafe { libc::close(listener) };
+        return;
+    }
     if pid == 0 {
         egress_relay_loop(listener); // never returns
         unsafe { libc::_exit(0) };
@@ -415,7 +420,12 @@ fn egress_relay_loop(listener: RawFd) {
     loop {
         let conn = unsafe { libc::accept(listener, std::ptr::null_mut(), std::ptr::null_mut()) };
         if conn < 0 {
-            continue;
+            let err = unsafe { *libc::__errno_location() };
+            if err == libc::EINTR {
+                continue;
+            }
+            eprintln!("microvm-init: egress relay accept failed (errno {err}); relay exiting");
+            break;
         }
         match connect_host_vsock(VMADDR_CID_HOST, EGRESS_VSOCK_PORT) {
             Some(vfd) => {
