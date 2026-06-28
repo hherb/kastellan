@@ -381,7 +381,7 @@ items unlock later ones.
     (`<run_dir>/launcher.pid` + `/proc` liveness) at the top of
     `spawn_under_policy` backstops both the SIGKILL and panic-kept cases. No `SandboxBackend` trait change. DGX e2e **6/6**, 0 leftover run-dirs.
     Spec/plan: `docs/superpowers/{specs,plans}/2026-06-27-firecracker-rundir-cleanup*`.
-    [x] **SLICE 2 — warm/idle reuse + re-armable watchdog (2026-06-27, PR pending).** The entry/resolver/in-guest-wipe wiring
+    [x] **SLICE 2 — warm/idle reuse + re-armable watchdog (2026-06-27, MERGED `555f611`, PR #369).** The entry/resolver/in-guest-wipe wiring
     already existed from slice 1, so slice 2 = fix a latent watchdog bug + DGX-verify. The wall-clock watchdog was one-shot
     (armed at spawn) → a warm `IdleTimeout` worker was SIGKILLed `wall_clock_ms` after boot regardless of the idle window
     (latent on the macOS container warm path too). Replaced with a **re-armable `Watchdog`** owned by `SupervisedWorker`, armed
@@ -390,8 +390,17 @@ items unlock later ones.
     **4/4 real** (warm reuse boots VM once; `/tmp` wiped between warm calls; idle teardown; warm survives gap past `wall_clock_ms`);
     slice-1 e2e **6/6** no-regression; clippy `--all-targets` clean both platforms; opus final review: concurrency primitive correct.
     Spec/plan: `docs/superpowers/{specs,plans}/2026-06-27-firecracker-microvm-slice2-warm-idle*`.
-    **Slices 3–5 (next):** fs-sharing (per-spawn RO ext4 + writable overlay block devices — Firecracker has no virtio-fs/9p),
-    net workers (egress UDS over 2nd vsock), jailer.
+    [x] **SLICE 3 — host-dir sharing (2026-06-28, PR pending).** Per-spawn **read-only ext4** drive built from `policy.fs_read`
+    (`mkfs.ext4 -d`, non-root) exposed in-guest at original absolute paths via in-init bind-mounts (tmpfs-anchored so mkdir works
+    on the RO root; `fs_read` under a rootfs system dir `/usr|/bin|/lib|/etc` fails closed) + a disjoint **writable disk-backed
+    scratch** drive from `policy.fs_write` (blank ext4, ephemeral, NO host write-back; default 64 MiB, `KASTELLAN_MICROVM_SCRATCH_MIB`).
+    Mount plan rides a hex `kastellan.mounts=` cmdline token (sandbox `mounts.rs` encoder ↔ `microvm-init` decoder, no shared dep,
+    roundtrip-fixture-pinned). New `sandbox/src/linux_firecracker/{mounts.rs,images.rs}`; `probe` gains `mkfs.ext4`. No overlayfs/no
+    guest-kernel change. **DGX synthetic e2e 1/1 real** (host sentinel read at its abs path via RO bind + `/work` anchor scratch write);
+    sandbox lib 80/0, microvm-init 10/0, slice-1 e2e 6/0 + slice-2 4/0 no-regression, 0 orphan run-dirs, clippy clean. opus final
+    review: ready-to-merge, RO held at ext4 superblock. Follow-up [#370](https://github.com/hherb/kastellan/issues/370) (copy_tree
+    dir-symlink policy). Spec/plan: `docs/superpowers/{specs/2026-06-27-firecracker-microvm-slice3-host-dir-sharing-design.md,plans/2026-06-28-firecracker-microvm-slice3-host-dir-sharing.md}`.
+    **Slices 4–5 (next):** net workers (egress UDS over 2nd vsock — `Net::Allowlist` in-VM), jailer hardening + long-lived/channel workers.
     Spec/plan: `docs/superpowers/{specs/2026-06-26-linux-firecracker-microvm-design.md,plans/2026-06-26-linux-firecracker-microvm-slice1.md}`,
     `specs/2026-06-27-firecracker-guest-env-forwarding-design.md`.
   - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
