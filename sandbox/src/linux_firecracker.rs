@@ -45,14 +45,23 @@ pub fn launcher_argv(
     log_path: &str,
     run_dir: &str,
 ) -> Vec<String> {
-    vec![
+    let mut argv = vec![
         MICROVM_RUN_BIN.into(),
         "--config-file".into(), config_path.into(),
         "--vsock-uds".into(), plan.vsock_uds.to_string_lossy().into_owned(),
         "--vsock-port".into(), plan.vsock_port.to_string(),
         "--log".into(), log_path.into(),
         "--run-dir".into(), run_dir.into(),
-    ]
+    ];
+    // Slice 4a: when force-routed, the launcher also runs the egress reverse-relay
+    // (listen on `<vsock_uds>_<port>`, forward to the host proxy UDS).
+    if let (Some(uds), Some(port)) = (&plan.egress_host_uds, plan.egress_proxy_vsock_port) {
+        argv.push("--egress-uds".into());
+        argv.push(uds.to_string_lossy().into_owned());
+        argv.push("--egress-vsock-port".into());
+        argv.push(port.to_string());
+    }
+    argv
 }
 
 /// Counter for unique per-spawn temp dir suffixes (avoids collisions on rapid
@@ -212,5 +221,43 @@ mod spawn_tests {
                 .any(|w| w[0] == "--vsock-port" && w[1] == plan.vsock_port.to_string()),
             "argv must pass --vsock-port <port>"
         );
+    }
+
+    #[test]
+    fn launcher_argv_passes_egress_flags_when_force_routed() {
+        let policy = SandboxPolicy {
+            net: crate::Net::Allowlist(vec!["h:443".into()]),
+            proxy_uds: Some("/scratch/egress.sock".into()),
+            ..Default::default()
+        };
+        let plan = plan::build_launch_plan(
+            &policy,
+            &FirecrackerImage { kernel_path: "/k".into(), rootfs_path: "/var/r.ext4".into() },
+            "/w",
+            &[],
+        )
+        .unwrap();
+        let argv = launcher_argv(&plan, "/run/fc.json", "/run/fc.log", "/run");
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--egress-uds" && w[1] == "/scratch/egress.sock"),
+            "argv must pass --egress-uds <host sidecar path>: {argv:?}"
+        );
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--egress-vsock-port" && w[1] == EGRESS_VSOCK_PORT.to_string()),
+            "argv must pass --egress-vsock-port: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn launcher_argv_omits_egress_flags_for_net_deny() {
+        let plan = plan::build_launch_plan(
+            &SandboxPolicy::default(),
+            &FirecrackerImage { kernel_path: "/k".into(), rootfs_path: "/var/r.ext4".into() },
+            "/w",
+            &[],
+        )
+        .unwrap();
+        let argv = launcher_argv(&plan, "/run/fc.json", "/run/fc.log", "/run");
+        assert!(!argv.iter().any(|a| a == "--egress-uds"), "no egress flags for Net::Deny: {argv:?}");
     }
 }
