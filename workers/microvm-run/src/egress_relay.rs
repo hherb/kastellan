@@ -51,6 +51,10 @@ pub fn spawn_egress_relay(
 /// Pipe bytes both directions between two connected streams until either closes.
 fn relay_bidirectional(left: UnixStream, right: UnixStream) {
     let (Ok(left_rd), Ok(right_rd)) = (left.try_clone(), right.try_clone()) else {
+        // Likely fd exhaustion (EMFILE/ENFILE) under many concurrent egress
+        // connections; log it so a dropped connection is diagnosable rather than
+        // surfacing in-guest as a phantom intermittent network error.
+        eprintln!("microvm-run egress: try_clone failed; dropping connection");
         return;
     };
     let up = thread::spawn(move || pipe(left_rd, right)); // left -> right

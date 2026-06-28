@@ -427,22 +427,42 @@ fn egress_relay_loop(listener: RawFd) {
             eprintln!("microvm-init: egress relay accept failed (errno {err}); relay exiting");
             break;
         }
-        match connect_host_vsock(VMADDR_CID_HOST, EGRESS_VSOCK_PORT) {
-            Some(vfd) => {
-                // conn/vfd are RawFd (Copy); both directions run concurrently on
-                // the same full-duplex sockets.
-                let up = std::thread::spawn(move || pump_raw(conn, vfd));
-                pump_raw(vfd, conn);
-                let _ = up.join();
-                unsafe {
-                    libc::close(conn);
-                    libc::close(vfd);
-                }
+        // Service each accepted connection on its own thread so concurrent worker
+        // egress connections don't serialize behind one another (mirrors the
+        // host-side reverse-relay in `microvm-run::egress_relay`). A worker that
+        // opens two simultaneous proxy connections would otherwise hang the second
+        // in the listen backlog until the first closed.
+        std::thread::spawn(move || relay_one_connection(conn));
+    }
+}
+
+/// Pump one accepted in-guest UDS connection to the host over vsock and back.
+/// Takes ownership of `conn` (closes it on return).
+#[cfg(target_os = "linux")]
+fn relay_one_connection(conn: RawFd) {
+    match connect_host_vsock(VMADDR_CID_HOST, EGRESS_VSOCK_PORT) {
+        Some(vfd) => {
+            // conn/vfd are RawFd (Copy); both directions run concurrently on
+            // the same full-duplex sockets.
+            let up = std::thread::spawn(move || pump_raw(conn, vfd));
+            pump_raw(vfd, conn);
+            // Force-shut both fds before joining so the sibling pump's blocking
+            // `read` can never hang `join` — covers the case where the inline
+            // pump exits via a write error (which alone leaves the peer read
+            // unblocked). Idempotent after the EOF-path half-close.
+            unsafe {
+                libc::shutdown(conn, libc::SHUT_RDWR);
+                libc::shutdown(vfd, libc::SHUT_RDWR);
             }
-            None => unsafe {
+            let _ = up.join();
+            unsafe {
                 libc::close(conn);
-            },
+                libc::close(vfd);
+            }
         }
+        None => unsafe {
+            libc::close(conn);
+        },
     }
 }
 
@@ -466,6 +486,9 @@ fn pump_raw(from_fd: RawFd, to_fd: RawFd) {
                 )
             };
             if w <= 0 {
+                // Write side is broken: half-close the writer so the peer pump
+                // sees EOF (mirrors the read-EOF path above) before bailing.
+                unsafe { libc::shutdown(to_fd, libc::SHUT_WR) };
                 return;
             }
             off += w;
@@ -485,7 +508,15 @@ fn egress_selftest() {
     let ping = b"PING\n";
     unsafe { libc::write(fd, ping.as_ptr() as *const libc::c_void, ping.len()) };
     let mut buf = [0u8; 16];
-    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    // Retry across EINTR so a stray signal during boot can't produce a false
+    // "no PONG" on a healthy channel — this log is the operator's certification.
+    let n = loop {
+        let r = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if r < 0 && unsafe { *libc::__errno_location() } == libc::EINTR {
+            continue;
+        }
+        break r;
+    };
     unsafe { libc::close(fd) };
     if n >= 4 && &buf[..4] == b"PONG" {
         eprintln!("EGRESS_CHANNEL_OK");
