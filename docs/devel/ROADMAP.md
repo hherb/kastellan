@@ -390,7 +390,7 @@ items unlock later ones.
     **4/4 real** (warm reuse boots VM once; `/tmp` wiped between warm calls; idle teardown; warm survives gap past `wall_clock_ms`);
     slice-1 e2e **6/6** no-regression; clippy `--all-targets` clean both platforms; opus final review: concurrency primitive correct.
     Spec/plan: `docs/superpowers/{specs,plans}/2026-06-27-firecracker-microvm-slice2-warm-idle*`.
-    [x] **SLICE 3 — host-dir sharing (2026-06-28, PR pending).** Per-spawn **read-only ext4** drive built from `policy.fs_read`
+    [x] **SLICE 3 — host-dir sharing (2026-06-28, MERGED `b12f0dc`, PR #371).** Per-spawn **read-only ext4** drive built from `policy.fs_read`
     (`mkfs.ext4 -d`, non-root) exposed in-guest at original absolute paths via in-init bind-mounts (tmpfs-anchored so mkdir works
     on the RO root; `fs_read`/`fs_write` top-level must be an allowlisted share anchor `{opt,data,srv,mnt,work,tmp}` — any other,
     incl. system dirs `/usr|/etc` AND unanchored dirs like `/home|/var`, fails closed up front so a share never silently mis-mounts
