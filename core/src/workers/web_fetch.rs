@@ -165,6 +165,27 @@ impl WorkerManifest for WebFetchManifest {
     }
 
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
+        let allowlist = (ctx.allowlist)(TOOL_NAME);
+
+        // Firecracker micro-VM mode (Linux) short-circuits host binary discovery:
+        // the worker binary lives inside the rootfs image, not on the host.
+        // Linux-only — on macOS USE_MICROVM is never read so the `FirecrackerVm`
+        // variant is never referenced (issue #144).
+        #[cfg(target_os = "linux")]
+        {
+            let use_microvm =
+                (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
+            if use_microvm {
+                let binary = PathBuf::from(MICROVM_WORKER_BIN);
+                let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
+                    .filter(|v| !v.trim().is_empty())
+                    .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
+                return Resolution::Register(web_fetch_firecracker_entry(
+                    binary, image_dir, &allowlist,
+                ));
+            }
+        }
+
         let binary = match discover_binary(ctx, BIN_ENV, DEFAULT_BIN_NAME) {
             Some(b) => b,
             None => {
@@ -176,7 +197,6 @@ impl WorkerManifest for WebFetchManifest {
                 };
             }
         };
-        let allowlist = (ctx.allowlist)(TOOL_NAME);
         Resolution::Register(web_fetch_entry(binary, &allowlist))
     }
 }
@@ -262,6 +282,37 @@ mod tests {
             Resolution::Register(_) => "Register",
             Resolution::Disabled { .. } => "Disabled",
             Resolution::Misconfigured { .. } => "Misconfigured",
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_uses_microvm_entry_when_opted_in() {
+        let get_env = |k: &str| match k {
+            "KASTELLAN_WEB_FETCH_USE_MICROVM" => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["en.wikipedia.org".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+
+        match WebFetchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                assert!(matches!(
+                    entry.sandbox_backend,
+                    Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+                ));
+                // In-rootfs binary path, not a host-discovered binary.
+                assert_eq!(
+                    entry.binary,
+                    PathBuf::from("/usr/local/bin/kastellan-worker-web-fetch")
+                );
+                // Shared default image dir.
+                let env = &entry.policy.env;
+                let dir = env.iter().find(|(k, _)| k == "KASTELLAN_MICROVM_DIR").map(|(_, v)| v.as_str());
+                assert_eq!(dir, Some("/var/lib/kastellan/microvm"));
+            }
+            other => panic!("expected Register(VM entry), got {}", outcome_label(&other)),
         }
     }
 
