@@ -711,26 +711,14 @@ fn exec_worker() {
     // (see parse_worker_args_cmdline): any interior NUL drops the WHOLE arg list
     // and runs `prog` bare rather than feeding the shim a positionally-shifted
     // argv — never aborts PID1.
-    let arg_cstrings: Vec<CString> = {
-        let raw = parse_worker_args_cmdline(&cmdline);
-        let mut built = Vec::with_capacity(raw.len());
-        let mut ok = true;
-        for a in raw {
-            match CString::new(a) {
-                Ok(c) => built.push(c),
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if ok {
-            built
-        } else {
+    let arg_cstrings: Vec<CString> = parse_worker_args_cmdline(&cmdline)
+        .into_iter()
+        .map(CString::new)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|_| {
             eprintln!("microvm-init: worker arg contained an interior NUL; running with no args");
             Vec::new()
-        }
-    };
+        });
     #[allow(deprecated)]
     unsafe {
         // Baked python interpreter default (harmless for non-python workers,
