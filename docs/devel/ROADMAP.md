@@ -402,9 +402,22 @@ items unlock later ones.
     sandbox lib 80/0, microvm-init 10/0, slice-1 e2e 6/0 + slice-2 4/0 no-regression, 0 orphan run-dirs, clippy clean. opus final
     review: ready-to-merge, RO held at ext4 superblock. Follow-up [#370](https://github.com/hherb/kastellan/issues/370) (copy_tree
     dir-symlink policy). Spec/plan: `docs/superpowers/{specs/2026-06-27-firecracker-microvm-slice3-host-dir-sharing-design.md,plans/2026-06-28-firecracker-microvm-slice3-host-dir-sharing.md}`.
-    **Slices 4–5 (next):** net workers (egress UDS over 2nd vsock — `Net::Allowlist` in-VM), jailer hardening + long-lived/channel workers.
     Spec/plan: `docs/superpowers/{specs/2026-06-26-linux-firecracker-microvm-design.md,plans/2026-06-26-linux-firecracker-microvm-slice1.md}`,
     `specs/2026-06-27-firecracker-guest-env-forwarding-design.md`.
+    [x] **SLICE 4a — egress vsock reverse-channel transport (2026-06-28, branch `feat/firecracker-microvm-slice4a-egress-transport`, PR pending).**
+    A force-routed `Net::Allowlist` worker reaches the host egress proxy from inside a VM (NO virtio-net device) over a **second, guest-initiated
+    vsock channel** — unchanged worker code, stronger isolation than the bwrap private-netns path. Transport only. Pure `build_launch_plan` detects
+    force-routing (`Net::Allowlist` + `proxy_uds`) → `egress_proxy_vsock_port=Some(1025)` + `net_enabled=false` + overrides the guest
+    `KASTELLAN_EGRESS_PROXY_UDS` env to `/run/kastellan-egress.sock` + ` kastellan.egress=1` token; bare `Net::Allowlist` w/o `proxy_uds` fail-closed
+    rejected. `launcher_argv` emits `--egress-uds`/`--egress-vsock-port`; launcher (`egress_relay.rs`) pre-binds `<base>_1025` + relays to the host
+    proxy UDS; guest init binds the in-guest UDS pre-exec + forks a relay to `AF_VSOCK(2,1025)` + a test-gated `PING/PONG` self-test; `/run` tmpfs
+    mountpoint. Constants triple duplicated both crates (no shared dep). `SandboxPolicy`+bwrap byte-unchanged. **DGX e2e 1/1 real** (guest→host PING
+    delivered over the reverse channel); sandbox lib 89/0, microvm-init 11/0, microvm-run 10/0, slice-1/2/3 e2e no-regression, 0 orphan run-dirs,
+    clippy clean. opus final review: READY TO MERGE; 2 Important PID1-robustness findings fixed in-branch (`695a1d5`). Spec/plan:
+    `docs/superpowers/{specs/2026-06-28-firecracker-microvm-slice4a-egress-transport-design.md,plans/2026-06-28-firecracker-microvm-slice4a-egress-transport.md}`.
+    [ ] **SLICE 4b (next) — first real net worker in a VM:** web-fetch micro-VM rootfs + CA-cert-into-guest (reuse slice-3 RO-share) +
+    `KASTELLAN_WEB_FETCH_USE_MICROVM` opt-in + full DGX e2e (in-VM web-fetch reaches an allowlisted host through the real egress proxy).
+    [ ] **SLICE 5:** jailer hardening (chroot/cgroup/uid-drop) + long-lived/channel workers in a VM.
   - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
     (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate
