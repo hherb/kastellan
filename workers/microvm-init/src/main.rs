@@ -207,6 +207,33 @@ fn vsock_listen_cid_port() -> (u32, u32) {
 #[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
 
+/// How a RO-share bind target must be prepared before `MS_BIND`, decided purely
+/// from the source's kind (probed at `/ro-share{target}`) so it is unit-testable
+/// without root or real mounts.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+enum BindPrep {
+    /// Source is a directory: create the target dir, then bind (slice-3 default).
+    Dir,
+    /// Source is a regular file (e.g. the per-instance `ca.pem`): create the
+    /// target's PARENT dir + an empty target file, then bind. A file bind needs
+    /// an existing regular-file target.
+    File,
+    /// Source missing or neither file nor dir: skip the bind.
+    Skip,
+}
+
+#[allow(dead_code)]
+fn bind_prep(src_is_dir: bool, src_is_file: bool) -> BindPrep {
+    if src_is_dir {
+        BindPrep::Dir
+    } else if src_is_file {
+        BindPrep::File
+    } else {
+        BindPrep::Skip
+    }
+}
+
 /// Apply the host-dir-share mounts (slice 3). RO drive → /ro-share, then each
 /// fs_read root bind-mounted to its absolute path (tmpfs-anchored so mkdir works
 /// on the read-only root); RW drive → its mountpoint. Best-effort per mount: a
@@ -270,14 +297,42 @@ fn apply_host_mounts(m: &MountManifest) {
         if mount(&ro.dev, "/ro-share", Some("ext4"), libc::MS_RDONLY) {
             for t in &ro.targets {
                 let from = format!("/ro-share{t}");
-                if std::fs::create_dir_all(t).is_ok() {
-                    // A bind does NOT inherit a per-mount RO flag, but it is a
-                    // second view of the /ro-share ext4 mounted MS_RDONLY at the
-                    // SUPERBLOCK level above, so writes through this path are
-                    // refused by the read-only superblock. The image is also
-                    // ephemeral with no host write-back. Hence MS_BIND alone is
-                    // a genuinely read-only exposure here.
-                    mount(&from, t, None, libc::MS_BIND);
+                // Probe the source kind on the mounted RO image (symlink_metadata
+                // does not follow links — the staged tree is symlink-free).
+                let (is_dir, is_file) = std::fs::symlink_metadata(&from)
+                    .map(|m| (m.is_dir(), m.is_file()))
+                    .unwrap_or((false, false));
+                match bind_prep(is_dir, is_file) {
+                    BindPrep::Dir => {
+                        // Directory share (slice-3 fs_read root): create the target
+                        // dir, then bind. MS_BIND alone is read-only here because the
+                        // /ro-share superblock above is MS_RDONLY + the image is
+                        // ephemeral with no host write-back.
+                        if std::fs::create_dir_all(t).is_ok() {
+                            mount(&from, t, None, libc::MS_BIND);
+                        }
+                    }
+                    BindPrep::File => {
+                        // Single-file share (the per-instance egress CA): a file bind
+                        // needs an existing regular-file target. Make the parent
+                        // writable (it may live in the /tmp scratch tmpfs) + touch
+                        // the target, then bind. Best-effort: never abort PID1.
+                        if let Some(parent) = std::path::Path::new(t).parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if std::fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(false)
+                            .open(t)
+                            .is_ok()
+                        {
+                            mount(&from, t, None, libc::MS_BIND);
+                        }
+                    }
+                    BindPrep::Skip => {
+                        eprintln!("microvm-init: RO source {from} missing; skipping bind of {t}");
+                    }
                 }
             }
         }
@@ -753,5 +808,21 @@ mod tests {
             parse_egress_config("kastellan.egress=1 kastellan.egress.selftest=1"),
             EgressConfig { enabled: true, selftest: true }
         );
+    }
+
+    #[test]
+    fn bind_prep_directory_source() {
+        assert_eq!(super::bind_prep(true, false), super::BindPrep::Dir);
+    }
+
+    #[test]
+    fn bind_prep_file_source() {
+        assert_eq!(super::bind_prep(false, true), super::BindPrep::File);
+    }
+
+    #[test]
+    fn bind_prep_missing_source_skips() {
+        // Neither dir nor file (missing / socket / fifo) → skip the bind entirely.
+        assert_eq!(super::bind_prep(false, false), super::BindPrep::Skip);
     }
 }
