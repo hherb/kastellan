@@ -415,7 +415,7 @@ items unlock later ones.
     delivered over the reverse channel); sandbox lib 89/0, microvm-init 11/0, microvm-run 10/0, slice-1/2/3 e2e no-regression, 0 orphan run-dirs,
     clippy clean. opus final review: READY TO MERGE; 2 Important PID1-robustness findings fixed in-branch (`695a1d5`). Spec/plan:
     `docs/superpowers/{specs/2026-06-28-firecracker-microvm-slice4a-egress-transport-design.md,plans/2026-06-28-firecracker-microvm-slice4a-egress-transport.md}`.
-    [x] **SLICE 4b — first real net worker in a VM: web-fetch (2026-06-28, branch `feat/firecracker-microvm-slice4b-web-fetch`, PR pending).**
+    [x] **SLICE 4b — first real net worker in a VM: web-fetch (2026-06-28, branch `feat/firecracker-microvm-slice4b-web-fetch`, PR [#375](https://github.com/hherb/kastellan/pull/375)).**
     web-fetch runs in a VM reaching the egress proxy over the 4a channel, opt-in `KASTELLAN_WEB_FETCH_USE_MICROVM=1`, unchanged worker code.
     Per-worker rootfs filename (`KASTELLAN_MICROVM_ROOTFS`, default python-exec.ext4; web-fetch=`web-fetch.ext4`); file-aware guest RO bind delivers the
     per-instance proxy `ca.pem` in-guest (worker `make_get` fails closed without it); `kastellan.worker=<hex>` cmdline token forwards the exec path
