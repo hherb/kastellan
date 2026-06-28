@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use crate::{Net, SandboxError, SandboxPolicy};
-use super::mounts::{encode_mount_manifest, reserved_top_level, RoShare, RwScratch};
+use super::mounts::{encode_mount_manifest, non_anchor_top_level, RoShare, RwScratch};
 
 /// Where the guest kernel + rootfs live on the host. Defaulted from
 /// constants; the `container_image` tag will later select per-worker rootfs.
@@ -168,11 +168,20 @@ pub fn build_launch_plan(
     // Slice 3: derive host-dir-sharing drives from the policy. Device nodes are
     // assigned RO-before-RW starting at /dev/vdb (vda is the rootfs); the config
     // drive order in render_firecracker_config MUST match (pinned by a test).
+    //
+    // Every share path's top-level must be a rootfs anchor the guest init can
+    // tmpfs-mount (see `non_anchor_top_level`). This is an allowlist, not just a
+    // system-dir blocklist: a path under e.g. /home or /var would pass an old
+    // "reject /usr|/etc" check but then SILENTLY fail to mount in-guest (the
+    // anchor dir doesn't exist on the read-only rootfs). Reject it here so the
+    // worker never believes it has access to a directory the guest cannot expose.
+    const ANCHOR_HINT: &str = "allowed share anchors: /opt /data /srv /mnt /work /tmp";
     for p in &policy.fs_read {
-        if let Some(sys) = reserved_top_level(p) {
+        if let Some(top) = non_anchor_top_level(p) {
             return Err(SandboxError::Backend(format!(
-                "fs_read path {p:?} is under reserved rootfs system dir /{sys}: the micro-VM \
-                 backend cannot anchor a tmpfs there without hiding the worker's own files"
+                "fs_read path {p:?} has top-level /{top}, which is not a micro-VM share anchor \
+                 ({ANCHOR_HINT}): the guest cannot mount it on the read-only rootfs — place the \
+                 shared dir under one of those anchors"
             )));
         }
     }
@@ -182,6 +191,15 @@ pub fn build_launch_plan(
              paths",
             policy.fs_write.len()
         )));
+    }
+    if let Some(mp) = policy.fs_write.first() {
+        if let Some(top) = non_anchor_top_level(mp) {
+            return Err(SandboxError::Backend(format!(
+                "fs_write path {mp:?} has top-level /{top}, which is not a micro-VM share anchor \
+                 ({ANCHOR_HINT}): the guest cannot mount the scratch drive on the read-only \
+                 rootfs — place the writable mountpoint under one of those anchors"
+            )));
+        }
     }
     let mut next_letter = b'b';
     let ro_share = if policy.fs_read.is_empty() {
@@ -532,7 +550,30 @@ mod tests {
         // Mounting a tmpfs anchor over /usr would hide the worker's own files.
         let policy = SandboxPolicy { fs_read: vec![PathBuf::from("/usr/lib/foo")], ..Default::default() };
         let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
-        assert!(format!("{err}").contains("system dir") || format!("{err}").contains("/usr"));
+        assert!(format!("{err}").contains("share anchor") && format!("{err}").contains("/usr"));
+    }
+
+    #[test]
+    fn fs_read_under_non_anchor_top_level_fails_closed() {
+        // /home and /var are not system dirs, but the rootfs has no anchor for
+        // them — an old "reject /usr|/etc" blocklist would have let these through
+        // and they'd silently fail to mount in-guest. The allowlist rejects them.
+        for p in ["/home/user/data", "/var/lib/models"] {
+            let policy = SandboxPolicy { fs_read: vec![PathBuf::from(p)], ..Default::default() };
+            let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+            assert!(
+                format!("{err}").contains("share anchor"),
+                "non-anchor fs_read {p} must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn fs_write_under_non_anchor_top_level_fails_closed() {
+        let policy =
+            SandboxPolicy { fs_write: vec![PathBuf::from("/home/user/scratch")], ..Default::default() };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(format!("{err}").contains("share anchor"), "non-anchor fs_write must be rejected: {err}");
     }
 
     #[test]

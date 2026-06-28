@@ -179,9 +179,24 @@ fn apply_host_mounts(m: &MountManifest) {
     use std::collections::BTreeSet;
 
     fn mount(src: &str, target: &str, fstype: Option<&str>, flags: libc::c_ulong) -> bool {
-        let csrc = std::ffi::CString::new(src).unwrap();
-        let ctarget = std::ffi::CString::new(target).unwrap();
-        let fst = fstype.map(|f| std::ffi::CString::new(f).unwrap());
+        // Build the C strings without unwrap: an interior NUL must be skipped, not
+        // a panic. PID1 panicking would kill the whole guest — this path is
+        // contractually best-effort (a bad mount just leaves the worker without
+        // that path), so a NUL-bearing src/target/fstype is logged and skipped.
+        let (csrc, ctarget) = match (std::ffi::CString::new(src), std::ffi::CString::new(target)) {
+            (Ok(s), Ok(t)) => (s, t),
+            _ => {
+                eprintln!("microvm-init: mount {target} skipped (path contains an interior NUL)");
+                return false;
+            }
+        };
+        let fst = match fstype.map(std::ffi::CString::new).transpose() {
+            Ok(f) => f,
+            Err(_) => {
+                eprintln!("microvm-init: mount {target} skipped (fstype contains an interior NUL)");
+                return false;
+            }
+        };
         let fst_ptr = fst.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
         let rc = unsafe {
             libc::mount(csrc.as_ptr(), ctarget.as_ptr(), fst_ptr, flags, std::ptr::null())

@@ -392,7 +392,9 @@ items unlock later ones.
     Spec/plan: `docs/superpowers/{specs,plans}/2026-06-27-firecracker-microvm-slice2-warm-idle*`.
     [x] **SLICE 3 — host-dir sharing (2026-06-28, PR pending).** Per-spawn **read-only ext4** drive built from `policy.fs_read`
     (`mkfs.ext4 -d`, non-root) exposed in-guest at original absolute paths via in-init bind-mounts (tmpfs-anchored so mkdir works
-    on the RO root; `fs_read` under a rootfs system dir `/usr|/bin|/lib|/etc` fails closed) + a disjoint **writable disk-backed
+    on the RO root; `fs_read`/`fs_write` top-level must be an allowlisted share anchor `{opt,data,srv,mnt,work,tmp}` — any other,
+    incl. system dirs `/usr|/etc` AND unanchored dirs like `/home|/var`, fails closed up front so a share never silently mis-mounts
+    [PR #371 post-review fix]) + a disjoint **writable disk-backed
     scratch** drive from `policy.fs_write` (blank ext4, ephemeral, NO host write-back; default 64 MiB, `KASTELLAN_MICROVM_SCRATCH_MIB`).
     Mount plan rides a hex `kastellan.mounts=` cmdline token (sandbox `mounts.rs` encoder ↔ `microvm-init` decoder, no shared dep,
     roundtrip-fixture-pinned). New `sandbox/src/linux_firecracker/{mounts.rs,images.rs}`; `probe` gains `mkfs.ext4`. No overlayfs/no

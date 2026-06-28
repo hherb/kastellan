@@ -24,19 +24,34 @@ pub struct RwScratch {
     pub guest_dev: String,
 }
 
-/// Reserved rootfs top-level dirs an `fs_read` path may not live under: mounting
-/// a tmpfs anchor over one of these would shadow the worker's own files. Returns
-/// the offending first component if reserved, else `None`.
-pub fn reserved_top_level(path: &std::path::Path) -> Option<&str> {
-    const RESERVED: &[&str] =
-        &["usr", "bin", "lib", "lib64", "etc", "sbin", "proc", "sys", "dev", "boot", "root"];
+/// Top-level rootfs dirs an `fs_read`/`fs_write` path may be anchored under in
+/// the micro-VM. These are exactly the empty anchor dirs `build-rootfs.sh`
+/// pre-creates (the guest init tmpfs-mounts the anchor so a bind/mount target is
+/// creatable on the otherwise read-only root), plus `/tmp` (already a tmpfs the
+/// init mounts at boot). A share under any other top-level cannot be mounted
+/// in-guest — the anchor dir does not exist on the read-only rootfs, so the
+/// tmpfs and the bind both fail — so such paths must be rejected up front in
+/// `build_launch_plan` rather than silently failing to appear inside the guest.
+/// Keep this list in lockstep with `build-rootfs.sh`'s anchor `mkdir`.
+const SHARE_ANCHORS: &[&str] = &["opt", "data", "srv", "mnt", "work", "tmp"];
+
+/// Returns the offending first path component when `path`'s top-level is not a
+/// permitted share anchor (see [`SHARE_ANCHORS`]); `None` when it is anchorable.
+/// This is an *allowlist*: it rejects not only rootfs system dirs (`/usr`,
+/// `/etc`, …) but any top-level (e.g. `/home`, `/var`) the rootfs has no anchor
+/// for, since those would silently fail to mount inside the guest.
+pub fn non_anchor_top_level(path: &std::path::Path) -> Option<&str> {
     let first = path
         .components()
         .find_map(|c| match c {
             std::path::Component::Normal(s) => s.to_str(),
             _ => None,
         })?;
-    RESERVED.iter().copied().find(|&r| r == first)
+    if SHARE_ANCHORS.contains(&first) {
+        None
+    } else {
+        Some(first)
+    }
 }
 
 /// Cmdline token key carrying the hex-encoded mount manifest (slice 3). The guest
@@ -93,12 +108,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reserved_top_level_flags_system_dirs_only() {
+    fn non_anchor_top_level_allowlists_share_anchors() {
         use std::path::Path;
-        assert_eq!(reserved_top_level(Path::new("/usr/lib/foo")), Some("usr"));
-        assert_eq!(reserved_top_level(Path::new("/etc/passwd")), Some("etc"));
-        assert_eq!(reserved_top_level(Path::new("/opt/venv")), None);
-        assert_eq!(reserved_top_level(Path::new("/data/x")), None);
+        // Rootfs system dirs are rejected (offending component returned).
+        assert_eq!(non_anchor_top_level(Path::new("/usr/lib/foo")), Some("usr"));
+        assert_eq!(non_anchor_top_level(Path::new("/etc/passwd")), Some("etc"));
+        // Non-system dirs the rootfs has no anchor for are ALSO rejected — they
+        // would silently fail to mount in-guest (the bug the allowlist closes).
+        assert_eq!(non_anchor_top_level(Path::new("/home/user/x")), Some("home"));
+        assert_eq!(non_anchor_top_level(Path::new("/var/lib/x")), Some("var"));
+        // The pre-created share anchors (+ /tmp) are accepted.
+        assert_eq!(non_anchor_top_level(Path::new("/opt/venv")), None);
+        assert_eq!(non_anchor_top_level(Path::new("/data/x")), None);
+        assert_eq!(non_anchor_top_level(Path::new("/work/scratch")), None);
+        assert_eq!(non_anchor_top_level(Path::new("/tmp/x")), None);
     }
 
     #[test]

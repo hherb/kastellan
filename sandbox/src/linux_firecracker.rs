@@ -16,7 +16,7 @@ pub use plan::{
 };
 
 mod mounts;
-pub use mounts::{encode_mount_manifest, reserved_top_level, RoShare, RwScratch};
+pub use mounts::{encode_mount_manifest, non_anchor_top_level, RoShare, RwScratch};
 
 mod images;
 pub use images::{build_share_images, RW_SCRATCH_MIB_DEFAULT};
