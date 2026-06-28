@@ -101,6 +101,46 @@ fn parse_worker_cmdline(cmdline: &str) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// Cmdline token carrying the host-forwarded worker argv (#374). Each arg is
+/// hex-encoded independently and the list joined with ','. Must stay in sync
+/// with `kastellan-sandbox::linux_firecracker::plan`'s WORKER_ARGS_CMDLINE_KEY.
+#[allow(dead_code)]
+const WORKER_ARGS_CMDLINE_KEY: &str = "kastellan.worker.args";
+
+/// Parse the host-forwarded worker argv out of the kernel cmdline (#374). The
+/// token is `<hex0>,<hex1>,…`, each component the hex of one argv entry (the
+/// ',' separator can never collide with the hex alphabet `[0-9a-f]`).
+///
+/// Fail-safe AND all-or-nothing: a missing token yields an empty `Vec` (no extra
+/// args — the common `lockdown_shim:None` case). A token that is present but has
+/// ANY malformed component (bad hex or non-UTF-8) also yields empty rather than a
+/// partial list — a positionally-shifted argv would misfeed the lockdown-exec
+/// shim (which reads its target from argv[1]), so dropping the whole list and
+/// running the program bare is the safe degradation. Pure.
+#[allow(dead_code)]
+fn parse_worker_args_cmdline(cmdline: &str) -> Vec<String> {
+    let prefix = format!("{WORKER_ARGS_CMDLINE_KEY}=");
+    let Some(token) = cmdline.split_whitespace().find_map(|t| t.strip_prefix(&prefix)) else {
+        return Vec::new();
+    };
+    // An empty token means no args were forwarded (the host emits no token at all
+    // for empty argv, so this only guards a hand-crafted cmdline).
+    if token.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for part in token.split(',') {
+        let Some(bytes) = hex_decode(part) else {
+            return Vec::new();
+        };
+        let Ok(s) = String::from_utf8(bytes) else {
+            return Vec::new();
+        };
+        out.push(s);
+    }
+    out
+}
+
 /// Cmdline token carrying the hex-encoded mount manifest (slice 3). Must stay in
 /// sync with `kastellan-sandbox::linux_firecracker::plan::MOUNTS_CMDLINE_KEY`.
 #[allow(dead_code)]
@@ -664,6 +704,33 @@ fn exec_worker() {
         Ok(c) => c,
         Err(_) => CString::new("/usr/local/bin/kastellan-worker-python-exec").unwrap(),
     };
+    // Forwarded worker argv (#374). Empty for every worker with
+    // `lockdown_shim: None` (today: all of them) — exec runs `prog` bare,
+    // byte-identical to slice 4b. A shimmed worker carries [target_binary, …],
+    // which the lockdown-exec shim reads from argv[1]. All-or-nothing decode
+    // (see parse_worker_args_cmdline): any interior NUL drops the WHOLE arg list
+    // and runs `prog` bare rather than feeding the shim a positionally-shifted
+    // argv — never aborts PID1.
+    let arg_cstrings: Vec<CString> = {
+        let raw = parse_worker_args_cmdline(&cmdline);
+        let mut built = Vec::with_capacity(raw.len());
+        let mut ok = true;
+        for a in raw {
+            match CString::new(a) {
+                Ok(c) => built.push(c),
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            built
+        } else {
+            eprintln!("microvm-init: worker arg contained an interior NUL; running with no args");
+            Vec::new()
+        }
+    };
     #[allow(deprecated)]
     unsafe {
         // Baked python interpreter default (harmless for non-python workers,
@@ -673,7 +740,14 @@ fn exec_worker() {
             std::env::set_var(k, v);
         }
     }
-    let argv = [prog.as_ptr(), std::ptr::null()];
+    // execv argv = [program, args…, NULL]. argv[0] is the program itself by
+    // convention; for a shimmed worker that's the shim path, args[0] the target.
+    let mut argv: Vec<*const libc::c_char> = Vec::with_capacity(arg_cstrings.len() + 2);
+    argv.push(prog.as_ptr());
+    for c in &arg_cstrings {
+        argv.push(c.as_ptr());
+    }
+    argv.push(std::ptr::null());
     unsafe {
         libc::execv(prog.as_ptr(), argv.as_ptr());
     }
@@ -747,6 +821,36 @@ mod tests {
     fn parse_worker_cmdline_missing_or_bad_is_none() {
         assert_eq!(super::parse_worker_cmdline("console=ttyS0 panic=1"), None);
         assert_eq!(super::parse_worker_cmdline("kastellan.worker=zz"), None); // bad hex
+    }
+
+    #[test]
+    fn parse_worker_args_cmdline_decodes_fixture() {
+        // Cross-crate sync guard: `kastellan-sandbox`'s encode_worker_args_cmdline
+        // emits this exact token for args ["/bin/x", "y"] — each arg hex-encoded
+        // independently, joined with ','. Keep this fixture identical in both
+        // crates' tests. "/bin/x" = 2f62696e2f78, "y" = 79.
+        let cmdline = "console=ttyS0 kastellan.worker.args=2f62696e2f78,79 panic=1";
+        assert_eq!(
+            super::parse_worker_args_cmdline(cmdline),
+            vec!["/bin/x".to_string(), "y".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_worker_args_cmdline_missing_token_is_empty() {
+        // No token → no extra args (the common case: every lockdown_shim:None
+        // worker forwards just `program`).
+        assert!(super::parse_worker_args_cmdline("console=ttyS0 panic=1").is_empty());
+    }
+
+    #[test]
+    fn parse_worker_args_cmdline_malformed_is_empty() {
+        // Any malformed component fails the WHOLE list closed (never a partial,
+        // positionally-shifted argv that would misfeed the lockdown-exec shim).
+        assert!(super::parse_worker_args_cmdline("kastellan.worker.args=zz").is_empty());
+        assert!(super::parse_worker_args_cmdline("kastellan.worker.args=2f62,zz").is_empty());
+        // An empty token decodes to no args (treated as "no extra args").
+        assert!(super::parse_worker_args_cmdline("kastellan.worker.args=").is_empty());
     }
 
     #[test]

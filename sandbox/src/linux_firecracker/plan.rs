@@ -87,6 +87,13 @@ const ENV_CMDLINE_KEY: &str = "kastellan.env";
 /// `kastellan-microvm-init`'s WORKER_CMDLINE_KEY.
 const WORKER_CMDLINE_KEY: &str = "kastellan.worker";
 
+/// Cmdline token carrying the hex-encoded worker argv (#374). Each arg is
+/// hex-encoded independently and the list joined with ','. Kept in sync with
+/// `kastellan-microvm-init`'s WORKER_ARGS_CMDLINE_KEY. Separate from
+/// [`WORKER_CMDLINE_KEY`] (which carries argv[0]/the program) so the no-args
+/// cmdline stays byte-identical to the pre-#374 baseline.
+const WORKER_ARGS_CMDLINE_KEY: &str = "kastellan.worker.args";
+
 /// Conservative ceiling for the whole kernel cmdline (base args + the env
 /// token). Well under arm64's 2048-byte `COMMAND_LINE_SIZE`; the slice-1 env is
 /// ~3 small vars (~120 hex chars), so this only ever trips on a pathological
@@ -151,13 +158,34 @@ pub fn encode_env_cmdline(env: &[(String, String)]) -> Result<Option<String>, Sa
     )))
 }
 
+/// Encode the worker argv as the ` kastellan.worker.args=<hex0>,<hex1>,…`
+/// cmdline suffix (#374).
+///
+/// Each arg is hex-encoded independently so it may contain ANY byte (paths,
+/// flags) — the ',' separator can never collide with the hex alphabet
+/// `[0-9a-f]`, and per-arg hex needs no fail-closed delimiter check (unlike the
+/// `\n`-joined env block in [`encode_env_cmdline`]). Returns `None` for an empty
+/// argv so the no-args cmdline is byte-identical to the pre-#374 baseline (every
+/// current FC worker has `lockdown_shim: None` ⇒ empty args).
+fn encode_worker_args_cmdline(args: &[&str]) -> Option<String> {
+    if args.is_empty() {
+        return None;
+    }
+    let joined = args
+        .iter()
+        .map(|a| hex_encode(a.as_bytes()))
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!(" {WORKER_ARGS_CMDLINE_KEY}={joined}"))
+}
+
 /// Translate a policy into a launch plan. Pure + fallible (rejects relative
 /// FS paths, matching bwrap).
 pub fn build_launch_plan(
     policy: &SandboxPolicy,
     image: &FirecrackerImage,
     program: &str,
-    _args: &[&str],
+    args: &[&str],
 ) -> Result<FirecrackerLaunchPlan, SandboxError> {
     for p in policy.fs_read.iter().chain(policy.fs_write.iter()) {
         if !p.is_absolute() {
@@ -289,6 +317,13 @@ pub fn build_launch_plan(
     // (slice 4b: python-exec and web-fetch share one init). Hex-encoded so any
     // absolute path is cmdline-safe, mirroring the #360 env token.
     boot_args.push_str(&format!(" {WORKER_CMDLINE_KEY}={}", hex_encode(program.as_bytes())));
+    // Forward the worker argv too (#374). Empty for every worker with
+    // `lockdown_shim: None` (no token emitted ⇒ baseline unchanged); a shimmed
+    // worker carries [target_binary, …] so the guest init can build the full
+    // execv argv and the lockdown-exec shim finds its target in argv[1].
+    if let Some(suffix) = encode_worker_args_cmdline(args) {
+        boot_args.push_str(&suffix);
+    }
     if boot_args.len() > MAX_CMDLINE_BYTES {
         return Err(SandboxError::Backend(format!(
             "kernel cmdline {} bytes exceeds {MAX_CMDLINE_BYTES}-byte cap \
@@ -582,6 +617,55 @@ mod tests {
         assert!(
             plan.boot_args.contains(&format!(" kastellan.worker={hex}")),
             "boot_args missing worker token: {}",
+            plan.boot_args
+        );
+    }
+
+    #[test]
+    fn encode_worker_args_cmdline_empty_is_none() {
+        // No args (every current FC worker has lockdown_shim:None) → no token, so
+        // the cmdline stays byte-identical to the pre-#374 baseline.
+        assert_eq!(super::encode_worker_args_cmdline(&[]), None);
+    }
+
+    #[test]
+    fn encode_worker_args_cmdline_roundtrip_fixture() {
+        // Cross-crate sync guard: `kastellan-microvm-init`'s
+        // parse_worker_args_cmdline_decodes_fixture decodes this exact token.
+        // Keep this fixture identical in both crates' tests. Each arg is
+        // hex-encoded independently, joined with ','. "/bin/x" = 2f62696e2f78,
+        // "y" = 79.
+        assert_eq!(
+            super::encode_worker_args_cmdline(&["/bin/x", "y"]).unwrap(),
+            " kastellan.worker.args=2f62696e2f78,79"
+        );
+    }
+
+    #[test]
+    fn build_launch_plan_forwards_worker_args() {
+        // A shimmed worker (lockdown_shim:Some) carries the real binary as
+        // args[0]; the guest must receive it so the shim knows what to execve.
+        let policy = SandboxPolicy::default();
+        let plan = build_launch_plan(&policy, &img(), "/shim", &["/real-worker", "--x"]).unwrap();
+        let expected = format!(
+            " kastellan.worker.args={},{}",
+            super::hex_encode(b"/real-worker"),
+            super::hex_encode(b"--x")
+        );
+        assert!(
+            plan.boot_args.contains(&expected),
+            "boot_args missing worker.args token: {}",
+            plan.boot_args
+        );
+    }
+
+    #[test]
+    fn build_launch_plan_omits_args_token_when_empty() {
+        // The no-args path (every current FC worker) emits no args token.
+        let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
+        assert!(
+            !plan.boot_args.contains("kastellan.worker.args"),
+            "no args token when argv is empty: {}",
             plan.boot_args
         );
     }
