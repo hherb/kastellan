@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use crate::{Net, SandboxError, SandboxPolicy};
+use super::mounts::{encode_mount_manifest, non_anchor_top_level, RoShare, RwScratch};
 
 /// Where the guest kernel + rootfs live on the host. Defaulted from
 /// constants; the `container_image` tag will later select per-worker rootfs.
@@ -32,6 +33,15 @@ pub struct FirecrackerLaunchPlan {
     /// load-bearing copy the guest init actually decodes.
     pub env: Vec<(String, String)>,
     pub net_enabled: bool,
+    /// Read-only host-dir share, derived from `policy.fs_read`. `None` if empty.
+    pub ro_share: Option<RoShare>,
+    /// Writable scratch drive, derived from `policy.fs_write`. `None` if empty.
+    pub rw_scratch: Option<RwScratch>,
+    /// Host path of the built RO ext4. Placeholder until the spawn sets the
+    /// run-dir path (mirrors `vsock_uds`); `Some` iff `ro_share` is `Some`.
+    pub ro_image_path: Option<std::path::PathBuf>,
+    /// Host path of the built RW ext4. `Some` iff `rw_scratch` is `Some`.
+    pub rw_image_path: Option<std::path::PathBuf>,
 }
 
 /// Placeholder guest CID baked into a freshly-built plan. CIDs 0–2 are reserved
@@ -65,7 +75,7 @@ const MAX_CMDLINE_BYTES: usize = 1024;
 /// Lowercase-hex encode (`[0-9a-f]`, two chars/byte). Hand-rolled so the crate
 /// takes no codec dependency; the guest's decoder in `kastellan-microvm-init`
 /// mirrors this exact scheme (roundtrip-pinned in both crates' unit tests).
-fn hex_encode(bytes: &[u8]) -> String {
+pub(super) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
@@ -155,21 +165,79 @@ pub fn build_launch_plan(
         .unwrap_or_else(|| std::path::Path::new("/tmp"))
         .join("worker-vsock.sock");
 
+    // Slice 3: derive host-dir-sharing drives from the policy. Device nodes are
+    // assigned RO-before-RW starting at /dev/vdb (vda is the rootfs); the config
+    // drive order in render_firecracker_config MUST match (pinned by a test).
+    //
+    // Every share path's top-level must be a rootfs anchor the guest init can
+    // tmpfs-mount (see `non_anchor_top_level`). This is an allowlist, not just a
+    // system-dir blocklist: a path under e.g. /home or /var would pass an old
+    // "reject /usr|/etc" check but then SILENTLY fail to mount in-guest (the
+    // anchor dir doesn't exist on the read-only rootfs). Reject it here so the
+    // worker never believes it has access to a directory the guest cannot expose.
+    const ANCHOR_HINT: &str = "allowed share anchors: /opt /data /srv /mnt /work /tmp";
+    for p in &policy.fs_read {
+        if let Some(top) = non_anchor_top_level(p) {
+            return Err(SandboxError::Backend(format!(
+                "fs_read path {p:?} has top-level /{top}, which is not a micro-VM share anchor \
+                 ({ANCHOR_HINT}): the guest cannot mount it on the read-only rootfs — place the \
+                 shared dir under one of those anchors"
+            )));
+        }
+    }
+    if policy.fs_write.len() > 1 {
+        return Err(SandboxError::Backend(format!(
+            "micro-VM backend supports a single writable mountpoint per spawn, got {} fs_write \
+             paths",
+            policy.fs_write.len()
+        )));
+    }
+    if let Some(mp) = policy.fs_write.first() {
+        if let Some(top) = non_anchor_top_level(mp) {
+            return Err(SandboxError::Backend(format!(
+                "fs_write path {mp:?} has top-level /{top}, which is not a micro-VM share anchor \
+                 ({ANCHOR_HINT}): the guest cannot mount the scratch drive on the read-only \
+                 rootfs — place the writable mountpoint under one of those anchors"
+            )));
+        }
+    }
+    let mut next_letter = b'b';
+    let ro_share = if policy.fs_read.is_empty() {
+        None
+    } else {
+        let dev = format!("/dev/vd{}", next_letter as char);
+        next_letter += 1;
+        Some(RoShare { sources: policy.fs_read.clone(), guest_dev: dev })
+    };
+    let rw_scratch = policy.fs_write.first().map(|mp| RwScratch {
+        mountpoint: mp.clone(),
+        guest_dev: format!("/dev/vd{}", next_letter as char),
+    });
+
     // Forward policy.env into the guest via a hex cmdline token (#360). The
-    // guest init decodes it before exec'ing the worker. Fail closed if the
-    // cmdline would exceed the kernel's COMMAND_LINE_SIZE — a truncated cmdline
-    // would silently corrupt the boot, never acceptable for a security boundary.
+    // guest init decodes it before exec'ing the worker. Then append the mounts
+    // token (slice 3). Fail closed if the combined cmdline would exceed the
+    // kernel's COMMAND_LINE_SIZE — a truncated cmdline would silently corrupt
+    // the boot, never acceptable for a security boundary.
     let mut boot_args = BASE_BOOT_ARGS.to_string();
     if let Some(suffix) = encode_env_cmdline(&policy.env)? {
+        boot_args.push_str(&suffix);
+    }
+    if let Some(suffix) = encode_mount_manifest(ro_share.as_ref(), rw_scratch.as_ref())? {
         boot_args.push_str(&suffix);
     }
     if boot_args.len() > MAX_CMDLINE_BYTES {
         return Err(SandboxError::Backend(format!(
             "kernel cmdline {} bytes exceeds {MAX_CMDLINE_BYTES}-byte cap \
-             (worker env too large to forward)",
+             (worker env + mount manifest too large to forward)",
             boot_args.len()
         )));
     }
+    // Placeholder image paths next to the rootfs (overridden per-spawn, like
+    // vsock_uds). Present iff the corresponding share is present.
+    let image_dir = image.rootfs_path.parent().unwrap_or_else(|| std::path::Path::new("/tmp"));
+    let ro_image_path = ro_share.as_ref().map(|_| image_dir.join("ro-share.ext4"));
+    let rw_image_path = rw_scratch.as_ref().map(|_| image_dir.join("rw-scratch.ext4"));
 
     Ok(FirecrackerLaunchPlan {
         kernel_path: image.kernel_path.clone(),
@@ -182,6 +250,10 @@ pub fn build_launch_plan(
         boot_args,
         env: policy.env.clone(),
         net_enabled,
+        ro_share,
+        rw_scratch,
+        ro_image_path,
+        rw_image_path,
     })
 }
 
@@ -219,6 +291,28 @@ pub fn render_firecracker_config(plan: &FirecrackerLaunchPlan) -> Value {
             "uds_path": plan.vsock_uds.to_string_lossy(),
         },
     });
+    // Slice 3: attach the host-dir-share drives in the fixed order RO → RW, which
+    // MUST agree with the /dev/vdb,/dev/vdc device nodes build_launch_plan
+    // assigned (the guest init mounts by those nodes). `*_image_path` is `Some`
+    // iff the corresponding share is present (set together in build_launch_plan,
+    // overridden to the run-dir path by build_share_images); path_on_host is the
+    // per-spawn image (a placeholder here in unit tests).
+    if let Some(img) = &plan.ro_image_path {
+        cfg["drives"].as_array_mut().unwrap().push(json!({
+            "drive_id": "ro-share",
+            "path_on_host": img.to_string_lossy(),
+            "is_root_device": false,
+            "is_read_only": true,
+        }));
+    }
+    if let Some(img) = &plan.rw_image_path {
+        cfg["drives"].as_array_mut().unwrap().push(json!({
+            "drive_id": "rw-scratch",
+            "path_on_host": img.to_string_lossy(),
+            "is_root_device": false,
+            "is_read_only": false,
+        }));
+    }
     if plan.net_enabled {
         // Slice 4 fills this in; slice 1 only reaches here for net workers,
         // which are out of scope, so leave a deterministic empty marker.
@@ -402,5 +496,153 @@ mod tests {
         assert_eq!(build_launch_plan(&p_none, &img(), "/w", &[]).unwrap().vcpu_count, 1);
         let p_250 = SandboxPolicy { cpu_quota_pct: Some(250), ..Default::default() };
         assert_eq!(build_launch_plan(&p_250, &img(), "/w", &[]).unwrap().vcpu_count, 3);
+    }
+
+    #[test]
+    fn fs_read_derives_ro_share_with_device_node() {
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv"), PathBuf::from("/data/models")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        let ro = plan.ro_share.expect("ro_share derived from fs_read");
+        assert_eq!(ro.sources, vec![PathBuf::from("/opt/venv"), PathBuf::from("/data/models")]);
+        assert_eq!(ro.guest_dev, "/dev/vdb", "RO share is the first extra drive");
+        // Placeholder image path present so render attaches the drive; spawn overrides it.
+        assert!(plan.ro_image_path.is_some());
+    }
+
+    #[test]
+    fn fs_write_derives_rw_scratch_after_ro() {
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv")],
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert_eq!(plan.ro_share.unwrap().guest_dev, "/dev/vdb");
+        let rw = plan.rw_scratch.expect("rw_scratch derived from fs_write");
+        assert_eq!(rw.mountpoint, PathBuf::from("/tmp/scratch"));
+        assert_eq!(rw.guest_dev, "/dev/vdc", "RW is the second extra drive when RO present");
+        assert!(plan.rw_image_path.is_some());
+    }
+
+    #[test]
+    fn rw_scratch_is_vdb_when_no_ro_share() {
+        let policy = SandboxPolicy {
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert!(plan.ro_share.is_none());
+        assert_eq!(plan.rw_scratch.unwrap().guest_dev, "/dev/vdb");
+    }
+
+    #[test]
+    fn empty_policy_has_no_extra_drives() {
+        let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
+        assert!(plan.ro_share.is_none() && plan.rw_scratch.is_none());
+        assert!(plan.ro_image_path.is_none() && plan.rw_image_path.is_none());
+    }
+
+    #[test]
+    fn fs_read_under_system_dir_fails_closed() {
+        // Mounting a tmpfs anchor over /usr would hide the worker's own files.
+        let policy = SandboxPolicy { fs_read: vec![PathBuf::from("/usr/lib/foo")], ..Default::default() };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(format!("{err}").contains("share anchor") && format!("{err}").contains("/usr"));
+    }
+
+    #[test]
+    fn fs_read_under_non_anchor_top_level_fails_closed() {
+        // /home and /var are not system dirs, but the rootfs has no anchor for
+        // them — an old "reject /usr|/etc" blocklist would have let these through
+        // and they'd silently fail to mount in-guest. The allowlist rejects them.
+        for p in ["/home/user/data", "/var/lib/models"] {
+            let policy = SandboxPolicy { fs_read: vec![PathBuf::from(p)], ..Default::default() };
+            let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+            assert!(
+                format!("{err}").contains("share anchor"),
+                "non-anchor fs_read {p} must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn fs_write_under_non_anchor_top_level_fails_closed() {
+        let policy =
+            SandboxPolicy { fs_write: vec![PathBuf::from("/home/user/scratch")], ..Default::default() };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(format!("{err}").contains("share anchor"), "non-anchor fs_write must be rejected: {err}");
+    }
+
+    #[test]
+    fn multiple_fs_write_fails_closed() {
+        let policy = SandboxPolicy {
+            fs_write: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            ..Default::default()
+        };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(format!("{err}").contains("single writable"));
+    }
+
+    #[test]
+    fn build_launch_plan_appends_mounts_token() {
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv")],
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert!(plan.boot_args.contains(" kastellan.mounts="), "mounts token in boot_args: {}", plan.boot_args);
+    }
+
+    #[test]
+    fn build_launch_plan_no_shares_omits_mounts_token() {
+        let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
+        assert!(!plan.boot_args.contains("kastellan.mounts"));
+    }
+
+    #[test]
+    fn config_attaches_ro_and_rw_drives_in_order() {
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv")],
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        let cfg = render_firecracker_config(&plan);
+        let drives = cfg["drives"].as_array().unwrap();
+        assert_eq!(drives.len(), 3, "rootfs + ro-share + rw-scratch");
+        assert_eq!(drives[0]["drive_id"], "rootfs");
+        assert_eq!(drives[1]["drive_id"], "ro-share");
+        assert_eq!(drives[1]["is_read_only"], true);
+        assert_eq!(drives[2]["drive_id"], "rw-scratch");
+        assert_eq!(drives[2]["is_read_only"], false);
+    }
+
+    #[test]
+    fn config_drive_order_matches_device_letters() {
+        // Pin the invariant: ro=vdb (drives[1]), rw=vdc (drives[2]). The guest relies
+        // on the manifest's device nodes, which this order must agree with.
+        let policy = SandboxPolicy {
+            fs_read: vec![PathBuf::from("/opt/venv")],
+            fs_write: vec![PathBuf::from("/tmp/scratch")],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert_eq!(plan.ro_share.as_ref().unwrap().guest_dev, "/dev/vdb");
+        assert_eq!(plan.rw_scratch.as_ref().unwrap().guest_dev, "/dev/vdc");
+        let cfg = render_firecracker_config(&plan);
+        // rootfs=vda (drives[0]), then ro (drives[1]) → vdb, rw (drives[2]) → vdc.
+        assert_eq!(cfg["drives"][1]["drive_id"], "ro-share");
+        assert_eq!(cfg["drives"][2]["drive_id"], "rw-scratch");
+    }
+
+    #[test]
+    fn config_no_extra_drives_when_no_shares() {
+        let plan = build_launch_plan(&SandboxPolicy::default(), &img(), "/w", &[]).unwrap();
+        let cfg = render_firecracker_config(&plan);
+        assert_eq!(cfg["drives"].as_array().unwrap().len(), 1, "only the rootfs drive");
     }
 }

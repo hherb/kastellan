@@ -85,8 +85,17 @@ copy_lib_closure \
 mkdir -p "$WORK$(dirname "$STDLIB")"
 cp -a "$STDLIB" "$WORK$STDLIB"
 
-# 3d. Pseudo-fs mountpoints (kastellan-microvm-init mounts proc/sys/tmp at boot).
-mkdir -p "$WORK/proc" "$WORK/sys" "$WORK/tmp" "$WORK/dev"
+# 3d. Pseudo-fs mountpoints (kastellan-microvm-init mounts proc/sys/tmp at boot)
+#     + slice-3 host-dir-share anchors: /ro-share holds the RO share mount; the
+#     others are empty anchors the init tmpfs-mounts so bind-mount targets can be
+#     mkdir'd on the otherwise read-only root. fs_read/fs_write paths MUST live
+#     under one of these anchors — build_launch_plan enforces this as an ALLOWLIST
+#     (mounts.rs::SHARE_ANCHORS = opt/data/srv/mnt/work/tmp), rejecting any other
+#     top-level (system dirs like /usr AND unanchored dirs like /home|/var) up
+#     front so a share never silently fails to mount in-guest. Keep the anchor
+#     mkdir list below in lockstep with SHARE_ANCHORS (/tmp is mounted at boot).
+mkdir -p "$WORK/proc" "$WORK/sys" "$WORK/tmp" "$WORK/dev" \
+         "$WORK/ro-share" "$WORK/opt" "$WORK/data" "$WORK/srv" "$WORK/mnt" "$WORK/work"
 
 # Build the image journal-less (`-O ^has_journal`). The backend attaches the
 # rootfs READ-ONLY (is_read_only:true) and every concurrent VM shares this one
