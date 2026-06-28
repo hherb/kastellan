@@ -115,10 +115,13 @@ async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::Pg
 /// The worker's make_get fails closed on an unreadable/invalid CA, so a parseable
 /// cert is required for it to build ProxyConnectGet and emit CONNECT at all.
 fn write_test_ca(path: &std::path::Path) {
-    use rcgen::{CertificateParams, KeyPair};
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     let key_pair = KeyPair::generate().expect("keypair");
-    let params =
+    let mut params =
         CertificateParams::new(vec!["egress-proxy.test".to_string()]).expect("params");
+    // Mint a proper CA (matches workers/egress-proxy/src/ca.rs) so the cert is a
+    // valid rustls/webpki trust anchor — a NoCa leaf is latent fragility there.
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     let cert = params.self_signed(&key_pair).expect("self-signed");
     std::fs::write(path, cert.pem()).expect("write ca.pem");
 }
