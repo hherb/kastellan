@@ -69,3 +69,8 @@ kastellan-worker-web-common = { path = "../workers/web-common", version = "0.1.0
 url = { workspace = true }
 
 tempfile = "3"
+
+# Slice 4b web-fetch-in-VM egress e2e: mint a self-signed CA fixture that the
+# in-guest worker trusts as KASTELLAN_EGRESS_PROXY_CA. Features match the
+# egress-proxy's rcgen pin (pem + ring) so the workspace lock stays unified.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }

@@ -83,6 +83,24 @@ fn parse_env_cmdline(cmdline: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Cmdline token carrying the hex-encoded worker program path to exec (slice 4b).
+/// Must stay in sync with `kastellan-sandbox::linux_firecracker::plan`'s
+/// WORKER_CMDLINE_KEY.
+#[allow(dead_code)]
+const WORKER_CMDLINE_KEY: &str = "kastellan.worker";
+
+/// Parse the host-forwarded worker program path out of the kernel cmdline
+/// (slice 4b). Fail-safe: a missing token, bad hex, non-UTF-8, or empty value
+/// all yield `None`, so `exec_worker` falls back to the baked path. Pure.
+#[allow(dead_code)]
+fn parse_worker_cmdline(cmdline: &str) -> Option<String> {
+    let prefix = format!("{WORKER_CMDLINE_KEY}=");
+    let token = cmdline.split_whitespace().find_map(|t| t.strip_prefix(&prefix))?;
+    let bytes = hex_decode(token)?;
+    let s = String::from_utf8(bytes).ok()?;
+    (!s.is_empty()).then_some(s)
+}
+
 /// Cmdline token carrying the hex-encoded mount manifest (slice 3). Must stay in
 /// sync with `kastellan-sandbox::linux_firecracker::plan::MOUNTS_CMDLINE_KEY`.
 #[allow(dead_code)]
@@ -207,6 +225,33 @@ fn vsock_listen_cid_port() -> (u32, u32) {
 #[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
 
+/// How a RO-share bind target must be prepared before `MS_BIND`, decided purely
+/// from the source's kind (probed at `/ro-share{target}`) so it is unit-testable
+/// without root or real mounts.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+enum BindPrep {
+    /// Source is a directory: create the target dir, then bind (slice-3 default).
+    Dir,
+    /// Source is a regular file (e.g. the per-instance `ca.pem`): create the
+    /// target's PARENT dir + an empty target file, then bind. A file bind needs
+    /// an existing regular-file target.
+    File,
+    /// Source missing or neither file nor dir: skip the bind.
+    Skip,
+}
+
+#[allow(dead_code)]
+fn bind_prep(src_is_dir: bool, src_is_file: bool) -> BindPrep {
+    if src_is_dir {
+        BindPrep::Dir
+    } else if src_is_file {
+        BindPrep::File
+    } else {
+        BindPrep::Skip
+    }
+}
+
 /// Apply the host-dir-share mounts (slice 3). RO drive → /ro-share, then each
 /// fs_read root bind-mounted to its absolute path (tmpfs-anchored so mkdir works
 /// on the read-only root); RW drive → its mountpoint. Best-effort per mount: a
@@ -270,14 +315,42 @@ fn apply_host_mounts(m: &MountManifest) {
         if mount(&ro.dev, "/ro-share", Some("ext4"), libc::MS_RDONLY) {
             for t in &ro.targets {
                 let from = format!("/ro-share{t}");
-                if std::fs::create_dir_all(t).is_ok() {
-                    // A bind does NOT inherit a per-mount RO flag, but it is a
-                    // second view of the /ro-share ext4 mounted MS_RDONLY at the
-                    // SUPERBLOCK level above, so writes through this path are
-                    // refused by the read-only superblock. The image is also
-                    // ephemeral with no host write-back. Hence MS_BIND alone is
-                    // a genuinely read-only exposure here.
-                    mount(&from, t, None, libc::MS_BIND);
+                // Probe the source kind on the mounted RO image (symlink_metadata
+                // does not follow links — the staged tree is symlink-free).
+                let (is_dir, is_file) = std::fs::symlink_metadata(&from)
+                    .map(|m| (m.is_dir(), m.is_file()))
+                    .unwrap_or((false, false));
+                match bind_prep(is_dir, is_file) {
+                    BindPrep::Dir => {
+                        // Directory share (slice-3 fs_read root): create the target
+                        // dir, then bind. MS_BIND alone is read-only here because the
+                        // /ro-share superblock above is MS_RDONLY + the image is
+                        // ephemeral with no host write-back.
+                        if std::fs::create_dir_all(t).is_ok() {
+                            mount(&from, t, None, libc::MS_BIND);
+                        }
+                    }
+                    BindPrep::File => {
+                        // Single-file share (the per-instance egress CA): a file bind
+                        // needs an existing regular-file target. Make the parent
+                        // writable (it may live in the /tmp scratch tmpfs) + touch
+                        // the target, then bind. Best-effort: never abort PID1.
+                        if let Some(parent) = std::path::Path::new(t).parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if std::fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(false)
+                            .open(t)
+                            .is_ok()
+                        {
+                            mount(&from, t, None, libc::MS_BIND);
+                        }
+                    }
+                    BindPrep::Skip => {
+                        eprintln!("microvm-init: RO source {from} missing; skipping bind of {t}");
+                    }
                 }
             }
         }
@@ -580,19 +653,22 @@ fn accept_host_bridge() -> RawFd {
 #[cfg(target_os = "linux")]
 fn exec_worker() {
     use std::ffi::CString;
-    // Baked worker invocation for python-exec (slice-1 consumer). A later
-    // generalization reads the program path from the cmdline too.
-    let prog = CString::new("/usr/local/bin/kastellan-worker-python-exec").unwrap();
     // SAFETY: single-threaded PID1; no other threads to race with.
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    // Forwarded worker path (slice 4b) with the slice-1 python-exec bake as the
+    // fail-safe fallback, so slices 1–3 (which forward their own python path now,
+    // or nothing) still boot a working worker.
+    let prog_path = parse_worker_cmdline(&cmdline)
+        .unwrap_or_else(|| "/usr/local/bin/kastellan-worker-python-exec".to_string());
+    let prog = match CString::new(prog_path) {
+        Ok(c) => c,
+        Err(_) => CString::new("/usr/local/bin/kastellan-worker-python-exec").unwrap(),
+    };
     #[allow(deprecated)]
     unsafe {
-        // Baked fallback FIRST (the rootfs reality), so a missing/garbled
-        // forwarded token still boots a working worker (#360 fail-safe).
+        // Baked python interpreter default (harmless for non-python workers,
+        // which ignore it); host-forwarded policy.env overrides it.
         std::env::set_var("KASTELLAN_PYTHON_EXEC_PYTHON", "/usr/bin/python3");
-        // Host-forwarded policy.env OVERRIDES the bake (operator knobs like
-        // KASTELLAN_PYTHON_PARAMS_FILE_MAX, and the now-correct interpreter
-        // path). Read from the kernel cmdline the launcher set.
-        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
         for (k, v) in parse_env_cmdline(&cmdline) {
             std::env::set_var(k, v);
         }
@@ -654,6 +730,23 @@ mod tests {
         // Guest listens on VMADDR_CID_ANY:1024. Assert the helper builds the
         // right (cid, port) pair.
         assert_eq!(vsock_listen_cid_port(), (0xffffffff, 1024));
+    }
+
+    #[test]
+    fn parse_worker_cmdline_decodes_fixture() {
+        // Same hex the sandbox build_launch_plan_appends_worker_token fixture emits.
+        let hex = "2f7573722f6c6f63616c2f62696e2f6b617374656c6c616e2d776f726b65722d7765622d6665746368";
+        let cmdline = format!("console=ttyS0 kastellan.worker={hex} panic=1");
+        assert_eq!(
+            super::parse_worker_cmdline(&cmdline),
+            Some("/usr/local/bin/kastellan-worker-web-fetch".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_worker_cmdline_missing_or_bad_is_none() {
+        assert_eq!(super::parse_worker_cmdline("console=ttyS0 panic=1"), None);
+        assert_eq!(super::parse_worker_cmdline("kastellan.worker=zz"), None); // bad hex
     }
 
     #[test]
@@ -753,5 +846,21 @@ mod tests {
             parse_egress_config("kastellan.egress=1 kastellan.egress.selftest=1"),
             EgressConfig { enabled: true, selftest: true }
         );
+    }
+
+    #[test]
+    fn bind_prep_directory_source() {
+        assert_eq!(super::bind_prep(true, false), super::BindPrep::Dir);
+    }
+
+    #[test]
+    fn bind_prep_file_source() {
+        assert_eq!(super::bind_prep(false, true), super::BindPrep::File);
+    }
+
+    #[test]
+    fn bind_prep_missing_source_skips() {
+        // Neither dir nor file (missing / socket / fifo) → skip the bind entirely.
+        assert_eq!(super::bind_prep(false, false), super::BindPrep::Skip);
     }
 }

@@ -38,6 +38,31 @@ use crate::{SandboxBackend, SandboxError, SandboxPolicy};
 /// The launcher binary name; discovered on `$PATH` / next to the daemon.
 pub const MICROVM_RUN_BIN: &str = "kastellan-microvm-run";
 
+/// Default micro-VM image dir + rootfs filename. The dir (and the pinned
+/// `vmlinux`) is shared across workers; the rootfs *filename* is what differs
+/// per worker (`python-exec.ext4`, `web-fetch.ext4`, …).
+const DEFAULT_MICROVM_DIR: &str = "/var/lib/kastellan/microvm";
+const DEFAULT_ROOTFS_FILE: &str = "python-exec.ext4";
+
+/// Resolve the guest kernel + rootfs from the worker's policy env. Pure →
+/// unit-tested without KVM. `KASTELLAN_MICROVM_DIR` picks the shared image dir;
+/// `KASTELLAN_MICROVM_ROOTFS` picks the rootfs filename inside it (default keeps
+/// the existing python-exec path byte-identical).
+fn resolve_image(env: &[(String, String)]) -> FirecrackerImage {
+    let get = |key: &str| {
+        env.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+            .filter(|v| !v.trim().is_empty())
+    };
+    let dir = std::path::PathBuf::from(get("KASTELLAN_MICROVM_DIR").unwrap_or(DEFAULT_MICROVM_DIR));
+    let rootfs = get("KASTELLAN_MICROVM_ROOTFS").unwrap_or(DEFAULT_ROOTFS_FILE);
+    FirecrackerImage {
+        kernel_path: dir.join("vmlinux"),
+        rootfs_path: dir.join(rootfs),
+    }
+}
+
 /// Pure: the launcher argv for a plan + its rendered config/log/run-dir paths.
 pub fn launcher_argv(
     plan: &FirecrackerLaunchPlan,
@@ -132,18 +157,10 @@ impl SandboxBackend for LinuxFirecracker {
         // own pid is now dead. Runs before we create THIS spawn's dir, so it
         // never races the in-flight spawn. Best-effort; ignores the count.
         let _ = cleanup::sweep_orphaned_run_dirs(&std::env::temp_dir(), cleanup::pid_is_alive);
-        // Image dir comes from the worker's policy env (set by the entry) —
-        // KASTELLAN_MICROVM_DIR — defaulting to /var/lib/kastellan/microvm.
-        let dir = policy
-            .env
-            .iter()
-            .find(|(k, _)| k == "KASTELLAN_MICROVM_DIR")
-            .map(|(_, v)| std::path::PathBuf::from(v))
-            .unwrap_or_else(|| "/var/lib/kastellan/microvm".into());
-        let image = FirecrackerImage {
-            kernel_path: dir.join("vmlinux"),
-            rootfs_path: dir.join("python-exec.ext4"),
-        };
+        // Image dir + rootfs filename come from the worker's policy env (set by
+        // the entry): KASTELLAN_MICROVM_DIR / KASTELLAN_MICROVM_ROOTFS. The dir
+        // (and vmlinux) is shared; the rootfs filename differs per worker.
+        let image = resolve_image(&policy.env);
         let mut plan = build_launch_plan(policy, &image, program, args)?;
         // Per-spawn temp dir for the config + log files. No new dep: uses std
         // only (atomic counter + create_dir_all).
@@ -259,5 +276,33 @@ mod spawn_tests {
         .unwrap();
         let argv = launcher_argv(&plan, "/run/fc.json", "/run/fc.log", "/run");
         assert!(!argv.iter().any(|a| a == "--egress-uds"), "no egress flags for Net::Deny: {argv:?}");
+    }
+
+    #[test]
+    fn resolve_image_defaults_to_python_exec_rootfs() {
+        let img = resolve_image(&[]);
+        assert_eq!(img.kernel_path, std::path::PathBuf::from("/var/lib/kastellan/microvm/vmlinux"));
+        assert_eq!(img.rootfs_path, std::path::PathBuf::from("/var/lib/kastellan/microvm/python-exec.ext4"));
+    }
+
+    #[test]
+    fn resolve_image_honours_rootfs_filename_env() {
+        let env = vec![("KASTELLAN_MICROVM_ROOTFS".to_string(), "web-fetch.ext4".to_string())];
+        let img = resolve_image(&env);
+        assert_eq!(img.rootfs_path, std::path::PathBuf::from("/var/lib/kastellan/microvm/web-fetch.ext4"));
+        // Kernel is still the shared vmlinux in the same dir.
+        assert_eq!(img.kernel_path, std::path::PathBuf::from("/var/lib/kastellan/microvm/vmlinux"));
+    }
+
+    #[test]
+    fn resolve_image_honours_dir_and_ignores_blank_rootfs() {
+        let env = vec![
+            ("KASTELLAN_MICROVM_DIR".to_string(), "/srv/vm".to_string()),
+            ("KASTELLAN_MICROVM_ROOTFS".to_string(), "  ".to_string()),
+        ];
+        let img = resolve_image(&env);
+        // Blank ROOTFS falls back to the python default; DIR is honoured.
+        assert_eq!(img.rootfs_path, std::path::PathBuf::from("/srv/vm/python-exec.ext4"));
+        assert_eq!(img.kernel_path, std::path::PathBuf::from("/srv/vm/vmlinux"));
     }
 }

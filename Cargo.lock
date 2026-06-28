@@ -2188,6 +2188,7 @@ dependencies = [
  "kastellan-worker-web-common",
  "libc",
  "rand 0.8.6",
+ "rcgen",
  "rpassword",
  "serde",
  "serde_json",

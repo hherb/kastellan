@@ -82,6 +82,11 @@ const BASE_BOOT_ARGS: &str =
 /// not depend on the sandbox crate — same pattern as [`WORKER_VSOCK_PORT`]).
 const ENV_CMDLINE_KEY: &str = "kastellan.env";
 
+/// Cmdline token carrying the hex-encoded worker program path the guest init
+/// execs (generalizes slice-1's baked python-exec path). Kept in sync with
+/// `kastellan-microvm-init`'s WORKER_CMDLINE_KEY.
+const WORKER_CMDLINE_KEY: &str = "kastellan.worker";
+
 /// Conservative ceiling for the whole kernel cmdline (base args + the env
 /// token). Well under arm64's 2048-byte `COMMAND_LINE_SIZE`; the slice-1 env is
 /// ~3 small vars (~120 hex chars), so this only ever trips on a pathological
@@ -151,7 +156,7 @@ pub fn encode_env_cmdline(env: &[(String, String)]) -> Result<Option<String>, Sa
 pub fn build_launch_plan(
     policy: &SandboxPolicy,
     image: &FirecrackerImage,
-    _program: &str,
+    program: &str,
     _args: &[&str],
 ) -> Result<FirecrackerLaunchPlan, SandboxError> {
     for p in policy.fs_read.iter().chain(policy.fs_write.iter()) {
@@ -262,6 +267,10 @@ pub fn build_launch_plan(
             None => env.push((K.to_string(), GUEST_EGRESS_UDS.to_string())),
         }
     }
+    // Backend-only config — consumed host-side by resolve_image (this fn already
+    // receives the resolved `image`), never by the worker. Don't forward into the
+    // guest: it's noise there and costs scarce cmdline budget.
+    env.retain(|(k, _)| k != "KASTELLAN_MICROVM_DIR" && k != "KASTELLAN_MICROVM_ROOTFS");
     let mut boot_args = BASE_BOOT_ARGS.to_string();
     if let Some(suffix) = encode_env_cmdline(&env)? {
         boot_args.push_str(&suffix);
@@ -276,6 +285,10 @@ pub fn build_launch_plan(
             boot_args.push_str(" kastellan.egress.selftest=1");
         }
     }
+    // Forward the worker program path so the guest init execs the right binary
+    // (slice 4b: python-exec and web-fetch share one init). Hex-encoded so any
+    // absolute path is cmdline-safe, mirroring the #360 env token.
+    boot_args.push_str(&format!(" {WORKER_CMDLINE_KEY}={}", hex_encode(program.as_bytes())));
     if boot_args.len() > MAX_CMDLINE_BYTES {
         return Err(SandboxError::Backend(format!(
             "kernel cmdline {} bytes exceeds {MAX_CMDLINE_BYTES}-byte cap \
@@ -514,17 +527,80 @@ mod tests {
             "env token must be appended: {}",
             plan.boot_args
         );
-        // Hex token carries no whitespace, so it is a single cmdline arg.
-        let token = plan.boot_args.split_whitespace().last().unwrap();
+        // Hex token carries no whitespace, so it is a single cmdline arg. The
+        // worker token (slice 4b) is appended after env, so find env by prefix.
+        let token = plan
+            .boot_args
+            .split_whitespace()
+            .find(|t| t.starts_with("kastellan.env="))
+            .unwrap();
         assert!(token.starts_with("kastellan.env="));
         assert!(token["kastellan.env=".len()..].bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
     #[test]
     fn build_launch_plan_no_env_leaves_boot_args_baseline() {
+        // No env/mounts/egress → boot_args starts with the baseline and the ONLY
+        // kastellan.* token is kastellan.worker (always forwarded, slice 4b).
         let policy = SandboxPolicy { env: vec![], ..Default::default() };
         let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
-        assert_eq!(plan.boot_args, BASE_BOOT_ARGS);
+        assert!(
+            plan.boot_args.starts_with(BASE_BOOT_ARGS),
+            "base kernel args must be preserved: {}",
+            plan.boot_args
+        );
+        assert!(
+            !plan.boot_args.contains("kastellan.env"),
+            "no env token when env is empty: {}",
+            plan.boot_args
+        );
+        assert!(
+            !plan.boot_args.contains("kastellan.mounts"),
+            "no mounts token when no shares: {}",
+            plan.boot_args
+        );
+        assert!(
+            !plan.boot_args.contains("kastellan.egress"),
+            "no egress token when net is deny: {}",
+            plan.boot_args
+        );
+        assert!(
+            plan.boot_args.contains(" kastellan.worker="),
+            "worker token always forwarded (slice 4b): {}",
+            plan.boot_args
+        );
+    }
+
+    #[test]
+    fn build_launch_plan_appends_worker_token() {
+        // The guest init reads kastellan.worker=<hex(program)> to exec the right
+        // binary. Pinned so kastellan-microvm-init decodes this exact hex.
+        let policy = SandboxPolicy { env: vec![], ..Default::default() };
+        let plan = build_launch_plan(&policy, &img(), "/usr/local/bin/kastellan-worker-web-fetch", &[])
+            .expect("plan");
+        let hex = super::hex_encode(b"/usr/local/bin/kastellan-worker-web-fetch");
+        assert!(
+            plan.boot_args.contains(&format!(" kastellan.worker={hex}")),
+            "boot_args missing worker token: {}",
+            plan.boot_args
+        );
+    }
+
+    #[test]
+    fn build_launch_plan_does_not_forward_backend_only_env() {
+        let policy = SandboxPolicy {
+            env: vec![
+                ("KASTELLAN_MICROVM_DIR".to_string(), "/var/lib/kastellan/microvm".to_string()),
+                ("KASTELLAN_MICROVM_ROOTFS".to_string(), "web-fetch.ext4".to_string()),
+                ("KASTELLAN_WEB_FETCH_ALLOWLIST".to_string(), "[\"example.com\"]".to_string()),
+            ],
+            ..Default::default()
+        };
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        // The worker key IS forwarded; the two backend-only keys are NOT.
+        assert!(plan.boot_args.contains(&super::hex_encode(b"KASTELLAN_WEB_FETCH_ALLOWLIST")));
+        assert!(!plan.boot_args.contains(&super::hex_encode(b"KASTELLAN_MICROVM_DIR")));
+        assert!(!plan.boot_args.contains(&super::hex_encode(b"KASTELLAN_MICROVM_ROOTFS")));
     }
 
     #[test]
