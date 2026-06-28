@@ -7,11 +7,12 @@
 //!
 //! DGX-only / #[ignore]: needs /dev/kvm + /dev/vhost-vsock + mkfs.ext4 + a built
 //! rootfs (REBUILD via build-rootfs.sh — it must carry the slice-3 anchor dirs)
-//! + the kastellan-microvm-run RELEASE launcher (rebuild it; target/release is
-//! preferred and a stale one silently shadows source changes). Run:
-//!   export PATH=$HOME/.local/bin:$PATH   # firecracker is off the ssh PATH
-//!   cargo build --release -p kastellan-microvm-run
-//!   cargo test -p kastellan-core --test python_exec_firecracker_hostdir_e2e -- --ignored --nocapture
+//! plus the kastellan-microvm-run RELEASE launcher (rebuild it; target/release
+//! is preferred and a stale one silently shadows source changes). Run:
+//!
+//!     export PATH=$HOME/.local/bin:$PATH   # firecracker is off the ssh PATH
+//!     cargo build --release -p kastellan-microvm-run
+//!     cargo test -p kastellan-core --test python_exec_firecracker_hostdir_e2e -- --ignored --nocapture
 
 use std::path::PathBuf;
 use std::sync::Arc;
