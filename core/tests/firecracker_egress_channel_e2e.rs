@@ -130,7 +130,7 @@ async fn egress_reverse_channel_delivers_guest_ping_to_host_proxy_uds() {
         args: &[],
         wall_clock_ms: entry.wall_clock_ms,
     };
-    let mut worker = spawn_worker(&*backend, &spec).expect("spawn force-routed worker in micro-VM");
+    let worker = spawn_worker(&*backend, &spec).expect("spawn force-routed worker in micro-VM");
 
     let got = rx
         .recv_timeout(Duration::from_secs(30))
