@@ -88,6 +88,44 @@ fn parse_env_cmdline(cmdline: &str) -> Vec<(String, String)> {
 #[allow(dead_code)]
 const MOUNTS_CMDLINE_KEY: &str = "kastellan.mounts";
 
+/// Egress vsock port (slice 4a). Shared with
+/// `kastellan-sandbox::linux_firecracker::plan::EGRESS_VSOCK_PORT` (kept in sync
+/// manually; this crate must not depend on the sandbox crate).
+#[allow(dead_code)]
+const EGRESS_VSOCK_PORT: u32 = 1025;
+/// In-guest UDS the worker dials and the relay binds. Shared with the sandbox
+/// crate's `GUEST_EGRESS_UDS`.
+#[allow(dead_code)]
+const GUEST_EGRESS_UDS: &str = "/run/kastellan-egress.sock";
+/// The host's vsock CID from inside the guest (mirrors `libc::VMADDR_CID_HOST`).
+/// Plain literal so the parser/tests compile on macOS without the libc item.
+#[allow(dead_code)]
+const VMADDR_CID_HOST: u32 = 2;
+
+/// Egress channel config parsed from the kernel cmdline (slice 4a). Pure.
+#[allow(dead_code)]
+#[derive(Debug, Default, PartialEq)]
+struct EgressConfig {
+    enabled: bool,
+    selftest: bool,
+}
+
+/// Parse the egress tokens out of the kernel cmdline. `enabled` from
+/// `kastellan.egress=1`, `selftest` from `kastellan.egress.selftest=1`. Pure →
+/// unit-testable on any platform.
+#[allow(dead_code)]
+fn parse_egress_config(cmdline: &str) -> EgressConfig {
+    let mut c = EgressConfig::default();
+    for t in cmdline.split_whitespace() {
+        match t {
+            "kastellan.egress=1" => c.enabled = true,
+            "kastellan.egress.selftest=1" => c.selftest = true,
+            _ => {}
+        }
+    }
+    c
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Default, PartialEq)]
 struct MountManifest {
@@ -252,6 +290,200 @@ fn apply_host_mounts(m: &MountManifest) {
     }
 }
 
+/// Slice 4a: stand up the in-guest egress relay. Mount a writable `/run` tmpfs,
+/// bind the in-guest UDS the worker dials, and fork a child that pipes every
+/// accepted UDS connection to the host over `AF_VSOCK(VMADDR_CID_HOST,
+/// EGRESS_VSOCK_PORT)` (firecracker forwards that to the launcher's reverse-relay
+/// listener at `<base>_<port>`, which dials the real host egress proxy). Bind
+/// happens in the parent BEFORE `exec`, so the worker can never dial before the
+/// listener exists. Best-effort: a failure logs and returns (the worker then
+/// fails its first dial, surfaced as a normal error — PID1 is never aborted).
+#[cfg(target_os = "linux")]
+fn setup_egress_relay() {
+    // `/run` must be a writable tmpfs (the rootfs is a read-only superblock).
+    let _ = std::fs::create_dir_all("/run");
+    if let (Ok(src), Ok(tgt), Ok(fst)) = (
+        std::ffi::CString::new("tmpfs"),
+        std::ffi::CString::new("/run"),
+        std::ffi::CString::new("tmpfs"),
+    ) {
+        unsafe { libc::mount(src.as_ptr(), tgt.as_ptr(), fst.as_ptr(), 0, std::ptr::null()) };
+    }
+    let listener = match bind_unix_listener(GUEST_EGRESS_UDS) {
+        Some(fd) => fd,
+        None => {
+            eprintln!("microvm-init: egress UDS bind failed; worker egress disabled");
+            return;
+        }
+    };
+    // SAFETY: single-threaded PID1 here; fork is safe (no other threads to race).
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        egress_relay_loop(listener); // never returns
+        unsafe { libc::_exit(0) };
+    }
+    // Parent: drop its copy of the listener fd so the exec'd worker can't inherit
+    // a stray listening fd (#361 hygiene); the child owns the accept loop.
+    unsafe { libc::close(listener) };
+}
+
+/// Bind an AF_UNIX SOCK_STREAM listener at `path`. Returns the listening fd or
+/// `None` on any failure. Unlinks a stale socket first.
+#[cfg(target_os = "linux")]
+fn bind_unix_listener(path: &str) -> Option<RawFd> {
+    let _ = std::fs::remove_file(path);
+    let cpath = std::ffi::CString::new(path).ok()?;
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return None;
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as _;
+        let bytes = cpath.as_bytes_with_nul();
+        if bytes.len() > addr.sun_path.len() {
+            libc::close(fd);
+            return None;
+        }
+        for (dst, &b) in addr.sun_path.iter_mut().zip(bytes) {
+            *dst = b as libc::c_char;
+        }
+        let alen = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, alen) != 0
+            || libc::listen(fd, 8) != 0
+        {
+            libc::close(fd);
+            return None;
+        }
+        Some(fd)
+    }
+}
+
+/// Connect an AF_VSOCK SOCK_STREAM to `(cid, port)`. Returns the connected fd.
+#[cfg(target_os = "linux")]
+fn connect_host_vsock(cid: u32, port: u32) -> Option<RawFd> {
+    unsafe {
+        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return None;
+        }
+        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+        addr.svm_family = libc::AF_VSOCK as _;
+        addr.svm_cid = cid;
+        addr.svm_port = port;
+        let alen = std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t;
+        if libc::connect(fd, &addr as *const _ as *const libc::sockaddr, alen) != 0 {
+            libc::close(fd);
+            return None;
+        }
+        Some(fd)
+    }
+}
+
+/// Connect an AF_UNIX SOCK_STREAM to `path` (the self-test client side).
+#[cfg(target_os = "linux")]
+fn connect_unix(path: &str) -> Option<RawFd> {
+    let cpath = std::ffi::CString::new(path).ok()?;
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return None;
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as _;
+        let bytes = cpath.as_bytes_with_nul();
+        if bytes.len() > addr.sun_path.len() {
+            libc::close(fd);
+            return None;
+        }
+        for (dst, &b) in addr.sun_path.iter_mut().zip(bytes) {
+            *dst = b as libc::c_char;
+        }
+        let alen = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        if libc::connect(fd, &addr as *const _ as *const libc::sockaddr, alen) != 0 {
+            libc::close(fd);
+            return None;
+        }
+        Some(fd)
+    }
+}
+
+/// Accept loop for the in-guest relay child: each UDS connection gets its own
+/// vsock connection to the host and a bidirectional byte pump.
+#[cfg(target_os = "linux")]
+fn egress_relay_loop(listener: RawFd) {
+    loop {
+        let conn = unsafe { libc::accept(listener, std::ptr::null_mut(), std::ptr::null_mut()) };
+        if conn < 0 {
+            continue;
+        }
+        match connect_host_vsock(VMADDR_CID_HOST, EGRESS_VSOCK_PORT) {
+            Some(vfd) => {
+                // conn/vfd are RawFd (Copy); both directions run concurrently on
+                // the same full-duplex sockets.
+                let up = std::thread::spawn(move || pump_raw(conn, vfd));
+                pump_raw(vfd, conn);
+                let _ = up.join();
+                unsafe {
+                    libc::close(conn);
+                    libc::close(vfd);
+                }
+            }
+            None => unsafe {
+                libc::close(conn);
+            },
+        }
+    }
+}
+
+/// One-direction raw-fd byte copy until EOF/err; half-closes the writer on EOF.
+#[cfg(target_os = "linux")]
+fn pump_raw(from_fd: RawFd, to_fd: RawFd) {
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = unsafe { libc::read(from_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 {
+            unsafe { libc::shutdown(to_fd, libc::SHUT_WR) };
+            break;
+        }
+        let mut off = 0isize;
+        while off < n {
+            let w = unsafe {
+                libc::write(
+                    to_fd,
+                    buf.as_ptr().offset(off) as *const libc::c_void,
+                    (n - off) as usize,
+                )
+            };
+            if w <= 0 {
+                return;
+            }
+            off += w;
+        }
+    }
+}
+
+/// Slice 4a self-test: connect our own in-guest UDS, write `PING`, expect `PONG`.
+/// Proves the full guest→host reverse path on real KVM. Logs `EGRESS_CHANNEL_OK`
+/// to the kernel console on success. Best-effort; never aborts PID1.
+#[cfg(target_os = "linux")]
+fn egress_selftest() {
+    let Some(fd) = connect_unix(GUEST_EGRESS_UDS) else {
+        eprintln!("microvm-init: egress selftest connect failed");
+        return;
+    };
+    let ping = b"PING\n";
+    unsafe { libc::write(fd, ping.as_ptr() as *const libc::c_void, ping.len()) };
+    let mut buf = [0u8; 16];
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    unsafe { libc::close(fd) };
+    if n >= 4 && &buf[..4] == b"PONG" {
+        eprintln!("EGRESS_CHANNEL_OK");
+    } else {
+        eprintln!("microvm-init: egress selftest got no PONG (n={n})");
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn mount_pseudo_fs() {
     let mounts: &[(&str, &str, &str)] = &[
@@ -338,6 +570,13 @@ fn main() {
     mount_pseudo_fs();
     let cmdline_for_mounts = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     apply_host_mounts(&parse_mount_manifest(&cmdline_for_mounts));
+    let egress = parse_egress_config(&cmdline_for_mounts);
+    if egress.enabled {
+        setup_egress_relay();
+        if egress.selftest {
+            egress_selftest();
+        }
+    }
     let conn_fd = accept_host_bridge();
     // Redirect the worker's stdio onto the vsock connection. A silent dup2
     // failure here would boot the guest with a dead JSON-RPC bridge and no
@@ -460,5 +699,18 @@ mod tests {
         // /tmp is already a writable tmpfs → no anchor needed.
         assert_eq!(anchor_of("/tmp/x"), None);
         assert_eq!(anchor_of("/"), None);
+    }
+
+    #[test]
+    fn parse_egress_config_reads_tokens() {
+        assert_eq!(parse_egress_config("console=ttyS0 panic=1"), EgressConfig::default());
+        assert_eq!(
+            parse_egress_config("console=ttyS0 kastellan.egress=1"),
+            EgressConfig { enabled: true, selftest: false }
+        );
+        assert_eq!(
+            parse_egress_config("kastellan.egress=1 kastellan.egress.selftest=1"),
+            EgressConfig { enabled: true, selftest: true }
+        );
     }
 }
