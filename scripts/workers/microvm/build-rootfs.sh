@@ -96,6 +96,7 @@ cp -a "$STDLIB" "$WORK$STDLIB"
 #     mkdir list below in lockstep with SHARE_ANCHORS (/tmp is mounted at boot).
 mkdir -p "$WORK/proc" "$WORK/sys" "$WORK/tmp" "$WORK/dev" \
          "$WORK/ro-share" "$WORK/opt" "$WORK/data" "$WORK/srv" "$WORK/mnt" "$WORK/work"
+mkdir -p "$WORK/run"   # slice 4a: egress relay tmpfs mountpoint (in-guest UDS lives here)
 
 # Build the image journal-less (`-O ^has_journal`). The backend attaches the
 # rootfs READ-ONLY (is_read_only:true) and every concurrent VM shares this one

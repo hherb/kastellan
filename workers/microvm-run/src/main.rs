@@ -4,6 +4,7 @@
 
 mod boot;
 mod bridge;
+mod egress_relay;
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -29,6 +30,17 @@ fn main() -> std::io::Result<()> {
     // compatibility with callers that don't pass it; when absent we fall back
     // to removing just the base vsock UDS, as before.
     let run_dir = arg("--run-dir");
+
+    // Slice 4a: when force-routed, start the egress reverse-relay BEFORE booting
+    // firecracker so the host listener at `<vsock_uds>_<port>` exists before the
+    // guest can dial it (firecracker connects there for a guest-initiated vsock
+    // connection on that port). The detached accept loop relays each connection
+    // to the host egress-proxy UDS.
+    if let Some((proxy_uds, egress_port)) =
+        egress_relay::parse_egress_relay_args(arg("--egress-uds"), arg("--egress-vsock-port"))
+    {
+        egress_relay::spawn_egress_relay(&vsock_uds, egress_port, proxy_uds)?;
+    }
 
     // Boot firecracker as our child; it creates the base vsock UDS once it is
     // up. Its stdout/stderr go to the log path via --log-path, so we keep our
