@@ -99,7 +99,7 @@ planner → tool_host::dispatch("web-fetch", {url})
   → guest microvm-init:
       → /run tmpfs + egress relay child (slice 4a)
       → apply_host_mounts: bind ca.pem at its host abs path  ← FILE-AWARE (NEW)
-      → apply kastellan.env; exec web-fetch (unchanged)
+      → apply kastellan.env; exec the forwarded worker path  ← kastellan.worker token (NEW)
   → web-fetch: KASTELLAN_EGRESS_PROXY_UDS set ⇒ ProxyConnectGet, trust only _CA
       → dial /run/kastellan-egress.sock → vsock 1025 → launcher → host sidecar
       → CONNECT host:443 → sidecar allowlist + SSRF + MITM → origin

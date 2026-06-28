@@ -404,7 +404,7 @@ items unlock later ones.
     dir-symlink policy). Spec/plan: `docs/superpowers/{specs/2026-06-27-firecracker-microvm-slice3-host-dir-sharing-design.md,plans/2026-06-28-firecracker-microvm-slice3-host-dir-sharing.md}`.
     Spec/plan: `docs/superpowers/{specs/2026-06-26-linux-firecracker-microvm-design.md,plans/2026-06-26-linux-firecracker-microvm-slice1.md}`,
     `specs/2026-06-27-firecracker-guest-env-forwarding-design.md`.
-    [x] **SLICE 4a — egress vsock reverse-channel transport (2026-06-28, branch `feat/firecracker-microvm-slice4a-egress-transport`, PR pending).**
+    [x] **SLICE 4a — egress vsock reverse-channel transport (2026-06-28, MERGED `bed1326`, PR [#373](https://github.com/hherb/kastellan/pull/373)).**
     A force-routed `Net::Allowlist` worker reaches the host egress proxy from inside a VM (NO virtio-net device) over a **second, guest-initiated
     vsock channel** — unchanged worker code, stronger isolation than the bwrap private-netns path. Transport only. Pure `build_launch_plan` detects
     force-routing (`Net::Allowlist` + `proxy_uds`) → `egress_proxy_vsock_port=Some(1025)` + `net_enabled=false` + overrides the guest
@@ -415,9 +415,16 @@ items unlock later ones.
     delivered over the reverse channel); sandbox lib 89/0, microvm-init 11/0, microvm-run 10/0, slice-1/2/3 e2e no-regression, 0 orphan run-dirs,
     clippy clean. opus final review: READY TO MERGE; 2 Important PID1-robustness findings fixed in-branch (`695a1d5`). Spec/plan:
     `docs/superpowers/{specs/2026-06-28-firecracker-microvm-slice4a-egress-transport-design.md,plans/2026-06-28-firecracker-microvm-slice4a-egress-transport.md}`.
-    [ ] **SLICE 4b (next) — first real net worker in a VM:** web-fetch micro-VM rootfs + CA-cert-into-guest (reuse slice-3 RO-share) +
-    `KASTELLAN_WEB_FETCH_USE_MICROVM` opt-in + full DGX e2e (in-VM web-fetch reaches an allowlisted host through the real egress proxy).
-    [ ] **SLICE 5:** jailer hardening (chroot/cgroup/uid-drop) + long-lived/channel workers in a VM.
+    [x] **SLICE 4b — first real net worker in a VM: web-fetch (2026-06-28, branch `feat/firecracker-microvm-slice4b-web-fetch`, PR pending).**
+    web-fetch runs in a VM reaching the egress proxy over the 4a channel, opt-in `KASTELLAN_WEB_FETCH_USE_MICROVM=1`, unchanged worker code.
+    Per-worker rootfs filename (`KASTELLAN_MICROVM_ROOTFS`, default python-exec.ext4; web-fetch=`web-fetch.ext4`); file-aware guest RO bind delivers the
+    per-instance proxy `ca.pem` in-guest (worker `make_get` fails closed without it); `kastellan.worker=<hex>` cmdline token forwards the exec path
+    (root-cause fix for the baked python path — `build_launch_plan` had ignored `_program`); backend-only env keys filtered from the guest cmdline.
+    `build-web-fetch-rootfs.sh` (no python, no system CA bundle — MITM-only). **DGX e2e 2/2** (hermetic CONNECT-stub gate proving boot+force-routing+vsock+CA
+    delivery, + `#[ignore]` real-net origin scaffold); no-regression slice-1 6/0 + slice-3 1/0 + slice-4a 1/0, 0 orphan run-dirs; sandbox 94/0, microvm-init
+    16/16, clippy clean. opus final review: READY TO MERGE; python-exec/slices 1–3 byte-identical (now boot via the forwarded token). Follow-up [#374](https://github.com/hherb/kastellan/issues/374)
+    (forward worker `args` for shimmed VM workers). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-28-firecracker-microvm-slice4b-web-fetch*`.
+    [ ] **SLICE 5 (next):** jailer hardening (chroot/cgroup/uid-drop) + long-lived/channel workers in a VM. (Or: generalize net-worker-in-VM for browser-driver/web-search.)
   - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
     (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate

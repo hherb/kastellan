@@ -976,6 +976,210 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
+### Task 7: Forward the worker program path into the guest init
+
+**Surfaced by Task 6's e2e** (root cause, systematic-debugging): the guest init
+`exec_worker()` hardcodes `/usr/local/bin/kastellan-worker-python-exec` (slice-1
+bake; `build_launch_plan` ignores its `_program` arg). The web-fetch rootfs has
+only `kastellan-worker-web-fetch`, so the init execs a nonexistent path → ENOENT
+→ PID1 panic → no worker → no `CONNECT`. Fix: forward the worker program path via
+a hex `kastellan.worker=<hex>` cmdline token (mirrors the #360 `kastellan.env`
+codec) and have the init exec it, falling back to the baked python path when the
+token is absent (back-compat for slices 1–3).
+
+**Files:**
+- Modify: `sandbox/src/linux_firecracker/plan.rs` (add `WORKER_CMDLINE_KEY` const; use `program` instead of `_program`; append the token to `boot_args`; add a roundtrip-fixture unit + fix the baseline boot_args test)
+- Modify: `workers/microvm-init/src/main.rs` (add `WORKER_CMDLINE_KEY` + `parse_worker_cmdline`; `exec_worker` execs the forwarded path with the baked fallback; add a parser unit + the matching roundtrip fixture)
+
+**Interfaces:**
+- Produces (sandbox): the boot_args now carry ` kastellan.worker=<hex(program)>`. The pure encoder is inline in `build_launch_plan`; the hex codec is the existing `hex_encode`.
+- Produces (microvm-init): `fn parse_worker_cmdline(cmdline: &str) -> Option<String>` (hex-decode → UTF-8 → non-empty), consumed by `exec_worker`.
+- Cross-crate contract: both crates pin `WORKER_CMDLINE_KEY = "kastellan.worker"` (kept-in-sync comment, like `kastellan.env`/`kastellan.mounts`), and a roundtrip fixture in each crate encodes/decodes the identical hex for a known path.
+
+- [ ] **Step 1: sandbox — write the failing tests**
+
+In `sandbox/src/linux_firecracker/plan.rs` test module, add a fixture pinning the token (hex of `/usr/local/bin/kastellan-worker-web-fetch`) and update the baseline test to expect the worker token. First add:
+
+```rust
+    #[test]
+    fn build_launch_plan_appends_worker_token() {
+        // The guest init reads kastellan.worker=<hex(program)> to exec the right
+        // binary. Pinned so kastellan-microvm-init decodes this exact hex.
+        let policy = min_policy(); // existing helper used by sibling tests (Net::Deny, no env)
+        let plan = build_launch_plan(&policy, &img(), "/usr/local/bin/kastellan-worker-web-fetch", &[])
+            .expect("plan");
+        let hex = super::hex_encode(b"/usr/local/bin/kastellan-worker-web-fetch");
+        assert!(
+            plan.boot_args.contains(&format!(" kastellan.worker={hex}")),
+            "boot_args missing worker token: {}",
+            plan.boot_args
+        );
+    }
+```
+
+(Use whatever minimal-policy constructor the sibling tests already use — e.g. the one in `build_launch_plan_no_env_leaves_boot_args_baseline`. Read that test for the exact helper name; if it builds the policy inline, build it inline here too.)
+
+Then update `build_launch_plan_no_env_leaves_boot_args_baseline` (it currently asserts boot_args == the env-less baseline): it must now also expect the ` kastellan.worker=<hex>` token, since the worker path is always forwarded. Change its assertion from an exact-equality/`!contains("kastellan.")` style to assert the baseline prefix is present AND the only `kastellan.*` token is `kastellan.worker` (no `kastellan.env`/`kastellan.mounts`/`kastellan.egress`). Read the current test body and adapt minimally.
+
+- [ ] **Step 2: sandbox — run to verify RED**
+
+```
+ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && cargo test -p kastellan-sandbox --lib build_launch_plan_appends_worker_token 2>&1 | tail -15'
+```
+Expected: FAIL (no worker token in boot_args yet). The baseline test will also fail once you adapt it — that is expected RED.
+
+(On the Mac, cross-clippy compile-checks: `cargo clippy -p kastellan-sandbox --target aarch64-unknown-linux-gnu --all-targets 2>&1 | tail` shows the test referencing the not-yet-emitted token compiles but fails at runtime on the DGX.)
+
+- [ ] **Step 3: sandbox — implement**
+
+Add the const near `ENV_CMDLINE_KEY` (~line 83):
+```rust
+/// Cmdline token carrying the hex-encoded worker program path the guest init
+/// execs (generalizes slice-1's baked python-exec path). Kept in sync with
+/// `kastellan-microvm-init`'s WORKER_CMDLINE_KEY.
+const WORKER_CMDLINE_KEY: &str = "kastellan.worker";
+```
+
+Change the `build_launch_plan` signature `_program: &str` → `program: &str` (keep `_args` as-is — args are not forwarded; these workers take none).
+
+In the boot_args assembly, after the env-token append (right after the `encode_env_cmdline` block, ~line 268), add:
+```rust
+    // Forward the worker program path so the guest init execs the right binary
+    // (slice 4b: python-exec and web-fetch share one init). Hex-encoded so any
+    // absolute path is cmdline-safe, mirroring the #360 env token.
+    boot_args.push_str(&format!(" {WORKER_CMDLINE_KEY}={}", hex_encode(program.as_bytes())));
+```
+(The existing `MAX_CMDLINE_BYTES` budget check below still covers it.)
+
+- [ ] **Step 4: sandbox — run to verify GREEN**
+
+```
+ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && cargo test -p kastellan-sandbox --lib build_launch_plan 2>&1 | grep -E "build_launch_plan|test result"'
+ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && cargo clippy -p kastellan-sandbox --all-targets -- -D warnings 2>&1 | tail -3'
+```
+Expected: the new worker-token test + the adapted baseline test pass; all other `build_launch_plan` tests still pass; clippy clean. (Controller runs these.)
+
+- [ ] **Step 5: microvm-init — write the failing test**
+
+In `workers/microvm-init/src/main.rs` test module, add (mirrors `parse_env_cmdline_decodes_host_fixture`, pinning the SAME hex as the sandbox fixture):
+```rust
+    #[test]
+    fn parse_worker_cmdline_decodes_fixture() {
+        // Same hex the sandbox build_launch_plan_appends_worker_token fixture emits.
+        let hex = "2f7573722f6c6f63616c2f62696e2f6b617374656c6c616e2d776f726b65722d7765622d6665746368";
+        let cmdline = format!("console=ttyS0 kastellan.worker={hex} panic=1");
+        assert_eq!(
+            super::parse_worker_cmdline(&cmdline),
+            Some("/usr/local/bin/kastellan-worker-web-fetch".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_worker_cmdline_missing_or_bad_is_none() {
+        assert_eq!(super::parse_worker_cmdline("console=ttyS0 panic=1"), None);
+        assert_eq!(super::parse_worker_cmdline("kastellan.worker=zz"), None); // bad hex
+    }
+```
+
+> The fixture hex above is `/usr/local/bin/kastellan-worker-web-fetch` hex-encoded. Verify it matches `hex_encode` output; if your editor can't, compute it once on the DGX with a tiny check, but it must be byte-identical to the sandbox-side fixture (that cross-crate identity is the contract).
+
+- [ ] **Step 6: microvm-init — run to verify RED**
+
+```
+source "$HOME/.cargo/env" && cargo test -p kastellan-microvm-init parse_worker_cmdline 2>&1 | tail -15
+```
+Expected: FAIL — `cannot find function parse_worker_cmdline`.
+
+- [ ] **Step 7: microvm-init — implement**
+
+Add the const (near `ENV_CMDLINE_KEY`):
+```rust
+/// Cmdline token carrying the hex-encoded worker program path to exec (slice 4b).
+/// Must stay in sync with `kastellan-sandbox::linux_firecracker::plan`'s
+/// WORKER_CMDLINE_KEY.
+const WORKER_CMDLINE_KEY: &str = "kastellan.worker";
+```
+
+Add the parser (mirrors `parse_env_cmdline`'s fail-safe style):
+```rust
+/// Parse the host-forwarded worker program path out of the kernel cmdline
+/// (slice 4b). Fail-safe: a missing token, bad hex, non-UTF-8, or empty value
+/// all yield `None`, so `exec_worker` falls back to the baked path. Pure.
+#[allow(dead_code)]
+fn parse_worker_cmdline(cmdline: &str) -> Option<String> {
+    let prefix = format!("{WORKER_CMDLINE_KEY}=");
+    let token = cmdline.split_whitespace().find_map(|t| t.strip_prefix(&prefix))?;
+    let bytes = hex_decode(token)?;
+    let s = String::from_utf8(bytes).ok()?;
+    (!s.is_empty()).then_some(s)
+}
+```
+
+Rework `exec_worker` to read the cmdline once and prefer the forwarded path, with the baked python path as the fallback (and guard the `CString::new` so a NUL-bearing path can't panic PID1 — fall back instead):
+```rust
+fn exec_worker() {
+    use std::ffi::CString;
+    // SAFETY: single-threaded PID1; no other threads to race with.
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    // Forwarded worker path (slice 4b) with the slice-1 python-exec bake as the
+    // fail-safe fallback, so slices 1–3 (which forward their own python path now,
+    // or nothing) still boot a working worker.
+    let prog_path = parse_worker_cmdline(&cmdline)
+        .unwrap_or_else(|| "/usr/local/bin/kastellan-worker-python-exec".to_string());
+    let prog = match CString::new(prog_path.clone()) {
+        Ok(c) => c,
+        Err(_) => CString::new("/usr/local/bin/kastellan-worker-python-exec").unwrap(),
+    };
+    #[allow(deprecated)]
+    unsafe {
+        // Baked python interpreter default (harmless for non-python workers,
+        // which ignore it); host-forwarded policy.env overrides it.
+        std::env::set_var("KASTELLAN_PYTHON_EXEC_PYTHON", "/usr/bin/python3");
+        for (k, v) in parse_env_cmdline(&cmdline) {
+            std::env::set_var(k, v);
+        }
+    }
+    let argv = [prog.as_ptr(), std::ptr::null()];
+    unsafe {
+        libc::execv(prog.as_ptr(), argv.as_ptr());
+    }
+    panic!("execv of worker failed");
+}
+```
+
+- [ ] **Step 8: microvm-init — run to verify GREEN**
+
+```
+source "$HOME/.cargo/env" && cargo test -p kastellan-microvm-init 2>&1 | tail -8
+source "$HOME/.cargo/env" && cargo clippy -p kastellan-microvm-init --all-targets -- -D warnings 2>&1 | tail -3
+source "$HOME/.cargo/env" && cargo clippy -p kastellan-microvm-init --target aarch64-unknown-linux-gnu --all-targets -- -D warnings 2>&1 | tail -3
+```
+Expected: all microvm-init tests pass (existing + 3 new); both clippy runs clean.
+
+- [ ] **Step 9: Commit (both crates, one commit)**
+
+```bash
+git add sandbox/src/linux_firecracker/plan.rs workers/microvm-init/src/main.rs
+git commit -m "feat(microvm): forward the worker program path into the guest init (slice 4b)
+
+build_launch_plan now forwards the worker binary path via a hex kastellan.worker=
+cmdline token; the guest init execs it (baked python-exec path as fail-safe
+fallback). Generalizes the slice-1 baked invocation so the web-fetch rootfs runs
+the web-fetch worker. Cross-crate roundtrip fixture pins the codec.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+- [ ] **Step 10: Controller — rebuild BOTH rootfs images (the init is baked in), then re-run Task 6 e2e + no-regression**
+
+The init binary lives inside each rootfs, so both must be rebuilt after this change:
+```
+ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && bash scripts/workers/microvm/build-rootfs.sh 2>&1 | tail -2 && bash scripts/workers/microvm/build-web-fetch-rootfs.sh 2>&1 | tail -2'
+ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && export PATH=$HOME/.local/bin:$PATH && cargo build --release -p kastellan-microvm-run >/dev/null 2>&1; cargo test -p kastellan-core --test web_fetch_firecracker_egress_e2e -- --ignored --nocapture 2>&1 | tail -12'
+ssh dgx 'cd ~/src/kastellan && source ~/.cargo/env && export PATH=$HOME/.local/bin:$PATH && cargo test -p kastellan-core --test firecracker_egress_channel_e2e -- --ignored --nocapture 2>&1 | tail -6'
+```
+Expected: the web-fetch gate passes (stub receives `CONNECT example.com:443`); slice-4a egress channel e2e still green (no regression — python rootfs now boots via the forwarded token).
+
 ## Self-Review
 
 **Spec coverage:**
