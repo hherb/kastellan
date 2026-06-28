@@ -83,6 +83,24 @@ fn parse_env_cmdline(cmdline: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Cmdline token carrying the hex-encoded worker program path to exec (slice 4b).
+/// Must stay in sync with `kastellan-sandbox::linux_firecracker::plan`'s
+/// WORKER_CMDLINE_KEY.
+#[allow(dead_code)]
+const WORKER_CMDLINE_KEY: &str = "kastellan.worker";
+
+/// Parse the host-forwarded worker program path out of the kernel cmdline
+/// (slice 4b). Fail-safe: a missing token, bad hex, non-UTF-8, or empty value
+/// all yield `None`, so `exec_worker` falls back to the baked path. Pure.
+#[allow(dead_code)]
+fn parse_worker_cmdline(cmdline: &str) -> Option<String> {
+    let prefix = format!("{WORKER_CMDLINE_KEY}=");
+    let token = cmdline.split_whitespace().find_map(|t| t.strip_prefix(&prefix))?;
+    let bytes = hex_decode(token)?;
+    let s = String::from_utf8(bytes).ok()?;
+    (!s.is_empty()).then_some(s)
+}
+
 /// Cmdline token carrying the hex-encoded mount manifest (slice 3). Must stay in
 /// sync with `kastellan-sandbox::linux_firecracker::plan::MOUNTS_CMDLINE_KEY`.
 #[allow(dead_code)]
@@ -635,19 +653,22 @@ fn accept_host_bridge() -> RawFd {
 #[cfg(target_os = "linux")]
 fn exec_worker() {
     use std::ffi::CString;
-    // Baked worker invocation for python-exec (slice-1 consumer). A later
-    // generalization reads the program path from the cmdline too.
-    let prog = CString::new("/usr/local/bin/kastellan-worker-python-exec").unwrap();
     // SAFETY: single-threaded PID1; no other threads to race with.
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    // Forwarded worker path (slice 4b) with the slice-1 python-exec bake as the
+    // fail-safe fallback, so slices 1–3 (which forward their own python path now,
+    // or nothing) still boot a working worker.
+    let prog_path = parse_worker_cmdline(&cmdline)
+        .unwrap_or_else(|| "/usr/local/bin/kastellan-worker-python-exec".to_string());
+    let prog = match CString::new(prog_path.clone()) {
+        Ok(c) => c,
+        Err(_) => CString::new("/usr/local/bin/kastellan-worker-python-exec").unwrap(),
+    };
     #[allow(deprecated)]
     unsafe {
-        // Baked fallback FIRST (the rootfs reality), so a missing/garbled
-        // forwarded token still boots a working worker (#360 fail-safe).
+        // Baked python interpreter default (harmless for non-python workers,
+        // which ignore it); host-forwarded policy.env overrides it.
         std::env::set_var("KASTELLAN_PYTHON_EXEC_PYTHON", "/usr/bin/python3");
-        // Host-forwarded policy.env OVERRIDES the bake (operator knobs like
-        // KASTELLAN_PYTHON_PARAMS_FILE_MAX, and the now-correct interpreter
-        // path). Read from the kernel cmdline the launcher set.
-        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
         for (k, v) in parse_env_cmdline(&cmdline) {
             std::env::set_var(k, v);
         }
@@ -709,6 +730,23 @@ mod tests {
         // Guest listens on VMADDR_CID_ANY:1024. Assert the helper builds the
         // right (cid, port) pair.
         assert_eq!(vsock_listen_cid_port(), (0xffffffff, 1024));
+    }
+
+    #[test]
+    fn parse_worker_cmdline_decodes_fixture() {
+        // Same hex the sandbox build_launch_plan_appends_worker_token fixture emits.
+        let hex = "2f7573722f6c6f63616c2f62696e2f6b617374656c6c616e2d776f726b65722d7765622d6665746368";
+        let cmdline = format!("console=ttyS0 kastellan.worker={hex} panic=1");
+        assert_eq!(
+            super::parse_worker_cmdline(&cmdline),
+            Some("/usr/local/bin/kastellan-worker-web-fetch".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_worker_cmdline_missing_or_bad_is_none() {
+        assert_eq!(super::parse_worker_cmdline("console=ttyS0 panic=1"), None);
+        assert_eq!(super::parse_worker_cmdline("kastellan.worker=zz"), None); // bad hex
     }
 
     #[test]
