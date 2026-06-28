@@ -422,8 +422,14 @@ items unlock later ones.
     (root-cause fix for the baked python path — `build_launch_plan` had ignored `_program`); backend-only env keys filtered from the guest cmdline.
     `build-web-fetch-rootfs.sh` (no python, no system CA bundle — MITM-only). **DGX e2e 2/2** (hermetic CONNECT-stub gate proving boot+force-routing+vsock+CA
     delivery, + `#[ignore]` real-net origin scaffold); no-regression slice-1 6/0 + slice-3 1/0 + slice-4a 1/0, 0 orphan run-dirs; sandbox 94/0, microvm-init
-    16/16, clippy clean. opus final review: READY TO MERGE; python-exec/slices 1–3 byte-identical (now boot via the forwarded token). Follow-up [#374](https://github.com/hherb/kastellan/issues/374)
-    (forward worker `args` for shimmed VM workers). Spec/plan: `docs/superpowers/{specs,plans}/2026-06-28-firecracker-microvm-slice4b-web-fetch*`.
+    16/16, clippy clean. opus final review: READY TO MERGE; python-exec/slices 1–3 byte-identical (now boot via the forwarded token). MERGED to `main` as `a1db0a7`.
+    Spec/plan: `docs/superpowers/{specs,plans}/2026-06-28-firecracker-microvm-slice4b-web-fetch*`.
+    [x] **Follow-up [#374](https://github.com/hherb/kastellan/issues/374) — forward worker `args` into the guest (2026-06-29, branch `feat/374-microvm-forward-worker-args`).**
+    Slice 4b forwarded only `program`; a *shimmed* VM worker (`lockdown_shim:Some`, none today) would exec the lockdown-exec shim with no target. `build_launch_plan` now
+    forwards the argv via a sibling `kastellan.worker.args=<hex>,…` token (per-arg hex, `,`-joined; empty argv ⇒ no token ⇒ cmdline byte-identical to the pre-#374 baseline);
+    guest `exec_worker` builds the full `[program, args…, NULL]` execv argv; all-or-nothing decode (bad component ⇒ run bare, never a shifted argv; interior-NUL never aborts PID1).
+    Cross-crate roundtrip fixture pinned in both crates. **DGX: sandbox 98/0 (+4) + microvm-init 19/0 (+3) + clippy clean + slice-1 FC e2e 6/6 no-regression** (rebuilt rootfs bakes
+    the refactored PID1). Mac: microvm-init 19/0 native + aarch64 cross-clippy clean. Pure-Rust, no migration.
     [ ] **SLICE 5 (next):** jailer hardening (chroot/cgroup/uid-drop) + long-lived/channel workers in a VM. (Or: generalize net-worker-in-VM for browser-driver/web-search.)
   - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
     (parity note: the net workers have none either).
