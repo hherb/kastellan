@@ -124,12 +124,15 @@ stdlib. No `ca-certificates` bundle** — MITM-only means the only trusted root 
 the per-instance proxy CA delivered per-spawn. Factor any genuinely shared rootfs
 setup (anchor `mkdir`, pseudo-fs, mkfs invocation) into a small sourced helper if
 cheap; otherwise duplicate with a kept-in-sync comment (the existing house style
-for the cross-crate constants). Image dir resolved via a **web-fetch-specific**
-knob `KASTELLAN_WEB_FETCH_MICROVM_DIR` (default
-`/var/lib/kastellan/microvm-web-fetch`) — **not** python-exec's
-`KASTELLAN_MICROVM_DIR`. The two workers ship distinct rootfs images (web-fetch
-carries no python stdlib), so they must resolve from independent dirs; sharing one
-var would collide on a single image when both run in VM mode.
+for the cross-crate constants). The image **dir** (and the pinned `vmlinux`) is
+**shared** with python-exec — the default `KASTELLAN_MICROVM_DIR`
+(`/var/lib/kastellan/microvm`). The two workers are disambiguated by **rootfs
+filename**, not by dir: the build script emits `web-fetch.ext4` alongside
+`python-exec.ext4`, and the backend gains per-worker rootfs-filename resolution
+(see Component 3) reading a new `KASTELLAN_MICROVM_ROOTFS` env (default
+`python-exec.ext4`, byte-identical for the existing python path). Sharing the dir
+avoids duplicating the ~30 MB kernel and a second provisioned dir; the filename
+env is the only differentiator.
 
 ### 2. web-fetch `firecracker_mode_entry` — `core/src/workers/web_fetch.rs` (new builder + resolver branch)
 
@@ -144,19 +147,37 @@ Linux-only `ToolEntry` builder, mirroring `python_exec/entries.rs::firecracker_m
   resolves. (Those `/etc/*` paths would also be rejected by `build_launch_plan`'s
   share-anchor allowlist anyway.) The CA is appended to `fs_read` at spawn by
   `rewrite_worker_policy`.
-- `env`: the verbatim `KASTELLAN_WEB_FETCH_ALLOWLIST` JSON (forwarded into the
-  guest via the #360 `kastellan.env` cmdline token).
+- `env`: the verbatim `KASTELLAN_WEB_FETCH_ALLOWLIST` JSON, plus
+  `KASTELLAN_MICROVM_DIR` (the shared image dir the resolver picked) and
+  `KASTELLAN_MICROVM_ROOTFS=web-fetch.ext4` so the backend boots the right rootfs.
+  All three ride the #360 `kastellan.env` cmdline token into the guest (harmless
+  there — the guest ignores the two backend-config vars, exactly as it already
+  ignores python-exec's forwarded `KASTELLAN_MICROVM_DIR`).
 - `mem_mb: 512`, `cpu_ms: 10_000`, `wall_clock_ms: Some(30_000)`, `SingleUse`
   (match host-mode web-fetch).
 
 Resolver (`WebFetchManifest::resolve`) gains a Linux-`cfg`-gated `USE_MICROVM`
 short-circuit identical in shape to python-exec's: when
 `KASTELLAN_WEB_FETCH_USE_MICROVM=1`, return the firecracker entry with the in-rootfs
-binary path; else fall through to today's host-mode `web_fetch_entry`. macOS build
-is untouched (the `FirecrackerVm` variant and the env const are
-`#[cfg(target_os = "linux")]`-gated — issue-#144 rule).
+binary path (`/usr/local/bin/kastellan-worker-web-fetch`) and the shared image dir
+(`KASTELLAN_MICROVM_DIR`, default `/var/lib/kastellan/microvm`); else fall through
+to today's host-mode `web_fetch_entry`. macOS build is untouched (the
+`FirecrackerVm` variant and the env const are `#[cfg(target_os = "linux")]`-gated
+— issue-#144 rule).
 
-### 3. Guest file-aware RO bind — `workers/microvm-init/src/main.rs` (`apply_host_mounts`)
+### 3. Backend rootfs-filename resolution — `sandbox/src/linux_firecracker.rs`
+
+`spawn_under_policy` currently hardcodes `rootfs_path: dir.join("python-exec.ext4")`,
+so a web-fetch worker would boot the python rootfs. Extract a pure
+`resolve_image(env) -> FirecrackerImage` that reads `KASTELLAN_MICROVM_DIR`
+(default `/var/lib/kastellan/microvm`) **and** a new `KASTELLAN_MICROVM_ROOTFS`
+filename (default `python-exec.ext4` — the existing python path stays
+byte-identical), joining `dir/<rootfs>`. Unit-tested without root (default →
+`python-exec.ext4`; `ROOTFS=web-fetch.ext4` → that file; `DIR` override honoured;
+empty `ROOTFS` → default). `spawn_under_policy` calls it instead of the inline
+literal.
+
+### 4. Guest file-aware RO bind — `workers/microvm-init/src/main.rs` (`apply_host_mounts`)
 
 The only guest-side change. Extract a pure helper to decide bind shape, then act:
 
@@ -174,35 +195,31 @@ No cross-crate wire change: `RoShare.sources` already carries individual paths a
 the `kastellan.mounts` encoder is path-agnostic; file vs directory is decided
 entirely in-guest by stat.
 
-### 4. DGX e2e — `core/tests/web_fetch_firecracker_egress_e2e.rs` (new)
+### 5. DGX e2e — `core/tests/web_fetch_firecracker_egress_e2e.rs` (new)
 
-Layered, mirroring `firecracker_egress_channel_e2e.rs` (4a) + `egress_force_routing_e2e.rs`.
-The two things 4b adds — **transport reachability from a real net worker** and
-**CA-into-guest delivery** — are deliberately verified by *different* assertions,
-because a single test cannot cover both without the deferred upstream-trust harness:
+Layered, mirroring `firecracker_egress_channel_e2e.rs` (4a) + `python_exec_e2e.rs`:
 
-- **Always-on DGX gate — transport + force-routing + boot** (real KVM, real egress
-  sidecar): a force-routed web-fetch VM boots and an **off-allowlist host → `403`
-  surfaced to the in-VM worker** proves the full CONNECT path
-  (`/run/...sock` → vsock 1025 → launcher → real sidecar, which rejected the host).
-  Note this `403` is returned at CONNECT time, **before** the MITM TLS handshake,
-  so it proves the VM net path is wired but **does not exercise the CA** — that is
-  intentional (no real origin / no upstream-trust plumbing needed for the cheap
-  always-on gate).
-- **CA-delivery proof, two layers:**
-  - **Always-on, pure:** the `microvm-init` file-vs-directory bind helper has
-    RED→GREEN units (file → parent-dir + touch + bind; dir → today's path;
-    missing → skip), runnable on macOS. This guards the bind *logic* that lands
-    `ca.pem` in-guest without needing a VM.
-  - **`#[ignore]` real-net, end-to-end:** a full MITM fetch through the real
-    sidecar to a real HTTPS origin — the worker validates the proxy's MITM leaf
-    against the delivered CA, so this **fails closed if the CA did not materialise
-    in-guest**, making it the genuine CA-delivery acceptance test. Mirrors the
-    existing `real_mitm_fetch_through_sidecar`; carries the DGX public-DNS caveat
-    (memory `dgx-realnet-egress-tests-fail`) — operator-driven on the Mac, not a
-    CI gate. (A hermetic always-on MITM gate would need the proxy to trust a test
-    upstream root for a loopback origin — the deferred harness in §"Open
-    implementation details".)
+- **Always-on DGX gate — transport + boot + CA delivery, hermetically** (real KVM):
+  a host `UnixListener` **stub stands in for the egress proxy** at the worker's
+  `proxy_uds` (exactly the slice-4a echo pattern, one level up); the test boots a
+  force-routed web-fetch VM and drives one `web.fetch` for an **allowlisted** host,
+  then asserts the stub **receives the worker's `CONNECT <host>:443` line** within
+  the wall-clock window. This single assertion proves the whole chain end-to-end:
+  VM boot + force-routing + the slice-4a vsock relay (`/run/...sock` → vsock 1025 →
+  launcher → host stub) **and CA delivery** — because the worker's `make_get` /
+  `ProxyConnectGet::with_trust` **fails closed on an unreadable
+  `KASTELLAN_EGRESS_PROXY_CA`** (pinned by `make_get_inner`'s own unit), so it
+  cannot emit `CONNECT` at all unless the per-instance `ca.pem` actually
+  materialised in-guest. No real origin and no upstream-trust plumbing needed.
+- **Always-on, pure:** the `microvm-init` file-vs-directory bind helper has
+  RED→GREEN units (file → parent-dir + touch + bind; dir → today's path;
+  missing → skip), runnable on macOS — guards the bind *logic* without a VM.
+- **`#[ignore]` real-net, end-to-end origin validation:** a full MITM fetch through
+  the **real** sidecar to a real HTTPS origin — the worker validates the proxy's
+  MITM leaf against the delivered CA and returns readable text. The last mile the
+  hermetic gate cannot cover (a stub can't complete TLS). Mirrors the existing
+  `real_mitm_fetch_through_sidecar`; carries the DGX public-DNS caveat (memory
+  `dgx-realnet-egress-tests-fail`) — operator-driven on the Mac, not a CI gate.
 - No-regression: slice-1 e2e, slice-2 warm/idle, slice-3 host-dir, slice-4a egress
   channel all still green; 0 orphan run-dirs.
 
@@ -248,12 +265,14 @@ because a single test cannot cover both without the deferred upstream-trust harn
 These are acceptable deferrals (the feature is testing-only, nothing in production
 depends on it yet) — resolve them during TDD, not now:
 
-- **Hermetic always-on MITM gate.** A loopback HTTPS origin would let the MITM
-  fetch (and thus CA delivery) run always-on, but the proxy validates upstream
-  against webpki and would reject a self-signed loopback cert. Closing this needs
-  either a webpki-chaining cert or a proxy test knob to trust an extra upstream
-  root — the same gap the existing `real_mitm_fetch_through_sidecar` lives with.
-  Until then, CA delivery's end-to-end proof is the `#[ignore]` real-net test.
+- **Hermetic always-on full-fetch gate.** The always-on gate proves transport +
+  CA delivery (the worker emits `CONNECT` only after loading the in-guest CA), but
+  not the final origin-validation TLS leg (the stub can't complete TLS). A loopback
+  HTTPS origin would let the *whole* fetch run always-on, but the proxy validates
+  upstream against webpki and would reject a self-signed loopback cert. Closing this
+  needs either a webpki-chaining cert or a proxy test knob to trust an extra
+  upstream root — the same gap `real_mitm_fetch_through_sidecar` lives with. Until
+  then, origin validation's proof is the `#[ignore]` real-net test.
 - **`/tmp` scratch ↔ CA bind ordering** in the guest init: the CA binds into the
   same `/tmp` tmpfs the worker scratch uses. web-fetch has no per-call `/tmp` wipe
   (that is python-exec's `wipe_scratch_contents`), so the risk is low, but pin the
