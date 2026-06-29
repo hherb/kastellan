@@ -31,6 +31,11 @@ fn main() -> std::io::Result<()> {
     // to removing just the base vsock UDS, as before.
     let run_dir = arg("--run-dir");
 
+    // Confined path (slice 5a): the bwrap jail has no $PATH, so the backend
+    // resolves + binds firecracker and passes its absolute path here. Absent →
+    // the bare name (resolved via $PATH), byte-identical to the pre-5a launcher.
+    let firecracker_bin = arg("--firecracker-bin").unwrap_or_else(|| "firecracker".to_string());
+
     // Slice 4a: when force-routed, start the egress reverse-relay BEFORE booting
     // firecracker so the host listener at `<vsock_uds>_<port>` exists before the
     // guest can dial it (firecracker connects there for a guest-initiated vsock
@@ -45,7 +50,7 @@ fn main() -> std::io::Result<()> {
     // Boot firecracker as our child; it creates the base vsock UDS once it is
     // up. Its stdout/stderr go to the log path via --log-path, so we keep our
     // own stdout pristine for JSON-RPC.
-    let fc_argv = boot::firecracker_argv(&config, &log);
+    let fc_argv = boot::firecracker_argv(&firecracker_bin, &config, &log);
     let mut fc = Command::new(&fc_argv[0])
         .args(&fc_argv[1..])
         .stdin(Stdio::null())
