@@ -89,6 +89,13 @@ pub fn launcher_argv(
         argv.push("--egress-vsock-port".into());
         argv.push(port.to_string());
     }
+    // Slice 5b-2: when a persistent store image is present (mkfs-once, stable
+    // host path outside run_dir), pass it to the launcher so it attaches the
+    // drive and sets up teardown-safe handling.
+    if let Some(img) = &plan.persistent_image_path {
+        argv.push("--persistent-image".into());
+        argv.push(img.to_string_lossy().into_owned());
+    }
     argv
 }
 
@@ -292,6 +299,41 @@ mod spawn_tests {
         assert!(
             argv.windows(2).any(|w| w[0] == "--egress-vsock-port" && w[1] == EGRESS_VSOCK_PORT.to_string()),
             "argv must pass --egress-vsock-port: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn launcher_argv_includes_persistent_image_flag_when_set() {
+        let mut plan = plan::build_launch_plan(
+            &SandboxPolicy::default(),
+            &FirecrackerImage { kernel_path: "/k".into(), rootfs_path: "/var/r.ext4".into() },
+            "/w",
+            &[],
+        )
+        .unwrap();
+        plan.persistent_image_path =
+            Some(std::path::PathBuf::from("/var/lib/kastellan/kv/store.ext4"));
+        let argv = launcher_argv(&plan, "fc.json", "fc.log", "run");
+        let i = argv
+            .iter()
+            .position(|a| a == "--persistent-image")
+            .expect("--persistent-image flag must be present");
+        assert_eq!(argv[i + 1], "/var/lib/kastellan/kv/store.ext4");
+
+        // absent ⇒ no flag (byte-identical legacy argv)
+        let mut plan2 = plan::build_launch_plan(
+            &SandboxPolicy::default(),
+            &FirecrackerImage { kernel_path: "/k".into(), rootfs_path: "/var/r.ext4".into() },
+            "/w",
+            &[],
+        )
+        .unwrap();
+        plan2.persistent_image_path = None;
+        assert!(
+            !launcher_argv(&plan2, "fc.json", "fc.log", "run")
+                .iter()
+                .any(|a| a == "--persistent-image"),
+            "no --persistent-image flag when persistent_image_path is None"
         );
     }
 
