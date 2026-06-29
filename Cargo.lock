@@ -2338,6 +2338,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kastellan-worker-kv-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kastellan-worker-matrix"
 version = "0.1.0"
 dependencies = [
