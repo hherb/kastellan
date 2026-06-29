@@ -303,7 +303,7 @@ pub fn build_launch_plan(
     if let Some(suffix) = encode_env_cmdline(&env)? {
         boot_args.push_str(&suffix);
     }
-    if let Some(suffix) = encode_mount_manifest(ro_share.as_ref(), rw_scratch.as_ref())? {
+    if let Some(suffix) = encode_mount_manifest(ro_share.as_ref(), rw_scratch.as_ref(), None)? {
         boot_args.push_str(&suffix);
     }
     if egress_proxy_vsock_port.is_some() {

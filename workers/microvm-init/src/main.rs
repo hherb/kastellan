@@ -188,7 +188,9 @@ fn parse_egress_config(cmdline: &str) -> EgressConfig {
 #[derive(Debug, Default, PartialEq)]
 struct MountManifest {
     ro: Option<RoMount>,
-    rw: Option<RwMount>,
+    /// All RW drives, in manifest order. Slice 3 = one scratch drive; slice 5b-2
+    /// adds a second persistent drive. The guest mounts every entry.
+    rw: Vec<RwMount>,
 }
 #[allow(dead_code)]
 #[derive(Debug, PartialEq)]
@@ -233,7 +235,7 @@ fn parse_mount_manifest(cmdline: &str) -> MountManifest {
             }
             Some("rw") => {
                 if let (Some(dev), Some(mp)) = (fields.next(), fields.next()) {
-                    m.rw = Some(RwMount { dev: dev.to_string(), mountpoint: mp.to_string() });
+                    m.rw.push(RwMount { dev: dev.to_string(), mountpoint: mp.to_string() });
                 }
             }
             _ => {}
@@ -339,7 +341,7 @@ fn apply_host_mounts(m: &MountManifest) {
             targets.push(t);
         }
     }
-    if let Some(rw) = &m.rw {
+    for rw in &m.rw {
         targets.push(&rw.mountpoint);
     }
     // tmpfs each unique anchor once (makes the read-only root writable there).
@@ -396,8 +398,10 @@ fn apply_host_mounts(m: &MountManifest) {
         }
     }
 
-    // RW scratch: mount the blank ext4 read-write at its mountpoint.
-    if let Some(rw) = &m.rw {
+    // RW drives (scratch + persistent): mount each blank/persistent ext4 read-write
+    // at its mountpoint. Slice 3 = one scratch drive; slice 5b-2 may add a second
+    // persistent drive; every entry is mounted.
+    for rw in &m.rw {
         let _ = std::fs::create_dir_all(&rw.mountpoint);
         mount(&rw.dev, &rw.mountpoint, Some("ext4"), 0);
     }
@@ -893,7 +897,7 @@ mod tests {
         let ro = m.ro.expect("ro mount");
         assert_eq!(ro.dev, "/dev/vdb");
         assert_eq!(ro.targets, vec!["/opt/a".to_string()]);
-        assert!(m.rw.is_none());
+        assert!(m.rw.is_empty());
     }
 
     #[test]
@@ -905,17 +909,33 @@ mod tests {
         let cmdline = format!("console=ttyS0 kastellan.mounts={hex}");
         let m = parse_mount_manifest(&cmdline);
         assert_eq!(m.ro.unwrap().dev, "/dev/vdb");
-        let rw = m.rw.unwrap();
-        assert_eq!(rw.dev, "/dev/vdc");
-        assert_eq!(rw.mountpoint, "/tmp/s");
+        assert_eq!(m.rw.len(), 1);
+        assert_eq!(m.rw[0].dev, "/dev/vdc");
+        assert_eq!(m.rw[0].mountpoint, "/tmp/s");
     }
 
     #[test]
     fn parse_mount_manifest_missing_or_garbled_is_empty() {
         let m = parse_mount_manifest("console=ttyS0 panic=1");
-        assert!(m.ro.is_none() && m.rw.is_none());
+        assert!(m.ro.is_none() && m.rw.is_empty());
         let bad = parse_mount_manifest("kastellan.mounts=zz");
-        assert!(bad.ro.is_none() && bad.rw.is_none());
+        assert!(bad.ro.is_none() && bad.rw.is_empty());
+    }
+
+    #[test]
+    fn parse_mount_manifest_decodes_two_rw_lines() {
+        // Slice 5b-2: a scratch drive + a persistent drive both appear as `rw`
+        // lines. The guest must mount EVERY rw entry, not just the first.
+        let block = "rw\t/dev/vdc\t/tmp\nrw\t/dev/vdd\t/data";
+        let hex: String = block.bytes().map(|b| format!("{b:02x}")).collect();
+        let cmdline = format!("console=ttyS0 kastellan.mounts={hex}");
+        let m = parse_mount_manifest(&cmdline);
+        assert!(m.ro.is_none());
+        assert_eq!(m.rw.len(), 2);
+        assert_eq!(m.rw[0].dev, "/dev/vdc");
+        assert_eq!(m.rw[0].mountpoint, "/tmp");
+        assert_eq!(m.rw[1].dev, "/dev/vdd");
+        assert_eq!(m.rw[1].mountpoint, "/data");
     }
 
     #[test]
