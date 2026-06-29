@@ -430,7 +430,18 @@ items unlock later ones.
     guest `exec_worker` builds the full `[program, args…, NULL]` execv argv; all-or-nothing decode (bad component ⇒ run bare, never a shifted argv; interior-NUL never aborts PID1).
     Cross-crate roundtrip fixture pinned in both crates. **DGX: sandbox 98/0 (+4) + microvm-init 19/0 (+3) + clippy clean + slice-1 FC e2e 6/6 no-regression** (rebuilt rootfs bakes
     the refactored PID1). Mac: microvm-init 19/0 native + aarch64 cross-clippy clean. Pure-Rust, no migration.
-    [ ] **SLICE 5 (next):** jailer hardening (chroot/cgroup/uid-drop) + long-lived/channel workers in a VM. (Or: generalize net-worker-in-VM for browser-driver/web-search.)
+    [x] **SLICE 5a — unprivileged VMM confinement (2026-06-29, branch `feat/microvm-slice5a-vmm-confinement`).** Firecracker's `jailer` needs root,
+    which violates the non-root/never-self-escalate daemon invariant — so the VMM (launcher + `firecracker`) is confined the unprivileged way: `spawn_under_policy`
+    wraps `kastellan-microvm-run` in the existing `systemd-run --user --scope` cgroup + a `bwrap` jail, and `firecracker` inherits the namespaces as the launcher's
+    child. Closes the missing host-side cgroup gap for FC workers. New `sandbox/src/linux_firecracker/confine.rs`: `VmmConfinement{None,BwrapCgroup}` seam (true
+    `Jailer` is a documented comment for a future privileged tier), pure `confinement_from_env` (default-ON, only a clear `KASTELLAN_MICROVM_CONFINE_VMM=0` opts out),
+    `find_executable` ($PATH resolver to bind the two binaries into the jail), `build_vmm_jail_argv` (binds only `/dev/kvm`+`/dev/vhost-vsock`, kernel/rootfs/binaries RO,
+    run-dir RW, egress UDS only when force-routed), `build_confined_spawn_argv`. Launcher gains optional `--firecracker-bin` (jail has no $PATH). **Fail-closed**: confinement
+    on + binary/probe missing ⇒ refuse to spawn (no silent bare fallback); probe gated. **DGX merge gate GREEN**: confined-boot e2e + full slice 1-4b suite pass under
+    default-ON confinement (python_exec 6/6 incl. mem-cap OOM + net-deny, warm-idle 4/4, hostdir 1/1, egress-4a 1/1, web-fetch-4b 2/2) ⇒ `/dev/kvm`+vsock survive the bwrap
+    userns. sandbox lib 114/0, microvm-run 11/11, workspace clippy clean. opus final review: READY TO MERGE. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-29-firecracker-microvm-slice5a-vmm-confinement*`.
+    [ ] **SLICE 5b (next):** long-lived/channel workers in a VM — boot a VM once and keep it running for a channel's lifetime (matrix/IMAP consumer), persistent-thread
+    spawn + supervision. **True `jailer`** (root chroot + dedicated-uid drop) deferred to a privileged-tier `VmmConfinement::Jailer` sibling. (Or: generalize net-worker-in-VM for browser-driver/web-search.)
   - [ ] **Follow-ups:** curated-wheels RO dir if/when the skill catalog demands packages; planner-prompt surfacing
     (parity note: the net workers have none either).
 - [ ] Skill catalog (named/persisted Python skills) with optional human-approve gate

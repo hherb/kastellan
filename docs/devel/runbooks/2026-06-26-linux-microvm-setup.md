@@ -80,6 +80,35 @@ vsock connection, `dup2`s it onto fd 0/1, and execs the **unchanged**
 `serve_stdio` python-exec worker. Teardown is driven by the host closing the
 launcher's stdin; the launcher kills Firecracker, so no VM is orphaned.
 
+## VMM confinement (slice 5a, default-ON)
+
+Since slice 5a, the VMM itself (the `kastellan-microvm-run` launcher + the
+`firecracker` process it spawns) runs **inside an unprivileged `bwrap` jail + a
+`systemd-run --user --scope` cgroup** — defense-in-depth around the hypervisor,
+on top of the guest-kernel boundary. This is **on by default** for every
+Firecracker VM worker and needs no extra setup beyond what this runbook already
+requires, because it reuses the same layers the bwrap workers use:
+
+- the unprivileged-userns **AppArmor profile**
+  (`sudo scripts/linux/install-bwrap-apparmor-profile.sh`, Ubuntu 24.04+), and
+- a live **`systemd --user`** session (`loginctl enable-linger $USER` on headless
+  hosts).
+
+If either is missing, the firecracker `probe` **fails closed** and names both
+fixes — the VM worker refuses to spawn rather than run the VMM unconfined. To run
+VMs **without** host-side VMM confinement (e.g. a host that can't provide the
+AppArmor profile), set the opt-out:
+
+```sh
+KASTELLAN_MICROVM_CONFINE_VMM=0   # default unset = confined
+```
+
+Note: under confinement the host cgroup `MemoryMax` equals the worker's `mem_mb`
+(the guest RAM), covering firecracker's guest-RAM mapping plus VMM overhead — a
+tight ceiling that is verified-passing for the 512 MiB python-exec worker. A
+future worker with a much larger guest RAM may want headroom for the VMM process
+itself (`mem_mb` reflects guest RAM, not the VMM-process budget).
+
 ## Reversing the host setup
 
 ```sh
