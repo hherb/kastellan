@@ -173,12 +173,20 @@ fn kv_demo_survives_respawn_under_default_backend() {
     );
 
     // ── Phase 4: optional — confirm the respawned process is a fresh PID ──────
+    // Only meaningful when the sandbox does NOT run the worker as PID 1. Under
+    // bwrap `--as-pid-1` (Linux) and the micro-VM the worker is ALWAYS PID 1, so
+    // both pids read as 1 and a pid-change check is invalid there — the
+    // value-survival assertion above is the real proof of respawn. macOS Seatbelt
+    // gives real OS pids, where this extra check confirms a fresh process.
 
     let post_stats = h.call("kv.stats", serde_json::json!({})).expect("post-respawn kv.stats");
     let post_pid = post_stats["pid"].as_u64();
-    if let (Some(pre), Some(post)) = (pre_crash_pid, post_pid) {
-        assert_ne!(pre, post, "respawned worker must be a new OS process (pid changed)");
-        eprintln!("[INFO] pre-crash pid={pre}, post-respawn pid={post} — confirmed new process");
+    match (pre_crash_pid, post_pid) {
+        (Some(pre), Some(post)) if pre != 1 && post != 1 => {
+            assert_ne!(pre, post, "respawned worker must be a new OS process (pid changed)");
+            eprintln!("[INFO] pre-crash pid={pre}, post-respawn pid={post} — confirmed new process");
+        }
+        _ => eprintln!("[INFO] worker runs as PID 1 (PID-1 sandbox); skipping pid-change check"),
     }
 
     // ── Teardown ──────────────────────────────────────────────────────────────
