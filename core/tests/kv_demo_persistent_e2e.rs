@@ -29,11 +29,11 @@ fn kv_demo_binary() -> Option<PathBuf> {
 }
 
 /// Create a canonicalized temporary directory for kv state with a unique name.
-/// Canonicalization is required on macOS because `std::env::temp_dir()` returns
-/// a `$TMPDIR`-based path that contains symlinks (`/var` → `/private/var`).
-/// The Seatbelt backend resolves symlinks in `fs_read`/`fs_write` but does NOT
-/// canonicalize `persistent_store.guest_mount`, so we do it here to ensure the
-/// generated Seatbelt rule matches what the kernel actually sees.
+/// On macOS `std::env::temp_dir()` returns a `$TMPDIR`-based path that contains
+/// symlinks (`/var` → `/private/var`). The Seatbelt backend now canonicalizes
+/// `persistent_store` paths itself (see `macos_seatbelt::canonicalize_policy_paths`),
+/// so this is belt-and-suspenders — we hand it the already-resolved path so the
+/// test asserts on a stable path regardless of that backend step.
 fn unique_tmp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "kastellan-kv-persist-{}-{}",
