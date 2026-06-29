@@ -64,11 +64,17 @@ pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
     let has_cpu_ms = out.env.iter().any(|(k, _)| k == ENV_CPU_MS);
 
     if !has_landlock {
-        let rw_paths: Vec<String> = out
+        let mut rw_paths: Vec<String> = out
             .fs_write
             .iter()
             .map(|p| p.display().to_string())
             .collect();
+        // Slice 5b-2: the persistent store is a writable path the worker needs
+        // Landlock RW for, but it must NOT enter fs_write (the FC backend turns
+        // fs_write into *ephemeral* scratch). Add only to the Landlock RW set.
+        if let Some(ps) = &out.persistent_store {
+            rw_paths.push(ps.guest_mount.display().to_string());
+        }
         // serde_json on a Vec<String> is infallible — `unwrap` is safe here.
         let json = serde_json::to_string(&rw_paths).unwrap();
         out.env.push((ENV_LANDLOCK_RW.into(), json));
@@ -289,5 +295,31 @@ mod tests {
             "caller-supplied KASTELLAN_LANDLOCK_RO must not be duplicated"
         );
         assert_eq!(ro_entries[0].1, r#"["/custom/ro"]"#);
+    }
+
+    #[test]
+    fn lockdown_env_landlock_rw_includes_persistent_guest_mount() {
+        let mut policy = base_policy();
+        policy.persistent_store = Some(kastellan_sandbox::PersistentStore {
+            host_backing: PathBuf::from("/var/lib/kastellan/kv/store.ext4"),
+            guest_mount: PathBuf::from("/data"),
+            size_mib: 64,
+        });
+        let derived = derive_lockdown_env(&policy);
+        let rw = derived
+            .env
+            .iter()
+            .find(|(k, _)| k == ENV_LANDLOCK_RW)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        assert!(
+            rw.contains("/data"),
+            "Landlock RW must include the persistent guest_mount, got {rw:?}"
+        );
+        // Must NOT be smuggled into fs_write (which FC would make ephemeral).
+        assert!(
+            !derived.fs_write.iter().any(|p| p == std::path::Path::new("/data")),
+            "persistent guest_mount must NOT appear in derived.fs_write"
+        );
     }
 }
