@@ -114,6 +114,7 @@ pub fn python_exec_entry(
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
+        persistent_store: None,
     };
     ToolEntry {
         binary,
@@ -217,6 +218,7 @@ pub fn container_mode_entry(
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
+        persistent_store: None,
     };
     ToolEntry {
         binary,
@@ -286,6 +288,7 @@ pub fn firecracker_mode_entry(
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
+        persistent_store: None,
     };
     ToolEntry {
         binary,

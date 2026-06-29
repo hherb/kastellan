@@ -532,6 +532,7 @@ pub fn build_matrix_policy(
         tasks_max: None,
         env: Vec::new(), // spawn fills env (homeserver/user/secret refs) at Phase D
         proxy_uds,
+        persistent_store: None,
     }
 }
 

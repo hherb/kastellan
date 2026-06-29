@@ -75,6 +75,21 @@ pub enum Net {
     ProxyEgress,
 }
 
+/// A persistent writable store for a long-lived worker: backing survives a
+/// worker/VM respawn. Interpreted per-backend — an **ext4 image file** on the
+/// Firecracker backend (mkfs-once, then reused untouched), a **directory**
+/// bound RW on bwrap/Seatbelt. Both `host_backing` and `guest_mount` must be
+/// absolute. Distinct from `fs_write` ephemeral scratch (re-created per spawn).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistentStore {
+    /// Stable host path. Firecracker: ext4 image file. bwrap/Seatbelt: directory.
+    pub host_backing: PathBuf,
+    /// Absolute in-guest/in-jail mount point the worker writes to.
+    pub guest_mount: PathBuf,
+    /// ext4 image size (MiB) on first create. Ignored by dir-backed backends.
+    pub size_mib: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SandboxPolicy {
     /// Read-only mounts/paths.
@@ -142,6 +157,10 @@ pub struct SandboxPolicy {
     /// behaviour (slice #1 posture). Additive.
     #[serde(default)]
     pub proxy_uds: Option<PathBuf>,
+    /// A persistent writable store that survives a respawn (long-lived workers).
+    /// `None` ⇒ no store, byte-identical to prior behaviour. See [`PersistentStore`].
+    #[serde(default)]
+    pub persistent_store: Option<PersistentStore>,
 }
 
 impl Default for SandboxPolicy {
@@ -162,6 +181,7 @@ impl Default for SandboxPolicy {
             tasks_max: None,
             env: Vec::new(),
             proxy_uds: None,
+            persistent_store: None,
         }
     }
 }
@@ -551,5 +571,25 @@ mod tests {
             Arc::ptr_eq(&first, &second),
             "resolve with image=None must return the cached default-image slot (Arc-pointer identity)"
         );
+    }
+
+    #[test]
+    fn persistent_store_defaults_to_none_and_round_trips() {
+        // Back-compat: a policy serialized without the field deserializes to None.
+        let json = r#"{"fs_read":[],"fs_write":[],"net":"Deny","cpu_ms":0,"mem_mb":256,"profile":"WorkerStrict"}"#;
+        let p: SandboxPolicy = serde_json::from_str(json).expect("deserialize legacy policy");
+        assert!(p.persistent_store.is_none());
+
+        // A populated store round-trips.
+        let store = PersistentStore {
+            host_backing: PathBuf::from("/var/lib/kastellan/kv/store.ext4"),
+            guest_mount: PathBuf::from("/data"),
+            size_mib: 64,
+        };
+        let mut p2 = p.clone();
+        p2.persistent_store = Some(store.clone());
+        let s = serde_json::to_string(&p2).unwrap();
+        let back: SandboxPolicy = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.persistent_store, Some(store));
     }
 }
