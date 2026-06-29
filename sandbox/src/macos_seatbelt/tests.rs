@@ -401,6 +401,25 @@ fn non_browser_proxy_uds_has_no_loopback_tcp() {
     assert!(!p.contains(r#"network-outbound (remote ip "localhost"#));
 }
 
+/// `persistent_store` emits a combined `file-read* file-write*` subpath rule
+/// for `guest_mount` so the worker can write to its persistent store.
+/// On macOS there is no path remap (host_backing == guest_mount in the demo),
+/// so we grant the `guest_mount` path directly.
+#[test]
+fn persistent_store_grants_rw_subpath() {
+    let mut policy = strict_policy();
+    policy.persistent_store = Some(crate::PersistentStore {
+        host_backing: std::path::PathBuf::from("/tmp/kvstate"),
+        guest_mount: std::path::PathBuf::from("/tmp/kvstate"),
+        size_mib: 0,
+    });
+    let profile = build_profile(&policy);
+    assert!(
+        profile.contains("(allow file-read* file-write* (subpath \"/tmp/kvstate\"))"),
+        "expected persistent_store subpath rule; got:\n{profile}"
+    );
+}
+
 /// The widening is gated to `WorkerBrowserClient` ALONE — the strict and
 /// net-client profiles keep the deny-default (incl. the issue-#1 mach-lookup
 /// deny). This is the regression pin that the browser cluster never leaks into

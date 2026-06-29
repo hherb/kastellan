@@ -359,6 +359,17 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
         ));
     }
 
+    // Persistent store: a stable RW mount that survives worker respawns.
+    // On macOS there is no path remap (host_backing == guest_mount in the
+    // demo), so we grant the guest_mount path directly. The backing dir
+    // must exist before spawn; creation is the caller's responsibility.
+    if let Some(ps) = &policy.persistent_store {
+        out.push_str(&format!(
+            "(allow file-read* file-write* (subpath \"{}\"))\n",
+            ps.guest_mount.display()
+        ));
+    }
+
     // Browser-only Seatbelt widening (spike findings, design spec §3.1). A
     // headless Chromium SIGSEGVs at launch without all three clusters; bisected
     // on macOS 26.4 ARM64 (dropping any one → child crash). This is gated to
