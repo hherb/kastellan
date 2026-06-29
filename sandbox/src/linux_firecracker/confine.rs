@@ -3,7 +3,6 @@
 //! privileged root chroot + uid-drop sibling) is a documented future addition —
 //! the `VmmConfinement` enum is the seam where it would slot in.
 
-#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
 
 #[allow(unused_imports)]
@@ -34,6 +33,21 @@ pub fn confinement_from_env(flag: Option<&str>) -> VmmConfinement {
     }
 }
 
+/// Resolve `name` to an absolute path by scanning the dirs in `path_env`
+/// (a `$PATH`-style `:`-joined string), returning the first that holds a file
+/// of that name. Pure over the injected `path_env` so it is unit-testable; the
+/// spawn site passes `std::env::var("PATH")`. Used only on the confined path,
+/// where the binary must be bound into the jail by absolute path.
+#[allow(dead_code)]
+pub fn find_executable(name: &str, path_env: Option<&str>) -> Option<PathBuf> {
+    let path_env = path_env?;
+    path_env
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .map(|dir| Path::new(dir).join(name))
+        .find(|p| p.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +69,18 @@ mod tests {
         for v in ["1", "true", "yes", "on", "", "garbage"] {
             assert_eq!(confinement_from_env(Some(v)), VmmConfinement::BwrapCgroup, "value {v:?}");
         }
+    }
+
+    #[test]
+    fn find_executable_returns_first_matching_dir() {
+        // /usr/bin/true exists on the DGX; /nonexistent does not.
+        let found = find_executable("true", Some("/nonexistent:/usr/bin"));
+        assert_eq!(found, Some(PathBuf::from("/usr/bin/true")));
+    }
+
+    #[test]
+    fn find_executable_none_when_absent_or_no_path() {
+        assert_eq!(find_executable("definitely-not-a-binary-xyz", Some("/usr/bin")), None);
+        assert_eq!(find_executable("true", None), None);
     }
 }
