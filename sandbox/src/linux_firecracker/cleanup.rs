@@ -17,24 +17,51 @@
 /// `kastellan-microvm-run` launcher's PID, written by the backend after spawn.
 pub const LAUNCHER_PID_FILE: &str = "launcher.pid";
 
+/// Marker the launcher drops when it tore down its VM but could NOT remove its
+/// own run-dir — the confined case (slice 5a): the run-dir is a `bwrap`
+/// bind-mount point, so `remove_dir_all` from inside the jail unlinks the
+/// contents (including `launcher.pid`) but `rmdir(2)` of the mount point returns
+/// `EBUSY`, leaving an empty husk with no pidfile. The launcher runs as jail
+/// PID 1 and cannot rewrite its host pidfile, so it writes this marker instead;
+/// the host-side sweep reclaims any marked husk (the launcher is exiting and
+/// firecracker is already killed, so the empty dir is safe to remove).
+///
+/// **Pinned literal** — `workers/microvm-run/src/main.rs` writes the SAME string
+/// (no shared dep between the launcher and this crate); keep the two in sync.
+pub const TEARDOWN_MARKER_FILE: &str = "teardown.done";
+
 /// Name prefix of every per-spawn run-dir under the system temp dir.
 /// Kept in sync with `make_spawn_dir` in the parent module.
 pub const RUN_DIR_PREFIX: &str = "kastellan-microvm-";
 
-/// Pure decision: should an orphan sweep remove a run-dir, given the contents of
-/// its pidfile (if any) and a liveness predicate?
+/// Pure decision: should an orphan sweep remove a run-dir, given whether the
+/// launcher left a teardown marker, the contents of its pidfile (if any), and a
+/// liveness predicate?
 ///
-/// Returns `true` ONLY when the pidfile is present AND parses to a PID the
-/// `alive` predicate reports as dead. Every uncertain case returns `false` —
-/// the sweep must never delete a dir it cannot prove belongs to a dead launcher:
-/// - `None` (no pidfile yet — a dir still mid-spawn) → keep
-/// - unparseable / whitespace-only contents → keep
-/// - a live PID → keep
+/// Returns `true` when EITHER:
+/// - `teardown_marker` is present — the launcher finished teardown but could not
+///   remove its own bind-mount run-dir (confined mode); the husk is empty and
+///   the launcher is exiting, so it is always safe to reclaim; OR
+/// - the pidfile is present AND parses to a PID the `alive` predicate reports as
+///   dead.
+///
+/// Every other case returns `false` — the sweep must never delete a dir it
+/// cannot prove belongs to a dead/finished launcher:
+/// - no marker and `None` pidfile (a dir still mid-spawn) → keep
+/// - no marker and unparseable / whitespace-only contents → keep
+/// - no marker and a live PID → keep
 ///
 /// This conservatism is what makes the sweep safe to run concurrently with live
 /// spawns: a false negative is a missed cleanup (caught next sweep); a false
 /// positive would delete a running VM's dir, which this rules out.
-pub fn orphaned_run_dir_should_remove(pidfile: Option<String>, alive: impl Fn(u32) -> bool) -> bool {
+pub fn orphaned_run_dir_should_remove(
+    teardown_marker: bool,
+    pidfile: Option<String>,
+    alive: impl Fn(u32) -> bool,
+) -> bool {
+    if teardown_marker {
+        return true;
+    }
     match pidfile
         .as_deref()
         .map(str::trim)
@@ -74,8 +101,11 @@ pub fn sweep_orphaned_run_dirs(temp_dir: &std::path::Path, alive: impl Fn(u32) -
         if !path.is_dir() {
             continue;
         }
+        let marker = path.join(TEARDOWN_MARKER_FILE).exists();
         let pidfile = std::fs::read_to_string(path.join(LAUNCHER_PID_FILE)).ok();
-        if orphaned_run_dir_should_remove(pidfile, &alive) && std::fs::remove_dir_all(&path).is_ok() {
+        if orphaned_run_dir_should_remove(marker, pidfile, &alive)
+            && std::fs::remove_dir_all(&path).is_ok()
+        {
             removed += 1;
         }
     }
@@ -98,32 +128,47 @@ mod tests {
 
     #[test]
     fn removes_when_pidfile_names_a_dead_pid() {
-        assert!(orphaned_run_dir_should_remove(Some("999".into()), |_| false));
+        assert!(orphaned_run_dir_should_remove(false, Some("999".into()), |_| false));
     }
 
     #[test]
     fn keeps_when_pidfile_names_a_live_pid() {
-        assert!(!orphaned_run_dir_should_remove(Some("999".into()), |_| true));
+        assert!(!orphaned_run_dir_should_remove(false, Some("999".into()), |_| true));
     }
 
     #[test]
     fn keeps_when_no_pidfile() {
         // A dir still mid-spawn (created, pidfile not yet written) must survive.
-        assert!(!orphaned_run_dir_should_remove(None, |_| false));
+        assert!(!orphaned_run_dir_should_remove(false, None, |_| false));
     }
 
     #[test]
     fn keeps_when_pidfile_is_garbage() {
-        assert!(!orphaned_run_dir_should_remove(Some("not-a-pid".into()), |_| false));
+        assert!(!orphaned_run_dir_should_remove(false, Some("not-a-pid".into()), |_| false));
     }
 
     #[test]
     fn parses_pidfile_with_trailing_whitespace() {
         // Dead pid with a trailing newline (how the backend writes it) → remove.
-        assert!(orphaned_run_dir_should_remove(Some("123\n".into()), |p| {
+        assert!(orphaned_run_dir_should_remove(false, Some("123\n".into()), |p| {
             assert_eq!(p, 123, "whitespace must be trimmed before parse");
             false
         }));
+    }
+
+    #[test]
+    fn removes_when_teardown_marker_present_even_without_pidfile() {
+        // Confined-mode husk: the launcher removed the contents (incl. the
+        // pidfile) but could not rmdir its bind-mount run-dir, so it dropped the
+        // teardown marker. Reclaim it regardless of the (now-absent) pidfile.
+        assert!(orphaned_run_dir_should_remove(true, None, |_| true));
+    }
+
+    #[test]
+    fn marker_reclaims_even_if_a_stale_pidfile_looks_alive() {
+        // Marker wins over a live-looking pidfile: only a finished launcher
+        // writes the marker, so the husk is dead regardless.
+        assert!(orphaned_run_dir_should_remove(true, Some("999".into()), |_| true));
     }
 
     // Unique temp root per test so parallel runs don't collide.
@@ -165,6 +210,24 @@ mod tests {
         assert!(live.exists(), "live-pid run-dir kept");
         assert!(young.exists(), "pidfile-less (mid-spawn) run-dir kept");
         assert!(other.exists(), "non-matching dir untouched");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn sweep_reclaims_confined_marker_husk_without_a_pidfile() {
+        // Confined-mode graceful teardown leaves an empty husk: no pidfile, but a
+        // teardown marker. The sweep must reclaim it (the bug this guards against
+        // was the husk surviving forever because pidfile-less dirs are kept).
+        let root = fresh_temp_root();
+        let husk = root.join(format!("{RUN_DIR_PREFIX}2-0"));
+        fs::create_dir_all(&husk).unwrap();
+        fs::write(husk.join(TEARDOWN_MARKER_FILE), "").unwrap();
+
+        let removed = sweep_orphaned_run_dirs(&root, |_| true); // even if "everything alive"
+
+        assert_eq!(removed, 1, "the marked husk is reclaimed");
+        assert!(!husk.exists(), "confined teardown husk removed");
 
         fs::remove_dir_all(&root).ok();
     }
