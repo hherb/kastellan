@@ -249,6 +249,12 @@ fn canonicalize_one(p: &std::path::Path) -> Result<std::path::PathBuf, SandboxEr
 /// a `SandboxError::Backend`, because emitting a rule for an unresolved path
 /// would silently produce a non-functional Seatbelt rule and mask user errors
 /// as "the sandbox is just too strict."
+///
+/// `persistent_store.guest_mount` and `persistent_store.host_backing` are
+/// also canonicalized. On macOS, `$TMPDIR` resolves through
+/// `/var/folders/…` → `/private/var/folders/…`; an unresolved `guest_mount`
+/// produces a `(subpath …)` rule the kernel never matches, causing the
+/// worker to start but silently fail all persistent-store writes.
 fn canonicalize_policy_paths(policy: &SandboxPolicy) -> Result<SandboxPolicy, SandboxError> {
     let canon_list =
         |paths: &[std::path::PathBuf]| -> Result<Vec<std::path::PathBuf>, SandboxError> {
@@ -259,6 +265,13 @@ fn canonicalize_policy_paths(policy: &SandboxPolicy) -> Result<SandboxPolicy, Sa
     out.fs_write = canon_list(&policy.fs_write)?;
     if let Some(uds) = &policy.proxy_uds {
         out.proxy_uds = Some(canonicalize_one(uds)?);
+    }
+    if let Some(ps) = &policy.persistent_store {
+        out.persistent_store = Some(crate::PersistentStore {
+            host_backing: canonicalize_one(&ps.host_backing)?,
+            guest_mount: canonicalize_one(&ps.guest_mount)?,
+            size_mib: ps.size_mib,
+        });
     }
     Ok(out)
 }
