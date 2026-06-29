@@ -119,6 +119,14 @@ pub fn build_vmm_jail_argv(
         a.extend(["--bind".into(), s.clone(), s]);
     }
 
+    // Slice 5b-2: the persistent-store ext4 image lives at a STABLE host path
+    // OUTSIDE run_dir (unlike the slice-3 share images), so the run_dir bind does
+    // not cover it. Bind it rw so the confined firecracker can open the drive.
+    if let Some(img) = &plan.persistent_image_path {
+        let s = img.display().to_string();
+        a.extend(["--bind".into(), s.clone(), s]);
+    }
+
     a.push("--".into());
     Ok(a)
 }
@@ -257,6 +265,38 @@ mod tests {
             "/w", &[],
         ).unwrap();
         assert!(jail(&plan).join(" ").contains("--bind /scratch/egress.sock /scratch/egress.sock"));
+    }
+
+    #[test]
+    fn jail_binds_persistent_image_rw_when_present() {
+        let mut plan = deny_plan();
+        plan.persistent_image_path = Some("/var/lib/kastellan/microvm/kv-demo-state.ext4".into());
+        let a = jail(&plan);
+        assert!(
+            a.join(" ").contains(
+                "--bind /var/lib/kastellan/microvm/kv-demo-state.ext4 \
+                 /var/lib/kastellan/microvm/kv-demo-state.ext4"
+            ),
+            "persistent image must be bound rw into the jail: {a:?}"
+        );
+    }
+
+    #[test]
+    fn jail_no_persistent_image_bind_when_absent() {
+        let plan = deny_plan(); // persistent_image_path is None by default
+        let a = jail(&plan);
+        assert!(
+            !a.join(" ").contains("kv-demo-state"),
+            "no persistent-image bind expected when path is None: {a:?}"
+        );
+        // Extra safety: no --bind for any path containing "microvm" other than
+        // the ro-bind of rootfs (which uses --ro-bind, not --bind).
+        let has_rw_microvm_bind = a.windows(3).any(|w| {
+            w[0] == "--bind"
+                && w[1].contains("microvm")
+                && !w[1].contains("python-exec")
+        });
+        assert!(!has_rw_microvm_bind, "unexpected rw microvm bind in default plan: {a:?}");
     }
 
     #[test]
