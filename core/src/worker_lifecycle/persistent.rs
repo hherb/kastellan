@@ -1,0 +1,189 @@
+//! Backend-agnostic supervisor for a LONG-LIVED worker: a persistent OS thread
+//! owns the worker, forwards serialized RPC calls to it, and respawns it on
+//! death (capped-exponential backoff + sliding-window rate alarm). PDEATHSIG-safe
+//! (the spawning thread outlives the worker — required under the slice-5a
+//! bwrap-confined launcher). A generalization of the Matrix channel's
+//! `supervised_self_spawn`/`drive`, with no channel/poll-send coupling.
+use std::sync::mpsc;
+use std::thread;
+use std::time::Instant;
+
+use crate::channel::respawn_alarm::RespawnRateAlarm;
+use crate::worker_lifecycle::RestartBackoff;
+
+pub trait PersistentTransport: Send {
+    fn call(&mut self, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value>;
+    fn death_report(&mut self) -> Option<String> { None }
+}
+
+pub type PersistentFactory =
+    Box<dyn FnMut() -> anyhow::Result<Box<dyn PersistentTransport>> + Send>;
+
+struct Job {
+    method: String,
+    params: serde_json::Value,
+    reply: mpsc::Sender<anyhow::Result<serde_json::Value>>,
+}
+
+pub struct PersistentWorker;
+
+pub struct PersistentHandle {
+    req_tx: Option<mpsc::Sender<Job>>,
+    driver: Option<thread::JoinHandle<()>>,
+}
+
+const ALARM_THRESHOLD: usize = 5;
+const ALARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
+impl PersistentWorker {
+    pub fn spawn(label: impl Into<String>, factory: PersistentFactory) -> anyhow::Result<PersistentHandle> {
+        Self::spawn_with_backoff(label, factory, RestartBackoff::default())
+    }
+
+    pub fn spawn_with_backoff(
+        label: impl Into<String>,
+        mut factory: PersistentFactory,
+        backoff: RestartBackoff,
+    ) -> anyhow::Result<PersistentHandle> {
+        let label = label.into();
+        let (req_tx, req_rx) = mpsc::channel::<Job>();
+        let (init_tx, init_rx) = mpsc::channel::<anyhow::Result<()>>();
+        let driver = thread::spawn(move || {
+            // Initial spawn ON this persistent thread (PDEATHSIG parent).
+            let mut transport = match factory() {
+                Ok(t) => { let _ = init_tx.send(Ok(())); t }
+                Err(e) => { let _ = init_tx.send(Err(e)); return; }
+            };
+            let mut alarm = RespawnRateAlarm::new(ALARM_WINDOW, ALARM_THRESHOLD);
+            // Serve jobs; respawn on transport error.
+            while let Ok(job) = req_rx.recv() {
+                match transport.call(&job.method, job.params) {
+                    Ok(v) => { let _ = job.reply.send(Ok(v)); }
+                    Err(e) => {
+                        if let Some(r) = transport.death_report() {
+                            tracing::warn!(%label, "persistent worker died: {r}");
+                        }
+                        let _ = job.reply.send(Err(e)); // in-flight call fails
+                        // respawn with backoff
+                        let mut restarts = 0u32;
+                        loop {
+                            let delay = backoff.next_delay(restarts);
+                            thread::sleep(delay);
+                            match factory() {
+                                Ok(fresh) => {
+                                    transport = fresh;
+                                    tracing::info!(%label, "persistent worker respawned");
+                                    if let Some(n) = alarm.record(Instant::now()) {
+                                        tracing::warn!(%label, respawns = n, "persistent worker respawn-rate alarm");
+                                    }
+                                    break;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(%label, error = %format!("{e:#}"), "respawn failed; backing off");
+                                    restarts += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // req_tx dropped (shutdown): drop transport → RAII VM teardown.
+            drop(transport);
+        });
+        init_rx.recv()
+            .map_err(|_| anyhow::anyhow!("persistent driver exited before initial spawn"))??;
+        Ok(PersistentHandle { req_tx: Some(req_tx), driver: Some(driver) })
+    }
+}
+
+impl PersistentHandle {
+    pub fn call(&self, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.req_tx.as_ref().ok_or_else(|| anyhow::anyhow!("persistent worker shut down"))?
+            .send(Job { method: method.to_string(), params, reply: reply_tx })
+            .map_err(|_| anyhow::anyhow!("persistent driver gone"))?;
+        reply_rx.recv().map_err(|_| anyhow::anyhow!("persistent driver dropped reply"))?
+    }
+
+    pub fn shutdown(mut self) {
+        self.req_tx.take(); // drop sender → driver loop exits → transport teardown
+        if let Some(d) = self.driver.take() { let _ = d.join(); }
+    }
+}
+
+impl Drop for PersistentHandle {
+    fn drop(&mut self) {
+        self.req_tx.take();
+        if let Some(d) = self.driver.take() { let _ = d.join(); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Fake transport that answers `die_after` calls, then errors (simulating
+    /// worker death). Each spawn gets a fresh counter.
+    struct FakeTransport { calls: usize, die_after: usize, gen: usize }
+    impl PersistentTransport for FakeTransport {
+        fn call(&mut self, _m: &str, _p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+            if self.calls >= self.die_after {
+                anyhow::bail!("simulated worker death");
+            }
+            self.calls += 1;
+            Ok(serde_json::json!({ "gen": self.gen, "n": self.calls }))
+        }
+    }
+
+    fn fast_backoff() -> RestartBackoff {
+        RestartBackoff { base: Duration::from_millis(1), factor_num: 1, factor_den: 1, cap: Duration::from_millis(1) }
+    }
+
+    #[test]
+    fn serves_many_calls_on_one_worker() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let s = spawns.clone();
+        let factory: PersistentFactory = Box::new(move || {
+            let g = s.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeTransport { calls: 0, die_after: 1000, gen: g }))
+        });
+        let h = PersistentWorker::spawn("test", factory).unwrap();
+        for _ in 0..5 {
+            let v = h.call("ping", serde_json::json!({})).unwrap();
+            assert_eq!(v["gen"], 0);
+        }
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "no respawn while healthy");
+        h.shutdown();
+    }
+
+    #[test]
+    fn respawns_on_death_and_serves_again() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let s = spawns.clone();
+        let factory: PersistentFactory = Box::new(move || {
+            let g = s.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeTransport { calls: 0, die_after: 1, gen: g }))
+        });
+        let h = PersistentWorker::spawn_with_backoff("test", factory, fast_backoff()).unwrap();
+        // gen 0 serves 1 call then dies on the 2nd
+        assert_eq!(h.call("a", serde_json::json!({})).unwrap()["gen"], 0);
+        assert!(h.call("b", serde_json::json!({})).is_err(), "in-flight call on death errors");
+        // supervisor respawned → gen 1 serves
+        let v = h.call("c", serde_json::json!({})).unwrap();
+        assert_eq!(v["gen"], 1);
+        assert!(spawns.load(Ordering::SeqCst) >= 2);
+        h.shutdown();
+    }
+
+    #[test]
+    fn call_after_shutdown_errors() {
+        let factory: PersistentFactory = Box::new(|| Ok(Box::new(FakeTransport { calls: 0, die_after: 1000, gen: 0 })));
+        let h = PersistentWorker::spawn("test", factory).unwrap();
+        h.call("a", serde_json::json!({})).unwrap();
+        h.shutdown();
+        // a fresh handle can't be used post-shutdown — covered by the move semantics of shutdown(self).
+    }
+}

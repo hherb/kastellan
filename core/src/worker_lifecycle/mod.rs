@@ -20,6 +20,7 @@ pub mod composite;
 pub mod force_route;
 pub mod idle_timeout;
 pub mod manager;
+pub mod persistent;
 pub mod types;
 
 pub use composite::CompositeLifecycle;
@@ -28,4 +29,5 @@ pub use force_route::{
 };
 pub use idle_timeout::RestartBackoff;
 pub use manager::{IdleTimeoutLifecycle, SingleUseLifecycle, WorkerHandle, WorkerLifecycleManager};
+pub use persistent::{PersistentFactory, PersistentHandle, PersistentTransport, PersistentWorker};
 pub use types::{Contract, IdleTimeoutCaps, Lifecycle, LifecycleValidationError};
