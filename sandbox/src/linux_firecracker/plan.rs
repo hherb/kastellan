@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use crate::{Net, SandboxError, SandboxPolicy};
-use super::mounts::{encode_mount_manifest, non_anchor_top_level, RoShare, RwScratch};
+use super::mounts::{encode_mount_manifest, non_anchor_top_level, PersistentMount, RoShare, RwScratch};
 
 /// Where the guest kernel + rootfs live on the host. Defaulted from
 /// constants; the `container_image` tag will later select per-worker rootfs.
@@ -49,6 +49,16 @@ pub struct FirecrackerLaunchPlan {
     /// Slice 4a: the **host** egress-proxy UDS (from `policy.proxy_uds`) the
     /// launcher relays the guest's egress connections to. `Some` iff force-routed.
     pub egress_host_uds: Option<std::path::PathBuf>,
+    /// Slice 5b: the `PersistentStore` from the policy, if any. Copied here so
+    /// the spawn can use `host_backing` when building or reusing the ext4 image.
+    pub persistent_store: Option<crate::PersistentStore>,
+    /// Slice 5b: host path of the persistent ext4 image to attach. `None` here
+    /// (plan is pure); `spawn_under_policy` fills it with the real path before
+    /// boot (mirrors `ro_image_path` / `rw_image_path`).
+    pub persistent_image_path: Option<PathBuf>,
+    /// Slice 5b: the in-guest device + mountpoint for the persistent store.
+    /// `Some` iff `persistent_store` is `Some`.
+    pub persistent_mount: Option<PersistentMount>,
 }
 
 /// Placeholder guest CID baked into a freshly-built plan. CIDs 0–2 are reserved
@@ -277,9 +287,15 @@ pub fn build_launch_plan(
         next_letter += 1;
         Some(RoShare { sources: policy.fs_read.clone(), guest_dev: dev })
     };
-    let rw_scratch = policy.fs_write.first().map(|mp| RwScratch {
-        mountpoint: mp.clone(),
-        guest_dev: format!("/dev/vd{}", next_letter as char),
+    let rw_scratch = policy.fs_write.first().map(|mp| {
+        let dev = format!("/dev/vd{}", next_letter as char);
+        next_letter += 1;
+        RwScratch { mountpoint: mp.clone(), guest_dev: dev }
+    });
+    let persistent_mount = policy.persistent_store.as_ref().map(|ps| {
+        let dev = format!("/dev/vd{}", next_letter as char);
+        next_letter += 1;
+        PersistentMount { mountpoint: ps.guest_mount.clone(), guest_dev: dev }
     });
 
     // Forward policy.env into the guest via a hex cmdline token (#360). When
@@ -303,7 +319,7 @@ pub fn build_launch_plan(
     if let Some(suffix) = encode_env_cmdline(&env)? {
         boot_args.push_str(&suffix);
     }
-    if let Some(suffix) = encode_mount_manifest(ro_share.as_ref(), rw_scratch.as_ref(), None)? {
+    if let Some(suffix) = encode_mount_manifest(ro_share.as_ref(), rw_scratch.as_ref(), persistent_mount.as_ref())? {
         boot_args.push_str(&suffix);
     }
     if egress_proxy_vsock_port.is_some() {
@@ -354,6 +370,9 @@ pub fn build_launch_plan(
         rw_image_path,
         egress_proxy_vsock_port,
         egress_host_uds,
+        persistent_store: policy.persistent_store.clone(),
+        persistent_image_path: None,
+        persistent_mount,
     })
 }
 
@@ -408,6 +427,17 @@ pub fn render_firecracker_config(plan: &FirecrackerLaunchPlan) -> Value {
     if let Some(img) = &plan.rw_image_path {
         cfg["drives"].as_array_mut().unwrap().push(json!({
             "drive_id": "rw-scratch",
+            "path_on_host": img.to_string_lossy(),
+            "is_root_device": false,
+            "is_read_only": false,
+        }));
+    }
+    // Slice 5b: persistent store drive, attached after rw-scratch so device
+    // letter order (vdb=ro, vdc=rw-scratch, vdd=persistent) agrees with
+    // build_launch_plan's next_letter assignment.
+    if let Some(img) = &plan.persistent_image_path {
+        cfg["drives"].as_array_mut().unwrap().push(json!({
+            "drive_id": "persistent-store",
             "path_on_host": img.to_string_lossy(),
             "is_root_device": false,
             "is_read_only": false,
@@ -908,5 +938,36 @@ mod tests {
         assert_eq!(plan.egress_proxy_vsock_port, None);
         assert!(plan.egress_host_uds.is_none());
         assert!(!plan.boot_args.contains("kastellan.egress"));
+    }
+
+    #[test]
+    fn persistent_store_assigns_drive_and_rw_mount() {
+        let mut policy = SandboxPolicy { net: Net::Deny, ..Default::default() };
+        policy.persistent_store = Some(crate::PersistentStore {
+            host_backing: std::path::PathBuf::from("/var/lib/kastellan/kv/store.ext4"),
+            guest_mount: std::path::PathBuf::from("/data"),
+            size_mib: 64,
+        });
+        let plan = build_launch_plan(&policy, &img(), "/usr/local/bin/kastellan-worker-kv-demo", &[]).unwrap();
+        let pm = plan.persistent_mount.as_ref().expect("persistent mount present");
+        assert_eq!(pm.mountpoint, std::path::PathBuf::from("/data"));
+        // distinct guest_dev from any ro/rw share device (no ro/rw here → first
+        // available letter after vda=rootfs is vdb)
+        assert!(pm.guest_dev.starts_with("/dev/vd"));
+        assert!(plan.boot_args.contains("kastellan.mounts="));
+        // persistent_store is copied from policy
+        assert!(plan.persistent_store.is_some());
+        // persistent_image_path is None at plan-build time (spawn fills it)
+        assert!(plan.persistent_image_path.is_none());
+        // rendered config attaches a non-root RW drive for the persistent image
+        // only when persistent_image_path is Some (spawn sets it); at plan time it
+        // is None so the drive is NOT yet in the config — the spawn supplies it.
+        // Set it manually to exercise the render path.
+        let mut plan_with_img = plan;
+        plan_with_img.persistent_image_path =
+            Some(std::path::PathBuf::from("/var/lib/kastellan/kv/store.ext4"));
+        let cfg = render_firecracker_config(&plan_with_img);
+        let drives = cfg["drives"].as_array().unwrap();
+        assert!(drives.iter().any(|d| d["drive_id"] == "persistent-store" && d["is_read_only"] == false));
     }
 }
