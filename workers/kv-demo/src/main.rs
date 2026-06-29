@@ -57,6 +57,12 @@ impl Handler for KvHandler {
                 Ok(serde_json::json!({ "value": map.get(&p.key) }))
             }
             "kv.stats" => Ok(serde_json::json!({ "calls_served": self.calls_served, "pid": std::process::id() })),
+            // kv.crash: deterministic worker-death trigger for lifecycle e2e tests.
+            // Calls std::process::exit(1) without sending a reply so the caller
+            // receives an I/O error (broken pipe / EOF), which PersistentWorker
+            // treats as a worker death and respawns. Only compiled in debug builds.
+            #[cfg(debug_assertions)]
+            "kv.crash" => std::process::exit(1),
             other => Err(RpcError::new(codes::METHOD_NOT_FOUND, format!("unknown method {other}"))),
         }
     }
