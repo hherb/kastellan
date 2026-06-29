@@ -204,6 +204,14 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
         push_bind(&mut argv, "--bind", uds);
     }
 
+    // Slice 5b-2: a persistent store is a RW bind from a stable host dir to the
+    // jail's guest_mount (distinct paths, so not push_bind which uses one path).
+    if let Some(ps) = &policy.persistent_store {
+        argv.push("--bind-try".into());
+        argv.push(ps.host_backing.display().to_string());
+        argv.push(ps.guest_mount.display().to_string());
+    }
+
     argv.push("--".into());
     argv.push(program.into());
     for a in args {
@@ -324,6 +332,21 @@ mod tests {
         };
         let argv = build_argv(&p, "/bin/proxy", &[]);
         assert!(argv.contains(&"--share-net".to_string()));
+    }
+
+    #[test]
+    fn persistent_store_bind_maps_host_backing_to_guest_mount() {
+        let mut policy = strict_policy();
+        policy.persistent_store = Some(crate::PersistentStore {
+            host_backing: std::path::PathBuf::from("/srv/kv-state"),
+            guest_mount: std::path::PathBuf::from("/data"),
+            size_mib: 0,
+        });
+        let argv = build_argv(&policy, "/bin/true", &[]);
+        // a --bind-try with DISTINCT host/jail paths (not the same-path push_bind)
+        let i = argv.iter().position(|a| a == "/srv/kv-state").unwrap();
+        assert_eq!(argv[i - 1], "--bind-try");
+        assert_eq!(argv[i + 1], "/data");
     }
 
     #[test]
