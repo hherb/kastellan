@@ -27,7 +27,7 @@ pub use probe::{probe_report, ProbeInputs};
 mod cleanup;
 pub use cleanup::{
     orphaned_run_dir_should_remove, pid_is_alive, sweep_orphaned_run_dirs, LAUNCHER_PID_FILE,
-    RUN_DIR_PREFIX,
+    RUN_DIR_PREFIX, TEARDOWN_MARKER_FILE,
 };
 
 mod confine;

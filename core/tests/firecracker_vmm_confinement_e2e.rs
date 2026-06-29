@@ -162,4 +162,29 @@ async fn confined_default_and_opt_out_both_boot_and_compute() {
         "opt-out (bare) boot must compute 42 — None strategy intact: {out}"
     );
     assert_eq!(out["exit_code"], 0, "opt-out clean exit expected: {out}");
+
+    // Phase 3 — confined teardown leaves NO unreclaimable husk. Under
+    // confinement the run-dir is a bwrap bind-mount point, so the launcher can't
+    // rmdir it on graceful exit; it drops a `teardown.done` marker instead and
+    // the host-side orphan sweep reclaims the husk. Run one explicit sweep (it's
+    // normally lazy — fired at the next spawn) and assert no marked husk survives.
+    // Scoping to marker-bearing dirs makes this race-safe against run-dirs from
+    // other parallel test binaries (only a FINISHED launcher writes the marker).
+    use kastellan_sandbox::linux_firecracker::{
+        pid_is_alive, sweep_orphaned_run_dirs, RUN_DIR_PREFIX, TEARDOWN_MARKER_FILE,
+    };
+    let temp = std::env::temp_dir();
+    sweep_orphaned_run_dirs(&temp, pid_is_alive);
+    if let Ok(entries) = std::fs::read_dir(&temp) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with(RUN_DIR_PREFIX) {
+                assert!(
+                    !path.join(TEARDOWN_MARKER_FILE).exists(),
+                    "confined teardown husk {path:?} not reclaimed by the sweep"
+                );
+            }
+        }
+    }
 }

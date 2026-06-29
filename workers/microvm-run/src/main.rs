@@ -117,10 +117,35 @@ fn teardown_run_dir(run_dir: Option<&str>, base_uds: &str, panicking: bool) {
     }
 }
 
+/// Marker dropped when teardown removed the VM's files but could not remove the
+/// run-dir itself (confined mode, slice 5a). MUST match
+/// `kastellan_sandbox::linux_firecracker::cleanup::TEARDOWN_MARKER_FILE`
+/// (the launcher has no dep on the sandbox crate — pinned literal in both).
+const TEARDOWN_MARKER_FILE: &str = "teardown.done";
+
 /// Best-effort removal of the per-spawn run-dir on launcher exit. Removing the
 /// whole dir subsumes removing the base vsock UDS (which lives inside it).
+///
+/// Bare path: `remove_dir_all` removes the whole tree (immediate self-clean,
+/// #362). Confined path (slice 5a): the run-dir is a `bwrap` bind-mount point,
+/// so `remove_dir_all` unlinks the contents (incl. `launcher.pid`) but
+/// `rmdir(2)` of the mount point returns `EBUSY` and the dir survives as an
+/// empty husk with no pidfile. We then drop a teardown marker so the host-side
+/// orphan sweep reclaims the husk — without it the sweep keeps every
+/// pidfile-less dir (assuming mid-spawn) and the husk would leak forever. The
+/// launcher runs as jail PID 1 here and cannot rewrite its host pidfile, so a
+/// marker (not a pidfile) is the signal.
 fn remove_run_dir(run_dir: &str) {
-    let _ = std::fs::remove_dir_all(run_dir);
+    if std::fs::remove_dir_all(run_dir).is_ok() {
+        return;
+    }
+    // Couldn't remove the dir itself (confined bind-mount, or a partial failure):
+    // leave the marker for the host-side sweep, which sees a plain dir and can
+    // remove it. Best-effort — a failed marker write only defers reclaim.
+    let _ = std::fs::write(
+        std::path::Path::new(run_dir).join(TEARDOWN_MARKER_FILE),
+        b"",
+    );
 }
 
 #[cfg(test)]
@@ -147,6 +172,36 @@ mod tests {
     fn remove_run_dir_is_noop_on_missing_dir() {
         // Must not panic when the dir is already gone.
         remove_run_dir("/tmp/kastellan-microvm-runtest-definitely-absent-zzz");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_run_dir_drops_marker_when_dir_cannot_be_removed() {
+        // Confined mode leaves the run-dir as a bind-mount point that rmdir can't
+        // remove. We can't mount in a unit test, so reproduce the
+        // "contents-gone-but-dir-survives" shape with a read-only parent: rmdir of
+        // the (empty) run-dir fails, but the run-dir itself stays writable so the
+        // teardown marker can be dropped for the host-side sweep.
+        use std::os::unix::fs::PermissionsExt;
+        let parent = std::env::temp_dir().join(format!(
+            "kastellan-microvm-runtest-{}-marker-parent",
+            std::process::id()
+        ));
+        let run = parent.join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        remove_run_dir(&run.to_string_lossy());
+
+        let marker_present = run.join(TEARDOWN_MARKER_FILE).exists();
+        // Restore write perms before asserting so cleanup always runs.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&parent).ok();
+
+        assert!(
+            marker_present,
+            "an un-removable run-dir must get the teardown marker for the sweep"
+        );
     }
 
     fn fresh_run_dir(tag: &str) -> std::path::PathBuf {
