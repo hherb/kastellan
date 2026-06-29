@@ -12,3 +12,6 @@ readme      = "../../README.md"
 [[bin]]
 name = "kastellan-microvm-run"
 path = "src/main.rs"
+
+[dependencies]
+libc = { workspace = true }
