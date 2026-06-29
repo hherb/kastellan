@@ -125,6 +125,47 @@ pub fn build_share_images(
     Ok(())
 }
 
+/// mkfs argv for the persistent image **iff it does not yet exist**. An
+/// existing image is reused untouched so its contents survive. Pure (the
+/// existence check is the caller's), so it is unit-testable without a disk.
+pub fn persistent_mkfs_decision(
+    host_backing_exists: bool,
+    host_backing: &str,
+    size_mib: u64,
+) -> Option<Vec<String>> {
+    if host_backing_exists {
+        None
+    } else {
+        Some(mkfs_blank_argv(host_backing, size_mib))
+    }
+}
+
+/// Create the persistent image once (mkfs if absent), set the plan's path.
+/// Reuses the same `run` shell-out style as [`build_share_images`].
+pub fn build_persistent_image(plan: &mut FirecrackerLaunchPlan) -> Result<(), SandboxError> {
+    let Some(ps) = plan.persistent_store.clone() else { return Ok(()) };
+    if let Some(parent) = ps.host_backing.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| SandboxError::Backend(format!("persistent store mkdir {parent:?}: {e}")))?;
+    }
+    let exists = ps.host_backing.exists();
+    if let Some(argv) = persistent_mkfs_decision(
+        exists,
+        &ps.host_backing.to_string_lossy(),
+        ps.size_mib as u64,
+    ) {
+        let status = Command::new(&argv[0])
+            .args(&argv[1..])
+            .status()
+            .map_err(|e| SandboxError::Backend(format!("spawn {}: {e}", argv[0])))?;
+        if !status.success() {
+            return Err(SandboxError::Backend(format!("{} failed: {status}", argv[0])));
+        }
+    }
+    plan.persistent_image_path = Some(ps.host_backing.clone());
+    Ok(())
+}
+
 /// Recursively copy a host tree (dirs, files, symlinks-as-targets) into `dest`.
 /// Plain `std` (no `fs_extra` dep).
 fn copy_tree(src: &Path, dest: &Path) -> Result<(), SandboxError> {
@@ -167,6 +208,18 @@ mod tests {
         // Garbage → fail-safe to default.
         let bad = vec![("KASTELLAN_MICROVM_SCRATCH_MIB".to_string(), "abc".to_string())];
         assert_eq!(rw_scratch_mib(&bad), RW_SCRATCH_MIB_DEFAULT);
+    }
+
+    #[test]
+    fn persistent_image_mkfs_only_when_absent() {
+        // Absent → produce a blank mkfs argv at the given size.
+        let argv = persistent_mkfs_decision(false, "/var/lib/kastellan/kv/store.ext4", 64)
+            .expect("absent image must be created");
+        assert_eq!(argv[0], "mkfs.ext4");
+        assert!(argv.contains(&"/var/lib/kastellan/kv/store.ext4".to_string()));
+        assert!(argv.contains(&"64M".to_string()));
+        // Present → reuse untouched, no mkfs.
+        assert!(persistent_mkfs_decision(true, "/var/lib/kastellan/kv/store.ext4", 64).is_none());
     }
 
     #[test]

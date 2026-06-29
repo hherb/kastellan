@@ -19,7 +19,7 @@ mod mounts;
 pub use mounts::{encode_mount_manifest, non_anchor_top_level, RoShare, RwScratch};
 
 mod images;
-pub use images::{build_share_images, RW_SCRATCH_MIB_DEFAULT};
+pub use images::{build_persistent_image, build_share_images, persistent_mkfs_decision, RW_SCRATCH_MIB_DEFAULT};
 
 mod probe;
 pub use probe::{probe_report, ProbeInputs};
@@ -180,6 +180,9 @@ impl SandboxBackend for LinuxFirecracker {
         // launcher's RAII teardown removes them with the dir). Sets the plan's
         // ro/rw image paths so the rendered config attaches the drives.
         build_share_images(&mut plan, &run_dir, &policy.env)?;
+        // Slice 5b: mkfs the persistent store image once (no-op if already
+        // present). Sets plan.persistent_image_path so render attaches the drive.
+        build_persistent_image(&mut plan)?;
         let config_path = run_dir.join("fc.json");
         let log_path = run_dir.join("fc.log");
         std::fs::write(&config_path, render_firecracker_config(&plan).to_string())
