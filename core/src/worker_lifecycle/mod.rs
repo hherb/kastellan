@@ -29,5 +29,7 @@ pub use force_route::{
 };
 pub use idle_timeout::RestartBackoff;
 pub use manager::{IdleTimeoutLifecycle, SingleUseLifecycle, WorkerHandle, WorkerLifecycleManager};
-pub use persistent::{PersistentFactory, PersistentHandle, PersistentTransport, PersistentWorker};
+pub use persistent::{
+    ClientTransport, PersistentFactory, PersistentHandle, PersistentTransport, PersistentWorker,
+};
 pub use types::{Contract, IdleTimeoutCaps, Lifecycle, LifecycleValidationError};

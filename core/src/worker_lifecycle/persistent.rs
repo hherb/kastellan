@@ -4,12 +4,97 @@
 //! (the spawning thread outlives the worker — required under the slice-5a
 //! bwrap-confined launcher). A generalization of the Matrix channel's
 //! `supervised_self_spawn`/`drive`, with no channel/poll-send coupling.
+//!
+//! Also houses [`ClientTransport`]: the production [`PersistentTransport`] impl
+//! that wraps a real [`kastellan_protocol::client::Client`] over a sandboxed
+//! worker's stdio, with stderr-tail death reporting (same pattern as the Matrix
+//! channel's `ProtocolWorkerClient`).
 use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
+use kastellan_protocol::client::Client;
+use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
+
 use crate::channel::respawn_alarm::RespawnRateAlarm;
 use crate::worker_lifecycle::RestartBackoff;
+
+// ── ClientTransport ──────────────────────────────────────────────────────────
+
+/// Production [`PersistentTransport`]: a JSON-RPC [`Client`] over a spawned
+/// worker's stdio, with a bounded stderr-tail for death diagnostics.
+///
+/// Reuses the lockdown-env derivation + stderr-tail drain that the Matrix
+/// channel's `spawn_worker_client` uses, without coupling to that module.
+pub struct ClientTransport {
+    client: Client,
+    /// Bounded tail of the worker's recent stderr lines, retained by the drain
+    /// thread so [`PersistentTransport::death_report`] can surface the death
+    /// cause. `None` when the child had no piped stderr (should not happen in
+    /// practice — backends always pipe stderr — but we handle it gracefully).
+    stderr_tail: Option<crate::worker_stderr::StderrTail>,
+}
+
+impl ClientTransport {
+    /// Spawn a sandboxed worker under `backend` + `policy`, drain its stderr
+    /// into a bounded tail, and connect a [`Client`] over its stdio.
+    ///
+    /// Applies the same worker-side lockdown-env derivation
+    /// (`KASTELLAN_LANDLOCK_*` / `KASTELLAN_SECCOMP_PROFILE`) that
+    /// `tool_host::spawn_worker` and `channel::matrix::spawn_worker_client` do,
+    /// so the worker is locked down identically regardless of spawn path.
+    pub fn spawn(
+        backend: &dyn SandboxBackend,
+        policy: &SandboxPolicy,
+        program: &str,
+        args: &[&str],
+    ) -> anyhow::Result<Self> {
+        let derived = crate::tool_host::derive_lockdown_env(policy);
+        let mut child = backend
+            .spawn_under_policy(&derived, program, args)
+            .map_err(|e| anyhow::anyhow!("spawn persistent worker: {e}"))?;
+        // Drain the worker's piped stderr. The JSON-RPC client reads only
+        // stdout; an undrained pipe is a deadlock risk past ~64 KiB.
+        let pid = child.id();
+        let stderr_tail = child
+            .stderr
+            .take()
+            .map(|s| crate::worker_stderr::spawn_drain_with_tail(pid, s));
+        let client = Client::from_child(child)
+            .map_err(|e| anyhow::anyhow!("connect persistent worker: {e}"))?;
+        Ok(Self { client, stderr_tail })
+    }
+}
+
+impl PersistentTransport for ClientTransport {
+    fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.client
+            .call(method, params)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    fn death_report(&mut self) -> Option<String> {
+        // Snapshot the tail (non-blocking; the drain thread owns the push side).
+        let tail = self.stderr_tail.as_ref()?.snapshot();
+        // Attempt a non-blocking reap to get the exit status — the same approach
+        // ProtocolWorkerClient uses in the Matrix channel.
+        let mut status = None;
+        for _ in 0..10 {
+            match self.client.try_wait() {
+                Ok(Some(s)) => { status = Some(s); break; }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        Some(crate::worker_stderr::format_death_report(status, &tail))
+    }
+}
+
+// ── PersistentWorker + PersistentHandle (unchanged below) ───────────────────
 
 pub trait PersistentTransport: Send {
     fn call(&mut self, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value>;
