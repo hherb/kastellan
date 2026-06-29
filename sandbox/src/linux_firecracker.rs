@@ -30,6 +30,9 @@ pub use cleanup::{
     RUN_DIR_PREFIX,
 };
 
+mod confine;
+pub use confine::{confinement_from_env, VmmConfinement};
+
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
