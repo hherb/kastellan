@@ -60,15 +60,42 @@ impl PersistentWorker {
                 match transport.call(&job.method, job.params) {
                     Ok(v) => { let _ = job.reply.send(Ok(v)); }
                     Err(e) => {
+                        // MINOR 1 fix: reply to the in-flight caller FIRST so a
+                        // panicking death_report cannot prevent the reply.
+                        let _ = job.reply.send(Err(e));
                         if let Some(r) = transport.death_report() {
                             tracing::warn!(%label, "persistent worker died: {r}");
                         }
-                        let _ = job.reply.send(Err(e)); // in-flight call fails
-                        // respawn with backoff
+                        // Respawn with backoff.  IMPORTANT fix: after each
+                        // sleep/attempt we poll req_rx so that a concurrent
+                        // shutdown() (which drops req_tx) is detected even
+                        // when factory() keeps failing forever.
                         let mut restarts = 0u32;
                         loop {
                             let delay = backoff.next_delay(restarts);
                             thread::sleep(delay);
+
+                            // Check for shutdown or queued jobs while the
+                            // worker is down.
+                            match req_rx.try_recv() {
+                                Err(mpsc::TryRecvError::Disconnected) => {
+                                    // All handles dropped → shutdown requested.
+                                    tracing::info!(%label, "persistent worker: shutdown detected during respawn; exiting");
+                                    return;
+                                }
+                                Ok(queued_job) => {
+                                    // A caller arrived while we are still dead;
+                                    // fail it immediately so it doesn't hang.
+                                    let _ = queued_job.reply.send(
+                                        Err(anyhow::anyhow!("persistent worker is restarting"))
+                                    );
+                                    // keep respawning
+                                }
+                                Err(mpsc::TryRecvError::Empty) => {
+                                    // Nothing pending — proceed with factory attempt.
+                                }
+                            }
+
                             match factory() {
                                 Ok(fresh) => {
                                     transport = fresh;
@@ -87,8 +114,8 @@ impl PersistentWorker {
                     }
                 }
             }
-            // req_tx dropped (shutdown): drop transport → RAII VM teardown.
-            drop(transport);
+            // req_tx dropped (shutdown): transport drops here via RAII.
+            // MINOR 2 fix: removed redundant explicit drop(transport).
         });
         init_rx.recv()
             .map_err(|_| anyhow::anyhow!("persistent driver exited before initial spawn"))??;
@@ -171,8 +198,15 @@ mod tests {
         // gen 0 serves 1 call then dies on the 2nd
         assert_eq!(h.call("a", serde_json::json!({})).unwrap()["gen"], 0);
         assert!(h.call("b", serde_json::json!({})).is_err(), "in-flight call on death errors");
-        // supervisor respawned → gen 1 serves
-        let v = h.call("c", serde_json::json!({})).unwrap();
+        // supervisor respawned → gen 1 serves.
+        // Calls sent while the driver is still in the respawn loop are
+        // rejected with "is restarting"; retry until the worker is up.
+        let v = loop {
+            match h.call("c", serde_json::json!({})) {
+                Ok(v) => break v,
+                Err(_) => thread::sleep(Duration::from_millis(5)),
+            }
+        };
         assert_eq!(v["gen"], 1);
         assert!(spawns.load(Ordering::SeqCst) >= 2);
         h.shutdown();
@@ -185,5 +219,48 @@ mod tests {
         h.call("a", serde_json::json!({})).unwrap();
         h.shutdown();
         // a fresh handle can't be used post-shutdown — covered by the move semantics of shutdown(self).
+    }
+
+    /// Regression test: shutdown() must return promptly even when the driver is
+    /// wedged in a perpetual respawn loop (factory always fails after the first
+    /// successful spawn).  Before the fix the driver never polled req_rx during
+    /// the respawn loop, so dropping req_tx in shutdown() had no effect and
+    /// join() would block forever — this test would hang CI if the fix regresses.
+    #[test]
+    fn shutdown_returns_promptly_during_perpetual_respawn_loop() {
+        // The factory succeeds exactly once (the initial spawn), then always errors.
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let sc = spawn_count.clone();
+        let factory: PersistentFactory = Box::new(move || {
+            let n = sc.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                // First call: supply a transport that dies immediately on any call.
+                Ok(Box::new(FakeTransport { calls: 0, die_after: 0, gen: 0 }))
+            } else {
+                // All subsequent respawn attempts fail.
+                anyhow::bail!("factory permanently broken")
+            }
+        });
+
+        // Use a very fast backoff (1 ms) so the respawn loop spins quickly.
+        let h = PersistentWorker::spawn_with_backoff("respawn-hang-test", factory, fast_backoff()).unwrap();
+
+        // Trigger a worker death: the transport dies on the very first call.
+        let _ = h.call("trigger-death", serde_json::json!({}));
+        // Give the driver a moment to enter the perpetual respawn loop.
+        thread::sleep(Duration::from_millis(20));
+
+        // shutdown() must return within a generous but bounded time.
+        // We verify this by running it in a separate thread with a timeout.
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            h.shutdown();
+            let _ = done_tx.send(());
+        });
+        done_rx.recv_timeout(Duration::from_secs(5))
+            .expect("shutdown() hung — driver did not observe Disconnected during respawn loop");
+
+        // Confirm the factory was called more than once (the loop really ran).
+        assert!(spawn_count.load(Ordering::SeqCst) >= 2, "factory should have been retried");
     }
 }
