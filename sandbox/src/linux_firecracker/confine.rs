@@ -5,8 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::linux_cgroup::build_systemd_run_argv;
+use crate::linux_firecracker::launcher_argv;
 use crate::linux_firecracker::plan::FirecrackerLaunchPlan;
 use crate::SandboxError;
+use crate::SandboxPolicy;
 
 /// How the VMM (launcher + firecracker) is confined on the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,8 +39,6 @@ pub fn confinement_from_env(flag: Option<&str>) -> VmmConfinement {
 /// of that name. Pure over the injected `path_env` so it is unit-testable; the
 /// spawn site passes `std::env::var("PATH")`. Used only on the confined path,
 /// where the binary must be bound into the jail by absolute path.
-// Tasks 4-6 wire the call site; allow until then so the cross-clippy gate stays clean.
-#[allow(dead_code)]
 pub fn find_executable(name: &str, path_env: Option<&str>) -> Option<PathBuf> {
     let path_env = path_env?;
     path_env
@@ -54,8 +55,6 @@ pub fn find_executable(name: &str, path_env: Option<&str>) -> Option<PathBuf> {
 /// invariants (`--unshare-all`/`--die-with-parent`/`--new-session`/`--as-pid-1`/
 /// `--clearenv`). The launcher reads its config from argv, and the guest worker
 /// env rides the kernel cmdline (in `fc.json`), so the jail forwards no env.
-// Tasks 4-6 wire the call site; allow until then so the cross-clippy gate stays clean.
-#[allow(dead_code)]
 pub fn build_vmm_jail_argv(
     plan: &FirecrackerLaunchPlan,
     run_dir: &Path,
@@ -122,6 +121,32 @@ pub fn build_vmm_jail_argv(
 
     a.push("--".into());
     Ok(a)
+}
+
+/// Compose the full confined spawn argv:
+///   systemd-run --user --scope … -- bwrap <vmm jail> -- <launcher abs> … --firecracker-bin <fc abs>
+/// The launcher's argv[0] is rewritten to its absolute path (the jail has no
+/// $PATH) and `--firecracker-bin <fc abs>` is appended so the in-jail launcher
+/// execs firecracker by absolute path. Pure — unit-testable without spawning.
+pub fn build_confined_spawn_argv(
+    policy: &SandboxPolicy,
+    plan: &FirecrackerLaunchPlan,
+    run_dir: &Path,
+    firecracker_bin: &Path,
+    launcher_bin: &Path,
+    config_path: &str,
+    log_path: &str,
+) -> Result<Vec<String>, SandboxError> {
+    let mut argv = build_systemd_run_argv(policy); // ends with `--`
+    argv.extend(build_vmm_jail_argv(plan, run_dir, firecracker_bin, launcher_bin)?); // ends with `--`
+
+    let mut largv = launcher_argv(plan, config_path, log_path, &run_dir.display().to_string());
+    largv[0] = launcher_bin.display().to_string(); // abs path, not MICROVM_RUN_BIN bare name
+    largv.push("--firecracker-bin".into());
+    largv.push(firecracker_bin.display().to_string());
+
+    argv.extend(largv);
+    Ok(argv)
 }
 
 #[cfg(test)]
@@ -239,5 +264,47 @@ mod tests {
         let e = build_vmm_jail_argv(&deny_plan(), Path::new("rel/dir"),
             Path::new("/fc"), Path::new("/l")).unwrap_err();
         assert!(format!("{e}").contains("absolute"));
+    }
+
+    #[test]
+    fn confined_argv_is_systemd_then_bwrap_then_launcher() {
+        let plan = deny_plan();
+        let argv = build_confined_spawn_argv(
+            &SandboxPolicy { mem_mb: 512, ..Default::default() },
+            &plan, Path::new("/run/x"),
+            Path::new("/fc/firecracker"), Path::new("/bin/kastellan-microvm-run"),
+            "/run/x/fc.json", "/run/x/fc.log",
+        ).unwrap();
+        assert_eq!(argv[0], "systemd-run");
+        // exactly two `--` separators: systemd-run|bwrap and bwrap|launcher
+        assert_eq!(argv.iter().filter(|s| *s == "--").count(), 2);
+        // launcher invoked by ABSOLUTE path (jail has no $PATH), not the bare name
+        assert!(argv.contains(&"/bin/kastellan-microvm-run".to_string()));
+        assert!(!argv.contains(&"kastellan-microvm-run".to_string()));
+        // firecracker abs path handed to the launcher
+        assert!(argv.windows(2).any(|w| w[0] == "--firecracker-bin" && w[1] == "/fc/firecracker"));
+        // cgroup cap from the policy is present (proves systemd-run saw mem_mb)
+        assert!(argv.join(" ").contains("MemoryMax=512M"));
+    }
+
+    #[test]
+    fn confined_argv_orders_bwrap_between_separators() {
+        let plan = deny_plan();
+        let argv = build_confined_spawn_argv(
+            &SandboxPolicy::default(), &plan, Path::new("/run/x"),
+            Path::new("/fc"), Path::new("/l"), "/run/x/fc.json", "/run/x/fc.log",
+        ).unwrap();
+        let first_dd = argv.iter().position(|s| s == "--").unwrap();
+        assert_eq!(argv[first_dd + 1], "bwrap", "bwrap must follow the systemd-run `--`");
+    }
+
+    #[test]
+    fn none_strategy_matches_bare_launcher_argv() {
+        let plan = deny_plan();
+        let bare = launcher_argv(&plan, "/run/x/fc.json", "/run/x/fc.log", "/run/x");
+        // The None arm calls launcher_argv with identical args — assert the
+        // helper output is what we expect the bare spawn to use.
+        assert_eq!(bare[0], crate::linux_firecracker::MICROVM_RUN_BIN);
+        assert!(!bare.iter().any(|s| s == "--firecracker-bin"));
     }
 }

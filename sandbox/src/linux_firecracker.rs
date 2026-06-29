@@ -31,7 +31,7 @@ pub use cleanup::{
 };
 
 mod confine;
-pub use confine::{confinement_from_env, VmmConfinement};
+pub use confine::{build_confined_spawn_argv, confinement_from_env, VmmConfinement};
 
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -184,12 +184,36 @@ impl SandboxBackend for LinuxFirecracker {
         let log_path = run_dir.join("fc.log");
         std::fs::write(&config_path, render_firecracker_config(&plan).to_string())
             .map_err(|e| SandboxError::Backend(format!("write fc config: {e}")))?;
-        let argv = launcher_argv(
-            &plan,
-            &config_path.to_string_lossy(),
-            &log_path.to_string_lossy(),
-            &run_dir.to_string_lossy(),
+        let confine = confinement_from_env(
+            std::env::var("KASTELLAN_MICROVM_CONFINE_VMM").ok().as_deref(),
         );
+        let config_s = config_path.to_string_lossy().into_owned();
+        let log_s = log_path.to_string_lossy().into_owned();
+        let run_s = run_dir.to_string_lossy().into_owned();
+
+        let argv = match confine {
+            VmmConfinement::None => launcher_argv(&plan, &config_s, &log_s, &run_s),
+            VmmConfinement::BwrapCgroup => {
+                // Resolve the two binaries to absolute paths so they can be bound
+                // into the jail (which has no $PATH). Fail closed: a missing
+                // binary under the (default) confined strategy refuses to spawn —
+                // never a silent bare-spawn fallback.
+                let path_env = std::env::var("PATH").ok();
+                let fc = confine::find_executable("firecracker", path_env.as_deref()).ok_or_else(|| {
+                    SandboxError::Backend(
+                        "VMM confinement on but firecracker not found on $PATH to bind into the \
+                         jail (set KASTELLAN_MICROVM_CONFINE_VMM=0 to disable, or fix $PATH)".into(),
+                    )
+                })?;
+                let launcher = confine::find_executable(MICROVM_RUN_BIN, path_env.as_deref()).ok_or_else(|| {
+                    SandboxError::Backend(format!(
+                        "VMM confinement on but {MICROVM_RUN_BIN} not found on $PATH to bind into \
+                         the jail (set KASTELLAN_MICROVM_CONFINE_VMM=0 to disable, or fix $PATH)"
+                    ))
+                })?;
+                build_confined_spawn_argv(policy, &plan, &run_dir, &fc, &launcher, &config_s, &log_s)?
+            }
+        };
         let child = Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(Stdio::piped())
