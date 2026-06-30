@@ -93,6 +93,20 @@ impl PersistentTransport for ClientTransport {
     }
 }
 
+impl Drop for ClientTransport {
+    /// Reap the worker's child so it cannot survive as a zombie. A `Client`
+    /// wraps a std `process::Child`, which is NOT reaped on drop — only an
+    /// explicit `wait()` collects it. On the respawn path the worker is already
+    /// dying (the driver detaches this drop to its own thread so the blocking
+    /// wait never stalls the supervisor); on shutdown `--die-with-parent` takes
+    /// it down. `kill()` is idempotent belt-and-suspenders for a worker whose
+    /// pipe broke but whose process is still alive.
+    fn drop(&mut self) {
+        let _ = self.client.kill();
+        let _ = self.client.wait();
+    }
+}
+
 // ── PersistentWorker + PersistentHandle (unchanged below) ───────────────────
 
 pub trait PersistentTransport: Send {
@@ -182,7 +196,17 @@ impl PersistentWorker {
 
                             match factory() {
                                 Ok(fresh) => {
-                                    transport = fresh;
+                                    // Reap the dead worker's child OFF the driver
+                                    // thread. `Client` wraps a std `Child`, which
+                                    // is never reaped on drop — only an explicit
+                                    // wait() collects it — and death_report's
+                                    // best-effort try_wait can miss a slow-exiting
+                                    // bwrap/VMM child, leaving a zombie (the leak
+                                    // behind the recurring daemon zombies). Detach
+                                    // the drop so ClientTransport::drop's blocking
+                                    // kill()+wait() reaps without stalling respawn.
+                                    let dead = std::mem::replace(&mut transport, fresh);
+                                    thread::spawn(move || drop(dead));
                                     tracing::info!(%label, "persistent worker respawned");
                                     if let Some(n) = alarm.record(Instant::now()) {
                                         tracing::warn!(%label, respawns = n, "persistent worker respawn-rate alarm");
@@ -346,5 +370,51 @@ mod tests {
 
         // Confirm the factory was called more than once (the loop really ran).
         assert!(spawn_count.load(Ordering::SeqCst) >= 2, "factory should have been retried");
+    }
+
+    /// Regression test for the zombie-reap leak: when the supervisor respawns, the
+    /// dead transport must be DROPPED (its `Drop` is where `ClientTransport` reaps
+    /// the worker's child — a std `Child` is never reaped on drop, so a missed drop
+    /// is a leaked zombie). The drop is detached to its own thread, so allow a
+    /// moment for it to run.
+    #[test]
+    fn respawn_drops_the_dead_transport() {
+        struct ReapTracking { dropped: Arc<AtomicUsize>, calls: usize, die_after: usize }
+        impl PersistentTransport for ReapTracking {
+            fn call(&mut self, _m: &str, _p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+                if self.calls >= self.die_after { anyhow::bail!("simulated death"); }
+                self.calls += 1;
+                Ok(serde_json::json!({}))
+            }
+        }
+        impl Drop for ReapTracking {
+            fn drop(&mut self) { self.dropped.fetch_add(1, Ordering::SeqCst); }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let d = dropped.clone();
+        let factory: PersistentFactory = Box::new(move || {
+            Ok(Box::new(ReapTracking { dropped: d.clone(), calls: 0, die_after: 1 }))
+        });
+        let h = PersistentWorker::spawn_with_backoff("reap-test", factory, fast_backoff()).unwrap();
+        // First transport serves one call, dies on the second → triggers a respawn.
+        let _ = h.call("a", serde_json::json!({}));
+        let _ = h.call("b", serde_json::json!({}));
+        // Drive a successful post-respawn call so we know the swap happened.
+        loop {
+            match h.call("c", serde_json::json!({})) {
+                Ok(_) => break,
+                Err(_) => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        // The dead transport's detached drop should have run.
+        let mut seen = 0;
+        for _ in 0..100 {
+            seen = dropped.load(Ordering::SeqCst);
+            if seen >= 1 { break; }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(seen >= 1, "respawn must drop (and thus reap) the dead transport");
+        h.shutdown();
     }
 }

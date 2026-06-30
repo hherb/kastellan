@@ -162,6 +162,23 @@ impl WorkerClient for ProtocolWorkerClient {
     }
 }
 
+impl Drop for ProtocolWorkerClient {
+    /// Reap the worker's child so it cannot linger as a zombie. `Client` wraps a
+    /// std `process::Child`, which is NOT reaped on drop — only an explicit
+    /// `wait()` collects it. `death_report` makes only a bounded best-effort
+    /// `try_wait` and gives up if a slow-exiting `bwrap` child outlives the
+    /// window, so the `client = fresh` swap on every respawn was dropping the old
+    /// client without ever reaping it — one leaked zombie per respawn (observed
+    /// as accumulating defunct `bwrap` processes under the long-lived daemon).
+    /// `kill()` is idempotent belt-and-suspenders for a worker whose pipe broke
+    /// but whose process is still alive; the worker here is normally already dead,
+    /// so the `wait()` returns promptly.
+    fn drop(&mut self) {
+        let _ = self.client.kill();
+        let _ = self.client.wait();
+    }
+}
+
 /// Spawn the matrix worker under `backend` + `policy` and return a connected
 /// [`ProtocolWorkerClient`]. Applies the same worker-side lockdown-env derivation
 /// (`KASTELLAN_LANDLOCK_*` / `KASTELLAN_SECCOMP_PROFILE`) that `tool_host`'s tool

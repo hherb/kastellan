@@ -104,6 +104,13 @@ impl Client {
         self.child.kill()
     }
 
+    /// Blocking reap: wait for the worker to exit and return its status. Unlike
+    /// [`close`](Self::close) it borrows rather than consumes, so a `Drop` impl
+    /// can guarantee the child is collected (no lingering zombie) on teardown.
+    pub fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        self.child.wait()
+    }
+
     /// Non-blocking reap: `Ok(Some(status))` once the worker has exited, `Ok(None)`
     /// while it is still running. Used on the death path to record *why* a worker
     /// exited (e.g. a clean `exit status: 1` vs a `signal: 6 (SIGABRT)` crash)
