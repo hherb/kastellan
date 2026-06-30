@@ -80,16 +80,15 @@ impl PersistentTransport for ClientTransport {
     fn death_report(&mut self) -> Option<String> {
         // Snapshot the tail (non-blocking; the drain thread owns the push side).
         let tail = self.stderr_tail.as_ref()?.snapshot();
-        // Attempt a non-blocking reap to get the exit status — the same approach
-        // ProtocolWorkerClient uses in the Matrix channel.
-        let mut status = None;
-        for _ in 0..10 {
-            match self.client.try_wait() {
-                Ok(Some(s)) => { status = Some(s); break; }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                Err(_) => break,
-            }
-        }
+        // A SINGLE non-blocking reap. This runs on the supervisor's driver
+        // thread, which cannot observe a concurrent shutdown() or start the
+        // respawn while it is here — a poll loop with sleeps (the Matrix
+        // channel's approach) would stall the driver up to half a second per
+        // death just to enrich a log line, and a slow-exiting VM launcher would
+        // hit the full stall every time. `format_death_report` already renders a
+        // `None` status as "not yet reaped", so an un-exited child degrades the
+        // message, not the supervisor's responsiveness.
+        let status = self.client.try_wait().ok().flatten();
         Some(crate::worker_stderr::format_death_report(status, &tail))
     }
 }

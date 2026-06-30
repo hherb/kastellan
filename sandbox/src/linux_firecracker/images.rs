@@ -125,19 +125,32 @@ pub fn build_share_images(
     Ok(())
 }
 
-/// mkfs argv for the persistent image **iff it does not yet exist**. An
-/// existing image is reused untouched so its contents survive. Pure (the
-/// existence check is the caller's), so it is unit-testable without a disk.
+/// mkfs argv for the persistent image **iff no usable image is present**. A
+/// usable image is reused untouched so its contents survive. Pure (the
+/// usability check is the caller's), so it is unit-testable without a disk.
 pub fn persistent_mkfs_decision(
-    host_backing_exists: bool,
+    host_backing_usable: bool,
     host_backing: &str,
     size_mib: u64,
 ) -> Option<Vec<String>> {
-    if host_backing_exists {
+    if host_backing_usable {
         None
     } else {
         Some(mkfs_blank_argv(host_backing, size_mib))
     }
+}
+
+/// Whether `path` is a usable persistent image: a regular file with non-zero
+/// length. A zero-length (or partially written) file is the signature of an
+/// interrupted earlier `mkfs.ext4`; mounting it later fails on every boot with
+/// no self-heal, so we treat it as absent and reformat rather than reuse it.
+/// NOTE: this only catches the empty-file case — a non-empty but corrupt ext4
+/// superblock, and a `size_mib` change against an existing image, are out of
+/// scope here (tracked as a follow-up; see HANDOVER open questions).
+pub fn persistent_image_is_usable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
 }
 
 /// Create the persistent image once (mkfs if absent), set the plan's path.
@@ -148,9 +161,9 @@ pub fn build_persistent_image(plan: &mut FirecrackerLaunchPlan) -> Result<(), Sa
         std::fs::create_dir_all(parent)
             .map_err(|e| SandboxError::Backend(format!("persistent store mkdir {parent:?}: {e}")))?;
     }
-    let exists = ps.host_backing.exists();
+    let usable = persistent_image_is_usable(&ps.host_backing);
     if let Some(argv) = persistent_mkfs_decision(
-        exists,
+        usable,
         &ps.host_backing.to_string_lossy(),
         ps.size_mib as u64,
     ) {
@@ -220,6 +233,23 @@ mod tests {
         assert!(argv.contains(&"64M".to_string()));
         // Present → reuse untouched, no mkfs.
         assert!(persistent_mkfs_decision(true, "/var/lib/kastellan/kv/store.ext4", 64).is_none());
+    }
+
+    #[test]
+    fn persistent_image_usable_rejects_absent_and_zero_length() {
+        let dir = std::env::temp_dir().join(format!("kvimg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let absent = dir.join("nope.ext4");
+        assert!(!persistent_image_is_usable(&absent), "absent image is not usable");
+        // Zero-length file is the interrupted-mkfs signature → treat as absent.
+        let empty = dir.join("empty.ext4");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(!persistent_image_is_usable(&empty), "zero-length image is not usable");
+        // Non-empty file → usable (reused untouched).
+        let full = dir.join("full.ext4");
+        std::fs::write(&full, b"\0\0\0\0").unwrap();
+        assert!(persistent_image_is_usable(&full), "non-empty image is usable");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

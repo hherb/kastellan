@@ -118,11 +118,22 @@ impl SandboxBackend for MacosSeatbelt {
         // rule just like fs_read/fs_write, so it must pass the same absolute +
         // injection-foreclosing checks — otherwise it would be the one policy
         // path that skips the guard the comment below promises.
+        // The persistent store's guest_mount is interpolated into the profile as
+        // a `(subpath "...")` rule (build_profile), so it must pass the same
+        // absolute + injection-foreclosing checks. host_backing is validated too
+        // because it must match guest_mount on this backend (checked after
+        // canonicalization below — Seatbelt has no path remap).
+        let persistent_paths: Vec<&std::path::PathBuf> = policy
+            .persistent_store
+            .iter()
+            .flat_map(|ps| [&ps.host_backing, &ps.guest_mount])
+            .collect();
         for p in policy
             .fs_read
             .iter()
             .chain(policy.fs_write.iter())
             .chain(policy.proxy_uds.iter())
+            .chain(persistent_paths.iter().copied())
         {
             if !p.is_absolute() {
                 return Err(SandboxError::Backend(format!(
@@ -156,6 +167,27 @@ impl SandboxBackend for MacosSeatbelt {
         // on a parent dir, etc.) propagate so we don't silently emit a
         // non-functional rule.
         let policy = canonicalize_policy_paths(policy)?;
+        // Slice 5b-2: Seatbelt has no mount remap — build_profile grants only
+        // guest_mount, so host_backing is inert. If a caller sets them to distinct
+        // paths (valid on bwrap/Firecracker), writes would land at guest_mount with
+        // NO relation to the intended stable host_backing — silent divergence of the
+        // cross-platform abstraction. Require equality and fail closed, and create
+        // the dir up front so first boot works without the caller pre-creating it.
+        if let Some(ps) = &policy.persistent_store {
+            if ps.host_backing != ps.guest_mount {
+                return Err(SandboxError::Backend(format!(
+                    "persistent_store on macOS requires host_backing == guest_mount (no path \
+                     remap under Seatbelt), got host_backing={:?} guest_mount={:?}",
+                    ps.host_backing, ps.guest_mount
+                )));
+            }
+            std::fs::create_dir_all(&ps.guest_mount).map_err(|e| {
+                SandboxError::Backend(format!(
+                    "persistent_store guest_mount {:?}: {e}",
+                    ps.guest_mount
+                ))
+            })?;
+        }
         let profile = build_profile(&policy);
         let mut cmd = Command::new("sandbox-exec");
         cmd.arg("-p").arg(&profile);
@@ -373,9 +405,9 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
     }
 
     // Persistent store: a stable RW mount that survives worker respawns.
-    // On macOS there is no path remap (host_backing == guest_mount in the
-    // demo), so we grant the guest_mount path directly. The backing dir
-    // must exist before spawn; creation is the caller's responsibility.
+    // On macOS there is no path remap, so we grant guest_mount directly;
+    // spawn_under_policy enforces host_backing == guest_mount and creates the
+    // dir up front, so this rule grants exactly the host path the worker writes.
     if let Some(ps) = &policy.persistent_store {
         out.push_str(&format!(
             "(allow file-read* file-write* (subpath \"{}\"))\n",

@@ -125,6 +125,26 @@ impl SandboxBackend for LinuxBwrap {
                 )));
             }
         }
+        // Slice 5b-2: the persistent store is a separate field, so it bypasses the
+        // loop above. Its paths must be absolute (a relative dest mis-binds against
+        // the jail cwd), and we create host_backing up front so the `--bind` below
+        // is fail-closed: a missing/unwritable store dir errors here instead of the
+        // `--bind-try` silently dropping the bind and writes vanishing on respawn.
+        if let Some(ps) = &policy.persistent_store {
+            for p in [&ps.host_backing, &ps.guest_mount] {
+                if !p.is_absolute() {
+                    return Err(SandboxError::Backend(format!(
+                        "persistent_store paths must be absolute, got {p:?}"
+                    )));
+                }
+            }
+            std::fs::create_dir_all(&ps.host_backing).map_err(|e| {
+                SandboxError::Backend(format!(
+                    "persistent_store host_backing {:?}: {e}",
+                    ps.host_backing
+                ))
+            })?;
+        }
 
         let bwrap_argv = build_argv(policy, program, args);
         // systemd-run is the **outer** process; it sets up the cgroup
@@ -206,8 +226,11 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
 
     // Slice 5b-2: a persistent store is a RW bind from a stable host dir to the
     // jail's guest_mount (distinct paths, so not push_bind which uses one path).
+    // `--bind` (not `--bind-try`): spawn_under_policy created host_backing, so a
+    // failed bind is a real error and must fail closed — a silent skip would drop
+    // every write and defeat the cross-respawn persistence guarantee.
     if let Some(ps) = &policy.persistent_store {
-        argv.push("--bind-try".into());
+        argv.push("--bind".into());
         argv.push(ps.host_backing.display().to_string());
         argv.push(ps.guest_mount.display().to_string());
     }
@@ -343,9 +366,10 @@ mod tests {
             size_mib: 0,
         });
         let argv = build_argv(&policy, "/bin/true", &[]);
-        // a --bind-try with DISTINCT host/jail paths (not the same-path push_bind)
+        // a fail-closed `--bind` with DISTINCT host/jail paths (not the same-path
+        // push_bind, and not `--bind-try` which would silently drop a missing store)
         let i = argv.iter().position(|a| a == "/srv/kv-state").unwrap();
-        assert_eq!(argv[i - 1], "--bind-try");
+        assert_eq!(argv[i - 1], "--bind");
         assert_eq!(argv[i + 1], "/data");
     }
 

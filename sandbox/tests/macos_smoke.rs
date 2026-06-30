@@ -160,6 +160,26 @@ fn relative_policy_paths_are_rejected() {
 }
 
 #[test]
+fn persistent_store_distinct_host_and_guest_paths_are_rejected() {
+    // Seatbelt has no path remap, so distinct host_backing/guest_mount would
+    // silently write to guest_mount with no relation to host_backing. The
+    // backend must fail closed rather than emit a misleading grant.
+    let backend = MacosSeatbelt::new();
+    let mut policy = strict_policy();
+    policy.persistent_store = Some(kastellan_sandbox::PersistentStore {
+        host_backing: PathBuf::from("/tmp/kv-host"),
+        guest_mount: PathBuf::from("/tmp/kv-guest"),
+        size_mib: 0,
+    });
+    let res = backend.spawn_under_policy(&policy, "/usr/bin/true", &[]);
+    let err = format!("{:?}", res.err().expect("distinct persistent paths must be rejected"));
+    assert!(
+        err.contains("host_backing == guest_mount"),
+        "expected equality-required error, got {err}"
+    );
+}
+
+#[test]
 fn reading_dev_disk0_is_denied() {
     if skip_if_no_seatbelt() {
         return;

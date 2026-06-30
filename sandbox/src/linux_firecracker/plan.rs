@@ -204,6 +204,19 @@ pub fn build_launch_plan(
             )));
         }
     }
+    // Slice 5b-2: the persistent store lives in a separate field, so it bypasses
+    // the loop above — but `PersistentStore` documents both paths as absolute and
+    // a relative host_backing/guest_mount mis-resolves (mkfs into the wrong dir, a
+    // relative guest mountpoint). Enforce it explicitly, fail-closed like fs_*.
+    if let Some(ps) = &policy.persistent_store {
+        for p in [&ps.host_backing, &ps.guest_mount] {
+            if !p.is_absolute() {
+                return Err(SandboxError::Backend(format!(
+                    "persistent_store paths must be absolute, got {p:?}"
+                )));
+            }
+        }
+    }
 
     // vcpu_count: None → 1; Some(pct) → ceil(pct/100), min 1, clamped to a
     // sane ceiling so a bad config can't request 256 vCPUs.
@@ -276,6 +289,21 @@ pub fn build_launch_plan(
                 "fs_write path {mp:?} has top-level /{top}, which is not a micro-VM share anchor \
                  ({ANCHOR_HINT}): the guest cannot mount the scratch drive on the read-only \
                  rootfs — place the writable mountpoint under one of those anchors"
+            )));
+        }
+    }
+    // Slice 5b-2: the persistent store mounts on its own guest drive exactly like
+    // a writable scratch dir, so its guest_mount must also be under a rootfs share
+    // anchor — otherwise the guest cannot mount it on the read-only rootfs and the
+    // store SILENTLY fails to appear (the exact failure the fs_read/fs_write checks
+    // above exist to prevent). Reject here so persistence never silently no-ops.
+    if let Some(ps) = &policy.persistent_store {
+        if let Some(top) = non_anchor_top_level(&ps.guest_mount) {
+            return Err(SandboxError::Backend(format!(
+                "persistent_store guest_mount {:?} has top-level /{top}, which is not a micro-VM \
+                 share anchor ({ANCHOR_HINT}): the guest cannot mount the persistent drive on the \
+                 read-only rootfs — place guest_mount under one of those anchors",
+                ps.guest_mount
             )));
         }
     }
@@ -969,5 +997,46 @@ mod tests {
         let cfg = render_firecracker_config(&plan_with_img);
         let drives = cfg["drives"].as_array().unwrap();
         assert!(drives.iter().any(|d| d["drive_id"] == "persistent-store" && d["is_read_only"] == false));
+    }
+
+    #[test]
+    fn persistent_store_guest_mount_non_anchor_fails_closed() {
+        // A guest_mount outside the share anchors silently fails to mount in-guest
+        // on the read-only rootfs — reject it like fs_read/fs_write.
+        let mut policy = SandboxPolicy { net: Net::Deny, ..Default::default() };
+        policy.persistent_store = Some(crate::PersistentStore {
+            host_backing: std::path::PathBuf::from("/var/lib/kastellan/kv/store.ext4"),
+            guest_mount: std::path::PathBuf::from("/persistent"),
+            size_mib: 64,
+        });
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(
+            format!("{err}").contains("share anchor"),
+            "non-anchor persistent guest_mount must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn persistent_store_relative_paths_fail_closed() {
+        for ps in [
+            crate::PersistentStore {
+                host_backing: std::path::PathBuf::from("kv/store.ext4"),
+                guest_mount: std::path::PathBuf::from("/data"),
+                size_mib: 64,
+            },
+            crate::PersistentStore {
+                host_backing: std::path::PathBuf::from("/var/lib/kastellan/kv/store.ext4"),
+                guest_mount: std::path::PathBuf::from("data"),
+                size_mib: 64,
+            },
+        ] {
+            let mut policy = SandboxPolicy { net: Net::Deny, ..Default::default() };
+            policy.persistent_store = Some(ps);
+            let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+            assert!(
+                format!("{err}").contains("must be absolute"),
+                "relative persistent_store path must be rejected: {err}"
+            );
+        }
     }
 }
