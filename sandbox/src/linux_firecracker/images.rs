@@ -157,6 +157,18 @@ pub fn persistent_image_is_usable(path: &Path) -> bool {
 /// Reuses the same `run` shell-out style as [`build_share_images`].
 pub fn build_persistent_image(plan: &mut FirecrackerLaunchPlan) -> Result<(), SandboxError> {
     let Some(ps) = plan.persistent_store.clone() else { return Ok(()) };
+    // host_backing is an ext4 IMAGE FILE on this backend — it is a *directory*
+    // only on bwrap/Seatbelt (see `PersistentStore` doc). If a directory already
+    // exists at the path (e.g. a policy built for a dir-backed backend was routed
+    // here), `mkfs.ext4` would fail with an opaque "is a directory"; reject up
+    // front with the cross-backend hint instead.
+    if ps.host_backing.is_dir() {
+        return Err(SandboxError::Backend(format!(
+            "persistent_store host_backing {:?} is a directory, but the Firecracker backend \
+             expects an ext4 image file (a directory is the bwrap/Seatbelt form)",
+            ps.host_backing
+        )));
+    }
     if let Some(parent) = ps.host_backing.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| SandboxError::Backend(format!("persistent store mkdir {parent:?}: {e}")))?;
@@ -249,6 +261,37 @@ mod tests {
         let full = dir.join("full.ext4");
         std::fs::write(&full, b"\0\0\0\0").unwrap();
         assert!(persistent_image_is_usable(&full), "non-empty image is usable");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_persistent_image_rejects_directory_host_backing() {
+        // host_backing is an ext4 image FILE on Firecracker; a directory (the
+        // bwrap/Seatbelt form, e.g. a policy routed to the wrong backend) must be
+        // rejected with a clear cross-backend hint, never handed to `mkfs.ext4`.
+        let dir = std::env::temp_dir().join(format!("kvimg-isdir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut policy = crate::SandboxPolicy { net: crate::Net::Deny, ..Default::default() };
+        policy.persistent_store = Some(crate::PersistentStore {
+            host_backing: dir.clone(),
+            guest_mount: PathBuf::from("/data"),
+            size_mib: 64,
+        });
+        let mut plan = crate::linux_firecracker::plan::build_launch_plan(
+            &policy,
+            &crate::linux_firecracker::FirecrackerImage {
+                kernel_path: "/k".into(),
+                rootfs_path: "/var/r.ext4".into(),
+            },
+            "/w",
+            &[],
+        )
+        .unwrap();
+        let err = build_persistent_image(&mut plan).unwrap_err();
+        assert!(
+            format!("{err}").contains("is a directory"),
+            "directory host_backing must be rejected with a cross-backend hint: {err}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

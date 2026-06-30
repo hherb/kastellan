@@ -80,6 +80,11 @@ pub enum Net {
 /// Firecracker backend (mkfs-once, then reused untouched), a **directory**
 /// bound RW on bwrap/Seatbelt. Both `host_backing` and `guest_mount` must be
 /// absolute. Distinct from `fs_write` ephemeral scratch (re-created per spawn).
+///
+/// The `host_backing` *kind* is backend-specific (file on Firecracker, directory
+/// on bwrap/Seatbelt), so each backend fails closed with a cross-backend hint if
+/// it finds the wrong kind already on disk (e.g. a policy routed to the wrong
+/// backend) rather than letting `mkfs`/`create_dir_all` fail opaquely.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistentStore {
     /// Stable host path. Firecracker: ext4 image file. bwrap/Seatbelt: directory.

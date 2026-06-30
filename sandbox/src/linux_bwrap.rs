@@ -138,6 +138,19 @@ impl SandboxBackend for LinuxBwrap {
                     )));
                 }
             }
+            // host_backing is a DIRECTORY on this backend — it is an ext4 image
+            // FILE only on Firecracker (see `PersistentStore` doc). If a regular
+            // file already exists at the path (e.g. a policy built for the
+            // Firecracker backend was routed here), `create_dir_all` would fail
+            // with an opaque "File exists"; reject up front with the cross-backend
+            // hint instead.
+            if ps.host_backing.is_file() {
+                return Err(SandboxError::Backend(format!(
+                    "persistent_store host_backing {:?} is a file, but the bwrap backend expects a \
+                     directory (a file is the Firecracker ext4-image form)",
+                    ps.host_backing
+                )));
+            }
             std::fs::create_dir_all(&ps.host_backing).map_err(|e| {
                 SandboxError::Backend(format!(
                     "persistent_store host_backing {:?}: {e}",
@@ -371,6 +384,30 @@ mod tests {
         let i = argv.iter().position(|a| a == "/srv/kv-state").unwrap();
         assert_eq!(argv[i - 1], "--bind");
         assert_eq!(argv[i + 1], "/data");
+    }
+
+    #[test]
+    fn persistent_store_rejects_file_host_backing() {
+        // host_backing is a DIRECTORY on bwrap; a regular file (the Firecracker
+        // ext4-image form, e.g. a policy routed to the wrong backend) must be
+        // rejected with a clear cross-backend hint before `create_dir_all` fails
+        // opaquely with "File exists".
+        let f = std::env::temp_dir().join(format!("kv-host-file-{}.ext4", std::process::id()));
+        std::fs::write(&f, b"x").unwrap();
+        let mut policy = strict_policy();
+        policy.persistent_store = Some(crate::PersistentStore {
+            host_backing: f.clone(),
+            guest_mount: PathBuf::from("/data"),
+            size_mib: 0,
+        });
+        let err = LinuxBwrap
+            .spawn_under_policy(&policy, "/bin/true", &[])
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("is a file"),
+            "file host_backing must be rejected with a cross-backend hint: {err:?}"
+        );
+        std::fs::remove_file(&f).ok();
     }
 
     #[test]

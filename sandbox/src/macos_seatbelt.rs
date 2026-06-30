@@ -181,6 +181,19 @@ impl SandboxBackend for MacosSeatbelt {
                     ps.host_backing, ps.guest_mount
                 )));
             }
+            // guest_mount is a DIRECTORY on this backend — it is an ext4 image
+            // FILE only on Firecracker (see `PersistentStore` doc). If a regular
+            // file already exists at the path (e.g. a policy built for the
+            // Firecracker backend was routed here), `create_dir_all` would fail
+            // with an opaque "File exists"; reject up front with the cross-backend
+            // hint instead.
+            if ps.guest_mount.is_file() {
+                return Err(SandboxError::Backend(format!(
+                    "persistent_store guest_mount {:?} is a file, but the Seatbelt backend expects \
+                     a directory (a file is the Firecracker ext4-image form)",
+                    ps.guest_mount
+                )));
+            }
             std::fs::create_dir_all(&ps.guest_mount).map_err(|e| {
                 SandboxError::Backend(format!(
                     "persistent_store guest_mount {:?}: {e}",
