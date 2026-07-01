@@ -39,22 +39,11 @@
 //!    always present (`<handoff>` is constant compiled-in text).
 //! 2. One blank line between sections.
 //! 3. Each row renders as `- {body}` (one row per line).
-//! 4. Bodies pass through verbatim (no HTML-style escaping of `<` `>`).
-//!    Operators curate L0/L1 content; trust posture matches the rest
-//!    of the memory store.
-//!
-//!    **SAFETY — prompt-injection seam.** This contract holds *only*
-//!    while every body fed into the assembler is operator-curated. If
-//!    any agent-writable layer (e.g. a future L1 promotion writer that
-//!    sources content from agent output) flows rows in here, the lack
-//!    of escaping becomes a prompt-injection vector: agent-controlled
-//!    text could close the `<l1_insights>` block and inject new
-//!    framing the model trusts at meta-rule level. See the L1-writer
-//!    follow-up in `docs/devel/handovers/HANDOVER.md` ("recall lane
-//!    wiring" / future "L3/L4 writers" — if any *promotion* writer is
-//!    added that pulls from agent-authored content, revisit this
-//!    contract before merging). Threat-model reference:
-//!    `docs/threat-model.md` (LLM-compromise scenario).
+//! 4. L0/L1/skills bodies pass through verbatim (no HTML-style escaping
+//!    of `<` `>`). L0 and surfaced skills are operator-gated, and L1's
+//!    own delimiter (`</l1_insights>`) plus newlines are rejected at
+//!    write time by `validate_l1_body`, so none can break their block.
+//!    **`<recalled>` bodies are escaped** — see the note below.
 //!
 //!    **Note for `<skills>` bodies:** Surfaced skills are
 //!    operator-approved (`user_approved` / `pinned` trust marker
@@ -63,16 +52,20 @@
 //!    (L0/L1), before the unverified `recalled` output. The
 //!    `<skills>` block is omitted entirely when the slice is empty.
 //!
-//!    **Note for `<recalled>` bodies:** Unlike L0/L1, recall bodies are
-//!    *not* operator-curated — any process with `INSERT` privilege on
-//!    `memories` writes them, and recall surfaces whatever the lanes
-//!    return. Phase 1 trusts the model's tokeniser for recall rows on
-//!    the same basis as L0/L1; if an adversarial-input scenario is
-//!    identified (e.g. attacker-supplied content in `memories` flowing
-//!    here via the recall lane), sanitise before passing to this
-//!    function. The `recalled_block_passes_xml_chars_in_body_verbatim`
-//!    test pins the current pass-through posture so any future
-//!    sanitiser is a deliberate behaviour change, not a silent fix.
+//!    **SAFETY — `<recalled>` bodies are untrusted (adversary #6).**
+//!    Recall bodies are the lowest-trust memory source: any process with
+//!    `INSERT` on `memories` writes them, including the agent-raised L1
+//!    promotion writer, which launders untrusted LLM output into the
+//!    store. Recall surfaces whatever the (layer-agnostic) lanes return.
+//!    Two layers defend the planner prompt: (a) catalogue screening in
+//!    [`crate::recall_assembly`] drops rows that trip the injection
+//!    guard before they reach a [`RecalledContext`], and (b) this
+//!    assembler escapes `&`/`<`/`>` in every recalled body via
+//!    [`escape_recalled_body`] so no stored row can close `<recalled>`
+//!    or forge framing. The `recalled_block_escapes_framing_delimiters`
+//!    test pins the escaping; the recall-builder tests pin the screen.
+//!    Threat-model reference: `docs/threat-model.md` (adversary #6) and
+//!    `docs/security-audit-2026-07-02.md` (finding #1).
 //! 5. The `<recalled>` block is omitted when the
 //!    [`RecalledContext`] is empty (the
 //!    failure-degraded state). Recall is enrichment, not policy —
@@ -119,6 +112,30 @@ fn render_handoff_block() -> String {
         tool = HANDOFF_TOOL,
         method = HANDOFF_METHOD_FETCH,
     )
+}
+
+/// Neutralise prompt-framing delimiters in an untrusted recalled body so a
+/// stored memory cannot close the `<recalled>` block — or forge any other
+/// framing tag (`<base>`, `<system>`, a chat-template token) — and inject
+/// content the planner reads as higher-trust structure.
+///
+/// Recall bodies are the lowest-trust memory source: *any* process with
+/// `INSERT` on `memories` writes them, including the agent-raised L1
+/// promotion writer that launders untrusted LLM output into the store
+/// (threat-model adversary #6). Escaping `&` / `<` / `>` means no `<tag>`
+/// sequence can form in a recalled body, closing the delimiter-breakout
+/// vector regardless of what any upstream writer or builder allowed. This is
+/// the render-level guarantee; catalogue screening in
+/// [`crate::recall_assembly`] is the complementary content-trust layer.
+///
+/// `&` is escaped first so an already-`&amp;`-looking body round-trips
+/// unambiguously. Only the `<recalled>` block is escaped — L0/skills are
+/// operator-gated and L1's own delimiter is blocked at write time by
+/// `validate_l1_body`.
+fn escape_recalled_body(body: &str) -> String {
+    body.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Render the supplied memory slices, surfaced skills, recall context, and
@@ -172,7 +189,7 @@ pub fn assemble_system_prompt(
         out.push_str("<recalled>\n");
         for body in &recalled.bodies {
             out.push_str("- ");
-            out.push_str(body);
+            out.push_str(&escape_recalled_body(body));
             out.push('\n');
         }
         out.push_str("</recalled>\n\n");
