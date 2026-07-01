@@ -1,0 +1,17 @@
+--- a/crates/obscura-js/Cargo.toml
++++ b/crates/obscura-js/Cargo.toml
+@@ -10,7 +10,7 @@
+ stealth = ["obscura-net/stealth"]
+
+ [build-dependencies]
+-deno_core = "0.350"
++deno_core = "0.405"
+
+ [dependencies]
+ obscura-dom = { workspace = true }
+@@ -18,7 +18,7 @@
+-deno_core = "0.350"
++deno_core = "0.405"
+ tokio = { workspace = true }
+ serde = { workspace = true }
+ serde_json = { workspace = true }

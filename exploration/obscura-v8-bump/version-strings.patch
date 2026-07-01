@@ -1,0 +1,27 @@
+--- a/crates/obscura-cdp/src/server.rs
++++ b/crates/obscura-cdp/src/server.rs
+@@ -1,8 +1,8 @@
+ # Apply with: grep -n "14.5.0.0\|Chrome/145" crates/obscura-cdp/src/server.rs
+ # Then manually update each occurrence. Known locations:
+ #
+-# handle_http_json_blocking / "version" endpoint:
+-#   "Browser": "Chrome/145.0.0.0"
+-#   "User-Agent": "...Chrome/145.0.0.0..."
+-#   "V8-Version": "14.5.0.0"
++# After bump, update to actual V8 version reported by the crate.
++# Expected values (verify after build):
++#   "Browser": "Chrome/149.0.0.0"
++#   "User-Agent": "...Chrome/149.0.0.0..."
++#   "V8-Version": "14.9.x.x"  (get exact value from build output)
+ #
+-# fast_path_response:
+-#   "jsVersion": "14.5.0.0"
++# fast_path_response:
++#   "jsVersion": "14.9.x.x"
+ #
+ # To get the exact V8 version after building:
+-#   grep -r "v8_version\|V8_VERSION" target/debug/build/v8-*/
++#   cargo build -p obscura-js
++#   grep -r "v8_version\|V8_VERSION" target/debug/build/v8-*/out/ 2>/dev/null
++#   # Or run: cargo run -- serve --port 9222 &
++#   # Then:  curl -s http://127.0.0.1:9222/json/version | jq '."V8-Version"'
