@@ -270,9 +270,10 @@ async fn render_in_jail_forced(
     let backend = backend();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     // Per-spawn writable scratch (#283), prepared on a private policy copy before
-    // force-routing rewrites it (the rewrite only appends proxy_uds + CA fs_read,
-    // so the scratch grant/env survive). No-op on Linux. The RAII guard is bound
-    // to the worker via `with_scratch` below.
+    // force-routing rewrites it (the rewrite only sets proxy_uds — the browser is a
+    // transparent-tunnel worker, `disable_mitm=true` ⇒ `mitm=false`, so no CA is
+    // injected — the scratch grant/env survive). No-op on Linux. The RAII guard is
+    // bound to the worker via `with_scratch` below.
     let mut policy = entry.policy.clone();
     let scratch =
         kastellan_core::tool_host::prepare_ephemeral_scratch(&mut policy, entry.ephemeral_scratch)
