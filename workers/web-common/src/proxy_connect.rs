@@ -95,6 +95,49 @@ impl ProxyConnectGet {
         Ok(Self { user_agent: user_agent.to_string(), uds, tls, rt })
     }
 
+    /// Build the transport trusting the compiled-in **webpki public roots**
+    /// plus, when `extra_ca` is `Some`, an additional CA (a self-signed test
+    /// origin for hermetic e2e). Unlike [`with_trust`]'s `Some` branch, this does
+    /// NOT drop the public roots — the worker validates real origins normally and
+    /// *also* trusts the extra CA. A set-but-unreadable/invalid `extra_ca` is an
+    /// error (fail closed; never silently ignore it). Used by transparent-tunnel
+    /// workers (slice 5c) that do their own end-to-end TLS and cannot trust the
+    /// proxy's per-instance MITM CA.
+    pub fn with_extra_ca(
+        user_agent: &str,
+        uds: PathBuf,
+        extra_ca: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        if let Some(path) = extra_ca {
+            let pem = std::fs::read(&path)
+                .map_err(|e| anyhow::anyhow!("read extra CA {path:?}: {e}"))?;
+            let mut added = 0usize;
+            for der in CertificateDer::pem_slice_iter(&pem) {
+                let der = der.map_err(|e| anyhow::anyhow!("parse extra CA {path:?}: {e}"))?;
+                root_store
+                    .add(der)
+                    .map_err(|e| anyhow::anyhow!("add extra CA {path:?}: {e}"))?;
+                added += 1;
+            }
+            if added == 0 {
+                anyhow::bail!("extra CA {path:?} contained no certificates");
+            }
+        }
+        let tls = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
+        Ok(Self { user_agent: user_agent.to_string(), uds, tls, rt })
+    }
+
     async fn get_async(&self, url: &Url) -> Result<RawResponse, String> {
         let host = url.host_str().ok_or("url has no host")?;
         let port = url
@@ -391,6 +434,26 @@ mod tests {
         // No CA → infallible webpki path (back-compat with slice #1/#2).
         let g = ProxyConnectGet::with_trust("kastellan-test/0", PathBuf::from("/tmp/x.sock"), None);
         assert!(g.is_ok());
+    }
+
+    #[test]
+    fn with_extra_ca_none_is_webpki_and_ok() {
+        // No extra CA → webpki roots only, infallible.
+        let g = ProxyConnectGet::with_extra_ca(
+            "kastellan-test/0", PathBuf::from("/tmp/x.sock"), None,
+        );
+        assert!(g.is_ok());
+    }
+
+    #[test]
+    fn with_extra_ca_unreadable_fails_closed() {
+        // A set-but-unreadable extra CA must fail closed (never silently drop it).
+        let g = ProxyConnectGet::with_extra_ca(
+            "kastellan-test/0",
+            PathBuf::from("/tmp/x.sock"),
+            Some(PathBuf::from("/nonexistent/extra-ca.pem")),
+        );
+        assert!(g.is_err(), "set-but-unreadable extra CA must fail closed");
     }
 
     #[test]
