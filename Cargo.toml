@@ -19,6 +19,7 @@ members = [
     "workers/matrix-wire",
     "workers/matrix",
     "workers/kv-demo",
+    "workers/net-demo",
     "workers/microvm-run",
     "workers/microvm-init",
 ]
