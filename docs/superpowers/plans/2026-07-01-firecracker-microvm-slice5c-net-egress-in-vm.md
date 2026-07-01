@@ -137,7 +137,7 @@ impl Handler for NetHandler {
                 let _p: ProbeParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::new(codes::INVALID_PARAMS, format!("bad params: {e}")))?;
                 // Filled in Task 3.
-                Err(RpcError::new(codes::OPERATION_FAILED, "net.tls_probe not yet implemented".into()))
+                Err(RpcError::new(codes::OPERATION_FAILED, "net.tls_probe not yet implemented"))
             }
             "net.stats" => Ok(serde_json::json!({
                 "calls_served": self.calls_served,
@@ -378,6 +378,8 @@ git commit -m "$(printf 'feat(web-common): webpki+extra-CA transparent CONNECT t
 **Interfaces:**
 - Consumes: `kastellan_worker_web_common::http::make_transparent_get`, `kastellan_worker_web_common::http::HttpGet`, `url::Url`.
 - Produces: `net.tls_probe {host, port=443}` → `{ok: bool, status: Option<u16>, error: Option<String>}` where `ok` is true iff the CONNECT + end-to-end TLS + GET `/` succeeded.
+
+**Also in this task:** remove the two `#[allow(dead_code)]` attributes added in Task 1 to `ProbeParams` and `NetHandler` — once `net.tls_probe` reads `host`/`port`/`uds`/`extra_ca`, the fields are live and the allows become unnecessary.
 
 - [ ] **Step 1: Add a pure result-shaping helper + failing test**
 
