@@ -95,6 +95,22 @@ impl Drop for EgressSidecar {
 }
 
 impl EgressSidecar {
+    /// Build a bundle from already-spawned parts. Used by
+    /// [`super::persistent_net::spawn_net_transport`], which spawns the sidecar +
+    /// worker itself (it needs the raw `Client`, not a `SupervisedWorker`) and
+    /// owns the scratch dir for RAII cleanup.
+    pub(crate) fn from_parts(
+        sidecar: SidecarHandle,
+        ingest: JoinHandle<()>,
+        scratch: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            sidecar,
+            _ingest: ingest,
+            scratch,
+        }
+    }
+
     /// Dispatch-time live provisioning (egress slice #3b, #268): merge `fps`
     /// into this worker's sidecar `secret_hashes.json` (union across reuse) and
     /// return the newly-added fingerprints for audit. The scratch dir holding
@@ -313,7 +329,7 @@ fn make_worker_scratch_dir(scratch_root: &Path) -> Result<PathBuf, ToolHostError
 /// Spawn the decision-ingest thread over the proxy's stdout. Reads decision
 /// lines and feeds each mapped row to `on_decision`. If `stdout` is `None`
 /// (already taken) the thread exits immediately.
-fn spawn_ingest_thread<F>(
+pub(crate) fn spawn_ingest_thread<F>(
     stdout: Option<std::process::ChildStdout>,
     on_decision: F,
 ) -> JoinHandle<()>
