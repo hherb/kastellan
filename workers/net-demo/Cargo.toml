@@ -21,3 +21,14 @@ serde                    = { workspace = true }
 serde_json               = { workspace = true }
 anyhow                   = { workspace = true }
 url                      = { workspace = true }
+
+# Dev-only hermetic harness for `net.tls_probe`: a loopback rustls origin with an
+# rcgen self-signed cert + a CONNECT-splicing UDS proxy. Versions/features copied
+# verbatim from workers/web-common/Cargo.toml (rustls/tokio-rustls/rustls-pki-types)
+# and workers/egress-proxy/Cargo.toml (rcgen) so the workspace lock is unchanged.
+[dev-dependencies]
+tokio            = { version = "1",    features = ["rt", "net", "io-util", "macros"] }
+tokio-rustls     = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls           = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
+rustls-pki-types = { version = "1",    features = ["std"] }
+rcgen            = { version = "0.13", default-features = false, features = ["pem", "ring"] }
