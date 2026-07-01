@@ -14,6 +14,19 @@ pub mod server;
 
 use serde::{Deserialize, Serialize};
 
+/// Maximum bytes buffered for a single `\n`-terminated JSON-RPC record before
+/// the read is abandoned with an error.
+///
+/// The transport is line-delimited, so a peer that never emits a newline would
+/// otherwise drive `read_line` to allocate without bound — a compromised or
+/// malfunctioning worker could OOM the core this way (security audit
+/// 2026-07-02, finding #2). This ceiling is deliberately far above any
+/// legitimate single response: workers self-cap their outputs well below it
+/// (web-fetch ~100 KiB text, python-exec 256 KiB captures) and the largest
+/// per-task handoff budget is 64 MiB. A record strictly larger than this is
+/// not a valid message and is rejected rather than buffered.
+pub const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
+
 /// JSON-RPC 2.0 error codes used by kastellan. Subset of the spec plus our own
 /// app-level codes in the -32000..-32099 reserved range.
 pub mod codes {

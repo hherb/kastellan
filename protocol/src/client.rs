@@ -1,9 +1,9 @@
 //! Client-side helper: talk to a child worker over its stdio pipes.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout};
 
-use crate::{codes, Request, Response, RpcError};
+use crate::{codes, Request, Response, RpcError, MAX_RECORD_BYTES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -13,6 +13,8 @@ pub enum ClientError {
     Decode(#[from] serde_json::Error),
     #[error("worker exited before responding")]
     EarlyExit,
+    #[error("worker response exceeded the {cap}-byte record cap")]
+    ResponseTooLarge { cap: usize },
     #[error("response id {got:?} does not match request id {expected:?}")]
     IdMismatch {
         expected: serde_json::Value,
@@ -67,12 +69,13 @@ impl Client {
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
 
-        let mut line = String::new();
-        let n = self.stdout.read_line(&mut line)?;
-        if n == 0 {
-            return Err(ClientError::EarlyExit);
-        }
-        let resp: Response = serde_json::from_str(line.trim())?;
+        // Bounded read: a worker that never emits `\n` must not be able to
+        // drive the core to OOM (audit finding #2).
+        let buf = match read_capped_record(&mut self.stdout, MAX_RECORD_BYTES)? {
+            Some(buf) => buf,
+            None => return Err(ClientError::EarlyExit),
+        };
+        let resp: Response = serde_json::from_slice(buf.trim_ascii())?;
         if resp.id != id {
             return Err(ClientError::IdMismatch {
                 expected: id,
@@ -117,5 +120,68 @@ impl Client {
     /// without risking a hang if the process is unexpectedly still alive.
     pub fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
         self.child.try_wait()
+    }
+}
+
+/// Read one `\n`-terminated record from `r`, buffering at most `cap` bytes.
+///
+/// `Ok(None)` = EOF before any byte; `Ok(Some(bytes))` = the record (including
+/// a trailing `\n` if present); `Err(ResponseTooLarge)` if the record would
+/// exceed `cap` without a newline. `take(cap + 1)` bounds the allocation so an
+/// unbounded line cannot OOM the reader (audit finding #2).
+fn read_capped_record<R: BufRead>(
+    r: &mut R,
+    cap: usize,
+) -> Result<Option<Vec<u8>>, ClientError> {
+    let mut buf: Vec<u8> = Vec::new();
+    let n = (&mut *r)
+        .take(cap as u64 + 1)
+        .read_until(b'\n', &mut buf)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n > cap {
+        return Err(ClientError::ResponseTooLarge { cap });
+    }
+    Ok(Some(buf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_capped_record_returns_a_normal_line() {
+        let mut r: &[u8] = b"{\"ok\":true}\nnext";
+        let got = read_capped_record(&mut r, 1024).unwrap();
+        assert_eq!(got.as_deref(), Some(&b"{\"ok\":true}\n"[..]));
+    }
+
+    #[test]
+    fn read_capped_record_eof_is_none() {
+        let mut r: &[u8] = b"";
+        assert!(read_capped_record(&mut r, 1024).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_capped_record_rejects_over_cap_line_without_ooming() {
+        // A 10 KiB line with NO newline against a 16-byte cap: the reader must
+        // buffer at most cap+1 bytes and error, not grow unbounded. This is the
+        // OOM guard (finding #2) in miniature.
+        let flood = vec![b'a'; 10 * 1024];
+        let mut r: &[u8] = &flood;
+        match read_capped_record(&mut r, 16) {
+            Err(ClientError::ResponseTooLarge { cap }) => assert_eq!(cap, 16),
+            other => panic!("expected ResponseTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_capped_record_accepts_record_at_cap() {
+        // 15 content bytes + newline = 16 total; the cap counts the whole
+        // record (newline included), so this is exactly at budget and accepted.
+        let mut r: &[u8] = b"aaaaaaaaaaaaaaa\n";
+        let got = read_capped_record(&mut r, 16).unwrap();
+        assert_eq!(got.unwrap().len(), 16);
     }
 }

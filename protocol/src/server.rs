@@ -3,7 +3,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 
-use crate::{codes, err_response, ok_response, Request, RpcError};
+use crate::{codes, err_response, ok_response, Request, RpcError, MAX_RECORD_BYTES};
 
 pub trait Handler {
     /// Handle one method call. Returning `Ok(value)` becomes a JSON-RPC
@@ -28,19 +28,51 @@ where
     R: Read,
     W: Write,
 {
+    serve_capped(handler, reader, writer, MAX_RECORD_BYTES)
+}
+
+/// [`serve`] with an explicit per-record byte cap. Separated out so the OOM
+/// guard (audit finding #2) can be unit-tested with a small cap instead of a
+/// 64 MiB flood.
+fn serve_capped<H, R, W>(
+    handler: &mut H,
+    reader: &mut R,
+    writer: &mut W,
+    cap: usize,
+) -> io::Result<()>
+where
+    H: Handler,
+    R: Read,
+    W: Write,
+{
     let mut br = BufReader::new(reader);
-    let mut line = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     loop {
-        line.clear();
-        let n = br.read_line(&mut line)?;
+        buf.clear();
+        // Bounded read, symmetric with the client: a single record is never
+        // buffered beyond `cap`. An over-cap record is a protocol error, not
+        // something to keep buffering.
+        let n = (&mut br)
+            .take(cap as u64 + 1)
+            .read_until(b'\n', &mut buf)?;
         if n == 0 {
             return Ok(()); // EOF: parent closed stdin
         }
-        let trimmed = line.trim();
+        if n > cap {
+            let response = err_response(
+                serde_json::Value::Null,
+                RpcError::new(codes::INVALID_REQUEST, "request exceeded record cap"),
+            );
+            serde_json::to_writer(&mut *writer, &response)?;
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+            return Ok(());
+        }
+        let trimmed = buf.trim_ascii();
         if trimmed.is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<Request>(trimmed) {
+        let response = match serde_json::from_slice::<Request>(trimmed) {
             Ok(req) => match handler.call(&req.method, req.params) {
                 Ok(result) => ok_response(req.id, result),
                 Err(e) => err_response(req.id, e),
@@ -108,5 +140,29 @@ mod tests {
         assert!(line.contains("\"error\""));
         assert!(line.contains("-32700"));
         assert!(line.contains("\"id\":null"));
+    }
+
+    #[test]
+    fn over_cap_record_is_rejected_without_ooming() {
+        // A 4 KiB record with no newline against a 16-byte cap: the loop must
+        // reject it (INVALID_REQUEST) and stop, never buffering the flood.
+        let flood = vec![b'x'; 4096];
+        let mut input: &[u8] = &flood;
+        let mut output: Vec<u8> = Vec::new();
+        let mut h = Echo;
+        super::serve_capped(&mut h, &mut input, &mut output, 16).unwrap();
+        let line = String::from_utf8(output).unwrap();
+        assert!(line.contains("-32600"), "expected INVALID_REQUEST, got {line}");
+    }
+
+    #[test]
+    fn record_within_cap_still_dispatches() {
+        let mut input: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"echo\",\"params\":42}\n";
+        let mut output: Vec<u8> = Vec::new();
+        let mut h = Echo;
+        // Cap comfortably above the record length.
+        super::serve_capped(&mut h, &mut input, &mut output, 4096).unwrap();
+        let line = String::from_utf8(output).unwrap();
+        assert!(line.contains("\"result\":42"), "expected echoed result, got {line}");
     }
 }
