@@ -326,16 +326,31 @@ fn net_demo_tls_probe_through_vm_survives_respawn() {
         "in-VM transparent-tunnel TLS must succeed, got {probe}"
     );
 
-    // Many calls on one boot (many-calls-one-boot invariant).
+    // Many calls on one boot (many-calls-one-boot invariant). Record the boot's
+    // high-water `calls_served` so we can prove the post-kill probe is served by a
+    // DIFFERENT (freshly-respawned) VM — a pid check is useless here because the
+    // worker is PID 1 inside the guest, but `calls_served` is per-process and
+    // resets to a low value on a fresh boot.
+    let mut pre_kill_calls = 0u64;
     for i in 0..5 {
-        h.call("net.stats", serde_json::json!({}))
+        let s = h
+            .call("net.stats", serde_json::json!({}))
             .unwrap_or_else(|e| panic!("net.stats call {i} failed: {e}"));
+        pre_kill_calls = s["calls_served"].as_u64().unwrap_or(0);
     }
+    assert!(
+        pre_kill_calls >= 5,
+        "expected the first boot to have served several calls, got {pre_kill_calls}"
+    );
 
     // ── Phase 2: SIGKILL the launcher → 1:1 sidecar+VM respawn ────────────────
-    eprintln!("[INFO] sending SIGKILL to kastellan-microvm-run to force VM death");
+    // NB: `pkill NAME` matches the 15-char-truncated /proc/<pid>/comm, so the
+    // 21-char "kastellan-microvm-run" overflows it and matches NOTHING (a silent
+    // no-op that would make this a vacuous respawn test). Use `-f` to match the
+    // full command line, which reliably kills the launcher.
+    eprintln!("[INFO] sending SIGKILL (-f) to kastellan-microvm-run to force VM death");
     let _ = std::process::Command::new("pkill")
-        .args(["-9", "kastellan-microvm-run"])
+        .args(["-9", "-f", "kastellan-microvm-run"])
         .status();
 
     // The in-flight / first post-kill call is expected to Err while the worker
@@ -365,6 +380,20 @@ fn net_demo_tls_probe_through_vm_survives_respawn() {
     assert!(
         ok,
         "net.tls_probe must succeed again within ~30s after VM+sidecar respawn"
+    );
+
+    // Prove the post-kill probe was served by a FRESH VM, not the original one
+    // that a no-op kill left alive: a respawned worker's `calls_served` counter
+    // has reset and is far below the pre-kill high-water mark.
+    let post = h
+        .call("net.stats", serde_json::json!({}))
+        .expect("post-respawn net.stats");
+    let post_calls = post["calls_served"].as_u64().unwrap_or(u64::MAX);
+    assert!(
+        post_calls < pre_kill_calls,
+        "post-respawn calls_served ({post_calls}) must be below the pre-kill \
+         high-water ({pre_kill_calls}) — proves a FRESH VM served it, not a \
+         still-alive original (a no-op kill would leave the counter climbing)"
     );
 
     h.shutdown();
