@@ -93,6 +93,7 @@ SandboxPolicy {
     fs_write: vec!["/tmp/kastellan/task-42"],  // directories it can write
     net: Net::Deny,                          // no network
     proxy_uds: None,                         // egress-proxy socket (set at spawn)
+    persistent_store: None,                  // survives-respawn store (opt-in)
     profile: Profile::WorkerStrict,          // syscall / Seatbelt cluster
     mem_mb: Some(256),                       // memory cap
     cpu_ms: None,                            // no CPU cap
@@ -102,6 +103,10 @@ SandboxPolicy {
 
 The sandbox backends translate this struct into bwrap arguments (Linux) or
 a Seatbelt profile (macOS). You write the policy once; both platforms enforce it.
+`persistent_store` is `None` for almost every worker (and renders
+byte-identically when unset); a long-lived worker that needs state to survive
+a micro-VM respawn sets it to a `PersistentStore { host_backing, guest_mount,
+size_mib }` — see the micro-VM section below.
 
 **Important:** `fs_read` paths must be absolute. Relative paths are rejected
 at `spawn_under_policy` time with a clear error.
@@ -139,6 +144,42 @@ allowlist" is enforced by the kernel + the proxy, not by convention.
 - `WorkerMlClient` — `WorkerNetClient` plus the torch/CUDA-probe set (the
   worker stays `Net::Deny`; the socket syscalls have no route out). Renders
   identically to `WorkerStrict` on macOS.
+
+---
+
+## The optional third tier: micro-VM backends
+
+The two layers above are namespace + kernel-filter containment: strong, but the
+worker still shares the host kernel. For workers that warrant hardware-level
+isolation, a worker can opt into a **micro-VM backend** via
+`SandboxBackendKind` — a real guest kernel and virtual hardware, so a kernel
+exploit in the worker does not reach the host kernel:
+
+- **Linux — Firecracker.** A minimal KVM micro-VM. `sandbox/src/linux_firecracker/`
+  builds the launch plan, `mkfs.ext4` RO/RW share images, and a
+  `kastellan.mounts` manifest, then boots the VM through `microvm-run` (the
+  launcher) with `microvm-init` as the guest PID 1 bridging vsock↔stdio back to
+  the host. It supports host-directory sharing, a warm/idle reuse lifecycle, a
+  vsock egress transport (network in a VM), unprivileged-VMM confinement (the
+  `firecracker` process is itself wrapped in a bwrap+cgroup jail, on by default),
+  and long-lived persistent-VM workers.
+- **macOS — Apple `container`.** An opt-in per-worker micro-VM using Apple's
+  `container` CLI (macOS Tahoe+), the parity backend that gives macOS real
+  memory enforcement.
+
+Both are **opt-in per worker** — the default path stays bwrap (Linux) /
+Seatbelt (macOS). The Firecracker backend is gated behind
+`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1` for python-exec; VMM confinement is on by
+default and opts out with `KASTELLAN_MICROVM_CONFINE_VMM=0`. See the
+[Linux micro-VM setup runbook](../runbooks/2026-06-26-linux-microvm-setup.md)
+for the one-time host setup (`scripts/linux/install-firecracker-vsock.sh`).
+
+**Persistent store.** A long-lived micro-VM worker can carry a
+`SandboxPolicy.persistent_store`. On Firecracker this is a stable, `mkfs`-once
+ext4 image attached RW and mounted at `guest_mount` — its contents survive a VM
+respawn (a launcher-held `flock` guarantees a single mounter). On bwrap /
+Seatbelt the equivalent is a persistent `fs_write` bind. When the field is
+`None` (the common case) every backend renders exactly as before.
 
 ---
 

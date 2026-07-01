@@ -123,6 +123,13 @@ Some workers are gated behind an explicit enable flag (off by default):
 | `KASTELLAN_BROWSER_DRIVER_ENABLE=1` | `browser-driver` |
 | `KASTELLAN_GLINER_RELEX_ENABLE=1` | `gliner-relex` (its `#[ignore]` real-model e2e tests) |
 
+### Micro-VM backend flags (Linux, opt-in)
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `KASTELLAN_PYTHON_EXEC_USE_MICROVM=1` | off | Run `python-exec` inside a Firecracker micro-VM instead of bwrap |
+| `KASTELLAN_MICROVM_CONFINE_VMM=0` | on | Opt **out** of wrapping the `firecracker` VMM process in its own bwrap+cgroup jail (confinement is on by default, fail-closed) |
+
 ---
 
 ## Python worker tests

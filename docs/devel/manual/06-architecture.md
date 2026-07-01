@@ -47,7 +47,11 @@ schedules work, reviews plans, and manages the lifetime of worker processes.
 **Worker processes** (one per tool invocation)  
 Short-lived processes that execute a single tool call and exit. They never
 talk to Postgres. They never talk to each other. They speak JSON-RPC over
-their own stdin/stdout. A worker that needs network egress gets its own
+their own stdin/stdout. Each is sandboxed by bwrap (Linux) or Seatbelt
+(macOS); a worker can also opt into a **micro-VM backend** (Firecracker on
+Linux, Apple `container` on macOS) for hardware-level isolation, and a
+long-lived worker can be kept alive across calls and respawned on death by the
+`PersistentWorker` supervisor. A worker that needs network egress gets its own
 sandboxed **egress-proxy sidecar** (force-routed on by default): the worker
 runs in a private network namespace whose only route out is the proxy's Unix
 socket, which enforces the host:port allowlist + SSRF guard. Workers never
