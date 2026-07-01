@@ -154,7 +154,9 @@ url = "2"
 rpassword = "7"
 
 # PDF text extraction for the web-fetch worker. MIT — AGPL-compatible.
-pdf-extract = "0.10"
+# Pinned >=0.12 so it pulls lopdf >=0.42, which fixes the nested-object stack
+# overflow RUSTSEC-2026-0187 (a malicious fetched PDF could crash the worker).
+pdf-extract = "0.12"
 
 # HTML readability extraction (Mozilla Readability port) for the web-fetch
 # worker. Imported as `readable_html` for call-site clarity; underlying crate
