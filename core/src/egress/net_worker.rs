@@ -123,24 +123,31 @@ fn provision_secret_hashes(scratch: &Path, fps: &[SecretFingerprint]) -> std::io
 /// drop its direct DNS file (the proxy resolves now), and inject the UDS env so
 /// the worker's transport switches onto CONNECT-over-UDS. Pure — no spawn,
 /// fully testable.
-pub fn rewrite_worker_policy(mut policy: SandboxPolicy, uds: &Path, ca: &Path) -> SandboxPolicy {
+pub fn rewrite_worker_policy(
+    mut policy: SandboxPolicy,
+    uds: &Path,
+    ca: &Path,
+    mitm: bool,
+) -> SandboxPolicy {
     policy.proxy_uds = Some(uds.to_path_buf());
     // The worker no longer resolves DNS (the proxy does); revoke the file so a
     // compromised worker can't even read the resolver config.
     policy.fs_read.retain(|p| p != Path::new("/etc/resolv.conf"));
-    // Make the per-instance CA readable in-jail (the sandbox layer binds every
-    // fs_read path into the worker) and announce it to the worker.
-    if !policy.fs_read.iter().any(|p| p == ca) {
+    // MITM mode only: make the per-instance CA readable in-jail + announce it.
+    // A transparent-tunnel worker (mitm=false) validates origins with its own
+    // roots and must NOT receive our CA (it never terminates its TLS).
+    policy.env.retain(|(k, _)| k != ENV_UDS && k != ENV_CA);
+    if mitm && !policy.fs_read.iter().any(|p| p == ca) {
         policy.fs_read.push(ca.to_path_buf());
     }
-    // Inject the UDS + CA env (overwrite any stale entries first).
-    policy.env.retain(|(k, _)| k != ENV_UDS && k != ENV_CA);
     policy
         .env
         .push((ENV_UDS.to_string(), uds.to_string_lossy().into_owned()));
-    policy
-        .env
-        .push((ENV_CA.to_string(), ca.to_string_lossy().into_owned()));
+    if mitm {
+        policy
+            .env
+            .push((ENV_CA.to_string(), ca.to_string_lossy().into_owned()));
+    }
     policy
 }
 
@@ -201,7 +208,7 @@ where
         .parent()
         .map(|d| d.join(super::spawn::CA_FILE_NAME))
         .unwrap_or_else(|| PathBuf::from(super::spawn::CA_FILE_NAME));
-    let forced = rewrite_worker_policy(params.spec.policy.clone(), &uds, &ca);
+    let forced = rewrite_worker_policy(params.spec.policy.clone(), &uds, &ca, !params.disable_mitm);
     let forced_spec = WorkerSpec {
         policy: &forced,
         program: params.spec.program,
@@ -364,7 +371,7 @@ mod tests {
             ..SandboxPolicy::default()
         };
         let uds = std::path::PathBuf::from("/scratch/egress.sock");
-        let out = rewrite_worker_policy(base, &uds, std::path::Path::new("/scratch/ca.pem"));
+        let out = rewrite_worker_policy(base, &uds, std::path::Path::new("/scratch/ca.pem"), true);
         // proxy_uds set → bwrap/Seatbelt force-route.
         assert_eq!(out.proxy_uds.as_deref(), Some(uds.as_path()));
         // resolv.conf removed (worker no longer resolves directly).
@@ -388,12 +395,36 @@ mod tests {
         };
         let uds = std::path::PathBuf::from("/scratch/egress.sock");
         let ca = std::path::PathBuf::from("/scratch/ca.pem");
-        let out = rewrite_worker_policy(base, &uds, &ca);
+        let out = rewrite_worker_policy(base, &uds, &ca, true);
         assert!(out.fs_read.contains(&ca));
         assert!(out
             .env
             .iter()
             .any(|(k, v)| k == "KASTELLAN_EGRESS_PROXY_CA" && v == "/scratch/ca.pem"));
+    }
+
+    #[test]
+    fn rewrite_worker_policy_transparent_injects_no_ca() {
+        let base = SandboxPolicy {
+            net: Net::Allowlist(vec!["origin.example.com:443".into()]),
+            fs_read: vec!["/etc/resolv.conf".into(), "/bin/worker".into()],
+            env: vec![],
+            ..SandboxPolicy::default()
+        };
+        let uds = std::path::PathBuf::from("/scratch/egress.sock");
+        let ca = std::path::PathBuf::from("/scratch/ca.pem");
+        // mitm = false → transparent tunnel: proxy_uds set, NO CA anywhere.
+        let out = rewrite_worker_policy(base, &uds, &ca, false);
+        assert_eq!(out.proxy_uds.as_deref(), Some(uds.as_path()));
+        assert!(!out.fs_read.contains(&ca), "no CA in fs_read in transparent mode");
+        assert!(
+            !out.env.iter().any(|(k, _)| k == "KASTELLAN_EGRESS_PROXY_CA"),
+            "no CA env in transparent mode"
+        );
+        // UDS still injected; resolv.conf still dropped; worker bin preserved.
+        assert!(out.env.iter().any(|(k, v)| k == ENV_UDS && v == "/scratch/egress.sock"));
+        assert!(!out.fs_read.contains(&"/etc/resolv.conf".into()));
+        assert!(out.fs_read.contains(&"/bin/worker".into()));
     }
 
     #[test]
@@ -407,6 +438,7 @@ mod tests {
             base,
             std::path::Path::new("/scratch/egress.sock"),
             std::path::Path::new("/scratch/ca.pem"),
+            true,
         );
         let uds_entries: Vec<&String> = out
             .env
