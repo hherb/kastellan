@@ -132,16 +132,24 @@ will happen and is built to contain it.
 
 Kastellan is under active development. As of mid-2026:
 
-- The full sandboxing stack works on **both Linux and macOS**.
+- The full sandboxing stack works on **both Linux and macOS**. On Linux there
+  is now also an optional, stronger **micro-VM** cell (a lightweight virtual
+  machine) for workers that need the tightest possible isolation — matching the
+  micro-VM option macOS already had.
 - The planning loop, the CASSANDRA reviewer, the long-term memory, the
   audit log, and the AI-model router are all functional.
 - Several real tools work end to end: running allow-listed commands,
   fetching and reading web pages, web search, running Python, and headless
   browsing.
 - The **egress proxy** — the guarded internet doorway — is built through
-  all its stages and is on by default in the supervised deployment.
-- The **Matrix chat channel** is largely built; the final live-connection
-  wiring is in progress.
+  all its stages (allowlist, forced routing, secret-leak scanning, and
+  certificate pinning) and is on by default in the supervised deployment.
+- The **Matrix chat channel** now works end to end: you can message the agent
+  over encrypted, self-hosted chat and get a reply, with a running deployment
+  driven by the system service supervisor.
+- A **one-command install** (`kastellan-cli install`) takes a freshly-built
+  copy to a running, supervised agent — database and daemon included — without
+  needing root.
 
 Where a feature is still being finished, this manual says so. For the exact
 engineering ledger, see `docs/devel/ROADMAP.md`.
