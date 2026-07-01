@@ -210,6 +210,7 @@ fn net_demo_tls_probe_survives_respawn_under_default_backend() {
             };
             let params = NetTransportSpawn {
                 backend: &*backend,
+                sidecar_backend: &*backend,
                 proxy_bin: &proxy_bin,
                 program: &net_demo.to_string_lossy(),
                 args: &[],

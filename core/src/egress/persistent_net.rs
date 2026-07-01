@@ -32,6 +32,12 @@ pub(crate) fn forced_transparent_policy(base: SandboxPolicy, uds: &Path) -> Sand
 /// (added to `fs_read` so the VM RO-share carries it); `None` in production.
 pub struct NetTransportSpawn<'a> {
     pub backend: &'a dyn SandboxBackend,
+    /// The HOST backend (bwrap on Linux, Seatbelt on macOS) the egress-proxy
+    /// sidecar runs under. The egress-proxy sidecar ALWAYS runs on the host (it
+    /// is the real-network egress boundary — it needs `Net::ProxyEgress` with a
+    /// real host route); only the worker (`backend`) may run in a VM. On non-VM
+    /// paths pass the same backend for both.
+    pub sidecar_backend: &'a dyn SandboxBackend,
     pub proxy_bin: &'a Path,
     pub program: &'a str,
     pub args: &'a [&'a str],
@@ -77,7 +83,7 @@ pub fn spawn_net_transport(
 ) -> anyhow::Result<NetClientTransport> {
     // 1. Sidecar first (transparent tunnel), fail-closed.
     let mut sidecar = spawn_sidecar(
-        params.backend,
+        params.sidecar_backend,
         params.proxy_bin,
         params.allowlist,
         scratch,

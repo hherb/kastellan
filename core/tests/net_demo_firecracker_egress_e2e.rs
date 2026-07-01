@@ -112,6 +112,13 @@ fn firecracker_backend() -> Arc<dyn SandboxBackend> {
     SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
 }
 
+/// The HOST backend (bwrap on Linux) for the egress-proxy sidecar. The sidecar
+/// is the real-network egress boundary and must run on the host, not in the VM;
+/// only the worker (`firecracker_backend`) runs in the Firecracker VM.
+fn host_backend() -> Arc<dyn SandboxBackend> {
+    SandboxBackends::default_for_current_os().resolve(None, None)
+}
+
 // ── loopback rustls origin (mirrored from net_demo_egress_e2e.rs) ──────────────
 
 /// Loopback self-signed rustls TLS origin. Reuses the exact rcgen + rustls
@@ -255,9 +262,11 @@ fn net_demo_tls_probe_through_vm_survives_respawn() {
     let (origin_port, ca_path) = origin::spawn_loopback_tls_origin();
     let allow = vec![format!("127.0.0.1:{origin_port}")];
     let backend = firecracker_backend();
+    let host_backend = host_backend();
 
     let factory: PersistentFactory = {
         let backend = Arc::clone(&backend);
+        let host_backend = Arc::clone(&host_backend);
         let proxy_bin = proxy_bin.clone();
         let ca_path = ca_path.clone();
         let allow = allow.clone();
@@ -289,6 +298,7 @@ fn net_demo_tls_probe_through_vm_survives_respawn() {
             };
             let params = NetTransportSpawn {
                 backend: &*backend,
+                sidecar_backend: &*host_backend,
                 proxy_bin: &proxy_bin,
                 program: "/usr/local/bin/kastellan-worker-net-demo",
                 args: &[],
