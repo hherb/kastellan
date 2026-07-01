@@ -103,6 +103,32 @@ macOS-Seatbelt-weaker-than-Linux asymmetry. All are already recorded in
 
 ## Remediation status
 
-See the commit series and GitHub issues opened alongside this document. Fix
-order: #1 → #2 → #3 → #4/#8 → #5 → #7 → #9 → #10 → #13; #6, #11, #12 and the
-Linux-only portion of #7 tracked as issues.
+Fixed and verified on this branch (unit tests green on the macOS dev box;
+Linux-gated changes cross-clippy'd for `aarch64-unknown-linux-gnu`, full
+bwrap/KVM/PG verification pending on the DGX):
+
+| # | Status | Where |
+|---|--------|-------|
+| 1 | Fixed | recall screening (`recall_assembly::screen_recall_rows`) + `<recalled>` delimiter escaping (`prompt_assembly::escape_recalled_body`) |
+| 2 | Fixed | `MAX_RECORD_BYTES` cap + bounded reader in `protocol` client & server |
+| 3 | Fixed | `pdf-extract` 0.12 → `lopdf` 0.42; `cargo audit` clean |
+| 4 | Fixed | `ssrf::embedded_transition_v4` (NAT64 / translated / 6to4) |
+| 5 | Fixed | `MacosContainer::spawn_under_policy` fails closed on `proxy_uds` |
+| 8 | Fixed | `ssrf::is_reserved_v4` (240/4) + 6to4 in the same helper |
+| 9 | Fixed | `anyhow` 1.0.103, `quinn-proto` 0.11.15; 0 vulnerabilities |
+| 10 | Fixed | systemd path-field control-char guard + migration 0020 `search_path` |
+| 13 | Fixed | `phase4-accounts.sh` mktemp; `dev-e2e-bootstrap.sh` no world-write |
+
+Tracked as GitHub issues (need pinned hashes / DGX verification / are
+documented-inherent):
+
+| # | Issue |
+|---|-------|
+| 6 | [#386](https://github.com/hherb/kastellan/issues/386) — pin checksums for downloaded provisioning binaries |
+| 7 (Linux) | [#387](https://github.com/hherb/kastellan/issues/387) — normalize `..`/symlinks in bwrap/Firecracker binds |
+| 12 | [#388](https://github.com/hherb/kastellan/issues/388) — worker-discovery ownership probe + lockdown-env footgun |
+| 11 | [#389](https://github.com/hherb/kastellan/issues/389) — keyring first-init race + scrub coverage gaps |
+
+Residual: 3 unmaintained-crate `cargo audit` warnings (`derivative`,
+`proc-macro-error2`, `ttf-parser`) — transitive, informational, no known
+exploit.
