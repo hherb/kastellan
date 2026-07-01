@@ -34,10 +34,12 @@ The **workspace members** declared in the top-level `Cargo.toml` are:
 `protocol`, `tests-common`, and the Rust workers `workers/prelude`,
 `workers/shell-exec`, `workers/web-common`, `workers/web-fetch`,
 `workers/web-search`, `workers/python-exec`, `workers/egress-proxy`,
-`workers/matrix-wire`, `workers/matrix`. The Python workers
-(`workers/gliner-relex`, `workers/browser-driver`) live outside the Rust
-workspace and are built with `uv`; `workers/mail` is an empty scaffold.
-See [The `workers/` directory](#the-workers-directory) below.
+`workers/matrix-wire`, `workers/matrix`, plus the Firecracker micro-VM
+support crates `workers/microvm-run`, `workers/microvm-init`, and
+`workers/kv-demo`. The Python workers (`workers/gliner-relex`,
+`workers/browser-driver`) live outside the Rust workspace and are built
+with `uv`; `workers/mail` is an empty scaffold. See
+[The `workers/` directory](#the-workers-directory) below.
 
 ---
 
@@ -98,7 +100,10 @@ core/src/
   prompt_assembly/       Builds the LLM prompt from recalled context
   recall_assembly/       Assembles recall query parameters from a task
   worker_lifecycle/      Long-lived worker management (SingleUse / IdleTimeout
-                         / Composite managers + egress force-routing glue)
+                         / Composite managers + egress force-routing glue +
+                         PersistentWorker: a backend-agnostic supervisor that
+                         keeps a worker alive across many calls and respawns
+                         it on death — used for the persistent micro-VM path)
 
   workers/               Host-side manifests + clients for each worker
     shell_exec.rs        ShellExecManifest + entry
@@ -132,11 +137,15 @@ see [chapter 11](./11-cassandra-pipeline.md).
 ```
 sandbox/src/
   lib.rs              Public API: SandboxPolicy, SandboxBackend trait,
-                      SandboxBackendKind
+                      SandboxBackendKind, Net, Profile, PersistentStore
   linux_bwrap.rs      Linux backend (bubblewrap)
   linux_cgroup.rs     cgroup v2 CPU/memory caps via systemd-run
-  macos_seatbelt.rs   macOS backend (sandbox-exec / Seatbelt) — shipped
-  macos_container.rs  macOS micro-VM backend (Apple `container` CLI, opt-in
+  linux_firecracker/  Linux micro-VM backend (Firecracker, opt-in): plan,
+                      probe, images (mkfs.ext4 RO/RW + persistent), mounts
+                      (kastellan.mounts share manifest), confine (unprivileged
+                      VMM confinement), cleanup (orphan run-dir sweep)
+  macos_seatbelt/     macOS backend (sandbox-exec / Seatbelt) — shipped
+  macos_container/    macOS micro-VM backend (Apple `container` CLI, opt-in
                       per-worker, Tahoe+) — wired into SandboxBackendKind
 sandbox/tests/
   linux_smoke.rs            Negative tests: file denials, net denial, OOM kill
@@ -145,14 +154,19 @@ sandbox/tests/
 ```
 
 The key abstraction is `SandboxPolicy` (a plain struct with fields like
-`fs_read`, `fs_write`, `net`, `proxy_uds`, `mem_mb`, `profile`) and the
-`SandboxBackend` trait (`spawn_under_policy`). The Linux and macOS backends
-both implement the same trait from the same `SandboxPolicy` — you only write
-policy once. `SandboxBackendKind` lets a worker opt into a specific backend
-(e.g. the Apple `container` micro-VM on macOS). `Net` is `Deny` /
-`Allowlist(hosts)` / `ProxyEgress`, and `Profile` selects the syscall/Seatbelt
-cluster (`WorkerStrict` / `WorkerNetClient` / `WorkerBrowserClient` /
-`WorkerMlClient`). See [chapter 7](./07-sandboxing.md).
+`fs_read`, `fs_write`, `net`, `proxy_uds`, `persistent_store`, `mem_mb`,
+`profile`) and the `SandboxBackend` trait (`spawn_under_policy`). The Linux
+and macOS backends both implement the same trait from the same
+`SandboxPolicy` — you only write policy once. `SandboxBackendKind` lets a
+worker opt into a specific backend (the Firecracker micro-VM on Linux, the
+Apple `container` micro-VM on macOS). `Net` is `Deny` / `Allowlist(hosts)` /
+`ProxyEgress`, and `Profile` selects the syscall/Seatbelt cluster
+(`WorkerStrict` / `WorkerNetClient` / `WorkerBrowserClient` /
+`WorkerMlClient`). The additive `persistent_store` field
+(`PersistentStore { host_backing, guest_mount, size_mib }`, `None` by
+default so it's byte-identical when unset) gives a long-lived worker a
+writable store that survives a micro-VM respawn. See
+[chapter 7](./07-sandboxing.md).
 
 ---
 
@@ -180,7 +194,15 @@ workers/
                     + TLS-intercept MITM + leak scanner + SPKI pinning.
   matrix-wire/      [RUST] Shared serde wire types for the Matrix worker.
   matrix/           [RUST] Matrix channel worker (matrix-rust-sdk behind a seam;
-                    hermetic parts compile by default, live SDK is feature-gated).
+                    hermetic parts compile by default, the live LiveSdk is
+                    feature-gated behind `live-matrix`).
+  microvm-run/      [RUST] Firecracker launcher Child (pure-std) — boots and
+                    supervises the micro-VM for the Linux Firecracker backend.
+  microvm-init/     [RUST] Guest PID 1: a vsock↔stdio adapter (Linux-only libc,
+                    macOS stub) that bridges the in-VM worker to the host.
+  kv-demo/          [RUST] Long-lived Net::Deny key-value worker with a
+                    persistent store — the 5b demo + micro-VM integration
+                    fixture.
 
   gliner-relex/     [PYTHON] Named-entity + relation extraction via GLiNER +
                     ReLeX. Built with uv. Host manifest in core/src/workers.
@@ -223,7 +245,7 @@ db/src/
                       providers [OS keyring], async DB I/O)
   tests.rs            Cross-module DB integration tests
   bin/                kastellan-db-init and other admin binaries
-db/migrations/        Embedded *.sql migrations (0001..0018) via sqlx::migrate!
+db/migrations/        Embedded *.sql migrations (0001..0019) via sqlx::migrate!
 ```
 
 Migrations live under `db/migrations/` and are embedded into the binary at

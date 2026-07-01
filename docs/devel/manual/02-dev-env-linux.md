@@ -110,6 +110,24 @@ not present in a standard dev setup (a real GLiNER model, the Apple
 
 ---
 
+## Optional — Firecracker micro-VM backend
+
+Most workers run under bwrap and need nothing more than the steps above. The
+opt-in Firecracker micro-VM backend (for workers that want hardware-level
+isolation) needs the worker user to be able to open the vsock device. Run the
+one-time privileged setup:
+
+```sh
+sudo scripts/linux/install-firecracker-vsock.sh
+```
+
+Without it, `LinuxFirecracker::probe()` fails closed and any worker configured
+for the micro-VM stays on bwrap. `/dev/kvm` is usually already accessible; pass
+`--kvm` if not. The full walkthrough is in the
+[Linux micro-VM setup runbook](../runbooks/2026-06-26-linux-microvm-setup.md).
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |

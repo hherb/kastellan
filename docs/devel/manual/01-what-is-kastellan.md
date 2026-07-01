@@ -51,8 +51,13 @@ record to the wrong person". CASSANDRA reviews each *plan*, not each syscall.
 The project is in active development. As of mid-2026:
 
 - The full parent-side sandbox stack works on both Linux (bwrap +
-  cgroup v2) and macOS (Seatbelt, plus an opt-in Apple `container`
-  micro-VM backend for workers that need real memory enforcement).
+  cgroup v2) and macOS (Seatbelt). Both platforms also have an **opt-in
+  micro-VM backend** for workers that need hardware-level isolation: a
+  **Firecracker** micro-VM on Linux and Apple's `container` micro-VM on
+  macOS. The Firecracker backend has grown into a substantial subsystem —
+  host-directory sharing, a warm/idle reuse lifecycle, a vsock egress
+  transport, unprivileged-VMM confinement, and long-lived persistent-VM
+  workers with a persistent RW store that survives a VM respawn.
   Worker-side defence-in-depth on Linux (Landlock + seccomp) is shipped,
   including for the pure-Python workers via a `lock_down()`-then-`execve`
   exec shim (`kastellan-worker-lockdown-exec`).
@@ -71,16 +76,21 @@ The project is in active development. As of mid-2026:
 - **Workers in the workspace today (Rust):** `prelude` (shared init +
   lockdown shim), `shell-exec`, `web-common` (shared net-egress helpers),
   `web-fetch`, `web-search`, `python-exec` (curated-stdlib executor for
-  agent-authored Python), `egress-proxy`, plus `matrix` / `matrix-wire`
-  (the Matrix channel worker, hermetic parts only).
+  agent-authored Python), `egress-proxy`, `matrix` / `matrix-wire`
+  (the Matrix channel worker), and the Firecracker micro-VM support
+  crates `microvm-run` (the launcher) / `microvm-init` (the guest PID 1
+  vsock-stdio adapter) / `kv-demo` (a long-lived persistent-store demo
+  worker + integration fixture).
 - **Python workers (built with `uv`, outside the Cargo workspace, driven
   from core over JSON-RPC):** `gliner-relex` (entity/relation extraction)
   and `browser-driver` (headless Chromium render). Each has a Rust-side
   manifest under `core/src/workers/`.
 - **Channel:** Matrix (self-hosted, single-user, federation off, E2E) is
-  the primary channel; inbound is in progress (hermetic parts shipped, live
-  SDK wiring pending). Email failover and the `workers/mail` worker are not
-  yet built (`workers/mail` is an empty scaffold).
+  the primary channel. The inbound worker is live: a `LiveSdk` backed by
+  `matrix-rust-sdk` (feature-gated behind `live-matrix`) does the real
+  restore-or-login, sync, poll, and send, routed through the worker's own
+  egress sidecar. Email failover and the `workers/mail` worker are not yet
+  built (`workers/mail` is an empty scaffold).
 
 See `docs/devel/ROADMAP.md` for the phased feature list and the latest
 `docs/devel/handovers/HANDOVER.md` for what shipped most recently.
