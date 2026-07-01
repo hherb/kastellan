@@ -195,10 +195,12 @@ There is also one honest **asymmetry between platforms**: the Linux
 sandboxing stack (bubblewrap + Landlock + seccomp) is more mature and more
 heavily audited than the macOS one (which relies on Apple's `sandbox-exec`,
 a facility Apple keeps but officially marks as private). Both are real
-containment; the *weaker* of the two sets the true bar, and where stronger
-isolation is needed on macOS, a worker can be moved into a lightweight
-virtual machine. We state this openly rather than pretend the two platforms
-are identical.
+containment; the *weaker* of the two sets the true bar. Where stronger
+isolation is needed, a worker can be moved into a lightweight **virtual
+machine** on either platform — a Firecracker micro-VM on Linux, Apple's
+`container` on macOS — which raises the wall well above what an ordinary
+sandbox provides. We state the asymmetry openly rather than pretend the two
+platforms are identical.
 
 ---
 

@@ -87,6 +87,11 @@ itself. Kastellan uses the strongest mechanisms each platform offers:
 - On **macOS**: the system's built-in `sandbox-exec` (Seatbelt) facility,
   which the operating system uses to confine its own background services.
 
+For workers that need the strongest possible isolation, Kastellan can go one
+step further and run a worker inside a **lightweight virtual machine** — a
+much harder shell than an ordinary sandbox — on either platform (a Firecracker
+micro-VM on Linux, Apple's `container` on macOS). This is opt-in per worker.
+
 Both are driven from **the same description** of what a given worker is
 allowed to do, so a worker is confined identically in spirit on either
 platform. A sandboxed worker typically:
