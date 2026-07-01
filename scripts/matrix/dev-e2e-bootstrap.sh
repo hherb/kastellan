@@ -56,10 +56,14 @@ up() {
   "$DOCKER" rm -f "$CNAME" >/dev/null 2>&1 || true
   rm -rf "$STATE"
   mkdir -p "$STATE/db"
-  # World-writable so the container's (image-defined, often non-root) uid can
-  # write the bind-mounted store regardless of host uid. Acceptable only because
-  # this is a dev-only, loopback, throwaway homeserver under "$HOME/.local/state".
-  chmod -R 777 "$STATE"
+  # The container's (image-defined, often non-root) uid must be able to write
+  # the bind-mounted store regardless of host uid. Grant group rwx + setgid so
+  # the container uid (added to the host user's group by the docker runtime)
+  # can write, WITHOUT world access — the old `chmod -R 777` left the
+  # generated registration_token/passwords readable+writable by every local
+  # user (audit finding #13). Still dev-only/loopback/throwaway under "$HOME".
+  chmod -R u+rwX,g+rwX,o-rwx "$STATE"
+  find "$STATE" -type d -exec chmod g+s {} +
 
   # Loopback, federation-off, token-gated registration (mirrors the production
   # security invariants; conduit-flavoured config keys).

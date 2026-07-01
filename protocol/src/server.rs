@@ -68,11 +68,11 @@ where
             writer.flush()?;
             return Ok(());
         }
-        let trimmed = buf.trim_ascii();
-        if trimmed.is_empty() {
-            continue;
+        if buf.iter().all(u8::is_ascii_whitespace) {
+            continue; // blank line (incl. the trailing newline of an empty record)
         }
-        let response = match serde_json::from_slice::<Request>(trimmed) {
+        // serde_json tolerates the trailing `\n` (surrounding whitespace is skipped).
+        let response = match serde_json::from_slice::<Request>(&buf) {
             Ok(req) => match handler.call(&req.method, req.params) {
                 Ok(result) => ok_response(req.id, result),
                 Err(e) => err_response(req.id, e),

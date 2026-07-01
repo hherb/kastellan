@@ -91,9 +91,14 @@ systemctl restart kastellan-matrix
 sleep 3
 
 log "Verify registration is closed"
-code="$(curl -sS -o /tmp/regclosed.out -w '%{http_code}' -X POST "${API}" \
+# mktemp (0600, unpredictable name) rather than a fixed /tmp path: this runs
+# as root, and a predictable /tmp target a local user could pre-create as a
+# symlink would let curl's -o follow it and write elsewhere (audit finding #13).
+regout="$(mktemp)"; chmod 600 "$regout"
+trap 'rm -f "$regout"' EXIT
+code="$(curl -sS -o "$regout" -w '%{http_code}' -X POST "${API}" \
   -H 'Content-Type: application/json' -d '{"username":"shouldfail","password":"x"}')"
-echo "register attempt now returns HTTP ${code}:"; head -c 200 /tmp/regclosed.out; echo; rm -f /tmp/regclosed.out
+echo "register attempt now returns HTTP ${code}:"; head -c 200 "$regout"; echo; rm -f "$regout"
 echo "allow_registration is now: $(grep '^allow_registration' "${CONF}")"
 echo
 echo "Phase 4 done."

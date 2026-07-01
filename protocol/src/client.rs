@@ -75,7 +75,8 @@ impl Client {
             Some(buf) => buf,
             None => return Err(ClientError::EarlyExit),
         };
-        let resp: Response = serde_json::from_slice(buf.trim_ascii())?;
+        // serde_json tolerates the trailing `\n` (surrounding whitespace is skipped).
+        let resp: Response = serde_json::from_slice(&buf)?;
         if resp.id != id {
             return Err(ClientError::IdMismatch {
                 expected: id,
