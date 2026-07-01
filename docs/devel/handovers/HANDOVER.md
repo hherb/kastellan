@@ -21,7 +21,7 @@ _(Prior sessions, full detail in "Earlier history" + ROADMAP: **slice 5a** — u
 
 ---
 
-**Current state.** `main` (`c6ddc3f`) carries all merged work through slice 5a (PR #377). **Slice 5b-1/5b-2 is complete on branch `feat/microvm-slice5b1-persistent-vm-lifecycle` (head `516c18c`), PR [#379](https://github.com/hherb/kastellan/pull/379) open + DGX-green + opus-reviewed READY TO MERGE — awaiting merge.** See "Working state" for the live crate map and "Earlier history" for the per-session log. Dev box is **macOS** (Seatbelt); the DGX Spark (aarch64) is driven natively over WireGuard SSH (`ssh dgx '<command>'`) for real-bwrap/KVM/PG Linux acceptance.
+**Current state.** `main` (`409da81`) carries all merged work through **slice 5b-1/5b-2 — PR [#379](https://github.com/hherb/kastellan/pull/379) MERGED** (`409da81`; long-lived persistent-VM worker lifecycle + persistent RW store, DGX-green + opus-reviewed). Slice 5a is `c6ddc3f` (PR #377). See "Working state" for the live crate map and "Earlier history" for the per-session log. Dev box is **macOS** (Seatbelt); the DGX Spark (aarch64) is driven natively over WireGuard SSH (`ssh dgx '<command>'`) for real-bwrap/KVM/PG Linux acceptance.
 
 **Session-end verification (2026-06-30, branch `516c18c`):** DGX native Linux `cargo test --workspace` = **2230 passed / 0 failed / 33 ignored**, `clippy --workspace --all-targets -D warnings` clean; the `#[ignore]` `kv_demo_firecracker_persistent_e2e` passes under default-ON VMM confinement on real KVM. macOS `clippy --workspace -D warnings` clean; new 5b suites green on Mac (sandbox lib incl. confine/canonicalize, `worker_lifecycle::persistent` 4/4, `kv-demo` 3/3, `kv_demo_persistent_e2e` 1/1). Full macOS `cargo test --workspace` is skip-as-pass per the standing PG-bring-up flake gotcha.
 
@@ -316,7 +316,7 @@ sessions 2026-05-06 → 2026-05-09 in
 
 ## Next TODO (pick one)
 
-**★ Firecracker micro-VM slices 1–5a + 5b-1/5b-2 are all DONE** (5a MERGED `c6ddc3f` PR #377; 5b-1/5b-2 on branch `feat/microvm-slice5b1-persistent-vm-lifecycle`, PR [#379](https://github.com/hherb/kastellan/pull/379), DGX-green + opus READY TO MERGE — **merge it first**). The long-lived persistent-VM foundation now exists (`PersistentWorker` + `persistent_store`), proven with `kv-demo`.
+**★ Firecracker micro-VM slices 1–5a + 5b-1/5b-2 are all DONE and MERGED** (5a `c6ddc3f` PR #377; 5b-1/5b-2 `409da81` PR [#379](https://github.com/hherb/kastellan/pull/379)). The long-lived persistent-VM foundation now exists (`PersistentWorker` + `persistent_store`), proven with `kv-demo`.
 
 **Leading micro-VM pick = slice 5c: network egress in a VM (transparent-tunnel vsock + long-lived sidecar)** — the *next* piece toward matrix-in-a-VM. Today's matrix worker reaches its homeserver via bwrap `--share-net` (host netns); a VM has none, so it must route through the slice-4a vsock reverse-channel + an egress-proxy sidecar in **transparent-tunnel (no-MITM)** mode (matrix does its own E2E TLS, can't trust our ephemeral CA), and that sidecar must be long-lived and respawn 1:1 with the VM. Build on `PersistentWorker` + slice-4a transport. Prove with a long-lived net worker before matrix.
 
