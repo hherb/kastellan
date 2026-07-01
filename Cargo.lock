@@ -2264,6 +2264,9 @@ dependencies = [
 [[package]]
 name = "kastellan-microvm-run"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "kastellan-protocol"
@@ -2332,6 +2335,17 @@ dependencies = [
  "tokio-rustls",
  "webpki-roots",
  "x509-cert",
+]
+
+[[package]]
+name = "kastellan-worker-kv-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

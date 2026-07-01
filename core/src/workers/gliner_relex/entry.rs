@@ -195,6 +195,7 @@ fn host_mode_entry(env: &GlinerRelexEnv, lockdown_shim: Option<PathBuf>) -> Tool
         tasks_max: Some(64),
         env: policy_env,
         proxy_uds: None,
+        persistent_store: None,
     };
 
     ToolEntry {
@@ -251,6 +252,7 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         tasks_max: Some(64),
         env: build_runtime_env(env),
         proxy_uds: None,
+        persistent_store: None,
     };
 
     let image = env

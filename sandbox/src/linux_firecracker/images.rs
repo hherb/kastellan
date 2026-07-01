@@ -125,6 +125,72 @@ pub fn build_share_images(
     Ok(())
 }
 
+/// mkfs argv for the persistent image **iff no usable image is present**. A
+/// usable image is reused untouched so its contents survive. Pure (the
+/// usability check is the caller's), so it is unit-testable without a disk.
+pub fn persistent_mkfs_decision(
+    host_backing_usable: bool,
+    host_backing: &str,
+    size_mib: u64,
+) -> Option<Vec<String>> {
+    if host_backing_usable {
+        None
+    } else {
+        Some(mkfs_blank_argv(host_backing, size_mib))
+    }
+}
+
+/// Whether `path` is a usable persistent image: a regular file with non-zero
+/// length. A zero-length (or partially written) file is the signature of an
+/// interrupted earlier `mkfs.ext4`; mounting it later fails on every boot with
+/// no self-heal, so we treat it as absent and reformat rather than reuse it.
+/// NOTE: this only catches the empty-file case — a non-empty but corrupt ext4
+/// superblock, and a `size_mib` change against an existing image, are out of
+/// scope here (tracked as a follow-up; see HANDOVER open questions).
+pub fn persistent_image_is_usable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Create the persistent image once (mkfs if absent), set the plan's path.
+/// Reuses the same `run` shell-out style as [`build_share_images`].
+pub fn build_persistent_image(plan: &mut FirecrackerLaunchPlan) -> Result<(), SandboxError> {
+    let Some(ps) = plan.persistent_store.clone() else { return Ok(()) };
+    // host_backing is an ext4 IMAGE FILE on this backend — it is a *directory*
+    // only on bwrap/Seatbelt (see `PersistentStore` doc). If a directory already
+    // exists at the path (e.g. a policy built for a dir-backed backend was routed
+    // here), `mkfs.ext4` would fail with an opaque "is a directory"; reject up
+    // front with the cross-backend hint instead.
+    if ps.host_backing.is_dir() {
+        return Err(SandboxError::Backend(format!(
+            "persistent_store host_backing {:?} is a directory, but the Firecracker backend \
+             expects an ext4 image file (a directory is the bwrap/Seatbelt form)",
+            ps.host_backing
+        )));
+    }
+    if let Some(parent) = ps.host_backing.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| SandboxError::Backend(format!("persistent store mkdir {parent:?}: {e}")))?;
+    }
+    let usable = persistent_image_is_usable(&ps.host_backing);
+    if let Some(argv) = persistent_mkfs_decision(
+        usable,
+        &ps.host_backing.to_string_lossy(),
+        ps.size_mib as u64,
+    ) {
+        let status = Command::new(&argv[0])
+            .args(&argv[1..])
+            .status()
+            .map_err(|e| SandboxError::Backend(format!("spawn {}: {e}", argv[0])))?;
+        if !status.success() {
+            return Err(SandboxError::Backend(format!("{} failed: {status}", argv[0])));
+        }
+    }
+    plan.persistent_image_path = Some(ps.host_backing.clone());
+    Ok(())
+}
+
 /// Recursively copy a host tree (dirs, files, symlinks-as-targets) into `dest`.
 /// Plain `std` (no `fs_extra` dep).
 fn copy_tree(src: &Path, dest: &Path) -> Result<(), SandboxError> {
@@ -167,6 +233,66 @@ mod tests {
         // Garbage → fail-safe to default.
         let bad = vec![("KASTELLAN_MICROVM_SCRATCH_MIB".to_string(), "abc".to_string())];
         assert_eq!(rw_scratch_mib(&bad), RW_SCRATCH_MIB_DEFAULT);
+    }
+
+    #[test]
+    fn persistent_image_mkfs_only_when_absent() {
+        // Absent → produce a blank mkfs argv at the given size.
+        let argv = persistent_mkfs_decision(false, "/var/lib/kastellan/kv/store.ext4", 64)
+            .expect("absent image must be created");
+        assert_eq!(argv[0], "mkfs.ext4");
+        assert!(argv.contains(&"/var/lib/kastellan/kv/store.ext4".to_string()));
+        assert!(argv.contains(&"64M".to_string()));
+        // Present → reuse untouched, no mkfs.
+        assert!(persistent_mkfs_decision(true, "/var/lib/kastellan/kv/store.ext4", 64).is_none());
+    }
+
+    #[test]
+    fn persistent_image_usable_rejects_absent_and_zero_length() {
+        let dir = std::env::temp_dir().join(format!("kvimg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let absent = dir.join("nope.ext4");
+        assert!(!persistent_image_is_usable(&absent), "absent image is not usable");
+        // Zero-length file is the interrupted-mkfs signature → treat as absent.
+        let empty = dir.join("empty.ext4");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(!persistent_image_is_usable(&empty), "zero-length image is not usable");
+        // Non-empty file → usable (reused untouched).
+        let full = dir.join("full.ext4");
+        std::fs::write(&full, b"\0\0\0\0").unwrap();
+        assert!(persistent_image_is_usable(&full), "non-empty image is usable");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_persistent_image_rejects_directory_host_backing() {
+        // host_backing is an ext4 image FILE on Firecracker; a directory (the
+        // bwrap/Seatbelt form, e.g. a policy routed to the wrong backend) must be
+        // rejected with a clear cross-backend hint, never handed to `mkfs.ext4`.
+        let dir = std::env::temp_dir().join(format!("kvimg-isdir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut policy = crate::SandboxPolicy { net: crate::Net::Deny, ..Default::default() };
+        policy.persistent_store = Some(crate::PersistentStore {
+            host_backing: dir.clone(),
+            guest_mount: PathBuf::from("/data"),
+            size_mib: 64,
+        });
+        let mut plan = crate::linux_firecracker::plan::build_launch_plan(
+            &policy,
+            &crate::linux_firecracker::FirecrackerImage {
+                kernel_path: "/k".into(),
+                rootfs_path: "/var/r.ext4".into(),
+            },
+            "/w",
+            &[],
+        )
+        .unwrap();
+        let err = build_persistent_image(&mut plan).unwrap_err();
+        assert!(
+            format!("{err}").contains("is a directory"),
+            "directory host_backing must be rejected with a cross-backend hint: {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

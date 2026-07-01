@@ -24,6 +24,14 @@ pub struct RwScratch {
     pub guest_dev: String,
 }
 
+/// A persistent, host-backed RW drive mounted in-guest at `mountpoint`. Unlike
+/// [`RwScratch`] its backing image is reused across spawns (contents survive).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PersistentMount {
+    pub mountpoint: PathBuf,
+    pub guest_dev: String,
+}
+
 /// Top-level rootfs dirs an `fs_read`/`fs_write` path may be anchored under in
 /// the micro-VM. These are exactly the empty anchor dirs `build-rootfs.sh`
 /// pre-creates (the guest init tmpfs-mounts the anchor so a bind/mount target is
@@ -71,8 +79,9 @@ const MOUNTS_CMDLINE_KEY: &str = "kastellan.mounts";
 pub fn encode_mount_manifest(
     ro: Option<&RoShare>,
     rw: Option<&RwScratch>,
+    persistent: Option<&PersistentMount>,
 ) -> Result<Option<String>, SandboxError> {
-    if ro.is_none() && rw.is_none() {
+    if ro.is_none() && rw.is_none() && persistent.is_none() {
         return Ok(None);
     }
     let mut lines: Vec<String> = Vec::new();
@@ -98,6 +107,11 @@ pub fn encode_mount_manifest(
         let mp = rw.mountpoint.to_string_lossy();
         guard(&mp)?;
         lines.push(format!("rw\t{}\t{}", rw.guest_dev, mp));
+    }
+    if let Some(ps) = persistent {
+        let mp = ps.mountpoint.to_string_lossy();
+        guard(&mp)?;
+        lines.push(format!("rw\t{}\t{}", ps.guest_dev, mp));
     }
     let block = lines.join("\n");
     Ok(Some(format!(" {MOUNTS_CMDLINE_KEY}={}", hex_encode(block.as_bytes()))))
@@ -126,7 +140,7 @@ mod tests {
 
     #[test]
     fn encode_mount_manifest_none_when_empty() {
-        assert_eq!(encode_mount_manifest(None, None).unwrap(), None);
+        assert_eq!(encode_mount_manifest(None, None, None).unwrap(), None);
     }
 
     #[test]
@@ -136,7 +150,7 @@ mod tests {
         //   72 6f 09 2f 64 65 76 2f 76 64 62 09 2f 6f 70 74 2f 61
         let ro = RoShare { sources: vec![PathBuf::from("/opt/a")], guest_dev: "/dev/vdb".into() };
         assert_eq!(
-            encode_mount_manifest(Some(&ro), None).unwrap().unwrap(),
+            encode_mount_manifest(Some(&ro), None, None).unwrap().unwrap(),
             " kastellan.mounts=726f092f6465762f766462092f6f70742f61"
         );
     }
@@ -145,7 +159,7 @@ mod tests {
     fn encode_mount_manifest_ro_and_rw() {
         let ro = RoShare { sources: vec![PathBuf::from("/opt/a")], guest_dev: "/dev/vdb".into() };
         let rw = RwScratch { mountpoint: PathBuf::from("/tmp/s"), guest_dev: "/dev/vdc".into() };
-        let suffix = encode_mount_manifest(Some(&ro), Some(&rw)).unwrap().unwrap();
+        let suffix = encode_mount_manifest(Some(&ro), Some(&rw), None).unwrap().unwrap();
         assert!(suffix.starts_with(" kastellan.mounts="));
         // Single whitespace-free token.
         assert_eq!(suffix.split_whitespace().count(), 1);
@@ -154,8 +168,23 @@ mod tests {
     #[test]
     fn encode_mount_manifest_rejects_tab_and_newline_in_paths() {
         let ro = RoShare { sources: vec![PathBuf::from("/opt/a\tb")], guest_dev: "/dev/vdb".into() };
-        assert!(encode_mount_manifest(Some(&ro), None).is_err());
+        assert!(encode_mount_manifest(Some(&ro), None, None).is_err());
         let ro2 = RoShare { sources: vec![PathBuf::from("/opt/a\nb")], guest_dev: "/dev/vdb".into() };
-        assert!(encode_mount_manifest(Some(&ro2), None).is_err());
+        assert!(encode_mount_manifest(Some(&ro2), None, None).is_err());
+    }
+
+    #[test]
+    fn encode_includes_persistent_rw_line_after_scratch() {
+        let rw = RwScratch { mountpoint: PathBuf::from("/tmp"), guest_dev: "/dev/vdc".into() };
+        let ps = PersistentMount { mountpoint: PathBuf::from("/data"), guest_dev: "/dev/vdd".into() };
+        let suffix = encode_mount_manifest(None, Some(&rw), Some(&ps)).unwrap().unwrap();
+        // hex-decode the value after "kastellan.mounts="
+        let hex = suffix.trim().strip_prefix("kastellan.mounts=").unwrap();
+        let bytes = (0..hex.len()).step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect::<Vec<u8>>();
+        let decoded = String::from_utf8(bytes).unwrap();
+        assert!(decoded.contains("rw\t/dev/vdc\t/tmp"));
+        assert!(decoded.contains("rw\t/dev/vdd\t/data"));
     }
 }

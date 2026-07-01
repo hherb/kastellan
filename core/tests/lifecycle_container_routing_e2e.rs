@@ -75,6 +75,7 @@ fn minimal_policy() -> SandboxPolicy {
         tasks_max: None,
         env: vec![],
         proxy_uds: None,
+        persistent_store: None,
     }
 }
 

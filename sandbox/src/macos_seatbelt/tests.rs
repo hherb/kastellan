@@ -401,6 +401,93 @@ fn non_browser_proxy_uds_has_no_loopback_tcp() {
     assert!(!p.contains(r#"network-outbound (remote ip "localhost"#));
 }
 
+/// `persistent_store` emits a combined `file-read* file-write*` subpath rule
+/// for `guest_mount` so the worker can write to its persistent store.
+/// On macOS there is no path remap (host_backing == guest_mount in the demo),
+/// so we grant the `guest_mount` path directly.
+#[test]
+fn persistent_store_grants_rw_subpath() {
+    let mut policy = strict_policy();
+    policy.persistent_store = Some(crate::PersistentStore {
+        host_backing: std::path::PathBuf::from("/tmp/kvstate"),
+        guest_mount: std::path::PathBuf::from("/tmp/kvstate"),
+        size_mib: 0,
+    });
+    let profile = build_profile(&policy);
+    assert!(
+        profile.contains("(allow file-read* file-write* (subpath \"/tmp/kvstate\"))"),
+        "expected persistent_store subpath rule; got:\n{profile}"
+    );
+}
+
+/// `canonicalize_policy_paths` must resolve symlink components in
+/// `persistent_store.guest_mount` and `persistent_store.host_backing`.
+/// On macOS, `$TMPDIR` goes through `/var/folders/...` which is a platform
+/// symlink chain ultimately rooted at `/private/var/folders/...`. A Seatbelt
+/// rule built from the unresolved path is silently ignored by the kernel,
+/// so the worker starts but cannot write its persistent store.
+///
+/// This test creates a real directory under `std::env::temp_dir()` (which
+/// carries the symlink), runs `canonicalize_policy_paths`, and asserts the
+/// returned policy contains the resolved `/private/...` form.
+#[test]
+fn canonicalize_policy_paths_resolves_persistent_store_symlinks() {
+    let base = std::env::temp_dir().join(format!(
+        "kastellan_ps_canon_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    std::fs::create_dir_all(&base).expect("create temp dir for persistent_store test");
+    let _cleanup = {
+        let base = base.clone();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        Cleanup(base)
+    };
+
+    // Confirm the path actually contains a symlink component (otherwise this
+    // test is vacuous on a hypothetical macOS where $TMPDIR is already /private).
+    // We use the raw path from temp_dir() — if it doesn't need resolution the
+    // canonicalize call is a no-op and the test still passes (not vacuous: it
+    // would have caught the bug where canonicalize wasn't called at all).
+    let raw_guest = base.join("guest");
+    let raw_host  = base.join("host");
+    std::fs::create_dir_all(&raw_guest).expect("create guest dir");
+    std::fs::create_dir_all(&raw_host).expect("create host dir");
+
+    let expected_guest = std::fs::canonicalize(&raw_guest).expect("canonicalize raw_guest");
+    let expected_host  = std::fs::canonicalize(&raw_host).expect("canonicalize raw_host");
+
+    let mut policy = strict_policy();
+    policy.persistent_store = Some(crate::PersistentStore {
+        host_backing: raw_host.clone(),
+        guest_mount:  raw_guest.clone(),
+        size_mib: 0,
+    });
+
+    let canon = canonicalize_policy_paths(&policy)
+        .expect("canonicalize_policy_paths must succeed for existing dirs");
+
+    let ps = canon.persistent_store.as_ref()
+        .expect("persistent_store must be Some after canonicalization");
+
+    assert_eq!(
+        ps.guest_mount, expected_guest,
+        "guest_mount was not canonicalized: raw={raw_guest:?} expected={expected_guest:?} got={:?}",
+        ps.guest_mount
+    );
+    assert_eq!(
+        ps.host_backing, expected_host,
+        "host_backing was not canonicalized: raw={raw_host:?} expected={expected_host:?} got={:?}",
+        ps.host_backing
+    );
+}
+
 /// The widening is gated to `WorkerBrowserClient` ALONE — the strict and
 /// net-client profiles keep the deny-default (incl. the issue-#1 mach-lookup
 /// deny). This is the regression pin that the browser cluster never leaks into

@@ -160,6 +160,50 @@ fn relative_policy_paths_are_rejected() {
 }
 
 #[test]
+fn persistent_store_distinct_host_and_guest_paths_are_rejected() {
+    // Seatbelt has no path remap, so distinct host_backing/guest_mount would
+    // silently write to guest_mount with no relation to host_backing. The
+    // backend must fail closed rather than emit a misleading grant.
+    let backend = MacosSeatbelt::new();
+    let mut policy = strict_policy();
+    policy.persistent_store = Some(kastellan_sandbox::PersistentStore {
+        host_backing: PathBuf::from("/tmp/kv-host"),
+        guest_mount: PathBuf::from("/tmp/kv-guest"),
+        size_mib: 0,
+    });
+    let res = backend.spawn_under_policy(&policy, "/usr/bin/true", &[]);
+    let err = format!("{:?}", res.expect_err("distinct persistent paths must be rejected"));
+    assert!(
+        err.contains("host_backing == guest_mount"),
+        "expected equality-required error, got {err}"
+    );
+}
+
+#[test]
+fn persistent_store_file_path_is_rejected() {
+    // guest_mount is a DIRECTORY on Seatbelt; a regular file (the Firecracker
+    // ext4-image form, e.g. a policy routed to the wrong backend) must be
+    // rejected with a clear cross-backend hint rather than failing opaquely in
+    // create_dir_all.
+    let backend = MacosSeatbelt::new();
+    let f = std::env::temp_dir().join(format!("kv-seatbelt-file-{}.ext4", std::process::id()));
+    std::fs::write(&f, b"x").unwrap();
+    let mut policy = strict_policy();
+    policy.persistent_store = Some(kastellan_sandbox::PersistentStore {
+        host_backing: f.clone(),
+        guest_mount: f.clone(),
+        size_mib: 0,
+    });
+    let res = backend.spawn_under_policy(&policy, "/usr/bin/true", &[]);
+    let err = format!("{:?}", res.expect_err("file persistent path must be rejected"));
+    assert!(
+        err.contains("is a file"),
+        "expected file-rejection hint, got {err}"
+    );
+    std::fs::remove_file(&f).ok();
+}
+
+#[test]
 fn reading_dev_disk0_is_denied() {
     if skip_if_no_seatbelt() {
         return;

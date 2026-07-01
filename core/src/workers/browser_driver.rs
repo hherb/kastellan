@@ -300,6 +300,7 @@ pub fn browser_driver_entry(
         // renders). 512 is generous headroom for a single-page render.
         tasks_max: Some(512),
         proxy_uds: None, // set at spawn by force-routing (rewrite_worker_policy); same as web-fetch
+        persistent_store: None,
     };
     ToolEntry {
         binary: env.script_path.clone(),

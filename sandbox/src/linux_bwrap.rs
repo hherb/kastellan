@@ -125,6 +125,39 @@ impl SandboxBackend for LinuxBwrap {
                 )));
             }
         }
+        // Slice 5b-2: the persistent store is a separate field, so it bypasses the
+        // loop above. Its paths must be absolute (a relative dest mis-binds against
+        // the jail cwd), and we create host_backing up front so the `--bind` below
+        // is fail-closed: a missing/unwritable store dir errors here instead of the
+        // `--bind-try` silently dropping the bind and writes vanishing on respawn.
+        if let Some(ps) = &policy.persistent_store {
+            for p in [&ps.host_backing, &ps.guest_mount] {
+                if !p.is_absolute() {
+                    return Err(SandboxError::Backend(format!(
+                        "persistent_store paths must be absolute, got {p:?}"
+                    )));
+                }
+            }
+            // host_backing is a DIRECTORY on this backend — it is an ext4 image
+            // FILE only on Firecracker (see `PersistentStore` doc). If a regular
+            // file already exists at the path (e.g. a policy built for the
+            // Firecracker backend was routed here), `create_dir_all` would fail
+            // with an opaque "File exists"; reject up front with the cross-backend
+            // hint instead.
+            if ps.host_backing.is_file() {
+                return Err(SandboxError::Backend(format!(
+                    "persistent_store host_backing {:?} is a file, but the bwrap backend expects a \
+                     directory (a file is the Firecracker ext4-image form)",
+                    ps.host_backing
+                )));
+            }
+            std::fs::create_dir_all(&ps.host_backing).map_err(|e| {
+                SandboxError::Backend(format!(
+                    "persistent_store host_backing {:?}: {e}",
+                    ps.host_backing
+                ))
+            })?;
+        }
 
         let bwrap_argv = build_argv(policy, program, args);
         // systemd-run is the **outer** process; it sets up the cgroup
@@ -202,6 +235,17 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
         // (not `--ro-bind`) gives the worker that permission while keeping
         // the path identical so no path rewrite is needed inside the jail.
         push_bind(&mut argv, "--bind", uds);
+    }
+
+    // Slice 5b-2: a persistent store is a RW bind from a stable host dir to the
+    // jail's guest_mount (distinct paths, so not push_bind which uses one path).
+    // `--bind` (not `--bind-try`): spawn_under_policy created host_backing, so a
+    // failed bind is a real error and must fail closed — a silent skip would drop
+    // every write and defeat the cross-respawn persistence guarantee.
+    if let Some(ps) = &policy.persistent_store {
+        argv.push("--bind".into());
+        argv.push(ps.host_backing.display().to_string());
+        argv.push(ps.guest_mount.display().to_string());
     }
 
     argv.push("--".into());
@@ -324,6 +368,46 @@ mod tests {
         };
         let argv = build_argv(&p, "/bin/proxy", &[]);
         assert!(argv.contains(&"--share-net".to_string()));
+    }
+
+    #[test]
+    fn persistent_store_bind_maps_host_backing_to_guest_mount() {
+        let mut policy = strict_policy();
+        policy.persistent_store = Some(crate::PersistentStore {
+            host_backing: std::path::PathBuf::from("/srv/kv-state"),
+            guest_mount: std::path::PathBuf::from("/data"),
+            size_mib: 0,
+        });
+        let argv = build_argv(&policy, "/bin/true", &[]);
+        // a fail-closed `--bind` with DISTINCT host/jail paths (not the same-path
+        // push_bind, and not `--bind-try` which would silently drop a missing store)
+        let i = argv.iter().position(|a| a == "/srv/kv-state").unwrap();
+        assert_eq!(argv[i - 1], "--bind");
+        assert_eq!(argv[i + 1], "/data");
+    }
+
+    #[test]
+    fn persistent_store_rejects_file_host_backing() {
+        // host_backing is a DIRECTORY on bwrap; a regular file (the Firecracker
+        // ext4-image form, e.g. a policy routed to the wrong backend) must be
+        // rejected with a clear cross-backend hint before `create_dir_all` fails
+        // opaquely with "File exists".
+        let f = std::env::temp_dir().join(format!("kv-host-file-{}.ext4", std::process::id()));
+        std::fs::write(&f, b"x").unwrap();
+        let mut policy = strict_policy();
+        policy.persistent_store = Some(crate::PersistentStore {
+            host_backing: f.clone(),
+            guest_mount: PathBuf::from("/data"),
+            size_mib: 0,
+        });
+        let err = LinuxBwrap
+            .spawn_under_policy(&policy, "/bin/true", &[])
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("is a file"),
+            "file host_backing must be rejected with a cross-backend hint: {err:?}"
+        );
+        std::fs::remove_file(&f).ok();
     }
 
     #[test]

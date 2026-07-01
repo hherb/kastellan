@@ -5,6 +5,7 @@
 mod boot;
 mod bridge;
 mod egress_relay;
+mod persistent_lock;
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -35,6 +36,23 @@ fn main() -> std::io::Result<()> {
     // resolves + binds firecracker and passes its absolute path here. Absent →
     // the bare name (resolved via $PATH), byte-identical to the pre-5a launcher.
     let firecracker_bin = arg("--firecracker-bin").unwrap_or_else(|| "firecracker".to_string());
+
+    // Slice 5b-2: take an exclusive flock on the persistent-store image BEFORE
+    // booting firecracker so two concurrent launchers can never mount the same
+    // RW ext4 (page-cache corruption). Fail-closed: lock busy → log + exit non-zero.
+    let _persistent_lock = if let Some(img) = arg("--persistent-image") {
+        let path = std::path::Path::new(&img);
+        let lock = persistent_lock::acquire(path).map_err(|e| {
+            eprintln!(
+                "kastellan-microvm-run: --persistent-image {img:?} is already locked \
+                 by another launcher (flock failed: {e}); aborting boot (fail-closed)"
+            );
+            e
+        })?;
+        Some(lock)
+    } else {
+        None
+    };
 
     // Slice 4a: when force-routed, start the egress reverse-relay BEFORE booting
     // firecracker so the host listener at `<vsock_uds>_<port>` exists before the
