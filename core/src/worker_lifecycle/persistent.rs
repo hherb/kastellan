@@ -64,6 +64,13 @@ impl ClientTransport {
             .map_err(|e| anyhow::anyhow!("connect persistent worker: {e}"))?;
         Ok(Self { client, stderr_tail })
     }
+
+    /// Wrap an ALREADY-CONNECTED client (no sandbox spawn) — the hermetic-test
+    /// path over a plain child process. No stderr tail ⇒ death reports carry
+    /// exit status only.
+    pub fn from_client(client: Client) -> Self {
+        Self { client, stderr_tail: None }
+    }
 }
 
 impl PersistentTransport for ClientTransport {
@@ -415,6 +422,24 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(seen >= 1, "respawn must drop (and thus reap) the dead transport");
+        h.shutdown();
+    }
+
+    /// #348 invariant: the initial factory() call — which forks the worker, so
+    /// bwrap's --die-with-parent PDEATHSIG binds to the calling THREAD — must
+    /// run on the persistent driver thread, never the (possibly ephemeral,
+    /// e.g. tokio spawn_blocking) caller thread.
+    #[test]
+    fn initial_spawn_runs_on_the_driver_thread_not_the_caller() {
+        let caller = thread::current().id();
+        let (tid_tx, tid_rx) = mpsc::channel();
+        let factory: PersistentFactory = Box::new(move || {
+            let _ = tid_tx.send(thread::current().id());
+            Ok(Box::new(FakeTransport { calls: 0, die_after: 1000, gen: 0 }))
+        });
+        let h = PersistentWorker::spawn("thread-parent-test", factory).unwrap();
+        let spawn_thread = tid_rx.recv().unwrap();
+        assert_ne!(spawn_thread, caller, "initial factory() must run on the driver thread (#348)");
         h.shutdown();
     }
 }
