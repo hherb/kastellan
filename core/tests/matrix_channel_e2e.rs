@@ -7,7 +7,7 @@
 //! matrix-rust-sdk, no homeserver, no sandbox, no Postgres**. Skip-as-pass if
 //! the fixture is unbuilt.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -77,7 +77,7 @@ impl CompletedTasks for FakeCompleted {
 /// Spawn the fixture worker (plain child, piped stdio) through the PRODUCTION
 /// stack: PersistentWorker (supervision) + PolledWorkerDriver (poll/identity/
 /// pending) + MatrixChannel — everything but the sandbox and the sidecar.
-fn spawn_matrix_channel(sent_file: &PathBuf, peer: &str) -> Option<MatrixChannel> {
+fn spawn_matrix_channel(sent_file: &Path, peer: &str) -> Option<MatrixChannel> {
     let bin = fixture_bin();
     if !bin.exists() {
         eprintln!(
@@ -86,7 +86,7 @@ fn spawn_matrix_channel(sent_file: &PathBuf, peer: &str) -> Option<MatrixChannel
         );
         return None;
     }
-    let sent_file = sent_file.clone();
+    let sent_file = sent_file.to_path_buf();
     let peer = peer.to_string();
     let factory: PersistentFactory = Box::new(move || {
         let child = Command::new(&bin)
@@ -134,12 +134,15 @@ async fn paired_inbound_round_trips_to_a_sent_reply() {
     );
 
     // The fixture's canned inbound is paired + benign → enqueued → completed →
-    // routed reply "pong" → fixture appends it to sent_file. Poll until it lands.
+    // routed reply "pong" → fixture appends it to sent_file. Poll until a
+    // COMPLETE line lands: the fixture's writeln! is not atomic, so a reader
+    // polling on "non-empty" can catch a half-written JSON line (a real flake
+    // seen in CI) — wait for the terminating newline instead.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut got = None;
     while std::time::Instant::now() < deadline {
         if let Ok(s) = std::fs::read_to_string(&sent_file) {
-            if !s.trim().is_empty() {
+            if s.contains('\n') {
                 got = Some(s);
                 break;
             }
