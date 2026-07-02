@@ -3,7 +3,7 @@
 //! active (`KASTELLAN_EGRESS_PROXY_UDS` set) — the worker has no other route
 //! out. TLS stays end-to-end worker↔origin (the proxy tunnels ciphertext).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +18,28 @@ use crate::http::{HttpGet, RawResponse, MAX_BODY_BYTES, TIMEOUT_SECS};
 
 /// Read cap for the proxy's CONNECT response head (mirrors the proxy's 8 KiB).
 const MAX_PROXY_HEAD_BYTES: usize = 8 * 1024;
+
+/// Read a PEM CA bundle from `path` and add every certificate to `store`.
+/// Fails closed: an unreadable/unparseable file, or one containing zero
+/// certificates, is an error — we never silently proceed with a CA the caller
+/// asked for but we could not load. `label` names the CA in error messages
+/// ("MITM CA" vs "extra CA"). Shared by [`ProxyConnectGet::with_trust`]'s
+/// `Some` branch and [`ProxyConnectGet::with_extra_ca`].
+fn add_ca_pem(store: &mut rustls::RootCertStore, path: &Path, label: &str) -> anyhow::Result<()> {
+    let pem = std::fs::read(path).map_err(|e| anyhow::anyhow!("read {label} {path:?}: {e}"))?;
+    let mut added = 0usize;
+    for der in CertificateDer::pem_slice_iter(&pem) {
+        let der = der.map_err(|e| anyhow::anyhow!("parse {label} {path:?}: {e}"))?;
+        store
+            .add(der)
+            .map_err(|e| anyhow::anyhow!("add {label} {path:?}: {e}"))?;
+        added += 1;
+    }
+    if added == 0 {
+        anyhow::bail!("{label} {path:?} contained no certificates");
+    }
+    Ok(())
+}
 
 /// `HttpGet` that reaches origins only via the egress-proxy UDS (HTTP CONNECT).
 pub struct ProxyConnectGet {
@@ -63,25 +85,12 @@ impl ProxyConnectGet {
         // call is measurably expensive; the resulting config lives behind an Arc.
         let mut root_store = rustls::RootCertStore::empty();
         match ca_path {
-            Some(path) => {
-                // MITM posture: trust ONLY this per-instance CA. Any failure to
-                // read/parse/add it is fatal — we must NOT fall back to webpki,
-                // or the fail-closed guarantee (egress only via the proxy that
-                // terminates TLS) would silently degrade to "trust the world".
-                let pem = std::fs::read(&path)
-                    .map_err(|e| anyhow::anyhow!("read MITM CA {path:?}: {e}"))?;
-                let mut added = 0usize;
-                for der in CertificateDer::pem_slice_iter(&pem) {
-                    let der = der.map_err(|e| anyhow::anyhow!("parse MITM CA {path:?}: {e}"))?;
-                    root_store
-                        .add(der)
-                        .map_err(|e| anyhow::anyhow!("add MITM CA {path:?}: {e}"))?;
-                    added += 1;
-                }
-                if added == 0 {
-                    anyhow::bail!("MITM CA {path:?} contained no certificates");
-                }
-            }
+            // MITM posture: trust ONLY this per-instance CA (public roots are
+            // dropped). Any failure to read/parse/add it is fatal — we must NOT
+            // fall back to webpki, or the fail-closed guarantee (egress only via
+            // the proxy that terminates TLS) would silently degrade to "trust the
+            // world".
+            Some(path) => add_ca_pem(&mut root_store, &path, "MITM CA")?,
             None => {
                 root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             }
@@ -116,19 +125,7 @@ impl ProxyConnectGet {
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         if let Some(path) = extra_ca {
-            let pem = std::fs::read(&path)
-                .map_err(|e| anyhow::anyhow!("read extra CA {path:?}: {e}"))?;
-            let mut added = 0usize;
-            for der in CertificateDer::pem_slice_iter(&pem) {
-                let der = der.map_err(|e| anyhow::anyhow!("parse extra CA {path:?}: {e}"))?;
-                root_store
-                    .add(der)
-                    .map_err(|e| anyhow::anyhow!("add extra CA {path:?}: {e}"))?;
-                added += 1;
-            }
-            if added == 0 {
-                anyhow::bail!("extra CA {path:?} contained no certificates");
-            }
+            add_ca_pem(&mut root_store, &path, "extra CA")?;
         }
         let tls = Arc::new(
             rustls::ClientConfig::builder()

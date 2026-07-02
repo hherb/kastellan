@@ -10,7 +10,7 @@ fn rewrite_worker_policy_forces_routing() {
         ..SandboxPolicy::default()
     };
     let uds = std::path::PathBuf::from("/scratch/egress.sock");
-    let out = rewrite_worker_policy(base, &uds, std::path::Path::new("/scratch/ca.pem"), true);
+    let out = rewrite_worker_policy(base, &uds, Some(std::path::Path::new("/scratch/ca.pem")));
     // proxy_uds set → bwrap/Seatbelt force-route.
     assert_eq!(out.proxy_uds.as_deref(), Some(uds.as_path()));
     // resolv.conf removed (worker no longer resolves directly).
@@ -34,7 +34,7 @@ fn rewrite_worker_policy_injects_ca_trust() {
     };
     let uds = std::path::PathBuf::from("/scratch/egress.sock");
     let ca = std::path::PathBuf::from("/scratch/ca.pem");
-    let out = rewrite_worker_policy(base, &uds, &ca, true);
+    let out = rewrite_worker_policy(base, &uds, Some(ca.as_path()));
     assert!(out.fs_read.contains(&ca));
     assert!(out
         .env
@@ -52,8 +52,8 @@ fn rewrite_worker_policy_transparent_injects_no_ca() {
     };
     let uds = std::path::PathBuf::from("/scratch/egress.sock");
     let ca = std::path::PathBuf::from("/scratch/ca.pem");
-    // mitm = false → transparent tunnel: proxy_uds set, NO CA anywhere.
-    let out = rewrite_worker_policy(base, &uds, &ca, false);
+    // ca = None → transparent tunnel: proxy_uds set, NO CA anywhere.
+    let out = rewrite_worker_policy(base, &uds, None);
     assert_eq!(out.proxy_uds.as_deref(), Some(uds.as_path()));
     assert!(!out.fs_read.contains(&ca), "no CA in fs_read in transparent mode");
     assert!(
@@ -76,8 +76,7 @@ fn rewrite_overwrites_stale_uds_env() {
     let out = rewrite_worker_policy(
         base,
         std::path::Path::new("/scratch/egress.sock"),
-        std::path::Path::new("/scratch/ca.pem"),
-        true,
+        Some(std::path::Path::new("/scratch/ca.pem")),
     );
     let uds_entries: Vec<&String> = out
         .env

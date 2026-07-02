@@ -10,19 +10,14 @@ use std::path::Path;
 use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
 use super::net_worker::{rewrite_worker_policy, spawn_ingest_thread, EgressSidecar};
-use super::spawn::{spawn_sidecar, CA_FILE_NAME};
+use super::spawn::spawn_sidecar;
 use crate::worker_lifecycle::persistent::{ClientTransport, PersistentTransport};
 
 /// Rewrite `base` for transparent-tunnel force-routing onto `uds`: proxy_uds set,
-/// resolv.conf dropped, UDS env injected, and NO CA (transparent tunnel). The
-/// `ca` path handed to `rewrite_worker_policy` is a placeholder — `mitm=false`
-/// means it is never read or injected.
+/// resolv.conf dropped, UDS env injected, and NO CA (transparent tunnel — `ca`
+/// is `None`, so `rewrite_worker_policy` never injects or announces one).
 pub(crate) fn forced_transparent_policy(base: SandboxPolicy, uds: &Path) -> SandboxPolicy {
-    let ca_placeholder = uds
-        .parent()
-        .map(|d| d.join(CA_FILE_NAME))
-        .unwrap_or_else(|| std::path::PathBuf::from(CA_FILE_NAME));
-    rewrite_worker_policy(base, uds, &ca_placeholder, false)
+    rewrite_worker_policy(base, uds, None)
 }
 
 /// Everything `spawn_net_transport` needs. `base_policy` is the worker's policy

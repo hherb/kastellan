@@ -139,27 +139,31 @@ fn provision_secret_hashes(scratch: &Path, fps: &[SecretFingerprint]) -> std::io
 /// drop its direct DNS file (the proxy resolves now), and inject the UDS env so
 /// the worker's transport switches onto CONNECT-over-UDS. Pure — no spawn,
 /// fully testable.
+///
+/// `ca` encodes the trust posture in one value: `Some(path)` is MITM mode (make
+/// the per-instance CA readable in-jail + announce it via `KASTELLAN_EGRESS_PROXY_CA`);
+/// `None` is a transparent tunnel — the worker validates origins with its own
+/// roots and must NOT receive our CA (it never terminates its TLS).
 pub fn rewrite_worker_policy(
     mut policy: SandboxPolicy,
     uds: &Path,
-    ca: &Path,
-    mitm: bool,
+    ca: Option<&Path>,
 ) -> SandboxPolicy {
     policy.proxy_uds = Some(uds.to_path_buf());
     // The worker no longer resolves DNS (the proxy does); revoke the file so a
     // compromised worker can't even read the resolver config.
     policy.fs_read.retain(|p| p != Path::new("/etc/resolv.conf"));
-    // MITM mode only: make the per-instance CA readable in-jail + announce it.
-    // A transparent-tunnel worker (mitm=false) validates origins with its own
-    // roots and must NOT receive our CA (it never terminates its TLS).
+    // Drop any stale UDS/CA env first; the fresh values (if any) are pushed below.
     policy.env.retain(|(k, _)| k != ENV_UDS && k != ENV_CA);
-    if mitm && !policy.fs_read.iter().any(|p| p == ca) {
-        policy.fs_read.push(ca.to_path_buf());
+    if let Some(ca) = ca {
+        if !policy.fs_read.iter().any(|p| p == ca) {
+            policy.fs_read.push(ca.to_path_buf());
+        }
     }
     policy
         .env
         .push((ENV_UDS.to_string(), uds.to_string_lossy().into_owned()));
-    if mitm {
+    if let Some(ca) = ca {
         policy
             .env
             .push((ENV_CA.to_string(), ca.to_string_lossy().into_owned()));
@@ -219,12 +223,14 @@ where
     }
     // 2. Rewrite the worker policy onto the sidecar UDS.
     let uds = sidecar.uds_path.clone();
-    // The sidecar exports its CA next to the UDS (same scratch dir).
+    // The sidecar exports its CA next to the UDS (same scratch dir). MITM workers
+    // trust it; a transparent-tunnel worker (`disable_mitm`) gets `None`.
     let ca = uds
         .parent()
         .map(|d| d.join(super::spawn::CA_FILE_NAME))
         .unwrap_or_else(|| PathBuf::from(super::spawn::CA_FILE_NAME));
-    let forced = rewrite_worker_policy(params.spec.policy.clone(), &uds, &ca, !params.disable_mitm);
+    let ca = (!params.disable_mitm).then_some(ca.as_path());
+    let forced = rewrite_worker_policy(params.spec.policy.clone(), &uds, ca);
     let forced_spec = WorkerSpec {
         policy: &forced,
         program: params.spec.program,
