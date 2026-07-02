@@ -3,7 +3,7 @@
 //! active (`KASTELLAN_EGRESS_PROXY_UDS` set) — the worker has no other route
 //! out. TLS stays end-to-end worker↔origin (the proxy tunnels ciphertext).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +18,28 @@ use crate::http::{HttpGet, RawResponse, MAX_BODY_BYTES, TIMEOUT_SECS};
 
 /// Read cap for the proxy's CONNECT response head (mirrors the proxy's 8 KiB).
 const MAX_PROXY_HEAD_BYTES: usize = 8 * 1024;
+
+/// Read a PEM CA bundle from `path` and add every certificate to `store`.
+/// Fails closed: an unreadable/unparseable file, or one containing zero
+/// certificates, is an error — we never silently proceed with a CA the caller
+/// asked for but we could not load. `label` names the CA in error messages
+/// ("MITM CA" vs "extra CA"). Shared by [`ProxyConnectGet::with_trust`]'s
+/// `Some` branch and [`ProxyConnectGet::with_extra_ca`].
+fn add_ca_pem(store: &mut rustls::RootCertStore, path: &Path, label: &str) -> anyhow::Result<()> {
+    let pem = std::fs::read(path).map_err(|e| anyhow::anyhow!("read {label} {path:?}: {e}"))?;
+    let mut added = 0usize;
+    for der in CertificateDer::pem_slice_iter(&pem) {
+        let der = der.map_err(|e| anyhow::anyhow!("parse {label} {path:?}: {e}"))?;
+        store
+            .add(der)
+            .map_err(|e| anyhow::anyhow!("add {label} {path:?}: {e}"))?;
+        added += 1;
+    }
+    if added == 0 {
+        anyhow::bail!("{label} {path:?} contained no certificates");
+    }
+    Ok(())
+}
 
 /// `HttpGet` that reaches origins only via the egress-proxy UDS (HTTP CONNECT).
 pub struct ProxyConnectGet {
@@ -63,25 +85,12 @@ impl ProxyConnectGet {
         // call is measurably expensive; the resulting config lives behind an Arc.
         let mut root_store = rustls::RootCertStore::empty();
         match ca_path {
-            Some(path) => {
-                // MITM posture: trust ONLY this per-instance CA. Any failure to
-                // read/parse/add it is fatal — we must NOT fall back to webpki,
-                // or the fail-closed guarantee (egress only via the proxy that
-                // terminates TLS) would silently degrade to "trust the world".
-                let pem = std::fs::read(&path)
-                    .map_err(|e| anyhow::anyhow!("read MITM CA {path:?}: {e}"))?;
-                let mut added = 0usize;
-                for der in CertificateDer::pem_slice_iter(&pem) {
-                    let der = der.map_err(|e| anyhow::anyhow!("parse MITM CA {path:?}: {e}"))?;
-                    root_store
-                        .add(der)
-                        .map_err(|e| anyhow::anyhow!("add MITM CA {path:?}: {e}"))?;
-                    added += 1;
-                }
-                if added == 0 {
-                    anyhow::bail!("MITM CA {path:?} contained no certificates");
-                }
-            }
+            // MITM posture: trust ONLY this per-instance CA (public roots are
+            // dropped). Any failure to read/parse/add it is fatal — we must NOT
+            // fall back to webpki, or the fail-closed guarantee (egress only via
+            // the proxy that terminates TLS) would silently degrade to "trust the
+            // world".
+            Some(path) => add_ca_pem(&mut root_store, &path, "MITM CA")?,
             None => {
                 root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             }
@@ -92,6 +101,37 @@ impl ProxyConnectGet {
                 .with_no_client_auth(),
         );
 
+        Ok(Self { user_agent: user_agent.to_string(), uds, tls, rt })
+    }
+
+    /// Build the transport trusting the compiled-in **webpki public roots**
+    /// plus, when `extra_ca` is `Some`, an additional CA (a self-signed test
+    /// origin for hermetic e2e). Unlike [`with_trust`]'s `Some` branch, this does
+    /// NOT drop the public roots — the worker validates real origins normally and
+    /// *also* trusts the extra CA. A set-but-unreadable/invalid `extra_ca` is an
+    /// error (fail closed; never silently ignore it). Used by transparent-tunnel
+    /// workers (slice 5c) that do their own end-to-end TLS and cannot trust the
+    /// proxy's per-instance MITM CA.
+    pub fn with_extra_ca(
+        user_agent: &str,
+        uds: PathBuf,
+        extra_ca: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        if let Some(path) = extra_ca {
+            add_ca_pem(&mut root_store, &path, "extra CA")?;
+        }
+        let tls = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
         Ok(Self { user_agent: user_agent.to_string(), uds, tls, rt })
     }
 
@@ -307,185 +347,4 @@ fn parse_status_line(line: &str) -> Result<u16, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn connect_line_has_host_port_and_host_header() {
-        let line = build_connect_request("example.com", 443);
-        assert_eq!(
-            line,
-            "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn connect_line_brackets_ipv6_literal() {
-        // `url::Url::host_str()` returns IPv6 WITH brackets, so a bracketed host
-        // is what we receive and what the proxy's request-line parser (slice #1,
-        // bracketed-IPv6 aware) expects. Pass it through verbatim — do NOT
-        // double-bracket and do NOT strip.
-        let line = build_connect_request("[2606:4700::1111]", 443);
-        assert_eq!(
-            line,
-            "CONNECT [2606:4700::1111]:443 HTTP/1.1\r\nHost: [2606:4700::1111]:443\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn parse_status_accepts_200() {
-        assert_eq!(parse_status_line("HTTP/1.1 200 Connection Established\r\n").unwrap(), 200);
-    }
-
-    #[test]
-    fn parse_status_rejects_403() {
-        assert_eq!(parse_status_line("HTTP/1.1 403 Forbidden\r\n").unwrap(), 403);
-    }
-
-    #[test]
-    fn parse_status_errors_on_garbage() {
-        assert!(parse_status_line("garbage").is_err());
-    }
-
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixListener;
-    use std::thread;
-    use url::Url;
-
-    /// Minimal in-test proxy: accept one conn, read the CONNECT head to the blank
-    /// line, reply `200`, then serve a fixed HTTP/1.1 response as the "origin".
-    fn spawn_stub_proxy(path: std::path::PathBuf, origin_response: &'static [u8]) {
-        let listener = UnixListener::bind(&path).unwrap();
-        thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            // Drain CONNECT head up to blank line.
-            let mut buf = [0u8; 1024];
-            let mut acc = Vec::new();
-            loop {
-                let n = conn.read(&mut buf).unwrap();
-                acc.extend_from_slice(&buf[..n]);
-                if acc.windows(4).any(|w| w == b"\r\n\r\n") || n == 0 {
-                    break;
-                }
-            }
-            conn.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").unwrap();
-            // Now act as the raw-HTTP origin.
-            let mut req = [0u8; 1024];
-            let _ = conn.read(&mut req).unwrap();
-            conn.write_all(origin_response).unwrap();
-        });
-    }
-
-    #[test]
-    fn new_with_unreadable_ca_fails_closed() {
-        let res = ProxyConnectGet::with_trust(
-            "kastellan-test/0",
-            PathBuf::from("/tmp/x.sock"),
-            Some(PathBuf::from("/nonexistent/ca.pem")),
-        );
-        assert!(res.is_err(), "set-but-unreadable CA must fail closed");
-    }
-
-    #[test]
-    fn new_without_ca_uses_webpki() {
-        // No CA → infallible webpki path (back-compat with slice #1/#2).
-        let g = ProxyConnectGet::with_trust("kastellan-test/0", PathBuf::from("/tmp/x.sock"), None);
-        assert!(g.is_ok());
-    }
-
-    #[test]
-    fn proxy_connect_get_round_trips_loopback_http() {
-        let dir = std::env::temp_dir().join(format!("kastellan-pc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let uds = dir.join("egress.sock");
-        let _ = std::fs::remove_file(&uds);
-        spawn_stub_proxy(
-            uds.clone(),
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
-        );
-
-        let get = ProxyConnectGet::new("kastellan-test/0", uds.clone());
-        let url = Url::parse("http://127.0.0.1:8888/search").unwrap();
-        let resp = get.get(&url).expect("round trip");
-
-        assert_eq!(resp.status, 200);
-        assert_eq!(resp.content_type, "application/json");
-        assert_eq!(resp.body, b"{}");
-        let _ = std::fs::remove_file(&uds);
-    }
-
-    // ── I1 + M4: premature-EOF and proxy-refused tests ──────────────────────
-
-    /// Stub that sends a partial head (no blank line) then closes — client MUST
-    /// return Err, not Ok (I1: premature EOF is not success).
-    fn spawn_stub_proxy_truncated_head(path: std::path::PathBuf) {
-        let listener = UnixListener::bind(&path).unwrap();
-        thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            // Drain CONNECT request (we don't care about its content).
-            let mut buf = [0u8; 1024];
-            let _ = conn.read(&mut buf);
-            // Send a partial status line — deliberately NO blank line, then close.
-            conn.write_all(b"HTTP/1.1 200\r\n").unwrap();
-            // Drop conn → EOF.
-        });
-    }
-
-    #[test]
-    fn premature_eof_is_an_error_not_success() {
-        let dir =
-            std::env::temp_dir().join(format!("kastellan-pc-trunc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let uds = dir.join("trunc.sock");
-        let _ = std::fs::remove_file(&uds);
-        spawn_stub_proxy_truncated_head(uds.clone());
-
-        let get = ProxyConnectGet::new("kastellan-test/0", uds.clone());
-        let url = Url::parse("http://127.0.0.1:8888/search").unwrap();
-        let result = get.get(&url);
-
-        assert!(
-            result.is_err(),
-            "expected Err for truncated proxy head, got Ok"
-        );
-        let msg = result.err().unwrap();
-        assert!(
-            msg.contains("complete response head"),
-            "expected 'complete response head' in error, got: {msg}"
-        );
-        let _ = std::fs::remove_file(&uds);
-    }
-
-    /// Stub that returns a well-formed `403 Forbidden` — client must return Err.
-    fn spawn_stub_proxy_403(path: std::path::PathBuf) {
-        let listener = UnixListener::bind(&path).unwrap();
-        thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = conn.read(&mut buf);
-            conn.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").unwrap();
-        });
-    }
-
-    #[test]
-    fn proxy_refused_403_is_an_error() {
-        let dir =
-            std::env::temp_dir().join(format!("kastellan-pc-403-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let uds = dir.join("refused.sock");
-        let _ = std::fs::remove_file(&uds);
-        spawn_stub_proxy_403(uds.clone());
-
-        let get = ProxyConnectGet::new("kastellan-test/0", uds.clone());
-        let url = Url::parse("http://127.0.0.1:8888/search").unwrap();
-        let result = get.get(&url);
-
-        assert!(result.is_err(), "expected Err for 403 CONNECT refusal, got Ok");
-        let msg = result.err().unwrap();
-        assert!(
-            msg.contains("403"),
-            "expected '403' in error message, got: {msg}"
-        );
-        let _ = std::fs::remove_file(&uds);
-    }
-}
+mod tests;

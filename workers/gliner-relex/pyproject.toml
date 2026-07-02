@@ -11,7 +11,7 @@ dependencies = [
     # Knowledgator gliner-relex-* model weights load via this same lib;
     # no separate inference framework needed.
     "gliner>=0.2",
-    "transformers>=4.40",
+    "transformers>=5.3.0",
     "sentencepiece>=0.2",
     # Torch is implicit via transformers, but pin it explicitly so an
     # accidental wheel-resolution surprise (CUDA version mismatch) is
