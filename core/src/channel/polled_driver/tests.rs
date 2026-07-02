@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Scripted fake worker: `t.init` returns a fixed identity, `t.poll` pops the
 /// next canned poll RESULT (empty batch when none queued), `t.send` records its
@@ -131,4 +132,98 @@ fn init_failure_fails_spawn() {
     let res =
         PolledWorkerDriver::spawn(TEST_SPEC, calls, test_parse, test_encode, ChannelId("t".into()));
     assert!(res.is_err(), "init error must fail the spawn (login proof)");
+}
+
+/// Bounded wait for a condition, so a regression fails the test rather than
+/// hanging the suite.
+fn wait_until(mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if cond() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("condition not reached within 5s");
+}
+
+#[test]
+fn outbound_message_is_delivered_encoded() {
+    let (st, calls) = fake();
+    let (driver, _identity) = spawn_test_driver(calls);
+    driver
+        .outbound_tx
+        .send(OutgoingMessage {
+            channel: ChannelId("t".into()),
+            peer: PeerId("@me:srv".into()),
+            conversation: ConversationId("!room:srv".into()),
+            body: "pong".into(),
+        })
+        .unwrap();
+    wait_until(|| !st.sends.lock().unwrap().is_empty());
+    let sent = st.sends.lock().unwrap();
+    assert_eq!(sent[0], json!({"conversation": "!room:srv", "body": "pong"}));
+}
+
+#[test]
+fn pending_send_is_retained_across_a_down_window_and_delivered_once() {
+    let (st, calls) = fake();
+    let (driver, _identity) = spawn_test_driver(calls);
+    // Worker goes down (supervisor respawn window: every call errors).
+    st.down.store(true, Ordering::SeqCst);
+    driver
+        .outbound_tx
+        .send(OutgoingMessage {
+            channel: ChannelId("t".into()),
+            peer: PeerId("@me:srv".into()),
+            conversation: ConversationId("!room:srv".into()),
+            body: "survives".into(),
+        })
+        .unwrap();
+    // Give the driver a few retry slices while down: nothing may be delivered.
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(st.sends.lock().unwrap().is_empty(), "no delivery while worker is down");
+    // Worker comes back: the retained message must arrive exactly once.
+    st.down.store(false, Ordering::SeqCst);
+    wait_until(|| !st.sends.lock().unwrap().is_empty());
+    std::thread::sleep(Duration::from_millis(100)); // catch double-delivery
+    let sent = st.sends.lock().unwrap();
+    assert_eq!(sent.len(), 1, "retained send must be delivered exactly once");
+    assert_eq!(sent[0]["body"], "survives");
+}
+
+#[test]
+fn dropping_endpoints_stops_the_driver_thread() {
+    let (_st, calls) = fake();
+    let (driver, _identity) = spawn_test_driver(calls);
+    let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
+    drop(inbound_rx);
+    drop(outbound_tx);
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = join.join();
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("driver thread must exit once both endpoints are dropped");
+}
+
+#[test]
+fn dropping_endpoints_during_a_down_window_stops_the_driver_thread() {
+    let (st, calls) = fake();
+    let (driver, _identity) = spawn_test_driver(calls);
+    st.down.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(100)); // let it enter the retry loop
+    let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
+    drop(inbound_rx);
+    drop(outbound_tx);
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = join.join();
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("driver must exit from the retry loop when endpoints drop");
 }
