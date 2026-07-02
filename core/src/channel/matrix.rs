@@ -96,8 +96,10 @@ pub struct MatrixChannel {
     id: ChannelId,
     inbound_rx: tok_mpsc::Receiver<IncomingMessage>,
     outbound_tx: std_mpsc::Sender<OutgoingMessage>,
-    // Kept so the driver thread's joined-on-drop semantics are explicit; the
-    // thread exits when the worker's outbound sender is dropped.
+    // Kept for ownership clarity only (dropping a JoinHandle detaches, it does
+    // not join): the driver thread exits on its own once both channel endpoints
+    // above are dropped, and its RAII drop of the PersistentHandle then tears
+    // down the supervisor + worker (+ sidecar).
     _driver: thread::JoinHandle<()>,
 }
 

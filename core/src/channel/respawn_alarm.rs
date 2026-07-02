@@ -1,14 +1,14 @@
 //! Sliding-window respawn-rate alarm for supervised channel workers (#348 item 3).
 //!
-//! The supervised Matrix driver (`channel::matrix::drive`) silently respawns a
-//! dead worker with capped backoff. A *single* crash is benign, but a worker
-//! that dies-and-respawns repeatedly ("churn") is a real fault — historically
+//! The `PersistentWorker` supervisor (`worker_lifecycle::persistent`) silently
+//! respawns a dead worker with capped backoff. A *single* crash is benign, but a
+//! worker that dies-and-respawns repeatedly ("churn") is a real fault — historically
 //! the bwrap-PDEATHSIG bug (#348) produced exactly this, and it was only
 //! diagnosed after deploying death-report observability. This module turns that
 //! churn into an *up-front* warning: it counts respawns in a sliding time window
 //! and signals once when the rate crosses a caller-supplied threshold (the
-//! driver wires in the compile-time `RESPAWN_ALARM_THRESHOLD` /
-//! `RESPAWN_ALARM_WINDOW` defaults).
+//! supervisor wires in its compile-time `ALARM_THRESHOLD` / `ALARM_WINDOW`
+//! defaults).
 //!
 //! The type is deliberately a **pure state machine over caller-supplied
 //! [`Instant`]s** — it owns no clock and spawns nothing — so the driver decides
