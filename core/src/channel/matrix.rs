@@ -481,8 +481,17 @@ pub fn spawn_matrix_worker(
                 extra_ca: None,
             };
             let sink = (eg.routing.make_sink)();
-            let t = spawn_net_transport(&params, &scratch, sink)?;
-            Ok(Box::new(t) as Box<dyn PersistentTransport>)
+            // On the fail-closed path the sidecar's Drop removes only the UDS,
+            // not the dir (see spawn_net_transport's contract) — reclaim it
+            // here, else every failed respawn in the supervisor's retry loop
+            // leaks one unique scratch dir on a long-lived daemon.
+            match spawn_net_transport(&params, &scratch, sink) {
+                Ok(t) => Ok(Box::new(t) as Box<dyn PersistentTransport>),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&scratch);
+                    Err(e)
+                }
+            }
         }
         None => {
             let t = ClientTransport::spawn(&*backend, &policy, &program, &[])?;
