@@ -193,9 +193,13 @@ fn kv_demo_persistent_store_survives_vm_respawn() {
     // ── Phase 2: force VM death by killing the launcher (SIGKILL) ─────────────
     // The kv-demo rootfs is a release build without kv.crash, so we kill the
     // launcher process from the outside. The in-flight call (if any) will Err.
-    eprintln!("[INFO] sending SIGKILL to kastellan-microvm-run to simulate VM crash");
+    // NB: `pkill NAME` matches the 15-char-truncated /proc/<pid>/comm, so the
+    // 21-char "kastellan-microvm-run" overflows it and matches NOTHING (a silent
+    // no-op). Use `-f` to match the full command line so the launcher is really
+    // killed and this exercises a real respawn.
+    eprintln!("[INFO] sending SIGKILL (-f) to kastellan-microvm-run to simulate VM crash");
     let _ = std::process::Command::new("pkill")
-        .args(["-9", "kastellan-microvm-run"])
+        .args(["-9", "-f", "kastellan-microvm-run"])
         .status();
 
     // Allow PersistentWorker to observe the death and begin respawning.

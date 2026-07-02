@@ -141,6 +141,24 @@ pub fn make_get(user_agent: &str) -> anyhow::Result<Box<dyn HttpGet>> {
     make_get_inner(user_agent, uds.as_deref(), ca.as_deref())
 }
 
+/// Build a transparent-tunnel CONNECT transport: reach origins ONLY via the
+/// egress-proxy `uds`, validating them against the compiled-in webpki roots plus
+/// an optional `extra_ca`. For workers that do their own end-to-end TLS (the
+/// proxy tunnels ciphertext and cannot MITM them) — slice 5c. `extra_ca` is a
+/// test-only self-signed origin cert; production callers pass `None`.
+pub fn make_transparent_get(
+    user_agent: &str,
+    uds: &std::path::Path,
+    extra_ca: Option<&std::path::Path>,
+) -> anyhow::Result<Box<dyn HttpGet>> {
+    let t = crate::proxy_connect::ProxyConnectGet::with_extra_ca(
+        user_agent,
+        uds.to_path_buf(),
+        extra_ca.map(|p| p.to_path_buf()),
+    )?;
+    Ok(Box::new(t))
+}
+
 #[cfg(test)]
 mod make_get_tests {
     use super::*;
@@ -157,5 +175,19 @@ mod make_get_tests {
         // UDS + a set-but-unreadable CA path → FAIL CLOSED (no silent webpki fallback).
         let err = make_get_inner("kastellan-test/0", Some("/tmp/x.sock"), Some("/nonexistent/ca.pem"));
         assert!(err.is_err(), "a set-but-unreadable CA must fail closed, not fall back");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn make_transparent_get_builds_a_transport() {
+        let g = super::make_transparent_get(
+            "kastellan-test/0",
+            std::path::Path::new("/tmp/egress.sock"),
+            None,
+        );
+        assert!(g.is_ok());
+        assert_eq!(g.unwrap().transport_kind(), "proxy-connect");
     }
 }

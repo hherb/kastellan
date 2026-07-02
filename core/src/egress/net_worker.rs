@@ -95,6 +95,22 @@ impl Drop for EgressSidecar {
 }
 
 impl EgressSidecar {
+    /// Build a bundle from already-spawned parts. Used by
+    /// [`super::persistent_net::spawn_net_transport`], which spawns the sidecar +
+    /// worker itself (it needs the raw `Client`, not a `SupervisedWorker`) and
+    /// owns the scratch dir for RAII cleanup.
+    pub(crate) fn from_parts(
+        sidecar: SidecarHandle,
+        ingest: JoinHandle<()>,
+        scratch: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            sidecar,
+            _ingest: ingest,
+            scratch,
+        }
+    }
+
     /// Dispatch-time live provisioning (egress slice #3b, #268): merge `fps`
     /// into this worker's sidecar `secret_hashes.json` (union across reuse) and
     /// return the newly-added fingerprints for audit. The scratch dir holding
@@ -123,24 +139,35 @@ fn provision_secret_hashes(scratch: &Path, fps: &[SecretFingerprint]) -> std::io
 /// drop its direct DNS file (the proxy resolves now), and inject the UDS env so
 /// the worker's transport switches onto CONNECT-over-UDS. Pure — no spawn,
 /// fully testable.
-pub fn rewrite_worker_policy(mut policy: SandboxPolicy, uds: &Path, ca: &Path) -> SandboxPolicy {
+///
+/// `ca` encodes the trust posture in one value: `Some(path)` is MITM mode (make
+/// the per-instance CA readable in-jail + announce it via `KASTELLAN_EGRESS_PROXY_CA`);
+/// `None` is a transparent tunnel — the worker validates origins with its own
+/// roots and must NOT receive our CA (it never terminates its TLS).
+pub fn rewrite_worker_policy(
+    mut policy: SandboxPolicy,
+    uds: &Path,
+    ca: Option<&Path>,
+) -> SandboxPolicy {
     policy.proxy_uds = Some(uds.to_path_buf());
     // The worker no longer resolves DNS (the proxy does); revoke the file so a
     // compromised worker can't even read the resolver config.
     policy.fs_read.retain(|p| p != Path::new("/etc/resolv.conf"));
-    // Make the per-instance CA readable in-jail (the sandbox layer binds every
-    // fs_read path into the worker) and announce it to the worker.
-    if !policy.fs_read.iter().any(|p| p == ca) {
-        policy.fs_read.push(ca.to_path_buf());
-    }
-    // Inject the UDS + CA env (overwrite any stale entries first).
+    // Drop any stale UDS/CA env first; the fresh values (if any) are pushed below.
     policy.env.retain(|(k, _)| k != ENV_UDS && k != ENV_CA);
+    if let Some(ca) = ca {
+        if !policy.fs_read.iter().any(|p| p == ca) {
+            policy.fs_read.push(ca.to_path_buf());
+        }
+    }
     policy
         .env
         .push((ENV_UDS.to_string(), uds.to_string_lossy().into_owned()));
-    policy
-        .env
-        .push((ENV_CA.to_string(), ca.to_string_lossy().into_owned()));
+    if let Some(ca) = ca {
+        policy
+            .env
+            .push((ENV_CA.to_string(), ca.to_string_lossy().into_owned()));
+    }
     policy
 }
 
@@ -196,12 +223,14 @@ where
     }
     // 2. Rewrite the worker policy onto the sidecar UDS.
     let uds = sidecar.uds_path.clone();
-    // The sidecar exports its CA next to the UDS (same scratch dir).
+    // The sidecar exports its CA next to the UDS (same scratch dir). MITM workers
+    // trust it; a transparent-tunnel worker (`disable_mitm`) gets `None`.
     let ca = uds
         .parent()
         .map(|d| d.join(super::spawn::CA_FILE_NAME))
         .unwrap_or_else(|| PathBuf::from(super::spawn::CA_FILE_NAME));
-    let forced = rewrite_worker_policy(params.spec.policy.clone(), &uds, &ca);
+    let ca = (!params.disable_mitm).then_some(ca.as_path());
+    let forced = rewrite_worker_policy(params.spec.policy.clone(), &uds, ca);
     let forced_spec = WorkerSpec {
         policy: &forced,
         program: params.spec.program,
@@ -306,7 +335,7 @@ fn make_worker_scratch_dir(scratch_root: &Path) -> Result<PathBuf, ToolHostError
 /// Spawn the decision-ingest thread over the proxy's stdout. Reads decision
 /// lines and feeds each mapped row to `on_decision`. If `stdout` is `None`
 /// (already taken) the thread exits immediately.
-fn spawn_ingest_thread<F>(
+pub(crate) fn spawn_ingest_thread<F>(
     stdout: Option<std::process::ChildStdout>,
     on_decision: F,
 ) -> JoinHandle<()>
@@ -351,235 +380,4 @@ pub fn pg_decision_sink(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use kastellan_sandbox::{Net, SandboxError};
-
-    #[test]
-    fn rewrite_worker_policy_forces_routing() {
-        let base = SandboxPolicy {
-            net: Net::Allowlist(vec!["api.example.com:443".into()]),
-            fs_read: vec!["/etc/resolv.conf".into(), "/bin/worker".into()],
-            env: vec![],
-            ..SandboxPolicy::default()
-        };
-        let uds = std::path::PathBuf::from("/scratch/egress.sock");
-        let out = rewrite_worker_policy(base, &uds, std::path::Path::new("/scratch/ca.pem"));
-        // proxy_uds set → bwrap/Seatbelt force-route.
-        assert_eq!(out.proxy_uds.as_deref(), Some(uds.as_path()));
-        // resolv.conf removed (worker no longer resolves directly).
-        assert!(!out.fs_read.contains(&"/etc/resolv.conf".into()));
-        // The worker binary path survives.
-        assert!(out.fs_read.contains(&"/bin/worker".into()));
-        // env carries the UDS path.
-        assert!(out
-            .env
-            .iter()
-            .any(|(k, v)| k == ENV_UDS && v == "/scratch/egress.sock"));
-    }
-
-    #[test]
-    fn rewrite_worker_policy_injects_ca_trust() {
-        let base = SandboxPolicy {
-            net: Net::Allowlist(vec!["api.example.com:443".into()]),
-            fs_read: vec!["/etc/resolv.conf".into(), "/bin/worker".into()],
-            env: vec![],
-            ..SandboxPolicy::default()
-        };
-        let uds = std::path::PathBuf::from("/scratch/egress.sock");
-        let ca = std::path::PathBuf::from("/scratch/ca.pem");
-        let out = rewrite_worker_policy(base, &uds, &ca);
-        assert!(out.fs_read.contains(&ca));
-        assert!(out
-            .env
-            .iter()
-            .any(|(k, v)| k == "KASTELLAN_EGRESS_PROXY_CA" && v == "/scratch/ca.pem"));
-    }
-
-    #[test]
-    fn rewrite_overwrites_stale_uds_env() {
-        let base = SandboxPolicy {
-            net: Net::Allowlist(vec!["api.example.com:443".into()]),
-            env: vec![(ENV_UDS.to_string(), "/old/stale.sock".to_string())],
-            ..SandboxPolicy::default()
-        };
-        let out = rewrite_worker_policy(
-            base,
-            std::path::Path::new("/scratch/egress.sock"),
-            std::path::Path::new("/scratch/ca.pem"),
-        );
-        let uds_entries: Vec<&String> = out
-            .env
-            .iter()
-            .filter(|(k, _)| k == ENV_UDS)
-            .map(|(_, v)| v)
-            .collect();
-        assert_eq!(uds_entries, vec!["/scratch/egress.sock"], "exactly one, fresh");
-    }
-
-    /// A backend whose spawn always fails — stands in for "the sidecar can't
-    /// start" without needing a real sandbox.
-    struct FailBackend;
-    impl SandboxBackend for FailBackend {
-        fn spawn_under_policy(
-            &self,
-            _policy: &SandboxPolicy,
-            _program: &str,
-            _args: &[&str],
-        ) -> Result<std::process::Child, SandboxError> {
-            Err(SandboxError::Backend("test: spawn refused".into()))
-        }
-    }
-
-    #[test]
-    fn spawn_net_worker_fails_closed_when_sidecar_unavailable() {
-        let backend = FailBackend;
-        let policy = SandboxPolicy {
-            net: Net::Allowlist(vec!["api.example.com:443".into()]),
-            ..SandboxPolicy::default()
-        };
-        let spec = WorkerSpec {
-            policy: &policy,
-            program: "/bin/worker",
-            args: &[],
-            wall_clock_ms: None,
-        };
-        let allowlist = ["api.example.com:443".to_string()];
-        let params = NetWorkerSpawn {
-            backend: &backend,
-            proxy_bin: Path::new("/nonexistent/egress-proxy"),
-            spec: &spec,
-            allowlist: &allowlist,
-            worker_name: "web-fetch",
-            secret_fingerprints: &[], // none for this fail-closed test
-            cert_pins_json: None,
-            disable_mitm: false,
-        };
-        let res = spawn_net_worker(&params, Path::new("/tmp/kastellan-net-worker-test"), |_row| {});
-        assert!(res.is_err(), "no proxy => no net worker (fail-closed)");
-    }
-
-    fn allowlist_spec(policy: &SandboxPolicy) -> WorkerSpec<'_> {
-        WorkerSpec {
-            policy,
-            program: "/bin/worker",
-            args: &[],
-            wall_clock_ms: None,
-        }
-    }
-
-    #[test]
-    fn spawn_forced_net_worker_fails_closed_when_sidecar_unavailable() {
-        let backend = FailBackend;
-        let policy = SandboxPolicy {
-            net: Net::Allowlist(vec!["api.example.com:443".into()]),
-            ..SandboxPolicy::default()
-        };
-        let scratch_root = tempfile::tempdir().expect("scratch root");
-        let spec = allowlist_spec(&policy);
-        let allowlist = ["api.example.com:443".to_string()];
-        let params = NetWorkerSpawn {
-            backend: &backend,
-            proxy_bin: Path::new("/nonexistent/egress-proxy"),
-            spec: &spec,
-            allowlist: &allowlist,
-            worker_name: "web-fetch",
-            secret_fingerprints: &[], // none for this fail-closed test
-            cert_pins_json: None,
-            disable_mitm: false,
-        };
-        let res = spawn_forced_net_worker(&params, scratch_root.path(), |_row| {});
-        assert!(res.is_err(), "no proxy => no net worker (fail-closed)");
-    }
-
-    #[test]
-    fn make_worker_scratch_dir_rejects_overlong_socket_path() {
-        // A deep scratch root whose projected `<dir>/egress.sock` overflows
-        // sockaddr_un.sun_path must be rejected up front with a clear Io error,
-        // not deferred to an opaque bind() failure inside the sidecar. The guard
-        // runs before any mkdir, so the (nonexistent) root needs no setup.
-        let long_root = PathBuf::from(format!("/{}", "x".repeat(2 * SUN_PATH_MAX)));
-        let res = make_worker_scratch_dir(&long_root);
-        assert!(
-            matches!(res, Err(ToolHostError::Io(_))),
-            "overlong scratch root must be rejected with an Io error, got {res:?}"
-        );
-    }
-
-    #[test]
-    fn spawn_forced_net_worker_cleans_scratch_on_failure() {
-        // When the sidecar can't spawn, the per-worker scratch subdir created
-        // under `scratch_root` must NOT leak — there is no worker to own it, so
-        // the wrapper removes it on the failure path.
-        let backend = FailBackend;
-        let policy = SandboxPolicy {
-            net: Net::Allowlist(vec!["api.example.com:443".into()]),
-            ..SandboxPolicy::default()
-        };
-        let scratch_root = tempfile::tempdir().expect("scratch root");
-        let spec = allowlist_spec(&policy);
-        let allowlist = ["api.example.com:443".to_string()];
-        let params = NetWorkerSpawn {
-            backend: &backend,
-            proxy_bin: Path::new("/nonexistent/egress-proxy"),
-            spec: &spec,
-            allowlist: &allowlist,
-            worker_name: "web-fetch",
-            secret_fingerprints: &[],
-            cert_pins_json: None,
-            disable_mitm: false,
-        };
-        let _ = spawn_forced_net_worker(&params, scratch_root.path(), |_row| {});
-        let leftovers: Vec<_> = std::fs::read_dir(scratch_root.path())
-            .expect("read scratch root")
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "failed force-route spawn left {} scratch entries behind",
-            leftovers.len()
-        );
-    }
-
-    #[test]
-    fn net_worker_spawn_struct_carries_pins_field() {
-        let backend = FailBackend;
-        let policy = SandboxPolicy {
-            net: Net::Allowlist(vec!["api.example.com:443".into()]),
-            ..SandboxPolicy::default()
-        };
-        let spec = allowlist_spec(&policy);
-        let allowlist = ["example.com".to_string()];
-        let params = NetWorkerSpawn {
-            backend: &backend,
-            proxy_bin: Path::new("/nonexistent/proxy-bin"),
-            spec: &spec,
-            allowlist: &allowlist,
-            worker_name: "web-fetch",
-            secret_fingerprints: &[],
-            cert_pins_json: Some(r#"{"api.anthropic.com":["sha256/AAAA"]}"#),
-            disable_mitm: false,
-        };
-        let scratch = tempfile::tempdir().unwrap();
-        let res = spawn_net_worker(&params, scratch.path(), |_row| {});
-        assert!(res.is_err(), "missing proxy binary must fail closed");
-    }
-
-    #[test]
-    fn provision_writes_secret_hashes_into_scratch() {
-        use kastellan_leak_scan::{fingerprint_value, parse_hashes};
-        let dir = tempfile::tempdir().expect("scratch");
-        let fps = vec![fingerprint_value(b"a-spawn-time-secret").unwrap()];
-        provision_secret_hashes(dir.path(), &fps).expect("write");
-        let s = std::fs::read_to_string(dir.path().join("secret_hashes.json")).unwrap();
-        assert_eq!(parse_hashes(&s), fps);
-    }
-
-    #[test]
-    fn provision_empty_writes_empty_list() {
-        use kastellan_leak_scan::parse_hashes;
-        let dir = tempfile::tempdir().expect("scratch");
-        provision_secret_hashes(dir.path(), &[]).expect("write");
-        let s = std::fs::read_to_string(dir.path().join("secret_hashes.json")).unwrap();
-        assert!(parse_hashes(&s).is_empty());
-    }
-}
+mod tests;
