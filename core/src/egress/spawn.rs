@@ -98,7 +98,12 @@ pub fn proxy_policy(
         ],
         fs_write: vec![scratch.to_path_buf()],
         net: Net::ProxyEgress,
-        cpu_ms: 10_000,
+        // Long-lived (the sidecar lives 1:1 with its worker — for a channel
+        // worker that is weeks): no cumulative RLIMIT_CPU cap, same convention
+        // as `build_matrix_policy`. The historical `10_000` here was never
+        // enforced (the lockdown env was not derived before the spawn fix
+        // below) and WOULD have SIGKILLed a long-lived sidecar mid-flight.
+        cpu_ms: 0,
         mem_mb: 256,
         profile: Profile::WorkerNetClient,
         cpu_quota_pct: None,
@@ -124,9 +129,18 @@ pub fn spawn_sidecar(
     let uds_path = scratch.join(UDS_FILE_NAME);
     let _ = std::fs::remove_file(&uds_path);
 
+    // Derive the worker-side lockdown env (KASTELLAN_SECCOMP_PROFILE +
+    // KASTELLAN_LANDLOCK_RW/RO) exactly like every other spawn path. Without
+    // it the proxy's in-process lock_down ran with NO seccomp and — worse — a
+    // Landlock ruleset missing the fs_read grants, so post-lockdown glibc
+    // could not open /etc/resolv.conf|hosts|nsswitch.conf and EVERY
+    // DNS-needing CONNECT failed EAI_AGAIN ("Temporary failure in name
+    // resolution") on Linux. Literal-IP tunnels never resolve, which is why
+    // the hermetic suites stayed green while real-hostname egress was broken.
+    let derived = crate::tool_host::derive_lockdown_env(&policy);
     let program = binary.to_string_lossy();
     let child = backend
-        .spawn_under_policy(&policy, &program, &[])
+        .spawn_under_policy(&derived, &program, &[])
         .map_err(|e| anyhow::anyhow!("spawn egress-proxy sidecar: {e}"))?;
 
     // Slice #3a: the sidecar also exports its per-instance MITM CA next to the
@@ -164,6 +178,30 @@ mod tests {
         assert_eq!(env[ENV_UDS], "/scratch/egress.sock");
         assert_eq!(env[ENV_ALLOWLIST], r#"["example.com"]"#);
         assert_eq!(env[ENV_WORKER], "web-fetch");
+    }
+
+    /// Regression pin for the live-gate bug (5b-4a): the sidecar spawn must
+    /// derive the worker-prelude lockdown env from the policy. Without it the
+    /// proxy self-applied Landlock WITHOUT the fs_read grants, so post-lockdown
+    /// glibc could not read /etc/resolv.conf|hosts|nsswitch.conf and every
+    /// DNS-needing CONNECT failed EAI_AGAIN on Linux (hermetic literal-IP
+    /// suites stayed green, hiding it) — and ran with no seccomp at all.
+    /// `spawn_sidecar` feeds `proxy_policy` through `derive_lockdown_env`;
+    /// this pins what that derivation must yield for the proxy's policy.
+    #[test]
+    fn derived_proxy_policy_carries_lockdown_env_for_dns() {
+        let p = proxy_policy(Path::new("/opt/proxy"), &["matrix.example.org:443".into()], Path::new("/scratch"), "matrix", None, true);
+        let d = crate::tool_host::derive_lockdown_env(&p);
+        let env: std::collections::HashMap<_, _> = d.env.into_iter().collect();
+        assert_eq!(env["KASTELLAN_SECCOMP_PROFILE"], "net_client");
+        let ro: Vec<String> = serde_json::from_str(&env["KASTELLAN_LANDLOCK_RO"]).unwrap();
+        for path in ["/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"] {
+            assert!(ro.iter().any(|r| r == path), "Landlock RO must grant {path}");
+        }
+        let rw: Vec<String> = serde_json::from_str(&env["KASTELLAN_LANDLOCK_RW"]).unwrap();
+        assert!(rw.iter().any(|r| r == "/scratch"), "Landlock RW must grant the scratch dir");
+        // Long-lived sidecar: no cumulative RLIMIT_CPU (cpu_ms == 0 ⇒ env omitted).
+        assert!(!env.contains_key("KASTELLAN_CPU_MS"), "no CPU rlimit for a long-lived sidecar");
     }
 
     #[test]
