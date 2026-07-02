@@ -550,6 +550,7 @@ items unlock later ones.
 
 ## Cross-cutting / continuous
 
+- [x] **Full-project security audit + remediation (pre-release)** — `docs/security-audit-2026-07-02.md`; 9 fixes landed (recall injection-screen + framing-escape of `<recalled>`/`<l1_insights>`, JSON-RPC 64 MiB record cap, `pdf-extract`→`lopdf 0.42`, SSRF IPv6-transition ranges, `MacosContainer` fail-closed egress, systemd path-field guard, migration 0020 `search_path`, script hardening) — PR [#392](https://github.com/hherb/kastellan/pull/392), 2026-07-02. **Open follow-ups:** [#386](https://github.com/hherb/kastellan/issues/386) (pin provisioning-binary checksums), [#387](https://github.com/hherb/kastellan/issues/387) (normalize `..`/symlinks in bwrap/FC binds), [#388](https://github.com/hherb/kastellan/issues/388) (worker-discovery ownership probe), [#389](https://github.com/hherb/kastellan/issues/389) (keyring first-init race + scrub gaps), [#393](https://github.com/hherb/kastellan/issues/393) (SSRF site-specific NAT64 / Teredo / ISATAP residual).
 - [ ] Threat-model doc kept in sync with shipped backends
 - [ ] Architecture doc kept in sync with shipped components
 - [ ] License audit on every new dependency (AGPL-compatible only)

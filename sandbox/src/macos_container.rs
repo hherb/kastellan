@@ -482,6 +482,23 @@ impl SandboxBackend for MacosContainer {
             }
         }
 
+        // Fail closed on force-routing (audit finding #5): a `proxy_uds`-set
+        // policy means "this worker's ONLY egress is the proxy UDS". This
+        // backend maps Net::Allowlist to `--network default` (NAT egress) and
+        // does not bind the UDS, so it cannot honour that contract — running
+        // anyway would silently give a force-routed worker full internet
+        // egress, bypassing the egress proxy's SSRF/allowlist enforcement.
+        // The Seatbelt backend implements the deny-all-except-UDS filter; a
+        // net worker that cannot prove that on this host must route through a
+        // backend that can, never through here.
+        if policy.proxy_uds.is_some() {
+            return Err(SandboxError::Backend(
+                "MacosContainer cannot enforce force-routed egress (proxy_uds set); \
+                 refuse rather than grant unrestricted NAT egress"
+                    .into(),
+            ));
+        }
+
         let argv = build_container_argv(policy, &self.image, program, args);
 
         let mut cmd = Command::new(&argv[0]);

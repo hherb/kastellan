@@ -87,6 +87,23 @@ fn install_rejects_relative_program_path() {
 }
 
 #[test]
+fn install_rejects_newline_in_path_field() {
+    // Audit finding #10: a newline in a path field would inject a unit-file
+    // directive (path fields are written verbatim via Display). Must fail
+    // closed before any file is written.
+    let dir = TestRoot::new("newline-path");
+    let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+    let mut spec = minimal_spec("svc");
+    spec.working_dir = Some(PathBuf::from("/tmp\nExecStartPre=/evil"));
+    let err = sup.install(&spec).expect_err("newline working_dir must be rejected");
+    assert!(matches!(err, SupervisorError::Io(_)), "{err}");
+    assert!(
+        !sup.unit_path("svc").exists(),
+        "no unit file may be written when a path field is rejected"
+    );
+}
+
+#[test]
 fn install_rejects_invalid_name() {
     let dir = TestRoot::new("bad-name");
     let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());

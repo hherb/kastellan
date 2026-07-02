@@ -121,6 +121,25 @@ fn build_unit_file_emits_log_redirects_when_set() {
 }
 
 #[test]
+fn build_unit_file_quotes_newline_in_path_field_so_it_cannot_inject_a_directive() {
+    // Audit finding #10 (altitude): a newline in a path field must not break
+    // the line and inject a directive. The builder escapes it at the emission
+    // seam via quote_if_needed, independent of SystemdUser::install's guard.
+    let mut spec = minimal_spec("svc");
+    spec.working_dir = Some(PathBuf::from("/tmp\nExecStartPre=/evil"));
+    let s = build_unit_file(&spec);
+    assert!(
+        !s.contains("\nExecStartPre=/evil"),
+        "a newline in a path must not start a new directive line; got:\n{s}"
+    );
+    // The newline is escaped inside a quoted value instead.
+    assert!(
+        s.contains(r#"WorkingDirectory="/tmp\nExecStartPre=/evil""#),
+        "path with a newline must be quoted+escaped; got:\n{s}"
+    );
+}
+
+#[test]
 fn build_unit_file_keep_alive_emits_restart_directives() {
     let mut spec = minimal_spec("svc");
     spec.keep_alive = true;

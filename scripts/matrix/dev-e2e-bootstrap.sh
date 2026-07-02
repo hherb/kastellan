@@ -56,10 +56,14 @@ up() {
   "$DOCKER" rm -f "$CNAME" >/dev/null 2>&1 || true
   rm -rf "$STATE"
   mkdir -p "$STATE/db"
-  # World-writable so the container's (image-defined, often non-root) uid can
-  # write the bind-mounted store regardless of host uid. Acceptable only because
-  # this is a dev-only, loopback, throwaway homeserver under "$HOME/.local/state".
-  chmod -R 777 "$STATE"
+  # Owner-only perms: the generated registration_token/passwords must never be
+  # group- or world-readable — the old `chmod -R 777` left them readable+
+  # writable by every local user (audit finding #13). Instead of widening the
+  # perms so the container's (image-defined) uid can write, we run the
+  # container AS the host user (see the --user/--userns mapping on `docker run`
+  # below), so the writing process OWNS these files and owner perms suffice.
+  # Still dev-only/loopback/throwaway under "$HOME".
+  chmod -R u+rwX,go-rwx "$STATE"
 
   # Loopback, federation-off, token-gated registration (mirrors the production
   # security invariants; conduit-flavoured config keys).
@@ -78,8 +82,19 @@ trusted_servers = []
 max_request_size = 20000000
 EOF
 
+  # Run the container as the host user so it can write the owner-only bind
+  # mount regardless of the image's default uid. Docker honours `--user
+  # uid:gid`; rootless podman instead keeps the invoking user's id inside the
+  # container userns via `--userns=keep-id`.
+  local -a userns
+  case "$DOCKER" in
+    *podman*) userns=(--userns=keep-id) ;;
+    *)        userns=(--user "$(id -u):$(id -g)") ;;
+  esac
+
   echo "### starting homeserver ($IMAGE) detached on 127.0.0.1:$PORT"
   "$DOCKER" run -d --rm \
+    "${userns[@]}" \
     -p "127.0.0.1:${PORT}:${PORT}" \
     -v "$STATE:/var/lib/matrix-conduit" \
     -e CONDUIT_CONFIG="/var/lib/matrix-conduit/conduit.toml" \

@@ -111,6 +111,28 @@ fn netclient_policy() -> SandboxPolicy {
 }
 
 #[test]
+fn spawn_rejects_force_routed_policy_before_spawn() {
+    // Audit finding #5: a proxy_uds-set (force-routed) policy must be refused
+    // by this backend rather than run with NAT egress. The guard fires before
+    // any `container` spawn, so this test needs no CLI. `/bin/true` would
+    // otherwise be a valid program.
+    let p = SandboxPolicy {
+        profile: Profile::WorkerNetClient,
+        net: Net::Allowlist(vec!["api.example.com:443".into()]),
+        proxy_uds: Some(PathBuf::from("/tmp/kastellan-proxy.sock")),
+        ..SandboxPolicy::default()
+    };
+    let err = MacosContainer::new()
+        .spawn_under_policy(&p, "/bin/true", &[])
+        .expect_err("force-routed policy must be rejected");
+    let SandboxError::Backend(msg) = err;
+    assert!(
+        msg.contains("proxy_uds"),
+        "error must name the force-routing gap; got: {msg}"
+    );
+}
+
+#[test]
 fn argv_starts_with_container_run() {
     let argv = build_container_argv(&strict_policy(), DEFAULT_IMAGE, "/bin/echo", &["hi"]);
     assert_eq!(argv[0], "container");

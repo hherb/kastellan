@@ -1,9 +1,9 @@
 //! Client-side helper: talk to a child worker over its stdio pipes.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout};
 
-use crate::{codes, Request, Response, RpcError};
+use crate::{codes, read_capped_record, Record, Request, Response, RpcError, MAX_RECORD_BYTES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -13,6 +13,8 @@ pub enum ClientError {
     Decode(#[from] serde_json::Error),
     #[error("worker exited before responding")]
     EarlyExit,
+    #[error("worker response exceeded the {cap}-byte record cap")]
+    ResponseTooLarge { cap: usize },
     #[error("response id {got:?} does not match request id {expected:?}")]
     IdMismatch {
         expected: serde_json::Value,
@@ -67,12 +69,19 @@ impl Client {
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
 
-        let mut line = String::new();
-        let n = self.stdout.read_line(&mut line)?;
-        if n == 0 {
-            return Err(ClientError::EarlyExit);
-        }
-        let resp: Response = serde_json::from_str(line.trim())?;
+        // Bounded read (shared with the server): a worker that never emits `\n`
+        // must not be able to drive the core to OOM (audit finding #2).
+        let buf = match read_capped_record(&mut self.stdout, MAX_RECORD_BYTES)? {
+            Record::Line(buf) => buf,
+            Record::Eof => return Err(ClientError::EarlyExit),
+            Record::TooLarge => {
+                return Err(ClientError::ResponseTooLarge {
+                    cap: MAX_RECORD_BYTES,
+                })
+            }
+        };
+        // serde_json tolerates the trailing `\n` (surrounding whitespace is skipped).
+        let resp: Response = serde_json::from_slice(&buf)?;
         if resp.id != id {
             return Err(ClientError::IdMismatch {
                 expected: id,

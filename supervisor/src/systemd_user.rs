@@ -320,6 +320,30 @@ impl SystemdUser {
             )));
         }
 
+        // Defense-in-depth (audit finding #10): path fields are written into
+        // unit-file directives verbatim via `Display`, so a value containing a
+        // newline (e.g. "/tmp\nExecStartPre=/evil") would inject a `[Service]`
+        // directive. `args`/`env` already go through `quote_if_needed` (which
+        // escapes newlines), but these path fields did not. Specs are
+        // code-constructed today, but `ServiceSpec` is `Deserialize`, so reject
+        // any control character before the write.
+        let path_fields: [(&str, Option<&PathBuf>); 5] = [
+            ("program", Some(&spec.program)),
+            ("environment_file", spec.environment_file.as_ref()),
+            ("working_dir", spec.working_dir.as_ref()),
+            ("stdout_log", spec.stdout_log.as_ref()),
+            ("stderr_log", spec.stderr_log.as_ref()),
+        ];
+        for (field, maybe_path) in path_fields {
+            if let Some(p) = maybe_path {
+                if p.to_string_lossy().contains(|c: char| c.is_control()) {
+                    return Err(SupervisorError::Io(format!(
+                        "{field} must not contain control characters, got {p:?}"
+                    )));
+                }
+            }
+        }
+
         fs::create_dir_all(&self.units_dir)
             .map_err(|e| SupervisorError::Io(format!("create {}: {e}", self.units_dir.display())))?;
 
