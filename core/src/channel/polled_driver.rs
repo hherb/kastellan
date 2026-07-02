@@ -82,10 +82,6 @@ impl WorkerCalls for PersistentHandle {
 /// both endpoints stops the driver thread, which drops its [`WorkerCalls`] —
 /// for a [`PersistentHandle`] that is the supervisor shutdown (worker + any
 /// sidecar torn down via RAII).
-// The endpoints are read by this module's tests today; the Matrix channel
-// adoption (next task in slice 5b-4a) is the first in-crate consumer, so the
-// non-test lib compile sees them as unread until then.
-#[allow(dead_code)]
 pub struct PolledWorkerDriver {
     pub(crate) inbound_rx: tok_mpsc::Receiver<IncomingMessage>,
     pub(crate) outbound_tx: std_mpsc::Sender<OutgoingMessage>,

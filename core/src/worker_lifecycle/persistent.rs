@@ -3,12 +3,14 @@
 //! death (capped-exponential backoff + sliding-window rate alarm). PDEATHSIG-safe
 //! (the spawning thread outlives the worker — required under the slice-5a
 //! bwrap-confined launcher). A generalization of the Matrix channel's
-//! `supervised_self_spawn`/`drive`, with no channel/poll-send coupling.
+//! historical self-spawning supervised-driver pattern, with no
+//! channel/poll-send coupling — the Matrix channel now consumes this
+//! supervisor directly (see `channel::matrix::spawn_matrix_worker`).
 //!
 //! Also houses [`ClientTransport`]: the production [`PersistentTransport`] impl
 //! that wraps a real [`kastellan_protocol::client::Client`] over a sandboxed
-//! worker's stdio, with stderr-tail death reporting (same pattern as the Matrix
-//! channel's `ProtocolWorkerClient`).
+//! worker's stdio, with stderr-tail death reporting (the same pattern the
+//! Matrix channel used before adopting this shared supervisor).
 use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
@@ -25,7 +27,7 @@ use crate::worker_lifecycle::RestartBackoff;
 /// worker's stdio, with a bounded stderr-tail for death diagnostics.
 ///
 /// Reuses the lockdown-env derivation + stderr-tail drain that the Matrix
-/// channel's `spawn_worker_client` uses, without coupling to that module.
+/// channel's worker spawn uses, without coupling to that module.
 pub struct ClientTransport {
     client: Client,
     /// Bounded tail of the worker's recent stderr lines, retained by the drain
@@ -41,8 +43,8 @@ impl ClientTransport {
     ///
     /// Applies the same worker-side lockdown-env derivation
     /// (`KASTELLAN_LANDLOCK_*` / `KASTELLAN_SECCOMP_PROFILE`) that
-    /// `tool_host::spawn_worker` and `channel::matrix::spawn_worker_client` do,
-    /// so the worker is locked down identically regardless of spawn path.
+    /// `tool_host::spawn_worker` does, so the worker is locked down
+    /// identically regardless of spawn path.
     pub fn spawn(
         backend: &dyn SandboxBackend,
         policy: &SandboxPolicy,

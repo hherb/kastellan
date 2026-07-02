@@ -1,9 +1,11 @@
 //! Hermetic full-loop e2e for the Matrix channel: spawns the `fake_matrix_worker`
 //! example as a real child process, speaks the real `matrix.*` JSON-RPC over real
-//! pipes through `ProtocolWorkerClient` + `MatrixChannel`, and drives it through
-//! the real `ChannelBus` with the slice-#1 fake DB seams. Proves the spawn,
-//! protocol, driver, bus, and routing integration with **no matrix-rust-sdk, no
-//! homeserver, no sandbox, no Postgres**. Skip-as-pass if the fixture is unbuilt.
+//! pipes through the PRODUCTION stack — `PersistentWorker` (supervision) +
+//! `PolledWorkerDriver` (poll/identity/pending) + `MatrixChannel` — and drives it
+//! through the real `ChannelBus` with the slice-#1 fake DB seams. Proves the
+//! spawn, protocol, driver, bus, and routing integration with **no
+//! matrix-rust-sdk, no homeserver, no sandbox, no Postgres**. Skip-as-pass if
+//! the fixture is unbuilt.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -14,8 +16,14 @@ use serde_json::{json, Value};
 
 use kastellan_core::channel::auth::StaticPairings;
 use kastellan_core::channel::bus::{ChannelBus, ChannelEvents, CompletedTasks};
-use kastellan_core::channel::matrix::{MatrixChannel, ProtocolWorkerClient};
+use kastellan_core::channel::matrix::{
+    encode_matrix_send, parse_matrix_poll, MatrixChannel, MATRIX_POLLED_SPEC,
+};
+use kastellan_core::channel::polled_driver::PolledWorkerDriver;
 use kastellan_core::channel::{ChannelId, PeerId};
+use kastellan_core::worker_lifecycle::persistent::{
+    ClientTransport, PersistentFactory, PersistentTransport, PersistentWorker,
+};
 use kastellan_db::tasks::Lane;
 use kastellan_protocol::client::Client;
 
@@ -66,7 +74,9 @@ impl CompletedTasks for FakeCompleted {
     }
 }
 
-/// Spawn the fixture worker (plain child, piped stdio) wired into a MatrixChannel.
+/// Spawn the fixture worker (plain child, piped stdio) through the PRODUCTION
+/// stack: PersistentWorker (supervision) + PolledWorkerDriver (poll/identity/
+/// pending) + MatrixChannel — everything but the sandbox and the sidecar.
 fn spawn_matrix_channel(sent_file: &PathBuf, peer: &str) -> Option<MatrixChannel> {
     let bin = fixture_bin();
     if !bin.exists() {
@@ -76,18 +86,34 @@ fn spawn_matrix_channel(sent_file: &PathBuf, peer: &str) -> Option<MatrixChannel
         );
         return None;
     }
-    let child = Command::new(&bin)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .env("FAKE_MATRIX_SENT", sent_file)
-        .env("FAKE_MATRIX_PEER", peer)
-        .env("FAKE_MATRIX_ROOM", "!room:srv")
-        .env("FAKE_MATRIX_BODY", "hello from peer")
-        .spawn()
-        .expect("spawn fake matrix worker");
-    let client = Client::from_child(child).expect("connect to fake worker");
-    Some(MatrixChannel::new(ChannelId("matrix".into()), Box::new(ProtocolWorkerClient::new(client))))
+    let sent_file = sent_file.clone();
+    let peer = peer.to_string();
+    let factory: PersistentFactory = Box::new(move || {
+        let child = Command::new(&bin)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .env("FAKE_MATRIX_SENT", &sent_file)
+            .env("FAKE_MATRIX_PEER", &peer)
+            .env("FAKE_MATRIX_ROOM", "!room:srv")
+            .env("FAKE_MATRIX_BODY", "hello from peer")
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("spawn fake matrix worker: {e}"))?;
+        let client = Client::from_child(child)
+            .map_err(|e| anyhow::anyhow!("connect to fake worker: {e}"))?;
+        Ok(Box::new(ClientTransport::from_client(client)) as Box<dyn PersistentTransport>)
+    });
+    let handle = PersistentWorker::spawn("matrix-e2e", factory).expect("persistent spawn");
+    let (driver, identity) = PolledWorkerDriver::spawn(
+        MATRIX_POLLED_SPEC,
+        Box::new(handle),
+        parse_matrix_poll,
+        encode_matrix_send,
+        ChannelId("matrix".into()),
+    )
+    .expect("polled driver spawn");
+    assert_eq!(identity["user_id"], "@bot:srv", "matrix.init identity must surface");
+    Some(MatrixChannel::from_driver(ChannelId("matrix".into()), driver))
 }
 
 #[tokio::test]

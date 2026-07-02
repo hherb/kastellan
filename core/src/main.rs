@@ -135,7 +135,10 @@ async fn main() -> Result<()> {
         kastellan_core::worker_lifecycle::CompositeLifecycle::with_backoff_and_force_routing(
             Arc::clone(&sandboxes),
             kastellan_core::worker_lifecycle::RestartBackoff::default(),
-            force_routing,
+            // Cloned (cheap — `Option<Arc<_>>`): the matrix channel spawn
+            // block below also needs the resolved config to build its own
+            // `MatrixEgress`, after `force_routing` is moved in here.
+            force_routing.clone(),
         ),
     );
 
@@ -382,14 +385,26 @@ async fn main() -> Result<()> {
         // timeout the blocking task is left to drain against the SDK's own HTTP
         // timeouts (a blocking task can't be force-cancelled).
         #[cfg(target_os = "linux")]
-        let backend = Arc::clone(&sandboxes.bwrap);
+        let backend: Arc<dyn kastellan_sandbox::SandboxBackend> = Arc::clone(&sandboxes.bwrap);
         #[cfg(target_os = "macos")]
-        let backend = Arc::clone(&sandboxes.seatbelt);
+        let backend: Arc<dyn kastellan_sandbox::SandboxBackend> = Arc::clone(&sandboxes.seatbelt);
+        // Matrix rides the global force-routing flag (5b-4 spec decision 2):
+        // when the daemon resolved a ForceRoutingConfig, the matrix worker gets
+        // a per-worker transparent-tunnel sidecar; decisions audit to PG via
+        // the same sink every force-routed worker uses. In 5b-4a the sidecar
+        // backend equals the worker backend (both host jails).
+        let egress = force_routing.as_ref().map(|fr| {
+            kastellan_core::channel::matrix::MatrixEgress {
+                sidecar_backend: Arc::clone(&backend),
+                routing: Arc::clone(fr),
+            }
+        });
         let spawn = tokio::task::spawn_blocking(move || {
             kastellan_core::channel::matrix::spawn_matrix_worker(
                 backend,
                 kastellan_core::channel::ChannelId("matrix".to_string()),
                 &spawn_cfg,
+                egress,
             )
         });
         const MATRIX_LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
