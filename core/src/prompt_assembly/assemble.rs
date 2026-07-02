@@ -39,11 +39,10 @@
 //!    always present (`<handoff>` is constant compiled-in text).
 //! 2. One blank line between sections.
 //! 3. Each row renders as `- {body}` (one row per line).
-//! 4. L0/L1/skills bodies pass through verbatim (no HTML-style escaping
-//!    of `<` `>`). L0 and surfaced skills are operator-gated, and L1's
-//!    own delimiter (`</l1_insights>`) plus newlines are rejected at
-//!    write time by `validate_l1_body`, so none can break their block.
-//!    **`<recalled>` bodies are escaped** — see the note below.
+//! 4. L0/skills bodies pass through verbatim (no HTML-style escaping
+//!    of `<` `>`); **L1 and `<recalled>` bodies are escaped** via
+//!    [`escape_untrusted_body`] — see the note below. L0 and surfaced
+//!    skills are operator-gated, so they cannot carry laundered content.
 //!
 //!    **Note for `<skills>` bodies:** Surfaced skills are
 //!    operator-approved (`user_approved` / `pinned` trust marker
@@ -52,19 +51,25 @@
 //!    (L0/L1), before the unverified `recalled` output. The
 //!    `<skills>` block is omitted entirely when the slice is empty.
 //!
-//!    **SAFETY — `<recalled>` bodies are untrusted (adversary #6).**
-//!    Recall bodies are the lowest-trust memory source: any process with
-//!    `INSERT` on `memories` writes them, including the agent-raised L1
-//!    promotion writer, which launders untrusted LLM output into the
-//!    store. Recall surfaces whatever the (layer-agnostic) lanes return.
-//!    Two layers defend the planner prompt: (a) catalogue screening in
-//!    [`crate::recall_assembly`] drops rows that trip the injection
-//!    guard before they reach a [`RecalledContext`], and (b) this
-//!    assembler escapes `&`/`<`/`>` in every recalled body via
-//!    [`escape_recalled_body`] so no stored row can close `<recalled>`
-//!    or forge framing. The `recalled_block_escapes_framing_delimiters`
-//!    test pins the escaping; the recall-builder tests pin the screen.
-//!    Threat-model reference: `docs/threat-model.md` (adversary #6) and
+//!    **SAFETY — L1 and `<recalled>` bodies are untrusted (adversary #6).**
+//!    Both blocks can carry laundered LLM output: `<recalled>` is the
+//!    lowest-trust memory source (any process with `INSERT` on `memories`
+//!    writes it), and `<l1_insights>` mixes operator-curated rows with
+//!    agent-raised rows promoted from `Plan.l1_insight` by the L1
+//!    promotion writer — the same untrusted channel. `validate_l1_body`
+//!    blocks only L1's *own* delimiter (`</l1_insights>`) and newlines at
+//!    write time, so a stored L1 body can still forge *other* framing
+//!    (`<recalled>`, `<system>`, a chat-template token) unless escaped
+//!    here. This assembler therefore escapes `&`/`<`/`>` and neutralises
+//!    control chars (incl. newlines) in **every L1 and recalled body** via
+//!    [`escape_untrusted_body`], so no stored row can close a block, forge
+//!    framing, or forge an extra `- ` row. Recall gains a second layer:
+//!    catalogue screening in [`crate::recall_assembly`] drops rows that
+//!    trip the injection guard before they reach a [`RecalledContext`].
+//!    The `recalled_block_escapes_framing_delimiters` and
+//!    `l1_block_escapes_framing_delimiters` tests pin the escaping; the
+//!    recall-builder tests pin the screen. Threat-model reference:
+//!    `docs/threat-model.md` (adversary #6) and
 //!    `docs/security-audit-2026-07-02.md` (finding #1).
 //! 5. The `<recalled>` block is omitted when the
 //!    [`RecalledContext`] is empty (the
@@ -114,28 +119,39 @@ fn render_handoff_block() -> String {
     )
 }
 
-/// Neutralise prompt-framing delimiters in an untrusted recalled body so a
-/// stored memory cannot close the `<recalled>` block — or forge any other
-/// framing tag (`<base>`, `<system>`, a chat-template token) — and inject
-/// content the planner reads as higher-trust structure.
+/// Neutralise prompt-framing in an untrusted memory body so a stored row
+/// cannot close its block — or forge any other framing tag (`<base>`,
+/// `<system>`, a chat-template token) — and cannot forge an extra `- ` row,
+/// injecting content the planner reads as higher-trust structure.
 ///
-/// Recall bodies are the lowest-trust memory source: *any* process with
-/// `INSERT` on `memories` writes them, including the agent-raised L1
-/// promotion writer that launders untrusted LLM output into the store
-/// (threat-model adversary #6). Escaping `&` / `<` / `>` means no `<tag>`
-/// sequence can form in a recalled body, closing the delimiter-breakout
-/// vector regardless of what any upstream writer or builder allowed. This is
-/// the render-level guarantee; catalogue screening in
-/// [`crate::recall_assembly`] is the complementary content-trust layer.
+/// Applied to **L1 and `<recalled>` bodies** — both carry laundered LLM
+/// output (threat-model adversary #6): `<recalled>` is written by any process
+/// with `INSERT` on `memories`, and `<l1_insights>` mixes operator rows with
+/// agent-raised rows the L1 promotion writer sources from `Plan.l1_insight`.
 ///
-/// `&` is escaped first so an already-`&amp;`-looking body round-trips
-/// unambiguously. Only the `<recalled>` block is escaped — L0/skills are
-/// operator-gated and L1's own delimiter is blocked at write time by
-/// `validate_l1_body`.
-fn escape_recalled_body(body: &str) -> String {
-    body.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+/// Two neutralisations, both render-level guarantees that hold regardless of
+/// what any upstream writer or builder allowed:
+/// - Escaping `&` / `<` / `>` means no `<tag>` sequence can form, closing the
+///   delimiter-breakout / framing-forgery vector.
+/// - Replacing every C0 control char (`< 0x20`, which includes `\n` and `\r`)
+///   with a space keeps the one-row-per-line contract, so a body cannot forge
+///   a sibling `- ` row (nor smuggle NUL / ANSI escapes into the prompt).
+///
+/// Single pass: `&` maps to `&amp;` unconditionally, so an already-`&amp;`-
+/// looking body round-trips exactly as the old chained-`replace` form did.
+/// L0/skills are left verbatim — they are operator-gated, not laundered.
+fn escape_untrusted_body(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    for c in body.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c if (c as u32) < 0x20 => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Render the supplied memory slices, surfaced skills, recall context, and
@@ -171,7 +187,9 @@ pub fn assemble_system_prompt(
         out.push_str("<l1_insights>\n");
         for row in l1 {
             out.push_str("- ");
-            out.push_str(&row.body);
+            // L1 mixes operator rows with agent-raised (laundered) rows; escape
+            // every body so a stored row cannot forge framing (audit finding #1).
+            out.push_str(&escape_untrusted_body(&row.body));
             out.push('\n');
         }
         out.push_str("</l1_insights>\n\n");
@@ -189,7 +207,7 @@ pub fn assemble_system_prompt(
         out.push_str("<recalled>\n");
         for body in &recalled.bodies {
             out.push_str("- ");
-            out.push_str(&escape_recalled_body(body));
+            out.push_str(&escape_untrusted_body(body));
             out.push('\n');
         }
         out.push_str("</recalled>\n\n");

@@ -1,9 +1,12 @@
 //! Worker-side helper: read JSON-RPC requests from stdin, dispatch to a
 //! [`Handler`], write JSON-RPC responses to stdout. Synchronous, line-delimited.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 
-use crate::{codes, err_response, ok_response, Request, RpcError, MAX_RECORD_BYTES};
+use crate::{
+    codes, err_response, ok_response, read_capped_record, Record, Request, RpcError,
+    MAX_RECORD_BYTES,
+};
 
 pub trait Handler {
     /// Handle one method call. Returning `Ok(value)` becomes a JSON-RPC
@@ -46,28 +49,24 @@ where
     W: Write,
 {
     let mut br = BufReader::new(reader);
-    let mut buf: Vec<u8> = Vec::new();
     loop {
-        buf.clear();
-        // Bounded read, symmetric with the client: a single record is never
+        // Bounded read, shared with the client: a single record is never
         // buffered beyond `cap`. An over-cap record is a protocol error, not
         // something to keep buffering.
-        let n = (&mut br)
-            .take(cap as u64 + 1)
-            .read_until(b'\n', &mut buf)?;
-        if n == 0 {
-            return Ok(()); // EOF: parent closed stdin
-        }
-        if n > cap {
-            let response = err_response(
-                serde_json::Value::Null,
-                RpcError::new(codes::INVALID_REQUEST, "request exceeded record cap"),
-            );
-            serde_json::to_writer(&mut *writer, &response)?;
-            writer.write_all(b"\n")?;
-            writer.flush()?;
-            return Ok(());
-        }
+        let buf = match read_capped_record(&mut br, cap)? {
+            Record::Eof => return Ok(()), // parent closed stdin
+            Record::TooLarge => {
+                let response = err_response(
+                    serde_json::Value::Null,
+                    RpcError::new(codes::INVALID_REQUEST, "request exceeded record cap"),
+                );
+                serde_json::to_writer(&mut *writer, &response)?;
+                writer.write_all(b"\n")?;
+                writer.flush()?;
+                return Ok(());
+            }
+            Record::Line(buf) => buf,
+        };
         if buf.iter().all(u8::is_ascii_whitespace) {
             continue; // blank line (incl. the trailing newline of an empty record)
         }

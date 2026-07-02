@@ -70,7 +70,11 @@ const MAX_NAME_LEN: usize = 200;
 /// `program` and each entry in `args` are emitted into `ExecStart=`,
 /// space-separated. Tokens that contain whitespace, quotes, or
 /// backslashes are wrapped in `"..."` with `"` and `\` escaped per
-/// systemd's quoting rules. Same for environment values.
+/// systemd's quoting rules. Same for environment values **and for every
+/// path field** (`WorkingDirectory`, `EnvironmentFile`, `StandardOutput`,
+/// `StandardError`): routing them through [`quote_if_needed`] escapes a
+/// newline as `\n`, so a control character in a path can never break the
+/// line and inject a directive. A clean absolute path is emitted verbatim.
 pub fn build_unit_file(spec: &ServiceSpec) -> String {
     let mut out = String::with_capacity(512);
 
@@ -114,19 +118,40 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
         out.push_str(&quote_if_needed(&kv));
         out.push('\n');
     }
+    // Path fields go through the same `quote_if_needed` as args/env, at the
+    // emission seam. A clean absolute path (the only legitimate input) is
+    // emitted unchanged; a value containing a newline or other fragile char is
+    // quoted with the newline escaped as `\n`, so it can never break the line
+    // and inject a `[Service]` directive — regardless of whether the caller
+    // reached the builder through `SystemdUser::install`'s control-char guard
+    // (audit finding #10). Escaping here, not just at the driver, keeps the
+    // guarantee at the point every directive is written (cf. launchd's
+    // `xml_escape` inside `build_plist`).
     if let Some(env_file) = &spec.environment_file {
-        out.push_str(&format!("EnvironmentFile={}\n", env_file.display()));
+        out.push_str(&format!(
+            "EnvironmentFile={}\n",
+            quote_if_needed(&env_file.to_string_lossy())
+        ));
     }
 
     if let Some(dir) = &spec.working_dir {
-        out.push_str(&format!("WorkingDirectory={}\n", dir.display()));
+        out.push_str(&format!(
+            "WorkingDirectory={}\n",
+            quote_if_needed(&dir.to_string_lossy())
+        ));
     }
 
     if let Some(log) = &spec.stdout_log {
-        out.push_str(&format!("StandardOutput=append:{}\n", log.display()));
+        out.push_str(&format!(
+            "StandardOutput=append:{}\n",
+            quote_if_needed(&log.to_string_lossy())
+        ));
     }
     if let Some(log) = &spec.stderr_log {
-        out.push_str(&format!("StandardError=append:{}\n", log.display()));
+        out.push_str(&format!(
+            "StandardError=append:{}\n",
+            quote_if_needed(&log.to_string_lossy())
+        ));
     }
 
     if spec.keep_alive {

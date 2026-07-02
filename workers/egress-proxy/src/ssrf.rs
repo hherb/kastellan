@@ -7,8 +7,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// True iff `ip` is in a range we refuse to connect a *resolved hostname* to.
 /// Covers loopback, RFC1918 private, link-local, unique-local, CGNAT,
-/// multicast, unspecified, class-E reserved, and every IPv4-in-IPv6
-/// transition encoding (each unwrapped + re-checked as v4).
+/// multicast, unspecified, class-E reserved, and the fixed-prefix IPv4-in-IPv6
+/// transition encodings (IPv4-mapped, IPv4-compatible, IPv4-translated,
+/// well-known NAT64 `64:ff9b::/96`, 6to4) — each unwrapped + re-checked as v4.
+/// See [`embedded_transition_v4`] for the residual gap (site-specific NAT64
+/// prefixes, Teredo, ISATAP), tracked as a follow-up issue.
 pub fn is_denied_range(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_denied_v4(v4),
@@ -18,10 +21,11 @@ pub fn is_denied_range(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_denied_v4(v4);
             }
-            // Every other IPv4-in-IPv6 transition encoding (compatible,
-            // translated, NAT64, 6to4) embeds a v4 the host kernel may route
-            // to an internal destination — unwrap + re-classify each so a
-            // private v4 can never hide inside them (fail-closed).
+            // The fixed-prefix IPv4-in-IPv6 transition encodings (compatible,
+            // translated, well-known NAT64, 6to4) embed a v4 the host kernel
+            // may route to an internal destination — unwrap + re-classify each
+            // so a private v4 can never hide inside them (fail-closed). Note
+            // the residual gap documented on `embedded_transition_v4`.
             if let Some(v4) = embedded_transition_v4(v6) {
                 return is_denied_v4(v4);
             }
@@ -38,6 +42,23 @@ pub fn is_denied_range(ip: IpAddr) -> bool {
 /// on an IPv6-only host synthesises NAT64 (`64:ff9b::/96`) addresses, so an
 /// allowlisted hostname could resolve to an embedded private/loopback v4 and
 /// bypass the v4 deny list entirely (audit finding #4).
+///
+/// **Not covered (documented residual, tracked as a follow-up issue):**
+/// - *Site-specific NAT64 prefixes* (RFC 6052 Network-Specific Prefixes at
+///   /32../64, and RFC 8215's `64:ff9b:1::/48` local-use prefix). The proxy
+///   cannot know a host's configured NAT64 prefix, and for prefixes shorter
+///   than /96 the embedded v4 is split around the reserved bits 64..71, so it
+///   cannot be extracted soundly without that config. The well-known
+///   `64:ff9b::/96` prefix — which dominates real DNS64 deployments — *is*
+///   covered above.
+/// - *Teredo* (`2001::/32`) and *ISATAP* (`::0:5efe:a.b.c.d`) embed a v4 in
+///   positions other than the trailing 32 bits; resolvers do not synthesise
+///   these for allowlisted hostnames, so they are a weaker vector.
+///
+/// These are unreachable on the common well-known-prefix deployment; a
+/// belt-and-braces fix (or a connect-time re-check against the actual peer
+/// address) is tracked separately rather than inviting a subtle split-embed
+/// bug in this security-critical predicate.
 fn embedded_transition_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     let s = ip.segments();
     let trailing_v4 = || {

@@ -109,10 +109,10 @@ bwrap/KVM/PG verification pending on the DGX):
 
 | # | Status | Where |
 |---|--------|-------|
-| 1 | Fixed | recall screening (`recall_assembly::screen_recall_rows`) + `<recalled>` delimiter escaping (`prompt_assembly::escape_recalled_body`) |
-| 2 | Fixed | `MAX_RECORD_BYTES` cap + bounded reader in `protocol` client & server |
+| 1 | Fixed | recall screening (`recall_assembly::screen_recall_rows`) + framing escaping of **both** `<recalled>` and `<l1_insights>` bodies (`prompt_assembly::escape_untrusted_body`) — the L1 render path is the same laundered-LLM channel, so it is escaped too (post-review follow-up) |
+| 2 | Fixed | `MAX_RECORD_BYTES` cap + shared bounded reader (`protocol::read_capped_record`) in client & server; the reader now also neutralises control chars in recalled bodies so a `\n` can't forge a `- ` row (post-review follow-up) |
 | 3 | Fixed | `pdf-extract` 0.12 → `lopdf` 0.42; `cargo audit` clean |
-| 4 | Fixed | `ssrf::embedded_transition_v4` (NAT64 / translated / 6to4) |
+| 4 | Fixed (partial) | `ssrf::embedded_transition_v4` (well-known NAT64 / translated / 6to4); doc narrowed to what's covered; site-specific NAT64 prefixes / Teredo / ISATAP tracked as [#393](https://github.com/hherb/kastellan/issues/393) |
 | 5 | Fixed | `MacosContainer::spawn_under_policy` fails closed on `proxy_uds` |
 | 8 | Fixed | `ssrf::is_reserved_v4` (240/4) + 6to4 in the same helper |
 | 9 | Fixed | `anyhow` 1.0.103, `quinn-proto` 0.11.15; 0 vulnerabilities |
@@ -128,6 +128,7 @@ documented-inherent):
 | 7 (Linux) | [#387](https://github.com/hherb/kastellan/issues/387) — normalize `..`/symlinks in bwrap/Firecracker binds |
 | 12 | [#388](https://github.com/hherb/kastellan/issues/388) — worker-discovery ownership probe + lockdown-env footgun |
 | 11 | [#389](https://github.com/hherb/kastellan/issues/389) — keyring first-init race + scrub coverage gaps |
+| 4 (residual) | [#393](https://github.com/hherb/kastellan/issues/393) — SSRF: site-specific NAT64 prefixes / Teredo / ISATAP (post-review follow-up) |
 
 Residual: 3 unmaintained-crate `cargo audit` warnings (`derivative`,
 `proc-macro-error2`, `ttf-parser`) — transitive, informational, no known

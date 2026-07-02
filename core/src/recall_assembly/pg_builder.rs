@@ -17,26 +17,6 @@ use kastellan_llm_router::Router;
 use crate::memory::{embed_query, recall, RecallParams};
 use super::{sha256_hex, RecallBuilder, RecalledContext, RecallError, L_RECALL_CAP_BYTES};
 
-/// Greedy newest-first cap: walk `rows` in order, push as long as
-/// cumulative body bytes stay ≤ `cap_bytes`. The first row that would
-/// push cumulative bytes over the cap is dropped and the walk stops —
-/// matches the L1 loader's `saturating_add` break idiom in
-/// `core::memory::layers::load_l1`.
-///
-/// Logging follows the L1 precedent's warn-vs-debug split:
-/// - A single row whose body alone exceeds the cap emits
-///   `tracing::warn!` (operator signal: retire the memory or raise
-///   the cap).
-/// - Rows dropped because the cap is already full after N kept rows
-///   emit `tracing::debug!` (normal exit, not an operator problem).
-///
-/// Pure helper, no I/O. Doesn't drop later rows that might
-/// individually fit — that would risk reorder vs. the RRF-fused
-/// order coming out of `recall`.
-///
-/// The `cap_bytes` parameter is expected to be [`L_RECALL_CAP_BYTES`]
-/// in production; tests may pass a smaller value to exercise the cap
-/// path without constructing kilobyte-sized bodies.
 /// Screen each recall row through the prompt-injection guard and drop any
 /// whose body trips the catalogue. Recall bodies are the lowest-trust
 /// memory source — *any* process with `INSERT` on `memories` writes them,
@@ -75,6 +55,26 @@ pub(crate) fn screen_recall_rows(rows: Vec<Memory>) -> Vec<Memory> {
         .collect()
 }
 
+/// Greedy newest-first cap: walk `rows` in order, push as long as
+/// cumulative body bytes stay ≤ `cap_bytes`. The first row that would
+/// push cumulative bytes over the cap is dropped and the walk stops —
+/// matches the L1 loader's `saturating_add` break idiom in
+/// `core::memory::layers::load_l1`.
+///
+/// Logging follows the L1 precedent's warn-vs-debug split:
+/// - A single row whose body alone exceeds the cap emits
+///   `tracing::warn!` (operator signal: retire the memory or raise
+///   the cap).
+/// - Rows dropped because the cap is already full after N kept rows
+///   emit `tracing::debug!` (normal exit, not an operator problem).
+///
+/// Pure helper, no I/O. Doesn't drop later rows that might
+/// individually fit — that would risk reorder vs. the RRF-fused
+/// order coming out of `recall`.
+///
+/// The `cap_bytes` parameter is expected to be [`L_RECALL_CAP_BYTES`]
+/// in production; tests may pass a smaller value to exercise the cap
+/// path without constructing kilobyte-sized bodies.
 pub(crate) fn cap_and_split(rows: Vec<Memory>, cap_bytes: usize) -> (Vec<i64>, Vec<String>) {
     let mut ids = Vec::with_capacity(rows.len());
     let mut bodies = Vec::with_capacity(rows.len());
