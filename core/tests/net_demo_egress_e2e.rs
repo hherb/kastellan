@@ -219,7 +219,7 @@ fn net_demo_tls_probe_survives_respawn_under_default_backend() {
                 worker_name: "net-demo",
                 extra_ca: Some(&ca_path),
             };
-            let t = spawn_net_transport(&params, &scratch)?;
+            let t = spawn_net_transport(&params, &scratch, |_row| {})?;
             Ok(Box::new(t) as Box<dyn PersistentTransport>)
         })
     };

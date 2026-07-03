@@ -9,6 +9,7 @@ use std::path::Path;
 
 use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
+use super::audit::EgressAuditRow;
 use super::net_worker::{rewrite_worker_policy, spawn_ingest_thread, EgressSidecar};
 use super::spawn::spawn_sidecar;
 use crate::worker_lifecycle::persistent::{ClientTransport, PersistentTransport};
@@ -72,9 +73,13 @@ impl PersistentTransport for NetClientTransport {
 /// `fs_read` so a VM RO-share carries it and the worker can trust a test origin.
 /// The caller owns `scratch` (a unique per-worker dir); on the fail-closed path
 /// the sidecar's `Drop` removes the UDS but NOT the dir — the caller cleans it.
+/// `on_decision` receives every per-CONNECT allow/deny row the sidecar emits, so
+/// production consumers (e.g. Matrix) can audit them like every other
+/// force-routed worker does; demos/tests that don't audit pass `|_row| {}`.
 pub fn spawn_net_transport(
     params: &NetTransportSpawn<'_>,
     scratch: &Path,
+    on_decision: impl FnMut(EgressAuditRow) + Send + 'static,
 ) -> anyhow::Result<NetClientTransport> {
     // 1. Sidecar first (transparent tunnel), fail-closed.
     let mut sidecar = spawn_sidecar(
@@ -104,10 +109,11 @@ pub fn spawn_net_transport(
     //    errors, `sidecar` drops here and its Drop kills the proxy.
     let inner = ClientTransport::spawn(params.backend, &forced, params.program, params.args)?;
 
-    // 4. Drain the sidecar's decision stdout (no-op sink — the demo doesn't audit
-    //    to PG; draining prevents a full-pipe stall past ~64 KiB). Bundle for 1:1
-    //    teardown; the caller hands the scratch dir to the bundle for RAII.
-    let ingest = spawn_ingest_thread(stdout, |_row| {});
+    // 4. Drain the sidecar's decision stdout into the caller's sink (draining
+    //    prevents a full-pipe stall past ~64 KiB regardless of whether the sink
+    //    audits). Bundle for 1:1 teardown; the caller hands the scratch dir to
+    //    the bundle for RAII.
+    let ingest = spawn_ingest_thread(stdout, on_decision);
     let egress = EgressSidecar::from_parts(sidecar, ingest, Some(scratch.to_path_buf()));
     Ok(NetClientTransport {
         inner,

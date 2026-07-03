@@ -1,47 +1,50 @@
-//! Core-side Matrix channel: drives the sandboxed `kastellan-worker-matrix` over
-//! the blocking `kastellan-protocol` `Client` from a dedicated thread, bridged to
-//! the async [`Channel`] trait via tokio mpsc.
+//! Core-side Matrix channel: wraps the channel-generic [`PolledWorkerDriver`]
+//! (poll/send/identity plumbing) over a [`PersistentWorker`]-supervised
+//! transport to the sandboxed `kastellan-worker-matrix`, bridged to the async
+//! [`Channel`] trait via the driver's tokio mpsc endpoints.
 //!
-//! Why a thread: `kastellan_protocol::client::Client` is synchronous, blocking,
-//! and one-request-at-a-time (strict request→response, no server-initiated
-//! notifications). A Matrix client must *push* inbound events, so we keep the
-//! worker a pure JSON-RPC server and put the streaming concern here: a driver
-//! thread serializes `matrix.poll` + `matrix.send` on the single pipe, while the
-//! mpsc buffers give the bus a cancellation-safe `recv()` and a non-blocking
-//! `send()`. See
+//! Why a driver thread at all: `kastellan_protocol::client::Client` is
+//! synchronous, blocking, and one-request-at-a-time (strict request→response,
+//! no server-initiated notifications). A Matrix client must *push* inbound
+//! events, so the driver thread serializes `matrix.poll` + `matrix.send` on the
+//! single pipe, while the mpsc endpoints give the bus a cancellation-safe
+//! `recv()` and a non-blocking `send()`. See
 //! `docs/superpowers/specs/2026-06-12-matrix-inbound-sandboxed-worker-design.md`.
 //!
-//! The production spawn path (sandbox + egress force-routing + persistent
-//! encrypted E2E store + restart supervision) and the real `matrix-rust-sdk`
-//! worker are comms-slice-#2 **Phase D** (built + verified on the DGX). This
-//! module ships the transport-and-driver mechanism + the pure policy builder,
-//! proven by `core/tests/matrix_channel_e2e.rs` against a fake-worker stub.
+//! Spawn/respawn/backoff/alarm is owned by [`PersistentWorker`] (shared across
+//! every long-lived worker, not just Matrix); this module supplies the
+//! matrix-specific wire codecs ([`parse_matrix_poll`] / [`encode_matrix_send`]),
+//! the [`MATRIX_POLLED_SPEC`], the [`SandboxPolicy`] builder, and the transport
+//! factory — including the optional egress-sidecar force-routing
+//! ([`MatrixEgress`]). Proven end-to-end by `core/tests/matrix_channel_e2e.rs`
+//! against a fake-worker stub.
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc as tok_mpsc;
 
-use kastellan_matrix_wire::{Event, PollResult};
-use kastellan_protocol::client::Client;
+use kastellan_matrix_wire::PollResult;
 use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
-use super::respawn_alarm::RespawnRateAlarm;
-use super::{Channel, ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerId};
+use crate::channel::polled_driver::{PolledEvent, PolledWorkerDriver, PolledWorkerSpec};
+use crate::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
+use crate::worker_lifecycle::force_route::ForceRoutingConfig;
+use crate::worker_lifecycle::persistent::{
+    ClientTransport, PersistentFactory, PersistentTransport, PersistentWorker,
+};
+use crate::worker_lifecycle::RestartBackoff;
+
+use super::{Channel, ChannelId, IncomingMessage, OutgoingMessage, PeerId};
 
 /// How long the driver waits in one `matrix.poll` before looping to check the
 /// outbound queue. Outbound latency is bounded by this; a few seconds is fine for
 /// a single-user assistant.
 pub const POLL_MS: u64 = 2000;
-
-/// Bounded depth of the in-core inbound buffer between the driver thread and the
-/// bus. Backpressure (the driver `blocking_send`s) past this — a single-user
-/// channel never reaches it.
-const INBOUND_BUFFER: usize = 256;
 
 /// Filename (inside the persistent store dir) for the one-time initial-login
 /// password handed to the worker out-of-band (not via argv). The worker reads it
@@ -62,154 +65,29 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     f.write_all(bytes)
 }
 
-/// Seam over the worker RPC so the driver is unit-tested without spawning a
-/// process. The real impl ([`ProtocolWorkerClient`]) wraps the blocking
-/// `kastellan_protocol::Client`.
-pub trait WorkerClient: Send {
-    /// `matrix.poll` — return buffered inbound events (long-poll up to `timeout_ms`).
-    fn poll(&mut self, timeout_ms: u64) -> anyhow::Result<Vec<Event>>;
-    /// `matrix.send` — deliver an outbound message to a room.
-    fn send(&mut self, conversation: &str, body: &str) -> anyhow::Result<()>;
-    /// After a `poll`/`send` error signals the worker died, produce a one-line
-    /// diagnostic for the daemon log — the worker's exit status + recent stderr
-    /// (#348). Returns `None` when no diagnostic is available (the default; the
-    /// in-process test fakes don't wrap a real process).
-    fn death_report(&mut self) -> Option<String> {
-        None
-    }
+/// The matrix instantiation of the channel-generic polled driver.
+pub const MATRIX_POLLED_SPEC: PolledWorkerSpec = PolledWorkerSpec {
+    label: "matrix",
+    init_method: "matrix.init",
+    poll_method: "matrix.poll",
+    send_method: "matrix.send",
+    poll_timeout_ms: POLL_MS,
+};
+
+/// Decode a `matrix.poll` result (wire [`PollResult`]) into driver events.
+pub fn parse_matrix_poll(v: serde_json::Value) -> anyhow::Result<Vec<PolledEvent>> {
+    let pr: PollResult =
+        serde_json::from_value(v).map_err(|e| anyhow::anyhow!("decode poll result: {e}"))?;
+    Ok(pr
+        .events
+        .into_iter()
+        .map(|e| PolledEvent { peer: e.peer, conversation: e.conversation, body: e.body })
+        .collect())
 }
 
-/// Real [`WorkerClient`] over the blocking `kastellan_protocol` [`Client`] — the
-/// synchronous JSON-RPC pipe to the spawned matrix worker.
-pub struct ProtocolWorkerClient {
-    client: Client,
-    /// Bounded tail of the worker's recent stderr lines, retained by the drain
-    /// thread so [`death_report`](WorkerClient::death_report) can surface the death
-    /// cause. `None` for callers that don't drain (e.g. the e2e helper).
-    stderr_tail: Option<crate::worker_stderr::StderrTail>,
-}
-
-/// How long [`ProtocolWorkerClient::death_report`] waits for the dead worker to be
-/// reaped before giving up on the exit status: up to `REAP_ATTEMPTS * REAP_TICK`.
-/// Bounded so a worker that is (unexpectedly) still alive can't hang the driver.
-const REAP_ATTEMPTS: u32 = 10;
-const REAP_TICK: Duration = Duration::from_millis(50);
-
-impl ProtocolWorkerClient {
-    /// Wrap a connected client with no stderr tail (used by the e2e helper, which
-    /// owns the child's stderr itself).
-    pub fn new(client: Client) -> Self {
-        Self { client, stderr_tail: None }
-    }
-
-    /// Wrap a connected client together with the tail its stderr is drained into,
-    /// so a death report can surface the worker's last words (#348).
-    pub fn with_stderr(client: Client, stderr_tail: crate::worker_stderr::StderrTail) -> Self {
-        Self { client, stderr_tail: Some(stderr_tail) }
-    }
-
-    /// Call `matrix.init`: the worker has already logged in + first-synced before
-    /// it answers any RPC (login happens in `LiveSdk::connect`, before serving),
-    /// so a successful return proves the live login and yields the bot identity
-    /// (`user_id`, `device_id`). Used at spawn time as the login smoke check.
-    pub fn init(&mut self) -> anyhow::Result<serde_json::Value> {
-        self.client
-            .call("matrix.init", serde_json::json!({}))
-            .map_err(|e| anyhow::anyhow!("matrix.init: {e}"))
-    }
-}
-
-impl WorkerClient for ProtocolWorkerClient {
-    fn poll(&mut self, timeout_ms: u64) -> anyhow::Result<Vec<Event>> {
-        let v = self
-            .client
-            .call("matrix.poll", serde_json::json!({ "timeout_ms": timeout_ms }))
-            .map_err(|e| anyhow::anyhow!("matrix.poll: {e}"))?;
-        let pr: PollResult =
-            serde_json::from_value(v).map_err(|e| anyhow::anyhow!("decode poll result: {e}"))?;
-        Ok(pr.events)
-    }
-    fn death_report(&mut self) -> Option<String> {
-        // The driver calls this once a poll/send error indicates death. Reap the
-        // child non-blockingly with a few short retries (the exit may not be
-        // visible the very instant the pipe closed) so we capture the real exit
-        // status — a clean `exit status: 1` (the sync-task fail-loud) vs a
-        // `signal: 6` (a crypto-store SIGABRT) is exactly the signal #348 needs —
-        // without risking a hang if the process is somehow still running.
-        let mut status = None;
-        for _ in 0..REAP_ATTEMPTS {
-            match self.client.try_wait() {
-                Ok(Some(s)) => {
-                    status = Some(s);
-                    break;
-                }
-                Ok(None) => thread::sleep(REAP_TICK),
-                Err(_) => break,
-            }
-        }
-        let tail = self.stderr_tail.as_ref().map(|t| t.snapshot()).unwrap_or_default();
-        Some(crate::worker_stderr::format_death_report(status, &tail))
-    }
-
-    fn send(&mut self, conversation: &str, body: &str) -> anyhow::Result<()> {
-        self.client
-            .call(
-                "matrix.send",
-                serde_json::json!({ "conversation": conversation, "body": body }),
-            )
-            .map_err(|e| anyhow::anyhow!("matrix.send: {e}"))?;
-        Ok(())
-    }
-}
-
-impl Drop for ProtocolWorkerClient {
-    /// Reap the worker's child so it cannot linger as a zombie. `Client` wraps a
-    /// std `process::Child`, which is NOT reaped on drop — only an explicit
-    /// `wait()` collects it. `death_report` makes only a bounded best-effort
-    /// `try_wait` and gives up if a slow-exiting `bwrap` child outlives the
-    /// window, so the `client = fresh` swap on every respawn was dropping the old
-    /// client without ever reaping it — one leaked zombie per respawn (observed
-    /// as accumulating defunct `bwrap` processes under the long-lived daemon).
-    /// `kill()` is idempotent belt-and-suspenders for a worker whose pipe broke
-    /// but whose process is still alive; the worker here is normally already dead,
-    /// so the `wait()` returns promptly.
-    fn drop(&mut self) {
-        let _ = self.client.kill();
-        let _ = self.client.wait();
-    }
-}
-
-/// Spawn the matrix worker under `backend` + `policy` and return a connected
-/// [`ProtocolWorkerClient`]. Applies the same worker-side lockdown-env derivation
-/// (`KASTELLAN_LANDLOCK_*` / `KASTELLAN_SECCOMP_PROFILE`) that `tool_host`'s tool
-/// spawn does — the channel worker is locked down identically; it just isn't a
-/// `ToolRegistry` tool and its `poll`/`send` are transport plumbing, not audited
-/// dispatches, so it holds a raw `Client` rather than the dispatch-sealed
-/// `SupervisedWorker`.
-pub fn spawn_worker_client<B: SandboxBackend + ?Sized>(
-    backend: &B,
-    policy: &SandboxPolicy,
-    program: &str,
-    args: &[&str],
-) -> anyhow::Result<ProtocolWorkerClient> {
-    let derived = crate::tool_host::derive_lockdown_env(policy);
-    let mut child = backend
-        .spawn_under_policy(&derived, program, args)
-        .map_err(|e| anyhow::anyhow!("spawn matrix worker: {e}"))?;
-    // Drain the worker's piped stderr (the JSON-RPC client reads only stdout, so an
-    // undrained pipe is both discarded and a deadlock risk past ~64 KiB), retaining
-    // a bounded tail so a death is diagnosable in the daemon log (#348).
-    let pid = child.id();
-    let stderr_tail = child
-        .stderr
-        .take()
-        .map(|stderr| crate::worker_stderr::spawn_drain_with_tail(pid, stderr));
-    let client = Client::from_child(child)
-        .map_err(|e| anyhow::anyhow!("connect to matrix worker: {e}"))?;
-    Ok(match stderr_tail {
-        Some(tail) => ProtocolWorkerClient::with_stderr(client, tail),
-        None => ProtocolWorkerClient::new(client),
-    })
+/// Encode an outbound message as `matrix.send` params.
+pub fn encode_matrix_send(msg: &OutgoingMessage) -> serde_json::Value {
+    serde_json::json!({ "conversation": msg.conversation.0, "body": msg.body })
 }
 
 /// A live Matrix channel: owns the driver thread; implements the [`Channel`]
@@ -218,259 +96,20 @@ pub struct MatrixChannel {
     id: ChannelId,
     inbound_rx: tok_mpsc::Receiver<IncomingMessage>,
     outbound_tx: std_mpsc::Sender<OutgoingMessage>,
-    // Kept so the driver thread is joined-on-drop semantics are explicit; the
-    // thread exits when the worker dies or the outbound sender is dropped.
+    // Kept for ownership clarity only (dropping a JoinHandle detaches, it does
+    // not join): the driver thread exits on its own once both channel endpoints
+    // above are dropped, and its RAII drop of the PersistentHandle then tears
+    // down the supervisor + worker (+ sidecar).
     _driver: thread::JoinHandle<()>,
 }
 
-/// Produces a fresh, logged-in worker (spawns the process + `matrix.init`),
-/// returning the client and its reported identity. The supervised
-/// [`MatrixChannel`] driver calls this to **respawn** after a worker death.
-pub type WorkerFactory =
-    Box<dyn FnMut() -> anyhow::Result<(Box<dyn WorkerClient>, serde_json::Value)> + Send>;
-
-/// Capped exponential backoff between worker respawn attempts.
-const RESPAWN_BACKOFF_START: Duration = Duration::from_secs(1);
-const RESPAWN_BACKOFF_MAX: Duration = Duration::from_secs(30);
-/// Granularity at which the respawn backoff checks for channel shutdown, so a
-/// long (up-to-30s) backoff doesn't keep a dead channel's driver thread alive.
-const RESPAWN_POLL_SLICE: Duration = Duration::from_millis(200);
-
-/// Respawn-rate alarm (#348 item 3): if the worker respawns this many times
-/// within [`RESPAWN_ALARM_WINDOW`], the driver logs a single `warn!` flagging
-/// churn. A lone crash is benign; sustained dies-and-respawns is the fault
-/// signature the PDEATHSIG bug produced, so surface it before it's only visible
-/// in a death-report archaeology dig.
-const RESPAWN_ALARM_THRESHOLD: usize = 5;
-/// Sliding window over which [`RESPAWN_ALARM_THRESHOLD`] respawns trip the alarm.
-const RESPAWN_ALARM_WINDOW: Duration = Duration::from_secs(300);
-
 impl MatrixChannel {
-    /// Spawn the driver thread over a [`WorkerClient`]. `id` is the channel id
-    /// (e.g. `"matrix"`) stamped onto every inbound message + matched on replies.
-    /// **Unsupervised:** the driver exits when the worker dies (used by tests and
-    /// callers that own worker lifecycle themselves).
-    pub fn new(id: ChannelId, client: Box<dyn WorkerClient>) -> Self {
-        Self::spawn_driver(id, client, None)
-    }
-
-    /// Like [`new`](Self::new) but **self-healing**: when the worker dies (a
-    /// `poll`/`send` error), the driver respawns it via `factory` with capped
-    /// exponential backoff and resumes — so a worker crash doesn't take the
-    /// channel down. Replies in flight when the worker died are retried after the
-    /// respawn (no dropped replies). Inbound messages a user sends during the
-    /// downtime are recovered on restart (#321): the respawned worker resumes
-    /// from the SDK's persisted sync token, so its catch-up sync surfaces the
-    /// messages received while it was down rather than dropping them. Only a
-    /// *fresh login* (no prior token) still suppresses its catch-up backlog, to
-    /// avoid replaying the whole room history.
-    pub fn supervised(id: ChannelId, client: Box<dyn WorkerClient>, factory: WorkerFactory) -> Self {
-        Self::spawn_driver(id, client, Some(factory))
-    }
-
-    /// The inbound (bus-bound) + outbound (reply) channel pair every driver owns.
-    /// Factored so the two constructors can't drift on buffer size or types.
-    #[allow(clippy::type_complexity)]
-    fn driver_channels() -> (
-        tok_mpsc::Sender<IncomingMessage>,
-        tok_mpsc::Receiver<IncomingMessage>,
-        std_mpsc::Sender<OutgoingMessage>,
-        std_mpsc::Receiver<OutgoingMessage>,
-    ) {
-        let (inbound_tx, inbound_rx) = tok_mpsc::channel::<IncomingMessage>(INBOUND_BUFFER);
-        let (outbound_tx, outbound_rx) = std_mpsc::channel::<OutgoingMessage>();
-        (inbound_tx, inbound_rx, outbound_tx, outbound_rx)
-    }
-
-    fn spawn_driver(
-        id: ChannelId,
-        client: Box<dyn WorkerClient>,
-        factory: Option<WorkerFactory>,
-    ) -> Self {
-        let (inbound_tx, inbound_rx, outbound_tx, outbound_rx) = Self::driver_channels();
-        let cid = id.clone();
-        let driver = thread::spawn(move || drive(client, factory, inbound_tx, outbound_rx, cid));
-        Self { id, inbound_rx, outbound_tx, _driver: driver }
-    }
-
-    /// Self-healing supervised channel that **also owns the initial spawn**: the
-    /// driver thread performs the *first* `factory()` call (login proof) itself
-    /// and reports the resulting identity back, so the worker process is parented
-    /// to the persistent driver thread — never an ephemeral caller thread.
-    ///
-    /// **This is the #348 churn fix.** The previous path (`supervised` after an
-    /// out-of-band initial `spawn()`) forked the initial worker on the *caller's*
-    /// thread. When the caller is a tokio `spawn_blocking` pool thread — the
-    /// daemon's startup path — tokio reaps it after its ~10s idle keep-alive, and
-    /// bwrap's `--die-with-parent` (`PR_SET_PDEATHSIG`, which fires on *parent
-    /// thread* death) then SIGKILLs the worker ~10s in. Respawns were already
-    /// immune because the driver thread issues them; doing the initial spawn here
-    /// closes the gap so no worker is ever tied to an ephemeral thread.
-    ///
-    /// Blocks until the first spawn+login completes (or fails), preserving the
-    /// synchronous login-proof contract; returns the worker's reported identity.
-    pub fn supervised_self_spawn(
-        id: ChannelId,
-        mut factory: WorkerFactory,
-    ) -> anyhow::Result<(Self, serde_json::Value)> {
-        let (inbound_tx, inbound_rx, outbound_tx, outbound_rx) = Self::driver_channels();
-        let (init_tx, init_rx) = std_mpsc::channel::<anyhow::Result<serde_json::Value>>();
-        let cid = id.clone();
-        let driver = thread::spawn(move || {
-            // The FIRST spawn happens HERE, on the persistent driver thread, so the
-            // worker's `--die-with-parent` PDEATHSIG is tied to a thread that lives
-            // for the channel's lifetime (the #348 fix).
-            let client = match factory() {
-                Ok((client, identity)) => {
-                    if init_tx.send(Ok(identity)).is_err() {
-                        return; // caller stopped waiting — let the worker die with us
-                    }
-                    client
-                }
-                Err(e) => {
-                    let _ = init_tx.send(Err(e));
-                    return;
-                }
-            };
-            drive(client, Some(factory), inbound_tx, outbound_rx, cid);
-        });
-        let identity = init_rx
-            .recv()
-            .map_err(|_| anyhow::anyhow!("matrix driver thread exited before initial spawn"))??;
-        Ok((Self { id, inbound_rx, outbound_tx, _driver: driver }, identity))
-    }
-}
-
-/// The driver loop: serialize `matrix.poll` + `matrix.send` on the worker's single
-/// pipe, bridge inbound events to the bus, and (when `factory` is `Some`) respawn a
-/// dead worker with capped backoff. Runs for the channel's lifetime on the thread
-/// that owns the worker process — so for the supervised paths every spawn (initial
-/// and respawn) is parented to this same persistent thread (#348).
-fn drive(
-    mut client: Box<dyn WorkerClient>,
-    mut factory: Option<WorkerFactory>,
-    inbound_tx: tok_mpsc::Sender<IncomingMessage>,
-    outbound_rx: std_mpsc::Receiver<OutgoingMessage>,
-    cid: ChannelId,
-) {
-    // Replies accepted from the bus but not yet acknowledged by the worker.
-    // Kept across a respawn so a death mid-send doesn't lose a reply.
-    let mut pending: VecDeque<OutgoingMessage> = VecDeque::new();
-    // Fires a single warn! when respawns cross the churn threshold (#348 item 3).
-    let mut respawn_alarm = RespawnRateAlarm::new(RESPAWN_ALARM_WINDOW, RESPAWN_ALARM_THRESHOLD);
-    loop {
-        // 1) Pull newly-queued replies into the local buffer (non-blocking).
-        loop {
-            match outbound_rx.try_recv() {
-                Ok(out) => pending.push_back(out),
-                Err(std_mpsc::TryRecvError::Empty) => break,
-                Err(std_mpsc::TryRecvError::Disconnected) => {
-                    tracing::info!("matrix outbound sender dropped; driver exiting");
-                    return;
-                }
-            }
-        }
-
-        // 2) Flush buffered replies (front-first). Stop on the first error
-        //    — the worker may have died; respawn before retrying this reply.
-        let mut worker_dead = false;
-        while let Some(out) = pending.front() {
-            match client.send(&out.conversation.0, &out.body) {
-                Ok(()) => {
-                    pending.pop_front();
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "matrix.send failed; retrying after respawn");
-                    worker_dead = true;
-                    break;
-                }
-            }
-        }
-
-        // 3) Long-poll for inbound events → push to the bus.
-        if !worker_dead {
-            match client.poll(POLL_MS) {
-                Ok(events) => {
-                    for ev in events {
-                        let msg = IncomingMessage {
-                            channel: cid.clone(),
-                            peer: PeerId(ev.peer),
-                            conversation: ConversationId(ev.conversation),
-                            body: ev.body,
-                        };
-                        if inbound_tx.blocking_send(msg).is_err() {
-                            tracing::info!("matrix inbound receiver closed; driver exiting");
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "matrix.poll failed (worker likely died)");
-                    worker_dead = true;
-                }
-            }
-        }
-
-        // 4) On death: surface the cause (exit status + recent stderr) so
-        //    the churn is diagnosable in the daemon log (#348), then
-        //    respawn (supervised) or exit (unsupervised).
-        if worker_dead {
-            if let Some(report) = client.death_report() {
-                tracing::warn!("matrix worker died: {report}");
-            }
-            let Some(factory) = factory.as_mut() else {
-                tracing::warn!("matrix worker died; driver exiting (unsupervised)");
-                return;
-            };
-            let mut delay = RESPAWN_BACKOFF_START;
-            loop {
-                // Responsive backoff: poll for shutdown in short slices
-                // rather than sleeping the full delay. If the bus dropped
-                // the inbound receiver (channel shutdown), bail instead of
-                // respawning forever against an unreachable homeserver.
-                let mut slept = Duration::ZERO;
-                while slept < delay {
-                    if inbound_tx.is_closed() {
-                        tracing::info!(
-                            "matrix inbound receiver closed during respawn; driver exiting"
-                        );
-                        return;
-                    }
-                    let slice = RESPAWN_POLL_SLICE.min(delay - slept);
-                    thread::sleep(slice);
-                    slept += slice;
-                }
-                if inbound_tx.is_closed() {
-                    tracing::info!(
-                        "matrix inbound receiver closed during respawn; driver exiting"
-                    );
-                    return;
-                }
-                match factory() {
-                    Ok((fresh, _identity)) => {
-                        client = fresh;
-                        tracing::info!("matrix worker respawned; channel resumed");
-                        if let Some(respawns) = respawn_alarm.record(Instant::now()) {
-                            tracing::warn!(
-                                respawns,
-                                window_secs = RESPAWN_ALARM_WINDOW.as_secs(),
-                                "matrix worker respawn-rate alarm: excessive churn \
-                                 (worker dies and respawns repeatedly) — check the \
-                                 preceding death reports for the cause"
-                            );
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %format!("{e:#}"),
-                            "matrix worker respawn failed; backing off"
-                        );
-                        delay = (delay * 2).min(RESPAWN_BACKOFF_MAX);
-                    }
-                }
-            }
-        }
+    /// Wrap a running [`PolledWorkerDriver`]'s endpoints as the bus-facing
+    /// [`Channel`]. The driver (and the supervisor + worker + sidecar under
+    /// it) shuts down via RAII when this channel is dropped.
+    pub fn from_driver(id: ChannelId, driver: PolledWorkerDriver) -> Self {
+        let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
+        Self { id, inbound_rx, outbound_tx, _driver: join }
     }
 }
 
@@ -722,21 +361,46 @@ pub struct SpawnedMatrixWorker {
     pub identity: serde_json::Value,
 }
 
+/// Egress force-routing context for the matrix worker (5b-4 spec decision 2:
+/// matrix rides the global `KASTELLAN_EGRESS_FORCE_ROUTING`). `None` ⇒
+/// legacy direct `Net::Allowlist` (dev / CLI probe). Carries the daemon's
+/// resolved [`ForceRoutingConfig`] (proxy binary, scratch root, decision-sink
+/// factory) plus the HOST backend the sidecar runs under — the sidecar is the
+/// real-network egress boundary; under 5b-4b the WORKER backend becomes a VM,
+/// the sidecar backend never does.
+pub struct MatrixEgress {
+    pub sidecar_backend: Arc<dyn SandboxBackend>,
+    pub routing: Arc<ForceRoutingConfig>,
+}
+
+/// Matrix respawn backoff: 1s → 30s doubling (the channel's historical envelope).
+fn matrix_backoff() -> RestartBackoff {
+    RestartBackoff {
+        base: Duration::from_secs(1),
+        factor_num: 2,
+        factor_den: 1,
+        cap: Duration::from_secs(30),
+    }
+}
+
 /// Bring up the sandboxed live Matrix worker: build the [`SandboxPolicy`]
 /// (`Net::Allowlist` scoped to the homeserver, persistent store as `fs_write`),
-/// spawn the worker, and block on `matrix.init` so the returned worker is
-/// logged-in-and-synced. The returned [`MatrixChannel`] is **supervised** — if
-/// the worker later dies, the driver respawns it (capped backoff) and resumes,
-/// so a worker crash doesn't take the channel down. `backend` is an [`Arc`] so
-/// the respawn factory can outlive this call.
+/// spawn the worker (via [`PersistentWorker`], respawning on death with capped
+/// backoff), and block on `matrix.init` so the returned worker is
+/// logged-in-and-synced. `backend` is an [`Arc`] so the respawn factory can
+/// outlive this call.
 ///
-/// Egress force-routing (the per-worker sidecar) is **not** wired here yet — the
-/// worker reaches the homeserver directly on `Net::Allowlist`. Coupling it to the
-/// egress proxy (matrix is on the MITM-bypass list) is the immediate follow-up.
+/// `egress` is `Some` when the daemon opted into egress force-routing
+/// (`KASTELLAN_EGRESS_FORCE_ROUTING`): every (re)spawn brings up a fresh
+/// per-worker transparent-tunnel sidecar alongside the worker and audits its
+/// routing decisions through the daemon's sink. `None` spawns the worker
+/// directly on `Net::Allowlist` (the legacy path — used by the `kastellan-cli
+/// matrix probe` diagnostic).
 pub fn spawn_matrix_worker(
     backend: Arc<dyn SandboxBackend>,
     id: ChannelId,
     cfg: &MatrixSpawnConfig,
+    egress: Option<MatrixEgress>,
 ) -> anyhow::Result<SpawnedMatrixWorker> {
     // 1) Persistent store dir must exist before bwrap can bind it.
     std::fs::create_dir_all(&cfg.store_dir)
@@ -786,404 +450,70 @@ pub fn spawn_matrix_worker(
         .ok_or_else(|| anyhow::anyhow!("worker bin path not UTF-8: {:?}", cfg.worker_bin))?
         .to_string();
 
-    // 4) Spawn factory: each call spawns the worker + blocks on `matrix.init`
-    //    (login proof / readiness). Owns the backend + policy + program so the
-    //    supervised driver can respawn after a death. NOTE: respawn relies on the
-    //    persisted session — the one-time password file is consumed on first login.
-    let spawn: WorkerFactory = Box::new(move || {
-        let mut client = spawn_worker_client(&*backend, &policy, &program, &[])?;
-        let identity = client.init()?;
-        Ok((Box::new(client) as Box<dyn WorkerClient>, identity))
+    // 4) PersistentFactory: each call brings up a fresh worker — force-routed
+    //    through a 1:1 transparent-tunnel sidecar when `egress` is Some (the
+    //    sidecar + worker respawn together; decisions flow to the audit sink),
+    //    else a plain direct-allowlist spawn (dev / probe). The factory runs on
+    //    the SUPERVISOR's persistent thread (PDEATHSIG-safe, #348).
+    let allowlist = vec![format!("{host}:{port}")];
+    let spawn_seq = AtomicU64::new(0);
+    let factory: PersistentFactory = Box::new(move || match &egress {
+        Some(eg) => {
+            // Fresh unique scratch per spawn/respawn → fresh sidecar UDS (no
+            // stale-socket reuse). RAII-cleaned by the EgressSidecar bundle.
+            let seq = spawn_seq.fetch_add(1, Ordering::SeqCst);
+            let scratch = eg
+                .routing
+                .scratch_root
+                .join(format!("matrix-{}-{seq}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&scratch);
+            std::fs::create_dir_all(&scratch)
+                .map_err(|e| anyhow::anyhow!("create matrix egress scratch {scratch:?}: {e}"))?;
+            let params = NetTransportSpawn {
+                backend: &*backend,
+                sidecar_backend: &*eg.sidecar_backend,
+                proxy_bin: &eg.routing.proxy_bin,
+                program: &program,
+                args: &[],
+                base_policy: policy.clone(),
+                allowlist: &allowlist,
+                worker_name: "matrix",
+                extra_ca: None,
+            };
+            let sink = (eg.routing.make_sink)();
+            // On the fail-closed path the sidecar's Drop removes only the UDS,
+            // not the dir (see spawn_net_transport's contract) — reclaim it
+            // here, else every failed respawn in the supervisor's retry loop
+            // leaks one unique scratch dir on a long-lived daemon.
+            match spawn_net_transport(&params, &scratch, sink) {
+                Ok(t) => Ok(Box::new(t) as Box<dyn PersistentTransport>),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&scratch);
+                    Err(e)
+                }
+            }
+        }
+        None => {
+            let t = ClientTransport::spawn(&*backend, &policy, &program, &[])?;
+            Ok(Box::new(t) as Box<dyn PersistentTransport>)
+        }
     });
 
-    // The driver thread performs the initial spawn (login proof) too, so the
-    // worker process is parented to that persistent thread rather than this
-    // caller — which the daemon runs on a tokio `spawn_blocking` pool thread that
-    // is reaped after ~10s, tripping bwrap's `--die-with-parent` PDEATHSIG and
-    // SIGKILLing the worker (#348). Blocks until login; returns the bot identity.
-    let (channel, identity) = MatrixChannel::supervised_self_spawn(id, spawn)?;
-
-    Ok(SpawnedMatrixWorker { channel, identity })
+    // 5) Shared supervisor owns spawn/respawn/backoff/alarm; the polled driver
+    //    owns poll/identity/pending-retention. `PolledWorkerDriver::spawn`
+    //    blocks on `matrix.init` — the synchronous login-proof contract the
+    //    daemon and CLI rely on. Respawns need no re-init: the worker logs in
+    //    (or restores its session) inside `LiveSdk::connect` before serving.
+    let handle = PersistentWorker::spawn_with_backoff("matrix", factory, matrix_backoff())?;
+    let (driver, identity) = PolledWorkerDriver::spawn(
+        MATRIX_POLLED_SPEC,
+        Box::new(handle),
+        parse_matrix_poll,
+        encode_matrix_send,
+        id.clone(),
+    )?;
+    Ok(SpawnedMatrixWorker { channel: MatrixChannel::from_driver(id, driver), identity })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-    use std::sync::{Arc, Mutex};
-
-    #[test]
-    fn host_from_url_strips_scheme_path_and_port() {
-        assert_eq!(host_from_url("https://matrix.kastellan.dev").unwrap(), "matrix.kastellan.dev");
-        assert_eq!(host_from_url("https://matrix.example.org:8448/").unwrap(), "matrix.example.org");
-        assert_eq!(host_from_url("http://127.0.0.1:6167").unwrap(), "127.0.0.1");
-        assert_eq!(host_from_url("matrix.bare.host").unwrap(), "matrix.bare.host");
-        // IPv6 literals: strip brackets + port.
-        assert_eq!(host_from_url("https://[::1]:8448").unwrap(), "::1");
-        assert_eq!(host_from_url("http://[2001:db8::1]/_matrix").unwrap(), "2001:db8::1");
-        assert!(host_from_url("https://").is_err());
-    }
-
-    #[test]
-    fn host_port_from_url_extracts_port_and_scheme_defaults() {
-        // Scheme defaults when no explicit port.
-        assert_eq!(host_port_from_url("https://matrix.kastellan.dev").unwrap(), ("matrix.kastellan.dev".into(), 443));
-        assert_eq!(host_port_from_url("http://127.0.0.1").unwrap(), ("127.0.0.1".into(), 80));
-        assert_eq!(host_port_from_url("matrix.bare.host").unwrap(), ("matrix.bare.host".into(), 443));
-        // Explicit port wins over the scheme default — the self-hosted-on-8448 case.
-        assert_eq!(host_port_from_url("https://matrix.example.org:8448/").unwrap(), ("matrix.example.org".into(), 8448));
-        assert_eq!(host_port_from_url("http://127.0.0.1:6167").unwrap(), ("127.0.0.1".into(), 6167));
-        // IPv6 literals, with and without an explicit port.
-        assert_eq!(host_port_from_url("https://[::1]:8448").unwrap(), ("::1".into(), 8448));
-        assert_eq!(host_port_from_url("http://[2001:db8::1]/_matrix").unwrap(), ("2001:db8::1".into(), 80));
-        // Malformed: empty host, non-numeric port.
-        assert!(host_port_from_url("https://").is_err());
-        assert!(host_port_from_url("https://h:notaport").is_err());
-    }
-
-    fn daemon_get(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: std::collections::HashMap<String, String> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        move |k: &str| map.get(k).cloned()
-    }
-
-    #[test]
-    fn daemon_cfg_none_when_required_unset() {
-        let exe = std::path::Path::new("/exe");
-        let st = std::path::Path::new("/st");
-        // Nothing set.
-        assert!(parse_daemon_spawn_config(daemon_get(&[]), Some(exe), Some(st)).is_none());
-        // Homeserver set but user missing.
-        let g = daemon_get(&[("KASTELLAN_MATRIX_HOMESERVER_URL", "https://m")]);
-        assert!(parse_daemon_spawn_config(g, Some(exe), Some(st)).is_none());
-    }
-
-    #[test]
-    fn daemon_cfg_defaults_worker_bin_and_store_and_sandbox_on() {
-        let g = daemon_get(&[
-            ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://m"),
-            ("KASTELLAN_MATRIX_USER", "@b:m"),
-        ]);
-        let c = parse_daemon_spawn_config(
-            g,
-            Some(std::path::Path::new("/exe")),
-            Some(std::path::Path::new("/st/matrix/store")),
-        )
-        .expect("config");
-        assert_eq!(c.worker_bin, PathBuf::from("/exe/kastellan-worker-matrix"));
-        assert_eq!(c.store_dir, PathBuf::from("/st/matrix/store"));
-        assert!(c.enforce_sandbox, "sandbox must default ON");
-        assert!(c.password.is_none(), "daemon relies on persisted session");
-    }
-
-    #[test]
-    fn daemon_cfg_enforce_sandbox_off_only_for_explicit_falsey() {
-        let mk = |val: &str| {
-            daemon_get(&[
-                ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://m"),
-                ("KASTELLAN_MATRIX_USER", "@b:m"),
-                ("KASTELLAN_MATRIX_ENFORCE_SANDBOX", val),
-            ])
-        };
-        let exe = std::path::Path::new("/e");
-        let st = std::path::Path::new("/s");
-        assert!(!parse_daemon_spawn_config(mk("0"), Some(exe), Some(st)).unwrap().enforce_sandbox);
-        assert!(!parse_daemon_spawn_config(mk("false"), Some(exe), Some(st)).unwrap().enforce_sandbox);
-        assert!(!parse_daemon_spawn_config(mk("FALSE"), Some(exe), Some(st)).unwrap().enforce_sandbox);
-        assert!(parse_daemon_spawn_config(mk("1"), Some(exe), Some(st)).unwrap().enforce_sandbox);
-    }
-
-    #[test]
-    fn daemon_cfg_env_overrides_worker_bin_and_store() {
-        let g = daemon_get(&[
-            ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://m"),
-            ("KASTELLAN_MATRIX_USER", "@b:m"),
-            ("KASTELLAN_MATRIX_WORKER_BIN", "/opt/w"),
-            ("KASTELLAN_MATRIX_STORE", "/data/store"),
-        ]);
-        // No exe_dir / default_store needed when both are overridden.
-        let c = parse_daemon_spawn_config(g, None, None).expect("config");
-        assert_eq!(c.worker_bin, PathBuf::from("/opt/w"));
-        assert_eq!(c.store_dir, PathBuf::from("/data/store"));
-    }
-
-    /// Fake WorkerClient over an injectable shared inbox (tests push events at
-    /// will) + a recorded sends log. `poll` drains the inbox; empty polls sleep
-    /// briefly so the driver loop doesn't spin. `fail_after` simulates worker
-    /// death after N polls.
-    #[derive(Clone)]
-    struct FakeWorker {
-        inbox: Arc<Mutex<VecDeque<Event>>>,
-        sent: Arc<Mutex<Vec<(String, String)>>>,
-        fail_after: Arc<Mutex<Option<usize>>>,
-        polls: Arc<Mutex<usize>>,
-    }
-    impl FakeWorker {
-        fn new() -> Self {
-            Self {
-                inbox: Arc::new(Mutex::new(VecDeque::new())),
-                sent: Arc::new(Mutex::new(vec![])),
-                fail_after: Arc::new(Mutex::new(None)),
-                polls: Arc::new(Mutex::new(0)),
-            }
-        }
-        fn push(&self, e: Event) {
-            self.inbox.lock().unwrap().push_back(e);
-        }
-    }
-    impl WorkerClient for FakeWorker {
-        fn poll(&mut self, _timeout_ms: u64) -> anyhow::Result<Vec<Event>> {
-            {
-                let mut n = self.polls.lock().unwrap();
-                *n += 1;
-                if let Some(limit) = *self.fail_after.lock().unwrap() {
-                    if *n > limit {
-                        anyhow::bail!("simulated worker death");
-                    }
-                }
-            }
-            let drained: Vec<Event> = self.inbox.lock().unwrap().drain(..).collect();
-            if drained.is_empty() {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Ok(drained)
-        }
-        fn send(&mut self, conversation: &str, body: &str) -> anyhow::Result<()> {
-            self.sent.lock().unwrap().push((conversation.to_string(), body.to_string()));
-            Ok(())
-        }
-    }
-
-    fn ev(body: &str) -> Event {
-        Event { conversation: "!room:srv".into(), peer: "@me:srv".into(), body: body.into() }
-    }
-
-    #[test]
-    fn supervised_self_spawn_runs_initial_spawn_off_the_caller_thread() {
-        // The real #348 churn cause: the *initial* worker was forked on the
-        // caller's thread (a tokio `spawn_blocking` pool thread), which tokio
-        // reaps after ~10s idle → bwrap's `--die-with-parent` PR_SET_PDEATHSIG
-        // SIGKILLs the worker. `supervised_self_spawn` must fork the initial
-        // worker on the persistent driver thread instead, so capture the thread
-        // the factory runs on and prove it is NOT the caller's.
-        let caller = std::thread::current().id();
-        let spawn_thread: Arc<Mutex<Option<std::thread::ThreadId>>> = Arc::new(Mutex::new(None));
-        let st = spawn_thread.clone();
-        let factory: WorkerFactory = Box::new(move || {
-            *st.lock().unwrap() = Some(std::thread::current().id());
-            Ok((
-                Box::new(FakeWorker::new()) as Box<dyn WorkerClient>,
-                serde_json::json!({ "device_id": "d", "user_id": "u" }),
-            ))
-        });
-        let (_channel, identity) =
-            MatrixChannel::supervised_self_spawn(ChannelId("matrix".into()), factory)
-                .expect("initial spawn + login proof");
-        assert_eq!(identity["device_id"], "d", "identity from the first factory call is returned");
-        let observed = spawn_thread.lock().unwrap().expect("factory ran");
-        assert_ne!(
-            observed, caller,
-            "initial worker must be forked on the driver thread, not the caller's ephemeral one"
-        );
-    }
-
-    #[test]
-    fn supervised_self_spawn_propagates_initial_failure() {
-        // A failed initial spawn/login must surface as an Err to the caller (the
-        // login-proof contract `spawn_matrix_worker` relies on), not a silently
-        // dead channel.
-        let factory: WorkerFactory = Box::new(move || anyhow::bail!("login rejected"));
-        // Avoid `expect_err` (it would require `MatrixChannel: Debug` on the Ok arm).
-        let err = match MatrixChannel::supervised_self_spawn(ChannelId("matrix".into()), factory) {
-            Ok(_) => panic!("expected the initial failure to propagate"),
-            Err(e) => e,
-        };
-        assert!(err.to_string().contains("login rejected"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn poll_events_surface_on_recv_in_order() {
-        let worker = FakeWorker::new();
-        worker.push(ev("a"));
-        worker.push(ev("b"));
-        let mut ch = MatrixChannel::new(ChannelId("matrix".into()), Box::new(worker));
-
-        let a = ch.recv().await.expect("a");
-        assert_eq!(a.body, "a");
-        assert_eq!(a.channel, ChannelId("matrix".into()));
-        assert_eq!(a.peer, PeerId("@me:srv".into()));
-        assert_eq!(a.conversation, ConversationId("!room:srv".into()));
-        let b = ch.recv().await.expect("b");
-        assert_eq!(b.body, "b");
-    }
-
-    #[tokio::test]
-    async fn send_reaches_the_worker() {
-        let worker = FakeWorker::new();
-        let sent = worker.sent.clone();
-        let ch = MatrixChannel::new(ChannelId("matrix".into()), Box::new(worker));
-
-        ch.send(OutgoingMessage {
-            channel: ChannelId("matrix".into()),
-            peer: PeerId("@me:srv".into()),
-            conversation: ConversationId("!room:srv".into()),
-            body: "hello there".into(),
-        })
-        .await
-        .expect("send queued");
-
-        // The driver delivers within a poll cycle; poll until recorded (bounded).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            if let Some((conv, body)) = sent.lock().unwrap().first().cloned() {
-                assert_eq!(conv, "!room:srv");
-                assert_eq!(body, "hello there");
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "send never reached worker");
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn recv_is_cancellation_safe() {
-        // Dropping a recv() future before it resolves must not lose a later
-        // event: the next recv() still returns it. Deterministic: the inbox is
-        // empty while we cancel (so recv stays pending and the timeout wins),
-        // then we inject the event and recv() again.
-        let worker = FakeWorker::new();
-        let inbox = worker.inbox.clone();
-        let mut ch = MatrixChannel::new(ChannelId("matrix".into()), Box::new(worker));
-
-        // Inbox empty → recv() pending → the 50ms timeout wins, dropping recv().
-        tokio::select! {
-            _ = ch.recv() => panic!("no event queued yet; timeout must win"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-        }
-        // Now inject an event; the next recv() must observe it (nothing lost).
-        inbox.lock().unwrap().push_back(ev("kept"));
-        let m = ch.recv().await.expect("buffered event survives cancellation");
-        assert_eq!(m.body, "kept");
-    }
-
-    #[tokio::test]
-    async fn poll_error_closes_the_channel() {
-        let worker = FakeWorker::new();
-        *worker.fail_after.lock().unwrap() = Some(0); // first poll errors
-        let mut ch = MatrixChannel::new(ChannelId("matrix".into()), Box::new(worker));
-        // Driver exits on the poll error → inbound sender dropped → recv() None.
-        assert!(ch.recv().await.is_none());
-    }
-
-    #[test]
-    fn death_report_surfaces_exit_status_and_stderr() {
-        // Drive a real short-lived child (writes to stderr, exits non-zero — the
-        // shape of a worker death) through `ProtocolWorkerClient::with_stderr`
-        // exactly as `spawn_worker_client` does, and assert the death report names
-        // both the exit status and the captured stderr (#348). Hermetic: no
-        // sandbox, no PG, no homeserver — just the protocol pipe + stderr drain.
-        use std::process::{Command, Stdio};
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("echo worker-boom >&2; exit 3")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn sh");
-        let pid = child.id();
-        let tail =
-            crate::worker_stderr::spawn_drain_with_tail(pid, child.stderr.take().expect("stderr"));
-        let client = Client::from_child(child).expect("wrap child");
-        let mut worker = ProtocolWorkerClient::with_stderr(client, tail);
-
-        // The stderr drain runs on a background thread; poll the (idempotent)
-        // report until the captured line lands, bounded so a regression can't hang.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        let report = loop {
-            let report = worker.death_report().expect("real client yields a report");
-            if report.contains("worker-boom") || std::time::Instant::now() >= deadline {
-                break report;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        };
-        assert!(report.contains("exit status: 3"), "exit status missing: {report}");
-        assert!(report.contains("worker-boom"), "stderr tail missing: {report}");
-    }
-
-    #[tokio::test]
-    async fn supervised_driver_respawns_after_worker_death() {
-        // First worker dies after its first poll; the factory hands back a fresh
-        // worker carrying a queued event. The supervised driver must respawn and
-        // surface that event — i.e. the channel survives a worker death.
-        let dying = FakeWorker::new();
-        *dying.fail_after.lock().unwrap() = Some(1); // poll #2 errors → "death"
-
-        let replacement = FakeWorker::new();
-        replacement.push(ev("after-respawn"));
-
-        // Factory yields the replacement exactly once, then errors (so a runaway
-        // respawn loop can't mask a bug — we only expect one respawn here).
-        let replacement_cell = std::sync::Mutex::new(Some(replacement));
-        let factory: WorkerFactory = Box::new(move || match replacement_cell.lock().unwrap().take() {
-            Some(w) => Ok((Box::new(w) as Box<dyn WorkerClient>, serde_json::json!({}))),
-            None => anyhow::bail!("factory exhausted"),
-        });
-
-        let mut ch =
-            MatrixChannel::supervised(ChannelId("matrix".into()), Box::new(dying), factory);
-
-        // Bounded wait: respawn backoff is 1s, so allow a couple of seconds.
-        let got = tokio::time::timeout(std::time::Duration::from_secs(5), ch.recv())
-            .await
-            .expect("channel should resume within the respawn window")
-            .expect("event surfaced after respawn");
-        assert_eq!(got.body, "after-respawn");
-    }
-
-    #[test]
-    fn policy_builder_shape() {
-        let p = build_matrix_policy(
-            PathBuf::from("/opt/kastellan/kastellan-worker-matrix"),
-            "matrix.example.org",
-            443,
-            PathBuf::from("/var/lib/kastellan/matrix/store"),
-            Some(PathBuf::from("/run/egress.sock")),
-            Some(PathBuf::from("/run/ca.pem")),
-        );
-        assert!(matches!(p.net, Net::Allowlist(ref v) if v == &["matrix.example.org:443"]));
-        assert!(matches!(p.profile, Profile::WorkerMatrixClient));
-        assert_eq!(p.fs_write, vec![PathBuf::from("/var/lib/kastellan/matrix/store")]);
-        assert!(p.fs_read.contains(&PathBuf::from("/run/ca.pem")));
-        assert!(p.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
-        // System CA trust store must be bound regardless of force-routing —
-        // matrix-sdk 0.18 validates homeserver TLS against it (transparent tunnel,
-        // not MITM), so its absence fails the client build at startup.
-        assert!(p.fs_read.contains(&PathBuf::from("/etc/ssl/certs")));
-        assert_eq!(p.proxy_uds, Some(PathBuf::from("/run/egress.sock")));
-    }
-
-    #[test]
-    fn parse_peers_csv_trims_and_drops_empties() {
-        assert!(parse_peers_csv("").is_empty());
-        assert!(parse_peers_csv("  , ,, ").is_empty());
-        assert_eq!(
-            parse_peers_csv(" @a:s , @b:s ,, @c:s "),
-            vec![PeerId("@a:s".into()), PeerId("@b:s".into()), PeerId("@c:s".into())]
-        );
-    }
-
-    #[test]
-    fn policy_builder_omits_ca_when_not_force_routed() {
-        let p = build_matrix_policy(
-            PathBuf::from("/opt/k/kastellan-worker-matrix"),
-            "m.example.org",
-            443,
-            PathBuf::from("/store"),
-            None,
-            None,
-        );
-        assert!(p.proxy_uds.is_none());
-        assert!(!p.fs_read.iter().any(|x| x.to_string_lossy().contains("ca.pem")));
-    }
-}
+mod tests;

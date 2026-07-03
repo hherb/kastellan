@@ -206,8 +206,11 @@ async fn probe(args: &[String], kp: kastellan_db::secrets::OsKeyringProvider) ->
         if a.enforce_sandbox { "enforced" } else { "disabled" },
     );
 
+    // The probe is an operator diagnostic: it spawns direct-allowlist (no
+    // egress sidecar) so a sidecar/DNS problem can be distinguished from an
+    // SDK/login problem. The daemon path is the force-routed one.
     let SpawnedMatrixWorker { mut channel, identity } =
-        match spawn_matrix_worker(backend, ChannelId("matrix".to_string()), &cfg) {
+        match spawn_matrix_worker(backend, ChannelId("matrix".to_string()), &cfg, None) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("matrix probe: spawn/login failed: {e:#}");

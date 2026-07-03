@@ -3,12 +3,14 @@
 //! death (capped-exponential backoff + sliding-window rate alarm). PDEATHSIG-safe
 //! (the spawning thread outlives the worker — required under the slice-5a
 //! bwrap-confined launcher). A generalization of the Matrix channel's
-//! `supervised_self_spawn`/`drive`, with no channel/poll-send coupling.
+//! historical self-spawning supervised-driver pattern, with no
+//! channel/poll-send coupling — the Matrix channel now consumes this
+//! supervisor directly (see `channel::matrix::spawn_matrix_worker`).
 //!
 //! Also houses [`ClientTransport`]: the production [`PersistentTransport`] impl
 //! that wraps a real [`kastellan_protocol::client::Client`] over a sandboxed
-//! worker's stdio, with stderr-tail death reporting (same pattern as the Matrix
-//! channel's `ProtocolWorkerClient`).
+//! worker's stdio, with stderr-tail death reporting (the same pattern the
+//! Matrix channel used before adopting this shared supervisor).
 use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
@@ -25,7 +27,7 @@ use crate::worker_lifecycle::RestartBackoff;
 /// worker's stdio, with a bounded stderr-tail for death diagnostics.
 ///
 /// Reuses the lockdown-env derivation + stderr-tail drain that the Matrix
-/// channel's `spawn_worker_client` uses, without coupling to that module.
+/// channel's worker spawn uses, without coupling to that module.
 pub struct ClientTransport {
     client: Client,
     /// Bounded tail of the worker's recent stderr lines, retained by the drain
@@ -41,8 +43,8 @@ impl ClientTransport {
     ///
     /// Applies the same worker-side lockdown-env derivation
     /// (`KASTELLAN_LANDLOCK_*` / `KASTELLAN_SECCOMP_PROFILE`) that
-    /// `tool_host::spawn_worker` and `channel::matrix::spawn_worker_client` do,
-    /// so the worker is locked down identically regardless of spawn path.
+    /// `tool_host::spawn_worker` does, so the worker is locked down
+    /// identically regardless of spawn path.
     pub fn spawn(
         backend: &dyn SandboxBackend,
         policy: &SandboxPolicy,
@@ -63,6 +65,13 @@ impl ClientTransport {
         let client = Client::from_child(child)
             .map_err(|e| anyhow::anyhow!("connect persistent worker: {e}"))?;
         Ok(Self { client, stderr_tail })
+    }
+
+    /// Wrap an ALREADY-CONNECTED client (no sandbox spawn) — the hermetic-test
+    /// path over a plain child process. No stderr tail ⇒ death reports carry
+    /// exit status only.
+    pub fn from_client(client: Client) -> Self {
+        Self { client, stderr_tail: None }
     }
 }
 
@@ -415,6 +424,24 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(seen >= 1, "respawn must drop (and thus reap) the dead transport");
+        h.shutdown();
+    }
+
+    /// #348 invariant: the initial factory() call — which forks the worker, so
+    /// bwrap's --die-with-parent PDEATHSIG binds to the calling THREAD — must
+    /// run on the persistent driver thread, never the (possibly ephemeral,
+    /// e.g. tokio spawn_blocking) caller thread.
+    #[test]
+    fn initial_spawn_runs_on_the_driver_thread_not_the_caller() {
+        let caller = thread::current().id();
+        let (tid_tx, tid_rx) = mpsc::channel();
+        let factory: PersistentFactory = Box::new(move || {
+            let _ = tid_tx.send(thread::current().id());
+            Ok(Box::new(FakeTransport { calls: 0, die_after: 1000, gen: 0 }))
+        });
+        let h = PersistentWorker::spawn("thread-parent-test", factory).unwrap();
+        let spawn_thread = tid_rx.recv().unwrap();
+        assert_ne!(spawn_thread, caller, "initial factory() must run on the driver thread (#348)");
         h.shutdown();
     }
 }

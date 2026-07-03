@@ -23,6 +23,7 @@ pub mod bus;
 pub mod ingest;
 pub mod matrix;
 pub mod pairing;
+pub mod polled_driver;
 pub mod respawn_alarm;
 pub mod route;
 
