@@ -519,7 +519,22 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
         .truncate(true)
         .mode(0o600)
         .open(path)?;
-    f.write_all(bytes)
+    f.write_all(bytes)?;
+    // Durability across a HARD kill. Under the slice 5b-4b VM backend the store is
+    // an ext4 `persistent_store` image: a plain write only reaches the guest page
+    // cache, so a SIGKILL of firecracker (a VM crash / the PersistentWorker respawn
+    // trigger) discards it — leaving a 0-byte `session.json` that a respawned worker
+    // cannot restore (it hangs in `restore_session`, breaking the #321 downtime
+    // recovery in a VM). SQLite fsyncs its own WAL, so only this plain-file write was
+    // at risk. fsync the file, then fsync the parent dir so the directory entry is
+    // durable too. Cheap + correct on every backend (bwrap/Seatbelt included).
+    f.sync_all()?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
 }
 
 /// Register the room-message event handler: decode text bodies, skip our own
