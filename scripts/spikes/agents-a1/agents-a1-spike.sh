@@ -33,10 +33,11 @@ MODEL="${MODEL:-agents-a1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="${OUT:-$HERE/agents-a1-spike-results.md}"
 
-pass=0 fail=0
+pass=0 fail=0 warns=0
 say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok()   { printf '\033[32m  PASS\033[0m %s\n' "$*"; pass=$((pass+1)); }
 bad()  { printf '\033[31m  FAIL\033[0m %s\n' "$*"; fail=$((fail+1)); }
+warn() { printf '\033[33m  WARN\033[0m %s\n' "$*"; warns=$((warns+1)); }
 
 # --- extract a field from an OpenAI chat response via python3 (no jq dep) ---
 jqpy() { python3 -c 'import sys,json;d=json.load(sys.stdin);print(eval(sys.argv[1]))' "$1"; }
@@ -53,10 +54,17 @@ LIC="$(curl -sSL --max-time 30 https://huggingface.co/InternScience/Agents-A1/ra
 echo "  ---"
 echo "${LIC:-  (could not fetch — check the model card manually)}" | sed 's/^/  /'
 echo "  ---"
-if printf '%s' "$LIC" | grep -qiE 'apache license|mit license|bsd|mozilla public|gnu (lesser )?general public'; then
+# AGPL-compatible allowlist per CLAUDE.md: Apache/MIT/BSD/MPL/LGPL/(A)GPL.
+# The "(affero |lesser )?" branch matters — AGPL is the project's own license
+# class and must not be flagged incompatible.
+if [ -z "$LIC" ]; then
+  # A network-fetch miss is not evidence of an incompatible license; warn and
+  # defer to the manual model-card check rather than failing the whole spike.
+  warn "could not fetch LICENSE over the network — verify AGPL-compatibility manually (model card)"
+elif printf '%s' "$LIC" | grep -qiE 'apache license|mit license|bsd|mozilla public|gnu (affero |lesser )?general public'; then
   ok "license text looks AGPL-compatible (verify the full file / model-card field)"
 else
-  bad "license NOT confirmed AGPL-compatible — STOP and verify manually before adopting"
+  bad "license text did NOT match a known AGPL-compatible license — STOP and verify manually before adopting"
 fi
 
 # ---------------------------------------------------------------------------
@@ -71,14 +79,16 @@ fi
 
 # ---------------------------------------------------------------------------
 say "Part 2 — basic chat round-trip"
-R="$(chat "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly one word: kastellan\"}],\"max_tokens\":16,\"temperature\":0}")"
+# `|| true`: a curl timeout/connection error must land in the `bad` branch below
+# (and still write the results file), not abort the whole spike via `set -e`.
+R="$(chat "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly one word: kastellan\"}],\"max_tokens\":16,\"temperature\":0}" || true)"
 MSG="$(printf '%s' "$R" | jqpy 'd["choices"][0]["message"]["content"]' 2>/dev/null || echo '<parse-error>')"
 echo "  model said: $MSG"
 [ "$MSG" != '<parse-error>' ] && [ -n "$MSG" ] && ok "chat completion returned content" || bad "no usable chat content (raw: ${R:0:200})"
 
 # ---------------------------------------------------------------------------
 say "Part 3 — tool-calling (validates the qwen3_coder parser emits tool_calls)"
-TR="$(chat "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"List the files in /etc. You must call the provided tool.\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"list_dir\",\"description\":\"List a directory\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}],\"tool_choice\":\"auto\",\"max_tokens\":256,\"temperature\":0}")"
+TR="$(chat "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"List the files in /etc. You must call the provided tool.\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"list_dir\",\"description\":\"List a directory\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}],\"tool_choice\":\"auto\",\"max_tokens\":256,\"temperature\":0}" || true)"
 TNAME="$(printf '%s' "$TR" | python3 -c 'import sys,json
 try:
   d=json.load(sys.stdin); tc=d["choices"][0]["message"].get("tool_calls") or []
@@ -88,13 +98,13 @@ echo "  tool_call name: $TNAME"
 [ "$TNAME" = "list_dir" ] && ok "model emitted a well-formed tool_call" || bad "expected tool_call list_dir, got '$TNAME' (raw: ${TR:0:200})"
 
 # ---------------------------------------------------------------------------
-say "Results — $pass passed, $fail failed"
+say "Results — $pass passed, $fail failed, $warns warned"
 {
   echo "# Agents-A1 spike results"
   echo
   echo "- Endpoint: \`$ENDPOINT\`"
   echo "- Model: \`$MODEL\`"
-  echo "- Automated probes: **$pass passed / $fail failed** (license gate, reachability, chat, tool-calling)"
+  echo "- Automated probes: **$pass passed / $fail failed / $warns warned** (license gate, reachability, chat, tool-calling)"
   echo
   echo "## Manual checks still owed (fill in)"
   echo "- [ ] License file/model-card field confirmed AGPL-compatible: ____"
