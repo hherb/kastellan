@@ -262,10 +262,64 @@ fn vsock_listen_cid_port() -> (u32, u32) {
     (VMADDR_CID_ANY, WORKER_VSOCK_PORT)
 }
 
+/// Pack an interface name into a 16-byte `ifr_name` buffer: NUL-padded, truncated
+/// to 15 chars + a trailing NUL. Pure — unit-testable without a socket. Only
+/// `bring_loopback_up` (Linux-only) calls this; cross-platform so its RED→GREEN
+/// TDD cycle and unit tests run on the Mac dev box too (slice 5b-4b, task 2).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn pack_ifname(name: &str) -> [libc::c_char; 16] {
+    let mut buf = [0 as libc::c_char; 16];
+    for (i, b) in name.bytes().take(15).enumerate() {
+        buf[i] = b as libc::c_char;
+    }
+    buf
+}
+
 // ── Linux-only: real syscall implementations ──────────────────────────────────
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
+
+/// Bring the guest loopback interface (`lo`) UP. A minimal Firecracker guest boots
+/// with `lo` DOWN; the matrix worker's in-guest `ProxyBridge` binds and dials
+/// `127.0.0.1:<port>`, which fails on a down loopback. Called UNCONDITIONALLY from
+/// `main` — it is harmless for workers that never touch loopback (removing a
+/// per-worker conditional). Fail-loud to the kernel console but never aborts PID1:
+/// read the current flags (SIOCGIFFLAGS), OR in IFF_UP, write back (SIOCSIFFLAGS).
+#[cfg(target_os = "linux")]
+fn bring_loopback_up() {
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if fd < 0 {
+            eprintln!(
+                "microvm-init: loopback socket() failed (errno {})",
+                *libc::__errno_location()
+            );
+            return;
+        }
+        let mut ifr: libc::ifreq = std::mem::zeroed();
+        ifr.ifr_name = pack_ifname("lo");
+        if libc::ioctl(fd, libc::SIOCGIFFLAGS, &mut ifr) != 0 {
+            eprintln!(
+                "microvm-init: SIOCGIFFLAGS(lo) failed (errno {})",
+                *libc::__errno_location()
+            );
+            libc::close(fd);
+            return;
+        }
+        // ifr_ifru is a union; ifru_flags is the active member after SIOCGIFFLAGS.
+        ifr.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+        if libc::ioctl(fd, libc::SIOCSIFFLAGS, &mut ifr) != 0 {
+            eprintln!(
+                "microvm-init: SIOCSIFFLAGS(lo) IFF_UP failed (errno {})",
+                *libc::__errno_location()
+            );
+        } else {
+            eprintln!("LOOPBACK_UP");
+        }
+        libc::close(fd);
+    }
+}
 
 /// How a RO-share bind target must be prepared before `MS_BIND`, decided purely
 /// from the source's kind (probed at `/ro-share{target}`) so it is unit-testable
@@ -751,6 +805,9 @@ fn exec_worker() {
 #[cfg(target_os = "linux")]
 fn main() {
     mount_pseudo_fs();
+    // Guest `lo` boots DOWN; the matrix worker's ProxyBridge binds 127.0.0.1.
+    // Unconditional + harmless for loopback-free workers (slice 5b-4b).
+    bring_loopback_up();
     let cmdline_for_mounts = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     apply_host_mounts(&parse_mount_manifest(&cmdline_for_mounts));
     let egress = parse_egress_config(&cmdline_for_mounts);
@@ -974,5 +1031,22 @@ mod tests {
     fn bind_prep_missing_source_skips() {
         // Neither dir nor file (missing / socket / fifo) → skip the bind entirely.
         assert_eq!(super::bind_prep(false, false), super::BindPrep::Skip);
+    }
+
+    #[test]
+    fn pack_ifname_lo_is_nul_padded() {
+        let n = super::pack_ifname("lo");
+        assert_eq!(n[0], b'l' as libc::c_char);
+        assert_eq!(n[1], b'o' as libc::c_char);
+        assert_eq!(n[2], 0);
+        assert_eq!(n[15], 0);
+    }
+
+    #[test]
+    fn pack_ifname_truncates_to_15_and_nul_terminates() {
+        // 20-char name → 15 bytes kept, index 15 stays NUL.
+        let n = super::pack_ifname("0123456789abcdefGHIJ");
+        assert_eq!(n[14], b'e' as libc::c_char); // 15th kept char (index 14)
+        assert_eq!(n[15], 0);
     }
 }
