@@ -246,13 +246,15 @@ fn spawn_peer(bin: &Path, homeserver: &str, acct: &Account, store_dir: &Path) ->
     Client::from_child(child).expect("connect to peer matrix worker")
 }
 
-/// Mint a unique shallow scratch dir under `/tmp` per spawn (fresh sidecar UDS each
-/// respawn; the `<scratch>/egress.sock` path must fit `sun_path`). `/tmp` is a
-/// slice-3 SHARE_ANCHOR.
-fn scratch_root_subdir() -> PathBuf {
+/// Mint a unique shallow scratch subdir per spawn (fresh sidecar UDS each respawn;
+/// the `<scratch>/egress.sock` path must fit `sun_path`). `root` is the test's
+/// auto-cleaned `TempDir` (a short `/tmp/.tmpXXXXXX`, itself a slice-3 SHARE_ANCHOR
+/// descendant); every subdir — and its UDS — is removed when the root drops, so
+/// repeated DGX runs don't accumulate `/tmp` cruft.
+fn scratch_subdir(root: &Path) -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
-    let dir = PathBuf::from("/tmp").join(format!("matrix-vm-{}-{}", std::process::id(), seq));
+    let dir = root.join(format!("vm-{seq}"));
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }
@@ -265,6 +267,7 @@ fn vm_bot_factory(
     user: String,
     password: String,
     proxy_bin: PathBuf,
+    scratch_root: PathBuf,
 ) -> PersistentFactory {
     let backend = firecracker_backend();
     let host_backend = host_backend();
@@ -289,7 +292,7 @@ fn vm_bot_factory(
         policy.env.push(("KASTELLAN_SECCOMP_PROFILE".into(), "none".into()));
         policy.env.push(("KASTELLAN_LANDLOCK_PROFILE".into(), "none".into()));
 
-        let scratch = scratch_root_subdir();
+        let scratch = scratch_subdir(&scratch_root);
         let allow = vec![format!("{host}:{port}")];
         let params = NetTransportSpawn {
             backend: &*backend,
@@ -339,12 +342,19 @@ fn gate() -> Option<(String, Account, Account, String, PathBuf, PathBuf)> {
 
 /// SIGKILL the launcher → force VM death. `-f` matches the full command line (the
 /// 21-char "kastellan-microvm-run" overflows the 15-char `comm`, so a bare `pkill`
-/// is a silent no-op).
-fn kill_vm() {
+/// is a silent no-op). Returns `true` iff `pkill` actually matched (exit 0) — i.e.
+/// a running launcher was found and killed. A `false` return means the kill was
+/// VACUOUS (no VM to kill), which the restart test asserts against: without a real
+/// kill the "recovery" would be a live delivery to a still-alive original VM, not
+/// the fresh-VM `/data`-store respawn under test (the false-green the sibling
+/// `net_demo_firecracker_egress_e2e` guards via its `calls_served` counter).
+fn kill_vm() -> bool {
     eprintln!("[INFO] sending SIGKILL (-f) to kastellan-microvm-run to force VM death");
-    let _ = std::process::Command::new("pkill")
+    std::process::Command::new("pkill")
         .args(["-9", "-f", "kastellan-microvm-run"])
-        .status();
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // ── tests ───────────────────────────────────────────────────────────────────────
@@ -364,9 +374,18 @@ fn matrix_vm_send_recv_round_trip() {
     let mut peer_client = spawn_peer(&peer_bin, &homeserver, &peer, peer_store.path());
     let _peer_id: Value = peer_client.call("matrix.init", json!({})).expect("peer init");
 
+    // Auto-cleaned scratch root (holds every spawn's sidecar UDS); declared before
+    // `bot` so it drops AFTER the worker teardown that uses those sockets.
+    let scratch_root = tempfile::tempdir().expect("scratch root dir");
     let bot = PersistentWorker::spawn(
         "matrix-vm",
-        vm_bot_factory(homeserver.clone(), bot.user.clone(), bot.password.clone(), proxy),
+        vm_bot_factory(
+            homeserver.clone(),
+            bot.user.clone(),
+            bot.password.clone(),
+            proxy,
+            scratch_root.path().to_path_buf(),
+        ),
     )
     .expect("boot matrix VM");
 
@@ -395,7 +414,11 @@ fn matrix_vm_send_recv_round_trip() {
                     break;
                 }
             }
-            Err(e) => eprintln!("[INFO] poll err (transient?): {e}"),
+            Err(e) => {
+                // Back off rather than busy-spin the deadline away on a persistent err.
+                eprintln!("[INFO] poll err (transient?): {e}");
+                std::thread::sleep(Duration::from_millis(500));
+            }
         }
     }
     bot.shutdown();
@@ -421,9 +444,18 @@ fn matrix_vm_restart_recovers_downtime_message() {
     let mut peer_client = spawn_peer(&peer_bin, &homeserver, &peer, peer_store.path());
     let _peer_id: Value = peer_client.call("matrix.init", json!({})).expect("peer init");
 
+    // Auto-cleaned scratch root (holds every (re)spawn's sidecar UDS); declared
+    // before `bot` so it drops AFTER the worker teardown that uses those sockets.
+    let scratch_root = tempfile::tempdir().expect("scratch root dir");
     let bot = PersistentWorker::spawn(
         "matrix-vm",
-        vm_bot_factory(homeserver.clone(), bot.user.clone(), bot.password.clone(), proxy),
+        vm_bot_factory(
+            homeserver.clone(),
+            bot.user.clone(),
+            bot.password.clone(),
+            proxy,
+            scratch_root.path().to_path_buf(),
+        ),
     )
     .expect("boot matrix VM");
 
@@ -436,8 +468,15 @@ fn matrix_vm_restart_recovers_downtime_message() {
     );
 
     // Kill the VM. PersistentWorker will respawn a FRESH VM against the same
-    // matrix-state.ext4 on the next call.
-    kill_vm();
+    // matrix-state.ext4 on the next call. Assert the kill was NON-VACUOUS: if pkill
+    // matched nothing the original VM is still alive and any "recovered" message
+    // would be a live delivery, not the fresh-VM /data-store recovery under test.
+    assert!(
+        kill_vm(),
+        "kill_vm matched no kastellan-microvm-run process — the VM was never killed, \
+         so this test would false-green on a live delivery instead of exercising the \
+         fresh-VM #321 recovery"
+    );
 
     // Peer sends WHILE the bot is down (distinct tag from the round-trip test).
     let body = format!("kastellan-fc-live-restart-{}", std::process::id());
@@ -450,6 +489,12 @@ fn matrix_vm_restart_recovers_downtime_message() {
     // fix surfaces the downtime backlog) and the tagged message appears.
     let deadline = Instant::now() + Duration::from_secs(150);
     let mut received = false;
+    // Fresh-VM proof: the driver replies Err to the in-flight caller when the
+    // transport is dead (persistent.rs) and does NOT transparently retry, so at
+    // least one poll MUST Err while the killed VM + sidecar respawn. A still-alive
+    // original (vacuous kill) would keep answering Ok and never surface an Err — so
+    // requiring `saw_respawn_err` rules out the "live delivery" false-green.
+    let mut saw_respawn_err = false;
     while Instant::now() < deadline {
         match bot.call("matrix.poll", json!({ "timeout_ms": 2000 })) {
             Ok(res) => {
@@ -459,10 +504,21 @@ fn matrix_vm_restart_recovers_downtime_message() {
                     break;
                 }
             }
-            Err(e) => eprintln!("[INFO] poll err during respawn (expected): {e}"),
+            Err(e) => {
+                saw_respawn_err = true;
+                // Back off rather than busy-spin through the multi-second respawn.
+                eprintln!("[INFO] poll err during respawn (expected): {e}");
+                std::thread::sleep(Duration::from_millis(500));
+            }
         }
     }
     bot.shutdown();
+    assert!(
+        saw_respawn_err,
+        "no poll error was observed after the kill — the transport never broke, so a \
+         fresh-VM respawn did not actually happen and {body:?} (if seen) was a live \
+         delivery to a still-running original VM, not #321 /data-store recovery"
+    );
     assert!(
         received,
         "#321 regression (VM): bot did not surface {body:?} sent during downtime — \
