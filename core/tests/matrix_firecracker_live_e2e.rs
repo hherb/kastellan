@@ -64,6 +64,18 @@ const GATE: &str = "KASTELLAN_MATRIX_FC_LIVE_E2E";
 /// The bot worker binary baked into the rootfs (its in-guest path).
 const GUEST_MATRIX_BIN: &str = "/usr/local/bin/kastellan-worker-matrix";
 
+/// Serializes the two VM tests. `cargo test` runs tests in parallel by default, but
+/// these two CANNOT run concurrently: [`kill_vm`]'s `pkill -f kastellan-microvm-run`
+/// is GLOBAL (it would kill the other test's VM), and both share the one
+/// `matrix-state.ext4`. Each test holds this guard for its whole duration so a plain
+/// `cargo test … -- --ignored` still runs them one at a time. Poison-tolerant: a
+/// panicking test must not wedge the other.
+static VM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn vm_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    VM_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ── Firecracker harness helpers (mirrored from net_demo_firecracker_egress_e2e.rs) ──
 
 /// The micro-VM image dir (kernel + rootfs). Matches the backend default and is
@@ -343,6 +355,8 @@ fn matrix_vm_send_recv_round_trip() {
     let Some((homeserver, bot, peer, room, proxy, peer_bin)) = gate() else {
         return;
     };
+    // Serialize against the sibling VM test (global pkill + shared persistent store).
+    let _vm_lock = vm_test_guard();
     // Fresh persistent store each run (the FC backend mkfs's it on first spawn).
     let _ = std::fs::remove_file(matrix_state_image());
 
@@ -397,6 +411,8 @@ fn matrix_vm_restart_recovers_downtime_message() {
     let Some((homeserver, bot, peer, room, proxy, peer_bin)) = gate() else {
         return;
     };
+    // Serialize against the sibling VM test (global pkill + shared persistent store).
+    let _vm_lock = vm_test_guard();
     // Fresh persistent store: the FIRST spawn mkfs's + populates it; the respawn
     // reuses the same image (mkfs-once), which is the mechanism under test.
     let _ = std::fs::remove_file(matrix_state_image());
