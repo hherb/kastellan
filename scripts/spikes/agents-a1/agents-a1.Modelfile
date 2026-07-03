@@ -1,0 +1,36 @@
+# Fixed Ollama Modelfile for InternScience/Agents-A1 (Q4_K_M GGUF).
+#
+# WHY THIS EXISTS
+# The upstream community GGUF ships a stub `TEMPLATE {{ .Prompt }}` with no chat
+# template, no stop tokens, and no tools template. Ollama therefore reports its
+# capabilities as `completion` only: chat leaks raw control tokens
+# (`<|im_start|>` / `<|endoftext|>`) and every tool call is rejected with
+# "does not support tools".
+#
+# THE FIX
+# Agents-A1 is a Qwen3.5-35B-A3B derivative — same tokenizer and the same
+# `<|im_start|>` / `<think>` chat markers — so Ollama's built-in `qwen3.5`
+# RENDERER + PARSER apply cleanly to the raw weights and restore the full chat
+# template, stop handling, tool-calling, and thinking channel. Capabilities
+# after building become: completion, tools, thinking. Parameters mirror the
+# sibling `qwen3.5:35b-a3b-q8_0` already published for this architecture.
+#
+# BUILD (once the base GGUF is pulled):
+#   ollama pull hf.co/InternScience/Agents-A1-Q4_K_M-GGUF
+#   ollama create agents-a1:q4 -f scripts/spikes/agents-a1/agents-a1.Modelfile
+#
+# THEN VALIDATE:
+#   ENDPOINT=http://127.0.0.1:11434/v1 MODEL=agents-a1:q4 \
+#     scripts/spikes/agents-a1/agents-a1-spike.sh
+#
+# NOTE: this covers the Q4 Ollama path (macOS / any-Linux). The model's headline
+# long-horizon tool-call CHAIN is best validated on the vLLM FP8-dynamic path
+# with `--tool-call-parser qwen3_coder` (see agents-a1-spike.sh header).
+
+FROM hf.co/InternScience/Agents-A1-Q4_K_M-GGUF:latest
+RENDERER qwen3.5
+PARSER qwen3.5
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER temperature 1
+PARAMETER presence_penalty 1.5
