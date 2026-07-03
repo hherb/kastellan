@@ -563,7 +563,14 @@ pub fn spawn_matrix_worker(
         // the RO-shared fs_read path always exists at spawn time (respawn-safe).
         if let Some((pw_path, secret)) = &pw_write {
             if let Some(parent) = pw_path.parent() {
-                std::fs::create_dir_all(parent)
+                // Owner-only (0700) — the transient plaintext password lives under
+                // the shared /tmp anchor, so restrict the pid-scoped dir to the
+                // daemon user (matches the private posture of the old store_dir).
+                use std::os::unix::fs::DirBuilderExt as _;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(parent)
                     .map_err(|e| anyhow::anyhow!("create matrix pw dir {parent:?}: {e}"))?;
             }
             write_private(pw_path, secret.as_bytes())
