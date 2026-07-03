@@ -13,5 +13,7 @@ readme      = "../../README.md"
 name = "kastellan-microvm-init"
 path = "src/main.rs"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[dependencies]
+# libc::c_char is available on macOS too — pack_ifname is cross-platform so its
+# RED→GREEN TDD cycle can run on the Mac dev box (slice 5b-4b, task 2 override).
 libc = "0.2"

@@ -195,6 +195,7 @@ async fn probe(args: &[String], kp: kastellan_db::secrets::OsKeyringProvider) ->
         password,
         device_name: Some("kastellan-probe".to_string()),
         enforce_sandbox: a.enforce_sandbox,
+        use_microvm: false,
     };
 
     eprintln!(

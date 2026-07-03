@@ -124,6 +124,34 @@ fn daemon_cfg_env_overrides_worker_bin_and_store() {
 }
 
 #[test]
+fn parse_daemon_config_defaults_use_microvm_false_and_password_none() {
+    let g = daemon_get(&[
+        ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://matrix.kastellan.dev"),
+        ("KASTELLAN_MATRIX_USER", "@kastellan:kastellan.dev"),
+        ("KASTELLAN_MATRIX_STORE", "/state/matrix/store"),
+        ("KASTELLAN_MATRIX_WORKER_BIN", "/bin/kastellan-worker-matrix"),
+    ]);
+    let cfg = parse_daemon_spawn_config(g, None, None).unwrap();
+    assert!(!cfg.use_microvm);
+    assert_eq!(cfg.password, None);
+}
+
+#[test]
+fn parse_daemon_config_reads_use_microvm_and_password() {
+    let g = daemon_get(&[
+        ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://matrix.kastellan.dev"),
+        ("KASTELLAN_MATRIX_USER", "@kastellan:kastellan.dev"),
+        ("KASTELLAN_MATRIX_STORE", "/state/matrix/store"),
+        ("KASTELLAN_MATRIX_WORKER_BIN", "/bin/kastellan-worker-matrix"),
+        ("KASTELLAN_MATRIX_USE_MICROVM", "1"),
+        ("KASTELLAN_MATRIX_PASSWORD", "s3cret"),
+    ]);
+    let cfg = parse_daemon_spawn_config(g, None, None).unwrap();
+    assert!(cfg.use_microvm);
+    assert_eq!(cfg.password.as_deref(), Some("s3cret"));
+}
+
+#[test]
 fn policy_builder_shape() {
     let p = build_matrix_policy(
         PathBuf::from("/opt/kastellan/kastellan-worker-matrix"),
@@ -167,4 +195,45 @@ fn policy_builder_omits_ca_when_not_force_routed() {
     );
     assert!(p.proxy_uds.is_none());
     assert!(!p.fs_read.iter().any(|x| x.to_string_lossy().contains("ca.pem")));
+}
+
+#[test]
+fn vm_password_path_is_pid_scoped_under_tmp_anchor() {
+    let p = super::matrix_vm_password_path(4242);
+    assert_eq!(
+        p,
+        std::path::PathBuf::from("/tmp/kastellan-matrix-4242/.login-password")
+    );
+    // Must sit under the /tmp share anchor so the FC backend RO-shares it.
+    assert!(p.starts_with("/tmp/"));
+}
+
+#[test]
+fn vm_policy_has_persistent_store_at_data_and_microvm_env() {
+    use kastellan_sandbox::{Net, Profile};
+    let store_image = std::path::PathBuf::from("/var/lib/kastellan/microvm/matrix-state.ext4");
+    let p = super::build_matrix_vm_policy(
+        "matrix.kastellan.dev",
+        443,
+        "/var/lib/kastellan/microvm".to_string(),
+        store_image.clone(),
+    );
+    // Baked-in binary + CA ⇒ nothing to RO-share.
+    assert!(p.fs_read.is_empty());
+    assert!(p.fs_write.is_empty());
+    assert_eq!(p.mem_mb, 512);
+    assert_eq!(p.cpu_ms, 0);
+    assert!(matches!(p.profile, Profile::WorkerMatrixClient));
+    assert!(matches!(p.net, Net::Allowlist(ref v) if v == &["matrix.kastellan.dev:443"]));
+    assert!(p.proxy_uds.is_none()); // force-routing sets this at spawn
+    // Persistent store rides an ext4 image mounted at /data (survives respawn).
+    let ps = p.persistent_store.expect("persistent_store set in VM mode");
+    assert_eq!(ps.host_backing, store_image);
+    assert_eq!(ps.guest_mount, std::path::PathBuf::from("/data"));
+    assert_eq!(ps.size_mib, 256);
+    // Backend boots the matrix rootfs from the shared image dir.
+    assert!(p.env.iter().any(|(k, v)| k == "KASTELLAN_MICROVM_DIR"
+        && v == "/var/lib/kastellan/microvm"));
+    assert!(p.env.iter().any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS"
+        && v == "matrix.ext4"));
 }

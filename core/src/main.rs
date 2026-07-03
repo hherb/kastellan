@@ -384,18 +384,28 @@ async fn main() -> Result<()> {
         // hanging daemon startup, and it doesn't block an async worker thread. On
         // timeout the blocking task is left to drain against the SDK's own HTTP
         // timeouts (a blocking task can't be force-cancelled).
+        // Worker backend: Firecracker VM when the operator opted in
+        // (KASTELLAN_MATRIX_USE_MICROVM=1, Linux); else the host jail. The SIDECAR
+        // backend always stays the host bwrap/Seatbelt (5c invariant — the egress
+        // proxy needs a real network route; a VM here would boot a proxy with none).
         #[cfg(target_os = "linux")]
-        let backend: Arc<dyn kastellan_sandbox::SandboxBackend> = Arc::clone(&sandboxes.bwrap);
+        let sidecar_backend: Arc<dyn kastellan_sandbox::SandboxBackend> =
+            Arc::clone(&sandboxes.bwrap);
+        #[cfg(target_os = "linux")]
+        let backend: Arc<dyn kastellan_sandbox::SandboxBackend> = if spawn_cfg.use_microvm {
+            Arc::clone(&sandboxes.firecracker)
+        } else {
+            Arc::clone(&sandboxes.bwrap)
+        };
+        #[cfg(target_os = "macos")]
+        let sidecar_backend: Arc<dyn kastellan_sandbox::SandboxBackend> =
+            Arc::clone(&sandboxes.seatbelt);
         #[cfg(target_os = "macos")]
         let backend: Arc<dyn kastellan_sandbox::SandboxBackend> = Arc::clone(&sandboxes.seatbelt);
-        // Matrix rides the global force-routing flag (5b-4 spec decision 2):
-        // when the daemon resolved a ForceRoutingConfig, the matrix worker gets
-        // a per-worker transparent-tunnel sidecar; decisions audit to PG via
-        // the same sink every force-routed worker uses. In 5b-4a the sidecar
-        // backend equals the worker backend (both host jails).
+
         let egress = force_routing.as_ref().map(|fr| {
             kastellan_core::channel::matrix::MatrixEgress {
-                sidecar_backend: Arc::clone(&backend),
+                sidecar_backend: Arc::clone(&sidecar_backend),
                 routing: Arc::clone(fr),
             }
         });
