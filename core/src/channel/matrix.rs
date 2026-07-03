@@ -260,14 +260,19 @@ fn parse_daemon_spawn_config(
     let enforce_sandbox = get("KASTELLAN_MATRIX_ENFORCE_SANDBOX")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(true);
+    let use_microvm = get("KASTELLAN_MATRIX_USE_MICROVM")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+    let password = get("KASTELLAN_MATRIX_PASSWORD").filter(|v| !v.is_empty());
     Some(MatrixSpawnConfig {
         worker_bin,
         homeserver_url,
         user,
         store_dir,
-        password: None,
+        password,
         device_name: Some("kastellan-daemon".to_string()),
         enforce_sandbox,
+        use_microvm,
     })
 }
 
@@ -352,6 +357,11 @@ pub struct MatrixSpawnConfig {
     /// passes `true` (the install default): the worker then runs under the
     /// `matrix_client` seccomp profile (TSYNC'd across all threads) + Landlock.
     pub enforce_sandbox: bool,
+    /// When `true` (Linux only, `KASTELLAN_MATRIX_USE_MICROVM=1`), the worker runs
+    /// in a Firecracker VM: the caller resolves the `FirecrackerVm` backend and
+    /// `spawn_matrix_worker` builds the VM policy (persistent_store at /data + baked
+    /// rootfs). Ignored on macOS. Default `false` ⇒ the 5b-4a bwrap/Seatbelt path.
+    pub use_microvm: bool,
 }
 
 /// A spawned live Matrix worker: the [`Channel`] for the bus plus the bot

@@ -124,6 +124,34 @@ fn daemon_cfg_env_overrides_worker_bin_and_store() {
 }
 
 #[test]
+fn parse_daemon_config_defaults_use_microvm_false_and_password_none() {
+    let g = daemon_get(&[
+        ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://matrix.kastellan.dev"),
+        ("KASTELLAN_MATRIX_USER", "@kastellan:kastellan.dev"),
+        ("KASTELLAN_MATRIX_STORE", "/state/matrix/store"),
+        ("KASTELLAN_MATRIX_WORKER_BIN", "/bin/kastellan-worker-matrix"),
+    ]);
+    let cfg = parse_daemon_spawn_config(g, None, None).unwrap();
+    assert!(!cfg.use_microvm);
+    assert_eq!(cfg.password, None);
+}
+
+#[test]
+fn parse_daemon_config_reads_use_microvm_and_password() {
+    let g = daemon_get(&[
+        ("KASTELLAN_MATRIX_HOMESERVER_URL", "https://matrix.kastellan.dev"),
+        ("KASTELLAN_MATRIX_USER", "@kastellan:kastellan.dev"),
+        ("KASTELLAN_MATRIX_STORE", "/state/matrix/store"),
+        ("KASTELLAN_MATRIX_WORKER_BIN", "/bin/kastellan-worker-matrix"),
+        ("KASTELLAN_MATRIX_USE_MICROVM", "1"),
+        ("KASTELLAN_MATRIX_PASSWORD", "s3cret"),
+    ]);
+    let cfg = parse_daemon_spawn_config(g, None, None).unwrap();
+    assert!(cfg.use_microvm);
+    assert_eq!(cfg.password.as_deref(), Some("s3cret"));
+}
+
+#[test]
 fn policy_builder_shape() {
     let p = build_matrix_policy(
         PathBuf::from("/opt/kastellan/kastellan-worker-matrix"),
