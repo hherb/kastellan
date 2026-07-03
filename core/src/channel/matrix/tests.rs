@@ -196,3 +196,33 @@ fn policy_builder_omits_ca_when_not_force_routed() {
     assert!(p.proxy_uds.is_none());
     assert!(!p.fs_read.iter().any(|x| x.to_string_lossy().contains("ca.pem")));
 }
+
+#[test]
+fn vm_policy_has_persistent_store_at_data_and_microvm_env() {
+    use kastellan_sandbox::{Net, Profile};
+    let store_image = std::path::PathBuf::from("/var/lib/kastellan/microvm/matrix-state.ext4");
+    let p = super::build_matrix_vm_policy(
+        "matrix.kastellan.dev",
+        443,
+        "/var/lib/kastellan/microvm".to_string(),
+        store_image.clone(),
+    );
+    // Baked-in binary + CA ⇒ nothing to RO-share.
+    assert!(p.fs_read.is_empty());
+    assert!(p.fs_write.is_empty());
+    assert_eq!(p.mem_mb, 512);
+    assert_eq!(p.cpu_ms, 0);
+    assert!(matches!(p.profile, Profile::WorkerMatrixClient));
+    assert!(matches!(p.net, Net::Allowlist(ref v) if v == &["matrix.kastellan.dev:443"]));
+    assert!(p.proxy_uds.is_none()); // force-routing sets this at spawn
+    // Persistent store rides an ext4 image mounted at /data (survives respawn).
+    let ps = p.persistent_store.expect("persistent_store set in VM mode");
+    assert_eq!(ps.host_backing, store_image);
+    assert_eq!(ps.guest_mount, std::path::PathBuf::from("/data"));
+    assert_eq!(ps.size_mib, 256);
+    // Backend boots the matrix rootfs from the shared image dir.
+    assert!(p.env.iter().any(|(k, v)| k == "KASTELLAN_MICROVM_DIR"
+        && v == "/var/lib/kastellan/microvm"));
+    assert!(p.env.iter().any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS"
+        && v == "matrix.ext4"));
+}

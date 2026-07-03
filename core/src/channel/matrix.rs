@@ -29,7 +29,7 @@ use std::time::Duration;
 use tokio::sync::mpsc as tok_mpsc;
 
 use kastellan_matrix_wire::PollResult;
-use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
+use kastellan_sandbox::{Net, PersistentStore, Profile, SandboxBackend, SandboxPolicy};
 
 use crate::channel::polled_driver::{PolledEvent, PolledWorkerDriver, PolledWorkerSpec};
 use crate::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
@@ -189,6 +189,42 @@ pub fn build_matrix_policy(
         env: Vec::new(), // spawn fills env (homeserver/user/secret refs) at Phase D
         proxy_uds,
         persistent_store: None,
+    }
+}
+
+/// VM-mode (5b-4b) Matrix policy. Unlike the bwrap `build_matrix_policy`, the
+/// worker binary AND the OS CA trust store are BAKED INTO the rootfs
+/// (`build-matrix-rootfs.sh`), so `fs_read` is empty — there are no host paths to
+/// RO-share, and the sidecar resolves DNS so no resolver files are needed in-guest.
+/// The E2E crypto/session store rides a `persistent_store` ext4 image mounted at
+/// `/data`: it survives VM respawns (the FC backend wipes `fs_write` per spawn),
+/// which is what preserves the device identity, `session.json`, and the #321
+/// sync-token downtime recovery. Force-routing sets `proxy_uds` at spawn.
+pub fn build_matrix_vm_policy(
+    homeserver_host: &str,
+    homeserver_port: u16,
+    image_dir: String,
+    store_image: PathBuf,
+) -> SandboxPolicy {
+    SandboxPolicy {
+        fs_read: vec![],
+        fs_write: vec![],
+        net: Net::Allowlist(vec![format!("{homeserver_host}:{homeserver_port}")]),
+        cpu_ms: 0, // long-lived; bounded by the KVM mem cap + cgroup
+        mem_mb: 512,
+        profile: Profile::WorkerMatrixClient,
+        cpu_quota_pct: None,
+        tasks_max: None,
+        env: vec![
+            ("KASTELLAN_MICROVM_DIR".to_string(), image_dir),
+            ("KASTELLAN_MICROVM_ROOTFS".to_string(), "matrix.ext4".to_string()),
+        ],
+        proxy_uds: None,
+        persistent_store: Some(PersistentStore {
+            host_backing: store_image,
+            guest_mount: PathBuf::from("/data"),
+            size_mib: 256,
+        }),
     }
 }
 
