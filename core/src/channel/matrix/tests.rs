@@ -198,6 +198,17 @@ fn policy_builder_omits_ca_when_not_force_routed() {
 }
 
 #[test]
+fn vm_password_path_is_pid_scoped_under_tmp_anchor() {
+    let p = super::matrix_vm_password_path(4242);
+    assert_eq!(
+        p,
+        std::path::PathBuf::from("/tmp/kastellan-matrix-4242/.login-password")
+    );
+    // Must sit under the /tmp share anchor so the FC backend RO-shares it.
+    assert!(p.starts_with("/tmp/"));
+}
+
+#[test]
 fn vm_policy_has_persistent_store_at_data_and_microvm_env() {
     use kastellan_sandbox::{Net, Profile};
     let store_image = std::path::PathBuf::from("/var/lib/kastellan/microvm/matrix-state.ext4");
