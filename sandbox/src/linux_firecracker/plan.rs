@@ -104,12 +104,20 @@ const WORKER_CMDLINE_KEY: &str = "kastellan.worker";
 /// cmdline stays byte-identical to the pre-#374 baseline.
 const WORKER_ARGS_CMDLINE_KEY: &str = "kastellan.worker.args";
 
-/// Conservative ceiling for the whole kernel cmdline (base args + the env
-/// token). Well under arm64's 2048-byte `COMMAND_LINE_SIZE`; the slice-1 env is
-/// ~3 small vars (~120 hex chars), so this only ever trips on a pathological
-/// policy. `build_launch_plan` fails closed above it rather than emit a
-/// truncated cmdline that would corrupt the boot.
-const MAX_CMDLINE_BYTES: usize = 1024;
+/// Ceiling for the whole kernel cmdline (base args + the env/mount/worker
+/// tokens), a 128-byte safety margin under the kernel's 2048-byte
+/// `COMMAND_LINE_SIZE` (2048 on both arm64 and x86_64 for the pinned
+/// firecracker-ci vmlinux; the buffer is NUL-terminated, so ≤2047 is usable).
+/// `build_launch_plan` fails closed above it rather than emit a truncated
+/// cmdline that would corrupt the boot.
+///
+/// The original slice-1 cap was 1024 (python-exec forwards ~3 small vars,
+/// ~120 hex chars). Slice 5b-4b's matrix-in-a-VM is the first legitimate,
+/// non-pathological policy that exceeds it: its env carries the homeserver URL,
+/// the full `@user:server` id, the store/device/egress-UDS vars, and the
+/// derived lockdown env — ~1090 bytes of boot_args, which overflowed 1024 and
+/// left the matrix VM unable to boot (DGX live-e2e finding, slice 5b-4b).
+const MAX_CMDLINE_BYTES: usize = 1920;
 
 /// Lowercase-hex encode (`[0-9a-f]`, two chars/byte). Hand-rolled so the crate
 /// takes no codec dependency; the guest's decoder in `kastellan-microvm-init`
