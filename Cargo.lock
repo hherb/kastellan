@@ -2306,10 +2306,14 @@ dependencies = [
  "kastellan-sandbox",
  "kastellan-supervisor",
  "parking_lot",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

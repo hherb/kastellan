@@ -30,85 +30,23 @@ fn target_bin(name: &str) -> Option<PathBuf> {
     }
 }
 
-/// Loopback self-signed rustls TLS origin. Reuses the exact rcgen + rustls
-/// pattern from the net-demo Task-3 dev harness (`workers/net-demo/src/main.rs`
-/// `mod probe_harness`), adapted to serve MANY connections (the initial
-/// `net.tls_probe`, then a fresh one after respawn each open a new TLS session):
-/// binds `127.0.0.1:0`, replies `HTTP/1.1 204 No Content\r\n\r\n` to any request,
-/// and returns `(port, ca_pem_path)`. The origin runs on the HOST; the real
-/// egress-proxy sidecar dials `127.0.0.1:<port>`, so the operator allowlist must
-/// carry that literal `127.0.0.1:<port>` (the proxy's SSRF has a literal-IP
-/// carve-out for allowlisted addresses — see `egress_force_routing_e2e.rs`).
+/// Loopback self-signed rustls TLS origin — the server-spawn is shared with the
+/// Firecracker e2e via [`kastellan_tests_common::tls_origin`] (#390); this module
+/// only keeps the hermetic test's distinct cert-PEM destination. The origin binds
+/// `127.0.0.1:0`, replies `HTTP/1.1 204 No Content\r\n\r\n` to any request, and
+/// runs on the HOST; the real egress-proxy sidecar dials `127.0.0.1:<port>`, so
+/// the operator allowlist must carry that literal `127.0.0.1:<port>` (the proxy's
+/// SSRF has a literal-IP carve-out for allowlisted addresses — see
+/// `egress_force_routing_e2e.rs`).
 mod origin {
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::thread;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    use tokio_rustls::TlsAcceptor;
-
-    /// Spawn a multi-connection loopback rustls origin on `127.0.0.1:0` that
-    /// answers any request with `204 No Content`. Writes its self-signed cert PEM
-    /// to a temp file and returns `(port, ca_pem_path)`.
+    /// Spawn the shared loopback TLS origin and write its cert PEM to a stable
+    /// temp file — the worker's `extra_ca`, kept out of the per-spawn scratch so
+    /// it survives respawn. Returns `(port, ca_pem_path)`.
     pub fn spawn_loopback_tls_origin() -> (u16, PathBuf) {
-        // Self-signed cert with a 127.0.0.1 IP SAN so rustls' server-name (IP)
-        // verification against the origin succeeds.
-        let ck = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
-            .expect("generate self-signed cert");
-        let cert_pem = ck.cert.pem();
-        let cert_der = ck.cert.der().clone();
-        let key_der = rustls_pki_types::PrivateKeyDer::Pkcs8(
-            rustls_pki_types::PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der()),
-        );
-
-        let server_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der)
-            .expect("build server config");
-        let acceptor = TlsAcceptor::from(Arc::new(server_config));
-
-        // A current-thread runtime dedicated to the origin. It binds the port
-        // synchronously so the caller can read it, then serves connections in a
-        // loop (one per probe). Detached — lives for the test's duration.
-        let (tx, rx) = std::sync::mpsc::channel::<u16>();
-        thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("origin runtime");
-            rt.block_on(async move {
-                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
-                let port = listener.local_addr().unwrap().port();
-                tx.send(port).unwrap();
-                loop {
-                    let (tcp, _) = match listener.accept().await {
-                        Ok(pair) => pair,
-                        Err(_) => break,
-                    };
-                    let acceptor = acceptor.clone();
-                    // Each connection gets its own task so a slow/aborted probe
-                    // never blocks the next one.
-                    tokio::spawn(async move {
-                        let mut tls = match acceptor.accept(tcp).await {
-                            Ok(t) => t,
-                            Err(_) => return,
-                        };
-                        let mut buf = [0u8; 1024];
-                        let _ = tls.read(&mut buf).await;
-                        let _ = tls
-                            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
-                            .await;
-                        let _ = tls.shutdown().await;
-                    });
-                }
-            });
-        });
-
-        let port = rx.recv().expect("origin port");
-
-        // Write the origin cert to a stable temp file; its path is the worker's
-        // extra_ca. Kept out of the per-spawn scratch so it survives respawn.
+        let (port, cert_pem) =
+            kastellan_tests_common::tls_origin::spawn_loopback_tls_origin();
         let ca_dir = std::env::temp_dir().join(format!(
             "kastellan-netdemo-5c-ca-{}",
             std::process::id()
