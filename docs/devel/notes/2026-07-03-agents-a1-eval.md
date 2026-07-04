@@ -231,7 +231,28 @@ Refines §5. Conditions and caveats now grounded in measurement:
    confidentiality — are solid without thinking.
 3. Keep a **separate embedder** (`Router::embed`); this is chat/agent only (§4.1).
 4. **Still owed before final adopt:** the vLLM **FP8** `qwen3_coder` tool-parser path
-   (§6.2) and longer real-scheduler chains (`core/tests/cli_ask_e2e.rs`).
+   (§6.2) — **attempted 2026-07-04, currently BLOCKED, see §7.6** — and longer
+   real-scheduler chains (`core/tests/cli_ask_e2e.rs`).
 
 Artifacts: probe scripts under `scripts/spikes/agents-a1/`; raw run notes in
 `~/a1-eval-deep-results.md` on the DGX.
+
+### 7.6 vLLM FP8 path — attempted, BLOCKED (arch too new for the Blackwell stacks)
+Tried to serve `InternScience/Agents-A1-FP8-dynamic` on the DGX with the pinned,
+Spark-blessed containers. The model arch is `Qwen3_5MoeForConditionalGeneration`
+(model_type `qwen3_5_moe`), which is **too new for the inference stacks currently
+on the box** — it failed at config/arch validation, so the ~35 GB weights never
+downloaded:
+- **vLLM `nvcr.io/nvidia/vllm:26.02-py3` (0.15.1+nv26.2)** — container Transformers
+  4.57.5 first rejected the config; upgrading to 5.13.0 fixes recognition, but vLLM
+  then has **no native `Qwen3_5Moe` kernel** (registry has `Qwen3MoeForCausalLM`,
+  not 3.5), and `--model-impl transformers` errors "not compatible with vLLM".
+- **SGLang `lmsysorg/sglang:spark` (0.5.4.post2)** — model registry stops at
+  `qwen3.py`; no `qwen3_5`.
+
+All flags were otherwise correct (`qwen3_coder` **is** a registered vLLM tool parser,
+`Qwen3CoderToolParser`). **Path forward:** a newer NGC vLLM container (26.03+, needs
+`docker login nvcr.io`) once it ships Qwen3.5-MoE, or wait for SGLang. Until then the
+**Ollama Q4 `agents-a1:q4` path is the working route** (llama.cpp already added the
+qwen3.5-moe GGUF arch). The FP8 gap is a *serving-tooling* matter, not a model-quality
+one — it does not change the §7.5 verdict.
