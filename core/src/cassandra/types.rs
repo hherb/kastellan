@@ -116,7 +116,7 @@ pub struct L3TemplateStep {
 /// Validation rules + caps live in [`crate::memory::l3_crystallise`];
 /// a candidate that fails validation causes the crystallise write to be
 /// skipped (a `tracing::warn!` is emitted by
-/// `runner::write_l3_crystallised_row` but no audit row is written).
+/// `runner::audit_rows::write_l3_crystallised_row` but no audit row is written).
 /// Stored skills are non-executable in this slice (no invocation path).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct L3SkillCandidate {
@@ -237,7 +237,7 @@ pub struct Plan {
     /// Validation rules + length cap live in [`crate::memory::l1_promote`];
     /// a payload that fails validation causes the write to be skipped
     /// entirely — a `tracing::warn!` is emitted by
-    /// `runner::write_l1_promoted_row` but no audit row is written.
+    /// `runner::audit_rows::write_l1_promoted_row` but no audit row is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l1_insight: Option<String>,
     /// Agent-raised L3 skill candidate. Only honoured on terminal

@@ -109,7 +109,7 @@ pub async fn sweep_and_audit(pool: &PgPool) -> Result<usize, DbError> {
 
 /// Insert one `actor='scheduler' action='task.crashed'` row carrying
 /// the canonical lifecycle payload. Same posture as
-/// [`super::runner::write_lifecycle_row`] — best-effort.
+/// [`super::runner::audit_rows::write_lifecycle_row`] — best-effort.
 async fn emit_task_crashed_row(pool: &PgPool, task: &Task) {
     let action = action_task_terminal("crashed");
     let payload = build_lifecycle_payload(task.id, task.lane, task.plan_count);

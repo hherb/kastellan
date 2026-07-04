@@ -12,7 +12,7 @@
 //!
 //! ## Side effect: entity auto-link
 //!
-//! On the agent-raised path (`runner::write_l1_promoted_row`), every
+//! On the agent-raised path (`runner::audit_rows::write_l1_promoted_row`), every
 //! newly-inserted L1 row is passed to
 //! [`crate::memory::entity_link::link_memory_entities`] in
 //! degrade-and-warn posture; the resulting `Option<LinkOutcome>`
