@@ -5,11 +5,14 @@
 //! below resolves to the parent `audit` module, reaching the
 //! `build_*_payload` builders, `compute_duration_ms`,
 //! `action_task_terminal`, and the `ACTION_*` / `SCHEDULER_AUDIT_ACTOR`
-//! / `FINALIZE_PROVENANCE_*` consts (including the `extract_entities`
-//! items re-exported by the parent). The `extract_entities` payload has
-//! its own co-located tests in `audit/extract_entities.rs`.
+//! / `FINALIZE_PROVENANCE_*` consts (including the items the parent
+//! re-exports from its `memory_rows` / `entity_rows` /
+//! `extract_entities` siblings — 2026-07-05 prod-split). The
+//! `extract_entities` payload has its own co-located tests in
+//! `audit/extract_entities.rs`.
 
 use super::*;
+use crate::memory::l1_promote::{L1Source, L1WriteOutcome};
 use std::collections::BTreeSet;
 use time::macros::datetime;
 
