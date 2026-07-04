@@ -17,8 +17,12 @@
 #   # 2. then, from a machine that can reach it (Mac over WireGuard):
 #   ENDPOINT=http://10.0.0.3:8000/v1 MODEL=agents-a1 scripts/spikes/agents-a1/agents-a1-spike.sh
 #
-#   # Mac-local Ollama Q4 alternative:
-#   ENDPOINT=http://127.0.0.1:11434/v1 MODEL=<ollama-tag> scripts/spikes/agents-a1/agents-a1-spike.sh
+#   # Ollama Q4 alternative (Mac or DGX). The upstream community GGUF ships a
+#   # broken stub template (completion-only, leaks control tokens, no tools);
+#   # build the fixed tag first from the Modelfile beside this script:
+#   #   ollama pull hf.co/InternScience/Agents-A1-Q4_K_M-GGUF
+#   #   ollama create agents-a1:q4 -f scripts/spikes/agents-a1/agents-a1.Modelfile
+#   ENDPOINT=http://127.0.0.1:11434/v1 MODEL=agents-a1:q4 scripts/spikes/agents-a1/agents-a1-spike.sh
 #
 # Env:
 #   ENDPOINT  OpenAI-compatible base URL, incl. /v1   (default http://127.0.0.1:8000/v1)
@@ -30,7 +34,10 @@ set -euo pipefail
 
 ENDPOINT="${ENDPOINT:-http://127.0.0.1:8000/v1}"
 MODEL="${MODEL:-agents-a1}"
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]:-$0} keeps `set -u` happy when the script is piped in
+# (e.g. `ssh host bash -s < agents-a1-spike.sh`), where BASH_SOURCE is unset;
+# the cd is guarded so a non-file invocation falls back to the cwd.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
 OUT="${OUT:-$HERE/agents-a1-spike-results.md}"
 
 pass=0 fail=0 warns=0
@@ -48,23 +55,42 @@ chat() { # $1 = JSON body -> raw response on stdout
 }
 
 # ---------------------------------------------------------------------------
-say "Part 0 — license gate (HARD constraint: AGPL-compatible only)"
-echo "  Fetching https://huggingface.co/InternScience/Agents-A1/raw/main/LICENSE ..."
-LIC="$(curl -sSL --max-time 30 https://huggingface.co/InternScience/Agents-A1/raw/main/LICENSE 2>/dev/null | head -3 || true)"
-echo "  ---"
-echo "${LIC:-  (could not fetch — check the model card manually)}" | sed 's/^/  /'
-echo "  ---"
 # AGPL-compatible allowlist per CLAUDE.md: Apache/MIT/BSD/MPL/LGPL/(A)GPL.
 # The "(affero |lesser )?" branch matters — AGPL is the project's own license
 # class and must not be flagged incompatible.
-if [ -z "$LIC" ]; then
-  # A network-fetch miss is not evidence of an incompatible license; warn and
-  # defer to the manual model-card check rather than failing the whole spike.
-  warn "could not fetch LICENSE over the network — verify AGPL-compatibility manually (model card)"
-elif printf '%s' "$LIC" | grep -qiE 'apache license|mit license|bsd|mozilla public|gnu (affero |lesser )?general public'; then
-  ok "license text looks AGPL-compatible (verify the full file / model-card field)"
+COMPAT_RE='apache|mit|bsd|mpl|mozilla public|isc|(a|l)?gpl|gnu (affero |lesser )?general public'
+say "Part 0 — license gate (HARD constraint: AGPL-compatible only)"
+# The HF API `cardData.license` SPDX tag is authoritative and reliable — the
+# raw `/LICENSE` blob 404s on repos that name the file differently (Agents-A1
+# does), which previously produced a false FAIL. Query the API first, fall back
+# to the raw blob only if the API yields nothing.
+echo "  Querying https://huggingface.co/api/models/InternScience/Agents-A1 (cardData.license) ..."
+LID="$(curl -sSL --max-time 30 https://huggingface.co/api/models/InternScience/Agents-A1 2>/dev/null \
+  | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin); print(d.get("cardData",{}).get("license") or d.get("license") or "")
+except Exception: print("")' 2>/dev/null || true)"
+if [ -n "$LID" ]; then
+  echo "  API license id: $LID"
+  if printf '%s' "$LID" | grep -qiE "$COMPAT_RE"; then
+    ok "HF API reports AGPL-compatible license: '$LID'"
+  else
+    bad "HF API license '$LID' is NOT on the AGPL-compatible allow-list — STOP and verify before adopting"
+  fi
 else
-  bad "license text did NOT match a known AGPL-compatible license — STOP and verify manually before adopting"
+  # Fall back to the raw LICENSE blob (best-effort; may 404 by filename).
+  echo "  API gave no license id; falling back to raw LICENSE blob ..."
+  LIC="$(curl -sSL --max-time 30 https://huggingface.co/InternScience/Agents-A1/raw/main/LICENSE 2>/dev/null | head -3 || true)"
+  echo "  ---"; echo "${LIC:-  (could not fetch — check the model card manually)}" | sed 's/^/  /'; echo "  ---"
+  if [ -z "$LIC" ] || printf '%s' "$LIC" | grep -qiE 'entry not found'; then
+    # A network/filename miss is not evidence of an incompatible license; warn
+    # and defer to the manual model-card check rather than failing the spike.
+    warn "could not read a license id — verify AGPL-compatibility manually (model card)"
+  elif printf '%s' "$LIC" | grep -qiE "$COMPAT_RE"; then
+    ok "raw LICENSE text looks AGPL-compatible (verify the model-card field)"
+  else
+    bad "raw LICENSE text did NOT match a known AGPL-compatible license — STOP and verify manually"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -81,10 +107,25 @@ fi
 say "Part 2 — basic chat round-trip"
 # `|| true`: a curl timeout/connection error must land in the `bad` branch below
 # (and still write the results file), not abort the whole spike via `set -e`.
-R="$(chat "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly one word: kastellan\"}],\"max_tokens\":16,\"temperature\":0}" || true)"
-MSG="$(printf '%s' "$R" | jqpy 'd["choices"][0]["message"]["content"]' 2>/dev/null || echo '<parse-error>')"
-echo "  model said: $MSG"
-[ "$MSG" != '<parse-error>' ] && [ -n "$MSG" ] && ok "chat completion returned content" || bad "no usable chat content (raw: ${R:0:200})"
+# max_tokens is generous (512): Agents-A1 is a *thinking* model, so a tiny budget
+# is spent reasoning before any final `content` is emitted. The extractor also
+# falls back to the separated reasoning channel so a thinking model still counts
+# as a live round-trip.
+R="$(chat "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly one word: kastellan\"}],\"max_tokens\":512,\"temperature\":0}" || true)"
+MSG="$(printf '%s' "$R" | python3 -c 'import sys,json
+try:
+  m=json.load(sys.stdin)["choices"][0]["message"]
+  c=(m.get("content") or "").strip()
+  if not c:
+    r=(m.get("reasoning") or m.get("reasoning_content") or "").strip()
+    c=("[reasoning-only] "+r) if r else ""
+  print(c if c else "<empty>")
+except Exception: print("<parse-error>")' 2>/dev/null || echo '<parse-error>')"
+echo "  model said: ${MSG:0:120}"
+case "$MSG" in
+  '<parse-error>'|'<empty>'|'') bad "no usable chat content (raw: ${R:0:200})" ;;
+  *) ok "chat completion returned content" ;;
+esac
 
 # ---------------------------------------------------------------------------
 say "Part 3 — tool-calling (validates the qwen3_coder parser emits tool_calls)"
