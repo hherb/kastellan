@@ -64,3 +64,31 @@ jobs:
 
       - name: cargo clippy (workspace, all targets, deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # The Matrix worker's live SDK path (`workers/matrix/src/sdk_live.rs`) is
+  # behind the optional `live-matrix` feature (`dep:matrix-sdk`). The `check`
+  # job above builds the default `--workspace`, which deliberately excludes that
+  # heavy, non-hermetic dependency — so a regression under `--features
+  # live-matrix` shipped silently until a DGX build caught it (issue #331). This
+  # job closes the gap by compiling + linting just that one crate with the
+  # feature on. It is a separate job (not a step in `check`) so the fast default
+  # gate stays light and hermetic; the two run in parallel.
+  matrix-live-check:
+    name: cargo check + clippy (matrix worker, live-matrix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (matrix worker, live-matrix feature)
+        run: cargo check -p kastellan-worker-matrix --features live-matrix --locked
+
+      - name: cargo clippy (matrix worker, live-matrix feature, deny warnings)
+        run: cargo clippy -p kastellan-worker-matrix --features live-matrix --locked -- -D warnings
