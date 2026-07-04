@@ -90,6 +90,19 @@ impl ForceRoutingConfig {
     pub(crate) fn pins_for(&self, allowlist: &[String]) -> Option<String> {
         self.cert_pins.as_ref().and_then(|m| select_pins_for_allowlist(m, allowlist))
     }
+
+    /// Best-effort startup reclaim of per-worker egress scratch dirs left under
+    /// `scratch_root` by a prior daemon that was SIGKILLed before its
+    /// `EgressSidecar::drop` RAII cleanup ran (#251). Only removes dirs whose
+    /// embedded pid is neither this process nor a live one, so it is safe to run
+    /// while a concurrent daemon owns its own dirs. Returns the number removed.
+    pub fn sweep_stale_scratch_dirs(&self) -> usize {
+        crate::egress::scratch_sweep::sweep_orphaned_scratch_dirs(
+            &self.scratch_root,
+            std::process::id(),
+            crate::egress::scratch_sweep::pid_is_alive,
+        )
+    }
 }
 
 /// Error from [`resolve_force_routing`]: the operator opted into force-routing

@@ -127,8 +127,17 @@ async fn main() -> Result<()> {
         exe_dir.as_deref(),
     )
     .context("building egress force-routing config")?;
-    if force_routing.is_some() {
+    if let Some(fr) = force_routing.as_ref() {
         info!("egress force-routing ENABLED — Net::Allowlist workers route through the egress proxy");
+        // Reclaim per-worker scratch dirs orphaned by a prior daemon that was
+        // SIGKILLed before its RAII cleanup ran (#251). Best-effort: a leak,
+        // never a safety issue — egress is gated by the OS netns/Seatbelt
+        // barrier, not by scratch hygiene. Conservative (only sweeps dead,
+        // non-self pids), so it is safe alongside a concurrent daemon.
+        let swept = fr.sweep_stale_scratch_dirs();
+        if swept > 0 {
+            info!(dirs = swept, "egress: reclaimed stale per-worker scratch dirs from a prior daemon");
+        }
     }
 
     let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(

@@ -309,7 +309,13 @@ where
 fn make_worker_scratch_dir(scratch_root: &Path) -> Result<PathBuf, ToolHostError> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = scratch_root.join(format!("egress-{}-{}", std::process::id(), seq));
+    // Prefix shared with the startup orphan sweep (#251) so the two stay in sync.
+    let dir = scratch_root.join(format!(
+        "{}{}-{}",
+        super::scratch_sweep::SCRATCH_DIR_PREFIX,
+        std::process::id(),
+        seq
+    ));
     // Reject up front if the sidecar's `<dir>/egress.sock` would overflow
     // `sockaddr_un.sun_path`. The default scratch root (`std::env::temp_dir()`)
     // is short; only a deep `KASTELLAN_EGRESS_SCRATCH_DIR` override can hit this.
