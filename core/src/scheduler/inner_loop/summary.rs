@@ -49,9 +49,55 @@ const OK_ELIDED_MARKER: &str = "ok: [output elided: summary budget]";
 /// real output (the budget may drop it); `false` for errors and for the
 /// already-tiny withheld/empty `Ok` markers, which carry load-bearing signal
 /// and are never elided.
+///
+/// `Clone` so [`render_plans_summary`] can copy the memoized renders before
+/// the per-call budget elision mutates them (see [`PlanRecord`]); `Debug` so
+/// [`PlanRecord`] (a field of the `Debug`-deriving `TaskContext`) can derive it.
+#[derive(Clone, Debug)]
 struct RenderedStep {
     text: String,
     elidable: bool,
+}
+
+/// A completed plan plus the screened, planner-bound render of its outcomes.
+///
+/// `rendered` is computed **once**, at the sole append point
+/// ([`PlanRecord::new`], called from `inner_loop.rs`), rather than being
+/// re-derived on every planner iteration. The sink screen
+/// ([`render_step_outcome`] → [`sink_screen_blocks`]) is a pure, deterministic
+/// function of `(tool, outcome)`, and both inputs are frozen the moment the
+/// record is pushed onto the append-only `TaskContext::plans`. Re-screening
+/// every accumulated outcome on every loop was latent-quadratic in
+/// `max_plans` (which is operator-overridable and unbounded); memoizing at the
+/// push is observationally identical and drops it to linear. Issue #344.
+#[derive(Debug)]
+pub struct PlanRecord {
+    /// The completed plan; its `decision` labels the summary object.
+    pub plan: Plan,
+    /// Screened renders of `plan`'s step outcomes, one per outcome. Private:
+    /// the only consumer is [`render_plans_summary`], and the screened-once
+    /// invariant depends on nothing else being able to inject an unscreened
+    /// `RenderedStep`.
+    rendered: Vec<RenderedStep>,
+}
+
+impl PlanRecord {
+    /// Screen each outcome under its step's own guard profile and store the
+    /// result. The `i`-th outcome is produced by `plan.steps[i]`, so
+    /// `plan.steps[i].tool` selects the profile; a missing step (outcomes
+    /// longer than steps — not expected) falls back to the fail-closed Strict
+    /// default (`for_tool("")`).
+    pub fn new(plan: Plan, outcomes: Vec<StepOutcome>) -> Self {
+        let rendered = outcomes
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let tool = plan.steps.get(i).map(|s| s.tool.as_str()).unwrap_or("");
+                render_step_outcome(tool, o)
+            })
+            .collect();
+        Self { plan, rendered }
+    }
 }
 
 /// Elide oldest `Ok`-output heads until the total byte size of all step texts
@@ -137,25 +183,17 @@ fn render_step_outcome(tool: &str, o: &StepOutcome) -> RenderedStep {
 }
 
 /// Build the compact per-plan summary for the planner prompt: one
-/// `{ "decision", "step_outcomes": [..] }` object per completed plan. Each
-/// outcome is the result of `p.steps[i]`, so the tool whose guard profile
-/// screens it is `p.steps[i].tool`; a missing step (outcomes longer than
-/// steps — not expected) falls back to the fail-closed Strict default
-/// (`for_tool("")`).
-pub(super) fn render_plans_summary(plans: &[(Plan, Vec<StepOutcome>)]) -> Vec<serde_json::Value> {
-    let mut rendered: Vec<Vec<RenderedStep>> = plans
-        .iter()
-        .map(|(p, outcomes)| {
-            outcomes
-                .iter()
-                .enumerate()
-                .map(|(i, o)| {
-                    let tool = p.steps.get(i).map(|s| s.tool.as_str()).unwrap_or("");
-                    render_step_outcome(tool, o)
-                })
-                .collect()
-        })
-        .collect();
+/// `{ "decision", "step_outcomes": [..] }` object per completed plan.
+///
+/// The step outcomes were **already screened once** when each [`PlanRecord`]
+/// was constructed at push time (issue #344), so this function performs *zero*
+/// injection screening — it clones the memoized renders (cheap string copies,
+/// no catalogue scans) and runs only the per-call size budget over them. The
+/// clone is required because [`apply_summary_budget`] elides in place and must
+/// not mutate the stored, immutable record.
+pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Value> {
+    let mut rendered: Vec<Vec<RenderedStep>> =
+        plans.iter().map(|r| r.rendered.clone()).collect();
 
     // Bound the accumulated size of the always-in-context summary, eliding the
     // oldest successful-step output heads first (#339).
@@ -164,10 +202,10 @@ pub(super) fn render_plans_summary(plans: &[(Plan, Vec<StepOutcome>)]) -> Vec<se
     plans
         .iter()
         .zip(rendered)
-        .map(|((p, _), steps)| {
+        .map(|(r, steps)| {
             let step_outcomes: Vec<String> = steps.into_iter().map(|s| s.text).collect();
             serde_json::json!({
-                "decision":      p.decision,
+                "decision":      r.plan.decision,
                 "step_outcomes": step_outcomes,
             })
         })
