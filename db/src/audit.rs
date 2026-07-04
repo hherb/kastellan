@@ -57,6 +57,28 @@ use crate::DbError;
 /// the JSONL mirror line count.
 pub const PAYLOAD_MAX_BYTES: usize = 4096;
 
+/// Payload key that marks a [`truncate_payload`] envelope. This is a **wire
+/// contract**: readers in other crates (e.g. `kastellan-core`'s observation
+/// capture, issue #62) detect truncation via [`is_truncation_envelope`], so
+/// the writer and every reader share this single definition rather than
+/// re-spelling the literal.
+pub const TRUNCATED_MARKER_KEY: &str = "_truncated";
+
+/// True iff `payload` is a truncation envelope produced by
+/// [`truncate_payload`] — i.e. the original payload was over budget and
+/// every real key was replaced by the `{_truncated, sha256, len}`
+/// fingerprint.
+///
+/// Lives next to the producer so the two cannot drift: a shape change to the
+/// envelope must update this predicate (and the shape-pin test below) in the
+/// same file. Pure.
+pub fn is_truncation_envelope(payload: &serde_json::Value) -> bool {
+    payload
+        .get(TRUNCATED_MARKER_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// One decoded `audit_log` row.
 ///
 /// `payload` is whatever the writer stored — a `serde_json::Value`
@@ -120,7 +142,7 @@ pub fn truncate_payload(payload: serde_json::Value) -> serde_json::Value {
     }
 
     serde_json::json!({
-        "_truncated": true,
+        (TRUNCATED_MARKER_KEY): true,
         "sha256": hex,
         "len": bytes.len(),
     })
@@ -300,6 +322,23 @@ mod tests {
             sha.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "sha256 must be lowercase hex: got {sha}"
         );
+    }
+
+    /// Producer↔predicate round-trip: whatever `truncate_payload` emits,
+    /// `is_truncation_envelope` must recognize — and an untruncated payload
+    /// must NOT be recognized. Cross-crate readers (core's observation
+    /// capture, #62) key off this predicate, so a shape change that breaks
+    /// the pairing must fail here, in the file that owns both sides.
+    #[test]
+    fn is_truncation_envelope_round_trips_producer() {
+        let big = serde_json::Value::String("z".repeat(PAYLOAD_MAX_BYTES + 1));
+        assert!(is_truncation_envelope(&truncate_payload(big)));
+
+        let small = serde_json::json!({"plan": {"steps": []}});
+        assert!(!is_truncation_envelope(&truncate_payload(small.clone())));
+        assert!(!is_truncation_envelope(&small));
+        // A non-boolean or absent marker is not an envelope.
+        assert!(!is_truncation_envelope(&serde_json::json!({"_truncated": "yes"})));
     }
 
     /// Same input → same fingerprint. This is what makes truncated

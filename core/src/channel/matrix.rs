@@ -581,10 +581,15 @@ pub fn spawn_matrix_worker(
                 // Fresh unique scratch per spawn/respawn → fresh sidecar UDS (no
                 // stale-socket reuse). RAII-cleaned by the EgressSidecar bundle.
                 let seq = spawn_seq.fetch_add(1, Ordering::SeqCst);
-                let scratch = eg
-                    .routing
-                    .scratch_root
-                    .join(format!("matrix-{}-{seq}", std::process::id()));
+                // Prefix shared with the startup orphan sweep (#251) so a
+                // SIGKILLed daemon's leaked matrix scratch dirs are reclaimed
+                // on the next boot; the sweep's round-trip test pins the
+                // `{prefix}{pid}-{seq}` shape.
+                let scratch = eg.routing.scratch_root.join(format!(
+                    "{}{}-{seq}",
+                    crate::egress::scratch_sweep::MATRIX_SCRATCH_DIR_PREFIX,
+                    std::process::id()
+                ));
                 let _ = std::fs::remove_dir_all(&scratch);
                 std::fs::create_dir_all(&scratch)
                     .map_err(|e| anyhow::anyhow!("create matrix egress scratch {scratch:?}: {e}"))?;

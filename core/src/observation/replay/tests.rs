@@ -300,7 +300,8 @@ fn pre_slice_a_plan_audit_row(id: i64, task_id: i64) -> CapturedAuditRow {
 
 fn synthetic_capture(audit_rows: Vec<CapturedAuditRow>, plans: Vec<CapturedPlan>) -> CaptureJson {
     CaptureJson {
-        schema_version: 2,
+        // Models a *current* capture — track the live schema version.
+        schema_version: crate::observation::capture::SCHEMA_VERSION,
         fixture_id: "test-fixture".into(),
         fixture_summary: "synthetic for replay_capture test".into(),
         captured_at: "2026-05-15T00:00:00Z".into(),
@@ -392,4 +393,42 @@ async fn replay_capture_skips_when_plan_body_is_null() {
     assert!(p.skipped_reason.is_some(),
         "skipped_reason must be populated when plan_json is null");
     assert!(!p.is_delta);
+    // Pre-Slice-A rows ARE recoverable by recapture — the reason must say so
+    // and must NOT be the truncation message (see the sibling test below).
+    assert!(p.skipped_reason.as_deref().unwrap().contains("recapture"));
+}
+
+#[tokio::test]
+async fn replay_capture_truncated_row_gets_distinct_skip_reason() {
+    // Schema-v3 (#62): a truncated source row also arrives with
+    // plan_json: null, but `source_truncated: true` — and recapture CANNOT
+    // recover it (the audit writer destroyed the payload). The skip reason
+    // must be distinct from the pre-Slice-A "recapture" advice.
+    let plans = vec![CapturedPlan {
+        iter: 1,
+        plan_json: serde_json::Value::Null,
+        verdict_today: Some("approve".into()),
+        step_count: 0,
+        data_ceiling: "Public".into(),
+        source_truncated: true,
+    }];
+    let audit_rows = vec![
+        pre_slice_a_plan_audit_row(1, 1),
+        verdict_audit_row(2, 1, "approve"),
+    ];
+    let capture = synthetic_capture(audit_rows, plans);
+    let chain = ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]);
+
+    let result = replay_capture(&capture, &chain).await;
+    assert_eq!(result.plans_replayed, 0);
+    assert_eq!(result.plans_skipped_missing_body, 1);
+    let reason = result.per_plan[0].skipped_reason.as_deref().unwrap();
+    assert!(
+        reason.contains("truncation") || reason.contains("elided"),
+        "truncated row must name truncation, got: {reason}"
+    );
+    assert!(
+        !reason.contains("recapture against current daemon"),
+        "truncated row must not carry the (useless) recapture advice: {reason}"
+    );
 }

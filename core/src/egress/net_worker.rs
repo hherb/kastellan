@@ -309,10 +309,12 @@ where
 fn make_worker_scratch_dir(scratch_root: &Path) -> Result<PathBuf, ToolHostError> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    // Prefix shared with the startup orphan sweep (#251) so the two stay in sync.
+    // Prefix shared with the startup orphan sweep (#251) so the two stay in
+    // sync; the sweep's `parser_round_trips_producer_grammar` test pins this
+    // exact `{prefix}{pid}-{seq}` shape.
     let dir = scratch_root.join(format!(
         "{}{}-{}",
-        super::scratch_sweep::SCRATCH_DIR_PREFIX,
+        super::scratch_sweep::EGRESS_SCRATCH_DIR_PREFIX,
         std::process::id(),
         seq
     ));

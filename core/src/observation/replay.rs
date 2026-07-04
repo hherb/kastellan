@@ -304,7 +304,10 @@ pub fn load_captures_from_dir(dir: &Path) -> std::io::Result<Vec<LoadedCapture>>
 /// Per-plan behaviour:
 /// - `capture.plans[i].plan_json` is JSON null → emit `ReplayedPlan`
 ///   with `skipped_reason: Some(...)`; never fabricate a synthetic
-///   `Plan` from derived fields.
+///   `Plan` from derived fields. The reason distinguishes a
+///   `source_truncated` row (payload destroyed at audit-write time,
+///   unrecoverable — #62) from a pre-Slice-A row (recoverable by
+///   recapture).
 /// - `plan_json` deserialises into a `Plan` → call `chain.review` and
 ///   build a `VerdictSnapshot`.
 ///
@@ -334,15 +337,25 @@ pub async fn replay_capture(
     for cp in capture.plans.iter() {
         if cp.plan_json.is_null() {
             skipped = skipped.saturating_add(1);
+            // Schema-v3 (#62): a truncated source row is *not* recoverable by
+            // recapture — the audit writer replaced the whole payload with the
+            // `truncate_payload` fingerprint. Surface it distinctly so the
+            // operator doesn't chase the recapture advice for rows where it
+            // can't help.
+            let reason = if cp.source_truncated {
+                "plan body elided at audit-write time (truncation envelope); \
+                 unrecoverable — raise the audit payload budget to capture \
+                 plans this large (issue #62)"
+            } else {
+                "plan body missing; recapture against current daemon \
+                 (Slice A's audit-payload v2)"
+            };
             per_plan.push(ReplayedPlan {
                 iter: cp.iter,
                 baseline_verdict: cp.verdict_today.clone(),
                 new_verdict: None,
                 is_delta: false,
-                skipped_reason: Some(
-                    "plan body missing; recapture against current daemon \
-                     (Slice A's audit-payload v2)".into()
-                ),
+                skipped_reason: Some(reason.into()),
             });
             continue;
         }

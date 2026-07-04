@@ -303,6 +303,25 @@ fn extract_plans_truncated_is_distinct_from_pre_slice_a_null() {
     assert_ne!(p_trunc[0].source_truncated, p_pre[0].source_truncated);
 }
 
+#[test]
+fn extract_plans_round_trips_real_truncate_payload_output() {
+    // Feed actual `truncate_payload` output (not a hand-written envelope)
+    // through the extractor. This pins the cross-crate wire contract end to
+    // end — producer (`kastellan_db::audit::truncate_payload`) ↔ reader
+    // (`is_truncation_envelope` behind `source_truncated`) — so an envelope
+    // shape change fails here, not silently in production (#62).
+    let oversized = serde_json::json!({
+        "task_id": 1,
+        "plan": {"steps": [{"tool": "shell-exec"}]},
+        "padding": "x".repeat(kastellan_db::audit::PAYLOAD_MAX_BYTES),
+    });
+    let envelope = kastellan_db::audit::truncate_payload(oversized);
+    let rows = vec![fake_audit_row(1, "agent", "plan.formulate", envelope)];
+    let plans = extract_plans_from_audit_rows(&rows);
+    assert!(plans[0].source_truncated, "real producer envelope must set source_truncated");
+    assert!(plans[0].plan_json.is_null(), "the envelope carries no plan key");
+}
+
 /// `SCHEMA_VERSION` pin. Bumping requires a deliberate edit here
 /// plus a migration note in the doc-comment.
 #[test]

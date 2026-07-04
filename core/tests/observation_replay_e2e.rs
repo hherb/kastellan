@@ -11,7 +11,9 @@ use tempfile::TempDir;
 
 use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
 use kastellan_core::cassandra::types::{DataClass, Plan};
-use kastellan_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
+use kastellan_core::observation::capture::{
+    CaptureJson, CapturedAuditRow, CapturedPlan, SCHEMA_VERSION,
+};
 use kastellan_core::observation::replay::{load_captures_from_dir, replay_capture};
 
 fn approve_baseline_capture() -> CaptureJson {
@@ -31,7 +33,8 @@ fn approve_baseline_capture() -> CaptureJson {
     };
     let plan_value = serde_json::to_value(&plan).unwrap();
     CaptureJson {
-        schema_version: 2,
+        // Models a *current* capture — track the live schema version.
+        schema_version: SCHEMA_VERSION,
         fixture_id: "t1-approve-baseline-with-plan-body".into(),
         fixture_summary: "synthetic approve baseline".into(),
         captured_at: "2026-05-15T10:00:00Z".into(),
@@ -70,6 +73,8 @@ fn approve_baseline_capture() -> CaptureJson {
 
 fn pre_slice_a_capture() -> CaptureJson {
     CaptureJson {
+        // Deliberately v2: models an OLD capture written before the
+        // schema-v3 `source_truncated` field existed. Do not bump.
         schema_version: 2,
         fixture_id: "t2-missing-plan-body".into(),
         fixture_summary: "synthetic pre-Slice-A capture".into(),

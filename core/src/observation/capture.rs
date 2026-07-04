@@ -243,14 +243,11 @@ pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedP
             iter = iter.saturating_add(1);
             // A truncated row's payload is the `{_truncated, sha256, len}`
             // envelope from `truncate_payload` — every real key, `plan`
-            // included, was elided. Detect it so the null `plan_json`
-            // below is attributable to truncation rather than a
-            // pre-Slice-A capture or a real zero-step plan.
-            let source_truncated = row
-                .payload
-                .get("_truncated")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            // included, was elided. Detect it (via the predicate that lives
+            // next to the producer, so the wire contract can't drift) so the
+            // null `plan_json` below is attributable to truncation rather
+            // than a pre-Slice-A capture or a real zero-step plan.
+            let source_truncated = kastellan_db::audit::is_truncation_envelope(&row.payload);
             let plan_json = row.payload.get("plan").cloned().unwrap_or(serde_json::Value::Null);
             let step_count = plan_json
                 .get("steps")
