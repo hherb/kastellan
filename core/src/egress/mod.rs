@@ -18,4 +18,5 @@ pub mod cert_pins;
 pub mod leak_provision;
 pub mod net_worker;
 pub mod persistent_net;
+pub mod scratch_sweep;
 pub mod spawn;

@@ -7,7 +7,9 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use kastellan_core::cassandra::types::{DataClass, Plan};
-use kastellan_core::observation::capture::{CaptureJson, CapturedAuditRow, CapturedPlan};
+use kastellan_core::observation::capture::{
+    CaptureJson, CapturedAuditRow, CapturedPlan, SCHEMA_VERSION,
+};
 use kastellan_tests_common::cli_binary;
 
 fn approve_capture() -> CaptureJson {
@@ -27,7 +29,8 @@ fn approve_capture() -> CaptureJson {
     };
     let plan_value = serde_json::to_value(&plan).unwrap();
     CaptureJson {
-        schema_version: 2,
+        // Models a *current* capture — track the live schema version.
+        schema_version: SCHEMA_VERSION,
         fixture_id: "cli-approve-baseline".into(),
         fixture_summary: "synthetic approve baseline for CLI test".into(),
         captured_at: "2026-05-15T11:00:00Z".into(),
@@ -44,6 +47,7 @@ fn approve_capture() -> CaptureJson {
             verdict_today: Some("approve".into()),
             step_count: 0,
             data_ceiling: "Public".into(),
+            source_truncated: false,
         }],
         audit_rows: vec![CapturedAuditRow {
             id: 1,

@@ -18,6 +18,7 @@ pub mod linux_firecracker;
 pub mod macos_container;
 #[cfg(target_os = "macos")]
 pub mod macos_seatbelt;
+pub mod pid;
 
 use std::path::PathBuf;
 use std::sync::Arc;

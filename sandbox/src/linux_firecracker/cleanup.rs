@@ -112,12 +112,13 @@ pub fn sweep_orphaned_run_dirs(temp_dir: &std::path::Path, alive: impl Fn(u32) -
     removed
 }
 
-/// Linux liveness check via `/proc/<pid>` existence. No external dependency.
-/// A reused pid (a dead launcher's pid now held by an unrelated process) reads
-/// as alive → that dir is conservatively kept (a safe missed-cleanup).
-pub fn pid_is_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
-}
+/// Liveness check, re-exported from the crate-wide helper so every orphan
+/// sweep shares one implementation ([`crate::pid`]). `kill(pid, 0)` semantics
+/// beat the old `/proc/<pid>` probe: it also reads correctly under hidepid
+/// mounts, and EPERM (exists, not signalable) counts as alive. A reused pid
+/// (a dead launcher's pid now held by an unrelated process) reads as alive →
+/// that dir is conservatively kept (a safe missed-cleanup).
+pub use crate::pid::pid_is_alive;
 
 #[cfg(test)]
 mod tests {

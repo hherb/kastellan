@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 
 use crate::cassandra::review::{ChainReviewStage, ReviewStage, ReviewStageContext};
-use crate::cassandra::types::{DataClass, Plan, PlannedStep, Verdict};
+use crate::cassandra::types::{DataClass, PlannedStep, Verdict};
 use crate::scheduler::audit::{
     build_l3_invoke_outcome_payload, ACTION_L3_INVOKE_OUTCOME, SCHEDULER_AUDIT_ACTOR,
 };
@@ -19,7 +19,7 @@ use crate::scheduler::audit::{
 use self::floor::apply_floor_raise;
 pub use self::floor::ClassificationFloorSource;
 use self::invoke_expand::{expand_invoke_skill, InvokeExpansion};
-use self::summary::render_plans_summary;
+use self::summary::{render_plans_summary, PlanRecord};
 // Re-exported only so the `#[cfg(test)] mod tests` below can reach these
 // `summary`-owned bounds via `use super::*`; no non-test code in this module
 // references them, hence the `cfg(test)` gate (else they read as unused).
@@ -50,7 +50,7 @@ pub struct TaskContext {
     /// raise (the tags explained the original CLI inference, not the
     /// elevated floor).
     pub classification_floor_signals: Vec<String>,
-    pub plans: Vec<(Plan, Vec<StepOutcome>)>,
+    pub plans: Vec<PlanRecord>,
     pub advisories: Vec<String>,
     pub blocks: Vec<String>,
     pub plan_count: u32,
@@ -472,7 +472,7 @@ pub async fn run_to_terminal(
             ).await?;
         }
 
-        ctx.plans.push((plan, outcomes));
+        ctx.plans.push(PlanRecord::new(plan, outcomes));
         // loop back: agent reflects on the outcomes for the next plan
     }
 }
