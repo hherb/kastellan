@@ -249,11 +249,65 @@ fn extract_plans_some_approve_is_distinct_from_none() {
     assert_ne!(p_with[0].verdict_today, p_without[0].verdict_today);
 }
 
+#[test]
+fn extract_plans_flags_truncated_source_row() {
+    // A plan.formulate row whose payload is the `truncate_payload`
+    // envelope (`{_truncated, sha256, len}`) has lost its `plan` key.
+    // Schema-v3 (issue #62) surfaces that as `source_truncated: true`
+    // so the null plan_json is attributable to truncation, not a real
+    // zero-step plan or a pre-Slice-A capture.
+    let rows = vec![
+        fake_audit_row(
+            1,
+            "agent",
+            "plan.formulate",
+            serde_json::json!({"_truncated": true, "sha256": "ab".repeat(32), "len": 8192}),
+        ),
+        fake_audit_row(2, "cassandra:chain", "verdict",
+            serde_json::json!({"verdict": "Approve"})),
+    ];
+    let plans = extract_plans_from_audit_rows(&rows);
+    assert_eq!(plans.len(), 1);
+    assert!(plans[0].source_truncated, "truncation envelope must set source_truncated");
+    assert!(plans[0].plan_json.is_null());
+    assert_eq!(plans[0].step_count, 0);
+    // The verdict lookahead is unaffected by truncation of the plan row.
+    assert_eq!(plans[0].verdict_today, Some("Approve".to_string()));
+}
+
+#[test]
+fn extract_plans_truncated_is_distinct_from_pre_slice_a_null() {
+    // Both a truncated row and a pre-Slice-A row yield `plan_json:
+    // null`, but only the truncated one sets `source_truncated`. This
+    // is the whole point of the schema-v3 bump (issue #62).
+    let truncated = vec![fake_audit_row(
+        1,
+        "agent",
+        "plan.formulate",
+        serde_json::json!({"_truncated": true, "sha256": "cd".repeat(32), "len": 9000}),
+    )];
+    // Pre-Slice-A: a plan.formulate row with no `plan` key and no
+    // `_truncated` marker.
+    let pre_slice_a = vec![fake_audit_row(
+        1,
+        "agent",
+        "plan.formulate",
+        serde_json::json!({"task_id": 1, "plan_count": 1}),
+    )];
+    let p_trunc = extract_plans_from_audit_rows(&truncated);
+    let p_pre = extract_plans_from_audit_rows(&pre_slice_a);
+    assert!(p_trunc[0].plan_json.is_null());
+    assert!(p_pre[0].plan_json.is_null());
+    assert!(p_trunc[0].source_truncated);
+    assert!(!p_pre[0].source_truncated);
+    assert_ne!(p_trunc[0].source_truncated, p_pre[0].source_truncated);
+}
+
 /// `SCHEMA_VERSION` pin. Bumping requires a deliberate edit here
 /// plus a migration note in the doc-comment.
 #[test]
-fn schema_version_is_two() {
-    assert_eq!(SCHEMA_VERSION, 2);
+fn schema_version_is_three() {
+    assert_eq!(SCHEMA_VERSION, 3);
 }
 
 // ---- write_capture_to_dir ----

@@ -48,6 +48,7 @@ fn approve_baseline_capture() -> CaptureJson {
             verdict_today: Some("approve".into()),
             step_count: 0,
             data_ceiling: "Public".into(),
+            source_truncated: false,
         }],
         audit_rows: vec![CapturedAuditRow {
             id: 1,
@@ -86,6 +87,7 @@ fn pre_slice_a_capture() -> CaptureJson {
             verdict_today: Some("approve".into()),
             step_count: 0,
             data_ceiling: "Public".into(),
+            source_truncated: false,
         }],
         audit_rows: vec![CapturedAuditRow {
             id: 1,

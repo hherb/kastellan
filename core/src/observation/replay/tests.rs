@@ -346,6 +346,7 @@ async fn replay_capture_against_noop_chain_yields_approve_no_delta() {
         verdict_today: Some("approve".into()),
         step_count: 0,
         data_ceiling: "Public".into(),
+        source_truncated: false,
     }];
     let capture = synthetic_capture(audit_rows, plans);
     let chain = ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]);
@@ -373,6 +374,7 @@ async fn replay_capture_skips_when_plan_body_is_null() {
         verdict_today: Some("approve".into()),
         step_count: 0,
         data_ceiling: "Public".into(),
+        source_truncated: false,
     }];
     let audit_rows = vec![
         pre_slice_a_plan_audit_row(1, 1),

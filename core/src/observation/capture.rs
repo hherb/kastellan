@@ -40,7 +40,11 @@ use thiserror::Error;
 /// * v2 — [`CapturedPlan::verdict_today`] changed from `String` to
 ///   `Option<String>` so a missing `cassandra:chain/verdict` row is
 ///   distinguishable from a real `Approve` verdict. Issue #47.
-pub const SCHEMA_VERSION: u32 = 2;
+/// * v3 — [`CapturedPlan::source_truncated`] added so a plan distilled
+///   from a [`kastellan_db::audit::truncate_payload`] envelope is
+///   distinguishable from a pre-Slice-A capture or a genuine zero-step
+///   plan (both of which also carry `plan_json: null`). Issue #62.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Top-level on-disk envelope for one captured fixture run.
 ///
@@ -90,6 +94,20 @@ pub struct CapturedPlan {
     pub verdict_today: Option<String>,
     pub step_count: u32,
     pub data_ceiling: String,
+    /// `true` iff the source `agent/plan.formulate` row's payload was a
+    /// [`kastellan_db::audit::truncate_payload`] envelope
+    /// (`{_truncated: true, sha256, len}`) — meaning every payload key,
+    /// including `plan`, was elided at write time. When set, the
+    /// `plan_json: null` / `step_count: 0` fields on this struct are
+    /// *artefacts of truncation*, not a real zero-step plan. This makes
+    /// the row wire-distinct from a pre-Slice-A capture (also
+    /// `plan_json: null`, but `source_truncated: false`). Schema-v3
+    /// (issue #62).
+    ///
+    /// `#[serde(default)]` so a v2 capture that predates this field
+    /// still deserialises (the field reads back as `false`).
+    #[serde(default)]
+    pub source_truncated: bool,
 }
 
 /// Trimmed projection of `db::audit::AuditRow` suitable for JSON
@@ -210,14 +228,29 @@ pub fn capture_filename(date_yyyy_mm_dd: &str, model_slug: &str) -> String {
 ///      was nuked along with every other key.
 ///   3. A genuine writer regression dropped the key.
 ///
-/// Slice B's harness should treat (2) specifically by checking the
-/// raw row payload for `_truncated == true` before falling through.
+/// Case (2) is now surfaced explicitly: when the source row's payload
+/// is a truncation envelope (`_truncated == true`), the resulting
+/// [`CapturedPlan::source_truncated`] is set. A consumer can then
+/// separate a truncated row (`source_truncated: true`) from a
+/// pre-Slice-A / genuinely-empty plan (`source_truncated: false`)
+/// rather than mis-classifying every `plan_json: null` as a zero-step
+/// plan (issue #62).
 pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedPlan> {
     let mut out = Vec::new();
     let mut iter: u32 = 0;
     for (i, row) in rows.iter().enumerate() {
         if row.actor == "agent" && row.action == "plan.formulate" {
             iter = iter.saturating_add(1);
+            // A truncated row's payload is the `{_truncated, sha256, len}`
+            // envelope from `truncate_payload` — every real key, `plan`
+            // included, was elided. Detect it so the null `plan_json`
+            // below is attributable to truncation rather than a
+            // pre-Slice-A capture or a real zero-step plan.
+            let source_truncated = row
+                .payload
+                .get("_truncated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let plan_json = row.payload.get("plan").cloned().unwrap_or(serde_json::Value::Null);
             let step_count = plan_json
                 .get("steps")
@@ -243,6 +276,7 @@ pub fn extract_plans_from_audit_rows(rows: &[CapturedAuditRow]) -> Vec<CapturedP
                 verdict_today,
                 step_count,
                 data_ceiling,
+                source_truncated,
             });
         }
     }
