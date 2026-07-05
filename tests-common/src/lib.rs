@@ -54,6 +54,7 @@ pub mod sandbox;
 pub mod serial;
 pub mod skip;
 pub mod temp;
+pub mod tls_origin;
 pub mod wait;
 pub mod watchdog;
 

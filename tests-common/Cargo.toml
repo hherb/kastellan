@@ -43,3 +43,11 @@ sqlx               = { workspace = true }
 # Already present transitively in the build graph (MIT/Apache-2.0,
 # AGPL-compatible); only referenced on macOS in `serial.rs`.
 parking_lot        = "0.12"
+# Shared loopback TLS-origin harness (`tls_origin.rs`, issue #390): the same
+# rcgen self-signed cert + rustls server the net-demo egress e2e tests spawn.
+# Pins mirror `core`'s (unified `ring` backend) so the workspace lock stays
+# single-versioned. All AGPL-compatible (Apache-2.0 / MIT / ISC). Dev-only.
+rcgen            = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+tokio-rustls     = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls           = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
+rustls-pki-types = { version = "1",    features = ["std"] }
