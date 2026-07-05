@@ -18,8 +18,8 @@
 //! Split 2026-07-05 (Item 9b file-size pass; was one 653-LOC file):
 //! this parent keeps the shared types, errors, and pure helpers; the
 //! I/O layer lives in two child modules with verbatim-moved bodies —
-//! [`query`] (read surface: `list_entities`, `get_entity_with_mentions`
-//! and the preview caps) and [`review`] (transactional write ops:
+//! `query` (read surface: `list_entities`, `get_entity_with_mentions`
+//! and the preview caps) and `review` (transactional write ops:
 //! `approve_entity`, `reject_entity`, `merge_entities`). Everything is
 //! re-exported here, so `kastellan_db::entities::…` paths are
 //! byte-identical to the pre-split module.
