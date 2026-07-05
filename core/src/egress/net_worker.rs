@@ -199,6 +199,7 @@ where
         params.worker_name,
         params.cert_pins_json,
         params.disable_mitm,
+        false, // short-lived: 1:1 with a single tool-call dispatch (issue #395)
     )
     .map_err(|e| ToolHostError::Io(std::io::Error::other(format!("egress sidecar: {e}"))))?;
     // Capture the proxy stdout for the ingest thread before the handle moves.

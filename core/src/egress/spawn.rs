@@ -31,6 +31,13 @@ pub(crate) const CA_FILE_NAME: &str = "ca.pem";
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(25);
 
+/// Cumulative CPU budget (ms → ceil-div RLIMIT_CPU seconds) for a **short-lived**
+/// per-tool-call sidecar. Matches the web-fetch worker's own `cpu_ms` (the
+/// sidecar lives 1:1 with that single dispatch), and restores the CPU
+/// defense-in-depth that `e70174b` had to drop blanket-wide (issue #395). A
+/// long-lived channel sidecar (matrix) gets `0` instead — see [`proxy_policy`].
+const SHORT_LIVED_SIDECAR_CPU_MS: u64 = 10_000;
+
 /// A running sidecar. Drop or `shutdown()` kills it.
 #[derive(Debug)]
 pub struct SidecarHandle {
@@ -64,6 +71,15 @@ impl SidecarHandle {
 /// DNS, self-enforcing), `WorkerNetClient` (permits `socket(2)`), fs_read for
 /// the DNS resolver files + the binary, fs_write for the scratch dir (to create
 /// the UDS), and the env contract.
+///
+/// `long_lived` selects the CPU governance (issue #395). A channel sidecar
+/// (matrix) lives 1:1 with a worker that runs for weeks, so a cumulative
+/// `RLIMIT_CPU` would eventually SIGKILL it mid-flight → `cpu_ms: 0` (no cap;
+/// bounded instead by the cgroup `CPUQuota` on Linux / the mem cap). A
+/// short-lived per-tool-call sidecar (web-fetch) lives only for the one
+/// dispatch, so it gets a bounded [`SHORT_LIVED_SIDECAR_CPU_MS`] cap back —
+/// restoring the defense-in-depth that only mattered on macOS, where
+/// `RLIMIT_CPU` is the sole per-process CPU-governance primitive.
 pub fn proxy_policy(
     binary: &Path,
     allowlist: &[String],
@@ -71,6 +87,7 @@ pub fn proxy_policy(
     worker: &str,
     cert_pins_json: Option<&str>,
     disable_mitm: bool,
+    long_lived: bool,
 ) -> SandboxPolicy {
     let uds = scratch.join(UDS_FILE_NAME);
     let allow_json = serde_json::to_string(allowlist).expect("Vec<String> serializes");
@@ -98,12 +115,15 @@ pub fn proxy_policy(
         ],
         fs_write: vec![scratch.to_path_buf()],
         net: Net::ProxyEgress,
-        // Long-lived (the sidecar lives 1:1 with its worker — for a channel
-        // worker that is weeks): no cumulative RLIMIT_CPU cap, same convention
-        // as `build_matrix_policy`. The historical `10_000` here was never
-        // enforced (the lockdown env was not derived before the spawn fix
-        // below) and WOULD have SIGKILLed a long-lived sidecar mid-flight.
-        cpu_ms: 0,
+        // CPU governance is lifetime-scoped (issue #395). A long-lived channel
+        // sidecar (matrix, weeks) gets no cumulative RLIMIT_CPU — same
+        // convention as `build_matrix_policy` — because the historical `10_000`
+        // WOULD have SIGKILLed it mid-flight once the spawn fix below made the
+        // lockdown env actually reach the proxy (it never did before `e70174b`).
+        // A short-lived per-tool-call sidecar lives only for its one dispatch,
+        // so it keeps the bounded cap as defense-in-depth (the only CPU primitive
+        // on macOS, where there is no cgroup quota).
+        cpu_ms: if long_lived { 0 } else { SHORT_LIVED_SIDECAR_CPU_MS },
         mem_mb: 256,
         profile: Profile::WorkerNetClient,
         cpu_quota_pct: None,
@@ -116,6 +136,11 @@ pub fn proxy_policy(
 
 /// Spawn the proxy under `backend` and wait (bounded) for its UDS to appear.
 /// Fail-closed: returns `Err` on spawn failure or bind timeout.
+///
+/// `long_lived` scopes the sidecar's CPU cap — see [`proxy_policy`]. Pass `true`
+/// for a channel sidecar that outlives many dispatches (matrix), `false` for a
+/// per-tool-call sidecar (web-fetch) so it gets a bounded `RLIMIT_CPU` back.
+#[allow(clippy::too_many_arguments)] // mirrors `proxy_policy`'s descriptor args + `backend`
 pub fn spawn_sidecar(
     backend: &dyn SandboxBackend,
     binary: &Path,
@@ -124,8 +149,17 @@ pub fn spawn_sidecar(
     worker: &str,
     cert_pins_json: Option<&str>,
     disable_mitm: bool,
+    long_lived: bool,
 ) -> anyhow::Result<SidecarHandle> {
-    let policy = proxy_policy(binary, allowlist, scratch, worker, cert_pins_json, disable_mitm);
+    let policy = proxy_policy(
+        binary,
+        allowlist,
+        scratch,
+        worker,
+        cert_pins_json,
+        disable_mitm,
+        long_lived,
+    );
     let uds_path = scratch.join(UDS_FILE_NAME);
     let _ = std::fs::remove_file(&uds_path);
 
@@ -168,7 +202,7 @@ mod tests {
 
     #[test]
     fn policy_uses_proxy_egress_and_net_client() {
-        let p = proxy_policy(Path::new("/opt/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None, false);
+        let p = proxy_policy(Path::new("/opt/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None, false, false);
         assert!(matches!(p.net, Net::ProxyEgress));
         assert!(matches!(p.profile, Profile::WorkerNetClient));
         assert!(p.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
@@ -190,7 +224,7 @@ mod tests {
     /// this pins what that derivation must yield for the proxy's policy.
     #[test]
     fn derived_proxy_policy_carries_lockdown_env_for_dns() {
-        let p = proxy_policy(Path::new("/opt/proxy"), &["matrix.example.org:443".into()], Path::new("/scratch"), "matrix", None, true);
+        let p = proxy_policy(Path::new("/opt/proxy"), &["matrix.example.org:443".into()], Path::new("/scratch"), "matrix", None, true, true);
         let d = crate::tool_host::derive_lockdown_env(&p);
         let env: std::collections::HashMap<_, _> = d.env.into_iter().collect();
         assert_eq!(env["KASTELLAN_SECCOMP_PROFILE"], "net_client");
@@ -204,9 +238,58 @@ mod tests {
         assert!(!env.contains_key("KASTELLAN_CPU_MS"), "no CPU rlimit for a long-lived sidecar");
     }
 
+    /// Issue #395: the CPU cap is lifetime-scoped. A long-lived channel sidecar
+    /// (matrix, weeks) must carry NO cumulative RLIMIT_CPU — a bounded cap would
+    /// eventually SIGKILL it mid-flight now that the lockdown env actually
+    /// reaches the proxy (post `e70174b`).
+    #[test]
+    fn proxy_policy_long_lived_has_no_cpu_cap() {
+        let p = proxy_policy(
+            Path::new("/opt/proxy"), &["matrix.example.org:443".into()],
+            Path::new("/scratch"), "matrix", None, true, true,
+        );
+        assert_eq!(p.cpu_ms, 0, "long-lived sidecar must have no cumulative CPU cap");
+    }
+
+    /// Issue #395: a short-lived per-tool-call sidecar (web-fetch) lives 1:1 with
+    /// its single dispatch, so it keeps a bounded RLIMIT_CPU as defense-in-depth
+    /// — the only per-process CPU-governance primitive on macOS. This is the
+    /// path `e70174b` had regressed to `0` blanket-wide.
+    #[test]
+    fn proxy_policy_short_lived_keeps_bounded_cpu_cap() {
+        let p = proxy_policy(
+            Path::new("/opt/proxy"), &["example.com".into()],
+            Path::new("/scratch"), "web-fetch", None, false, false,
+        );
+        assert_eq!(
+            p.cpu_ms, SHORT_LIVED_SIDECAR_CPU_MS,
+            "short-lived sidecar must keep a bounded CPU cap",
+        );
+        assert!(p.cpu_ms > 0);
+    }
+
+    /// The short-lived cap must survive lockdown-env derivation as
+    /// `KASTELLAN_CPU_MS` (the wire form the worker prelude reads for
+    /// `setrlimit(RLIMIT_CPU)`) — the long-lived case omits it entirely (pinned
+    /// by `derived_proxy_policy_carries_lockdown_env_for_dns`).
+    #[test]
+    fn derived_short_lived_policy_carries_cpu_ms_env() {
+        let p = proxy_policy(
+            Path::new("/opt/proxy"), &["example.com".into()],
+            Path::new("/scratch"), "web-fetch", None, false, false,
+        );
+        let d = crate::tool_host::derive_lockdown_env(&p);
+        let env: std::collections::HashMap<_, _> = d.env.into_iter().collect();
+        assert_eq!(
+            env["KASTELLAN_CPU_MS"],
+            SHORT_LIVED_SIDECAR_CPU_MS.to_string(),
+            "short-lived sidecar must derive a CPU rlimit env",
+        );
+    }
+
     #[test]
     fn proxy_policy_omits_pins_env_when_none() {
-        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None, false);
+        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", None, false, false);
         let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
         assert!(!env.contains_key(ENV_PINS));
     }
@@ -214,7 +297,7 @@ mod tests {
     #[test]
     fn proxy_policy_includes_pins_env_when_set() {
         let pins = r#"{"api.anthropic.com":["sha256/AAAA"]}"#;
-        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", Some(pins), false);
+        let p = proxy_policy(Path::new("/bin/proxy"), &["example.com".into()], Path::new("/scratch"), "web-fetch", Some(pins), false, false);
         let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
         assert_eq!(env[ENV_PINS], pins);
     }
@@ -223,7 +306,7 @@ mod tests {
     fn proxy_policy_sets_disable_mitm_env_when_requested() {
         let p = proxy_policy(
             Path::new("/bin/proxy"), &["example.com:443".into()],
-            Path::new("/scratch"), "browser-driver", None, true,
+            Path::new("/scratch"), "browser-driver", None, true, false,
         );
         let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
         assert_eq!(env[ENV_DISABLE_MITM], "1");
@@ -233,7 +316,7 @@ mod tests {
     fn proxy_policy_omits_disable_mitm_env_when_false() {
         let p = proxy_policy(
             Path::new("/bin/proxy"), &["example.com:443".into()],
-            Path::new("/scratch"), "web-fetch", None, false,
+            Path::new("/scratch"), "web-fetch", None, false, false,
         );
         let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
         assert!(!env.contains_key(ENV_DISABLE_MITM));
