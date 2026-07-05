@@ -205,12 +205,12 @@ pub fn build_launch_plan(
     program: &str,
     args: &[&str],
 ) -> Result<FirecrackerLaunchPlan, SandboxError> {
+    // Absolute + no-`..` (issue #387). Rejecting `..` up front also defuses the
+    // `mounts::non_anchor_top_level` first-component blind spot: a path like
+    // `/opt/../etc` never reaches the anchor logic, so it can't be treated as
+    // anchorable under `opt` and stage the OS-resolved `/etc` into the RO share.
     for p in policy.fs_read.iter().chain(policy.fs_write.iter()) {
-        if !p.is_absolute() {
-            return Err(SandboxError::Backend(format!(
-                "policy paths must be absolute, got {p:?}"
-            )));
-        }
+        crate::validate_linux_bind_path(p, "policy")?;
     }
     // Slice 5b-2: the persistent store lives in a separate field, so it bypasses
     // the loop above — but `PersistentStore` documents both paths as absolute and
@@ -218,11 +218,7 @@ pub fn build_launch_plan(
     // relative guest mountpoint). Enforce it explicitly, fail-closed like fs_*.
     if let Some(ps) = &policy.persistent_store {
         for p in [&ps.host_backing, &ps.guest_mount] {
-            if !p.is_absolute() {
-                return Err(SandboxError::Backend(format!(
-                    "persistent_store paths must be absolute, got {p:?}"
-                )));
-            }
+            crate::validate_linux_bind_path(p, "persistent_store")?;
         }
     }
 
@@ -1046,5 +1042,20 @@ mod tests {
                 "relative persistent_store path must be rejected: {err}"
             );
         }
+    }
+
+    #[test]
+    fn parent_dir_component_in_fs_read_is_rejected() {
+        // audit #7 / issue #387: an absolute-but-`..`-laden fs_read path must be
+        // rejected before staging, so `mounts::non_anchor_top_level` can't treat
+        // `/opt/../etc` as anchorable under `opt` and stage the OS-resolved
+        // `/etc` into the RO share.
+        let mut policy = SandboxPolicy { net: Net::Deny, ..Default::default() };
+        policy.fs_read = vec![std::path::PathBuf::from("/opt/../etc")];
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(
+            format!("{err}").contains("must not contain '..'"),
+            "'..'-laden fs_read must be rejected: {err}"
+        );
     }
 }

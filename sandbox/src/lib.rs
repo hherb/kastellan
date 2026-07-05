@@ -198,6 +198,81 @@ pub enum SandboxError {
     Backend(String),
 }
 
+/// Validate a single host path that a **Linux** sandbox backend will hand to
+/// bwrap (`--bind`/`--ro-bind-try`) or stage via `mkfs.ext4 -d` unmodified.
+///
+/// The path must be absolute AND free of `..` components (audit finding #7,
+/// issue #387). `is_absolute()` alone is not enough: a path like
+/// `/scratch/../../etc/ssl` is absolute yet binds/stages whatever it *resolves*
+/// to, not what it names — so a future untrusted-path caller could reach outside
+/// the intended share. The macOS Seatbelt/Container backends get this guarantee
+/// for free by canonicalizing; this is the Linux-side parity. (Full symlink
+/// canonicalization is a heavier, real-filesystem-dependent follow-up tracked on
+/// #387; rejecting `..` is the deterministic, config-independent half.)
+///
+/// `kind` names the path class for the error message ("policy" /
+/// "persistent_store" / "proxy_uds"). Pure — no filesystem access.
+pub(crate) fn validate_linux_bind_path(
+    p: &std::path::Path,
+    kind: &str,
+) -> Result<(), SandboxError> {
+    if !p.is_absolute() {
+        return Err(SandboxError::Backend(format!(
+            "{kind} paths must be absolute, got {p:?}"
+        )));
+    }
+    if p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err(SandboxError::Backend(format!(
+            "{kind} paths must not contain '..' components, got {p:?}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod bind_path_tests {
+    use super::validate_linux_bind_path;
+    use std::path::Path;
+
+    #[test]
+    fn accepts_plain_absolute_path() {
+        assert!(validate_linux_bind_path(Path::new("/opt/venv"), "policy").is_ok());
+        assert!(validate_linux_bind_path(Path::new("/etc/ssl/certs"), "policy").is_ok());
+    }
+
+    #[test]
+    fn rejects_relative_path_with_absolute_message() {
+        let err = validate_linux_bind_path(Path::new("relative/path"), "policy").unwrap_err();
+        assert!(format!("{err}").contains("must be absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_parent_dir_component() {
+        // The audit-#7 case: absolute, but escapes what it names.
+        for bad in ["/scratch/../../etc/ssl", "/opt/../etc", "/a/b/../c"] {
+            let err = validate_linux_bind_path(Path::new(bad), "policy").unwrap_err();
+            assert!(
+                format!("{err}").contains("must not contain '..'"),
+                "{bad} should be rejected for '..', got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn kind_is_reflected_in_the_message() {
+        let err =
+            validate_linux_bind_path(Path::new("/a/../b"), "persistent_store").unwrap_err();
+        assert!(format!("{err}").starts_with("backend error: persistent_store"), "got: {err}");
+    }
+
+    #[test]
+    fn does_not_reject_a_literal_dotdot_in_a_filename() {
+        // `..foo` / `foo..bar` are ordinary names, not a ParentDir component.
+        assert!(validate_linux_bind_path(Path::new("/opt/..foo/bar"), "policy").is_ok());
+        assert!(validate_linux_bind_path(Path::new("/opt/foo..bar"), "policy").is_ok());
+    }
+}
+
 /// Operator-facing identifier for selecting a specific sandbox backend
 /// per-worker. Cfg-gated per-OS so cross-OS mis-config (e.g. declaring
 /// `Container` on Linux) is a compile-time error rather than a runtime
