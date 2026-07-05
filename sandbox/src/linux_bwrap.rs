@@ -119,11 +119,12 @@ impl SandboxBackend for LinuxBwrap {
         args: &[&str],
     ) -> Result<Child, SandboxError> {
         for p in policy.fs_read.iter().chain(policy.fs_write.iter()) {
-            if !p.is_absolute() {
-                return Err(SandboxError::Backend(format!(
-                    "policy paths must be absolute, got {p:?}"
-                )));
-            }
+            crate::validate_linux_bind_path(p, "policy")?;
+        }
+        // The proxy UDS is bound into the jail too (force-routing); hold it to
+        // the same absolute + no-`..` rule (issue #387).
+        if let Some(uds) = &policy.proxy_uds {
+            crate::validate_linux_bind_path(uds, "proxy_uds")?;
         }
         // Slice 5b-2: the persistent store is a separate field, so it bypasses the
         // loop above. Its paths must be absolute (a relative dest mis-binds against
@@ -132,11 +133,7 @@ impl SandboxBackend for LinuxBwrap {
         // `--bind-try` silently dropping the bind and writes vanishing on respawn.
         if let Some(ps) = &policy.persistent_store {
             for p in [&ps.host_backing, &ps.guest_mount] {
-                if !p.is_absolute() {
-                    return Err(SandboxError::Backend(format!(
-                        "persistent_store paths must be absolute, got {p:?}"
-                    )));
-                }
+                crate::validate_linux_bind_path(p, "persistent_store")?;
             }
             // host_backing is a DIRECTORY on this backend — it is an ext4 image
             // FILE only on Firecracker (see `PersistentStore` doc). If a regular
