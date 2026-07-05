@@ -212,6 +212,11 @@ pub enum SandboxError {
 ///
 /// `kind` names the path class for the error message ("policy" /
 /// "persistent_store" / "proxy_uds"). Pure — no filesystem access.
+// The production callers (the bwrap backend and the Firecracker launch-plan
+// builder) are all cfg(target_os = "linux")-gated; keep the pure fn (and its
+// tests) compiled on macOS rather than cfg-gating it away, so the
+// cross-platform test suite still pins the validation logic.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn validate_linux_bind_path(
     p: &std::path::Path,
     kind: &str,

@@ -27,6 +27,21 @@
 //! belong to a different family (step-level short-circuits, not
 //! task-level transitions) and carry a different payload shape.
 //!
+//! Three further row families are defined in sibling modules and
+//! re-exported here so every public path stays `scheduler::audit::…`:
+//! L1/L3 memory-layer rows (`memory_rows`) and operator entity-review +
+//! kind-registry rows (`entity_rows`) — both split out 2026-07-05 for
+//! the 500-LOC cap — plus the earlier `extractor:gliner-relex` summary
+//! row (`extract_entities`, split during the v2 Entity Extraction arc).
+//!
+//! A handful of standalone action strings also remain in this file
+//! outside the two families above (action strings only, no co-located
+//! payload builders): the daemon bring-up rows [`ACTION_REGISTRY_LOADED`]
+//! and [`ACTION_L0_SEEDED`], and the operator tools-allowlist rows
+//! [`ACTION_TOOLS_ALLOWLIST_ADD`] / [`ACTION_TOOLS_ALLOWLIST_REMOVE`]
+//! (whose symmetric `entity_kinds.*` / `relation_kinds.*` siblings live
+//! in `entity_rows`).
+//!
 //! # Caveat for observation-phase SQL: audit row vs `tasks.state`
 //!
 //! Both row families record what the scheduler **observed**, not what
@@ -67,8 +82,6 @@
 //! transitioned the row out of `running`, so this concrete race does
 //! not produce divergence.)
 
-use crate::memory::l1_promote::{L1Source, L1WriteOutcome};
-use crate::memory::l3_crystallise::{L3Source, L3WriteOutcome};
 use kastellan_db::tasks::Lane;
 use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
@@ -92,55 +105,6 @@ pub const ACTION_REGISTRY_LOADED: &str = "registry.loaded";
 /// operator-visible breadcrumb that the loader ran, plus
 /// cross-restart drift detection via the file hash.
 pub const ACTION_L0_SEEDED: &str = "l0.seeded";
-
-/// Action string for `actor='cli' action='l1.added'` audit rows.
-/// Emitted by `cli_audit::l1_add_and_audit` after a successful
-/// `kastellan-cli memory l1 add` call. The payload is built by
-/// [`build_l1_write_payload`].
-pub const ACTION_L1_ADDED: &str = "l1.added";
-
-/// Action string for `actor='cli' action='l1.removed'` audit rows.
-/// Emitted by `cli_audit::l1_remove_and_audit` after a successful
-/// `kastellan-cli memory l1 remove`. Payload: `{memory_id, deleted}`.
-pub const ACTION_L1_REMOVED: &str = "l1.removed";
-
-/// Action string for `actor='scheduler' action='l1.promoted'` audit
-/// rows. Emitted by `runner::drain_lane` when the terminal plan
-/// carried `l1_insight` and the inner loop reached `Outcome::Completed`.
-/// The payload is built by [`build_l1_write_payload`].
-pub const ACTION_L1_PROMOTED: &str = "l1.promoted";
-
-/// Action verb for the agent-raised L3 crystallisation row written by
-/// `runner::drain_lane`. Payload built by [`build_l3_write_payload`].
-pub const ACTION_L3_CRYSTALLISED: &str = "l3.crystallised";
-/// Action verb for the operator `memory l3 remove` audit row.
-pub const ACTION_L3_REMOVED: &str = "l3.removed";
-/// Action verb for the operator `memory l3 approve` success row.
-pub const ACTION_L3_APPROVED: &str = "l3.approved";
-/// Action verb for the operator `memory l3 approve` rejection row (the
-/// gate refused). Audited because an operator attempting to approve a
-/// skill carrying a `secret://` ref is a security-relevant event.
-pub const ACTION_L3_APPROVE_REJECTED: &str = "l3.approve_rejected";
-/// Action verb for the operator `memory l3 revoke` row (trust → untrusted).
-pub const ACTION_L3_REVOKED: &str = "l3.revoked";
-/// Action verb for the start-of-execution row written by `memory l3 run
-/// --execute`. Payload built by [`build_l3_invoked_payload`].
-pub const ACTION_L3_INVOKED: &str = "l3.invoked";
-/// Action verb for the end-of-execution summary row. Payload built by
-/// [`build_l3_invoke_outcome_payload`].
-pub const ACTION_L3_INVOKE_OUTCOME: &str = "l3.invoke_outcome";
-/// Action verb for a refused run attempt (trust gate or live re-validation
-/// rejected), written before any dispatch. Audited because attempting to
-/// run a non-runnable / now-invalid skill is a security-relevant event.
-/// Payload built by [`build_l3_invoke_rejected_payload`].
-pub const ACTION_L3_INVOKE_REJECTED: &str = "l3.invoke_rejected";
-/// Action verb for the operator `memory l3 pin` success row (trust
-/// `user_approved` → `pinned`, granting agent-autonomous invocability).
-pub const ACTION_L3_PINNED: &str = "l3.pinned";
-/// Action verb for a refused `memory l3 pin` (not yet approved / gate
-/// rejected / no registry snapshot). Trust unchanged; audited as a
-/// security-relevant attempt.
-pub const ACTION_L3_PIN_REJECTED: &str = "l3.pin_rejected";
 
 /// `action` value written when the lane runner claims a `pending` task
 /// and transitions it to `running`. Fires exactly once per `claim_one`
@@ -175,53 +139,6 @@ pub const ACTION_TOOLS_ALLOWLIST_ADD: &str = "tools.allowlist.add";
 /// Action string for `actor='cli'` audit rows emitted when an operator
 /// removes one allowlist entry via `kastellan-cli tools allowlist remove`.
 pub const ACTION_TOOLS_ALLOWLIST_REMOVE: &str = "tools.allowlist.remove";
-
-/// `actor='cli' action='entities.approved'` — operator flipped a
-/// quarantined entity to approved. Payload: {entity_id, kind, name}.
-pub const ACTION_ENTITIES_APPROVED: &str = "entities.approved";
-
-/// `actor='cli' action='entities.rejected'` — operator deleted a
-/// quarantined entity. Payload:
-/// {entity_id, kind, name, mentions_dropped}. The `mentions_dropped`
-/// field is the number of `memory_entities` rows cascaded by the FK.
-pub const ACTION_ENTITIES_REJECTED: &str = "entities.rejected";
-
-/// `actor='cli' action='entities.merged'` — operator consolidated near-
-/// duplicate entities. Payload: {kept_id, kept_kind, kept_name,
-/// dropped_ids, links_retargeted, links_dropped_as_duplicate}.
-pub const ACTION_ENTITIES_MERGED: &str = "entities.merged";
-
-/// `actor='cli' action='entity_kinds.add'` — operator added a new
-/// entity-kind label via `kastellan-cli entities kinds add`. Payload:
-/// `{kind, description}` where `description` is `null` when omitted.
-/// Emitted only on a real INSERT (`Ok(true)`); idempotent re-adds and
-/// validation errors write no row. Symmetric to
-/// [`ACTION_RELATION_KINDS_ADD`].
-pub const ACTION_ENTITY_KINDS_ADD: &str = "entity_kinds.add";
-
-/// `actor='cli' action='entity_kinds.remove'` — operator removed an
-/// entity-kind label via `kastellan-cli entities kinds remove`. Payload:
-/// `{kind}`. Emitted only on a real DELETE (`Ok(true)`); idempotent
-/// no-ops, validation errors, and the explicit
-/// `RemovalOfUndefinedRejected` write no row. Symmetric to
-/// [`ACTION_RELATION_KINDS_REMOVE`].
-pub const ACTION_ENTITY_KINDS_REMOVE: &str = "entity_kinds.remove";
-
-/// `actor='cli' action='relation_kinds.add'` — operator added a new
-/// relation-kind label via `kastellan-cli relations kinds add`. Payload:
-/// `{kind, description}` where `description` is `null` when omitted.
-/// Emitted only on a real INSERT (`Ok(true)`); idempotent re-adds and
-/// validation errors write no row. Symmetric to
-/// [`ACTION_TOOLS_ALLOWLIST_ADD`].
-pub const ACTION_RELATION_KINDS_ADD: &str = "relation_kinds.add";
-
-/// `actor='cli' action='relation_kinds.remove'` — operator removed a
-/// relation-kind label via `kastellan-cli relations kinds remove`.
-/// Payload: `{kind}`. Emitted only on a real DELETE (`Ok(true)`);
-/// idempotent no-ops, validation errors, and the explicit
-/// `RemovalOfUndefinedRejected` write no row. Symmetric to
-/// [`ACTION_TOOLS_ALLOWLIST_REMOVE`].
-pub const ACTION_RELATION_KINDS_REMOVE: &str = "relation_kinds.remove";
 
 /// Value of the `provenance` field in a `task.finalize` payload emitted
 /// from the scheduler's runtime path (the lane runner observed the task
@@ -415,265 +332,6 @@ fn format_rfc3339(ts: OffsetDateTime) -> String {
     ts.format(&Rfc3339).unwrap_or_default()
 }
 
-/// Build the payload for `l1.added` (operator) and `l1.promoted`
-/// (agent-raised) audit rows. Single helper so both paths land
-/// byte-identical rows on the common keys.
-///
-/// Operator shape: `{source: "operator", action, memory_id, body_sha256}` (4 keys).
-/// Agent-raised shape: `{source: "agent_raised", task_id, action, memory_id, body_sha256}` (5 keys).
-pub fn build_l1_write_payload(
-    outcome: &L1WriteOutcome,
-    source: &L1Source,
-    body_sha256: &str,
-) -> Value {
-    let mut obj = serde_json::Map::new();
-    match source {
-        L1Source::Operator => {
-            obj.insert("source".into(), Value::String("operator".into()));
-        }
-        L1Source::AgentRaised { task_id } => {
-            obj.insert("source".into(), Value::String("agent_raised".into()));
-            obj.insert(
-                "task_id".into(),
-                Value::Number(serde_json::Number::from(*task_id)),
-            );
-        }
-    }
-    let (action_str, memory_id) = match outcome {
-        L1WriteOutcome::Inserted { memory_id, .. } => ("inserted", *memory_id),
-        L1WriteOutcome::SkippedDuplicate { memory_id } => ("skipped_duplicate", *memory_id),
-    };
-    obj.insert("action".into(), Value::String(action_str.into()));
-    obj.insert(
-        "memory_id".into(),
-        Value::Number(serde_json::Number::from(memory_id)),
-    );
-    obj.insert(
-        "body_sha256".into(),
-        Value::String(body_sha256.into()),
-    );
-    Value::Object(obj)
-}
-
-/// Build the payload for the `l3.crystallised` audit row. Shape:
-/// `{source: "agent_raised", task_id, skill_name, action, memory_id, body_sha256}` (6 keys).
-pub fn build_l3_write_payload(
-    outcome: &L3WriteOutcome,
-    source: &L3Source,
-    skill_name: &str,
-    body_sha256: &str,
-) -> Value {
-    let mut obj = serde_json::Map::new();
-    match source {
-        L3Source::AgentRaised { task_id } => {
-            obj.insert("source".into(), Value::String("agent_raised".into()));
-            obj.insert("task_id".into(), Value::Number(serde_json::Number::from(*task_id)));
-        }
-    }
-    let (action_str, memory_id) = match outcome {
-        L3WriteOutcome::Inserted { memory_id } => ("inserted", *memory_id),
-        L3WriteOutcome::SkippedDuplicate { memory_id } => ("skipped_duplicate", *memory_id),
-    };
-    obj.insert("skill_name".into(), Value::String(skill_name.into()));
-    obj.insert("action".into(), Value::String(action_str.into()));
-    obj.insert("memory_id".into(), Value::Number(serde_json::Number::from(memory_id)));
-    obj.insert("body_sha256".into(), Value::String(body_sha256.into()));
-    Value::Object(obj)
-}
-
-/// Payload for an `l3.approved` row. `tools` is the template's distinct
-/// step tools the gate verified against the registry snapshot.
-pub fn build_l3_approved_payload(
-    memory_id: i64,
-    skill_name: &str,
-    body_sha256: &str,
-    tools: &[String],
-) -> Value {
-    serde_json::json!({
-        "memory_id": memory_id,
-        "skill_name": skill_name,
-        "body_sha256": body_sha256,
-        "tools": tools,
-    })
-}
-
-/// Payload for an `l3.approve_rejected` row. `skill_name`/`body_sha256`
-/// are omitted when the row/template could not be parsed.
-pub fn build_l3_approve_rejected_payload(
-    memory_id: i64,
-    skill_name: Option<&str>,
-    body_sha256: Option<&str>,
-    reasons: &[String],
-) -> Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert("memory_id".into(), Value::Number(serde_json::Number::from(memory_id)));
-    if let Some(n) = skill_name {
-        obj.insert("skill_name".into(), Value::String(n.into()));
-    }
-    if let Some(s) = body_sha256 {
-        obj.insert("body_sha256".into(), Value::String(s.into()));
-    }
-    obj.insert(
-        "reasons".into(),
-        Value::Array(reasons.iter().map(|r| Value::String(r.clone())).collect()),
-    );
-    Value::Object(obj)
-}
-
-/// Payload for an `l3.revoked` row.
-pub fn build_l3_revoked_payload(memory_id: i64, updated: bool) -> Value {
-    serde_json::json!({ "memory_id": memory_id, "updated": updated })
-}
-
-/// Payload for the `l3.invoked` row. Carries arg *names* only (not
-/// values); substituted values land in the per-step chokepoint rows where
-/// secret-refs stay opaque.
-pub fn build_l3_invoked_payload(
-    memory_id: i64,
-    skill_name: &str,
-    body_sha256: &str,
-    arg_names: &[String],
-    step_count: usize,
-) -> Value {
-    serde_json::json!({
-        "memory_id": memory_id,
-        "skill_name": skill_name,
-        "body_sha256": body_sha256,
-        "arg_names": arg_names,
-        "step_count": step_count,
-    })
-}
-
-/// Payload for the `l3.invoke_outcome` row (mirrors `plan.outcome`).
-/// Shape: `{memory_id, skill_name, steps_executed, steps_total, any_err}`.
-pub fn build_l3_invoke_outcome_payload(
-    memory_id: i64,
-    skill_name: &str,
-    steps_executed: usize,
-    steps_total: usize,
-    any_err: bool,
-) -> Value {
-    serde_json::json!({
-        "memory_id": memory_id,
-        "skill_name": skill_name,
-        "steps_executed": steps_executed,
-        "steps_total": steps_total,
-        "any_err": any_err,
-    })
-}
-
-/// Payload for the `l3.invoke_rejected` row. Written by `invoke_l3` after
-/// a trust-gate or live-re-validation refusal, before any dispatch. The
-/// only caller always holds a successfully-parsed template (→ `skill_name`)
-/// and the stored row's `body_sha256`, so both are **required** here
-/// (unlike `build_l3_approve_rejected_payload`, whose no-parse path can
-/// have neither). Shape: `{memory_id, skill_name, body_sha256, reasons}`.
-pub fn build_l3_invoke_rejected_payload(
-    memory_id: i64,
-    skill_name: &str,
-    body_sha256: &str,
-    reasons: &[String],
-) -> Value {
-    serde_json::json!({
-        "memory_id": memory_id,
-        "skill_name": skill_name,
-        "body_sha256": body_sha256,
-        "reasons": reasons,
-    })
-}
-
-/// Payload for the `l3.pinned` row (operator pinned an approved skill).
-pub fn build_l3_pinned_payload(memory_id: i64, skill_name: &str, body_sha256: &str) -> Value {
-    serde_json::json!({
-        "memory_id": memory_id,
-        "skill_name": skill_name,
-        "body_sha256": body_sha256,
-    })
-}
-
-/// Payload for the `l3.pin_rejected` row. `skill_name` is `None` when the
-/// stored template did not parse (the only no-name pin-reject path).
-pub fn build_l3_pin_rejected_payload(
-    memory_id: i64,
-    skill_name: Option<&str>,
-    reasons: &[String],
-) -> Value {
-    serde_json::json!({
-        "memory_id": memory_id,
-        "skill_name": skill_name,
-        "reasons": reasons,
-    })
-}
-
-/// Agent-path variant of [`build_l3_invoke_rejected_payload`]: `memory_id`
-/// and `body_sha256` are `Option` because an unknown / non-pinned skill
-/// name refusal happens before any row is loaded. `skill_name` (the
-/// directive's requested name) is always known.
-pub fn build_l3_invoke_rejected_agent_payload(
-    skill_name: &str,
-    memory_id: Option<i64>,
-    body_sha256: Option<&str>,
-    reasons: &[String],
-) -> Value {
-    serde_json::json!({
-        "memory_id": memory_id,
-        "skill_name": skill_name,
-        "body_sha256": body_sha256,
-        "reasons": reasons,
-    })
-}
-
-/// Build the wire-stable payload for `actor='cli' action='entities.approved'`.
-/// Keys: {entity_id, kind, name} (3 keys, BTreeSet-pinned in tests).
-pub fn build_entities_approved_payload(
-    entity_id: i64,
-    kind: &str,
-    name: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "entity_id": entity_id,
-        "kind":      kind,
-        "name":      name,
-    })
-}
-
-/// Build the wire-stable payload for `actor='cli' action='entities.rejected'`.
-/// Keys: {entity_id, kind, name, mentions_dropped} (4 keys).
-pub fn build_entities_rejected_payload(
-    entity_id: i64,
-    kind: &str,
-    name: &str,
-    mentions_dropped: i64,
-) -> serde_json::Value {
-    serde_json::json!({
-        "entity_id":        entity_id,
-        "kind":             kind,
-        "name":             name,
-        "mentions_dropped": mentions_dropped,
-    })
-}
-
-/// Build the wire-stable payload for `actor='cli' action='entities.merged'`.
-/// Keys: {kept_id, kept_kind, kept_name, dropped_ids, links_retargeted,
-/// links_dropped_as_duplicate} (6 keys).
-pub fn build_entities_merged_payload(
-    kept_id: i64,
-    kept_kind: &str,
-    kept_name: &str,
-    dropped_ids: &[i64],
-    links_retargeted: i64,
-    links_dropped_as_duplicate: i64,
-) -> serde_json::Value {
-    serde_json::json!({
-        "kept_id":                     kept_id,
-        "kept_kind":                   kept_kind,
-        "kept_name":                   kept_name,
-        "dropped_ids":                 dropped_ids,
-        "links_retargeted":            links_retargeted,
-        "links_dropped_as_duplicate":  links_dropped_as_duplicate,
-    })
-}
-
 /// Compute `total_duration_ms` for the finalize payload, clamping
 /// negative or huge values (clock skew, missing `started_at`) to 0.
 /// Pure helper, separately testable.
@@ -696,6 +354,30 @@ pub fn compute_duration_ms(
 /// public paths `scheduler::audit::{ACTION_EXTRACT_ENTITIES, build_…}` hold.
 mod extract_entities;
 pub use extract_entities::{build_extract_entities_payload, ACTION_EXTRACT_ENTITIES};
+
+/// L1/L3 memory-layer rows (`l1.*` / `l3.*` constants + payload
+/// builders); see the module doc above for the split/re-export rationale.
+mod memory_rows;
+pub use memory_rows::{
+    build_l1_write_payload, build_l3_approve_rejected_payload, build_l3_approved_payload,
+    build_l3_invoke_outcome_payload, build_l3_invoke_rejected_agent_payload,
+    build_l3_invoke_rejected_payload, build_l3_invoked_payload, build_l3_pin_rejected_payload,
+    build_l3_pinned_payload, build_l3_revoked_payload, build_l3_write_payload, ACTION_L1_ADDED,
+    ACTION_L1_PROMOTED, ACTION_L1_REMOVED, ACTION_L3_APPROVED, ACTION_L3_APPROVE_REJECTED,
+    ACTION_L3_CRYSTALLISED, ACTION_L3_INVOKED, ACTION_L3_INVOKE_OUTCOME,
+    ACTION_L3_INVOKE_REJECTED, ACTION_L3_PINNED, ACTION_L3_PIN_REJECTED, ACTION_L3_REMOVED,
+    ACTION_L3_REVOKED,
+};
+
+/// Operator entity-review + entity/relation-kind rows (`entities.*`,
+/// `entity_kinds.*`, `relation_kinds.*`); same split/re-export rationale.
+mod entity_rows;
+pub use entity_rows::{
+    build_entities_approved_payload, build_entities_merged_payload,
+    build_entities_rejected_payload, ACTION_ENTITIES_APPROVED, ACTION_ENTITIES_MERGED,
+    ACTION_ENTITIES_REJECTED, ACTION_ENTITY_KINDS_ADD, ACTION_ENTITY_KINDS_REMOVE,
+    ACTION_RELATION_KINDS_ADD, ACTION_RELATION_KINDS_REMOVE,
+};
 
 #[cfg(test)]
 mod tests;
