@@ -193,9 +193,33 @@ pub fn build_persistent_image(plan: &mut FirecrackerLaunchPlan) -> Result<(), Sa
 
 /// Recursively copy a host tree (dirs, files, symlinks-as-targets) into `dest`.
 /// Plain `std` (no `fs_extra` dep).
+///
+/// Symlink policy (issue #370): the top of a symlink is inspected with
+/// `symlink_metadata`, so a **symlink to a file** falls through to
+/// `std::fs::copy`, which follows it and copies the target's *content* (cp -L,
+/// intended — the worker sees a plain file). A **symlink to a directory** is
+/// **skipped with a `warn!`** rather than followed: following it would stage a
+/// possibly out-of-`fs_read`-tree subtree into the worker's RO image (a
+/// share-scope surprise), and `std::fs::copy` on a directory would otherwise
+/// abort the entire spawn. Skipping lets the rest of the share build while
+/// surfacing the omission to the operator. No current consumer's `fs_read`
+/// carries a top-level dir symlink.
 fn copy_tree(src: &Path, dest: &Path) -> Result<(), SandboxError> {
     let md = std::fs::symlink_metadata(src)
         .map_err(|e| SandboxError::Backend(format!("stat {src:?}: {e}")))?;
+    if md.file_type().is_symlink() {
+        // Resolve the link target's type (follows the link). A dir target is
+        // skipped-with-warn; a file target (or a broken/unreadable link) falls
+        // through to the copy branch below, preserving the cp -L behaviour and
+        // the existing loud error on a broken link.
+        if std::fs::metadata(src).map(|m| m.is_dir()).unwrap_or(false) {
+            tracing::warn!(
+                source = ?src,
+                "fs_read stage: skipping directory symlink (not followed into the RO image)"
+            );
+            return Ok(());
+        }
+    }
     if md.is_dir() {
         std::fs::create_dir_all(dest)
             .map_err(|e| SandboxError::Backend(format!("mkdir {dest:?}: {e}")))?;
@@ -233,6 +257,43 @@ mod tests {
         // Garbage → fail-safe to default.
         let bad = vec![("KASTELLAN_MICROVM_SCRATCH_MIB".to_string(), "abc".to_string())];
         assert_eq!(rw_scratch_mib(&bad), RW_SCRATCH_MIB_DEFAULT);
+    }
+
+    #[test]
+    fn copy_tree_skips_directory_symlinks_but_dereferences_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir()
+            .join(format!("copytree-{}-{}", std::process::id(), line!()));
+        let src = base.join("src");
+        let dest = base.join("dest");
+        let outside = base.join("outside"); // a dir the dir-symlink points at
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"out-of-tree").unwrap();
+
+        // A regular file, a symlink-to-file (same dir), and a symlink-to-dir
+        // (pointing outside the staged tree).
+        std::fs::write(src.join("real.txt"), b"hello").unwrap();
+        symlink(src.join("real.txt"), src.join("link-to-file")).unwrap();
+        symlink(&outside, src.join("link-to-dir")).unwrap();
+
+        copy_tree(&src, &dest).expect("copy_tree must not abort on a dir symlink");
+
+        // Regular file copied.
+        assert_eq!(std::fs::read(dest.join("real.txt")).unwrap(), b"hello");
+        // File symlink dereferenced (cp -L): a plain file with the target's bytes.
+        let ftype = std::fs::symlink_metadata(dest.join("link-to-file")).unwrap().file_type();
+        assert!(!ftype.is_symlink(), "file symlink should be materialized as content");
+        assert_eq!(std::fs::read(dest.join("link-to-file")).unwrap(), b"hello");
+        // Directory symlink skipped — neither the link nor its out-of-tree
+        // content is staged.
+        assert!(
+            !dest.join("link-to-dir").exists(),
+            "directory symlink must be skipped, not followed into the image"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
