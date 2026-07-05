@@ -90,6 +90,7 @@ pub fn spawn_net_transport(
         params.worker_name,
         None, // no cert pins
         true, // disable_mitm — transparent tunnel
+        true, // long-lived: a channel sidecar outlives many dispatches (issue #395)
     )?;
     let stdout = sidecar.stdout();
     let uds = sidecar.uds_path.clone();

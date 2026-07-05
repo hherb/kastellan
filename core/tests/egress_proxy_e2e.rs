@@ -57,7 +57,7 @@ fn allowed_literal_origin_round_trips_and_blocks_off_allowlist() {
     // Allowlist: the literal loopback origin (the local-SearxNG carve-out shape).
     let allowlist = vec!["127.0.0.1".to_string()];
     let backend = backend();
-    let mut handle = spawn_sidecar(backend.as_ref(), &binary, &allowlist, &scratch, "web-fetch", None, false)
+    let mut handle = spawn_sidecar(backend.as_ref(), &binary, &allowlist, &scratch, "web-fetch", None, false, false)
         .expect("sidecar spawns and binds UDS");
     let stdout = handle.stdout().expect("child stdout piped");
 
@@ -116,7 +116,7 @@ fn real_host_round_trips_through_sidecar() {
     std::fs::create_dir_all(&scratch).unwrap();
     let allowlist = vec!["example.com".to_string()];
     let backend = backend();
-    let handle = spawn_sidecar(backend.as_ref(), &binary, &allowlist, &scratch, "web-fetch", None, false)
+    let handle = spawn_sidecar(backend.as_ref(), &binary, &allowlist, &scratch, "web-fetch", None, false, false)
         .expect("sidecar spawns");
 
     let mut client = UnixStream::connect(&handle.uds_path).unwrap();
