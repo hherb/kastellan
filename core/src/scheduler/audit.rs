@@ -28,11 +28,19 @@
 //! task-level transitions) and carry a different payload shape.
 //!
 //! Three further row families are defined in sibling modules and
-//! re-exported here so every public path stays `scheduler::audit::…`
-//! (2026-07-05 prod-split, 500-LOC cap): L1/L3 memory-layer rows
-//! (`memory_rows`), operator entity-review + kind-registry rows
-//! (`entity_rows`), and the `extractor:gliner-relex` summary row
-//! (`extract_entities`).
+//! re-exported here so every public path stays `scheduler::audit::…`:
+//! L1/L3 memory-layer rows (`memory_rows`) and operator entity-review +
+//! kind-registry rows (`entity_rows`) — both split out 2026-07-05 for
+//! the 500-LOC cap — plus the earlier `extractor:gliner-relex` summary
+//! row (`extract_entities`, split during the v2 Entity Extraction arc).
+//!
+//! A handful of standalone action strings also remain in this file
+//! outside the two families above (action strings only, no co-located
+//! payload builders): the daemon bring-up rows [`ACTION_REGISTRY_LOADED`]
+//! and [`ACTION_L0_SEEDED`], and the operator tools-allowlist rows
+//! [`ACTION_TOOLS_ALLOWLIST_ADD`] / [`ACTION_TOOLS_ALLOWLIST_REMOVE`]
+//! (whose symmetric `entity_kinds.*` / `relation_kinds.*` siblings live
+//! in `entity_rows`).
 //!
 //! # Caveat for observation-phase SQL: audit row vs `tasks.state`
 //!
@@ -347,9 +355,8 @@ pub fn compute_duration_ms(
 mod extract_entities;
 pub use extract_entities::{build_extract_entities_payload, ACTION_EXTRACT_ENTITIES};
 
-/// L1/L3 memory-layer rows (`l1.*` / `l3.*` constants + payload builders)
-/// live in the sibling `memory_rows` module (2026-07-05 prod-split, 500-LOC
-/// cap); re-exported so every `scheduler::audit::…` public path holds.
+/// L1/L3 memory-layer rows (`l1.*` / `l3.*` constants + payload
+/// builders); see the module doc above for the split/re-export rationale.
 mod memory_rows;
 pub use memory_rows::{
     build_l1_write_payload, build_l3_approve_rejected_payload, build_l3_approved_payload,
@@ -363,8 +370,7 @@ pub use memory_rows::{
 };
 
 /// Operator entity-review + entity/relation-kind rows (`entities.*`,
-/// `entity_kinds.*`, `relation_kinds.*`) live in the sibling `entity_rows`
-/// module (same split); re-exported for the same path-stability reason.
+/// `entity_kinds.*`, `relation_kinds.*`); same split/re-export rationale.
 mod entity_rows;
 pub use entity_rows::{
     build_entities_approved_payload, build_entities_merged_payload,

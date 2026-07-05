@@ -1,10 +1,11 @@
 //! Entity-review + entity/relation-kind audit-row payload builders.
 //!
-//! Split out of the parent `scheduler/audit.rs` (500-LOC cap); the
-//! parent re-exports everything here via `pub use`, so the public paths
-//! `scheduler::audit::{ACTION_ENTITIES_*, ACTION_ENTITY_KINDS_*,
-//! ACTION_RELATION_KINDS_*, build_entities_*}` are unchanged. Function
-//! bodies and doc comments are verbatim moves.
+//! Split out of the parent `scheduler/audit.rs` 2026-07-05 (500-LOC
+//! cap); the parent re-exports everything here via `pub use` — see its
+//! module doc for the split/re-export rationale. Function bodies and
+//! doc comments are verbatim moves, except two intra-doc links
+//! re-anchored via `super::` (their targets,
+//! `ACTION_TOOLS_ALLOWLIST_ADD`/`_REMOVE`, stayed in the parent).
 //!
 //! These are the `actor='cli'` rows behind the operator's entity
 //! quarantine-review workflow (`kastellan-cli entities

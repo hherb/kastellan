@@ -1,11 +1,9 @@
 //! L1/L3 memory-layer audit-row payload builders.
 //!
-//! Split out of the parent `scheduler/audit.rs` (500-LOC cap) — same
-//! prod-split shape as `runner/{audit_rows,task_exec}.rs`: the parent
-//! keeps the task-lifecycle family it was written for and re-exports
-//! everything here via `pub use`, so the public paths
-//! `scheduler::audit::{ACTION_L1_*, ACTION_L3_*, build_l1_*, build_l3_*}`
-//! are unchanged. Function bodies and doc comments are verbatim moves.
+//! Split out of the parent `scheduler/audit.rs` 2026-07-05 (500-LOC
+//! cap); the parent re-exports everything here via `pub use` — see its
+//! module doc for the split/re-export rationale. Function bodies and
+//! doc comments are verbatim moves.
 //!
 //! Two sub-families live here:
 //!
